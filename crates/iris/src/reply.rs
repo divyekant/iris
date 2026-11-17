@@ -91,12 +91,7 @@ pub fn write(
     // The wait after a model error is shared with understanding: only
     // evidence of the model changes it. An error of the draft itself (a
     // hostile thread, an invalid answer) is no evidence against the model.
-    let wait = match stop {
-        "budget" => batch::Stop::Budget,
-        "unknown" => batch::Stop::Unknown,
-        "model" => batch::Stop::Model,
-        _ => batch::Stop::Done,
-    };
+    let failed = matches!(stop, "unknown" | "model");
     let end = store.write(|tx| {
         let ended = now_ms.max(crate::engine::now_ms());
         tx.execute(
@@ -104,7 +99,7 @@ pub fn write(
             params![run, ended, stop],
         )?;
         let r = batch::report(tx, run)?;
-        batch::end_wait(tx, &wait, &r, ended)?;
+        batch::update_wait(tx, failed, r.calls > 0, ended)?;
         Ok(())
     });
     if let Some(e) = budgeted.take_error() {

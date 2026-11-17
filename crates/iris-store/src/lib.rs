@@ -5,6 +5,20 @@
 //! the folder, applies the schema migrations, and gives the read and write
 //! paths that the engine uses.
 
+/// The SQL condition "message `m` can be hostile": it has a hostile mark
+/// (specification 1, section 6.7), or it waits for its link check (a
+/// `link_check` row, migration 20). Each gate that lets the model, a rule, an
+/// agent, a notice or a watch use mail reads this condition, not the column
+/// `hostile` alone. The test `each_gate_reads_may_be_hostile` finds other
+/// forms.
+#[macro_export]
+macro_rules! may_be_hostile {
+    () => {
+        "((m.hostile IS NOT NULL AND m.hostile NOT IN ('', '[]'))
+          OR EXISTS (SELECT 1 FROM link_check lc WHERE lc.message_id = m.id))"
+    };
+}
+
 mod backup;
 mod content;
 mod file_lock;
@@ -45,6 +59,16 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_11.sql"),
     include_str!("schema_12.sql"),
     include_str!("schema_13.sql"),
+    include_str!("schema_14.sql"),
+    include_str!("schema_15.sql"),
+    include_str!("schema_16.sql"),
+    include_str!("schema_17.sql"),
+    include_str!("schema_18.sql"),
+    include_str!("schema_19.sql"),
+    include_str!("schema_20.sql"),
+    include_str!("schema_21.sql"),
+    include_str!("schema_22.sql"),
+    include_str!("schema_23.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,

@@ -824,3 +824,325 @@ fn the_waits_model_mark_clears_on_each_input_change() {
     b.model(false, None);
     assert_eq!(waits(&b), Some(0), "model set");
 }
+
+/// HTML mail with the text of a feed item and one link that shows
+/// `bank.example.com` and goes to `target`. No DMARC result.
+fn bank(target: &str) -> String {
+    format!(
+        "From: Bank <alerts@bank-mail.example.org>\nTo: owner@example.com\nSubject: Invoice\n\
+         Date: Tue, 30 Dec 2025 08:00:00 +0000\nContent-Type: text/html\n\n\
+         <p>Pay the invoice by Friday.</p><p><a href=\"{target}\">https://bank.example.com/pay</a></p>\n"
+    )
+}
+
+#[test]
+fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
+    let b = store("link-upgrade");
+    b.model(false, None);
+    // More messages than one page of the check, and `m` after them.
+    let pages = iris_understand::store::LINK_CHECKS as usize + 5;
+    let honest = bank("https://bank.example.com/pay");
+    let ok = b.add_raw("ok", "t1", 1, &honest, &["INBOX"]);
+    for i in 1..pages {
+        b.add_raw(
+            &format!("ok{i}"),
+            &format!("t1-{i}"),
+            1,
+            &honest,
+            &["INBOX"],
+        );
+    }
+    let m = b.add_raw("m", "t2", 1, &honest, &["INBOX"]);
+    // A message whose file is missing at the check.
+    let lost = b.add_raw("lost", "t3", 1, &honest, &["INBOX"]);
+    // A message that the model got 3 times with no valid answer.
+    let stuck = b.add_raw("stuck", "t4", 1, &honest, &["INBOX"]);
+    // The same answer for each message.
+    for _ in 0..pages + 3 {
+        b.script.push(Ok((
+            r#"{"items": [{"form": "feed", "status": "new", "title": "Invoice",
+          "quote": "Pay the invoice by Friday.", "confidence": 0.5}], "phishing": false}"#
+                .into(),
+            usage(100, 10),
+        )));
+    }
+    b.run(&Limits::default()).unwrap();
+    let items = "SELECT count(*) FROM item_source s JOIN item i ON i.id = s.item_id
+                 WHERE s.message_id = MSG AND s.role = 'origin' AND i.form <> 'conversation'";
+    let items_of = |b: &Box_, m: i64| b.col(&items.replace("MSG", &m.to_string())).unwrap();
+    assert_eq!(items_of(&b, m), 1);
+    let calls = b.script.calls();
+    // The state of a store of the engine before the mark: the file of the
+    // message has a deceptive link, and the message is understood.
+    let evil = bank("https://evil.example.net/pay").replace('\n', "\r\n");
+    let sha = b.store.put_content(evil.as_bytes()).unwrap();
+    let evil2 = bank("https://evil2.example.net/pay").replace('\n', "\r\n");
+    let sha2 = b.store.put_content(evil2.as_bytes()).unwrap();
+    std::fs::remove_file(b.store.content_path(&sha2).unwrap()).unwrap();
+    let ok_at = b.col(&format!(
+        "SELECT understood_at FROM message WHERE id = {ok}"
+    ));
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET content_sha256 = ?2 WHERE id = ?1",
+                rusqlite::params![m, sha],
+            )?;
+            tx.execute(
+                "UPDATE message SET content_sha256 = ?2 WHERE id = ?1",
+                rusqlite::params![lost, sha2],
+            )?;
+            tx.execute(
+                "UPDATE message SET content_sha256 = ?2, understood_at = NULL, tries = 3
+                 WHERE id = ?1",
+                rusqlite::params![stuck, sha],
+            )?;
+            tx.execute_batch(
+                "DROP TRIGGER link_check_insert; DROP TRIGGER link_check_update;
+                 DROP TRIGGER link_check_label; DROP TRIGGER link_check_attention_add;
+                 DROP TRIGGER link_check_attention_end;
+                 DROP TABLE link_check;
+                 -- Migrations 21 and 22 run again after 20. The triggers
+                 -- of 22 replace themselves.
+                 DROP TRIGGER job_session_revoke; DROP TRIGGER job_session_job_state;
+                 DROP TABLE job_session; DROP TABLE send_switch;
+                 PRAGMA user_version = 19;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let Box_ {
+        _dir,
+        store,
+        account,
+        script,
+    } = b;
+    drop(store);
+    let b = Box_ {
+        store: Store::open(&_dir.0).unwrap(),
+        _dir,
+        account,
+        script,
+    };
+    assert_eq!(
+        b.col("SELECT count(*) FROM link_check"),
+        Some(pages as i64 + 3)
+    );
+    // One run, with a model that Iris cannot make: the check needs none.
+    let fail = |_: &ModelRow| -> Result<Box<dyn Model>, String> { Err("no model".into()) };
+    let _ = batch::run(&b.store, &fail, &Limits::default(), NOW);
+    let marks: String = b
+        .store
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT hostile FROM message WHERE id = ?1", [m], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .unwrap();
+    assert_eq!(marks, r#"["link"]"#);
+    let stuck_marks: String = b
+        .store
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT hostile FROM message WHERE id = ?1", [stuck], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        stuck_marks, r#"["link"]"#,
+        "failed tries do not hold the check"
+    );
+    assert_eq!(items_of(&b, m), 0, "quarantine keeps no item");
+    assert!(b.understood(m));
+    assert_eq!(b.script.calls(), calls, "no model call");
+    // The other message keeps its understanding, and each row went.
+    assert_eq!(
+        b.col(&format!(
+            "SELECT understood_at FROM message WHERE id = {ok}"
+        )),
+        ok_at
+    );
+    // The missing file keeps its row. After a repair with the same
+    // bytes, the next run gives the mark.
+    assert_eq!(
+        b.col("SELECT max(message_id) FROM link_check WHERE (SELECT count(*) FROM link_check) = 1"),
+        Some(lost)
+    );
+    b.store.put_content(evil2.as_bytes()).unwrap();
+    let _ = batch::run(&b.store, &fail, &Limits::default(), NOW);
+    let marks: String = b
+        .store
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT hostile FROM message WHERE id = ?1", [lost], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .unwrap();
+    assert_eq!(marks, r#"["link"]"#);
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(0));
+}
+
+#[test]
+fn new_mail_gets_the_link_check_when_iris_cannot_make_the_model() {
+    let b = store("link-new");
+    b.model(false, None);
+    let m = b.add_raw(
+        "m",
+        "t",
+        1,
+        &bank("https://evil.example.net/pay"),
+        &["INBOX"],
+    );
+    let honest = b.add_raw(
+        "h",
+        "t2",
+        1,
+        &bank("https://bank.example.com/pay"),
+        &["INBOX"],
+    );
+    let fail = |_: &ModelRow| -> Result<Box<dyn Model>, String> { Err("no model".into()) };
+    let _ = batch::run(&b.store, &fail, &Limits::default(), NOW);
+    let marks: String = b
+        .store
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT hostile FROM message WHERE id = ?1", [m], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .unwrap();
+    assert_eq!(marks, r#"["link"]"#);
+    assert!(b.understood(m));
+    // The honest message waits for the model, with no row left.
+    assert!(!b.understood(honest));
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(0));
+    // New content needs the check again.
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET content_sha256 = 'x' WHERE id = ?1",
+                [honest],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(1));
+}
+
+#[test]
+fn the_link_check_counts_toward_the_message_limit() {
+    let b = store("link-limit");
+    b.model(false, None);
+    for i in 0..3 {
+        let raw = bank(&format!("https://evil{i}.example.net/pay"));
+        b.add_raw(&format!("m{i}"), &format!("t{i}"), 1, &raw, &["INBOX"]);
+    }
+    let marked = "SELECT count(*) FROM message WHERE hostile LIKE '%\"link\"%'";
+    let limits = Limits {
+        max_messages: Some(1),
+        ..Limits::default()
+    };
+    let r = b.run(&limits).unwrap();
+    assert_eq!(r.messages, 1);
+    assert_eq!(b.col(marked), Some(1));
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(2));
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.col(marked), Some(3));
+    assert_eq!(b.script.calls(), 0);
+}
+
+#[test]
+fn new_honest_content_clears_the_link_mark_of_the_old_content() {
+    let b = store("link-clear");
+    b.model(false, None);
+    let m = b.add_raw(
+        "m",
+        "t",
+        1,
+        &bank("https://evil.example.net/pay"),
+        &["INBOX"],
+    );
+    b.run(&Limits::default()).unwrap();
+    let marks = |b: &Box_| -> String {
+        b.store
+            .read(|c| {
+                Ok(
+                    c.query_row("SELECT hostile FROM message WHERE id = ?1", [m], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap()
+    };
+    assert_eq!(marks(&b), r#"["link"]"#);
+    // New content, as a sync writes it: the old marks stay until a check.
+    let honest = bank("https://bank.example.com/pay").replace('\n', "\r\n");
+    let sha = b.store.put_content(honest.as_bytes()).unwrap();
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET content_sha256 = ?2, understood_at = NULL WHERE id = ?1",
+                rusqlite::params![m, sha],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let fail = |_: &ModelRow| -> Result<Box<dyn Model>, String> { Err("no model".into()) };
+    let _ = batch::run(&b.store, &fail, &Limits::default(), NOW);
+    assert_eq!(marks(&b), "[]");
+    assert!(!b.understood(m), "the model work still waits");
+}
+
+#[test]
+fn mail_that_loses_the_sent_label_gets_the_link_check() {
+    let b = store("link-sent");
+    b.model(false, None);
+    let raw = bank("https://evil.example.net/pay");
+    let m = b.add_raw("s", "t", 1, &raw, &["SENT"]);
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(0));
+    // The same content again, as received mail.
+    assert_eq!(b.add_raw("s", "t", 1, &raw, &["INBOX"]), m);
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(1));
+    let fail = |_: &ModelRow| -> Result<Box<dyn Model>, String> { Err("no model".into()) };
+    let _ = batch::run(&b.store, &fail, &Limits::default(), NOW);
+    let marks: String = b
+        .store
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT hostile FROM message WHERE id = ?1", [m], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .unwrap();
+    assert_eq!(marks, r#"["link"]"#);
+}
+
+#[test]
+fn a_label_change_during_a_check_queues_the_message_again() {
+    let b = store("link-race");
+    let raw = bank("https://evil.example.net/pay");
+    let m = b.add_raw("s", "t", 1, &raw, &["SENT"]);
+    // A check reads this row while the message is your own mail.
+    let read = b.col("SELECT id FROM link_check");
+    // A sync removes SENT before the check ends: the row is new.
+    b.add_raw("s", "t", 1, &raw, &["INBOX"]);
+    let now = b.col(&format!("SELECT id FROM link_check WHERE message_id = {m}"));
+    assert!(now > read, "{now:?} {read:?}");
+    // The end of the old check removes only the row that it read.
+    b.store
+        .write(|tx| {
+            tx.execute("DELETE FROM link_check WHERE id = ?1", [read])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(1));
+}

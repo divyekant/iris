@@ -16,7 +16,7 @@ use iris_store::{Body, Store};
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::Value;
 
-use crate::{analyze, decide, validate, Analysis, Context, Ids, Kind, Mark, Model, Usage};
+use crate::{analyze_cut, decide, validate, Analysis, Context, Ids, Kind, Mark, Model, Usage};
 
 /// The wait after a failed try of the model (section 7.4).
 pub const RETRY_MS: i64 = 86_400_000;
@@ -111,6 +111,102 @@ struct Row {
     phishing: bool,
 }
 
+/// Rows of `link_check` in one read of [`recheck_links`].
+pub const LINK_CHECKS: i64 = 200;
+
+/// The link check of each message in `link_check` (migration 20): new
+/// content, and mail that the engine understood before the mark `link`. It
+/// reads each row, in pages of [`LINK_CHECKS`], with no model. A message
+/// with a deceptive link is understood at once: the mark makes it hostile,
+/// so the run needs no model, and its items go. A row goes only when the
+/// store has the result of the check for the content that it read: no
+/// deceptive link, or the mark `link`. Other rows stay for the next run (a
+/// file that Iris cannot read, a change during the check). Returns the
+/// count of messages that got the mark. With `max_marks`, it stops before
+/// one more message would get the mark: the run limit counts them.
+pub fn recheck_links(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Result<u64> {
+    let mut marked = 0;
+    let mut after = 0;
+    loop {
+        let rows: Vec<(i64, i64)> = store.read(|c| {
+            let mut st = c.prepare(
+                "SELECT id, message_id FROM link_check WHERE id > ?1 ORDER BY id LIMIT ?2",
+            )?;
+            let rows = st
+                .query_map([after, LINK_CHECKS], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })?;
+        let Some(&(last, _)) = rows.last() else {
+            return Ok(marked);
+        };
+        after = last;
+        for (row, id) in rows {
+            // The row ID first: a trigger that queues the message again
+            // after this read gives it a new row, which this check keeps.
+            let Some((mark, sha)) = link_mark_of(store, id) else {
+                continue;
+            };
+            if mark && max_marks.is_some_and(|n| marked >= n) {
+                // The message limit of the run: the rest waits.
+                return Ok(marked);
+            }
+            if mark {
+                // Hostile mail never reaches the model (section 6.7). An
+                // error leaves the row for the next run.
+                let _ = understand(store, id, &crate::budget::NoModel, now_ms);
+            }
+            // The row goes only for the state that the check read (the same
+            // row, the same content), and, for a deceptive link, only when
+            // the message has the mark.
+            let done = store.write(|tx| {
+                let n = tx.execute(
+                    "DELETE FROM link_check WHERE id = ?1 AND EXISTS (
+                       SELECT 1 FROM message m WHERE m.id = ?2
+                         AND (m.content_sha256 IS ?3 OR m.gone_at IS NOT NULL)
+                         AND (NOT ?4 OR EXISTS (
+                           SELECT 1 FROM json_each(coalesce(m.hostile, '[]'))
+                           WHERE value = 'link')))",
+                    params![row, id, sha, mark],
+                )?;
+                if n > 0 && !mark {
+                    // A mark of earlier content goes: the check of this
+                    // content found no deceptive link.
+                    tx.execute(
+                        "UPDATE message SET hostile = (
+                           SELECT json_group_array(value) FROM json_each(hostile)
+                           WHERE value <> 'link')
+                         WHERE id = ?1 AND content_sha256 IS ?2 AND EXISTS (
+                           SELECT 1 FROM json_each(coalesce(hostile, '[]'))
+                           WHERE value = 'link')",
+                        params![id, sha],
+                    )?;
+                }
+                Ok(n > 0)
+            })?;
+            marked += u64::from(mark && done);
+        }
+    }
+}
+
+/// For the received message `id`: true when it has a deceptive link, with
+/// the content hash that the check read. False when it has none, is gone,
+/// is your own mail or has no content. `None` when Iris cannot read the
+/// row or the file now.
+fn link_mark_of(store: &Store, id: i64) -> Option<(bool, Option<String>)> {
+    let row = read_row(store, id).ok()?;
+    let own = row.labels.iter().any(|l| l == "SENT" || l == "DRAFT");
+    if row.gone || own || row.sha.is_none() {
+        return Some((false, row.sha));
+    }
+    let path = row.sha.as_deref().and_then(|s| store.content_path(s))?;
+    let (raw, raw_cut, html_after) = read_raw(&path).ok()?;
+    let c = iris_clean::clean_cut(&raw, raw_cut);
+    let head = crate::Head::parse(&raw);
+    let mark = crate::link_mark(&head, &c.links, c.links_cut || html_after);
+    Some((mark, row.sha))
+}
+
 /// Run understanding on message `message` (its row ID): steps 1 to 8. Run
 /// it again on the same message to understand it again: the items of the
 /// message that a person did not correct are made again, not duplicated.
@@ -150,7 +246,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         .as_deref()
         .and_then(|s| store.content_path(s))
         .ok_or(Error::NoMessage(message))?;
-    let (raw, raw_cut) = read_raw(&path)?;
+    let (raw, raw_cut, html_after) = read_raw(&path)?;
 
     let draft = row.labels.iter().any(|l| l == "DRAFT");
     let head = crate::Head::parse(&raw);
@@ -185,7 +281,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         same_sender: &first.same,
         known: &[],
     };
-    let mut a = analyze(&raw, &cx);
+    let mut a = analyze_cut(&raw, raw_cut, html_after, &cx);
     a.text.cut |= raw_cut;
     // The mark phishing stays until a rebuild (section 6.7).
     if row.phishing {
@@ -407,19 +503,24 @@ fn state(c: &rusqlite::Connection, message: i64, full: bool) -> rusqlite::Result
 pub const RAW_LIMIT: u64 = 8 * 1024 * 1024;
 
 // shortcut: parts after RAW_LIMIT are lost, for example a text part after a
-// large attachment. Read only the parts that iris-clean decodes, with no
+// large attachment (an HTML part there gives the mark `link`). Read only the parts that iris-clean decodes, with no
 // limit on the file, when a real mailbox shows the need.
-/// The first `RAW_LIMIT` bytes of the content file, and true if the file is
-/// longer.
-fn read_raw(path: &std::path::Path) -> Result<(Vec<u8>, bool)> {
+/// The first `RAW_LIMIT` bytes of the content file, true if the file is
+/// longer, and true if the rest can hold an HTML part
+/// (`iris_clean::html_part_in`, which reads the first bytes to know if the
+/// cut is in a part header). The rest is read in chunks: the memory stays bounded.
+fn read_raw(path: &std::path::Path) -> Result<(Vec<u8>, bool, bool)> {
     use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
     let mut raw = Vec::new();
-    std::fs::File::open(path)?
-        .take(RAW_LIMIT + 1)
-        .read_to_end(&mut raw)?;
+    (&mut file).take(RAW_LIMIT + 1).read_to_end(&mut raw)?;
     let cut = raw.len() as u64 > RAW_LIMIT;
+    let html_after = cut && {
+        let limit = RAW_LIMIT as usize;
+        iris_clean::html_part_in(&raw[..limit], (&raw[limit..]).chain(file))?
+    };
     raw.truncate(RAW_LIMIT as usize);
-    Ok((raw, cut))
+    Ok((raw, cut, html_after))
 }
 
 fn read_row(store: &Store, message: i64) -> Result<Row> {
@@ -531,13 +632,15 @@ fn inputs(
 /// the thread yet.
 macro_rules! earlier_ok {
     () => {
-        "m.thread_id = ?1 AND m.id <> ?2 AND m.gone_at IS NULL
-         AND m.internal_date < ?3
-         AND coalesce(m.hostile, '[]') = '[]'
-         AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+        concat!(
+            "m.thread_id = ?1 AND m.id <> ?2 AND m.gone_at IS NULL
+         AND m.internal_date < ?3 AND NOT ",
+            iris_store::may_be_hostile!(),
+            " AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                          WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'DRAFT'))
          AND NOT EXISTS (SELECT 1 FROM header hh JOIN sender s ON s.address = hh.from_addr
                          WHERE hh.message_id = m.id AND s.kind = 'hostile')"
+        )
     };
 }
 

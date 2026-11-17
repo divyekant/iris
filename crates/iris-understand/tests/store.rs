@@ -118,7 +118,8 @@ impl Box_ {
     fn add_in(&self, id: &str, thread: &str, date: i64, raw: &str, labels: &[&str]) -> i64 {
         let raw = raw.replace('\n', "\r\n");
         let sha = self.store.put_content(raw.as_bytes()).unwrap();
-        self.store
+        let id = self
+            .store
             .put_messages(
                 self.account,
                 &[NewMessage {
@@ -130,7 +131,10 @@ impl Box_ {
                     ..NewMessage::default()
                 }],
             )
-            .unwrap()[0]
+            .unwrap()[0];
+        // Step 1 of each batch run: the link check of new content.
+        iris_understand::store::recheck_links(&self.store, NOW, None).unwrap();
+        id
     }
 
     fn kind(&self, addr: &str, name: &str, kind: &str) {
@@ -1562,6 +1566,64 @@ fn a_message_over_the_read_limit_is_cut_text_for_the_model() {
     // The fixed code rule does not fire on cut text: the model reads it.
     assert_eq!((out.calls, fake.calls.borrow().len()), (1, 1));
     assert!(fake.calls.borrow()[0].1.contains("Your code: 482913"));
+    // The body ends before the cut: the link list is whole, no mark.
+    let marks: String = b.col("SELECT hostile FROM message WHERE id = ?1", m);
+    assert_eq!(marks, "[]");
+}
+
+#[test]
+fn an_html_body_past_the_read_limit_is_a_link_mark() {
+    let b = store("large-link");
+    // The attachment comes first, so the HTML body (with its link) is past
+    // the read limit. A mail client still shows it.
+    let big = "A".repeat(iris_understand::store::RAW_LIMIT as usize);
+    let raw = format!(
+        "From: Bank <alerts@bank.example>\nTo: owner@example.com\nSubject: Sign in\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=b\n\n--b\nContent-Type: application/octet-stream\n\n{big}\n--b\nContent-Type: text/html\n\n<a href=\"https://evil.example.net/\">bank.example</a>\n--b--\n"
+    );
+    let m = b.add("1", &raw, &["INBOX"]);
+    let fake = Fake::default();
+    understand(&b.store, m, &fake, NOW).unwrap();
+    let marks: String = b.col("SELECT hostile FROM message WHERE id = ?1", m);
+    assert_eq!(marks, r#"["link"]"#);
+    assert!(
+        fake.calls.borrow().is_empty(),
+        "hostile mail never reaches the model"
+    );
+}
+
+#[test]
+fn an_html_body_after_a_plain_body_and_the_read_limit_is_a_link_mark() {
+    let b = store("large-link-plain");
+    // A plain part comes first, so the read part has a body. The HTML
+    // part with the link is still past the read limit.
+    let big = "A".repeat(iris_understand::store::RAW_LIMIT as usize);
+    let raw = format!(
+        "From: Bank <alerts@bank.example>\nTo: owner@example.com\nSubject: Sign in\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=b\n\n--b\nContent-Type: text/plain\n\nSee the note.\n--b\nContent-Type: application/octet-stream\n\n{big}\n--b\nContent-Type: Text/HTML; charset=utf-8\n\n<a href=\"https://evil.example.net/\">bank.example</a>\n--b--\n"
+    );
+    let m = b.add("1", &raw, &["INBOX"]);
+    let fake = Fake::default();
+    understand(&b.store, m, &fake, NOW).unwrap();
+    let marks: String = b.col("SELECT hostile FROM message WHERE id = ?1", m);
+    assert_eq!(marks, r#"["link"]"#);
+    assert!(fake.calls.borrow().is_empty());
+}
+
+#[test]
+fn text_html_in_an_attachment_past_the_read_limit_is_no_mark() {
+    let b = store("large-plain");
+    // The words `text/html` are in the body of a plain attachment, past
+    // the read limit. No part header has the type, so no HTML part is there.
+    let big = "A".repeat(iris_understand::store::RAW_LIMIT as usize);
+    let raw = format!(
+        "From: Bo Ren <bo@example.org>\nTo: owner@example.com\nSubject: Logs\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=b\n\n--b\nContent-Type: text/plain\n\nThe logs.\n--b\nContent-Type: text/plain; name=log.txt\n\n{big}\nContent-Type: text/html\nsent as text/html\n--b--\n"
+    );
+    let m = b.add("1", &raw, &["INBOX"]);
+    understand(&b.store, m, &Fake::default(), NOW).unwrap();
+    let marks: String = b.col(
+        "SELECT coalesce(hostile, '[]') FROM message WHERE id = ?1",
+        m,
+    );
+    assert_eq!(marks, "[]");
 }
 
 #[test]

@@ -670,6 +670,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "idna"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b0875f23caa03898994f6ddc501886a45c7d3d62d04d2d90788d47be1b1e4de"
+dependencies = [
+ "idna_adapter",
+ "smallvec",
+ "utf8_iter",
+]
+
+[[package]]
+name = "idna_adapter"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "279259b0ac81c89d11c290495fdcfa96ea3643b7df311c138b6fe8ca5237f0f8"
+dependencies = [
+ "idna_mapping",
+ "unicode-bidi",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "idna_mapping"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11c13906586a4b339310541a274dd927aff6fcbb5b8e3af90634c4b31681c792"
+dependencies = [
+ "unicode-joining-type",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -699,11 +730,15 @@ dependencies = [
  "iris-apply",
  "iris-auth",
  "iris-changeset",
+ "iris-compose",
  "iris-fakegmail",
  "iris-gmail",
+ "iris-job",
+ "iris-matters",
  "iris-model",
  "iris-policy",
  "iris-service",
+ "iris-spec",
  "iris-store",
  "iris-sync",
  "iris-synth",
@@ -726,13 +761,20 @@ dependencies = [
  "getrandom 0.4.3",
  "iris-apply",
  "iris-changeset",
+ "iris-compose",
+ "iris-job",
+ "iris-matters",
+ "iris-model",
  "iris-observe",
  "iris-policy",
+ "iris-senders",
  "iris-spec",
  "iris-store",
  "iris-synth",
  "iris-triage",
+ "iris-understand",
  "iris-web",
+ "iris-workspace",
  "rusqlite",
  "serde",
  "serde_json",
@@ -744,9 +786,12 @@ dependencies = [
 name = "iris-apply"
 version = "0.0.0"
 dependencies = [
+ "getrandom 0.4.3",
  "iris-changeset",
+ "iris-compose",
  "iris-fakegmail",
  "iris-gmail",
+ "iris-job",
  "iris-policy",
  "iris-spec",
  "iris-store",
@@ -755,6 +800,7 @@ dependencies = [
  "iris-talk",
  "iris-understand",
  "rusqlite",
+ "serde",
  "serde_json",
  "unicase",
 ]
@@ -776,10 +822,14 @@ dependencies = [
 name = "iris-changeset"
 version = "0.0.0"
 dependencies = [
+ "iris-compose",
+ "iris-job",
+ "iris-senders",
  "iris-spec",
  "iris-store",
  "iris-talk",
  "iris-understand",
+ "iris-workspace",
  "rusqlite",
  "serde_json",
  "sha2",
@@ -794,6 +844,17 @@ dependencies = [
  "iris-synth",
  "mail-parser",
  "miniz_oxide",
+]
+
+[[package]]
+name = "iris-compose"
+version = "0.0.0"
+dependencies = [
+ "mail-builder",
+ "mail-parser",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -826,6 +887,29 @@ dependencies = [
  "serde",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "iris-job"
+version = "0.0.0"
+dependencies = [
+ "iris-spec",
+ "iris-store",
+ "iris-talk",
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
+name = "iris-matters"
+version = "0.0.0"
+dependencies = [
+ "iris-model",
+ "iris-store",
+ "iris-understand",
+ "rusqlite",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -887,12 +971,24 @@ dependencies = [
  "iris-eval",
  "iris-store",
  "iris-synth",
+ "psl",
  "rusqlite",
 ]
 
 [[package]]
 name = "iris-service"
 version = "0.0.0"
+
+[[package]]
+name = "iris-session"
+version = "0.0.0"
+dependencies = [
+ "httparse",
+ "libc",
+ "rustls",
+ "serde",
+ "toml",
+]
 
 [[package]]
 name = "iris-spec"
@@ -960,6 +1056,7 @@ dependencies = [
 name = "iris-understand"
 version = "0.0.0"
 dependencies = [
+ "idna_adapter",
  "iris-clean",
  "iris-eval",
  "iris-model",
@@ -970,6 +1067,7 @@ dependencies = [
  "jsonschema",
  "rusqlite",
  "serde_json",
+ "url",
 ]
 
 [[package]]
@@ -993,6 +1091,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-workspace"
+version = "0.0.0"
+dependencies = [
+ "iris-job",
+ "iris-spec",
+ "iris-store",
+ "iris-talk",
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1011,6 +1121,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8dc09d2154098bbf4ef54eab6b117a3c24cbbffe94046b16ee6d6d4510584d3a"
 dependencies = [
  "cfg-if",
+ "futures-util",
  "wasm-bindgen",
 ]
 
@@ -1099,6 +1210,16 @@ name = "log"
 version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
+
+[[package]]
+name = "mail-builder"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aca3ad941e4c466402151719d6b4cea4bdfcb212b11e5970afa75e7d28c6502a"
+dependencies = [
+ "encodify",
+ "web-time",
+]
 
 [[package]]
 name = "mail-parser"
@@ -1318,6 +1439,21 @@ checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "psl"
+version = "2.1.253"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82576eafaa94759a92a0cf047f34d227665811d5cdf70f4b11e25cd813f3de54"
+dependencies = [
+ "psl-types",
+]
+
+[[package]]
+name = "psl-types"
+version = "2.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 
 [[package]]
 name = "quote"
@@ -1728,11 +1864,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinyvec"
+version = "1.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
+
+[[package]]
 name = "tokio"
 version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
+ "bytes",
  "libc",
  "mio",
  "pin-project-lite",
@@ -1845,6 +1988,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b844d17643ee918803943289730bec8aac480150456169e647ed0b576ba539"
 
 [[package]]
+name = "unicode-bidi"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
+
+[[package]]
 name = "unicode-general-category"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1855,6 +2004,21 @@ name = "unicode-ident"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
+
+[[package]]
+name = "unicode-joining-type"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8d00a78170970967fdb83f9d49b92f959ab2bb829186b113e4f4604ad98e180"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75cd3fb03d5288b3ba9a1ee103ac7e9cbb59f0b03d64f8ddfcc04dd42758a85d"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "universal-hash"
@@ -1901,16 +2065,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "url"
+version = "2.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32f8b686cadd1473f4bd0117a5d28d36b1ade384ea9b5069a1c40aefed7fda60"
+dependencies = [
+ "form_urlencoded",
+ "idna",
+ "percent-encoding",
+]
+
+[[package]]
 name = "utf8-zero"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8c0a043c9540bae7c578c88f91dda8bd82e59ae27c21baca69c8b191aaf5a6e"
 
 [[package]]
+name = "utf8_iter"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af3bd9d3e571c26fcce9d033b87ea5ab061b8d2ffe9b7a5675d810d68f03edf0"
+dependencies = [
+ "utf_types",
+]
+
+[[package]]
 name = "utf8parse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
+
+[[package]]
+name = "utf_types"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a3b425286980a367278453f3b6d28cdcb134b574e5a35824a6ff5eebad50bb6"
 
 [[package]]
 name = "uuid-simd"
@@ -1997,6 +2187,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b1f9c3798725016c6ee5f2f57869ec0831e8bbc0ab0310a86e787e97f41389e"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "web-time"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
 ]
 
 [[package]]

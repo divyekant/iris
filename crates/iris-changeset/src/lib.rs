@@ -27,6 +27,14 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use unicase::UniCase;
 
+mod flags;
+mod outbox;
+pub use flags::{
+    action_content, attachment_spans, date_spans, draft_flags, draft_marks, has_attachment,
+    has_date, has_money, money_spans, names, new_flags, words, Field, Mark, DRAFT_FLAGS,
+};
+pub use outbox::{cancel, cancel_draft, hold, send_of_draft, Cancel, CANCELLED};
+
 /// The flag `bulk`: more than this count of messages in one action, or in
 /// one revision (section 5.3).
 pub const BULK: i64 = 500;
@@ -38,6 +46,9 @@ pub enum Error {
     NotFound,
     /// The request does not agree with the state of the changeset.
     Refused(String),
+    /// An action of a job session is outside the grant of its job
+    /// (docs/specs/2026-11-17-job-verbs.md). Nothing changed.
+    Denied(String),
 }
 
 impl fmt::Display for Error {
@@ -46,6 +57,7 @@ impl fmt::Display for Error {
             Error::Store(e) => write!(f, "{e}"),
             Error::NotFound => write!(f, "no changeset or action has this ID"),
             Error::Refused(why) => write!(f, "refused: {why}"),
+            Error::Denied(why) => write!(f, "denied: {why}"),
         }
     }
 }
@@ -105,11 +117,12 @@ names!(
 );
 
 names!(
-    /// The verbs of release 2 (section 4).
+    /// The verbs of release 2 (section 4), and `draft` and `send` of
+    /// release 3 (`docs/specs/2026-11-16-send.md`).
     Verb {
         Archive = "archive", Inbox = "inbox", Label = "label", Unlabel = "unlabel",
         Read = "read", Unread = "unread", Trash = "trash", Untrash = "untrash", Close = "close",
-        Defer = "defer", Decline = "decline", Correct = "correct",
+        Defer = "defer", Decline = "decline", Correct = "correct", Draft = "draft", Send = "send",
     }
 );
 
@@ -245,6 +258,10 @@ pub fn create(store: &Store, author: &Author, now_ms: i64) -> Result<i64> {
 /// [`create`] in a write transaction of the caller, with the same checks.
 /// Use [`transaction`] to run more than one step in one transaction.
 pub fn create_in(c: &Connection, author: &Author, now_ms: i64) -> Result<i64> {
+    if let Some(job) = &author.job {
+        job_author(c, author, job)?;
+        no_other_draft(c, job)?;
+    }
     c.execute(
         "INSERT INTO changeset(author_kind, author_name, author_session, author_job, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -312,8 +329,8 @@ pub fn add_action_in(
     Ok(n)
 }
 
-/// The targets as JSON: `{"threads": [...]}`, `{"messages": [...]}` or
-/// `{"items": [...]}`.
+/// The targets as JSON: `{"threads": [...]}`, `{"messages": [...]}`,
+/// `{"items": [...]}`, `{"drafts": [...]}` or `{"accounts": [...]}`.
 fn targets_json(targets: &[&str]) -> Result<String> {
     let mut group = None;
     let mut ids = Vec::with_capacity(targets.len());
@@ -326,6 +343,8 @@ fn targets_json(targets: &[&str]) -> Result<String> {
             Kind::Thread => "threads",
             Kind::Message => "messages",
             Kind::Sender => return Err(refused(format!("{t} is a sender, not a target"))),
+            Kind::Draft => "drafts",
+            Kind::Account => "accounts",
             _ => "items",
         };
         if group.is_some_and(|k| k != g) {
@@ -378,6 +397,9 @@ pub fn revise(store: &Store, changeset: i64, author: &Author) -> Result<i64> {
 /// Use [`transaction`] to run more than one step in one transaction.
 pub fn revise_in(c: &Connection, changeset: i64, author: &Author) -> Result<i64> {
     check_author(c, changeset, author)?;
+    if let Some(job) = &author.job {
+        no_other_draft(c, job)?;
+    }
     let (state, submitted): (String, Option<i64>) = c.query_row(
         "SELECT state, submitted_at FROM changeset WHERE id = ?1",
         [changeset],
@@ -400,7 +422,8 @@ pub fn revise_in(c: &Connection, changeset: i64, author: &Author) -> Result<i64>
     )?)
 }
 
-/// The same `kind`, `name` and `session` (section 5.5).
+/// The same `kind`, `name` and `session`, or the same `kind` and `job`
+/// for a job author (section 5.5).
 /// Withdraw a changeset (section 5.5). `author` is the author of the
 /// changeset (`iris withdraw`), or `None` for the person in the web client.
 /// Each open action and each draft action becomes `cancelled` in the same
@@ -446,7 +469,7 @@ pub fn expire_in(c: &Connection, now_ms: i64) -> Result<usize> {
     Ok(c.execute(
         "UPDATE changeset_action SET state = 'expired', decided_by = 'expiry', rule = NULL,
            policy = NULL, reason = 'no decision or apply in 14 days', decided_at = ?1
-         WHERE state IN ('proposed', 'in_review', 'approved')
+         WHERE state IN ('proposed', 'in_review', 'approved', 'held')
            AND NOT EXISTS (SELECT 1 FROM ledger l
                            WHERE l.action_id = changeset_action.id AND l.state = 'writing')
            AND submitted_at <= ?1 - ?2",
@@ -454,19 +477,78 @@ pub fn expire_in(c: &Connection, now_ms: i64) -> Result<usize> {
     )?)
 }
 
+/// Refuse each change by a job author that is not an agent session of a
+/// job that is canonical, exists and is not `done` (issue #247): only an
+/// agent session has a job, and a done job changes nothing.
+fn job_author(c: &Connection, author: &Author, job: &str) -> Result<()> {
+    if author.kind != AuthorKind::Agent || author.session.is_none() {
+        return Err(refused("only an agent session has a job".into()));
+    }
+    let open: bool = match iris_job::parse_job_id(job) {
+        Some(id) => c
+            .query_row("SELECT state <> 'done' FROM job WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .unwrap_or(false),
+        None => false,
+    };
+    if !open {
+        return Err(refused(format!("{job} is not a job that is open")));
+    }
+    Ok(())
+}
+
+/// The draft of a job: its changeset whose newest revision is not
+/// submitted, and that is not withdrawn. A job has at most one
+/// (docs/specs/2026-11-17-job-verbs.md, section 2).
+pub fn job_draft(c: &Connection, job: &str) -> Result<Option<i64>> {
+    Ok(c.query_row(
+        "SELECT id FROM changeset
+             WHERE author_job = ?1 AND submitted_at IS NULL AND state <> 'withdrawn'
+             ORDER BY id DESC LIMIT 1",
+        [job],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
+/// Refuse a second draft of a job.
+fn no_other_draft(c: &Connection, job: &str) -> Result<()> {
+    match job_draft(c, job)? {
+        Some(cs) => Err(refused(format!(
+            "{job} has the draft {}: submit or withdraw it first",
+            format_changeset_id(cs)
+        ))),
+        None => Ok(()),
+    }
+}
+
 fn check_author(c: &Connection, changeset: i64, author: &Author) -> Result<()> {
     let same: Option<bool> = c
         .query_row(
-            "SELECT author_kind = ?2 AND author_name IS ?3 AND author_session IS ?4
+            // A changeset of a job belongs to the job: a later session of
+            // the job continues it (docs/specs/2026-11-17-job-verbs.md).
+            "SELECT author_kind = ?2 AND author_job IS ?5
+                    AND (?5 IS NOT NULL OR (author_name IS ?3 AND author_session IS ?4))
              FROM changeset WHERE id = ?1",
-            params![changeset, author.kind.as_str(), author.name, author.session],
+            params![
+                changeset,
+                author.kind.as_str(),
+                author.name,
+                author.session,
+                author.job
+            ],
             |r| r.get(0),
         )
         .optional()?;
     match same {
         None => Err(Error::NotFound),
         Some(false) => Err(refused("only the author can do this".into())),
-        Some(true) => Ok(()),
+        Some(true) => match &author.job {
+            Some(job) => job_author(c, author, job),
+            None => Ok(()),
+        },
     }
 }
 
@@ -517,18 +599,34 @@ pub fn submit_in(
     // until the end of the submit; stream the reasons if an author can
     // send a very large number of actions.
     let mut denials = Vec::new();
+    // A job session: the grant of the job now. Each action must be in it,
+    // else the whole submit fails and the caller rolls back (job verbs
+    // spec). The check reads the rows of the targets, before any other
+    // check can clear them, so no other denial hides a target outside the
+    // grant.
+    let job = changeset_job(c, changeset)?;
+    let grant = job.map(|j| grant_of(c, j)).transpose()?;
     let mut last = 0;
     while let Some((id, n, verb, targets, args)) = next_action(c, changeset, revision, last)? {
         last = n;
         let verb = Verb::parse(&verb).expect("the CHECK of the table");
         // Only the targets give the rows: drop rows of another writer.
         clear(c, id)?;
+        let resolved = resolve(c, id, verb, &targets)?;
+        if let (Some(job), Some(grant)) = (job, &grant) {
+            if let Some(why) = outside_grant(c, id, job, grant, Phase::Submit)? {
+                return Err(Error::Denied(why));
+            }
+        }
         let mut denial = match supported(c, verb, &args)? {
             Err(why) => Some(why),
-            Ok(()) => resolve(c, id, verb, &targets)?,
+            Ok(()) => resolved,
         };
         if denial.is_none() && verb == Verb::Correct {
             denial = check_correct(c, id, &args, now_ms)?;
+        }
+        if denial.is_none() && WRITE_VERBS.contains(&verb.as_str()) {
+            denial = check_write(c, id, verb, &args)?;
         }
         if let Some(why) = denial {
             clear(c, id)?;
@@ -549,7 +647,7 @@ pub fn submit_in(
              WHERE a.changeset_id = ?1
                AND (a.state IS NULL
                     OR a.state IN ('approved', 'held', 'applied'))
-               AND a.verb NOT IN ('close', 'defer', 'decline', 'correct')",
+               AND a.verb NOT IN ('close', 'defer', 'decline', 'correct', 'draft', 'send')",
         [changeset],
         |r| r.get(0),
     )?;
@@ -558,14 +656,28 @@ pub fn submit_in(
         last = n;
         let (count, hash) = hash(c, id)?;
         // The flags of a mailbox verb: a state verb changes no message, and
-        // has no target thread.
-        let valid = count > 0 && !STATE_VERBS.contains(&verb.as_str());
+        // has no target thread. A write verb (draft, send) changes no
+        // message either, but its thread can be a first contact.
+        // A denied action has no message and no draft row (`clear`), so
+        // `first_contact` finds no thread for it. A send whose thread has
+        // only gone messages has no message row but keeps its draft thread.
+        let mailbox = !STATE_VERBS.contains(&verb.as_str());
         let mut flags = Vec::new();
-        if valid && (count > BULK || total > BULK) {
+        if mailbox
+            && count > 0
+            && !WRITE_VERBS.contains(&verb.as_str())
+            && (count > BULK || total > BULK)
+        {
             flags.push("bulk");
         }
-        if valid && first_contact(c, id)? {
+        if mailbox && first_contact(c, id)? {
             flags.push("first_contact");
+        }
+        // The draft flags (spec 2, section 5.3) come from the content.
+        if WRITE_VERBS.contains(&verb.as_str()) {
+            if let Some((account, content)) = action_content(c, id)? {
+                flags.extend(draft_flags(c, &account, &content)?);
+            }
         }
         c.execute(
             "UPDATE changeset_action SET hash = ?2, flags = ?3 WHERE id = ?1",
@@ -586,6 +698,154 @@ pub fn submit_in(
         )?;
     }
     Ok(())
+}
+
+/// The job of the author of a changeset, or `None` for an author with no
+/// job. A job text that is not canonical is job 0, which has no grant.
+fn changeset_job(c: &Connection, changeset: i64) -> Result<Option<i64>> {
+    let job: Option<Option<String>> = c
+        .query_row(
+            "SELECT author_job FROM changeset WHERE id = ?1",
+            [changeset],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(job
+        .flatten()
+        .map(|j| iris_job::parse_job_id(&j).unwrap_or(0)))
+}
+
+/// The grant of `job`, or an empty grant for a job that does not exist.
+fn grant_of(c: &Connection, job: i64) -> Result<iris_workspace::Grant> {
+    match iris_workspace::grant_in(c, job) {
+        Ok(g) => Ok(g),
+        Err(iris_job::Error::NotFound) => Ok(iris_workspace::Grant::default()),
+        Err(iris_job::Error::Store(e)) => Err(Error::Store(e)),
+        Err(e) => Err(Error::Store(iris_store::Error::Query(e.to_string()))),
+    }
+}
+
+/// Why an action of a job session is outside the grant of its job now, or
+/// `None` when the action is in the grant, or its author has no job. The
+/// apply checks each action with this function before each change
+/// (docs/specs/2026-11-17-job-verbs.md, section 4).
+pub fn grant_denial(c: &Connection, action: i64) -> Result<Option<String>> {
+    let changeset: Option<i64> = c
+        .query_row(
+            "SELECT changeset_id FROM changeset_action WHERE id = ?1",
+            [action],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(changeset) = changeset else {
+        return Err(Error::NotFound);
+    };
+    let Some(job) = changeset_job(c, changeset)? else {
+        return Ok(None);
+    };
+    let grant = grant_of(c, job)?;
+    outside_grant(c, action, job, &grant, Phase::Apply)
+}
+
+/// When the grant check runs: the targets are only declared at submit,
+/// and resolved to rows after it.
+#[derive(Clone, Copy, PartialEq)]
+enum Phase {
+    Submit,
+    Apply,
+}
+
+/// The checks of one action against the grant of its job: no draft or
+/// send, each resolved message granted, each item an item of the workspace.
+/// Invariant: an action of a session changes only granted rows, and a
+/// target that gives no row never passes. At submit, each declared target
+/// must also be in the grant, so a target that gives no row (each message
+/// gone, no such row, an ID that does not parse) fails. After submit, the
+/// rows are fixed: the check reads them, not the targets, because sync can
+/// move a granted message to another thread. An action with no row fails.
+fn outside_grant(
+    c: &Connection,
+    action: i64,
+    job: i64,
+    grant: &iris_workspace::Grant,
+    phase: Phase,
+) -> Result<Option<String>> {
+    let j = iris_job::format_job_id(job);
+    let (verb, targets): (String, String) = c.query_row(
+        "SELECT verb, targets FROM changeset_action WHERE id = ?1",
+        [action],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if WRITE_VERBS.contains(&verb.as_str()) {
+        return Ok(Some(format!(
+            "a session of {j} cannot {verb}: a job has no grant of an account or a draft"
+        )));
+    }
+    let outside = || Ok(Some(format!("the targets are outside the grant of {j}")));
+    if phase == Phase::Submit {
+        // Fail closed: a target list that does not parse is outside the grant.
+        let Ok(groups) = serde_json::from_str::<Map<String, Value>>(&targets) else {
+            return outside();
+        };
+        for ids in groups.values() {
+            let Value::Array(ids) = ids else {
+                return outside();
+            };
+            for id in ids {
+                let Some((kind, row)) = id.as_str().and_then(parse_id) else {
+                    return outside();
+                };
+                let granted = match kind {
+                    Kind::Thread => grant.has_thread(row),
+                    Kind::Message => grant.messages.contains(&row),
+                    Kind::Commitment
+                    | Kind::Conversation
+                    | Kind::Record
+                    | Kind::Feed
+                    | Kind::Signal => grant.items.contains(&row),
+                    _ => false,
+                };
+                if !granted {
+                    let id = format_id(kind, row);
+                    return Ok(Some(format!("{id} is outside the grant of {j}")));
+                }
+            }
+        }
+    } else {
+        let rows: bool = c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM action_message WHERE action_id = ?1)
+                 OR EXISTS (SELECT 1 FROM action_item WHERE action_id = ?1)",
+            [action],
+            |r| r.get(0),
+        )?;
+        if !rows {
+            return outside();
+        }
+    }
+    let mut q = c.prepare_cached(
+        "SELECT message_id FROM action_message WHERE action_id = ?1 ORDER BY message_id",
+    )?;
+    for m in q.query_map([action], |r| r.get::<_, i64>(0))? {
+        let m = m?;
+        if !grant.messages.contains(&m) {
+            let id = format_id(Kind::Message, m);
+            return Ok(Some(format!("{id} is outside the grant of {j}")));
+        }
+    }
+    let mut q = c.prepare_cached(
+        "SELECT a.item_id, i.doc ->> '$.id' FROM action_item a
+         LEFT JOIN item i ON i.id = a.item_id WHERE a.action_id = ?1 ORDER BY a.item_id",
+    )?;
+    for row in q.query_map([action], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+    })? {
+        let (item, id) = row?;
+        if !grant.items.contains(&item) {
+            let id = id.unwrap_or_else(|| format!("item {item}"));
+            return Ok(Some(format!("{id} is not an item of the workspace of {j}")));
+        }
+    }
+    Ok(None)
 }
 
 type ActionRow = (i64, i64, String, String, String);
@@ -613,17 +873,28 @@ fn next_action(
 /// mail from a sender of the kind `stranger`.
 fn first_contact(c: &Connection, action: i64) -> Result<bool> {
     Ok(c.query_row(
-        "SELECT EXISTS (
-           SELECT 1 FROM action_message am
-           JOIN message m ON m.id = am.message_id
-           JOIN message t ON t.thread_id = m.thread_id
-           JOIN header h ON h.message_id = t.id
-           JOIN sender p ON p.address = h.from_addr
-           WHERE am.action_id = ?1 AND p.kind = 'stranger')",
+        &format!(
+            "SELECT EXISTS (
+               SELECT 1 FROM message t
+               JOIN header h ON h.message_id = t.id
+               JOIN sender p ON p.address = h.from_addr
+               WHERE t.thread_id IN ({ACTION_THREADS}) AND p.kind = 'stranger')
+             FROM changeset_action a WHERE a.id = ?1"
+        ),
         [action],
         |r| r.get(0),
     )?)
 }
+
+/// The threads of the action `a`: the threads of its messages and the
+/// thread of its draft. The thread of a draft stays when each message of
+/// the thread is gone, so the hostile check and the flags read the same
+/// threads.
+const ACTION_THREADS: &str = "SELECT t.thread_id FROM action_message am
+       JOIN message t ON t.id = am.message_id WHERE am.action_id = a.id
+     UNION
+     SELECT d.thread_id FROM action_draft ad
+       JOIN draft d ON d.id = ad.draft_id WHERE ad.action_id = a.id";
 
 /// The Gmail system labels (Gmail API, labels guide). The store also has the
 /// system labels of each account in `label`.
@@ -672,6 +943,15 @@ fn supported(c: &Connection, verb: Verb, args: &str) -> Result<std::result::Resu
         },
         // The undo of a trash (R2-03, section 7.4) makes its own changeset.
         Verb::Untrash => Err("only the undo of a trash makes untrash".into()),
+        // The content checks need the target: see check_draft.
+        Verb::Draft => Ok(()),
+        Verb::Send => {
+            if args.is_empty() {
+                Ok(())
+            } else {
+                Err("send takes no arguments".into())
+            }
+        }
     })
 }
 
@@ -715,10 +995,15 @@ fn label_name(
 /// targets are items.
 const STATE_VERBS: [&str; 4] = ["close", "defer", "decline", "correct"];
 
+/// The verbs that write mail (release 3). A `draft` takes one account, one
+/// thread or one draft; a `send` takes one draft.
+const WRITE_VERBS: [&str; 2] = ["draft", "send"];
+
 /// Delete the rows that submit derives from the targets of an action.
 fn clear(c: &Connection, action: i64) -> Result<()> {
     c.execute("DELETE FROM action_message WHERE action_id = ?1", [action])?;
     c.execute("DELETE FROM action_item WHERE action_id = ?1", [action])?;
+    c.execute("DELETE FROM action_draft WHERE action_id = ?1", [action])?;
     Ok(())
 }
 
@@ -739,14 +1024,23 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
         return bad();
     };
     let state = STATE_VERBS.contains(&verb.as_str());
-    match (state, group.as_str()) {
-        (false, "threads" | "messages") | (true, "items") => {}
-        (false, _) => return Ok(Some("a mailbox verb takes threads or messages".into())),
-        (true, _) => return Ok(Some(format!("{} takes items", verb.as_str()))),
+    let write = WRITE_VERBS.contains(&verb.as_str());
+    match (verb, group.as_str()) {
+        (Verb::Draft, "accounts" | "threads") | (Verb::Send, "drafts") => {}
+        // A change of a draft needs its undo first (spec 2, section 7.5).
+        (Verb::Draft, _) => return Ok(Some("draft takes one account or one thread".into())),
+        (Verb::Send, _) => return Ok(Some("send takes one draft".into())),
+        _ if state && group == "items" => {}
+        _ if !state && (group == "threads" || group == "messages") => {}
+        _ if state => return Ok(Some(format!("{} takes items", verb.as_str()))),
+        _ => return Ok(Some("a mailbox verb takes threads or messages".into())),
     }
     // Each verb needs one or more targets. A thread can still give no message.
     if ids.is_empty() {
         return Ok(Some("the action has no target".into()));
+    }
+    if write && ids.len() != 1 {
+        return Ok(Some(format!("{} takes one target", verb.as_str())));
     }
     let mut seen = HashSet::with_capacity(ids.len());
     for id in ids {
@@ -759,13 +1053,19 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
         }
         let found: bool = match (kind, group.as_str()) {
             (Kind::Thread, "threads") => {
+                // A reply resolves to one message, its parent (send spec,
+                // section 3): the newest one with no DRAFT label.
                 c.execute(
                     "INSERT OR IGNORE INTO action_message(action_id, message_id)
                      SELECT ?1, m.id FROM message m WHERE m.thread_id = ?2 AND m.gone_at IS NULL
                        AND NOT EXISTS (SELECT 1 FROM message_label ml
                          JOIN label l ON l.id = ml.label_id
-                         WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))",
-                    params![action, row],
+                         WHERE ml.message_id = m.id
+                           AND (l.provider_id IN ('SPAM', 'TRASH')
+                                OR (?3 AND l.provider_id = 'DRAFT')))
+                     ORDER BY m.internal_date DESC, m.id DESC
+                     LIMIT CASE WHEN ?3 THEN 1 ELSE -1 END",
+                    params![action, row, verb == Verb::Draft],
                 )?;
                 c.query_row(
                     "SELECT EXISTS (SELECT 1 FROM thread WHERE id = ?1)",
@@ -786,7 +1086,29 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
                         |r| r.get(0),
                     )?
             }
-            (Kind::Thread | Kind::Message | Kind::Sender, _) => return bad(),
+            (Kind::Account, "accounts") => c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM account WHERE id = ?1)",
+                [row],
+                |r| r.get(0),
+            )?,
+            (Kind::Draft, "drafts") => {
+                let found = c.execute(
+                    "INSERT INTO action_draft(action_id, draft_id)
+                     SELECT ?1, id FROM draft WHERE id = ?2",
+                    params![action, row],
+                )? == 1;
+                // The thread of a reply, for the hostile check and the flags.
+                c.execute(
+                    "INSERT OR IGNORE INTO action_message(action_id, message_id)
+                     SELECT ?1, m.id FROM draft d JOIN message m ON m.thread_id = d.thread_id
+                     WHERE d.id = ?2 AND m.gone_at IS NULL",
+                    params![action, row],
+                )?;
+                found
+            }
+            (Kind::Thread | Kind::Message | Kind::Sender | Kind::Draft | Kind::Account, _) => {
+                return bad()
+            }
             (_, "items") => {
                 if verb != Verb::Correct && kind != Kind::Commitment {
                     return Ok(Some(format!("{} takes only commitments", verb.as_str())));
@@ -821,7 +1143,7 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
         [action],
         |r| r.get(0),
     )?;
-    if none && !state {
+    if none && !state && !write {
         return Ok(Some("the targets have no message to change".into()));
     }
     // One action changes one mailbox: the apply and the undo use one account.
@@ -831,7 +1153,10 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
            JOIN message m ON m.id = am.message_id WHERE am.action_id = ?1
            UNION ALL
            SELECT i.account_id FROM action_item ai
-           JOIN item i ON i.id = ai.item_id WHERE ai.action_id = ?1)",
+           JOIN item i ON i.id = ai.item_id WHERE ai.action_id = ?1
+           UNION ALL
+           SELECT d.account_id FROM action_draft ad
+           JOIN draft d ON d.id = ad.draft_id WHERE ad.action_id = ?1)",
         [action],
         |r| r.get(0),
     )?;
@@ -839,6 +1164,158 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
         return Ok(Some("the targets are in two or more accounts".into()));
     }
     Ok(None)
+}
+
+/// The checks of a write verb (`docs/specs/2026-11-16-send.md`, sections 4
+/// and 5), after resolve. Gives the reason of the denial, or `None`.
+fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Option<String>> {
+    if hostile(c, action)? {
+        return Ok(Some(format!(
+            "the thread has hostile mail: only a person can {} in it",
+            verb.as_str()
+        )));
+    }
+    if verb == Verb::Send {
+        let draft: i64 = c.query_row(
+            "SELECT draft_id FROM action_draft WHERE action_id = ?1",
+            [action],
+            |r| r.get(0),
+        )?;
+        if let Some(why) = draft_busy(c, action, draft)? {
+            return Ok(Some(why));
+        }
+        // The flags come from the stored bytes (docs/specs/2026-11-17-send-checks.md).
+        if action_content(c, action)?.is_none() {
+            return Ok(Some(format!(
+                "{} has no content that Iris can check",
+                format_id(Kind::Draft, draft)
+            )));
+        }
+        return Ok(None);
+    }
+    let Ok(content) = serde_json::from_str::<iris_compose::Content>(args) else {
+        return Ok(Some(
+            "draft takes {\"to\": [...], \"cc\": [...], \"subject\": \"...\", \"body\": \"...\"}"
+                .into(),
+        ));
+    };
+    let reply: bool = c.query_row(
+        "SELECT json_type(targets, '$.threads') IS NOT NULL FROM changeset_action WHERE id = ?1",
+        [action],
+        |r| r.get(0),
+    )?;
+    let content = if reply {
+        // The field itself, also an empty one: the schema of a checked reply
+        // has no subject.
+        let has_subject = serde_json::from_str::<Map<String, Value>>(args)
+            .is_ok_and(|m| m.contains_key("subject"));
+        if has_subject {
+            return Ok(Some("a reply takes no subject: Iris sets it".into()));
+        }
+        // The apply reads the Message-ID of the parent at Gmail: the mirror
+        // can lack it before the understanding of the message.
+        match parent(c, action)? {
+            None => return Ok(Some("the thread has no message to reply to".into())),
+            Some(p) => iris_compose::Content {
+                subject: iris_compose::reply_subject(&p.subject),
+                ..content
+            },
+        }
+    } else {
+        content
+    };
+    Ok(content.check().err())
+}
+
+/// Spec 2, section 6.5: an author other than the person writes no mail
+/// into a thread with hostile mail. True if the action is such a write:
+/// each message of the threads of its resolved messages and of its draft
+/// counts, also a gone message, not only the resolved ones. A gone message
+/// with no header (after the content cleanup) counts as hostile, because
+/// its sender is no longer known. The apply checks it again.
+pub fn hostile(c: &Connection, action: i64) -> Result<bool> {
+    Ok(c.query_row(
+        &format!(
+            "SELECT cs.author_kind <> 'person' AND EXISTS (
+           SELECT 1 FROM message m
+           LEFT JOIN header h ON h.message_id = m.id
+           LEFT JOIN sender p ON p.address = h.from_addr
+           WHERE m.thread_id IN ({ACTION_THREADS})
+             AND ({may_be_hostile} OR p.kind = 'hostile'
+                  -- A gone message after the cleanup has no header, so its
+                  -- sender is not known: it counts as hostile evidence.
+                  OR (m.gone_at IS NOT NULL AND h.message_id IS NULL)))
+         FROM changeset_action a JOIN changeset cs ON cs.id = a.changeset_id WHERE a.id = ?1",
+            may_be_hostile = iris_store::may_be_hostile!(),
+        ),
+        [action],
+        |r| r.get(0),
+    )?)
+}
+
+/// A draft that has a send which can go out, or that went out, takes no
+/// other send: a `ledger_send` row, a sent draft, a draft
+/// in a form that Iris does not write (`foreign_at`), an
+/// `approved` or `held` send, an open send of another changeset, or an
+/// earlier send of the same revision. A `proposed` or `in_review` send of
+/// an older revision of the same changeset is replaced by this submit.
+fn draft_busy(c: &Connection, action: i64, draft: i64) -> Result<Option<String>> {
+    let busy: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM ledger_send WHERE draft_id = ?2)
+             OR EXISTS (SELECT 1 FROM draft WHERE id = ?2
+                        AND (sent_at IS NOT NULL OR foreign_at IS NOT NULL))
+             OR EXISTS (
+               SELECT 1 FROM action_draft o JOIN changeset_action b ON b.id = o.action_id
+               JOIN changeset_action a ON a.id = ?1
+               WHERE o.draft_id = ?2 AND b.id <> a.id AND b.verb = 'send'
+                 AND (b.state IN ('approved', 'held')
+                      OR (b.state IN ('proposed', 'in_review') AND b.changeset_id <> a.changeset_id)
+                      OR (b.state IS NULL AND b.changeset_id = a.changeset_id
+                          AND b.revision = a.revision)))",
+        params![action, draft],
+        |r| r.get(0),
+    )?;
+    Ok(busy.then(|| {
+        format!(
+            "{} was sent, has a send that can go out, or has a form that Iris does not write",
+            format_id(Kind::Draft, draft)
+        )
+    }))
+}
+
+/// The parent of a reply (spec section 3): the one message that submit
+/// resolved (`action_message`, in the action hash). A message that comes
+/// into the thread after the submit is never the parent.
+pub struct Parent {
+    pub message: i64,
+    /// The message is gone now: the apply denies the reply.
+    pub gone: bool,
+    pub message_id: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub subject: String,
+}
+
+/// The parent of the reply `action`, or `None` if submit resolved no
+/// message.
+pub fn parent(c: &Connection, action: i64) -> Result<Option<Parent>> {
+    Ok(c.query_row(
+        "SELECT m.id, m.gone_at IS NOT NULL, nullif(trim(h.message_id_hdr), ''), h.in_reply_to,
+                coalesce(h.subject, '')
+             FROM action_message am JOIN message m ON m.id = am.message_id
+             LEFT JOIN header h ON h.message_id = m.id
+             WHERE am.action_id = ?1",
+        [action],
+        |r| {
+            Ok(Parent {
+                message: r.get(0)?,
+                gone: r.get(1)?,
+                message_id: r.get(2)?,
+                in_reply_to: r.get(3)?,
+                subject: r.get(4)?,
+            })
+        },
+    )
+    .optional()?)
 }
 
 /// `correct` (section 4): the rules of a correction (`iris_understand::correct`)
@@ -913,6 +1390,20 @@ pub fn hash(c: &Connection, action: i64) -> Result<(i64, String)> {
         h.update(format_id(Kind::Message, id).as_bytes());
         h.update(b",");
         count += 1;
+    }
+    // A draft target (release 3): the approval binds to the content of the
+    // draft (docs/specs/2026-11-16-send.md, section 5).
+    let draft: Option<String> = c
+        .query_row(
+            "SELECT d.hash FROM action_draft a JOIN draft d ON d.id = a.draft_id
+             WHERE a.action_id = ?1",
+            [action],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(d) = draft {
+        h.update(b"draft:");
+        h.update(d.as_bytes());
     }
     let hex: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
     Ok((count, hex))

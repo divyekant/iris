@@ -219,8 +219,12 @@ gets its saved status again.
   `userRateLimitExceeded`, and on HTTP 5xx, the engine waits and tries again.
   The wait starts at 1 second, doubles each time to a maximum of 5 minutes,
   and has a random part of up to 50 percent.
-- On HTTP 401, the engine gets a new access token with the refresh token, one
-  time. If the new token gets HTTP 401 too, or Google refuses the refresh
+- On HTTP 401, the engine gets a new access token with the refresh token.
+  An access token lives about 1 hour, and one call of a first sync can run
+  for many hours. A 401 from a token at the end of its life is not a
+  refusal: the engine gets a new token and continues. A 401 from a token
+  that is not at the end of its life is a refusal. If two tokens are
+  refused in one call, or Google refuses the refresh
   token (`invalid_grant`), the account goes to the state "needs sign-in", and
   the brief shows it. A network error or a server error of the token endpoint
   keeps the state: the next sync tries again. A refusal changes the state only
@@ -339,6 +343,7 @@ iris/
       3fa1...c9.eml
   policy.toml        the policy file (specification 2)
   iris.sock          the socket of the iris command (specification 2)
+  workspaces/        the workspace of each agent job (docs/specs/2026-11-16-job-workspace.md)
 ```
 
 To back up Iris, stop the engine and copy the folder. `iris backup <path>`
@@ -368,6 +373,16 @@ is never lost.
 
 New content files after step 2 are not in the backup, and the copy of
 `iris.db` does not refer to them.
+
+`iris backup` does not copy `workspaces/`. A copy of the whole folder while
+the engine is stopped copies `workspaces/` too, with the files of the agent.
+The build makes the files of a
+workspace again from the store, before each session. The files of the agent
+(`drafts/` and `notes.md`) are not in a copy of `iris backup`: after a
+restore from it, the next build makes them empty. A draft that the agent submits is in the store
+(specification 2), so only work that the agent did not submit is lost. This
+is a known limit, with a GitHub issue, until the notes between sessions
+(R5-06) move into the store.
 
 ### 5.2 SQLite settings
 
@@ -434,7 +449,7 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `header` | `message_id` PK, `date` INTEGER, `from_addr` TEXT, `from_name` TEXT, `to_addrs` TEXT, `cc_addrs` TEXT, `subject` TEXT, `message_id_hdr` TEXT, `in_reply_to` TEXT, `list_id` TEXT, `auth` TEXT | Parsed headers that queries need. `auth` holds the SPF, DKIM and DMARC results from `Authentication-Results`. `to_addrs` and `cc_addrs` hold bare lowercase addresses joined by `,`. |
 | `body` | `message_id` INTEGER PK, `subject` TEXT, `sender` TEXT, `text` TEXT | The clean text of the message (section 7.2), with the subject and the sender name and address. `message_id` is the row ID. |
 | `message_fts` | FTS5 table on `subject`, `sender`, `text`, with `content='body'` and `content_rowid='message_id'` | Full-text search. Triggers on `body` keep it current. |
-| `sender` | `id` INTEGER PK, `address` TEXT UNIQUE, `name` TEXT, `kind` TEXT, `basis` TEXT, `decided_by` TEXT, `decided_at` INTEGER | The sender axis. Gives the `p-` IDs. |
+| `sender` | `id` INTEGER PK, `address` TEXT UNIQUE, `name` TEXT, `kind` TEXT, `basis` TEXT, `decided_by` TEXT, `decided_at` INTEGER, `declined_at` INTEGER | The sender axis. Gives the `p-` IDs. `declined_at`: the time of a decline at the stranger gate (section 6.7), or NULL. |
 | `sender_evidence` | `message_id` FK, `address` TEXT, `rule` TEXT (`sent`, `replied` or `service`), `content_sha256` TEXT; PK (`address`, `rule`, `message_id`) | The messages that prove a `person` or `service` kind (section 6.7). The sender step writes the rows. A `sent` row: the sent message names the address in `To`, `Cc` or `Bcc`. A `replied` row: the sent message comes after a message from the address in its thread. A `service` row: the message from the address is automated mail with a Gmail DKIM pass; the rule counts its 2 earlier messages when it reads the row. A row counts only while its message is not gone and has the same content hash. |
 | `item` | `id` INTEGER PK, `form` TEXT, `account_id`, `status` TEXT, `status_before_gone` TEXT, `doc` TEXT (JSON), `created_at`, `updated_at`, `derived_by` TEXT, `duplicate_of` INTEGER | One row for each item of each form. `doc` is the form document of section 6. `duplicate_of` marks a possible duplicate (section 7.5). |
 | `item_source` | `item_id`, `message_id`, `role` TEXT, PK(`item_id`, `message_id`) | Many to many: one message can feed more than one item. |
@@ -442,6 +457,8 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `sync_log` | `id` INTEGER PK, `account_id`, `kind` TEXT, `started_at`, `ended_at`, `result` TEXT | Each sync, resync and verify. |
 | `understand_run` | `id` INTEGER PK, `started_at`, `ended_at`, `model` TEXT, `prompt` TEXT, `messages`, `calls`, `input_tokens`, `output_tokens`, `cost_micro_usd`, `unknown_calls`, `unknown_cost_micro_usd`, `reserved_micro_usd`, `stop` TEXT | Each run of understanding, with its calls, tokens and cost (`docs/specs/2026-11-16-cost-control.md`). |
 | `understand_estimate` | `code` TEXT PK, `model_version`, `messages`, `input_tokens`, `output_tokens`, `cost_micro_usd`, `created_at` | One-time estimate receipts for the budget approval (`docs/specs/2026-11-16-cost-control.md`). |
+| `matter`, `matter_item`, `matter_run` | See `docs/specs/2026-11-16-matters.md` (migration 16). | Matters: the proposals of Iris, the decisions of the person, and the last proposal call. |
+| `link_check` | `id` INTEGER PK AUTOINCREMENT, `message_id` INTEGER UNIQUE, FK to `message` | Migration 20: the live messages whose content has not had the link check of the hostile mark `link` (section 6.7). At the migration: each live message. Triggers add a row for new content, for a message that comes back, and for a message that loses the label `SENT` or `DRAFT`. Each batch run first reads all rows (`recheck_links`), before it makes the model, so a model error or failed tries cannot hold the check back. A message with a deceptive link is understood at once, with no model, so it goes to quarantine and its items go. A message that it understands counts toward the message limit of the run. A check that finds no deceptive link removes a `link` mark of earlier content. Each trigger gives the message a new row (a new `id`), and a check removes only the row that it read, so a change during a check queues the message again. A row goes only when the store has the result for the content that the check read. A row whose file Iris cannot read stays. While a message has a row, it counts as hostile mail for each gate that lets the model, a rule, an agent, a notice or a watch use mail (the SQL condition `iris_store::may_be_hostile!()`): rules and agents cannot act on it as on clean mail, Ask, the thread context of the model and job workspaces leave it out, the triage rules of observe mode leave it out, and notices and watches wait. Each start and each end of a check marks the message in `attention_due`. |
 | `model_setting` | `id` INTEGER PK (one row), `version` INTEGER, `provider` TEXT, `base_url` TEXT, `model` TEXT, `price_in`, `price_out`, `api_key` BLOB (encrypted), `max_tokens`, `timeout_s`, `budget_micro_usd` | The model of understanding, and the budget that the person approved for paid runs (`docs/specs/2026-11-16-cost-control.md`). |
 
 The `message`, `thread`, `sender` and `item` tables use `INTEGER PRIMARY KEY
@@ -482,7 +499,9 @@ Iris gives short IDs that a person and an agent can type:
 | `r-` | Record |
 | `f-` | Feed item |
 | `s-` | Signal |
+| `g-` | Matter (`docs/specs/2026-11-16-matters.md`) |
 | `w-` | Watch (card R5-07) |
+| `n-` | Notice by rule (card R5-08) |
 
 The number after the prefix is the row ID of the table. An ID is unique in one
 Iris install and the engine never uses it again, also after a rebuild deletes
@@ -514,7 +533,7 @@ Each item of each form has these fields:
 | `updated` | date-time | yes | The last change. |
 | `derived` | object | yes | Who made the item: `by` is `rule`, `model` or `person`. `rule` names the rule. `model` names the model, and `prompt` names the prompt version. |
 | `confidence` | number from 0 to 1 | no | How sure the understanding step is. Not set when `derived.by` is `person`. |
-| `matter` | string or null | no | Reserved for release 6. |
+| `matter` | string or null | no | The `g-` ID of the confirmed matter of the item, or null (`docs/specs/2026-11-16-matters.md`). The engine sets it when it reads the item. |
 | `attention` | object | no | Reserved for specification 2: `state` is `shown`, `bundled` or `hidden`, with the rule and the reason. |
 
 A source has these fields:
@@ -652,8 +671,51 @@ than `person`, the profile drops the address.
 
 `basis` records the rule that matched. `decided_by` is `engine` or `person`.
 A decision by a person always wins over the engine, and the engine never
-changes it. From release 2, the person sets the kind in the web client. In
-release 5, the stranger gate makes this a rule in the policy file.
+changes it.
+
+#### The stranger gate
+
+From release 5, the brief shows the items of strangers as a gate, by sender.
+The person gives one answer for each sender:
+
+| Answer | Effect |
+|---|---|
+| Accept | The kind becomes `person`, with `decided_by` `person` and the `basis` "accepted at the gate". The items go to their sections ("You owe", "Owed to you", "Conversations"). |
+| Decline | The engine sets `declined_at` on the sender row. The kind stays with the engine, so a declined sender can still become `hostile`, or known (for example after a reply of the person). The decline applies only while the kind is `stranger`: the items of a declined stranger are in no section of the brief, and the web client lists the declined senders. |
+| Reopen | Removes the accept or the decline of the gate. After an accept, the engine decides the kind again from the evidence in the store. A kind that a person set for another reason (for example, a correction) stays. |
+
+The web client shows the gate in the brief: one row for each sender, with
+the newest 3 items, "Ignore" and "Accept". After an answer, the row keeps
+its place and shows one line with "Undo" (reopen, or decline again after a
+reopen from the list of declined senders). The brief shows the first 20
+senders and links all of them. The list of declined senders has "Ask again"
+(reopen) and "Accept". An API without the gate gives no `gate` in the
+brief, and the web client then shows the strangers section as a list of
+items, as in release 1.
+
+A rule decides first. A `hide` or a `bundle` rule with `sender_kind =
+"stranger"` (specification 2, section 6.2) takes the items of strangers out of
+the gate, as it does for each section. A rule never accepts a sender: only the
+person makes a stranger a known person. Agents get no answer of the gate.
+
+The engine accepts an answer only for a sender at the gate: the stored kind is
+`stranger` (or no kind yet), and, unless a person set the kind, the rules of
+this section give `stranger` for the mail of now. The stored kind can be older
+than the evidence until the next refresh, and a person must never accept a
+sender that is `hostile` now. Also, an item of the sender must wait at the
+gate in the same transaction (for an accept, an item on the list of declined
+senders is enough), because a rule can take the items out after the person
+saw them. A repeated answer is no change. Else the engine refuses the answer
+and changes nothing.
+
+An accept makes the domain of the sender known, and a reopen of an accept can
+make it unknown. So in the same transaction the engine decides again each
+sender whose domain is a near copy of that domain. For each sender that
+becomes `hostile` or stops being `hostile`, the same transaction deletes the
+items that understanding made from its mail and marks that mail for
+understanding again. The understanding worker runs the model later, out of
+the transaction, so the items of such a sender come back after the next
+understanding batch.
 
 The engine decides the kind of a sender again each time it understands a
 message with that address. After each batch of sync or understanding, a
@@ -682,14 +744,14 @@ The `hostile` column of the message holds each mark that applies:
 |---|---|
 | `dmarc` | `Authentication-Results` reports a DMARC fail for the domain of `From`. |
 | `spoof` | The display name is the name of a known person, the address is not the address of that person, and DKIM or DMARC does not pass for the domain of the address. If DKIM and DMARC pass, the address is a new sender, with the kind `stranger`. |
+| `link` | An HTML link of the message (from `Clean.links`) shows a web address with the host `S` (text that starts with `http://`, `https://` or `www.`, or a first word that is a domain with a known public suffix, not a file name such as `report.pdf`), and its target is an `http` or `https` URL that a browser opens on another owner. Iris reads the target with the WHATWG URL standard. The owner of a host is its registrable domain by the public suffix list, with the hosts and the `From` domain in punycode (so `münchen.de` and `xn--mnchen-3ya.de` are one owner). The link is deceptive if one of these is true: the target host is an IP address or Iris cannot read it; the target has a user part, a backslash or a percent sign in front of its path; the target host has another owner than `S`. If DMARC passes for the domain of `From` and that domain has the owner of `S`, the link is not deceptive: the sender owns the shown domain and can link through any redirect. DMARC for another domain proves nothing about `S`. If `iris-clean` could not list each link (`links_cut`), or the part of the file past the read limit has a part header (after a delimiter of a declared boundary) with the type `text/html`, the message gets the mark. |
 | `spam` | The message has the label `SPAM`. |
 | `phishing` | The understanding step marks the message as phishing. |
 
-A message with the label `SENT` is your mail. It never gets the marks `dmarc`
-and `spoof`, because these marks test the `From` header of mail that you
-receive.
+A message with the label `SENT` is your mail. It never gets the marks `dmarc`,
+`spoof` and `link`, because these marks test mail that you receive.
 
-The engine computes the marks `dmarc`, `spoof` and `spam` again at each change
+The engine computes the marks `dmarc`, `spoof`, `link` and `spam` again at each change
 of the label set of the message. The mark `phishing` stays until a rebuild.
 When a mark is set, or the last mark is cleared, the engine runs understanding
 again on the message (section 7.1).
@@ -700,7 +762,7 @@ The kind changes the treatment of items (from the manifesto):
 |---|---|
 | `person` | An ask becomes a commitment in "You owe" at once. |
 | `service` | Records, feed items and signals. Payment commitments go to "You owe". |
-| `stranger` | Items go to "Strangers" in the brief, not to "You owe". |
+| `stranger` | Items go to "Strangers" in the brief, not to "You owe". From release 5 they wait at the stranger gate until the person accepts or declines the sender. |
 | `hostile` | The understanding step does not send the body to a model. The engine makes no item. The brief shows a count only. |
 
 A message with a hostile mark gets the treatment of `hostile`, whatever the
@@ -1015,17 +1077,18 @@ with the original, whatever its own attention.
 |---|---|
 | You owe | Commitments with `direction` `you_owe` and `status` `open`, where the counterparty is a `person` or a `service`. Order by `due`, then by `created`. |
 | Owed to you | Commitments with `direction` `owed_to_you` and `status` `open`, where the owner is a `person` or a `service`. Order by age. |
-| Conversations | Conversations with `status` `active`, and `new` greater than 0 or `your_turn` true, with no `stranger` participant. |
+| Conversations | Conversations with `status` `active`, and `new` greater than 0 or `your_turn` true, with no `stranger` participant and no declined participant. |
 | Records | Count for each record type. |
 | Feed | Feed items with `status` `new`, by publisher. |
 | Signals | Signals with `status` `active` and an `expires` time later than now. The engine sets `expired` at `expires`, so this also covers the time before the engine changes the status. |
-| Strangers | Commitments with `status` `open` whose counterparty or owner is a `stranger`, and conversations with `status` `active` with a `stranger` participant. |
+| Strangers | Commitments with `status` `open` whose counterparty or owner is a `stranger`, and conversations with `status` `active` with a `stranger` participant. A stranger that the person declined at the gate (section 6.7) does not count. |
 | Hostile | The count of hostile mail in the last 7 days, with no subject and no sender. |
 | Not understood | The count of messages that the model failed 3 times (section 7.4). |
 
 The sections do not overlap. A conversation with a `stranger` participant
 shows only under Strangers, so each item shows one time and each section count
-is exact. The client uses the counts of the engine and does not remove
+is exact. An item whose stranger the person declined, with no other stranger,
+is in no section. The client uses the counts of the engine and does not remove
 duplicates between sections.
 
 The web client opens the brief with Due soon, after the live login codes
@@ -1036,6 +1099,15 @@ split from the You owe items, and the API keeps one You owe section. The
 client shows You owe with the rest of its items, and with the engine count
 less the Due soon items. The "All" link of You owe, and the link of Due soon,
 give the engine count, because the full list holds both.
+
+A watch whose mail came (card R5-07) leads the brief. The opening sentence
+starts with one sentence that counts these mails ("The mail that you watched
+for came." for one, "Two mails that you watched for came." for two), and one
+card for each such
+watch comes before the live login codes. The card opens the mail. Done
+removes the watch. Near the end, "Iris watches for" lists the watches that
+wait, and a quiet button starts a new watch. The client reads the watches
+from `/api/watches`, not from the brief.
 
 In release 1 the brief is read-only. Each line opens its source mail in one
 step. The triage proposal ("Triage proposes 447 mailbox changes. Nothing is

@@ -66,6 +66,9 @@ struct Msg {
     /// The message has the SENT or DRAFT label.
     own: bool,
     hostile: bool,
+    /// The message waits for its link check (a `link_check` row, store
+    /// migration 20): it counts as hostile mail.
+    pending: bool,
     labels: Vec<String>,
     /// `None`: the message has no date.
     date: Option<i64>,
@@ -171,6 +174,7 @@ fn mailbox(store: &Store, rng: &mut Rng) -> Vec<Msg> {
                     },
                     own: sent,
                     hostile,
+                    pending: false,
                     labels,
                     date,
                     internal,
@@ -262,7 +266,7 @@ fn expected(policy: &Policy, mailbox: &[Msg], now: i64) -> Vec<(i64, Attention)>
         let msg = Message {
             sender: &m.sender,
             sender_kind: m.kind,
-            hostile: m.hostile,
+            hostile: m.hostile || m.pending,
             labels: &m.labels,
             date: m.date.unwrap_or(now),
             items: &all,
@@ -456,7 +460,8 @@ fn each_fact_change_gets_the_attention_of_the_policy_after_a_refresh() {
     // Invariant: after `refresh_attention`, the attention of each item is
     // the attention that the active policy gives it, also after a change
     // of a fact of its origin message: a label, a label name, the hostile
-    // marks, the date, the kind of the sender, a new item of the message,
+    // marks, a link check that starts or ends, the date, the kind of the
+    // sender, a new item of the message,
     // or a new form, type or document of the item. Each such change marks
     // the message in `attention_due` (store migration 8).
     for seed in 1..=20u64 {
@@ -500,7 +505,7 @@ fn each_fact_change_gets_the_attention_of_the_policy_after_a_refresh() {
             for _ in 0..1 + rng.next() % 3 {
                 let i = (rng.next() % mail.len() as u64) as usize;
                 let id = msg_id(i);
-                let op = rng.next() % 10;
+                let op = rng.next() % 11;
                 what += &format!("\nop {op} on message {id}");
                 match op {
                     // A label on or off.
@@ -676,6 +681,18 @@ fn each_fact_change_gets_the_attention_of_the_policy_after_a_refresh() {
                             m.sender = String::new();
                             m.date = m.internal;
                         }
+                        marked.push(id);
+                    }
+                    // The link check of the message starts or ends.
+                    10 => {
+                        let m = &mut mail[i];
+                        m.pending = !m.pending;
+                        let q = if m.pending {
+                            "INSERT INTO link_check(message_id) VALUES (?1)"
+                        } else {
+                            "DELETE FROM link_check WHERE message_id = ?1"
+                        };
+                        sql(&s, q, [id]);
                         marked.push(id);
                     }
                     // A new name of a label: each message with it.

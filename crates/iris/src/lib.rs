@@ -11,7 +11,9 @@ macro_rules! say {
 
 pub mod cost;
 pub mod engine;
+pub mod notify;
 pub mod reply;
+pub mod socket;
 pub mod verbs;
 
 use std::io::BufRead;
@@ -103,6 +105,127 @@ pub enum Command {
         #[command(subcommand)]
         command: ModelCommand,
     },
+    /// Show the send switch, or turn it on or off. No send leaves while it
+    /// is off. `on` needs a terminal and a typed "yes".
+    Sending {
+        #[arg(value_enum)]
+        state: Option<Switch>,
+    },
+    /// Cancel the send of a draft (`d-4`) while it waits in the outbox.
+    Cancel { id: String },
+    /// Close a commitment (`c-7`) in a draft changeset. Needs the engine.
+    Close {
+        id: String,
+        /// The reason. The default is "Done.".
+        #[arg(long)]
+        reason: Option<String>,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Decline a commitment in a draft changeset. Needs the engine.
+    Decline {
+        id: String,
+        /// The reason. The default is "Declined.".
+        #[arg(long)]
+        reason: Option<String>,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Defer a commitment to a date in a draft changeset. Needs the engine.
+    Defer {
+        id: String,
+        /// The day it opens again, YYYY-MM-DD.
+        #[arg(long)]
+        date: String,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Correct one field of an item in a draft changeset. Needs the engine.
+    Correct {
+        id: String,
+        /// The field, a dotted path, for example due.date.
+        #[arg(long)]
+        field: String,
+        /// The new value, as JSON. A value that is not JSON is a text.
+        #[arg(long)]
+        value: String,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Archive threads or messages in a draft changeset. Needs the engine.
+    Archive(Targets),
+    /// Move threads or messages to the inbox in a draft changeset.
+    Inbox(Targets),
+    /// Mark threads or messages read in a draft changeset.
+    Read(Targets),
+    /// Mark threads or messages unread in a draft changeset.
+    Unread(Targets),
+    /// Move threads or messages to the trash in a draft changeset.
+    Trash(Targets),
+    /// Add a label in a draft changeset.
+    Label(LabelTargets),
+    /// Remove a label in a draft changeset.
+    Unlabel(LabelTargets),
+    /// Write a reply to a thread (`t-3`) or a new mail from an account
+    /// (`a-1`) in a draft changeset. The file is a JSON object with `to`,
+    /// `cc`, `subject` (not for a reply) and `body`. Needs the engine.
+    #[command(name = "draft")]
+    Compose {
+        target: String,
+        file: PathBuf,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Send a draft that Iris made (`d-4`), in a draft changeset. Only a
+    /// person approves a send, and it waits for the hold. Needs the engine.
+    Send {
+        id: String,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Submit a draft changeset. Prints the state of each action. Needs the engine.
+    Submit {
+        /// The changeset ID, for example cs-12.
+        id: String,
+        /// The reason of the changeset, for the person.
+        #[arg(long)]
+        why: String,
+        /// Print the changeset document.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a changeset (`cs-12`), or list your drafts. Needs the engine.
+    #[command(arg_required_else_help = true)]
+    Changeset {
+        /// The changeset ID, for example cs-12.
+        #[arg(required_unless_present = "drafts", conflicts_with = "drafts")]
+        id: Option<String>,
+        /// List the drafts of the author `local`, the newest first.
+        #[arg(long)]
+        drafts: bool,
+        /// Print the changeset document (specification 2, section 5.1).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Withdraw a changeset that this command made. Applied actions stay.
+    /// Needs the engine.
+    Withdraw {
+        /// The changeset ID, for example cs-12.
+        id: String,
+        /// Print the changeset document after the withdraw.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start a new draft revision of a submitted changeset of yours, after
+    /// a review comment. Add the new actions with `--changeset`, then
+    /// submit. Needs the engine.
+    Revise {
+        /// The changeset ID, for example cs-12.
+        id: String,
+        /// Print the changeset document.
+        #[arg(long)]
+        json: bool,
+    },
     /// Understand the mail: an estimate, the approval of a budget, or a run.
     Understand {
         /// Print the estimate and an approval code. No model call.
@@ -135,6 +258,23 @@ pub enum Command {
         #[command(subcommand)]
         command: WatchCommand,
     },
+    /// The matters that Iris proposes and that you confirmed. Prints the
+    /// JSON of the local API (`/api/matters`).
+    Matters {
+        #[command(subcommand)]
+        command: Option<MattersCommand>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum MattersCommand {
+    /// The valid proposals and the confirmed matters (the default).
+    List,
+    /// One matter (`g-4`) with its members, by form.
+    Show { id: String },
+    /// Ask the model for new proposals now: at most one call, after the
+    /// wait of a model error, and only for a new set of candidates.
+    Propose,
 }
 
 #[derive(Subcommand)]
@@ -150,6 +290,97 @@ pub enum WatchCommand {
     },
     /// Remove a watch (`w-3`): one that waits, or one that you saw.
     Remove { id: String },
+}
+
+/// The draft changeset of a verb that adds an action.
+#[derive(clap::Args, Clone)]
+pub struct Draft {
+    /// Add to this draft changeset. Without it, the command makes a new one.
+    #[arg(long)]
+    pub changeset: Option<String>,
+    /// The reason of the action.
+    #[arg(long)]
+    pub why: Option<String>,
+}
+
+#[derive(clap::Args, Clone)]
+pub struct Targets {
+    /// Thread (`t-3`) or message (`m-42`) IDs.
+    #[arg(required = true)]
+    pub ids: Vec<String>,
+    #[command(flatten)]
+    pub to: Draft,
+}
+
+#[derive(clap::Args, Clone)]
+pub struct LabelTargets {
+    #[arg(required = true)]
+    pub ids: Vec<String>,
+    /// The label name.
+    #[arg(long)]
+    pub label: String,
+    #[command(flatten)]
+    pub to: Draft,
+}
+
+/// The action of a verb that adds one: the verb, the targets, the
+/// arguments and the draft.
+type Action<'a> = (&'static str, Vec<String>, serde_json::Value, &'a Draft);
+
+fn action(c: &Command) -> Result<Option<Action<'_>>, socket::Failure> {
+    use serde_json::json;
+    let reason = |r: &Option<String>, default: &str| json!({ "reason": r.clone().unwrap_or_else(|| default.into()) });
+    Ok(Some(match c {
+        Command::Compose { target, file, to } => {
+            let usage = |error: String| socket::Failure {
+                code: socket::code::USAGE,
+                error,
+            };
+            let text = std::fs::read_to_string(file)
+                .map_err(|e| usage(format!("{}: {e}", file.display())))?;
+            let args: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+                usage(format!(
+                    "{}: not a JSON object of the draft: {e}",
+                    file.display()
+                ))
+            })?;
+            ("draft", vec![target.clone()], args, to)
+        }
+        Command::Send { id, to } => ("send", vec![id.clone()], json!({}), to),
+        Command::Close { id, reason: r, to } => ("close", vec![id.clone()], reason(r, "Done."), to),
+        Command::Decline { id, reason: r, to } => {
+            ("decline", vec![id.clone()], reason(r, "Declined."), to)
+        }
+        Command::Defer { id, date, to } => ("defer", vec![id.clone()], json!({ "date": date }), to),
+        Command::Correct {
+            id,
+            field,
+            value,
+            to,
+        } => {
+            let value = serde_json::from_str(value).unwrap_or_else(|_| json!(value));
+            (
+                "correct",
+                vec![id.clone()],
+                json!({ "field": field, "value": value }),
+                to,
+            )
+        }
+        Command::Archive(t) => ("archive", t.ids.clone(), json!({}), &t.to),
+        Command::Inbox(t) => ("inbox", t.ids.clone(), json!({}), &t.to),
+        Command::Read(t) => ("read", t.ids.clone(), json!({}), &t.to),
+        Command::Unread(t) => ("unread", t.ids.clone(), json!({}), &t.to),
+        Command::Trash(t) => ("trash", t.ids.clone(), json!({}), &t.to),
+        Command::Label(t) => ("label", t.ids.clone(), json!({ "label": t.label }), &t.to),
+        Command::Unlabel(t) => ("unlabel", t.ids.clone(), json!({ "label": t.label }), &t.to),
+        _ => return Ok(None),
+    }))
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum Switch {
+    On,
+    Off,
 }
 
 #[derive(Subcommand)]
@@ -257,8 +488,169 @@ pub fn version_line() -> String {
     format!("iris {VERSION}")
 }
 
-/// Run one command. Gives the error text for standard error.
-pub fn run(cli: Cli) -> Result<(), String> {
+/// Run one command. Gives the exit code (specification 2, section 8.4) and
+/// the error text for standard error.
+pub fn run(cli: Cli) -> Result<(), socket::Failure> {
+    // The verbs that change changesets go through the engine socket, never
+    // through the store (specification 2, section 8.1).
+    let data = engine::data_dir(cli.data.clone()).map_err(|e| socket::Failure {
+        code: socket::code::ERROR,
+        error: e.to_string(),
+    });
+    if let Some((verb, targets, args, to)) = action(&cli.command)? {
+        let mut request = serde_json::json!({ "verb": verb, "targets": targets, "args": args });
+        if let Some(cs) = &to.changeset {
+            request["changeset"] = cs.clone().into();
+        }
+        if let Some(why) = &to.why {
+            request["why"] = why.clone().into();
+        }
+        let r = socket::request(&data?, "add", request)?;
+        println!("{} {}", r["changeset"].as_str().unwrap_or_default(), r["n"]);
+        return Ok(());
+    }
+    if let Command::Submit { id, why, json } = &cli.command {
+        let doc = socket::request(
+            &data?,
+            "submit",
+            serde_json::json!({ "changeset": id, "why": why }),
+        )?;
+        print!("{}", changeset_text(&doc, *json));
+        return match submit_code(&doc) {
+            0 => Ok(()),
+            code => Err(socket::Failure {
+                code,
+                error: format!("{id}: not each action is applied (exit code {code})"),
+            }),
+        };
+    }
+    let text = match &cli.command {
+        Command::Changeset { id, drafts, json } => {
+            let dir = data?;
+            if *drafts {
+                let r = socket::request(&dir, "drafts", serde_json::json!({}))?;
+                Some(drafts_text(&r, *json))
+            } else {
+                let id = id.as_deref().unwrap_or_default();
+                let r = socket::request(&dir, "show", serde_json::json!({ "changeset": id }))?;
+                Some(changeset_text(&r, *json))
+            }
+        }
+        Command::Withdraw { id, json } => {
+            let r = socket::request(&data?, "withdraw", serde_json::json!({ "changeset": id }))?;
+            Some(changeset_text(&r, *json))
+        }
+        Command::Revise { id, json } => {
+            let r = socket::request(&data?, "revise", serde_json::json!({ "changeset": id }))?;
+            Some(changeset_text(&r, *json))
+        }
+        _ => None,
+    };
+    if let Some(text) = text {
+        print!("{text}");
+        return Ok(());
+    }
+    run_store(cli).map_err(|error| socket::Failure {
+        code: socket::code::ERROR,
+        error,
+    })
+}
+
+/// The exit code of `iris submit` (specification 2, section 8.4), from the
+/// actions of the revision that it submitted, in the order 2, 1, 3, 5, 0.
+pub fn submit_code(doc: &serde_json::Value) -> u8 {
+    let mut codes = Vec::new();
+    for a in doc["actions"].as_array().into_iter().flatten() {
+        if a["revision"] != doc["revision"] {
+            continue;
+        }
+        let d = &a["decision"];
+        codes.push(match (d["state"].as_str(), d["by"].as_str()) {
+            (Some("denied"), Some("engine")) => socket::code::USAGE,
+            (Some("failed"), _) => socket::code::ERROR,
+            (Some("denied"), _) => socket::code::DENIED,
+            (Some("applied"), _) => 0,
+            _ => socket::code::OPEN,
+        });
+    }
+    [
+        socket::code::USAGE,
+        socket::code::ERROR,
+        socket::code::DENIED,
+        socket::code::OPEN,
+    ]
+    .into_iter()
+    .find(|c| codes.contains(c))
+    .unwrap_or(0)
+}
+
+/// `iris changeset --drafts`: one changeset ID on each line.
+fn drafts_text(r: &serde_json::Value, json: bool) -> String {
+    let ids = r["changesets"].as_array().cloned().unwrap_or_default();
+    if json {
+        return ids.iter().map(|i| format!("{i}\n")).collect();
+    }
+    if ids.is_empty() {
+        return "No draft.\n".into();
+    }
+    ids.iter()
+        .map(|i| format!("{}\n", i.as_str().unwrap_or_default()))
+        .collect()
+}
+
+/// A changeset as text (specification 2, section 8.3): a label line for the
+/// changeset, then one line for each action, which starts with
+/// `<revision>.<n>`.
+pub fn changeset_text(doc: &serde_json::Value, json: bool) -> String {
+    if json {
+        return format!("{doc}\n");
+    }
+    let s = |v: &serde_json::Value| v.as_str().unwrap_or_default().to_string();
+    let mut out = format!(
+        "ID: {}\nState: {}\nRevision: {}\n",
+        s(&doc["id"]),
+        s(&doc["state"]),
+        doc["revision"]
+    );
+    if let Some(why) = doc["why"].as_str() {
+        out.push_str(&format!("Why: {}\n", verbs::field(why)));
+    }
+    for a in doc["actions"].as_array().into_iter().flatten() {
+        let state = a["decision"]["state"].as_str().unwrap_or("draft");
+        let targets: Vec<String> = a["targets"]
+            .as_object()
+            .into_iter()
+            .flat_map(|t| t.values())
+            .flat_map(|v| v.as_array().cloned().unwrap_or_default())
+            .map(|v| verbs::field(v.as_str().unwrap_or_default()))
+            .collect();
+        let mut line = format!(
+            "{}.{} {} {} {state}",
+            a["revision"],
+            a["n"],
+            s(&a["verb"]),
+            targets.join(",")
+        );
+        if let Some(args) = a["args"].as_object().filter(|o| !o.is_empty()) {
+            line.push_str(&format!(
+                " args: {}",
+                verbs::field(&serde_json::Value::from(args.clone()).to_string())
+            ));
+        }
+        if let Some(why) = a["why"].as_str() {
+            line.push_str(&format!(" why: {}", verbs::field(why)));
+        }
+        if let Some(reason) = a["decision"]["reason"].as_str() {
+            line.push_str(&format!(" reason: {}", verbs::field(reason)));
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Run one command that uses the store. Gives the error text for standard error.
+fn run_store(cli: Cli) -> Result<(), String> {
     let data = || engine::data_dir(cli.data.clone()).map_err(|e| e.to_string());
     let open =
         || -> Result<Store, String> { Store::open(&data()?).map_err(|e| format!("store: {e}")) };
@@ -301,6 +693,18 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
         Command::Watch { command } => print(verbs::watch(&open()?, command)),
+        Command::Matters { command } => {
+            let store = open()?;
+            let text = match command.as_ref().unwrap_or(&MattersCommand::List) {
+                MattersCommand::Propose => {
+                    cost::propose_matters(&store, iris_matters::Gate::Now, engine::now_ms())?
+                        .ok_or("an understanding run holds the lock; try again later")?
+                }
+                c => verbs::matters(&store, c)?,
+            };
+            println!("{text}");
+            Ok(())
+        }
         Command::Backup { path } => {
             let files = open()?.backup(path).map_err(|e| format!("backup: {e}"))?;
             println!("iris: backup in {} ({files} content files)", path.display());
@@ -329,6 +733,57 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             println!("{text}");
             Ok(())
         }
+        Command::Sending { state } => {
+            let store = open()?;
+            match state {
+                Some(Switch::On) => {
+                    {
+                        use std::io::IsTerminal;
+                        let stdin = std::io::stdin();
+                        sending_on_confirm(stdin.is_terminal(), &mut stdin.lock())?;
+                    }
+                    iris_apply::set_sending(&store, true).map_err(|e| e.to_string())?;
+                }
+                Some(Switch::Off) => match iris_apply::set_sending(&store, false) {
+                    Ok(()) => {}
+                    Err(iris_apply::Error::Busy) => {
+                        return Err("A send is in progress. Run the command again.".into())
+                    }
+                    Err(e) => return Err(e.to_string()),
+                },
+                None => {}
+            }
+            println!(
+                "{}",
+                match iris_apply::sending(&store).map_err(|e| e.to_string())? {
+                    Some(_) => "Sending is on.",
+                    None => "Sending is off. Sends wait in the outbox.",
+                }
+            );
+            Ok(())
+        }
+        Command::Cancel { id } => {
+            let store = open()?;
+            println!("{}", cancel_send(&store, id, engine::now_ms())?);
+            Ok(())
+        }
+        Command::Changeset { .. }
+        | Command::Withdraw { .. }
+        | Command::Revise { .. }
+        | Command::Submit { .. }
+        | Command::Close { .. }
+        | Command::Decline { .. }
+        | Command::Defer { .. }
+        | Command::Correct { .. }
+        | Command::Archive(_)
+        | Command::Inbox(_)
+        | Command::Read(_)
+        | Command::Unread(_)
+        | Command::Trash(_)
+        | Command::Label(_)
+        | Command::Unlabel(_)
+        | Command::Compose { .. }
+        | Command::Send { .. } => unreachable!("run() sends these verbs to the socket"),
         Command::Understand {
             estimate,
             approve,
@@ -604,8 +1059,11 @@ fn test_token_uri(client: iris_auth::Client) -> Result<iris_auth::Client, String
 
 /// Return all the routes of the engine.
 pub fn app(store: Arc<Store>, auth: Arc<iris_api::Auth>) -> axum::Router {
+    // The model client of `POST /api/ask`, from the model row of each call.
+    let model_store = store.clone();
+    let connect: iris_api::Connect = Arc::new(move |row| cost::connect(&model_store, row));
     // The API routes come before the fallback of the web client.
-    iris_api::router(store, auth).merge(iris_web::router())
+    iris_api::router_with_model(store, auth, connect).merge(iris_web::router())
 }
 
 /// The API has no TLS, so only this machine may connect (specification 2,
@@ -625,6 +1083,8 @@ fn check_loopback(addr: SocketAddr) -> std::io::Result<()> {
 pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
     check_loopback(addr)?;
     let gmail = gmail_config().map_err(std::io::Error::other)?;
+    // The engine lock and the socket come first: a second engine stops here.
+    let bound = socket::bind(store.dir())?;
     let api_store = store.clone();
     let sync = engine::Engine::new(store, gmail, std::env::var("IRIS_TEST_TOKEN_URI").ok());
     std::thread::Builder::new()
@@ -632,8 +1092,10 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
         .spawn(move || sync.run())?;
 
     // One thread: the lightest memory footprint has priority.
+    // The time driver: the socket waits at most READ_WAIT for a request.
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_io()
+        .enable_time()
         .build()?;
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -641,15 +1103,27 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
         // The API checks the Host against the bound address.
         let auth = Arc::new(iris_api::Auth::new(local)?);
         say!("iris: serving on http://{local}");
+        say!("iris: commands connect to {}", bound.path.display());
+        let socket_store = api_store.clone();
+        let commands = async {
+            if let Err(e) = socket::serve(&bound, socket_store).await {
+                say!("iris: socket: {e}");
+            }
+            std::future::pending::<()>().await
+        };
         // The one-time code of the API sign-in (specification 2, section 8.6).
         if let Some(url) = auth.sign_in_url() {
             say!("iris: sign-in address of the local API: {url}");
         }
-        axum::serve(listener, app(api_store, auth))
-            .with_graceful_shutdown(async {
-                let _ = tokio::signal::ctrl_c().await;
-            })
-            .await
+        let web = axum::serve(listener, app(api_store, auth)).with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        });
+        // The web server ends at Ctrl-C. Then `bound` drops: the socket file
+        // goes, and the lock is released.
+        tokio::select! {
+            r = web => r,
+            () = commands => Ok(()),
+        }
     })
 }
 
@@ -717,5 +1191,198 @@ mod tests {
         assert_eq!(cli.data, Some(PathBuf::from("/tmp/d")));
         let cli = Cli::try_parse_from(["iris", "export", "/tmp/e"]).unwrap();
         assert!(matches!(cli.command, Command::Export { path } if path.as_os_str() == "/tmp/e"));
+    }
+}
+
+/// The confirmation of `iris sending on`: a terminal and a typed "yes". So
+/// a script with no terminal does not turn sending on by mistake.
+/// `terminal` is true when standard input is a terminal: a script or an
+/// agent without a terminal cannot turn sending on.
+fn sending_on_confirm(terminal: bool, input: &mut impl BufRead) -> Result<(), String> {
+    if !terminal {
+        return Err("`iris sending on` needs a terminal: standard input is not a TTY".into());
+    }
+    eprint!(
+        "Approved sends leave Gmail after their hold. \
+         Check Gmail on this machine first (issue #302). Type yes to turn sending on: "
+    );
+    let mut line = String::new();
+    input.read_line(&mut line).map_err(|e| e.to_string())?;
+    if line.trim() != "yes" {
+        return Err("Sending stays off.".into());
+    }
+    Ok(())
+}
+
+/// `iris cancel d-4`: cancel the open send of the draft.
+fn cancel_send(store: &Store, id: &str, now: i64) -> Result<&'static str, String> {
+    let draft = match iris_store::parse_id(id) {
+        Some((iris_store::Kind::Draft, n)) => n,
+        _ => return Err(format!("{id} is not a draft ID such as d-4")),
+    };
+    match iris_changeset::cancel_draft(store, draft, now).map_err(|e| e.to_string())? {
+        None => Err(format!("{id} has no send")),
+        Some(iris_changeset::Cancel::Done) => Ok("Cancelled. The send does not leave."),
+        Some(iris_changeset::Cancel::Started) => {
+            Err("The send started. It cannot be cancelled.".into())
+        }
+        Some(iris_changeset::Cancel::NotOpen) => Err(format!("{id} has no send that waits")),
+    }
+}
+
+#[cfg(test)]
+mod outbox_tests {
+    use super::*;
+
+    /// `iris cancel` takes only a draft ID, and says so for a draft with no
+    /// send.
+    #[test]
+    fn cancel_names_a_draft() {
+        let dir = std::env::temp_dir().join(format!("iris-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        assert!(cancel_send(&store, "t-4", 0)
+            .unwrap_err()
+            .contains("not a draft ID"));
+        assert!(cancel_send(&store, "d-x", 0)
+            .unwrap_err()
+            .contains("not a draft ID"));
+        assert_eq!(
+            cancel_send(&store, "d-4", 0).unwrap_err(),
+            "d-4 has no send"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Only the typed word "yes" at a terminal turns sending on.
+    #[test]
+    fn only_yes_turns_sending_on() {
+        assert_eq!(sending_on_confirm(true, &mut "yes\n".as_bytes()), Ok(()));
+        assert_eq!(sending_on_confirm(true, &mut "  yes \n".as_bytes()), Ok(()));
+        for answer in ["no\n", "\n", "", "yes please\n", "y\n", "YES!\n"] {
+            assert_eq!(
+                sending_on_confirm(true, &mut answer.as_bytes()),
+                Err("Sending stays off.".to_string()),
+                "{answer:?}"
+            );
+        }
+        let r = sending_on_confirm(false, &mut "yes\n".as_bytes());
+        assert!(r.unwrap_err().contains("needs a terminal"));
+    }
+
+    /// A store with account 1 and draft d-1 (a new mail that the apply
+    /// made), and a function that submits and approves a send of d-1.
+    fn draft_store(name: &str) -> (std::path::PathBuf, Store) {
+        let dir = std::env::temp_dir().join(format!("iris-cancel-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        store.add_account("gmail", "owner@example.com").unwrap();
+        store
+            .write(|tx| {
+                tx.execute_batch(
+                    "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0);
+                     INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+                       VALUES (1, 1, 1, 'draft', '{\"accounts\":[\"a-1\"]}', '{}');",
+                )?;
+                let c = iris_compose::Content {
+                    to: vec!["priya@example.com".into()],
+                    cc: Vec::new(),
+                    subject: "Plan".into(),
+                    body: "Hello".into(),
+                }
+                .check()
+                .unwrap();
+                let raw =
+                    iris_compose::compose("owner@example.com", "iris.1@example.com", &c, None, 1);
+                tx.execute(
+                    "INSERT INTO draft(account_id, provider_id, message_id_hdr, content, hash,
+                                       raw, action_id, created_at, updated_at)
+                     VALUES (1, 'r1', 'iris.1@example.com', '{}', ?1, ?2, 1, 0, 0)",
+                    rusqlite::params![iris_compose::hash(&c, None), raw],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        (dir, store)
+    }
+
+    /// Submit a send of d-1 as the person, and approve it. Gives its ID.
+    fn approved_send(store: &Store) -> i64 {
+        let who = iris_changeset::Author {
+            kind: iris_changeset::AuthorKind::Person,
+            name: None,
+            session: None,
+            job: None,
+        };
+        let now = engine::now_ms();
+        let cs = iris_changeset::create(store, &who, now).unwrap();
+        let verb = iris_changeset::Verb::Send;
+        iris_changeset::add_action(store, cs, &who, verb, &["d-1"], &Default::default(), None)
+            .unwrap();
+        iris_changeset::submit(store, cs, &who, "Send.", now).unwrap();
+        store
+            .write(|tx| {
+                let id: i64 = tx.query_row(
+                    "SELECT id FROM changeset_action WHERE changeset_id = ?1",
+                    [cs],
+                    |r| r.get(0),
+                )?;
+                let n = tx.execute(
+                    "UPDATE changeset_action SET state = 'approved', decided_by = 'person',
+                       decided_at = ?2 WHERE id = ?1 AND state IN ('proposed', 'in_review')",
+                    rusqlite::params![id, now],
+                )?;
+                assert_eq!(n, 1, "the send was not proposed");
+                Ok(id)
+            })
+            .unwrap()
+    }
+
+    fn decision(store: &Store, action: i64) -> (String, String, String) {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT state, decided_by, coalesce(reason, '') FROM changeset_action
+                     WHERE id = ?1",
+                    [action],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?)
+            })
+            .unwrap()
+    }
+
+    /// `iris cancel d-1` cancels an approved send and a held send of the
+    /// draft. A second cancel finds no send that waits.
+    #[test]
+    fn cancel_removes_the_send_of_a_draft() {
+        let (dir, store) = draft_store("send");
+        let want = (
+            "denied".to_string(),
+            "person".to_string(),
+            iris_changeset::CANCELLED.to_string(),
+        );
+        let s = approved_send(&store);
+        let now = engine::now_ms();
+        assert_eq!(
+            cancel_send(&store, "d-1", now),
+            Ok("Cancelled. The send does not leave.")
+        );
+        assert_eq!(decision(&store, s), want);
+        assert_eq!(
+            cancel_send(&store, "d-1", now).unwrap_err(),
+            "d-1 has no send that waits"
+        );
+        // A held send: the cancel finds the open send, not the old one.
+        let s = approved_send(&store);
+        assert_eq!(iris_changeset::hold(&store, 1, now).unwrap(), 1);
+        assert_eq!(decision(&store, s).0, "held");
+        assert_eq!(
+            cancel_send(&store, "d-1", now),
+            Ok("Cancelled. The send does not leave.")
+        );
+        assert_eq!(decision(&store, s), want);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

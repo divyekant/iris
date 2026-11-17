@@ -5,7 +5,7 @@
   here; the engine writes the file and keeps its comments.
 -->
 <script lang="ts">
-  import { get, own, post, type Mode, type Policy, type Rule } from "../api";
+  import { get, own, post, type Mode, type Policy, type Proposal, type Rule } from "../api";
   import { poll } from "../clock";
   import { conditions, example, GROUPS, keep, MODES, verbs } from "../rules";
 
@@ -64,6 +64,11 @@
   const discard = () => send("discard", {});
   const setMode = () => send("mode", { version: policy.version, mode: choice });
   const remove = (id: number) => send("remove", { version: policy.version, id });
+  const accept = (id: number) => send("accept", { version: policy.version, id });
+  const dismiss = (id: number) => send("dismiss", { id });
+  let proposals = $derived(policy.proposals ?? []);
+  // One sentence for the reason of a proposal: the count and the verb, from the approvals of the person.
+  const why = (p: Proposal) => `You approved all ${p.approvals} ${p.rule.verbs.join(", ")} changes like this.`;
   const title = (r: Rule) => GROUPS.find((g) => g.effect === r.effect)?.title ?? r.effect;
   const author = (r: Rule) => (r.by === "proposal" ? "Iris proposed it" : "You wrote it");
   // Each field that can make a rule changed, and that the rule sentence does not show.
@@ -152,6 +157,28 @@
     <div class="actions">
       <button type="button" class="primary" onclick={discard} disabled={busy}>Put the file back</button>
     </div>
+  </section>
+{/if}
+
+{#if proposals.length}
+  <section aria-labelledby="proposals">
+    <h2 id="proposals" class="label">Suggested by Iris</h2>
+    <p class="muted note">Iris saw a pattern in your approvals. A suggestion goes into your file only when you add it.</p>
+    <ul class="rules">
+      {#each proposals as p (p.id)}
+        <li class="proposal">
+          <div class="rule">
+            <p class="name">{p.rule.name}</p>
+            <p class="how">{@render sentence(p.rule)}</p>
+            <p class="small">{why(p)}</p>
+          </div>
+          <div class="actions">
+            <button type="button" class="accept" onclick={() => accept(p.id)} disabled={blocked || busy}>Add the rule</button>
+            <button type="button" class="quiet" onclick={() => dismiss(p.id)} disabled={busy}>Dismiss</button>
+          </div>
+        </li>
+      {/each}
+    </ul>
   </section>
 {/if}
 
@@ -383,6 +410,19 @@
   .danger {
     border-color: var(--color-error);
   }
+  /* The add of a suggestion: an outline in the primary color, because the screen has one primary button at most. */
+  .accept {
+    font-weight: 600;
+    color: var(--color-text);
+    background: none;
+    border: 1px solid var(--color-primary);
+  }
+  .accept:hover:not(:disabled) {
+    background: var(--color-background-surface);
+  }
+  .proposal .actions {
+    margin: 0;
+  }
   .danger:hover:not(:disabled) {
     background: var(--color-background-surface);
   }
@@ -527,6 +567,9 @@
     .diff li {
       grid-template-columns: 1fr;
       gap: var(--space-1);
+    }
+    .proposal .actions {
+      flex-basis: 100%;
     }
   }
   @media (prefers-reduced-motion: reduce) {

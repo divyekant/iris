@@ -20,6 +20,12 @@
       "type": "string",
       "format": "date-time"
     },
+    "utcDateTime": {
+      "$comment": "A date-time in UTC with three digits of milliseconds and Z, as the engine writes it. See docs/spec/03-job-workspace.md, section 2.",
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
     "date": {
       "type": "string",
       "format": "date"
@@ -277,9 +283,15 @@
           "maximum": 1
         },
         "matter": {
-          "type": [
-            "string",
-            "null"
+          "description": "The g- ID of the confirmed matter of the item, or null. See docs/specs/2026-11-16-matters.md.",
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^g-[1-9][0-9]*$"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "attention": {

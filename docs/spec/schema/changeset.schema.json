@@ -177,7 +177,8 @@
                       "enum": [
                         "proposed",
                         "in_review",
-                        "approved"
+                        "approved",
+                        "held"
                       ]
                     }
                   }
@@ -216,7 +217,8 @@
                         "enum": [
                           "proposed",
                           "in_review",
-                          "approved"
+                          "approved",
+                          "held"
                         ]
                       }
                     }
@@ -312,6 +314,7 @@
                               "proposed",
                               "in_review",
                               "approved",
+                              "held",
                               "applied",
                               "failed",
                               "undone",
@@ -455,7 +458,7 @@
       }
     },
     "verb": {
-      "$comment": "The verbs of release 2 (section 4). Only the undo of a trash makes untrash (section 7.4).",
+      "$comment": "The verbs of release 2 (section 4), and draft and send of release 3 (docs/specs/2026-11-16-send.md). Only the undo of a trash makes untrash (section 7.4).",
       "enum": [
         "archive",
         "inbox",
@@ -468,7 +471,9 @@
         "close",
         "defer",
         "decline",
-        "correct"
+        "correct",
+        "draft",
+        "send"
       ]
     },
     "flag": {
@@ -589,6 +594,7 @@
                   "proposed",
                   "in_review",
                   "approved",
+                  "held",
                   "applied",
                   "failed",
                   "undone",
@@ -653,6 +659,7 @@
                     "enum": [
                       "in_review",
                       "approved",
+                      "held",
                       "applied",
                       "failed",
                       "undone",
@@ -668,6 +675,35 @@
             "properties": {
               "hash": {
                 "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "$comment": "Only a send is held (docs/specs/2026-11-17-held-outbox.md, migration 22).",
+          "if": {
+            "type": "object",
+            "required": [
+              "decision"
+            ],
+            "properties": {
+              "decision": {
+                "type": "object",
+                "required": [
+                  "state"
+                ],
+                "properties": {
+                  "state": {
+                    "const": "held"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "verb": {
+                "const": "send"
               }
             }
           }
@@ -822,7 +858,7 @@
           }
         },
         {
-          "$comment": "A mailbox verb changes threads or messages, and resolves to one or more messages. close, defer and decline change commitments. correct changes any item (section 4).",
+          "$comment": "A mailbox verb changes threads or messages, and resolves to one or more messages. close, defer and decline change commitments. correct changes any item (section 4). draft takes one account or one thread; send takes one draft (release 3).",
           "if": {
             "properties": {
               "verb": {
@@ -845,16 +881,40 @@
             }
           },
           "else": {
-            "properties": {
-              "targets": {
-                "properties": {
-                  "items": false
+            "if": {
+              "properties": {
+                "verb": {
+                  "enum": [
+                    "draft",
+                    "send"
+                  ]
                 }
-              },
-              "resolved": {
-                "properties": {
-                  "messages": {
-                    "minItems": 1
+              }
+            },
+            "then": {
+              "properties": {
+                "targets": {
+                  "properties": {
+                    "items": false,
+                    "messages": false
+                  }
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "targets": {
+                  "properties": {
+                    "items": false,
+                    "drafts": false,
+                    "accounts": false
+                  }
+                },
+                "resolved": {
+                  "properties": {
+                    "messages": {
+                      "minItems": 1
+                    }
                   }
                 }
               }
@@ -910,11 +970,155 @@
               }
             }
           }
+        },
+        {
+          "$comment": "send takes one draft and no arguments. draft takes the content of docs/specs/2026-11-16-send.md, section 1.",
+          "if": {
+            "properties": {
+              "verb": {
+                "const": "send"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "targets": {
+                "required": [
+                  "drafts"
+                ]
+              },
+              "args": {
+                "type": "object",
+                "maxProperties": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verb": {
+                "const": "draft"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "targets": {
+                "properties": {
+                  "threads": {
+                    "maxItems": 1
+                  },
+                  "drafts": false
+                }
+              },
+              "args": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "to",
+                  "body"
+                ],
+                "properties": {
+                  "to": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "cc": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "subject": {
+                    "type": "string"
+                  },
+                  "body": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "$comment": "A checked draft of new mail has a subject and no resolved message; a checked reply has no subject (the subject of the parent decides it) and exactly one resolved message, its parent (send spec, sections 1 and 3).",
+          "if": {
+            "properties": {
+              "verb": {
+                "const": "draft"
+              },
+              "targets": {
+                "required": [
+                  "accounts"
+                ]
+              }
+            },
+            "required": [
+              "verb",
+              "targets"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "required": [
+                  "subject"
+                ]
+              },
+              "resolved": {
+                "properties": {
+                  "messages": {
+                    "maxItems": 0
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "$comment": "See the rule above: a checked reply has no subject and one parent.",
+          "if": {
+            "properties": {
+              "verb": {
+                "const": "draft"
+              },
+              "targets": {
+                "required": [
+                  "threads"
+                ]
+              }
+            },
+            "required": [
+              "verb",
+              "targets"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "properties": {
+                  "subject": false
+                }
+              },
+              "resolved": {
+                "properties": {
+                  "messages": {
+                    "minItems": 1,
+                    "maxItems": 1
+                  }
+                }
+              }
+            }
+          }
         }
       ]
     },
     "targets": {
-      "$comment": "IDs of one kind: threads, messages or items. A sender is not a target (section 5.6).",
+      "$comment": "IDs of one kind: threads, messages, items, drafts or accounts. A sender is not a target (section 5.6). drafts and accounts are the targets of the write verbs (release 3).",
       "type": "object",
       "additionalProperties": false,
       "minProperties": 1,
@@ -943,6 +1147,22 @@
           "items": {
             "$ref": "#/$defs/itemId"
           }
+        },
+        "drafts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "$ref": "#/$defs/draftId"
+          }
+        },
+        "accounts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "$ref": "#/$defs/accountId"
+          }
         }
       }
     },
@@ -958,6 +1178,7 @@
             "proposed",
             "in_review",
             "approved",
+            "held",
             "applied",
             "failed",
             "denied",
@@ -966,7 +1187,7 @@
             "replaced",
             "undone"
           ],
-          "$comment": "held is for a send in the held outbox (release 3). No verb of this version can be held."
+          "$comment": "held is for a send in the held outbox (release 3): an approved send that waits for its hold and the send switch."
         },
         "by": {
           "enum": [
@@ -1051,6 +1272,7 @@
               "state": {
                 "enum": [
                   "approved",
+                  "held",
                   "applied",
                   "failed"
                 ]
@@ -1159,6 +1381,14 @@
     "commitmentId": {
       "type": "string",
       "pattern": "^c-[1-9][0-9]*$"
+    },
+    "draftId": {
+      "type": "string",
+      "pattern": "^d-[1-9][0-9]*$"
+    },
+    "accountId": {
+      "type": "string",
+      "pattern": "^a-[1-9][0-9]*$"
     }
   }
 }

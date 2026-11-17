@@ -70,8 +70,8 @@ not have the label `SPAM` or `TRASH`.
 | `defer` | commitment | date | none (Iris state) | set the old value (below) | 2 |
 | `decline` | commitment | reason | none (Iris state) | set the old value (below) | 2 |
 | `correct` | any item | field, value | none (Iris state) | set the old value (below) | 2 |
-| `draft` | thread, or none for new mail | file with the text | a later specification (section 7.5) | a later specification | 3 |
-| `send` | a draft | none | `drafts.send`, after the hold (section 7.5) | none: final after the hold | 3 |
+| `draft` | one thread (a reply) or one account (`a-N`, a new mail) | recipients, subject, text | `drafts.create` (section 7.5) | none: Iris never deletes a draft. The change of a draft and its undo come in a later card | 3 |
+| `send` | one draft (`d-N`) | none | `drafts.send`, after the hold (section 7.5) | none: final after the hold | 3 |
 | `nudge` | commitment `owed_to_you` | none | makes a `draft` action, then a `send` action | as `draft` and `send` | 3 |
 | `wait` | thread, or a date | until | none | not applicable | 5 |
 | `ask` | none | question, options | none | not applicable | 5 |
@@ -197,11 +197,11 @@ documents in `schema/examples/` (files `changeset*.json`).
 | `state` | `draft` (the newest revision is not submitted), `open` (one or more actions are open, section 5.2), `closed` (no action is open) or `withdrawn`. |
 | `actions[].n` | The number of the action in the changeset, from 1. |
 | `actions[].revision` | The revision of the action. The document lists the actions of each revision, because an old revision can keep decided actions and `approved` actions. |
-| `actions[].targets` | What the author named: `threads`, `messages` or `items`. |
-| `actions[].args` | The arguments of the verb (section 4), as one JSON object. `label` and `unlabel`: `label`. `close` and `decline`: `reason`. `defer`: `date`. `correct`: `field` and `value`. Each other verb: none (`{}`). A `denied` or `cancelled` action, and a draft action, can hold arguments that do not fit the verb, because only submit checks them. |
+| `actions[].targets` | What the author named: `threads`, `messages` or `items`. The write verbs of release 3 also name `accounts` (`a-N`, a new mail) or `drafts` (`d-N`), with exactly one target (`docs/specs/2026-11-16-send.md`, section 4). |
+| `actions[].args` | The arguments of the verb (section 4), as one JSON object. `label` and `unlabel`: `label`. `close` and `decline`: `reason`. `defer`: `date`. `correct`: `field` and `value`. `draft`: `to`, `cc`, `subject` and `body` (a reply has no `subject`; `docs/specs/2026-11-16-send.md`, section 1). Each other verb, `send` too: none (`{}`). A `denied` or `cancelled` action, and a draft action, can hold arguments that do not fit the verb, because only submit checks them. |
 | `actions[].resolved` | The message IDs at submit. Review shows these, and apply uses only these. The engine keeps them in a child table, and writes the document by streaming (section 9). |
 | `actions[].flags` | Why a person must look: see section 5.3. |
-| `actions[].hash` | `null` in a triage proposal that the engine does not store (release 1). Else the SHA-256 (hex) of the `verb`, the `targets` text, the `args` text and the `resolved` message IDs, from submit. Each of the three texts has its length in bytes first (8 bytes, big-endian). Then each message ID follows, in the order of the store row IDs, with a comma after it. An approval names it (section 5.5). A submitted action does not change, but the engine can add a flag before apply (section 5.4). `null` before submit. |
+| `actions[].hash` | `null` in a triage proposal that the engine does not store (release 1). Else the SHA-256 (hex) of the `verb`, the `targets` text, the `args` text and the `resolved` message IDs, from submit. Each of the three texts has its length in bytes first (8 bytes, big-endian). Then each message ID follows, in the order of the store row IDs, with a comma after it. For an action with a draft target (release 3), the content hash of the draft follows (`docs/specs/2026-11-16-send.md`, section 5). An approval names it (section 5.5). A submitted action does not change, but the engine can add a flag before apply (section 5.4). `null` before submit. |
 | `actions[].decision.state` | See section 5.2. |
 | `actions[].decision.rule`, `actions[].decision.policy` | For a decision by a rule: the rule `id` and the policy version (section 6.3). Together they name one rule text. |
 | `actions[].decision.by` | Who decided: `rule` (with `rule`, its ID), `person`, `policy` (the default or the mode), `limit` (a hard limit), `engine` (a target or an argument that is not valid), `author` (a withdraw or a new revision) or `expiry`. A draft action has the decision `null`. An `applied` or `failed` action keeps the decision that approved it. The ledger names it, and records the apply (section 7.1). |
@@ -214,12 +214,12 @@ documents in `schema/examples/` (files `changeset*.json`).
 | `proposed` | Submitted, and the policy did not decide it, or the mode is `observe`. | `approved`, `in_review`, `denied`, `expired`, `cancelled`, `replaced` |
 | `in_review` | Waits for a person. | `approved`, `denied`, `expired`, `cancelled`, `replaced` |
 | `approved` | An `allow` rule (`decision.by` `rule`) or a person approved it. The engine applies it next. | `applied`, `failed`, `held`, `in_review`, `denied`, `expired`, `cancelled` |
-| `held` | A send in the held outbox (release 3). | `applied`, `failed`, `cancelled` |
+| `held` | A send in the held outbox (release 3). | `applied`, `failed`, `cancelled` (a withdraw), `expired`, `denied` (by `engine`: the draft changed or is gone, `docs/specs/2026-11-16-send.md`; by `person`: the cancel in the outbox, `docs/specs/2026-11-17-held-outbox.md`) |
 | `applied` | The provider accepted the change. The ledger has the entry. | `undone` |
 | `failed` | The provider refused it, or recovery could not confirm each message. The ledger lists the messages that changed. | `undone`, only when the ledger lists one or more changed messages |
 | `denied` | The policy, a hard limit or a person refused it. `reason` says why. | none |
 | `expired` | No decision or no apply in 14 days after submit (section 5.5). | none |
-| `cancelled` | The author withdrew the changeset, or a person cancelled a held send. | none |
+| `cancelled` | The author withdrew the changeset. A person who cancels a held send denies it (`denied` by `person`). | none |
 | `replaced` | A new revision replaced the action before a decision. | none |
 | `undone` | The undo is applied. The undo has its own ledger entry. | none |
 
@@ -232,10 +232,10 @@ The engine adds flags. An author cannot remove a flag.
 
 | Flag | When |
 |---|---|
-| `new_recipient` | A `send` goes to an address that the owner never sent mail to. |
+| `new_recipient` | A `draft` or a `send` goes to an address that the owner never sent mail to. |
 | `outside_thread` | A `send` goes to an address that is not in the thread, after the session read external mail (release 4). |
-| `money` | The text of a draft promises an amount of money. |
-| `date` | The text of a draft promises a date. |
+| `money` | The text of a draft names an amount of money (`docs/specs/2026-11-17-send-checks.md`). |
+| `date` | The text of a draft names a date (`docs/specs/2026-11-17-send-checks.md`). |
 | `attachment` | The text refers to an attachment, and none is attached, or an attachment is attached. |
 | `first_contact` | The target thread is with a `stranger`. |
 | `untrusted_content` | The text of the draft contains text from an external message. |
@@ -298,12 +298,17 @@ that a rule approved at the same time cannot together go past the limit of
 - A comment goes back to the author. In release 4, the comment arrives as a
   file in the workspace. The author submits a new revision.
 - `iris withdraw` withdraws a changeset. The engine accepts it only from the
-  author of the changeset: the same `kind`, `name` and `session`. The person
+  author of the changeset: the same `kind`, `name` and `session`. For an
+  author with a job (release 4), the author is the job: the same `kind` and
+  `job`, so a later session of the job continues its changesets
+  (`docs/specs/2026-11-17-job-verbs.md`). The same rule applies to each
+  change of a changeset by its author: add, revise and submit. The person
   can withdraw each changeset in the web client. Each open action becomes
   `cancelled`, except an action with a ledger row in the state `writing`,
   which continues to its end. Applied actions stay.
-- 14 days after submit, each open action that is not `held`, and has no
-  ledger row in the state `writing`, becomes `expired`. The changeset is `closed` when no action is open.
+- 14 days after submit, each open action that has no ledger row in the
+  state `writing`, becomes `expired`. A `held` send expires too
+  (`docs/specs/2026-11-17-held-outbox.md`). The changeset is `closed` when no action is open.
 
 ### 5.6 Failure list of the changeset store
 
@@ -325,7 +330,7 @@ section 5.1) keep other users out.
 |---|---|---|
 | A text that is not an ID, a sender ID, IDs of two groups in one action (threads, messages and items), or one target two times | The action names nothing that it can change | `add_action` refuses it. Nothing is written. The items of all forms are one group: a `correct` action can name a commitment and a record. |
 | An ID that is not in the mirror, a gone message, or a target of the wrong kind for the verb | Apply changes the wrong object | Submit gives the action `denied`, by `engine`, with the reason. |
-| No target, or mailbox verb targets that give no message (each message of the thread is gone or in `SPAM` or `TRASH`) | A `proposed` action that changes nothing | Submit gives the action `denied`. A state verb changes its items, so an item with no origin message is a valid target. |
+| No target, or mailbox verb targets that give no message (each message of the thread is gone or in `SPAM` or `TRASH`) | A `proposed` action that changes nothing | Submit gives the action `denied`. A state verb changes its items, so an item with no origin message is a valid target. A write verb (`draft`, `send`, release 3) writes mail, so it needs no message: an account target (`a-N`) gives no message, a draft target (`d-N`) gives the messages of the thread of the draft, for the checks only, and the thread target of a `draft` gives one message, the parent of the reply (`docs/specs/2026-11-16-send.md`, section 3). |
 | Targets in two or more accounts | One approval changes two mailboxes, and the apply has no one account | Submit gives the action `denied`. One action changes one account. |
 | Arguments that do not fit the verb, or the verb `untrash` from an author | A rule or a limit for one verb is bypassed | Submit gives the action `denied`. Until each verb has its argument checks, submit denies the verb. Only the undo of a `trash` makes `untrash` (section 7.4). |
 | A row with targets or arguments of a wrong shape, from another writer | A panic of the engine | Submit gives the action `denied`. A text that is not JSON cannot be stored (`CHECK`). |
@@ -420,8 +425,8 @@ added = 2026-11-10
 |---|---|---|
 | `id` | yes | A positive integer, unique in the file. |
 | `name` | yes | One line that the brief and the ledger show. |
-| `effect` | yes | `allow`, `review` or `deny` (actions); `hide` or `bundle` (attention). |
-| `verbs` | for `allow`, `review` and `deny` | The verbs of section 4. |
+| `effect` | yes | `allow`, `review` or `deny` (actions); `hide`, `bundle` or `notify` (attention). |
+| `verbs` | for `allow`, `review` and `deny` | The verbs of section 4, except `draft` and `send`: a rule with these verbs is refused until R3-03 (`docs/specs/2026-11-16-send.md`). |
 | `when` | yes | The conditions. Each condition must match. |
 | `by` | yes | `person` (written by the person) or `proposal` (proposed by Iris and accepted by the person). |
 | `added` | yes | The date. |
@@ -468,7 +473,7 @@ valid when:
   cannot make a rule wider than the person wrote it.
 - A value is not one of the values above, or two rules have the same `id`.
 - `when` has no condition, or a `name` has more than one line.
-- A `hide` or a `bundle` rule has `verbs`, `author` or `job`. An item has no
+- A `hide`, a `bundle` or a `notify` rule has `verbs`, `author` or `job`. An item has no
   author and no job, so such a rule could never match.
 - The file is larger than 256 KiB, or has more than 1,000 rules (section 9).
 
@@ -560,6 +565,13 @@ rule that matches and has the lowest `id`. With no match, the item is `shown`. T
 records the rule in its `attention` field (specification 1, section 6.1).
 Hidden is never deleted: a `hide` rule changes only what the brief shows.
 
+A `notify` rule does not change the attention of an item. It gives one
+notice for each new mail that it matches, in the web client and in the
+system (`docs/specs/2026-11-16-notices.md`). It matches with the reading of
+a `review` rule: an item condition matches when one or more items of the
+message have the value. With no `notify` rule that matches, no notice
+appears.
+
 The engine evaluates the attention of an item again at these times:
 
 - When the active policy changes, for each item, in the same transaction.
@@ -586,10 +598,11 @@ in the file.
 | A `send` never goes at once. | It waits in the held outbox for the hold delay, after the approval (release 3). |
 | A `send` with the flag `new_recipient`, `outside_thread`, `money` or `date`. | Review, even if a rule allows it. |
 | An action with the flag `bulk`. | Review, even if a rule allows it. |
-| An action by an author other than `person`, whose target has hostile mail: a message with a hostile mark, or a message from a `hostile` sender (specification 1, section 6.7). For a thread or a draft target, each message of the thread counts. | Only `archive`, `trash` and `label`. Other verbs are denied. |
+| An action by an author other than `person`, whose target has hostile mail: a message with a hostile mark, a message that waits for its link check (a `link_check` row), or a message from a `hostile` sender (specification 1, section 6.7). For a thread or a draft target, each message of the thread counts. | Only `archive`, `trash` and `label`. Other verbs are denied. |
 | Stop is on (release 4). | No provider write. Actions in the outbox wait. |
 | Mode is `observe`. | Nothing applies, except an undo by the person (section 7.4) and a state verb that the person approved (section 4). |
 | A permanent delete. | No verb exists. |
+| Hostile mail: a message with a hostile mark, a message that waits for its link check, or a message from a `hostile` sender. | No notice, even if a `notify` rule matches. |
 
 The hard limits treat `local` and `triage` as agents.
 
@@ -600,6 +613,51 @@ Iris proposes a rule after a pattern: for example, the person approved 14 of
 store, not a line in the file. When the person accepts it, the engine adds the
 rule to the file with `by = "proposal"`. A proposal never changes the file
 without the person.
+
+The proposal is a row of the table `rule_proposal` (store migration 15).
+The engine (crate `iris-policy`, module `propose`) writes the open rows
+again when a decision of the person, an undo, the active policy or the hour
+changes:
+
+- It reads the newest 2,000 actions of an author other than `person`, with
+  the verb `archive`, `read`, `unread`, `inbox` or `trash`, that the person
+  approved (the states `approved`, `held`, `applied` and `failed`) or
+  refused (`denied` by the person, or `undone`). `label` and `unlabel` are
+  not in the list, because a rule cannot name the label. The state verbs
+  change items, not mail.
+- A candidate is one verb and one condition: the `sender` address or the
+  `sender_kind` that each message of one approved action has. An action on
+  hostile mail (a hostile mark, or a sender of the kind `hostile`) gives no
+  candidate and counts as no approval, and `hostile` is never a candidate.
+- The candidate rule is added to the active policy. An action counts for it
+  only when the rule changes the decision of that action to approved
+  (section 6.4), with the author, the job and the flag `bulk` of the
+  action. The engine proposes the rule when 10 or more approvals count and
+  no refusal counts.
+- A refusal that the engine cannot read again (a message row or its
+  header is gone) stops each proposal of its verb.
+- The pass holds the facts of one action at a time, and one count for each
+  key. It skips a bulk action, because a bulk action stays in review with
+  each rule (section 6.5), so it holds the facts of 500 messages or fewer.
+  It runs on a read connection and holds no write lock.
+- The person accepts or dismisses a proposal in the web client. An accept
+  is a change of section 6.3: the engine adds the rule at the end of the
+  file, with the next rule ID, `by = "proposal"`, the date and a comment,
+  and marks the row `accepted` in the same transaction. The accept runs the
+  same count again in that transaction. If a decision after the last pass
+  breaks the pattern, the accept adds nothing and the web client gets a
+  409. A dismiss changes
+  no file. Iris never proposes an accepted or a dismissed rule again.
+- An open row that no longer has the pattern goes away.
+
+Failure list of the proposals:
+
+| Input or event | Failure mode | Safe result |
+|---|---|---|
+| A decision after the last pass | An accept adds a rule that a new refusal contradicts | The accept counts again in its transaction, and refuses (409). |
+| A crash after the file write of an accept, before its commit | The file has the rule, and the row stays open | The file is a change of section 6.3. Each policy that becomes active (an accept, a confirmation) marks as accepted each open row whose rule it has with `by = "proposal"`. A discard leaves the row open. |
+| A failed commit of a pass | The pass is lost | The engine keeps the mark of a pass only after its commit, so the next tick runs it again. |
+| A message of a decided action that the cleanup changed | A refusal does not count | A refusal that the engine cannot read again stops each proposal of its verb. |
 
 ## 7. The ledger
 
@@ -617,8 +675,8 @@ or with a change of Iris state:
 | `id` | `l-` and a number. |
 | `action` | The action that the entry applies. One entry for each action. The changeset, the revision, the verb, the author and the decision (`rule` with its ID and the policy version of section 6.3, or `person`) come from the action row. That row does not change after the submit, and an applied action keeps the decision that approved it. |
 | `account` | The mailbox of the provider calls. None for a state verb. |
-| `ops` | The provider operations, as JSON: the call (`batchModify` or `trash`), the labels to add and remove, and the number of calls. For a state verb, the field. |
-| `pre`, `post` | For a state verb only: the old and the new values. |
+| `ops` | The provider operations, as JSON: the call (`batchModify` or `trash`), the labels to add and remove, and the number of calls. For a state verb, the field. For `draft` and `send` (release 3): the call (`drafts.create` or `drafts.send`), the `Message-ID`, the `Date`, the content hash and, for a send, the Gmail draft ID (`docs/specs/2026-11-16-send.md`). |
+| `pre`, `post` | For a state verb: the old and the new values. For `draft`: `post` only, the content with its reply headers. |
 | `call` | The number of the last provider call that the engine started, from 1. 0 before the first call. |
 | `state` | `writing`, `applied`, `failed` or `undone`. The trigger `ledger_state` moves the action to the same state. |
 | `error` | The refusal of the provider, or why the engine could not confirm each message. |
@@ -784,17 +842,25 @@ An undo of an undo is a new action, not a delete of the record.
 ### 7.5 Release 3: draft, send and the held outbox
 
 A later specification defines the verbs `draft`, `send` and `nudge`, and the
-held outbox. That specification must meet these constraints:
+held outbox. `docs/specs/2026-11-16-send.md` (R3-01) defines `draft`, `send`
+and the release step. That specification must meet these constraints:
 
 - A `send` never goes at once. After the approval, it waits in the held
   outbox for the hold delay (default 60 seconds). The outbox survives a
   restart.
-- A cancel of a held send succeeds only while the send is held. Cancel and
-  release run on the one write connection, so only one of the two can win.
+- A cancel of a send succeeds only while the send is `approved` or `held`
+  and has no ledger row (the release did not claim it). It moves the send
+  to `denied` by `person`. Cancel and release run on the one write
+  connection, so only one of the two can win.
+- The send switch (`docs/specs/2026-11-17-held-outbox.md`) is off until the
+  owner turns it on with `iris sending on`. While it is off, no send leaves
+  the held outbox. The hold starts at the later of the approval and the
+  time the switch went on.
 - The approval of a send binds to a hash of the draft content: the
   recipients, the subject, the body and the attachments. Before the release,
   the engine reads the draft at Gmail again. If the hash is different, the
-  send goes back to review. No `draft` action can change a draft that has an
+  engine denies the send, and a new send action of the draft goes to
+  review. No `draft` action can change a draft that has an
   approved or a held send.
 - The flags of a draft (section 5.3) come from the content of the draft, at
   submit and again at the release.
@@ -804,8 +870,10 @@ held outbox. That specification must meet these constraints:
   known, the engine searches at Gmail, not in the mirror. Until it finds the
   sent message or a set time passes, the send has a state that blocks a new
   send of the same draft.
-- The undo of a `draft` action restores the old content of the draft. It
-  never deletes a draft of the person.
+- The undo of a `draft` action that changes a draft restores the old
+  content of the draft. It never deletes a draft of the person. So a
+  draft create has no undo, and no `draft` action can change a draft
+  until its undo exists (R3-01 makes only creates).
 - Each verb records its result in the ledger and has a crash test.
 
 ## 8. The iris command
@@ -832,17 +900,32 @@ write to the local store, but none of them changes the mailbox:
 | `backup` | A copy of the data folder at the given path | Specification 1, section 5.1 |
 | `model set` | The model setting and its sealed key | `docs/specs/2026-11-16-cost-control.md` |
 | `understand` | Items, run rows, estimate receipts and the budget | `docs/specs/2026-11-16-cost-control.md`. The budget approval needs an estimate receipt and a terminal (a TTY). It is not a mailbox action. See the exception below. |
-| `write` (release 3, card R3-05) | One reply draft of a thread (table `reply_draft`), a run row, and the cost of one model call from the approved budget | `crates/iris-voice`. It is not a mailbox action: the draft stays in the store. It holds the run lock of `understand`. It moves to the socket with the other verbs. |
 
 The policy governs mailbox actions (sections 4 to 6). The writes in
 the table are not mailbox actions, so they do not go through the policy.
 Release 1 has no verb that adds an action, so no request can skip the policy.
 The socket comes with the first verb that adds an action (release 2). Then
 each verb that adds, submits or withdraws an action goes through the socket
-(`docs/specs/2026-11-16-engine-socket.md`). The read verbs (`status`,
-`search`, `show`, `brief` and `list`) keep the exception of release 1: they
-change nothing, so they cannot skip the policy. One engine runs on a data
-folder: `iris serve` holds the lock `engine.lock` in the data folder while it
+(`docs/specs/2026-11-16-engine-socket.md`). In host mode, the read verbs
+(`status`, `search`, `show`, `brief` and `list`) keep the exception of
+release 1: they change nothing, so they cannot skip the policy. In session
+mode (release 4), each read verb goes through the session socket, and the
+engine applies the current grant of the job of the session
+(`docs/specs/2026-11-16-job-workspace.md`). A session never opens the store
+directly: the direct path is for host mode only.
+
+Release 3 exception (`docs/specs/2026-11-17-held-outbox.md`, sections 3
+and 5): `iris sending on|off`, `iris sending` and `iris cancel <d-N>` open
+the data folder directly, in host mode only, and do not need a running
+engine. They change no mailbox, so they cannot skip the policy:
+
+| Verb | Local writes | Rules |
+|---|---|---|
+| `sending on` | The send switch, after a typed `yes` at a terminal | Held-outbox spec, section 3 |
+| `sending off` | The send switch, after it holds `apply.lock` (at most 20 seconds) | Held-outbox spec, section 3 |
+| `cancel <d-N>` | The open send of the draft becomes `denied` by `person` | Held-outbox spec, section 5 |
+
+One engine runs on a data folder: `iris serve` holds the lock `engine.lock` in the data folder while it
 runs.
 
 | Mode | When | Socket | Who |
@@ -863,6 +946,15 @@ is the person. In release 1, the person gives no agent host access to that
 folder (an agent with host access could approve a budget). Release 2 moves
 the approval to the web client (section 8.6).
 
+Release 3 exception: `iris write` (card R3-05) opens the data folder
+directly, as `understand` does, and needs no running engine. It writes one
+reply draft of a thread (table `reply_draft`), a run row, and the cost of one
+model call from the approved budget. It holds the run lock of `understand`
+during the call. It is not a mailbox action: the draft stays in the store, and
+nothing goes to Gmail. So it does not go through the policy or the socket.
+The `draft` verb that adds a Gmail draft action (section 8.2) goes through the
+socket.
+
 The command has no verb to approve, to deny or to change the policy. Only the
 web client does these steps, for the person. The person has no terminal client
 (decision of the maintainer). In host mode, a changeset has the author `local`
@@ -876,7 +968,7 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris serve [--addr <addr>]` | Starts the engine. The default address is `127.0.0.1:4800`. The engine refuses an address that is not a loopback address, until open question 1 has a decision. | host | 0 |
 | `iris service install` | Installs and starts the background service that runs `iris serve`: a launchd agent on macOS, a systemd user unit on Linux. If a call to the service manager fails or its result is not known, the service file stays and the command returns the error. The state of the service manager is then not known: a second `install` finishes the work, and `remove` undoes it. Both are safe to repeat. | host | 1 |
 | `iris service remove` | Stops the background service and removes its file. If the stop fails, or if launchd cannot say if the agent runs, the file stays and the command returns the error. A second remove tries again. On Linux with no running systemd (`/run/systemd/system` is absent), nothing can run the unit, so it deletes the file with no `systemctl` call. If systemd runs and the stop fails (also when `systemctl` is not found), the file stays and the command returns the error. After a good stop, a failed `systemctl --user daemon-reload` is not an error, because the unit is stopped and disabled. | host | 1 |
-| `iris status` | Shows the account, the sync, the mode and the counts. | both | 1 |
+| `iris status` | Host mode: shows the account, the sync, the mode and the counts of the mailbox. Session mode: shows only the job (its ID, goal, state and due date) and the counts of the workspace. It shows no account, sync or mailbox count. | both | 1 |
 | `iris mirror sync` | Runs an incremental sync now, then one run of understanding inside the approved budget. If another run holds the run lock, it waits for that run to end. | host | 1 |
 | `iris mirror verify` | Compares the mirror with Gmail (specification 1, section 4.8). | host | 1 |
 | `iris rebuild [--since-prompt <v>]` | Runs understanding again. | host | 1 |
@@ -884,17 +976,19 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris understand --estimate`, `iris understand --approve <code> --budget <usd>`, `iris understand [--max-cost <usd>] [--max-messages <n>]` | Shows the estimate and its approval code, approves a budget for paid runs after the estimate, and runs understanding on the pending messages. | host | 1 |
 | `iris backup <path>` | Copies the data folder while the engine runs. | host | 1 |
 | `iris export <path>` | Writes each item as JSON Lines, and copies the raw messages. | host | 1 |
-| `iris brief` | Shows the brief. | both | 1 |
-| `iris search <query>` | Full-text search (specification 1, section 5.6). In session mode, it adds the threads that match to `threads/`. | both | 1 |
-| `iris show <id>` | Shows one item or message. Release 1 has no read path for a thread or a sender, so a thread and a sender come in a later release. | both | 1 |
-| `iris list <form> [filters]` | Lists items of one form. | both | 1 |
+| `iris brief` | Shows the brief. | host | 1 |
+| `iris search <query>` | Full-text search (specification 1, section 5.6). In session mode, it searches only the messages that the job grants (`docs/specs/2026-11-16-job-workspace.md`), and it adds nothing to the workspace. | both | 1 |
+| `iris show <id>` | Shows one item or message. Release 1 has no read path for a thread or a sender, so a thread and a sender come in a later release. In session mode, only an item or a message that the job grants, and an item is a job item (`id`, `form` and `sources`, with no text of the model and no status). | both | 1 |
+| `iris list <form> [filters]` | Lists items of one form. In session mode, only the items of the workspace, with the fields of `show`. | both | 1 |
 | `iris archive`, `inbox`, `label`, `unlabel`, `read`, `unread`, `trash` `<ids> [--changeset <cs-id>]` | Adds an action to a draft changeset. | both | 2 |
 | `iris close`, `defer`, `decline`, `correct` `<id> [--changeset <cs-id>]` | Adds a state action to a draft changeset. | both | 2 |
 | `iris changeset <cs-id>` | Shows a changeset. | both | 2 |
+| `iris revise <cs-id>` | Starts a new draft revision of a submitted changeset of the same author, after a review comment (section 5.5). | both | 4 |
 | `iris submit <cs-id> --why <text>` | Submits a draft changeset, and prints one result for each action. | both | 2 |
 | `iris withdraw <cs-id>` | Withdraws a changeset of the same author (section 5.5). Applied actions stay. | both | 2 |
 | `iris ledger [filters]` | Lists ledger entries. | host | 2 |
 | `iris draft <thread> <file>`, `iris send <draft>`, `iris nudge <c-id>` | Adds write actions. | both | 3 |
+| `iris write <t-id or m-id> [--intent <text>]` | Writes a draft of a reply in the voice of the owner with one model call, saves it in the store and prints it. It sends nothing and adds no action. It opens the store directly (section 8.1). | host | 3 |
 | `iris wait`, `iris ask` | Ends the session and waits, or asks the person. | session | 5 |
 
 Without `--changeset`, a command that adds an action makes a new draft
@@ -905,6 +999,16 @@ session has one draft changeset, and `--changeset` is not necessary.
 Each command that adds an action prints the changeset ID and the action
 number, and changes nothing outside the draft changeset. Nothing leaves the
 engine before `submit`.
+
+In session mode, each message that an action changes must be in the
+current grant of the job (`docs/specs/2026-11-16-job-workspace.md`): the
+engine checks each message that a target resolves to, at `submit` and again
+just before the apply. A message outside the grant at `submit` makes the
+submit fail with no change. A message that left the grant before the apply
+makes the action refused, with the reason. Each item target must be an item
+of the workspace now, by the same two checks. `iris draft`, `iris send` and `iris nudge` are
+refused in session mode until a card defines their grant, and `submit`
+refuses each draft or send action in a changeset of a session.
 
 ### 8.3 Output
 
@@ -917,7 +1021,9 @@ engine before `submit`.
   program reads these commands with `--json`, where the command has it.
 - `--json` prints the open model documents (specification 1, section 6, and
   section 5.1 here). One JSON document for one object, and JSON Lines for a
-  list.
+  list. Exception: in session mode, an item is a job item
+  (`jobitem.schema.json`, `docs/specs/2026-11-16-job-workspace.md`), not the
+  full item document.
 - The command writes errors to standard error. An error message says what
   failed and what to do.
 
