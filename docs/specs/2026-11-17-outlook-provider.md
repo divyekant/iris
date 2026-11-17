@@ -306,9 +306,15 @@ not a label, and Iris moves messages only with `archive`, `inbox` and
 Archive in Iris is a move to the well-known `archive` folder. Inbox is a
 move to `inbox`. Trash is a move to `deleteditems`.
 
-Each folder label has the provider ID `folder:<folder id>`, also the
-system ones, so the mirror knows the folder of each message from its one
-folder label. The move guard reads this provider ID, not the label name.
+The system labels keep their fixed provider IDs (`INBOX`, `DRAFT`,
+`TRASH`, `SPAM`), so each caller that reads `provider_id = 'INBOX'` or
+`'DRAFT'` works for Outlook mail as for Gmail. Each `Folders/` label has
+the provider ID `folder:<folder id>`; `Folders/Drafts` is
+`folder:<drafts id>`, distinct from `DRAFT`. The mirror knows the folder
+of each message from its one folder label: a system ID names its
+well-known folder (`INBOX` is `inbox`, `DRAFT` is `drafts`, `TRASH` is
+`deleteditems`, `SPAM` is `junkemail`), and `folder:<id>` names that
+folder. The move guard reads this, not the label name.
 Iris moves a message with `archive`, `inbox` or `trash` only from
 `inbox` or `archive`. Such a verb on a message in any other folder
 (`deleteditems`, a user folder, `junkemail`, `sentitems`) gets a definite
