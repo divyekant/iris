@@ -109,7 +109,7 @@
   <ul class="sources">
     {#each item.sources as source, i (source.message)}
       <li>
-        <a href={href.mail(source.message)}>{source.role === "origin" ? "The mail that made this item" : source.role === "update" ? `Update ${i}` : `Evidence ${i}`}</a>
+        <a class="touch" href={href.mail(source.message)}>{source.role === "origin" ? "The mail that made this item" : source.role === "update" ? `Update ${i}` : `Evidence ${i}`}</a>
         {#if source.quote && source !== quoted}<span>{source.quote}</span>{/if}
       </li>
     {/each}

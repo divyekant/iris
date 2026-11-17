@@ -14,7 +14,8 @@ try {
   // shortcut: no Playwright on this machine (it is not a dependency), so the test skips. Add it to package.json when CI runs the client in a browser.
 }
 
-const ROUTES = ["#/brief", "#/review", "#/item/c-311", "#/item/r-1201", "#/mail/m-55210"];
+// c-311: a commitment with a quote. v-88: a conversation with 3 source mails. r-1201: a record.
+const ROUTES = ["#/brief", "#/review", "#/item/c-311", "#/item/v-88", "#/item/r-1201", "#/mail/m-55210"];
 const WIDTHS = [360, 390, 768];
 const TOUCH = 44;
 
