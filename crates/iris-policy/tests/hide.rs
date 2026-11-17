@@ -194,8 +194,42 @@ fn ten_choices_give_a_hide_proposal_and_only_an_accept_writes_the_file() {
         .read(|c| Ok(c.query_row("SELECT state FROM rule_proposal", [], |r| r.get(0))?))
         .unwrap();
     assert_eq!(state, "accepted");
-    // The rule hides these items now: no new proposal, and a second accept
-    // finds nothing.
+    // The accept writes the attention of the items: each chosen item is
+    // hidden by the new rule.
+    let shown: i64 = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM item
+                 WHERE coalesce(json_extract(doc, '$.attention.state'), '') <> 'hidden'
+                    OR json_extract(doc, '$.attention.rule') <> ?1",
+                [rule.id],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(shown, 0, "each item of the sender and the form is hidden");
+    // The next item of the sender and the form is hidden too, and an item
+    // of another form is not.
+    for (form, want) in [
+        ("feed", Attention::Hidden { rule: rule.id }),
+        ("signal", Attention::Shown),
+    ] {
+        let i = item(&store, form, "news@shop.example", false, false);
+        let got = store
+            .read(|c| {
+                let m: i64 = c.query_row(
+                    "SELECT message_id FROM item_source WHERE item_id = ?1",
+                    [i],
+                    |r| r.get(0),
+                )?;
+                let f = facts(c, m, NOW)?.unwrap();
+                let at = f.item_ids.iter().position(|&x| x == i).unwrap();
+                Ok(policy.attention(&f.items[at], &f.message(), NOW))
+            })
+            .unwrap();
+        assert_eq!(got, want, "{form}");
+    }
+    // No new proposal, and a second accept finds nothing.
     assert!(hides(&refresh(&store)).is_empty());
     let v = store.read(active).unwrap().version;
     assert_eq!(

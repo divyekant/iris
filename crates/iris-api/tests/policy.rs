@@ -370,3 +370,28 @@ async fn an_accept_after_a_new_refusal_is_a_409() {
     assert_eq!(code, StatusCode::CONFLICT, "{e}");
     assert!(!d.0.join(iris_policy::FILE).exists());
 }
+
+/// A `hide` proposal (R5-02) reads as `choices`, with a hide rule for one
+/// sender and one form and no verbs.
+#[tokio::test]
+async fn a_hide_proposal_reads_as_choices() {
+    let d = open("hide");
+    d.1.write(|tx| {
+        Ok(tx.execute(
+            "INSERT INTO rule_proposal (verb, cond, value, form, approvals, created_at, updated_at)
+             VALUES ('hide', 'sender', 'news@shop.example', 'feed', 11, 5, 5)",
+            [],
+        )?)
+    })
+    .unwrap();
+    let v = d.get().await;
+    let p = &v["proposals"][0];
+    assert_eq!(p["kind"], json!("choices"), "{v}");
+    assert_eq!(p["approvals"], json!(11));
+    assert_eq!(p["rule"]["effect"], json!("hide"));
+    assert_eq!(p["rule"]["verbs"], json!([]));
+    assert_eq!(
+        p["rule"]["when"],
+        json!({ "sender": "news@shop.example", "form": "feed" })
+    );
+}
