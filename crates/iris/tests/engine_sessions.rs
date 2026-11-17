@@ -439,6 +439,9 @@ fn a_revoke_retry_gives_the_egress_log_to_the_new_session() {
         assert!(Instant::now() < end, "no second session: {last:?}");
         std::thread::sleep(Duration::from_millis(100));
     };
+    // The socket of the running session names the second session.
+    let v = ask(&f, "status", serde_json::json!({})).unwrap();
+    assert_eq!(v["result"]["session"], format!("se-{second}"), "{v}");
     let log = |id: i64| f.store.dir().join(format!("sessions/se-{id}.egress.log"));
     assert!(
         log(second).exists(),

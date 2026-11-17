@@ -611,6 +611,10 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
         r#"{"ok":true,"result":{"session":"se-0","reaped":true}}"#,
         r#"{"ok":true,"result":{"session":"se-01","reaped":false}}"#,
         r#"{"ok":true,"result":{"session":7,"reaped":true}}"#,
+        r#"{"ok":true,"result":{"job":"j-1","goal":"g","state":"working"}}"#,
+        r#"{"ok":true,"result":{"job":"j-1","session":"se-1","goal":"g","state":"working","threads":"1","messages":1,"items":1}}"#,
+        r#"{"ok":true,"result":{"job":"j-1","session":"se-1","goal":"g","state":"working","threads":1,"messages":1,"items":1,"due":5}}"#,
+        r#"{"ok":true,"result":{"job":"x","session":"se-1","goal":"g","state":"working","threads":1,"messages":1,"items":1}}"#,
     ]
     .iter()
     .map(|l| l.as_bytes().to_vec())
@@ -622,7 +626,7 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
                 seed = seed
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(1442695040888963407);
-                let abc = b"{}[]\":,oktruefalseresultcodeerrorid1234 nsessionreaped-";
+                let abc = b"{}[]\":,oktruefalseresultcodeerrorid1234 nsessionreaped-jgoalstatethreadsmessagesitemsdue";
                 abc[(seed >> 33) as usize % abc.len()]
             })
             .collect();
@@ -630,10 +634,25 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
     }
     for line in &lines {
         for verb in [
-            "show", "drafts", "add", "submit", "withdraw", "job.run", "job.stop",
+            "show", "drafts", "add", "submit", "withdraw", "job.run", "job.stop", "status",
         ] {
             match socket::parse_answer(verb, line) {
                 None => {}
+                Some(Ok(r)) if verb == "status" => assert!(
+                    r["job"].as_str().and_then(iris_job::parse_job_id).is_some()
+                        && r["session"]
+                            .as_str()
+                            .and_then(iris_job::parse_session_id)
+                            .is_some()
+                        && r["goal"].is_string()
+                        && r["state"].is_string()
+                        && ["threads", "messages", "items"]
+                            .iter()
+                            .all(|k| r[k].is_u64())
+                        && (r["due"].is_null() || r["due"].is_string()),
+                    "{verb} {}",
+                    String::from_utf8_lossy(line)
+                ),
                 Some(Ok(r)) if verb.starts_with("job.") => assert!(
                     r["session"]
                         .as_str()
@@ -660,6 +679,11 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
     assert!(socket::parse_answer("drafts", ok).is_none());
     let run = br#"{"ok":true,"result":{"session":"se-12"}}"#;
     assert!(matches!(socket::parse_answer("job.run", run), Some(Ok(_))));
+    let status = br#"{"ok":true,"result":{"job":"j-1","session":"se-2","goal":"g","state":"working","due":null,"threads":1,"messages":2,"items":0}}"#;
+    assert!(matches!(
+        socket::parse_answer("status", status),
+        Some(Ok(_))
+    ));
 }
 
 /// The command adds and submits the write verbs: a new mail to an account
@@ -888,8 +912,8 @@ fn session_mode_uses_only_the_session_socket() {
             std::io::BufReader::new(&s).read_line(&mut line).unwrap();
             let v: serde_json::Value = serde_json::from_str(&line).unwrap();
             verbs.push(v["verb"].as_str().unwrap().to_string());
-            let answer = json!({"ok": true, "result": {"job": "j-4", "goal": "Get it.",
-                "state": "working", "threads": 1, "messages": 2, "items": 0}});
+            let answer = json!({"ok": true, "result": {"job": "j-4", "session": "se-9",
+                "goal": "Get it.", "state": "working", "threads": 1, "messages": 2, "items": 0}});
             (&s).write_all(format!("{answer}\n").as_bytes()).unwrap();
         }
         verbs
@@ -897,9 +921,12 @@ fn session_mode_uses_only_the_session_socket() {
     let out = iris(&["status"]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     assert!(String::from_utf8_lossy(&out.stdout).contains("j-4 (working)"));
-    // A store verb: code 3, and nothing reaches the socket.
-    let out = iris(&["search", "x"]);
-    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    // A store verb and a host verb of the socket: code 3, and nothing
+    // reaches the socket.
+    for args in [&["search", "x"][..], &["changeset", "--drafts"]] {
+        let out = iris(args);
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {out:?}");
+    }
     let out = iris(&["status", "--json"]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     assert_eq!(server.join().unwrap(), ["status", "status"]);

@@ -629,6 +629,7 @@ fn status_gives_the_counts_of_the_grant_now() {
     let v = call(&store, &me, "status", json!({})).unwrap();
     assert_eq!(v["job"], iris_job::format_job_id(job), "{v}");
     assert_eq!(v["goal"], "Get the signed contract.", "{v}");
+    assert_eq!(v["session"], "se-1", "{v}");
     assert_eq!(v["state"], "working", "{v}");
     assert_eq!(
         (&v["threads"], &v["messages"], &v["items"]),
