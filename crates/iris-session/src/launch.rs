@@ -23,6 +23,7 @@ use iris_job::{format_session_id, EndReason};
 use iris_store::Store;
 
 use crate::config::{self, Adapter};
+use crate::egress::Endpoint;
 use crate::isolation::Isolation;
 use crate::reap::reap_check;
 
@@ -48,9 +49,9 @@ pub enum Step {
     HelperStarted,
 }
 
-/// Gives the egress port of a session from its adapter (see
+/// Gives the egress endpoint of a session from its adapter (see
 /// [`Launcher::egress`]).
-pub type Egress<'a> = dyn Fn(i64, &Adapter) -> Result<Option<u16>, String> + 'a;
+pub type Egress<'a> = dyn Fn(i64, &Adapter) -> Result<Option<Endpoint>, String> + 'a;
 
 /// What the launch needs from the engine.
 pub struct Launcher<'a> {
@@ -264,14 +265,14 @@ impl Launcher<'_> {
             return a;
         }
         // 5. Start the held helper and write its process ID.
-        let port = match (self.egress)(session, adapter) {
+        let egress = match (self.egress)(session, adapter) {
             Ok(p) => p,
             Err(why) => {
                 let why = format!("no egress port: {why}");
                 return self.fail(session, why, None, Some(&socket_path));
             }
         };
-        let helper = match self.start_helper(session, &dir, adapter, port) {
+        let helper = match self.start_helper(session, &dir, adapter, egress.as_ref()) {
             Ok(h) => h,
             Err(why) => return self.fail(session, why, None, Some(&socket_path)),
         };
@@ -429,8 +430,9 @@ impl Launcher<'_> {
         session: i64,
         dir: &Path,
         adapter: &Adapter,
-        egress_port: Option<u16>,
+        egress: Option<&Endpoint>,
     ) -> Result<Helper, String> {
+        let egress_port = egress.map(|e| e.port);
         let logs = self.data_dir.join("sessions");
         fs::DirBuilder::new()
             .recursive(true)
@@ -448,7 +450,7 @@ impl Launcher<'_> {
                 .command(session, dir, egress_port, &adapter.program, &adapter.args);
         let mut args: Vec<OsString> = vec![session.to_string().into(), command.program.into()];
         args.extend(command.args);
-        let env = config::agent_env(adapter, egress_port, |n| (self.env)(n));
+        let env = config::agent_env(adapter, egress, |n| (self.env)(n));
         let mut child = (self.helper)(&args)
             .current_dir(dir)
             .env_clear()

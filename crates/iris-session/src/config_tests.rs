@@ -330,8 +330,12 @@ fn engine_env() -> HashMap<&'static str, &'static str> {
 }
 
 fn env_of(a: &Adapter, port: Option<u16>) -> HashMap<String, String> {
+    env_with(a, port.map(|port| Endpoint { port, token: None }))
+}
+
+fn env_with(a: &Adapter, end: Option<Endpoint>) -> HashMap<String, String> {
     let e = engine_env();
-    agent_env(a, port, |k| e.get(k).map(|v| v.into()))
+    agent_env(a, end.as_ref(), |k| e.get(k).map(|v| v.into()))
         .into_iter()
         .map(|(k, v)| (k, v.into_string().unwrap()))
         .collect()
@@ -366,6 +370,16 @@ fn the_agent_env_has_only_the_listed_variables() {
     );
     assert_eq!(c["HTTPS_PROXY"], "http://127.0.0.1:4000");
     assert_eq!(c["https_proxy"], "http://127.0.0.1:4000");
+    // macOS: the URL holds the token of the session, in both variables.
+    let t = env_with(
+        &adapter(&f, "claude-code", Some(&path)).unwrap(),
+        Some(Endpoint {
+            port: 4003,
+            token: Some("ab12".into()),
+        }),
+    );
+    assert_eq!(t["HTTPS_PROXY"], "http://iris:ab12@127.0.0.1:4003");
+    assert_eq!(t["https_proxy"], "http://iris:ab12@127.0.0.1:4003");
     let x = env_of(&adapter(&f, "codex", Some(&path)).unwrap(), Some(4001));
     assert!(x.contains_key("OPENAI_API_KEY") && x.contains_key("CODEX_HOME"));
     assert!(!x.contains_key("ANTHROPIC_API_KEY") && !x.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));

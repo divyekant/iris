@@ -32,6 +32,9 @@ socket2 = "=0.6.5"
 # tunnel, to check its server name. No handshake: the proxy reads only the
 # first message.
 rustls = { version = "=0.23.46", default-features = false, features = ["std", "ring"] }
+# Already in Cargo.lock. Encodes the expected Proxy-Authorization value of a
+# session token (macOS egress).
+base64 = "=0.23.1"
 
 # The launch tests run their own main: the test program is also the hold
 # helper of each session that it launches.
