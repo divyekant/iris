@@ -1,0 +1,568 @@
+//! A thin Microsoft Graph mail client for the Iris mirror (spec
+//! `docs/specs/2026-11-17-outlook-provider.md`).
+//!
+//! The client is synchronous, as `iris-gmail`. The engine calls it from a
+//! blocking thread. Each call takes the OAuth access token as a parameter:
+//! the client stores no token. The client:
+//!
+//! - sends `Prefer: IdType="ImmutableId"` on each request, so that a message
+//!   keeps its ID when it moves between folders (spec, A3);
+//! - runs at most [`MAX_RUNNING`] requests at the same time (spec, A5);
+//! - on HTTP 429 and 503 of each call, and on HTTP 5xx of a read, waits for
+//!   `Retry-After`, or else 1 second first, then double up to 5 minutes, plus
+//!   a random part of up to 50 percent, and tries again;
+//! - calls a `nextLink` or a `deltaLink` only if it starts with the base URL,
+//!   so that an answer cannot send the token to another host;
+//! - streams the MIME text of a message into a sink, and never holds the
+//!   full message.
+
+use std::io::{Read, Write};
+use std::sync::{Condvar, Mutex};
+use std::time::Duration;
+
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+
+/// The API root of Graph.
+pub const API: &str = "https://graph.microsoft.com/v1.0";
+/// The most requests at the same time for one app and one mailbox (spec, A5).
+pub const MAX_RUNNING: usize = 4;
+/// The page size that the client asks for. Graph can give fewer.
+pub const PAGE_SIZE: u32 = 200;
+/// The largest MIME text that [`Graph::raw`] copies to a sink.
+pub const RAW_LIMIT: u64 = 150 * 1024 * 1024;
+/// The largest JSON answer that the client reads into memory.
+const ANSWER_LIMIT: u64 = 16 * 1024 * 1024;
+/// The fields of a message that a delta query gives.
+const SELECT: &str =
+    "id,conversationId,parentFolderId,categories,isRead,flag,isDraft,receivedDateTime,internetMessageId";
+/// The well-known folders that the mirror maps (spec section 6).
+pub const WELL_KNOWN: [&str; 7] = [
+    "inbox",
+    "sentitems",
+    "drafts",
+    "deleteditems",
+    "junkemail",
+    "archive",
+    "outbox",
+];
+
+/// The settings of a client.
+#[derive(Clone, Debug)]
+pub struct Config {
+    /// The API root. Tests set the URL of the fake server.
+    pub base_url: String,
+    /// The first wait after a refused call with no `Retry-After`.
+    pub backoff_start: Duration,
+    /// The longest wait after a refused call.
+    pub backoff_max: Duration,
+    /// The longest time for one call, the body included.
+    pub timeout: Duration,
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        Config {
+            base_url: API.to_string(),
+            backoff_start: Duration::from_secs(1),
+            backoff_max: Duration::from_secs(300),
+            timeout: Duration::from_secs(300),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum Error {
+    /// HTTP 401. Get a new access token one time, then call again.
+    Unauthorized,
+    /// HTTP 404: Graph does not have the item.
+    NotFound,
+    /// Graph does not accept the stored delta link any more (HTTP 410, or
+    /// another 4xx of a stored link). Start the folder again with no link.
+    DeltaReset,
+    /// Another HTTP error. `code` is the code of the Graph error body.
+    Api {
+        status: u16,
+        code: String,
+        message: String,
+    },
+    /// The network failed, or the answer stopped before its end.
+    Transport(String),
+    /// The answer is not in the shape of the Graph API, or is too large.
+    Decode(String),
+    /// The sink of a raw message failed.
+    Sink(std::io::Error),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Unauthorized => write!(f, "Graph refused the access token (HTTP 401)"),
+            Error::NotFound => write!(f, "Graph does not have the item (HTTP 404)"),
+            Error::DeltaReset => write!(f, "Graph does not accept the delta link any more"),
+            Error::Api {
+                status,
+                code,
+                message,
+            } => write!(f, "Graph error {status} {code}: {message}"),
+            Error::Transport(e) => write!(f, "network error: {e}"),
+            Error::Decode(e) => write!(f, "bad answer from Graph: {e}"),
+            Error::Sink(e) => write!(f, "cannot write the raw message: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// The account of the token: `GET /me`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Me {
+    pub id: String,
+    pub mail: Option<String>,
+    pub user_principal_name: String,
+}
+
+impl Me {
+    /// The address of the mailbox: `mail`, else `userPrincipalName`.
+    pub fn address(&self) -> &str {
+        match &self.mail {
+            Some(m) if !m.is_empty() => m,
+            _ => &self.user_principal_name,
+        }
+    }
+}
+
+/// One mail folder.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Folder {
+    pub id: String,
+    pub display_name: String,
+    pub parent_folder_id: Option<String>,
+    #[serde(default)]
+    pub child_folder_count: u64,
+    #[serde(default)]
+    pub total_item_count: u64,
+    #[serde(default)]
+    pub unread_item_count: u64,
+    /// The well-known name, from [`WELL_KNOWN`]. Graph does not send it: the
+    /// client sets it.
+    #[serde(skip)]
+    pub well_known: Option<&'static str>,
+}
+
+/// The follow-up flag of a message.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Flag {
+    #[serde(default)]
+    pub flag_status: String,
+}
+
+/// The fields of a message in a delta page.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Message {
+    pub id: String,
+    #[serde(default)]
+    pub conversation_id: String,
+    #[serde(default)]
+    pub parent_folder_id: String,
+    #[serde(default)]
+    pub categories: Vec<String>,
+    #[serde(default)]
+    pub is_read: bool,
+    pub flag: Option<Flag>,
+    #[serde(default)]
+    pub is_draft: bool,
+    /// ISO 8601 in UTC, for example `2026-11-17T10:00:00Z`.
+    pub received_date_time: Option<String>,
+    pub internet_message_id: Option<String>,
+}
+
+impl Message {
+    pub fn flagged(&self) -> bool {
+        self.flag
+            .as_ref()
+            .is_some_and(|f| f.flag_status == "flagged")
+    }
+}
+
+/// One change of a delta page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Change {
+    /// The message is in the folder now.
+    Message(Message),
+    /// The message left the folder: a delete or a move (spec section 3).
+    Removed(String),
+}
+
+/// The link at the end of a delta page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Next {
+    /// Call this `nextLink` for the next page of the round.
+    More(String),
+    /// The round is done. Store this `deltaLink` for the next sync.
+    Done(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeltaPage {
+    pub changes: Vec<Change>,
+    pub next: Next,
+}
+
+#[derive(Deserialize)]
+struct Removed {}
+
+#[derive(Deserialize)]
+struct DeltaItem {
+    #[serde(rename = "@removed")]
+    removed: Option<Removed>,
+    #[serde(flatten)]
+    message: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct DeltaJson {
+    #[serde(default)]
+    value: Vec<DeltaItem>,
+    #[serde(rename = "@odata.nextLink")]
+    next_link: Option<String>,
+    #[serde(rename = "@odata.deltaLink")]
+    delta_link: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FolderPage {
+    #[serde(default)]
+    value: Vec<Folder>,
+    #[serde(rename = "@odata.nextLink")]
+    next_link: Option<String>,
+}
+
+/// A count of the requests that run now.
+struct Gate {
+    running: Mutex<usize>,
+    free: Condvar,
+}
+
+struct GateGuard<'a>(&'a Gate);
+
+impl Gate {
+    fn enter(&self) -> GateGuard<'_> {
+        let mut n = self.running.lock().unwrap();
+        while *n >= MAX_RUNNING {
+            n = self.free.wait(n).unwrap();
+        }
+        *n += 1;
+        GateGuard(self)
+    }
+}
+
+impl Drop for GateGuard<'_> {
+    fn drop(&mut self) {
+        *self.0.running.lock().unwrap() -= 1;
+        self.0.free.notify_one();
+    }
+}
+
+/// A Graph API client. Share one client between threads.
+pub struct Graph {
+    agent: ureq::Agent,
+    config: Config,
+    gate: Gate,
+}
+
+impl Graph {
+    pub fn new(config: Config) -> Graph {
+        let agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(config.timeout))
+            .build()
+            .into();
+        Graph {
+            agent,
+            config,
+            gate: Gate {
+                running: Mutex::new(0),
+                free: Condvar::new(),
+            },
+        }
+    }
+
+    /// `GET /me`.
+    pub fn me(&self, token: &str) -> Result<Me> {
+        let url = self.url("/me?$select=id,mail,userPrincipalName");
+        self.json(token, &url, false)
+    }
+
+    /// Each mail folder of the mailbox, the child folders at each depth
+    /// included, parents before children (spec section 2).
+    pub fn folders(&self, token: &str) -> Result<Vec<Folder>> {
+        let mut known = Vec::new();
+        for name in WELL_KNOWN {
+            match self.json::<Folder>(token, &self.url(&format!("/me/mailFolders/{name}")), false) {
+                Ok(f) => known.push((f.id, name)),
+                // A mailbox can lack a well-known folder, for example `archive`.
+                Err(Error::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        let mut all: Vec<Folder> = Vec::new();
+        let mut parents = vec![None::<String>];
+        while let Some(parent) = parents.pop() {
+            let path = match &parent {
+                None => "/me/mailFolders".to_string(),
+                Some(id) => format!("/me/mailFolders/{}/childFolders", segment(id)),
+            };
+            let mut url = self.url(&format!(
+                "{path}?includeHiddenFolders=true&$top={PAGE_SIZE}"
+            ));
+            loop {
+                let page: FolderPage = self.json(token, &url, false)?;
+                for mut f in page.value {
+                    if f.child_folder_count > 0 {
+                        parents.push(Some(f.id.clone()));
+                    }
+                    f.well_known = known.iter().find(|(id, _)| *id == f.id).map(|(_, n)| *n);
+                    all.push(f);
+                }
+                match page.next_link {
+                    Some(next) => url = self.checked(&next)?,
+                    None => break,
+                }
+            }
+        }
+        Ok(all)
+    }
+
+    /// One page of the message delta of `folder`. With no `link`, start a new
+    /// round. With a link, call the stored `nextLink` or `deltaLink`.
+    /// [`Error::DeltaReset`] means: start the folder again with no link.
+    pub fn delta(&self, token: &str, folder: &str, link: Option<&str>) -> Result<DeltaPage> {
+        let (url, stored) = match link {
+            Some(l) => (self.checked(l)?, true),
+            None => (
+                self.url(&format!(
+                    "/me/mailFolders/{}/messages/delta?$select={SELECT}",
+                    segment(folder)
+                )),
+                false,
+            ),
+        };
+        let page: DeltaJson = match self.json(token, &url, true) {
+            Err(Error::NotFound) if stored => return Err(Error::DeltaReset),
+            Err(Error::Api { status, .. })
+                if stored && (400..500).contains(&status) && status != 403 && status != 429 =>
+            {
+                return Err(Error::DeltaReset)
+            }
+            other => other?,
+        };
+        let mut changes = Vec::with_capacity(page.value.len());
+        for item in page.value {
+            if item.removed.is_some() {
+                let id = item.message["id"]
+                    .as_str()
+                    .ok_or_else(|| Error::Decode("a removed item has no id".into()))?;
+                changes.push(Change::Removed(id.to_string()));
+            } else {
+                let m: Message = serde_json::from_value(item.message)
+                    .map_err(|e| Error::Decode(e.to_string()))?;
+                changes.push(Change::Message(m));
+            }
+        }
+        let next = match (page.next_link, page.delta_link) {
+            (Some(n), _) => Next::More(self.checked(&n)?),
+            (None, Some(d)) => Next::Done(self.checked(&d)?),
+            (None, None) => return Err(Error::Decode("a delta page has no link".into())),
+        };
+        Ok(DeltaPage { changes, next })
+    }
+
+    /// `GET /me/messages/{id}/$value`: the MIME text of the message goes to
+    /// `sink` through a buffer of 64 KiB. Returns the count of bytes. If the
+    /// call fails after the first byte, the sink has a part: discard it.
+    pub fn raw<W: Write>(&self, token: &str, id: &str, sink: &mut W) -> Result<u64> {
+        let url = self.url(&format!("/me/messages/{}/$value", segment(id)));
+        let _running = self.gate.enter();
+        let response = self.call(token, &url, false)?;
+        let mut body = response.into_body().into_reader().take(RAW_LIMIT + 1);
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut total = 0u64;
+        loop {
+            let n = match body.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(Error::Transport(e.to_string())),
+            };
+            total += n as u64;
+            if total > RAW_LIMIT {
+                return Err(Error::Decode(format!("a message above {RAW_LIMIT} bytes")));
+            }
+            sink.write_all(&buf[..n]).map_err(Error::Sink)?;
+        }
+        Ok(total)
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.config.base_url)
+    }
+
+    /// A link from an answer, only if it starts with the base URL.
+    fn checked(&self, link: &str) -> Result<String> {
+        let base = &self.config.base_url;
+        match link.strip_prefix(base.as_str()) {
+            Some(rest) if rest.starts_with('/') => Ok(link.to_string()),
+            _ => Err(Error::Decode("a link to another host".into())),
+        }
+    }
+
+    fn json<T: DeserializeOwned>(&self, token: &str, url: &str, page: bool) -> Result<T> {
+        let _running = self.gate.enter();
+        let response = self.call(token, url, page)?;
+        let body = response
+            .into_body()
+            .with_config()
+            .limit(ANSWER_LIMIT)
+            .read_to_vec()
+            .map_err(|e| match e {
+                ureq::Error::BodyExceedsLimit(_) => Error::Decode("an answer above 16 MiB".into()),
+                e => Error::Transport(e.to_string()),
+            })?;
+        serde_json::from_slice(&body).map_err(|e| Error::Decode(e.to_string()))
+    }
+
+    /// One GET, with the backoff. Returns only a 2xx answer. `page` asks
+    /// for [`PAGE_SIZE`] items in a page.
+    fn call(&self, token: &str, url: &str, page: bool) -> Result<ureq::http::Response<ureq::Body>> {
+        let auth = format!("Bearer {token}");
+        let prefer = if page {
+            format!("IdType=\"ImmutableId\", odata.maxpagesize={PAGE_SIZE}")
+        } else {
+            "IdType=\"ImmutableId\"".to_string()
+        };
+        let mut wait = self.config.backoff_start;
+        loop {
+            let response = self
+                .agent
+                .get(url)
+                .header("Authorization", &auth)
+                .header("Prefer", &prefer)
+                .call()
+                .map_err(|e| Error::Transport(e.to_string()))?;
+            let status = response.status().as_u16();
+            if (200..300).contains(&status) {
+                return Ok(response);
+            }
+            if status == 429 || status >= 500 {
+                let after = retry_after(&response).unwrap_or_else(|| jitter(wait));
+                std::thread::sleep(after.min(self.config.backoff_max));
+                wait = (wait * 2).min(self.config.backoff_max);
+                continue;
+            }
+            return Err(match status {
+                401 => Error::Unauthorized,
+                404 => Error::NotFound,
+                _ => {
+                    let (code, message) = error_of(response);
+                    Error::Api {
+                        status,
+                        code,
+                        message,
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// The seconds of a `Retry-After` header. Graph sends seconds (spec, A5).
+fn retry_after(response: &ureq::http::Response<ureq::Body>) -> Option<Duration> {
+    let v = response.headers().get("Retry-After")?.to_str().ok()?;
+    v.trim().parse::<u64>().ok().map(Duration::from_secs)
+}
+
+/// Add a random part of up to 50 percent to a wait.
+fn jitter(wait: Duration) -> Duration {
+    use std::hash::{BuildHasher, Hasher};
+    let r = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    wait + wait.mul_f64((r % 1000) as f64 / 2000.0)
+}
+
+/// Escape an ID for one segment of the URL path.
+fn segment(id: &str) -> String {
+    id.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// The code and the message of a Graph error body (spec, A8).
+fn error_of(response: ureq::http::Response<ureq::Body>) -> (String, String) {
+    let body = response
+        .into_body()
+        .with_config()
+        .limit(64 * 1024)
+        .read_to_vec()
+        .unwrap_or_default();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    let e = &v["error"];
+    (
+        e["code"].as_str().unwrap_or("").to_string(),
+        e["message"].as_str().unwrap_or("").to_string(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_link_must_start_with_the_base_url() {
+        let g = Graph::new(Config {
+            base_url: "http://127.0.0.1:9/v1.0".into(),
+            ..Config::default()
+        });
+        assert!(g
+            .checked("http://127.0.0.1:9/v1.0/me/x?$deltatoken=1")
+            .is_ok());
+        for bad in [
+            "http://127.0.0.1:9/v1.0.evil.example/me",
+            "http://127.0.0.1:99/v1.0/me",
+            "https://evil.example/v1.0/me",
+            "http://127.0.0.1:9/v1.0",
+        ] {
+            assert!(matches!(g.checked(bad), Err(Error::Decode(_))), "{bad}");
+        }
+    }
+
+    #[test]
+    fn segments_escape_path_characters() {
+        assert_eq!(segment("AAMk-_."), "AAMk-_.");
+        assert_eq!(segment("a/b=c+"), "a%2Fb%3Dc%2B");
+    }
+
+    #[test]
+    fn the_address_falls_back_to_the_principal_name() {
+        let me = |mail: Option<&str>| Me {
+            id: "1".into(),
+            mail: mail.map(String::from),
+            user_principal_name: "u@example.com".into(),
+        };
+        assert_eq!(me(Some("m@example.com")).address(), "m@example.com");
+        assert_eq!(me(Some("")).address(), "u@example.com");
+        assert_eq!(me(None).address(), "u@example.com");
+    }
+}
