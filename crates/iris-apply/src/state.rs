@@ -164,6 +164,11 @@ fn apply_in(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<O
     // The writes first, in a savepoint: a refusal leaves no item write of
     // the action. Then the entry, with `pre` and `post` read from the
     // documents before and after, so the entry holds each changed value.
+    // Each correction row after this ID is of this entry: the undo removes
+    // only these rows, also when the changeset has more actions on the item.
+    let last: i64 = tx.query_row("SELECT coalesce(max(id), 0) FROM correction", [], |r| {
+        r.get(0)
+    })?;
     tx.execute_batch("SAVEPOINT state_write")?;
     let result = match plan(tx, action, &verb, &args, &fields, now_ms)? {
         Ok(items) => match write(tx, &verb, &args, &items, &by, now_ms)? {
@@ -185,6 +190,13 @@ fn apply_in(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<O
         tx.execute_batch("ROLLBACK TO state_write")?;
     }
     tx.execute_batch("RELEASE state_write")?;
+    let corrections: Vec<i64> = if result.is_ok() {
+        let mut st = tx.prepare("SELECT id FROM correction WHERE id > ?1 ORDER BY id")?;
+        let ids = st.query_map([last], |r| r.get(0))?;
+        ids.collect::<rusqlite::Result<_>>()?
+    } else {
+        Vec::new()
+    };
     let (pre, post) = match &result {
         Ok((pre, post)) => (Some(pre.to_string()), Some(post.to_string())),
         Err(_) => (None, None),
@@ -195,7 +207,7 @@ fn apply_in(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<O
          VALUES (?1, ?2, ?3, ?4, 'writing', ?5, ?6)",
         params![
             action,
-            json!({ "fields": fields }).to_string(),
+            json!({ "fields": fields, "corrections": corrections }).to_string(),
             pre,
             post,
             // A failed entry changed nothing, so it has no undo.
@@ -234,13 +246,12 @@ fn apply_in(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<O
 /// becomes `undone`.
 fn restore(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<Outcome, Inner> {
     #[allow(clippy::type_complexity)]
-    let (entry, pre, post, ops, changeset): (i64, String, String, String, i64) = tx.query_row(
-        "SELECT l.id, l.pre, l.post, l.ops, o.changeset_id FROM ledger_undo u
+    let (entry, pre, post, ops): (i64, String, String, String) = tx.query_row(
+        "SELECT l.id, l.pre, l.post, l.ops FROM ledger_undo u
          JOIN ledger l ON l.id = u.ledger_id
-         JOIN changeset_action o ON o.id = l.action_id
          WHERE u.action_id = ?1 AND u.step = 1",
         [action],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
     let parse = |t: &str| serde_json::from_str::<Value>(t).unwrap_or(Value::Null);
     let (pre, post, ops) = (parse(&pre), parse(&post), parse(&ops));
@@ -250,18 +261,29 @@ fn restore(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<Ou
         .flatten()
         .filter_map(|f| f.as_str().map(str::to_string))
         .collect();
-    let by = format_changeset_id(changeset);
-    let rows: Vec<(i64, String)> = {
+    let corrections = ops["corrections"].to_string();
+    // `later`: the item is gone, or a state entry after this entry names it.
+    // The value check alone misses a later action that set the same values.
+    let rows: Vec<(i64, String, bool)> = {
         let mut st = tx.prepare(
-            "SELECT i.id, i.doc FROM action_item ai JOIN item i ON i.id = ai.item_id
+            "SELECT i.id, i.doc, i.status = 'gone' OR EXISTS (
+               SELECT 1 FROM action_item x
+               JOIN changeset_action o ON o.id = x.action_id
+               JOIN ledger l ON l.action_id = o.id
+               WHERE x.item_id = i.id AND x.action_id != ?1 AND l.id > ?2
+                 AND l.state != 'failed'
+                 AND o.verb IN ('close', 'decline', 'defer', 'correct', 'restore'))
+             FROM action_item ai JOIN item i ON i.id = ai.item_id
              WHERE ai.action_id = ?1 ORDER BY i.id",
         )?;
-        let rows = st.query_map([action], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let rows = st.query_map(params![action, entry], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
         rows.collect::<rusqlite::Result<_>>()?
     };
     let (mut was, mut now) = (Map::new(), Map::new());
     let mut counts = Counts::default();
-    for (item, doc) in rows {
+    for (item, doc, later) in rows {
         let Ok(mut doc) = serde_json::from_str::<Value>(&doc) else {
             counts.unchanged += 1;
             continue;
@@ -270,12 +292,23 @@ fn restore(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<Ou
         let current = values(&doc, &fields);
         // A later change (an action, understanding, the tick of a deferred
         // item, a gone item) wins: the item stays as it is.
-        if post.get(&id) != Some(&current) || !pre[&id].is_object() {
+        if later || post.get(&id) != Some(&current) || !pre[&id].is_object() {
             counts.unchanged += 1;
             continue;
         }
         for f in &fields {
             set(&mut doc, f, pre[&id][f].clone());
+        }
+        // The sender ID of each party follows its address, as for a correction.
+        let mut failed = None;
+        iris_understand::set_senders(&mut doc, &mut |addr, name| {
+            iris_understand::store::sender_row(tx, addr, name).unwrap_or_else(|e| {
+                failed.get_or_insert(e);
+                0
+            })
+        });
+        if let Some(e) = failed {
+            return Err(e.into());
         }
         doc["updated"] = json!(iris_talk::rfc3339(now_ms));
         tx.execute(
@@ -283,8 +316,9 @@ fn restore(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<Ou
             params![item, doc.to_string(), now_ms, doc["status"].as_str()],
         )?;
         tx.execute(
-            "DELETE FROM correction WHERE item_id = ?1 AND by = ?2",
-            params![item, by],
+            "DELETE FROM correction WHERE item_id = ?1
+               AND id IN (SELECT value FROM json_each(?2))",
+            params![item, corrections],
         )?;
         now.insert(id.clone(), values(&doc, &fields));
         was.insert(id, current);

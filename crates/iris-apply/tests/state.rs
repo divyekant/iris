@@ -612,7 +612,9 @@ fn the_undo_of_each_state_verb_sets_the_old_values() {
         );
         assert_eq!(entry_can(&b, a), json!(0), "{verb:?}: no second undo");
         // The undo changeset is a valid document of the open model.
-        let cs = b.one(&format!("SELECT changeset_id FROM changeset_action WHERE id = {undo}"));
+        let cs = b.one(&format!(
+            "SELECT changeset_id FROM changeset_action WHERE id = {undo}"
+        ));
         let mut out = Vec::new();
         iris_changeset::write_document(&b.store, cs.as_i64().unwrap(), &mut out).unwrap();
         let doc: Value = serde_json::from_slice(&out).unwrap();
@@ -713,4 +715,139 @@ fn the_link_of_a_state_undo_takes_only_restore() {
     assert!(link("untrash", "{}", 1).is_err(), "another verb");
     assert!(link("restore", "{}", 2).is_err(), "step 2");
     assert!(link("restore", "{}", 1).is_ok());
+}
+
+/// Invariant: the undo of an entry reverses only that entry. A later state
+/// action on the item, with the same values or not, and a gone item, keep
+/// the item as it is.
+#[test]
+fn the_undo_of_a_state_entry_keeps_a_later_action_and_a_gone_item() {
+    let b = setup("undo-same", "open", None);
+    let first = b.approved(Verb::Defer, json!({ "date": "2099-01-05" }));
+    assert!(matches!(
+        apply_state(&b.store, first),
+        Ok(Outcome::Applied(_))
+    ));
+    let other = b.approved(Verb::Defer, json!({ "date": "2099-02-01" }));
+    assert!(matches!(
+        apply_state(&b.store, other),
+        Ok(Outcome::Applied(_))
+    ));
+    // A later defer to the same date: the values are the `post` of `first`.
+    let again = b.approved(Verb::Defer, json!({ "date": "2099-01-05" }));
+    assert!(matches!(
+        apply_state(&b.store, again),
+        Ok(Outcome::Applied(_))
+    ));
+    let after = b.plain();
+    let (_, outcome) = b.undo(first);
+    assert!(
+        matches!(outcome, Outcome::Applied(c) if (c.changed, c.unchanged) == (0, 1)),
+        "the later defer stays"
+    );
+    assert_eq!(b.plain(), after);
+
+    let b = setup("undo-gone", "open", None);
+    let a = b.approved(Verb::Defer, json!({ "date": "2099-01-05" }));
+    assert!(matches!(apply_state(&b.store, a), Ok(Outcome::Applied(_))));
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE item SET status_before_gone = status, status = 'gone' WHERE id = 1",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let (_, outcome) = b.undo(a);
+    assert!(
+        matches!(outcome, Outcome::Applied(c) if (c.changed, c.unchanged) == (0, 1)),
+        "a gone item stays gone"
+    );
+    assert_eq!(b.one("SELECT status FROM item WHERE id = 1"), json!("gone"));
+}
+
+/// Invariant: the undo removes only the correction rows of its own entry,
+/// also when one changeset has two actions on the item.
+#[test]
+fn the_undo_keeps_the_corrections_of_the_other_action_of_the_changeset() {
+    let b = setup("undo-two", "open", None);
+    let me = Author {
+        kind: AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    let s = &b.store;
+    let cs = iris_changeset::create(s, &me, now()).unwrap();
+    for (verb, args) in [
+        (
+            Verb::Correct,
+            json!({ "field": "due.date", "value": "2026-11-20" }),
+        ),
+        (Verb::Defer, json!({ "date": "2099-01-05" })),
+    ] {
+        let args = args.as_object().unwrap().clone();
+        iris_changeset::add_action(s, cs, &me, verb, &["c-1"], &args, None).unwrap();
+    }
+    iris_changeset::submit(s, cs, &me, "Two changes.", now()).unwrap();
+    let mut ids = Vec::new();
+    for n in 1..=2 {
+        let id = b
+            .one(&format!(
+                "SELECT id FROM changeset_action WHERE changeset_id = {cs} AND n = {n}"
+            ))
+            .as_i64()
+            .unwrap();
+        let hash = b.one(&format!(
+            "SELECT hash FROM changeset_action WHERE id = {id}"
+        ));
+        let action = ActionId {
+            changeset: cs,
+            revision: 1,
+            n,
+        };
+        iris_changeset::approve(s, action, hash.as_str().unwrap(), now()).unwrap();
+        assert!(matches!(apply_state(s, id), Ok(Outcome::Applied(_))));
+        ids.push(id);
+    }
+    let (_, outcome) = b.undo(ids[1]);
+    assert!(
+        matches!(outcome, Outcome::Applied(ref c) if c.changed == 1),
+        "{outcome:?}"
+    );
+    assert_eq!(b.doc()["due"]["date"], json!("2026-11-20"));
+    assert_eq!(
+        b.one("SELECT count(*) FROM correction WHERE field = 'due.date'"),
+        json!(1),
+        "the correction of the other action stays"
+    );
+    assert_eq!(
+        b.one("SELECT count(*) FROM correction WHERE field = 'deferred_until'"),
+        json!(0)
+    );
+}
+
+/// Invariant: the sender ID of each party agrees with its address, also
+/// after the undo of a correction of the address.
+#[test]
+fn the_undo_of_an_address_correction_sets_the_sender_again() {
+    let b = setup("undo-addr", "open", None);
+    let a = b.approved(
+        Verb::Correct,
+        json!({ "field": "counterparty.address", "value": "new@contoso.example" }),
+    );
+    assert!(matches!(apply_state(&b.store, a), Ok(Outcome::Applied(_))));
+    let (_, outcome) = b.undo(a);
+    assert!(
+        matches!(outcome, Outcome::Applied(ref c) if c.changed == 1),
+        "{outcome:?}"
+    );
+    let party = &b.doc()["counterparty"];
+    assert_eq!(party["address"], json!("dana@contoso.example"));
+    let old = b.one("SELECT id FROM sender WHERE address = 'dana@contoso.example'");
+    assert_eq!(
+        party["sender"],
+        json!(format!("p-{}", old.as_i64().unwrap()))
+    );
 }

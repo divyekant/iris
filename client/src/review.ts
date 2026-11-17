@@ -26,7 +26,7 @@ export function verb(a: Action): string {
     case "untrash":
       return "Take out of the trash";
     case "restore":
-      return "Undo the change to";
+      return "Undo";
     case "close":
       return "Close";
     case "decline":
@@ -48,6 +48,8 @@ export function verb(a: Action): string {
 export function target(a: Action): string {
   // A draft or a send writes one mail: its messages are the thread, not the change.
   if (mail(a)) return "a mail";
+  // A restore changes the items of its ledger entries, and no message.
+  if (a.verb === "restore") return n(a.targets.ledger?.length ?? 0, "earlier change", "earlier changes");
   const messages = a.resolved.messages.length;
   const threads = a.targets.threads?.length ?? 0;
   const items = a.targets.items?.length ?? 0;
