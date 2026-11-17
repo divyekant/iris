@@ -21,6 +21,10 @@ pub const STATE_NEEDS_SIGN_IN: &str = "needs_sign_in";
 
 /// The time between two incremental syncs (specification 1, section 4.6).
 pub const SYNC_EVERY: Duration = Duration::from_secs(60);
+
+/// How often a sleeping sync thread looks for a new send mark of the write
+/// view (docs/specs/2026-11-17-write.md, section 7).
+pub const WAKE_EVERY: Duration = Duration::from_secs(1);
 /// The time between two runs of the content cleanup (section 4.5).
 pub const CLEAN_EVERY: Duration = Duration::from_secs(3600);
 
@@ -322,32 +326,66 @@ impl Worker {
     /// the next hold if it comes first, until the account leaves the list
     /// of [`sync_accounts`]. Each error goes to standard error.
     pub fn run(mut self) {
+        // False after an early wake for a written mail: the turn runs only
+        // the apply step, and the sync keeps its time.
+        let mut sync = true;
+        let mut until = Instant::now();
         loop {
-            match self.sync() {
-                Ok(_) => {}
-                // Another process syncs the account: not an error.
-                Err(Error::Sync(iris_sync::Error::OtherSync)) => {}
-                Err(e) => say!("iris: account {}: {e}", self.account),
+            if sync {
+                self.sync_turn();
             }
-            let next = match self.apply_step() {
-                Ok(turn) => {
-                    for line in &turn.reports {
-                        say!("iris: account {}: {line}", self.account);
-                    }
-                    turn.next
-                }
-                // Another apply runs now: the next turn tries again.
-                Err(Error::Apply(iris_apply::Error::Busy)) => None,
-                Err(e) => {
-                    say!("iris: account {}: {e}", self.account);
-                    None
-                }
-            };
+            let started = now_ms();
+            let next = self.apply_turn();
             match sync_accounts(&self.store) {
                 Ok(a) if !a.contains(&self.account) => return,
                 _ => {}
             }
-            std::thread::sleep(wait(next, now_ms()));
+            let end = Instant::now() + wait(next, now_ms());
+            until = if sync { end } else { until.min(end) };
+            sync = !self.pause(until, started);
+        }
+    }
+
+    /// Sleep until `until`, and look each [`WAKE_EVERY`] for a send mark of
+    /// the write view made after `since` (docs/specs/2026-11-17-write.md,
+    /// section 7). Gives true if a new mark woke the thread early.
+    fn pause(&self, until: Instant, since: i64) -> bool {
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            std::thread::sleep(left.min(WAKE_EVERY));
+            if matches!(iris_changeset::written_since(&self.store, since), Ok(true)) {
+                return true;
+            }
+        }
+    }
+
+    fn sync_turn(&mut self) {
+        match self.sync() {
+            Ok(_) => {}
+            // Another process syncs the account: not an error.
+            Err(Error::Sync(iris_sync::Error::OtherSync)) => {}
+            Err(e) => say!("iris: account {}: {e}", self.account),
+        }
+    }
+
+    /// The apply step of a turn. Gives the end of the next hold.
+    fn apply_turn(&mut self) -> Option<i64> {
+        match self.apply_step() {
+            Ok(turn) => {
+                for line in &turn.reports {
+                    say!("iris: account {}: {line}", self.account);
+                }
+                turn.next
+            }
+            // Another apply runs now: the next turn tries again.
+            Err(Error::Apply(iris_apply::Error::Busy)) => None,
+            Err(e) => {
+                say!("iris: account {}: {e}", self.account);
+                None
+            }
         }
     }
 }
