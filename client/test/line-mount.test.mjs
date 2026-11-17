@@ -226,3 +226,46 @@ test("Skip, Mute and Dismiss wait, then send their verb and call ondone", async 
     }
   }
 });
+
+// The full sections of the brief (`#/brief/feed` and the others) have the actions of a brief line.
+test("a full section of the brief has the quiet verb, and the line leaves after the hold", async () => {
+  const feed = fx.items.filter((i) => i.form === "feed" && !["skipped"].includes(i.status));
+  const page = { items: feed, next: null };
+  const asked = [];
+  // The other calls of the app (status, policy) stay pending, so they change nothing.
+  globalThis.fetch = (url, init) => {
+    const u = String(url).replace(/^\/api\//, "");
+    asked.push([u, init?.body ? JSON.parse(init.body) : undefined]);
+    if (!u.startsWith("brief/feed") && !u.startsWith("items/")) return new Promise(() => {});
+    return Promise.resolve(new Response(JSON.stringify(page), { status: 200, headers: { "content-type": "application/json" } }));
+  };
+  // The app reads the route from the hash of the page.
+  const globals = ["location", "history", "addEventListener", "removeEventListener"];
+  for (const name of globals) globalThis[name] = typeof window[name] === "function" ? window[name].bind(window) : window[name];
+  window.location.hash = "#/brief/feed";
+  const app = await mount("/src/App.svelte", {});
+  try {
+    await until(() => button(app, "Skip"));
+    assert.ok(asked.some(([u]) => u === "brief/feed?limit=50"), JSON.stringify(asked));
+  } finally {
+    app.destroy();
+    window.location.hash = "";
+    for (const name of globals) delete globalThis[name];
+  }
+  const list = await mount("/src/views/List.svelte", { title: "Feed", page, act: true, delay: 30 });
+  try {
+    const before = list.target.querySelectorAll("li").length;
+    button(list, "Skip").click();
+    await until(() => list.target.querySelectorAll("li").length === before - 1);
+    assert.deepEqual(asked.at(-1), [`items/${feed[0].id}/skip`, {}]);
+  } finally {
+    list.destroy();
+  }
+  // A list of a form has no actions.
+  const form = await mount("/src/views/List.svelte", { title: "Feed", page });
+  try {
+    assert.ok(!button(form, "Skip"));
+  } finally {
+    form.destroy();
+  }
+});

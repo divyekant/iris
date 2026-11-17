@@ -127,12 +127,12 @@
     {:else if route.view === "section"}
       {@const key = route.key}
       {#await get<Page>(`brief/${key}?limit=50`) then page}
-        <List title={SECTIONS[key]} {page} more={`brief/${key}?limit=50`} cursor="after" expiring={key === "signals"} />
+        <List title={SECTIONS[key]} {page} more={`brief/${key}?limit=50`} cursor="after" expiring={key === "signals"} act />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "bundle"}
       {@const rule = route.rule}
       {#await Promise.all([get<Page>(`brief/bundle-${rule}?limit=50`), get<Policy>("policy").catch(() => null)]) then [page, policy]}
-        <List title={policy?.rules.find((r) => r.id === rule)?.name ?? `Rule ${rule}`} {page} more={`brief/bundle-${rule}?limit=50`} cursor="after" />
+        <List title={policy?.rules.find((r) => r.id === rule)?.name ?? `Rule ${rule}`} {page} more={`brief/bundle-${rule}?limit=50`} cursor="after" act />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "handled"}
       {#await Promise.all([get<HandledPage>("handled?limit=50"), get<Page & { count: number }>("brief/hidden?limit=50")]) then [changes, hidden]}
