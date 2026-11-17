@@ -378,9 +378,48 @@ fn request(spec: &Spec, args: &Map<String, Value>) -> Call {
     }
 }
 
-/// The function that runs a request on the path of the command. It gives
-/// the result text (JSON), or the error text.
-pub type Run = dyn Fn(Call) -> Result<String, String> + Send + Sync;
+/// The result of a request, as the command gives it: what it prints with
+/// `--json`, and the exit code and the error text when the code is not 0.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Outcome {
+    pub text: String,
+    pub failure: Option<(u8, String)>,
+}
+
+impl Outcome {
+    pub fn ok(text: String) -> Outcome {
+        Outcome {
+            text,
+            failure: None,
+        }
+    }
+
+    pub fn fail(code: u8, error: String) -> Outcome {
+        Outcome {
+            text: String::new(),
+            failure: Some((code, error)),
+        }
+    }
+
+    /// The tool result: the printed text, then the error with its exit
+    /// code. A code that is not 0 is an error result.
+    fn result(self) -> CallToolResult {
+        let mut content = Vec::new();
+        if !self.text.is_empty() {
+            content.push(ContentBlock::text(self.text));
+        }
+        match self.failure {
+            None => CallToolResult::success(content),
+            Some((code, error)) => {
+                content.push(ContentBlock::text(format!("{error} (exit code {code})")));
+                CallToolResult::error(content)
+            }
+        }
+    }
+}
+
+/// The function that runs a request on the path of the command.
+pub type Run = dyn Fn(Call) -> Outcome + Send + Sync;
 
 struct Server {
     run: Arc<Run>,
@@ -418,21 +457,17 @@ impl ServerHandler for Server {
                 None,
             ));
         };
-        let result = match c {
+        let outcome = match c {
             Ok(c) => {
                 let run = self.run.clone();
                 // The socket request and the read verbs block.
                 tokio::task::spawn_blocking(move || run(c))
                     .await
-                    .unwrap_or_else(|e| Err(format!("the request stopped: {e}")))
+                    .unwrap_or_else(|e| Outcome::fail(1, format!("the request stopped: {e}")))
             }
-            Err(e) => Err(format!("{e} (exit code 2)")),
+            Err(e) => Outcome::fail(2, e),
         };
-        Ok(match result {
-            Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
-            Err(e) => CallToolResult::error(vec![ContentBlock::text(e)]),
-        }
-        .into())
+        Ok(outcome.result().into())
     }
 }
 

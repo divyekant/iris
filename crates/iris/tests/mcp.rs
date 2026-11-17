@@ -106,18 +106,43 @@ impl Client {
         }
     }
 
-    /// Call a tool. Gives the error flag and the text.
-    fn call(&mut self, name: &str, args: Value) -> (bool, String) {
+    /// Call a tool. Gives what the command prints, and the exit code from
+    /// the last block of an error result (0 for a result that is not an
+    /// error).
+    fn run(&mut self, name: &str, args: Value) -> (String, u8) {
         let r = self.ask("tools/call", json!({ "name": name, "arguments": args }));
         let result = &r["result"];
-        assert!(result.is_object(), "{r}");
-        let text = result["content"][0]["text"].as_str().unwrap_or_default();
-        (result["isError"] == json!(true), text.to_string())
+        let mut blocks: Vec<String> = result["content"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{r}"))
+            .iter()
+            .map(|b| b["text"].as_str().unwrap().to_string())
+            .collect();
+        if result["isError"] != json!(true) {
+            return (blocks.concat(), 0);
+        }
+        let error = blocks.pop().unwrap();
+        let code = error
+            .rsplit_once("(exit code ")
+            .and_then(|(_, c)| c.trim_end_matches(')').parse().ok())
+            .unwrap_or_else(|| panic!("no exit code in {error}"));
+        (blocks.concat(), code)
+    }
+
+    /// The error text of a call that fails with `code`.
+    fn error(&mut self, name: &str, args: Value, code: u8) -> String {
+        let r = self.ask("tools/call", json!({ "name": name, "arguments": args }));
+        let text = r["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert_eq!(r["result"]["isError"], json!(true), "{r}");
+        assert!(text.ends_with(&format!("(exit code {code})")), "{text}");
+        text.to_string()
     }
 
     fn ok(&mut self, name: &str, args: Value) -> Value {
-        let (error, text) = self.call(name, args);
-        assert!(!error, "{name}: {text}");
+        let (text, code) = self.run(name, args);
+        assert_eq!(code, 0, "{name}: {text}");
         serde_json::from_str(&text).unwrap()
     }
 
@@ -156,8 +181,8 @@ fn a_client_reads_the_mail_and_submits_a_changeset() {
         status,
         serde_json::to_value(iris_api::status(&store).unwrap()).unwrap()
     );
-    let (error, lines) = c.call("search", json!({ "text": "label:INBOX", "limit": 2 }));
-    assert!(!error, "{lines}");
+    let (lines, code) = c.run("search", json!({ "text": "label:INBOX", "limit": 2 }));
+    assert_eq!(code, 0, "{lines}");
     assert_eq!(lines.lines().count(), 2, "{lines}");
     let first: Value = serde_json::from_str(lines.lines().next().unwrap()).unwrap();
     let m = first["id"].as_str().unwrap().to_string();
@@ -176,7 +201,9 @@ fn a_client_reads_the_mail_and_submits_a_changeset() {
         (r["changeset"].as_str(), r["n"].as_i64()),
         (Some(cs.as_str()), Some(2))
     );
-    let doc = c.ok("submit", json!({ "changeset": cs, "why": "Tidy up." }));
+    let (text, code) = c.run("submit", json!({ "changeset": cs, "why": "Tidy up." }));
+    assert_eq!(code, socket::code::OPEN, "{text}");
+    let doc: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(doc["id"], json!(cs), "{doc}");
     assert_eq!(doc["author"]["kind"], json!("local"), "{doc}");
     assert_eq!(doc["actions"][0]["verb"], json!("archive"));
@@ -185,7 +212,6 @@ fn a_client_reads_the_mail_and_submits_a_changeset() {
         json!("proposed"),
         "{doc}"
     );
-    assert_eq!(iris::submit_code(&doc), socket::code::OPEN);
     assert_eq!(
         c.ok("changeset", json!({ "changeset": cs }))["id"],
         json!(cs)
@@ -202,10 +228,12 @@ fn a_client_reads_the_mail_and_submits_a_changeset() {
         })
         .unwrap();
     let r = c.ok("read", json!({ "ids": [m] }));
-    let doc = c.ok(
+    let (text, code) = c.run(
         "submit",
         json!({ "changeset": r["changeset"], "why": "Seen." }),
     );
+    assert_eq!(code, socket::code::DENIED, "{text}");
+    let doc: Value = serde_json::from_str(&text).unwrap();
     let d = &doc["actions"][0]["decision"];
     assert_eq!(
         (d["state"].as_str(), d["by"].as_str()),
@@ -216,13 +244,111 @@ fn a_client_reads_the_mail_and_submits_a_changeset() {
     // A wrong argument is a usage error, and a tool that does not exist is
     // an error of the protocol. Neither writes a changeset.
     let before = count(&store, "SELECT count(*) FROM changeset");
-    let (error, text) = c.call("archive", json!({ "ids": [] }));
-    assert!(error && text.contains("exit code 2"), "{text}");
-    let (error, text) = c.call("show", json!({ "id": "m-999999" }));
-    assert!(error, "{text}");
+    c.error("archive", json!({ "ids": [] }), socket::code::USAGE);
+    c.error("show", json!({ "id": "m-999999" }), socket::code::ERROR);
     let r = c.ask("tools/call", json!({ "name": "approve", "arguments": {} }));
     assert!(r["error"].is_object(), "{r}");
     assert_eq!(count(&store, "SELECT count(*) FROM changeset"), before);
+    c.stop();
+}
+
+/// Each tool gives what its verb prints with `--json`, and the exit code of
+/// the verb.
+#[test]
+fn each_tool_gives_the_output_and_the_code_of_its_verb() {
+    let (store, _fake) = engine("mcp-same");
+    let mut c = Client::start(store.dir());
+    let cli = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_iris"))
+            .arg("--data")
+            .arg(store.dir())
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            String::from_utf8(out.stdout).unwrap(),
+            out.status.code().unwrap() as u8,
+        )
+    };
+    let (text, _) = c.run("search", json!({ "text": "label:INBOX", "limit": 1 }));
+    let m: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    let m = m["id"].as_str().unwrap().to_string();
+    // No draft: no line on both paths.
+    assert_eq!(c.run("drafts", json!({})), (String::new(), 0));
+    assert_eq!(cli(&["changeset", "--drafts", "--json"]), (String::new(), 0));
+    let draft = c.ok("archive", json!({ "ids": [m] }))["changeset"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // A changeset that a hard limit denies: the code is 3.
+    let (_, row) = iris_store::parse_id(&m).unwrap();
+    store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE message SET hostile = '[\"dmarc\"]' WHERE id = ?1",
+                [row],
+            )?)
+        })
+        .unwrap();
+    let denied = c.ok("read", json!({ "ids": [m] }))["changeset"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (_, code) = c.run("submit", json!({ "changeset": denied, "why": "x" }));
+    assert_eq!(code, socket::code::DENIED);
+    let cases: Vec<(Vec<&str>, &str, Value)> = vec![
+        (vec!["status", "--json"], "status", json!({})),
+        (
+            vec!["search", "label:INBOX", "--limit", "3", "--json"],
+            "search",
+            json!({ "text": "label:INBOX", "limit": 3 }),
+        ),
+        (vec!["show", &m, "--json"], "show", json!({ "id": m })),
+        (
+            vec!["show", "m-999999", "--json"],
+            "show",
+            json!({ "id": "m-999999" }),
+        ),
+        (
+            vec!["changeset", &draft, "--json"],
+            "changeset",
+            json!({ "changeset": draft }),
+        ),
+        (
+            vec!["changeset", &denied, "--json"],
+            "changeset",
+            json!({ "changeset": denied }),
+        ),
+        (
+            vec!["changeset", "cs-999", "--json"],
+            "changeset",
+            json!({ "changeset": "cs-999" }),
+        ),
+        (vec!["changeset", "--drafts", "--json"], "drafts", json!({})),
+        (
+            vec!["submit", "cs-999", "--why", "x", "--json"],
+            "submit",
+            json!({ "changeset": "cs-999", "why": "x" }),
+        ),
+    ];
+    for (argv, tool, args) in cases {
+        let mcp = c.run(tool, args);
+        assert_eq!(mcp, cli(&argv), "{argv:?}");
+    }
+    // A withdraw and a revise change the changeset: each gives the document
+    // that `changeset --json` shows after it. A second call fails the same
+    // way on both paths.
+    for (tool, cs) in [("withdraw", &draft), ("revise", &denied)] {
+        let mcp = c.run(tool, json!({ "changeset": cs }));
+        assert_eq!(mcp, cli(&["changeset", cs, "--json"]), "{tool}");
+        let again = c.run(tool, json!({ "changeset": cs }));
+        assert_ne!(again.1, 0, "{tool}");
+        assert_eq!(again, cli(&[tool, cs, "--json"]), "{tool}");
+    }
+    // After the withdraw and the revise: only the revised changeset is a draft.
+    let drafts = c.run("drafts", json!({}));
+    assert_eq!(drafts, (format!("\"{denied}\"\n"), 0));
+    assert_eq!(drafts, cli(&["changeset", "--drafts", "--json"]));
     c.stop();
 }
 
@@ -231,12 +357,12 @@ fn with_no_engine_a_write_tool_gives_code_4() {
     let dir = data_dir("mcp-no-engine");
     std::fs::create_dir_all(&dir).unwrap();
     let mut c = Client::start(&dir);
-    let (error, text) = c.call("archive", json!({ "ids": ["m-1"] }));
-    assert!(error, "{text}");
-    assert!(
-        text.contains("iris serve") && text.contains("exit code 4"),
-        "{text}"
+    let text = c.error(
+        "archive",
+        json!({ "ids": ["m-1"] }),
+        socket::code::UNREACHABLE,
     );
+    assert!(text.contains("iris serve"), "{text}");
     c.stop();
 }
 
