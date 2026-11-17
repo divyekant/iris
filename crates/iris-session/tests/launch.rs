@@ -140,6 +140,7 @@ fn running(o: Outcome) -> Running {
     match o {
         Outcome::Running(r) => r,
         Outcome::Ended { end, why, .. } => panic!("the launch ended: {} ({why})", end.as_str()),
+        Outcome::Open { why, .. } => panic!("the session stays open: {why}"),
     }
 }
 
@@ -147,6 +148,7 @@ fn ended(o: Outcome) -> (i64, EndReason, String) {
     match o {
         Outcome::Running(r) => panic!("the session {} runs", r.session),
         Outcome::Ended { session, end, why } => (session, end, why),
+        Outcome::Open { session, why } => panic!("the session {session} stays open: {why}"),
     }
 }
 
@@ -404,6 +406,33 @@ fn the_reap_check_waits_for_the_helper_and_the_group() {
     assert!(get().reaped_ms.is_some());
 }
 
+/// The launch reports an end only if the store has it. A failed end write
+/// gives `Open`, and the row stays open for the engine to end.
+fn a_failed_end_write_is_not_reported_as_an_end() {
+    let long = "e".repeat(120);
+    let f = fixture("end-fails", &long, "sleep 30");
+    let o = launch(&f, &real_helper, &|step, _| {
+        if step == Step::Built {
+            f.store
+                .write(|tx| {
+                    tx.execute_batch(
+                        "CREATE TRIGGER test_no_end BEFORE UPDATE OF ended_at ON job_session
+                         BEGIN SELECT RAISE(ABORT, 'test: the disk is full'); END;",
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+    });
+    let Outcome::Open { session: s, why } = o else {
+        panic!("a launch with no end in the store reported an end");
+    };
+    assert!(why.contains("cannot write the end"), "{why}");
+    let row = session(&f.store, s).unwrap();
+    assert_eq!(row.ended_ms, None);
+    assert_eq!(row.reaped_ms, None);
+}
+
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "session-hold") {
@@ -446,6 +475,10 @@ fn main() {
         (
             "the_reap_check_waits_for_the_helper_and_the_group",
             the_reap_check_waits_for_the_helper_and_the_group,
+        ),
+        (
+            "a_failed_end_write_is_not_reported_as_an_end",
+            a_failed_end_write_is_not_reported_as_an_end,
         ),
         (
             "a_missing_program_fails_before_a_session_row",
