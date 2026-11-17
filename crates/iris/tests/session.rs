@@ -696,6 +696,26 @@ fn the_read_verbs_give_only_the_grant() {
     assert_eq!(ids(&list("commitment").unwrap(), "items"), ["c-1"]);
     assert!(ids(&list("record").unwrap(), "items").is_empty());
     assert_eq!(list("task").unwrap_err().0, code::USAGE);
+    // A search decides each match only from the grant: the record r-9 has
+    // the granted source m-1 and the source m-7 outside the grant, so it is
+    // not a workspace item, and `form:record` finds nothing. A workspace
+    // holds no labels: `label:` is a usage error.
+    store
+        .write(|tx| {
+            tx.execute_batch(
+                r#"INSERT INTO item (id, form, account_id, status, doc, created_at, updated_at)
+                     VALUES (9, 'record', 1, 'open', '{"id":"r-9","form":"record"}', 1, 1);
+                   INSERT INTO item_source (item_id, message_id, role) VALUES (9, 1, 'origin'), (9, 7, 'origin');"#,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(ids(&search("form:record").unwrap(), "messages").is_empty());
+    assert_eq!(
+        ids(&search("form:commitment").unwrap(), "messages"),
+        ["m-1"]
+    );
+    assert_eq!(search("label:INBOX").unwrap_err().0, code::USAGE);
     // A session has no drafts verb of the host (issue #522).
     assert_eq!(
         call(&store, &me, "drafts", json!({})).unwrap_err().0,
