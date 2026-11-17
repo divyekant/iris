@@ -29,7 +29,8 @@ use unicase::UniCase;
 
 mod flags;
 pub use flags::{
-    action_content, draft_flags, has_attachment, has_date, has_money, new_flags, words,
+    action_content, attachment_spans, date_spans, draft_flags, draft_marks, has_attachment,
+    has_date, has_money, money_spans, names, new_flags, words, Field, Mark, DRAFT_FLAGS,
 };
 
 /// The flag `bulk`: more than this count of messages in one action, or in
