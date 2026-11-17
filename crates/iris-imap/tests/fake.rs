@@ -186,11 +186,18 @@ fn fetch_raw_streams() {
     let mut s = open(&fake, PASS).unwrap();
     s.examine("INBOX").unwrap();
     let mut out = Vec::new();
-    assert_eq!(s.fetch_raw(uid, &mut out).unwrap(), Some(out.len() as u64));
+    let (n, e) = s.fetch_raw(uid, &mut out).unwrap().unwrap();
+    assert_eq!((n, e.uid), (out.len() as u64, uid));
     assert_eq!(out, mail.raw(1));
+    let heads = String::from_utf8(e.headers.unwrap()).unwrap();
+    assert!(
+        heads.to_ascii_lowercase().starts_with("message-id:"),
+        "{heads}"
+    );
+    assert_eq!(e.internal_date.as_deref(), Some(iris_fakeimap::DATE));
     let mut out = Vec::new();
     assert_eq!(
-        s.fetch_raw(big_uid, &mut out).unwrap(),
+        s.fetch_raw(big_uid, &mut out).unwrap().map(|r| r.0),
         Some(big.len() as u64)
     );
     assert!(out == big);

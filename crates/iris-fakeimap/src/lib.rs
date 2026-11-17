@@ -179,6 +179,11 @@ impl FakeImap {
         }
     }
 
+    /// Delete a folder and its messages.
+    pub fn drop_folder(&self, name: &str) {
+        self.lock().folders.remove(name);
+    }
+
     /// Give the folder a new `UIDVALIDITY`. Each message gets a new UID,
     /// from 1.
     pub fn renew(&self, folder: &str) {
@@ -216,6 +221,27 @@ impl State {
         self.modseq += 1;
         self.modseq
     }
+}
+
+/// The `Message-ID`, `In-Reply-To` and `References` lines of the header
+/// of `raw`, with their folded lines, and an empty line at the end.
+fn thread_fields(raw: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(raw);
+    let head = text.split("\r\n\r\n").next().unwrap_or("");
+    let mut out = String::new();
+    let mut keep = false;
+    for line in head.split("\r\n") {
+        if !line.starts_with([' ', '\t']) {
+            let name = line.split(':').next().unwrap_or("").to_ascii_lowercase();
+            keep = ["message-id", "in-reply-to", "references"].contains(&name.as_str());
+        }
+        if keep {
+            out.push_str(line);
+            out.push_str("\r\n");
+        }
+    }
+    out.push_str("\r\n");
+    out.into_bytes()
 }
 
 /// Split a command line into words. A quoted string is one word, without
@@ -441,9 +467,17 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                             .chain(f.gone.iter().map(|g| g.1))
                             .max()
                             .unwrap_or(1);
-                        reply.push_str(
-                            "* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)\r\n",
-                        );
+                        reply.push_str(&format!(
+                            "* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft{})\r\n",
+                            f.messages
+                                .values()
+                                .flat_map(|m| m.flags.iter())
+                                .filter(|x| !x.starts_with('\\'))
+                                .collect::<std::collections::BTreeSet<_>>()
+                                .into_iter()
+                                .map(|k| format!(" {k}"))
+                                .collect::<String>()
+                        ));
                         reply.push_str(&format!("* {} EXISTS\r\n", f.messages.len()));
                         reply.push_str(&format!("* OK [UIDVALIDITY {}] ok\r\n", f.uidvalidity));
                         reply.push_str(&format!("* OK [UIDNEXT {}] ok\r\n", f.uidnext));
@@ -453,6 +487,34 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                             reply.push_str("* OK [NOMODSEQ] no mod-sequences\r\n");
                         }
                         "OK [READ-ONLY] done".to_owned()
+                    }
+                }
+            }
+            "UID" if w.get(2).is_some_and(|x| x.eq_ignore_ascii_case("SEARCH")) => {
+                let s = lock();
+                match conn.folder.as_ref().and_then(|n| s.folders.get(n)) {
+                    None => "BAD no folder".to_owned(),
+                    Some(f) => {
+                        let key = w.get(3).map(|x| x.to_ascii_uppercase()).unwrap_or_default();
+                        let arg = w.get(4).cloned().unwrap_or_default();
+                        let has = |m: &Message, flag: &str| {
+                            m.flags.iter().any(|x| x.eq_ignore_ascii_case(flag))
+                        };
+                        let hits: Vec<String> = f
+                            .messages
+                            .iter()
+                            .filter(|(_, m)| match key.as_str() {
+                                "UNSEEN" => !has(m, "\\Seen"),
+                                "FLAGGED" => has(m, "\\Flagged"),
+                                "KEYWORD" => has(m, &arg),
+                                _ => false,
+                            })
+                            .map(|(u, _)| u.to_string())
+                            .collect();
+                        reply.push_str(
+                            &format!("* SEARCH {}\r\n", hits.join(" ")).replace(" \r\n", "\r\n"),
+                        );
+                        "OK done".to_owned()
                     }
                 }
             }
@@ -513,12 +575,19 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                                 if conn.condstore {
                                     parts.push(format!("MODSEQ ({})", m.modseq));
                                 }
-                                if items.contains("BODY.PEEK[]") {
-                                    parts.push(format!("BODY[] {{{}}}\r\n", m.raw.len()));
-                                }
                                 let head = format!("* {} FETCH ({}", seq + 1, parts.join(" "));
                                 bytes.extend_from_slice(head.as_bytes());
+                                if items.contains("HEADER.FIELDS") {
+                                    let h = thread_fields(&m.raw);
+                                    bytes.extend_from_slice(
+                                        format!(" BODY[HEADER.FIELDS (MESSAGE-ID IN-REPLY-TO REFERENCES)] {{{}}}\r\n", h.len()).as_bytes(),
+                                    );
+                                    bytes.extend_from_slice(&h);
+                                }
                                 if items.contains("BODY.PEEK[]") {
+                                    bytes.extend_from_slice(
+                                        format!(" BODY[] {{{}}}\r\n", m.raw.len()).as_bytes(),
+                                    );
                                     bytes.extend_from_slice(&m.raw);
                                 }
                                 bytes.extend_from_slice(b")\r\n");
