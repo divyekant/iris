@@ -525,9 +525,10 @@ async fn get_policy(State(s): State<Arc<Store>>) -> Result<Response> {
     Ok(Json(policy::policy(&s)?).into_response())
 }
 
-/// The body of a route that takes none: no bytes, or the JSON object `{}`
-/// (the web client sends `{}`). Any other body gives 400 before the route
-/// changes anything.
+/// The body of a route that takes none: zero bytes, or a JSON text that is
+/// the empty object `{}` (the web client sends `{}`). `serde_json` parses
+/// the JSON. Any other body, a body of only spaces too, gives 400 before the
+/// route changes anything.
 struct NoBody;
 
 impl<S: Send + Sync> axum::extract::FromRequest<S> for NoBody {
@@ -537,7 +538,7 @@ impl<S: Send + Sync> axum::extract::FromRequest<S> for NoBody {
         let b = Bytes::from_request(req, state)
             .await
             .map_err(|e| Error::Query(e.body_text()))?;
-        let none = b.iter().all(u8::is_ascii_whitespace)
+        let none = b.is_empty()
             || serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&b)
                 .is_ok_and(|m| m.is_empty());
         if none {

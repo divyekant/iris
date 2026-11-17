@@ -280,7 +280,18 @@ async fn a_confirm_answers_the_state_of_the_matter_first() {
 #[tokio::test]
 async fn a_route_with_no_body_refuses_a_body() {
     let (dir, s) = setup("nobody");
-    let bad = ["{", "x", "[]", "null", "1", "\"\"", "{\"a\": 1}", "{} {}"];
+    let bad = [
+        "{",
+        "x",
+        "[]",
+        "null",
+        "1",
+        "\"\"",
+        "{\"a\": 1}",
+        "{} {}",
+        " ",
+        "\n",
+    ];
     for body in bad {
         let (code, _) = call(&s, Method::POST, "/api/matters/g-1/decline", body).await;
         assert_eq!(code, StatusCode::BAD_REQUEST, "{body}");
@@ -302,6 +313,61 @@ async fn a_route_with_no_body_refuses_a_body() {
     assert_eq!(code, StatusCode::OK);
     let (code, _) = call(&s, Method::POST, "/api/matters/g-2/decline", "").await;
     assert_eq!(code, StatusCode::OK);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The rule of a body on a route that takes none, written apart from the
+/// code: zero bytes, or `{` and `}` with only JSON whitespace around and
+/// between them.
+fn no_body(b: &[u8]) -> bool {
+    let ws = |c: &u8| matches!(c, b' ' | b'\t' | b'\n' | b'\r');
+    let inner: Vec<u8> = b.iter().copied().filter(|c| !ws(c)).collect();
+    b.is_empty() || inner == b"{}"
+}
+
+/// Generated bodies: each gets 400 unless it follows the rule, and a
+/// refused body leaves a valid proposal undone.
+#[tokio::test]
+async fn generated_bodies_follow_the_no_body_rule() {
+    let (dir, s) = setup("nobody-gen");
+    let pieces: [&[u8]; 14] = [
+        b"{", b"}", b" ", b"\n", b"\t", b"\r", b"\x0c", b"\"", b"a", b":", b"1", b"[", b"]",
+        b"null",
+    ];
+    let mut seed: u64 = 17;
+    let mut next = |n: u64| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) % n
+    };
+    let (mut passed, mut refused) = (0, 0);
+    for _ in 0..600 {
+        let len = next(7);
+        let body: Vec<u8> = (0..len)
+            .flat_map(|_| pieces[next(pieces.len() as u64) as usize].to_vec())
+            .collect();
+        let text = String::from_utf8(body.clone()).unwrap();
+        let want = no_body(&body);
+        // g-9 does not exist: a body that passes reaches the route and gets 404.
+        let (code, _) = call(&s, Method::POST, "/api/matters/g-9/decline", &text).await;
+        let expect = if want {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        assert_eq!(code, expect, "{text:?}");
+        if !want {
+            let (code, _) = call(&s, Method::POST, "/api/matters/g-1/decline", &text).await;
+            assert_eq!(code, StatusCode::BAD_REQUEST, "{text:?}");
+            refused += 1;
+        } else {
+            passed += 1;
+        }
+    }
+    assert!(passed > 20 && refused > 20, "{passed} {refused}");
+    let (_, list) = call(&s, Method::GET, "/api/matters", "").await;
+    assert_eq!(ids(&list["proposed"]), vec!["g-2", "g-1"]);
     let _ = std::fs::remove_dir_all(dir);
 }
 
