@@ -479,14 +479,10 @@ fn boot_id() -> io::Result<String> {
 /// the ID was its own during the reads (an ID goes to another process only
 /// after the reap), so the values are its own.
 pub(crate) fn identify(pid: i32) -> io::Result<Option<(OwnedFd, Info)>> {
+    let gone = |e: io::Error| if exited(&e) { Ok(None) } else { Err(e) };
     let fd = match pidfd_open(pid) {
         Ok(fd) => fd,
-        Err(e) if e.raw_os_error() == Some(libc::ESRCH) => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    let gone = |e: io::Error| match e.kind() {
-        io::ErrorKind::NotFound => Ok(None),
-        _ => Err(e),
+        Err(e) => return gone(e),
     };
     let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
         Ok(s) => s,
@@ -590,6 +586,12 @@ fn readable(fd: RawFd, wait: Duration) -> io::Result<bool> {
             return Err(e);
         }
     }
+}
+
+/// True if `e` says that the process ended: no `/proc/<pid>` entry
+/// (`NotFound`), or a process that ended during the call (`ESRCH`).
+fn exited(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ESRCH)
 }
 
 fn pidfd_open(pid: i32) -> io::Result<OwnedFd> {
