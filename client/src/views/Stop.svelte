@@ -5,11 +5,7 @@
   no mail, and Resume undoes it.
 -->
 <script lang="ts">
-  import { post, own } from "../api";
   import { when } from "../format";
-
-  type State = { stopped: boolean; since: string | null };
-  type Stopped = State & { sessions: number; live: number; busy: boolean };
 
   let { place }: { place: "button" | "band" } = $props();
 
@@ -22,19 +18,46 @@
 </script>
 
 <script module lang="ts">
-  import { get as read } from "../api";
+  import { get as read, post, own } from "../api";
 
+  type Answer = { stopped: boolean; since: string | null; live?: number; busy?: boolean };
   type Shared = { stopped: boolean; since: string | null; live: number; busy: boolean; busyAction: "" | "stop" | "resume"; note: string; error: string };
   /** One state for the button and the band, read from GET /api/stop. */
   export const stopState: Shared = $state({ stopped: false, since: null, live: 0, busy: false, busyAction: "", note: "", error: "" });
 
+  // The number of the newest request. Only the answer of the newest request
+  // changes the state, so an older answer never replaces a newer one.
+  let newest = 0;
+
+  function show(n: number, a: Answer) {
+    if (n !== newest) return;
+    Object.assign(stopState, { stopped: a.stopped, since: a.since, live: a.stopped ? (a.live ?? 0) : 0, busy: a.stopped && !!a.busy });
+  }
+
   /** Read the state again: at start, at each new view and when the tab comes back. */
   export async function refresh() {
+    // A Stop or a Resume in progress gives the newer state.
+    if (stopState.busyAction) return;
+    const n = ++newest;
     try {
-      const s = await read<{ stopped: boolean; since: string | null; live: number; busy: boolean }>("stop");
-      Object.assign(stopState, { stopped: s.stopped, since: s.since, live: s.stopped ? s.live : 0, busy: s.stopped && s.busy });
+      show(n, await read<Answer>("stop"));
     } catch {
       // The access state shows a failure of the engine above each view.
+    }
+  }
+
+  /** Stop all agent work, or resume it. */
+  export async function act(kind: "stop" | "resume") {
+    const n = ++newest;
+    Object.assign(stopState, { busyAction: kind, error: "", note: "" });
+    try {
+      const a = await post<Answer>(kind, {});
+      show(n, kind === "resume" ? { ...a, stopped: false, since: null } : a);
+      if (kind === "resume" && n === newest) stopState.note = "Iris runs again. Each held send waits a full minute before it leaves.";
+    } catch (e) {
+      stopState.error = own(e) || (kind === "stop" ? "Iris did not stop. Try again, or run iris stop at the terminal." : "Iris did not resume. Try again.");
+    } finally {
+      stopState.busyAction = "";
     }
   }
 </script>
@@ -45,20 +68,8 @@
     type="button"
     disabled={shared.busyAction === "stop"}
     aria-label={shared.busyAction === "stop" ? "Stopping all agent work" : "Stop all agent work"}
-    title="Stop all agent work. Nothing applies and no mail leaves until you resume."
-    onclick={async () => {
-      shared.busyAction = "stop";
-      shared.error = "";
-      shared.note = "";
-      try {
-        const s = await post<Stopped>("stop", {});
-        Object.assign(shared, { stopped: true, since: s.since, live: s.live, busy: s.busy });
-      } catch (e) {
-        shared.error = own(e) || "Iris did not stop. Try again, or run iris stop at the terminal.";
-      } finally {
-        shared.busyAction = "";
-      }
-    }}
+    title="Stop all agent work. Resume starts it again."
+    onclick={() => act("stop")}
   >
     <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" /></svg>
   </button>
@@ -83,39 +94,18 @@
         {/if}
       </div>
       <div class="actions">
-        {#if shared.live > 0}
+        {#if shared.live > 0 || shared.busy}
           <button
             class="again"
             type="button"
             disabled={shared.busyAction !== ""}
-            onclick={async () => {
-              shared.busyAction = "stop";
-              try {
-                const s = await post<Stopped>("stop", {});
-                Object.assign(shared, { since: s.since, live: s.live, busy: s.busy });
-              } catch (e) {
-                shared.error = own(e) || "Iris did not answer. Try again.";
-              } finally {
-                shared.busyAction = "";
-              }
-            }}>Stop again</button>
+            onclick={() => act("stop")}>Stop again</button>
         {/if}
         <button
           class="resume"
           type="button"
           disabled={shared.busyAction !== ""}
-          onclick={async () => {
-            shared.busyAction = "resume";
-            shared.error = "";
-            try {
-              await post<State>("resume", {});
-              Object.assign(shared, { stopped: false, since: null, live: 0, busy: false, note: "Iris runs again. Each held send waits a full minute before it leaves." });
-            } catch (e) {
-              shared.error = own(e) || "Iris did not resume. Try again.";
-            } finally {
-              shared.busyAction = "";
-            }
-          }}>{shared.busyAction === "resume" ? "Resuming" : "Resume"}</button>
+          onclick={() => act("resume")}>{shared.busyAction === "resume" ? "Resuming" : "Resume"}</button>
       </div>
     </section>
   {:else if shared.note}
