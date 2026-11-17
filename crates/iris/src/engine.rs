@@ -530,10 +530,13 @@ fn attention_loop(store: Arc<Store>) {
         // Notices by rule (R5-08): the row commits first, so a crash before
         // the system notice still leaves the notice in the web client. The
         // system notice runs on its own thread: this loop never waits for it.
+        // The Mac app shows some notices: the engine chooses before the queue.
         match iris_policy::notice::refresh(&store, now_ms()) {
-            Ok(new) => new.into_iter().for_each(|n| {
-                let _ = system.try_send(n);
-            }),
+            Ok(new) => crate::notify::for_system(new, now_ms())
+                .into_iter()
+                .for_each(|n| {
+                    let _ = system.try_send(n);
+                }),
             Err(e) => say!("iris: notices: {e}"),
         }
         // The measure "time to the first brief" ends at the first brief with content.

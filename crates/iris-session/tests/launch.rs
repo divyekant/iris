@@ -327,6 +327,24 @@ fn a_stop_during_the_launch_cancels_it_with_no_retry() {
     assert!(iris_job::register(&f.store, f.job, "script", NOW + 3).is_ok());
 }
 
+/// A launch that ends with a bad `notes.md` reaps in its cleanup: the
+/// reason of the end says that the store kept its last copy (R5-06).
+fn a_launch_that_ends_reports_bad_notes() {
+    let f = fixture("badnotes", "data", "sleep 30");
+    fs::create_dir_all(workspace(&f).join("notes.md")).unwrap();
+    let (_, end, why) = ended(launch(&f, &real_helper, &|step, s| {
+        if step == Step::Bound {
+            iris_job::end(&f.store, s, EndReason::Stop, None, NOW + 1).unwrap();
+        }
+    }));
+    assert_eq!(end, EndReason::Stop, "{why}");
+    assert!(
+        why.contains("the store keeps its last copy of the notes: notes.md is not a regular file"),
+        "{why}"
+    );
+    assert!(sessions(&f)[0].reaped_ms.is_some());
+}
+
 /// A stop mark that comes while the gate waits for the helper either
 /// comes before the gate reads it (no start) or after the commit of the
 /// start. It never comes between the read and the commit.
@@ -565,6 +583,10 @@ fn main() {
         (
             "a_script_runs_in_the_workspace_through_the_generic_adapter",
             a_script_runs_in_the_workspace_through_the_generic_adapter,
+        ),
+        (
+            "a_launch_that_ends_reports_bad_notes",
+            a_launch_that_ends_reports_bad_notes,
         ),
         (
             "a_revoke_during_the_build_starts_the_launch_again_once",

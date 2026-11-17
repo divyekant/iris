@@ -389,11 +389,11 @@ export type JobChangeset = { id: string; at: string; state: string; why: string 
 /** One job (GET /api/jobs/{id}): the job with its events, its changesets, and the newest mail of each wait thread. */
 export type JobDetail = { job: Job & { events: JobEvent[] }; changesets: JobChangeset[]; threads: Record<string, Target> };
 
-export const SIGN_IN = "Open the sign-in address that iris serve printed.";
-export const SIGN_IN_FAILED = "This sign-in address was used or is not valid. Start iris serve again, then open the new address.";
+export const SIGN_IN = "Sign in: run iris open in Terminal.";
+export const SIGN_IN_FAILED = "This sign-in address was used, ended or is not valid. Run iris open in Terminal for a new address.";
 export const NOT_COPIED = "Iris has not copied the original of this mail yet. Try again after the copy of the mailbox.";
 export const SIGN_IN_RETRY = "The engine of Iris could not sign you in. Load this page again to try again.";
-export const UNREACHABLE = "Iris cannot reach its engine. Start it with iris serve, then open the sign-in address that it prints.";
+export const UNREACHABLE = "Iris cannot reach its engine. Start it with iris service install, then run iris open.";
 
 /** The text that a view shows for an error: "" when App.svelte shows it already as the access state. */
 export function own(error: unknown): string {

@@ -11,9 +11,11 @@ publish.workspace = true
 iris-job = { version = "0.0.0", path = "../iris-job" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
 iris-talk = { version = "0.0.0", path = "../iris-talk" }
+libc = "=0.2.191"
 # Same version as iris-store, so the program has one copy of SQLite.
 rusqlite = "=0.43.0"
 serde_json = "1"
 
 [dev-dependencies]
+libc = "=0.2.191"
 iris-spec = { version = "0.0.0", path = "../iris-spec" }

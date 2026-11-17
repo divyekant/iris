@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Iris</title>
+<style>
+  /* The tokens of client/src/tokens.css (dark default, light when the system asks). */
+  :root {
+    color-scheme: dark;
+    --color-primary: #a394ff; --color-on-primary: #0e0f14;
+    --color-background: #0e0f14; --color-background-surface: #1c1e27;
+    --color-text: #e7e8ee; --color-text-muted: #a4a7b5;
+    --font-family: Inter, system-ui, sans-serif;
+    --font-family-mono: 'SF Mono', 'Cascadia Mono', 'Menlo', monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      color-scheme: light;
+      --color-primary: #5b47d6; --color-on-primary: #ffffff;
+      --color-background: #f7f7fa; --color-background-surface: #eeeef4;
+      --color-text: #1b1c24; --color-text-muted: #555867;
+    }
+  }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: grid; place-items: center; background: var(--color-background); color: var(--color-text);
+    font-family: var(--font-family); font-size: 1rem; line-height: 1.5; -webkit-user-select: none; cursor: default;
+  }
+  main { max-width: 360px; padding: 48px 24px; text-align: center; }
+  svg { width: 48px; height: 48px; color: var(--color-primary); }
+  h1 { font-size: 1.5625rem; font-weight: 600; margin: 24px 0 8px; }
+  p { color: var(--color-text-muted); margin: 0 0 32px; }
+  a.button {
+    display: inline-block; min-height: 44px; padding: 12px 24px; box-sizing: border-box; border-radius: 9999px;
+    background: var(--color-primary); color: var(--color-on-primary); font-weight: 600; text-decoration: none;
+    transition: opacity 120ms ease;
+  }
+  a.button:active { opacity: 0.8; }
+  a.button:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 4px; }
+  code {
+    display: block; padding: 12px; border-radius: 8px; background: var(--color-background-surface);
+    font-family: var(--font-family-mono); font-size: 0.8rem; text-align: left; -webkit-user-select: text; word-break: break-all;
+  }
+</style>
+</head>
+<body>
+<main>
+  <svg viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="24" r="19" fill="none" stroke="currentColor" stroke-width="4"/><circle cx="24" cy="24" r="8" fill="currentColor"/></svg>
+  <h1>Install Iris first</h1>
+  <p>This app opens Iris on your Mac. Install Iris with this command in Terminal, then open the app again.</p>
+  <code>curl -fsSLO https://raw.githubusercontent.com/divyekant/iris/main/scripts/install.sh &amp;&amp; sh install.sh</code>
+</main>
+</body>
+</html>

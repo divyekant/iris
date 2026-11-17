@@ -1,0 +1,9 @@
+{
+  "identifier": "engine",
+  "description": "The web client of the local engine may start a drag of the window, and nothing else. Mail text is data: no other command of Tauri is open to the page.",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*/*", "http://[\\:\\:1]:*/*"]
+  },
+  "permissions": ["core:window:allow-start-dragging"]
+}

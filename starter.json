@@ -63,6 +63,27 @@
         "npm --version"
       ]
     },
+    "mac": {
+      "paths": [
+        "apps/mac/**"
+      ],
+      "setup": "cd apps/mac && cargo fetch --locked",
+      "setup_inputs": [
+        "apps/mac/Cargo.toml",
+        "apps/mac/Cargo.lock",
+        "rust-toolchain.toml"
+      ],
+      "check": "cd apps/mac && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings",
+      "test": "cd apps/mac && cargo test --locked",
+      "tools": [
+        "rustc --version",
+        "cargo --version"
+      ],
+      "env": {
+        "RUSTUP_HOME": "~/.rustup",
+        "CARGO_HOME": "./.local-ci/cargo"
+      }
+    },
     "spec-kit": {
       "paths": [
         "docs/spec/schema/**",

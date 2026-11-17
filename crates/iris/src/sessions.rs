@@ -675,7 +675,12 @@ impl Sessions {
             .map_err(|e| format!("no isolation: {e}"))?;
         let s = iris_job::session(&self.store, session).map_err(|e| e.to_string())?;
         match reap_check(&self.store, &**iso, &s, helper_reaped, now) {
-            Ok(()) => Ok(()),
+            Ok(notes) => {
+                if let Some(p) = notes.problem() {
+                    say!("iris: {}: {p}", iris_job::format_job_id(s.job_id));
+                }
+                Ok(())
+            }
             Err(why) => {
                 // One line in the engine log for a session still live 10
                 // minutes after its end.
