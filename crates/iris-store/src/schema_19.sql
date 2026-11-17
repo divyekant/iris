@@ -70,13 +70,17 @@ CREATE TABLE job_scope_message (
   PRIMARY KEY (scope_id, message_id)
 ) WITHOUT ROWID;
 
+-- A list grows only while its ref is active and its job is not done, and
+-- only with a message of the thread or a source of the item of the ref.
 CREATE TRIGGER job_scope_message_insert BEFORE INSERT ON job_scope_message
-WHEN NOT EXISTS (SELECT 1 FROM job_scope s JOIN message m ON m.thread_id = s.thread_id
-                 WHERE s.id = new.scope_id AND m.id = new.message_id)
- AND NOT EXISTS (SELECT 1 FROM job_scope s JOIN item_source i ON i.item_id = s.item_id
-                 WHERE s.id = new.scope_id AND i.message_id = new.message_id)
+WHEN NOT EXISTS (SELECT 1 FROM job_scope s JOIN job j ON j.id = s.job_id
+                 WHERE s.id = new.scope_id AND s.revoked_at IS NULL AND j.state <> 'done'
+                   AND (EXISTS (SELECT 1 FROM message m
+                                WHERE m.id = new.message_id AND m.thread_id = s.thread_id)
+                        OR EXISTS (SELECT 1 FROM item_source i
+                                   WHERE i.item_id = s.item_id AND i.message_id = new.message_id)))
 BEGIN
-  SELECT RAISE(ABORT, 'job: a scope message is a message of the thread or a source of the item of the ref');
+  SELECT RAISE(ABORT, 'job: a scope message is a message of the thread or a source of the item of an active ref of an open job');
 END;
 
 CREATE TRIGGER job_scope_message_update BEFORE UPDATE ON job_scope_message
