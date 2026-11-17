@@ -165,7 +165,8 @@ The granted messages of a job:
   (an update, more evidence) is not in the list, so the item leaves the
   workspace (not all its sources are granted) until the person adds it
   again. An add of an item ref that is in the scope already adds its
-  sources now to its list. No other message of its thread is granted. Gmail can put two subjects
+  sources now to its list. No other message of its thread is granted,
+  and no other item with the same sources (see the items below). Gmail can put two subjects
   in one thread (spec 1), so an item does not grant its whole thread.
 
 The build reads the scope in one read transaction, and writes only data of
@@ -176,7 +177,16 @@ the granted messages:
    thread has other messages, because that count comes from mail outside
    the grant.
 2. The items: each item of the forms `commitment` and `record`, that is not
-   `gone`, whose source messages are all granted. An item with one source
+   `gone`, and that one of these grants:
+   - An active item ref of the item, when each source of the item is a
+     clean message of the list of that ref.
+   - The thread refs, when each source of the item is a clean message of
+     the list of a thread ref. A thread ref grants the items that
+     understanding makes only from its messages, also a later item.
+
+   A message that only an item ref grants grants no other item. Spec 1
+   lets one message feed more than one item, and the person gave only the
+   one item. An item with one source
    that is not granted (for example a source that became hostile mail after
    a correction pinned the item) is not in the workspace, because the
    agent must not learn that a hidden message is a source of a job item.
@@ -555,8 +565,9 @@ None.
 2. Hostile mail, a draft, a signal and the source message of a signal of
    the scope threads are in no file that the build writes, and no item with
    such a source is in the folder. Red if their text is in such a file.
-3. An item of the scope grants only its source messages. Red if another
-   message of its thread is in the folder.
+3. An item of the scope grants only its source messages and itself. Red
+   if another message of its thread, or another item of the same source,
+   is in the folder.
 4. A second build after a new message in a scope thread does not have the
    new message. After the person adds the thread again, the next build has
    it. Both builds keep `drafts/` and `notes.md`. Red if the new message is
