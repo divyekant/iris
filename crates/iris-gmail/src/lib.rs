@@ -32,7 +32,7 @@ use serde::{Deserialize, Deserializer};
 pub use iris_provider::{
     Change, Draft, DraftRaw, Error, Header, History, HistoryMessage, HistoryPage, Label,
     MessagePage, MessageRef, Metadata, Minimal, Profile, Provider, RawMessage, Result, Sent,
-    BATCH_LIMIT, MAX_GETS,
+    BATCH_LIMIT, DRAFT_LIMIT, MAX_GETS,
 };
 pub use raw::encode_url;
 
@@ -206,11 +206,6 @@ struct DraftPage {
     drafts: Vec<Draft>,
     next_page_token: Option<String>,
 }
-
-/// The most bytes of a draft message that [`Gmail::draft_raw`] keeps. A
-/// draft of Iris has a body of at most 256 KiB, so a larger message is
-/// not in the form that Iris writes.
-pub const DRAFT_LIMIT: usize = 4 * 1024 * 1024;
 
 /// A sink that keeps at most [`DRAFT_LIMIT`] bytes, and then only counts.
 #[derive(Default)]

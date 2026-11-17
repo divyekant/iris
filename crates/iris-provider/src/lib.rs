@@ -12,6 +12,10 @@ use serde::Deserialize;
 /// The most message IDs in one [`Provider::modify`] call. A provider with a
 /// lower limit splits the call (spec, section 6).
 pub const BATCH_LIMIT: usize = 1000;
+/// The most bytes of a draft that [`Provider::draft_raw`] keeps. A draft
+/// of Iris has a body of at most 256 KiB, so a larger message is not in the
+/// form that Iris writes.
+pub const DRAFT_LIMIT: usize = 4 * 1024 * 1024;
 /// The most reads of messages that the sync runs at the same time.
 pub const MAX_GETS: usize = 8;
 
@@ -252,7 +256,8 @@ pub trait Provider: Send + Sync {
     fn create_label(&self, token: &str, name: &str) -> Result<Label>;
     /// Each draft whose `Message-ID` header is `message_id`.
     fn drafts_with_id(&self, token: &str, message_id: &str) -> Result<Vec<Draft>>;
-    /// [`Error::NotFound`]: the draft is gone, deleted or sent.
+    /// [`Error::NotFound`]: the draft is gone, deleted or sent. Streams the
+    /// draft: `raw` is `None` above [`DRAFT_LIMIT`].
     fn draft_raw(&self, token: &str, id: &str) -> Result<DraftRaw>;
     /// A draft of `raw`, in the thread `thread` for a reply.
     fn create_draft(&self, token: &str, raw: &[u8], thread: Option<&str>) -> Result<Draft>;
