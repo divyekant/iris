@@ -185,7 +185,7 @@ requirements.txt`.
 
 | Command | Does |
 |---|---|
-| `python3 run.py self-test` | Validates each `.json`, `.jsonl` and `.toml` file of `examples/` (each must pass) and of `examples/invalid/` (each must fail). Prints one line for each file that does not give the expected result. |
+| `python3 run.py self-test` | Checks the schemas only (no "newer than the kit" rule, so a sample of a newer minor version can prove the `model` pattern). Validates each `.json`, `.jsonl` and `.toml` file of `examples/` (each must pass) and of `examples/invalid/` (each must fail). Prints one line for each file that does not give the expected result. |
 | `python3 run.py check <folder>` | Validates each `.json`, `.jsonl` and `.toml` file at the top level of the folder against the schemas of the kit. A document with a minor version higher than the kit fails ("newer than the kit"), because the kit cannot check it. A `.jsonl` file holds one document on each line. Prints one line for each file or line that fails. |
 | `python3 run.py --version` | Prints the kit version from `docs/spec/VERSION`. |
 
@@ -297,7 +297,7 @@ as a producer meets the stricter rule.
 |---|---|---|
 | 1 | This spec | none |
 | 2 | The freeze: section 1, section 6 items 1 to 4 (without `conformance.rs`), the spec text changes, and specification 4 with sections 2, 3 and 4 of this design (the version rules that the freeze needs) | PR 1 approved by dk |
-| 3 | The kit: section 5 of specification 4, `docs/spec/VERSION`, `conformance/`, `conformance.rs`, the `spec-kit` area | PR 2 |
+| 3 | The kit: the kit section of specification 4 (section 6 there, after the reader failure list), `docs/spec/VERSION`, `conformance/` with `test_run.py` (the Python tests of the runner and the producer), `conformance.rs`, the `spec-kit` area | PR 2 |
 
 PR 2 changes the schemas and the code together, because the tests of each
 writer validate its output against the schemas.
@@ -345,7 +345,7 @@ with a schema name of the kit.
 
 | Input | Result | Test |
 |---|---|---|
-| A file that is not valid UTF-8, JSON or TOML | That file fails with the parse error. Exit 1. | `conformance.rs` runs `check` on a bad file |
+| A file that is not valid UTF-8, JSON or TOML | That file fails with the parse error. Exit 1. | `test_run.py` runs `check` on each bad file |
 | A JSON object with a key two times | That file fails ("duplicate key"). | same |
 | `NaN`, `Infinity` or `-Infinity` | That file fails. | same |
 | A name with no schema of the kit | That file fails ("no schema"). It is not skipped. | same |
@@ -354,12 +354,14 @@ with a schema name of the kit.
 | A folder with no `.json`, `.jsonl` or `.toml` file | Exit 1 ("no documents"). | same |
 | A subfolder | Not read. | same |
 | A TOML date or time | Its RFC 3339 text. The self-test proves that the Python and the Rust converters give the same verdict on each sample. | `self-test` on `policy-*.toml` |
-| A schema with a `$ref` to an `$id` that is not in the kit | Exit 2 at load. No network call. | `conformance.rs` |
+| A schema with a `$ref` to an `$id` that is not in the kit | Exit 2 at load. No network call. | `test_run.py` |
 | A date that has the right shape and is not on the calendar | That file fails (section 5.4). | the two format fixtures |
 | No `rfc3339-validator` in the Python environment | Exit 2 ("the date-time check is not active"). | `self-test` |
 | A validator with a different `email` check | Same verdict on each fixture (section 5.4). | `conformance.rs` |
-| `produce.py` with an output path that exists | Exit 1. Nothing is written. | `conformance.rs` |
+| `produce.py` with an output path that exists | Exit 1. Nothing is written. | `test_run.py` |
 | A very large file | The runner reads it into memory. The runner is a test tool, not a part of the product. | none (issue) |
+| A file or a folder that cannot be read (`OSError`) | Exit 2 with the error. It is not a verdict on a document. | `test_run.py` |
+| A `.jsonl` file with a bad line among good lines | Each bad line fails with its own reason. The other lines are still checked. | `test_run.py`, a property test |
 | Any other error | Exit 2 with the error. | none |
 
 Crash recovery: the store migration of section 6 runs in the migration
