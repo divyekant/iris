@@ -35,6 +35,7 @@
       // A sign-in address opened in this tab: the access state shows a failure.
       if (/^#code=/.test(location.hash)) return void followSignIn().then(() => (hash = location.hash));
       hash = location.hash;
+      if (moreOpen) document.getElementById("more")?.hidePopover();
       scrollTo(0, 0);
     };
     addEventListener("hashchange", update);
@@ -45,13 +46,25 @@
   // svelte-ignore state_referenced_locally
   if (typeof location !== "undefined" && !["home", "setup", "brief"].includes(route.view)) get("status").catch(() => {});
 
+  // Line icons of the phone tabs, drawn on a 24px grid.
+  const ICONS: Record<string, string> = {
+    "#/brief": "M5 6h14M5 12h14M5 18h9",
+    "#/matters": "M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z",
+    "#/ask": "M4.5 6.5a2 2 0 0 1 2-2h11a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H10l-4 3.5v-3.5h0.5a2 2 0 0 1-2-2z",
+    "#/review": "M4 12.5l4.5 4.5L20 6.5",
+    more: "M5.5 12h.01M12 12h.01M18.5 12h.01",
+  };
   const JOB_STATES = ["needs_you", "working", "waiting", "done"] as const;
   const TITLES = { commitment: "Commitments", conversation: "Conversations", feed: "Feed", signal: "Signals" };
+  // On a phone, the first views of NAV are tabs at the bottom. "More" opens the rest.
+  const TABS = NAV.slice(0, 4);
+  const MORE = NAV.slice(4);
+  let moreOpen = $state(false);
   const back = () => (history.length > 1 ? history.back() : (location.hash = "#/brief"));
 </script>
 
 <header>
-  <a class="name" href="#/brief">
+  <a class="name touch" href="#/brief">
     <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
       <circle cx="12" cy="12" r="9" fill="none" stroke="var(--color-primary)" stroke-width="2" />
       <circle cx="12" cy="12" r="3.5" fill="var(--color-primary)" />
@@ -64,6 +77,27 @@
     {/each}
   </nav>
 </header>
+
+<nav class="tabs" aria-label="Main views">
+  {#each TABS as [link, label] (link)}
+    <a href={link} aria-current={active === link ? "page" : undefined}>
+      <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d={ICONS[link]} /></svg>
+      {label}
+    </a>
+  {/each}
+  <button type="button" popovertarget="more" class:current={MORE.some(([link]) => link === active)}>
+    <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d={ICONS.more} /></svg>
+    More
+  </button>
+</nav>
+<div id="more" popover ontoggle={(e) => (moreOpen = (e as ToggleEvent).newState === "open")}>
+  <ul>
+    {#each MORE as [link, label] (link)}
+      <!-- A view closes More, also the view that is open, where the hash does not change. -->
+      <li><a href={link} aria-current={active === link ? "page" : undefined} onclick={() => document.getElementById("more")?.hidePopover()}>{label}</a></li>
+    {/each}
+  </ul>
+</div>
 
 {#snippet failed(error: unknown)}
   {#if own(error)}<p role="alert">{own(error)}</p>{/if}
@@ -152,8 +186,8 @@
 </main>
 
 <footer class="site">
-  <a href="#/rules">Rules</a>
-  <a href="#/measures">Measures</a>
+  <a class="touch" href="#/rules">Rules</a>
+  <a class="touch" href="#/measures">Measures</a>
   <span>Iris runs on your machine.</span>
 </footer>
 
@@ -198,7 +232,7 @@
     display: flex;
     align-items: center;
     gap: var(--space-8);
-    padding: var(--space-3) var(--space-6);
+    padding: max(var(--space-3), env(safe-area-inset-top)) max(var(--space-6), env(safe-area-inset-right)) var(--space-3) max(var(--space-6), env(safe-area-inset-left));
     border-bottom: 1px solid var(--color-border-subtle);
     background: var(--color-background);
   }
@@ -235,7 +269,7 @@
   main {
     max-width: 720px;
     margin: 0 auto;
-    padding: var(--space-6) var(--space-6) var(--space-16);
+    padding: var(--space-6) max(var(--space-6), env(safe-area-inset-right)) var(--space-16) max(var(--space-6), env(safe-area-inset-left));
   }
   .back {
     font: inherit;
@@ -255,9 +289,10 @@
   .site {
     max-width: 720px;
     margin: 0 auto;
-    padding: var(--space-6);
+    padding: var(--space-6) max(var(--space-6), env(safe-area-inset-right)) max(var(--space-6), env(safe-area-inset-bottom)) max(var(--space-6), env(safe-area-inset-left));
     display: flex;
     flex-wrap: wrap;
+    align-items: center;
     gap: var(--space-2) var(--space-6);
     color: var(--color-text-faint);
     font-size: var(--font-size--1);
@@ -265,18 +300,132 @@
   .site a {
     color: var(--color-text-muted);
   }
+  /* A touch screen: each control is at least the size of a finger tip. */
+  @media (max-width: 600px), (pointer: coarse) {
+    main :global(:is(button, summary, select, input:not([type="checkbox"], [type="radio"]))) {
+      min-width: var(--size-touch);
+      min-height: var(--size-touch);
+    }
+    /* A link that stands alone, not in a sentence, has the class "touch". */
+    :global(.touch) {
+      display: inline-flex;
+      align-items: center;
+      min-width: var(--size-touch);
+      min-height: var(--size-touch);
+    }
+    header nav a {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-width: var(--size-touch);
+      min-height: var(--size-touch);
+      padding: 0;
+    }
+  }
+  /* The height of the phone tabs. An element that sticks to the bottom of the screen sits above it. */
+  :global(:root) {
+    --tabs-height: 0px;
+  }
+  .tabs,
+  #more {
+    display: none;
+  }
+  /* A phone: the tabs stay at the bottom, in reach of the thumb. */
   @media (max-width: 600px) {
+    :global(:root) {
+      --tabs-height: calc(var(--space-16) + env(safe-area-inset-bottom));
+    }
     header {
-      gap: var(--space-4);
-      padding: var(--space-3) var(--space-4);
+      position: static;
+      padding: max(var(--space-3), env(safe-area-inset-top)) max(var(--space-4), env(safe-area-inset-right)) var(--space-3) max(var(--space-4), env(safe-area-inset-left));
+    }
+    header nav {
+      display: none;
     }
     main {
-      padding: var(--space-4) var(--space-4) var(--space-12);
+      padding: var(--space-4) max(var(--space-4), env(safe-area-inset-right)) var(--space-12) max(var(--space-4), env(safe-area-inset-left));
     }
-    nav {
-      gap: var(--space-4);
-      /* Fade the right edge, so that the row shows that it scrolls. */
-      mask-image: linear-gradient(to right, black 85%, transparent);
+    .site {
+      padding: var(--space-6) max(var(--space-4), env(safe-area-inset-right)) calc(var(--space-8) + var(--tabs-height)) max(var(--space-4), env(safe-area-inset-left));
+    }
+    .tabs {
+      position: fixed;
+      inset: auto 0 0;
+      z-index: 2;
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 0;
+      overflow: visible;
+      mask-image: none;
+      padding: 0 max(var(--space-2), env(safe-area-inset-right)) env(safe-area-inset-bottom) max(var(--space-2), env(safe-area-inset-left));
+      /* A shadow line, not a border, so that the bar is exactly --tabs-height high. */
+      box-shadow: 0 -1px 0 var(--color-border-subtle);
+      background: var(--color-background-elevated);
+    }
+    .tabs a,
+    .tabs button {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: var(--space-1);
+      min-height: var(--space-16);
+      padding: 0;
+      border: 0;
+      background: none;
+      font: inherit;
+      font-size: var(--font-size--2);
+      font-weight: 500;
+      color: var(--color-text-muted);
+      cursor: pointer;
+    }
+    .tabs button svg {
+      stroke-width: 3;
+    }
+    .tabs svg {
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.75;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .tabs [aria-current="page"],
+    .tabs .current {
+      color: var(--color-primary);
+    }
+    #more {
+      inset: auto max(var(--space-2), env(safe-area-inset-right)) calc(var(--tabs-height) + var(--space-2)) auto;
+      margin: 0;
+      min-width: calc(var(--space-32) + var(--space-16));
+      /* A short screen: the list scrolls, so each view stays in reach. */
+      max-height: calc(100dvh - var(--tabs-height) - var(--space-4) - max(var(--space-2), env(safe-area-inset-top)));
+      overflow-y: auto;
+      box-sizing: border-box;
+      padding: var(--space-2);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-lg);
+      background: var(--color-background-elevated);
+      color: var(--color-text);
+    }
+    #more:popover-open {
+      display: block;
+    }
+    #more ul {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    #more a {
+      display: flex;
+      align-items: center;
+      min-height: calc(var(--space-12) - var(--space-1));
+      padding: 0 var(--space-3);
+      border-radius: var(--radius-md);
+      text-decoration: none;
+    }
+    #more a[aria-current="page"] {
+      color: var(--color-primary);
+      background: var(--color-background-surface);
     }
   }
   @media (prefers-reduced-motion: reduce) {

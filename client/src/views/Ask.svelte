@@ -69,7 +69,7 @@
               <ul class="sources" aria-label="Sources">
                 {#each sources as s (s.n)}
                   <li>
-                    <a class="chip" href={href.mail(s.message.id)}><span class="n" aria-hidden="true">{s.n}</span><span class="label">{label(s)}</span></a>
+                    <a class="chip touch" href={href.mail(s.message.id)}><span class="n" aria-hidden="true">{s.n}</span><span class="label">{label(s)}</span></a>
                   </li>
                 {/each}
               </ul>
@@ -260,11 +260,11 @@
   }
   /* The question box is sticky, so a scroll to the end keeps room for it. */
   .end {
-    scroll-margin-bottom: var(--space-32);
+    scroll-margin-bottom: calc(var(--space-32) + var(--tabs-height));
   }
   form {
     position: sticky;
-    bottom: 0;
+    bottom: var(--tabs-height);
     padding: var(--space-6) 0 var(--space-4);
     background: linear-gradient(to bottom, transparent, var(--color-background) 30%);
   }

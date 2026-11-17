@@ -127,7 +127,7 @@
     {#each shown as item (item.id)}
       <li class:cleared={editing && cleared.includes(item.id)}>
         {#if editing}
-          <input class="tick" type="checkbox" checked={!cleared.includes(item.id)} onchange={() => toggle(item.id)} aria-label={`Keep ${item.title}`} />
+          <label class="hit"><input class="tick" type="checkbox" checked={!cleared.includes(item.id)} onchange={() => toggle(item.id)} aria-label={`Keep ${item.title}`} /></label>
         {:else}
           <span class="form">{@render icon(item.form)}</span>
         {/if}
@@ -138,7 +138,7 @@
       </li>
     {/each}
   </ul>
-  {#if shown.length < members.length}<a class="more" href={href.matter(matter.id)}>And {members.length - shown.length} more</a>{/if}
+  {#if shown.length < members.length}<a class="more touch" href={href.matter(matter.id)}>And {members.length - shown.length} more</a>{/if}
   <div class="acts" role="status">
     {#if phase.at === "idle"}
       <button class="keep" type="button" onclick={edit}>Keep together</button>
@@ -240,6 +240,12 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  @media (max-width: 600px), (pointer: coarse) {
+    .what a {
+      display: block;
+      line-height: var(--size-touch);
+    }
+  }
   .what a:hover {
     text-decoration: underline;
   }
@@ -296,6 +302,21 @@
     margin: 4px;
     accent-color: var(--color-primary);
     cursor: pointer;
+  }
+  .hit {
+    display: contents;
+  }
+  /* A touch screen: the label is a 44px target around the 20px box, with the same flow size (20px and 4px margins). */
+  @media (max-width: 600px), (pointer: coarse) {
+    .hit {
+      flex: none;
+      display: grid;
+      place-items: center;
+      width: var(--size-touch);
+      height: var(--size-touch);
+      margin: calc((var(--space-6) + var(--space-1) - var(--size-touch)) / 2);
+      cursor: pointer;
+    }
   }
   li.cleared .what {
     opacity: 0.5;

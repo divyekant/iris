@@ -533,6 +533,26 @@
     font-size: var(--font-size--1);
     text-decoration: none;
   }
+  @media (max-width: 600px), (pointer: coarse) {
+    /* The box is 44px to touch. A transparent border keeps the 24px mark, and a negative margin keeps the layout. */
+    input[type="checkbox"] {
+      width: var(--size-touch);
+      height: var(--size-touch);
+      margin: calc((var(--space-6) - var(--size-touch)) / 2);
+      border: calc((var(--size-touch) - var(--space-6)) / 2) solid transparent;
+      background-clip: padding-box;
+      box-shadow: inset 0 0 0 1px var(--color-border);
+    }
+    input[type="checkbox"]:checked {
+      border-color: transparent;
+      background-clip: padding-box;
+      box-shadow: inset 0 0 0 1px var(--color-primary);
+    }
+    .messages a {
+      align-items: center;
+      min-height: var(--size-touch);
+    }
+  }
   .messages a:hover {
     background: var(--color-background-surface);
   }
