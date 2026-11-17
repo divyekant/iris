@@ -110,7 +110,7 @@ fn each_stored_item_gets_model_1_0_and_the_attention_queue_stays() {
             .map(|d| serde_json::from_str(&d.unwrap()).unwrap())
             .collect();
         let v1 = |mut d: Value| {
-            d["model"] = json!(iris_store::MODEL);
+            d["model"] = json!("iris/1.0"); // migration 31 writes 1.0
             d
         };
         assert_eq!(

@@ -15,6 +15,16 @@ edit an old entry. If a decision changes, add a new entry that names the old one
 - Links: <card, spec, PR, before/after page>
 ```
 
+## D9 (2026-11-17): Open model 1.1 adds the account of each item
+
+- Decided by: dk
+- Why: With more than one account, each item must name its mailbox. IMAP and
+  Outlook (R6-03, R6-04) make the account a basic fact of each item. Agents
+  through MCP and the export see it too.
+- Options not chosen: Keep model 1.0 and put an item-to-account map next to
+  the items in the brief answer only.
+- Links: card R6-02, `docs/specs/2026-11-17-accounts.md`, PR #627
+
 ## D8 (2026-11-17): Agent sessions on macOS use Seatbelt and an exact end check
 
 - Decided by: dk (decision card of the R4-05m thread)

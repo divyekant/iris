@@ -1154,11 +1154,13 @@ fn empty_summary() -> MessageSummary {
     }
 }
 
-/// The column `matter` of an item row: the row ID of the confirmed matter
-/// that keeps the item, or NULL. The query must name the table `item`.
+/// The columns `matter` and `account` of an item row: the row ID of the
+/// confirmed matter that keeps the item, or NULL, and the row ID of the
+/// account of the item. The query must name the table `item`.
 pub(crate) const MATTER: &str = "(SELECT mi.matter_id FROM matter_item mi
       JOIN matter m ON m.id = mi.matter_id
-     WHERE mi.item_id = item.id AND mi.kept = 1 AND m.status = 'confirmed') AS matter";
+     WHERE mi.item_id = item.id AND mi.kept = 1 AND m.status = 'confirmed') AS matter,
+     item.account_id AS account";
 
 /// The column `ready_draft` of an item row: true when the thread of the
 /// mail that made the item has a reply draft that the person can use now
@@ -1176,8 +1178,8 @@ fn ready_draft() -> String {
 }
 
 /// The document of an item row (id, form, status, doc, and the column
-/// [`MATTER`] by name). The row is the true copy of the ID, the status and
-/// the matter, so they replace the values of the document. A stored `ready`
+/// [`MATTER`] by name). The row is the true copy of the ID, the status,
+/// the matter and the account, so they replace the values of the document. A stored `ready`
 /// is removed: only [`read_section`] sets it, from the store. Each output of
 /// an item (the API, the read verbs, the export) uses this function.
 pub(crate) fn doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
@@ -1204,6 +1206,10 @@ pub(crate) fn doc_at(r: &rusqlite::Row, at: usize) -> rusqlite::Result<Value> {
             "matter".into(),
             matter.map_or(Value::Null, |m| format_id(Kind::Matter, m).into()),
         );
+        let account: i64 = r.get("account")?;
+        map.insert("account".into(), format_id(Kind::Account, account).into());
+        // `account` is a field of model 1.1: the document claims that version.
+        map.insert("model".into(), iris_store::MODEL.into());
     }
     Ok(doc)
 }
