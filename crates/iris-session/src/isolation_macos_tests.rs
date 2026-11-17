@@ -169,13 +169,14 @@ impl Sys for Fake {
         Ok(())
     }
 
-    fn bootout(&self, label: &str) -> io::Result<()> {
-        self.w().bootouts.push(label.to_string());
-        Ok(())
-    }
-
     fn run(&self, argv: &[OsString], _wait: Duration) -> io::Result<i32> {
         let program = argv[0].to_string_lossy().into_owned();
+        if argv.get(1).is_some_and(|a| a == "bootout") {
+            self.w()
+                .bootouts
+                .push(argv[2].to_string_lossy().into_owned());
+            return Ok(3);
+        }
         self.w()
             .exits
             .get(&program)
@@ -279,7 +280,7 @@ fn stop_freezes_a_fork_loop_then_kills_only_the_session() {
     s.stop(1).unwrap();
     assert!(s.ended(1).unwrap());
     assert_eq!(f.live(50), 0);
-    assert_eq!(f.w().bootouts, [s.name(1)]);
+    assert_eq!(f.w().bootouts, [format!("gui/501/{}", s.name(1))]);
     // No signal reached a process outside the coalition.
     let w = f.w();
     assert!(
@@ -646,4 +647,26 @@ fn no_random_text_is_a_journal_but_the_valid_form() {
             assert_eq!(parse_journal(&back).as_ref(), Some(p));
         }
     }
+}
+
+#[test]
+fn a_journal_of_an_earlier_boot_is_removed_and_resumes_nothing() {
+    let (_d, s, f) = setup("reboot");
+    s.write_record(1, &rec(50)).unwrap();
+    // After a restart the ID of the entry belongs to a stopped process
+    // of the person.
+    let pid = f.add(60, false);
+    f.w().procs.get_mut(&pid).unwrap().stopped = true;
+    s.journal(1, pid).unwrap();
+    f.w().boot = "200.000000".into();
+    s.stop(1).unwrap();
+    let w = f.w();
+    assert!(
+        w.signals.is_empty() && w.bootouts.is_empty(),
+        "{:?}",
+        w.signals
+    );
+    assert!(w.procs[&pid].stopped);
+    drop(w);
+    assert!(!s.file(1, "stops").exists());
 }

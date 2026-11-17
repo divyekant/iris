@@ -26,6 +26,9 @@ use super::{Command, Isolation};
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// The longest run of the freeze and kill loop of one `stop`.
 const STOP_WAIT: Duration = Duration::from_secs(5);
+/// The exit codes of `launchctl bootout` for a job that is not loaded:
+/// 3 ("No such process") and 113 ("Could not find service").
+const NOT_LOADED: [i32; 2] = [3, 113];
 /// The longest run of `check`.
 const CHECK_WAIT: Duration = Duration::from_secs(5);
 /// The pause between two scans of the freeze, so that a `SIGSTOP` takes
@@ -57,9 +60,6 @@ pub trait Sys: Send + Sync {
     fn counts(&self, cid: u64) -> io::Result<Option<(u64, u64)>>;
     /// Sends `sig` to `pid`.
     fn signal(&self, pid: i32, sig: i32) -> io::Result<()>;
-    /// Removes the launchd job `label`. A job that is not loaded is not an
-    /// error.
-    fn bootout(&self, label: &str) -> io::Result<()>;
     /// Runs `argv` with no input and no output, and gives its exit code.
     /// It kills the program and gives an error after `wait`.
     fn run(&self, argv: &[OsString], wait: Duration) -> io::Result<i32>;
@@ -339,6 +339,26 @@ impl Seatbelt {
         }
     }
 
+    /// `launchctl bootout` of the job of the session, until `end`. A job
+    /// that is not loaded is not an error.
+    fn bootout(&self, session: i64, end: Instant) -> io::Result<()> {
+        let argv: Vec<OsString> = vec![
+            "/bin/launchctl".into(),
+            "bootout".into(),
+            format!("gui/{}/{}", self.sys.uid(), self.name(session)).into(),
+        ];
+        match self
+            .sys
+            .run(&argv, end.saturating_duration_since(Instant::now()))?
+        {
+            0 => Ok(()),
+            c if NOT_LOADED.contains(&c) => Ok(()),
+            c => Err(io::Error::other(format!(
+                "launchctl bootout: exit code {c}"
+            ))),
+        }
+    }
+
     fn stop_with(&self, session: i64, wait: Duration) -> io::Result<()> {
         self.sessions_dir()?;
         let _lock = FileLock::take(&self.file(session, "stop.lock"))?;
@@ -353,14 +373,21 @@ impl Seatbelt {
         if cid.is_some() && me == cid {
             return Ok(());
         }
-        self.recover(session, cid)?;
-        let Some(rec) = rec else {
-            return Ok(());
-        };
-        // 1. The job.
-        self.sys.bootout(&self.name(session))?;
-        // 2. Freeze, then kill, until the coalition holds no process.
         let end = Instant::now() + wait;
+        // A journal of an earlier boot names processes that are gone: its
+        // IDs now belong to other processes, so it is removed, not
+        // resolved. Without a record no freeze ran, so no journal is valid.
+        let boot = self.sys.boot_time()?;
+        let Some(rec) = rec.filter(|r| r.boot == boot) else {
+            match fs::remove_file(self.file(session, "stops")) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => return Ok(()),
+            }
+        };
+        self.recover(session, cid)?;
+        // 1. The job, inside the time limit of the stop.
+        self.bootout(session, end)?;
+        // 2. Freeze, then kill, until the coalition holds no process.
         let mut ended = self.coalition_ended(&rec)?;
         while !ended && Instant::now() < end {
             if let Some(frozen) = self.freeze(session, rec.coalition)? {

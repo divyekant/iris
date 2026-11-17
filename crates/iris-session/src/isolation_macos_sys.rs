@@ -14,10 +14,6 @@ use super::macos::{Proc, Sys};
 const PIDT_BSDINFOWITHUNIQID: c_int = 18;
 /// `PROC_PIDCOALITIONINFO` of `<sys/proc_info.h>`.
 const PIDCOALITIONINFO: c_int = 20;
-/// The exit codes of `launchctl bootout` for a job that is not loaded:
-/// 3 ("No such process") and 113 ("Could not find service").
-const NOT_LOADED: [i32; 2] = [3, 113];
-
 /// `struct proc_uniqidentifierinfo`.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -180,22 +176,6 @@ impl Sys for MacSys {
                 return Err(io::ErrorKind::TimedOut.into());
             }
             std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    fn bootout(&self, label: &str) -> io::Result<()> {
-        let uid = self.uid();
-        let status = std::process::Command::new("/bin/launchctl")
-            .arg("bootout")
-            .arg(format!("gui/{uid}/{label}"))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
-        match status.code() {
-            Some(0) => Ok(()),
-            Some(c) if NOT_LOADED.contains(&c) => Ok(()),
-            _ => Err(io::Error::other(format!("launchctl bootout: {status}"))),
         }
     }
 }
