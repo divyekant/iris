@@ -1,6 +1,6 @@
 // Answers of the local API, made from the examples of docs/spec/schema/examples.
 // The dev server (`pnpm dev --mode fixtures`) and the tests use them. They are not in the build.
-import type { Action, AskAnswer, DraftView, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, Job, JobDetail, Matter, MatterList, MatterView, Message, Policy, Rule, Status, Summary, Target } from "../src/api";
+import type { Outbox, Action, AskAnswer, DraftView, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, Job, JobDetail, Matter, MatterList, MatterView, Message, Policy, Rule, Status, Summary, Target } from "../src/api";
 import youOwe from "../../docs/spec/schema/examples/commitment-you-owe.json" with { type: "json" };
 import owedToYou from "../../docs/spec/schema/examples/commitment-owed-to-you.json" with { type: "json" };
 import payment from "../../docs/spec/schema/examples/commitment-payment.json" with { type: "json" };
@@ -509,6 +509,7 @@ export function answer(path: string): unknown {
   if (name === "records") return { receipt: 1, booking: 1 };
   if (name === "brief" && id === "hidden") return { count: hidden.length, items: hidden, next: null };
   if (name === "handled") return handled;
+  if (name === "outbox") return outbox();
   if (name === "gate") return page(id === "declined" ? "declined" : "waiting");
   if (name === "brief" && id) {
     const section = briefNow()[id as "you_owe"];
@@ -605,4 +606,19 @@ export function policyPost(path: string, body: { job?: string; verbs?: string[];
   } else return [404, { error: "Not found." }];
   policy.version = (policy.version ?? 0) + 1;
   return [200, policy];
+}
+
+/** GET /api/outbox: sending is on, and three sends wait. The times move with the clock. */
+export function outbox(): Outbox {
+  const at = (s: number) => new Date(Date.now() + s * 1000).toISOString();
+  return {
+    sending: { on: true, since: at(-3600) },
+    count: 3,
+    next: null,
+    sends: [
+      { draft: "d-14", state: "held", approved: at(-18), leaves: at(42), flags: [], readable: true, to: ["dana@acme.example"], cc: [], subject: "Re: Signing on Friday" },
+      { draft: "d-15", state: "held", approved: at(-5), leaves: at(55), flags: ["new_recipient", "money"], readable: true, to: ["dana@acme.example"], cc: ["legal@new.example"], subject: "Renewal: $48,000 for 12 months" },
+      { draft: "d-16", state: "approved", approved: at(0), leaves: at(60), flags: ["attachment"], readable: true, to: ["priya@example.com"], cc: [], subject: "The quote" },
+    ],
+  };
 }

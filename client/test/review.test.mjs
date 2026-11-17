@@ -46,6 +46,7 @@ test("the review shows the newest revision and the open actions of an older one,
 test("the review route opens the review", () => {
   assert.deepEqual(parse("#/review"), { view: "review" });
   assert.deepEqual(parse("#/handled"), { view: "handled" });
+  assert.deepEqual(parse("#/outbox"), { view: "outbox" });
 });
 
 test("the review says who asks and why, and each change with its count and flags", async () => {

@@ -256,6 +256,35 @@ export type HandledAction = {
 /** `count` is the count of all such actions, not only of this page. */
 export type HandledPage = { count: number; actions: HandledAction[]; next: string | null };
 
+/** One send in the outbox (GET /api/outbox): approved or held, with the words of its draft. */
+export type OutboxSend = {
+  draft: string;
+  state: "approved" | "held";
+  approved: string;
+  /** The time that the send can leave. Null while sending is off. */
+  leaves: string | null;
+  flags: string[];
+  readable: boolean;
+  to?: string[];
+  cc?: string[];
+  subject?: string;
+};
+/** GET /api/outbox: the send switch and each send that waits. Only `iris sending on|off` changes the switch. */
+export type Outbox = { sending: { on: boolean; since: string | null }; count: number; sends: OutboxSend[]; next: string | null };
+
+/** The whole outbox: each page of GET /api/outbox, so no send that can leave is hidden. */
+export async function loadOutbox(): Promise<Outbox> {
+  const first = await get<Outbox>("outbox");
+  const sends = [...first.sends];
+  let next = first.next;
+  while (next) {
+    const page = await get<Outbox>(`outbox?after=${encodeURIComponent(next)}`);
+    sends.push(...page.sends);
+    next = page.next;
+  }
+  return { ...first, sends, next: null };
+}
+
 /** A message summary, or only the ID of a message that is not in the mirror any more. */
 export type Target = (Summary & { gone?: false }) | { id: string; gone: true };
 

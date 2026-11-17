@@ -1,6 +1,6 @@
 <script lang="ts">
   import { access } from "./access.svelte.ts";
-  import { followSignIn, get, loadBrief, own, type Changeset, type GatePage, type HandledPage, type JobDetail, type JobPage, type MatterList, type MatterView, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
+  import { followSignIn, get, loadBrief, loadOutbox, own, type Changeset, type GatePage, type HandledPage, type JobDetail, type JobPage, type MatterList, type MatterView, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
   import { home } from "./format";
   import { NAV, parse, SECTIONS, type Route } from "./route";
   import Setup from "./views/Setup.svelte";
@@ -15,6 +15,7 @@
   import Rules from "./views/Rules.svelte";
   import Review from "./views/Review.svelte";
   import Handled from "./views/Handled.svelte";
+  import Outbox from "./views/Outbox.svelte";
   import Gate from "./views/Gate.svelte";
   import Jobs from "./views/Jobs.svelte";
   import Job from "./views/Job.svelte";
@@ -101,6 +102,10 @@
     {:else if route.view === "handled"}
       {#await Promise.all([get<HandledPage>("handled?limit=50"), get<Page & { count: number }>("brief/hidden?limit=50")]) then [changes, hidden]}
         <Handled {changes} {hidden} />
+      {:catch error}{@render failed(error)}{/await}
+    {:else if route.view === "outbox"}
+      {#await loadOutbox() then first}
+        <Outbox {first} />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "gate"}
       {@const path = route.declined ? "gate/declined?limit=50" : "gate?limit=50"}

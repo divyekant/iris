@@ -4,7 +4,7 @@ export type Form = "commitment" | "conversation" | "feed" | "signal";
 export type SectionKey = "you_owe" | "owed_to_you" | "conversations" | "strangers" | "signals" | "feed";
 
 export type Route =
-  | { view: "home" | "setup" | "brief" | "ask" | "measures" | "rules" | "review" | "handled" | "jobs" | "matters" }
+  | { view: "home" | "setup" | "brief" | "ask" | "measures" | "rules" | "review" | "handled" | "jobs" | "matters" | "outbox" }
   | { view: "records"; type: string }
   | { view: "list"; form: Form }
   | { view: "section"; key: SectionKey }
@@ -56,7 +56,7 @@ export function parse(hash: string): Route {
     if (parts.length === 1 || (parts.length === 2 && parts[1] === "")) return { view: list };
     return parts.length === 2 && ID.test(id) ? { view: one, id } : { view: "home" };
   }
-  if (name === "setup" || name === "brief" || name === "ask" || name === "measures" || name === "rules" || name === "review" || name === "handled") return { view: name };
+  if (name === "setup" || name === "brief" || name === "ask" || name === "measures" || name === "rules" || name === "review" || name === "handled" || name === "outbox") return { view: name };
   return { view: "home" };
 }
 
@@ -74,6 +74,7 @@ export const NAV = [
   ["#/matters", "Matters"],
   ["#/ask", "Ask"],
   ["#/review", "Review"],
+  ["#/outbox", "Outbox"],
   ["#/jobs", "Jobs"],
   ["#/commitments", "Commitments"],
   ["#/conversations", "Conversations"],
