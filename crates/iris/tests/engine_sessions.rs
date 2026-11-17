@@ -318,10 +318,15 @@ fn the_engine_start_builds_each_done_job_again() {
     let old = logs.join("se-90.log");
     let new = logs.join("se-91.log");
     fs::write(&new, "").unwrap();
-    let file = fs::File::create(&old).unwrap();
-    file.set_modified(std::time::SystemTime::now() - Duration::from_secs(31 * 86_400))
-        .unwrap();
-    drop(file);
+    // Other old files in `sessions/` stay: only the session logs go.
+    let old_egress = logs.join("se-92.egress.log");
+    let other = logs.join("recovery-state");
+    let near = logs.join("se-93.log.bak");
+    for path in [&old, &old_egress, &other, &near] {
+        let file = fs::File::create(path).unwrap();
+        file.set_modified(std::time::SystemTime::now() - Duration::from_secs(31 * 86_400))
+            .unwrap();
+    }
     iris_job::finish(
         &f.store,
         f.job,
@@ -335,6 +340,15 @@ fn the_engine_start_builds_each_done_job_again() {
     gone(&marker);
     assert!(workspace(&f).join("JOB.md").exists());
     assert!(!old.exists(), "a log older than 30 days goes");
+    assert!(
+        !old_egress.exists(),
+        "an egress log older than 30 days goes"
+    );
+    assert!(
+        other.exists(),
+        "an old file that is not a session log stays"
+    );
+    assert!(near.exists(), "an old file that is not a session log stays");
     assert!(new.exists());
 }
 
