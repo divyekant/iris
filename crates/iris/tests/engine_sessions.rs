@@ -562,6 +562,29 @@ fn a_stop_before_the_register_stops_the_launch() {
     assert!(row.reaped_ms.is_some(), "{row:?}");
 }
 
+fn a_job_done_during_the_launch_gets_its_workspace_again() {
+    let f = fixture("donelaunch", "sleep 30");
+    let s = sessions(&f);
+    let marker = workspace(&f).join(".iris/marker");
+    // After the first build: a file of that build, then the job moves to
+    // done. The launch ends and reaps its session in its cleanup.
+    let (store, job, m, once) = (
+        f.store.clone(),
+        f.job,
+        marker.clone(),
+        AtomicBool::new(false),
+    );
+    s.set_after(Arc::new(move |step, _| {
+        if step == Step::Built && !once.swap(true, Ordering::SeqCst) {
+            fs::write(&m, "x").unwrap();
+            iris_job::finish(&store, job, By::Person, iris_job::End::Cancel, None, now()).unwrap();
+        }
+    }));
+    let id = s.run(f.job, "script").unwrap();
+    until(&s, &f, id, |r| r.reaped_ms.is_some());
+    gone(&marker);
+}
+
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "session-hold") {
@@ -644,6 +667,10 @@ fn main() {
         (
             "a_stop_before_the_register_stops_the_launch",
             a_stop_before_the_register_stops_the_launch,
+        ),
+        (
+            "a_job_done_during_the_launch_gets_its_workspace_again",
+            a_job_done_during_the_launch_gets_its_workspace_again,
         ),
     ];
     let mut failed = 0;
