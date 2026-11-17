@@ -38,8 +38,8 @@ pub use state::{apply_state, apply_states};
 pub use step::{step, step_clock, Step};
 pub use stop::{resume, state as stop_state, stop, stop_wait, Stopped, STOPPED_CALL};
 
-use iris_gmail::{Gmail, BATCH_LIMIT};
 use iris_policy::Mode;
+use iris_provider::{Provider, BATCH_LIMIT};
 use iris_store::Store;
 use rusqlite::{params, Connection, OptionalExtension};
 use unicase::UniCase;
@@ -53,7 +53,7 @@ pub enum Error {
     /// A Gmail call failed before the first write call, and the action
     /// stays as it was: HTTP 401 with no new token, or a read that failed.
     /// An apply again does each check again.
-    Gmail(iris_gmail::Error),
+    Provider(iris_provider::Error),
     /// The action is not `approved`: it does not exist, or another write
     /// changed its state before its first provider call (for example a
     /// withdraw), or another apply of the action has the mark.
@@ -80,7 +80,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Store(e) => write!(f, "store: {e}"),
-            Error::Gmail(e) => write!(f, "Gmail: {e}"),
+            Error::Provider(e) => write!(f, "mail provider: {e}"),
             Error::NotApproved(a) => write!(f, "action {a} is not approved"),
             Error::Busy => write!(f, "another apply runs now"),
             Error::OtherMailbox => write!(f, "the token is of another mailbox"),
@@ -270,9 +270,9 @@ impl Change {
 /// (`unicase`, as `iris-changeset`). `Err` gives the reason of a denial:
 /// the name is the name or the ID of a system label.
 fn find_label<'l>(
-    labels: &'l [iris_gmail::Label],
+    labels: &'l [iris_provider::Label],
     name: &str,
-) -> std::result::Result<Option<&'l iris_gmail::Label>, String> {
+) -> std::result::Result<Option<&'l iris_provider::Label>, String> {
     let name = UniCase::new(name);
     let mut found = None;
     for l in labels {
@@ -291,8 +291,8 @@ fn find_label<'l>(
 }
 
 /// True if `token` is a token of the mailbox `address` (Gmail profile).
-fn owns(gmail: &Gmail, token: &str, address: &str) -> iris_gmail::Result<bool> {
-    Ok(gmail
+fn owns(mail: &dyn Provider, token: &str, address: &str) -> iris_provider::Result<bool> {
+    Ok(mail
         .profile(token)?
         .email_address
         .eq_ignore_ascii_case(address))
@@ -347,7 +347,7 @@ pub struct Token<'a> {
 /// recovery.
 pub fn apply(
     store: &Store,
-    gmail: &Gmail,
+    mail: &dyn Provider,
     token: &mut Token<'_>,
     account: i64,
     action: i64,
@@ -403,7 +403,7 @@ pub fn apply(
         if writing_account != Some(account) {
             return Err(Error::OtherMailbox);
         }
-        let mut run = Run::new(store, gmail, token, account)?;
+        let mut run = Run::new(store, mail, token, account)?;
         run.mailbox()?;
         return run.recover(ledger);
     }
@@ -411,7 +411,7 @@ pub fn apply(
     // action, also when this action waits or is refused (section 7.3).
     let mut run = None;
     if writing_rows(store, account)? {
-        let mut r = Run::new(store, gmail, token, account)?;
+        let mut r = Run::new(store, mail, token, account)?;
         r.mailbox()?;
         r.recover_account()?;
         run = Some(r);
@@ -426,7 +426,7 @@ pub fn apply(
     let mut run = match run {
         Some(r) => r,
         None => {
-            let mut r = Run::new(store, gmail, token, account)?;
+            let mut r = Run::new(store, mail, token, account)?;
             r.mailbox()?;
             r
         }
@@ -452,7 +452,7 @@ pub fn apply(
     if let Some(id) = undo_label {
         // A label that the person deleted at Gmail stays deleted: the undo
         // is denied, with no write call.
-        let labels = run.call(|g, t| g.labels(t)).map_err(Error::Gmail)?;
+        let labels = run.call(|g, t| g.labels(t)).map_err(Error::Provider)?;
         let Some(l) = labels.iter().find(|l| l.id == id) else {
             let reason = "The label of the entry is not at Gmail now.";
             decide(store, action, "denied", reason)?;
@@ -470,7 +470,7 @@ pub fn apply(
     // undo (section 7.2).
     let label = label.filter(|_| change.add.is_empty() && change.remove.is_empty());
     if let Some(name) = &label {
-        let labels = run.call(|g, t| g.labels(t)).map_err(Error::Gmail)?;
+        let labels = run.call(|g, t| g.labels(t)).map_err(Error::Provider)?;
         let id = match find_label(&labels, name) {
             Err(reason) => {
                 decide(store, action, "denied", &reason)?;
@@ -577,10 +577,10 @@ pub fn apply(
                     }
                     seen.push((id, m.label_ids));
                 }
-                Err(iris_gmail::Error::NotFound) => run.counts.gone.push(id),
+                Err(iris_provider::Error::NotFound) => run.counts.gone.push(id),
                 Err(e) => {
                     mirror(store, account, &seen);
-                    return Err(Error::Gmail(e));
+                    return Err(Error::Provider(e));
                 }
             }
         }
@@ -604,10 +604,15 @@ pub fn apply(
 /// The recovery of section 7.3 for each ledger row in `writing` of the
 /// account. The engine runs it at start. It holds the same locks as
 /// [`apply`].
-pub fn recover(store: &Store, gmail: &Gmail, token: &mut Token<'_>, account: i64) -> Result<()> {
+pub fn recover(
+    store: &Store,
+    mail: &dyn Provider,
+    token: &mut Token<'_>,
+    account: i64,
+) -> Result<()> {
     let _lock = lock(store)?;
     let _sync = sync_lock(store, account)?;
-    let mut run = Run::new(store, gmail, token, account)?;
+    let mut run = Run::new(store, mail, token, account)?;
     run.mailbox()?;
     run.recover_account()
 }
@@ -624,7 +629,7 @@ fn sync_lock(store: &Store, account: i64) -> Result<iris_sync::SyncLock> {
 /// One apply in progress.
 struct Run<'a, 'b> {
     store: &'a Store,
-    gmail: &'a Gmail,
+    mail: &'a dyn Provider,
     token: &'a mut Token<'b>,
     renewed: bool,
     /// The address of the account: each token must be of this mailbox.
@@ -644,7 +649,7 @@ enum Found {
 impl<'a, 'b> Run<'a, 'b> {
     fn new(
         store: &'a Store,
-        gmail: &'a Gmail,
+        mail: &'a dyn Provider,
         token: &'a mut Token<'b>,
         account: i64,
     ) -> Result<Run<'a, 'b>> {
@@ -657,7 +662,7 @@ impl<'a, 'b> Run<'a, 'b> {
         })?;
         Ok(Run {
             store,
-            gmail,
+            mail,
             token,
             renewed: false,
             address,
@@ -673,7 +678,7 @@ impl<'a, 'b> Run<'a, 'b> {
         match self.call(|g, t| owns(g, t, &address)) {
             Ok(true) => Ok(()),
             Ok(false) => Err(Error::OtherMailbox),
-            Err(e) => Err(Error::Gmail(e)),
+            Err(e) => Err(Error::Provider(e)),
         }
     }
 
@@ -681,25 +686,25 @@ impl<'a, 'b> Run<'a, 'b> {
     /// new token one time for the apply, and call one time again.
     fn call<T>(
         &mut self,
-        f: impl Fn(&Gmail, &str) -> iris_gmail::Result<T>,
-    ) -> iris_gmail::Result<T> {
-        let mut r = f(self.gmail, &self.token.token);
-        if matches!(r, Err(iris_gmail::Error::Unauthorized)) && !self.renewed {
+        f: impl Fn(&dyn Provider, &str) -> iris_provider::Result<T>,
+    ) -> iris_provider::Result<T> {
+        let mut r = f(self.mail, &self.token.token);
+        if matches!(r, Err(iris_provider::Error::Unauthorized)) && !self.renewed {
             self.renewed = true;
             r = match (self.token.renew)() {
                 // A token of another mailbox is no token for this one.
-                Some(t) => match owns(self.gmail, &t, &self.address) {
+                Some(t) => match owns(self.mail, &t, &self.address) {
                     Ok(true) => {
                         self.token.token = t;
-                        f(self.gmail, &self.token.token)
+                        f(self.mail, &self.token.token)
                     }
-                    Ok(false) => Err(iris_gmail::Error::Unauthorized),
+                    Ok(false) => Err(iris_provider::Error::Unauthorized),
                     Err(e) => Err(e),
                 },
-                None => Err(iris_gmail::Error::Unauthorized),
+                None => Err(iris_provider::Error::Unauthorized),
             };
         }
-        if matches!(r, Err(iris_gmail::Error::Unauthorized)) {
+        if matches!(r, Err(iris_provider::Error::Unauthorized)) {
             self.token.refused = true;
         }
         r
@@ -831,7 +836,7 @@ impl<'a, 'b> Run<'a, 'b> {
                 let ids: Vec<&str> = live.iter().map(|(_, p)| p.as_str()).collect();
                 let add: Vec<&str> = change.add.iter().map(String::as_str).collect();
                 let remove: Vec<&str> = change.remove.iter().map(String::as_str).collect();
-                self.call(|g, t| g.batch_modify(t, &ids, &add, &remove))
+                self.call(|g, t| g.modify(t, &ids, &add, &remove))
                     .map(|()| Vec::new())
             };
             match result {
@@ -873,9 +878,7 @@ impl<'a, 'b> Run<'a, 'b> {
         })?;
         // The history ID is a note for the person: a failed read leaves it out.
         let history = if call > 0 {
-            self.call(|g, t| g.profile(t))
-                .ok()
-                .map(|p| p.history_id.to_string())
+            self.call(|g, t| g.profile(t)).ok().map(|p| p.cursor)
         } else {
             None
         };
@@ -1027,7 +1030,7 @@ impl<'a, 'b> Run<'a, 'b> {
                         ));
                         seen.push((id, m.label_ids));
                     }
-                    Err(iris_gmail::Error::NotFound) => found.push((id, Found::Listed("gone"))),
+                    Err(iris_provider::Error::NotFound) => found.push((id, Found::Listed("gone"))),
                     Err(e) => {
                         failure = Some(e);
                         break;
@@ -1059,7 +1062,7 @@ impl<'a, 'b> Run<'a, 'b> {
             })?;
             mirror(self.store, self.account, &seen);
             if let Some(e) = failure {
-                return Err(Error::Gmail(e));
+                return Err(Error::Provider(e));
             }
         }
         self.calls(ledger, &change)
@@ -1092,7 +1095,7 @@ impl Run<'_, '_> {
         let label = match self.call(|g, t| g.create_label(t, name)) {
             Ok(l) => l,
             Err(e) => {
-                let labels = self.call(|g, t| g.labels(t)).map_err(Error::Gmail)?;
+                let labels = self.call(|g, t| g.labels(t)).map_err(Error::Provider)?;
                 match find_label(&labels, name) {
                     Ok(Some(l)) => l.clone(),
                     _ => {

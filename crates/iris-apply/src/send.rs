@@ -7,14 +7,14 @@
 //! `Message-ID` that the claim saved, and never calls again.
 
 use iris_compose::{Content, Reply};
-use iris_gmail::Error as GmailError;
+use iris_provider::Error as GmailError;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use super::{
     check, decide, gate, lock, now, sync_lock, writing_rows, Error, Outcome, Result, Run, Token,
 };
-use iris_gmail::Gmail;
+use iris_provider::Provider;
 use iris_store::Store;
 
 /// The hold delay of a send after its approval (spec 2, section 7.5).
@@ -148,7 +148,7 @@ pub(crate) fn draft(run: &mut Run<'_, '_>, action: i64) -> Result<Outcome> {
         let head = match run.call(|g, t| g.metadata(t, &provider, &names)) {
             Ok(h) => h,
             Err(GmailError::NotFound) => return deny("the parent message is gone"),
-            Err(e) => return Err(Error::Gmail(e)),
+            Err(e) => return Err(Error::Provider(e)),
         };
         let header = |name: &str| {
             head.headers
@@ -397,8 +397,9 @@ pub(crate) fn recover(run: &mut Run<'_, '_>, ledger: i64) -> Result<Outcome> {
     })?;
     match ops {
         Ops::Create { message_id, .. } => {
-            let q = format!("rfc822msgid:{message_id}");
-            let found = run.call(|g, t| g.drafts(t, &q)).map_err(Error::Gmail)?;
+            let found = run
+                .call(|g, t| g.drafts_with_id(t, &message_id))
+                .map_err(Error::Provider)?;
             match found.first() {
                 Some(d) => {
                     let (id, thread) = (d.id.clone(), d.message.thread_id.clone());
@@ -419,18 +420,17 @@ pub(crate) fn recover(run: &mut Run<'_, '_>, ledger: i64) -> Result<Outcome> {
             message_id,
             hash,
         } => {
-            let q = format!("rfc822msgid:{message_id}");
-            let page = run
-                .call(|g, t| g.search(t, &q, None))
-                .map_err(Error::Gmail)?;
-            for m in &page.messages {
+            let found = run
+                .call(|g, t| g.messages_with_id(t, &message_id))
+                .map_err(Error::Provider)?;
+            for m in &found {
                 let labels = run.call(|g, t| g.minimal(t, &m.id));
                 match labels {
                     Ok(l) if l.label_ids.iter().any(|l| l == "SENT") => {
                         return complete(run, ledger, draft, &m.id, &hash);
                     }
                     Ok(_) | Err(GmailError::NotFound) => {}
-                    Err(e) => return Err(Error::Gmail(e)),
+                    Err(e) => return Err(Error::Provider(e)),
                 }
             }
             if now() - at >= UNKNOWN_MS {
@@ -510,7 +510,7 @@ struct Draft {
 /// It takes the locks of [`super::apply`].
 pub fn release(
     store: &Store,
-    gmail: &Gmail,
+    mail: &dyn Provider,
     token: &mut Token<'_>,
     account: i64,
     action: i64,
@@ -558,7 +558,7 @@ pub fn release(
     if d.account != account {
         return Err(Error::OtherMailbox);
     }
-    let mut run = Run::new(store, gmail, token, account)?;
+    let mut run = Run::new(store, mail, token, account)?;
     run.mailbox()?;
     if let Some(ledger) = writing {
         return recover(&mut run, ledger);
@@ -603,7 +603,7 @@ pub fn release(
             decide(store, action, "denied", why)?;
             return Ok(Outcome::Denied(why.into()));
         }
-        Err(e) => return Err(Error::Gmail(e)),
+        Err(e) => return Err(Error::Provider(e)),
     };
     // A draft over DRAFT_LIMIT has no raw: it is not in the form of Iris.
     let raw = at_gmail.raw.unwrap_or_default();

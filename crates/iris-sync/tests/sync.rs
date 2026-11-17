@@ -57,7 +57,7 @@ fn a_full_copy_has_the_messages_and_labels_of_the_fake() {
     let dir = data_dir("full");
     let store = Store::open(&dir).unwrap();
     let account = store.add_account("gmail", OWNER).unwrap();
-    let h0 = gmail.profile(TOKEN).unwrap().history_id;
+    let h0 = gmail.profile(TOKEN).unwrap().cursor;
 
     let done = first_sync(&store, &gmail, account, TOKEN).unwrap();
     assert_eq!(done.fetched, 300);
@@ -75,7 +75,7 @@ fn a_full_copy_has_the_messages_and_labels_of_the_fake() {
     // account.history_id (specification 1, section 4.2).
     let (kind, start, step, history) = sync_state(&store);
     assert_eq!(kind.as_deref(), Some("first"));
-    assert_eq!(start, Some(h0.to_string()));
+    assert_eq!(start, Some(h0.clone()));
     assert_eq!(step, Some(STEP_INCREMENTAL));
     assert_eq!(history, None);
     assert_eq!(temp_files(&dir.join("content")), 0);
@@ -162,7 +162,7 @@ fn a_401_stops_the_sync_and_a_new_call_continues() {
     fake.fail_next(&[401]);
     assert!(matches!(
         first_sync(&store, &gmail, account, TOKEN),
-        Err(Error::Gmail(iris_gmail::Error::Unauthorized))
+        Err(Error::Provider(iris_gmail::Error::Unauthorized))
     ));
     assert_eq!(
         first_sync(&store, &gmail, account, TOKEN).unwrap().fetched,
@@ -224,7 +224,7 @@ fn cut_sync(fake: &FakeGmail, mailbox: &Mailbox, name: &str) -> (Store, i64) {
     let total: usize = (0..mailbox.len()).map(|i| mailbox.raw(i).len()).sum();
     let cut = client(cutting_proxy(fake.addr(), total as i64 * 2 / 3));
     match first_sync(&store, &cut, account, TOKEN) {
-        Err(Error::Gmail(iris_gmail::Error::Transport(_))) => {}
+        Err(Error::Provider(iris_gmail::Error::Transport(_))) => {}
         other => panic!("the proxy did not drop the sync: {other:?}"),
     }
     assert_eq!(sync_state(&store).2, Some(STEP_FETCH));

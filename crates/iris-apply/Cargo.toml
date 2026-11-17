@@ -10,7 +10,7 @@ publish.workspace = true
 [dependencies]
 iris-changeset = { version = "0.0.0", path = "../iris-changeset" }
 iris-compose = { version = "0.0.0", path = "../iris-compose" }
-iris-gmail = { version = "0.0.0", path = "../iris-gmail" }
+iris-provider = { version = "0.0.0", path = "../iris-provider" }
 iris-policy = { version = "0.0.0", path = "../iris-policy" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
 iris-job = { version = "0.0.0", path = "../iris-job" }
@@ -24,6 +24,7 @@ serde_json = "1"
 unicase = "=2.8.1"
 
 [dev-dependencies]
+iris-gmail = { version = "0.0.0", path = "../iris-gmail" }
 iris-spec = { version = "0.0.0", path = "../iris-spec" }
 iris-fakegmail = { version = "0.0.0", path = "../iris-fakegmail" }
 iris-synth = { version = "0.0.0", path = "../iris-synth" }
