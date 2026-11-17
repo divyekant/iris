@@ -217,7 +217,7 @@ fn first_categories(i: usize, form: Form) -> Vec<String> {
     if form == Form::Record {
         c.push("Receipts".to_string());
     }
-    if i % 7 == 0 {
+    if i.is_multiple_of(7) {
         c.push("Blue category".to_string());
     }
     c
