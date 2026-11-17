@@ -1,6 +1,6 @@
 <!--
   One source mail, as clean text. Mail text is data: Svelte escapes it, and the
-  client never renders the HTML of a mail. Each open adds 1 to the opens of the day (R5-12).
+  client never renders the HTML of a mail. Each open counts the mail in the opens of the day, once for each day (R5-12).
 -->
 <script lang="ts">
   import { download, own, type Address, type Message } from "../api";
@@ -11,7 +11,7 @@
   let { message }: { message: Message } = $props();
 
   $effect(() => {
-    void count("open");
+    void count({ open: message.id });
   });
 
   let failed = $state("");

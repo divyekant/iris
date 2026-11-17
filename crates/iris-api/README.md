@@ -145,10 +145,11 @@ engine computes them from the store. Nothing leaves the machine.
 |---|---|
 | `GET /api/measures` | `{"days", "first_brief", "mirror", "memory", "approvals", "undo"}`. See below. |
 | `POST /api/measures/use` | Body `{"day": "YYYY-MM-DD"}`. Counts one use of the web client on that day. The answer is `{}`. |
-| `POST /api/measures/open` | The same body. Counts one use and one source mail opened on that day. |
+| `POST /api/measures/open` | Body `{"day": "YYYY-MM-DD", "message": "m-…"}`. Counts one use, and the open of that source mail on that day. A mail counts once for each day, so a repeated request changes nothing. |
 
 - `days`: the newest 28 days of use, the newest first, each
-  `{"day", "opens"}`. A day with no entry is a day with no use.
+  `{"day", "opens"}`. `opens` counts the different source mails that the
+  person opened on that day. A day with no entry is a day with no use.
 - `first_brief`: `{"connect", "brief", "seconds"}`, or `null` before the
   first brief with content. `connect` is the time of the first account (the
   connect step). `brief` is the time of the first brief with content: an
@@ -158,9 +159,10 @@ engine computes them from the store. Nothing leaves the machine.
   writes each time once (migration 12). For a store from before migration
   12, the times are the start of the oldest sync and the oldest item.
 - `mirror`: the newest mirror check (`iris mirror verify`) of each account,
-  each `{"account", "checked", "differences", "complete"}`. `differences` is
-  `null` if the log has no count. `complete` is `false` when an error stopped
-  the check.
+  each `{"account", "checked", "differences", "complete"}`. An account with
+  no check has `checked` and `differences` `null`, and `complete` `false`.
+  `differences` is `null` if the log has no count. `complete` is `false`
+  when an error stopped the check.
 - `memory`: `{"rss_kib", "messages"}`. `rss_kib` is the resident memory of
   the engine from `ps`, or `null`.
 - `approvals`: `{"decided", "approved"}`, the decisions of the person on the
@@ -170,8 +172,9 @@ engine computes them from the store. Nothing leaves the machine.
   not an undo. `undone` counts the actions of them that an undo reversed.
 
 `day` is the local date of the person. It must be the date of the engine in
-UTC, or the day before or after it. Another day, or a body that is not
-valid, is a 400, and nothing is written. Another event is a 404.
+UTC, or the day before or after it. Another day, an open with no
+`message`, a use with a `message`, or a body that is not valid, is a 400,
+and nothing is written. Another event is a 404.
 
 ## State verbs
 

@@ -24,7 +24,7 @@ test("the measures page reads the measures after the use of today and each open 
   // An open of a mail just before: its count is still in flight.
   let opened = null;
   const { count } = await load("/src/measures.ts");
-  const open = count("open");
+  const open = count({ open: "m-1" });
   await until(() => opened !== null);
   const app = await mount("/src/App.svelte");
   try {

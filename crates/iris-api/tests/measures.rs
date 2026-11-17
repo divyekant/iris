@@ -72,7 +72,10 @@ fn now() -> i64 {
 
 fn days(s: &Store) -> Vec<(String, i64)> {
     s.read(|c| {
-        let mut q = c.prepare("SELECT day, opens FROM use_day ORDER BY day")?;
+        let mut q = c.prepare(
+            "SELECT day, (SELECT count(*) FROM use_open o WHERE o.day = d.day)
+             FROM use_day d ORDER BY day",
+        )?;
         let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     })
@@ -93,29 +96,41 @@ async fn an_empty_store_has_empty_measures() {
     assert!(m["memory"]["rss_kib"].as_i64().unwrap() > 1000, "{m}");
 }
 
-/// A use makes the day; each open adds one to it. The answer gives the
-/// newest 28 days, the newest first.
+/// A use makes the day; each open of another mail adds one to it. The
+/// answer gives the newest 28 days, the newest first.
 #[tokio::test]
 async fn use_and_open_count_on_the_day_of_the_person() {
     let s = store("count");
     let day = today();
     let body = json!({ "day": day }).to_string();
+    let open = |m: &str| json!({ "day": day, "message": m }).to_string();
     assert_eq!(
         post(&s, "/api/measures/use", &body).await,
         (StatusCode::OK, json!({}))
     );
     assert_eq!(days(&s), vec![(day.clone(), 0)]);
-    post(&s, "/api/measures/open", &body).await;
-    post(&s, "/api/measures/open", &body).await;
+    assert_eq!(
+        post(&s, "/api/measures/open", &open("m-1")).await,
+        (StatusCode::OK, json!({}))
+    );
+    post(&s, "/api/measures/open", &open("m-2")).await;
     post(&s, "/api/measures/use", &body).await;
     assert_eq!(days(&s), vec![(day.clone(), 2)]);
 
     s.write(|tx| {
         for d in 1..=30 {
-            tx.execute(
-                "INSERT INTO use_day(day, opens) VALUES (date('2020-01-01', ?1), ?2)",
-                params![format!("+{d} days"), d],
+            let day: String = tx.query_row(
+                "SELECT date('2020-01-01', ?1)",
+                [format!("+{d} days")],
+                |r| r.get(0),
             )?;
+            tx.execute("INSERT INTO use_day(day) VALUES (?1)", [&day])?;
+            for m in 0..d {
+                tx.execute(
+                    "INSERT INTO use_open(day, message_id) VALUES (?1, ?2)",
+                    params![day, m],
+                )?;
+            }
         }
         Ok(())
     })
@@ -128,6 +143,31 @@ async fn use_and_open_count_on_the_day_of_the_person() {
     assert_eq!(got[27]["day"], "2020-01-05");
 }
 
+/// Invariant: the opens of a day are the distinct mails that the person
+/// opened on it, whatever the count of requests. A retry of an open whose
+/// answer got lost (the write is done) changes nothing.
+#[test]
+fn a_repeated_open_counts_once() {
+    let s = store("repeat");
+    let day = "2026-11-16";
+    // A fixed sequence of repeats: each mail i is sent (i * 7) % 5 + 1 times,
+    // in an interleaved order.
+    let mut sent = Vec::new();
+    for round in 0..5 {
+        for i in 1..=9 {
+            if round < (i * 7) % 5 + 1 {
+                sent.push(format!("m-{i}"));
+            }
+        }
+    }
+    for m in &sent {
+        iris_api::measures::count_use(&s, day, Some(m), NOON).unwrap();
+        iris_api::measures::count_use(&s, day, None, NOON).unwrap();
+    }
+    assert!(sent.len() > 9);
+    assert_eq!(days(&s), vec![(day.to_string(), 9)]);
+}
+
 /// The day is the date of the engine, or one day before or after it. Any
 /// other text is a 400 and writes nothing.
 #[test]
@@ -135,7 +175,7 @@ fn only_a_date_near_today_counts() {
     let s = store("days");
     let good = ["2026-11-15", "2026-11-16", "2026-11-17"];
     for d in good {
-        iris_api::measures::count_use(&s, d, true, NOON).unwrap();
+        iris_api::measures::count_use(&s, d, Some("m-1"), NOON).unwrap();
     }
     let mut bad: Vec<String> = [
         "",
@@ -175,7 +215,7 @@ fn only_a_date_near_today_counts() {
         }
     }
     for d in &bad {
-        let e = iris_api::measures::count_use(&s, d, true, NOON);
+        let e = iris_api::measures::count_use(&s, d, Some("m-1"), NOON);
         assert!(matches!(e, Err(iris_api::Error::Query(_))), "{d:?}: {e:?}");
     }
     assert_eq!(
@@ -207,7 +247,22 @@ async fn a_bad_request_writes_nothing() {
         ),
         (
             "/api/measures/open",
-            json!({"day": "2001-01-01"}).to_string(),
+            json!({"day": "2001-01-01", "message": "m-1"}).to_string(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "/api/measures/open",
+            json!({"day": day}).to_string(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "/api/measures/open",
+            json!({"day": day, "message": "i-1"}).to_string(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "/api/measures/use",
+            json!({"day": day, "message": "m-1"}).to_string(),
             StatusCode::BAD_REQUEST,
         ),
     ] {
@@ -333,7 +388,7 @@ fn downgrade(s: &Store) {
         tx.execute_batch(
             "DROP TRIGGER measure_connect;
              DROP TRIGGER person_decision; DROP TABLE person_decision;
-             DROP TABLE use_day; DROP TABLE measure_time; PRAGMA user_version = 11;",
+             DROP TABLE use_open; DROP TABLE use_day; DROP TABLE measure_time; PRAGMA user_version = 11;",
         )?;
         Ok(())
     })
@@ -461,6 +516,7 @@ async fn mirror_gives_the_newest_verify_of_each_account() {
         json!([
             {"account": "a@example.com", "checked": "2026-11-16T12:00:01Z", "differences": 0, "complete": true},
             {"account": "b@example.com", "checked": "2026-11-16T12:00:00Z", "differences": 1, "complete": false},
+            {"account": "c@example.com", "checked": null, "differences": null, "complete": false},
         ])
     );
 }

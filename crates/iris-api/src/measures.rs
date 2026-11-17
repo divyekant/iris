@@ -19,7 +19,8 @@ pub struct Measures {
     /// From the first account to the first brief with content, or `null`
     /// before that brief.
     pub first_brief: Option<FirstBrief>,
-    /// The last mirror check of each account that has one.
+    /// The last mirror check of each account. An account with no check
+    /// has `checked: null`.
     pub mirror: Vec<Check>,
     pub memory: Memory,
     /// The decisions of the person on the actions of an agent or of triage.
@@ -32,7 +33,8 @@ pub struct Measures {
 pub struct Day {
     /// The local date of the person, `YYYY-MM-DD`.
     pub day: String,
-    /// The source mail that the person opened on that day.
+    /// The source mails that the person opened on that day. A mail that
+    /// the person opened twice on one day counts once.
     pub opens: i64,
 }
 
@@ -48,11 +50,13 @@ pub struct FirstBrief {
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Check {
     pub account: String,
-    pub checked: String,
-    /// The differences that the check found, or `null` when the text of
-    /// the log row has no count.
+    /// The time of the last check, or `null` when the account has none.
+    pub checked: Option<String>,
+    /// The differences that the check found, or `null` when there is no
+    /// check or the text of the log row has no count.
     pub differences: Option<i64>,
-    /// `false` when an error stopped the check before its end.
+    /// `false` when there is no check, or when an error stopped the check
+    /// before its end.
     pub complete: bool,
 }
 
@@ -79,7 +83,10 @@ pub struct Undo {
 /// The measures now. `rss_kib` is the resident memory of the engine.
 pub fn measures(store: &Store, rss_kib: Option<i64>) -> Result<Measures> {
     Ok(store.read(|c| {
-        let mut q = c.prepare("SELECT day, opens FROM use_day ORDER BY day DESC LIMIT ?1")?;
+        let mut q = c.prepare(
+            "SELECT day, (SELECT count(*) FROM use_open o WHERE o.day = d.day)
+             FROM use_day d ORDER BY day DESC LIMIT ?1",
+        )?;
         let days = q
             .query_map([DAYS], |r| {
                 Ok(Day {
@@ -104,18 +111,21 @@ pub fn measures(store: &Store, rss_kib: Option<i64>) -> Result<Measures> {
                 _ => None,
             })?;
         let mut q = c.prepare(
-            "SELECT a.address, coalesce(l.ended_at, l.started_at), coalesce(l.result, '')
-             FROM account a JOIN sync_log l ON l.id =
+            "SELECT a.address, coalesce(l.ended_at, l.started_at), l.result
+             FROM account a LEFT JOIN sync_log l ON l.id =
                (SELECT max(id) FROM sync_log WHERE account_id = a.id AND kind = 'verify')
              ORDER BY a.id",
         )?;
         let mirror = q
             .query_map([], |r| {
-                let result: String = r.get(2)?;
-                let (differences, complete) = verify_result(&result);
+                let checked: Option<i64> = r.get(1)?;
+                let (differences, complete) = match checked {
+                    Some(_) => verify_result(&r.get::<_, Option<String>>(2)?.unwrap_or_default()),
+                    None => (None, false),
+                };
                 Ok(Check {
                     account: r.get(0)?,
-                    checked: rfc3339(r.get(1)?),
+                    checked: checked.map(rfc3339),
                     differences,
                     complete,
                 })
@@ -223,11 +233,15 @@ fn verify_result(text: &str) -> (Option<i64>, bool) {
 }
 
 /// Count one use of the web client on `day` (the local date of the person,
-/// `YYYY-MM-DD`), and one source mail opened when `open`. `now_ms` is the
-/// time of the engine. The day must be the date of the engine in UTC, or
-/// the day before or after it: the time zone of the person moves the date
-/// by at most one day.
-pub fn count_use(store: &Store, day: &str, open: bool, now_ms: i64) -> Result<()> {
+/// `YYYY-MM-DD`), and the open of the source mail `open` (an `m-` ID). A
+/// second count of the same use or open on the same day changes nothing,
+/// so a retry is safe. `now_ms` is the time of the engine. The day must be
+/// the date of the engine in UTC, or the day before or after it: the time
+/// zone of the person moves the date by at most one day.
+pub fn count_use(store: &Store, day: &str, open: Option<&str>, now_ms: i64) -> Result<()> {
+    let open = open
+        .map(|id| crate::read::row_of(id, iris_store::Kind::Message))
+        .transpose()?;
     let digits = day.len() == 10
         && day.bytes().enumerate().all(|(i, b)| {
             if i == 4 || i == 7 {
@@ -253,10 +267,15 @@ pub fn count_use(store: &Store, day: &str, open: bool, now_ms: i64) -> Result<()
     }
     store.write(|tx| {
         tx.execute(
-            "INSERT INTO use_day(day, opens) VALUES (?1, ?2)
-             ON CONFLICT(day) DO UPDATE SET opens = opens + excluded.opens",
-            params![day, i64::from(open)],
+            "INSERT INTO use_day(day) VALUES (?1) ON CONFLICT DO NOTHING",
+            [day],
         )?;
+        if let Some(message) = open {
+            tx.execute(
+                "INSERT INTO use_open(day, message_id) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
+                params![day, message],
+            )?;
+        }
         Ok(())
     })?;
     Ok(())

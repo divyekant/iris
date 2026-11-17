@@ -418,10 +418,13 @@ async fn get_measures(State(s): State<Arc<Store>>) -> Result<Response> {
 #[serde(deny_unknown_fields)]
 struct DayBody {
     day: String,
+    /// The `m-` ID of the source mail. An open needs it, a use has none.
+    message: Option<String>,
 }
 
-/// One use of the web client (`use`) or one source mail opened (`open`)
-/// on the local day of the person. The answer is `{}`.
+/// One use of the web client (`use`, body `{"day"}`) or one source mail
+/// opened (`open`, body `{"day", "message"}`) on the local day of the
+/// person. A repeated request changes nothing. The answer is `{}`.
 async fn post_measure(
     State(s): State<Arc<Store>>,
     Path(event): Path<String>,
@@ -433,7 +436,12 @@ async fn post_measure(
         _ => return Ok(not_found()),
     };
     let b = body(b)?;
-    measures::count_use(&s, &b.day, open, now_ms())?;
+    if open != b.message.is_some() {
+        return Err(Error::Query(
+            "an open names its message, and a use names none".into(),
+        ));
+    }
+    measures::count_use(&s, &b.day, b.message.as_deref(), now_ms())?;
     Ok(Json(serde_json::json!({})).into_response())
 }
 

@@ -1130,7 +1130,7 @@ fn item_id(row: i64, form: &str) -> Option<String> {
         .map(|(_, k)| format_id(*k, row))
 }
 
-fn row_of(id: &str, kind: Kind) -> Result<i64> {
+pub(crate) fn row_of(id: &str, kind: Kind) -> Result<i64> {
     match parse_id(id) {
         Some((k, row)) if k == kind => Ok(row),
         _ => Err(bad_id(id)),

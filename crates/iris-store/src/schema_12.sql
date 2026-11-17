@@ -2,13 +2,20 @@
 -- "How we measure Iris") that the store does not have yet.
 --
 -- One row for each day on which the person used the web client, by the
--- local date of the person. `opens` counts the source mail that the person
--- opened on that day. The rows stay on this machine.
-
+-- local date of the person. The rows stay on this machine.
 CREATE TABLE use_day (
   day TEXT PRIMARY KEY
-    CHECK (day GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(day) IS day),
-  opens INTEGER NOT NULL DEFAULT 0 CHECK (opens >= 0)
+    CHECK (day GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(day) IS day)
+) WITHOUT ROWID;
+
+-- One row for each source mail that the person opened on a day of use. A
+-- second open of the same mail on the same day adds no row, so a retry of
+-- an open with a lost answer does not count twice. No foreign key to
+-- `message`: a message that goes stays an open of its day.
+CREATE TABLE use_open (
+  day TEXT NOT NULL REFERENCES use_day(day),
+  message_id INTEGER NOT NULL,
+  PRIMARY KEY (day, message_id)
 ) WITHOUT ROWID;
 
 -- The two times of the measure "time from install to the first brief"

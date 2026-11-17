@@ -5,7 +5,8 @@ import { post } from "./api";
 export type Measures = {
   days: { day: string; opens: number }[];
   first_brief: { connect: string; brief: string; seconds: number } | null;
-  mirror: { account: string; checked: string; differences: number | null; complete: boolean }[];
+  /** Each account. An account with no check has `checked: null` and `complete: false`. */
+  mirror: { account: string; checked: string | null; differences: number | null; complete: boolean }[];
   memory: { rss_kib: number | null; messages: number };
   approvals: { decided: number; approved: number };
   undo: { applied: number; undone: number };
@@ -30,15 +31,19 @@ export function localDay(now = new Date()): string {
 
 let use: { day: string; done: Promise<void> } | null = null;
 const pending = new Set<Promise<void>>();
-// The days of opens that got no answer of success. A 400 is a definite refusal (for
-// example a day that is too old now), so it is not kept.
-const failed: string[] = [];
+// The opens that got no answer of success. A 400 is a definite refusal (for example a
+// day that is too old now), so it is not kept. The engine counts each mail once for each
+// day, so a second try of an open that the engine wrote but whose answer got lost
+// changes nothing.
+type Open = { day: string; message: string };
+const failed: Open[] = [];
 
-function send(event: "use" | "open", day: string): Promise<void> {
-  const done: Promise<void> = post(`measures/${event}`, { day }).then(
+function send(body: { day: string; message?: string }): Promise<void> {
+  const open = body.message !== undefined;
+  const done: Promise<void> = post(`measures/${open ? "open" : "use"}`, body).then(
     () => {},
     (e: { status?: number }) => {
-      if (event === "open" && e?.status !== 400) failed.push(day);
+      if (open && e?.status !== 400) failed.push(body as Open);
       if (use?.done === done) use = null;
     },
   );
@@ -49,21 +54,22 @@ function send(event: "use" | "open", day: string): Promise<void> {
 
 /** Send each open again that got no answer of success. */
 function resend() {
-  for (const day of failed.splice(0)) void send("open", day);
+  for (const open of failed.splice(0)) void send(open);
 }
 
 /**
- * Count one use of the web client on the local day, or one source mail opened.
- * A use counts once for each day in this page: a second call of the same day gives
- * the promise of the first. A failed count does not stop the page. The next use tries
- * again, and each failed open goes again with the next count.
+ * Count one use of the web client on the local day, or the open of one source mail
+ * (`{ open: <m- ID> }`). A use counts once for each day in this page: a second call of
+ * the same day gives the promise of the first. A failed count does not stop the page.
+ * The next use tries again, and each failed open goes again with the next count.
  */
-export function count(event: "use" | "open", now = new Date()): Promise<void> {
+export function count(event: "use" | { open: string }, now = new Date()): Promise<void> {
   const day = localDay(now);
   resend();
-  if (event === "use" && use?.day === day) return use.done;
-  const done = send(event, day);
-  if (event === "use") use = { day, done };
+  if (event !== "use") return send({ day, message: event.open });
+  if (use?.day === day) return use.done;
+  const done = send({ day });
+  use = { day, done };
   return done;
 }
 
@@ -102,7 +108,9 @@ export function rows(m: Measures, now = new Date()): Row[] {
   const window = since(m, bars(m, now));
   const used = window.filter((b) => b.opens !== null).length;
   const brief = m.first_brief;
-  const checks = m.mirror;
+  // The target is met only when each account has a complete check with no difference.
+  const checks = m.mirror.filter((c) => c.checked !== null) as { checked: string; differences: number | null; complete: boolean }[];
+  const unchecked = m.mirror.length - checks.length;
   const differences = checks.reduce((a, c) => a + (c.differences ?? 0), 0);
   const stopped = checks.some((c) => !c.complete || c.differences === null);
   const oldest = checks.reduce((a, c) => (c.checked < a ? c.checked : a), checks[0]?.checked ?? "");
@@ -131,8 +139,8 @@ export function rows(m: Measures, now = new Date()): Row[] {
       : {
           name: "Differences from Gmail",
           value: num(differences),
-          detail: `${stopped ? "A check stopped before its end. " : ""}${checks.length === 1 ? "Last check" : `Last checks of ${checks.length} accounts, the oldest`} on ${shortDay(oldest)}. Target: zero.`,
-          tone: differences > 0 ? "missed" : stopped ? "flat" : "met",
+          detail: `${unchecked ? `${plural(unchecked, "account has", "accounts have")} no check yet. ` : ""}${stopped ? "A check stopped before its end. " : ""}${checks.length === 1 ? "Last check" : `Last checks of ${checks.length} accounts, the oldest`} on ${shortDay(oldest)}. Target: zero.`,
+          tone: differences > 0 ? "missed" : stopped || unchecked ? "flat" : "met",
         },
     rss === null
       ? { name: "Memory of the engine", value: "Not known", detail: "The system did not give the memory of the engine. Target: 50 MB or less with 100,000 messages.", tone: "none" }
