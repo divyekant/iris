@@ -146,11 +146,11 @@ impl Facts {
 /// The facts of message row `id` at the time `now` (seconds since
 /// 1970-01-01 UTC). `None` if the message does not exist.
 pub fn facts(tx: &Connection, id: i64, now: i64) -> Result<Option<Facts>> {
-    let mut head = tx.prepare_cached(
-        "SELECT h.from_addr, coalesce(h.date, m.internal_date),
-                m.hostile IS NOT NULL AND m.hostile NOT IN ('', '[]')
-         FROM message m LEFT JOIN header h ON h.message_id = m.id WHERE m.id = ?1",
-    )?;
+    let mut head = tx.prepare_cached(concat!(
+        "SELECT h.from_addr, coalesce(h.date, m.internal_date), ",
+        iris_store::may_be_hostile!(),
+        " FROM message m LEFT JOIN header h ON h.message_id = m.id WHERE m.id = ?1",
+    ))?;
     // The rule of the local API: no row or no kind is a stranger, and of two
     // rows that differ only in case, the most cautious kind wins.
     let mut kind = tx.prepare_cached(

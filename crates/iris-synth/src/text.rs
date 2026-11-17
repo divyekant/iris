@@ -199,7 +199,13 @@ pub(crate) fn render(seed: u64, m: &Meta) -> Vec<u8> {
             format!("no-reply@{}.example.com", service.1),
         ),
         Sender::Hostile => {
-            let fake = format!("{}-secure.example.net", service.1);
+            let fake = if crate::unrelated_domain(m.thread, m.traits) {
+                // A domain with no likeness to a known domain: only the
+                // link in the body gives the phishing away.
+                format!("mx{}.example.org", m.thread)
+            } else {
+                format!("{}-secure.example.net", service.1)
+            };
             if m.traits & traits::SPOOFED_NAME != 0 {
                 // The display name of a known person, the address of an attacker.
                 (
@@ -357,10 +363,12 @@ pub(crate) fn render(seed: u64, m: &Meta) -> Vec<u8> {
         headers.push("Auto-Submitted: auto-generated".to_string());
     }
     if m.sender != Sender::Owner {
-        // Gmail adds this header on receipt (authserv-id mx.google.com). A
-        // hostile sender fails DMARC; each other sender passes.
+        // Gmail adds this header on receipt (authserv-id mx.google.com).
+        // Half of the hostile senders fail DMARC. The other half own their
+        // domain, so DKIM and DMARC pass, as with most real phishing. Each
+        // other sender passes.
         let domain = &from_addr[from_addr.find('@').unwrap() + 1..];
-        headers.push(if hostile {
+        headers.push(if hostile && m.thread.is_multiple_of(2) {
             format!(
                 "Authentication-Results: mx.google.com;\r\n       spf=softfail smtp.mailfrom={from_addr};\r\n       dmarc=fail (p=NONE) header.from={domain}"
             )

@@ -221,6 +221,22 @@ fn only_a_person_writes_into_a_hostile_thread() {
             .unwrap();
         }
     }
+    // A message that waits for its link check (migration 20) counts as
+    // hostile mail, also with an empty mark list.
+    s.write(|tx| {
+        tx.execute("DELETE FROM link_check WHERE message_id = 1", [])?;
+        Ok(tx.execute("INSERT INTO link_check(message_id) VALUES (1)", [])?)
+    })
+    .unwrap();
+    for (verb, t, a) in [
+        (Verb::Draft, "t-1", REPLY()),
+        (Verb::Send, "d-1", json!({})),
+    ] {
+        let got = one(&s, AuthorKind::Agent, verb, &[t], a);
+        assert_eq!(state(&got), "denied", "{verb:?} waits for the link check");
+    }
+    s.write(|tx| Ok(tx.execute("DELETE FROM link_check WHERE message_id = 1", [])?))
+        .unwrap();
     s.write(|tx| Ok(tx.execute("UPDATE message SET hostile = '[\"link\"]' WHERE id = 1", [])?))
         .unwrap();
     for verb in [Verb::Draft, Verb::Send] {

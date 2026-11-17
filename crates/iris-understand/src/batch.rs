@@ -300,6 +300,18 @@ fn run_messages(
     limits: &Limits,
     now_ms: i64,
 ) -> Result<Stop, Error> {
+    // Step 1: the link check of each new or old content (migration 20),
+    // with no model, so a model error cannot hold it back. Each message
+    // that it understands counts toward the run limit.
+    let done =
+        store::recheck_links(store, now_ms, limits.max_messages).map_err(Error::Understand)?;
+    store.write(|tx| {
+        tx.execute(
+            "UPDATE understand_run SET messages = messages + ?2 WHERE id = ?1",
+            params![run, i64_of(done)],
+        )?;
+        Ok(())
+    })?;
     // Step 2 before step 3: the refresh needs no model, so a model that
     // cannot be made does not keep stale items of a changed sender. Its
     // resets come before the main pass, which sees them.
@@ -320,7 +332,7 @@ fn run_messages(
         run,
         limits,
         now_ms,
-        done: 0,
+        done,
         since_refresh: 0,
         rerun: false,
     };
