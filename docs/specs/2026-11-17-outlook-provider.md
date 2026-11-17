@@ -190,8 +190,10 @@ of the server bytes cannot show a change, and an etag alone is not proof
 2. Before the send, `draft_etag` reads the server draft, and `raw` reads
    its MIME text. The release runs the read back of the send spec
    section 1 on that text (the fields of the content hash). It goes on
-   only if the draft exists, the etag is the kept etag, and the content
-   hash is the hash of the `draft` row. Else the person or another client
+   only if the draft exists, the etag is the kept etag, the `Message-ID`
+   of the read back is the `Message-ID` that Iris set (the content hash
+   does not cover it), and the content hash is the hash of the `draft`
+   row. Else the person or another client
    changed it: the release denies the send ("The draft changed after the
    approval."), as spec 2 section 7.5 and the send spec require, and
    refreshes the `draft` row as the send spec section 4.1 says: the row
@@ -256,17 +258,16 @@ not a label, and Iris moves messages only with `archive`, `inbox` and
 Archive in Iris is a move to the well-known `archive` folder. Inbox is a
 move to `inbox`. Trash is a move to `deleteditems`.
 
-Iris moves only a message that is in `inbox`, `archive` or
-`deleteditems`. An `archive`, `inbox` or `trash` of a
-message in any other folder (a user folder, `junkemail`, `sentitems`)
-gets a definite refusal before any write. Thus the folder of a message
-before a move is always one of these three, and the mirror labels of
-spec 2 stay inverse pairs: the ledger `pre` labels (`INBOX`, no label for
-`archive`, `TRASH`) name the folder, and the undo of spec 2 moves the
-message back to that folder. For example, a trash of an archived message
-records no `INBOX` label, so the undo moves it from `deleteditems` to
-`archive`. The read state, the flag and the categories are not moves, and
-work in each folder. R6-10 keeps the same rule for each folder provider.
+Iris moves a message with `archive`, `inbox` or `trash` only from
+`inbox` or `archive`. Such a verb on a message in any other folder
+(`deleteditems`, a user folder, `junkemail`, `sentitems`) gets a definite
+refusal before any write. The undo of a `trash` (spec 2) is the only move
+out of `deleteditems`, and it goes back to the folder that the ledger
+`pre` labels name (`INBOX` for `inbox`, no `INBOX` for `archive`). Thus
+the mirror labels of spec 2 stay inverse pairs: the undo of `archive` is
+`inbox` and the reverse, both between the two folders, and a trash of an
+archived message goes back to `archive`. The read state, the flag and the
+categories are not moves, and work in each folder. R6-10 keeps the same rule for each folder provider.
 
 ### 7. Sign-in
 
