@@ -151,3 +151,24 @@ test("a new question of the same job is a new card with an empty field", async (
     view.destroy();
   }
 });
+
+test("the newest question can be on a later page", async () => {
+  const { loadQuestions } = await load("/src/jobs.ts");
+  const at = (h) => `2026-11-17T${String(h).padStart(2, "0")}:00:00.000Z`;
+  const first = Array.from({ length: 200 }, (_, k) => ({ ...job(), id: `j-${1000 - k}`, updated: at(1) }));
+  const late = { ...job(), id: "j-2", updated: at(9), question: "Asked last?" };
+  const asked = serve((path) => [200, path.includes("after=") ? { jobs: [late], next: null } : { jobs: first, next: "j-801" }]);
+  const list = await loadQuestions();
+  assert.equal(list.length, 201);
+  assert.equal(list[0].id, "j-2");
+  assert.deepEqual(asked.map(([, p]) => p), ["jobs?state=needs_you&limit=200", "jobs?state=needs_you&limit=200&after=j-801"]);
+});
+
+test("the preview keeps an answer as the person wrote it", () => {
+  const given = "  card: blue\n  limit: 2400\n";
+  const [code, doc] = fx.answerJob("j-14", given);
+  assert.equal(code, 200);
+  assert.equal(doc.job.events.at(-1).answer, given);
+  assert.equal(fx.answerJob("j-14", "again")[0], 409);
+  assert.equal(fx.answerJob("j-15", "  ")[0], 400);
+});

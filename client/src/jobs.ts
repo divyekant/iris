@@ -139,9 +139,15 @@ export function steps(d: JobDetail): Step[] {
 
 /** The jobs whose agent asks you a question now (card R5-05), the newest question first (`updated` of the job, not its ID). */
 export async function loadQuestions(): Promise<Job[]> {
-  // shortcut: one page of 200 jobs that ask you; page with `next` if one person has more open questions.
-  const page = await get<JobPage>("jobs?state=needs_you&limit=200");
-  return page.jobs.filter((j) => j.state === "needs_you" && j.question).sort((a, b) => Date.parse(b.updated) - Date.parse(a.updated));
+  // The API pages by job ID, so the newest question can be on any page: read each page.
+  let jobs: Job[] = [];
+  let next: string | null = null;
+  do {
+    const page: JobPage = await get<JobPage>(`jobs?state=needs_you&limit=200${next ? `&after=${encodeURIComponent(next)}` : ""}`);
+    jobs = jobs.concat(page.jobs);
+    next = page.next;
+  } while (next);
+  return jobs.filter((j) => j.state === "needs_you" && j.question).sort((a, b) => Date.parse(b.updated) - Date.parse(a.updated));
 }
 
 /** Your answer to the question of a job (card R5-05). The engine starts a new session of the job with it. */

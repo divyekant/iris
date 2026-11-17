@@ -676,7 +676,7 @@ export function answerJob(id: string, said: unknown): [number, unknown] {
   if (job.state !== "needs_you") return [409, { error: "The job asks no question now." }];
   const asked = jobDetails[id]?.job.events ?? [];
   jobs[id] = { ...job, state: "working", question: undefined, updated: new Date().toISOString() };
-  const events = [...asked, { at: jobs[id].updated, state: "working" as const, by: "person" as const, answer: said.trim() }];
+  const events = [...asked, { at: jobs[id].updated, state: "working" as const, by: "person" as const, answer: said }];
   jobDetails[id] = { job: { ...jobs[id], events }, changesets: jobDetails[id]?.changesets ?? [], threads: jobDetails[id]?.threads ?? {} };
   return [200, jobDetails[id]];
 }
