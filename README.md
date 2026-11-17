@@ -157,11 +157,14 @@ use a terminal. Each tool has the name and the arguments of its verb:
 `correct`, `archive`, `inbox`, `read`, `unread`, `trash`, `label`,
 `unlabel`, `submit`, `changeset`, `drafts`, `withdraw`, `revise`,
 `watch_add`, `watch_list`, `watch_remove`, `matters_list` and
-`matters_show`. The result is what the verb prints with `--json`.
+`matters_show`. The result is what the verb prints with `--json`, or its
+text where the verb has no `--json` (`watch_add` and `watch_remove`). A tool
+that adds an action gives the JSON `{"changeset": ..., "n": ...}`.
 
 The tools take the same path as the command, with the same author (`local`),
-the same policy and the same review. The read tools read the store. The
-other tools need the engine: start `iris serve` first. A failed tool call
+the same policy and the same review. The read tools and the watch tools use
+the store directly. The other tools need the engine: start `iris serve`
+first. A failed tool call
 gives the error line and the exit code of the command. MCP has no tool to
 approve, to deny or to change the policy. Only the web client does these
 steps.

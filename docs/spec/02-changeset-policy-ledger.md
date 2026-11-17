@@ -1046,21 +1046,34 @@ agent that does not work in a folder. The rules for the MCP interface:
   verb that the command does not have. It gives no verb of the person
   (`sending`, `cancel`), no verb of the host (`serve`, `account`,
   `mirror`, `backup`, `export`, `service`, `model`, `understand`, `mcp`),
-  and not `matters propose`, which spends model budget. The read tools and
-  the watch tools take the direct path of their verb (section 8.1). A test
-  checks that each verb is a tool or is in this list.
+  and not `matters propose`, which spends model budget. A test checks
+  that each verb is a tool or is in this list.
 - Each tool call takes the path of its verb in the same mode, so MCP adds
-  no power. In host mode: the read verbs read the store (section 8.1), and
-  the other verbs go through `iris.sock` with the author `local`. In
+  no power. In host mode, these are the paths:
+
+  | Tools | Path |
+  |---|---|
+  | `status`, `search`, `show`, `matters_list`, `matters_show` | Read the store directly (section 8.1). |
+  | `watch_add`, `watch_list`, `watch_remove` | Read and write the watch rows of the store directly, as `iris watch` does. A watch changes no mailbox, so it does not go through the policy. |
+  | All other tools | A request on `iris.sock`, with the author `local`. |
+
+  In
   session mode, the MCP interface uses the session socket, so the session
   limits apply. The command has no session mode yet, so `iris mcp` has
   host mode only (issue #440).
-- The result of a call is what the verb prints with `--json` (section
-  8.3). A verb that ends with a code that is not 0 gives an error result:
-  the printed text, then the error line of standard error (`iris: <error>`),
-  then `exit code N` (section 8.4). A tool that adds an action gives the
-  JSON of the engine answer (`{"changeset": ..., "n": ...}`), because the
-  command has no `--json` for it.
+- The result of a call is what its verb prints on standard output: with
+  `--json` where the verb has it (section 8.3), else the text of the verb.
+  Two exceptions:
+
+  | Tools | Result |
+  |---|---|
+  | `watch_add`, `watch_remove` | The text of the verb (`w-1: Iris tells you ...`, `w-1 removed.`), because the verb has no `--json`. The line starts with the watch ID. |
+  | Each tool that adds an action | The JSON of the engine answer (`{"changeset": ..., "n": ...}`). The verb prints `<cs-id> <n>` and has no `--json`. |
+
+  `matters_list` and `matters_show` give JSON, because the verb always
+  prints JSON. A verb that ends with a code that is not 0 gives an error
+  result: the printed text, then the error line of standard error
+  (`iris: <error>`), then `exit code N` (section 8.4).
 
 Failure list of `iris mcp` (the client is input that Iris does not
 control):
