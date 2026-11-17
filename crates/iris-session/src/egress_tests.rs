@@ -633,17 +633,35 @@ fn only_a_complete_hello_with_the_host_name_passes() {
 }
 
 /// A connection whose setup fails (no file descriptor for a clone, no
-/// thread) still gets its one log line and an answer.
+/// thread) at any step still gets its one log line, closes, and leaves no
+/// tunnel that a stop cannot reach.
 #[test]
 fn a_failed_setup_still_writes_one_line() {
-    for fault in [Fault::Clone, Fault::Spawn] {
+    for fault in [
+        Fault::Clone,
+        Fault::Spawn,
+        Fault::ResolverSpawn,
+        Fault::UpstreamClone,
+        Fault::RelaySpawn,
+    ] {
         let b = proxy("fault", echo(), false, LOG_LIMIT);
         *lock(&b.proxy.shared.fault) = Some(fault);
-        let (_s, line) = send(&b.proxy, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
-        assert!(line.starts_with("HTTP/1.1 403"), "{line}");
+        let (mut s, line) = send(&b.proxy, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
+        if fault == Fault::RelaySpawn {
+            // The fault comes after the ClientHello: the 200 is sent, then
+            // the tunnel closes before a byte reaches the host.
+            assert!(line.starts_with("HTTP/1.1 200"), "{line}");
+            s.write_all(&hello("api.example.test")).unwrap();
+            let mut buf = [0u8; 64];
+            assert_eq!(s.read(&mut buf).unwrap_or(0), 0);
+        } else {
+            assert!(line.starts_with("HTTP/1.1 403"), "{fault:?} {line}");
+        }
+        let t = Instant::now();
         b.proxy.stop().unwrap();
+        assert!(t.elapsed() < Duration::from_secs(2), "{fault:?}");
         let text = log_text(&b.log);
-        assert_eq!(text.lines().count(), 1, "{text}");
-        assert!(text.contains("reason=no_resources"), "{text}");
+        assert_eq!(text.lines().count(), 1, "{fault:?} {text}");
+        assert!(text.contains("reason=no_resources"), "{fault:?} {text}");
     }
 }
