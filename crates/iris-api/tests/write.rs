@@ -423,6 +423,63 @@ async fn a_reply_after_your_own_mail_goes_to_its_recipients() {
     }
 }
 
+/// For random text in the `To` list of mail of the person, each start
+/// address of the reply passes the address check of a draft (R3-01): text
+/// that is not a list gives no address that is not valid.
+#[tokio::test]
+async fn property_each_start_address_is_valid() {
+    const SIGNS: &[&str] = &[
+        "a",
+        "Z",
+        "@",
+        ".",
+        ",",
+        ";",
+        ":",
+        "<",
+        ">",
+        "(",
+        ")",
+        "\"",
+        " ",
+        "é",
+        "example.com",
+        "b@example.org",
+    ];
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = |n: usize| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        (x % n as u64) as usize
+    };
+    let dir = temp("own-any");
+    let s = store(&dir);
+    newest(&s, OWNER, "", true);
+    for _ in 0..300 {
+        let n = next(16);
+        let text: String = (0..n).map(|_| SIGNS[next(SIGNS.len())]).collect();
+        s.write(|tx| {
+            Ok(tx.execute(
+                "UPDATE header SET to_addrs = ?1 WHERE message_id = 3",
+                [&text],
+            )?)
+        })
+        .unwrap();
+        let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+        for a in v["to"].as_array().unwrap() {
+            let a = a.as_str().unwrap().to_string();
+            let c = iris_compose::Content {
+                to: vec![a.clone()],
+                cc: vec![],
+                subject: "s".into(),
+                body: String::new(),
+            };
+            assert!(c.check().is_ok(), "{text:?} gave {a:?}");
+        }
+    }
+}
+
 /// From can be forged: mail that comes in with the address of the person
 /// in From (no label `SENT`) is mail of a stranger. The reply goes to that
 /// From address, never to the recipients that the stranger chose.
