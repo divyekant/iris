@@ -1,5 +1,8 @@
-/* Iris project pages (GitHub Pages). Colors are the dark brand tokens of .kalos.yaml. */
-:root { --bg: #0a0a0a; --text: #e5e5e5; --muted: #a3a3a3; --link: #d4af37; }
+/* Iris project pages (GitHub Pages). Colors are the dark brand tokens of
+   .kalos.yaml and docs/DESIGN.md: background, text, text-muted, primary,
+   background-surface and border. */
+:root { --bg: #0e0f14; --text: #e7e8ee; --muted: #a4a7b5; --link: #a394ff;
+  --surface: #1c1e27; --line: #2c2e3b; }
 body { margin: 0; background: var(--bg); color: var(--text);
   font: 16px/1.5 Inter, system-ui, sans-serif; }
 main { max-width: 40rem; margin: 0 auto; padding: 32px 16px; }
@@ -7,7 +10,6 @@ h1 { font-size: 1.953rem; } h2 { font-size: 1.25rem; margin-top: 32px; }
 a { color: var(--link); }
 .muted { color: var(--muted); }
 /* The builder guide (docs/guide/). */
-:root { --surface: #171717; --line: #262626; }
 nav { max-width: 40rem; margin: 0 auto; padding: 16px 16px 0; display: flex; flex-wrap: wrap; gap: 16px; }
 nav a { text-decoration: none; }
 nav a[aria-current="page"] { color: var(--text); }

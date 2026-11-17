@@ -95,6 +95,14 @@ class SiteTest(unittest.TestCase):
         self.assertIn("gmail.readonly", text)
         self.assertIn("Google API Services User Data Policy", text)
 
+    def test_each_color_of_the_site_is_a_dark_token_of_the_design_system(self):
+        css = (DOCS / "site.css").read_text(encoding="utf-8")
+        design = (DOCS / "DESIGN.md").read_text(encoding="utf-8")
+        dark = set(re.findall(r"^\| `[a-z-]+` \| `(#[0-9a-f]{6})` \|", design, re.M))
+        colors = set(re.findall(r"#[0-9a-fA-F]{3,8}\b", css))
+        self.assertGreater(len(colors), 0)
+        self.assertLessEqual({c.lower() for c in colors}, dark)
+
     def test_the_home_page_links_the_guide(self):
         self.assertIn("guide/index.html", self.pages[DOCS / "index.html"].links)
 
