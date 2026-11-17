@@ -325,7 +325,7 @@ fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
 /// True if `m` can go into a workspace: clean for the conversation rule, not
 /// gone, and not the source of a signal, which can hold a security code.
 fn clean(c: &Connection, m: &iris_talk::Mail) -> rusqlite::Result<bool> {
-    if !m.clean || m.gone {
+    if !m.for_reader() {
         return Ok(false);
     }
     let signal: bool = c.query_row(
@@ -369,11 +369,9 @@ fn write_thread(
         if n == 1 { "message" } else { "messages" }
     )?;
     writeln!(f)?;
-    let me: String = c.query_row(
-        "SELECT lower(address) FROM account WHERE id = ?1",
-        [account],
-        |r| r.get(0),
-    )?;
+    // You are no person of the scope: the account address and each alias
+    // of your sent mail.
+    let me = iris_talk::your_addresses(c, account)?;
     for (_, id) in granted {
         let m = &mail(*id)?;
         // The people of the scope come only from the messages in this file.
@@ -384,7 +382,7 @@ fn write_thread(
             parties.entry(a).or_insert(None);
         }
         for (address, name) in parties {
-            if address.is_empty() || *address == me {
+            if address.is_empty() || me.contains(address) {
                 continue;
             }
             let p = people.entry(address.clone()).or_default();

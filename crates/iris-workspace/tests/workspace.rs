@@ -748,8 +748,14 @@ fn an_alias_of_yours_is_not_a_person() {
     build(&store, job, &ws).unwrap();
     let (paths, text) = walk(&ws);
     assert!(text.contains("ALIAS-TEXT"));
-    assert!(!text.contains("me.work@example.com\""), "an alias in a people file");
-    let people: Vec<&String> = paths.iter().filter(|p| p.starts_with("people/")).collect();
+    assert!(
+        !text.contains("me.work@example.com\""),
+        "an alias in a people file"
+    );
+    let people: Vec<&String> = paths
+        .iter()
+        .filter(|p| p.starts_with("people/") && p.ends_with(".json"))
+        .collect();
     for p in &people {
         let v: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(ws.join(p)).unwrap()).unwrap();

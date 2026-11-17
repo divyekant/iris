@@ -58,6 +58,42 @@ pub struct Mail {
     pub clean: bool,
 }
 
+impl Mail {
+    /// The conversation rule: the message counts for a reader when it is
+    /// clean, not gone, and from you or from an address.
+    pub fn for_reader(&self) -> bool {
+        !self.gone && self.clean && (self.mine || !self.from.is_empty())
+    }
+}
+
+/// Your addresses in `account`: the account address and the From of each of
+/// your sent messages (an alias), lowercase. One row at a time.
+pub fn your_addresses(
+    conn: &Connection,
+    account: i64,
+) -> rusqlite::Result<std::collections::BTreeSet<String>> {
+    let mut out = std::collections::BTreeSet::new();
+    out.insert(conn.query_row(
+        "SELECT lower(address) FROM account WHERE id = ?1",
+        [account],
+        |r| r.get(0),
+    )?);
+    let mut q = conn.prepare_cached(
+        "SELECT h.from_addr FROM message m JOIN header h ON h.message_id = m.id
+         WHERE m.account_id = ?1
+           AND EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                      WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
+           AND NOT EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                          WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT')",
+    )?;
+    for from in q.query_map([account], |r| r.get::<_, Option<String>>(0))? {
+        if let Some(a) = from?.and_then(|f| addresses(&f).into_iter().next()) {
+            out.insert(a);
+        }
+    }
+    Ok(out)
+}
+
 /// The conversation item of a thread, as the store has it.
 struct Existing {
     id: i64,
@@ -103,10 +139,7 @@ pub fn update(
         .map(|m| (m.at, m.id))
         .collect();
     let origin_only_gone = |origin: i64| all.iter().any(|m| m.id == origin && m.gone && m.clean);
-    let mails: Vec<&Mail> = all
-        .iter()
-        .filter(|m| !m.gone && m.clean && (m.mine || !m.from.is_empty()))
-        .collect();
+    let mails: Vec<&Mail> = all.iter().filter(|m| m.for_reader()).collect();
     let existing = existing(conn, thread)?;
 
     let Some(old) = existing else {
