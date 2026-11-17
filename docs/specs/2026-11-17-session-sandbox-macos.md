@@ -128,11 +128,21 @@ runs only after the record exists. The reap removes the record only after
 
 1. `launchctl bootout` of the job. A job that is not loaded is not an
    error.
-2. Until `ended` is true or 5 seconds pass: scan the processes
-   (`proc_listallpids`), and for each process in the coalition of the
-   record send `SIGSTOP`, read its coalition again, and send `SIGKILL` if
-   it is still in the coalition. Else send `SIGCONT` to it, because its
-   process ID went to another process between the reads.
+2. Until `ended` is true or 5 seconds pass, do a freeze, then a kill:
+   1. Freeze: scan the processes (`proc_listallpids`). For each process
+      in the coalition of the record, send `SIGSTOP`, then read its
+      coalition again. If the process is not in the coalition now (its
+      process ID went to another process between the reads), send
+      `SIGCONT` to it. Repeat the scan until one scan finds each live
+      member stopped (`pbi_status` is `SSTOP`), the count of these
+      members equals `tasks_started - tasks_exited`, and `tasks_started`
+      did not change during the scan. Then no member of the coalition can
+      run, fork or send a signal.
+   2. Kill: send `SIGKILL` to each member of the frozen set. A stopped
+      process cannot exit by itself, and no member runs to kill it, so its
+      process ID cannot go to another process before the `SIGKILL`.
+      Invariant: `stop` sends `SIGKILL` only to a process that is stopped
+      and in the coalition of the session.
 3. Return `Ok` if `ended` is true, else an error that names the count of
    live processes.
 
@@ -174,23 +184,26 @@ only `127.0.0.1` on the loopback interface, so `session_peer` addresses do
 not work there.
 
 Invariant: a process of a session reaches only the proxy of its own
-session, also after an engine crash. Two paths can give the port of a
-session that is not reaped to another proxy:
+session, also after an engine crash and with another data folder. A port
+check cannot give this: after a crash, a new engine (perhaps of another
+data folder) can get the port of a session that is not reaped. So each
+proxy on macOS needs a secret of its session:
 
-- The engine runs: the proxy keeps its port until the reap (launcher
-  spec), and the reap waits for `ended`.
-- The engine crashed: the operating system freed the port, and a new
-  engine can get the same port for a new proxy. So a new trait method
-  `Isolation::holds_port(port) -> io::Result<bool>` reads the records in
-  `<data dir>/sessions/`. It is true if a record names the port and
-  `ended` of its session is false. The default method gives `false`
-  (Linux keeps the sessions apart by the peer address). The egress
-  callback of the engine starts the proxy, and if `holds_port` is true or
-  an error, it stops that proxy and starts a new one, at most 8 times.
-  Then the launch fails (`launch_failed`), fail closed.
+- The launch makes a random token of 32 bytes for each session, with the
+  egress port, and gives it to the agent only in its environment:
+  `HTTPS_PROXY=http://iris:<token>@127.0.0.1:<port>`. The token is not in
+  the record, the store or a log.
+- `Proxy::start` gets an optional token. With a token, the proxy answers
+  each `CONNECT` with no `Proxy-Authorization: Basic` header that holds
+  `iris:<token>` with `407` and the log word `not_session`, before it
+  opens a connection. The compare takes constant time.
+- A process of session A has only the token of A. The profile denies
+  `process-info` and signals outside the sandbox, so it cannot read the
+  environment of session B.
 
-A crash between the start of the proxy and the record leaves no record,
-but then the agent did not start, so no process uses the port.
+So the proxy of B refuses each process of A before any byte goes out, with
+no timing assumption. The Linux proxy keeps the peer check and gets no
+token.
 
 ### Check
 
@@ -231,7 +244,6 @@ before the agent runs, or `ended` is false.
 |---|---|---|
 | The agent calls `setsid` and forks and exits in a loop | `ended` stays false until no process runs; the reap waits | Mac acceptance 3 |
 | `stop` does not catch the loop in 5 seconds | `stop` returns an error; the engine tries again at its next turn; the session keeps its port and workspace | Mac acceptance 3 |
-| A process ID goes to another process between the scan and the signal | `SIGSTOP`, then the second read shows another coalition: `SIGCONT`, no `SIGKILL` | Unit test of the signal step with a process of another coalition |
 | The agent reads the data folder, the home folder, `~/.ssh`, or another workspace | Refused | Mac acceptance 1 |
 | The agent connects to another port, a public address, UDP or a Unix socket | Refused | Mac acceptance 1 |
 | The agent calls `launchctl`, `open`, `pbpaste` or another system service | Refused (no `mach-lookup`) | Mac acceptance 1 |
@@ -241,7 +253,8 @@ before the agent runs, or `ended` is false.
 | The engine crashes while a session runs | The pipe ends, the hold stops the agent; the new engine reads the record and calls `stop` and `ended` | Mac acceptance 4 |
 | The system starts again | The boot time differs: `ended` is true | Unit test with a record of another boot time |
 | The record cannot be written | `spawn` fails; the agent did not run | Unit test with a read-only sessions folder |
-| The engine crashes while an escaped process of session A lives, and a new engine gets the old port of A for the proxy of session B | `holds_port` is true for that port: the new engine drops that proxy and takes another port | Unit test: a record of a live coalition with port P makes `holds_port(P)` true; engine test with a test isolation that holds the first port |
+| The engine crashes while an escaped process of session A lives, and a new engine (of the same or another data folder) gets the old port of A for the proxy of session B | The proxy of B answers `407` (`not_session`): the process has the token of A | Proxy test: no header, a wrong token and the token of another session each get `407`; the right token gets `200` |
+| A process ID goes to another process during `stop` | The freeze reads the coalition after `SIGSTOP` and sends `SIGCONT` to a process of another coalition; `SIGKILL` goes only to the frozen set | Unit test of the freeze with a process of another coalition: it gets `SIGCONT` and lives |
 | A program file in a folder of the person (for example `~/.local/bin/claude`) | Only that file is readable | Mac acceptance 1 |
 
 ## Impact
@@ -252,9 +265,12 @@ before the agent runs, or `ended` is false.
   `stop`, `ended`, check) and `isolation_macos_tests.rs`.
 - `crates/iris-session/src/hold.rs` or the helper entry of the program:
   the shim and the `session-job` verb on macOS.
-- `crates/iris/src/sessions.rs`: the egress peer `127.0.0.1` on macOS, and
-  the retry of the proxy start while `holds_port` is true.
-- `crates/iris-session/src/isolation.rs`: the trait method `holds_port`.
+- `crates/iris/src/sessions.rs`: the egress peer `127.0.0.1` and the token
+  of each session on macOS.
+- `crates/iris-session/src/egress.rs`: the optional token of
+  `Proxy::start` and the `407` answer.
+- `crates/iris-session/src/config.rs` or the launch: the token in
+  `HTTPS_PROXY` of the agent environment.
 - The launcher spec, "Isolation": the macOS form of the lifetime rule.
 - `docs/DEPLOYMENT.md`: the Mac needs a signed-in user (GUI domain).
 
@@ -274,15 +290,30 @@ while the session runs. No virtual machine.
   because a new coalition with the same ID holds processes.
 - `coalition_info_resource_usage` stays callable by a normal user.
   Evidence: the probe. If not, `check` fails.
+- Claude Code (Node.js) and Codex send `Proxy-Authorization: Basic` from
+  the user and password in `HTTPS_PROXY`. Evidence: the Claude Code
+  network configuration documentation gives `http://user:pass@host:port`;
+  `reqwest`, the HTTP client of Codex, takes the credentials of a proxy
+  URL. Pending: Mac acceptance 2. If a tool does not send them, its
+  session gets `407` and no data leaves (fail closed).
 - The Claude Code native program and Codex run with no `mach-lookup`.
   Pending: Mac acceptance 2. If not, the profile gets the smallest list of
   services that the program needs, in the code PR, with the evidence.
 
 ## External writes
 
-None. The isolation writes files in the data folder, loads and removes
-launchd jobs of its own label, and sends signals to processes of the
-coalition of the session.
+The isolation loads and removes launchd jobs (state of launchd outside the
+data folder). It also writes files in the data folder and sends signals to
+processes of the coalition of the session.
+
+The label of a job is fixed by the data folder and the session ID, and a
+session ID is never used again. So each retry and each recovery acts on
+the same label, and a job of one session never acts on another session.
+
+| Write | Success | Definite rejection | Unknown result (time-out, crash, lost answer) | Retry |
+|---|---|---|---|---|
+| `launchctl bootstrap` (the shim) | The job process connects; the hold runs | The shim exits with 1 (`failed`); `launch_failed` | The shim waits at most 1 second for the connection, then runs `bootout` and exits with 1. If the shim crashed, the job process finds no shim at the socket and exits before it writes the record, so no agent runs. The job can stay loaded with no process | Never: the launch does not retry a bootstrap. The reap calls `stop`, and `stop` runs `bootout` first |
+| `launchctl bootout` (`stop`) | The job is removed | "No such process" (the job is not loaded): taken as success | `stop` does not depend on it: `ended` reads the coalition, not launchd | Each `stop` runs `bootout` again, and the reap calls `stop` until the check passes. A new engine reaps each open session at its start (launcher spec), so it removes the job of each session that a crash left |
 
 ## Open questions
 
