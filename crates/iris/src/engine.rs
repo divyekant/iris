@@ -296,16 +296,24 @@ pub const UNDERSTAND_EVERY: Duration = Duration::from_secs(10);
 /// only pending mail, so a turn with nothing to do reads no message.
 fn understand_loop(store: Arc<Store>) {
     loop {
-        match crate::cost::after_sync(&store, now_ms()) {
-            Ok(crate::cost::AfterSync::Busy) => {
-                std::thread::sleep(BUSY_RETRY);
-                continue;
-            }
-            Ok(_) => {}
-            Err(e) => say!("iris: understand: {e}"),
-        }
-        std::thread::sleep(UNDERSTAND_EVERY);
+        std::thread::sleep(understand_turn(&store, now_ms()));
     }
+}
+
+/// One turn of the understanding thread. The answer is the time until the
+/// next turn. After each run, idle or not, the proposal step of matters
+/// runs with its hourly gate, so a mailbox that is already understood
+/// still gets proposals.
+pub fn understand_turn(store: &Store, now_ms: i64) -> Duration {
+    match crate::cost::after_sync(store, now_ms) {
+        Ok(crate::cost::AfterSync::Busy) => return BUSY_RETRY,
+        Ok(_) => {}
+        Err(e) => say!("iris: understand: {e}"),
+    }
+    if let Err(e) = crate::cost::propose_matters(store, iris_matters::Gate::Hourly, now_ms) {
+        say!("iris: matters: {e}");
+    }
+    UNDERSTAND_EVERY
 }
 
 /// The time between two turns of the attention thread.
@@ -316,9 +324,11 @@ pub const ATTENTION_EVERY: Duration = Duration::from_secs(10);
 /// each item ([`iris_policy::refresh_attention`]). It is apart from the
 /// understanding thread, because one understanding run can take hours.
 /// The same thread writes the rules that Iris proposes from the approvals
-/// of the person (spec 2 section 6.6, [`iris_policy::propose::refresh`]).
+/// of the person (spec 2 section 6.6, [`iris_policy::propose::refresh`]),
+/// and the notices by rule ([`iris_policy::notice::refresh`]).
 fn attention_loop(store: Arc<Store>) {
     let mut mark = None;
+    let system = crate::notify::spawn(crate::notify::show);
     loop {
         if let Err(e) = iris_policy::refresh_attention(&store, now_ms().div_euclid(1000)) {
             say!("iris: attention: {e}");
@@ -326,6 +336,15 @@ fn attention_loop(store: Arc<Store>) {
         if let Err(e) = iris_policy::propose::refresh(&store, now_ms().div_euclid(1000), &mut mark)
         {
             say!("iris: proposed rules: {e}");
+        }
+        // Notices by rule (R5-08): the row commits first, so a crash before
+        // the system notice still leaves the notice in the web client. The
+        // system notice runs on its own thread: this loop never waits for it.
+        match iris_policy::notice::refresh(&store, now_ms()) {
+            Ok(new) => new.into_iter().for_each(|n| {
+                let _ = system.try_send(n);
+            }),
+            Err(e) => say!("iris: notices: {e}"),
         }
         std::thread::sleep(ATTENTION_EVERY);
     }

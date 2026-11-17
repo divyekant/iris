@@ -19,6 +19,7 @@
   import Job from "./views/Job.svelte";
   import PolicyNotice from "./views/PolicyNotice.svelte";
   import SignInNotice from "./views/SignInNotice.svelte";
+  import Notices from "./views/Notices.svelte";
 
   let hash = $state(typeof location === "undefined" ? "" : location.hash);
   let route: Route = $derived(parse(hash));
@@ -66,6 +67,7 @@
 <main>
   {#if access.problem}<p class="problem" role="alert">{access.problem}</p>{/if}
   <SignInNotice />
+  <Notices />
   {#if access.none && !["home", "setup", "brief"].includes(route.view)}
     <p class="problem">Iris has no account yet. <a href="#/setup">Set up Iris</a> to copy your mail.</p>
   {/if}

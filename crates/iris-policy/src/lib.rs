@@ -1,6 +1,6 @@
 //! The policy file of Iris (spec 2, section 6): the rules in `policy.toml`
 //! that decide which actions apply without review, and which items the brief
-//! hides or bundles.
+//! hides or bundles, and which new mail gives a notice.
 //!
 //! This crate reads and checks the file, and evaluates actions and items.
 //! It keeps the active policy in `iris.db` and confirms a changed file
@@ -12,6 +12,7 @@ mod attention;
 pub use attention::{facts, refresh as refresh_attention, Facts, PASS_EVERY};
 mod edit;
 mod eval;
+pub mod notice;
 pub mod propose;
 
 pub use active::{
@@ -65,7 +66,7 @@ names!(
 
 names!(
     /// The effect of a rule.
-    Effect { Allow = "allow", Review = "review", Deny = "deny", Hide = "hide", Bundle = "bundle" }
+    Effect { Allow = "allow", Review = "review", Deny = "deny", Hide = "hide", Bundle = "bundle", Notify = "notify" }
 );
 
 impl Effect {
@@ -172,7 +173,7 @@ pub struct Rule {
     pub id: u32,
     pub name: String,
     pub effect: Effect,
-    /// Empty for `hide` and `bundle`.
+    /// Empty for `hide`, `bundle` and `notify`.
     pub verbs: Vec<Verb>,
     pub when: When,
     pub by: By,
@@ -377,9 +378,10 @@ fn check_rule(raw: RawRule, line: usize) -> Result<Rule, String> {
         "deny" => Effect::Deny,
         "hide" => Effect::Hide,
         "bundle" => Effect::Bundle,
+        "notify" => Effect::Notify,
         e => {
             return Err(format!(
-                "the effect \"{e}\" is not known; use allow, review, deny, hide or bundle"
+                "the effect \"{e}\" is not known; use allow, review, deny, hide, bundle or notify"
             ))
         }
     };

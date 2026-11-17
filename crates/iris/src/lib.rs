@@ -11,6 +11,7 @@ macro_rules! say {
 
 pub mod cost;
 pub mod engine;
+pub mod notify;
 pub mod socket;
 pub mod verbs;
 
@@ -212,6 +213,23 @@ pub enum Command {
         #[command(subcommand)]
         command: WatchCommand,
     },
+    /// The matters that Iris proposes and that you confirmed. Prints the
+    /// JSON of the local API (`/api/matters`).
+    Matters {
+        #[command(subcommand)]
+        command: Option<MattersCommand>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum MattersCommand {
+    /// The valid proposals and the confirmed matters (the default).
+    List,
+    /// One matter (`g-4`) with its members, by form.
+    Show { id: String },
+    /// Ask the model for new proposals now: at most one call, after the
+    /// wait of a model error, and only for a new set of candidates.
+    Propose,
 }
 
 #[derive(Subcommand)]
@@ -602,6 +620,18 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
         Command::Watch { command } => print(verbs::watch(&open()?, command)),
+        Command::Matters { command } => {
+            let store = open()?;
+            let text = match command.as_ref().unwrap_or(&MattersCommand::List) {
+                MattersCommand::Propose => {
+                    cost::propose_matters(&store, iris_matters::Gate::Now, engine::now_ms())?
+                        .ok_or("an understanding run holds the lock; try again later")?
+                }
+                c => verbs::matters(&store, c)?,
+            };
+            println!("{text}");
+            Ok(())
+        }
         Command::Backup { path } => {
             let files = open()?.backup(path).map_err(|e| format!("backup: {e}"))?;
             println!("iris: backup in {} ({files} content files)", path.display());

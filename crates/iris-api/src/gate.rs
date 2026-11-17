@@ -13,7 +13,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::read::{
-    declined_sql, decode_cursor, doc_of, encode_cursor, head, row_of, section_sql, MAX_LIMIT, SHOWN,
+    declined_sql, decode_cursor, doc_of, encode_cursor, head, row_of, section_sql, MATTER,
+    MAX_LIMIT, SHOWN,
 };
 use crate::{Error, Result};
 
@@ -160,7 +161,7 @@ pub(crate) fn read_gate(
              r AS (SELECT party.sender AS sid, g.id, g.at,
                           row_number() OVER (PARTITION BY party.sender ORDER BY g.at DESC, g.id DESC) AS k
                      FROM party JOIN g ON g.id = party.item WHERE party.sender IN ({ids}))
-             SELECT item.id, item.form, item.status, item.doc, r.sid FROM r JOIN item ON item.id = r.id
+             SELECT item.id, item.form, item.status, item.doc, r.sid, {MATTER} FROM r JOIN item ON item.id = r.id
               WHERE r.k <= {GATE_ITEMS} ORDER BY r.sid, r.at DESC, r.id DESC"
         ))?;
         for row in st.query_map([], |r| Ok((r.get::<_, i64>(4)?, doc_of(r)?)))? {

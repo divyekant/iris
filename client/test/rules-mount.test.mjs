@@ -28,7 +28,7 @@ test("Add the rule sends the version and the proposal ID, and the new policy has
     button(view, "Add the rule").click();
     await until(() => view.target.querySelectorAll(".proposal").length === 1);
     assert.deepEqual(asked, [["/api/policy/accept", { version: 3, id: 1 }]]);
-    assert.match(text(view.target), /Archive mail from deals@acme\.example .*Rule 6 · line 40 · Iris proposed it/);
+    assert.match(text(view.target), /Archive mail from deals@acme\.example .*Rule 10 · line 40 · Iris proposed it/);
   } finally {
     view.destroy();
   }

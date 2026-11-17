@@ -1,4 +1,4 @@
-//! Migration 17: the verbs `draft` and `send`, and the tables `draft`,
+//! Migration 18: the verbs `draft` and `send`, and the tables `draft`,
 //! `action_draft` and `ledger_send` (docs/specs/2026-11-16-send.md).
 
 use std::fs;
@@ -79,16 +79,17 @@ fn an_old_store_gets_the_new_verbs() {
             include_str!("../src/schema_14.sql"),
             include_str!("../src/schema_15.sql"),
             include_str!("../src/schema_16.sql"),
+            include_str!("../src/schema_17.sql"),
         ] {
             c.execute_batch(sql).unwrap();
         }
-        c.pragma_update(None, "user_version", 16).unwrap();
+        c.pragma_update(None, "user_version", 17).unwrap();
         add_action(&c, "archive").unwrap();
         assert!(add_action(&c, "send").is_err());
     }
     let s = Store::open(&dir.0).unwrap();
     s.write(|tx| {
-        assert_eq!(iris_store::schema_version(tx)?, 17);
+        assert_eq!(iris_store::schema_version(tx)?, 18);
         let n: i64 = tx.query_row(
             "SELECT count(*) FROM changeset_action WHERE verb = 'archive'",
             [],
