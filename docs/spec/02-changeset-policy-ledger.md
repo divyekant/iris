@@ -670,7 +670,10 @@ The pass also proposes a `hide` rule from the choices of the person
 - The engine proposes the rule when 10 or more choices count and no
   refusal counts. A refusal that the engine cannot read again stops each
   `hide` proposal of its form.
-- The row has `verb = 'hide'` and the `form` (store migration 23).
+- An undone choice whose item, origin message, header or sender cannot
+  be read again stops each `hide` proposal of its form.
+- The row has `verb = 'hide'` and the `form` (store migration 23). An
+  `allow` row has the form `''`.
 
 Failure list of the proposals:
 

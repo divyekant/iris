@@ -61,8 +61,10 @@ cannot tell which sender the person wants to see.
 - The web client calls `POST /api/items/<id>/<verb>`, as for `close`. The
   engine makes a changeset of the author `person` with one action, and
   applies it in the same request through `iris_apply::apply_state`.
-- An item that the verb cannot change (another form, or another status)
-  fails the ledger entry, and the API answers 409 with the reason.
+- An item of another form: the submit denies the action, nothing stays,
+  and the API answers 400 with the reason, as for `close` on a feed item.
+- An item of another status: the ledger entry fails, and the API answers
+  409 with the reason.
 - The ledger entry has `pre` and `post` of the field `status`, so the
   undo of #226 can restore it.
 - The engine keeps a `muted` conversation muted when a new message
@@ -95,9 +97,12 @@ in the same read transaction:
 - The engine proposes the rule when 10 or more choices count and no
   refusal counts. A refusal is an `undone` action whose item the rule
   would hide.
-- An action whose item or origin message cannot be read again (a
-  cleanup deleted it) is not counted. If it is a refusal, it stops each
-  `hide` proposal of its form.
+- An action is unreadable when its item, the origin message of the item,
+  the `header` row of that message or a sender address in it is missing
+  (a cleanup of a gone message deletes the header, spec 1 section 5.5,
+  and keeps the message row). An unreadable choice is not counted. An
+  unreadable refusal stops each `hide` proposal of its form, because the
+  engine cannot tell which sender it refused.
 
 This is the invariant of R5-01 for attention: the count is exactly the
 number of choices that the rule, in the active policy, would have made.
@@ -110,13 +115,18 @@ Migration 23 also makes `rule_proposal` hold a `hide` proposal:
 
 - The column `verb` accepts `hide`. For a `hide` row, the verb is the
   effect of the rule.
-- A new column `form` (`feed`, `conversation` or `signal`). It is NULL
-  for an `allow` row, and required for a `hide` row. The CHECK enforces
-  both.
+- A new column `form`, NOT NULL: `feed`, `conversation` or `signal` for
+  a `hide` row, and the empty text `''` for an `allow` row. The CHECK
+  enforces both. The column is never NULL, because SQLite treats two NULL
+  values as different in a unique key.
 - The unique key becomes `(verb, cond, value, form)`. SQLite cannot
-  change a key in place, so the migration makes the table again, copies
-  each row with its ID, and makes the two triggers again. The
-  AUTOINCREMENT counter goes with the table name, so no ID is used again.
+  change a key in place, so the migration makes a new table, copies each
+  row with its ID, drops the old table, renames the new one, and makes
+  the two triggers again.
+- No ID is used again: before the drop, the migration reads the `seq` of
+  the old table in `sqlite_sequence` (the highest ID ever given, also when
+  that row was deleted). After the rename, it writes the larger of that
+  value and the highest copied ID as the `seq` of the new table.
 - The column `approvals` keeps its name. For a `hide` row it is the
   number of choices.
 
@@ -156,16 +166,19 @@ the item view, and the new sentence, for dk to pick a layout.
 
 Supported input: the person's own actions of the three verbs, through the
 local API. All other input fails closed: the API refuses an unknown verb
-(404), a body with an unknown field (400), and an item that the verb
-cannot change (409, no change).
+(404), a body with an unknown field (400), an item of another form (400)
+and an item of another status (409). None of these changes an item.
 
 | Input or event | Failure mode | Safe result | Test |
 |---|---|---|---|
-| A verb on an item of another form or status | A wrong status | The ledger entry fails, 409, the item does not change | API test for each verb |
+| A verb on an item of another form | A wrong status | The submit denies it, 400, nothing stays | API test for each verb |
+| A verb on an item of another status | A wrong status | The ledger entry fails, 409, the item does not change | API test for each verb |
 | Two requests for the same item at once | Two entries | The store write lock orders them. The second sees the new status and fails with 409 | API test, second call |
 | A crash after the apply | No answer | The entry and the status commit in one transaction, or neither does | Existing `apply_state` test |
 | A choice after the last pass | An accept with a stale count | `current` counts again in the accept transaction (R5-01) | Unit test of `current` with a new refusal |
-| A refusal whose item is gone | The refusal is lost | It stops each `hide` proposal of its form | Unit test |
+| A refusal whose item, origin message, header or sender is gone | The refusal is lost | It stops each `hide` proposal of its form | Unit test |
+| Two passes with the same decisions | A second open row for the same rule | `form` is never NULL, so the unique key holds and the upsert updates the row | Unit test |
+| Migration 23 after a deleted proposal | A new proposal gets the ID of a deleted one, and a stale accept names another rule | The migration keeps the `seq` of `sqlite_sequence` | Migration test |
 | A choice on hostile mail | A rule learned from an attack | No candidate, no count | Unit test |
 | A sender address that a rule cannot hold | A proposal that the file refuses | `check_sender` refuses it; no candidate | Unit test |
 | An old program reads the new table | It reads a `hide` row as a verb | `open` skips a row that it cannot read (R5-01) | Existing behavior |
@@ -260,7 +273,12 @@ Migration 23 runs on the first start of the new program. No flag.
 - API tests for each verb: the status move, 409 for another form or
   status, 404 for an unknown verb.
 - A migration test: a store at migration 22 with proposals keeps each
-  row and ID.
+  row and ID. With IDs 1 and 2 kept and ID 3 deleted before the
+  migration, the next proposal gets ID 4.
+- A repeated pass test: two passes with the same decisions leave one
+  open row for each `allow` and each `hide` proposal.
+- A cleanup test: an undone choice whose origin header is gone stops
+  each `hide` proposal of its form.
 
 ## Spec checks
 
