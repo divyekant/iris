@@ -29,6 +29,7 @@ mod drafts;
 mod export;
 pub mod gate;
 mod jobs;
+mod ledger;
 mod matters;
 mod notice;
 mod outbox;
@@ -43,6 +44,7 @@ pub use auth::{Auth, SIGN_IN};
 pub use drafts::write_drafts;
 pub use export::{export, Exported};
 pub use jobs::*;
+pub use ledger::{ledger, undo_entry, LedgerEntry, LedgerPage};
 pub use matters::{confirm_matter, decline_matter, matter, matters};
 pub use notice::*;
 pub use outbox::{cancel_send, outbox, Cancelled, MAX_SENDS};
@@ -136,6 +138,8 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/brief", get(get_brief))
         .route("/api/brief/{section}", get(get_brief_section))
         .route("/api/handled", get(get_handled))
+        .route("/api/ledger", get(get_ledger))
+        .route("/api/ledger/{id}/undo", post(post_undo))
         .route("/api/gate", get(get_gate))
         .route("/api/gate/declined", get(get_declined))
         .route("/api/senders/{id}/{answer}", post(post_answer))
@@ -209,6 +213,23 @@ async fn get_handled(
     let q = query(q)?;
     let page = handled(&s, q.limit.unwrap_or(50), q.after.as_deref())?;
     Ok(Json(page).into_response())
+}
+
+async fn get_ledger(
+    State(s): State<Arc<Store>>,
+    q: std::result::Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
+    Ok(Json(ledger(&s, q.limit.unwrap_or(50), q.after.as_deref())?).into_response())
+}
+
+/// The person undoes a ledger entry (specification 2, section 7.4).
+async fn post_undo(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    _: NoBody,
+) -> Result<Response> {
+    Ok(undo_entry(&s, &id, now_ms())?.map_or_else(not_found, |e| Json(e).into_response()))
 }
 
 async fn get_changesets(State(s): State<Arc<Store>>) -> Response {

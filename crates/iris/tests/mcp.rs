@@ -545,7 +545,6 @@ const NOT_TOOLS: &[&str] = &[
     "understand",
     "mcp",
     "matters_propose",
-    // `iris write` (R3-05) asks the model for a draft: it spends model budget.
     "write",
 ];
 
