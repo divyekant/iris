@@ -406,6 +406,7 @@ async fn a_reply_shows_the_conversation() {
                 [i],
             )?;
         }
+        tx.execute("INSERT INTO link_check(message_id) VALUES (?1)", [n])?;
         // A newer draft and a newer mail in the trash.
         for (i, label) in [(n + 1, "DRAFT"), (n + 2, "TRASH")] {
             tx.execute(
@@ -435,7 +436,9 @@ async fn a_reply_shows_the_conversation() {
     assert_eq!(v["parent"]["id"], *ids.last().unwrap());
     let last = mails.last().unwrap();
     assert_eq!(last["you"], true);
-    assert_eq!(last["hostile"], false);
+    // The parent waits for its link check: it counts as hostile mail.
+    assert_eq!(last["hostile"], true);
+    assert_eq!(mails[mails.len() - 2]["hostile"], false);
     assert_eq!(last["cut"], true);
     assert_eq!(
         last["text"].as_str().unwrap().chars().count(),

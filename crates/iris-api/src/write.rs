@@ -251,16 +251,22 @@ fn conversation(c: &Connection, thread: i64) -> rusqlite::Result<(Vec<Value>, i6
     })?;
     let mut st = c.prepare(&format!(
         "SELECT m.id, EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                              WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
-         {ANSWERABLE} ORDER BY m.internal_date DESC, m.id DESC LIMIT ?2"
+                              WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
+                {}
+         {ANSWERABLE} ORDER BY m.internal_date DESC, m.id DESC LIMIT ?2",
+        iris_store::may_be_hostile!()
     ))?;
     let rows = st
         .query_map(rusqlite::params![thread, CONVERSATION as i64], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?))
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, bool>(1)?,
+                r.get::<_, bool>(2)?,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut out = Vec::with_capacity(rows.len());
-    for (row, you) in rows.into_iter().rev() {
+    for (row, you, marked) in rows.into_iter().rev() {
         let Some(m) = message_in(c, row)? else {
             continue;
         };
@@ -272,7 +278,8 @@ fn conversation(c: &Connection, thread: i64) -> rusqlite::Result<(Vec<Value>, i6
             "to": m.to,
             // The label `SENT` says that the person wrote the mail (section 5).
             "you": you,
-            "hostile": !m.hostile.is_empty() || m.sender_kind == "hostile",
+            // A hostile mark, a link check that waits, or a hostile sender.
+            "hostile": marked || m.sender_kind == "hostile",
             "text": text.map(|t| cut(t, MAIL_TEXT)),
             "cut": text.is_some_and(|t| t.chars().nth(MAIL_TEXT).is_some()),
         }));
