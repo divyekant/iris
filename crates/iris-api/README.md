@@ -4,8 +4,9 @@ The local API of Iris (tracker item R1-17). The API gives the web client
 and the read verbs of the `iris` program their data from the store. The API
 reads only, except the policy changes of the web client (see
 [Policy](#policy)), the review of the person: decisions and withdraws
-(see [Review](#review)), and the state verbs of the person (see
-[State verbs](#state-verbs)).
+(see [Review](#review)), the state verbs of the person (see
+[State verbs](#state-verbs)), and the cancel of a send in the outbox (see
+[Outbox](#outbox)).
 
 ## Use
 
@@ -168,6 +169,18 @@ or `deferred`. For another item, the answer is a 409 with the reason, and the
 ledger keeps a `failed` entry. A body that is not valid (for example, a date
 that is not valid) is a 400, and nothing is written. An ID that no item has,
 or another verb, is a 404.
+
+## Outbox
+
+The outbox holds each send that a person approved and that waits for its
+hold or for the send switch (spec `docs/specs/2026-11-17-held-outbox.md`,
+sections 5 and 6). The API reads the switch. It cannot change it: only
+`iris sending on|off` at the terminal changes it.
+
+| Endpoint | Does |
+|---|---|
+| `GET /api/outbox?limit=&after=` | Gives `{"sending": {"on", "since"}, "count", "sends", "next"}`. `count` is the number of all sends that wait. `sends` is one page in the order of the action ID: `limit` 1 to 200 (default 200). `next` is the `after` of the next page, or `null` on the last page. Each send has `draft` (`d-N`), `state` (`approved` or `held`), `approved`, `leaves` (`null` while sending is off), `flags`, and `to`, `cc` and `subject` from the stored raw bytes of the draft. A draft that Iris cannot read has `"readable": false` and no recipients. One answer is one snapshot of the store. |
+| `POST /api/outbox/{d-N}/cancel` | No body. Cancels the open send of the draft: the send becomes `denied` by `person` with the reason "Cancelled in the outbox.". The answer is `{"cancelled": "d-N"}`. If the release claimed the send, the answer is a 409 "The send started. It cannot be cancelled.", and nothing changes. A draft with no send that waits, or an ID that is not a draft, is a 404. |
 
 ## Stranger gate
 

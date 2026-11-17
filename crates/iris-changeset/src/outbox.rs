@@ -67,3 +67,27 @@ pub fn cancel(store: &Store, action: i64, now_ms: i64) -> Result<Cancel> {
         })
     })
 }
+
+/// The open send of the draft `draft` (a `d-N` row ID): the newest send in
+/// `approved` or `held`, else the newest send of the draft. `None` if the
+/// draft has no send.
+pub fn send_of_draft(c: &rusqlite::Connection, draft: i64) -> rusqlite::Result<Option<i64>> {
+    use rusqlite::OptionalExtension;
+    c.query_row(
+        "SELECT a.id FROM action_draft ad JOIN changeset_action a ON a.id = ad.action_id
+         WHERE ad.draft_id = ?1 AND a.verb = 'send'
+         ORDER BY a.state IN ('approved', 'held') DESC, a.id DESC LIMIT 1",
+        [draft],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+/// The cancel of the send of the draft `draft` (`iris cancel d-N` and the
+/// outbox of the web client). `None` if the draft has no send.
+pub fn cancel_draft(store: &Store, draft: i64, now_ms: i64) -> Result<Option<Cancel>> {
+    let Some(action) = store.read(|c| Ok(send_of_draft(c, draft)?))? else {
+        return Ok(None);
+    };
+    cancel(store, action, now_ms).map(Some)
+}

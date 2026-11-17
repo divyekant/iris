@@ -760,6 +760,7 @@ dependencies = [
  "getrandom 0.4.3",
  "iris-apply",
  "iris-changeset",
+ "iris-compose",
  "iris-job",
  "iris-matters",
  "iris-model",

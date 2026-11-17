@@ -31,6 +31,7 @@ pub mod gate;
 mod jobs;
 mod matters;
 mod notice;
+mod outbox;
 pub mod policy;
 mod read;
 mod review;
@@ -43,6 +44,7 @@ pub use export::{export, Exported};
 pub use jobs::*;
 pub use matters::{confirm_matter, decline_matter, matter, matters};
 pub use notice::*;
+pub use outbox::{cancel_send, outbox, Cancelled, MAX_SENDS};
 pub use read::*;
 pub use review::*;
 pub use verbs::*;
@@ -164,6 +166,8 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/notices/{id}/done", post(post_notice_done))
         .route("/api/watches", get(get_watches).post(post_watch))
         .route("/api/watches/{id}/remove", post(post_watch_remove))
+        .route("/api/outbox", get(get_outbox))
+        .route("/api/outbox/{draft}/cancel", post(post_outbox_cancel))
         .route("/api/matters", get(get_matters))
         .route("/api/matters/{id}", get(get_matter))
         .route("/api/matters/{id}/confirm", post(post_matter_confirm))
@@ -745,6 +749,39 @@ async fn post_notice_done(
         return Ok(not_found());
     }
     Ok(Json(serde_json::json!({ "done": id })).into_response())
+}
+
+async fn get_outbox(
+    State(s): State<Arc<Store>>,
+    q: std::result::Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
+    Ok(Json(outbox(
+        &s,
+        q.limit.unwrap_or(MAX_SENDS),
+        q.after.as_deref(),
+    )?)
+    .into_response())
+}
+
+/// Cancel the send of a draft (`d-N`) in the outbox. 409 if the release
+/// claimed it, 404 if the draft has no send that waits.
+async fn post_outbox_cancel(
+    State(s): State<Arc<Store>>,
+    Path(draft): Path<String>,
+    _: NoBody,
+) -> Result<Response> {
+    let Some((iris_store::Kind::Draft, row)) = iris_store::parse_id(&draft) else {
+        return Ok(not_found());
+    };
+    Ok(match cancel_send(&s, row, now_ms())? {
+        Cancelled::Done => Json(serde_json::json!({ "cancelled": draft })).into_response(),
+        Cancelled::Started => error(
+            StatusCode::CONFLICT,
+            "The send started. It cannot be cancelled.",
+        ),
+        Cancelled::NotOpen => not_found(),
+    })
 }
 
 async fn get_watches(State(s): State<Arc<Store>>) -> Result<Response> {
