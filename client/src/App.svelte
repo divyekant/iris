@@ -253,7 +253,7 @@
   /* The Mac app (apps/mac) sets data-shell="mac": the window buttons sit at
      the left of this bar, and the menu bar of the Mac names the app. */
   :global(:root[data-shell="mac"]) header {
-    padding-left: calc(var(--space-16) + var(--space-6));
+    padding-left: calc(var(--space-16) + var(--space-8));
   }
   :global(:root[data-shell="mac"]) .name {
     display: none;

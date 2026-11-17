@@ -47,6 +47,6 @@ test("the top bar makes room for the window buttons of the Mac app", async () =>
   assert.match(html, /<header[^>]*data-tauri-drag-region/);
   const { readFile } = await import("node:fs/promises");
   const source = await readFile(new URL("../src/App.svelte", import.meta.url), "utf8");
-  assert.match(source, /:global\(:root\[data-shell="mac"\]\) header \{\s*padding-left: calc\(var\(--space-16\) \+ var\(--space-6\)\);/);
+  assert.match(source, /:global\(:root\[data-shell="mac"\]\) header \{\s*padding-left: calc\(var\(--space-16\) \+ var\(--space-8\)\);/);
   assert.match(source, /:global\(:root\[data-shell="mac"\]\) \.name \{\s*display: none;/);
 });
