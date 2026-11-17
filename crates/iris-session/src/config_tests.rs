@@ -380,3 +380,29 @@ fn the_agent_env_has_only_the_listed_variables() {
         assert!(!env.keys().any(|k| k.starts_with("IRIS")));
     }
 }
+
+/// The program is looked up only in the absolute folders of the PATH of
+/// the engine: a relative or empty entry depends on the working folder of
+/// the engine, which is not fixed for a service, so it is skipped.
+#[test]
+fn a_relative_path_entry_is_skipped() {
+    let bin = Bin::new("rel", &["my-tool"]);
+    let f = parse_agents("[agent.mine]\ncommand = [\"my-tool\"]\n").unwrap();
+    let rel = bin.0.strip_prefix("/").unwrap();
+    for path in [
+        format!("{}", rel.display()),
+        String::new(),
+        format!(":{}", rel.display()),
+    ] {
+        // Each entry names the same folder only when the working folder is /.
+        assert!(
+            adapter(&f, "mine", Some(OsStr::new(&path))).is_err(),
+            "{path:?}"
+        );
+    }
+    let abs = format!("/no/such:{}", bin.0.display());
+    assert_eq!(
+        adapter(&f, "mine", Some(OsStr::new(&abs))).unwrap().program,
+        bin.0.join("my-tool")
+    );
+}

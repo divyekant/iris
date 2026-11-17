@@ -130,6 +130,11 @@ agent. The prompt is fixed text. It holds no mail text and no goal text:
 | `codex` | `codex exec --sandbox workspace-write --skip-git-repo-check <prompt>` (the workspace is not a Git repository; `codex exec --help` lists the flag) |
 | `<name>` from `agents.toml` | The `command` list of the file, then the prompt as the last argument. |
 
+The engine finds the program of an adapter by its absolute path, or in the
+absolute folders of its own `PATH`. It skips a relative folder or an empty
+entry of `PATH`, because the working folder of the engine is not fixed (a
+service). The program must be an executable file.
+
 The file `<data dir>/agents.toml` is optional:
 
 ```toml
