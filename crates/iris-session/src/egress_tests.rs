@@ -4,6 +4,7 @@
 use super::*;
 use std::io::{BufRead, BufReader};
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::time::Instant;
 
 /// A small random number source for the property tests.
 struct Rng(u64);
@@ -361,4 +362,66 @@ fn a_stop_closes_each_open_connection() {
     let mut buf = [0u8; 8];
     assert_eq!(s.read(&mut buf).unwrap_or(0), 0);
     assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+}
+
+/// A resolver that never answers, as a stalled system DNS.
+struct Stalled;
+
+impl Resolve for Stalled {
+    fn resolve(&self, _host: &str, _port: u16) -> io::Result<Vec<SocketAddr>> {
+        loop {
+            thread::park();
+        }
+    }
+}
+
+#[test]
+fn a_stop_does_not_wait_for_a_stalled_resolver() {
+    let log = std::env::temp_dir().join(format!("iris-egress-stall-{}.log", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+    let guard = LogFile(log.clone());
+    let file = File::options().create_new(true).append(true).open(&log).unwrap();
+    let proxy = Proxy::start_with(allowed(), file, Box::new(Stalled), false, LOG_LIMIT).unwrap();
+    let mut s = TcpStream::connect(("127.0.0.1", proxy.port())).unwrap();
+    s.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\n\r\n").unwrap();
+    thread::sleep(Duration::from_millis(200));
+    let t = Instant::now();
+    proxy.stop().unwrap();
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    assert!(log_text(&guard).contains("host=api.example.test up=0 down=0 result=stopped"));
+}
+
+/// Each accepted connection writes exactly one log line, whatever the
+/// client does: a random mix of early closes, part heads, refusals and
+/// tunnels, then a stop with some of them still open.
+#[test]
+fn each_connection_writes_one_log_line() {
+    let mut r = Rng(5);
+    for round in 0..4 {
+        let b = proxy(&format!("one-{round}"), echo(), false, LOG_LIMIT);
+        let mut held = Vec::new();
+        let n = 6;
+        for _ in 0..n {
+            let mut s = TcpStream::connect(("127.0.0.1", b.proxy.port())).unwrap();
+            match r.next(5) {
+                0 => {}
+                1 => s.write_all(b"CONNECT api.exa").unwrap(),
+                2 => s.write_all(b"CONNECT evil.test:443 HTTP/1.1\r\n\r\n").unwrap(),
+                3 => s.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\n\r\nhi").unwrap(),
+                _ => {
+                    s.write_all(b"CONNECT api.exa").unwrap();
+                    held.push(s);
+                    continue;
+                }
+            }
+            if r.next(2) == 0 {
+                held.push(s);
+            }
+        }
+        thread::sleep(Duration::from_millis(200));
+        b.proxy.stop().unwrap();
+        let text = log_text(&b.log);
+        assert_eq!(text.lines().count(), n, "{text}");
+        drop(held);
+    }
 }
