@@ -152,6 +152,7 @@ account. R6-10 decides where this compare lives.
 | `move_to(id, folder)` | `POST /me/messages/{id}/move` `{"destinationId"}` | 201, the message |
 | `create_draft(mime)` | `POST /me/messages`, `text/plain`, base64 MIME | 201, the draft |
 | `send_mime(mime)` | `POST /me/sendMail`, `text/plain`, base64 MIME | 202, no body |
+| `sent_by_message_id(id)` | `GET /me/mailFolders/sentitems/messages?$filter=internetMessageId eq '<id>'` (a read) | 200, at most one message |
 | `draft_etag(id)` | `GET /me/messages/{id}?$select=id` | 200, the `@odata.etag` |
 | `delete_draft(id, etag)` | `DELETE /me/messages/{id}` with `If-Match: <etag>` | 204, or 412 |
 
@@ -177,8 +178,21 @@ of a send does these steps:
    gone (404), or its etag is not the kept etag, the person or another
    client changed it: the release denies the send ("The draft changed
    after the approval."), as spec 2 section 7.5 and the send spec require.
-3. `send_mime` sends the stored bytes.
-4. `delete_draft` deletes the server draft with `If-Match` and the kept
+3. The claim of spec `2026-11-16-send.md` section 5, step 3 (the ledger
+   row in `writing` and the `ledger_send` row), then `send_mime` with the
+   stored bytes. The answer 202 has no message ID, so the row stays in
+   `writing`.
+4. The completion finds the sent copy: `sent_by_message_id(id)` lists
+   `sentitems` with `$filter=internetMessageId eq '<id>'` (A15), and
+   reads the `$value` of the copy. It runs the content check of the send
+   spec section 6 (the fields of the content hash, the headers that
+   change who gets the message), and sets the ledger row `applied` or
+   writes the error "Outlook sent other content than the approved
+   content". If no copy is there yet, the row stays in `writing`, and
+   each later recovery turn searches again. Recovery never calls
+   `send_mime` again. After 24 hours with no copy, the row fails with
+   the unknown result kept, as for Gmail (issue #280).
+5. After the completion, `delete_draft` deletes the server draft with `If-Match` and the kept
    etag, so that the person does not send it a second time from Outlook.
    A draft that changed after step 2 gives 412, and Iris leaves it in
    place. A failed delete leaves a draft and changes no sent mail.
@@ -200,6 +214,18 @@ This mapping is a proposal for R6-10, which owns the provider interface:
 
 Archive in Iris is a move to the well-known `archive` folder. Inbox is a
 move to `inbox`. Trash is a move to `deleteditems`.
+
+Iris moves only a message that is in `inbox`, `archive` or
+`deleteditems`. An `archive`, `inbox` or `trash` of a
+message in any other folder (a user folder, `junkemail`, `sentitems`)
+gets a definite refusal before any write. Thus the folder of a message
+before a move is always one of these three, and the mirror labels of
+spec 2 stay inverse pairs: the ledger `pre` labels (`INBOX`, no label for
+`archive`, `TRASH`) name the folder, and the undo of spec 2 moves the
+message back to that folder. For example, a trash of an archived message
+records no `INBOX` label, so the undo moves it from `deleteditems` to
+`archive`. The read state, the flag and the categories are not moves, and
+work in each folder. R6-10 keeps the same rule for each folder provider.
 
 ### 7. Sign-in
 
@@ -331,6 +357,14 @@ Each assumption has the evidence of a Microsoft Learn page, read on
   page does not state it). The release gate tests it on the real mailbox.
   If Graph ignores `If-Match`, Iris turns off category writes for Outlook
   accounts (label and unlabel give a definite refusal), and the rest works.
+- A15. A list of a folder with `$filter=internetMessageId eq '<id>'`
+  finds the sent copy, and the `$value` of the copy keeps the fields of
+  the content hash. Evidence: `pending`; the release gate tests it. If the
+  filter fails, the completion lists the newest page of `sentitems` and
+  compares `internetMessageId`. If the content changes at Graph (for
+  example a converted body), the completion writes the content error and
+  each later release stops, as the send spec requires: no wrong send is
+  marked good.
 - A13. An app registration needs an Entra tenant; a person with only a
   personal Microsoft account makes one with a free Azure account. Evidence:
   <https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app>.
@@ -353,7 +387,7 @@ section 7.3). The caller reconciles with reads only.
 | `set_categories` | the answer has the new list | `Error::Api`; 412 means the message changed after the read: nothing changed | as `set_read` | after 412 only: one new read and one new PATCH |
 | `move_to` | 201 with the moved message | `Error::Api` | the caller reads the message: the target folder means applied; any other folder keeps the result unknown, and Iris tells the person | never after an unknown result |
 | `create_draft` | 201 with the draft ID | `Error::Api` | a draft can exist. The caller searches `drafts` for its `Message-ID` header: found means created, not found means failed | never after an unknown result |
-| `send_mime` | 202 | `Error::Api` | the ledger keeps the claim, and the caller looks in `sentitems` for the `Message-ID` (spec 2 section 7.5) | never |
+| `send_mime` | 202: the row stays in `writing` until the completion finds and checks the sent copy (section 5) | `Error::Api`; the row fails and the claim goes, as in the send spec | the ledger keeps the claim; recovery searches `sentitems` for the `Message-ID` and runs the completion (spec 2 section 7.5) | never |
 | `delete_draft` | 204 | `Error::Api`; 404 means the draft is gone, which is the target; 412 means the draft changed, and Iris leaves it | the caller reads the draft: 404 means deleted, else the draft stays | never after an unknown result |
 
 ## Open questions
