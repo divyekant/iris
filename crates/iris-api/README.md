@@ -89,6 +89,14 @@ for an item in `items`, the IDs of the newer items whose `duplicate_of` is that
 item (specification 1, section 7.5). The brief shows such a pair once, so the
 newer item is not in `items` and not in `count`.
 
+An item of a list field, of a bundle or of a page of `/api/brief/{section}`
+has `"ready": ["draft"]` when Iris prepared a reply for it (card R3-09): the
+thread of the mail that made the item has a reply draft of `iris write`, and
+the draft is not stale. A draft is stale when the thread has a newer message
+than the one that the draft answers, when its newest message is gone, or when
+a message of the thread is hostile or waits for understanding. With nothing
+ready, the item has no `ready` field.
+
 The attention of an item (specification 2, section 6.4) decides where it
 shows. Each item that a list field or `records` would have is in exactly one
 place: its list field or `records` when its `attention.state` is `shown` or

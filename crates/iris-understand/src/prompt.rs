@@ -233,6 +233,7 @@ fn item(src: &Map<String, Value>, a: &Analysis, cx: &Context) -> Option<Draft> {
         "sources",
         "same_as",
         "matter",
+        "ready",
         "attention",
     ] {
         m.remove(k);

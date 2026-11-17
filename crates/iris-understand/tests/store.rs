@@ -1911,6 +1911,7 @@ fn a_refused_correction_writes_nothing() {
         (&id, "title", json!("Other")),
         (&id, "sources.0.quote", json!("x")),
         (&id, "derived", json!({"by": "person"})),
+        (&id, "ready", json!(["draft"])),
         (&id, "", json!("x")),
         (&id, "due..date", json!("2026-01-09")),
         (&id, "due.date", json!("Friday")),

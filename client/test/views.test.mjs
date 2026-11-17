@@ -68,7 +68,7 @@ test("the brief lists what you owe, what is owed to you, and conversations, each
 test("what you owe in 2 days or less, or late, leads the brief, and You owe lists the rest", async () => {
   const t = text(await render("/src/views/Brief.svelte", { brief: fx.brief, now: NOW }));
   // The due section comes before the review and before You owe.
-  assert.match(t, /Due soon 1 Review contract section 4 Dana Whitfield ?, due tomorrow Waits for your review/);
+  assert.match(t, /Due soon 1 Review contract section 4 Dana Whitfield ?, due tomorrow Draft ready Waits for your review/);
   assert.match(t, /You owe 1 Pay invoice .* All 2 Owed to you/);
   // A late thing is due soon too; a thing due in 3 days is not.
   const at = (date) => ({ ...item("c-311"), due: { date } });
