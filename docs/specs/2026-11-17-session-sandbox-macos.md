@@ -229,7 +229,7 @@ The profile starts with `(deny default)` and allows only these:
 | `file-read*` | The system folders: `/usr` without `/usr/local`, `/bin`, `/sbin`, `/System/Library`, `/System/Cryptexes`, `/System/Volumes/Preboot/Cryptexes`, `/Library/Apple`, `/private/var/db/dyld` (never all of `/System`: `/System/Volumes/Data` holds the home folders and the data folder); the device files `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`; in `/private/etc` only `hosts`, `passwd`, `group`, `localtime` and the public certificate files (`ssl/cert.pem`, `ssl/certs`); the adapter program file and the `iris` program file (each one a literal real path); the workspace; the private home and `/tmp` of the session |
 | `file-read-metadata` | The paths above, and each folder above them (literal paths), so that a program can resolve its paths |
 | `file-write*` | The workspace, the private home and `/tmp` of the session, `/dev/null` |
-| `network-outbound` | `(remote ip "localhost:<egress port>")` only, if the session has an egress port |
+| `network-outbound` | `(remote ip "localhost:<egress port>")`, if the session has an egress port; and `(remote unix-socket (path-literal "<workspace>/.iris/socket"))`, the session socket (launcher spec, goal 6), which each `iris` verb of the session uses. No other Unix socket |
 
 Each path in the profile is a real path (`canonicalize`). Seatbelt checks
 real paths, and macOS links `/tmp` and `/etc` to `/private`. The last rule
@@ -326,7 +326,8 @@ before the agent runs, or `ended` is false.
 | `SIGCONT` to a journal entry fails, or the process stays stopped | The entry stays; `stop` returns an error and the reap waits | Unit test: an entry whose read fails stays in the journal, and `stop` gives an error |
 | The agent reads the arguments or the environment of another process (`sysctl kern.procargs2`, `ps`) | Refused | Mac acceptance 1 |
 | The shim ends after the job process got the descriptors, before the agent starts | The record exists (it comes before the handoff), so `ended` reads the coalition | Unit test: the shim refuses the handoff with no record |
-| The agent connects to another port, a public address, UDP or a Unix socket | Refused | Mac acceptance 1 |
+| The agent connects to another port, a public address, UDP or a Unix socket other than its session socket | Refused | Mac acceptance 1 |
+| The agent runs `iris status` (the session socket `.iris/socket`) | Works | Mac acceptance 1 |
 | The agent calls `launchctl`, `open`, `pbpaste` or another system service | Refused (no `mach-lookup`) | Mac acceptance 1 |
 | The agent signals a process outside the sandbox | Refused | Mac acceptance 1 |
 | No GUI domain (no person signed in, for example an SSH session only) | `check` fails with the reason; `run` is refused | Unit test of the reason text |
@@ -352,8 +353,10 @@ before the agent runs, or `ended` is false.
   `Proxy::start` and the `407` answer.
 - `crates/iris-session/src/config.rs` or the launch: the token in
   `HTTPS_PROXY` of the agent environment.
-- The launcher spec, "Isolation": the macOS exception to the lifetime
-  rule (changed in this PR).
+- The launcher spec, "Isolation", goal 3 and the failure list: the macOS
+  exception to the lifetime rule (changed in this PR).
+- The Stop spec (`docs/specs/2026-11-17-stop.md`): what runs while the
+  engine is down on macOS (changed in this PR).
 - `docs/DEPLOYMENT.md`: the Mac needs a signed-in user (GUI domain).
 
 Memory: the shim is one more `iris` process for each session (a few MB)

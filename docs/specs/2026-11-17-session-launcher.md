@@ -25,7 +25,9 @@ command. Each tool has its own command line.
    scope, when the job leaves the state `working`, at the time limit of the
    session, and when the engine stops.
 3. When a session ends, no process of the session runs after the stop
-   time (see [Stop](#stop)).
+   time (see [Stop](#stop)). On macOS a process can run until a later
+   `stop` catches it, and the session is not reaped before (the macOS
+   exception in [Isolation](#isolation)).
 4. The launcher steps of the workspace spec hold: one open session for each
    job, a build before each session, a held process, and a start only if the
    session did not end.
