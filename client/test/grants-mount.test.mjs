@@ -100,7 +100,7 @@ test("an allow rule of the whole policy shows, and the page does not say that th
   const view = await mount("/src/views/Grants.svelte", { job: job() });
   await until(() => switches(view).length === 3);
   assert.match(text(view.target), /Also allowed by your whole policy/);
-  assert.match(text(view.target), /except for the changes that the rules of your whole policy below allow/);
+  assert.match(text(view.target), /unless a grant of this job or a rule of your whole policy below allows it/);
   assert.match(text(view.target), /rule 7/);
   view.destroy();
 });
@@ -127,5 +127,33 @@ test("a failed read of the policy shows the reason and Try again, not an empty l
   [...view.target.querySelectorAll("button")].find((b) => text(b).includes("Try again")).click();
   await until(() => switches(view).length === 3);
   assert.equal(view.target.querySelector("[role=alert]"), null);
+  view.destroy();
+});
+
+test("the note never says that each change needs you: also with a grant of the job and no rule of the whole policy", async () => {
+  serve(() => [200, policy([grant(1, ["trash"])])]);
+  const view = await mount("/src/views/Grants.svelte", { job: job() });
+  await until(() => switches(view).length === 3);
+  const note = text(view.target.querySelector(".note"));
+  assert.match(note, /unless a grant of this job or a rule of your whole policy below allows it/);
+  assert.doesNotMatch(note, /before each change to your mail\./);
+  view.destroy();
+});
+
+test("a change with a lost answer, then a failed read: the switches hide, and the page shows both reasons and Try again", async () => {
+  let reads = 0;
+  serve((path) => {
+    if (path !== "policy") return [502, { error: "No answer from the engine." }];
+    return ++reads === 1 ? [200, policy([])] : reads === 2 ? [500, { error: "The store is busy." }] : [200, policy([grant(20, [...s.GRANTS[0].verbs])])];
+  });
+  const view = await mount("/src/views/Grants.svelte", { job: job() });
+  await until(() => switches(view).length === 3);
+  switches(view)[0].click();
+  await until(() => (view.flushSync(), switches(view).length === 0));
+  assert.match(text(view.target.querySelector("[role=alert]")), /No answer from the engine\..*Iris cannot read your policy now.*The store is busy\./);
+  [...view.target.querySelectorAll("button")].find((b) => text(b).includes("Try again")).click();
+  await until(() => (view.flushSync(), switches(view).length === 3));
+  assert.ok(switches(view)[0].checked, "the grant that the lost answer made shows as on");
+  assert.equal(view.target.querySelector("[role=alert]"), null, "no old reason stays after the read");
   view.destroy();
 });

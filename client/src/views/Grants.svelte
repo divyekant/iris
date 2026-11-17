@@ -15,11 +15,13 @@
   let busy = $state(false);
   let problem = $state("");
 
+  // Invariant: the switches show only a policy that the page read after its last change. A failed read hides them.
   async function load() {
     failed = "";
     try {
       policy = await get<Policy>("policy");
     } catch (error) {
+      policy = null;
       failed = (error as Error).message;
     }
   }
@@ -38,8 +40,8 @@
       policy = await post<Policy>(path, { version: policy.version, ...body });
     } catch (error) {
       problem = (error as Error).message;
-      // The policy can be newer than the page (a 409): read it again, so that each switch shows the policy as it is.
-      await get<Policy>("policy").then((p) => (policy = p)).catch(() => {});
+      // The policy can be newer than the page (a 409), or the change can be done with a lost answer: read it again.
+      await load();
     } finally {
       busy = false;
     }
@@ -59,13 +61,12 @@
 <section aria-labelledby="grants">
   <h2 id="grants">Without asking you</h2>
   {#if failed}
-    <p class="error" role="alert">Iris cannot read your policy now, so the grants of this job do not show. {failed}</p>
-    <button class="quiet" type="button" onclick={load}>Try again</button>
+    <p class="error" role="alert">{#if problem}{problem} {/if}Iris cannot read your policy now, so the grants of this job do not show. {failed}</p>
+    <button class="quiet" type="button" onclick={() => ((problem = ""), load())}>Try again</button>
   {:else if policy && view}
     <p class="note">
       {#if !open}The job ended, so these grants allow nothing more.
-      {:else if view.general.length}The agent asks you before each change to your mail, except for the changes that the rules of your whole policy below allow. Allow more changes in this job only.
-      {:else}The agent asks you before each change to your mail. Allow some changes in this job only.{/if}
+      {:else}The agent asks you before each change to your mail, unless a grant of this job or a rule of your whole policy below allows it. Allow more changes in this job only.{/if}
       {#if policy.mode === "observe"}Iris is in observe mode now: it applies nothing, also with a grant.{/if}
     </p>
 
