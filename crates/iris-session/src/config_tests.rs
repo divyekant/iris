@@ -406,3 +406,38 @@ fn a_relative_path_entry_is_skipped() {
         bin.0.join("my-tool")
     );
 }
+
+/// A file with an execute bit that does not let the engine user run it is
+/// not a program, and the lookup goes on to the next folder of PATH (#432).
+/// Root can run a file with any execute bit, so the check of the first
+/// folder runs only for a user that is not root.
+#[test]
+fn the_lookup_skips_a_file_that_the_engine_cannot_run() {
+    let first = Bin::new("noexec-1", &["my-tool"]);
+    let second = Bin::new("noexec-2", &["my-tool"]);
+    // Only "others" may run the first file; the engine user owns it.
+    std::fs::set_permissions(
+        first.0.join("my-tool"),
+        std::fs::Permissions::from_mode(0o001),
+    )
+    .unwrap();
+    let path = std::env::join_paths([&first.0, &second.0]).unwrap();
+    let f = parse_agents("[agent.mine]\ncommand = [\"my-tool\"]\n").unwrap();
+    let got = adapter(&f, "mine", Some(&path)).unwrap();
+    // SAFETY: geteuid has no memory effects.
+    if unsafe { libc::geteuid() } != 0 {
+        assert_eq!(got.program, second.0.join("my-tool"));
+    }
+    // A file with no execute bit is refused for each user, root too.
+    std::fs::set_permissions(
+        second.0.join("my-tool"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        first.0.join("my-tool"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    assert!(adapter(&f, "mine", Some(&path)).is_err());
+}

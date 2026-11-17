@@ -13,6 +13,10 @@ publish.workspace = true
 test-isolation = []
 
 [dependencies]
+iris-job = { version = "0.0.0", path = "../iris-job" }
+iris-store = { version = "0.0.0", path = "../iris-store" }
+iris-workspace = { version = "0.0.0", path = "../iris-workspace" }
+rusqlite = "=0.43.0"
 serde = { version = "1", features = ["derive"] }
 toml = { version = "=0.9.8", default-features = false, features = ["std", "parse", "serde"] }
 # Already in Cargo.lock (through hyper). Parses the CONNECT request head.
@@ -23,3 +27,9 @@ libc = "=0.2.191"
 # tunnel, to check its server name. No handshake: the proxy reads only the
 # first message.
 rustls = { version = "=0.23.46", default-features = false, features = ["std", "ring"] }
+
+# The launch tests run their own main: the test program is also the hold
+# helper of each session that it launches.
+[[test]]
+name = "launch"
+harness = false

@@ -79,6 +79,10 @@ not have the label `SPAM` or `TRASH`.
 | `wait` | thread, or a date | until | none | not applicable | 5 |
 | `ask` | none | question, options | none | not applicable | 5 |
 
+Two verbs come only from an undo (section 7.4), never from an author: `untrash`
+(the undo of `trash`) and `restore` (the undo of a state verb). `restore`
+takes its ledger entry as the target and no arguments. It changes no mailbox.
+
 Iris has no verb for a permanent delete, and no verb to empty the trash.
 Gmail deletes a message in the trash for good after 30 days. After that time,
 the undo of `trash` is not possible, and the ledger shows the entry as final:
@@ -112,7 +116,10 @@ transaction:
   section 5.5). So the item is pinned, and a rebuild keeps the change.
 - A ledger row with the state `applied`, the old values as `pre` and the new
   values as `post` (section 7.1). `pre` and `post` map each item ID to its
-  fields, for example `{"c-7": {"status": "open"}}`.
+  fields, for example `{"c-7": {"status": "open"}}`. For `correct`, the
+  fields are the corrected field, its top-level value (for example `due` for
+  `due.date`) and `status`: a correction can change the siblings of the
+  field, and the undo sets them back.
 
 The engine applies each approved action of a state verb at the next tick,
 with no provider call. These rules apply:
@@ -137,10 +144,17 @@ the same request. If the submit denies the action (for example, a date that
 is not valid), nothing stays. If the engine stops before the apply, the next
 tick applies the approved action.
 
-The undo of the action sets the old values and deletes the correction row, in
-one transaction, with its own ledger row. If the current value is not the
-`post` value of the entry (a later action changed it), the undo changes
-nothing and lists the item. After the undo of a `correct` on a record with no
+The undo of the action is one action with the verb `restore` (section 7.4).
+Its apply sets the old values, sets the sender ID of each party from its
+address again, and deletes the correction rows of the entry (their IDs are in
+`ops`), in one transaction, with its own ledger row (the undo `none`), and
+the first entry becomes `undone`. The undo changes nothing on an item, and
+lists the item, if one of these is true:
+
+- The current value is not the `post` value of the entry.
+- The item is gone.
+- A later state entry that did not fail names the item, also with the same
+  values. After the undo of a `correct` on a record with no
 correction left, the status of the record goes back to `kept`.
 
 `correct` cannot change `status`, a common field of section 6.1 of
@@ -675,7 +689,7 @@ The pass also proposes a `hide` rule from the choices of the person
   `hide` proposal of its form.
 - An undone choice whose item, origin message, header or sender cannot
   be read again stops each `hide` proposal of its form.
-- The row has `verb = 'hide'` and the `form` (store migration 27). An
+- The row has `verb = 'hide'` and the `form` (store migration 28). An
   `allow` row has the form `''`.
 
 Failure list of the proposals:
@@ -703,13 +717,13 @@ or with a change of Iris state:
 | `id` | `l-` and a number. |
 | `action` | The action that the entry applies. One entry for each action. The changeset, the revision, the verb, the author and the decision (`rule` with its ID and the policy version of section 6.3, or `person`) come from the action row. That row does not change after the submit, and an applied action keeps the decision that approved it. |
 | `account` | The mailbox of the provider calls. None for a state verb. |
-| `ops` | The provider operations, as JSON: the call (`batchModify` for each 1,000 messages, or `trash` or `untrash` for each message), the labels to add and remove, and the number of calls. Only an undo of `trash` writes `untrash` (section 7.4). For a state verb, the field. For `draft` and `send` (release 3): the call (`drafts.create` or `drafts.send`), the `Message-ID`, the `Date`, the content hash and, for a send, the Gmail draft ID (`docs/specs/2026-11-16-send.md`). |
+| `ops` | The provider operations, as JSON: the call (`batchModify` for each 1,000 messages, or `trash` or `untrash` for each message), the labels to add and remove, and the number of calls. Only an undo of `trash` writes `untrash` (section 7.4). For a state verb, the fields and the IDs of the correction rows of the entry. For `draft` and `send` (release 3): the call (`drafts.create` or `drafts.send`), the `Message-ID`, the `Date`, the content hash and, for a send, the Gmail draft ID (`docs/specs/2026-11-16-send.md`). |
 | `pre`, `post` | For a state verb: the old and the new values. For `draft`: `post` only, the content with its reply headers. |
 | `call` | The number of the last provider call that the engine started, from 1. 0 before the first call. |
 | `state` | `writing`, `applied`, `failed` or `undone`. The trigger `ledger_state` moves the action to the same state. |
 | `error` | The refusal of the provider, or why the engine could not confirm each message. |
 | `history_id` | The Gmail history ID after the apply. |
-| `undo` | `inverse` (the verb has an undo) or `none` (final, for example a sent message, or an action applied before the ledger). The column records the verb, and does not change. An undo is available now only if the entry is `applied` or `failed`, has `inverse`, and has a message with `done` that is not gone (section 7.4). The view `ledger_can_undo` (migration 23) lists these entries, and `iris_apply::undo` refuses each other entry. Else the ledger shows the entry as final, for example after Gmail deleted each message of a `trash` entry. |
+| `undo` | `inverse` (the verb has an undo) or `none` (final, for example a sent message, or an action applied before the ledger). The column records the verb, and does not change. An undo is available now only if the entry is `applied` or `failed`, has `inverse`, and has a message with `done` that is not gone, or, for a state entry, an item in `post` and the IDs of its correction rows in `ops` (section 7.4). A state entry from before migration 26 has no such IDs, so it has no undo. The view `ledger_can_undo` (migration 23) lists these entries, and `iris_apply::undo` refuses each other entry. Else the ledger shows the entry as final, for example after Gmail deleted each message of a `trash` entry. |
 | `undone_by` | The ledger entry of the undo. |
 | `at` | The time. |
 
@@ -841,14 +855,18 @@ applies it.
 
 1. The person selects undo on a ledger entry, in the web client. The entry
    must be `applied` or `failed`, with the undo `inverse`, and with one or
-   more messages with `done` that are not gone. No other undo of the entry
-   is open.
+   more messages with `done` that are not gone (a state entry: one or more
+   items in `post` that are in the store). No other undo of the entry is
+   open.
 2. The engine (`iris_apply::undo`) makes a changeset with author `person`
    and one action: the inverse of the entry (`archive` and `inbox`, `read`
    and `unread`, `label` and `unlabel` of the same name, `trash` and
-   `untrash`). Its target is the entry (`{"ledger": ["l-N"]}`), and submit
+   `untrash`, and `restore` for a `close`, `decline`, `defer`, `correct`, `skip`, `mute` or `dismiss`
+   entry). Its target is the entry (`{"ledger": ["l-N"]}`), and submit
    resolves the messages with `done` that are not gone, in SQL, so no list
-   of message IDs is in memory (section 9). Only an action with the link
+   of message IDs is in memory (section 9). For `restore`, submit resolves
+   the items of the entry instead (`action_item`), and the apply runs with
+   the state verbs (section 4). Only an action with the link
    of migration 23 to that entry can target an entry. The undo of `label`
    or `unlabel` changes the label of the entry by its ID (from `ops`), so a
    rename of the label at Gmail after the entry does not change the undo.
@@ -860,10 +878,16 @@ applies it.
    `bulk` do not apply to an undo. Only Stop (release 4) holds it.
 3. The apply reads the labels at Gmail as in step 2 of section 7.2. The
    inverse changes only the messages that still have the `post` state of
-   the entry, and that no later ledger entry changed (`done`, or listed
-   `unknown`), except the actions of the undos of the same entry. A
-   message that changed after the entry (for example, the person moved it
-   in Gmail, or a later action of Iris changed it) stays as it is. The
+   the entry, and on which no later change of Iris stands. A later entry
+   with the message listed `unknown` blocks. A later entry with the
+   message `done` is a change. The change stands if no undo of it with the
+   message `done` stands. So an undo that changed the message back cancels
+   the change, an undo of that undo makes it stand again, and each retry
+   of an undo counts. An undo entry is not a change by itself, unless it
+   undoes an entry before this entry. The actions of the undos of this
+   entry do not count. A message that changed after the entry (for
+   example, the person moved it in Gmail, or a later action of Iris that
+   stands changed it) stays as it is. The
    result counts these messages as unchanged. Known limit (issue #225):
    a change in Gmail outside Iris that puts the message back in the `post`
    state is not detected, and the undo reverses it.
@@ -901,12 +925,17 @@ An undo of an undo is a new action, not a delete of the record.
 
 | Input or event | Failure mode | Safe result |
 |---|---|---|
+| The undo of a state entry whose item changed after the entry (a later action, also with the same values, understanding, the tick of a deferred item, or a gone item) | The undo reverses the later change | The apply of `restore` changes only an item that is not gone, that no later state entry names, and whose fields have the `post` values of the entry. It counts each other item as unchanged. It deletes only the correction rows whose IDs the entry holds, so another action of the same changeset keeps its rows. |
+| The undo of a `correct` of an array element (`fields.items.0`) | The undo changes nothing and still marks the entry `undone` | The apply sets each field with the path rule of a correction (`iris_talk::set_field`), with array indices. If a path does not fit the item, the item stays as it is and counts as unchanged. |
+| The undo of a `correct` of a field whose parent was missing (`due.date` with no `due`) | The undo leaves an empty parent, and the item is not valid | The apply removes each parent object that becomes empty, and checks the restored item against the schemas. An item that is not valid stays as it is and counts as unchanged. |
+| The undo of a `correct` that changes more than its field (an address of the owner makes the whole party `self`) | The undo sets only the field back, and the party stays `self` | The entry holds the top-level value of the field, and the undo sets the whole value back. |
+| The undo of a `correct` of a party address | The party keeps the sender ID of the corrected address | The apply of `restore` sets the sender ID of each party from its address, with the rule of a correction. Migration 26 links `restore` with no arguments only to a state entry, as step 1. |
 | An undo of an entry in `writing`, `undone`, or with the undo `none` | The undo changes messages of an apply that did not end, or reverses a change two times | `undo` refuses it (`Error::Undo`). The trigger `ledger_undo_insert` refuses the link. |
 | A second undo while an undo of the entry is open | Two undos change the same messages, or a one-action undo ends the entry while action 2 of another undo waits | `undo` refuses it until each action of the open undo ended. The trigger refuses a link while an action of another undo changeset of the entry is open, and a second link of the same step in one changeset. Action 2 of a `trash` undo applies also after a failed action 1, so the undo ends. |
 | A link of an action whose target is not the whole entry (`{"ledger": ["l-N"]}`), whose verb is not the inverse of the entry, with other arguments, a step 2 of an entry that is not `trash`, or a step 2 with no step 1 of the same entry in the same changeset | A link lets an action skip the mode, or makes `untrash` for an entry that is not a trash | The trigger `ledger_undo_insert` refuses the link. The end of a ledger entry records an undo only when the entry of step 1 exists, so it never fails on the link. The trigger `ledger_undo_action` refuses a change of the verb, the targets or the arguments of a linked action, also in a draft. Submit denies a linked action with another target, and also denies `untrash` unless the action is step 1 of the undo of a `trash` entry. The apply changes only the messages that the entry changed, whatever the targets. |
 | An entry with no message with `done`, or each such message gone | An undo that changes nothing | `undo` refuses it. Nothing is written. |
 | A message that changed at Gmail after the entry | The undo reverses a change of the person | The apply reads the labels at Gmail, and skips the message if it does not have the `post` state. A change outside Iris that ends in the `post` state is not detected (issue #225). |
-| A message that a later entry of Iris changed (for example `archive`, `inbox`, `archive`, then the undo of the first `archive`) | The undo reverses the later action | The apply skips each message with a later `ledger_message` row with `done` or `unknown`, except the rows of the undos of the same entry. |
+| A message that a later entry of Iris changed (for example `archive`, `inbox`, `archive`, then the undo of the first `archive`) | The undo reverses the later action | The apply skips each message on which a later change of Iris stands, by the rule of step 3. The check reads only the ledger rows and undo links of that message. So an undo of the newest entry, then an undo of the entry before it, returns each message to its first state (card R2-13). |
 | A gone message, or HTTP 404 | A call on a message that does not exist | `undo` leaves a gone message out of the targets. The apply lists a message that Gmail does not have as gone. |
 | The mode `observe` | The person cannot reverse a change while Iris observes | The mode does not hold an undo. The apply checks the link of migration 23. |
 | Action 2 of the undo of `trash` before action 1 ends | An `archive` of a message that is still in the trash, or that `untrash` did not change | The apply of action 2 waits. Action 2 changes only the messages with `done` in the entry of action 1. |

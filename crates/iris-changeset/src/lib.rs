@@ -119,12 +119,13 @@ names!(
 names!(
     /// The verbs of release 2 (section 4), `draft` and `send` of release 3
     /// (`docs/specs/2026-11-16-send.md`), and `skip`, `mute` and `dismiss`
-    /// of release 5 (`docs/specs/2026-11-17-preference-rules.md`).
+    /// of release 5 (`docs/specs/2026-11-17-preference-rules.md`). Only an
+    /// undo makes `untrash` and `restore` (section 7.4).
     Verb {
         Archive = "archive", Inbox = "inbox", Label = "label", Unlabel = "unlabel",
         Read = "read", Unread = "unread", Trash = "trash", Untrash = "untrash", Close = "close",
         Defer = "defer", Decline = "decline", Correct = "correct", Draft = "draft", Send = "send",
-        Skip = "skip", Mute = "mute", Dismiss = "dismiss",
+        Restore = "restore", Skip = "skip", Mute = "mute", Dismiss = "dismiss",
     }
 );
 
@@ -669,7 +670,7 @@ pub fn submit_in(
         // A denied action has no message and no draft row (`clear`), so
         // `first_contact` finds no thread for it. A send whose thread has
         // only gone messages has no message row but keeps its draft thread.
-        let mailbox = !STATE_VERBS.contains(&verb.as_str());
+        let mailbox = !STATE_VERBS.contains(&verb.as_str()) && verb != "restore";
         // The flag `bulk` does not apply to an undo (section 7.4).
         let undo: bool = c.query_row(
             "SELECT EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = ?1)",
@@ -1068,6 +1069,25 @@ fn supported(
                 (false, _) => Err("only the undo of a trash makes untrash".into()),
             }
         }
+        // Only the undo of a state entry makes restore (section 7.4).
+        Verb::Restore => {
+            let undo: bool = c.query_row(
+                &format!(
+                    "SELECT EXISTS (SELECT 1 FROM ledger_undo u JOIN ledger l ON l.id = u.ledger_id
+                                    JOIN changeset_action o ON o.id = l.action_id
+                                    WHERE u.action_id = ?1 AND u.step = 1
+                                      AND o.verb IN ({}))",
+                    sql_list(&STATE_VERBS)
+                ),
+                [action],
+                |r| r.get(0),
+            )?;
+            match (undo, args.is_empty()) {
+                (true, true) => Ok(()),
+                (true, false) => Err("restore takes no arguments".into()),
+                (false, _) => Err("only the undo of a state entry makes restore".into()),
+            }
+        }
         // The content checks need the target: see check_draft.
         Verb::Draft => Ok(()),
         Verb::Send => {
@@ -1355,6 +1375,29 @@ fn resolve_undo(c: &Connection, action: i64, ids: &[Value]) -> Result<Option<Str
         return Ok(Some(
             "only an undo of the entry targets a ledger entry".into(),
         ));
+    }
+    // The undo of a state entry: the items of the entry, which pins them
+    // while the undo is open. The apply sets back only the items that
+    // still have the `post` values of the entry.
+    let state: bool = c.query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM ledger l JOIN changeset_action o ON o.id = l.action_id
+                            WHERE l.id = ?1 AND o.verb IN ({}))",
+            sql_list(&STATE_VERBS)
+        ),
+        [ledger],
+        |r| r.get(0),
+    )?;
+    if state {
+        let n = c.execute(
+            "INSERT INTO action_item(action_id, item_id)
+             SELECT ?1, ai.item_id FROM ledger l
+             JOIN action_item ai ON ai.action_id = l.action_id
+             JOIN item i ON i.id = ai.item_id
+             WHERE l.id = ?2",
+            params![action, ledger],
+        )?;
+        return Ok((n == 0).then(|| "the entry has no item to change".into()));
     }
     let n = c.execute(
         "INSERT INTO action_message(action_id, message_id)
