@@ -645,6 +645,45 @@ fn a_slow_isolation_stop_does_not_hold_a_stop_of_another_job() {
     until(&s, &f, a, |r| r.reaped_ms.is_some());
 }
 
+fn the_end_of_a_session_closes_its_egress_port_before_the_reap() {
+    // The agent writes its proxy address, and ignores the TERM of the
+    // helper: it lives about 5 s after the end.
+    let f = fixture_with(
+        "egressend",
+        "trap '' TERM; echo $HTTPS_PROXY > proxy-url; sleep 30",
+        "allow_hosts = [\"example.com\"]\n",
+    );
+    let s = sessions(&f);
+    let id = s.run(f.job, "script").unwrap();
+    until(&s, &f, id, |r| r.started_ms.is_some());
+    let url = workspace(&f).join("proxy-url");
+    let end = Instant::now() + Duration::from_secs(20);
+    while !fs::read_to_string(&url).is_ok_and(|t| t.ends_with('\n')) {
+        assert!(Instant::now() < end, "no proxy address");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let text = fs::read_to_string(&url).unwrap();
+    let port: u16 = text.trim().rsplit(':').next().unwrap().parse().unwrap();
+    std::net::TcpStream::connect(("127.0.0.1", port)).expect("the port is open");
+    iris_job::end(&f.store, id, EndReason::Stop, None, now()).unwrap();
+    s.turn(now());
+    let end = Instant::now() + Duration::from_secs(4);
+    loop {
+        let closed = std::net::TcpStream::connect(("127.0.0.1", port)).is_err();
+        if closed {
+            break;
+        }
+        assert!(Instant::now() < end, "the port stays open after the end");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        session(&f.store, id).unwrap().reaped_ms,
+        None,
+        "the agent still runs: the port closed before the reap"
+    );
+    until(&s, &f, id, |r| r.reaped_ms.is_some());
+}
+
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "session-hold") {
@@ -735,6 +774,10 @@ fn main() {
         (
             "a_slow_isolation_stop_does_not_hold_a_stop_of_another_job",
             a_slow_isolation_stop_does_not_hold_a_stop_of_another_job,
+        ),
+        (
+            "the_end_of_a_session_closes_its_egress_port_before_the_reap",
+            the_end_of_a_session_closes_its_egress_port_before_the_reap,
         ),
     ];
     let mut failed = 0;
