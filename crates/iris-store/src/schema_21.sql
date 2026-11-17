@@ -12,7 +12,9 @@ CREATE TABLE job_session (
   -- positive ID.
   id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   job_id INTEGER NOT NULL REFERENCES job(id),
-  agent TEXT NOT NULL CHECK (typeof(agent) = 'text' AND length(agent) BETWEEN 1 AND 64
+  -- instr: length and GLOB stop at a NUL, so a NUL is refused first.
+  agent TEXT NOT NULL CHECK (typeof(agent) = 'text' AND instr(agent, char(0)) = 0
+    AND length(agent) BETWEEN 1 AND 64
     AND agent NOT GLOB '*[^a-z0-9-]*'),
   registered_at INTEGER NOT NULL CHECK (typeof(registered_at) = 'integer'
     AND registered_at BETWEEN 0 AND 253402300799999),
