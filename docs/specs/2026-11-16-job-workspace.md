@@ -62,9 +62,12 @@ this one takes the next free number.
 | `item_id` | INTEGER | An item of the scope, or NULL. |
 | `by` | TEXT NOT NULL | `person` or `engine`. |
 | `at` | INTEGER NOT NULL | Milliseconds. |
-| `upto` | INTEGER | For a thread ref: the highest `message.id` in the store at the add (0 if none). NULL for an item ref. |
 | `revoked_by` | TEXT | `person` or `engine` after a revoke, else NULL. |
 | `revoked_at` | INTEGER | Milliseconds of the revoke, else NULL. |
+
+The table `job_scope_message(scope_id, message_id)` lists the messages of
+the thread of a thread ref at its add. `scope_id` is the `id` (INTEGER
+PRIMARY KEY) of the scope row. Its rows are never changed or deleted.
 
 Exactly one of `thread_id` and `item_id` is set. `revoked_by` and
 `revoked_at` are both NULL or both set. A row with `revoked_at` NULL is
@@ -133,11 +136,13 @@ The granted messages of a job:
   start. The callers come with
   R4-04 and R4-09 (known limit until then, with a GitHub issue).
 
-- A thread of the scope grants each clean message of the thread that the
-  store held at the add of the ref: its row ID is at or below `upto` of the
-  scope row. `message.id` is `AUTOINCREMENT`, so a row that sync adds later
-  has a higher ID, also when its date is older (a delayed sync or a
-  backfill). A message that the store adds later is granted only if
+- A thread of the scope grants each clean message that was in the thread
+  at the add of the ref. The add writes these messages into the table
+  `job_scope_message` in the same write transaction, so the grant does not
+  depend on a date or a row ID: a message that sync adds later with an
+  older date, or that a later fetch moves into the thread from another
+  thread, is not in that list. Any other message of the thread is granted
+  only if
   it is a reply in the granted chain: its `In-Reply-To` names the
   `Message-ID` of a granted message of the same thread. So a reply to the
   job mail comes in, and an unrelated message that Gmail puts in the
@@ -476,7 +481,7 @@ Markdown and JSON with `serde_json`.
 | A revoke by an agent | Refused | Unit test, and raw SQL |
 | A revoke during a build | `Built::revoked` differs from `revoked_count`, so the launcher builds again before the session (R4-04) | Unit test: the count grows on each revoke and the build gives the count it read |
 | An add of a ref whose row does not exist | Refused | Unit test |
-| A message that the store adds to a scope thread after the add, also with an older date | Granted only if its `In-Reply-To` names a granted message of the thread | Unit test: a reply comes in, an unrelated message stays out, an old-dated backfill stays out |
+| A message that the store adds to a scope thread after the add, also with an older date, or that a fetch moves into the thread from another thread | Granted only if its `In-Reply-To` names a granted message of the thread | Unit test: a reply comes in, an unrelated message stays out, an old-dated backfill stays out, a moved message stays out |
 | A revoke at the same time as the apply of a session action | Before the cutoff: the action is refused. After the cutoff: the provider call goes on, and the ledger shows it (R4-03) | Test with R4-03 |
 | A revoke, a hostile mark, a gone message or a signal after the read of a build | The files keep the message until the next build (known limit). The read verbs see the change at once (R4-03, R4-04) | Unit test: the next build drops a revoked ref |
 | Two builds of one workspace at the same time | The second waits for the lock of the first | Unit test: a held lock makes `try` fail, and a build after it succeeds |
