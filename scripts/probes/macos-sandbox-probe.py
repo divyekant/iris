@@ -434,7 +434,7 @@ def write_profile(path, workspace, priv, port, read_extra):
 (allow file-read*
   (literal "/")
   (subpath "/usr/lib") (subpath "/usr/bin") (subpath "/usr/share") (subpath "/bin")
-  (subpath "/System") (subpath "/Library/Apple") (subpath "/private/var/db/dyld")
+  (subpath "/System/Library") (subpath "/System/Cryptexes") (subpath "/System/Volumes/Preboot/Cryptexes") (subpath "/Library/Apple") (subpath "/private/var/db/dyld")
   (literal "/dev/null") (literal "/dev/urandom") (literal "/dev/random") (literal "/dev/zero")
   (subpath "/private/etc/ssl") (literal "/private/etc/hosts") (literal "/private/etc/passwd")
   {reads}
@@ -538,6 +538,8 @@ def run_inside(argjson):
         return {"rc": r.returncode, "stdout_len": len(r.stdout), "stderr": r.stderr.decode(errors="replace")[:200]}
 
     out["read_data_key"] = attempt(lambda: open(os.path.join(a["data"], "store.key")).read() and "read")
+    out["read_data_key_via_data_volume"] = attempt(lambda: open("/System/Volumes/Data" + os.path.join(a["data"], "store.key")).read() and "read")
+    out["list_home_via_data_volume"] = attempt(lambda: len(os.listdir("/System/Volumes/Data" + a["home"])))
     out["list_data_dir"] = attempt(lambda: len(os.listdir(a["data"])))
     out["list_home"] = attempt(lambda: len(os.listdir(a["home"])))
     out["list_home_ssh"] = attempt(lambda: len(os.listdir(os.path.join(a["home"], ".ssh"))))

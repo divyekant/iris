@@ -87,10 +87,14 @@ still a child of the engine, with the same pipes):
    of the real path of the data folder, so two data folders do not share a
    label. The job runs `iris session-job <data dir> <id>`, with
    `RunAtLoad` true and `KeepAlive` false.
-2. The job process connects to the socket. The shim checks that the peer
-   has the same user ID (`getpeereid`). It sends its file descriptors 0, 1
-   and 2 (the pipe from the engine, the session log and the status pipe)
-   and the hold arguments, with `SCM_RIGHTS`.
+2. The job process first writes the record of the session (see
+   [The record of a session](#the-record-of-a-session)). Then it connects
+   to the socket. The shim checks that the peer has the same user ID
+   (`getpeereid`) and that the record exists and names the coalition of
+   the peer process (`LOCAL_PEERPID`, then `PROC_PIDCOALITIONINFO`). Only
+   then it sends its file descriptors 0, 1 and 2 (the pipe from the
+   engine, the session log and the status pipe) and the hold arguments,
+   with `SCM_RIGHTS`.
 3. The job process runs the hold helper (`hold`) with these descriptors.
    So the protocol of the helper does not change.
 4. The shim waits for the end of the socket. The job process writes its
@@ -106,18 +110,27 @@ the shim boots out the job and exits with 1 (`failed`).
 
 ### The record of a session
 
-Before the job process starts the agent, it writes the record
+The job process writes the record before it connects to the shim, so
+before the handoff of step 2. It writes the record
 `<data dir>/sessions/se-<id>.sandbox`, as on Linux (temporary file,
 `fsync`, `link`, `fsync` of the folder). The record holds the boot time
 (`sysctl kern.boottime`) and the resource coalition ID of the job process
 (`proc_pidinfo`, `PROC_PIDCOALITIONINFO`), and the egress port of the
-session (or none). A coalition ID is not used again in one boot. The agent
-runs only after the record exists. The reap removes the record only after
-`ended` is true.
+session (or none). A coalition ID is not used again in one boot. The reap
+removes the record only after `ended` is true.
+
+Invariant: if no record exists when the engine reaps the session, no
+agent of the session runs or can start later. The agent starts only after
+the handoff. The handoff needs a live shim, and the shim checks the record
+first. The reap check needs the end of the shim (launcher spec). So with
+no record at the reap, the handoff did not happen and cannot happen. A job
+process that writes its record after that reap finds no shim and exits
+with no agent. Its record names a coalition that ends with it, so a later
+`ended` gives true.
 
 `ended(session)`:
 
-- No record: true. The agent did not start.
+- No record: true. No agent ran, and none can start (invariant above).
 - The boot time differs: true. The system started again.
 - `coalition_info_resource_usage` gives `ESRCH`: true. The coalition is
   gone, so it holds no process.
@@ -138,11 +151,20 @@ runs only after the record exists. The reap removes the record only after
       members equals `tasks_started - tasks_exited`, and `tasks_started`
       did not change during the scan. Then no member of the coalition can
       run, fork or send a signal.
-   2. Kill: send `SIGKILL` to each member of the frozen set. A stopped
-      process cannot exit by itself, and no member runs to kill it, so its
-      process ID cannot go to another process before the `SIGKILL`.
-      Invariant: `stop` sends `SIGKILL` only to a process that is stopped
-      and in the coalition of the session.
+   2. Kill: for each member of the frozen set, read its status, its
+      coalition and its unique ID (`PROC_PIDUNIQIDENTIFIERINFO`) again,
+      and send `SIGKILL` only if it is still stopped, in the coalition and
+      has the same unique ID. A stopped process cannot exit by itself, and
+      no member runs to signal it.
+      Invariant: no process of the session can make `stop` send a signal
+      to a process outside the session. Each member is stopped, and the
+      profile denies signals outside the sandbox.
+
+   macOS gives no signal by process identity (no `pidfd`). So one race
+   stays, which the session cannot cause: between the last read and the
+   `SIGKILL`, a process outside the sandbox kills the stopped member,
+   launchd reaps it, and the system gives the same process ID to a new
+   process. The window is one system call. Known limit (issue).
 3. Return `Ok` if `ended` is true, else an error that names the count of
    live processes.
 
@@ -158,13 +180,20 @@ The profile starts with `(deny default)` and allows only these:
 | `process-exec`, `process-fork` | Each program that the profile lets the session read |
 | `signal`, `process-info*` | `(target same-sandbox)` only |
 | `sysctl-read` | All |
-| `file-read*` | The system folders: `/usr` without `/usr/local`, `/bin`, `/sbin`, `/System`, `/Library/Apple`, `/private/var/db/dyld`; the device files `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`; in `/private/etc` only `hosts`, `passwd`, `group`, `localtime` and the public certificate files (`ssl/cert.pem`, `ssl/certs`); the adapter program file and the `iris` program file (each one a literal real path); the workspace; the private home and `/tmp` of the session |
+| `file-read*` | The system folders: `/usr` without `/usr/local`, `/bin`, `/sbin`, `/System/Library`, `/System/Cryptexes`, `/System/Volumes/Preboot/Cryptexes`, `/Library/Apple`, `/private/var/db/dyld` (never all of `/System`: `/System/Volumes/Data` holds the home folders and the data folder); the device files `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`; in `/private/etc` only `hosts`, `passwd`, `group`, `localtime` and the public certificate files (`ssl/cert.pem`, `ssl/certs`); the adapter program file and the `iris` program file (each one a literal real path); the workspace; the private home and `/tmp` of the session |
 | `file-read-metadata` | The paths above, and each folder above them (literal paths), so that a program can resolve its paths |
 | `file-write*` | The workspace, the private home and `/tmp` of the session, `/dev/null` |
 | `network-outbound` | `(remote ip "localhost:<egress port>")` only, if the session has an egress port |
 
 Each path in the profile is a real path (`canonicalize`). Seatbelt checks
-real paths, and macOS links `/tmp` and `/etc` to `/private`.
+real paths, and macOS links `/tmp` and `/etc` to `/private`. The last rule
+of the profile is `(deny file-read* file-write* (subpath
+"/System/Volumes/Data"))`, so the second path of the user volume never
+gives access, also if an allowed folder is under it. The workspace and the
+private folders are then allowed again by their own path after this rule:
+Seatbelt takes the last rule that matches, and the workspace path that
+Seatbelt sees is the real path under `/Users` or `/private`, not the
+`/System/Volumes/Data` path.
 
 The private home is `<data dir>/sessions/se-<id>.home` and the private
 `/tmp` is `<data dir>/sessions/se-<id>.tmp`, both mode `0700`. The job
@@ -245,6 +274,8 @@ before the agent runs, or `ended` is false.
 | The agent calls `setsid` and forks and exits in a loop | `ended` stays false until no process runs; the reap waits | Mac acceptance 3 |
 | `stop` does not catch the loop in 5 seconds | `stop` returns an error; the engine tries again at its next turn; the session keeps its port and workspace | Mac acceptance 3 |
 | The agent reads the data folder, the home folder, `~/.ssh`, or another workspace | Refused | Mac acceptance 1 |
+| The agent reads the store key or a home file through `/System/Volumes/Data/...` | Refused | Mac acceptance 1 |
+| The shim ends after the job process got the descriptors, before the agent starts | The record exists (it comes before the handoff), so `ended` reads the coalition | Unit test: the shim refuses the handoff with no record |
 | The agent connects to another port, a public address, UDP or a Unix socket | Refused | Mac acceptance 1 |
 | The agent calls `launchctl`, `open`, `pbpaste` or another system service | Refused (no `mach-lookup`) | Mac acceptance 1 |
 | The agent signals a process outside the sandbox | Refused | Mac acceptance 1 |
