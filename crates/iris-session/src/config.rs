@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -85,34 +86,42 @@ struct RawFile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAgent {
-    command: Vec<String>,
+    command: Spanned<Vec<Spanned<String>>>,
     #[serde(default)]
-    pass_env: Vec<String>,
+    pass_env: Vec<Spanned<String>>,
     #[serde(default)]
-    allow_hosts: Vec<String>,
+    allow_hosts: Option<Spanned<Vec<Spanned<String>>>>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSession {
-    max_minutes: Option<i64>,
+    max_minutes: Option<Spanned<i64>>,
 }
 
 /// Reads `agents.toml` of the data folder. A missing file gives the
 /// defaults: no adapter of the file, and a time limit of 30 minutes.
 pub fn read_agents(data_dir: &Path) -> Result<AgentsFile, ConfigError> {
     let path = data_dir.join(FILE);
-    match std::fs::read(&path) {
-        Ok(bytes) if bytes.len() > MAX_BYTES => Err(no_line(format!(
+    let file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(AgentsFile::default()),
+        Err(e) => return Err(no_line(format!("cannot read the file: {e}"))),
+    };
+    // Read at most one byte past the limit, so a large file costs no memory.
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| no_line(format!("cannot read the file: {e}")))?;
+    if bytes.len() > MAX_BYTES {
+        return Err(no_line(format!(
             "the file is larger than {} KiB",
             MAX_BYTES / 1024
-        ))),
-        Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(text) => parse_agents(&text),
-            Err(_) => Err(no_line("the file is not UTF-8".into())),
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AgentsFile::default()),
-        Err(e) => Err(no_line(format!("cannot read the file: {e}"))),
+        )));
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => parse_agents(&text),
+        Err(_) => Err(no_line("the file is not UTF-8".into())),
     }
 }
 
@@ -134,8 +143,9 @@ pub fn parse_agents(text: &str) -> Result<AgentsFile, ConfigError> {
     })?;
     let mut file = AgentsFile::default();
     if let Some(s) = raw.session {
-        let line = line_of(text, s.span().start);
         if let Some(m) = s.into_inner().max_minutes {
+            let line = line_of(text, m.span().start);
+            let m = m.into_inner();
             if !(1..=1440).contains(&m) {
                 return Err(ConfigError {
                     line,
@@ -146,9 +156,13 @@ pub fn parse_agents(text: &str) -> Result<AgentsFile, ConfigError> {
         }
     }
     for (name, spanned) in raw.agent {
-        let line = line_of(text, spanned.span().start);
-        let agent = check_agent(&name, spanned.into_inner())
-            .map_err(|message| ConfigError { line, message })?;
+        let table = spanned.span().start;
+        let agent = check_agent(&name, spanned.into_inner(), table).map_err(|(at, message)| {
+            ConfigError {
+                line: line_of(text, at),
+                message,
+            }
+        })?;
         file.agents.insert(name, agent);
     }
     Ok(file)
@@ -164,40 +178,65 @@ fn line_of(text: &str, offset: usize) -> usize {
         + 1
 }
 
-fn check_agent(name: &str, raw: RawAgent) -> Result<Custom, String> {
+/// Checks one adapter of the file. The error gives the byte offset of the
+/// field or item that is wrong (`table` for the name), and the message.
+fn check_agent(name: &str, raw: RawAgent, table: usize) -> Result<Custom, (usize, String)> {
     if !is_adapter_name(name) {
-        return Err(format!(
-            "the agent name {name:?} must have 1 to 64 characters of a-z, 0-9 and -"
+        return Err((
+            table,
+            format!("the agent name {name:?} must have 1 to 64 characters of a-z, 0-9 and -"),
         ));
     }
     if BUILT_IN.contains(&name) {
-        return Err(format!("the agent name {name} is a built-in adapter"));
+        return Err((
+            table,
+            format!("the agent name {name} is a built-in adapter"),
+        ));
     }
-    if raw.command.is_empty() || raw.command.len() > MAX_COMMAND {
-        return Err(format!("command must have 1 to {MAX_COMMAND} strings"));
+    let at = raw.command.span().start;
+    let command = raw.command.into_inner();
+    if command.is_empty() || command.len() > MAX_COMMAND {
+        return Err((at, format!("command must have 1 to {MAX_COMMAND} strings")));
     }
-    if raw.command[0].is_empty() {
-        return Err("the program (the first string of command) is empty".into());
+    if command[0].get_ref().is_empty() {
+        return Err((
+            command[0].span().start,
+            "the program (the first string of command) is empty".into(),
+        ));
     }
-    if raw.command.iter().any(|s| s.contains('\0')) {
-        return Err("a string of command holds a NUL character".into());
+    if let Some(bad) = command.iter().find(|s| s.get_ref().contains('\0')) {
+        return Err((
+            bad.span().start,
+            "a string of command holds a NUL character".into(),
+        ));
     }
     if raw.pass_env.len() > MAX_PASS_ENV {
-        return Err(format!("pass_env has more than {MAX_PASS_ENV} names"));
+        return Err((
+            raw.pass_env[MAX_PASS_ENV].span().start,
+            format!("pass_env has more than {MAX_PASS_ENV} names"),
+        ));
     }
     for v in &raw.pass_env {
-        check_env_name(v)?;
+        check_env_name(v.get_ref()).map_err(|m| (v.span().start, m))?;
     }
-    if raw.allow_hosts.len() > MAX_HOSTS {
-        return Err(format!("allow_hosts has more than {MAX_HOSTS} hosts"));
-    }
-    for h in &raw.allow_hosts {
-        check_host(h)?;
+    let hosts = match raw.allow_hosts {
+        Some(h) => {
+            let at = h.span().start;
+            let h = h.into_inner();
+            if h.len() > MAX_HOSTS {
+                return Err((at, format!("allow_hosts has more than {MAX_HOSTS} hosts")));
+            }
+            h
+        }
+        None => Vec::new(),
+    };
+    for h in &hosts {
+        check_host(h.get_ref()).map_err(|m| (h.span().start, m))?;
     }
     Ok(Custom {
-        command: raw.command,
-        pass_env: raw.pass_env,
-        allow_hosts: raw.allow_hosts,
+        command: command.into_iter().map(Spanned::into_inner).collect(),
+        pass_env: raw.pass_env.into_iter().map(Spanned::into_inner).collect(),
+        allow_hosts: hosts.into_iter().map(Spanned::into_inner).collect(),
     })
 }
 
