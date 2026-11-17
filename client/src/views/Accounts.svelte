@@ -16,14 +16,17 @@
   let names = $derived(accountNames(status.accounts));
 
   // The state of one account, in one sentence, and its tone.
-  function stateOf(a: Account): { text: string; tone: "ok" | "busy" | "stopped" } {
+  function stateOf(a: Account): { text: string; tone: "ok" | "busy" | "retry" | "stopped" } {
     if (a.state === "needs_sign_in") return { text: "The copy stopped: Google refused the sign-in. Sign in again to continue.", tone: "stopped" };
+    // A failed run comes before the busy states. The status cannot tell if a new try runs now, so the
+    // sentence says only what it knows: the last try failed, and Iris tries again. Only a refused sign-in stops.
+    // A sync writes "error: ...", a verify writes "N differences, M skipped, then error: ..." (iris-sync).
+    const last = a.last_sync;
+    if (last?.result?.includes("error:"))
+      return { text: `${a.mirror_ready_at ? "The last sync" : "The last try of the first copy"} failed. Iris tries again each minute.`, tone: "retry" };
     // `sync` is set while a first copy or a full copy again runs (iris-sync, account.sync_kind).
     if (!a.mirror_ready_at) return { text: "Iris copies this mailbox now. The brief shows the mail that it copied so far.", tone: "busy" };
     if (a.sync) return { text: "Iris copies this mailbox again now, to find each change.", tone: "busy" };
-    const last = a.last_sync;
-    // A sync writes "error: ...", a verify writes "N differences, M skipped, then error: ..." (iris-sync).
-    if (last?.result?.includes("error:")) return { text: "The last sync failed. Iris tries again each minute.", tone: "stopped" };
     return { text: last?.ended ? `Up to date. Last sync ${when(last.ended)}.` : "Up to date.", tone: "ok" };
   }
 </script>
@@ -93,6 +96,9 @@
   }
   .tone.busy {
     background: var(--color-primary);
+  }
+  .tone.retry {
+    background: var(--color-warning);
   }
   .tone.stopped {
     background: var(--color-error);
