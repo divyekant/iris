@@ -26,8 +26,9 @@ history ID for the mailbox.
 4. After the provider interface (card R6-10) merges, the Graph client
    implements that interface, and the engine syncs an Outlook account.
 
-The card is done when an Outlook mailbox syncs with zero differences
-against the fake server. The release gate is 7 days with zero differences
+Card R6-04 is done when this spec merges. The build cards of "Plan" end
+when an Outlook mailbox syncs with zero differences against the fake
+server (R6-14). The release gate is 7 days with zero differences
 on a real Outlook mailbox on dk's Mac, after R1-07 ends.
 
 ## Not in scope
@@ -231,7 +232,7 @@ This mapping is a proposal for R6-10, which owns the provider interface:
 
 | Graph | Mirror label |
 |---|---|
-| The folder of the message | one label for the folder; `INBOX`, `DRAFT`, `TRASH` and `SPAM` for `inbox`, `drafts`, `deleteditems` and `junkemail`; `Folders/Sent Items` for `sentitems` (not `SENT`, see below) |
+| The folder of the message | exactly one folder label: `INBOX`, `DRAFT`, `TRASH` and `SPAM` for `inbox`, `drafts`, `deleteditems` and `junkemail`; `Folders/Archive`, `Folders/Outbox` and `Folders/Sent Items` for `archive`, `outbox` and `sentitems` (not `SENT`, see below); `Folders/<path>` for each other folder |
 | Each category | one user label (see the names below) |
 | `isRead` false | `UNREAD` |
 | `flag.flagStatus` `flagged` | `STARRED` |
@@ -264,6 +265,8 @@ person or a sender can set. Two existing rules read such data as proof:
 Label names must stay distinct, because search, policy rules and label
 actions match label names (spec 2). The names:
 
+- `archive`, `outbox` and `sentitems`: the fixed names above, in each
+  language of the mailbox.
 - A folder that is not well-known: the label `Folders/<path>`, where the
   path is the display names from the top folder, joined with `/`. For
   example `Folders/Receipts/Projects`. In a display name, `%` becomes
@@ -288,6 +291,9 @@ not a label, and Iris moves messages only with `archive`, `inbox` and
 Archive in Iris is a move to the well-known `archive` folder. Inbox is a
 move to `inbox`. Trash is a move to `deleteditems`.
 
+Each folder label has the provider ID `folder:<folder id>`, also the
+system ones, so the mirror knows the folder of each message from its one
+folder label. The move guard reads this provider ID, not the label name.
 Iris moves a message with `archive`, `inbox` or `trash` only from
 `inbox` or `archive`. Such a verb on a message in any other folder
 (`deleteditems`, a user folder, `junkemail`, `sentitems`) gets a definite
