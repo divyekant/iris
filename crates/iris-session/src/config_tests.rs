@@ -32,6 +32,22 @@ fn err_line(text: &str) -> usize {
     }
 }
 
+/// The file is read only up to its limit: a larger file is refused, and
+/// the file at the limit is read.
+#[test]
+fn the_file_is_read_up_to_its_limit() {
+    let dir = std::env::temp_dir().join(format!("iris-cfg-size-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let mut text = String::from("[session]\nmax_minutes = 5\n");
+    text.push_str(&"#".repeat(64 * 1024 - text.len()));
+    std::fs::write(dir.join(FILE), &text).unwrap();
+    assert_eq!(read_agents(&dir).unwrap().max_minutes, 5);
+    text.push('#');
+    std::fs::write(dir.join(FILE), &text).unwrap();
+    assert!(read_agents(&dir).unwrap_err().message.contains("larger"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn an_empty_or_missing_file_gives_the_defaults() {
     let f = parse_agents("").unwrap();
@@ -66,48 +82,27 @@ allow_hosts = ["api.my-tool.example"]
 
 #[test]
 fn each_bad_entry_is_refused_with_its_line() {
+    // Each error names the line of the field or the item that is wrong,
+    // not the line of its table.
     let cases = [
         ("[agent.x]\ncommand = [\"a\"]\nflag = 1\n", 3),
         ("[agent.claude-code]\ncommand = [\"a\"]\n", 1),
         ("[agent.codex]\ncommand = [\"a\"]\n", 1),
         ("[agent.My-Tool]\ncommand = [\"a\"]\n", 1),
-        ("[agent.x]\ncommand = []\n", 1),
-        ("[agent.x]\ncommand = [\"\"]\n", 1),
-        (
-            "[agent.x]\n\ncommand = [\"a\"]\npass_env = [\"IRIS_TOKEN\"]\n",
-            1,
-        ),
-        (
-            "[agent.x]\ncommand = [\"a\"]\npass_env = [\"HTTPS_PROXY\"]\n",
-            1,
-        ),
-        (
-            "[agent.x]\ncommand = [\"a\"]\npass_env = [\"https_proxy\"]\n",
-            1,
-        ),
-        (
-            "[agent.x]\ncommand = [\"a\"]\npass_env = [\"No_Proxy\"]\n",
-            1,
-        ),
-        (
-            "[agent.x]\ncommand = [\"a\"]\nallow_hosts = [\"api.example:443\"]\n",
-            1,
-        ),
-        (
-            "[agent.x]\ncommand = [\"a\"]\nallow_hosts = [\"*.example.com\"]\n",
-            1,
-        ),
-        (
-            "[agent.x]\ncommand = [\"a\"]\nallow_hosts = [\"10.0.0.1\"]\n",
-            1,
-        ),
-        ("[agent.x]\ncommand = [\"a\"]\nallow_hosts = [\"::1\"]\n", 1),
-        (
-            "[agent.x]\ncommand = [\"a\"]\nallow_hosts = [\"API.example.com\"]\n",
-            1,
-        ),
-        ("[session]\nmax_minutes = 0\n", 1),
-        ("[session]\nmax_minutes = 1441\n", 1),
+        ("[agent.x]\ncommand = []\n", 2),
+        ("[agent.x]\ncommand = [\"\"]\n", 2),
+        ("[agent.x]\ncommand = [\n  \"a\",\n  \"b\\u0000\",\n]\n", 4),
+        ("[agent.x]\n\ncommand = [\"a\"]\npass_env = [\"IRIS_TOKEN\"]\n", 4),
+        ("[agent.x]\ncommand = [\"a\"]\npass_env = [\"HTTPS_PROXY\"]\n", 3),
+        ("[agent.x]\ncommand = [\"a\"]\npass_env = [\"https_proxy\"]\n", 3),
+        ("[agent.x]\ncommand = [\"a\"]\npass_env = [\"No_Proxy\"]\n", 3),
+        ("[agent.x]\ncommand = [\"a\"]\nallow_hosts = [\"api.example:443\"]\n", 3),
+        ("[agent.x]\ncommand = [\"a\"]\nallow_hosts = [\"*.example.com\"]\n", 3),
+        ("[agent.x]\ncommand = [\"a\"]\nallow_hosts = [\"10.0.0.1\"]\n", 3),
+        ("[agent.x]\ncommand = [\"a\"]\nallow_hosts = [\"::1\"]\n", 3),
+        ("[agent.x]\ncommand = [\"a\"]\nallow_hosts = [\n  \"ok.example\",\n  \"API.example.com\",\n]\n", 5),
+        ("[session]\n\nmax_minutes = 0\n", 3),
+        ("[session]\nmax_minutes = 1441\n", 2),
         ("[session]\nlimit = 3\n", 2),
         ("top = 1\n", 1),
     ];
