@@ -27,9 +27,14 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use unicase::UniCase;
 
+mod comment;
 mod flags;
 mod outbox;
 mod written;
+
+pub use comment::{
+    check_comment, comment_in, comment_pending_in, commented_jobs_in, comments_in, Comment,
+};
 pub use flags::{
     action_content, attachment_spans, date_spans, draft_flags, draft_marks, has_attachment,
     has_date, has_money, money_spans, names, new_flags, words, Field, Mark, DRAFT_FLAGS,

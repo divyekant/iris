@@ -41,7 +41,7 @@ mod verbs;
 mod watch;
 mod write;
 pub use ask::{answer, AskAnswer, AskSource, Connect};
-pub use auth::{Auth, SIGN_IN};
+pub use auth::{Auth, CODE_LIFE, SIGN_IN};
 pub use drafts::write_drafts;
 pub use export::{export, Exported};
 pub use jobs::*;
@@ -133,6 +133,7 @@ pub fn router_with_model(store: Arc<Store>, auth: Arc<Auth>, connect: Connect) -
 fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Router {
     let ask = Router::new()
         .route("/api/ask", post(post_ask))
+        .route("/api/threads/{id}/draft", post(post_draft))
         .with_state((store.clone(), connect));
     Router::new()
         .route("/api/status", get(get_status))
@@ -155,6 +156,10 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/changesets/{id}/drafts", get(get_drafts))
         .route("/api/changesets/{id}/decide", post(post_decide))
         .route("/api/changesets/{id}/withdraw", post(post_withdraw))
+        .route(
+            "/api/changesets/{id}/comments",
+            get(get_comments).post(post_comment),
+        )
         .route("/api/messages", get(get_messages))
         .route("/api/messages/{id}", get(get_message))
         .route("/api/messages/{id}/raw", get(get_raw))
@@ -174,6 +179,8 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/notices/{id}/done", post(post_notice_done))
         .route("/api/watches", get(get_watches).post(post_watch))
         .route("/api/watches/{id}/remove", post(post_watch_remove))
+        .route("/api/stop", get(get_stop).post(post_stop))
+        .route("/api/resume", post(post_resume))
         .route("/api/outbox", get(get_outbox))
         .route("/api/outbox/{draft}/cancel", post(post_outbox_cancel))
         .route("/api/write", post(post_write))
@@ -316,6 +323,38 @@ async fn post_withdraw(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CommentBody {
+    revision: i64,
+    text: String,
+    key: String,
+}
+
+/// A review comment of the person on the newest revision of a changeset of
+/// a job (docs/specs/2026-11-17-review-comments.md). The answer is the
+/// comment. A retry with the same key gives the same comment.
+async fn post_comment(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<CommentBody>, JsonRejection>,
+) -> Result<Response> {
+    let Some(row) = changeset_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    let b = body(b)?;
+    let c = review::comment(&s, row, b.revision, &b.text, &b.key, now_ms())?;
+    Ok(Json(c).into_response())
+}
+
+/// Each review comment of a changeset, oldest first.
+async fn get_comments(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    let Some(row) = changeset_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    Ok(Json(review::comments(&s, row)?).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AskBody {
     question: String,
 }
@@ -333,6 +372,37 @@ async fn post_ask(
         .await
         .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;
     Ok(Json(a).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DraftBody {
+    /// What the reply must say, in the words of the person. Empty: Iris
+    /// writes the reply from the thread alone.
+    #[serde(default)]
+    intent: String,
+    /// The mail that the form answers (`m-N`, the `parent` of the reply
+    /// start values). A newer parent makes a 409 before the call.
+    parent: String,
+}
+
+/// A draft of the reply in the voice of the person (R3-04 intent path,
+/// R3-05). The model call runs on a blocking thread, so the other requests
+/// go on. The draft is saved in the store; nothing goes to Gmail.
+async fn post_draft(
+    State((s, connect)): State<(Arc<Store>, Option<Connect>)>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<DraftBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let connect =
+        connect.ok_or_else(|| Error::Unavailable("This engine has no model client.".into()))?;
+    let d = tokio::task::spawn_blocking(move || {
+        write::draft(&s, &connect, &id, &b.parent, &b.intent, now_ms)
+    })
+    .await
+    .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;
+    Ok(d.map_or_else(not_found, |v| Json(v).into_response()))
 }
 
 #[derive(Deserialize)]
@@ -830,6 +900,58 @@ async fn get_outbox(
         q.after.as_deref(),
     )?)
     .into_response())
+}
+
+/// `GET /api/stop`: `{"stopped": bool, "since": time|null, "live": n,
+/// "busy": bool}` (docs/specs/2026-11-17-stop.md, section 5). `live` and
+/// `busy` are measured now, so a client says that no mail leaves only for a
+/// complete stop.
+async fn get_stop(State(s): State<Arc<Store>>) -> Result<Response> {
+    let now = iris_apply::stop_state(&s).map_err(apply_error)?;
+    Ok(Json(match now {
+        None => serde_json::json!({ "stopped": false, "since": null, "live": 0, "busy": false }),
+        Some(n) => serde_json::json!({
+            "stopped": true, "since": rfc3339(n.since), "live": n.live, "busy": n.busy,
+        }),
+    })
+    .into_response())
+}
+
+/// `POST /api/stop`: Stop all agent work. The answer adds `sessions` (the
+/// sessions that this stop ended), `live` (the sessions that are not reaped
+/// yet) and `busy` (a Gmail call still ran). The stop is complete only when
+/// `live` is 0 and `busy` is false. The wait of up to 20 seconds runs on a
+/// blocking thread, so the other routes still answer.
+async fn post_stop(State(s): State<Arc<Store>>, _: NoBody) -> Result<Response> {
+    let done = tokio::task::spawn_blocking(move || iris_apply::stop(&s))
+        .await
+        .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))?
+        .map_err(apply_error)?;
+    Ok(Json(serde_json::json!({
+        "stopped": true,
+        "since": rfc3339(done.since),
+        "sessions": done.sessions,
+        "live": done.live,
+        "busy": done.busy,
+    }))
+    .into_response())
+}
+
+/// `POST /api/resume`: end the stop. `resumed` is false if Iris was not
+/// stopped; then nothing changed.
+async fn post_resume(State(s): State<Arc<Store>>, _: NoBody) -> Result<Response> {
+    let resumed = iris_apply::resume(&s).map_err(apply_error)?;
+    Ok(
+        Json(serde_json::json!({ "stopped": false, "since": null, "resumed": resumed }))
+            .into_response(),
+    )
+}
+
+fn apply_error(e: iris_apply::Error) -> Error {
+    match e {
+        iris_apply::Error::Store(e) => Error::Store(e),
+        other => Error::Unavailable(other.to_string()),
+    }
 }
 
 /// Cancel the send of a draft (`d-N`) in the outbox. 409 if the release

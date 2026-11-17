@@ -4,7 +4,10 @@
 //!   must be that same origin. So a web page on another site cannot read the
 //!   API, also through DNS rebinding.
 //! - At each start, the engine makes a random web secret and a one-time code.
-//!   `iris serve` prints the sign-in address `http://<addr>/#code=<code>`. The
+//!   `iris serve` prints the sign-in address `http://<addr>/#code=<code>`.
+//!   `iris open` asks the engine for a new code ([`Auth::sign_in`],
+//!   `docs/specs/2026-11-17-mac-app.md`): it works one time, for
+//!   [`CODE_LIFE`]. The
 //!   client page reads the code from the fragment (the browser never sends a
 //!   fragment to a server) and exchanges it one time at `POST /api/session`
 //!   for the secret. The client keeps the secret in the storage of its origin
@@ -15,6 +18,7 @@
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::{
     body::to_bytes,
@@ -29,9 +33,22 @@ use serde::Deserialize;
 /// The path of the code exchange.
 pub const SIGN_IN: &str = "/api/session";
 
+/// The life of a code of [`Auth::sign_in`]. The code of the start has no end.
+pub const CODE_LIFE: Duration = Duration::from_secs(120);
+/// The most codes of [`Auth::sign_in`] that wait at the same time. The code
+/// of the start is not one of them.
+pub const CODES_MAX: usize = 8;
+
+struct Code {
+    value: String,
+    /// `None` for the code of the start.
+    ends: Option<Instant>,
+}
+
 pub struct Auth {
     secret: String,
-    code: Mutex<Option<String>>,
+    /// The codes that wait, oldest first.
+    codes: Mutex<Vec<Code>>,
     /// The values of `Host` that name the bound address.
     hosts: Vec<String>,
     addr: SocketAddr,
@@ -47,18 +64,51 @@ impl Auth {
         }
         Ok(Auth {
             secret: random_hex::<32>()?,
-            code: Mutex::new(Some(random_hex::<16>()?)),
+            codes: Mutex::new(vec![Code {
+                value: random_hex::<16>()?,
+                ends: None,
+            }]),
             hosts,
             addr,
         })
     }
 
-    /// The sign-in address to print, `http://<addr>/#code=<code>`. `None`
-    /// after the code was used.
+    /// The sign-in address of the start to print, `http://<addr>/#code=<code>`.
+    /// `None` after the code was used.
     pub fn sign_in_url(&self) -> Option<String> {
-        let code = self.code.lock().unwrap_or_else(|e| e.into_inner());
-        code.as_ref()
-            .map(|c| format!("http://{}/#code={c}", self.addr))
+        let codes = self.codes.lock().unwrap_or_else(|e| e.into_inner());
+        codes
+            .iter()
+            .find(|c| c.ends.is_none())
+            .map(|c| self.url(&c.value))
+    }
+
+    /// A new sign-in address with a new one-time code, for [`CODE_LIFE`]. When
+    /// [`CODES_MAX`] codes of this call wait, the oldest of them ends. The
+    /// code of the start stays.
+    pub fn sign_in(&self) -> std::io::Result<String> {
+        self.sign_in_at(Instant::now())
+    }
+
+    fn sign_in_at(&self, now: Instant) -> std::io::Result<String> {
+        let value = random_hex::<16>()?;
+        let mut codes = self.codes.lock().unwrap_or_else(|e| e.into_inner());
+        codes.retain(|c| live(c, now));
+        if codes.iter().filter(|c| c.ends.is_some()).count() >= CODES_MAX {
+            if let Some(i) = codes.iter().position(|c| c.ends.is_some()) {
+                codes.remove(i);
+            }
+        }
+        let url = self.url(&value);
+        codes.push(Code {
+            value,
+            ends: Some(now + CODE_LIFE),
+        });
+        Ok(url)
+    }
+
+    fn url(&self, code: &str) -> String {
+        format!("http://{}/#code={code}", self.addr)
     }
 
     /// The `Authorization` header of a signed-in client. Only for a client
@@ -67,14 +117,21 @@ impl Auth {
         format!("Bearer {}", self.secret)
     }
 
-    /// Use the one-time code. True one time only, for the correct code.
+    /// Use a one-time code. True one time only, for a code that waits and
+    /// did not end.
     fn take_code(&self, given: &str) -> bool {
-        let mut code = self.code.lock().unwrap_or_else(|e| e.into_inner());
-        if code.as_deref().is_some_and(|c| same(c, given)) {
-            *code = None;
-            true
-        } else {
-            false
+        self.take_code_at(given, Instant::now())
+    }
+
+    fn take_code_at(&self, given: &str, now: Instant) -> bool {
+        let mut codes = self.codes.lock().unwrap_or_else(|e| e.into_inner());
+        codes.retain(|c| live(c, now));
+        match codes.iter().position(|c| same(&c.value, given)) {
+            Some(i) => {
+                codes.remove(i);
+                true
+            }
+            None => false,
         }
     }
 
@@ -104,6 +161,10 @@ impl Auth {
                 .is_some_and(|o| o.eq_ignore_ascii_case(host)),
         }
     }
+}
+
+fn live(c: &Code, now: Instant) -> bool {
+    c.ends.is_none_or(|e| now < e)
 }
 
 /// Compare two values in a time that does not depend on the first change.
@@ -153,7 +214,7 @@ async fn check(auth: &Auth, req: Request, next: Next) -> Response {
         if !auth.take_code(&code) {
             return crate::error(
                 StatusCode::FORBIDDEN,
-                "the sign-in code is not valid or was used. Start iris serve again for a new code",
+                "the sign-in code is not valid, was used or ended. Run iris open for a new address",
             );
         }
         return Json(serde_json::json!({ "token": auth.secret })).into_response();
@@ -161,7 +222,7 @@ async fn check(auth: &Auth, req: Request, next: Next) -> Response {
     if !auth.signed_in(req.headers()) {
         return crate::error(
             StatusCode::UNAUTHORIZED,
-            "sign in with the address that iris serve prints",
+            "sign in with the address of iris open",
         );
     }
     next.run(req).await
@@ -186,6 +247,43 @@ mod tests {
         assert!(auth.take_code(&code));
         assert!(!auth.take_code(&code));
         assert_eq!(auth.sign_in_url(), None);
+    }
+
+    #[test]
+    fn each_new_code_works_one_time_until_it_ends() {
+        let auth = auth();
+        let start = auth.sign_in_url().unwrap();
+        let now = Instant::now();
+        let code = |url: String| url.split_once("code=").unwrap().1.to_string();
+        let a = code(auth.sign_in_at(now).unwrap());
+        let b = code(auth.sign_in_at(now).unwrap());
+        assert_ne!(a, b);
+        // The start code stays, and each code works one time.
+        assert!(auth.take_code_at(&b, now));
+        assert!(!auth.take_code_at(&b, now));
+        assert!(auth.take_code_at(&a, now + CODE_LIFE - Duration::from_secs(1)));
+        let late = code(auth.sign_in_at(now).unwrap());
+        assert!(!auth.take_code_at(&late, now + CODE_LIFE));
+        // The start code has no end.
+        assert!(auth.take_code_at(&code(start), now + CODE_LIFE * 100));
+    }
+
+    #[test]
+    fn a_new_code_ends_the_oldest_when_the_list_is_full() {
+        let auth = auth();
+        let start = auth.sign_in_url().unwrap();
+        let now = Instant::now();
+        let codes: Vec<String> = (0..=CODES_MAX)
+            .map(|_| {
+                let url = auth.sign_in_at(now).unwrap();
+                url.split_once("code=").unwrap().1.to_string()
+            })
+            .collect();
+        // The code CODES_MAX + 1 ended the first code of a call, not the
+        // start code.
+        assert!(!auth.take_code_at(&codes[0], now));
+        assert!(codes[1..].iter().all(|c| auth.take_code_at(c, now)));
+        assert_eq!(auth.sign_in_url(), Some(start));
     }
 
     #[test]

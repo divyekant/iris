@@ -21,6 +21,9 @@ use iris_understand::Model;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
+mod run;
+pub use run::{draft, Connect, Drafted, Failure};
+
 /// The version of the prompt. `reply_draft.prompt` records it.
 pub const PROMPT: &str = "draft/0.1";
 /// The most sent messages that show the voice of the owner.
@@ -132,7 +135,10 @@ struct Msg {
 /// The state of a thread that a draft depends on, in memory that does not
 /// grow with the thread: counts over all messages, and the newest
 /// [`THREAD_MESSAGES`] messages, oldest first. Only messages that are not
-/// gone and not a Gmail draft count.
+/// gone and not a Gmail draft count. The newest messages leave out spam and
+/// trash too, so the newest one is the parent of the reply form and of the
+/// send (`iris_changeset::reply_parent`). The counts keep them: a hostile
+/// mail in the trash still stops the draft.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Snapshot {
     count: i64,
@@ -176,6 +182,13 @@ macro_rules! in_thread {
 /// The messages of thread `?1` that count.
 const IN_THREAD: &str = in_thread!("?1");
 
+/// A message that a reply can answer: not in spam and not in the trash, as
+/// `iris_changeset::reply_parent`. The counts of [`snapshot`] keep these
+/// messages, so hostile mail in the trash still stops a draft.
+const ANSWERABLE: &str =
+    "AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                           WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))";
+
 /// The newest message first: the order of [`snapshot`].
 const NEWEST: &str = "ORDER BY coalesce(m.internal_date, 0) DESC, m.id DESC";
 
@@ -189,7 +202,7 @@ pub fn ready_sql(threads: &str) -> String {
     let in_thread = in_thread!("d.thread_id");
     format!(
         "EXISTS (SELECT 1 FROM reply_draft d WHERE d.thread_id IN ({threads})
-           AND d.based_on = (SELECT m.id {in_thread} {NEWEST} LIMIT 1)
+           AND d.based_on = (SELECT m.id {in_thread} {ANSWERABLE} {NEWEST} LIMIT 1)
            AND NOT EXISTS (SELECT 1 {in_thread}
                            AND ({HOSTILE} OR b.message_id IS NULL OR m.understood_at IS NULL)))"
     )
@@ -210,6 +223,7 @@ fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
            EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                    WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
          {IN_THREAD}
+         {ANSWERABLE}
          {NEWEST}
          LIMIT ?2"
     ))?;

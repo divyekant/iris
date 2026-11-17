@@ -721,3 +721,12 @@ export const measures: Measures = {
   approvals: { decided: 50, approved: 47 },
   undo: { applied: 48, undone: 1 },
 };
+
+/** POST /api/threads/t-8841/draft: a draft of the reply in your voice (R3-04 intent path). */
+export const replyDraft = {
+  body: "Hi Priya,\n\nYes, I will add the Q3 numbers next to Q4, so the board sees the trend. You get the deck on Monday morning.\n\nThanks",
+  based_on: "m-55212",
+  samples: 6,
+  unknown_cost: false,
+  overrun: false,
+};

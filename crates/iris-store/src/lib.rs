@@ -77,6 +77,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_29.sql"),
     include_str!("schema_30.sql"),
     include_str!("schema_31.sql"),
+    include_str!("schema_32.sql"),
+    include_str!("schema_33.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
@@ -683,4 +685,15 @@ fn migrate(conn: &mut Connection, db: &Path) -> Result<()> {
 /// The schema version of an open database.
 pub fn schema_version(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
+}
+
+/// The time of the stop (docs/specs/2026-11-17-stop.md), in milliseconds
+/// since 1970, or `None` while Iris runs. Read it in the transaction that
+/// the stop guards.
+pub fn stopped(conn: &Connection) -> Result<Option<i64>> {
+    Ok(
+        conn.query_row("SELECT stopped_at FROM stop_switch WHERE id = 1", [], |r| {
+            r.get(0)
+        })?,
+    )
 }

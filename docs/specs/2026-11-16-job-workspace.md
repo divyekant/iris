@@ -307,7 +307,11 @@ of that mail ends later (a revoke, or the message becomes hostile mail or
 gone), the quote stays: the build does not know which text is a quote, and
 a change would alter the record of the job. The agent saw the text while it
 was granted. This is a known limit, with a GitHub issue. The person can
-delete the workspace folder to remove the agent files.
+delete the workspace folder to remove `drafts/`. From R5-06, the store keeps
+a copy of the notes of an open job, and a build writes it back to a new
+folder. To remove text from the notes of an open job, the person edits
+`notes.md`. When the job is done, Iris deletes the copy
+(`docs/specs/2026-11-17-job-memory.md`).
 
 ### The layout
 
@@ -327,7 +331,9 @@ delete the workspace folder to remove the agent files.
 The build owns `JOB.md`, `job.json`, `threads/`, `commitments/`, `records/`
 and `people/`. It writes them new on each build. The agent owns `drafts/` and
 `notes.md`: the build makes them when they are not there, and never changes
-or reads them. The build does not touch other paths.
+them. From R5-06, the build reads `notes.md` to save its copy in the store,
+and a new `notes.md` holds that copy (`docs/specs/2026-11-17-job-memory.md`).
+The build does not touch other paths.
 
 The rules of the grant apply to the data that the build reads from mail
 rows. The text that the agent or the person wrote follows the section above.
@@ -414,7 +420,9 @@ revoke count of the scope that it read (see below).
 6. For each path that the build owns: remove the old path (a symbolic link is
    removed as a link, never followed), then rename the new path from the
    stage into place. Then remove the empty stage.
-7. Make `drafts/` and `notes.md` if they are not there.
+7. Make `drafts/` and `notes.md` if they are not there. From R5-06, the
+   build saves the copy of `notes.md` first, and a new `notes.md` holds the
+   copy of the store (`docs/specs/2026-11-17-job-memory.md`).
 
 The agent can write only in the workspace (R4-05), not in the folder that
 holds it. Each path that the build opens, makes or removes is the workspace
@@ -512,7 +520,7 @@ Markdown and JSON with `serde_json`.
 | An item (also a pinned item) with a source that is hostile mail, a draft or gone | The item is not in the folder | Unit test |
 | An agent symbolic link at `threads`, `people`, `JOB.md` or another owned path, to a folder or a file outside | The link is removed, the target does not change | Unit test |
 | `dir` is a symbolic link or a file | `Error::Refused`, nothing written | Unit test |
-| An agent file in `drafts/`, `notes.md` or another path | Kept as it is | Unit test |
+| An agent file in `drafts/`, `notes.md` or another path | Kept as it is (R5-06: the build also saves a copy of `notes.md`) | Unit test |
 | A crash during the build | An owned path can be old, new or absent. The build returned no `Ok`, so no session starts (R4-04). The stage stays, and the next build removes it and writes each owned path again | Test: a build after a left stage succeeds and writes each owned path |
 | An agent link at `.iris` | Removed as a link, and a new folder is made. The stage is not under `.iris`, so the link cannot move the stage | Unit test |
 | An entry in `.iris` from an earlier session (an old socket, a file of the agent) | The build makes `.iris` new and empty | Unit test |
@@ -531,7 +539,7 @@ Markdown and JSON with `serde_json`.
 | A revoke at the same time as the apply of a session action | Before the cutoff: the action is refused. After the cutoff: the provider call goes on, and the ledger shows it (R4-03) | Test with R4-03 |
 | A revoke, a hostile mark, a gone message or a signal after the read of a build | The files keep the message until the next build (known limit). The read verbs see the change at once (R4-03, R4-04) | Unit test: the next build drops a revoked ref |
 | Two builds of one workspace at the same time | The second waits for the lock of the first | Unit test: a held lock makes `try` fail, and a build after it succeeds |
-| An agent copy of granted text in `notes.md` or `drafts/`, and the grant ends | The copy stays (known limit) | None: the build does not read agent files |
+| An agent copy of granted text in `notes.md` or `drafts/`, and the grant ends | The copy stays (known limit). R5-06: the store copy of `notes.md` follows the file; the person edits the file to remove text | None: the build does not check the text of agent files |
 | An unknown job | `Error::NotFound` | Unit test |
 | A job in the state `done` | No thread, item or person file. The job files stay | Unit test |
 | A crash between `finish` and the build of the done job, or during that build | The mail files stay until the next engine start, which builds each done job whose workspace folder exists (R4-04) | Test with R4-04 |
