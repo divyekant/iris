@@ -822,20 +822,24 @@ fn changeset_of(b: &Box, action: i64) -> i64 {
 fn no_send_leaves_while_the_switch_is_off() {
     let b = setup("switch");
     let (s, _) = b.new_mail(AGED);
-    iris_apply::set_sending(&b.store, false, now()).unwrap();
+    iris_apply::set_sending(&b.store, false).unwrap();
     assert_eq!(iris_apply::sending(&b.store).unwrap(), None);
     assert_eq!(b.release(s).unwrap(), Outcome::SendingOff);
     assert_eq!((b.state(s).as_str(), b.sends()), ("held", 0));
     // On again: a full hold from now, though the approval is old.
-    let on = now();
-    iris_apply::set_sending(&b.store, true, on).unwrap();
+    let before = now();
+    iris_apply::set_sending(&b.store, true).unwrap();
+    // The switch takes the time of its own write, not an earlier time of
+    // the caller.
+    let on = iris_apply::sending(&b.store).unwrap().unwrap();
+    assert!(on >= before, "{on} < {before}");
     match b.release(s) {
         Ok(Outcome::Hold(until)) => assert!(until >= on + HOLD_MS, "{until}"),
         other => panic!("{other:?}"),
     }
     assert_eq!(b.sends(), 0);
     // A second "on" keeps the first time, so it does not restart a hold.
-    iris_apply::set_sending(&b.store, true, on + 5_000).unwrap();
+    iris_apply::set_sending(&b.store, true).unwrap();
     assert_eq!(iris_apply::sending(&b.store).unwrap(), Some(on));
 }
 
@@ -928,7 +932,7 @@ fn sending_off_waits_for_a_send_in_progress() {
         std::thread::sleep(Duration::from_millis(300));
         drop(file);
     });
-    iris_apply::set_sending(&b.store, false, now()).unwrap();
+    iris_apply::set_sending(&b.store, false).unwrap();
     assert!(start.elapsed() >= Duration::from_millis(300));
     assert_eq!(iris_apply::sending(&b.store).unwrap(), None);
     holder.join().unwrap();

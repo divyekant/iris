@@ -991,7 +991,7 @@ fn set_listed(tx: &Connection, ledger: i64, message: i64, why: &str) -> iris_sto
 }
 
 /// Milliseconds since the Unix epoch.
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)

@@ -699,12 +699,13 @@ pub fn sending(store: &Store) -> Result<Option<i64>> {
 /// shorter than the answer wait of the socket command (30 seconds).
 pub const OFF_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// Turn the send switch on or off (`iris sending on|off`). Off takes the
+/// Turn the send switch on or off (`iris sending on|off`) at the time of
+/// the write. Off takes the
 /// apply lock first, which the release holds from its claim to the end of
 /// `drafts.send`: when off returns, no send call is in progress, and each
 /// later claim reads off. If the lock stays busy for [`OFF_WAIT`], nothing
 /// changes and the answer is [`Error::Busy`].
-pub fn set_sending(store: &Store, on: bool, now_ms: i64) -> Result<()> {
+pub fn set_sending(store: &Store, on: bool) -> Result<()> {
     let _lock = if on {
         None
     } else {
@@ -719,6 +720,9 @@ pub fn set_sending(store: &Store, on: bool, now_ms: i64) -> Result<()> {
             }
         }
     };
+    // The clock is read here, after the lock and the confirmation of the
+    // caller, so a hold always counts from the moment the switch changed.
+    let now_ms = super::now();
     store.write(|tx| {
         tx.execute(
             "UPDATE send_switch SET on_at = CASE WHEN ?1 THEN coalesce(on_at, ?2) END,

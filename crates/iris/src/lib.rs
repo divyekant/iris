@@ -711,13 +711,12 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         }
         Command::Sending { state } => {
             let store = open()?;
-            let now = engine::now_ms();
             match state {
                 Some(Switch::On) => {
                     sending_on_confirm(&mut std::io::stdin().lock())?;
-                    iris_apply::set_sending(&store, true, now).map_err(|e| e.to_string())?;
+                    iris_apply::set_sending(&store, true).map_err(|e| e.to_string())?;
                 }
-                Some(Switch::Off) => match iris_apply::set_sending(&store, false, now) {
+                Some(Switch::Off) => match iris_apply::set_sending(&store, false) {
                     Ok(()) => {}
                     Err(iris_apply::Error::Busy) => {
                         return Err("A send is in progress. Run the command again.".into())
