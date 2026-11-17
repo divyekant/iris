@@ -524,3 +524,78 @@ fn a_session_close_applies_only_inside_the_grant() {
         }
     }
 }
+
+/// The tick applies an approved action of each state verb of R5-02, as
+/// after a stop between the approval of the web client and its apply.
+#[test]
+fn the_tick_applies_skip_mute_and_dismiss() {
+    let b = setup("tick-r5-02", "open", Some(APPLY_POLICY));
+    let person = Author {
+        kind: AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    let s = &b.store;
+    let mut actions = Vec::new();
+    for (verb, form, file, status, id, to) in [
+        (Verb::Skip, "feed", "feed.json", "new", "f-2", "skipped"),
+        (
+            Verb::Mute,
+            "conversation",
+            "conversation.json",
+            "quiet",
+            "v-3",
+            "muted",
+        ),
+        (
+            Verb::Dismiss,
+            "signal",
+            "signal-code.json",
+            "active",
+            "s-4",
+            "dismissed",
+        ),
+    ] {
+        s.write(|tx| {
+            let mut doc =
+                iris_spec::read_json(&iris_spec::schema_dir().join("examples").join(file));
+            doc["id"] = json!(id);
+            doc["status"] = json!(status);
+            tx.execute(
+                "INSERT INTO item(id, form, account_id, status, doc, created_at, updated_at)
+                 VALUES (?1, ?2, 1, ?3, ?4, 0, 0)",
+                rusqlite::params![&id[2..], form, status, doc.to_string()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let mut args = Map::new();
+        args.insert("reason".into(), json!("No."));
+        let cs = iris_changeset::create(s, &person, now()).unwrap();
+        iris_changeset::add_action(s, cs, &person, verb, &[id], &args, None).unwrap();
+        iris_changeset::submit(s, cs, &person, "No.", now()).unwrap();
+        let row = b
+            .one("SELECT max(id) FROM changeset_action")
+            .as_i64()
+            .unwrap();
+        let hash = b.one(&format!(
+            "SELECT hash FROM changeset_action WHERE id = {row}"
+        ));
+        let action = ActionId {
+            changeset: cs,
+            revision: 1,
+            n: 1,
+        };
+        iris_changeset::approve(s, action, hash.as_str().unwrap(), now()).unwrap();
+        actions.push((row, id, to));
+    }
+    assert_eq!(apply_states(s).unwrap(), 3);
+    for (row, id, to) in actions {
+        assert_eq!(b.state(row), "applied", "{id}");
+        assert_eq!(
+            b.one(&format!("SELECT status FROM item WHERE id = {}", &id[2..])),
+            json!(to)
+        );
+    }
+}

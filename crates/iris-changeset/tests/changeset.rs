@@ -1587,3 +1587,82 @@ fn open_actions_expire_14_days_after_the_submit() {
     );
     assert!(doc(&s, draft)["actions"][0]["decision"].is_null());
 }
+
+/// No state verb counts toward the bulk limit of a changeset (section 5.3):
+/// a state verb changes no message. For each verb of `STATE_VERBS` but
+/// `correct`, an item with more origin messages than the limit sits next
+/// to an archive of one message, and the archive gets no `bulk` flag.
+#[test]
+fn no_state_verb_counts_toward_bulk() {
+    let dir = TempDir::new("bulk-state");
+    let s = store(&dir);
+    let n = BULK as usize + 1;
+    let batch: Vec<NewMessage> = (0..n)
+        .map(|i| NewMessage {
+            provider_id: format!("o{i}"),
+            thread_provider_id: "ot".into(),
+            ..Default::default()
+        })
+        .collect();
+    s.put_messages(1, &batch).unwrap();
+    let forms = [
+        ("commitment", "commitment-you-owe.json", "c", "open"),
+        ("feed", "feed.json", "f", "new"),
+        ("conversation", "conversation.json", "v", "active"),
+        ("signal", "signal-code.json", "s", "active"),
+    ];
+    let mut ids = Vec::new();
+    s.write(|tx| {
+        for (form, file, prefix, status) in forms {
+            let mut doc =
+                iris_spec::read_json(&iris_spec::schema_dir().join("examples").join(file));
+            let row: i64 = tx.query_row("SELECT coalesce(max(id), 0) + 1 FROM item", [], |r| {
+                r.get(0)
+            })?;
+            doc["id"] = json!(format!("{prefix}-{row}"));
+            doc["status"] = json!(status);
+            tx.execute(
+                "INSERT INTO item(id, form, account_id, status, doc, created_at, updated_at)
+                 VALUES (?1, ?2, 1, ?3, ?4, 0, 0)",
+                rusqlite::params![row, form, status, doc.to_string()],
+            )?;
+            tx.execute(
+                "INSERT INTO item_source(item_id, message_id, role)
+                 SELECT ?1, id, 'origin' FROM message WHERE provider_id LIKE 'o%'",
+                [row],
+            )?;
+            ids.push(format!("{prefix}-{row}"));
+        }
+        Ok(())
+    })
+    .unwrap();
+    for verb in iris_changeset::STATE_VERBS {
+        let verb = Verb::parse(verb).unwrap();
+        let (target, a) = match verb {
+            Verb::Correct => continue,
+            Verb::Defer => (&ids[0], json!({"date": "2099-01-05"})),
+            Verb::Skip => (&ids[1], json!({"reason": "No."})),
+            Verb::Mute => (&ids[2], json!({"reason": "No."})),
+            Verb::Dismiss => (&ids[3], json!({"reason": "No."})),
+            _ => (&ids[0], json!({"reason": "No."})),
+        };
+        let cs = create(&s, &agent(), NOW).unwrap();
+        add_action(&s, cs, &agent(), verb, &[target], &args(a), None).unwrap();
+        add_action(&s, cs, &agent(), Verb::Archive, &["m-1"], &Map::new(), None).unwrap();
+        submit(&s, cs, &agent(), "Tidy up.", NOW).unwrap();
+        let state = hash_doc(&s, cs, 1, 1);
+        assert_eq!(state["decision"]["state"], "proposed", "{state}");
+        assert_eq!(
+            state["resolved"]["messages"].as_array().unwrap().len(),
+            n,
+            "{}",
+            verb.as_str()
+        );
+        assert_eq!(
+            hash_doc(&s, cs, 1, 2)["flags"],
+            json!([]),
+            "{}",
+            verb.as_str()
+        );
+    }
+}

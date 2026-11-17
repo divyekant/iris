@@ -644,12 +644,15 @@ pub fn submit_in(
     // messages: ten actions on the same 100 messages count 1,000
     // (section 10).
     let total: i64 = c.query_row(
-        "SELECT count(*) FROM action_message m
+        &format!(
+            "SELECT count(*) FROM action_message m
              JOIN changeset_action a ON a.id = m.action_id
              WHERE a.changeset_id = ?1
                AND (a.state IS NULL
                     OR a.state IN ('approved', 'held', 'applied'))
-               AND a.verb NOT IN ('close', 'defer', 'decline', 'correct', 'draft', 'send')",
+               AND a.verb NOT IN ({})",
+            sql_list(STATE_VERBS.iter().chain(&WRITE_VERBS))
+        ),
         [changeset],
         |r| r.get(0),
     )?;
@@ -996,14 +999,24 @@ fn label_name(
 }
 
 /// The verbs that change Iris state, not a mailbox (section 4). Their
-/// targets are items.
-const STATE_VERBS: [&str; 7] = [
+/// targets are items. Each list of state verbs (the bulk count, the apply,
+/// the tick) reads this one.
+pub const STATE_VERBS: [&str; 7] = [
     "close", "defer", "decline", "correct", "skip", "mute", "dismiss",
 ];
 
 /// The verbs that write mail (release 3). A `draft` takes one account, one
 /// thread or one draft; a `send` takes one draft.
-const WRITE_VERBS: [&str; 2] = ["draft", "send"];
+pub const WRITE_VERBS: [&str; 2] = ["draft", "send"];
+
+/// The SQL list `'a', 'b'` of fixed verb names (no quotes in them).
+pub fn sql_list<'a>(verbs: impl IntoIterator<Item = &'a &'a str>) -> String {
+    verbs
+        .into_iter()
+        .map(|v| format!("'{v}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 /// Delete the rows that submit derives from the targets of an action.
 fn clear(c: &Connection, action: i64) -> Result<()> {

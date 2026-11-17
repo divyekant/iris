@@ -26,9 +26,6 @@ use serde_json::{json, Map, Value};
 
 use crate::{expire, now, Counts, Error, Outcome, Result};
 
-/// The state verbs.
-const VERBS: &str = "'close', 'decline', 'defer', 'correct'";
-
 /// The actions that [`apply_states`] reads in one page (specification 2,
 /// section 9: no list of changesets in memory).
 const PAGE: i64 = 100;
@@ -43,8 +40,9 @@ pub fn apply_states(store: &Store) -> Result<usize> {
         let page: Vec<i64> = store.read(|c| {
             let mut st = c.prepare_cached(&format!(
                 "SELECT id FROM changeset_action
-                 WHERE state = 'approved' AND verb IN ({VERBS}) AND id > ?1
-                 ORDER BY id LIMIT ?2"
+                 WHERE state = 'approved' AND verb IN ({}) AND id > ?1
+                 ORDER BY id LIMIT ?2",
+                iris_changeset::sql_list(&iris_changeset::STATE_VERBS)
             ))?;
             let rows = st.query_map([after, PAGE], |r| r.get(0))?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -111,10 +109,7 @@ fn apply_in(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<O
         )
         .optional()?;
     let (verb, hash, decided_by, changeset, args) = row.ok_or(Inner::NotApproved)?;
-    if !matches!(
-        verb.as_str(),
-        "close" | "decline" | "defer" | "correct" | "skip" | "mute" | "dismiss"
-    ) {
+    if !iris_changeset::STATE_VERBS.contains(&verb.as_str()) {
         return Err(Inner::Verb(verb));
     }
     if expire(tx, action)? {
