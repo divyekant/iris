@@ -23,16 +23,33 @@ use axum::{
 use iris_store::Store;
 use serde::Deserialize;
 
+mod ask;
 mod auth;
+mod drafts;
+mod export;
+pub mod gate;
+mod jobs;
+mod matters;
 pub mod measures;
+mod notice;
+mod outbox;
 pub mod policy;
 mod read;
 mod review;
 mod verbs;
+mod watch;
+pub use ask::{answer, AskAnswer, AskSource, Connect};
 pub use auth::{Auth, SIGN_IN};
+pub use drafts::write_drafts;
+pub use export::{export, Exported};
+pub use jobs::*;
+pub use matters::{confirm_matter, decline_matter, matter, matters};
+pub use notice::*;
+pub use outbox::{cancel_send, outbox, Cancelled, MAX_SENDS};
 pub use read::*;
 pub use review::*;
 pub use verbs::*;
+pub use watch::*;
 
 #[derive(Debug)]
 pub enum Error {
@@ -42,6 +59,11 @@ pub enum Error {
     /// The request cannot apply to the state of now, for example a policy
     /// that changed after the person saw it.
     Conflict(String),
+    /// The engine cannot do the request now, for example with no model or
+    /// no budget.
+    Unavailable(String),
+    /// The model failed or gave an answer that is not valid.
+    Model(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -50,7 +72,10 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::Store(e) => write!(f, "{e}"),
-            Error::Query(why) | Error::Conflict(why) => write!(f, "{why}"),
+            Error::Query(why)
+            | Error::Conflict(why)
+            | Error::Unavailable(why)
+            | Error::Model(why) => write!(f, "{why}"),
         }
     }
 }
@@ -61,6 +86,7 @@ impl From<iris_store::Error> for Error {
     fn from(e: iris_store::Error) -> Error {
         match e {
             iris_store::Error::Query(why) => Error::Query(why),
+            e @ iris_store::Error::Watch(_) => Error::Query(e.to_string()),
             e => Error::Store(e),
         }
     }
@@ -71,6 +97,8 @@ impl IntoResponse for Error {
         let code = match self {
             Error::Query(_) => StatusCode::BAD_REQUEST,
             Error::Conflict(_) => StatusCode::CONFLICT,
+            Error::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Error::Model(_) => StatusCode::BAD_GATEWAY,
             Error::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         error(code, &self.to_string())
@@ -85,22 +113,41 @@ fn not_found() -> Response {
     error(StatusCode::NOT_FOUND, "not found")
 }
 
+/// The routes of the API, under `/api`, with no model: `POST /api/ask`
+/// answers 503. See [`router_with_model`].
+pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
+    routes(store, auth, None)
+}
+
 /// The routes of the API, under `/api`. Merge them before the fallback of
 /// `iris_web::router()`. Each request needs the bearer token of the sign-in
-/// of `auth` (see [`Auth`]).
-pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
+/// of `auth` (see [`Auth`]). `connect` makes the model client of
+/// `POST /api/ask`.
+pub fn router_with_model(store: Arc<Store>, auth: Arc<Auth>, connect: Connect) -> Router {
+    routes(store, auth, Some(connect))
+}
+
+fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Router {
+    let ask = Router::new()
+        .route("/api/ask", post(post_ask))
+        .with_state((store.clone(), connect));
     Router::new()
         .route("/api/status", get(get_status))
         .route("/api/brief", get(get_brief))
         .route("/api/brief/{section}", get(get_brief_section))
         .route("/api/handled", get(get_handled))
+        .route("/api/gate", get(get_gate))
+        .route("/api/gate/declined", get(get_declined))
+        .route("/api/senders/{id}/{answer}", post(post_answer))
         .route("/api/records", get(get_records))
         .route("/api/items", get(get_items))
         .route("/api/items/{id}", get(get_item))
+        .route("/api/items/{id}/job", get(get_start))
         .route("/api/items/{id}/{verb}", post(post_verb))
         .route("/api/search", get(get_search))
         .route("/api/changesets", get(get_changesets))
         .route("/api/changesets/{id}", get(get_changeset))
+        .route("/api/changesets/{id}/drafts", get(get_drafts))
         .route("/api/changesets/{id}/decide", post(post_decide))
         .route("/api/changesets/{id}/withdraw", post(post_withdraw))
         .route("/api/messages", get(get_messages))
@@ -113,10 +160,26 @@ pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
         .route("/api/policy/discard", post(post_discard))
         .route("/api/policy/mode", post(post_mode))
         .route("/api/policy/remove", post(post_remove))
+        .route("/api/policy/grant", post(post_grant))
+        .route("/api/jobs", get(get_jobs).post(post_job))
+        .route("/api/jobs/{id}", get(get_job))
+        .route("/api/policy/accept", post(post_accept))
+        .route("/api/policy/dismiss", post(post_dismiss))
+        .route("/api/notices", get(get_notices))
+        .route("/api/notices/{id}/done", post(post_notice_done))
+        .route("/api/watches", get(get_watches).post(post_watch))
+        .route("/api/watches/{id}/remove", post(post_watch_remove))
+        .route("/api/outbox", get(get_outbox))
+        .route("/api/outbox/{draft}/cancel", post(post_outbox_cancel))
+        .route("/api/matters", get(get_matters))
+        .route("/api/matters/{id}", get(get_matter))
+        .route("/api/matters/{id}/confirm", post(post_matter_confirm))
+        .route("/api/matters/{id}/decline", post(post_matter_decline))
         // No fallback: `iris_web::router()` has the fallback of the server.
         .route("/api", any(|| async { not_found() }))
         .route("/api/{*rest}", any(|| async { not_found() }))
         .with_state(store)
+        .merge(ask)
         // The code exchange has no handler: the guard answers it.
         .route(SIGN_IN, any(|| async { not_found() }))
         .layer(middleware::from_fn_with_state(auth, auth::guard))
@@ -167,6 +230,15 @@ async fn get_changeset(State(s): State<Arc<Store>>, Path(id): Path<String>) -> R
     )
 }
 
+/// The draft of each `draft` and `send` action that waits, with the parts
+/// that gave its flags (card R4-07).
+async fn get_drafts(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    let Some(row) = changeset_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    Ok(stream(move |w| drafts::write_drafts(&s, row, w)).await)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DecideBody {
@@ -195,7 +267,11 @@ async fn post_decide(
 
 /// The withdraw of the person (section 5.5). The answer is the changeset
 /// after the withdraw. The request has no body.
-async fn post_withdraw(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+async fn post_withdraw(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    _: NoBody,
+) -> Result<Response> {
     let Some(row) = changeset_row(&s, &id)? else {
         return Ok(not_found());
     };
@@ -206,6 +282,27 @@ async fn post_withdraw(State(s): State<Arc<Store>>, Path(id): Path<String>) -> R
         })
         .await,
     )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AskBody {
+    question: String,
+}
+
+/// One question of the person. The model call runs on a blocking thread,
+/// so the other requests go on.
+async fn post_ask(
+    State((s, connect)): State<(Arc<Store>, Option<Connect>)>,
+    b: std::result::Result<Json<AskBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let connect =
+        connect.ok_or_else(|| Error::Unavailable("This engine has no model client.".into()))?;
+    let a = tokio::task::spawn_blocking(move || answer(&s, &connect, &b.question, now_ms()))
+        .await
+        .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;
+    Ok(Json(a).into_response())
 }
 
 #[derive(Deserialize)]
@@ -359,6 +456,49 @@ async fn post_verb(
         .map_or_else(not_found, |d| Json(d).into_response()))
 }
 
+/// The senders that wait at the stranger gate.
+async fn get_gate(
+    State(s): State<Arc<Store>>,
+    q: std::result::Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
+    let page = gate::gate_page(
+        &s,
+        now_ms(),
+        false,
+        q.limit.unwrap_or(50),
+        q.after.as_deref(),
+    )?;
+    Ok(Json(page).into_response())
+}
+
+/// The senders that the person declined at the gate.
+async fn get_declined(
+    State(s): State<Arc<Store>>,
+    q: std::result::Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
+    let page = gate::gate_page(
+        &s,
+        now_ms(),
+        true,
+        q.limit.unwrap_or(50),
+        q.after.as_deref(),
+    )?;
+    Ok(Json(page).into_response())
+}
+
+/// The answer of the person at the stranger gate: `accept`, `decline` or
+/// `reopen` (specification 1, section 6.7). The answer is the sender row.
+async fn post_answer(
+    State(s): State<Arc<Store>>,
+    Path((id, answer)): Path<(String, String)>,
+    _: NoBody,
+) -> Result<Response> {
+    Ok(gate::answer(&s, &id, &answer, now_ms())?
+        .map_or_else(not_found, |d| Json(d).into_response()))
+}
+
 #[derive(Deserialize)]
 struct SearchQuery {
     q: String,
@@ -449,6 +589,30 @@ async fn get_policy(State(s): State<Arc<Store>>) -> Result<Response> {
     Ok(Json(policy::policy(&s)?).into_response())
 }
 
+/// The body of a route that takes none: zero bytes, or a JSON text that is
+/// the empty object `{}` (the web client sends `{}`). `serde_json` parses
+/// the JSON. Any other body, a body of only spaces too, gives 400 before the
+/// route changes anything.
+struct NoBody;
+
+impl<S: Send + Sync> axum::extract::FromRequest<S> for NoBody {
+    type Rejection = Error;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self> {
+        let b = Bytes::from_request(req, state)
+            .await
+            .map_err(|e| Error::Query(e.body_text()))?;
+        let none = b.is_empty()
+            || serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&b)
+                .is_ok_and(|m| m.is_empty());
+        if none {
+            Ok(NoBody)
+        } else {
+            Err(Error::Query("this route takes no body".into()))
+        }
+    }
+}
+
 /// A JSON body that does not parse gives the JSON error of the API.
 fn body<T>(b: std::result::Result<Json<T>, JsonRejection>) -> Result<T> {
     b.map(|Json(v)| v).map_err(|e| Error::Query(e.body_text()))
@@ -467,7 +631,7 @@ async fn post_confirm(
     Ok(Json(policy::confirm(&s, &b.sha256, now_s())?).into_response())
 }
 
-async fn post_discard(State(s): State<Arc<Store>>) -> Result<Response> {
+async fn post_discard(State(s): State<Arc<Store>>, _: NoBody) -> Result<Response> {
     Ok(Json(policy::discard(&s)?).into_response())
 }
 
@@ -501,6 +665,235 @@ async fn post_remove(
     let b = body(b)?;
     let change = iris_policy::Change::Remove(b.id);
     Ok(Json(policy::change(&s, b.version, change, now_s())?).into_response())
+}
+
+#[derive(Deserialize)]
+struct JobsQuery {
+    state: Option<String>,
+    limit: Option<u32>,
+    after: Option<String>,
+}
+
+async fn get_jobs(
+    State(s): State<Arc<Store>>,
+    q: std::result::Result<Query<JobsQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
+    let state = q.state.as_deref().unwrap_or("open");
+    let page = jobs(&s, state, q.limit.unwrap_or(50), q.after.as_deref())?;
+    Ok(Json(page).into_response())
+}
+
+/// The mail that a start from the item grants now.
+async fn get_start(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    Ok(start_preview(&s, &id)?.map_or_else(not_found, |v| Json(v).into_response()))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartBody {
+    item: String,
+    goal: String,
+    due: Option<String>,
+    messages: Vec<String>,
+}
+
+/// Start a job from one item ("Handle this"). The answer is 201 with the
+/// job document. If an open job has the item, 409 names that job.
+async fn post_job(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<StartBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    Ok(
+        match start_job(
+            &s,
+            &b.item,
+            &b.goal,
+            b.due.as_deref(),
+            &b.messages,
+            now_ms(),
+        )? {
+            Started::Created(doc) => (StatusCode::CREATED, Json(doc)).into_response(),
+            Started::NotFound => not_found(),
+            Started::Open(job) => (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "A job that is not done has this item already.",
+                    "job": job,
+                })),
+            )
+                .into_response(),
+        },
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrantBody {
+    version: Option<i64>,
+    job: String,
+    verbs: Vec<String>,
+}
+
+/// A grant inside one open job: one `allow` rule with `job`.
+async fn post_grant(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<GrantBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    Ok(policy::grant(&s, &b.job, &b.verbs, b.version, now_s())?
+        .map_or_else(not_found, |v| Json(v).into_response()))
+}
+
+async fn get_job(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    let Some(row) = job_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    Ok(stream(move |w| write_job(&s, row, w)).await)
+}
+
+/// `id` is the ID of an open proposal (spec 2, section 6.6).
+#[derive(Deserialize)]
+struct ProposalBody {
+    version: Option<i64>,
+    id: i64,
+}
+
+async fn post_accept(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<ProposalBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let change = iris_policy::Change::Accept(b.id);
+    Ok(Json(policy::change(&s, b.version, change, now_s())?).into_response())
+}
+
+#[derive(Deserialize)]
+struct DismissBody {
+    id: i64,
+}
+
+async fn post_dismiss(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<DismissBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    Ok(Json(policy::dismiss(&s, b.id, now_s())?).into_response())
+}
+
+async fn get_notices(State(s): State<Arc<Store>>) -> Result<Response> {
+    Ok(Json(notices(&s)?).into_response())
+}
+
+async fn post_notice_done(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    _: NoBody,
+) -> Result<Response> {
+    if !notice_done(&s, &id, now_ms())? {
+        return Ok(not_found());
+    }
+    Ok(Json(serde_json::json!({ "done": id })).into_response())
+}
+
+async fn get_outbox(
+    State(s): State<Arc<Store>>,
+    q: std::result::Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
+    Ok(Json(outbox(
+        &s,
+        q.limit.unwrap_or(MAX_SENDS),
+        q.after.as_deref(),
+    )?)
+    .into_response())
+}
+
+/// Cancel the send of a draft (`d-N`) in the outbox. 409 if the release
+/// claimed it, 404 if the draft has no send that waits.
+async fn post_outbox_cancel(
+    State(s): State<Arc<Store>>,
+    Path(draft): Path<String>,
+    _: NoBody,
+) -> Result<Response> {
+    let Some((iris_store::Kind::Draft, row)) = iris_store::parse_id(&draft) else {
+        return Ok(not_found());
+    };
+    Ok(match cancel_send(&s, row, now_ms())? {
+        Cancelled::Done => Json(serde_json::json!({ "cancelled": draft })).into_response(),
+        Cancelled::Started => error(
+            StatusCode::CONFLICT,
+            "The send started. It cannot be cancelled.",
+        ),
+        Cancelled::NotOpen => not_found(),
+    })
+}
+
+async fn get_watches(State(s): State<Arc<Store>>) -> Result<Response> {
+    Ok(Json(watches(&s)?).into_response())
+}
+
+#[derive(Deserialize)]
+struct WatchBody {
+    text: String,
+}
+
+/// Add a watch. The answer is the new watch.
+async fn post_watch(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<WatchBody>, JsonRejection>,
+) -> Result<Response> {
+    let id = add_watch(&s, &body(b)?.text, now_ms())?;
+    let new = watches(&s)?.into_iter().find(|w| w.id == id);
+    Ok((StatusCode::CREATED, Json(new)).into_response())
+}
+
+async fn post_watch_remove(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    _: NoBody,
+) -> Result<Response> {
+    if !remove_watch(&s, &id)? {
+        return Ok(not_found());
+    }
+    Ok(Json(serde_json::json!({ "removed": id })).into_response())
+}
+
+/// The valid proposals and the confirmed matters.
+async fn get_matters(State(s): State<Arc<Store>>) -> Result<Response> {
+    Ok(Json(matters(&s)?).into_response())
+}
+
+/// One matter with its members. A proposal that is not valid now is 404.
+async fn get_matter(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    Ok(matter(&s, &id)?.map_or_else(not_found, |d| Json(d).into_response()))
+}
+
+#[derive(Deserialize)]
+struct MatterConfirm {
+    title: String,
+    items: Vec<String>,
+}
+
+/// The person confirms a proposal: the title and the members to keep.
+async fn post_matter_confirm(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<MatterConfirm>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    Ok(confirm_matter(&s, &id, &b.title, &b.items, now_ms())?
+        .map_or_else(not_found, |d| Json(d).into_response()))
+}
+
+/// The person declines a proposal.
+async fn post_matter_decline(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    _: NoBody,
+) -> Result<Response> {
+    Ok(decline_matter(&s, &id, now_ms())?.map_or_else(not_found, |d| Json(d).into_response()))
 }
 
 fn now_s() -> i64 {

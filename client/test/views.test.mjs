@@ -12,7 +12,7 @@ const NOW = new Date("2026-11-16T09:05:00Z");
 test("the brief opens with what needs you, in words", async () => {
   const t = text(await render("/src/views/Brief.svelte", { brief: fx.brief, now: NOW }));
   assert.match(t, /You owe two things\. One thing is owed to you\. One conversation waits for you\./);
-  const empty = { ...fx.brief, you_owe: { count: 0, items: [] }, owed_to_you: { count: 0, items: [] }, conversations: { count: 0, items: [] }, strangers: { count: 0, items: [] }, review: { changesets: 0, actions: 0 } };
+  const empty = { ...fx.brief, you_owe: { count: 0, items: [] }, owed_to_you: { count: 0, items: [] }, conversations: { count: 0, items: [] }, strangers: { count: 0, items: [] }, review: { changesets: 0, actions: 0 }, gate: undefined };
   assert.match(text(await render("/src/views/Brief.svelte", { brief: empty, now: NOW })), /Nothing needs you now\./);
   // Only stranger items: the opening must not say that nothing needs you.
   const strangers = { ...empty, strangers: { count: 2, items: [] } };
@@ -20,12 +20,40 @@ test("the brief opens with what needs you, in words", async () => {
   assert.doesNotMatch(t2, /Nothing needs you now/);
   assert.match(t2, /Two items are from senders you do not know\./);
   assert.match(text(await render("/src/views/Brief.svelte", { brief: { ...empty, strangers: { count: 1, items: [] } }, now: NOW })), /One item is from a sender you do not know\./);
+  // With the stranger gate, the opening counts the senders that wait for an answer.
+  const gate = (n) => ({ count: n, senders: fx.gate.senders.slice(0, n), next: null });
+  assert.match(text(await render("/src/views/Brief.svelte", { brief: { ...empty, strangers: { count: 4, items: [] }, gate: gate(3) }, now: NOW })), /Three senders that you do not know wait for an answer\./);
+  assert.match(text(await render("/src/views/Brief.svelte", { brief: { ...empty, strangers: { count: 1, items: [] }, gate: gate(1) }, now: NOW })), /One sender that you do not know waits for an answer\./);
+  assert.match(text(await render("/src/views/Brief.svelte", { brief: { ...empty, gate: gate(0) }, now: NOW })), /Nothing needs you now\./);
+});
+
+test("the stranger gate shows each sender once, with what they ask and the answers", async () => {
+  const html = await render("/src/views/Brief.svelte", { brief: fx.brief, now: NOW, poll: 0 });
+  const gate = html.split('id="strangers"')[1].split("</section>")[0];
+  const t = text(gate);
+  assert.match(t, /From senders you do not know 3/);
+  assert.match(t, /Maria Ruiz maria@brightpath\.example Intro from Sam Ortiz Review the pitch deck before Friday/);
+  assert.match(t, /billing@vendorhub\.example Confirm the address for the invoice/);
+  assert.equal((gate.match(/>Accept</g) ?? []).length, 3);
+  assert.equal((gate.match(/>Ignore</g) ?? []).length, 3);
+  assert.match(gate, /aria-label="Accept Maria Ruiz"/);
+  assert.match(gate, /href="#\/brief\/declined"[^>]*>Ignored 1</);
+  assert.match(gate, /href="#\/rules"[^>]*>Let a rule answer</);
+  // An ask from a stranger is not under You owe before you accept.
+  const owe = html.split('id="you_owe"')[1]?.split("</section>")[0] ?? "";
+  assert.doesNotMatch(owe, /c-401|c-403|c-404/);
+  // More senders than the brief shows: a link to all of them.
+  const more = await render("/src/views/Brief.svelte", { brief: { ...fx.brief, gate: { ...fx.gate, count: 25, next: "k" } }, now: NOW, poll: 0 });
+  assert.match(more, /href="#\/brief\/gate"[^>]*>All 25</);
+  // No sender waits, but some were ignored: the section stays for the link.
+  const quiet = text(await render("/src/views/Brief.svelte", { brief: { ...fx.brief, gate: { count: 0, senders: [], next: null } }, now: NOW, poll: 0 }));
+  assert.match(quiet, /No sender that you do not know waits for an answer\. Ignored 1/);
 });
 
 test("the brief lists what you owe, what is owed to you, and conversations, each line with its source mail", async () => {
   const html = await render("/src/views/Brief.svelte", { brief: fx.brief, now: NOW });
   const t = text(html);
-  assert.match(t, /You owe 2 Review contract section 4/);
+  assert.match(t, /You owe 1 Pay invoice/);
   assert.match(t, /Owed to you 1 SDK examples/);
   assert.match(t, /Conversations 1 Dinner on Thursday\?/);
   assert.match(t, /Sam Ortiz: Are you free for dinner on Thursday\?/);
@@ -35,6 +63,23 @@ test("the brief lists what you owe, what is owed to you, and conversations, each
   assert.match(t, /Iris found 2 hostile messages in the last 7 days/);
   assert.match(t, /Iris could not read 1 messages/);
   assert.match(t, /It changed nothing in your mailbox/);
+});
+
+test("what you owe in 2 days or less, or late, leads the brief, and You owe lists the rest", async () => {
+  const t = text(await render("/src/views/Brief.svelte", { brief: fx.brief, now: NOW }));
+  // The due section comes before the review and before You owe.
+  assert.match(t, /Due soon 1 Review contract section 4 Dana Whitfield ?, due tomorrow Waits for your review/);
+  assert.match(t, /You owe 1 Pay invoice .* All 2 Owed to you/);
+  // A late thing is due soon too; a thing due in 3 days is not.
+  const at = (date) => ({ ...item("c-311"), due: { date } });
+  const late = { ...fx.brief, you_owe: { count: 2, items: [at("2026-11-10"), { ...at("2026-11-19"), id: "c-999" }] } };
+  const t2 = text(await render("/src/views/Brief.svelte", { brief: late, now: NOW }));
+  assert.match(t2, /Due soon 1 Review contract section 4 Dana Whitfield ?, was due 6 days ago/);
+  assert.match(t2, /You owe 1 Review contract section 4 Dana Whitfield ?, due in 3 days All 2/);
+  // Nothing due soon: no section, and You owe has every thing.
+  const none = text(await render("/src/views/Brief.svelte", { brief: { ...fx.brief, you_owe: { count: 1, items: [late.you_owe.items[1]] } }, now: NOW }));
+  assert.doesNotMatch(none, /Due soon/);
+  assert.match(none, /You owe 1 /);
 });
 
 test("the brief shows a live login code at the top, and not after it expires", async () => {
@@ -81,13 +126,21 @@ test("the dev proxy sends the Host of the engine, and changes only the dev page'
 });
 
 test("each brief section shows at most 7 lines and links its full list", async () => {
-  const many = Array.from({ length: 9 }, (_, n) => ({ ...item("c-311"), id: `c-${n}` }));
-  const brief = { ...fx.brief, you_owe: { count: 9, items: many }, strangers: { count: 8, items: many.slice(0, 8) } };
+  const many = Array.from({ length: 9 }, (_, n) => ({ ...item("c-311"), id: `c-${n}`, due: { date: "2026-12-20" } }));
+  // An API from before the stranger gate: strangers is a section of items.
+  const brief = { ...fx.brief, you_owe: { count: 9, items: many }, strangers: { count: 8, items: many.slice(0, 8) }, gate: undefined };
   const html = await render("/src/views/Brief.svelte", { brief, now: NOW });
   assert.match(html, /href="#\/brief\/you_owe">All 9</);
   assert.match(html, /href="#\/brief\/strangers">All 8</);
   const youOwe = html.split('id="you_owe"')[1].split("</section>")[0];
   assert.equal((youOwe.match(/href="#\/item\/c-\d"/g) ?? []).length, 7);
+  // Due soon has the same limit, and its link opens all that you owe.
+  const due = Array.from({ length: 9 }, (_, n) => ({ ...item("c-311"), id: `c-${n}` }));
+  const html2 = await render("/src/views/Brief.svelte", { brief: { ...fx.brief, you_owe: { count: 9, items: due } }, now: NOW });
+  const soon = html2.split('id="soon"')[1].split("</section>")[0];
+  assert.equal((soon.match(/href="#\/item\/c-\d"/g) ?? []).length, 7);
+  assert.match(soon, /href="#\/brief\/you_owe">All 9 that you owe</);
+  assert.doesNotMatch(html2, /id="you_owe"/);
 });
 
 test("the brief groups the feed by sender, not by name, and shows at most 7 senders", async () => {
@@ -335,8 +388,8 @@ test("the handled view lists each change and each hidden item with its reason", 
 });
 
 test("a stranger conversation shows once, under strangers", async () => {
-  // The API gives it only under strangers.
-  const brief = { ...fx.brief, conversations: { count: 0, items: [] }, strangers: { count: 1, items: [item("v-88")] } };
+  // The API gives it only under strangers (an API from before the stranger gate).
+  const brief = { ...fx.brief, conversations: { count: 0, items: [] }, strangers: { count: 1, items: [item("v-88")] }, gate: undefined };
   const html = await render("/src/views/Brief.svelte", { brief, now: NOW, poll: 0 });
   assert.equal((html.match(/href="#\/item\/v-88"/g) ?? []).length, 1);
   assert.match(html, /id="strangers"/);
@@ -399,8 +452,9 @@ test("the next day starts at local midnight", async () => {
 
 test("the fixture server gives the original of a mail", () => {
   const source = fx.raw("m-55210");
-  assert.match(source, /^From: Example Sender <sender@example\.com>\r\n/);
-  assert.match(source, /\r\nSubject: Review contract section 4\r\n/);
+  // m-55210 has a fixed head: the head of its summary.
+  assert.match(source, /^From: Priya Raman <priya@northwind\.example>\r\n/);
+  assert.match(source, /\r\nSubject: Q4 numbers for the board\r\n/);
   assert.equal(fx.raw("m-0"), undefined);
 });
 
@@ -634,6 +688,8 @@ test("routes in the hash give the view", async () => {
   assert.deepEqual(parse("#/item/"), { view: "home" });
   assert.deepEqual(parse("#/records/receipt"), { view: "records", type: "receipt" });
   assert.deepEqual(parse("#/brief/strangers"), { view: "section", key: "strangers" });
+  assert.deepEqual(parse("#/brief/gate"), { view: "gate", declined: false });
+  assert.deepEqual(parse("#/brief/declined"), { view: "gate", declined: true });
   assert.deepEqual(parse("#/brief/nothing"), { view: "brief" });
   assert.deepEqual(parse("#/mail/%"), { view: "home" });
 });

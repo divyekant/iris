@@ -28,6 +28,7 @@ pub fn policy(store: &Store) -> Result<Value> {
         "version": active.version,
         "next_id": store.read(iris_policy::next_rule_id)?,
         "rules": active.policy.rules.iter().map(rule).collect::<Vec<_>>(),
+        "proposals": proposals(store)?,
         "error": active.error.as_ref().map(error),
         "file": file,
     }))
@@ -75,9 +76,43 @@ pub fn change(store: &Store, seen: Option<i64>, change: Change, now: i64) -> Res
         Edited::FileChanged => Err(conflict(
             "The policy file changed on disk. Confirm or discard that change first.",
         )),
-        Edited::NoRule => Err(conflict("The policy has no such rule.")),
+        Edited::NoRule => Err(conflict(
+            "The policy has no such rule, or the proposal is not open any more.",
+        )),
         Edited::Invalid(e) => Err(conflict(&e.to_string())),
     }
+}
+
+/// The open proposals (spec 2, section 6.6), each with the rule that an
+/// accept adds. `rule.id` and `rule.added` are the values of now: the
+/// accept gives the next free ID and the date of the accept.
+fn proposals(store: &Store) -> Result<Vec<Value>> {
+    let (open, next) = store.read(|c| {
+        Ok((
+            iris_policy::propose::open(c)?,
+            iris_policy::next_rule_id(c)?,
+        ))
+    })?;
+    let today = iris_policy::propose::date(crate::now_s());
+    Ok(open
+        .iter()
+        .map(|p| {
+            json!({
+                "id": p.id,
+                "approvals": p.approvals,
+                "created_at": p.created_at,
+                "rule": rule(&p.rule(next, &today)),
+            })
+        })
+        .collect())
+}
+
+/// Dismisses an open proposal. Iris does not propose the same rule again.
+pub fn dismiss(store: &Store, id: i64, now: i64) -> Result<Value> {
+    if !iris_policy::propose::dismiss(store, id, now)? {
+        return Err(conflict("The proposal is not open any more."));
+    }
+    policy(store)
 }
 
 /// Reads a mode name of a request.
@@ -171,4 +206,50 @@ fn difference(active: &Policy, file: &Policy) -> Value {
         "removed": removed,
         "changed": changed,
     })
+}
+
+/// A grant inside one open job (`docs/specs/2026-11-17-start-job.md`,
+/// section 2): one `allow` rule for the agent of `job`, for `verbs`. Gives
+/// `None` when no job has the ID. `seen` is the active version that the
+/// person saw.
+pub fn grant(
+    store: &Store,
+    job: &str,
+    verbs: &[String],
+    seen: Option<i64>,
+    now: i64,
+) -> Result<Option<Value>> {
+    let Some(row) = iris_job::parse_job_id(job) else {
+        return Ok(None);
+    };
+    let mut list: Vec<iris_policy::Verb> = Vec::new();
+    for v in verbs {
+        match iris_policy::Verb::from_name(v) {
+            Some(v) if !list.contains(&v) => list.push(v),
+            Some(_) => return Err(Error::Query(format!("the verb {v:?} is in the list twice"))),
+            None => {
+                return Err(Error::Query(format!(
+                    "not a verb that a rule can allow: {v:?}"
+                )))
+            }
+        }
+    }
+    if list.is_empty() {
+        return Err(Error::Query("a grant needs one or more verbs".into()));
+    }
+    let state = match iris_job::get(store, row) {
+        Ok(j) => j.state,
+        Err(iris_job::Error::NotFound) => return Ok(None),
+        Err(iris_job::Error::Store(e)) => return Err(Error::Store(e)),
+        Err(e) => return Err(Error::Conflict(e.to_string())),
+    };
+    // A job that ends after this check keeps a rule that matches nothing.
+    if state == iris_job::State::Done {
+        return Err(conflict("The job ended."));
+    }
+    let change = Change::Grant {
+        job: iris_job::format_job_id(row),
+        verbs: list,
+    };
+    self::change(store, seen, change, now).map(Some)
 }

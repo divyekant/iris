@@ -7,7 +7,10 @@ use std::path::Path;
 
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 
-use crate::{content, lock, make_private_dir, settings, sync_dir, Error, FileLock, Result, Store};
+use crate::{
+    content, lock, make_private_dir, new_private_dir, settings, sync_dir, Error, FileLock, Result,
+    Store,
+};
 
 /// How long the store keeps the content of a gone message (section 4.5).
 pub const GONE_KEEP_MS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -70,14 +73,8 @@ impl Store {
     /// refers to and that is not there is an error: the copy is not complete.
     pub fn backup(&self, dest: &Path) -> Result<u64> {
         let _lock = self.backup_lock()?;
-        if dest.exists() && fs::read_dir(dest)?.next().is_some() {
-            return Err(Error::Io(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "the backup folder is not empty",
-            )));
-        }
         // The copy holds the key and the mail.
-        make_private_dir(dest)?;
+        new_private_dir(dest)?;
         let dest_content = dest.join("content");
         make_private_dir(&dest_content)?;
 

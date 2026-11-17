@@ -128,6 +128,48 @@ pub fn show(store: &Store, id: &str, as_json: bool) -> Output {
     to_json(&item)
 }
 
+/// `iris watch add|list|remove` (card R5-07).
+pub fn watch(store: &Store, command: &crate::WatchCommand) -> Output {
+    let err = |e: iris_api::Error| e.to_string();
+    match command {
+        crate::WatchCommand::Add { text } => {
+            let id = iris_api::add_watch(store, text, crate::engine::now_ms()).map_err(err)?;
+            Ok(format!(
+                "{id}: Iris tells you one time when a new mail matches. \
+                 Check with `iris watch list`.\n"
+            ))
+        }
+        crate::WatchCommand::List { json } => {
+            let all = iris_api::watches(store).map_err(err)?;
+            let mut out = String::new();
+            for w in &all {
+                if *json {
+                    out.push_str(&serde_json::to_string(w).map_err(|e| e.to_string())?);
+                    out.push('\n');
+                    continue;
+                }
+                let state = match (&w.message, &w.arrived) {
+                    (Some(m), _) => format!("arrived  {}", summary_line(m)),
+                    (None, Some(at)) => format!("arrived  {at}, the mail is gone"),
+                    (None, None) => format!("waits    since {}", w.created),
+                };
+                let _ = writeln!(out, "{}  {state}\n    watch: {}", w.id, field(&w.text));
+            }
+            if all.is_empty() && !json {
+                out.push_str("No watches.\n");
+            }
+            Ok(out)
+        }
+        crate::WatchCommand::Remove { id } => {
+            if iris_api::remove_watch(store, id).map_err(err)? {
+                Ok(format!("{} removed.\n", field(id)))
+            } else {
+                Err(format!("no watch has the ID {}", field(id)))
+            }
+        }
+    }
+}
+
 fn summary_line(m: &iris_api::MessageSummary) -> String {
     format!(
         "{}  {}  {}  {}",
@@ -168,6 +210,19 @@ pub fn field(text: &str) -> String {
         .map(|c| if c.is_whitespace() { ' ' } else { c })
         .filter(|c| !c.is_control())
         .collect()
+}
+
+/// `iris matters` and `iris matters show <id>`: the JSON of the routes
+/// `/api/matters` and `/api/matters/{id}`. They write nothing.
+pub fn matters(store: &Store, command: &crate::MattersCommand) -> Output {
+    let err = |e: iris_api::Error| e.to_string();
+    let v = match command {
+        crate::MattersCommand::Show { id } => iris_api::matter(store, id)
+            .map_err(err)?
+            .ok_or_else(|| format!("no matter {id}, or a proposal that is not valid now"))?,
+        _ => iris_api::matters(store).map_err(err)?,
+    };
+    serde_json::to_string_pretty(&v).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

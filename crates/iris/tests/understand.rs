@@ -583,3 +583,36 @@ fn iris_understand_writes_the_attention_of_new_items() {
         .unwrap();
     assert_eq!(state.as_deref(), Some("hidden"));
 }
+
+/// Each turn of the understanding thread runs the proposal step of
+/// matters after the run, also when the run is idle, with the hourly gate.
+#[test]
+fn an_idle_turn_runs_the_hourly_proposal_step() {
+    let (store, _fake) = synced("matters-turn");
+    let (url, calls) = model_server();
+    let (ok, _, err) = iris(&store, &["model", "set", "local", &url, "local-1"]);
+    assert!(ok, "{err}");
+    let (ok, _, err) = iris(&store, &["understand"]);
+    assert!(ok, "{err}");
+    let eligible = col(
+        &store,
+        "SELECT count(DISTINCT m.thread_id) FROM item i
+           JOIN item_source s ON s.item_id = i.id AND s.role = 'origin'
+           JOIN message m ON m.id = s.message_id
+          WHERE i.form IN ('commitment', 'conversation', 'record')",
+    )
+    .unwrap_or(0);
+    assert!(eligible >= 2, "the mailbox gives candidates of 2 threads");
+    let before = calls.load(Ordering::SeqCst);
+    let now = iris::engine::now_ms();
+    iris::engine::understand_turn(&store, now);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        before + 1,
+        "one proposal call"
+    );
+    assert_eq!(col(&store, "SELECT tried_at FROM matter_run"), Some(now));
+    // The next turn: the run is idle and the hourly gate holds.
+    iris::engine::understand_turn(&store, now + 10_000);
+    assert_eq!(calls.load(Ordering::SeqCst), before + 1);
+}

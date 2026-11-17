@@ -7,9 +7,14 @@
   import { watch } from "../clock";
   import { due, field, money, party, RECORD_FIELDS, when } from "../format";
   import { href } from "../route";
+  import Act from "./Act.svelte";
+  import { canStart } from "../start";
   import Code from "./Code.svelte";
 
-  let { item, now: start = new Date() }: { item: Item; now?: Date } = $props();
+  let { item: given, now: start = new Date() }: { item: Item; now?: Date } = $props();
+  // The item after a change of the person (Done, Later, Decline).
+  // svelte-ignore state_referenced_locally
+  let item = $state(given);
   // svelte-ignore state_referenced_locally
   let now = $state(start);
   $effect(() => (item.form === "signal" && item.expires ? watch(item.expires, (d) => (now = d)) : undefined));
@@ -32,6 +37,7 @@
         if (d) r.push(["Due", `${when(item.due?.date ?? item.due?.at)}, ${d.text}${item.due?.strict ? ". The date is firm." : ""}`]);
         if (item.amount) r.push(["Amount", money(item.amount)]);
         r.push(["Kind", item.kind ?? ""]);
+        if (item.status === "deferred" && item.deferred_until) r.push(["Back on", when(item.deferred_until)]);
         break;
       }
       case "conversation":
@@ -59,6 +65,8 @@
     r.push(["State", item.status]);
     return r;
   });
+  // "Handle this" (R4-10): the start of a job, on its own page.
+  let startable = $derived(canStart(item));
   let made = $derived(
     item.derived.by === "rule" ? `a fixed rule (${item.derived.rule})` : item.derived.by === "model" ? `the model ${item.derived.model}` : "you",
   );
@@ -67,6 +75,13 @@
 <article>
   <p class="form">{FORMS[item.form]}{item.form === "record" && item.type ? `: ${item.type}` : ""}</p>
   <h1>{item.title}</h1>
+
+  {#snippet handle()}
+    {#if startable}<a class="handle" href={href.start(item.id)}>Handle this</a>{/if}
+  {/snippet}
+
+  <Act {item} onchange={(next) => (item = next)} more={handle} />
+  {#if item.form !== "commitment" && startable}<div class="alone">{@render handle()}</div>{/if}
 
   {#if item.form === "signal" && item.code}
     <div class="code"><Code {item} {now} /></div>
@@ -121,6 +136,32 @@
     letter-spacing: -0.01em;
     line-height: 1.25;
     margin: 0 0 var(--space-6);
+  }
+  .handle {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: calc(var(--space-8) + var(--space-2));
+    padding: 0 var(--space-4);
+    margin-left: auto;
+    border: 1px solid var(--color-primary);
+    border-radius: var(--radius-full);
+    background: transparent;
+    color: var(--color-primary);
+    font: inherit;
+    font-weight: 500;
+    text-decoration: none;
+    transition: background var(--transition-fast);
+  }
+  .handle:hover {
+    background: var(--color-background-elevated);
+  }
+  .alone {
+    display: flex;
+    margin: 0 0 var(--space-8);
+  }
+  .alone .handle {
+    margin-left: 0;
   }
   .code {
     margin-bottom: var(--space-6);

@@ -1,0 +1,11 @@
+{
+  "model": "iris/0",
+  "id": "g-5",
+  "title": "Office lease",
+  "status": "proposed",
+  "items": ["r-1300", "v-901"],
+  "counts": { "commitment": 0, "conversation": 1, "record": 1 },
+  "created": "2026-11-07T09:00:00Z",
+  "updated": "2026-11-07T09:00:00Z",
+  "derived": { "by": "model", "model": "example-model-1", "prompt": "matters/0.1" }
+}

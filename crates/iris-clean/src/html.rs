@@ -85,6 +85,17 @@ struct Writer {
     lists: usize,
     /// The open link: its target and the output position of its text.
     link: Option<(String, usize)>,
+    /// The text of the open link as a person sees it: no Markdown marks
+    /// (`> `, `- `), no invisible characters.
+    shown: String,
+    /// True while the writer writes a Markdown mark, not text.
+    mark: bool,
+    /// True when the text or the href of a shown link holds a named
+    /// character reference that `decode_entities` does not know.
+    unread: bool,
+    /// Each closed link whose text is not its target: `(text, href)`, with
+    /// the href as the HTML gives it.
+    links: Vec<(String, String)>,
     /// True when the output reached `OUT_LIMIT`.
     full: bool,
 }
@@ -108,6 +119,16 @@ impl Writer {
         if self.out.len() + breaks + lead + c.len_utf8() > OUT_LIMIT {
             self.full = true;
             return;
+        }
+        if self.link.is_some() && !self.mark {
+            if breaks > 0 {
+                self.shown.push('\n');
+            } else if self.space && !start {
+                self.shown.push(' ');
+            }
+            if !crate::INVISIBLE.contains(&c) {
+                self.shown.push(if c == '\u{a0}' { ' ' } else { c });
+            }
         }
         if self.breaks > 0 {
             if !self.out.is_empty() {
@@ -134,7 +155,9 @@ impl Writer {
     }
 
     fn literal(&mut self, s: &str) {
+        self.mark = true;
         s.chars().for_each(|c| self.push(c));
+        self.mark = false;
     }
 
     fn text(&mut self, t: &str) {
@@ -159,20 +182,34 @@ impl Writer {
         let tail = &self.out[start..];
         let lead = tail.len() - tail.trim_start().len();
         let text = tail.trim().to_string();
+        let shown = std::mem::take(&mut self.shown);
+        let shown = shown.trim();
         let plain = href.strip_prefix("mailto:").unwrap_or(&href);
         if text.is_empty() || text == plain {
             return;
         }
-        // Percent-encode the characters that end a link target, so that the
-        // URL step reads the whole target. The URL stays the same URL.
+        // The link check reads the text as a person sees it.
+        if !self.full && !shown.is_empty() && shown != plain {
+            // A browser decodes each named reference of HTML; this decoder
+            // knows a short list. A link with another one is not checked.
+            self.unread |= unknown_entity(shown) || unknown_entity(&href);
+            self.links.push((shown.to_string(), href.clone()));
+        }
+        // Percent-encode the characters that end a link target, and each
+        // white space or control character, so that the target is one
+        // token with each character of the href in it. A reader of the text
+        // (the URL step, the link check) then reads the whole target.
         let href: String = href
             .chars()
             .map(|c| match c {
-                ' ' => "%20".to_string(),
-                '(' => "%28".to_string(),
-                ')' => "%29".to_string(),
-                '<' => "%3C".to_string(),
-                '>' => "%3E".to_string(),
+                '(' | ')' | '<' | '>' => format!("%{:02X}", c as u32),
+                c if c.is_whitespace() || c.is_control() => {
+                    let mut b = [0; 4];
+                    c.encode_utf8(&mut b)
+                        .bytes()
+                        .map(|x| format!("%{x:02X}"))
+                        .collect()
+                }
                 c => c.to_string(),
             })
             .collect();
@@ -196,7 +233,28 @@ impl Writer {
 /// Convert HTML to Markdown. If `drop_quotes` is true (the message is a
 /// reply), quoted history of common mail clients goes out too.
 /// Return the Markdown and true if the output reached [`OUT_LIMIT`].
+#[cfg(test)]
 pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
+    let c = convert(html, drop_quotes);
+    (c.md, c.full)
+}
+
+/// The result of [`convert`].
+pub(crate) struct Converted {
+    /// The Markdown of `to_markdown`.
+    pub md: String,
+    /// True if the output reached [`OUT_LIMIT`].
+    pub full: bool,
+    /// Each link whose text is not its target, as `(text, href)`: the text
+    /// as a person sees it, the href as the HTML gives it.
+    pub links: Vec<(String, String)>,
+    /// True when a limit can hide a link from `links`: the output limit, or
+    /// a shown element past the stack limit (its content goes out).
+    pub links_cut: bool,
+}
+
+/// Convert HTML to Markdown, with the list of links.
+pub(crate) fn convert(html: &str, drop_quotes: bool) -> Converted {
     let b = html.as_bytes();
     let mut w = Writer {
         line_start: true,
@@ -212,6 +270,7 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
     let mut overflow: Vec<String> = Vec::new();
     // Elements past the name limit. Each end tag closes one of them.
     let mut overflow_lost = 0usize;
+    let mut deep_shown = false;
     let mut i = 0;
     while i < b.len() && !w.full {
         if b[i] != b'<' {
@@ -295,6 +354,8 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
             continue;
         }
         if stack.len() >= MAX_STACK {
+            // A browser shows this element: its links can be out of the list.
+            deep_shown |= shown;
             if overflow.len() < MAX_STACK * 8 {
                 overflow.push(tag.name.clone());
             } else {
@@ -312,7 +373,12 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
         hidden += own_hidden as usize;
     }
     w.close_link();
-    (w.out, w.full)
+    Converted {
+        links_cut: w.full || deep_shown || w.unread,
+        md: w.out,
+        full: w.full,
+        links: w.links,
+    }
 }
 
 fn pop_to(stack: &mut Vec<Open>, at: usize, hidden: &mut usize, w: &mut Writer) {
@@ -389,13 +455,18 @@ fn open_effect(tag: &Tag, w: &mut Writer) {
         }
         "a" => {
             w.close_link();
-            let href = tag.attr("href").unwrap_or("").trim();
+            // The href as a browser reads it: `https:x.com` is a web link.
+            let href = crate::browser_href(tag.attr("href").unwrap_or(""));
             let lower = href.to_ascii_lowercase();
-            if ["http://", "https://", "mailto:"]
+            // An unknown reference can hide a web target (`https&colon;`):
+            // such a link is open too, so that its shown text cuts the list.
+            if ["http:", "https:", "mailto:"]
                 .iter()
                 .any(|p| lower.starts_with(p))
+                || unknown_entity(&href)
             {
-                w.link = Some((href.to_string(), w.out.len()));
+                w.link = Some((href, w.out.len()));
+                w.shown.clear();
             }
         }
         "img" => {
@@ -888,6 +959,18 @@ fn find_close(b: &[u8], from: usize, name: &str) -> usize {
     b.len()
 }
 
+/// True when `s` holds `&`, a name and `;`: a named character reference
+/// that [`decode_entities`] left as it is.
+fn unknown_entity(s: &str) -> bool {
+    s.match_indices('&').any(|(i, _)| {
+        let name = &s[i + 1..];
+        let len = name.bytes().take_while(u8::is_ascii_alphanumeric).count();
+        len > 0
+            && name.as_bytes()[0].is_ascii_alphabetic()
+            && name.as_bytes().get(len) == Some(&b';')
+    })
+}
+
 /// Decode HTML character references (`&amp;`, `&#233;`, `&#xE9;`).
 pub fn decode_entities(s: &str) -> Cow<'_, str> {
     if !s.contains('&') {
@@ -1044,6 +1127,10 @@ mod tests {
         assert_eq!(
             md("<a href='https://a.example.com/'>https://a.example.com/</a>"),
             "https://a.example.com/"
+        );
+        assert_eq!(
+            md("<a href=\"https://bank.example.com&#9;@evil.example.net/x y\u{a0}z\">Bank</a>"),
+            "[Bank](https://bank.example.com@evil.example.net/x%20y%C2%A0z)"
         );
         assert_eq!(md("<a href=\"javascript:run()\">Click</a>"), "Click");
         assert_eq!(

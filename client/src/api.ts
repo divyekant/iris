@@ -2,7 +2,8 @@ import { access } from "./access.svelte.ts";
 import { addPage } from "./format";
 // The client reads the local API of the engine (crates/iris-api/README.md).
 // The form documents follow docs/spec/schema. The client only reads, except
-// the policy changes of the policy view (spec 2 section 6.3).
+// the policy changes of the policy view (spec 2 section 6.3), the decisions of
+// the review, and the state verbs of a commitment (spec 2 section 4).
 
 export type Party = { kind: "self" | "sender"; sender?: string; name?: string; address?: string };
 export type Money = { value: string; currency: string };
@@ -26,6 +27,8 @@ export type Item = {
   owner?: Party;
   counterparty?: Party;
   due?: { date?: string; at?: string; strict?: boolean };
+  /** The day a deferred commitment opens again. */
+  deferred_until?: string;
   amount?: Money;
   participants?: Party[];
   latest?: { at: string; from: Party; snippet: string };
@@ -41,7 +44,25 @@ export type Item = {
   published?: string;
   code?: string;
   expires?: string;
+  /** The confirmed matter that keeps the item (`g-4`), or null. */
+  matter?: string | null;
 };
+
+// A matter: mail that belongs together, as Iris proposes it and the person decides it
+// (docs/spec/schema/matter.schema.json).
+export type MatterForm = "commitment" | "conversation" | "record";
+export type Matter = {
+  id: string;
+  title: string;
+  status: "proposed" | "confirmed" | "declined";
+  items: string[];
+  counts: Record<MatterForm, number>;
+  created: string;
+  updated: string;
+  decided?: string;
+};
+export type MatterList = { proposed: Matter[]; confirmed: Matter[] };
+export type MatterView = { matter: Matter; items: Record<MatterForm, Item[]> };
 
 // `duplicates` maps an item ID to newer items that can be the same thing (spec 1
 // section 7.5). The newer items are not in `items`: the client shows a pair as one line.
@@ -69,9 +90,19 @@ export type Brief = {
   hidden?: number;
   /** The open changesets, and their actions that wait for a person (spec 2 section 5.5). */
   review?: { changesets: number; actions: number };
+  /** The senders that wait at the stranger gate: the first 20 (spec 1 section 6.7). */
+  gate?: GatePage;
+  /** The count of senders that you ignored at the gate. */
+  declined?: number;
 };
 
 export type Bundle = Section & { rule: number; name: string };
+
+/** One sender at the stranger gate (spec 1 section 6.7): its count of items, and the newest 3. */
+export type GateSender = { id: string; address: string; name: string | null; count: number; items: Item[] };
+export type GatePage = { count: number; senders: GateSender[]; next: string | null };
+/** The sender row after an answer at the gate. */
+export type GateAnswer = { id: string; address: string; name: string | null; kind: string; decided_by: string | null; declined: boolean };
 
 export type Account = {
   id: number;
@@ -94,7 +125,7 @@ export type Status = {
 export type Rule = {
   id: number;
   name: string;
-  effect: "allow" | "review" | "deny" | "hide" | "bundle";
+  effect: "allow" | "review" | "deny" | "hide" | "bundle" | "notify";
   verbs: string[];
   when: Record<string, string | number>;
   by: "person" | "proposal";
@@ -105,6 +136,9 @@ export type Rule = {
 
 export type Mode = "observe" | "apply";
 
+/** A rule that Iris proposes. `rule` is the rule that an accept adds to the file; its `line` is 0. */
+export type Proposal = { id: number; approvals: number; created_at: number; rule: Rule };
+
 /** GET /api/policy: the active policy and the file on disk, compared to it. */
 export type Policy = {
   mode: Mode;
@@ -112,6 +146,8 @@ export type Policy = {
   /** One more than the highest rule ID that a rule had: the ID of a removed rule is never used again. */
   next_id: number;
   rules: Rule[];
+  /** The open rules that Iris proposes from your approvals (spec 2 section 6.6). */
+  proposals?: Proposal[];
   error: { line: number; message: string } | null;
   file:
     | { state: "same" | "missing" }
@@ -132,6 +168,10 @@ export type Summary = {
   subject: string | null;
   labels: string[];
 };
+
+/** POST /api/ask (card R5-09). `answer` has a mark `[n]` after each fact: the source with that `n`. */
+export type AskSource = { n: number; quote: string | null; message: Summary };
+export type AskAnswer = { answer: string | null; sources: AskSource[]; read: number; cost_micro_usd: number | null };
 
 export type Message = Summary & {
   /** The To and Cc headers as text, or null. */
@@ -160,7 +200,7 @@ export type Action = {
   n: number;
   revision: number;
   verb: string;
-  targets: { threads?: string[]; messages?: string[]; items?: string[] };
+  targets: { threads?: string[]; messages?: string[]; items?: string[]; drafts?: string[]; accounts?: string[] };
   resolved: { messages: string[] };
   args: Record<string, unknown>;
   why: string | null;
@@ -168,6 +208,21 @@ export type Action = {
   hash: string | null;
   decision: Decision | null;
 };
+
+/** A part of a draft text, with the draft flags that its words gave (card R4-07). `source` is the mail of copied text. */
+export type Part = { text: string; flags?: string[]; source?: string };
+/** A recipient of a draft, with the flag `new_recipient` if the owner never wrote to the address. */
+export type Recipient = { address: string; flags?: string[] };
+/**
+ * GET /api/changesets/{id}/drafts: the draft of each `draft` and `send`
+ * action that waits, as the review shows it. Each part of the text carries
+ * the flags of the action that its words gave. An action whose text Iris
+ * cannot read has `readable: false` and no text.
+ */
+export type DraftView = { revision: number; n: number; draft: string | null; thread: string | null } & (
+  | { readable: true; to: Recipient[]; cc: Recipient[]; subject: Part[]; body: Part[] }
+  | { readable: false }
+);
 
 export type Changeset = {
   id: string;
@@ -201,8 +256,67 @@ export type HandledAction = {
 /** `count` is the count of all such actions, not only of this page. */
 export type HandledPage = { count: number; actions: HandledAction[]; next: string | null };
 
+/** One send in the outbox (GET /api/outbox): approved or held, with the words of its draft. */
+export type OutboxSend = {
+  draft: string;
+  state: "approved" | "held";
+  approved: string;
+  /** The time that the send can leave. Null while sending is off. */
+  leaves: string | null;
+  flags: string[];
+  readable: boolean;
+  to?: string[];
+  cc?: string[];
+  subject?: string;
+};
+/** GET /api/outbox: the send switch and each send that waits. Only `iris sending on|off` changes the switch. */
+export type Outbox = { sending: { on: boolean; since: string | null }; count: number; sends: OutboxSend[]; next: string | null };
+
+/** The whole outbox: each page of GET /api/outbox, so no send that can leave is hidden. */
+export async function loadOutbox(): Promise<Outbox> {
+  const first = await get<Outbox>("outbox");
+  const sends = [...first.sends];
+  let next = first.next;
+  while (next) {
+    const page = await get<Outbox>(`outbox?after=${encodeURIComponent(next)}`);
+    sends.push(...page.sends);
+    next = page.next;
+  }
+  return { ...first, sends, next: null };
+}
+
 /** A message summary, or only the ID of a message that is not in the mirror any more. */
 export type Target = (Summary & { gone?: false }) | { id: string; gone: true };
+
+/** A job of an agent (card R4-01, docs/spec/schema/job.schema.json). */
+export type JobState = "working" | "waiting" | "needs_you" | "done";
+export type JobWait = { thread?: string; until: string };
+export type JobEvent = {
+  at: string;
+  state: JobState;
+  by: "person" | "agent" | "engine";
+  wait?: JobWait;
+  question?: string;
+  answer?: string;
+  end?: "complete" | "cancel";
+  why?: string;
+};
+export type Job = {
+  id: string;
+  goal: string;
+  due?: string;
+  created: string;
+  updated: string;
+  state: JobState;
+  wait?: JobWait;
+  question?: string;
+  end?: "complete" | "cancel";
+};
+export type JobPage = { jobs: Job[]; next: string | null };
+/** A submitted changeset of a job: `actions` counts the actions of its newest revision in each state. */
+export type JobChangeset = { id: string; at: string; state: string; why: string | null; actions: Record<string, number> };
+/** One job (GET /api/jobs/{id}): the job with its events, its changesets, and the newest mail of each wait thread. */
+export type JobDetail = { job: Job & { events: JobEvent[] }; changesets: JobChangeset[]; threads: Record<string, Target> };
 
 export const SIGN_IN = "Open the sign-in address that iris serve printed.";
 export const SIGN_IN_FAILED = "This sign-in address was used or is not valid. Start iris serve again, then open the new address.";
@@ -217,9 +331,10 @@ export function own(error: unknown): string {
 }
 
 /** Set the access state that App.svelte shows above each view, and throw it. */
-function fail(problem: string): never {
+// `status`: the HTTP status when the engine answered, so that a caller can tell a refusal from no answer.
+function fail(problem: string, status?: number): never {
   access.problem = problem;
-  throw new Error(problem);
+  throw Object.assign(new Error(problem), status ? { status } : {});
 }
 
 // Spec 2 section 8.6 and crates/iris-api/README.md: the API gives a token one
@@ -327,7 +442,10 @@ async function call(path: string, accept: string, body?: unknown): Promise<Respo
   const sent = token;
   if (sent) headers.authorization = `Bearer ${sent}`;
   const init: RequestInit =
-    body === undefined ? { headers } : { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify(body) };
+    body === undefined
+      ? { headers }
+      : // keepalive: a POST that starts as the page closes still reaches the engine (Act.svelte).
+        { method: "POST", keepalive: true, headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify(body) };
   const response = await fetch(`/api/${path}`, init).catch(() => fail(UNREACHABLE));
   if (response.status === 401) {
     // The engine does not know the token (for example after a restart of iris serve).
@@ -337,7 +455,7 @@ async function call(path: string, accept: string, body?: unknown): Promise<Respo
       quiet(() => session()?.removeItem(KEY));
     }
     if (token) return call(path, accept, body);
-    fail(signInError?.message ?? SIGN_IN);
+    fail(signInError?.message ?? SIGN_IN, 401);
   }
   access.problem = "";
   return response;
@@ -362,7 +480,8 @@ export async function get<T>(path: string): Promise<T> {
 export async function post<T>(path: string, body: unknown): Promise<T> {
   const response = await call(path, "application/json", body);
   const answer = await response.json().catch(() => null);
-  if (!response.ok) throw Object.assign(new Error(answer?.error ?? `The engine answered ${response.status}.`), { status: response.status });
+  // The body goes with the error too: a 409 of a start names the open job.
+  if (!response.ok) throw Object.assign(new Error(answer?.error ?? `The engine answered ${response.status}.`), { status: response.status, body: answer });
   return answer as T;
 }
 
@@ -402,4 +521,9 @@ export async function loadBrief(): Promise<Brief> {
   } while (next);
   // A signal that came in between the calls makes the pages longer than the first count.
   return { ...brief, signals: { ...brief.signals, count: Math.max(brief.signals.count, items.length), items } };
+}
+
+/** Your answer to a sender at the stranger gate: `accept`, `decline` (the screen says "Ignore") or `reopen` (undo). */
+export function answerSender(id: string, answer: "accept" | "decline" | "reopen"): Promise<GateAnswer> {
+  return post<GateAnswer>(`senders/${encodeURIComponent(id)}/${answer}`, {});
 }

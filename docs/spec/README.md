@@ -6,9 +6,13 @@ This folder holds the specifications of Iris and the open model.
 |---|---|---|
 | [01-mirror-store-forms.md](01-mirror-store-forms.md) | The mirror, the store, and the data format of the five forms and the sender axis | 1 |
 | [02-changeset-policy-ledger.md](02-changeset-policy-ledger.md) | The changeset, the policy file, the ledger and the `iris` command | 2 |
+| [03-job-workspace.md](03-job-workspace.md) | The layout of the job workspace folder and the format of each file | 4 |
 | [schema/](schema/) | Version 0 of the open model as JSON Schema (draft 2020-12), with sample documents | 1 |
 | [schema/changeset.schema.json](schema/changeset.schema.json) | The changeset document of specification 2, section 5.1, as JSON Schema, with sample documents | 2 |
 | [schema/policy.schema.json](schema/policy.schema.json) | The policy file of specification 2, section 6.2, as JSON Schema for its TOML data, with sample files | 2 |
+| [schema/job.schema.json](schema/job.schema.json) | The job document of the job store spec (`docs/specs/2026-11-16-job-store.md`), as JSON Schema, with sample documents | 4 |
+| [schema/jobitem.schema.json](schema/jobitem.schema.json) | The job item of specification 3, section 5, as JSON Schema, with sample documents | 4 |
+| [schema/person.schema.json](schema/person.schema.json) | The person file of specification 3, section 7, as JSON Schema, with sample documents | 4 |
 
 ## Status
 

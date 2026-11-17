@@ -27,6 +27,10 @@
   <p class="notice">Your policy file is missing. Iris uses the rules from before. <a href="#/rules">Open the rules</a></p>
 {:else if file?.state === "changed"}
   <p class="notice">Your policy file changed. Iris uses it after you confirm the change. <a href="#/rules">Review the change</a></p>
+{:else if current?.proposals?.length}
+  <p class="notice idea">
+    Iris suggests {current.proposals.length === 1 ? "a rule" : `${current.proposals.length} rules`} from your approvals. <a href="#/rules">See the suggestions</a>
+  </p>
 {/if}
 
 <style>
@@ -37,5 +41,8 @@
   }
   .notice.bad {
     border-left-color: var(--color-error);
+  }
+  .notice.idea {
+    border-left-color: var(--color-primary);
   }
 </style>

@@ -1,0 +1,18 @@
+[package]
+name = "iris-job"
+description = "The job of Iris: a goal with limits for an agent, its states and its events."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+iris-store = { version = "0.0.0", path = "../iris-store" }
+iris-talk = { version = "0.0.0", path = "../iris-talk" }
+# Same version as iris-store, so the program has one copy of SQLite.
+rusqlite = "=0.43.0"
+serde_json = "1"
+
+[dev-dependencies]
+iris-spec = { version = "0.0.0", path = "../iris-spec" }

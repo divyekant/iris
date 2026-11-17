@@ -382,23 +382,23 @@ async fn first_brief_runs_to_the_first_brief_with_content() {
     assert_eq!(m["first_brief"]["seconds"], (brief - connect) / 1000);
 }
 
-/// Make the store a store of migration 11 again.
+/// Make the store a store of migration 22 again.
 fn downgrade(s: &Store) {
     s.write(|tx| {
         tx.execute_batch(
             "DROP TRIGGER measure_connect;
              DROP TRIGGER person_decision; DROP TABLE person_decision;
-             DROP TABLE use_open; DROP TABLE use_day; DROP TABLE measure_time; PRAGMA user_version = 11;",
+             DROP TABLE use_open; DROP TABLE use_day; DROP TABLE measure_time; PRAGMA user_version = 22;",
         )?;
         Ok(())
     })
     .unwrap();
 }
 
-/// A store from before migration 12 gets the times from the oldest sync
+/// A store from before migration 23 gets the times from the oldest sync
 /// and the oldest item.
 #[test]
-fn migration_12_takes_the_times_of_an_older_store() {
+fn migration_23_takes_the_times_of_an_older_store() {
     let dir = std::env::temp_dir().join(format!("iris-api-measures-old-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     {
@@ -454,10 +454,10 @@ fn migration_12_takes_the_times_of_an_older_store() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A store from before migration 12 gets the decisions of the person that
+/// A store from before migration 23 gets the decisions of the person that
 /// the actions still show.
 #[test]
-fn migration_12_takes_the_decisions_of_an_older_store() {
+fn migration_23_takes_the_decisions_of_an_older_store() {
     let dir = std::env::temp_dir().join(format!(
         "iris-api-measures-old-decide-{}",
         std::process::id()

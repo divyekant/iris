@@ -254,3 +254,127 @@ fn the_cut_mark_stays_after_the_repeated_end_goes_out() {
         &a.text.text[..200.min(a.text.text.len())]
     );
 }
+
+/// HTML mail from a sender that passes DMARC for `evil.example.net`, with
+/// one link that shows `www.shop.com` and goes to `target`.
+fn html_link(target: &str) -> String {
+    format!(
+        "Authentication-Results: mx.google.com; dkim=pass header.i=@evil.example.net; dmarc=pass (p=NONE) header.from=evil.example.net
+From: Shop <alerts@evil.example.net>
+Subject: Your account
+Content-Type: text/html; charset=utf-8
+
+<p>Verify your account: <a href=\"{target}\">https://www.shop.com/account</a></p>
+"
+    )
+}
+
+#[test]
+fn a_link_that_shows_a_brand_and_goes_elsewhere_is_a_mark() {
+    for target in [
+        "https://login.shop-secure.example.net/v",
+        "https://shop.com.evil.example.net/v",
+        "https://evil.example.net\\@www.shop.com/v",
+        "https://192.0.2.7/v",
+        "https://www.shop.com&#9;@evil.example.net/v",
+        "https://www.shop.com&#10;@evil.example.net/v",
+        "https:www.shop.com.evil.example.net/v",
+        "https:\\\\evil.example.net\\@www.shop.com/v",
+        " ht&#9;tps://www.shop.com@evil.example.net/v",
+    ] {
+        assert_eq!(
+            run(&html_link(target), &[], &[], &[]),
+            vec![Mark::Link],
+            "{target}"
+        );
+        // Your sent mail never gets the mark.
+        assert!(
+            run(&html_link(target), &["SENT"], &[], &[]).is_empty(),
+            "{target}"
+        );
+    }
+    // A shown address across two lines.
+    let lines = html_link("https://login.shop-secure.example.net/v").replace(
+        "https://www.shop.com/account</a>",
+        "https://www.shop.com<br>/account</a>",
+    );
+    assert_eq!(run(&lines, &[], &[], &[]), vec![Mark::Link]);
+    // The real target of the shown address.
+    assert!(run(&html_link("https://www.shop.com/account"), &[], &[], &[]).is_empty());
+    // DMARC for its own domain proves nothing about the shown domain.
+    assert_eq!(
+        run(
+            &html_link("https://click.evil.example.net/r/1"),
+            &[],
+            &[],
+            &[]
+        ),
+        vec![Mark::Link]
+    );
+    // The proven owner of the shown domain can link through a click counter.
+    let own =
+        html_link("https://click.mailer.example.org/r/1").replace("evil.example.net", "shop.com");
+    assert!(run(&own, &[], &[], &[]).is_empty(), "{own}");
+}
+
+/// HTML mail with no DMARC result and the body `body`.
+fn html_body(body: &str) -> String {
+    format!(
+        "From: Shop <alerts@shop-mail.example.org>\nSubject: Your account\n\
+         Content-Type: text/html; charset=utf-8\n\n{body}\n"
+    )
+}
+
+#[test]
+fn the_link_check_reads_the_text_that_a_person_sees() {
+    for body in [
+        "<a href=\"https://evil.example.net/\">https://bank.exa&#x200b;mple.com</a>",
+        "<a href=\"https://evil.example.net/\">www.bank&shy;.example.com</a>",
+        "<blockquote><a href=\"https://evil.example.net/\">https://bank.example.com<br>/login</a></blockquote>",
+        "<blockquote><blockquote><a href=\"https://evil.example.net/\"><p>www.bank.example.com</p><p>/login</p></a></blockquote></blockquote>",
+        "<ul><li><a href=\"https://evil.example.net/\"><b>https://bank.example.com</b></a></li></ul>",
+        "<a href=\"https://evil.example.net/\">https://&#x202e;moc.elpmaxe.knab</a>",
+        "<a href=\"https://evil.example.net/\">&nbsp;https://bank.example.com&nbsp;</a>",
+        "<a href=\"https://evil.example.net/\">https://bank.<br>example.com/login</a>",
+    ] {
+        assert_eq!(run(&html_body(body), &[], &[], &[]), vec![Mark::Link], "{body}");
+    }
+    // The same texts with the real target.
+    for body in [
+        "<a href=\"https://bank.example.com/\">https://bank.exa&#x200b;mple.com</a>",
+        "<blockquote><a href=\"https://bank.example.com/\">https://bank.example.com<br>/login</a></blockquote>",
+    ] {
+        assert!(run(&html_body(body), &[], &[], &[]).is_empty(), "{body}");
+    }
+}
+
+#[test]
+fn each_name_of_one_domain_is_the_same_domain() {
+    // A header can name a domain in Unicode (`münchen.de`) and an
+    // authentication result in punycode (`xn--mnchen-3ya.de`), or the
+    // other way. Each check compares one form.
+    let forms = [
+        ("münchen.de", "xn--mnchen-3ya.de"),
+        ("xn--mnchen-3ya.de", "münchen.de"),
+        ("MÜNCHEN.de", "xn--mnchen-3ya.de"),
+    ];
+    for (from, auth) in forms {
+        let head = format!(
+            "Authentication-Results: mx.google.com; dkim=pass header.d={auth}; dmarc=pass header.from={auth}\n"
+        );
+        // The owner of the shown domain links through a click counter.
+        let own = format!(
+            "{head}From: Shop <alerts@{from}>\nSubject: Your account\nContent-Type: text/html; charset=utf-8\n\n\
+             <p><a href=\"https://click.mailer.example.org/r/1\">https://www.münchen.de/konto</a></p>\n"
+        );
+        assert!(run(&own, &[], &[], &[]).is_empty(), "{from} {auth}");
+        // A known name from another address that passes DMARC and DKIM for
+        // its own domain is not a spoof.
+        let name = format!("{head}From: Ana Lee <ana@{from}>\nSubject: Hi\n\nCall me.\n");
+        assert!(run(&name, &[], ANA, &[]).is_empty(), "{from} {auth}");
+    }
+    // A DMARC fail for the punycode form is a fail for the Unicode form.
+    let fail = "Authentication-Results: mx.google.com; dmarc=fail header.from=xn--mnchen-3ya.de\n\
+                From: Shop <alerts@münchen.de>\nSubject: Hi\n\nHi.\n";
+    assert_eq!(run(fail, &[], &[], &[]), vec![Mark::Dmarc]);
+}

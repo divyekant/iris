@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:model:0:person",
+  "title": "Iris open model 0 (draft): person of a workspace",
+  "description": "Draft. One known person in the workspace of a job (people/p-<id>.json). Each field comes only from the messages in the thread files of the workspace. See docs/spec/03-job-workspace.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "address", "names", "first", "last", "from_them", "from_you", "threads"],
+  "properties": {
+    "id": { "$ref": "urn:iris:model:0:common#/$defs/senderId" },
+    "address": {
+      "$comment": "The bare address in lower case: a local part (an atom with no @, quote or white space, or one quoted string), @, and a domain with no @ or white space. See docs/spec/03-job-workspace.md, section 2.",
+      "type": "string",
+      "pattern": "^(?:[^A-Z@\"\\s]+|\"(?:[^\"\\\\A-Z]|\\\\[^A-Z])*\")@[^A-Z@\\s]+$"
+    },
+    "names": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string" }
+    },
+    "first": { "$ref": "urn:iris:model:0:common#/$defs/utcDateTime" },
+    "last": { "$ref": "urn:iris:model:0:common#/$defs/utcDateTime" },
+    "from_them": { "type": "integer", "minimum": 0 },
+    "from_you": { "type": "integer", "minimum": 0 },
+    "threads": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "urn:iris:model:0:common#/$defs/threadId" }
+    }
+  }
+}
