@@ -330,12 +330,7 @@ impl Sessions {
     /// Steps 3 to 6, on the launch thread.
     fn launch(&self, isolation: &dyn Isolation, begun: iris_session::launch::Begun) {
         let job = begun.job();
-        let author = Author {
-            kind: AuthorKind::Agent,
-            name: Some(begun.agent().to_string()),
-            session: Some(format_session_id(begun.session)),
-            job: Some(iris_job::format_job_id(job)),
-        };
+        let agent = begun.agent().to_string();
         let limit_ms = i64::from(begun.max_minutes()) * 60_000;
         let hook = self.hook();
         let after = |step: Step, s: i64| {
@@ -372,7 +367,7 @@ impl Sessions {
         match outcome {
             Outcome::Running(r) => {
                 let proxy = proxies.remove(&r.session);
-                let server = self.serve(r.session, r.socket, author);
+                let server = self.serve(r.session, r.socket, job, agent);
                 st.running.insert(
                     r.session,
                     Live {
@@ -572,9 +567,16 @@ impl Sessions {
     }
 
     /// Starts the server of the session socket, with the author of the
-    /// session. If its thread does not start, the session ends with
+    /// session that owns the socket (after a revoke retry, the second
+    /// session). If its thread does not start, the session ends with
     /// `launch_failed`: an agent with no socket cannot do its job.
-    fn serve(&self, session: i64, socket: UnixListener, me: Author) -> Option<Server> {
+    fn serve(&self, session: i64, socket: UnixListener, job: i64, agent: String) -> Option<Server> {
+        let me = Author {
+            kind: AuthorKind::Agent,
+            name: Some(agent),
+            session: Some(format_session_id(session)),
+            job: Some(iris_job::format_job_id(job)),
+        };
         let store = self.store.clone();
         let handler: Arc<Handler> =
             Arc::new(move |line, mut out| crate::socket::answer_as(&store, &me, line, &mut out));

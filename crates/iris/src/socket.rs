@@ -554,6 +554,7 @@ fn status(store: &Store, me: &Author) -> Result<Value, Failure> {
     let (j, g) = read.map_err(|e| Failure::new(code::ERROR, e.to_string()))?;
     Ok(json!({
         "job": iris_job::format_job_id(j.id),
+        "session": me.session,
         "goal": j.goal,
         "state": j.state.as_str(),
         "due": j.due_ms.map(iris_api::rfc3339),
@@ -725,7 +726,19 @@ pub fn parse_answer(verb: &str, line: &[u8]) -> Option<Result<Value, Failure>> {
                 "add" => r["changeset"].is_string() && r["n"].is_u64(),
                 "job.run" => session_id(r),
                 "job.stop" => session_id(r) && r["reaped"].is_boolean(),
-                "status" => r["job"].is_string() && r["goal"].is_string() && r["state"].is_string(),
+                "status" => {
+                    r["job"].as_str().and_then(iris_job::parse_job_id).is_some()
+                        && r["session"]
+                            .as_str()
+                            .and_then(iris_job::parse_session_id)
+                            .is_some()
+                        && r["goal"].is_string()
+                        && r["state"].is_string()
+                        && ["threads", "messages", "items"]
+                            .iter()
+                            .all(|k| r[k].is_u64())
+                        && (r["due"].is_null() || r["due"].is_string())
+                }
                 _ => r["id"].is_string() && r["state"].is_string() && r["actions"].is_array(),
             };
             valid.then(|| Ok(r.clone()))

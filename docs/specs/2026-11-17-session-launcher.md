@@ -641,8 +641,8 @@ session from the socket that took the request, never from the request.
 
 The session socket answers these verbs of this card:
 
-- `status`: the job (ID, goal, state, due date) and the counts of the
-  grant now (threads, messages and items), from the same grant as the
+- `status`: the job (ID, goal, state, due date), the session ID of the
+  socket, and the counts of the grant now (threads, messages and items), from the same grant as the
   build (`iris_workspace::grant_in`). It reads no file of the workspace,
   which the agent can change.
 - `search`, `show` and `list`: the read verbs with the grant rules of the
@@ -727,7 +727,9 @@ exit code 3.
   `.iris/socket`. If the socket is not there, the command fails with exit
   code 4. `--data` has no effect in session mode. Until R4-04f, the
   command refuses each verb that is not a session verb (`status` and the
-  write verbs of R4-03) with exit code 3, and sends nothing.
+  write verbs `add`, `submit`, `show`, `withdraw` and `revise` of R4-03)
+  with exit code 3, and sends nothing. So `iris changeset --drafts` gets
+  code 3.
 
 ## Options not chosen
 

@@ -637,7 +637,11 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
         print!("{}", session_status_text(&r, *json));
         return Ok(());
     }
-    let Some((verb, args, json)) = socket_request(c)? else {
+    // Only the write verbs of a session (R4-03): `drafts`, for example, is
+    // a host verb of the socket.
+    const SESSION_VERBS: [&str; 5] = ["add", "submit", "show", "withdraw", "revise"];
+    let request = socket_request(c)?.filter(|(verb, ..)| SESSION_VERBS.contains(verb));
+    let Some((verb, args, json)) = request else {
         // The read verbs (R4-04f) and the host verbs: the engine gives
         // nothing else to a session. With no socket file, code 4 here too.
         use std::os::unix::fs::FileTypeExt;
