@@ -164,6 +164,8 @@ Each entry is `{"id", "verb", "args", "state", "at", "error", "messages",
 "changed", "items", "title", "changeset", "author", "decided_by", "rule",
 "policy", "reason", "why", "can_undo", "undo_open", "undone_by", "undo_of"}`:
 
+- `args` holds only the short arguments that the words of a verb need: `label`, `until`, `date` and `field`. Each other argument (for example the body of a draft) stays out.
+- Each text has at most 2,000 characters, so a page stays small.
 - `state` is `writing`, `applied`, `failed` or `undone`. `error` is the reason of a failure.
 - `messages` counts the messages of the entry. `changed` counts the messages that Gmail confirmed. A `failed` entry can have changed some messages.
 - `items` counts the items of a state verb (`close`, `decline`, `defer`, `correct`). `title` is the title of the first item.

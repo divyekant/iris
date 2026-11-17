@@ -15,6 +15,7 @@ pub struct LedgerEntry {
     /// `l-` and the row ID.
     pub id: String,
     pub verb: String,
+    /// Only `label`, `until`, `date` and `field` ([`ARGS`]).
     pub args: Value,
     /// `writing`, `applied`, `failed` or `undone`.
     pub state: String,
@@ -65,16 +66,30 @@ pub struct LedgerPage {
     pub next: Option<String>,
 }
 
-const ENTRY: &str = "SELECT l.id, a.verb, a.args, l.state, l.at, l.error,
+/// The arguments that the list gives: the short ones that the words of a
+/// verb need. Each other argument (for example the body of a draft) stays
+/// out. `json_patch` drops the keys with no text value.
+const ARGS: &str = "json_patch('{}', json_object(
+          'label', CASE WHEN json_type(a.args, '$.label') = 'text' THEN substr(json_extract(a.args, '$.label'), 1, 2000) END,
+          'until', CASE WHEN json_type(a.args, '$.until') = 'text' THEN substr(json_extract(a.args, '$.until'), 1, 2000) END,
+          'date', CASE WHEN json_type(a.args, '$.date') = 'text' THEN substr(json_extract(a.args, '$.date'), 1, 2000) END,
+          'field', CASE WHEN json_type(a.args, '$.field') = 'text' THEN substr(json_extract(a.args, '$.field'), 1, 2000) END))";
+
+/// The entry query. `{args}` is [`ARGS`]. Each text has at most 2,000
+/// characters (`substr(x, 1, 2000)`), so a page of 200 entries stays small
+/// also when an action has a large text (the body of a draft has up to
+/// 256 KiB).
+const ENTRY: &str = "SELECT l.id, a.verb, {args}, l.state, l.at, substr(l.error, 1, 2000),
         (SELECT count(*) FROM ledger_message lm WHERE lm.ledger_id = l.id),
         (SELECT count(*) FROM ledger_message lm WHERE lm.ledger_id = l.id AND lm.done = 1),
         (SELECT count(*) FROM action_item ai WHERE ai.action_id = a.id),
-        (SELECT json_extract(i.doc, '$.title') FROM action_item ai JOIN item i ON i.id = ai.item_id
+        (SELECT CASE WHEN json_type(i.doc, '$.title') = 'text' THEN substr(json_extract(i.doc, '$.title'), 1, 2000) END
+         FROM action_item ai JOIN item i ON i.id = ai.item_id
          WHERE ai.action_id = a.id ORDER BY ai.item_id LIMIT 1),
-        a.changeset_id, c.author_kind, c.author_name, c.author_job, j.goal,
-        a.decided_by, a.rule, a.policy, a.reason,
-        coalesce(a.why, (SELECT r.why FROM changeset_revision r
-                         WHERE r.changeset_id = a.changeset_id AND r.revision = a.revision)),
+        a.changeset_id, c.author_kind, substr(c.author_name, 1, 2000), substr(c.author_job, 1, 2000),
+        substr(j.goal, 1, 2000), a.decided_by, a.rule, a.policy, substr(a.reason, 1, 2000),
+        substr(coalesce(a.why, (SELECT r.why FROM changeset_revision r
+                                WHERE r.changeset_id = a.changeset_id AND r.revision = a.revision)), 1, 2000),
         EXISTS (SELECT 1 FROM ledger_can_undo v WHERE v.ledger_id = l.id),
         EXISTS (SELECT 1 FROM ledger_undo u JOIN changeset_action o ON o.id = u.action_id
                 WHERE u.ledger_id = l.id
@@ -86,12 +101,16 @@ const ENTRY: &str = "SELECT l.id, a.verb, a.args, l.state, l.at, l.error,
      JOIN changeset c ON c.id = a.changeset_id
      LEFT JOIN job j ON c.author_job = 'j-' || j.id";
 
+fn entry_sql(tail: &str) -> String {
+    format!("{} {tail}", ENTRY.replace("{args}", ARGS))
+}
+
 fn entry(r: &rusqlite::Row) -> rusqlite::Result<LedgerEntry> {
     let l = |n: Option<i64>| n.map(|n| format!("l-{n}"));
     Ok(LedgerEntry {
         id: format!("l-{}", r.get::<_, i64>(0)?),
         verb: r.get(1)?,
-        // A CHECK of the store keeps `args` valid JSON.
+        // `json_patch` gives valid JSON.
         args: serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or(Value::Null),
         state: r.get(3)?,
         at: crate::rfc3339(r.get(4)?),
@@ -135,9 +154,7 @@ pub fn ledger(store: &Store, limit: u32, after: Option<&str>) -> Result<LedgerPa
             .ok_or_else(|| Error::Query(format!("after {t} is not the next value of a page")))?,
     };
     let mut entries: Vec<LedgerEntry> = store.read(|c| {
-        let mut st = c.prepare_cached(&format!(
-            "{ENTRY} WHERE l.id < ?1 ORDER BY l.id DESC LIMIT ?2"
-        ))?;
+        let mut st = c.prepare_cached(&entry_sql("WHERE l.id < ?1 ORDER BY l.id DESC LIMIT ?2"))?;
         let rows = st.query_map(params![before, limit + 1], entry)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     })?;
@@ -150,7 +167,7 @@ pub fn ledger(store: &Store, limit: u32, after: Option<&str>) -> Result<LedgerPa
 }
 
 fn one(c: &Connection, id: i64) -> rusqlite::Result<Option<LedgerEntry>> {
-    c.query_row(&format!("{ENTRY} WHERE l.id = ?1"), [id], entry)
+    c.query_row(&entry_sql("WHERE l.id = ?1"), [id], entry)
         .optional()
 }
 

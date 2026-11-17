@@ -72,6 +72,18 @@ fn archived_why(
     decision: &str,
     why: Option<&str>,
 ) -> i64 {
+    archived_args(s, author, messages, decision, why, "{}")
+}
+
+/// As `archived_why`, with the arguments `args` (JSON text).
+fn archived_args(
+    s: &Store,
+    author: &str,
+    messages: &[i64],
+    decision: &str,
+    why: Option<&str>,
+    args: &str,
+) -> i64 {
     s.write(|tx| {
         let job = (author == "agent").then_some("j-1");
         tx.execute(
@@ -82,8 +94,8 @@ fn archived_why(
         let ids: Vec<String> = messages.iter().map(|m| format!("\"m-{m}\"")).collect();
         tx.execute(
             "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args, why)
-             VALUES (?1, 1, 1, 'archive', ?2, '{}', ?3)",
-            params![cs, format!("{{\"messages\":[{}]}}", ids.join(",")), why],
+             VALUES (?1, 1, 1, 'archive', ?2, ?4, ?3)",
+            params![cs, format!("{{\"messages\":[{}]}}", ids.join(",")), why, args],
         )?;
         let a = tx.last_insert_rowid();
         for m in messages {
@@ -273,6 +285,57 @@ async fn the_entry_of_an_undo_names_its_entry() {
     assert_eq!(p["entries"][0]["verb"], "inbox");
     assert_eq!(p["entries"][0]["undo_of"], format!("l-{l}"));
     assert_eq!(p["entries"][0]["can_undo"], false);
+    assert_eq!(p["entries"][1]["undo_open"], true);
+
+    // The undo ends as the apply ends it: the entry of the undo is applied,
+    // and the first entry is undone by it (section 7.4, step 5).
+    let u: i64 = s
+        .write(|tx| {
+            let u: i64 = tx.query_row(
+                "SELECT l.id FROM ledger l JOIN ledger_undo lu ON lu.action_id = l.action_id
+                 WHERE lu.ledger_id = ?1",
+                [l],
+                |r| r.get(0),
+            )?;
+            tx.execute("UPDATE ledger SET state = 'applied' WHERE id = ?1", [u])?;
+            tx.execute(
+                "UPDATE ledger SET state = 'undone', undone_by = ?2 WHERE id = ?1",
+                [l, u],
+            )?;
+            Ok(u)
+        })
+        .unwrap();
+    let (_, p) = call(&s, false, "/api/ledger").await;
+    let first = &p["entries"][1];
+    assert_eq!(first["id"], format!("l-{l}"));
+    assert_eq!(first["state"], "undone");
+    assert_eq!(first["undone_by"], format!("l-{u}"));
+    assert_eq!(first["undo_open"], false);
+    assert_eq!(first["can_undo"], false);
+}
+
+/// Each value of an entry is bounded: a large argument (the body of a
+/// draft has up to 256 KiB) stays out, and each text has at most 2,000
+/// characters, so a full page stays small.
+#[tokio::test]
+async fn a_page_of_large_actions_stays_small() {
+    let dir = temp("large");
+    let s = store(&dir);
+    let long = "\u{e9}".repeat(3000);
+    let args = json!({ "body": "x".repeat(256 << 10), "label": long, "other": [1, 2] }).to_string();
+    for m in 1..=3 {
+        archived_args(&s, "person", &[m], PERSON, Some(&long), &args);
+    }
+    let (code, p) = call(&s, false, "/api/ledger?limit=200").await;
+    assert_eq!(code, StatusCode::OK);
+    let size = p.to_string().len();
+    assert!(size < 64 << 10, "{size} bytes");
+    for e in p["entries"].as_array().unwrap() {
+        let keys: Vec<&String> = e["args"].as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["label"]);
+        assert_eq!(e["args"]["label"].as_str().unwrap().chars().count(), 2000);
+        assert_eq!(e["why"].as_str().unwrap().chars().count(), 2000);
+    }
 }
 
 /// An entry with no changed message has no undo: a conflict, with the reason.
