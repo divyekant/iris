@@ -361,8 +361,19 @@ removes the socket file. The workspace stays for the next session.
 
 ### The reap check
 
-The engine sets `reaped_at` only when it confirms that each process of the
+The engine sets `reaped_at` only when it confirms that each process and each launch step of the
 session ended. The check passes only if all of these are true:
+
+0. No launch thread of this engine holds the session. The launch thread
+   (steps 3 to 7) owns the session from the register until it returns: it
+   does each build, the bind and the removal of `.iris/socket`, and the
+   start of the helper. The engine keeps the set of the session IDs of the
+   running launch threads. The supervisor does not run the reap check of a
+   session in the set. The launch thread checks the end of the session
+   after each step and returns at the first check after an end, after its
+   own cleanup. A build is not stopped in its middle, so the wait is at
+   most the time of one build. After an engine restart, no launch thread
+   exists, so rule 0 holds.
 
 1. The helper ended. This engine reaped the helper (`wait` gave its exit),
    or `helper_pid` is NULL, or `kill(helper_pid, 0)` fails with `ESRCH`.
@@ -646,6 +657,7 @@ is refused before a row is written.
 | The agent and its children exit before the helper signals the group | The agent stays a zombie until after the last signal, so its group ID is not reused | Helper test: the agent exits at once, and the helper sends the signals before the reap (test hook that records the order) |
 | A build that takes longer than the socket time-out | `job.run` already answered after the register; the launch goes on; `iris job session` shows it | Launch test with a slow build hook |
 | The answer of `job.run` is lost | The command says the result is unknown and names `iris job session`; a retry is refused with the live session ID | Command test with a socket that closes before the answer |
+| A revoke or a stop during the build, then at once a second `run` | The first session stays live until its launch thread returns after its cleanup; the second `run` is refused at the register until then | Launch test: a build hook that waits, a stop, then a second `run` that fails until the first thread returned |
 | `iris job stop` during steps 3 to 5 of a launch | The launch ends with `stop`, no retry; `iris job session` shows the end with no start | Launch test with a stop hook |
 | An agent that opens connections without end | The egress log stops at 1 MiB, then counts; the engine memory stays bounded (8 open connections) | Proxy test with 100,000 refused connections and a small limit |
 | The engine is killed and an agent process left the group (`setsid`) | The helper sees the end of the pipe, stops the group and calls `Isolation::stop`; if the helper is killed too, the lifetime rule ends the process | Helper test with the test isolation that records `stop`; R4-05 test of the lifetime rule on each system |
