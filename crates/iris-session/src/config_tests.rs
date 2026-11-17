@@ -164,11 +164,13 @@ fn a_pass_env_name_passes_only_in_its_form() {
 }
 
 /// Property test over hosts: a host passes only as a lower-case DNS name
-/// with no port, no wildcard and no IP address form.
+/// with no port, no wildcard and no IP address form. A name whose last
+/// label is a number (decimal, or hexadecimal with 0x, as the system
+/// resolver reads it) is an IPv4 address form.
 #[test]
 fn an_allowed_host_passes_only_as_a_dns_name() {
     let mut r = Rng(23);
-    let alphabet = b"ab09.-:*[]A_ ";
+    let alphabet = b"ab0x9f.-:*[]A_ ";
     for _ in 0..20_000 {
         let host = r.word(alphabet, 20);
         let text = format!("[agent.x]\ncommand = [\"a\"]\nallow_hosts = [\"{host}\"]\n");
@@ -182,8 +184,26 @@ fn an_allowed_host_passes_only_as_a_dns_name() {
         };
         let want = host.len() <= 253
             && labels.iter().all(label_ok)
-            && !labels.last().unwrap().bytes().all(|b| b.is_ascii_digit());
+            && !ends_in_a_number(labels.last().unwrap());
         assert_eq!(parse_agents(&text).is_ok(), want, "{host:?}");
+    }
+}
+
+/// The rule of the URL Standard for a label that makes a host an IPv4 form.
+fn ends_in_a_number(l: &str) -> bool {
+    l.bytes().all(|b| b.is_ascii_digit())
+        || l.strip_prefix("0x").is_some_and(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+#[test]
+fn each_numeric_ip_form_is_refused() {
+    for host in ["8.8.8.8", "134744072", "0x08080808", "0x8.0x8.0x8.0x8", "010.0.0.1", "a.0x", "a.0xff", "a.1"] {
+        let text = format!("[agent.x]\ncommand = [\"a\"]\nallow_hosts = [\"{host}\"]\n");
+        assert!(parse_agents(&text).is_err(), "{host}");
+    }
+    for host in ["0xa.example", "api.0xg", "x1.example", "a.b1"] {
+        let text = format!("[agent.x]\ncommand = [\"a\"]\nallow_hosts = [\"{host}\"]\n");
+        assert!(parse_agents(&text).is_ok(), "{host}");
     }
 }
 
