@@ -148,7 +148,7 @@ Supported input: actions of the store that passed submit.
 | A cancel of another verb, or of a closed action | No change; an error | changeset test |
 | A crash while held | The send stays `held` after the restart, and the hold counts from `decided_at` or `on_at` | restart test |
 | A crash after the claim | Recovery of R3-01 | existing tests |
-| The clock goes back | The hold is longer. The clock goes forward: the hold is shorter (known limit, issue) | none |
+| The clock goes back | The hold is longer. The clock goes forward: the hold is shorter (known limit, issue #399) | none |
 | An apply error of one action | Logged; the step goes on | engine test |
 
 ## Impact
