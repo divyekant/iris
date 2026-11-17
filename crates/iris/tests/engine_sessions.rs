@@ -213,6 +213,9 @@ fn the_session_socket_answers_status_and_refuses_other_verbs() {
         let v = ask(&f, verb, serde_json::json!({})).unwrap();
         assert_eq!(v["code"], 3, "{verb}: {v}");
     }
+    // The read form of show (a message or an item) waits for R4-04f.
+    let v = ask(&f, "show", serde_json::json!({"message": "m-1"})).unwrap();
+    assert_eq!(v["code"], 3, "{v}");
     // A request after the end in the store gets code 3, before any turn.
     iris_job::end(&f.store, id, EndReason::Stop, None, now()).unwrap();
     let v = ask(&f, "status", serde_json::json!({})).unwrap();

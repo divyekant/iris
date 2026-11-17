@@ -619,3 +619,33 @@ fn a_rule_of_a_job_matches_only_that_job() {
     assert_eq!(by[0], json!("rule"), "{by:?}");
     assert_ne!(by[1], json!("rule"), "{by:?}");
 }
+
+/// `status` gives the counts of the grant now: thread 1 (messages 1 and 2)
+/// and the item c-1. A revoke of the thread empties them at once.
+#[test]
+fn status_gives_the_counts_of_the_grant_now() {
+    let (store, job) = fixture("status");
+    let me = session(job, "se-1");
+    let v = call(&store, &me, "status", json!({})).unwrap();
+    assert_eq!(v["job"], iris_job::format_job_id(job), "{v}");
+    assert_eq!(v["goal"], "Get the signed contract.", "{v}");
+    assert_eq!(v["state"], "working", "{v}");
+    assert_eq!(
+        (&v["threads"], &v["messages"], &v["items"]),
+        (&json!(1), &json!(2), &json!(1)),
+        "{v}"
+    );
+    revoke_scope(&store, job, Ref::Thread(1), By::Person, NOW + 1).unwrap();
+    let v = call(&store, &me, "status", json!({})).unwrap();
+    assert_eq!(
+        (&v["threads"], &v["messages"], &v["items"]),
+        (&json!(0), &json!(0), &json!(0)),
+        "{v}"
+    );
+    // Host mode has no status verb on the socket.
+    let host = socket::local();
+    assert_eq!(
+        call(&store, &host, "status", json!({})).unwrap_err().0,
+        code::USAGE
+    );
+}

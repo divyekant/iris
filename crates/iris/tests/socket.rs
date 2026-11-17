@@ -853,3 +853,55 @@ fn a_bad_job_id_is_a_usage_error_with_no_engine() {
         assert!(e.error.contains("not a job ID"), "{args:?}: {}", e.error);
     }
 }
+
+/// Session mode: in a folder below `.iris/`, the command sends each verb
+/// to `.iris/socket` and never opens the data folder, also with `--data`.
+#[test]
+fn session_mode_uses_only_the_session_socket() {
+    let root = dir("sessionmode");
+    let work = root.join("workspace");
+    let deep = work.join("drafts");
+    std::fs::create_dir_all(work.join(".iris")).unwrap();
+    std::fs::create_dir_all(&deep).unwrap();
+    let data = root.join("data");
+    let iris = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_iris"))
+            .current_dir(&deep)
+            .arg("--data")
+            .arg(&data)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    // No socket: code 4, for a socket verb and for a store verb.
+    for args in [&["status"][..], &["withdraw", "cs-1"], &["search", "x"]] {
+        let out = iris(args);
+        assert_eq!(out.status.code(), Some(4), "{args:?}: {out:?}");
+    }
+    // A socket that answers `status`: the command prints the job.
+    let listener = std::os::unix::net::UnixListener::bind(work.join(".iris/socket")).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut verbs = Vec::new();
+        for _ in 0..2 {
+            let (s, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(&s).read_line(&mut line).unwrap();
+            let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+            verbs.push(v["verb"].as_str().unwrap().to_string());
+            let answer = json!({"ok": true, "result": {"job": "j-4", "goal": "Get it.",
+                "state": "working", "threads": 1, "messages": 2, "items": 0}});
+            (&s).write_all(format!("{answer}\n").as_bytes()).unwrap();
+        }
+        verbs
+    });
+    let out = iris(&["status"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("j-4 (working)"));
+    // A store verb: code 3, and nothing reaches the socket.
+    let out = iris(&["search", "x"]);
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    let out = iris(&["status", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(server.join().unwrap(), ["status", "status"]);
+    assert!(!data.exists(), "the command made the data folder");
+}
