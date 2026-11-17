@@ -868,6 +868,7 @@ dependencies = [
  "iris-mcp",
  "iris-model",
  "iris-policy",
+ "iris-provider",
  "iris-service",
  "iris-session",
  "iris-spec",
@@ -927,6 +928,7 @@ dependencies = [
  "iris-gmail",
  "iris-job",
  "iris-policy",
+ "iris-provider",
  "iris-spec",
  "iris-store",
  "iris-sync",
@@ -1017,6 +1019,7 @@ name = "iris-gmail"
 version = "0.0.0"
 dependencies = [
  "iris-fakegmail",
+ "iris-provider",
  "iris-synth",
  "serde",
  "serde_json",
@@ -1108,6 +1111,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-provider"
+version = "0.0.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "iris-senders"
 version = "0.0.0"
 dependencies = [
@@ -1170,6 +1180,7 @@ version = "0.0.0"
 dependencies = [
  "iris-fakegmail",
  "iris-gmail",
+ "iris-provider",
  "iris-store",
  "iris-synth",
  "rusqlite",

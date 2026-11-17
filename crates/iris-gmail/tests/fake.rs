@@ -24,7 +24,7 @@ fn profile_and_labels() {
     let p = gmail.profile(TOKEN).unwrap();
     assert_eq!(p.email_address, "owner@example.com");
     assert_eq!(p.messages_total, 120);
-    assert!(p.history_id > 0);
+    assert!(p.cursor.parse::<u64>().unwrap() > 0);
 
     let labels = gmail.labels(TOKEN).unwrap();
     assert!(labels.iter().any(|l| l.id == "SPAM" && l.kind == "system"));
@@ -82,7 +82,7 @@ fn get_in_each_format() {
     assert_eq!(raw.size, expected.len() as u64);
     assert_eq!(raw.id, id);
     assert!(!raw.thread_id.is_empty() && !raw.label_ids.is_empty());
-    assert!(raw.history_id > 0 && raw.internal_date > 1_700_000_000_000);
+    assert!(raw.internal_date > 1_700_000_000_000);
 
     let minimal = gmail.minimal(TOKEN, &id).unwrap();
     assert_eq!(minimal.label_ids, raw.label_ids);
@@ -104,30 +104,36 @@ fn get_in_each_format() {
 fn history_changes_types_and_expiry() {
     let fake = FakeGmail::start(Mailbox::new(3, 40)).unwrap();
     let gmail = client(&fake);
-    let start = gmail.profile(TOKEN).unwrap().history_id;
+    let start = gmail.profile(TOKEN).unwrap().cursor;
     let a = FakeGmail::id_of(4);
     fake.modify_labels(&a, &["STARRED"], &[]);
     fake.delete_message(&FakeGmail::id_of(5));
     let new = fake.add_message(b"Subject: x\r\n\r\ny\r\n", &["INBOX"]);
 
     let page = gmail
-        .history(TOKEN, start, &HistoryType::ALL, None)
+        .history(TOKEN, &start, &HistoryType::ALL, None)
         .unwrap();
     let changes: Vec<&Change> = page.history.iter().flat_map(|h| &h.changes).collect();
     assert!(matches!(changes[0], Change::LabelsAdded(m, l) if m.id == a && l == &["STARRED"]));
     assert!(matches!(changes[1], Change::Deleted(_)));
     assert!(matches!(changes[2], Change::Added(m) if m.id == new && m.label_ids == ["INBOX"]));
-    assert_eq!(page.history_id, page.history.last().unwrap().id);
+    assert!(page.cursor.parse::<u64>().unwrap() > start.parse::<u64>().unwrap());
     assert!(page.next_page_token.is_none());
 
     let only = gmail
-        .history(TOKEN, start, &[HistoryType::MessageAdded], None)
+        .history(TOKEN, &start, &[HistoryType::MessageAdded], None)
         .unwrap();
     assert_eq!(only.history.len(), 1);
 
-    fake.expire_history_before(start + 1);
+    // A cursor that is not a history ID never reaches Gmail.
     assert!(matches!(
-        gmail.history(TOKEN, start, &HistoryType::ALL, None),
+        gmail.history(TOKEN, "12a", &HistoryType::ALL, None),
+        Err(Error::Decode(_))
+    ));
+
+    fake.expire_history_before(start.parse::<u64>().unwrap() + 1);
+    assert!(matches!(
+        gmail.history(TOKEN, &start, &HistoryType::ALL, None),
         Err(Error::HistoryExpired)
     ));
 }
@@ -136,10 +142,10 @@ fn history_changes_types_and_expiry() {
 fn history_pages_at_500_records() {
     let fake = FakeGmail::start(Mailbox::new(3, 700)).unwrap();
     let gmail = client(&fake);
-    let first = gmail.history(TOKEN, 100_000, &[], None).unwrap();
+    let first = gmail.history(TOKEN, "100000", &[], None).unwrap();
     assert_eq!(first.history.len(), 500);
     let token = first.next_page_token.unwrap();
-    let second = gmail.history(TOKEN, 100_000, &[], Some(&token)).unwrap();
+    let second = gmail.history(TOKEN, "100000", &[], Some(&token)).unwrap();
     assert_eq!(second.history.len(), 200);
     assert!(second.next_page_token.is_none());
 }
