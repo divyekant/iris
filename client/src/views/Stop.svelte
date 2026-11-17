@@ -23,35 +23,35 @@
   type Answer = { stopped: boolean; since: string | null; live?: number; busy?: boolean; resumed?: boolean };
   type Shared = { stopped: boolean; since: string | null; live: number; busy: boolean; known: boolean; busyAction: "" | "stop" | "resume"; note: string; error: string };
   /**
-   * One state for the button and the band. Only an answer of the engine sets
-   * it. `known` is false after a Stop or a Resume with no answer, until a read
-   * of GET /api/stop gives the state again.
+   * One state for the button and the band. Only a read of GET /api/stop sets
+   * it. `known` is true only when no Stop or Resume is open and the newest
+   * read agrees with the last action that the person asked for.
    */
   export const stopState: Shared = $state({ stopped: false, since: null, live: 0, busy: false, known: true, busyAction: "", note: "", error: "" });
 
-  // The number of the newest request. Only the answer of the newest request
-  // changes the state, so an older answer never replaces a newer one.
+  // The number of the newest read. Only the newest read changes the state.
   let newest = 0;
-  // The Stop or Resume that got no good answer. Until a read shows that it
-  // took effect, the state stays not known: the action can still commit
-  // after the read. A new action, or a read that shows it, clears it.
-  let failedAction: "" | "stop" | "resume" = "";
+  // The count of Stop and Resume requests with no answer yet. A write can
+  // commit before its answer comes, so while one is open nothing is known.
+  let open = 0;
+  // The last action that the person asked for, until a read shows it. A
+  // failed action can still commit after a read, so it stays until then.
+  let wanted: "" | "stop" | "resume" = "";
 
-  function show(n: number, a: Answer): boolean {
-    if (n !== newest) return false;
-    const confirmed = !failedAction || a.stopped === (failedAction === "stop");
-    if (confirmed) failedAction = "";
-    Object.assign(stopState, { stopped: a.stopped, since: a.since, live: a.stopped ? (a.live ?? 0) : 0, busy: a.stopped && !!a.busy, known: confirmed });
-    if (confirmed) stopState.error = "";
-    return true;
+  function show(n: number, a: Answer) {
+    if (n !== newest) return;
+    const known = open === 0 && (!wanted || a.stopped === (wanted === "stop"));
+    if (known) wanted = "";
+    Object.assign(stopState, { stopped: a.stopped, since: a.since, live: a.stopped ? (a.live ?? 0) : 0, busy: a.stopped && !!a.busy, known });
+    if (known) stopState.error = "";
   }
 
+  /** Read the state from the engine. With no answer, the state is not known. */
   export async function reread() {
     const n = ++newest;
     try {
       show(n, await read<Answer>("stop"));
     } catch {
-      // With no answer, the state is not known: the band makes no claim.
       // The access state shows the failure of the engine above each view.
       if (n === newest) stopState.known = false;
     }
@@ -59,43 +59,42 @@
 
   /** The action to try again while the state is not known. */
   export function pending(): "" | "stop" | "resume" {
-    return failedAction;
+    return wanted;
   }
 
   /** Read the state again: at start, at each new view and when the tab comes back. */
   export async function refresh() {
-    // A Stop or a Resume in progress gives the newer state.
-    if (stopState.busyAction) return;
+    // An open Stop or Resume reads the state when it ends.
+    if (open > 0) return;
     await reread();
   }
 
-  /** Stop all agent work, or resume it. */
+  /**
+   * Stop all agent work, or resume it. A Stop can start while a Resume is
+   * open, because a stop must always be possible. A Resume starts only when
+   * nothing is open.
+   */
   export async function act(kind: "stop" | "resume") {
-    // One Stop or Resume at a time: two writes can commit in the other order
-    // than their answers, and then the screen shows the wrong one.
-    if (stopState.busyAction) return;
-    const n = ++newest;
-    failedAction = "";
-    Object.assign(stopState, { busyAction: kind, error: "", note: "" });
-    let failed = false;
+    if (open > 0 && (kind === "resume" || wanted === "stop")) return;
+    wanted = kind;
+    open++;
+    newest++; // A read that is open now is older than this action.
+    Object.assign(stopState, { known: false, busyAction: kind, error: "", note: "" });
+    let resumed = false;
     try {
       const a = await post<Answer>(kind, {});
-      show(n, kind === "resume" ? { ...a, stopped: false, since: null } : a);
-      // Only a real resume starts a new hold of each held send.
-      if (kind === "resume" && n === newest && a.resumed) stopState.note = "Iris runs again. Each held send waits a full minute before it leaves.";
+      resumed = kind === "resume" && !!a.resumed;
     } catch (e) {
-      // The change can have happened with no answer: the state is not known
-      // until the engine says it again.
-      failed = true;
-      failedAction = kind;
-      Object.assign(stopState, {
-        known: false,
-        error: own(e) || (kind === "stop" ? "Iris did not answer the Stop. Try again, or run iris stop at the terminal." : "Iris did not answer the Resume. Try again."),
-      });
-    } finally {
-      stopState.busyAction = "";
+      if (wanted === kind) {
+        stopState.error = own(e) || (kind === "stop" ? "Iris did not answer the Stop. Try again, or run iris stop at the terminal." : "Iris did not answer the Resume. Try again.");
+      }
     }
-    if (failed) await reread();
+    open--;
+    if (open > 0) return;
+    stopState.busyAction = "";
+    await reread();
+    // Only a real resume starts a new hold of each held send.
+    if (resumed && stopState.known && !stopState.stopped) stopState.note = "Iris runs again. Each held send waits a full minute before it leaves.";
   }
 </script>
 
@@ -103,7 +102,7 @@
   <button
     class="stop-all"
     type="button"
-    disabled={shared.busyAction !== ""}
+    disabled={shared.busyAction === "stop"}
     aria-label={shared.busyAction === "stop" ? "Stopping all agent work" : "Stop all agent work"}
     title="Stop all agent work. Each running agent ends. After Resume, run a job again to start it."
     onclick={() => act("stop")}
@@ -116,9 +115,9 @@
   {#if shared.error}<p class="band failed" role="alert">{shared.error}</p>{/if}
   {#if !shared.known}
     <section class="band" role="status" aria-label="Stop state not known">
-      <p class="words">Iris does not know if agent work is stopped now.</p>
+      <p class="words">{shared.busyAction ? "Iris waits for the answer of the engine." : "Iris does not know if agent work is stopped now."}</p>
       <div class="actions">
-        {#if shared.error && pending()}
+        {#if shared.error && !shared.busyAction && pending()}
           <button class="again" type="button" disabled={shared.busyAction !== ""} onclick={() => act(pending() || "stop")}>{pending() === "stop" ? "Stop again" : "Resume again"}</button>
         {/if}
         <button class="again" type="button" disabled={shared.busyAction !== ""} onclick={() => reread()}>Check again</button>

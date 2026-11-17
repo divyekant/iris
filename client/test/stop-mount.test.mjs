@@ -4,280 +4,227 @@ import assert from "node:assert/strict";
 import { load, mount, until } from "./mount.mjs";
 
 const text = (el) => el.textContent.replace(/\s+/g, " ");
-
-function serve(answer) {
-  const asked = [];
-  globalThis.fetch = async (url, init) => {
-    const path = String(url).replace(/^\/api\//, "");
-    asked.push([init?.method ?? "GET", path]);
-    const [status, out] = answer(init?.method ?? "GET", path);
-    return new Response(JSON.stringify(out), { status, headers: { "content-type": "application/json" } });
-  };
-  return asked;
-}
-
 const since = "2026-11-17T09:00:00Z";
+const { act, refresh, reread, stopState } = await load("/src/views/Stop.svelte");
 
-test("Stop is one icon button; only a complete stop says that no mail leaves; Resume runs again", async () => {
-  let stop = { stopped: true, since, sessions: 1, live: 1, busy: false };
-  const asked = serve((method, path) =>
-    path === "resume" ? [200, { stopped: false, since: null, resumed: true }] : method === "POST" ? [200, stop] : [200, { stopped: false, since: null, live: 0, busy: false }],
-  );
-  const button = await mount("/src/views/Stop.svelte", { place: "button" });
-  const band = await mount("/src/views/Stop.svelte", { place: "band" });
-  try {
-    const stopButton = button.target.querySelector("button.stop-all");
-    assert.equal(stopButton.getAttribute("aria-label"), "Stop all agent work");
-    assert.equal(text(stopButton).trim(), "", "the button has no text, only the icon");
-    stopButton.click();
-    await until(() => band.target.querySelector("[role=status]"));
-    assert.deepEqual(asked.at(-1), ["POST", "stop"]);
-    assert.equal(button.target.querySelector("button.stop-all"), null, "no Stop button while stopped");
-    // One session still stops: no claim that no mail leaves.
-    assert.match(text(band.target), /The stop is not complete yet/);
-    assert.doesNotMatch(text(band.target), /no mail leaves/);
-    stop = { ...stop, live: 0 };
-    [...band.target.querySelectorAll("button")].find((b) => text(b).includes("Stop again")).click();
-    await until(() => /no mail leaves/.test(text(band.target)));
-    [...band.target.querySelectorAll("button")].find((b) => text(b).includes("Resume")).click();
-    await until(() => button.target.querySelector("button.stop-all"));
-    assert.deepEqual(asked.at(-1), ["POST", "resume"]);
-    assert.match(text(band.target), /Each held send waits a full minute/);
-  } finally {
-    button.destroy();
-    band.destroy();
-  }
-});
-
-test("refresh reads a stop that is busy, and the band says that it is not complete", async () => {
-  serve(() => [200, { stopped: true, since, live: 0, busy: true }]);
-  const band = await mount("/src/views/Stop.svelte", { place: "band" });
-  try {
-    const mod = await load("/src/views/Stop.svelte");
-    await mod.refresh();
-    await until(() => band.target.querySelector("[role=status]"));
-    assert.match(text(band.target), /The stop is not complete yet/);
-    assert.match(text(band.target), /A Gmail change was in progress/);
-  } finally {
-    band.destroy();
-  }
-});
-
-test("an older answer never replaces a newer state", async () => {
-  const { refresh, act, stopState } = await load("/src/views/Stop.svelte");
-  Object.assign(stopState, { stopped: true, since, live: 0, busy: false, note: "", error: "" });
-  // The GET waits; the resume answers first.
-  let release;
-  const late = new Promise((r) => (release = r));
+/**
+ * A fake engine. `state` is the stop switch. `hold` keeps the answer of a
+ * POST (after its commit) until `release` runs; `lose` makes a POST commit
+ * with no answer; `reject` refuses a POST with no change; `down` fails each
+ * request.
+ */
+function engine(start = {}) {
+  const e = { state: { stopped: false, since: null, live: 0, busy: false, ...start }, posts: [], hold: false, lose: false, reject: false, down: false, waiting: [] };
+  e.release = () => e.waiting.splice(0).forEach((r) => r());
   globalThis.fetch = async (url, init) => {
     const path = String(url).replace(/^\/api\//, "");
-    const out = path === "resume" ? { stopped: false, since: null, resumed: true } : (await late, { stopped: true, since, live: 0, busy: false });
+    const method = init?.method ?? "GET";
+    if (e.down) throw new TypeError("Failed to fetch");
+    let out = e.state;
+    if (method === "POST") {
+      e.posts.push(path);
+      if (e.reject) return new Response(JSON.stringify({ error: "database: locked" }), { status: 500, headers: { "content-type": "application/json" } });
+      const resumed = path === "resume" && e.state.stopped;
+      e.state = path === "stop" ? { ...e.state, stopped: true, since: e.state.since ?? since } : { stopped: false, since: null, live: 0, busy: false };
+      out = path === "resume" ? { stopped: false, since: null, resumed } : { ...e.state, sessions: 0 };
+      if (e.hold) await new Promise((r) => e.waiting.push(r));
+      if (e.lose) throw new TypeError("Failed to fetch");
+    }
     return new Response(JSON.stringify(out), { status: 200, headers: { "content-type": "application/json" } });
   };
-  const band = await mount("/src/views/Stop.svelte", { place: "band" });
-  try {
-    const reading = refresh();
-    await act("resume");
-    assert.equal(stopState.stopped, false);
-    release();
-    await reading;
-    band.flushSync();
-    assert.equal(stopState.stopped, false, "the late GET did not stop Iris again on the screen");
-    assert.doesNotMatch(text(band.target), /no mail leaves/);
-  } finally {
-    band.destroy();
-  }
-});
+  return e;
+}
 
-test("a stop with only a Gmail call in progress offers Stop again, and the tooltip makes no claim on mail", async () => {
-  const { stopState } = await load("/src/views/Stop.svelte");
-  Object.assign(stopState, { stopped: false, since: null, live: 0, busy: false, note: "", error: "" });
-  serve((method) => [200, method === "POST" ? { stopped: true, since, sessions: 0, live: 0, busy: true } : { stopped: false, since: null, live: 0, busy: false }]);
+async function start(e) {
+  Object.assign(stopState, { busyAction: "", note: "", error: "" });
+  await reread();
   const button = await mount("/src/views/Stop.svelte", { place: "button" });
   const band = await mount("/src/views/Stop.svelte", { place: "band" });
+  const flush = () => (button.flushSync(), band.flushSync());
+  return { button, band, flush, e, done: () => (button.destroy(), band.destroy()) };
+}
+const press = (view, name) => [...view.target.querySelectorAll("button")].find((b) => text(b).includes(name)).click();
+
+test("Stop is one icon button; only a complete stop says that no mail leaves; Resume runs again", async () => {
+  const v = await start(engine());
   try {
-    const stopButton = button.target.querySelector("button.stop-all");
+    const stopButton = v.button.target.querySelector("button.stop-all");
+    assert.equal(stopButton.getAttribute("aria-label"), "Stop all agent work");
+    assert.equal(text(stopButton).trim(), "", "the button has no text, only the icon");
     assert.doesNotMatch(stopButton.getAttribute("title"), /mail/);
+    v.e.state.live = 1; // One session still stops after the Stop.
     stopButton.click();
-    await until(() => band.target.querySelector("[role=status]"));
-    assert.match(text(band.target), /The stop is not complete yet/);
-    assert.ok([...band.target.querySelectorAll("button")].some((b) => text(b).includes("Stop again")));
+    await until(() => v.band.target.querySelector('[aria-label="Iris is stopped"]'));
+    assert.deepEqual(v.e.posts, ["stop"]);
+    assert.equal(v.button.target.querySelector("button.stop-all"), null, "no Stop button while stopped");
+    assert.match(text(v.band.target), /The stop is not complete yet/);
+    assert.doesNotMatch(text(v.band.target), /no mail leaves/);
+    v.e.state.live = 0;
+    press(v.band, "Stop again");
+    await until(() => /no mail leaves/.test(text(v.band.target)));
+    press(v.band, "Resume");
+    await until(() => v.button.target.querySelector("button.stop-all"));
+    assert.deepEqual(v.e.posts, ["stop", "stop", "resume"]);
+    await until(() => /Each held send waits a full minute/.test(text(v.band.target)));
   } finally {
-    button.destroy();
-    band.destroy();
+    v.done();
   }
 });
 
-test("a Resume with no answer makes no claim, and a read of the engine gives the state", async () => {
-  const { stopState } = await load("/src/views/Stop.svelte");
-  Object.assign(stopState, { stopped: true, since, live: 0, busy: false, known: true, note: "", error: "" });
-  let getWorks = false;
-  globalThis.fetch = async (url, init) => {
-    const path = String(url).replace(/^\/api\//, "");
-    // The resume commits in the engine, but its answer is lost.
-    if (path === "resume" || !getWorks) throw new TypeError("Failed to fetch");
-    return new Response(JSON.stringify({ stopped: false, since: null, live: 0, busy: false }), { status: 200, headers: { "content-type": "application/json" } });
-  };
-  const band = await mount("/src/views/Stop.svelte", { place: "band" });
+test("a busy stop is not complete, and offers Stop again", async () => {
+  const v = await start(engine({ stopped: true, since, busy: true }));
   try {
-    [...band.target.querySelectorAll("button")].find((b) => text(b).includes("Resume")).click();
-    await until(() => stopState.known === false && stopState.busyAction === "");
-    band.flushSync();
-    assert.doesNotMatch(text(band.target), /no mail leaves/);
-    assert.match(text(band.target), /does not know if agent work is stopped/);
-    assert.doesNotMatch(text(band.target), /Iris is stopped/);
-    // The next read of the engine gives the state, and clears the old error.
-    getWorks = true;
-    const { refresh } = await load("/src/views/Stop.svelte");
-    await refresh();
-    band.flushSync();
-    assert.equal(stopState.stopped, false);
-    assert.equal(stopState.known, true);
-    assert.equal(stopState.error, "");
-    assert.equal(band.target.querySelector("[role=status]")?.getAttribute("aria-label") ?? null, null);
+    assert.match(text(v.band.target), /The stop is not complete yet/);
+    assert.match(text(v.band.target), /A Gmail change was in progress/);
+    assert.ok([...v.band.target.querySelectorAll("button")].some((b) => text(b).includes("Stop again")));
   } finally {
-    band.destroy();
+    v.done();
+  }
+});
+
+test("while a Resume waits for its answer, the band makes no claim and Stop stays possible", async () => {
+  const v = await start(engine({ stopped: true, since }));
+  try {
+    assert.match(text(v.band.target), /no mail leaves/);
+    v.e.hold = true;
+    press(v.band, "Resume");
+    await until(() => v.e.waiting.length === 1); // The Resume committed; its answer waits.
+    v.flush();
+    assert.doesNotMatch(text(v.band.target), /no mail leaves|Iris is stopped/);
+    const stopButton = v.button.target.querySelector("button.stop-all");
+    assert.equal(stopButton.disabled, false);
+    // A second Resume sends nothing.
+    await Promise.race([act("resume"), new Promise((r) => setTimeout(r, 20))]);
+    assert.deepEqual(v.e.posts, ["resume"]);
+    // The Stop commits after the Resume. Both answers come in the other order.
+    stopButton.click();
+    await until(() => v.e.waiting.length === 2);
+    v.e.release();
+    await until(() => stopState.known);
+    v.flush();
+    assert.equal(stopState.stopped, true);
+    assert.match(text(v.band.target), /no mail leaves/);
+  } finally {
+    v.e.release();
+    v.done();
+  }
+});
+
+test("a Stop that commits after a Resume answers wins, and the screen shows the stop", async () => {
+  const v = await start(engine({ stopped: true, since }));
+  try {
+    v.e.hold = true;
+    press(v.band, "Resume");
+    await until(() => v.e.waiting.length === 1);
+    v.button.target.querySelector("button.stop-all").click();
+    await until(() => v.e.waiting.length === 2);
+    // The Resume answers first, then the Stop.
+    v.e.waiting.shift()();
+    await new Promise((r) => setTimeout(r, 20));
+    v.flush();
+    assert.equal(stopState.known, false, "the Stop is still open");
+    v.e.release();
+    await until(() => stopState.known);
+    assert.equal(stopState.stopped, true);
+  } finally {
+    v.e.release();
+    v.done();
+  }
+});
+
+test("a Resume with a lost answer: no claim until a read shows that Iris runs", async () => {
+  const v = await start(engine({ stopped: true, since }));
+  try {
+    v.e.lose = true;
+    press(v.band, "Resume");
+    // The read after the lost answer shows that the Resume committed.
+    await until(() => stopState.known && !stopState.stopped);
+    assert.equal(stopState.error, "", "no error to try again a completed action");
+  } finally {
+    v.done();
+  }
+});
+
+test("a Stop with a lost answer and a down engine: no claim, with Stop again and Check again", async () => {
+  const v = await start(engine());
+  try {
+    v.e.lose = true;
+    v.e.hold = true;
+    v.button.target.querySelector("button.stop-all").click();
+    await until(() => v.e.waiting.length === 1); // The Stop committed.
+    v.e.down = true;
+    v.e.release();
+    await until(() => stopState.error && !stopState.busyAction);
+    v.flush();
+    assert.equal(stopState.known, false);
+    assert.doesNotMatch(text(v.band.target), /no mail leaves|Iris is stopped/);
+    assert.match(text(v.band.target), /does not know if agent work is stopped/);
+    assert.ok([...v.band.target.querySelectorAll("button")].some((b) => text(b).includes("Stop again")));
+    v.e.down = false;
+    press(v.band, "Check again");
+    await until(() => stopState.known);
+    assert.equal(stopState.stopped, true);
+    assert.equal(stopState.error, "");
+  } finally {
+    v.done();
+  }
+});
+
+test("a rejected Stop keeps its error, and the state stays not known", async () => {
+  const v = await start(engine());
+  try {
+    v.e.reject = true;
+    await act("stop");
+    v.flush();
+    assert.equal(stopState.known, false);
+    assert.notEqual(stopState.error, "");
+    assert.ok(v.band.target.querySelector("[role=alert]"));
+    assert.doesNotMatch(text(v.band.target), /no mail leaves/);
+  } finally {
+    v.done();
+  }
+});
+
+test("a failed read after a complete stop takes back the claim, and the Stop button comes back", async () => {
+  const v = await start(engine({ stopped: true, since }));
+  try {
+    assert.match(text(v.band.target), /no mail leaves/);
+    v.e.down = true;
+    await refresh();
+    v.flush();
+    assert.doesNotMatch(text(v.band.target), /no mail leaves|Iris is stopped/);
+    assert.ok(v.button.target.querySelector("button.stop-all"));
+  } finally {
+    v.done();
+  }
+});
+
+test("an older read never replaces a newer state", async () => {
+  const v = await start(engine({ stopped: true, since }));
+  try {
+    v.e.hold = false;
+    let release;
+    const late = new Promise((r) => (release = r));
+    const real = globalThis.fetch;
+    globalThis.fetch = async (url, init) => ((init?.method ?? "GET") === "GET" && !release.used ? ((release.used = true), await late, new Response(JSON.stringify({ stopped: true, since, live: 0, busy: false }), { status: 200 })) : real(url, init));
+    const reading = refresh();
+    await act("resume");
+    release();
+    await reading;
+    assert.equal(stopState.stopped, false, "the late read did not stop Iris again on the screen");
+    globalThis.fetch = real;
+  } finally {
+    v.done();
   }
 });
 
 test("a Resume when Iris already runs does not say that a new hold started", async () => {
-  const { act, stopState } = await load("/src/views/Stop.svelte");
-  Object.assign(stopState, { stopped: true, since, live: 0, busy: false, known: true, note: "", error: "" });
-  serve(() => [200, { stopped: false, since: null, resumed: false }]);
-  await act("resume");
-  assert.equal(stopState.stopped, false);
-  assert.equal(stopState.note, "");
-});
-
-test("a failed read after a complete stop takes back the claim, and the Stop button comes back", async () => {
-  const { refresh, stopState } = await load("/src/views/Stop.svelte");
-  Object.assign(stopState, { stopped: true, since, live: 0, busy: false, known: true, note: "", error: "" });
-  globalThis.fetch = async () => {
-    throw new TypeError("Failed to fetch");
-  };
-  const button = await mount("/src/views/Stop.svelte", { place: "button" });
-  const band = await mount("/src/views/Stop.svelte", { place: "band" });
-  try {
-    assert.match(text(band.target), /no mail leaves/);
-    // For example, `iris resume` ran at the terminal, and the engine does not answer now.
-    await refresh();
-    band.flushSync();
-    assert.doesNotMatch(text(band.target), /no mail leaves|Iris is stopped/);
-    assert.match(text(band.target), /does not know if agent work is stopped/);
-    assert.ok(button.target.querySelector("button.stop-all"));
-  } finally {
-    button.destroy();
-    band.destroy();
-  }
-});
-
-test("a Stop with no answer makes no claim", async () => {
-  const { act, stopState } = await load("/src/views/Stop.svelte");
-  Object.assign(stopState, { stopped: false, since: null, live: 0, busy: false, known: true, note: "", error: "" });
-  globalThis.fetch = async () => {
-    throw new TypeError("Failed to fetch");
-  };
-  const band = await mount("/src/views/Stop.svelte", { place: "band" });
-  try {
-    await act("stop");
-    band.flushSync();
-    assert.equal(stopState.known, false);
-    assert.doesNotMatch(text(band.target), /no mail leaves|Iris is stopped/);
-    assert.match(text(band.target), /does not know if agent work is stopped/);
-  } finally {
-    band.destroy();
-  }
-});
-
-for (const kind of ["stop", "resume"]) {
-  test(`a ${kind} with a lost answer and a good read shows the state, with no error to try again`, async () => {
-    const { act, stopState } = await load("/src/views/Stop.svelte");
-    const before = kind === "resume";
-    Object.assign(stopState, { stopped: before, since: before ? since : null, live: 0, busy: false, known: true, note: "", error: "" });
-    globalThis.fetch = async (url, init) => {
-      // The POST commits in the engine, but its answer is lost. The GET answers.
-      if ((init?.method ?? "GET") === "POST") throw new TypeError("Failed to fetch");
-      const out = { stopped: !before, since: before ? null : since, live: 0, busy: false };
-      return new Response(JSON.stringify(out), { status: 200, headers: { "content-type": "application/json" } });
-    };
-    await act(kind);
-    assert.equal(stopState.known, true);
-    assert.equal(stopState.stopped, !before);
-    assert.equal(stopState.error, "");
-  });
-}
-
-test("a rejected Stop keeps its error when the read shows that Iris still runs", async () => {
-  const { act, stopState } = await load("/src/views/Stop.svelte");
-  Object.assign(stopState, { stopped: false, since: null, live: 0, busy: false, known: true, note: "", error: "" });
-  serve((method) => (method === "POST" ? [500, { error: "database: locked" }] : [200, { stopped: false, since: null, live: 0, busy: false }]));
-  const band = await mount("/src/views/Stop.svelte", { place: "band" });
-  try {
-    await act("stop");
-    band.flushSync();
-    // The Stop can still commit after the read: the state is not known.
-    assert.equal(stopState.known, false);
-    assert.notEqual(stopState.error, "");
-    assert.ok(band.target.querySelector("[role=alert]"));
-  } finally {
-    band.destroy();
-  }
-});
-
-test("a Resume with no answer, then a read of the old stop, stays not known until a read shows Iris runs", async () => {
-  const { act, refresh, stopState } = await load("/src/views/Stop.svelte");
-  Object.assign(stopState, { stopped: true, since, live: 0, busy: false, known: true, note: "", error: "" });
-  let committed = false;
-  globalThis.fetch = async (url, init) => {
-    if ((init?.method ?? "GET") === "POST") throw new TypeError("Failed to fetch");
-    // The read comes before the Resume commits.
-    const out = committed ? { stopped: false, since: null, live: 0, busy: false } : { stopped: true, since, live: 0, busy: false };
-    return new Response(JSON.stringify(out), { status: 200, headers: { "content-type": "application/json" } });
-  };
-  const band = await mount("/src/views/Stop.svelte", { place: "band" });
+  const v = await start(engine());
   try {
     await act("resume");
-    band.flushSync();
-    assert.equal(stopState.known, false);
-    assert.doesNotMatch(text(band.target), /no mail leaves/);
-    assert.ok([...band.target.querySelectorAll("button")].some((b) => text(b).includes("Resume again")));
-    committed = true;
-    await refresh();
-    band.flushSync();
-    assert.equal(stopState.known, true);
     assert.equal(stopState.stopped, false);
-    assert.equal(stopState.error, "");
+    assert.equal(stopState.note, "");
   } finally {
-    band.destroy();
-  }
-});
-
-test("only one Stop or Resume runs at a time", async () => {
-  const { act, stopState } = await load("/src/views/Stop.svelte");
-  Object.assign(stopState, { stopped: true, since, live: 0, busy: false, known: false, busyAction: "", note: "", error: "" });
-  const posts = [];
-  let release;
-  globalThis.fetch = async (url, init) => {
-    const path = String(url).replace(/^\/api\//, "");
-    if ((init?.method ?? "GET") === "POST") {
-      posts.push(path);
-      await new Promise((r) => (release = r));
-    }
-    const out = path === "resume" ? { stopped: false, since: null, resumed: true } : { stopped: false, since: null, live: 0, busy: false };
-    return new Response(JSON.stringify(out), { status: 200, headers: { "content-type": "application/json" } });
-  };
-  const button = await mount("/src/views/Stop.svelte", { place: "button" });
-  try {
-    const resuming = act("resume");
-    await until(() => posts.length === 1);
-    button.flushSync();
-    assert.equal(button.target.querySelector("button.stop-all").disabled, true);
-    await act("stop");
-    assert.deepEqual(posts, ["resume"], "no Stop while the Resume runs");
-    release();
-    await resuming;
-    assert.equal(stopState.stopped, false);
-  } finally {
-    button.destroy();
+    v.done();
   }
 });
