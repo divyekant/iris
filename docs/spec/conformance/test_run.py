@@ -70,6 +70,13 @@ class Runner(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("newer than the kit", out)
 
+    def test_a_very_long_minor_version_is_newer_not_a_traceback(self):
+        doc = dict(GOOD, model="iris/1." + "9" * 5000)
+        code, out = check({"signal-long.json": json.dumps(doc)})
+        self.assertEqual(code, 1)
+        self.assertIn("newer than the kit", out)
+        self.assertTrue(run.newer("10", 9) and not run.newer("0", 0))
+
     def test_an_impossible_date_fails(self):
         doc = dict(GOOD, expires="2026-02-30T09:15:00Z")
         self.assertEqual(check({"signal-date.json": json.dumps(doc)})[0], 1)

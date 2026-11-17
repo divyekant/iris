@@ -153,6 +153,13 @@ def documents(path):
     return out
 
 
+def newer(text, minor):
+    """True if the minor version `text` (digits, no leading zero) is higher
+    than `minor`. No int() of the text: a very long text has no limit."""
+    k = str(minor)
+    return (len(text), text) > (len(k), k)
+
+
 def verdict(validators, minor, name, doc):
     """None if the document passes, else the reason. With minor None, only
     the schemas decide (the self-test checks the schemas)."""
@@ -162,7 +169,7 @@ def verdict(validators, minor, name, doc):
         return "no schema"
     if isinstance(doc, dict) and isinstance(doc.get("model"), str):
         m = MODEL.match(doc["model"])
-        if m and minor is not None and int(m.group(1)) > minor:
+        if m and minor is not None and newer(m.group(1), minor):
             return "newer than the kit"
     errors = sorted(validators[name].iter_errors(doc), key=lambda e: list(e.absolute_path))
     if errors:
