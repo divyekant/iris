@@ -3,14 +3,16 @@
   source mail in one step. An unread dot marks a conversation that waits for you.
   With `ondone`, an open commitment starts with a round tick box: a click marks
   it done after the same Undo time as the item view, then calls `ondone`. The
-  view that passes `ondone` calls `flushHolds` when the person leaves it.
+  view that passes `ondone` calls `flushHolds` when the person leaves it. A feed
+  item, a conversation or a signal gets its one quiet verb (Skip, Mute or
+  Dismiss) as a text button, with the same Undo time.
 -->
 <script lang="ts">
   import type { Item } from "../api";
   import { due, initials, money, origin, other, party, timeLeft, when } from "../format";
   import { href } from "../route";
   import { post } from "../api";
-  import { hold, HOLD } from "../act";
+  import { hold, HOLD, quiet, said, type Verb } from "../act";
 
   // `note`: one more muted line, for example the reason of a rule that hides the item.
   // `ondone`: shows the tick box on an open commitment. `delay`: the time for Undo, shorter in tests.
@@ -26,11 +28,15 @@
   let box = $derived(
     !!ondone && item.form === "commitment" && (item.status === "open" || item.status === "deferred"),
   );
+  // A feed item, a conversation or a signal gets its one quiet verb (Skip, Mute, Dismiss).
+  let away = $derived(ondone && !box ? quiet(item) : null);
+  let verb: Verb = $state("close");
   type Phase = { at: "idle" } | { at: "held" } | { at: "sending" } | { at: "done" } | { at: "failed"; why: string; known: boolean };
   let phase: Phase = $state({ at: "idle" });
   let pending: ReturnType<typeof hold> | undefined;
 
-  function tick() {
+  function tick(v: Verb = "close") {
+    verb = v;
     phase = { at: "held" };
     pending = hold(send, delay);
   }
@@ -45,7 +51,7 @@
     pending = undefined;
     phase = { at: "sending" };
     try {
-      await post(`items/${encodeURIComponent(item.id)}/close`, {});
+      await post(`items/${encodeURIComponent(item.id)}/${verb}`, {});
       phase = { at: "done" };
       ondone?.(item.id);
     } catch (error) {
@@ -95,7 +101,7 @@
         <path d="M6 10.5l2.75 2.75L14 8" />
       </svg>
       <span class="struck">{item.title}</span>
-      <span class="muted">Done. It leaves your brief.</span>
+      <span class="muted">{said(verb)} It leaves your brief.</span>
       {#if phase.at === "held"}
         <button class="undo" type="button" onclick={undo}>Undo</button>
         <span class="bar" style:animation-duration={`${delay}ms`} aria-hidden="true"></span>
@@ -105,7 +111,7 @@
 {:else}
 <li class="line">
   {#if box}
-    <button class="box" type="button" aria-label={`Done: ${item.title}`} title="Done" onclick={tick}>
+    <button class="box" type="button" aria-label={`Done: ${item.title}`} title="Done" onclick={() => tick()}>
       <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
         <circle cx="10" cy="10" r="9" />
         <path d="M6 10.5l2.75 2.75L14 8" />
@@ -127,6 +133,9 @@
     {/if}
   </div>
   {#if waits}<span class="dot" title={item.your_turn ? "Your turn" : `${item.new} new`}><span class="hidden">{item.your_turn ? "Your turn" : `${item.new} new`}</span></span>{/if}
+  {#if away}
+    <button class="away" type="button" aria-label={`${away.label}: ${item.title}`} onclick={() => tick(away.verb)}>{away.label}</button>
+  {/if}
   <a class="source" href={href.mail(origin(item))} aria-label="Open the source mail" title="Open the source mail">
     <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
       <rect x="2.5" y="4.5" width="15" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.5" />
@@ -264,6 +273,42 @@
       width: var(--size-touch);
       height: var(--size-touch);
     }
+    .away {
+      min-height: var(--size-touch);
+    }
+  }
+  /* The quiet verb: a text button that shows on hover or focus of the line. */
+  .away {
+    position: relative;
+    z-index: 1;
+    flex: none;
+    padding: var(--space-1) var(--space-2);
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--color-text-muted);
+    font: inherit;
+    font-size: var(--font-size--1);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity var(--transition-fast), color var(--transition-fast);
+  }
+  .line:hover .away,
+  .away:focus-visible {
+    opacity: 1;
+  }
+  .away:hover,
+  .away:focus-visible {
+    color: var(--color-text);
+    background: var(--color-background-elevated);
+  }
+  .away:focus-visible {
+    outline: 2px solid var(--color-primary);
+  }
+  @media (hover: none) {
+    .away {
+      opacity: 1;
+    }
   }
   /* The tick box: a ring that shows the tick on hover or focus. */
   .box {
@@ -390,6 +435,7 @@
   @media (prefers-reduced-motion: reduce) {
     .line,
     .source,
+    .away,
     .box circle,
     .box path {
       transition: none;
