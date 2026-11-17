@@ -710,10 +710,15 @@ mod tests {
             pin_local_url("http://[::1]:9/v1").unwrap(),
             "http://[::1]:9/v1"
         );
-        let pinned = pin_local_url("http://LocalHost:9/v1").unwrap();
-        let host = local_host(&pinned).unwrap();
-        assert!(host.parse::<IpAddr>().unwrap().is_loopback(), "{pinned}");
-        assert!(pinned.ends_with(":9/v1"), "{pinned}");
+        // `localhost` can give `::1` first (as on CI runners), and an IPv6
+        // host comes in `[]`, as in a URL.
+        for url in ["http://[::1]:9/v1", "http://LocalHost:9/v1"] {
+            let pinned = pin_local_url(url).unwrap();
+            let host = local_host(&pinned).unwrap();
+            let bare = host.trim_start_matches('[').trim_end_matches(']');
+            assert!(bare.parse::<IpAddr>().unwrap().is_loopback(), "{pinned}");
+            assert!(pinned.ends_with(":9/v1"), "{pinned}");
+        }
     }
 
     /// A small xorshift generator with a fixed seed, so a failure repeats.
