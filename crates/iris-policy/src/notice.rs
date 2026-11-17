@@ -147,12 +147,39 @@ pub fn line(s: &str) -> String {
 
 /// The notices that are not done, newest first, at most [`LIST_MAX`].
 pub fn list(conn: &Connection) -> Result<Vec<Notice>> {
+    select(
+        conn,
+        "WHERE done_at IS NULL ORDER BY id DESC LIMIT ?1",
+        params![LIST_MAX],
+    )
+}
+
+/// The notices that are not done with a row ID larger than `after`, oldest
+/// first, at most `limit` (the Mac app, `docs/specs/2026-11-17-mac-app.md`).
+pub fn after(conn: &Connection, after: i64, limit: i64) -> Result<Vec<Notice>> {
+    select(
+        conn,
+        "WHERE done_at IS NULL AND id > ?1 ORDER BY id LIMIT ?2",
+        params![after, limit],
+    )
+}
+
+/// The count of notices that are not done, and the largest row ID of all
+/// notices (0 with no notice).
+pub fn counts(conn: &Connection) -> Result<(i64, i64)> {
+    Ok(conn.query_row(
+        "SELECT count(*) FILTER (WHERE done_at IS NULL), coalesce(max(id), 0) FROM notice",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
+}
+
+fn select(conn: &Connection, rest: &str, p: impl rusqlite::Params) -> Result<Vec<Notice>> {
     let rows = conn
-        .prepare(
-            "SELECT id, message_id, rule, rule_name, title, text, created_at FROM notice
-             WHERE done_at IS NULL ORDER BY id DESC LIMIT ?1",
-        )?
-        .query_map([LIST_MAX], |r| {
+        .prepare(&format!(
+            "SELECT id, message_id, rule, rule_name, title, text, created_at FROM notice {rest}"
+        ))?
+        .query_map(p, |r| {
             Ok(Notice {
                 id: r.get(0)?,
                 message_id: r.get(1)?,

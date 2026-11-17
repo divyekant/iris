@@ -1225,8 +1225,10 @@ policy. The one exception is the model budget of release 1 (section 8.1). The en
   one-time code. `iris serve` prints a one-time sign-in address:
   `http://<address>/#code=<code>`. Release 1 does not open the browser,
   because the engine often runs as a background service with no screen
-  (`iris service install`). The person opens the address. A later release
-  can open the browser when the engine runs in a terminal. The browser does
+  (`iris service install`). The person opens the address. `iris open` asks
+  the engine socket (verb `sign-in`) for a new one-time code with a life of 2
+  minutes, and opens its address in the browser
+  (`docs/specs/2026-11-17-mac-app.md`). The browser does
   not send the fragment to a server. The client exchanges the code one time
   (`POST /api/session`) for the web secret, keeps the secret in the storage
   of its origin, and sends it as `Authorization: Bearer <secret>`. The engine
