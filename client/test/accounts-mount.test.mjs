@@ -89,6 +89,7 @@ test("the accounts view never says up to date while a copy runs or after a faile
     [{ ...base, last_sync: { ...base.last_sync, result: "error: Gmail: HTTP 500" } }, /last sync failed/],
     [{ ...base, last_sync: { ...base.last_sync, kind: "verify", result: "2 differences, 0 skipped, then error: HTTP 401" } }, /last sync failed/],
     [{ ...base, mirror_ready_at: null, sync: { kind: "first", step: 1 } }, /copies this mailbox now/],
+    [{ ...base, mirror_ready_at: null, sync: { kind: "first", step: 1 }, last_sync: { ...base.last_sync, kind: "first", result: "error: Gmail: HTTP 500" } }, /last sync failed/],
     [base, /Up to date/],
   ];
   for (const [account, want] of cases) {
@@ -100,5 +101,23 @@ test("the accounts view never says up to date while a copy runs or after a faile
     } finally {
       view.destroy();
     }
+  }
+});
+
+test("each item view of the brief names its account: a line and a live login code", async () => {
+  access.accounts = { "a-1": "gmail", "a-2": "northwind" };
+  const signal = { ...fx.items.find((i) => i.form === "signal"), account: "a-2" };
+  const now = new Date(new Date(signal.expires).getTime() - 60_000);
+  try {
+    for (const [path, props] of [["/src/views/Line.svelte", { item: signal }], ["/src/views/Code.svelte", { item: signal, now }]]) {
+      const view = await mount(path, props);
+      try {
+        assert.equal(view.target.querySelector(".pill")?.textContent.trim(), "northwind", path);
+      } finally {
+        view.destroy();
+      }
+    }
+  } finally {
+    access.accounts = {};
   }
 });
