@@ -157,6 +157,7 @@ fn each_case_of_the_test_set_gives_its_flag() {
             vec!["date"],
         ),
         ("date month", known, "Due on 3 March.".into(), vec!["date"]),
+        ("date may", known, "Due on May 3.".into(), vec!["date"]),
         (
             "date iso",
             known,

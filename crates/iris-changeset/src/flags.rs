@@ -14,6 +14,8 @@ const CURRENCY_WORDS: [&str; 16] = [
     "usd", "eur", "gbp", "inr", "jpy", "cad", "aud", "chf", "dollar", "dollars", "euro", "euros",
     "pound", "pounds", "rupee", "rupees",
 ];
+/// The month names, then the short forms. "may" is its own short form, so
+/// it is in the list once.
 const MONTHS: [&str; 24] = [
     "january",
     "february",
