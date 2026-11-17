@@ -969,7 +969,7 @@ pub fn hostile(c: &Connection, action: i64) -> Result<bool> {
                                  UNION
                                  SELECT d.thread_id FROM action_draft ad
                                  JOIN draft d ON d.id = ad.draft_id WHERE ad.action_id = a.id)
-             AND (m.hostile IS NOT NULL OR p.kind = 'hostile'))
+             AND ((m.hostile IS NOT NULL AND m.hostile NOT IN ('', '[]')) OR p.kind = 'hostile'))
          FROM changeset_action a JOIN changeset cs ON cs.id = a.changeset_id WHERE a.id = ?1",
         [action],
         |r| r.get(0),

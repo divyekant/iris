@@ -186,7 +186,28 @@ fn submit_denies_a_draft_that_is_not_valid() {
 fn only_a_person_writes_into_a_hostile_thread() {
     let dir = TempDir::new("hostile");
     let s = store(&dir);
-    s.write(|tx| Ok(tx.execute("UPDATE message SET hostile = 'link' WHERE id = 1", [])?))
+    // An empty mark list (understanding found no mark) is not hostile.
+    for empty in ["[]", ""] {
+        s.write(|tx| Ok(tx.execute("UPDATE message SET hostile = ?1 WHERE id = 1", [empty])?))
+            .unwrap();
+        for (verb, t, a) in [
+            (Verb::Draft, "t-1", REPLY()),
+            (Verb::Send, "d-1", json!({})),
+        ] {
+            let got = one(&s, AuthorKind::Agent, verb, &[t], a);
+            assert_eq!(state(&got), "proposed", "{verb:?} {empty:?}");
+            // Withdraw it, so the send of the draft is free again.
+            s.write(|tx| {
+                Ok(tx.execute(
+                    "UPDATE changeset_action SET state = 'denied', decided_by = 'engine',
+                       reason = 'test', decided_at = 1 WHERE state = 'proposed'",
+                    [],
+                )?)
+            })
+            .unwrap();
+        }
+    }
+    s.write(|tx| Ok(tx.execute("UPDATE message SET hostile = '[\"link\"]' WHERE id = 1", [])?))
         .unwrap();
     for verb in [Verb::Draft, Verb::Send] {
         let (t, a) = if verb == Verb::Draft {
