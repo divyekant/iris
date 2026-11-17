@@ -126,7 +126,10 @@ The granted messages of a job:
   session of a done job see nothing (R4-04 ends the session).
 - Each caller that moves a job to `done` (`iris_job::finish`) does these
   steps in this order: move the job, end the session of the job if one
-  runs and wait until it ended (R4-04), then build the workspace. So the
+  runs and wait until it ended (R4-04), then build the workspace. If the
+  caller is the agent of that session (`iris done`), the engine replies to
+  the command after the move, and then does the other steps by itself, so
+  the command does not wait for its own session to end. So the
   mail files go at once, and no build runs while a session runs. The engine also
   builds, at each start, the workspace of each done job whose workspace
   folder exists. A partial build can leave any owned path absent, so the
@@ -403,7 +406,11 @@ can close the gap. The rules are:
   (`Built::revoked`), and `iris_job::revoked_count(store, job)` gives the
   current count. Revokes only grow, so a revoke during a build makes the
   two counts differ. The launcher (R4-04) does these steps in order:
-  1. Register the session of the job in a write transaction.
+  1. Register the session of the job in a write transaction. One job has
+     at most one registered session that did not end: the store refuses a
+     second one (a unique index in the session table of R4-04). A second
+     launch fails at this step, before it can build, so no build runs
+     while a session of the job runs.
   2. Build, and compare the two counts. If they differ, build again.
   3. Make the agent process in a held state: it runs no code of the agent
      and cannot read the workspace yet (for example a suspended process,
