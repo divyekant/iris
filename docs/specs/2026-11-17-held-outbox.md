@@ -22,7 +22,7 @@ wait for the owner.
 1. The engine applies each approved Gmail action of an account (the
    mailbox verbs and `draft`), with no command from the person.
 2. An approved `send` moves to `held`. It waits there for the hold delay
-   (60 seconds), and the person can cancel it while it is held.
+   (60 seconds), and the person can cancel it until the release claims it.
 3. The engine releases each held send whose hold ended, only while the send
    switch is on. The switch is off until the owner turns it on.
 4. The outbox view shows each held send, the time that is left, its
@@ -97,7 +97,9 @@ goes on.
   stays `held`. A switch that goes off during a hold stops the send.
 - The release holds the apply lock (`apply.lock`) from before its claim to
   the end of its `drafts.send` call. `iris sending off` takes the same lock
-  before it writes the switch, and tries for up to 60 seconds. So when the
+  before it writes the switch, and tries for up to 20 seconds. The command
+  waits at most 30 seconds for an answer (`ANSWER_WAIT` in
+  `crates/iris/src/socket.rs`), so the engine always answers in time. So when the
   command says "Sending is off.", no send call is in progress, and each
   later claim reads the switch as off. If the lock stays busy, the command
   writes nothing and says "A send is in progress. Run the command again."
@@ -243,8 +245,10 @@ owner turns it on after the Mac check of issue #302.
   approval (R3-01), the warnings (R3-03), the hold and the switch.
 - The engine now applies approved mailbox actions with no command. The
   policy mode `observe` still stops each one.
-- Rollback: `iris sending off`, then revert the code PRs. The migration
-  stays; an old program does not read the new table.
+- Rollback: run `iris sending off` first, so no send leaves. A program
+  without migration 20 refuses the database (`UnknownSchema`), so a revert
+  of the code is not a rollback. Fix forward with a new PR. A restore of
+  the backup from before the migration loses each change after it.
 
 ## Plan
 

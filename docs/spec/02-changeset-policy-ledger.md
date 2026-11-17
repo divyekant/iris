@@ -848,9 +848,10 @@ and the release step. That specification must meet these constraints:
 - A `send` never goes at once. After the approval, it waits in the held
   outbox for the hold delay (default 60 seconds). The outbox survives a
   restart.
-- A cancel of a held send succeeds only while the send is held. It moves
-  the send to `denied` by `person`. Cancel and
-  release run on the one write connection, so only one of the two can win.
+- A cancel of a send succeeds only while the send is `approved` or `held`
+  and has no ledger row (the release did not claim it). It moves the send
+  to `denied` by `person`. Cancel and release run on the one write
+  connection, so only one of the two can win.
 - The send switch (`docs/specs/2026-11-17-held-outbox.md`) is off until the
   owner turns it on with `iris sending on`. While it is off, no send leaves
   the held outbox. The hold starts at the later of the approval and the
