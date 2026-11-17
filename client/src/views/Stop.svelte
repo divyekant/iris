@@ -88,7 +88,7 @@
     type="button"
     disabled={shared.busyAction === "stop"}
     aria-label={shared.busyAction === "stop" ? "Stopping all agent work" : "Stop all agent work"}
-    title="Stop all agent work. Resume starts it again."
+    title="Stop all agent work. Each running agent ends. After Resume, run a job again to start it."
     onclick={() => act("stop")}
   >
     <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" /></svg>
