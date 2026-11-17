@@ -14,6 +14,8 @@ function serve(answer) {
   const asked = [];
   globalThis.fetch = async (url, init) => {
     const path = String(url).replace(/^\/api\//, "");
+    // A brief line owed to you reads its ready draft (card R3-07): not a request of the gate.
+    if (path.endsWith("/draft")) return new Response(JSON.stringify({ error: "Not found." }), { status: 404 });
     asked.push([init?.method ?? "GET", path]);
     const [status, out] = await answer(path);
     return new Response(JSON.stringify(out), { status, headers: { "content-type": "application/json" } });
@@ -281,6 +283,7 @@ test("in the brief, a row stays when a new brief comes before the answer", async
     if (path === "status") return Promise.resolve(new Response(JSON.stringify(fx.answer("status")), { status: 200 }));
     if (path.startsWith("watches")) return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
     if (path === "matters") return Promise.resolve(new Response(JSON.stringify({ proposed: [], confirmed: [] }), { status: 200 }));
+    if (path.endsWith("/draft")) return Promise.resolve(new Response(JSON.stringify({ error: "Not found." }), { status: 404 }));
     return new Promise((done) => (post = () => done(new Response(JSON.stringify(rowFor(path)), { status: 200 }))));
   };
   const view = await mount("/src/views/Brief.svelte", { watches: [], proposed: null, brief: fx.brief, now: new Date("2026-11-16T09:05:00Z"), poll: 30 });
