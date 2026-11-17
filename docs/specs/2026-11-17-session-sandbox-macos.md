@@ -248,7 +248,7 @@ The profile starts with `(deny default)` and allows only these:
 | `file-read*` | The system folders: `/usr` without `/usr/local`, `/bin`, `/sbin`, `/System/Library`, `/System/Cryptexes`, `/System/Volumes/Preboot/Cryptexes`, `/Library/Apple`, `/private/var/db/dyld` (never all of `/System`: `/System/Volumes/Data` holds the home folders and the data folder); the device files `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`; in `/private/etc` only `hosts`, `passwd`, `group`, `localtime` and the public certificate files (`ssl/cert.pem`, `ssl/certs`); the adapter program file and the `iris` program file (each one a literal real path); the workspace; the private home and `/tmp` of the session |
 | `file-read-metadata` | The paths above, and each folder above them (literal paths), so that a program can resolve its paths |
 | `file-write*` | The workspace, the private home and `/tmp` of the session, `/dev/null` |
-| `network-outbound` | `(remote ip "localhost:<egress port>")`, if the session has an egress port; and `(remote unix-socket (path-literal "<workspace>/.iris/socket"))`, the session socket (launcher spec, goal 6), which each `iris` verb of the session uses. No other Unix socket |
+| `network-outbound` | `(remote tcp "localhost:<egress port>")`, if the session has an egress port: TCP only, so a UDP datagram to the same port number (for example to another local service on that UDP port) is refused; and `(remote unix-socket (path-literal "<workspace>/.iris/socket"))`, the session socket (launcher spec, goal 6), which each `iris` verb of the session uses. No other Unix socket |
 
 Each path in the profile is a real path (`canonicalize`). Seatbelt checks
 real paths, and macOS links `/tmp` and `/etc` to `/private`. The last rule
@@ -324,6 +324,14 @@ token.
   first design): no exact `ended`.
 - The Anthropic `sandbox-runtime` profile: it reads the whole disk minus a
   deny list.
+- Public libraries checked for the profile and the process code: the Rust
+  crates `birdcage` (applies `sandbox_init` to the whole calling process,
+  with allow-list exceptions but no rule for one TCP port or one Unix
+  socket) and `gaol` (not maintained); `libproc` (no coalition flavor of
+  `proc_pidinfo`). Iris writes the profile text itself and runs it with
+  `sandbox-exec`, so the helper stays outside the sandbox, and calls
+  `proc_pidinfo` and `coalition_info_resource_usage` through `libc`, a
+  dependency of the crate already.
 - Endpoint Security, `coalition_create` or `pid_suspend`: each one needs
   root or an Apple entitlement.
 
@@ -348,6 +356,7 @@ before the agent runs, or `ended` is false.
 | The shim ends after the job process got the descriptors, before the agent starts | The record exists (it comes before the handoff), so `ended` reads the coalition | Unit test: the shim refuses the handoff with no record |
 | The agent connects to another port, a public address, UDP or a Unix socket other than its session socket | Refused | Mac acceptance 1 |
 | The agent runs `iris status` (the session socket `.iris/socket`) | Works | Mac acceptance 1 |
+| The agent sends UDP to `127.0.0.1:<egress port>` | Refused: the rule allows TCP only | Mac acceptance 1 |
 | The agent calls `launchctl`, `open`, `pbpaste` or another system service | Refused (no `mach-lookup`) | Mac acceptance 1 |
 | The agent signals a process outside the sandbox | Refused | Mac acceptance 1 |
 | No GUI domain (no person signed in, for example an SSH session only) | `check` fails with the reason; `run` is refused | Unit test of the reason text |

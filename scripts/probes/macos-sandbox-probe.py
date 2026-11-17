@@ -453,7 +453,7 @@ def write_profile(path, workspace, priv, port, read_extra):
   {reads}
   (subpath "{workspace}") (subpath "{priv}"))
 (allow file-write* (subpath "{workspace}") (subpath "{priv}") (literal "/dev/null"))
-(allow network-outbound (remote ip "localhost:{port}"))
+(allow network-outbound (remote tcp "localhost:{port}"))
 """
     with open(path, "w") as f:
         f.write(text)
@@ -565,6 +565,7 @@ def run_inside(argjson):
     out["connect_public"] = attempt(public)
     out["udp_public"] = attempt(udp)
     out["connect_unix_socket"] = attempt(unix)
+    out["udp_egress_port"] = attempt(lambda: socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b"x", ("127.0.0.1", a["good"])))
     out["signal_parent"] = attempt(lambda: os.kill(a["parent"], 0) or "signaled")
     out["exec_echo"] = attempt(lambda: run(["/bin/echo", "hi"]))
     out["launchctl_submit"] = attempt(lambda: run(["/bin/launchctl", "submit", "-l", "com.iris.probe.escape." + a["marker"], "--", "/usr/bin/true"]))
@@ -629,7 +630,7 @@ def self_check():
     write_profile(path, "/w", "/p", 1234, ["/x"])
     text = open(path).read()
     assert "(deny default)" in text
-    assert '(remote ip "localhost:1234")' in text
+    assert '(remote tcp "localhost:1234")' in text
     assert '(subpath "/System")' not in text
     assert "kern.proc" not in text
     print("self-check ok")
