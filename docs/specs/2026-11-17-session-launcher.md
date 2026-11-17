@@ -607,7 +607,10 @@ exit code 3.
 
 - `iris session-hold` is not a verb of the command line: the program
   checks this first argument before it reads the command line, and the
-  verb list (and the MCP tools) does not show it.
+  verb list (and the MCP tools) does not show it. Its command line is
+  `iris session-hold <data folder> <hold arguments>`. The helper builds the
+  isolation with the same data folder as the engine, because the isolation
+  keeps a record of each session there (R4-05).
 - `iris job run <j-id> --agent <name>` and `iris job stop <j-id>` are host
   verbs. They send a request on `iris.sock`, so only the engine starts and
   stops sessions.

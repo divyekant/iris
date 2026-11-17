@@ -93,7 +93,7 @@ fn fixture(name: &str, script: &str) -> Fixture {
 fn helper() -> Arc<HelperCommand> {
     Arc::new(|args: &[OsString]| {
         let mut c = Process::new(std::env::current_exe().unwrap());
-        c.arg("session-hold").args(args);
+        c.arg("session-hold").arg("unused-data-dir").args(args);
         c
     })
 }
@@ -253,7 +253,7 @@ fn a_session_cannot_run_or_stop_a_session() {
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "session-hold") {
-        std::process::exit(iris_session::hold::hold_main(&Plain, &args[2..]));
+        std::process::exit(iris_session::hold::hold_main(&Plain, &args[3..]));
     }
     let filter = args
         .iter()

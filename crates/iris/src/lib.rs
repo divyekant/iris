@@ -1295,9 +1295,10 @@ fn check_loopback(addr: SocketAddr) -> std::io::Result<()> {
 /// program with `session-hold`.
 pub fn start_sessions(store: Arc<Store>) -> std::io::Result<()> {
     let exe = std::env::current_exe()?;
+    let data = store.dir().to_path_buf();
     let helper: Arc<sessions::HelperCommand> = Arc::new(move |args: &[std::ffi::OsString]| {
         let mut c = std::process::Command::new(&exe);
-        c.arg(SESSION_HOLD).args(args);
+        c.arg(SESSION_HOLD).arg(&data).args(args);
         c
     });
     let isolation = iris_session::isolation::system()
@@ -1311,7 +1312,9 @@ pub fn start_sessions(store: Arc<Store>) -> std::io::Result<()> {
 }
 
 /// The hidden first argument of the hold helper of a session. `main` runs
-/// it before the parse of the command line.
+/// it before the parse of the command line. The command line is
+/// `iris session-hold <data dir> <hold args>`: the helper builds the
+/// isolation with the same data folder as the engine.
 pub const SESSION_HOLD: &str = "session-hold";
 
 /// Serve the engine on `addr` until the process gets Ctrl-C. A thread runs
