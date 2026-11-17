@@ -15,6 +15,19 @@ edit an old entry. If a decision changes, add a new entry that names the old one
 - Links: <card, spec, PR, before/after page>
 ```
 
+## D7 (2026-11-17): Review comment files are a part of open model 1.0
+
+- Decided by: dk
+- Why: Spec 2, section 5.5 of version 1.0 already says that a comment
+  arrives as a file in the workspace. The folder `comments/` is there only
+  when it holds a file, so each workspace of a job with no comment stays the
+  same, and no document changes its `model` value.
+- Options not chosen: Version 1.1 (each document moves to `iris/1.1`, about
+  140 files). Comments in a private Iris path (another tool cannot build the
+  same workspace).
+- Links: card R4-08, `docs/specs/2026-11-17-review-comments.md`,
+  `docs/spec/03-job-workspace.md` section 7a, PR #539
+
 ## D6 (2026-11-16): Ask answers from a full-text search and one model call
 
 - Decided by: the build thread of card R5-09 (Claude, owner of the code)
