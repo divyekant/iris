@@ -396,3 +396,67 @@ test("a withdraw that is refused or has no answer loads the request again and sa
     }
   }
 });
+
+// Card R4-07: each flag of the test set (the fixture request cs-79) shows on the correct action, on its words.
+test("each flag of a draft shows as a tag on its words, on its own action only", async () => {
+  const asked = serve();
+  const cs = fx.changesets.find((c) => c.id === "cs-79");
+  const view = await mount("/src/views/Request.svelte", { changeset: structuredClone(cs) });
+  try {
+    const items = () => view.target.querySelectorAll(".actions > li");
+    await until(() => items()[0].querySelector(".mail"));
+    const [send, label] = items();
+    assert.match(text(send.querySelector(".what")), /^Send a reply to dana@acme\.example and legal@acme-partners\.example$/);
+    // Each tag follows the marked words that gave it.
+    const tags = [...send.querySelectorAll(".tag")].map((t) => [t.previousElementSibling.textContent, t.textContent]);
+    assert.deepEqual(tags, [
+      ["legal@acme-partners.example", "new address"],
+      ["$48,000", "amount"],
+      ["Friday, Dec 4", "date"],
+      ["attached", "no file attached"],
+      ["Please wire the payment to the new account below before the end of the week to avoid a late fee", "copied from another mail"],
+    ]);
+    assert.equal(send.querySelector("a.tag").getAttribute("href"), "#/mail/m-9003");
+    // Each flag is marked, so no flag line repeats it.
+    assert.equal(send.querySelectorAll(".flag").length, 0);
+    assert.equal(label.querySelectorAll(".tag, .flag, mark").length, 0);
+    assert.ok(asked.includes("changesets/cs-79/drafts"));
+    assert.equal(view.target.querySelector("button.primary").disabled, false);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a send waits for its draft before the decision, and a failed load can try again", async () => {
+  let fail = true;
+  serve({ "changesets/cs-79/drafts": () => (fail ? [500, { error: "The store is busy." }] : [200, fx.answer("/changesets/cs-79/drafts")]) });
+  const cs = fx.changesets.find((c) => c.id === "cs-79");
+  const view = await mount("/src/views/Request.svelte", { changeset: structuredClone(cs) });
+  try {
+    const alert = await until(() => view.target.querySelector("[role=alert]"));
+    assert.match(alert.textContent, /The store is busy\./);
+    assert.equal(view.target.querySelector("button.primary").disabled, true);
+    // The flags show in words while the draft is not there.
+    assert.equal(view.target.querySelectorAll(".actions > li")[0].querySelectorAll(".flag").length, 5);
+    fail = false;
+    alert.querySelector("button.more").click();
+    await until(() => view.target.querySelector(".mail"));
+    assert.equal(view.target.querySelector("button.primary").disabled, false);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a draft that Iris cannot read says so, and keeps each flag in words", async () => {
+  serve({ "changesets/cs-79/drafts": [200, { drafts: [{ revision: 1, n: 1, draft: "d-21", thread: "t-9001", readable: false }] }] });
+  const cs = fx.changesets.find((c) => c.id === "cs-79");
+  const view = await mount("/src/views/Request.svelte", { changeset: structuredClone(cs) });
+  try {
+    await until(() => text(view.target).includes("Iris cannot show the text of this draft."));
+    const send = view.target.querySelectorAll(".actions > li")[0];
+    assert.equal(send.querySelectorAll(".flag").length, 5);
+    assert.equal(send.querySelector(".mail"), null);
+  } finally {
+    view.destroy();
+  }
+});

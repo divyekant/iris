@@ -1,6 +1,6 @@
 // Words for the review screen (R2-06): a changeset of spec 2 section 5.1 in
 // plain sentences. Pure functions, so the tests need no DOM.
-import type { Action, Changeset, Item, Target } from "./api";
+import type { Action, Changeset, DraftView, Item, Target } from "./api";
 import { href } from "./route";
 
 const n = (count: number, one: string, many: string) => `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`;
@@ -33,6 +33,10 @@ export function verb(a: Action): string {
       return `Defer to ${arg(a, "until") || arg(a, "date")}`;
     case "correct":
       return `Correct ${arg(a, "field") || "a field of"}`;
+    case "send":
+      return "Send";
+    case "draft":
+      return "Write the draft of";
     default:
       return a.verb;
   }
@@ -185,3 +189,34 @@ export function short(value: string | null | undefined, now = new Date()): strin
   return date.toLocaleString("en-US", { month: "short", day: "numeric", year, hour: "numeric", minute: "2-digit" });
 }
 
+
+/** The verbs whose action holds a mail text: the review shows the draft (card R4-07). */
+export const mail = (a: Action) => a.verb === "send" || a.verb === "draft";
+
+/** What a draft or a send writes, in words: "a reply to dana@acme.example", "a new mail to ana@x.org and 2 more". */
+export function to(d: DraftView): string {
+  const kind = d.thread ? "a reply" : "a new mail";
+  if (!d.readable) return kind;
+  const list = [...d.to, ...d.cc].map((r) => r.address);
+  return `${kind} to ${list.length > 2 ? `${list[0]} and ${list.length - 1} more` : list.join(" and ")}`;
+}
+
+/** The short words beside a marked part of a draft (option C of card R4-07, the owner's pick). */
+export const TAGS: Record<string, string> = {
+  new_recipient: "new address",
+  money: "amount",
+  date: "date",
+  attachment: "no file attached",
+  untrusted_content: "copied from another mail",
+};
+
+/**
+ * The flags of an action that no part of its draft shows, in words. A flag
+ * that the draft marks shows only as its mark and tag. A flag with no mark
+ * (for example, the owner wrote to the address after the submit, or Iris
+ * cannot read the draft) keeps its line.
+ */
+export function unmarked(a: Action, d: DraftView | undefined): string[] {
+  const on = new Set(d?.readable ? [...d.to, ...d.cc, ...d.subject, ...d.body].flatMap((p) => p.flags ?? []) : []);
+  return a.flags.filter((f) => !on.has(f)).map((f) => FLAGS[f] ?? f);
+}

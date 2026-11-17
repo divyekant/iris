@@ -7,8 +7,9 @@
   one question in the page.
 -->
 <script lang="ts">
-  import { get, post, type Changeset, type Item, type Target } from "../api";
-  import { author, detail, FLAGS, itemRow, key, messageRow, outcome, pages, plan, short, shown, target, targets, verb, waits, type Row } from "../review";
+  import { href } from "../route";
+  import { get, post, type Changeset, type DraftView, type Item, type Part, type Recipient, type Target } from "../api";
+  import { author, detail, FLAGS, itemRow, mail, TAGS, to, unmarked, key, messageRow, outcome, pages, plan, short, shown, target, targets, verb, waits, type Row } from "../review";
 
   // `onchange` gets the changeset after a decision, so that the review shows it as it is now.
   let { changeset: c, onchange = () => {} }: { changeset: Changeset; onchange?: (c: Changeset) => void } = $props();
@@ -53,7 +54,22 @@
   // The changes whose last load failed. They load again only with "Try again".
   let failed: Record<string, boolean> = $state({});
   let problem = $state("");
-  const complete = (a: (typeof actions)[number]) => (rows[key(a)]?.length ?? -1) >= new Set(targets(a)).size;
+  // The draft of each draft and send action that waits (card R4-07), by the key of the action.
+  let drafts: Record<string, DraftView> | null = $state(null);
+  let draftsFailed = $state(false);
+  let mails = $derived(open.some(mail));
+  $effect(() => {
+    if (!mails || drafts || draftsFailed) return;
+    get<{ drafts: DraftView[] }>(`changesets/${encodeURIComponent(c.id)}/drafts`).then(
+      (got) => (drafts = Object.fromEntries(got.drafts.map((d) => [`${d.revision}.${d.n}`, d]))),
+      (e) => {
+        draftsFailed = true;
+        problem = e instanceof Error ? e.message : String(e);
+      },
+    );
+  });
+  // A mail action is complete when its draft loaded: the person sees the final text before the decision.
+  const complete = (a: (typeof actions)[number]) => (mail(a) ? !!drafts?.[key(a)] : (rows[key(a)]?.length ?? -1) >= new Set(targets(a)).size);
   function load(a: (typeof actions)[number]) {
     loader.more(a, PAGE).then(
       (list) => {
@@ -75,6 +91,7 @@
   function retry() {
     problem = "";
     failed = {};
+    draftsFailed = false;
   }
 
   let ready = $derived(!busy && !stale && !missing.length);
@@ -151,6 +168,35 @@
   }
 </script>
 
+<!-- A part that gave a flag: a warning line under it, and a short tag beside it (option C, the owner's pick). -->
+{#snippet marked(text: string, flags: string[] | undefined, source?: string)}
+  {#if flags?.length}<mark>{text}</mark>{#each flags as f (f)}{#if f === "untrusted_content" && source}<a class="tag" href={href.mail(source)}>{TAGS[f]}</a>{:else}<span class="tag">{TAGS[f] ?? f}</span>{/if}{/each}{:else}{text}{/if}
+{/snippet}
+
+{#snippet text(parts: Part[])}
+  {#each parts as p, i (i)}{@render marked(p.text, p.flags, p.source)}{/each}
+{/snippet}
+
+{#snippet people(label: string, list: Recipient[])}
+  {#if list.length}
+    <dt>{label}</dt>
+    <dd>{#each list as r, i (r.address)}{i ? ", " : ""}{@render marked(r.address, r.flags)}{/each}</dd>
+  {/if}
+{/snippet}
+
+<!-- The draft as the receiver gets it (card R4-07). -->
+{#snippet draft(d: DraftView)}
+  {#if d.readable}
+    <div class="mail">
+      <dl>{@render people("To", d.to)}{@render people("Cc", d.cc)}</dl>
+      <p class="subject-line">{@render text(d.subject)}</p>
+      <p class="text">{@render text(d.body)}</p>
+    </div>
+  {:else}
+    <p class="because">Iris cannot show the text of this draft. Deny it, or ask the author for a new one.</p>
+  {/if}
+{/snippet}
+
 {#snippet lines(a: (typeof actions)[number])}
   {@const list = rows[key(a)] ?? []}
   {#if list.length}
@@ -211,14 +257,16 @@
     <ol class="actions">
       {#each open as a (key(a))}
         {@const id = `${c.id}-${key(a)}`}
+        {@const d = drafts?.[key(a)]}
         <li class:off={off[key(a)]}>
           <input type="checkbox" {id} checked={!off[key(a)]} disabled={busy} onchange={(e) => (off[key(a)] = !e.currentTarget.checked)} />
           <div class="body">
-            <label class="what" for={id}><b>{verb(a)}</b> {target(a)}</label>
+            <label class="what" for={id}><b>{verb(a)}</b> {mail(a) ? (d ? to(d) : "a mail") : target(a)}</label>
             {#if detail(a)}<p class="because">{detail(a)}</p>{/if}
             {#if a.why}<p class="because">{a.why}</p>{/if}
-            {#each a.flags as flag (flag)}<p class="flag">{FLAGS[flag] ?? flag}</p>{/each}
+            {#each mail(a) ? unmarked(a, d) : a.flags.map((f) => FLAGS[f] ?? f) as words (words)}<p class="flag">{words}</p>{/each}
             {#if off[key(a)]}<p class="denied">Iris will deny this change.</p>{/if}
+            {#if d}{@render draft(d)}{/if}
             {@render lines(a)}
           </div>
         </li>
@@ -394,6 +442,61 @@
     margin: 0 var(--space-2) 1px 0;
     border-radius: var(--radius-full);
     background: var(--color-warning);
+  }
+  /* The draft as the receiver gets it. A part that gave a flag has a warning line under it and a tag. */
+  .mail {
+    margin-top: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-md);
+    background: var(--color-background-elevated);
+    border: 1px solid var(--color-border-subtle);
+  }
+  .mail dl {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: var(--space-1) var(--space-3);
+    margin: 0;
+    font-size: var(--font-size--1);
+  }
+  .mail dt {
+    color: var(--color-text-faint);
+  }
+  .mail dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  .subject-line {
+    margin: var(--space-3) 0 0;
+    font-weight: 600;
+  }
+  .text {
+    margin: var(--space-2) 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-width: 70ch;
+  }
+  .tag {
+    margin-left: var(--space-1);
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-warning);
+    color: var(--color-text-muted);
+    font-size: var(--font-size--1);
+    white-space: nowrap;
+  }
+  a.tag {
+    text-decoration: none;
+  }
+  a.tag:hover,
+  a.tag:focus-visible {
+    color: var(--color-text);
+  }
+  mark {
+    background: none;
+    color: inherit;
+    text-decoration: underline 2px var(--color-warning);
+    text-underline-offset: 4px;
+    text-decoration-skip-ink: none;
   }
   /* Each row of a change shows. After about six rows, the box scrolls. */
   .messages {
