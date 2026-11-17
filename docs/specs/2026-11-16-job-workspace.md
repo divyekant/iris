@@ -65,9 +65,12 @@ this one takes the next free number.
 | `revoked_by` | TEXT | `person` or `engine` after a revoke, else NULL. |
 | `revoked_at` | INTEGER | Milliseconds of the revoke, else NULL. |
 
-The table `job_scope_message(scope_id, message_id)` lists the messages of
-the thread of a thread ref at its add. `scope_id` is the `id` (INTEGER
-PRIMARY KEY) of the scope row. Its rows are never changed or deleted.
+The table `job_scope_message(scope_id, message_id)` is the list of a ref:
+the messages of the thread of a thread ref, or the source messages of the
+item of an item ref, at each add by the person or the engine. `scope_id`
+is the `id` (INTEGER PRIMARY KEY) of the scope row. Its rows are never
+changed or deleted. The grant of a ref comes only from its list, never
+from rows that sync or understanding writes later.
 
 Exactly one of `thread_id` and `item_id` is set. `revoked_by` and
 `revoked_at` are both NULL or both set. A row with `revoked_at` NULL is
@@ -90,7 +93,10 @@ Triggers:
 `Ref::Item(row)`. It refuses `By::Agent`. It refuses a ref whose `thread`
 or `item` row does not exist, in the same write transaction as the insert,
 so no ID of a future row is granted before the person can see it. An add
-of a ref that is in the active scope already does nothing. A granted row
+of a thread ref that is in the active scope already adds the messages that
+the thread has now to its list, and writes no new scope row. An add of an
+item ref that is in the active scope already adds its source messages now
+to its list. A granted row
 can disappear later (the cleanup of gone mail), and the build skips it.
 
 `iris_job::revoke_scope(store, job, Ref, By, now)` revokes the active row of
@@ -148,12 +154,18 @@ The granted messages of a job:
   by the thread ref, also not a reply: the reply headers come from the
   sender, so they cannot grant mail. A new message comes into the
   workspace only when the person or the engine for the person adds it,
-  as a new thread ref (a new list) or as an item of it. The wake of a
+  again (`add_scope` of the thread adds the messages of the thread now to
+  its list) or as an item. The wake of a
   waiting job (R5-04) shows the person a new message of a scope thread, so
   the person can add it. Until R5-04, a reply stays out of the workspace
   (known limit, with a GitHub issue).
-- An item of the scope that is not `gone` grants each clean source message
-  (`item_source`) of the item, and no other message of its thread. Gmail can put two subjects
+- An item of the scope that is not `gone` grants each clean message of its
+  list: the source messages (`item_source`) of the item at the add, in
+  `job_scope_message`. A source that understanding adds to the item later
+  (an update, more evidence) is not in the list, so the item leaves the
+  workspace (not all its sources are granted) until the person adds it
+  again. An add of an item ref that is in the scope already adds its
+  sources now to its list. No other message of its thread is granted. Gmail can put two subjects
   in one thread (spec 1), so an item does not grant its whole thread.
 
 The build reads the scope in one read transaction, and writes only data of
@@ -545,8 +557,10 @@ None.
    such a source is in the folder. Red if their text is in such a file.
 3. An item of the scope grants only its source messages. Red if another
    message of its thread is in the folder.
-4. A second build after a new message in a scope thread has the new message,
-   and keeps `drafts/` and `notes.md`. Red if the agent files change.
+4. A second build after a new message in a scope thread does not have the
+   new message. After the person adds the thread again, the next build has
+   it. Both builds keep `drafts/` and `notes.md`. Red if the new message is
+   in a file before the new add, or if the agent files change.
 5. A link that the agent made does not make the build change a file outside
    the folder. Red if the target changes.
 6. An agent cannot add to a scope or revoke a part of it. Red if the store
