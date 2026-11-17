@@ -427,3 +427,53 @@ fn a_shown_link_past_the_html_stack_limit_cuts_the_links() {
     let c = clean(&html(&deep("<div style=\"display:none\">")));
     assert!(!c.links_cut);
 }
+
+#[test]
+fn a_limit_of_the_part_scan_counts_as_an_html_part() {
+    // A boundary after 1,000 bytes of folded parameters: the scan reads it.
+    let folded = |n: usize| {
+        let mut head = b"Content-Type: multipart/mixed;\r\n".to_vec();
+        for i in 0..n {
+            head.extend_from_slice(format!(" x{i}=y;\r\n").as_bytes());
+        }
+        head.extend_from_slice(b" boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nAAAA");
+        head
+    };
+    let head = folded(150);
+    assert!(head.len() > 1000);
+    assert!(html_part_in(&head, &b"AAA\r\n--b\r\nContent-Type: text/html\r\n\r\n"[..]).unwrap());
+    assert!(!html_part_in(
+        &head,
+        &b"AAA\r\n--b\r\nContent-Type: text/plain\r\n\r\n"[..]
+    )
+    .unwrap());
+    // Past the field limit: the scan cannot know the boundary.
+    let head = folded(1500);
+    assert!(head.len() > 8 * 1024);
+    assert!(html_part_in(
+        &head,
+        &b"AAA\r\n--b\r\nContent-Type: text/plain\r\n\r\n"[..]
+    )
+    .unwrap());
+    // One `Content-Type` line past 1,000 bytes.
+    let long = format!(
+        "Content-Type: multipart/mixed; x=\"{}\"; boundary=b\r\n\r\n",
+        "a".repeat(1200)
+    );
+    assert!(html_part_in(long.as_bytes(), &b"--b\r\n"[..]).unwrap());
+    // More boundaries than the scan keeps.
+    let mut many = Vec::new();
+    for i in 0..70 {
+        many.extend_from_slice(
+            format!("Content-Type: multipart/mixed; boundary=b{i}\r\n").as_bytes(),
+        );
+    }
+    assert!(html_part_in(&many, &b""[..]).unwrap());
+    // A long line in a body does not count.
+    let body = format!("{}\r\n", "a".repeat(5000));
+    assert!(!html_part_in(
+        &with_top(b"--b\r\nContent-Type: text/plain\r\n\r\n"),
+        body.as_bytes()
+    )
+    .unwrap());
+}

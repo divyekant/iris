@@ -667,6 +667,13 @@ pub fn registrable(d: &str) -> String {
     base(d).join(".")
 }
 
+/// True when the public suffix list knows the suffix of `d` (`com`,
+/// `co.uk`, `xn--p1ai`), so `d` reads as a domain and not as a file name
+/// (`report.pdf`). `d` is lowercase ASCII (punycode).
+pub fn known_suffix(d: &str) -> bool {
+    psl::suffix(d.as_bytes()).is_some_and(|s| s.is_known())
+}
+
 /// The registrable domain: the suffix and one label more.
 fn base(d: &str) -> Vec<&str> {
     let l: Vec<&str> = d.split('.').collect();

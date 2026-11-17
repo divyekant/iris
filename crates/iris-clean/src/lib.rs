@@ -120,7 +120,9 @@ pub fn html_part_in(before: &[u8], mut rest: impl std::io::Read) -> std::io::Res
         header: true,
         value: None,
         line: Vec::with_capacity(PartScan::LINE_BYTES),
+        long: false,
         bounds: Vec::new(),
+        incomplete: false,
     };
     for &b in before {
         scan.byte(b);
@@ -131,9 +133,9 @@ pub fn html_part_in(before: &[u8], mut rest: impl std::io::Read) -> std::io::Res
         if n == 0 {
             // The end of the input also ends the open header field.
             let last = scan.end_line();
-            return Ok(last || scan.end_field());
+            return Ok(last || scan.end_field() || scan.incomplete);
         }
-        if buf[..n].iter().any(|&b| scan.byte(b)) {
+        if buf[..n].iter().any(|&b| scan.byte(b)) || scan.incomplete {
             return Ok(true);
         }
     }
@@ -148,13 +150,22 @@ struct PartScan {
     value: Option<Vec<u8>>,
     /// The first bytes of the open line, lowercase.
     line: Vec<u8>,
+    /// True when the open line is longer than `LINE_BYTES`.
+    long: bool,
     /// The declared boundaries, lowercase.
     bounds: Vec<Vec<u8>>,
+    /// True when a limit can hide a boundary or a type: a `Content-Type`
+    /// field past `VALUE_BYTES` or with a line past `LINE_BYTES`, or more
+    /// than `MAX_BOUNDARIES` boundaries. Then the scan is true: an HTML
+    /// part can be past the cut.
+    incomplete: bool,
 }
 
 impl PartScan {
     /// The longest header line of RFC 5322, with its line end.
     const LINE_BYTES: usize = 1000;
+    /// The most bytes of one `Content-Type` field, with its folded lines.
+    const VALUE_BYTES: usize = 8 * 1024;
     const MAX_BOUNDARIES: usize = 64;
 
     /// Reads one byte. True when a header field ends at it with the type
@@ -165,6 +176,8 @@ impl PartScan {
         }
         if self.line.len() < Self::LINE_BYTES {
             self.line.push(b.to_ascii_lowercase());
+        } else {
+            self.long = true;
         }
         false
     }
@@ -174,11 +187,15 @@ impl PartScan {
     fn end_line(&mut self) -> bool {
         let line = std::mem::take(&mut self.line);
         let text = line.strip_suffix(b"\r").unwrap_or(&line);
+        let long = std::mem::take(&mut self.long);
         let mut html = false;
         if self.header && matches!(text.first(), Some(b' ' | b'\t')) {
             if let Some(v) = &mut self.value {
                 v.extend_from_slice(text);
-                v.truncate(Self::LINE_BYTES);
+                if long || v.len() > Self::VALUE_BYTES {
+                    self.incomplete = true;
+                    v.truncate(Self::VALUE_BYTES);
+                }
             }
         } else {
             html = self.end_field();
@@ -188,6 +205,7 @@ impl PartScan {
                 self.header = false;
             } else if self.header {
                 if let Some(v) = text.strip_prefix(b"content-type:") {
+                    self.incomplete |= long;
                     self.value = Some(v.to_vec());
                 }
             }
@@ -208,9 +226,13 @@ impl PartScan {
             .copied()
             .filter(|b| !b.is_ascii_whitespace())
             .collect();
-        if kind.starts_with(b"multipart/") && self.bounds.len() < Self::MAX_BOUNDARIES {
+        if kind.starts_with(b"multipart/") {
             if let Some(b) = boundary(&v) {
-                self.bounds.push(b);
+                if self.bounds.len() < Self::MAX_BOUNDARIES {
+                    self.bounds.push(b);
+                } else {
+                    self.incomplete = true;
+                }
             }
         }
         kind.starts_with(b"text/html")

@@ -217,7 +217,9 @@ not used makes no cut in either case.
   part header past the cut (after a delimiter line of a declared boundary,
   up to the empty line) has the type `text/html`, with any case, white
   space or folding. `text/html` in a part body does not count, also after
-  a line that starts with `--` but is not a delimiter. The caller then sets `links_cut` too,
+  a line that starts with `--` but is not a delimiter. The scan is also
+  true when a limit can hide a boundary or a type: a `Content-Type` field
+  past 8 KiB or with a line past 1,000 bytes, or more than 64 boundaries. The caller then sets `links_cut` too,
   because the rest can hold an HTML part that a mail client shows. The
   links of an attached message are not in the list.
 - Images go out. The `alt` text stays, unless `width` or `height` is `0` or

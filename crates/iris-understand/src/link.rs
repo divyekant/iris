@@ -4,7 +4,7 @@
 //! Mail text is data: the code only compares host names.
 
 use iris_clean::Link;
-use iris_senders::registrable;
+use iris_senders::{known_suffix, registrable};
 use url::{Host, Url};
 
 /// True when the message has a deceptive link: the link text is a web
@@ -81,20 +81,16 @@ fn shown_host(shown: &str) -> Option<String> {
         .any(|p| lower.starts_with(p));
     let mut words = lower.split_whitespace();
     let mut address = words.next()?.to_string();
-    let mut rest_words = false;
     for w in words {
         let joins = w.starts_with(['.', '/', '?', '#', ':']) || address.ends_with(['.', '-', '/']);
         if !joins {
-            rest_words = true;
             break;
         }
         address.push_str(w);
     }
-    // Words after an address with a web prefix are a description. A text
-    // with no prefix is an address only when it has no other words.
-    if rest_words && !prefixed {
-        return None;
-    }
+    // Words after the address are a description (`bank.com<br>Log in`). A
+    // text with no prefix is an address only when its first word is a
+    // domain with a known suffix, not a word such as `report.pdf`.
     let lower = address;
     let rest = ["https://", "http://"]
         .iter()
@@ -121,7 +117,7 @@ fn shown_host(shown: &str) -> Option<String> {
     }
     // One form for each host: punycode, as the URL parser gives a target.
     match Host::parse(host) {
-        Ok(Host::Domain(d)) => Some(d),
+        Ok(Host::Domain(d)) if prefixed || known_suffix(&d) => Some(d),
         _ => None,
     }
 }
@@ -366,13 +362,25 @@ mod tests {
                 "{text:?}"
             );
         }
-        // Other words make a bare text no address.
-        assert!(!one(
+        // A bare address with words after it is an address. Words first
+        // make the text no address, and a file name is no address.
+        for text in ["bank.example.com\nLog in", "bank.example.com Log in now"] {
+            assert!(
+                one(text, "https://evil.example.net/", "x.org", false),
+                "{text:?}"
+            );
+        }
+        for text in [
             "Visit\npaypal.com",
-            "https://evil.example.net/",
-            "x.org",
-            false
-        ));
+            "report.pdf",
+            "Q3-report.pdf (2 MB)",
+            "notes.txt",
+        ] {
+            assert!(
+                !one(text, "https://evil.example.net/", "x.org", false),
+                "{text:?}"
+            );
+        }
     }
 
     #[test]
