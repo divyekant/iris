@@ -45,8 +45,15 @@ async function ask(page, question) {
   await page.getByRole("list", { name: "Sources" }).nth(answers).waitFor();
 }
 
-// The fixtures dev server and a browser, closed after the tests.
-async function serve() {
+// The fixtures dev server and a browser, closed after the tests. Each one gets its
+// close hook as soon as it opens, so a step that fails later leaves nothing open.
+// The browser starts first: it is the step that fails on a machine without the
+// Chromium system libraries.
+async function serve(launch = () => chromium.launch()) {
+  const browser = await launch().catch((e) => {
+    throw new Error(`Chromium did not start. On Linux, install its system libraries one time: cd client && npx playwright-core install-deps chromium\n${e.message}`);
+  });
+  after(() => browser.close());
   const vite = await createServer({
     root: new URL("..", import.meta.url).pathname,
     mode: "fixtures",
@@ -55,17 +62,17 @@ async function serve() {
     server: { port: 0, hmr: false },
     logLevel: "error",
   });
+  after(() => vite.close());
   await vite.listen();
-  const browser = await chromium.launch().catch((e) => {
-    // A Linux machine with no Chromium system libraries fails here. Name the fix.
-    throw new Error(`Chromium did not start. On Linux, install its system libraries one time: cd client && npx playwright-core install-deps chromium\n${e.message}`);
-  });
-  after(async () => {
-    await browser.close();
-    await vite.close();
-  });
   return { base: vite.resolvedUrls.local[0], browser };
 }
+
+test("a browser that does not start names the fix and leaves no server open", async () => {
+  const servers = () => process.getActiveResourcesInfo().filter((r) => r === "TCPServerWrap").length;
+  const open = servers();
+  await assert.rejects(serve(() => Promise.reject(new Error("libnss3.so: cannot open shared object file"))), /install-deps chromium/);
+  assert.equal(servers(), open);
+});
 
 test("the brief, the review, an item and a mail fit a phone", async () => {
   const { base, browser } = await serve();
