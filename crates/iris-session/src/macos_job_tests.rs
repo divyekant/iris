@@ -433,7 +433,9 @@ fn the_job_runs_the_hold_with_the_handoff() {
     let fds = fs::read_to_string(d.join("work/fds")).unwrap();
     assert!(
         fds.split_whitespace().count() <= 4
-            && fds.split_whitespace().all(|n| ["0", "1", "2", "3"].contains(&n)),
+            && fds
+                .split_whitespace()
+                .all(|n| ["0", "1", "2", "3"].contains(&n)),
         "{fds}"
     );
     assert!(sb.home(3).is_dir() && sb.tmp(3).is_dir());
@@ -448,7 +450,10 @@ fn the_end_of_the_shim_stops_the_agent() {
     let up = j.dir.join("work/up");
     let t = Instant::now();
     while !up.exists() {
-        assert!(t.elapsed() < Duration::from_secs(10), "the agent did not start");
+        assert!(
+            t.elapsed() < Duration::from_secs(10),
+            "the agent did not start"
+        );
         thread::sleep(Duration::from_millis(20));
     }
     drop(j.sock);
