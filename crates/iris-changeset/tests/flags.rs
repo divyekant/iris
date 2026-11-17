@@ -342,7 +342,8 @@ fn submit_flags_a_draft_and_its_send() {
     // submit denies the send.
     s.write(|tx| {
         tx.execute(
-            "UPDATE changeset_action SET state = 'denied' WHERE verb = 'send'",
+            "UPDATE changeset_action SET state = 'denied', decided_by = 'engine',
+               decided_at = 0, reason = 'test' WHERE verb = 'send'",
             [],
         )?;
         Ok(tx.execute("UPDATE draft SET hash = 'other' WHERE id = 1", [])?)

@@ -93,7 +93,7 @@ fn grown(
     content: &iris_compose::Content,
 ) -> Result<bool> {
     let new = store.read(|c| {
-        Ok(iris_changeset::new_flags(c, action, address, content).map_err(changeset_error)?)
+        iris_changeset::new_flags(c, action, address, content).map_err(changeset_error)
     })?;
     if !new.is_empty() {
         decide(store, action, "denied", GROWN)?;
