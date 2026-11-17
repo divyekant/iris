@@ -163,8 +163,9 @@ test("the suggestions of Iris show above the mode, and wait while the file waits
 
 test("the brief says that Iris suggests rules, after each notice of the file", async () => {
   const notice = (policy) => render("/src/views/PolicyNotice.svelte", { policy }).then(text);
-  assert.match(await notice(same), /Iris suggests 3 rules from your choices\. See the suggestions/);
-  assert.match(await notice({ ...same, proposals: [same.proposals[0]] }), /Iris suggests a rule from/);
+  assert.match(await notice(same), /Iris suggests 3 rules from what you approve and hide\. See the suggestions/);
+  assert.match(await notice({ ...same, proposals: [same.proposals[0]] }), /Iris suggests a rule from your approvals\. See the suggestions/);
+  assert.match(await notice({ ...same, proposals: [same.proposals[2]] }), /Iris suggests a rule from what you hide\. See the suggestions/);
   assert.doesNotMatch(await notice(fx.policy), /suggests/);
 });
 

@@ -409,3 +409,60 @@ fn an_apply_after_a_pass_runs_the_pass_again() {
     assert!(propose::refresh(&store, NOW, &mut mark).unwrap().is_some());
     assert_eq!(hides(&store.read(propose::open).unwrap()).len(), 1);
 }
+
+/// Property (spec, "Tests"): with no rule in the file, the count of each
+/// `hide` proposal is exactly the number of choices that its rule would
+/// hide, and a proposal exists only for 10 or more such choices with no
+/// refusal. Generated cases mix senders, forms, refusals and hostile mail.
+#[test]
+fn each_count_is_the_number_of_choices_that_its_rule_hides() {
+    use std::collections::BTreeMap;
+    const KINDS: [(&str, &str, Form); 3] = [
+        ("skip", "feed", Form::Feed),
+        ("mute", "conversation", Form::Conversation),
+        ("dismiss", "signal", Form::Signal),
+    ];
+    const SENDERS: [&str; 2] = ["a@shop.example", "b@shop.example"];
+    let mut seed: u64 = 0x5eed;
+    let mut next = |n: u64| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) % n
+    };
+    let mut proposed = 0;
+    for case in 0..12 {
+        let (_dir, store) = store(&format!("property-{case}"));
+        // Keyed by the sender and the form name: `Form` has no order.
+        let mut want: BTreeMap<(String, &str), (i64, i64)> = BTreeMap::new();
+        for _ in 0..(20 + next(40)) {
+            let (verb, form, f) = KINDS[next(3) as usize];
+            let sender = SENDERS[next(2) as usize];
+            let hostile = next(10) == 0;
+            let state = if next(15) == 0 { "undone" } else { "applied" };
+            let i = item(&store, form, sender, hostile, false);
+            chose(&store, verb, i, state);
+            if !hostile {
+                let c = want.entry((sender.to_string(), f.name())).or_default();
+                if state == "applied" {
+                    c.0 += 1;
+                } else {
+                    c.1 += 1;
+                }
+            }
+        }
+        let want: Vec<(String, &str, i64)> = want
+            .into_iter()
+            .filter(|(_, (yes, no))| *no == 0 && *yes >= MIN_APPROVALS)
+            .map(|((s, f), (yes, _))| (s, f, yes))
+            .collect();
+        let mut got: Vec<(String, &str, i64)> = hides(&refresh(&store))
+            .into_iter()
+            .map(|(s, f, n)| (s, f.name(), n))
+            .collect();
+        got.sort();
+        assert_eq!(got, want, "case {case}");
+        proposed += want.len();
+    }
+    assert!(proposed > 0, "the cases give some proposals");
+}

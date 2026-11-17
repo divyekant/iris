@@ -15,6 +15,11 @@
     if (!policy) return follow(() => get<Policy>("policy"), (p) => (current = p), every);
   });
   let file = $derived(current?.file);
+  // The source of the open suggestions: approvals (R5-01), choices (R5-02) or both.
+  let from = $derived.by(() => {
+    const kinds = new Set((current?.proposals ?? []).map((p) => (p.kind === "choices" ? "hide" : "approve")));
+    return kinds.size > 1 ? "what you approve and hide" : kinds.has("hide") ? "what you hide" : "your approvals";
+  });
 </script>
 
 {#if current?.error}
@@ -29,7 +34,7 @@
   <p class="notice">Your policy file changed. Iris uses it after you confirm the change. <a href="#/rules">Review the change</a></p>
 {:else if current?.proposals?.length}
   <p class="notice idea">
-    Iris suggests {current.proposals.length === 1 ? "a rule" : `${current.proposals.length} rules`} from your choices. <a href="#/rules">See the suggestions</a>
+    Iris suggests {current.proposals.length === 1 ? "a rule" : `${current.proposals.length} rules`} from {from}. <a href="#/rules">See the suggestions</a>
   </p>
 {/if}
 
