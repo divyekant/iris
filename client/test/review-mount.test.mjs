@@ -503,3 +503,16 @@ test("a drafts answer with no entry for a waiting send loads the request again a
     view.destroy();
   }
 });
+
+test("a decided send names the mail, not a count of messages", async () => {
+  serve();
+  const cs = structuredClone(fx.changesets.find((c) => c.id === "cs-79"));
+  cs.actions[0].decision = { state: "denied", by: "person", reason: "No." };
+  const view = await mount("/src/views/Request.svelte", { changeset: cs });
+  try {
+    const row = await until(() => [...view.target.querySelectorAll(".decided li")].find((li) => li.textContent.includes("Send")));
+    assert.equal(text(row), "Send a mail You denied it");
+  } finally {
+    view.destroy();
+  }
+});

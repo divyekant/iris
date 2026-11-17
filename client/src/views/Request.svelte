@@ -274,7 +274,7 @@
         <li class:off={!approves(a)}>
           <input type="checkbox" {id} checked={approves(a)} disabled={busy || unreadable(a)} onchange={(e) => (off[key(a)] = !e.currentTarget.checked)} />
           <div class="body">
-            <label class="what" for={id}><b>{verb(a)}</b> {mail(a) ? (d ? to(d) : "a mail") : target(a)}</label>
+            <label class="what" for={id}><b>{verb(a)}</b> {mail(a) && d ? to(d) : target(a)}</label>
             {#if detail(a)}<p class="because">{detail(a)}</p>{/if}
             {#if a.why}<p class="because">{a.why}</p>{/if}
             {#each mail(a) ? unmarked(a, d) : a.flags.map((f) => FLAGS[f] ?? f) as words (words)}<p class="flag">{words}</p>{/each}

@@ -44,6 +44,8 @@ export function verb(a: Action): string {
 
 /** What the action changes: the real count of messages at submit, and the threads that the author named. */
 export function target(a: Action): string {
+  // A draft or a send writes one mail: its messages are the thread, not the change.
+  if (mail(a)) return "a mail";
   const messages = a.resolved.messages.length;
   const threads = a.targets.threads?.length ?? 0;
   const items = a.targets.items?.length ?? 0;

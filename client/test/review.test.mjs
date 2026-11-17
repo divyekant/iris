@@ -153,6 +153,9 @@ test("an item with the status gone shows as gone, and the bulk flag names no cou
 test("a draft or a send names its kind and its recipients", () => {
   assert.equal(r.verb(act({ verb: "send" })), "Send");
   assert.equal(r.verb(act({ verb: "draft" })), "Write the draft of");
+  // With no draft at hand (a decided action), a mail action names one mail, never its messages.
+  assert.equal(r.target(act({ verb: "send", resolved: { messages: ["m-1"] } })), "a mail");
+  assert.equal(r.target(act({ verb: "draft" })), "a mail");
   const d = (to, cc = [], thread = null) => ({ revision: 1, n: 1, draft: null, thread, readable: true, to: to.map((address) => ({ address })), cc: cc.map((address) => ({ address })), subject: [], body: [] });
   assert.equal(r.to(d(["a@x.org"], [], "t-1")), "a reply to a@x.org");
   assert.equal(r.to(d(["a@x.org"], ["b@x.org"])), "a new mail to a@x.org and b@x.org");
