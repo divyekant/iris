@@ -63,6 +63,17 @@ fn run(script: &str, term_wait: Duration) -> Run {
 }
 
 fn run_with(script: &str, term_wait: Duration, drain_delay: Duration) -> Run {
+    run_tuned(
+        script,
+        Tuning {
+            term_wait,
+            drain_delay,
+            fail_thread: None,
+        },
+    )
+}
+
+fn run_tuned(script: &str, tuning: Tuning) -> Run {
     let (in_r, in_w) = io::pipe().unwrap();
     let (st_r, st_w) = io::pipe().unwrap();
     let log = Buf::default();
@@ -72,9 +83,7 @@ fn run_with(script: &str, term_wait: Duration, drain_delay: Duration) -> Run {
         args: vec!["-c".into(), script.into()],
     };
     let (iso, out) = (isolation.clone(), log.clone());
-    let done = thread::spawn(move || {
-        hold_with(&*iso, 7, &command, in_r, st_w, out, term_wait, drain_delay)
-    });
+    let done = thread::spawn(move || hold_with(&*iso, 7, &command, in_r, st_w, out, tuning));
     Run {
         input: Some(in_w),
         status: BufReader::new(st_r),
@@ -263,8 +272,11 @@ fn a_failed_spawn_writes_failed() {
         in_r,
         st_w,
         log.clone(),
-        Duration::ZERO,
-        Duration::ZERO,
+        Tuning {
+            term_wait: Duration::ZERO,
+            drain_delay: Duration::ZERO,
+            fail_thread: None,
+        },
     );
     assert_eq!(code, 1);
     let mut s = String::new();
@@ -335,4 +347,35 @@ fn a_process_that_keeps_the_pipe_open_gives_a_lower_bound() {
         log.contains("at least 0 bytes of output dropped, the output pipe is still open"),
         "{log}"
     );
+}
+
+#[test]
+fn a_helper_thread_that_does_not_start_stops_the_agent_at_once() {
+    for name in ["iris-hold-output", "iris-hold-wait", "iris-hold-pipe"] {
+        let mut r = run_tuned(
+            "sleep 100",
+            Tuning {
+                term_wait: Duration::from_millis(200),
+                drain_delay: Duration::ZERO,
+                fail_thread: Some(name),
+            },
+        );
+        r.send("start\n");
+        let pid = pid_of(&r.line());
+        // The pipe from the engine stays open: only the fault stops the agent.
+        let t = Instant::now();
+        assert_eq!(r.line(), format!("signaled {}", libc::SIGTERM), "{name}");
+        assert!(t.elapsed() < Duration::from_secs(5), "{name}");
+        let (code, log, calls) = r.end();
+        assert_eq!(code, 0);
+        assert!(
+            log.contains("a helper thread did not start"),
+            "{name}: {log}"
+        );
+        assert_eq!(calls, vec![Call::Stop(7)]);
+        assert!(!alive(pid), "{name}");
+        if name == "iris-hold-output" {
+            assert!(log.contains("; the output was not read"), "{log}");
+        }
+    }
 }
