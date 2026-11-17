@@ -49,9 +49,13 @@ fn a_full_sync_finds_each_folder_and_each_message() {
     fake.set_page_limit(17);
     let folders = graph.folders(TOKEN).unwrap();
     let names: Vec<&str> = folders.iter().map(|f| f.display_name.as_str()).collect();
-    for want in ["Inbox", "Receipts", "Projects", "Old", "Archive"] {
+    for want in ["Inbox", "Receipts", "Projects", "Old", "Archive", "Hidden"] {
         assert!(names.contains(&want), "{want} in {names:?}");
     }
+    assert!(
+        !names.contains(&"Unread mail"),
+        "a search folder is left out"
+    );
     let inbox = folders.iter().find(|f| f.display_name == "Inbox").unwrap();
     assert_eq!(inbox.well_known, Some("inbox"));
     let old = folders.iter().find(|f| f.display_name == "Old").unwrap();
@@ -170,4 +174,32 @@ fn errors_keep_the_graph_code() {
         graph.raw(TOKEN, "AAMkffffffff", &mut Vec::new()),
         Err(Error::NotFound)
     ));
+}
+
+#[test]
+fn a_removed_message_is_read_by_id() {
+    let (fake, graph, _) = setup(60);
+    let inbox = FakeGraph::folder_id("Inbox");
+    let (first, _) = round(&graph, inbox, None);
+    let moved = first.keys().next().unwrap().clone();
+    let deleted = first.keys().nth(1).unwrap().clone();
+    fake.move_message(&moved, FakeGraph::folder_id("Old"));
+    fake.delete_message(&deleted);
+    let m = graph.message(TOKEN, &moved).unwrap();
+    assert_eq!(m.parent_folder_id, "F-old");
+    assert!(matches!(
+        graph.message(TOKEN, &deleted),
+        Err(Error::NotFound)
+    ));
+}
+
+#[test]
+fn a_redirect_is_not_followed() {
+    let (fake, graph, _) = setup(5);
+    fake.fail_next(&[(302, None)]);
+    match graph.me(TOKEN) {
+        Err(Error::Api { status, .. }) => assert_eq!(status, 302),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(fake.requests().len(), 1);
 }

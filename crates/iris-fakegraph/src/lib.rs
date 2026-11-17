@@ -9,7 +9,7 @@
 //! `$top` and `$skip`), `GET /me/mailFolders/{id or well-known name}`,
 //! `GET /me/mailFolders/{id}/childFolders`,
 //! `GET /me/mailFolders/{id}/messages/delta` (paging, delta links) and
-//! `GET /me/messages/{id}/$value`.
+//! `GET /me/messages/{id}` and `GET /me/messages/{id}/$value`.
 //!
 //! Each request must send `Prefer: IdType="ImmutableId"`: the fake answers
 //! HTTP 400 without it, because the real IDs then change on a move.
@@ -39,8 +39,9 @@ use serde_json::{json, Value};
 
 /// The folders of a new fake: (id, display name, parent id, well-known name).
 /// `Projects` is a child of `Receipts`, and `Old` a child of `Projects`, so
-/// that the tree has three levels.
-const FOLDERS: [(&str, &str, Option<&str>, Option<&str>); 9] = [
+/// that the tree has three levels. `Hidden` is a hidden child folder, and
+/// `Unread mail` a search folder.
+const FOLDERS: [(&str, &str, Option<&str>, Option<&str>); 11] = [
     ("F-inbox", "Inbox", None, Some("inbox")),
     ("F-sent", "Sent Items", None, Some("sentitems")),
     ("F-drafts", "Drafts", None, Some("drafts")),
@@ -50,7 +51,14 @@ const FOLDERS: [(&str, &str, Option<&str>, Option<&str>); 9] = [
     ("F-receipts", "Receipts", None, None),
     ("F-projects", "Projects", Some("F-receipts"), None),
     ("F-old", "Old", Some("F-projects"), None),
+    ("F-hidden", "Hidden", Some("F-receipts"), None),
+    ("F-search", "Unread mail", None, None),
 ];
+
+/// Graph lists a hidden folder only with `includeHiddenFolders=true`.
+const HIDDEN: &str = "F-hidden";
+/// A search folder: a view of messages in other folders.
+const SEARCH: &str = "F-search";
 
 /// The largest page of the fake, and the page with no `Prefer` size.
 const PAGE_MAX: usize = 1000;
@@ -199,6 +207,7 @@ fn first_folder(i: usize, form: Form, sender: Sender) -> &'static str {
         9 if form == Form::Record => "F-receipts",
         13 if form == Form::Conversation => "F-projects",
         17 => "F-old",
+        21 => "F-hidden",
         _ => "F-inbox",
     }
 }
@@ -408,6 +417,7 @@ fn router(store: Shared) -> Router {
         .route("/v1.0/me/mailFolders/{id}", get(folder))
         .route("/v1.0/me/mailFolders/{id}/childFolders", get(child_folders))
         .route("/v1.0/me/mailFolders/{id}/messages/delta", get(delta))
+        .route("/v1.0/me/messages/{id}", get(message))
         .route("/v1.0/me/messages/{id}/$value", get(value))
         .layer(middleware::from_fn_with_state(store.clone(), gate))
         .with_state(store)
@@ -435,6 +445,12 @@ async fn gate(State(s): State<Shared>, req: Request, next: Next) -> Response {
                 "Injected",
                 "an injected failure",
             );
+            if (300..400).contains(&status) {
+                r.headers_mut().insert(
+                    "Location",
+                    HeaderValue::from_static("http://127.0.0.1:1/v1.0/me"),
+                );
+            }
             if let Some(a) = after {
                 r.headers_mut().insert("Retry-After", HeaderValue::from(a));
             }
@@ -508,14 +524,18 @@ fn folder_json(s: &Store, f: &(&str, &str, Option<&str>, Option<&str>)) -> Value
     let live = s.msgs.iter().filter(|m| !m.deleted && m.folder == f.0);
     let (total, unread) = live.fold((0, 0), |(t, u), m| (t + 1, u + usize::from(!m.read)));
     let children = FOLDERS.iter().filter(|c| c.2 == Some(f.0)).count();
-    json!({
+    let mut v = json!({
         "id": f.0,
         "displayName": f.1,
         "parentFolderId": f.2.unwrap_or("F-root"),
         "childFolderCount": children,
         "totalItemCount": total,
         "unreadItemCount": unread,
-    })
+    });
+    if f.0 == SEARCH {
+        v["@odata.type"] = "#microsoft.graph.mailSearchFolder".into();
+    }
+    v
 }
 
 async fn folder(State(s): State<Shared>, Path(id): Path<String>) -> Response {
@@ -562,7 +582,11 @@ fn folder_page(
     // The fake gives at most 2 folders in a page, so that a test reads more than one page.
     let top = top.clamp(1, 2);
     let skip: usize = q.get("$skip").and_then(|t| t.parse().ok()).unwrap_or(0);
-    let all: Vec<_> = FOLDERS.iter().filter(|f| f.2 == parent).collect();
+    let hidden = q.get("includeHiddenFolders").is_some_and(|v| v == "true");
+    let all: Vec<_> = FOLDERS
+        .iter()
+        .filter(|f| f.2 == parent && (hidden || f.0 != HIDDEN))
+        .collect();
     let value: Vec<Value> = all
         .iter()
         .skip(skip)
@@ -664,6 +688,14 @@ async fn delta(
         body["@odata.deltaLink"] = s.link(&base(&h), &rest).into();
     }
     Json(body).into_response()
+}
+
+async fn message(State(s): State<Shared>, Path(id): Path<String>) -> Response {
+    let s = s.lock().unwrap();
+    match s.index(&id) {
+        Some(i) => Json(s.message_json(i)).into_response(),
+        None => not_found(),
+    }
 }
 
 async fn value(State(s): State<Shared>, Path(id): Path<String>) -> Response {

@@ -139,6 +139,9 @@ impl Me {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Folder {
+    /// `#microsoft.graph.mailSearchFolder` for a search folder.
+    #[serde(rename = "@odata.type", default)]
+    pub odata_type: Option<String>,
     pub id: String,
     pub display_name: String,
     pub parent_folder_id: Option<String>,
@@ -281,6 +284,8 @@ impl Graph {
     pub fn new(config: Config) -> Graph {
         let agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
+            // A redirect could send the token to another host: a 3xx is an error.
+            .max_redirects(0)
             .timeout_global(Some(config.timeout))
             .build()
             .into();
@@ -325,6 +330,10 @@ impl Graph {
             loop {
                 let page: FolderPage = self.json(token, &url, false)?;
                 for mut f in page.value {
+                    // A search folder is a view of messages in other folders.
+                    if f.odata_type.as_deref() == Some("#microsoft.graph.mailSearchFolder") {
+                        continue;
+                    }
                     if f.child_folder_count > 0 {
                         parents.push(Some(f.id.clone()));
                     }
@@ -384,6 +393,14 @@ impl Graph {
         Ok(DeltaPage { changes, next })
     }
 
+    /// `GET /me/messages/{id}` with the fields of a delta page: the read by
+    /// ID of a removed message (spec section 3). [`Error::NotFound`] means
+    /// gone.
+    pub fn message(&self, token: &str, id: &str) -> Result<Message> {
+        let url = self.url(&format!("/me/messages/{}?$select={SELECT}", segment(id)));
+        self.json(token, &url, false)
+    }
+
     /// `GET /me/messages/{id}/$value`: the MIME text of the message goes to
     /// `sink` through a buffer of 64 KiB. Returns the count of bytes. If the
     /// call fails after the first byte, the sink has a part: discard it.
@@ -414,12 +431,25 @@ impl Graph {
         format!("{}{path}", self.config.base_url)
     }
 
-    /// A link from an answer, only if it starts with the base URL.
+    /// A link from an answer, only if its scheme and authority equal those
+    /// of the base URL and its path is below the base path. A text prefix
+    /// is not enough: `https://graph.microsoft.com@evil.example/` has one.
     fn checked(&self, link: &str) -> Result<String> {
-        let base = &self.config.base_url;
-        match link.strip_prefix(base.as_str()) {
-            Some(rest) if rest.starts_with('/') => Ok(link.to_string()),
-            _ => Err(Error::Decode("a link to another host".into())),
+        use ureq::http::Uri;
+        let bad = || Error::Decode("a link to another host".into());
+        let base: Uri = self.config.base_url.parse().map_err(|_| bad())?;
+        let uri: Uri = link.parse().map_err(|_| bad())?;
+        let (Some(a), Some(b)) = (uri.authority(), base.authority()) else {
+            return Err(bad());
+        };
+        let below = uri
+            .path()
+            .strip_prefix(base.path())
+            .is_some_and(|rest| rest.starts_with('/'));
+        if uri.scheme() == base.scheme() && a.as_str() == b.as_str() && below {
+            Ok(link.to_string())
+        } else {
+            Err(bad())
         }
     }
 
@@ -543,6 +573,10 @@ mod tests {
             "http://127.0.0.1:99/v1.0/me",
             "https://evil.example/v1.0/me",
             "http://127.0.0.1:9/v1.0",
+            "http://127.0.0.1:9@evil.example/v1.0/me",
+            "http://user@127.0.0.1:9/v1.0/me",
+            "https://127.0.0.1:9/v1.0/me",
+            "http://127.0.0.1:9/v1.0x/me",
         ] {
             assert!(matches!(g.checked(bad), Err(Error::Decode(_))), "{bad}");
         }

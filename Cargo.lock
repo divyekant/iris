@@ -1050,6 +1050,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-graph"
+version = "0.0.0"
+dependencies = [
+ "iris-fakegraph",
+ "iris-synth",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "iris-imap"
 version = "0.0.0"
 dependencies = [
