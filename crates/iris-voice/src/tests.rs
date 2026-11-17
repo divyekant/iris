@@ -1088,18 +1088,19 @@ fn a_thread_is_late_only_while_each_rule_holds() {
             false,
         ),
         (
-            "a stale nudge",
+            "a stale nudge with a key",
             "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
-               created_at)
-             SELECT ?1, min(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'p', 0, 1 FROM message",
+               created_at, ask)
+             SELECT ?1, min(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'p', 0, 1, '{}'
+               FROM message",
             at,
             true,
         ),
         (
             "a ready nudge of another commitment",
             "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
-               created_at)
-             SELECT ?1, max(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'p', 0, 1
+               created_at, ask)
+             SELECT ?1, max(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'p', 0, 1, '{}'
                FROM message WHERE thread_id = ?1",
             at,
             true,
@@ -1169,6 +1170,13 @@ fn a_thread_is_late_only_while_each_rule_holds() {
     assert_eq!(late_threads(&b.store, 3000 + LATE_AFTER_MS), [t]);
 }
 
+/// The person of the ready nudge of thread `t`, or `None`.
+fn ready_to(store: &Store, t: i64) -> Option<String> {
+    store
+        .read(|c| Ok(super::ready(c, t)?.and_then(|r| r.3)))
+        .unwrap()
+}
+
 /// The one late thread at `now`.
 fn one_late(store: &Store, now: i64) -> Late {
     let mut l = store.read(|c| Ok(late(c, now)?)).unwrap();
@@ -1212,7 +1220,7 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
         .read(|c| Ok(c.query_row("SELECT prompt FROM reply_draft", [], |r| r.get(0))?))
         .unwrap();
     assert_eq!(prompt, NUDGE_PROMPT);
-    let to = b.store.read(|c| Ok(nudge_to(c, t, now)?)).unwrap();
+    let to = ready_to(&b.store, t);
     assert_eq!(to.as_deref(), Some("ana@example.org"));
 
     // A correction of the commitment after the save: the nudge is stale,
@@ -1226,16 +1234,12 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
             .unwrap()
     };
     set("UPDATE item SET doc = json_set(doc, '$.title', 'Send the deck')");
-    assert_eq!(b.store.read(|c| Ok(nudge_to(c, t, now)?)).unwrap(), None);
+    assert_eq!(ready_to(&b.store, t), None);
     assert_eq!(late_threads(&b.store, now), [t]);
     set("UPDATE item SET doc = json_set(doc, '$.title', 'Send the slides')");
-    assert!(b
-        .store
-        .read(|c| Ok(nudge_to(c, t, now)?))
-        .unwrap()
-        .is_some());
+    assert!(ready_to(&b.store, t).is_some());
     set("UPDATE item SET status = 'done'");
-    assert_eq!(b.store.read(|c| Ok(nudge_to(c, t, now)?)).unwrap(), None);
+    assert_eq!(ready_to(&b.store, t), None);
 
     // A long thread: the origin of the ask is out of the six newest
     // messages, and the commitment is in the data all the same.
@@ -1303,4 +1307,73 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
         let body = saved(store, t).map(|s| s.0);
         assert_ne!(body.as_deref(), Some("x"), "{name}");
     }
+}
+
+#[test]
+fn a_nudge_is_stale_when_its_person_changes_and_a_second_commitment_waits() {
+    let now = 1000 + LATE_AFTER_MS;
+    let (b, t) = asked("nudge-group");
+    let set = |sql: &str| {
+        b.store
+            .write(|tx| {
+                tx.execute(sql, [])?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    // The ask went to Ana and Bo. Bo is a person too.
+    set(
+        "UPDATE header SET to_addrs = 'ana@example.org, bo@example.org'
+          WHERE message_id IN (SELECT id FROM message WHERE provider_id = 'ask')",
+    );
+    set("INSERT INTO sender(address, kind) VALUES ('bo@example.org', 'person')");
+    let l = one_late(&b.store, now);
+    nudge(&b.store, &l, &Fake::new(r#"{"body": "Hi Ana"}"#), now).unwrap();
+    assert_eq!(ready_to(&b.store, t).as_deref(), Some("ana@example.org"));
+
+    // A second late commitment of the same thread, owed by Bo: the nudge
+    // of the first stays, and no call replaces it.
+    set("INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+         SELECT form, account_id, status,
+                json_set(doc, '$.title', 'Book the room',
+                         '$.owner.sender', 's-' || (SELECT id FROM sender WHERE address = 'bo@example.org')),
+                2, 2 FROM item WHERE id = 1");
+    set("INSERT INTO item_source(item_id, message_id, role)
+         SELECT 2, message_id, role FROM item_source WHERE item_id = 1");
+    assert!(late_threads(&b.store, now).is_empty());
+    assert_eq!(ready_to(&b.store, t).as_deref(), Some("ana@example.org"));
+
+    // The first is done: the nudge to Ana is stale, and the thread is late
+    // for Bo.
+    set("UPDATE item SET status = 'done' WHERE id = 1");
+    assert_eq!(ready_to(&b.store, t), None);
+    assert_eq!(one_late(&b.store, now).to(), "bo@example.org");
+
+    // A correction of the person of the commitment (Ana to Bo): the nudge
+    // to Ana is stale.
+    let (b, t) = asked("nudge-owner-fix");
+    b.store
+        .write(|tx| {
+            tx.execute_batch(
+                "UPDATE header SET to_addrs = 'ana@example.org, bo@example.org'
+                  WHERE message_id IN (SELECT id FROM message WHERE provider_id = 'ask');
+                 INSERT INTO sender(address, kind) VALUES ('bo@example.org', 'person');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let l = one_late(&b.store, now);
+    nudge(&b.store, &l, &Fake::new(r#"{"body": "Hi Ana"}"#), now).unwrap();
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE item SET doc = json_set(doc, '$.owner.sender',
+                   's-' || (SELECT id FROM sender WHERE address = 'bo@example.org'))",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(ready_to(&b.store, t), None);
+    assert_eq!(one_late(&b.store, now).to(), "bo@example.org");
 }

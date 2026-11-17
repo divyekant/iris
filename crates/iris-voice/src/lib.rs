@@ -184,20 +184,23 @@ const NEWEST: &str = "ORDER BY coalesce(m.internal_date, 0) DESC, m.id DESC";
 /// The checks of [`write`] still pass: the draft answers the newest message
 /// that counts, and no message that counts is hostile or waits for
 /// understanding. A newer message, a gone newest message or a new hostile
-/// mark makes the draft stale, and the draft is not ready.
+/// mark makes the draft stale, and the draft is not ready. A nudge (card
+/// R3-07, a draft with `ask`) is ready only while its `ask` is the
+/// [`nudge_key_sql`] of its thread: the same commitment, to the same person.
 pub fn ready_sql(threads: &str) -> String {
     let in_thread = in_thread!("d.thread_id");
+    let key = nudge_key_sql("d.thread_id", None);
     format!(
         "EXISTS (SELECT 1 FROM reply_draft d WHERE d.thread_id IN ({threads})
            AND d.based_on = (SELECT m.id {in_thread} {NEWEST} LIMIT 1)
            AND NOT EXISTS (SELECT 1 {in_thread}
-                           AND ({HOSTILE} OR b.message_id IS NULL OR m.understood_at IS NULL)))"
+                           AND ({HOSTILE} OR b.message_id IS NULL OR m.understood_at IS NULL))
+           AND (d.ask IS NULL OR d.ask = {key}))"
     )
 }
 
 /// The fixed intent of a nudge (card R3-07). It comes from Iris, not
-/// from mail, so it goes in the `intent` field of the data block. A draft
-/// with this intent is a nudge.
+/// from mail, so it goes in the `intent` field of the data block.
 pub const NUDGE_INTENT: &str = "A short, polite reminder of the commitment in the data: \
 what they promised or what I asked for. It is late. Ask when they can do it. Do not repeat all of it.";
 
@@ -216,127 +219,106 @@ fn nudge_instruction() -> String {
 /// How long after the last message of the owner a nudge can be prepared.
 pub const LATE_AFTER_MS: i64 = 2 * 86_400_000;
 
-/// The threads that need a nudge at the time `now_ms`, each with its
-/// newest message that counts, the address of the person that owes and
-/// the commitment, oldest first. One entry for each thread. A thread needs
-/// a nudge when:
-/// - it is the thread of the origin message of an open commitment that is
-///   owed to you by a `person`, and that the brief shows (no `hide` or
-///   `bundle` rule), with no due date or a due date that passed: a `due.at`
-///   at its instant, a `due.date` at the end of that day in UTC;
+/// SQL of the key of the nudge of the thread `thread` (an SQL expression),
+/// or NULL: JSON text of the commitment that the nudge reminds of (`item`,
+/// `to`, `title`, `due`, `quote`). It is the open commitment with the
+/// lowest row ID that:
+/// - came from a message of the thread (its `origin`), is owed to you by a
+///   `person`, and the brief shows it (no `hide` or `bundle` rule);
+/// - names a person whose address is in `To` or `Cc` of the newest message
+///   of the thread that counts, and is not an address of the owner (the
+///   account, or the `From` of that message). The nudge goes to it;
+/// - with `now` (an SQL expression of milliseconds), has no due date or a
+///   due date that passed: a `due.at` at its instant, a `due.date` at the
+///   end of that day in UTC. With no `now`, the due date does not count:
+///   a due date that passed stays passed.
+///
+/// One thread has one nudge, so a second commitment waits for the first.
+/// A change of the commitment, its person or the newest message changes
+/// the key, so a saved nudge with the old key is stale.
+pub fn nudge_key_sql(thread: &str, now: Option<&str>) -> String {
+    let in_thread = in_thread!("om.thread_id");
+    let due = now.map_or(String::new(), |now| {
+        format!(
+            "AND coalesce(unixepoch(json_extract(ki.doc, '$.due.at'), 'subsec'),
+                          unixepoch(json_extract(ki.doc, '$.due.date'), '+1 day'),
+                          0) * 1000 <= {now}"
+        )
+    });
+    format!(
+        "(SELECT json_object('item', ki.id, 'to', lower(trim(ks.address)),
+                  'title', substr(json_extract(ki.doc, '$.title'), 1, 300),
+                  'due', json(json_extract(ki.doc, '$.due')),
+                  'quote', (SELECT substr(json_extract(q.value, '$.quote'), 1, 1000)
+                              FROM json_each(ki.doc, '$.sources') q
+                             WHERE json_extract(q.value, '$.role') = 'origin' LIMIT 1))
+            FROM item ki
+            JOIN item_source os ON os.item_id = ki.id AND os.role = 'origin'
+            JOIN message om ON om.id = os.message_id
+            JOIN account ka ON ka.id = om.account_id
+            JOIN sender ks ON ks.id =
+                 CAST(substr(json_extract(ki.doc, '$.owner.sender'), 3) AS INTEGER)
+            JOIN header kh ON kh.message_id = (SELECT m.id {in_thread} {NEWEST} LIMIT 1)
+           WHERE om.thread_id = {thread}
+             AND ki.form = 'commitment' AND ki.status = 'open'
+             AND json_extract(ki.doc, '$.direction') = 'owed_to_you'
+             AND coalesce(json_extract(ki.doc, '$.attention.state'), 'shown') = 'shown'
+             AND ks.kind = 'person'
+             AND instr(',' || lower(replace(coalesce(kh.to_addrs, '') || ',' ||
+                                            coalesce(kh.cc_addrs, ''), ' ', '')) || ',',
+                       ',' || lower(trim(ks.address)) || ',') > 0
+             AND lower(trim(ks.address)) NOT IN (lower(trim(ka.address)),
+                                                 lower(trim(coalesce(kh.from_addr, ''))))
+             {due}
+           ORDER BY ki.id LIMIT 1)"
+    )
+}
+
+/// The threads that need a nudge at the time `now_ms`, oldest newest
+/// message first. A thread needs a nudge when:
+/// - it has a [`nudge_key_sql`] at `now_ms`;
 /// - its newest message that counts is from the owner (`SENT`) and is at
 ///   least [`LATE_AFTER_MS`] old, so the person did not answer, and a
 ///   nudge that the owner sent starts the wait again;
-/// - that message went to the person that owes: the address of the sender
-///   row of the commitment owner is in its `To` or `Cc`, and is not an
-///   address of the owner. The nudge goes to that address;
 /// - [`write`] can make a draft: no message that counts is hostile or waits
 ///   for understanding;
-/// - it has no draft of the owner (a draft with another intent than
-///   [`NUDGE_INTENT`], stale or not), so a nudge never replaces it, and no
-///   nudge that the person can use now ([`ready_sql`]) for the same
-///   commitment (`reply_draft.ask`).
+/// - it has no draft of the owner (a draft with no `ask`), stale or not,
+///   so a nudge never replaces it, and no draft that is ready
+///   ([`ready_sql`]): a ready nudge has the same key.
 pub fn late(c: &Connection, now_ms: i64) -> rusqlite::Result<Vec<Late>> {
-    candidates(c, now_ms, true)
-}
-
-/// The address that the nudge of `thread` goes to, while it is valid: the
-/// thread is late by the rules of [`late`] (a draft does not count), for
-/// the same commitment as the one of the saved nudge (`reply_draft.ask`).
-/// `None` if the commitment is done, hidden, changed or answered.
-pub fn nudge_to(c: &Connection, thread: i64, now_ms: i64) -> rusqlite::Result<Option<String>> {
-    let ask: Option<String> = c
-        .query_row(
-            "SELECT ask FROM reply_draft WHERE thread_id = ?1",
-            [thread],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
-    Ok(candidates(c, now_ms, false)?
-        .into_iter()
-        .find(|l| l.thread == thread && Some(&l.ask) == ask.as_ref())
-        .map(|l| l.to))
-}
-
-/// [`late`], with the two rules of the drafts only if `drafts`.
-fn candidates(c: &Connection, now_ms: i64, drafts: bool) -> rusqlite::Result<Vec<Late>> {
-    let newest = in_thread!("t.id");
-    let all = in_thread!("n.thread");
-    let ready = ready_sql("SELECT n.thread");
+    let newest = in_thread!("t.thread");
+    let all = in_thread!("k.thread");
+    let key = nudge_key_sql("n.thread", Some("?1"));
+    let ready = ready_sql("SELECT k.thread");
     let mut st = c.prepare_cached(&format!(
-        "WITH t(id, me, owner, ask) AS (
-           SELECT DISTINCT om.thread_id, a.address, s.address,
-                  json_object('title', substr(json_extract(item.doc, '$.title'), 1, 300),
-                              'due', json(json_extract(item.doc, '$.due')),
-                              'quote', (SELECT substr(json_extract(q.value, '$.quote'), 1, 1000)
-                                          FROM json_each(item.doc, '$.sources') q
-                                         WHERE json_extract(q.value, '$.role') = 'origin'
-                                         LIMIT 1))
-             FROM item
+        "WITH t(thread) AS (
+           SELECT DISTINCT om.thread_id FROM item
              JOIN item_source os ON os.item_id = item.id AND os.role = 'origin'
              JOIN message om ON om.id = os.message_id
-             JOIN account a ON a.id = om.account_id
-             JOIN sender s ON s.id =
-                  CAST(substr(json_extract(item.doc, '$.owner.sender'), 3) AS INTEGER)
             WHERE item.form = 'commitment' AND item.status = 'open'
-              AND json_extract(item.doc, '$.direction') = 'owed_to_you'
-              AND coalesce(json_extract(item.doc, '$.attention.state'), 'shown') = 'shown'
-              AND s.kind = 'person'
-              -- A due time passes at its instant. A due date with no time
-              -- passes at the end of that day in UTC.
-              AND coalesce(unixepoch(json_extract(item.doc, '$.due.at'), 'subsec'),
-                           unixepoch(json_extract(item.doc, '$.due.date'), '+1 day'),
-                           0) * 1000 <= ?1),
-         n(thread, me, owner, ask, newest) AS
-           (SELECT t.id, t.me, t.owner, t.ask, (SELECT m.id {newest} {NEWEST} LIMIT 1) FROM t)
-         SELECT n.thread, n.newest, n.me, n.owner, n.ask FROM n
-           JOIN message nm ON nm.id = n.newest
-          WHERE coalesce(nm.internal_date, 0) <= ?1 - ?2
+              AND json_extract(item.doc, '$.direction') = 'owed_to_you'),
+         n(thread, newest) AS (SELECT t.thread, (SELECT m.id {newest} {NEWEST} LIMIT 1) FROM t),
+         k(thread, newest, key) AS (SELECT n.thread, n.newest, {key} FROM n)
+         SELECT k.thread, k.newest, k.key FROM k JOIN message nm ON nm.id = k.newest
+          WHERE k.key IS NOT NULL
+            AND coalesce(nm.internal_date, 0) <= ?1 - ?2
             AND EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                          WHERE ml.message_id = nm.id AND l.provider_id = 'SENT')
             AND NOT EXISTS (SELECT 1 {all}
                              AND ({HOSTILE} OR b.message_id IS NULL OR m.understood_at IS NULL))
-            AND (NOT ?4 OR (NOT EXISTS (SELECT 1 FROM reply_draft d
-                                         WHERE d.thread_id = n.thread
-                                           AND coalesce(d.intent, '') <> ?3)
-                            AND NOT ({ready} AND EXISTS (SELECT 1 FROM reply_draft d
-                                                          WHERE d.thread_id = n.thread
-                                                            AND d.ask IS n.ask))))
-          ORDER BY n.newest, n.owner, n.ask"
+            AND NOT EXISTS (SELECT 1 FROM reply_draft d
+                             WHERE d.thread_id = k.thread AND d.ask IS NULL)
+            AND NOT {ready}
+          ORDER BY k.newest"
     ))?;
-    let rows = st.query_map(params![now_ms, LATE_AFTER_MS, NUDGE_INTENT, drafts], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, i64>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, String>(4)?,
-        ))
+    let rows = st.query_map(params![now_ms, LATE_AFTER_MS], |r| {
+        Ok(Late {
+            thread: r.get(0)?,
+            newest: r.get(1)?,
+            key: r.get(2)?,
+        })
     })?;
-    let mut out: Vec<Late> = Vec::new();
-    for row in rows {
-        let (thread, newest, me, owner, ask) = row?;
-        if out.last().is_some_and(|l| l.thread == thread) {
-            continue;
-        }
-        let to = owner.trim().to_lowercase();
-        let snap = snapshot(c, thread)?;
-        let Some(last) = snap.newest.last().filter(|m| m.id == newest) else {
-            continue;
-        };
-        let owners = [Some(me.as_str()), last.from_addr.as_deref()];
-        let lists = [last.to_addrs.as_deref(), last.cc_addrs.as_deref()];
-        if addresses(&lists, &owners).any(|a| a == to) {
-            out.push(Late {
-                thread,
-                newest,
-                to,
-                ask,
-            });
-        }
-    }
-    Ok(out)
+    rows.collect()
 }
 
 /// A thread that needs a nudge ([`late`]).
@@ -345,27 +327,34 @@ pub struct Late {
     pub thread: i64,
     /// The newest message that counts: the last mail of the owner.
     pub newest: i64,
-    /// The address of the person that owes, in lower case.
-    pub to: String,
-    /// The commitment, as JSON text: `title`, `due` and the `quote` of its
-    /// origin message, cut. It comes from the mail: it is data.
-    pub ask: String,
+    /// The [`nudge_key_sql`] of the thread: the commitment and the person.
+    pub key: String,
+}
+
+impl Late {
+    /// The address of the person that owes.
+    pub fn to(&self) -> String {
+        let v: Value = serde_json::from_str(&self.key).unwrap_or(Value::Null);
+        v["to"].as_str().unwrap_or_default().to_string()
+    }
 }
 
 /// The draft of `thread` that the person can use now ([`ready_sql`]), or
-/// `None`: `(based_on, intent, body)`.
+/// `None`: `(based_on, intent, body, to)`. `to` is the address of the
+/// person that owes, for a nudge only.
+#[allow(clippy::type_complexity)]
 pub fn ready(
     c: &Connection,
     thread: i64,
-) -> rusqlite::Result<Option<(i64, Option<String>, String)>> {
+) -> rusqlite::Result<Option<(i64, Option<String>, String, Option<String>)>> {
     c.query_row(
         &format!(
-            "SELECT based_on, intent, body FROM reply_draft
+            "SELECT based_on, intent, body, json_extract(ask, '$.to') FROM reply_draft
               WHERE thread_id = ?1 AND {}",
             ready_sql("SELECT ?1")
         ),
         [thread],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )
     .optional()
 }
@@ -373,13 +362,20 @@ pub fn ready(
 /// Writes a nudge of a late thread ([`write`] with [`NUDGE_INTENT`], to
 /// the person that owes). The same entry must be in [`late`] before the
 /// call and again in the write of the draft, so a commitment that is done,
-/// hidden or answered during the call gets no nudge.
+/// hidden, changed or answered during the call gets no nudge. The draft
+/// keeps the key in `reply_draft.ask`.
 pub fn nudge(store: &Store, late: &Late, model: &dyn Model, now_ms: i64) -> Result<Saved> {
     let still = |c: &Connection| Ok(self::late(c, now_ms)?.contains(late));
+    let mut ask: Value = serde_json::from_str(&late.key).unwrap_or(Value::Null);
+    let to = late.to();
+    if let Some(o) = ask.as_object_mut() {
+        o.remove("item");
+        o.remove("to");
+    }
     let nudge = Nudge {
-        to: &late.to,
-        ask: serde_json::from_str(&late.ask).unwrap_or(Value::Null),
-        text: &late.ask,
+        to: &to,
+        ask,
+        key: &late.key,
     };
     write_when(
         store,
@@ -392,12 +388,12 @@ pub fn nudge(store: &Store, late: &Late, model: &dyn Model, now_ms: i64) -> Resu
     )
 }
 
-/// What a nudge adds to [`write`]: the recipient and the commitment.
+/// What a nudge adds to [`write`]: the recipient, the commitment for the
+/// data, and the key to save.
 struct Nudge<'a> {
     to: &'a str,
     ask: Value,
-    /// The JSON text of `ask`, as [`Late::ask`] gives it.
-    text: &'a str,
+    key: &'a str,
 }
 
 fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
@@ -477,21 +473,12 @@ fn recipient(msgs: &[Msg], me: &str) -> Option<String> {
 /// The first address of the comma lists that is not empty and not one of
 /// `owners`, in lower case.
 fn first_other(lists: &[Option<&str>], owners: &[Option<&str>]) -> Option<String> {
-    addresses(lists, owners).next()
-}
-
-/// The addresses of the comma lists that are not empty and not one of
-/// `owners`, in lower case, in order.
-fn addresses<'a>(
-    lists: &'a [Option<&'a str>],
-    owners: &'a [Option<&'a str>],
-) -> impl Iterator<Item = String> + 'a {
     lists
         .iter()
         .flatten()
         .flat_map(|l| l.split(','))
         .map(|a| a.trim().to_lowercase())
-        .filter(|a| {
+        .find(|a| {
             !a.is_empty()
                 && !owners
                     .iter()
@@ -757,7 +744,7 @@ fn write_when(
                     },
                     samples.len() as i64,
                     now_ms,
-                    nudge.map(|n| n.text)
+                    nudge.map(|n| n.key)
                 ],
             )?;
             Ok(true)

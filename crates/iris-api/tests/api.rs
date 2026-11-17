@@ -1607,15 +1607,17 @@ async fn an_item_shows_a_ready_draft_of_its_thread_until_the_draft_is_stale() {
     assert_eq!(status, StatusCode::OK, "{draft}");
     assert_eq!(draft["body"], "Yes.");
     assert_eq!(draft["nudge"], false);
+    // A nudge whose thread has no late commitment is stale, on both paths.
     exec(
         &store,
-        "UPDATE reply_draft SET intent = ?1",
-        [iris_voice::NUDGE_INTENT],
+        "UPDATE reply_draft SET ask = '{\"to\": \"x@x.example\"}' WHERE ?1",
+        [1],
     );
-    // A nudge whose thread is not late (no ask of the owner) is stale.
     let (status, _) = get(&store, &format!("/api/threads/{thread}/draft")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    exec(&store, "UPDATE reply_draft SET intent = NULL WHERE ?1", [1]);
+    let (_, brief) = get(&store, "/api/brief").await;
+    assert_eq!(brief["you_owe"]["items"][0]["ready"], Value::Null);
+    exec(&store, "UPDATE reply_draft SET ask = NULL WHERE ?1", [1]);
     let (status, _) = get(&store, "/api/threads/m-1/draft").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let ready = json!(["draft"]);

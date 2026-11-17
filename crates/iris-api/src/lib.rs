@@ -870,35 +870,20 @@ async fn get_write(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
 /// The draft of a thread (`t-N`) that the person can use now: a reply in
 /// the voice of the owner (R3-05) or a nudge (R3-07), with the address of
 /// the person that owes (`to`). 404 when there is none, or when it is
-/// stale: a newer mail, or for a nudge, a commitment that is not late for
-/// the same commitment ([`iris_voice::nudge_to`]). Nothing is sent.
+/// stale ([`iris_voice::ready_sql`]): a newer mail, or for a nudge, a
+/// change of its commitment or its person. Nothing is sent.
 async fn get_draft(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
     let Some((iris_store::Kind::Thread, thread)) = iris_store::parse_id(&id) else {
         return Ok(not_found());
     };
     let draft = s
-        .read(|c| {
-            let Some((based_on, intent, body)) = iris_voice::ready(c, thread)? else {
-                return Ok(None);
-            };
-            let nudge = intent.as_deref() == Some(iris_voice::NUDGE_INTENT);
-            let to = match nudge {
-                true => iris_voice::nudge_to(c, thread, now_ms())?,
-                false => None,
-            };
-            // A nudge whose commitment is done, hidden, changed or answered
-            // is stale.
-            if nudge && to.is_none() {
-                return Ok(None);
-            }
-            Ok(Some((based_on, nudge, to, body)))
-        })
+        .read(|c| Ok(iris_voice::ready(c, thread)?))
         .map_err(Error::from)?;
     Ok(match draft {
-        Some((based_on, nudge, to, body)) => Json(serde_json::json!({
+        Some((based_on, _, body, to)) => Json(serde_json::json!({
             "thread": id,
             "based_on": iris_store::format_id(iris_store::Kind::Message, based_on),
-            "nudge": nudge,
+            "nudge": to.is_some(),
             "to": to,
             "body": body,
         }))
