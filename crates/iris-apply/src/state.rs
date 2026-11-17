@@ -18,6 +18,8 @@
 //! 5. `close`, `decline` and `defer` change only a commitment that is `open`
 //!    or `deferred`. If one item is not, or is gone, the entry is `failed`
 //!    with the reason, and no item changes.
+//!
+//! `restore` is the undo of a state entry (section 7.4): see [`restore`].
 
 use iris_changeset::format_changeset_id;
 use iris_store::Store;
@@ -27,7 +29,7 @@ use serde_json::{json, Map, Value};
 use crate::{expire, now, Counts, Error, Outcome, Result};
 
 /// The state verbs.
-const VERBS: &str = "'close', 'decline', 'defer', 'correct'";
+const VERBS: &str = "'close', 'decline', 'defer', 'correct', 'restore'";
 
 /// The actions that [`apply_states`] reads in one page (specification 2,
 /// section 9: no list of changesets in memory).
@@ -111,7 +113,10 @@ fn apply_in(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<O
         )
         .optional()?;
     let (verb, hash, decided_by, changeset, args) = row.ok_or(Inner::NotApproved)?;
-    if !matches!(verb.as_str(), "close" | "decline" | "defer" | "correct") {
+    if !matches!(
+        verb.as_str(),
+        "close" | "decline" | "defer" | "correct" | "restore"
+    ) {
         return Err(Inner::Verb(verb));
     }
     if expire(tx, action)? {
@@ -142,6 +147,9 @@ fn apply_in(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<O
         let reason = "The action changed after its approval.";
         decide(tx, action, "denied", reason, now_ms)?;
         return Ok(Outcome::Denied(reason.into()));
+    }
+    if verb == "restore" {
+        return restore(tx, action, now_ms);
     }
     // Submit wrote the arguments, and checked them.
     let args: Map<String, Value> = serde_json::from_str(&args).unwrap_or_default();
@@ -216,6 +224,110 @@ fn apply_in(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<O
             }
         }
     })
+}
+
+/// The apply of `restore`, the undo of a state entry (specification 2,
+/// section 4): each item that still has the `post` values of the entry gets
+/// its `pre` values again, and loses the correction rows of the entry. An
+/// item that changed after the entry stays as it is, and counts as
+/// unchanged. The undo has its own ledger entry, and the first entry
+/// becomes `undone`.
+fn restore(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<Outcome, Inner> {
+    #[allow(clippy::type_complexity)]
+    let (entry, pre, post, ops, changeset): (i64, String, String, String, i64) = tx.query_row(
+        "SELECT l.id, l.pre, l.post, l.ops, o.changeset_id FROM ledger_undo u
+         JOIN ledger l ON l.id = u.ledger_id
+         JOIN changeset_action o ON o.id = l.action_id
+         WHERE u.action_id = ?1 AND u.step = 1",
+        [action],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+    )?;
+    let parse = |t: &str| serde_json::from_str::<Value>(t).unwrap_or(Value::Null);
+    let (pre, post, ops) = (parse(&pre), parse(&post), parse(&ops));
+    let fields: Vec<String> = ops["fields"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|f| f.as_str().map(str::to_string))
+        .collect();
+    let by = format_changeset_id(changeset);
+    let rows: Vec<(i64, String)> = {
+        let mut st = tx.prepare(
+            "SELECT i.id, i.doc FROM action_item ai JOIN item i ON i.id = ai.item_id
+             WHERE ai.action_id = ?1 ORDER BY i.id",
+        )?;
+        let rows = st.query_map([action], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let (mut was, mut now) = (Map::new(), Map::new());
+    let mut counts = Counts::default();
+    for (item, doc) in rows {
+        let Ok(mut doc) = serde_json::from_str::<Value>(&doc) else {
+            counts.unchanged += 1;
+            continue;
+        };
+        let id = doc["id"].as_str().unwrap_or_default().to_string();
+        let current = values(&doc, &fields);
+        // A later change (an action, understanding, the tick of a deferred
+        // item, a gone item) wins: the item stays as it is.
+        if post.get(&id) != Some(&current) || !pre[&id].is_object() {
+            counts.unchanged += 1;
+            continue;
+        }
+        for f in &fields {
+            set(&mut doc, f, pre[&id][f].clone());
+        }
+        doc["updated"] = json!(iris_talk::rfc3339(now_ms));
+        tx.execute(
+            "UPDATE item SET doc = ?2, updated_at = ?3, status = coalesce(?4, status) WHERE id = ?1",
+            params![item, doc.to_string(), now_ms, doc["status"].as_str()],
+        )?;
+        tx.execute(
+            "DELETE FROM correction WHERE item_id = ?1 AND by = ?2",
+            params![item, by],
+        )?;
+        now.insert(id.clone(), values(&doc, &fields));
+        was.insert(id, current);
+        counts.changed += 1;
+    }
+    tx.execute(
+        "INSERT INTO ledger(action_id, ops, pre, post, state, undo, at)
+         VALUES (?1, ?2, ?3, ?4, 'writing', 'none', ?5)",
+        params![
+            action,
+            json!({ "fields": fields }).to_string(),
+            Value::Object(was).to_string(),
+            Value::Object(now).to_string(),
+            now_ms
+        ],
+    )?;
+    let undo = tx.last_insert_rowid();
+    // The trigger ledger_state moves the action to `applied`, and the first
+    // entry's action to `undone`.
+    tx.execute("UPDATE ledger SET state = 'applied' WHERE id = ?1", [undo])?;
+    tx.execute(
+        "UPDATE ledger SET state = 'undone', undone_by = ?2
+         WHERE id = ?1 AND state IN ('applied', 'failed')",
+        params![entry, undo],
+    )?;
+    Ok(Outcome::Applied(counts))
+}
+
+/// Set the field at a dotted path to `value`; `null` removes the field.
+fn set(doc: &mut Value, field: &str, value: Value) {
+    let (parent, last) = match field.rsplit_once('.') {
+        Some((p, l)) => (pointer(p), l),
+        None => (String::new(), field),
+    };
+    // The item has the `post` values, so the parent of a field with a value is there.
+    let Some(Value::Object(map)) = doc.pointer_mut(&parent) else {
+        return;
+    };
+    if value.is_null() {
+        map.remove(last);
+    } else {
+        map.insert(last.to_string(), value);
+    }
 }
 
 /// The document of an item row, or `None` if the row or its JSON is gone.

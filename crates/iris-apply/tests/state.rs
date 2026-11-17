@@ -524,3 +524,193 @@ fn a_session_close_applies_only_inside_the_grant() {
         }
     }
 }
+
+impl Box {
+    /// The doc of c-1 with no `updated` (the undo sets a new time) and no
+    /// sender row ID (a `correct` writes the sender rows of the store).
+    fn plain(&self) -> Value {
+        let mut d = self.doc();
+        d.as_object_mut().unwrap().remove("updated");
+        d["counterparty"].as_object_mut().unwrap().remove("sender");
+        d
+    }
+
+    fn ledger_of(&self, action: i64) -> i64 {
+        self.one(&format!("SELECT id FROM ledger WHERE action_id = {action}"))
+            .as_i64()
+            .unwrap()
+    }
+
+    /// Make the undo of the entry of `action`, and apply its one action.
+    fn undo(&self, action: i64) -> (i64, Outcome) {
+        let ids = iris_apply::undo(&self.store, self.ledger_of(action), now()).unwrap();
+        assert_eq!(ids.len(), 1, "a state undo has one action");
+        assert_eq!(
+            self.one(&format!(
+                "SELECT verb FROM changeset_action WHERE id = {}",
+                ids[0]
+            )),
+            json!("restore")
+        );
+        (ids[0], apply_state(&self.store, ids[0]).unwrap())
+    }
+}
+
+/// The undo of each state verb (issue #226) gives the item its document,
+/// its status and its corrections of before, and makes the entry `undone`.
+#[test]
+fn the_undo_of_each_state_verb_sets_the_old_values() {
+    for (i, (verb, args)) in [
+        (Verb::Close, json!({ "reason": "Done." })),
+        (Verb::Decline, json!({ "reason": "No." })),
+        (Verb::Defer, json!({ "date": "2099-01-05" })),
+        (
+            Verb::Correct,
+            json!({ "field": "due.date", "value": "2026-11-20" }),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let b = setup(&format!("undo{i}"), "open", None);
+        let before = b.plain();
+        let entry_can = |b: &Box, a: i64| {
+            b.one(&format!(
+                "SELECT count(*) FROM ledger_can_undo WHERE ledger_id = {}",
+                b.ledger_of(a)
+            ))
+        };
+        let a = b.approved(verb, args.clone());
+        assert!(matches!(apply_state(&b.store, a), Ok(Outcome::Applied(_))));
+        assert_ne!(b.plain(), before, "{verb:?} changed the item");
+        assert_eq!(
+            entry_can(&b, a),
+            json!(1),
+            "{verb:?}: the entry has an undo"
+        );
+        let (undo, outcome) = b.undo(a);
+        let Outcome::Applied(counts) = outcome else {
+            panic!("{outcome:?}")
+        };
+        assert_eq!((counts.changed, counts.unchanged), (1, 0), "{verb:?}");
+        assert_eq!(b.plain(), before, "{verb:?}: the document of before");
+        assert_eq!(b.one("SELECT status FROM item WHERE id = 1"), json!("open"));
+        assert_eq!(
+            b.one("SELECT count(*) FROM correction WHERE by = 'cs-1'"),
+            json!(0),
+            "{verb:?}: no correction of the entry"
+        );
+        let (state, _, _, _) = b.entry(a);
+        assert_eq!(state, "undone", "{verb:?}");
+        assert_eq!(b.state(a), "undone");
+        assert_eq!(b.state(undo), "applied");
+        assert_eq!(
+            b.one(&format!(
+                "SELECT undone_by FROM ledger WHERE action_id = {a}"
+            )),
+            json!(b.ledger_of(undo))
+        );
+        assert_eq!(entry_can(&b, a), json!(0), "{verb:?}: no second undo");
+        // The undo changeset is a valid document of the open model.
+        let cs = b.one(&format!("SELECT changeset_id FROM changeset_action WHERE id = {undo}"));
+        let mut out = Vec::new();
+        iris_changeset::write_document(&b.store, cs.as_i64().unwrap(), &mut out).unwrap();
+        let doc: Value = serde_json::from_slice(&out).unwrap();
+        let errors: Vec<String> = iris_spec::validator("changeset")
+            .iter_errors(&doc)
+            .map(|e| format!("{e} at {}", e.instance_path()))
+            .collect();
+        assert!(errors.is_empty(), "{verb:?}: {errors:#?}\n{doc}");
+        assert!(iris_apply::undo(&b.store, b.ledger_of(a), now()).is_err());
+    }
+}
+
+/// An item that changed after the entry stays as it is: the undo does not
+/// reverse a later change.
+#[test]
+fn the_undo_of_a_state_entry_keeps_a_later_change() {
+    let b = setup("undo-later", "open", None);
+    let a = b.approved(Verb::Defer, json!({ "date": "2099-01-05" }));
+    assert!(matches!(apply_state(&b.store, a), Ok(Outcome::Applied(_))));
+    // A later close of the same commitment.
+    let later = b.approved(Verb::Close, json!({ "reason": "Done." }));
+    assert!(matches!(
+        apply_state(&b.store, later),
+        Ok(Outcome::Applied(_))
+    ));
+    let after = b.plain();
+    let (_, outcome) = b.undo(a);
+    let Outcome::Applied(counts) = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!((counts.changed, counts.unchanged), (0, 1));
+    assert_eq!(b.plain(), after, "the later close stays");
+    assert_eq!(
+        b.one("SELECT count(*) FROM correction WHERE by = 'cs-2'"),
+        json!(1),
+        "the corrections of the later action stay"
+    );
+    // A failed entry has no undo.
+    let failed = b.approved(Verb::Close, json!({ "reason": "Again." }));
+    assert!(matches!(
+        apply_state(&b.store, failed),
+        Ok(Outcome::Failed { .. })
+    ));
+    assert!(iris_apply::undo(&b.store, b.ledger_of(failed), now()).is_err());
+}
+
+/// Only an undo makes `restore`: submit denies it from any other path.
+#[test]
+fn submit_denies_restore_with_no_undo_link() {
+    let b = setup("restore-denied", "done", None);
+    for kind in [AuthorKind::Person, AuthorKind::Agent] {
+        let (id, _) = b.submitted(kind, Verb::Restore, json!({}));
+        assert_eq!(b.state(id), "denied");
+        let reason = b.one(&format!(
+            "SELECT reason FROM changeset_action WHERE id = {id}"
+        ));
+        assert!(reason.as_str().unwrap().contains("undo"), "{reason}");
+    }
+    assert_eq!(b.one("SELECT status FROM item WHERE id = 1"), json!("done"));
+}
+
+/// The link of an undo to a state entry (migration 24) takes only `restore`
+/// with no arguments, as step 1.
+#[test]
+fn the_link_of_a_state_undo_takes_only_restore() {
+    let b = setup("restore-link", "open", None);
+    let a = b.approved(Verb::Close, json!({ "reason": "Done." }));
+    assert!(matches!(apply_state(&b.store, a), Ok(Outcome::Applied(_))));
+    let entry = b.ledger_of(a);
+    let link = |verb: &str, args: &str, step: i64| {
+        b.store.write(|tx| {
+            tx.execute(
+                "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0)",
+                [],
+            )?;
+            let cs = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+                 VALUES (?1, 1, 1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    cs,
+                    verb,
+                    json!({ "ledger": [format!("l-{entry}")] }).to_string(),
+                    args
+                ],
+            )?;
+            tx.execute(
+                "INSERT INTO ledger_undo(action_id, ledger_id, step) VALUES (?1, ?2, ?3)",
+                rusqlite::params![tx.last_insert_rowid(), entry, step],
+            )?;
+            Ok(())
+        })
+    };
+    assert!(
+        link("restore", r#"{"reason":"x"}"#, 1).is_err(),
+        "arguments"
+    );
+    assert!(link("untrash", "{}", 1).is_err(), "another verb");
+    assert!(link("restore", "{}", 2).is_err(), "step 2");
+    assert!(link("restore", "{}", 1).is_ok());
+}

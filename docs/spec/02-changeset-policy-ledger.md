@@ -79,6 +79,10 @@ not have the label `SPAM` or `TRASH`.
 | `wait` | thread, or a date | until | none | not applicable | 5 |
 | `ask` | none | question, options | none | not applicable | 5 |
 
+Two verbs come only from an undo (section 7.4), never from an author: `untrash`
+(the undo of `trash`) and `restore` (the undo of a state verb). `restore`
+takes its ledger entry as the target and no arguments. It changes no mailbox.
+
 Iris has no verb for a permanent delete, and no verb to empty the trash.
 Gmail deletes a message in the trash for good after 30 days. After that time,
 the undo of `trash` is not possible, and the ledger shows the entry as final:
@@ -137,8 +141,10 @@ the same request. If the submit denies the action (for example, a date that
 is not valid), nothing stays. If the engine stops before the apply, the next
 tick applies the approved action.
 
-The undo of the action sets the old values and deletes the correction row, in
-one transaction, with its own ledger row. If the current value is not the
+The undo of the action is one action with the verb `restore` (section 7.4).
+Its apply sets the old values and deletes the correction rows of the
+changeset, in one transaction, with its own ledger row (the undo `none`), and
+the first entry becomes `undone`. If the current value is not the
 `post` value of the entry (a later action changed it), the undo changes
 nothing and lists the item. After the undo of a `correct` on a record with no
 correction left, the status of the record goes back to `kept`.
@@ -841,14 +847,18 @@ applies it.
 
 1. The person selects undo on a ledger entry, in the web client. The entry
    must be `applied` or `failed`, with the undo `inverse`, and with one or
-   more messages with `done` that are not gone. No other undo of the entry
-   is open.
+   more messages with `done` that are not gone (a state entry: one or more
+   items in `post` that are in the store). No other undo of the entry is
+   open.
 2. The engine (`iris_apply::undo`) makes a changeset with author `person`
    and one action: the inverse of the entry (`archive` and `inbox`, `read`
    and `unread`, `label` and `unlabel` of the same name, `trash` and
-   `untrash`). Its target is the entry (`{"ledger": ["l-N"]}`), and submit
+   `untrash`, and `restore` for a `close`, `decline`, `defer` or `correct`
+   entry). Its target is the entry (`{"ledger": ["l-N"]}`), and submit
    resolves the messages with `done` that are not gone, in SQL, so no list
-   of message IDs is in memory (section 9). Only an action with the link
+   of message IDs is in memory (section 9). For `restore`, submit resolves
+   the items of the entry instead (`action_item`), and the apply runs with
+   the state verbs (section 4). Only an action with the link
    of migration 23 to that entry can target an entry. The undo of `label`
    or `unlabel` changes the label of the entry by its ID (from `ops`), so a
    rename of the label at Gmail after the entry does not change the undo.
@@ -901,6 +911,7 @@ An undo of an undo is a new action, not a delete of the record.
 
 | Input or event | Failure mode | Safe result |
 |---|---|---|
+| The undo of a state entry whose item changed after the entry (a later action, understanding, the tick of a deferred item, or a gone item) | The undo reverses the later change | The apply of `restore` changes only an item whose fields have the `post` values of the entry, and counts each other item as unchanged. It deletes only the correction rows of the changeset of the entry. Migration 24 links `restore` with no arguments only to a state entry, as step 1. |
 | An undo of an entry in `writing`, `undone`, or with the undo `none` | The undo changes messages of an apply that did not end, or reverses a change two times | `undo` refuses it (`Error::Undo`). The trigger `ledger_undo_insert` refuses the link. |
 | A second undo while an undo of the entry is open | Two undos change the same messages, or a one-action undo ends the entry while action 2 of another undo waits | `undo` refuses it until each action of the open undo ended. The trigger refuses a link while an action of another undo changeset of the entry is open, and a second link of the same step in one changeset. Action 2 of a `trash` undo applies also after a failed action 1, so the undo ends. |
 | A link of an action whose target is not the whole entry (`{"ledger": ["l-N"]}`), whose verb is not the inverse of the entry, with other arguments, a step 2 of an entry that is not `trash`, or a step 2 with no step 1 of the same entry in the same changeset | A link lets an action skip the mode, or makes `untrash` for an entry that is not a trash | The trigger `ledger_undo_insert` refuses the link. The end of a ledger entry records an undo only when the entry of step 1 exists, so it never fails on the link. The trigger `ledger_undo_action` refuses a change of the verb, the targets or the arguments of a linked action, also in a draft. Submit denies a linked action with another target, and also denies `untrash` unless the action is step 1 of the undo of a `trash` entry. The apply changes only the messages that the entry changed, whatever the targets. |

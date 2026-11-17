@@ -25,6 +25,8 @@ export function verb(a: Action): string {
       return "Move to the trash";
     case "untrash":
       return "Take out of the trash";
+    case "restore":
+      return "Undo the change to";
     case "close":
       return "Close";
     case "decline":
