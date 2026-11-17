@@ -744,8 +744,12 @@ limit of 8 connections bound it. This is a known limit with an issue.
 3. `iris job stop` ends the session and exits with 0, and when it returns
    no process of the session runs, also when the script ignores `SIGTERM`.
    Red if it exits with 0 while a process of the session runs.
-4. A revoke during the build makes the agent never start. Red if the script
-   writes its marker file.
+4. A revoke during the build ends the first session with `revoke` and its
+   agent never starts; the launch registers a second session, builds with
+   the new grant, and starts the agent there. The script writes its
+   session ID and the thread files that it sees to a marker file. Red if
+   the marker names the first session, or lists a thread of the revoked
+   ref.
 5. A revoke while the agent runs ends the session with `revoke`, and stops
    the group. Red if a process of the group runs 6 seconds later.
 6. After a kill of the engine, the agent stops, and the next engine start
