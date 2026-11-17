@@ -189,6 +189,18 @@ A hosted model makes no call before you approve a budget. Each
 `iris model set` clears the budget, so a new estimate and a new approval are
 necessary.
 
+To get a draft of a reply in your voice, run:
+
+```bash
+target/release/iris write t-42 --intent "yes, Friday at 10"
+```
+
+The model reads the thread and up to 8 of your sent messages (mail to the
+same person first), and writes the reply in their style. The command saves
+the draft and prints it. It sends nothing. The call uses the same budget as
+understanding. Iris makes no draft for a thread with hostile mail, or for a
+thread with a message that understanding did not read yet.
+
 ## Back up, export and move
 
 CAUTION: A backup folder and an export folder hold your mail. A backup folder

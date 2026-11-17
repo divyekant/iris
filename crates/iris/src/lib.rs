@@ -12,6 +12,7 @@ macro_rules! say {
 pub mod cost;
 pub mod engine;
 pub mod notify;
+pub mod reply;
 pub mod socket;
 pub mod verbs;
 
@@ -242,6 +243,15 @@ pub enum Command {
         /// Stop the run after this many messages.
         #[arg(long)]
         max_messages: Option<u64>,
+    },
+    /// Write a draft of a reply in your voice, from your sent mail. It saves
+    /// and prints the draft. It sends nothing.
+    Write {
+        /// The thread (`t-42`), or a message of the thread (`m-42`).
+        id: String,
+        /// What the reply must say, for example "yes, Friday at 10".
+        #[arg(long)]
+        intent: Option<String>,
     },
     /// Watch for a mail: one notice when a new mail matches a search.
     Watch {
@@ -802,6 +812,13 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
                 }
             };
             println!("{text}");
+            Ok(())
+        }
+        Command::Write { id, intent } => {
+            let store = open()?;
+            let connect = |row: &iris_understand::budget::ModelRow| cost::connect(&store, row);
+            let text = reply::write(&store, id, intent.as_deref(), &connect, engine::now_ms())?;
+            print!("{text}");
             Ok(())
         }
     }

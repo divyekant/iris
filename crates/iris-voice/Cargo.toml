@@ -1,0 +1,16 @@
+[package]
+name = "iris-voice"
+description = "Drafts in your voice: the text of a reply to one thread, from the model, in the style of your sent mail."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+iris-model = { version = "0.0.0", path = "../iris-model" }
+iris-store = { version = "0.0.0", path = "../iris-store" }
+iris-understand = { version = "0.0.0", path = "../iris-understand" }
+# Same version as iris-store, so the program has one copy of SQLite.
+rusqlite = "=0.43.0"
+serde_json = "1"

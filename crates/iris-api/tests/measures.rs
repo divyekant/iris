@@ -382,13 +382,13 @@ async fn first_brief_runs_to_the_first_brief_with_content() {
     assert_eq!(m["first_brief"]["seconds"], (brief - connect) / 1000);
 }
 
-/// Make the store a store of migration 23 again.
+/// Make the store a store of migration 24 again.
 fn downgrade(s: &Store) {
     s.write(|tx| {
         tx.execute_batch(
             "DROP TRIGGER measure_connect;
              DROP TRIGGER person_decision; DROP TABLE person_decision;
-             DROP TABLE use_open; DROP TABLE use_day; DROP TABLE measure_time; PRAGMA user_version = 23;",
+             DROP TABLE use_open; DROP TABLE use_day; DROP TABLE measure_time; PRAGMA user_version = 24;",
         )?;
         Ok(())
     })
@@ -396,11 +396,11 @@ fn downgrade(s: &Store) {
 }
 
 /// Invariant: a stored brief time is always a brief with content that the
-/// engine saw. A store from before migration 24 with an account has no
+/// engine saw. A store from before migration 25 with an account has no
 /// such record, so both times are not known, and a later brief or account
 /// does not write a time that is not the first.
 #[test]
-fn migration_24_does_not_guess_the_times_of_an_older_store() {
+fn migration_25_does_not_guess_the_times_of_an_older_store() {
     let dir = std::env::temp_dir().join(format!("iris-api-measures-old-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     {
@@ -453,10 +453,10 @@ fn migration_24_does_not_guess_the_times_of_an_older_store() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A store from before migration 24 gets the decisions of the person that
+/// A store from before migration 25 gets the decisions of the person that
 /// the actions still show.
 #[test]
-fn migration_24_takes_the_decisions_of_an_older_store() {
+fn migration_25_takes_the_decisions_of_an_older_store() {
     let dir = std::env::temp_dir().join(format!(
         "iris-api-measures-old-decide-{}",
         std::process::id()

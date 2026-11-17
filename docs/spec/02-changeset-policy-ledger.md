@@ -1025,6 +1025,15 @@ is the person. In release 1, the person gives no agent host access to that
 folder (an agent with host access could approve a budget). Release 2 moves
 the approval to the web client (section 8.6).
 
+Release 3 exception: `iris write` (card R3-05) opens the data folder
+directly, as `understand` does, and needs no running engine. It writes one
+reply draft of a thread (table `reply_draft`), a run row, and the cost of one
+model call from the approved budget. It holds the run lock of `understand`
+during the call. It is not a mailbox action: the draft stays in the store, and
+nothing goes to Gmail. So it does not go through the policy or the socket.
+The `draft` verb that adds a Gmail draft action (section 8.2) goes through the
+socket.
+
 The command has no verb to approve, to deny or to change the policy. Only the
 web client does these steps, for the person. The person has no terminal client
 (decision of the maintainer). In host mode, a changeset has the author `local`
@@ -1058,6 +1067,7 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris withdraw <cs-id>` | Withdraws a changeset of the same author (section 5.5). Applied actions stay. | both | 2 |
 | `iris ledger [filters]` | Lists ledger entries. | host | 2 |
 | `iris draft <thread> <file>`, `iris send <draft>`, `iris nudge <c-id>` | Adds write actions. | both | 3 |
+| `iris write <t-id or m-id> [--intent <text>]` | Writes a draft of a reply in the voice of the owner with one model call, saves it in the store and prints it. It sends nothing and adds no action. It opens the store directly (section 8.1). | host | 3 |
 | `iris wait`, `iris ask` | Ends the session and waits, or asks the person. | session | 5 |
 
 Without `--changeset`, a command that adds an action makes a new draft
