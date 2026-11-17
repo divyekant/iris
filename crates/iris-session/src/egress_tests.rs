@@ -483,3 +483,21 @@ fn stalled_resolver_workers_stay_bounded() {
         "{text}"
     );
 }
+
+/// A refused connection keeps its place in the count until its socket
+/// closes, and a stop closes it.
+#[test]
+fn a_refused_connection_counts_until_it_closes() {
+    let b = proxy("held", echo(), false, LOG_LIMIT);
+    let mut held: Vec<_> = (0..MAX_CONNECTIONS)
+        .map(|_| send(&b.proxy, "CONNECT evil.test:443 HTTP/1.1\r\n\r\n").0)
+        .collect();
+    let (_s, line) = send(&b.proxy, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
+    assert!(line.starts_with("HTTP/1.1 403"), "{line}");
+    assert!(log_text(&b.log).contains("reason=too_many"));
+    b.proxy.stop().unwrap();
+    let mut buf = [0u8; 8];
+    for s in &mut held {
+        assert_eq!(s.read(&mut buf).unwrap_or(0), 0);
+    }
+}
