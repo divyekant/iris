@@ -119,6 +119,19 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl Error {
+    /// For a write: true if Graph can have done the call (spec section 1).
+    /// A time-out, a lost answer, a bad answer to an accepted write, 429,
+    /// 5xx and an unfollowed 3xx give an unknown result.
+    pub fn write_result_unknown(&self) -> bool {
+        match self {
+            Error::Transport(_) => true,
+            Error::Api { status, .. } => *status >= 500 || *status == 429 || *status < 400,
+            _ => false,
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// The account of the token: `GET /me`.
@@ -180,6 +193,39 @@ pub struct Message {
     /// ISO 8601 in UTC, for example `2026-11-17T10:00:00Z`.
     pub received_date_time: Option<String>,
     pub internet_message_id: Option<String>,
+    /// The version of the message. A category write sends it in `If-Match`.
+    #[serde(rename = "@odata.etag")]
+    pub etag: Option<String>,
+}
+
+/// A message of the mailbox with a given `Message-ID`, from
+/// [`Graph::sent_by_message_id`].
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Copy {
+    pub id: String,
+    pub is_draft: bool,
+    pub sent_date_time: Option<String>,
+    pub parent_folder_id: String,
+}
+
+#[derive(Deserialize)]
+struct CopyPage {
+    value: Vec<Copy>,
+    #[serde(rename = "@odata.nextLink")]
+    next_link: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Tag {
+    #[serde(rename = "@odata.etag")]
+    etag: String,
+}
+
+/// The method of a write.
+enum Verb {
+    Patch,
+    Post,
 }
 
 impl Message {
@@ -378,6 +424,155 @@ impl Graph {
         self.json(token, &url, false)
     }
 
+    /// `PATCH isRead`. A write: one request (spec section 5).
+    pub fn set_read(&self, token: &str, id: &str, read: bool) -> Result<Message> {
+        let m = self.patch(token, id, serde_json::json!({ "isRead": read }), None)?;
+        sure(m.is_read == read, m)
+    }
+
+    /// `PATCH flag`. A write: one request.
+    pub fn set_flag(&self, token: &str, id: &str, flagged: bool) -> Result<Message> {
+        let status = if flagged { "flagged" } else { "notFlagged" };
+        let body = serde_json::json!({ "flag": { "flagStatus": status } });
+        let m = self.patch(token, id, body, None)?;
+        sure(m.flagged() == flagged, m)
+    }
+
+    /// `PATCH categories` with the full list and `If-Match: etag`. A write:
+    /// one request. HTTP 412 (`Error::Api`) means the message changed after
+    /// the read of `etag`, and nothing changed.
+    pub fn set_categories(
+        &self,
+        token: &str,
+        id: &str,
+        categories: &[String],
+        etag: &str,
+    ) -> Result<Message> {
+        let body = serde_json::json!({ "categories": categories });
+        let m = self.patch(token, id, body, Some(etag))?;
+        sure(m.categories == categories, m)
+    }
+
+    /// `POST /me/messages/{id}/move` to the folder with the ID `folder`. A
+    /// write: one request. The ID of the message stays (immutable IDs).
+    pub fn move_to(&self, token: &str, id: &str, folder: &str) -> Result<Message> {
+        let url = self.url(&format!("/me/messages/{}/move", segment(id)));
+        let body = serde_json::json!({ "destinationId": folder }).to_string();
+        let m: Message = accepted(&self.write(
+            token,
+            Verb::Post,
+            &url,
+            body.into(),
+            "application/json",
+            None,
+        )?)?;
+        sure(m.id == id && m.parent_folder_id == folder, m)
+    }
+
+    /// `POST /me/messages` with the MIME text: a new draft. A write: one
+    /// request. Keep the `etag` of the answer for the send.
+    pub fn create_draft(&self, token: &str, mime: &[u8]) -> Result<Message> {
+        let url = self.url("/me/messages");
+        let m: Message =
+            accepted(&self.write(token, Verb::Post, &url, base64(mime), "text/plain", None)?)?;
+        sure(m.is_draft, m)
+    }
+
+    /// `POST /me/sendMail` with the MIME text: Graph sends these bytes. A
+    /// write: one request. The answer (202) has no message ID: find the
+    /// sent copy with [`Graph::sent_by_message_id`].
+    pub fn send_mime(&self, token: &str, mime: &[u8]) -> Result<()> {
+        let url = self.url("/me/sendMail");
+        self.write(token, Verb::Post, &url, base64(mime), "text/plain", None)?;
+        Ok(())
+    }
+
+    /// Each message of the mailbox (each folder) with the `Message-ID`
+    /// `message_id` (angle brackets included), each page. A read. The
+    /// caller picks the sent copy (spec section 5, step 5). Drafts are in
+    /// the list too.
+    pub fn sent_by_message_id(&self, token: &str, message_id: &str) -> Result<Vec<Copy>> {
+        let filter = format!("internetMessageId eq '{}'", message_id.replace('\'', "''"));
+        let mut url = self.url(&format!(
+            "/me/messages?$filter={}&$select=id,isDraft,sentDateTime,parentFolderId",
+            segment(&filter)
+        ));
+        let mut all = Vec::new();
+        loop {
+            let page: CopyPage = self.json(token, &url, true)?;
+            all.extend(page.value);
+            match page.next_link {
+                Some(next) => url = self.checked(&next)?,
+                None => return Ok(all),
+            }
+        }
+    }
+
+    /// The `@odata.etag` of a message now. A read.
+    pub fn draft_etag(&self, token: &str, id: &str) -> Result<String> {
+        let url = self.url(&format!("/me/messages/{}?$select=id", segment(id)));
+        self.json::<Tag>(token, &url, false).map(|t| t.etag)
+    }
+
+    fn patch(
+        &self,
+        token: &str,
+        id: &str,
+        body: serde_json::Value,
+        etag: Option<&str>,
+    ) -> Result<Message> {
+        let url = self.url(&format!("/me/messages/{}", segment(id)));
+        let answer = self.write(
+            token,
+            Verb::Patch,
+            &url,
+            body.to_string().into(),
+            "application/json",
+            etag,
+        )?;
+        let m: Message = accepted(&answer)?;
+        sure(m.id == id, m)
+    }
+
+    /// One write request: no second try, also not after 429 or 5xx (spec
+    /// section 1). Returns the body of a 2xx answer.
+    fn write(
+        &self,
+        token: &str,
+        verb: Verb,
+        url: &str,
+        body: Vec<u8>,
+        content_type: &str,
+        if_match: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        let _running = self.gate.enter();
+        let request = match verb {
+            Verb::Patch => self.agent.patch(url),
+            Verb::Post => self.agent.post(url),
+        };
+        let mut request = request
+            .header("Authorization", &format!("Bearer {token}"))
+            .header("Prefer", "IdType=\"ImmutableId\"")
+            .header("Content-Type", content_type);
+        if let Some(e) = if_match {
+            request = request.header("If-Match", e);
+        }
+        let response = request
+            .send(&body[..])
+            .map_err(|e| Error::Transport(e.to_string()))?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(status_error(status, response));
+        }
+        // Graph accepted the write, so a lost answer leaves the result unknown.
+        response
+            .into_body()
+            .with_config()
+            .limit(ANSWER_LIMIT)
+            .read_to_vec()
+            .map_err(|e| Error::Transport(format!("answer of an accepted write: {e}")))
+    }
+
     /// `GET /me/messages/{id}/$value`: the MIME text of the message goes to
     /// `sink` through a buffer of 64 KiB. Returns the count of bytes. If the
     /// call fails after the first byte, the sink has a part: discard it.
@@ -493,20 +688,52 @@ impl Graph {
                 wait = (wait * 2).min(self.config.backoff_max);
                 continue;
             }
-            return Err(match status {
-                401 => Error::Unauthorized,
-                404 => Error::NotFound,
-                _ => {
-                    let (code, message) = error_of(response);
-                    Error::Api {
-                        status,
-                        code,
-                        message,
-                    }
-                }
-            });
+            return Err(status_error(status, response));
         }
     }
+}
+
+/// The error of a status that is not 2xx and not retried.
+fn status_error(status: u16, response: ureq::http::Response<ureq::Body>) -> Error {
+    match status {
+        401 => Error::Unauthorized,
+        404 => Error::NotFound,
+        _ => {
+            let (code, message) = error_of(response);
+            Error::Api {
+                status,
+                code,
+                message,
+            }
+        }
+    }
+}
+
+/// The answer of an accepted write. A bad answer leaves the result
+/// unknown, so it is [`Error::Transport`], not [`Error::Decode`].
+fn accepted<T: DeserializeOwned>(body: &[u8]) -> Result<T> {
+    serde_json::from_slice(body)
+        .map_err(|e| Error::Transport(format!("bad answer of an accepted write: {e}")))
+}
+
+/// The message if Graph answered with the asked state, else an unknown
+/// result: the caller reads the message again (spec, "External writes").
+fn sure(ok: bool, m: Message) -> Result<Message> {
+    if ok {
+        Ok(m)
+    } else {
+        Err(Error::Transport(format!(
+            "Graph accepted the write of {} but answered with another state",
+            m.id
+        )))
+    }
+}
+
+fn base64(raw: &[u8]) -> Vec<u8> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .encode(raw)
+        .into_bytes()
 }
 
 /// One item of a delta page. An item with `@removed` must have a reason
