@@ -78,9 +78,11 @@ the job is the mark of each of its sessions.
 ### 2. Outside the thread
 
 The **thread addresses** of an action are the addresses in `From`, `To`
-and `Cc` of each message of the action threads (the SQL `ACTION_THREADS`
+and `Cc` of each live message (`gone_at IS NULL`) of the action threads (the SQL `ACTION_THREADS`
 of `iris-changeset`: the threads of its messages and the thread of its
-draft), parsed with `iris_senders::head::addresses`. A new mail (target
+draft), parsed with `iris_senders::head::addresses`. The mirror keeps the
+header of a gone message for 30 days, but the read skips it: a gone message
+gives no thread address. A new mail (target
 `accounts`) has no thread, so it has no thread addresses.
 
 **Your addresses** are `iris_talk::your_addresses`: each account address and
@@ -103,10 +105,14 @@ recipients.
 
 ### 4. The store limit
 
-Migration 23 adds one trigger on `changeset_action`. A move to `approved` of
-a `draft` or a `send` whose flags have `new_recipient`, `outside_thread`,
-`money` or `date` must have `decided_by = 'person'`. Else the store aborts
-with "iris: only a person approves a draft or a send with a warning flag".
+Migration 23 adds one trigger on `changeset_action`, `BEFORE UPDATE OF
+state, flags`. After the update, an `approved` `draft` or `send` whose flags
+have `new_recipient`, `outside_thread`, `money` or `date` must have
+`decided_by = 'person'`. Else the store aborts with "iris: only a person
+approves a draft or a send with a warning flag". The trigger reads the new
+row, so it covers two paths: a move to `approved`, and a warning flag that
+an update adds to an action that a rule approved before (the trigger
+`action_flags` of migration 7 allows a flag change on an approved action).
 
 This is the hard limit of spec 2, section 6.5, for `draft` too: a forward is
 a `draft` to a new address and then a `send`. A held, applied or failed send
@@ -149,6 +155,7 @@ the thread messages in the store, the scope rows of the job.
 | A `draft` with no checked content, or a `send` whose raw bytes do not hash | Submit denies it (R3-01, R3-03). No flag is necessary. | existing tests |
 | A store error in the mark read or the address read | Submit fails, and no revision is submitted. | by construction (one transaction) |
 | A rule or engine approval of a flagged `draft` or `send`, from any code path | The trigger aborts the update. | property test |
+| A warning flag added to a `draft` or `send` that a rule approved | The trigger aborts the update. | `outside.rs` |
 | An external address that a stranger put in `Cc` of a thread message | It is a thread address, so no `outside_thread`. `new_recipient` still flags it if you never sent to it. | Known limit issue |
 
 ## Impact
