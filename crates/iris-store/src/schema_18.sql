@@ -35,3 +35,13 @@ BEGIN
   INSERT INTO link_check(message_id) SELECT NEW.id
     WHERE NOT EXISTS (SELECT 1 FROM link_check WHERE message_id = NEW.id);
 END;
+
+-- The check skips your own mail (`SENT`, `DRAFT`). When such a label goes,
+-- the message is received mail, and needs the check.
+CREATE TRIGGER link_check_label AFTER DELETE ON message_label
+  WHEN (SELECT provider_id FROM label WHERE id = OLD.label_id) IN ('SENT', 'DRAFT')
+BEGIN
+  INSERT INTO link_check(message_id) SELECT m.id FROM message m
+    WHERE m.id = OLD.message_id AND m.content_sha256 IS NOT NULL AND m.gone_at IS NULL
+      AND NOT EXISTS (SELECT 1 FROM link_check WHERE message_id = OLD.message_id);
+END;

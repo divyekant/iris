@@ -1092,3 +1092,29 @@ fn new_honest_content_clears_the_link_mark_of_the_old_content() {
     assert_eq!(marks(&b), "[]");
     assert!(!b.understood(m), "the model work still waits");
 }
+
+#[test]
+fn mail_that_loses_the_sent_label_gets_the_link_check() {
+    let b = store("link-sent");
+    b.model(false, None);
+    let raw = bank("https://evil.example.net/pay");
+    let m = b.add_raw("s", "t", 1, &raw, &["SENT"]);
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(0));
+    // The same content again, as received mail.
+    assert_eq!(b.add_raw("s", "t", 1, &raw, &["INBOX"]), m);
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(1));
+    let fail = |_: &ModelRow| -> Result<Box<dyn Model>, String> { Err("no model".into()) };
+    let _ = batch::run(&b.store, &fail, &Limits::default(), NOW);
+    let marks: String = b
+        .store
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT hostile FROM message WHERE id = ?1", [m], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .unwrap();
+    assert_eq!(marks, r#"["link"]"#);
+}
