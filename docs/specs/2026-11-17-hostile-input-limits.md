@@ -165,7 +165,7 @@ the thread messages in the store, the scope rows of the job.
 
 ## Impact
 
-- `crates/iris-store`: `schema_23.sql` (one trigger), the migration list.
+- `crates/iris-store`: `schema_25.sql` (one trigger), the migration list.
 - `crates/iris-job`: `reads_outside_in`.
 - `crates/iris-changeset`: the flag at submit (`submit_in`, `marked_in`,
   `outside_marks`).
