@@ -411,8 +411,8 @@ pub const RAW_LIMIT: u64 = 8 * 1024 * 1024;
 // limit on the file, when a real mailbox shows the need.
 /// The first `RAW_LIMIT` bytes of the content file, true if the file is
 /// longer, and true if the rest can hold an HTML part
-/// (`iris_clean::html_part_in`, from a little before the cut, so that a cut
-/// header counts). The rest is read in chunks: the memory stays bounded.
+/// (`iris_clean::html_part_in`, which reads the first bytes to know if the
+/// cut is in a part header). The rest is read in chunks: the memory stays bounded.
 fn read_raw(path: &std::path::Path) -> Result<(Vec<u8>, bool, bool)> {
     use std::io::Read;
     let mut file = std::fs::File::open(path)?;
@@ -420,8 +420,8 @@ fn read_raw(path: &std::path::Path) -> Result<(Vec<u8>, bool, bool)> {
     (&mut file).take(RAW_LIMIT + 1).read_to_end(&mut raw)?;
     let cut = raw.len() as u64 > RAW_LIMIT;
     let html_after = cut && {
-        let from = raw.len().saturating_sub(256);
-        iris_clean::html_part_in((&raw[from..]).chain(file))?
+        let limit = RAW_LIMIT as usize;
+        iris_clean::html_part_in(&raw[..limit], (&raw[limit..]).chain(file))?
     };
     raw.truncate(RAW_LIMIT as usize);
     Ok((raw, cut, html_after))

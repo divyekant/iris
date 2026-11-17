@@ -1605,6 +1605,24 @@ fn an_html_body_after_a_plain_body_and_the_read_limit_is_a_link_mark() {
 }
 
 #[test]
+fn text_html_in_an_attachment_past_the_read_limit_is_no_mark() {
+    let b = store("large-plain");
+    // The words `text/html` are in the body of a plain attachment, past
+    // the read limit. No part header has the type, so no HTML part is there.
+    let big = "A".repeat(iris_understand::store::RAW_LIMIT as usize);
+    let raw = format!(
+        "From: Bo Ren <bo@example.org>\nTo: owner@example.com\nSubject: Logs\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=b\n\n--b\nContent-Type: text/plain\n\nThe logs.\n--b\nContent-Type: text/plain; name=log.txt\n\n{big}\nContent-Type: text/html\nsent as text/html\n--b--\n"
+    );
+    let m = b.add("1", &raw, &["INBOX"]);
+    understand(&b.store, m, &Fake::default(), NOW).unwrap();
+    let marks: String = b.col(
+        "SELECT coalesce(hostile, '[]') FROM message WHERE id = ?1",
+        m,
+    );
+    assert_eq!(marks, "[]");
+}
+
+#[test]
 fn an_earlier_text_of_the_sender_that_changes_during_the_call_saves_nothing() {
     let b = store("same-change");
     let mut first = 0;

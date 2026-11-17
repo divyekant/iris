@@ -30,7 +30,12 @@ pub fn deceptive(links: &[Link], cut: bool, from_domain: &str, authenticated: bo
     if cut {
         return true;
     }
-    let owner = registrable(&from_domain.to_ascii_lowercase());
+    // One form for each host: punycode, as for the shown and target hosts.
+    let from = match Host::parse(from_domain) {
+        Ok(Host::Domain(d)) => d,
+        _ => from_domain.to_lowercase(),
+    };
+    let owner = registrable(&from);
     for Link { text, href } in links {
         let Some(shown) = shown_host(text) else {
             continue;
@@ -184,6 +189,16 @@ mod tests {
         let (s, t) = ("shop.com", "https://click.shop-mail.net/x");
         assert!(!one(s, t, "news.shop.com", true));
         assert!(one(s, t, "news.shop.com", false));
+        // The owner in each form of its letters.
+        let t = "https://click.mailer.example.net/x";
+        for (s, from) in [
+            ("www.m\u{fc}nchen.de", "m\u{fc}nchen.de"),
+            ("www.m\u{fc}nchen.de", "news.M\u{dc}NCHEN.de"),
+            ("www.xn--mnchen-3ya.de", "m\u{fc}nchen.de"),
+            ("www.m\u{fc}nchen.de", "xn--mnchen-3ya.de"),
+        ] {
+            assert!(!one(s, t, from, true), "{s} {from}");
+        }
     }
 
     #[test]

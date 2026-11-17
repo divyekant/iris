@@ -100,30 +100,93 @@ pub struct Link {
     pub href: String,
 }
 
-/// True when the bytes of `rest` (the part of a message past a cut) name
-/// the type `text/html`, in any case, also with white space in it: an HTML
-/// part can start there. One pass with a window of 9 bytes, so the memory
-/// does not grow with the input. Base64 data does not hold the word with
-/// its `/` by chance in practice.
-pub fn html_part_in(mut rest: impl std::io::Read) -> std::io::Result<bool> {
-    const WORD: &[u8; 9] = b"text/html";
-    let mut window = [0u8; 9];
+/// True when `rest`, the part of a message past a cut, has a MIME part
+/// header with the type `text/html`: a mail client can show an HTML part
+/// there. `before` is the message up to the cut: the scan reads it first
+/// to know if the cut is in a header or in a body, and does not count its
+/// HTML parts. A part header starts after a line with `--` (a boundary) and
+/// ends at an empty line. `text/html` in a part body (an attachment) does
+/// not count. Folded header lines count, and case and white space in the
+/// value do not matter. One pass that keeps at most 128 bytes of each line,
+/// so the memory does not grow with the input.
+pub fn html_part_in(before: &[u8], mut rest: impl std::io::Read) -> std::io::Result<bool> {
+    let mut scan = PartScan {
+        header: true,
+        value: None,
+        line: Vec::with_capacity(128),
+    };
+    for &b in before {
+        scan.byte(b);
+    }
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         let n = rest.read(&mut buf)?;
         if n == 0 {
-            return Ok(false);
+            // The end of the input also ends the open header field.
+            let last = scan.end_line();
+            return Ok(last || scan.value.is_some_and(|v| v.starts_with(b"text/html")));
         }
-        for &b in &buf[..n] {
-            if b.is_ascii_whitespace() {
-                continue;
+        if buf[..n].iter().any(|&b| scan.byte(b)) {
+            return Ok(true);
+        }
+    }
+}
+
+/// The state of [`html_part_in`].
+struct PartScan {
+    /// True in a header: the message header, or a part header.
+    header: bool,
+    /// The `Content-Type` value of the open header field, with no white
+    /// space, at most 64 bytes.
+    value: Option<Vec<u8>>,
+    /// The first bytes of the open line, in lowercase.
+    line: Vec<u8>,
+}
+
+impl PartScan {
+    /// Reads one byte. True when a header field ends at it with the value
+    /// `text/html`.
+    fn byte(&mut self, b: u8) -> bool {
+        if b == b'\n' {
+            return self.end_line();
+        }
+        if self.line.len() < self.line.capacity() {
+            self.line.push(b.to_ascii_lowercase());
+        }
+        false
+    }
+
+    /// Ends the open line. True when it ends a header field with the value
+    /// `text/html`.
+    fn end_line(&mut self) -> bool {
+        let line = std::mem::take(&mut self.line);
+        let mut text = line.as_slice();
+        text = text.strip_suffix(b"\r").unwrap_or(text);
+        let mut html = false;
+        if self.header && matches!(text.first(), Some(b' ' | b'\t')) {
+            if let Some(v) = &mut self.value {
+                v.extend(text.iter().filter(|b| !b.is_ascii_whitespace()));
+                v.truncate(64);
             }
-            window.copy_within(1.., 0);
-            window[8] = b.to_ascii_lowercase();
-            if &window == WORD {
-                return Ok(true);
+        } else {
+            html = self
+                .value
+                .take()
+                .is_some_and(|v| v.starts_with(b"text/html"));
+            if text.starts_with(b"--") {
+                self.header = true;
+            } else if text.is_empty() {
+                self.header = false;
+            } else if self.header {
+                if let Some(v) = text.strip_prefix(b"content-type:") {
+                    let v = v.iter().copied().filter(|b| !b.is_ascii_whitespace());
+                    self.value = Some(v.take(64).collect());
+                }
             }
         }
+        self.line = line;
+        self.line.clear();
+        html
     }
 }
 
