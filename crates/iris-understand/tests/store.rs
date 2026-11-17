@@ -453,7 +453,7 @@ fn a_new_run_keeps_a_skip_and_a_dismiss() {
             "}], \"phishing\"",
             &format!(
                 "}}, {}], \"phishing\"",
-                &answer[answer.find("{\"form").unwrap()..answer.find("}]").unwrap() + 1]
+                answer[answer.find("{\"form").unwrap()..answer.find("}]").unwrap() + 1]
                     .replace("Can you send me the signed lease by Friday?", "The lease")
             ),
         );
@@ -471,7 +471,7 @@ fn a_new_run_keeps_a_skip_and_a_dismiss() {
             "}], \"phishing\"",
             &format!(
                 "}}, {}], \"phishing\"",
-                &answer[answer.find("{\"form").unwrap()..answer.find("}]").unwrap() + 1]
+                answer[answer.find("{\"form").unwrap()..answer.find("}]").unwrap() + 1]
                     .replace("\"title\": \"", "\"title\": \"Other ")
             ),
         );
