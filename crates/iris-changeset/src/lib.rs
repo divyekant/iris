@@ -591,15 +591,28 @@ pub fn submit_in(
     // until the end of the submit; stream the reasons if an author can
     // send a very large number of actions.
     let mut denials = Vec::new();
+    // A job session: the grant of the job now. Each action must be in it,
+    // else the whole submit fails and the caller rolls back (job verbs
+    // spec). The check reads the rows of the targets, before any other
+    // check can clear them, so no other denial hides a target outside the
+    // grant.
+    let job = changeset_job(c, changeset)?;
+    let grant = job.map(|j| grant_of(c, j)).transpose()?;
     let mut last = 0;
     while let Some((id, n, verb, targets, args)) = next_action(c, changeset, revision, last)? {
         last = n;
         let verb = Verb::parse(&verb).expect("the CHECK of the table");
         // Only the targets give the rows: drop rows of another writer.
         clear(c, id)?;
+        let resolved = resolve(c, id, verb, &targets)?;
+        if let (Some(job), Some(grant)) = (job, &grant) {
+            if let Some(why) = outside_grant(c, id, job, grant)? {
+                return Err(Error::Denied(why));
+            }
+        }
         let mut denial = match supported(c, verb, &args)? {
             Err(why) => Some(why),
-            Ok(()) => resolve(c, id, verb, &targets)?,
+            Ok(()) => resolved,
         };
         if denial.is_none() && verb == Verb::Correct {
             denial = check_correct(c, id, &args, now_ms)?;
@@ -610,18 +623,6 @@ pub fn submit_in(
         if let Some(why) = denial {
             clear(c, id)?;
             denials.push((id, why));
-        }
-    }
-    // A job session: each action must be in the grant of the job now, else
-    // the whole submit fails and the caller rolls back (job verbs spec).
-    if let Some(job) = changeset_job(c, changeset)? {
-        let grant = grant_of(c, job)?;
-        let mut last = 0;
-        while let Some(id) = next_id(c, changeset, revision, last)? {
-            last = id.1;
-            if let Some(why) = outside_grant(c, id.0, job, &grant)? {
-                return Err(Error::Denied(why));
-            }
         }
     }
     // Pass 2: the hash and the flags of each action. The flags need the
@@ -683,19 +684,6 @@ pub fn submit_in(
         )?;
     }
     Ok(())
-}
-
-/// The action after number `last` in a revision, also a denied one: ID and
-/// number.
-fn next_id(c: &Connection, changeset: i64, revision: i64, last: i64) -> Result<Option<(i64, i64)>> {
-    Ok(c.prepare_cached(
-        "SELECT id, n FROM changeset_action
-         WHERE changeset_id = ?1 AND revision = ?2 AND n > ?3 ORDER BY n LIMIT 1",
-    )?
-    .query_row(params![changeset, revision, last], |r| {
-        Ok((r.get(0)?, r.get(1)?))
-    })
-    .optional()?)
 }
 
 /// The job of the author of a changeset, or `None` for an author with no

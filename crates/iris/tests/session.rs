@@ -230,6 +230,8 @@ fn a_later_session_revises_the_changeset_of_its_job() {
 fn a_target_outside_the_grant_fails_the_whole_submit() {
     for (name, verb, target, args) in [
         ("thread", "archive", "t-2", json!({})),
+        ("bad-args", "archive", "t-2", json!({ "foo": 1 })),
+        ("bad-item-args", "close", "c-4", json!({})),
         ("message", "read", "m-7", json!({})),
         ("item", "close", "c-4", json!({ "reason": "x" })),
     ] {
