@@ -677,6 +677,9 @@ pub fn submit_in(
         if WRITE_VERBS.contains(&verb.as_str()) {
             if let Some((account, content)) = action_content(c, id)? {
                 flags.extend(draft_flags(c, &account, &content)?);
+                if marked_in(c, changeset)? && !outside_marks(c, id, &content)?.is_empty() {
+                    flags.push("outside_thread");
+                }
             }
         }
         c.execute(
@@ -867,6 +870,77 @@ fn next_action(
         Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
     })
     .optional()?)
+}
+
+/// True when the author of `changeset` read mail that you did not send
+/// (spec R4-06, "The mark"). Only the person and an agent whose job scope
+/// is your own mail are not marked; each other author is.
+pub fn marked_in(c: &Connection, changeset: i64) -> Result<bool> {
+    let (kind, job): (String, Option<String>) = c.query_row(
+        "SELECT author_kind, author_job FROM changeset WHERE id = ?1",
+        [changeset],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(
+        match (
+            kind.as_str(),
+            job.as_deref().and_then(iris_job::parse_job_id),
+        ) {
+            ("person", _) => false,
+            ("agent", Some(job)) => iris_job::reads_outside_in(c, job)?,
+            _ => true,
+        },
+    )
+}
+
+/// The marks of the flag `outside_thread` (spec R4-06): each address of
+/// `to` and `cc` of `content` that is not in From, To or Cc of a live
+/// message of the threads of `action`, and is not one of your addresses. A
+/// new mail has no thread. Submit gives the flag to a marked author when
+/// this list is not empty; the review shows the marks.
+pub fn outside_marks(
+    c: &Connection,
+    action: i64,
+    content: &iris_compose::Content,
+) -> Result<Vec<Mark>> {
+    let mut known = iris_talk::your_addresses(c)?;
+    let mut st = c.prepare(&format!(
+        "SELECT h.from_addr, h.to_addrs, h.cc_addrs
+         FROM changeset_action a, message t JOIN header h ON h.message_id = t.id
+         WHERE a.id = ?1 AND t.gone_at IS NULL AND t.thread_id IN ({ACTION_THREADS})"
+    ))?;
+    let mut rows = st.query([action])?;
+    while let Some(r) = rows.next()? {
+        for i in 0..3 {
+            if let Some(v) = r.get::<_, Option<String>>(i)? {
+                known.extend(
+                    iris_senders::head::addresses(&v)
+                        .into_iter()
+                        .map(|(a, _)| a),
+                );
+            }
+        }
+    }
+    let to = content
+        .to
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (Field::To(i), a));
+    let cc = content
+        .cc
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (Field::Cc(i), a));
+    Ok(to
+        .chain(cc)
+        .filter(|(_, a)| !known.contains(&a.trim().to_ascii_lowercase()))
+        .map(|(field, a)| Mark {
+            flag: "outside_thread",
+            field,
+            range: 0..a.len(),
+            source: None,
+        })
+        .collect())
 }
 
 /// The flag `first_contact` (section 5.3): a thread of a resolved message has

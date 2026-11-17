@@ -34,6 +34,17 @@ fn temp(name: &str) -> TempDir {
     TempDir(dir)
 }
 
+/// The person is never marked (spec R4-06), so a draft of the person has
+/// no `outside_thread`: the tests of the other flags use it.
+fn person() -> Author {
+    Author {
+        kind: AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    }
+}
+
 fn agent() -> Author {
     Author {
         kind: AuthorKind::Agent,
@@ -130,7 +141,7 @@ fn joined(parts: &Value) -> String {
 async fn each_flag_of_the_test_set_shows_on_its_action_and_words() {
     let dir = temp("set");
     let s = store(&dir);
-    let cs = create(&s, &agent(), NOW).unwrap();
+    let cs = create(&s, &person(), NOW).unwrap();
     let mail = |to: &[&str], cc: &[&str], subject: &str, body: &str| -> Map<String, Value> {
         json!({"to": to, "cc": cc, "subject": subject, "body": body})
             .as_object()
@@ -148,11 +159,20 @@ async fn each_flag_of_the_test_set_shows_on_its_action_and_words() {
         &one,
     );
     let second = mail(&["dana@acme.example"], &[], "Signing", two);
-    add_action(&s, cs, &agent(), Verb::Draft, &["a-1"], &first, None).unwrap();
-    add_action(&s, cs, &agent(), Verb::Draft, &["a-1"], &second, None).unwrap();
+    add_action(&s, cs, &person(), Verb::Draft, &["a-1"], &first, None).unwrap();
+    add_action(&s, cs, &person(), Verb::Draft, &["a-1"], &second, None).unwrap();
     // An action of another verb gets no entry.
-    add_action(&s, cs, &agent(), Verb::Archive, &["m-1"], &Map::new(), None).unwrap();
-    submit(&s, cs, &agent(), "Write to Dana.", NOW).unwrap();
+    add_action(
+        &s,
+        cs,
+        &person(),
+        Verb::Archive,
+        &["m-1"],
+        &Map::new(),
+        None,
+    )
+    .unwrap();
+    submit(&s, cs, &person(), "Write to Dana.", NOW).unwrap();
 
     let (code, v) = get(&s, &format!("/api/changesets/cs-{cs}/drafts")).await;
     assert_eq!(code, StatusCode::OK, "{v}");
@@ -240,16 +260,16 @@ impl std::io::Write for Decides<'_> {
 async fn the_drafts_stream_one_at_a_time_and_name_a_flag_with_no_mark() {
     let dir = temp("stream");
     let s = store(&dir);
-    let cs = create(&s, &agent(), NOW).unwrap();
+    let cs = create(&s, &person(), NOW).unwrap();
     let mail = json!({"to": ["dana@acme.example"], "cc": ["legal@new.example"],
                       "subject": "Renewal", "body": "Hello Dana"})
     .as_object()
     .unwrap()
     .clone();
     for _ in 0..3 {
-        add_action(&s, cs, &agent(), Verb::Draft, &["a-1"], &mail, None).unwrap();
+        add_action(&s, cs, &person(), Verb::Draft, &["a-1"], &mail, None).unwrap();
     }
-    submit(&s, cs, &agent(), "Write to Dana.", NOW).unwrap();
+    submit(&s, cs, &person(), "Write to Dana.", NOW).unwrap();
 
     // The memory holds one draft: the second draft is read after the first is written.
     let mut w = Decides {
@@ -292,7 +312,34 @@ async fn the_drafts_stream_one_at_a_time_and_name_a_flag_with_no_mark() {
     assert_eq!(d["unmarked"], json!(["new_recipient", "first_contact"]));
 
     // While a new revision is a draft, nothing waits for the review.
-    revise(&s, cs, &agent()).unwrap();
+    revise(&s, cs, &person()).unwrap();
     let (code, v) = get(&s, &format!("/api/changesets/cs-{cs}/drafts")).await;
     assert_eq!((code, v), (StatusCode::OK, json!({"drafts": []})));
+}
+
+/// Spec R4-06: a marked author (an agent with no job) writes a new mail,
+/// so each address that is not yours is outside the thread. The review
+/// shows `outside_thread` on each such address, and not on your own.
+#[tokio::test]
+async fn outside_thread_marks_each_outside_address() {
+    let dir = temp("outside");
+    let s = store(&dir);
+    let cs = create(&s, &agent(), NOW).unwrap();
+    let m = json!({"to": ["dana@acme.example"], "cc": [OWNER], "subject": "Plan",
+                   "body": "See you."})
+    .as_object()
+    .unwrap()
+    .clone();
+    add_action(&s, cs, &agent(), Verb::Draft, &["a-1"], &m, None).unwrap();
+    submit(&s, cs, &agent(), "Write to Dana.", NOW).unwrap();
+    let (code, v) = get(&s, &format!("/api/changesets/cs-{cs}/drafts")).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    let d = &v["drafts"][0];
+    assert_eq!(
+        d["to"],
+        json!([{"address": "dana@acme.example", "flags": ["outside_thread"]}]),
+        "{v}"
+    );
+    assert_eq!(d["cc"], json!([{"address": OWNER}]), "{v}");
+    assert_eq!(d["unmarked"], json!([]), "{v}");
 }

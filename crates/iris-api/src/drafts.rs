@@ -5,7 +5,7 @@
 use std::io::Write;
 use std::ops::Range;
 
-use iris_changeset::{action_content, draft_marks, Field, Mark};
+use iris_changeset::{action_content, draft_marks, outside_marks, Field, Mark};
 use iris_store::{format_id, Kind, Store};
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -86,8 +86,11 @@ fn next_draft(
             Vec::new()
         }
         Some((account, content)) => {
-            let marks: Vec<Mark> = draft_marks(c, &account, &content)
-                .map_err(store_error)?
+            let mut marks = draft_marks(c, &account, &content).map_err(store_error)?;
+            if flags.iter().any(|f| f == "outside_thread") {
+                marks.extend(outside_marks(c, action, &content).map_err(store_error)?);
+            }
+            let marks: Vec<Mark> = marks
                 .into_iter()
                 .filter(|m| flags.iter().any(|f| f == m.flag))
                 .collect();
