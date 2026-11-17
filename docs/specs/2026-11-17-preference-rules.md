@@ -81,7 +81,7 @@ cannot tell which sender the person wants to see.
 - The engine keeps a `muted` conversation muted when a new message
   arrives (`iris-talk`, already built). A `skipped` feed item and a
   `dismissed` signal keep their status. Only `gone` replaces each one.
-- Store migration 23: the three verbs join the verb CHECK of
+- Store migration 25: the three verbs join the verb CHECK of
   `changeset_action`, with the method of migration 18.
 - The open model schemas of the changeset and of the policy
   (`docs/spec/schema/`) add the three verbs. They are verbs of the policy
