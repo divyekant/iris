@@ -158,6 +158,13 @@ async fn a_commitment_starts_a_job_with_the_item_and_the_threads_of_its_sources(
     assert_eq!(job["goal"], json!("Sign the contract."));
     assert_eq!(job["state"], json!("working"));
     assert_eq!(job["due"], json!("2026-11-20T17:00:00.000Z"));
+    // The full job document, with the create event of the person.
+    let errors: Vec<String> = iris_spec::validator("job")
+        .iter_errors(&job)
+        .map(|e| e.to_string())
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}: {job}");
+    assert_eq!(job["events"][0]["by"], json!("person"));
     // Not thread 3, which holds no source of the item.
     let mut scope = d.scope("j-1");
     scope.sort();
@@ -199,6 +206,14 @@ async fn a_second_start_finds_the_open_job() {
     assert_eq!(code, StatusCode::CONFLICT, "{v}");
     assert_eq!(v["job"], json!("j-1"));
     assert_eq!(d.jobs(), 1);
+    // Only an item of the same kind finds the job: no conversation 1 exists.
+    for item in ["v-1", "c-3"] {
+        let (code, v) = d
+            .post("/api/jobs", json!({"item": item, "goal": "Go.", "messages": []}))
+            .await;
+        assert_ne!(v.get("job"), Some(&json!("j-1")), "{item}: {v}");
+        assert_ne!(code, StatusCode::CREATED, "{item}: {v}");
+    }
 
     // A retry after the item closed still finds the job.
     d.1.write(|tx| {
@@ -274,6 +289,10 @@ async fn the_goal_the_due_date_and_the_messages_are_checked() {
         json!({"item": "c-1", "goal": "x".repeat(2001), "messages": m}),
         json!({"item": "c-1", "goal": "Go.", "due": "2026-11-20", "messages": m}),
         json!({"item": "c-1", "goal": "Go.", "due": 5, "messages": m}),
+        // The job table holds no time before 1970 or after 9999, and no NUL.
+        json!({"item": "c-1", "goal": "Go.", "due": "1969-12-31T23:59:59Z", "messages": m}),
+        json!({"item": "c-1", "goal": "Go.", "due": "9999-12-31T23:59:59-01:00", "messages": m}),
+        json!({"item": "c-1", "goal": "Go\u{0}.", "messages": m}),
         json!({"item": "c-1", "goal": "Go."}),
         json!({"item": "c-1", "messages": m}),
         json!({"item": "c-1", "goal": "Go.", "messages": ["t-1"]}),
@@ -332,6 +351,29 @@ async fn the_preview_shows_each_message_of_the_grant() {
     let (_, v) = d.get("/api/items/c-1/job").await;
     assert_eq!(v["messages"][3]["id"], json!("m-7"));
     assert_eq!(v["messages"][3]["readable"], json!(false));
+
+    // The order is the date that the summary shows: the header date first.
+    d.1.write(|tx| {
+        tx.execute_batch(
+            "INSERT INTO message (id, account_id, thread_id, provider_id, internal_date, understood_at)
+             VALUES (14, 1, 1, 'm14', 500, 1);
+             INSERT INTO header (message_id, date, from_addr, subject)
+             VALUES (14, 9000, 'dana@example.com', 'Late');",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, v) = d.get("/api/items/c-1/job").await;
+    let dates: Vec<&str> = v["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["thread"] == json!("t-1"))
+        .map(|m| m["date"].as_str().unwrap())
+        .collect();
+    let mut sorted = dates.clone();
+    sorted.sort();
+    assert_eq!(dates, sorted);
 
     // The same checks as the start.
     for (item, code) in [
