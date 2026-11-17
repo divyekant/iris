@@ -1096,13 +1096,13 @@ fn a_thread_is_late_only_while_each_rule_holds() {
             true,
         ),
         (
-            "a ready nudge",
+            "a ready nudge of another commitment",
             "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
                created_at)
              SELECT ?1, max(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'p', 0, 1
                FROM message WHERE thread_id = ?1",
             at,
-            false,
+            true,
         ),
         (
             "the ask went to another person",
@@ -1214,6 +1214,28 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
     assert_eq!(prompt, NUDGE_PROMPT);
     let to = b.store.read(|c| Ok(nudge_to(c, t, now)?)).unwrap();
     assert_eq!(to.as_deref(), Some("ana@example.org"));
+
+    // A correction of the commitment after the save: the nudge is stale,
+    // and the thread is late again for the new commitment. A close: stale.
+    let set = |sql: &str| {
+        b.store
+            .write(|tx| {
+                tx.execute(sql, [])?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    set("UPDATE item SET doc = json_set(doc, '$.title', 'Send the deck')");
+    assert_eq!(b.store.read(|c| Ok(nudge_to(c, t, now)?)).unwrap(), None);
+    assert_eq!(late_threads(&b.store, now), [t]);
+    set("UPDATE item SET doc = json_set(doc, '$.title', 'Send the slides')");
+    assert!(b
+        .store
+        .read(|c| Ok(nudge_to(c, t, now)?))
+        .unwrap()
+        .is_some());
+    set("UPDATE item SET status = 'done'");
+    assert_eq!(b.store.read(|c| Ok(nudge_to(c, t, now)?)).unwrap(), None);
 
     // A long thread: the origin of the ask is out of the six newest
     // messages, and the commitment is in the data all the same.

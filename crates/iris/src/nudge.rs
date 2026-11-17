@@ -20,6 +20,7 @@ pub const MAX_PER_TURN: usize = 3;
 /// A thread gets one call for each newest message, person and commitment,
 /// also if the answer was not valid, so an invalid answer does not cost a
 /// call each turn. A model failure marks nothing: the shared wait governs.
+/// A change during the call marks nothing: the change gives a new chance.
 /// shortcut: the set is in memory, so a restart of the engine gives each late thread one more call; store it if restarts are frequent.
 pub type Tried = HashSet<iris_voice::Late>;
 
@@ -61,6 +62,7 @@ pub fn step(
         // shared wait decide when the thread gets its call.
         match call(store, &row, model.as_ref(), &l, now_ms)? {
             Outcome::Refused | Outcome::ModelFailed => break,
+            Outcome::Changed => continue,
             Outcome::Saved => saved += 1,
             Outcome::Failed => {}
         }
@@ -75,6 +77,8 @@ enum Outcome {
     Saved,
     /// No draft, and no evidence against the model.
     Failed,
+    /// The thread or the commitment changed during the call. No mark.
+    Changed,
     /// The model failed: the shared wait starts.
     ModelFailed,
 }
@@ -145,6 +149,9 @@ fn call(
         _ if refused => Outcome::Refused,
         _ if failed => Outcome::ModelFailed,
         Ok(_) => Outcome::Saved,
+        // The mail or the commitment changed during the call: the next
+        // turn reads the thread again.
+        Err(iris_voice::Error::Changed) => Outcome::Changed,
         Err(_) => Outcome::Failed,
     })
 }

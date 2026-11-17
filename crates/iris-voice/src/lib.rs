@@ -234,17 +234,28 @@ pub const LATE_AFTER_MS: i64 = 2 * 86_400_000;
 ///   for understanding;
 /// - it has no draft of the owner (a draft with another intent than
 ///   [`NUDGE_INTENT`], stale or not), so a nudge never replaces it, and no
-///   nudge that the person can use now ([`ready_sql`]).
+///   nudge that the person can use now ([`ready_sql`]) for the same
+///   commitment (`reply_draft.ask`).
 pub fn late(c: &Connection, now_ms: i64) -> rusqlite::Result<Vec<Late>> {
     candidates(c, now_ms, true)
 }
 
-/// The address that the ready nudge of `thread` goes to: the rules of
-/// [`late`], but a draft does not count. `None` if the thread is not late.
+/// The address that the nudge of `thread` goes to, while it is valid: the
+/// thread is late by the rules of [`late`] (a draft does not count), for
+/// the same commitment as the one of the saved nudge (`reply_draft.ask`).
+/// `None` if the commitment is done, hidden, changed or answered.
 pub fn nudge_to(c: &Connection, thread: i64, now_ms: i64) -> rusqlite::Result<Option<String>> {
+    let ask: Option<String> = c
+        .query_row(
+            "SELECT ask FROM reply_draft WHERE thread_id = ?1",
+            [thread],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
     Ok(candidates(c, now_ms, false)?
         .into_iter()
-        .find(|l| l.thread == thread)
+        .find(|l| l.thread == thread && Some(&l.ask) == ask.as_ref())
         .map(|l| l.to))
 }
 
@@ -289,7 +300,9 @@ fn candidates(c: &Connection, now_ms: i64, drafts: bool) -> rusqlite::Result<Vec
             AND (NOT ?4 OR (NOT EXISTS (SELECT 1 FROM reply_draft d
                                          WHERE d.thread_id = n.thread
                                            AND coalesce(d.intent, '') <> ?3)
-                            AND NOT {ready}))
+                            AND NOT ({ready} AND EXISTS (SELECT 1 FROM reply_draft d
+                                                          WHERE d.thread_id = n.thread
+                                                            AND d.ask IS n.ask))))
           ORDER BY n.newest, n.owner, n.ask"
     ))?;
     let rows = st.query_map(params![now_ms, LATE_AFTER_MS, NUDGE_INTENT, drafts], |r| {
@@ -366,6 +379,7 @@ pub fn nudge(store: &Store, late: &Late, model: &dyn Model, now_ms: i64) -> Resu
     let nudge = Nudge {
         to: &late.to,
         ask: serde_json::from_str(&late.ask).unwrap_or(Value::Null),
+        text: &late.ask,
     };
     write_when(
         store,
@@ -382,6 +396,8 @@ pub fn nudge(store: &Store, late: &Late, model: &dyn Model, now_ms: i64) -> Resu
 struct Nudge<'a> {
     to: &'a str,
     ask: Value,
+    /// The JSON text of `ask`, as [`Late::ask`] gives it.
+    text: &'a str,
 }
 
 fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
@@ -722,12 +738,12 @@ fn write_when(
             }
             tx.execute(
                 "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
-               created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+               created_at, ask)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(thread_id) DO UPDATE SET
                based_on = excluded.based_on, intent = excluded.intent, body = excluded.body,
                model = excluded.model, prompt = excluded.prompt, samples = excluded.samples,
-               created_at = excluded.created_at",
+               created_at = excluded.created_at, ask = excluded.ask",
                 params![
                     thread,
                     based_on,
@@ -740,7 +756,8 @@ fn write_when(
                         PROMPT
                     },
                     samples.len() as i64,
-                    now_ms
+                    now_ms,
+                    nudge.map(|n| n.text)
                 ],
             )?;
             Ok(true)

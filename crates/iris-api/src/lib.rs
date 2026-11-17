@@ -869,8 +869,9 @@ async fn get_write(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
 
 /// The draft of a thread (`t-N`) that the person can use now: a reply in
 /// the voice of the owner (R3-05) or a nudge (R3-07), with the address of
-/// the person that owes (`to`) while the thread is late. 404 when there is
-/// none, or when it is stale. The draft is text only: nothing is sent.
+/// the person that owes (`to`). 404 when there is none, or when it is
+/// stale: a newer mail, or for a nudge, a commitment that is not late for
+/// the same commitment ([`iris_voice::nudge_to`]). Nothing is sent.
 async fn get_draft(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
     let Some((iris_store::Kind::Thread, thread)) = iris_store::parse_id(&id) else {
         return Ok(not_found());
@@ -885,6 +886,11 @@ async fn get_draft(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
                 true => iris_voice::nudge_to(c, thread, now_ms())?,
                 false => None,
             };
+            // A nudge whose commitment is done, hidden, changed or answered
+            // is stale.
+            if nudge && to.is_none() {
+                return Ok(None);
+            }
             Ok(Some((based_on, nudge, to, body)))
         })
         .map_err(Error::from)?;

@@ -1612,10 +1612,10 @@ async fn an_item_shows_a_ready_draft_of_its_thread_until_the_draft_is_stale() {
         "UPDATE reply_draft SET intent = ?1",
         [iris_voice::NUDGE_INTENT],
     );
-    let (_, draft) = get(&store, &format!("/api/threads/{thread}/draft")).await;
-    assert_eq!(draft["nudge"], true);
-    // The thread is not late (no ask of the owner): no address.
-    assert_eq!(draft["to"], Value::Null);
+    // A nudge whose thread is not late (no ask of the owner) is stale.
+    let (status, _) = get(&store, &format!("/api/threads/{thread}/draft")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    exec(&store, "UPDATE reply_draft SET intent = NULL WHERE ?1", [1]);
     let (status, _) = get(&store, "/api/threads/m-1/draft").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let ready = json!(["draft"]);
