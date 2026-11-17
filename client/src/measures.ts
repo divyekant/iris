@@ -160,7 +160,7 @@ export function rows(m: Measures, now = new Date()): Row[] {
     applied === 0
       ? { name: "Changes that you undid", value: "Not yet", detail: "Iris has applied no change yet. Lower is better.", tone: "none" }
       : { name: "Changes that you undid", value: `${num(undone)} of ${num(applied)}`, detail: `${percent(undone, applied)}. Lower is better.`, tone: "flat" },
-    { name: "Sends without review after hostile mail", value: "Not yet", detail: "Iris sends no mail before release 3. Target: zero.", tone: "none" },
+    { name: "Sends without review after hostile mail", value: "Not yet", detail: "Iris does not measure this yet. Target: zero.", tone: "none" },
   ];
 }
 
