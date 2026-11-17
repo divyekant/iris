@@ -1,6 +1,6 @@
 // Answers of the local API, made from the examples of docs/spec/schema/examples.
 // The dev server (`pnpm dev --mode fixtures`) and the tests use them. They are not in the build.
-import type { Outbox, Action, AskAnswer, DraftView, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, Job, JobDetail, Matter, MatterList, MatterView, Message, Policy, Rule, Status, Summary, Target } from "../src/api";
+import type { Outbox, Action, AskAnswer, DraftView, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, LedgerEntry, LedgerPage, Job, JobDetail, Matter, MatterList, MatterView, Message, Policy, Rule, Status, Summary, Target } from "../src/api";
 import youOwe from "../../docs/spec/schema/examples/commitment-you-owe.json" with { type: "json" };
 import owedToYou from "../../docs/spec/schema/examples/commitment-owed-to-you.json" with { type: "json" };
 import payment from "../../docs/spec/schema/examples/commitment-payment.json" with { type: "json" };
@@ -115,6 +115,52 @@ export const decided: HandledPage = {
 
 /** GET /api/handled in the fixture state: observe mode, so no rule decided an action. */
 export const handled: HandledPage = { count: 0, next: null, actions: [] };
+
+// The history view (card R2-07): ledger entries of each kind, newest first.
+const entry = (id: number, at: string, rest: Partial<LedgerEntry>): LedgerEntry => ({
+  id: `l-${id}`,
+  verb: "archive",
+  args: {},
+  state: "applied",
+  at,
+  error: null,
+  messages: 0,
+  changed: 0,
+  items: 0,
+  title: null,
+  changeset: `cs-${id + 100}`,
+  author: { kind: "person", name: null, job: null, goal: null },
+  decided_by: "person",
+  rule: null,
+  policy: null,
+  reason: null,
+  why: null,
+  can_undo: false,
+  undo_open: false,
+  undone_by: null,
+  undo_of: null,
+  ...rest,
+});
+export const ledger: LedgerPage = {
+  next: null,
+  entries: [
+    entry(31, "2026-11-17T09:42:00Z", { messages: 18, changed: 18, author: { kind: "triage", name: null, job: null, goal: null }, decided_by: "rule", rule: 5, policy: 3, reason: "Rule 5 (Archive old newsletters) allows archive.", why: "Newsletters that you did not open in a week.", can_undo: true }),
+    entry(30, "2026-11-17T09:40:00Z", { verb: "trash", messages: 2, changed: 2, why: "Sales mail from senders that you do not know.", can_undo: true }),
+    entry(29, "2026-11-17T09:15:00Z", { verb: "label", args: { label: "Finance" }, messages: 3, changed: 3, author: { kind: "agent", name: "Claude Code", job: "j-4", goal: "Pay the Acme invoice" }, why: "The invoices of the Acme order.", can_undo: true }),
+    entry(28, "2026-11-17T08:30:00Z", { verb: "unread", messages: 6, changed: 6, why: "Undo of l-12", undo_of: "l-12", can_undo: true }),
+    entry(27, "2026-11-16T18:20:00Z", { state: "failed", messages: 40, changed: 12, error: "Gmail refused one call.", why: "Old notices from Example Air.", can_undo: true }),
+    entry(26, "2026-11-16T17:05:00Z", { verb: "close", items: 1, title: "Send the Q4 numbers to Priya", why: "Done." }),
+    entry(25, "2026-11-16T08:02:00Z", { verb: "read", state: "undone", messages: 6, changed: 6, author: { kind: "triage", name: null, job: null, goal: null }, decided_by: "rule", rule: 5, policy: 3, why: "Receipts that need no reply.", undone_by: "l-32" }),
+  ],
+};
+
+/** POST /api/ledger/{id}/undo: the entry with its open undo. */
+export function undoEntry(id: string): LedgerEntry | undefined {
+  const e = ledger.entries.find((x) => x.id === id && x.can_undo);
+  if (!e) return undefined;
+  Object.assign(e, { can_undo: false, undo_open: true });
+  return e;
+}
 
 export function message(id: string): Message | undefined {
   const item = items.find((i) => i.sources.some((s) => s.message === id));
@@ -509,6 +555,7 @@ export function answer(path: string): unknown {
   if (name === "records") return { receipt: 1, booking: 1 };
   if (name === "brief" && id === "hidden") return { count: hidden.length, items: hidden, next: null };
   if (name === "handled") return handled;
+  if (name === "ledger" && !id) return ledger;
   if (name === "outbox") return outbox();
   if (name === "gate") return page(id === "declined" ? "declined" : "waiting");
   if (name === "brief" && id) {
