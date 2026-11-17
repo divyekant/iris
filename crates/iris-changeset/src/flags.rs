@@ -2,6 +2,8 @@
 //! (docs/specs/2026-11-17-send-checks.md). Fixed rules, no model.
 
 use iris_compose::Content;
+use std::ops::Range;
+
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::Result;
@@ -80,12 +82,33 @@ const ATTACHMENT_WORDS: [&str; 21] = [
     "enclosing",
 ];
 
+/// The byte ranges of the words of a text, as the full-text index splits
+/// them: runs of letters and digits.
+fn word_spans(text: &str) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
+    let mut start = None;
+    for (i, ch) in text.char_indices() {
+        match (ch.is_alphanumeric(), start) {
+            (true, None) => start = Some(i),
+            (false, Some(s)) => {
+                out.push(s..i);
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        out.push(s..text.len());
+    }
+    out
+}
+
 /// The words of a text, as the full-text index splits them: runs of
 /// letters and digits, in lower case.
 pub fn words(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(str::to_lowercase)
+    word_spans(text)
+        .into_iter()
+        .map(|r| text[r].to_lowercase())
         .collect()
 }
 
@@ -93,23 +116,90 @@ fn digit_start(w: &str) -> bool {
     w.starts_with(|c: char| c.is_ascii_digit())
 }
 
+/// The words of a text in lower case, each with its byte range.
+fn spanned(text: &str) -> (Vec<String>, Vec<Range<usize>>) {
+    let spans = word_spans(text);
+    (
+        spans
+            .iter()
+            .map(|r| text[r.clone()].to_lowercase())
+            .collect(),
+        spans,
+    )
+}
+
+/// The range of word `i`, widened to the previous word if `before` and to
+/// the next word if `after`.
+fn widen(spans: &[Range<usize>], i: usize, before: bool, after: bool) -> Range<usize> {
+    let start = if before {
+        spans[i - 1].start
+    } else {
+        spans[i].start
+    };
+    let end = if after {
+        spans[i + 1].end
+    } else {
+        spans[i].end
+    };
+    start..end
+}
+
 /// An amount: a currency sign next to a digit (one space between is
 /// allowed), or a number next to a currency code or word.
 pub fn has_money(text: &str) -> bool {
-    let chars: Vec<char> = text.chars().collect();
-    let digit_at = |i: usize| chars.get(i).is_some_and(|c| c.is_ascii_digit());
-    for (i, c) in chars.iter().enumerate() {
-        if CURRENCY_SIGNS.contains(c) {
-            let before = i.checked_sub(1).is_some_and(digit_at)
-                || (i >= 2 && chars[i - 1] == ' ' && digit_at(i - 2));
-            let after = digit_at(i + 1) || (chars.get(i + 1) == Some(&' ') && digit_at(i + 2));
-            if before || after {
-                return true;
+    !money_spans(text).is_empty()
+}
+
+/// The range grown over the number characters (digits, `,` and `.`) on
+/// each side, so a mark covers the whole amount ("1,250.50"). A `,` or a
+/// `.` at an end of the range is not part of the number.
+fn grow(text: &str, r: Range<usize>) -> Range<usize> {
+    let number = |c: char| c.is_ascii_digit() || c == ',' || c == '.';
+    let mut start = r.start;
+    while let Some(c) = text[..start].chars().next_back().filter(|&c| number(c)) {
+        start -= c.len_utf8();
+    }
+    let mut end = r.end;
+    while let Some(c) = text[end..].chars().next().filter(|&c| number(c)) {
+        end += c.len_utf8();
+    }
+    let s = &text[start..end];
+    let lead = s.len() - s.trim_start_matches([',', '.']).len();
+    let trail = s.len() - s.trim_end_matches([',', '.']).len();
+    (start + lead).min(r.start)..(end - trail).max(r.end)
+}
+
+/// The byte range of each amount of [`has_money`]: the sign or the
+/// currency word with its whole number.
+pub fn money_spans(text: &str) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let digit_at = |i: usize| chars.get(i).is_some_and(|(_, c)| c.is_ascii_digit());
+    let end_of = |i: usize| chars[i].0 + chars[i].1.len_utf8();
+    for (i, &(_, c)) in chars.iter().enumerate() {
+        if CURRENCY_SIGNS.contains(&c) {
+            let near = i.checked_sub(1).is_some_and(digit_at);
+            let before = near || (i >= 2 && chars[i - 1].1 == ' ' && digit_at(i - 2));
+            let close = digit_at(i + 1);
+            let after = close || (chars.get(i + 1).map(|x| x.1) == Some(' ') && digit_at(i + 2));
+            if !(before || after) {
+                continue;
             }
+            let first = match (before, near) {
+                (false, _) => i,
+                (true, true) => i - 1,
+                (true, false) => i - 2,
+            };
+            let last = match (after, close) {
+                (false, _) => i,
+                (true, true) => i + 1,
+                (true, false) => i + 2,
+            };
+            out.push(grow(text, chars[first].0..end_of(last)));
         }
     }
-    let w = words(text);
-    w.iter().enumerate().any(|(i, t)| {
+    let (w, spans) = spanned(text);
+    for (i, t) in w.iter().enumerate() {
         let joined = |s: &str| CURRENCY_WORDS.contains(&s);
         // "200usd" and "usd200".
         let digits = t.trim_start_matches(|c: char| c.is_ascii_digit());
@@ -117,31 +207,43 @@ pub fn has_money(text: &str) -> bool {
         if (digits.len() < t.len() && joined(digits))
             || (letters.len() < t.len() && joined(letters))
         {
-            return true;
+            out.push(grow(text, spans[i].clone()));
+            continue;
         }
-        joined(t)
-            && (i.checked_sub(1).is_some_and(|p| digit_start(&w[p]))
-                || w.get(i + 1).is_some_and(|n| digit_start(n)))
-    })
+        if joined(t) {
+            let before = i.checked_sub(1).is_some_and(|p| digit_start(&w[p]));
+            let after = w.get(i + 1).is_some_and(|n| digit_start(n));
+            if before || after {
+                out.push(grow(text, widen(&spans, i, before, after)));
+            }
+        }
+    }
+    out
 }
 
 /// A date: a month next to a number, a weekday or a near day, `next
 /// week|month|year`, `end of (the) day|week|month`, an ISO date or a
 /// numeric date.
 pub fn has_date(text: &str) -> bool {
-    let w = words(text);
-    let near_number = |i: usize| {
-        i.checked_sub(1).is_some_and(|p| digit_start(&w[p]))
-            || w.get(i + 1).is_some_and(|n| digit_start(n))
-    };
+    !date_spans(text).is_empty()
+}
+
+/// The byte range of each date of [`has_date`].
+pub fn date_spans(text: &str) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
+    let (w, spans) = spanned(text);
     for (i, t) in w.iter().enumerate() {
         let t = t.as_str();
-        if DAY_WORDS.contains(&t) || (MONTHS.contains(&t) && near_number(i)) {
-            return true;
+        let before = i.checked_sub(1).is_some_and(|p| digit_start(&w[p]));
+        let after = w.get(i + 1).is_some_and(|n| digit_start(n));
+        if DAY_WORDS.contains(&t) {
+            out.push(spans[i].clone());
+        } else if MONTHS.contains(&t) && (before || after) {
+            out.push(widen(&spans, i, before, after));
         }
         let next = w.get(i + 1).map(String::as_str);
         if t == "next" && matches!(next, Some("week" | "month" | "year")) {
-            return true;
+            out.push(spans[i].start..spans[i + 1].end);
         }
         if t == "end" && next == Some("of") {
             let n = if w.get(i + 2).map(String::as_str) == Some("the") {
@@ -153,16 +255,18 @@ pub fn has_date(text: &str) -> bool {
                 w.get(i + n).map(String::as_str),
                 Some("day" | "week" | "month")
             ) {
-                return true;
+                out.push(spans[i].start..spans[i + n].end);
             }
         }
     }
-    numeric_date(text)
+    out.extend(numeric_dates(text));
+    out
 }
 
 /// `2026-11-17` (4, 2 and 2 digits with `-`) or `17/11`, `11/17/2026`
 /// (two or three groups of 1 to 4 digits with `/`).
-fn numeric_date(text: &str) -> bool {
+fn numeric_dates(text: &str) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
     let b = text.as_bytes();
     let mut i = 0;
     while i < b.len() {
@@ -199,74 +303,194 @@ fn numeric_date(text: &str) -> bool {
             _ => false,
         };
         if date {
-            return true;
+            out.push(i..j);
         }
         i = j.max(i + 1);
     }
-    false
+    out
 }
 
 /// A word of the attachment group.
 pub fn has_attachment(text: &str) -> bool {
-    words(text)
-        .iter()
-        .any(|t| ATTACHMENT_WORDS.contains(&t.as_str()))
+    !attachment_spans(text).is_empty()
+}
+
+/// The byte range of each word of [`has_attachment`].
+pub fn attachment_spans(text: &str) -> Vec<Range<usize>> {
+    let (w, spans) = spanned(text);
+    w.iter()
+        .zip(spans)
+        .filter(|(t, _)| ATTACHMENT_WORDS.contains(&t.as_str()))
+        .map(|(_, r)| r)
+        .collect()
+}
+
+/// The draft flags in the order of spec 2, section 5.3.
+pub const DRAFT_FLAGS: [&str; 5] = [
+    "new_recipient",
+    "money",
+    "date",
+    "attachment",
+    "untrusted_content",
+];
+
+/// The part of a draft that a mark is in, in the order of the draft.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Field {
+    /// The address with this index in `to`.
+    To(usize),
+    /// The address with this index in `cc`.
+    Cc(usize),
+    Subject,
+    Body,
+}
+
+/// One part of a draft that gave a draft flag (card R4-07): the review
+/// shows the flag on this part.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mark {
+    pub flag: &'static str,
+    pub field: Field,
+    /// The byte range in the text of the field: the whole address for
+    /// `To` and `Cc`.
+    pub range: Range<usize>,
+    /// For `untrusted_content`: the store ID of an external message that
+    /// holds the run.
+    pub source: Option<i64>,
 }
 
 /// The flags `new_recipient`, `money`, `date`, `attachment` and
 /// `untrusted_content` of a checked content, in this order. `account` is
 /// the address of the account that writes the draft.
 pub fn draft_flags(c: &Connection, account: &str, content: &Content) -> Result<Vec<&'static str>> {
-    let mut flags = Vec::new();
-    let mut new = false;
-    for a in content.to.iter().chain(&content.cc) {
+    Ok(names(&scan(c, account, content, false)?))
+}
+
+/// Each part of a checked content that gives a draft flag. The flags of
+/// the marks are the flags of [`draft_flags`]: the same rules give both.
+pub fn draft_marks(c: &Connection, account: &str, content: &Content) -> Result<Vec<Mark>> {
+    scan(c, account, content, true)
+}
+
+/// The flags of the marks, in the order of [`DRAFT_FLAGS`].
+pub fn names(marks: &[Mark]) -> Vec<&'static str> {
+    DRAFT_FLAGS
+        .into_iter()
+        .filter(|f| marks.iter().any(|m| m.flag == *f))
+        .collect()
+}
+
+/// The marks of a content. With `all` false, the store checks stop at the
+/// first new address and the first copied run: the flags are the same.
+fn scan(c: &Connection, account: &str, content: &Content, all: bool) -> Result<Vec<Mark>> {
+    let mut marks = Vec::new();
+    let mark = |flag, field, range, source| Mark {
+        flag,
+        field,
+        range,
+        source,
+    };
+    let addresses = content
+        .to
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (Field::To(i), a))
+        .chain(
+            content
+                .cc
+                .iter()
+                .enumerate()
+                .map(|(i, a)| (Field::Cc(i), a)),
+        );
+    for (field, a) in addresses {
         if a.eq_ignore_ascii_case(account) {
             continue;
         }
         if !iris_senders::sent_to(c, &a.to_ascii_lowercase())? {
-            new = true;
+            marks.push(mark("new_recipient", field, 0..a.len(), None));
+            if !all {
+                break;
+            }
+        }
+    }
+    let texts = [
+        (Field::Subject, content.subject.as_str()),
+        (Field::Body, content.body.as_str()),
+    ];
+    for (flag, find) in [
+        ("money", money_spans as fn(&str) -> Vec<Range<usize>>),
+        ("date", date_spans),
+        ("attachment", attachment_spans),
+    ] {
+        for (field, text) in texts {
+            marks.extend(find(text).into_iter().map(|r| mark(flag, field, r, None)));
+        }
+    }
+    for (field, text) in texts {
+        if !all && marks.iter().any(|m| m.flag == "untrusted_content") {
             break;
         }
-    }
-    let texts = [content.subject.as_str(), content.body.as_str()];
-    for (flag, on) in [
-        ("new_recipient", new),
-        ("money", texts.iter().any(|t| has_money(t))),
-        ("date", texts.iter().any(|t| has_date(t))),
-        ("attachment", texts.iter().any(|t| has_attachment(t))),
-        (
-            "untrusted_content",
-            copied(c, &content.subject)? || copied(c, &content.body)?,
-        ),
-    ] {
-        if on {
-            flags.push(flag);
+        for (range, source) in copied(c, text, all)? {
+            marks.push(mark("untrusted_content", field, range, Some(source)));
         }
     }
-    Ok(flags)
+    Ok(merge(marks))
 }
 
-/// True if a run of [`RUN`] words of the text, at a start of 0, 8, 16 and
-/// so on, is a phrase of the clean text of an external message: no `SENT`
-/// and no `DRAFT` label (the mail of the owner, as in `iris-senders`). A copied run of 15 words or more always has such a start.
-fn copied(c: &Connection, text: &str) -> Result<bool> {
-    let w = words(text);
-    let mut st = c.prepare_cached(
-        "SELECT EXISTS (SELECT 1 FROM message_fts f
-                        WHERE message_fts MATCH ?1
-                          AND NOT EXISTS (SELECT 1 FROM message_label ml
-                                          JOIN label l ON l.id = ml.label_id
-                                          WHERE ml.message_id = f.rowid
-                                            AND l.provider_id IN ('SENT', 'DRAFT')))",
-    )?;
-    for run in w.as_chunks::<RUN>().0 {
-        // The words are letters and digits only: no FTS5 syntax inside.
-        let phrase = format!("text : \"{}\"", run.join(" "));
-        if st.query_row([phrase], |r| r.get::<_, bool>(0))? {
-            return Ok(true);
+/// One mark for each piece of text: the marks of one flag, one field and
+/// one source that overlap or touch become one mark ("$1,200 USD" is one
+/// amount). Marks of two sources stay apart, so each copied run keeps its
+/// message; the copied runs never overlap. The marks come in the order of [`DRAFT_FLAGS`],
+/// then of the field, then of the text.
+fn merge(mut marks: Vec<Mark>) -> Vec<Mark> {
+    let rank = |f: &str| DRAFT_FLAGS.iter().position(|x| *x == f);
+    marks.sort_by_key(|m| (rank(m.flag), m.field, m.range.start, m.range.end));
+    let mut out: Vec<Mark> = Vec::with_capacity(marks.len());
+    for m in marks {
+        match out.last_mut() {
+            Some(last)
+                if last.flag == m.flag
+                    && last.field == m.field
+                    && last.source == m.source
+                    && m.range.start <= last.range.end =>
+            {
+                last.range.end = last.range.end.max(m.range.end);
+            }
+            _ => out.push(m),
         }
     }
-    Ok(false)
+    out
+}
+
+/// Each run of [`RUN`] words of the text, at a start of 0, 8, 16 and so
+/// on, that is a phrase of the clean text of an external message: no
+/// `SENT` and no `DRAFT` label (the mail of the owner, as in
+/// `iris-senders`). A copied run of 15 words or more always has such a
+/// start. Gives the byte range of the run and one such message. With
+/// `all` false, it stops at the first run.
+fn copied(c: &Connection, text: &str, all: bool) -> Result<Vec<(Range<usize>, i64)>> {
+    let (w, spans) = spanned(text);
+    let mut st = c.prepare_cached(
+        "SELECT f.rowid FROM message_fts f
+         WHERE message_fts MATCH ?1
+           AND NOT EXISTS (SELECT 1 FROM message_label ml
+                           JOIN label l ON l.id = ml.label_id
+                           WHERE ml.message_id = f.rowid
+                             AND l.provider_id IN ('SENT', 'DRAFT'))
+         ORDER BY f.rowid LIMIT 1",
+    )?;
+    let mut out = Vec::new();
+    for (k, run) in w.as_chunks::<RUN>().0.iter().enumerate() {
+        // The words are letters and digits only: no FTS5 syntax inside.
+        let phrase = format!("text : \"{}\"", run.join(" "));
+        if let Some(id) = st.query_row([phrase], |r| r.get::<_, i64>(0)).optional()? {
+            out.push((spans[k * RUN].start..spans[k * RUN + RUN - 1].end, id));
+            if !all {
+                break;
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The draft content and the account address of a `draft` or `send`

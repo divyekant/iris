@@ -38,6 +38,7 @@ serde_json = { version = "1", features = ["raw_value"] }
 tokio = { version = "1", default-features = false, features = ["rt", "net", "macros", "signal", "io-util", "time", "sync"] }
 
 [dev-dependencies]
+iris-job = { version = "0.0.0", path = "../iris-job" }
 iris-spec = { version = "0.0.0", path = "../iris-spec" }
 iris-fakegmail = { version = "0.0.0", path = "../iris-fakegmail" }
 iris-synth = { version = "0.0.0", path = "../iris-synth" }

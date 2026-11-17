@@ -70,12 +70,43 @@ fn agent(job: Option<&str>) -> Author {
     }
 }
 
-/// A changeset of `job` with one archive action, submitted when `at` is
-/// `Some`. Gives its ID.
+/// A changeset of `job` with one archive action on the thread of the news,
+/// submitted when `at` is `Some`. The thread is in the scope of the job,
+/// so the action is in its grant. Gives its ID.
 fn changeset(s: &Store, job: Option<&str>, at: Option<i64>) -> i64 {
+    // The grant holds only understood mail, so the news is understood.
+    let thread: i64 = s
+        .write(|c| {
+            c.execute(
+                "UPDATE message SET understood_at = 1 WHERE provider_id = 'g3'",
+                [],
+            )?;
+            Ok(c.query_row(
+                "SELECT thread_id FROM message WHERE provider_id = 'g3'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    if let Some(j) = job.and_then(iris_job::parse_job_id) {
+        let scoped: bool = s
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM job_scope
+                     WHERE job_id = ?1 AND thread_id = ?2 AND revoked_at IS NULL)",
+                    [j, thread],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        if !scoped {
+            iris_job::add_scope(s, j, iris_job::Ref::Thread(thread), By::Person, NOW).unwrap();
+        }
+    }
     let a = agent(job);
     let cs = create(s, &a, NOW).unwrap();
-    add_action(s, cs, &a, Verb::Archive, &["t-2"], &Map::new(), None).unwrap();
+    let t = format!("t-{thread}");
+    add_action(s, cs, &a, Verb::Archive, &[t.as_str()], &Map::new(), None).unwrap();
     if let Some(at) = at {
         submit(s, cs, &a, "Old news.", at).unwrap();
     }
@@ -225,10 +256,10 @@ async fn one_job_with_its_changesets_and_the_mail_of_its_waits() {
     assert_eq!(cs, [f(sooner), f(later)], "the first submit first");
     let c = &v["changesets"][0];
     assert_eq!(c["why"], "Old news.");
-    // The policy of the first start denies the action, so the changeset closed.
-    assert_eq!(c["state"], "closed");
+    // The policy of the first start proposes the action: it waits for you.
+    assert_eq!(c["state"], "open");
     assert_eq!(c["at"], iris_api::rfc3339(NOW + 10));
-    assert_eq!(c["actions"], json!({ "denied": 1 }));
+    assert_eq!(c["actions"], json!({ "proposed": 1 }));
 
     let threads = v["threads"].as_object().unwrap();
     assert_eq!(threads.len(), 2, "{threads:?}");

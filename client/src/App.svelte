@@ -8,6 +8,7 @@
   import List from "./views/List.svelte";
   import Records from "./views/Records.svelte";
   import Item from "./views/Item.svelte";
+  import StartPage from "./views/StartPage.svelte";
   import Mail from "./views/Mail.svelte";
   import Measures from "./views/Measures.svelte";
   import Ask from "./views/Ask.svelte";
@@ -73,7 +74,7 @@
   {#if access.none && !["home", "setup", "brief"].includes(route.view)}
     <p class="problem">Iris has no account yet. <a href="#/setup">Set up Iris</a> to copy your mail.</p>
   {/if}
-  {#if route.view === "item" || route.view === "mail" || route.view === "section" || route.view === "bundle" || route.view === "handled" || route.view === "gate" || route.view === "job" || route.view === "matter"}
+  {#if route.view === "item" || route.view === "start" || route.view === "mail" || route.view === "section" || route.view === "bundle" || route.view === "handled" || route.view === "gate" || route.view === "job" || route.view === "matter"}
     <button class="back" type="button" onclick={back}>Back</button>
   {/if}
   {#key hash}
@@ -114,6 +115,8 @@
       {#await get<Record<string, number>>("records") then counts}<Records {counts} {type} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "item"}
       {#await get<ItemData>(`items/${encodeURIComponent(route.id)}`) then item}<Item {item} />{:catch error}{@render failed(error)}{/await}
+    {:else if route.view === "start"}
+      {#await get<ItemData>(`items/${encodeURIComponent(route.id)}`) then item}<StartPage {item} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "mail"}
       {#await get<MessageData>(`messages/${encodeURIComponent(route.id)}`) then message}<Mail {message} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "ask"}
