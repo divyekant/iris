@@ -689,7 +689,7 @@ The pass also proposes a `hide` rule from the choices of the person
   `hide` proposal of its form.
 - An undone choice whose item, origin message, header or sender cannot
   be read again stops each `hide` proposal of its form.
-- The row has `verb = 'hide'` and the `form` (store migration 28). An
+- The row has `verb = 'hide'` and the `form` (store migration 29). An
   `allow` row has the form `''`.
 
 Failure list of the proposals:
