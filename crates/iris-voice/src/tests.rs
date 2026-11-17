@@ -777,3 +777,62 @@ fn a_message_that_waits_for_its_link_check_gets_no_call() {
     ));
     assert!(fake.calls.borrow().is_empty());
 }
+
+/// A large stored body reaches the data cut, with the cut mark.
+#[test]
+fn large_bodies_are_cut_in_the_read() {
+    let (b, t) = mailbox("large");
+    let big = format!("  \n{}", "y".repeat(30_000));
+    b.store
+        .put_messages(
+            1,
+            &[
+                msg(
+                    "bigs",
+                    "old9",
+                    380,
+                    "SENT",
+                    "me@example.com",
+                    "ana@example.org",
+                    Some(&big),
+                ),
+                msg(
+                    "bigt",
+                    "t1",
+                    950,
+                    "INBOX",
+                    "ana@example.org",
+                    "me@example.com",
+                    Some(&big),
+                ),
+            ],
+        )
+        .unwrap();
+    understood(&b.store);
+    let picked = b
+        .store
+        .read(|c| Ok(samples(c, 1, t, Some("ana@example.org"))?))
+        .unwrap();
+    assert_eq!(picked[0].text.chars().count(), SAMPLE_CHARS + 1);
+    let snap = b.store.read(|c| Ok(snapshot(c, t)?)).unwrap();
+    assert_eq!(
+        snap.newest
+            .last()
+            .unwrap()
+            .text
+            .as_ref()
+            .unwrap()
+            .chars()
+            .count(),
+        MESSAGE_CHARS + 1
+    );
+    let fake = Fake::new(r#"{"body": "ok"}"#);
+    write(&b.store, t, None, &fake, 1).unwrap();
+    let v: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
+    let ex = v["examples"][0]["text"].as_str().unwrap();
+    assert!(
+        ex.ends_with(CUT_MARK) && ex.starts_with('y'),
+        "{}",
+        &ex[..20]
+    );
+}

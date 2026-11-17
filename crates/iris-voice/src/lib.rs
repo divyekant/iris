@@ -175,25 +175,30 @@ fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
         ))?
         .query_row([thread], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     let mut st = c.prepare_cached(&format!(
-        "SELECT m.id, h.from_addr, h.from_name, h.to_addrs, h.cc_addrs, b.subject, b.text,
+        "SELECT m.id, h.from_addr, h.from_name, h.to_addrs, h.cc_addrs, b.subject,
+           substr(ltrim(b.text, char(32, 9, 10, 13)), 1, ?3),
            EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                    WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
          {IN_THREAD}
          ORDER BY coalesce(m.internal_date, 0) DESC, m.id DESC
          LIMIT ?2"
     ))?;
-    let rows = st.query_map([thread, THREAD_MESSAGES as i64], |r| {
-        Ok(Msg {
-            id: r.get(0)?,
-            from_addr: r.get(1)?,
-            from_name: r.get(2)?,
-            to_addrs: r.get(3)?,
-            cc_addrs: r.get(4)?,
-            subject: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
-            text: r.get(6)?,
-            sent: r.get(7)?,
-        })
-    })?;
+    // One character more than the cut keeps, so `cut` still marks a cut.
+    let rows = st.query_map(
+        [thread, THREAD_MESSAGES as i64, MESSAGE_CHARS as i64 + 1],
+        |r| {
+            Ok(Msg {
+                id: r.get(0)?,
+                from_addr: r.get(1)?,
+                from_name: r.get(2)?,
+                to_addrs: r.get(3)?,
+                cc_addrs: r.get(4)?,
+                subject: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                text: r.get(6)?,
+                sent: r.get(7)?,
+            })
+        },
+    )?;
     let mut newest = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     newest.reverse();
     Ok(Snapshot {
@@ -299,7 +304,7 @@ fn samples(
     to: Option<&str>,
 ) -> rusqlite::Result<Vec<Sample>> {
     let mut st = c.prepare_cached(&format!(
-        "SELECT m.id, h.to_addrs, b.text {}",
+        "SELECT m.id, h.to_addrs, substr(ltrim(b.text, char(32, 9, 10, 13)), 1, ?5) {}",
         sample_sql(
             "AND m.thread_id <> ?2
          ORDER BY coalesce(instr(',' || coalesce(h.to_addrs, '') || ',' || coalesce(h.cc_addrs, '') || ',',
@@ -308,13 +313,22 @@ fn samples(
          LIMIT ?4"
         )
     ))?;
-    let rows = st.query_map(params![account, thread, to, MAX_SAMPLES as i64], |r| {
-        Ok(Sample {
-            id: r.get(0)?,
-            to: r.get(1)?,
-            text: r.get(2)?,
-        })
-    })?;
+    let rows = st.query_map(
+        params![
+            account,
+            thread,
+            to,
+            MAX_SAMPLES as i64,
+            SAMPLE_CHARS as i64 + 1
+        ],
+        |r| {
+            Ok(Sample {
+                id: r.get(0)?,
+                to: r.get(1)?,
+                text: r.get(2)?,
+            })
+        },
+    )?;
     rows.collect()
 }
 
