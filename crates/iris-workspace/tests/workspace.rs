@@ -630,3 +630,35 @@ fn an_item_ref_grants_no_other_item_of_its_sources() {
     build(&store, job, &ws).unwrap();
     assert!(walk(&ws).0.contains("records/r-7.json"));
 }
+
+/// A person counts once for each message, also when one message names the
+/// address in more than one field.
+#[test]
+fn a_person_counts_once_for_each_message() {
+    let tmp = TempDir::new("once");
+    let store = store(&tmp.0.join("data"));
+    store
+        .write(|tx| {
+            Ok(tx.execute_batch(
+                "UPDATE header SET to_addrs = 'dana@example.com, dana@example.com',
+                   cc_addrs = 'dana@example.com' WHERE message_id = 9;
+                 UPDATE header SET to_addrs = 'me@example.com, sam@example.com',
+                   cc_addrs = 'sam@example.com' WHERE message_id = 7;",
+            )?)
+        })
+        .unwrap();
+    let job = create(&store, "Goal.", None, NOW).unwrap();
+    add_scope(&store, job, Ref::Thread(1), By::Person, NOW).unwrap();
+    add_scope(&store, job, Ref::Thread(2), By::Person, NOW).unwrap();
+    let ws = tmp.0.join("ws");
+    build(&store, job, &ws).unwrap();
+    let count = |p: &str| {
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(ws.join(p)).unwrap()).unwrap();
+        (v["from_them"].as_u64(), v["from_you"].as_u64())
+    };
+    // Dana: message 1 from Dana; message 9 from you (To twice and Cc).
+    assert_eq!(count("people/p-1.json"), (Some(1), Some(1)));
+    // Sam: message 7 from Sam (also in its To and Cc); message 10 from you.
+    assert_eq!(count("people/p-3.json"), (Some(1), Some(1)));
+}
