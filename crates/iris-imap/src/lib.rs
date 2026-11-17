@@ -41,8 +41,9 @@ pub enum Error {
     Protocol(String),
     /// A response or a line is above [`RESPONSE_LIMIT`].
     TooLarge,
-    /// The server refused the sign-in. The person must sign in again.
-    SignIn(String),
+    /// The server refused the sign-in. The person must sign in again. It
+    /// holds no server text, because a server can echo the secret.
+    SignIn,
     /// The server answered `NO` or `BAD` to a command.
     Refused(String),
     /// The server closed the connection (`BYE`).
@@ -61,7 +62,7 @@ impl fmt::Display for Error {
             Error::Tls(e) => write!(f, "imap: tls: {e}"),
             Error::Protocol(e) => write!(f, "imap: bad response: {e}"),
             Error::TooLarge => write!(f, "imap: response above {RESPONSE_LIMIT} bytes"),
-            Error::SignIn(e) => write!(f, "imap: sign-in refused: {e}"),
+            Error::SignIn => write!(f, "imap: sign-in refused"),
             Error::Refused(e) => write!(f, "imap: refused: {e}"),
             Error::Closed => write!(f, "imap: the server closed the connection"),
             Error::Missing(c) => write!(f, "imap: the server has no {c}"),
@@ -314,30 +315,13 @@ impl<S: Read + Write> Session<S> {
             _ => return Err(Error::Protocol("greeting".into())),
         }
         s.capability()?;
-        match auth {
-            Auth::Password { user, password } => {
-                if s.has("AUTH=PLAIN") {
-                    s.authenticate("PLAIN", format!("\0{user}\0{password}").as_bytes())?;
-                } else if s.has("LOGINDISABLED") {
-                    return Err(Error::Missing("AUTH=PLAIN or LOGIN"));
-                } else {
-                    let cmd = format!("LOGIN {} {}", quote(user)?, quote(password)?);
-                    s.run(&cmd, None, |_, _| Ok(())).map_err(|e| match e {
-                        Error::Refused(t) => Error::SignIn(t),
-                        e => e,
-                    })?;
-                }
-            }
-            Auth::OAuth { user, token } => {
-                if !s.has("AUTH=XOAUTH2") {
-                    return Err(Error::Missing("AUTH=XOAUTH2"));
-                }
-                s.authenticate(
-                    "XOAUTH2",
-                    format!("user={user}\x01auth=Bearer {token}\x01\x01").as_bytes(),
-                )?;
-            }
-        }
+        // A server can echo the secret in any answer to the sign-in, so
+        // each error of this step drops the server text.
+        s.sign_in(auth).map_err(|e| match e {
+            Error::Refused(_) | Error::SignIn => Error::SignIn,
+            Error::Protocol(_) => Error::Protocol("sign-in".into()),
+            e => e,
+        })?;
         // The capabilities can change after the sign-in.
         s.capability()?;
         if s.has("QRESYNC") {
@@ -353,6 +337,28 @@ impl<S: Read + Write> Session<S> {
             s.qresync = on;
         }
         Ok(s)
+    }
+
+    fn sign_in(&mut self, auth: Auth<'_>) -> Result<()> {
+        match auth {
+            Auth::Password { user, password } => {
+                if self.has("AUTH=PLAIN") {
+                    self.authenticate("PLAIN", format!("\0{user}\0{password}").as_bytes())
+                } else if self.has("LOGINDISABLED") {
+                    Err(Error::Missing("AUTH=PLAIN or LOGIN"))
+                } else {
+                    let cmd = format!("LOGIN {} {}", quote(user)?, quote(password)?);
+                    self.run(&cmd, None, |_, _| Ok(()))
+                }
+            }
+            Auth::OAuth { user, token } => {
+                if !self.has("AUTH=XOAUTH2") {
+                    return Err(Error::Missing("AUTH=XOAUTH2"));
+                }
+                let payload = format!("user={user}\x01auth=Bearer {token}\x01\x01");
+                self.authenticate("XOAUTH2", payload.as_bytes())
+            }
+        }
     }
 
     /// The server has the capability `name` (no case).
@@ -421,11 +427,11 @@ impl<S: Read + Write> Session<S> {
                 Response::Done {
                     tag: t,
                     status,
-                    outcome,
+                    outcome: _,
                 } if t.0 == tag => {
                     return match status {
                         Status::Ok => Ok(()),
-                        _ => Err(Error::SignIn(text(outcome.information.as_deref()))),
+                        _ => Err(Error::SignIn),
                     };
                 }
                 Response::Data {
@@ -664,7 +670,8 @@ impl<S: Read + Write> Session<S> {
                     }
                 }
                 _ => {
-                    if buf.len() + size > RESPONSE_LIMIT {
+                    // buf.len() is at most RESPONSE_LIMIT here; a server size can be usize::MAX.
+                    if size > RESPONSE_LIMIT - buf.len() {
                         return Err(Error::TooLarge);
                     }
                     let at = buf.len();

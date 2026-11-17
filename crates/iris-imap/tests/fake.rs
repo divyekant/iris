@@ -77,7 +77,7 @@ fn bad_password() {
                 password: "wrong",
             },
         );
-        assert!(matches!(r, Err(Error::SignIn(_))), "{:?}", r.err());
+        assert!(matches!(r, Err(Error::SignIn)), "{:?}", r.err());
     }
 }
 
@@ -92,7 +92,7 @@ fn bad_token() {
             token: "old",
         },
     );
-    assert!(matches!(r, Err(Error::SignIn(_))), "{:?}", r.err());
+    assert!(matches!(r, Err(Error::SignIn)), "{:?}", r.err());
 }
 
 #[test]
@@ -254,6 +254,53 @@ fn too_large() {
     for rest in [long_line, big_literal] {
         let mut s = Session::start(script(rest.as_bytes()), PASS).unwrap();
         assert!(matches!(s.folders(), Err(Error::TooLarge)));
+    }
+}
+
+#[test]
+fn huge_literal() {
+    let rest = format!("* LIST () \"/\" {{{}}}\r\n", usize::MAX);
+    let mut s = Session::start(script(rest.as_bytes()), PASS).unwrap();
+    assert!(matches!(s.folders(), Err(Error::TooLarge)));
+}
+
+/// A server that echoes the secret in each answer to the sign-in: no error
+/// shows it.
+#[test]
+fn sign_in_errors_hide_the_secret() {
+    let secret = "s3cret-Value";
+    for (caps, auth) in [("AUTH=PLAIN", 0), ("", 0), ("AUTH=XOAUTH2", 1)] {
+        for answer in [
+            format!("a2 NO bad {secret}\r\n"),
+            format!("a2 BAD bad {secret}\r\n"),
+            format!("a2 NO [ALERT] {secret}\r\n"),
+            format!("* {secret} (\r\n"),
+            format!("a9 OK {secret}\r\n"),
+        ] {
+            let challenge = if caps.starts_with("AUTH") {
+                "+ \r\n"
+            } else {
+                ""
+            };
+            let bytes = format!(
+                "* OK ready\r\n* CAPABILITY IMAP4rev1 {caps}\r\na1 OK done\r\n{challenge}{answer}"
+            );
+            let a = match auth {
+                0 => Auth::Password {
+                    user: USER,
+                    password: secret,
+                },
+                _ => Auth::OAuth {
+                    user: USER,
+                    token: secret,
+                },
+            };
+            let err = Session::start(Script(Cursor::new(bytes.into_bytes())), a)
+                .err()
+                .expect("error");
+            let shown = format!("{err} {err:?}");
+            assert!(!shown.contains(secret), "{shown}");
+        }
     }
 }
 
