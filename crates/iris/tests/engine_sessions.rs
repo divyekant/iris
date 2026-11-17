@@ -897,7 +897,7 @@ fn a_job_waits_three_days_and_continues() {
     assert_eq!(woke.why.as_deref(), Some("time"));
     let next = next_session(&s, &f, first.id);
     let notes = fs::read_to_string(workspace(&f).join("notes.md")).unwrap();
-    assert!(notes.contains("Dana has the contract."), "{notes}");
+    assert_eq!(notes, "# Notes\nDana has the contract.\n");
     // A second wake call starts no second session.
     s.wake(until_ms + 1000);
     assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, next.id);
@@ -1014,6 +1014,34 @@ fn a_reply_on_the_wait_thread_wakes_the_job() {
         .unwrap();
     assert_eq!(granted, vec![41]);
     next_session(&s, &f, first.id);
+    let _ = s.stop(f.job).unwrap();
+}
+
+/// R5-06 (docs/specs/2026-11-17-job-memory.md): the reap saves the notes in
+/// the store, and a job whose workspace folder is lost during the wait
+/// gets the same bytes at the wake.
+fn a_lost_workspace_gets_the_notes_at_the_wake() {
+    let f = fixture("memory", "sleep 30");
+    let s = sessions(&f);
+    let (until_day, until_ms) = day(3);
+    let first = s.run(f.job, "script").unwrap();
+    until(&s, &f, first, |r| r.started_ms.is_some());
+    // The session changes the notes after its build: only the reap can
+    // save these bytes. Not UTF-8, a NUL, a CR and no line end at the end.
+    let text: &[u8] = b"# Notes\r\nDana \xff\x00 has it";
+    fs::write(workspace(&f).join("notes.md"), text).unwrap();
+    let v = ask(&f, "wait", serde_json::json!({ "until": until_day })).unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    until(&s, &f, first, |r| r.reaped_ms.is_some());
+    // The reap transaction saved the notes.
+    assert_eq!(
+        iris_job::notes(&f.store, f.job).unwrap().as_deref(),
+        Some(text)
+    );
+    fs::remove_dir_all(workspace(&f)).unwrap();
+    s.wake(until_ms);
+    next_session(&s, &f, first);
+    assert_eq!(fs::read(workspace(&f).join("notes.md")).unwrap(), text);
     let _ = s.stop(f.job).unwrap();
 }
 
@@ -1364,6 +1392,10 @@ fn main() {
         (
             "a_job_waits_three_days_and_continues",
             a_job_waits_three_days_and_continues,
+        ),
+        (
+            "a_lost_workspace_gets_the_notes_at_the_wake",
+            a_lost_workspace_gets_the_notes_at_the_wake,
         ),
         (
             "a_reply_on_the_wait_thread_wakes_the_job",

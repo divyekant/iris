@@ -2,7 +2,7 @@
 
 - Date: 2026-11-17
 - Card: R5-06
-- Status: Draft
+- Status: Built
 
 ## Problem
 

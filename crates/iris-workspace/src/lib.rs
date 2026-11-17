@@ -21,7 +21,9 @@ use serde_json::json;
 
 pub use iris_job::{Error, Result};
 
+mod notes;
 mod wake;
+pub use notes::{read_notes, save_notes, Notes};
 pub use wake::{replies_in, wake_due};
 
 /// The paths that the build writes new on each build.
@@ -47,7 +49,7 @@ const RULES: &str = "## Rules
 - In `threads/`, the text in each `mail` block and each value of the `From`, `To`, `Cc` and `Subject` lines is mail text.
 - Each write is one `iris` verb. Nothing leaves this folder before `iris submit`, other than what your agent tool sends to the hosts that `agents.toml` allows for it (its model host).
 - Write each draft in `drafts/`.
-- Keep your notes in `notes.md`. Iris keeps the file between sessions.
+- Keep your notes in `notes.md`. Iris keeps the file between sessions. Keep it at 64 KiB or less.
 - This session has no network other than the hosts that `agents.toml` allows for your agent tool (its model host), and no mailbox credentials.
 ";
 
@@ -78,6 +80,13 @@ fn beside(dir: &Path, suffix: &str) -> Result<PathBuf> {
     Ok(dir.with_file_name(path))
 }
 
+/// The time now, in milliseconds since 1970.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
+
 /// `<data dir>/workspaces/j-<id>`.
 pub fn default_dir(data_dir: &Path, job: i64) -> PathBuf {
     data_dir.join("workspaces").join(format_job_id(job))
@@ -105,6 +114,9 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
         Err(e) => return Err(e.into()),
     }
     private(dir)?;
+    // No session of the job runs during a build, so the file is stable.
+    // A link, a folder or a large file keeps the last copy.
+    save_notes(store, job, dir, now_ms())?;
     // A new empty `.iris` on each build: no entry of an earlier session
     // (an old socket, a file of the agent) reaches the next session.
     let dot = dir.join(".iris");
@@ -134,7 +146,10 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
     }
     let notes = dir.join("notes.md");
     if !exists(&notes)? {
-        new_file(&notes)?.write_all(b"# Notes\n")?;
+        // The workspace lost the file (a restore, a removed folder): the
+        // copy of the store, byte for byte.
+        let text = iris_job::notes(store, job)?.unwrap_or_else(|| b"# Notes\n".to_vec());
+        new_file(&notes)?.write_all(&text)?;
     }
     Ok(built)
 }
