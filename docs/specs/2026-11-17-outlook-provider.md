@@ -242,11 +242,17 @@ actions match label names (spec 2). The names:
 
 - A folder that is not well-known: the label `Folders/<path>`, where the
   path is the display names from the top folder, joined with `/`. For
-  example `Folders/Receipts/Projects`. Its provider ID is `folder:<id>`.
+  example `Folders/Receipts/Projects`. In a display name, `%` becomes
+  `%25` and `/` becomes `%2F`, so that each `/` of the label is a level.
+  Its provider ID is `folder:<id>`. If two folder labels are equal under
+  the case folding of spec 2, each gets ` #` and the first 8 characters
+  of its folder ID at the end.
 - A category: the label with the category name, provider ID
   `category:<name>`. If the name is a system label name of spec 1 section
-  4.10 (case is not significant), or starts with `Folders/` or
-  `Categories/`, the label is `Categories/<name>`.
+  4.10, or starts with `Folders/` or `Categories/`, the label is
+  `Categories/<name>`. Each of these compares uses the Unicode case
+  folding of the label lookup of spec 2, so `folders/x` also gets the
+  prefix.
 
 Thus no category name gives a folder label or a system label, and two
 sources never give one name. A label action (`label`, `unlabel`) on a
