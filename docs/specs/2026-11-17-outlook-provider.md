@@ -93,6 +93,13 @@ The client does not use `mailFolders/delta`. Microsoft does not say if it
 gives child folders at all depths (A2). A mailbox has tens of folders, so a
 full read at each sync costs a few calls.
 
+A folder can go away (the person deletes it, or moves it out of the
+mailbox tree). If a folder of the mirror is not in the new list, the sync
+drops its delta link, and each mirror message of that folder gets the
+read by ID of section 3: 404 means gone, a message means a move to its
+new folder. A renamed or moved folder keeps its ID, so only its name or
+parent changes in the mirror.
+
 ### 3. Delta of the messages of one folder
 
 `delta(token, folder, link)`:
@@ -305,6 +312,7 @@ and MIME text of `$value`. All other input fails closed: the call gives
 | The same message two times in one round | the last one wins | fake replays |
 | A message moves during the round of a folder | `Removed` in one folder, `Message` in the other | fake move |
 | A message moves after the round of its new folder | `Removed` only; the read by ID finds the new folder, and the message stays | fake move between rounds |
+| A folder of the mirror is not in the folder list | its link goes; each of its messages is read by ID: 404 is gone, else its new folder | fake folder delete |
 | An expired delta link | `Error::DeltaReset`, a full round of that folder | fake expiry |
 | 429 or 503 with `Retry-After` on a read | wait for it, then call again; a write never calls again | fake with `Retry-After` |
 | A crash in a round | the last stored link is the start; Graph replays changes, the mirror applies each one again with the same result | R6-10 part |
