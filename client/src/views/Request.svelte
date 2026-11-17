@@ -9,6 +9,7 @@
 <script lang="ts">
   import { href } from "../route";
   import { get, post, type Changeset, type DraftView, type Item, type Part, type Recipient, type Target } from "../api";
+  import Comments from "./Comments.svelte";
   import { author, detail, FLAGS, itemRow, mail, TAGS, to, unmarked, key, messageRow, outcome, pages, plan, short, shown, target, targets, verb, waits, type Row } from "../review";
 
   // `onchange` gets the changeset after a decision, so that the review shows it as it is now.
@@ -231,6 +232,11 @@
   {/if}
 {/snippet}
 
+<!-- Only a changeset of a job takes a comment: its agent reads the comment in the next session. -->
+{#snippet comments()}
+  {#if c.author.job}<Comments changeset={c} agent={who} refused={refresh} />{/if}
+{/snippet}
+
 <!-- Withdraw ends the whole request, so it sits at the end of the decision row (option B, the owner's pick). -->
 {#snippet ask()}
   <button type="button" class="quiet end" disabled={busy || stale} onclick={() => (asking = true)}>Withdraw the request</button>
@@ -285,6 +291,7 @@
         </li>
       {/each}
     </ol>
+    {@render comments()}
     <div class="decide">
       <button type="button" class="primary" class:deny={!chosen.length} disabled={!ready} onclick={decide}>{plan(chosen.length, open.length)}</button>
       <p>Iris makes none of these changes before you approve them.</p>
@@ -292,6 +299,7 @@
       {#if !asking}{@render ask()}{/if}
     </div>
   {:else if c.state === "open" && !asking}
+    {@render comments()}
     <div class="decide">
       <p>No change of this request waits for your decision.</p>
       {@render ask()}

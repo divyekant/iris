@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
-import { act, answer, answerSender, askAnswer, replyDraft, decide, noticePost, undoEntry, outboxPost, policyPost, raw, startJob, stopPost, watchPost, withdraw } from "./dev/fixtures.ts";
+import { act, answer, answerSender, askAnswer, commentPost, replyDraft, decide, noticePost, undoEntry, outboxPost, policyPost, raw, startJob, stopPost, watchPost, withdraw } from "./dev/fixtures.ts";
 import { engineProxy } from "./dev/proxy.ts";
 
 // `pnpm dev` sends /api to an engine on 127.0.0.1:4800 (`iris serve`).
@@ -57,6 +57,18 @@ export default defineConfig(({ mode }) => {
             res.statusCode = done ? 200 : 409;
             res.setHeader("content-type", "application/json");
             res.end(JSON.stringify(done ?? { error: "This change has no undo now." }));
+            return;
+          }
+          const comment = url.match(/^\/changesets\/([^/?]+)\/comments$/);
+          if (comment && req.method === "POST") {
+            let text = "";
+            req.on("data", (part: Buffer) => (text += part));
+            req.on("end", () => {
+              const [status, body] = commentPost(decodeURIComponent(comment[1]), JSON.parse(text || "{}"));
+              res.statusCode = status;
+              res.setHeader("content-type", "application/json");
+              res.end(JSON.stringify(body));
+            });
             return;
           }
           const decision = url.match(/^\/changesets\/([^/?]+)\/(decide|withdraw)$/);
