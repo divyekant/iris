@@ -223,7 +223,9 @@ fn start(app: AppHandle) {
         }
         // The engine needs a moment to bind its socket.
         for _ in 0..20 {
-            if engine::request(&shell.socket, "app.notices", serde_json::json!({})).is_ok() {
+            // Only the notice thread may call `app.notices`: a call with no
+            // `after` starts the app, and its `last` must reach the cursor.
+            if engine::listening(&shell.socket) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(250));

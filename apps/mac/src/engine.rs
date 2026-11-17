@@ -40,6 +40,11 @@ pub fn program(home: &Path, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
     .find(|p| exists(p))
 }
 
+/// True when an engine listens on the socket at `path`. It sends no verb.
+pub fn listening(path: &Path) -> bool {
+    UnixStream::connect(path).is_ok()
+}
+
 /// Send one request to the engine socket at `path`, and give the result.
 pub fn request(path: &Path, verb: &str, args: Value) -> Result<Value, String> {
     let mut s = UnixStream::connect(path).map_err(|e| format!("no engine: {e}"))?;
@@ -499,13 +504,27 @@ mod tests {
     }
 
     #[test]
+    fn only_the_notice_thread_calls_app_notices() {
+        // A call with no `after` starts the app in the engine. A second
+        // caller would take a `last` that the cursor never sees, and the
+        // notices after it would get no system notice.
+        let mac = include_str!("mac.rs");
+        assert_eq!(mac.matches("\"app.notices\"").count(), 1);
+        assert!(mac.contains("engine::request(&socket, \"app.notices\", poll.args())"));
+    }
+
+    #[test]
     fn a_request_with_no_engine_or_a_bad_answer_is_an_error() {
         let d = std::env::temp_dir().join(format!("iris-mac-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let path = d.join("iris.sock");
         assert!(request(&path, "app.notices", json!({})).is_err());
+        assert!(!listening(&path));
         let l = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        assert!(listening(&path));
+        // The check of `listening` is the first connection: take it.
+        drop(l.accept().unwrap());
         let serve = move |answer: &'static str| {
             let (mut s, _) = l.accept().unwrap();
             let mut line = String::new();
