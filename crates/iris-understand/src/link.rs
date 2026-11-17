@@ -61,7 +61,13 @@ pub fn deceptive(links: &[Link], cut: bool, from_domain: &str, authenticated: bo
 /// `-` or `/` (`https://bank.com<br>/login`, `https://bank.<br>com`). Other
 /// words after it are a description (`https://bank.com<br>View account`).
 fn shown_host(shown: &str) -> Option<String> {
-    let lower = shown.trim().to_lowercase();
+    // Direction marks change the order that a person sees, not the letters.
+    let lower: String = shown
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|c| !matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+        .collect();
     let lower = if ["http://", "https://", "www."]
         .iter()
         .any(|p| lower.starts_with(p))

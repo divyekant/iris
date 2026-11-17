@@ -316,3 +316,33 @@ fn a_link_that_shows_a_brand_and_goes_elsewhere_is_a_mark() {
         html_link("https://click.mailer.example.org/r/1").replace("evil.example.net", "shop.com");
     assert!(run(&own, &[], &[], &[]).is_empty(), "{own}");
 }
+
+/// HTML mail with no DMARC result and the body `body`.
+fn html_body(body: &str) -> String {
+    format!(
+        "From: Shop <alerts@shop-mail.example.org>\nSubject: Your account\n\
+         Content-Type: text/html; charset=utf-8\n\n{body}\n"
+    )
+}
+
+#[test]
+fn the_link_check_reads_the_text_that_a_person_sees() {
+    for body in [
+        "<a href=\"https://evil.example.net/\">https://bank.exa&#x200b;mple.com</a>",
+        "<a href=\"https://evil.example.net/\">www.bank&shy;.example.com</a>",
+        "<blockquote><a href=\"https://evil.example.net/\">https://bank.example.com<br>/login</a></blockquote>",
+        "<blockquote><blockquote><a href=\"https://evil.example.net/\"><p>www.bank.example.com</p><p>/login</p></a></blockquote></blockquote>",
+        "<ul><li><a href=\"https://evil.example.net/\"><b>https://bank.example.com</b></a></li></ul>",
+        "<a href=\"https://evil.example.net/\">https://&#x202e;moc.elpmaxe.knab</a>",
+        "<a href=\"https://evil.example.net/\">&nbsp;https://bank.example.com&nbsp;</a>",
+    ] {
+        assert_eq!(run(&html_body(body), &[], &[], &[]), vec![Mark::Link], "{body}");
+    }
+    // The same texts with the real target.
+    for body in [
+        "<a href=\"https://bank.example.com/\">https://bank.exa&#x200b;mple.com</a>",
+        "<blockquote><a href=\"https://bank.example.com/\">https://bank.example.com<br>/login</a></blockquote>",
+    ] {
+        assert!(run(&html_body(body), &[], &[], &[]).is_empty(), "{body}");
+    }
+}

@@ -85,6 +85,11 @@ struct Writer {
     lists: usize,
     /// The open link: its target and the output position of its text.
     link: Option<(String, usize)>,
+    /// The text of the open link as a person sees it: no Markdown marks
+    /// (`> `, `- `), no invisible characters.
+    shown: String,
+    /// True while the writer writes a Markdown mark, not text.
+    mark: bool,
     /// Each closed link whose text is not its target: `(text, href)`, with
     /// the href as the HTML gives it.
     links: Vec<(String, String)>,
@@ -112,6 +117,16 @@ impl Writer {
             self.full = true;
             return;
         }
+        if self.link.is_some() && !self.mark {
+            if breaks > 0 {
+                self.shown.push('\n');
+            } else if self.space && !start {
+                self.shown.push(' ');
+            }
+            if !crate::INVISIBLE.contains(&c) {
+                self.shown.push(if c == '\u{a0}' { ' ' } else { c });
+            }
+        }
         if self.breaks > 0 {
             if !self.out.is_empty() {
                 for _ in 0..self.breaks {
@@ -137,7 +152,9 @@ impl Writer {
     }
 
     fn literal(&mut self, s: &str) {
+        self.mark = true;
         s.chars().for_each(|c| self.push(c));
+        self.mark = false;
     }
 
     fn text(&mut self, t: &str) {
@@ -162,12 +179,15 @@ impl Writer {
         let tail = &self.out[start..];
         let lead = tail.len() - tail.trim_start().len();
         let text = tail.trim().to_string();
+        let shown = std::mem::take(&mut self.shown);
+        let shown = shown.trim();
         let plain = href.strip_prefix("mailto:").unwrap_or(&href);
         if text.is_empty() || text == plain {
             return;
         }
-        if !self.full {
-            self.links.push((text.clone(), href.clone()));
+        // The link check reads the text as a person sees it.
+        if !self.full && !shown.is_empty() && shown != plain {
+            self.links.push((shown.to_string(), href.clone()));
         }
         // Percent-encode the characters that end a link target, and each
         // white space or control character, so that the target is one
@@ -417,6 +437,7 @@ fn open_effect(tag: &Tag, w: &mut Writer) {
                 .any(|p| lower.starts_with(p))
             {
                 w.link = Some((href, w.out.len()));
+                w.shown.clear();
             }
         }
         "img" => {

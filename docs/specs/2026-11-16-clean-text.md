@@ -198,7 +198,8 @@ not used makes no cut in either case.
   text only.
 - `Clean.links` lists each link whose text is not empty and is not its
   target (card R5-10, the hostile mark `link` of spec 1 section 6.7): the
-  text as the clean text shows it (trimmed, with its lines), and the href
+  text as a person sees it (trimmed, with its lines, with no Markdown marks
+  such as `> ` or `- ` and no invisible characters), and the href
   as the HTML gives it (entities decoded, not percent-encoded). Each HTML
   part that the walker reads adds its links. Each HTML version of a
   `multipart/alternative` adds its links too, also a version that the text
