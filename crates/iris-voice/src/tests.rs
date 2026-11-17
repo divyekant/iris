@@ -1012,6 +1012,11 @@ fn asked(name: &str) -> (Box_, i64) {
                   WHERE m.provider_id = 'ask'",
                 [],
             )?;
+            // iris-senders writes the `sent` evidence of each recipient.
+            tx.execute(
+                "INSERT INTO sender_evidence(message_id, address, rule, content_sha256) SELECT id, 'ana@example.org', 'sent', content_sha256 FROM message WHERE provider_id = 'ask'",
+                [],
+            )?;
             Ok(())
         })
         .unwrap();
@@ -1107,17 +1112,21 @@ fn a_thread_is_late_only_while_each_rule_holds() {
         ),
         (
             "the ask went to another person",
-            "UPDATE header SET to_addrs = 'bo@example.org', cc_addrs = 'me@example.com'
-              WHERE message_id IN (SELECT id FROM message WHERE thread_id = ?1)",
+            "UPDATE sender_evidence SET address = 'bo@example.org' WHERE ?1 > 0",
             at,
             false,
         ),
         (
             "Ana is the second recipient",
-            "UPDATE header SET to_addrs = 'bo@example.org', cc_addrs = ' ANA@example.org'
-              WHERE message_id IN (SELECT id FROM message WHERE thread_id = ?1)",
+            "INSERT INTO sender_evidence(message_id, address, rule, content_sha256) SELECT id, 'bo@example.org', 'sent', content_sha256 FROM message WHERE provider_id = 'ask' AND ?1 > 0",
             at,
             true,
+        ),
+        (
+            "the content of the ask changed",
+            "UPDATE message SET content_sha256 = 'other' WHERE thread_id = ?1",
+            at,
+            false,
         ),
         (
             "due today",
@@ -1162,12 +1171,27 @@ fn a_thread_is_late_only_while_each_rule_holds() {
             .put_messages(1, &[msg(id, "t-ask", date, label, from, to, Some("Hi"))])
             .unwrap();
         understood(&b.store);
+        evidence(&b.store, id, to);
     };
     add("answer", 2000, "INBOX", "ana@example.org", "me@example.com");
     assert!(late_threads(&b.store, at + 5000).is_empty());
     add("nudge", 3000, "SENT", "me@example.com", "ana@example.org");
     assert!(late_threads(&b.store, 3000 + LATE_AFTER_MS - 1).is_empty());
     assert_eq!(late_threads(&b.store, 3000 + LATE_AFTER_MS), [t]);
+}
+
+/// The `sent` evidence of iris-senders: message `provider` went to `to`.
+fn evidence(store: &Store, provider: &str, to: &str) {
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO sender_evidence(message_id, address, rule, content_sha256)
+                 SELECT id, ?2, 'sent', content_sha256 FROM message WHERE provider_id = ?1",
+                [provider, to],
+            )?;
+            Ok(())
+        })
+        .unwrap();
 }
 
 /// The person of the ready nudge of thread `t`, or `None`.
@@ -1190,7 +1214,8 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
     // A nudge draft makes the thread not late until the thread changes.
     let (b, t) = asked("nudge-saved");
     let fake = Fake::new(r#"{"body": "Hi Ana, any news on the slides? D"}"#);
-    // Ana is the second recipient: the nudge goes to her.
+    // The ask went to Bo first and to Ana: the nudge goes to Ana, the
+    // person of the commitment, not to the first recipient.
     b.store
         .write(|tx| {
             tx.execute(
@@ -1201,6 +1226,7 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
             Ok(())
         })
         .unwrap();
+    evidence(&b.store, "ask", "bo@example.org");
     let l = one_late(&b.store, now);
     nudge(&b.store, &l, &fake, now).unwrap();
     assert!(late_threads(&b.store, now).is_empty());
@@ -1209,7 +1235,8 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
     assert_eq!(data["reply_to"], "ana@example.org");
     assert_eq!(
         data["commitment"],
-        json!({"title": "Send the slides", "due": null, "quote": "can you send the slides?"})
+        json!({"title": "Send the slides", "kind": null, "amount": null, "due": null,
+               "quote": "can you send the slides?"})
     );
     assert!(fake.calls.borrow()[0]
         .0
@@ -1238,6 +1265,11 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
     assert_eq!(late_threads(&b.store, now), [t]);
     set("UPDATE item SET doc = json_set(doc, '$.title', 'Send the slides')");
     assert!(ready_to(&b.store, t).is_some());
+    // A correction of the amount: stale.
+    set("UPDATE item SET doc = json_set(doc, '$.amount', json_object('value', '10', 'currency', 'USD'))");
+    assert_eq!(ready_to(&b.store, t), None);
+    set("UPDATE item SET doc = json_remove(doc, '$.amount')");
+    assert!(ready_to(&b.store, t).is_some());
     set("UPDATE item SET status = 'done'");
     assert_eq!(ready_to(&b.store, t), None);
 
@@ -1263,6 +1295,7 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
                 )],
             )
             .unwrap();
+        evidence(&b.store, &format!("more{i}"), to);
     }
     understood(&b.store);
     let fake = Fake::new(r#"{"body": "x"}"#);
@@ -1322,10 +1355,7 @@ fn a_nudge_is_stale_when_its_person_changes_and_a_second_commitment_waits() {
             .unwrap()
     };
     // The ask went to Ana and Bo. Bo is a person too.
-    set(
-        "UPDATE header SET to_addrs = 'ana@example.org, bo@example.org'
-          WHERE message_id IN (SELECT id FROM message WHERE provider_id = 'ask')",
-    );
+    evidence(&b.store, "ask", "bo@example.org");
     set("INSERT INTO sender(address, kind) VALUES ('bo@example.org', 'person')");
     let l = one_late(&b.store, now);
     nudge(&b.store, &l, &Fake::new(r#"{"body": "Hi Ana"}"#), now).unwrap();
@@ -1355,8 +1385,7 @@ fn a_nudge_is_stale_when_its_person_changes_and_a_second_commitment_waits() {
     b.store
         .write(|tx| {
             tx.execute_batch(
-                "UPDATE header SET to_addrs = 'ana@example.org, bo@example.org'
-                  WHERE message_id IN (SELECT id FROM message WHERE provider_id = 'ask');
+                "INSERT INTO sender_evidence(message_id, address, rule, content_sha256) SELECT id, 'bo@example.org', 'sent', content_sha256 FROM message WHERE provider_id = 'ask';
                  INSERT INTO sender(address, kind) VALUES ('bo@example.org', 'person');",
             )?;
             Ok(())

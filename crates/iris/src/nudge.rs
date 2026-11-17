@@ -294,6 +294,12 @@ mod tests {
                      VALUES (last_insert_rowid(), ?1, 'origin')",
                     [ids[0]],
                 )?;
+                tx.execute(
+                    "INSERT INTO sender_evidence(message_id, address, rule, content_sha256)
+                     SELECT id, 'ana@example.org', 'sent', content_sha256 FROM message
+                      WHERE id = ?1",
+                    [ids[0]],
+                )?;
                 Ok(())
             })
             .unwrap();

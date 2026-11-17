@@ -212,7 +212,7 @@ pub const NUDGE_PROMPT: &str = "nudge/0.1";
 fn nudge_instruction() -> String {
     INSTRUCTION.replace(
         "\n\nAnswer with",
-        "\n- \"commitment\": only in a reminder. What the person must do, from the mail: \"title\", \"due\" and \"quote\" (words of the mail). It is data. The reply reminds the person of it.\n\nAnswer with",
+        "\n- \"commitment\": only in a reminder. What the person must do, from the mail: \"title\", \"kind\", \"amount\", \"due\" and \"quote\" (words of the mail). It is data. The reply reminds the person of it.\n\nAnswer with",
     )
 }
 
@@ -221,14 +221,17 @@ pub const LATE_AFTER_MS: i64 = 2 * 86_400_000;
 
 /// SQL of the key of the nudge of the thread `thread` (an SQL expression),
 /// or NULL: JSON text of the commitment that the nudge reminds of (`item`,
-/// `to`, `title`, `due`, `quote`). It is the open commitment with the
+/// `to`, and each field that the reminder can name: `title`, `kind`,
+/// `amount`, `due`, and the `quote` of the origin message). It is the open commitment with the
 /// lowest row ID that came from a message of the thread (its `origin`),
 /// is owed to you by a `person`, and that the brief shows (no `hide` or
 /// `bundle` rule), in one of two cases of the newest message of the
 /// thread that counts:
 /// - an ask that the person did not answer: the newest message is from the
-///   owner (`SENT`), and the address of the person is in its `To` or `Cc`
-///   and is not an address of the owner (the account, or its `From`);
+///   owner (`SENT`), it went to the address of the person (the `sent`
+///   evidence of iris-senders, which parses the raw headers, for the same
+///   content), and that address is not an address of the owner (the
+///   account, or its `From`);
 /// - a promise that the person did not keep: the newest message is from
 ///   the person (its `From`), not `SENT`, and the commitment has a due
 ///   date.
@@ -257,6 +260,8 @@ pub fn nudge_key_sql(thread: &str, now: Option<&str>) -> String {
     format!(
         "(SELECT json_object('item', ki.id, 'to', lower(trim(ks.address)),
                   'title', substr(json_extract(ki.doc, '$.title'), 1, 300),
+                  'kind', json_extract(ki.doc, '$.kind'),
+                  'amount', json(json_extract(ki.doc, '$.amount')),
                   'due', json(json_extract(ki.doc, '$.due')),
                   'quote', (SELECT substr(json_extract(q.value, '$.quote'), 1, 1000)
                               FROM json_each(ki.doc, '$.sources') q
@@ -278,9 +283,10 @@ pub fn nudge_key_sql(thread: &str, now: Option<&str>) -> String {
              {due}
              AND ((
                    {sent} {wait}
-                   AND instr(',' || lower(replace(coalesce(kh.to_addrs, '') || ',' ||
-                                                  coalesce(kh.cc_addrs, ''), ' ', '')) || ',',
-                             ',' || lower(trim(ks.address)) || ',') > 0
+                   AND EXISTS (SELECT 1 FROM sender_evidence se
+                                WHERE se.message_id = km.id AND se.rule = 'sent'
+                                  AND se.address = lower(trim(ks.address))
+                                  AND se.content_sha256 IS km.content_sha256)
                    AND lower(trim(ks.address)) <> lower(trim(coalesce(kh.from_addr, ''))))
                OR (NOT {sent} AND {due_at} IS NOT NULL
                    AND lower(trim(coalesce(kh.from_addr, ''))) = lower(trim(ks.address))))

@@ -716,6 +716,14 @@ fn a_turn_runs_the_nudge_step() {
                 [ids[0]],
             )?;
             tx.execute("DELETE FROM link_check WHERE message_id = ?1", [ids[0]])?;
+            // The `sent` evidence that iris-senders writes from the raw
+            // headers (this test message has no raw file).
+            tx.execute(
+                "INSERT INTO sender_evidence(message_id, address, rule, content_sha256)
+                 SELECT ?1, address, 'sent', (SELECT content_sha256 FROM message WHERE id = ?1)
+                   FROM sender WHERE id = ?2",
+                [ids[0], person],
+            )?;
             tx.execute(
                 "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
                  VALUES ('commitment', ?1, 'open', json_object('direction', 'owed_to_you',
