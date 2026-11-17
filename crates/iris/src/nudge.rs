@@ -3,8 +3,6 @@
 //! [`iris_voice::NUDGE_INTENT`]), through the one budget of understanding.
 //! It sends nothing: the draft stays in the store until the person acts.
 
-use std::collections::HashSet;
-
 use iris_store::Store;
 use iris_understand::batch;
 use iris_understand::budget::{model_row, Budgeted, ModelRow};
@@ -16,71 +14,62 @@ use crate::reply::Connect;
 /// The most nudge calls in one turn of the understanding thread.
 pub const MAX_PER_TURN: usize = 3;
 
-/// The late threads ([`iris_voice::Late`]) that a nudge call was made for,
-/// with the version of the model setting. A thread gets one call for each
-/// newest message, person, commitment and model version,
-/// also if the answer was not valid, so an invalid answer does not cost a
-/// call each turn. A model failure marks nothing: the shared wait governs.
-/// A change during the call marks nothing: the change gives a new chance.
-/// shortcut: the set is in memory, so a restart of the engine gives each late thread one more call; store it if restarts are frequent.
-pub type Tried = HashSet<(iris_voice::Late, i64)>;
+/// The most late threads that one step reads.
+pub const PAGE: usize = 20;
 
-/// One nudge step: a call for each late thread ([`iris_voice::late`]) that
-/// `tried` does not have, at most [`MAX_PER_TURN`] calls. No call when
-/// another run holds the lock, when no model is set, or during the wait
-/// after a model error. A budget refusal leaves no row and no mark, so the
-/// thread gets its call when the budget can pay it, and the step goes on
-/// with the next thread. Gives the count of saved drafts.
-pub fn step(
-    store: &Store,
-    connect: Connect,
-    tried: &mut Tried,
-    now_ms: i64,
-) -> Result<usize, String> {
+/// One nudge step: a call for each late thread of one page of
+/// [`iris_voice::late`] (at most [`PAGE`] threads, the oldest try first),
+/// at most [`MAX_PER_TURN`] calls. No call when another run holds the
+/// lock, when no model is set, or during the wait after a model error.
+/// Each try is in the store ([`iris_voice::tried`]): it moves the thread to
+/// the end of the order, so a thread that the budget cannot pay does not
+/// stop the others. Only an answer that is not a valid draft blocks the
+/// same key and model version. A budget refusal leaves no run row. Gives
+/// the count of saved drafts.
+pub fn step(store: &Store, connect: Connect, now_ms: i64) -> Result<usize, String> {
     let _lock = match batch::lock(store) {
         Ok(l) => l,
         Err(batch::Error::Busy) => return Ok(0),
         Err(e) => return Err(e.to_string()),
     };
-    let (row, wait, late) = store
-        .read(|c| {
-            Ok((
-                model_row(c)?,
-                batch::retry_after(c)?,
-                iris_voice::late(c, now_ms)?,
-            ))
-        })
+    let (row, wait) = store
+        .read(|c| Ok((model_row(c)?, batch::retry_after(c)?)))
         .map_err(|e| e.to_string())?;
     let Some(row) = row else { return Ok(0) };
-    let late: Vec<_> = late
-        .into_iter()
-        .map(|l| (l, row.version))
-        .filter(|k| !tried.contains(k))
-        .collect();
-    if late.is_empty() || wait.is_some_and(|t| t > now_ms) {
+    if wait.is_some_and(|t| t > now_ms) {
+        return Ok(0);
+    }
+    let late = store
+        .read(|c| Ok(iris_voice::late(c, now_ms, None, PAGE)?))
+        .map_err(|e| e.to_string())?;
+    if late.is_empty() {
         return Ok(0);
     }
     let model = connect(&row)?;
     let mut saved = 0;
     let mut calls = 0;
-    for key in late {
+    for l in late {
         if calls == MAX_PER_TURN {
             break;
         }
-        // A refusal or a model failure marks nothing: the budget and the
-        // shared wait decide when the thread gets its call. A refusal
-        // makes no call, so the next thread can still fit the budget.
-        match call(store, &row, model.as_ref(), &key.0, now_ms)? {
+        let outcome = call(store, &row, model.as_ref(), &l, now_ms)?;
+        store
+            .write(|tx| {
+                Ok(iris_voice::tried(
+                    tx,
+                    &l,
+                    row.version,
+                    matches!(outcome, Outcome::Invalid),
+                    now_ms,
+                )?)
+            })
+            .map_err(|e| e.to_string())?;
+        match outcome {
+            // No call went out: the next thread can still fit the budget.
             Outcome::Refused => continue,
             Outcome::ModelFailed => break,
-            Outcome::Changed => {}
-            Outcome::Saved => {
-                saved += 1;
-                tried.insert(key);
-            }
-            Outcome::Failed => {
-                tried.insert(key);
-            }
+            Outcome::Saved => saved += 1,
+            Outcome::Invalid | Outcome::Other => {}
         }
         calls += 1;
     }
@@ -91,10 +80,11 @@ enum Outcome {
     /// The budget refused the call. No row stays.
     Refused,
     Saved,
-    /// No draft, and no evidence against the model.
-    Failed,
-    /// The thread or the commitment changed during the call. No mark.
-    Changed,
+    /// The model answered, and the answer is not a valid draft.
+    Invalid,
+    /// No draft for another reason (the thread changed, a store error):
+    /// the next try can succeed.
+    Other,
     /// The model failed: the shared wait starts.
     ModelFailed,
 }
@@ -165,10 +155,8 @@ fn call(
         _ if refused => Outcome::Refused,
         _ if failed => Outcome::ModelFailed,
         Ok(_) => Outcome::Saved,
-        // The mail or the commitment changed during the call: the next
-        // turn reads the thread again.
-        Err(iris_voice::Error::Changed) => Outcome::Changed,
-        Err(_) => Outcome::Failed,
+        Err(iris_voice::Error::BadAnswer(_)) => Outcome::Invalid,
+        Err(_) => Outcome::Other,
     })
 }
 
@@ -216,6 +204,11 @@ mod tests {
                 stop: Stop::End,
             })
         }
+    }
+
+    /// The count of blocked tries.
+    fn blocked(store: &Store) -> i64 {
+        count(store, "SELECT count(*) FROM nudge_try WHERE blocked = 1")
     }
 
     fn count(store: &Store, sql: &str) -> i64 {
@@ -315,13 +308,13 @@ mod tests {
             Ok(Box::new(Fake(calls.clone(), answer.get())))
         };
         let late = 1_000 + iris_voice::LATE_AFTER_MS;
-        let mut tried = Tried::new();
 
         // Not late yet: no call.
-        assert_eq!(step(&store, &connect, &mut tried, late - 1), Ok(0));
-        // No budget: the call is refused, and no row and no mark stay.
-        assert_eq!(step(&store, &connect, &mut tried, late), Ok(0));
-        assert_eq!((calls.get(), tried.len()), (0, 0));
+        assert_eq!(step(&store, &connect, late - 1), Ok(0));
+        // No budget: the call is refused. No run row stays, and the try
+        // does not block.
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!((calls.get(), blocked(&store)), (0, 0));
         assert_eq!(count(&store, "SELECT count(*) FROM understand_run"), 0);
 
         // With a budget: one call, one draft with the nudge intent, and
@@ -335,23 +328,32 @@ mod tests {
         // A model failure: the shared wait starts, and no mark stays, so
         // the thread gets its call after the wait.
         answer.set("fail");
-        assert_eq!(step(&store, &connect, &mut tried, late), Ok(0));
-        assert_eq!((calls.get(), tried.len()), (1, 0));
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!((calls.get(), blocked(&store)), (1, 0));
         let wait = count(&store, "SELECT retry_at FROM model_setting");
         assert!(wait > late);
-        assert_eq!(step(&store, &connect, &mut tried, late), Ok(0));
+        assert_eq!(step(&store, &connect, late), Ok(0));
         assert_eq!(calls.get(), 1, "no call during the wait");
         calls.set(0);
         // An invalid answer after the wait: one call, then no call again
         // for the same newest message.
         let late = wait;
         answer.set("not json");
-        assert_eq!(step(&store, &connect, &mut tried, late), Ok(0));
-        assert_eq!(step(&store, &connect, &mut tried, late), Ok(0));
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!((calls.get(), blocked(&store)), (1, 1));
+        // A store that the engine opens again keeps the try: no new call.
+        let again = Store::open(&dir).unwrap();
+        assert_eq!(step(&again, &connect, late), Ok(0));
         assert_eq!(calls.get(), 1);
-        tried.clear();
+        store
+            .write(|tx| {
+                tx.execute("DELETE FROM nudge_try", [])?;
+                Ok(())
+            })
+            .unwrap();
         answer.set(r#"{"body": "Hi Ana, any news on the slides? D"}"#);
-        assert_eq!(step(&store, &connect, &mut tried, late), Ok(1));
+        assert_eq!(step(&store, &connect, late), Ok(1));
         assert_eq!(calls.get(), 2);
         assert_eq!(
             count(
@@ -364,9 +366,14 @@ mod tests {
             1
         );
         assert!(count(&store, "SELECT budget_micro_usd FROM model_setting") < 1_000_000);
-        // The draft is ready: no call again, also with an empty set.
-        tried.clear();
-        assert_eq!(step(&store, &connect, &mut tried, late + 60_000), Ok(0));
+        // The draft is ready: no call again, also with no try.
+        store
+            .write(|tx| {
+                tx.execute("DELETE FROM nudge_try", [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(step(&store, &connect, late + 60_000), Ok(0));
         assert_eq!(calls.get(), 2);
 
         // The lock is held: no call.
@@ -377,7 +384,7 @@ mod tests {
             })
             .unwrap();
         let lock = batch::lock(&store).unwrap();
-        assert_eq!(step(&store, &connect, &mut tried, late), Ok(0));
+        assert_eq!(step(&store, &connect, late), Ok(0));
         drop(lock);
         assert_eq!(calls.get(), 2);
         let _ = std::fs::remove_dir_all(&dir);
@@ -400,12 +407,11 @@ mod tests {
             Ok(Box::new(Fake(calls.clone(), answer.get())))
         };
         let late = 1_000 + iris_voice::LATE_AFTER_MS;
-        let mut tried = Tried::new();
         // The big thread comes first and is refused; the small one gets its
         // call. The answer is not valid: no draft.
-        assert_eq!(step(&store, &connect, &mut tried, late), Ok(0));
-        assert_eq!((calls.get(), tried.len()), (1, 1));
-        assert_eq!(step(&store, &connect, &mut tried, late), Ok(0));
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!((calls.get(), blocked(&store)), (1, 1));
+        assert_eq!(step(&store, &connect, late), Ok(0));
         assert_eq!(calls.get(), 1, "one call for one model version");
         // A new model version: the small thread gets a new call.
         store
@@ -415,7 +421,7 @@ mod tests {
             })
             .unwrap();
         answer.set(r#"{"body": "Hi Ana, any news? D"}"#);
-        assert_eq!(step(&store, &connect, &mut tried, late), Ok(1));
+        assert_eq!(step(&store, &connect, late), Ok(1));
         assert_eq!(calls.get(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }

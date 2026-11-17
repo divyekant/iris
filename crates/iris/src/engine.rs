@@ -481,9 +481,8 @@ pub const UNDERSTAND_EVERY: Duration = Duration::from_secs(10);
 /// the senders that search finds (spec 1 section 5.6). The runner reads
 /// only pending mail, so a turn with nothing to do reads no message.
 fn understand_loop(store: Arc<Store>) {
-    let mut tried = crate::nudge::Tried::new();
     loop {
-        std::thread::sleep(understand_turn(&store, &mut tried, now_ms()));
+        std::thread::sleep(understand_turn(&store, now_ms()));
     }
 }
 
@@ -491,7 +490,7 @@ fn understand_loop(store: Arc<Store>) {
 /// next turn. After each run, idle or not, the proposal step of matters
 /// runs with its hourly gate, so a mailbox that is already understood
 /// still gets proposals. Then the nudge step ([`crate::nudge::step`]).
-pub fn understand_turn(store: &Store, tried: &mut crate::nudge::Tried, now_ms: i64) -> Duration {
+pub fn understand_turn(store: &Store, now_ms: i64) -> Duration {
     match crate::cost::after_sync(store, now_ms) {
         Ok(crate::cost::AfterSync::Busy) => return BUSY_RETRY,
         Ok(_) => {}
@@ -501,7 +500,7 @@ pub fn understand_turn(store: &Store, tried: &mut crate::nudge::Tried, now_ms: i
         say!("iris: matters: {e}");
     }
     let connect = |row: &iris_understand::budget::ModelRow| crate::cost::connect(store, row);
-    if let Err(e) = crate::nudge::step(store, &connect, tried, now_ms) {
+    if let Err(e) = crate::nudge::step(store, &connect, now_ms) {
         say!("iris: nudge: {e}");
     }
     UNDERSTAND_EVERY

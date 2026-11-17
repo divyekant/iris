@@ -1025,7 +1025,7 @@ fn asked(name: &str) -> (Box_, i64) {
 
 fn late_threads(store: &Store, now: i64) -> Vec<i64> {
     store
-        .read(|c| Ok(late(c, now)?))
+        .read(|c| Ok(late(c, now, None, 100)?))
         .unwrap()
         .into_iter()
         .map(|l| l.thread)
@@ -1203,7 +1203,7 @@ fn ready_to(store: &Store, t: i64) -> Option<String> {
 
 /// The one late thread at `now`.
 fn one_late(store: &Store, now: i64) -> Late {
-    let mut l = store.read(|c| Ok(late(c, now)?)).unwrap();
+    let mut l = store.read(|c| Ok(late(c, now, None, 100)?)).unwrap();
     assert_eq!(l.len(), 1, "{l:?}");
     l.remove(0)
 }
@@ -1471,4 +1471,79 @@ fn a_promise_of_the_person_is_late_after_its_due_date() {
     understood(&b.store);
     assert_eq!(ready_to(&b.store, t), None);
     assert!(late_threads(&b.store, 3 * 86_400_000).is_empty());
+}
+
+#[test]
+fn the_tries_order_the_pages_and_only_an_invalid_answer_blocks() {
+    let now = 1000 + LATE_AFTER_MS;
+    let (b, t) = asked("nudge-tries");
+    // A second late thread: an ask to Ana in another thread.
+    b.store
+        .put_messages(
+            1,
+            &[msg(
+                "ask2",
+                "t-ask2",
+                900,
+                "SENT",
+                "me@example.com",
+                "ana@example.org",
+                Some("Ana, can you book the room?"),
+            )],
+        )
+        .unwrap();
+    understood(&b.store);
+    evidence(&b.store, "ask2", "ana@example.org");
+    let t2 = thread_of(&b.store, "t-ask2");
+    b.store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 SELECT form, account_id, status, json_set(doc, '$.title', 'Book the room'), 2, 2
+                   FROM item WHERE id = 1;
+                 INSERT INTO item_source(item_id, message_id, role)
+                 SELECT last_insert_rowid(), id, 'origin' FROM message WHERE provider_id = 'ask2';
+                 INSERT INTO model_setting(id, provider, base_url, model, version, max_tokens,
+                   timeout_s) VALUES (1, 'local', 'http://127.0.0.1:1/v1', 'm', 1, 1000, 60);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let page = |limit| {
+        b.store
+            .read(|c| Ok(late(c, now, None, limit)?))
+            .unwrap()
+            .into_iter()
+            .map(|l| l.thread)
+            .collect::<Vec<_>>()
+    };
+    let try_ = |thread: i64, version: i64, blocked: bool, at: i64| {
+        b.store
+            .write(|tx| {
+                let l = late(tx, now, Some(thread), 1)?.remove(0);
+                tried(tx, &l, version, blocked, at)?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    // No try yet: the oldest newest message (by row ID) first, one page of
+    // one thread.
+    assert_eq!(page(1), [t]);
+    // A try moves the thread to the end: the next page has the other one.
+    try_(t, 1, false, 5);
+    assert_eq!(page(1), [t2]);
+    assert_eq!(page(10), [t2, t]);
+    try_(t2, 1, false, 6);
+    assert_eq!(page(10), [t, t2]);
+    // A blocked try: no call for the same key and model version.
+    try_(t, 1, true, 7);
+    assert_eq!(page(10), [t2]);
+    // A new model version: the thread is late again.
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE model_setting SET version = 2", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(page(10), [t2, t]);
 }

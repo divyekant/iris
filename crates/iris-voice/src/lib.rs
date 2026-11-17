@@ -294,15 +294,23 @@ pub fn nudge_key_sql(thread: &str, now: Option<&str>) -> String {
     )
 }
 
-/// The threads that need a nudge at the time `now_ms`, oldest newest
-/// message first. A thread needs a nudge when:
+/// At most `limit` threads that need a nudge at the time `now_ms`, or
+/// only `thread` if it is given. The threads with no try or the oldest try
+/// come first ([`tried`]), then the oldest newest message. A thread needs
+/// a nudge when:
 /// - it has a [`nudge_key_sql`] at `now_ms`;
 /// - [`write`] can make a draft: no message that counts is hostile or waits
 ///   for understanding;
 /// - it has no draft of the owner (a draft with no `ask`), stale or not,
 ///   so a nudge never replaces it, and no draft that is ready
-///   ([`ready_sql`]): a ready nudge has the same key.
-pub fn late(c: &Connection, now_ms: i64) -> rusqlite::Result<Vec<Late>> {
+///   ([`ready_sql`]): a ready nudge has the same key;
+/// - its last try is not blocked for the same key and model version.
+pub fn late(
+    c: &Connection,
+    now_ms: i64,
+    thread: Option<i64>,
+    limit: usize,
+) -> rusqlite::Result<Vec<Late>> {
     let newest = in_thread!("t.thread");
     let all = in_thread!("k.thread");
     let key = nudge_key_sql("n.thread", Some("?1"));
@@ -313,19 +321,24 @@ pub fn late(c: &Connection, now_ms: i64) -> rusqlite::Result<Vec<Late>> {
              JOIN item_source os ON os.item_id = item.id AND os.role = 'origin'
              JOIN message om ON om.id = os.message_id
             WHERE item.form = 'commitment' AND item.status = 'open'
-              AND json_extract(item.doc, '$.direction') = 'owed_to_you'),
+              AND json_extract(item.doc, '$.direction') = 'owed_to_you'
+              AND (?2 IS NULL OR om.thread_id = ?2)),
          n(thread, newest) AS (SELECT t.thread, (SELECT m.id {newest} {NEWEST} LIMIT 1) FROM t),
          k(thread, newest, key) AS (SELECT n.thread, n.newest, {key} FROM n)
          SELECT k.thread, k.newest, k.key FROM k
+           LEFT JOIN nudge_try nt ON nt.thread_id = k.thread
           WHERE k.key IS NOT NULL
             AND NOT EXISTS (SELECT 1 {all}
                              AND ({HOSTILE} OR b.message_id IS NULL OR m.understood_at IS NULL))
             AND NOT EXISTS (SELECT 1 FROM reply_draft d
                              WHERE d.thread_id = k.thread AND d.ask IS NULL)
             AND NOT {ready}
-          ORDER BY k.newest"
+            AND NOT (coalesce(nt.blocked, 0) = 1 AND nt.key = k.key
+                     AND nt.version IS (SELECT version FROM model_setting))
+          ORDER BY coalesce(nt.tried_at, 0), k.newest
+          LIMIT ?3"
     ))?;
-    let rows = st.query_map(params![now_ms], |r| {
+    let rows = st.query_map(params![now_ms, thread, limit as i64], |r| {
         Ok(Late {
             thread: r.get(0)?,
             newest: r.get(1)?,
@@ -333,6 +346,26 @@ pub fn late(c: &Connection, now_ms: i64) -> rusqlite::Result<Vec<Late>> {
         })
     })?;
     rows.collect()
+}
+
+/// Records a try of the nudge of `late` for the model version `version`.
+/// `blocked`: the model gave an answer that is not a valid draft, so the
+/// same key and version get no new call.
+pub fn tried(
+    c: &Connection,
+    late: &Late,
+    version: i64,
+    blocked: bool,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    c.execute(
+        "INSERT INTO nudge_try(thread_id, key, version, blocked, tried_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(thread_id) DO UPDATE SET key = excluded.key, version = excluded.version,
+           blocked = excluded.blocked, tried_at = excluded.tried_at",
+        params![late.thread, late.key, version, blocked, now_ms],
+    )?;
+    Ok(())
 }
 
 /// A thread that needs a nudge ([`late`]).
@@ -379,7 +412,7 @@ pub fn ready(
 /// hidden, changed or answered during the call gets no nudge. The draft
 /// keeps the key in `reply_draft.ask`.
 pub fn nudge(store: &Store, late: &Late, model: &dyn Model, now_ms: i64) -> Result<Saved> {
-    let still = |c: &Connection| Ok(self::late(c, now_ms)?.contains(late));
+    let still = |c: &Connection| Ok(self::late(c, now_ms, Some(late.thread), 1)?.contains(late));
     let mut ask: Value = serde_json::from_str(&late.key).unwrap_or(Value::Null);
     let to = late.to();
     if let Some(o) = ask.as_object_mut() {
