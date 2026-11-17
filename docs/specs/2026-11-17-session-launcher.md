@@ -184,6 +184,10 @@ standard output) holds only status lines that the helper writes from
 fixed text and numbers: the start, the process group ID, each signal that
 the helper sends, the exit code or signal of the agent, the count of
 output bytes that the helper dropped, and the result of `Isolation::stop`.
+After the reap, the helper waits at most 2 seconds for the end of the
+output pipe, so that the count holds each byte. If a process that the stop
+missed keeps the pipe open, the line gives the count as a lower bound and
+says that the pipe is still open.
 A status line holds no text of the agent. The log has a limit of 64 KiB.
 The agent writes its own notes in `notes.md` of the workspace.
 

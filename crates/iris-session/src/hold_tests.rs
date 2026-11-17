@@ -312,3 +312,20 @@ fn the_count_holds_each_byte_that_the_agent_wrote() {
     let (_, log, _) = r.end();
     assert!(log.contains("; 1000 bytes of output dropped"), "{log}");
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_process_that_keeps_the_pipe_open_gives_a_lower_bound() {
+    // setsid moves the child out of the group, and the test isolation
+    // stops nothing, so the child keeps the output pipe open.
+    let mut r = run("setsid sleep 5 & exit 0", Duration::ZERO);
+    r.send("start\n");
+    r.line();
+    assert_eq!(r.line(), "exited 0");
+    let (code, log, _) = r.end();
+    assert_eq!(code, 0);
+    assert!(
+        log.contains("at least 0 bytes of output dropped, the output pipe is still open"),
+        "{log}"
+    );
+}

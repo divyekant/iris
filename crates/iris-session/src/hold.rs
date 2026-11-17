@@ -18,6 +18,8 @@ use crate::isolation::{Command, Isolation};
 pub const TERM_WAIT: Duration = Duration::from_secs(5);
 /// The size limit of the session log.
 pub const LOG_LIMIT: u64 = 64 * 1024;
+/// The longest wait for the output thread after the reap.
+const DRAIN_WAIT: Duration = Duration::from_secs(2);
 /// The longest first line that the helper reads.
 const LINE_MAX: usize = 64;
 
@@ -60,10 +62,21 @@ pub fn hold(
     status: impl Write,
     log: impl Write,
 ) -> i32 {
-    hold_with(isolation, session, command, input, status, log, TERM_WAIT)
+    hold_with(
+        isolation,
+        session,
+        command,
+        input,
+        status,
+        log,
+        TERM_WAIT,
+        Duration::ZERO,
+    )
 }
 
-/// [`hold`] with another wait between the two signals, for tests.
+#[allow(clippy::too_many_arguments)]
+/// [`hold`] with another wait between the two signals, and a delay before
+/// the output thread reads, for tests.
 pub(crate) fn hold_with(
     isolation: &dyn Isolation,
     session: i64,
@@ -72,6 +85,7 @@ pub(crate) fn hold_with(
     mut status: impl Write,
     log: impl Write,
     term_wait: Duration,
+    drain_delay: Duration,
 ) -> i32 {
     let mut log = Log {
         out: log,
@@ -102,9 +116,15 @@ pub(crate) fn hold_with(
     // never blocks on a full pipe, and no byte of it is stored.
     let dropped = Arc::new(AtomicU64::new(0));
     let count = dropped.clone();
+    // The output thread sends on `drained` when it reads the end of the pipe.
+    let (drained_tx, drained) = mpsc::channel::<()>();
     if thread::Builder::new()
         .name("iris-hold-output".into())
-        .spawn(move || drain(output, &count))
+        .spawn(move || {
+            thread::sleep(drain_delay);
+            drain(output, &count);
+            let _ = drained_tx.send(());
+        })
         .is_err()
     {
         // The reader is gone with the closure: a write of the agent fails.
@@ -157,10 +177,17 @@ pub(crate) fn hold_with(
     }
     // 5. The reap, only now.
     let line = reap(child);
-    log.line(&format!(
-        "{line}; {} bytes of output dropped",
-        dropped.load(Ordering::SeqCst)
-    ));
+    // Each process of the session is stopped now, so the output thread
+    // reads the last bytes and the end of the pipe. Wait for it, so that
+    // the count holds each byte. A process that the stop missed can keep
+    // the pipe open: then the count is a lower bound, and the log says so.
+    let open = drained.recv_timeout(DRAIN_WAIT).is_err();
+    let count = dropped.load(Ordering::SeqCst);
+    log.line(&if open {
+        format!("{line}; at least {count} bytes of output dropped, the output pipe is still open")
+    } else {
+        format!("{line}; {count} bytes of output dropped")
+    });
     let _ = writeln!(status, "{line}");
     let _ = status.flush();
     0
