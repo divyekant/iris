@@ -231,7 +231,10 @@ fn a_repair_that_stops_keeps_each_difference_and_the_resync() {
     // The caller gets the 401, so that it can get a new token.
     let e = verify(&store, &gmail, account, TOKEN).unwrap_err();
     assert!(
-        matches!(e, iris_sync::Error::Gmail(iris_gmail::Error::Unauthorized)),
+        matches!(
+            e,
+            iris_sync::Error::Provider(iris_gmail::Error::Unauthorized)
+        ),
         "{e}"
     );
     // The log and the resync are saved before the error.
@@ -439,7 +442,7 @@ fn a_400_of_the_extra_message_check_is_an_error_not_a_difference() {
         at_fake.fail_next(&[400])
     }));
     match verify(&store, &gmail, account, TOKEN) {
-        Err(iris_sync::Error::Gmail(iris_gmail::Error::Api { status: 400, .. })) => {}
+        Err(iris_sync::Error::Provider(iris_gmail::Error::Api { status: 400, .. })) => {}
         other => panic!("not the 400: {other:?}"),
     }
     assert_eq!(sync_state(&store).0, None, "no resync");

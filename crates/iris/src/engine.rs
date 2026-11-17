@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use iris_auth::{AccessToken, Client, Secret};
 use iris_gmail::Gmail;
+use iris_provider::Provider;
 use iris_store::Store;
 use serde::{Deserialize, Serialize};
 
@@ -184,7 +185,7 @@ pub fn sync_accounts(store: &Store) -> Result<Vec<i64>> {
 /// The sync of one account. The access token stays in memory only.
 pub struct Worker {
     store: Arc<Store>,
-    gmail: Gmail,
+    mail: Box<dyn Provider>,
     account: i64,
     test_token_uri: Option<String>,
     token: Option<AccessToken>,
@@ -195,16 +196,17 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// `test_token_uri` is for tests: a token endpoint on 127.0.0.1.
+    /// `mail` is the provider of the account. `test_token_uri` is for
+    /// tests: a token endpoint on 127.0.0.1.
     pub fn new(
         store: Arc<Store>,
-        gmail: Gmail,
+        mail: impl Provider + 'static,
         account: i64,
         test_token_uri: Option<String>,
     ) -> Worker {
         Worker {
             store,
-            gmail,
+            mail: Box::new(mail),
             account,
             test_token_uri,
             token: None,
@@ -230,13 +232,18 @@ impl Worker {
     /// account needs a new sign-in (specification 1, section 4.7).
     fn call<T>(
         &mut self,
-        f: impl Fn(&Store, &Gmail, i64, &str) -> iris_sync::Result<T>,
+        f: impl Fn(&Store, &dyn Provider, i64, &str) -> iris_sync::Result<T>,
     ) -> Result<T> {
         let mut refused = 0;
         while refused < 2 {
             let token = self.access()?;
-            match f(&self.store, &self.gmail, self.account, token.expose()) {
-                Err(iris_sync::Error::Gmail(iris_gmail::Error::Unauthorized)) => {
+            match f(
+                &self.store,
+                self.mail.as_ref(),
+                self.account,
+                token.expose(),
+            ) {
+                Err(iris_sync::Error::Provider(iris_provider::Error::Unauthorized)) => {
                     let expires_at = self.token.take().map(|t| t.expires_at);
                     if !expires_at.is_some_and(|e| ran_out(self.got, e, Instant::now())) {
                         refused += 1;
@@ -300,7 +307,7 @@ impl Worker {
                 renew: &mut renew,
                 refused: false,
             };
-            let step = iris_apply::step(store, &self.gmail, &mut t, account, now_ms());
+            let step = iris_apply::step(store, self.mail.as_ref(), &mut t, account, now_ms());
             (step, t.refused)
         };
         // The token state comes before the result of the step: a refusal

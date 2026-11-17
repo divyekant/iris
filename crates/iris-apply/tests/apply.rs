@@ -877,7 +877,7 @@ fn a_failed_recovery_read_keeps_the_row() {
     b.stopped(a, &ms, 1);
     // The profile call passes, the first read gets 400.
     b.fake.fail_next(&[0, 400]);
-    assert!(matches!(b.apply(a), Err(Error::Gmail(_))));
+    assert!(matches!(b.apply(a), Err(Error::Provider(_))));
     assert!(b.writing(a));
     assert_eq!(b.state(a).0, "approved");
     assert!(matches!(b.apply(a), Ok(Outcome::Failed { .. })));
@@ -910,7 +910,7 @@ fn a_refused_token_gets_one_new_token() {
     b.fake.fail_next(&[401]);
     assert!(matches!(
         b.apply_as(b.account, a, &mut || None),
-        Err(Error::Gmail(iris_gmail::Error::Unauthorized))
+        Err(Error::Provider(iris_gmail::Error::Unauthorized))
     ));
     assert_eq!(b.state(a).0, "approved");
     assert!(!b.writing(a));
@@ -926,7 +926,7 @@ fn a_refused_token_gets_one_new_token() {
     };
     assert!(matches!(
         apply(&b.store, &b.gmail, &mut token, b.account, a),
-        Err(Error::Gmail(iris_gmail::Error::Unauthorized))
+        Err(Error::Provider(iris_gmail::Error::Unauthorized))
     ));
     assert!(token.refused);
     applied(b.apply(a));

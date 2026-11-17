@@ -1,0 +1,11 @@
+[package]
+name = "iris-provider"
+description = "The mail provider interface of Iris: one trait for the sync, the apply and the send, with the shared types and errors."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

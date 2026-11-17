@@ -3,7 +3,7 @@
 //! Gmail actions, the move of approved sends to the held outbox, and the
 //! release of each held send whose hold ended.
 
-use iris_gmail::Gmail;
+use iris_provider::Provider;
 use iris_store::Store;
 use rusqlite::params;
 
@@ -58,14 +58,14 @@ impl Step {
 /// An error of the recovery or of the store ends the step with the error.
 pub fn step(
     store: &Store,
-    gmail: &Gmail,
+    mail: &dyn Provider,
     token: &mut Token<'_>,
     account: i64,
     now_ms: i64,
 ) -> Result<Step> {
     let begun = std::time::Instant::now();
     let clock = move || now_ms + i64::try_from(begun.elapsed().as_millis()).unwrap_or(i64::MAX / 2);
-    step_clock(store, gmail, token, account, &clock)
+    step_clock(store, mail, token, account, &clock)
 }
 
 /// [`step`] with a clock. Steps 1, 2, 3 and 4 use the time at the start of
@@ -74,7 +74,7 @@ pub fn step(
 /// hold (docs/specs/2026-11-17-write.md, section 3).
 pub fn step_clock(
     store: &Store,
-    gmail: &Gmail,
+    mail: &dyn Provider,
     token: &mut Token<'_>,
     account: i64,
     clock: &dyn Fn() -> i64,
@@ -82,7 +82,7 @@ pub fn step_clock(
     let now_ms = clock();
     let mut out = Step::default();
     if writing_rows(store, account)? {
-        recover(store, gmail, token, account)?;
+        recover(store, mail, token, account)?;
     }
     // While stopped, only the recovery runs. The claims check the stop
     // again, so a stop after this read still holds.
@@ -90,7 +90,7 @@ pub fn step_clock(
         return Ok(out);
     }
     for action in approved(store, account)? {
-        let r = apply(store, gmail, token, account, action);
+        let r = apply(store, mail, token, account, action);
         out.results.push((action, r));
         if out.stop(token) {
             return Ok(out);
@@ -110,7 +110,7 @@ pub fn step_clock(
             out.next = Some(out.next.map_or(until, |n| n.min(until)));
             continue;
         }
-        let r = release(store, gmail, token, account, action);
+        let r = release(store, mail, token, account, action);
         if let Ok(Outcome::Hold(t)) = r {
             out.next = Some(out.next.map_or(t, |n| n.min(t)));
         }
