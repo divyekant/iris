@@ -44,7 +44,25 @@ export type Item = {
   published?: string;
   code?: string;
   expires?: string;
+  /** The confirmed matter that keeps the item (`g-4`), or null. */
+  matter?: string | null;
 };
+
+// A matter: mail that belongs together, as Iris proposes it and the person decides it
+// (docs/spec/schema/matter.schema.json).
+export type MatterForm = "commitment" | "conversation" | "record";
+export type Matter = {
+  id: string;
+  title: string;
+  status: "proposed" | "confirmed" | "declined";
+  items: string[];
+  counts: Record<MatterForm, number>;
+  created: string;
+  updated: string;
+  decided?: string;
+};
+export type MatterList = { proposed: Matter[]; confirmed: Matter[] };
+export type MatterView = { matter: Matter; items: Record<MatterForm, Item[]> };
 
 // `duplicates` maps an item ID to newer items that can be the same thing (spec 1
 // section 7.5). The newer items are not in `items`: the client shows a pair as one line.

@@ -13,6 +13,8 @@
   import Gate from "./Gate.svelte";
   import Arrived from "./Arrived.svelte";
   import Watches from "./Watches.svelte";
+  import MatterCard from "./MatterCard.svelte";
+  import { loadProposed, type Proposed } from "../matters";
   import { arrivedLine, loadWatches, type Watch } from "../watches";
   import { flushHolds, HOLD } from "../act";
 
@@ -20,10 +22,11 @@
     brief: firstBrief,
     status: firstStatus = null,
     watches: firstWatches,
+    proposed: firstProposed,
     now: start = new Date(),
     poll = 5000,
     hold = HOLD,
-  }: { brief: Brief; status?: Status | null; watches?: Watch[]; now?: Date; poll?: number; hold?: number } = $props();
+  }: { brief: Brief; status?: Status | null; watches?: Watch[]; proposed?: Proposed | null; now?: Date; poll?: number; hold?: number } = $props();
 
   // The API puts a conversation with a stranger only under Strangers, with exact counts (dk, 2026-11-16).
   // svelte-ignore state_referenced_locally
@@ -84,12 +87,27 @@
       flushHolds();
     };
   });
+  // The proposal of a matter loads apart from the brief too, with its own ticket. A failed load keeps the last card.
+  // svelte-ignore state_referenced_locally
+  let proposed = $state(firstProposed ?? null);
+  const proposedTicket = newest();
+  async function reloadProposed() {
+    const fresh = proposedTicket();
+    try {
+      const p = await loadProposed();
+      if (fresh()) proposed = p;
+    } catch {
+      // The next poll tries again.
+    }
+  }
   // The watches load apart from the brief, so a slow or failed watch load never holds the brief.
   // svelte-ignore state_referenced_locally
   if (firstWatches === undefined) reloadWatches();
+  // svelte-ignore state_referenced_locally
+  if (firstProposed === undefined) reloadProposed();
   $effect(() => {
     if (!poll) return;
-    const timer = setInterval(reloadWatches, poll * 12);
+    const timer = setInterval(() => (reloadWatches(), reloadProposed()), poll * 12);
     return () => clearInterval(timer);
   });
 
@@ -199,6 +217,15 @@
       {#each soon.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={brief.you_owe.duplicates?.[item.id]} ondone={done} delay={hold} />{/each}
     </ul>
     {#if soon.length > SHOWN}<a class="all" href="#/brief/you_owe">All {brief.you_owe.count} that you owe</a>{/if}
+  </section>
+{/if}
+
+<!-- A matter that Iris proposes (R6-01, option A of the owner): one card, the newest proposal. -->
+{#if proposed}
+  <section aria-labelledby="matter">
+    <h2 id="matter"><span>{proposed.count === 1 ? "A matter to confirm" : "Matters to confirm"}</span> <span class="count">{proposed.count}</span></h2>
+    {#key proposed.view.matter.id}<MatterCard view={proposed.view} ondecided={() => (done(), reloadProposed())} delay={hold} />{/key}
+    {#if proposed.count > 1}<a class="all" href="#/matters">All {proposed.count} that Iris proposes</a>{/if}
   </section>
 {/if}
 

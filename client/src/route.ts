@@ -4,13 +4,13 @@ export type Form = "commitment" | "conversation" | "feed" | "signal";
 export type SectionKey = "you_owe" | "owed_to_you" | "conversations" | "strangers" | "signals" | "feed";
 
 export type Route =
-  | { view: "home" | "setup" | "brief" | "ask" | "measures" | "rules" | "review" | "handled" | "jobs" }
+  | { view: "home" | "setup" | "brief" | "ask" | "measures" | "rules" | "review" | "handled" | "jobs" | "matters" }
   | { view: "records"; type: string }
   | { view: "list"; form: Form }
   | { view: "section"; key: SectionKey }
   | { view: "bundle"; rule: number }
   | { view: "gate"; declined: boolean }
-  | { view: "item" | "mail" | "job"; id: string };
+  | { view: "item" | "mail" | "job" | "matter"; id: string };
 
 const LISTS = { commitments: "commitment", conversations: "conversation", feed: "feed", signals: "signal" } as const;
 
@@ -25,6 +25,9 @@ export const SECTIONS: Record<SectionKey, string> = {
 
 /** The canonical job ID (docs/spec/schema/job.schema.json). Up to 18 digits keeps it inside an i64. */
 export const JOB_ID = /^j-[1-9]\d{0,17}$/;
+
+/** The canonical matter ID (docs/spec/schema/matter.schema.json). */
+export const MATTER_ID = /^g-[1-9]\d{0,17}$/;
 
 export function parse(hash: string): Route {
   let name = "";
@@ -43,11 +46,12 @@ export function parse(hash: string): Route {
   const rule = hash.replace(/^#\/?/, "").split("/")[2] ?? "";
   if (name === "brief" && id === "bundle" && /^[1-9]\d{0,9}$/.test(rule)) return { view: "bundle", rule: Number(rule) };
   if (name === "records") return { view: "records", type: id };
-  // #/jobs, or #/jobs/j-12 with the canonical job ID and no other part.
-  if (name === "jobs") {
+  // #/jobs, or #/jobs/j-12; #/matters, or #/matters/g-4. The canonical ID and no other part.
+  for (const [list, one, ID] of [["jobs", "job", JOB_ID], ["matters", "matter", MATTER_ID]] as const) {
+    if (name !== list) continue;
     const parts = hash.replace(/^#\/?/, "").split("/");
-    if (parts.length === 1 || (parts.length === 2 && parts[1] === "")) return { view: "jobs" };
-    return parts.length === 2 && JOB_ID.test(id) ? { view: "job", id } : { view: "home" };
+    if (parts.length === 1 || (parts.length === 2 && parts[1] === "")) return { view: list };
+    return parts.length === 2 && ID.test(id) ? { view: one, id } : { view: "home" };
   }
   if (name === "setup" || name === "brief" || name === "ask" || name === "measures" || name === "rules" || name === "review" || name === "handled") return { view: name };
   return { view: "home" };
@@ -58,10 +62,12 @@ export const href = {
   mail: (id: string) => `#/mail/${encodeURIComponent(id)}`,
   bundle: (rule: number) => `#/brief/bundle/${rule}`,
   job: (id: string) => `#/jobs/${encodeURIComponent(id)}`,
+  matter: (id: string) => `#/matters/${encodeURIComponent(id)}`,
 };
 
 export const NAV = [
   ["#/brief", "Brief"],
+  ["#/matters", "Matters"],
   ["#/ask", "Ask"],
   ["#/review", "Review"],
   ["#/jobs", "Jobs"],

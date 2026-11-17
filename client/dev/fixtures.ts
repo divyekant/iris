@@ -1,6 +1,6 @@
 // Answers of the local API, made from the examples of docs/spec/schema/examples.
 // The dev server (`pnpm dev --mode fixtures`) and the tests use them. They are not in the build.
-import type { Action, AskAnswer, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, Job, JobDetail, Message, Policy, Rule, Status, Summary, Target } from "../src/api";
+import type { Action, AskAnswer, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, Job, JobDetail, Matter, MatterList, MatterView, Message, Policy, Rule, Status, Summary, Target } from "../src/api";
 import youOwe from "../../docs/spec/schema/examples/commitment-you-owe.json" with { type: "json" };
 import owedToYou from "../../docs/spec/schema/examples/commitment-owed-to-you.json" with { type: "json" };
 import payment from "../../docs/spec/schema/examples/commitment-payment.json" with { type: "json" };
@@ -9,6 +9,8 @@ import receipt from "../../docs/spec/schema/examples/record-receipt.json" with {
 import booking from "../../docs/spec/schema/examples/record-booking.json" with { type: "json" };
 import feed from "../../docs/spec/schema/examples/feed.json" with { type: "json" };
 import signal from "../../docs/spec/schema/examples/signal-code.json" with { type: "json" };
+import matterConfirmed from "../../docs/spec/schema/examples/matter-confirmed.json" with { type: "json" };
+import matterProposed from "../../docs/spec/schema/examples/matter-proposed.json" with { type: "json" };
 
 export const items = [youOwe, owedToYou, payment, conversation, receipt, booking, feed, signal] as unknown as Item[];
 
@@ -475,11 +477,26 @@ export function answer(path: string): unknown {
   if (name === "search") return { messages: [] };
   if (name === "policy") return policy;
   if (name === "watches") return watches;
+  if (name === "matters" && id) return matterViews[id];
+  if (name === "matters") return matters;
   if (name === "jobs" && id) return jobDetails[id];
   if (name === "jobs") return jobPage(q.get("state"));
   if (name === "notices") return notices;
   return undefined;
 }
+
+// Matters: the two examples, with members from the item examples above.
+const members = (base: object, list: Item[]): MatterView => {
+  const by = (form: string) => list.filter((i) => i.form === form);
+  const items = { commitment: by("commitment"), conversation: by("conversation"), record: by("record") };
+  const counts = { commitment: items.commitment.length, conversation: items.conversation.length, record: items.record.length };
+  return { matter: { ...(base as Matter), items: list.map((i) => i.id), counts }, items };
+};
+export const matterViews: Record<string, MatterView> = {
+  "g-4": members(matterConfirmed, [youOwe, conversation, booking] as unknown as Item[]),
+  "g-5": members(matterProposed, [receipt, owedToYou] as unknown as Item[]),
+};
+export const matters: MatterList = { proposed: [matterViews["g-5"].matter], confirmed: [matterViews["g-4"].matter] };
 
 /** POST /api/senders/<id>/<answer> in the fixture state: the sender row after the answer. */
 // The answers at the gate in the dev server: the state of each sender, from the fixtures.

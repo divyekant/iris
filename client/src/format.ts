@@ -1,4 +1,4 @@
-import type { Account, Brief, Item, Money, Party, Section, Status } from "./api";
+import type { Account, Brief, Item, MatterForm, Money, Party, Section, Status } from "./api";
 
 export function party(p: Party | undefined): string {
   if (!p) return "";
@@ -154,6 +154,13 @@ export const RECORD_FIELDS: Record<string, string[]> = {
 const WORDS = ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
 export const count = (n: number, one: string, many: string) => `${WORDS[n] ?? n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
 export const capital = (s: string) => s[0].toUpperCase() + s.slice(1);
+
+/** The members of a matter by form: "Two records, one conversation". */
+export function matterCounts(counts: Record<MatterForm, number>): string {
+  const forms: MatterForm[] = ["record", "conversation", "commitment"];
+  const text = forms.filter((f) => counts[f] > 0).map((f) => count(counts[f], f, `${f}s`)).join(", ");
+  return text ? capital(text) : "No items now";
+}
 
 /** The start of the next local day, as an ISO date-time. */
 export function nextDay(now = new Date()): string {
