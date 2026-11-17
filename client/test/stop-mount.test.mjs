@@ -188,3 +188,21 @@ test("a Stop with no answer makes no claim", async () => {
     band.destroy();
   }
 });
+
+for (const kind of ["stop", "resume"]) {
+  test(`a ${kind} with a lost answer and a good read shows the state, with no error to try again`, async () => {
+    const { act, stopState } = await load("/src/views/Stop.svelte");
+    const before = kind === "resume";
+    Object.assign(stopState, { stopped: before, since: before ? since : null, live: 0, busy: false, known: true, note: "", error: "" });
+    globalThis.fetch = async (url, init) => {
+      // The POST commits in the engine, but its answer is lost. The GET answers.
+      if ((init?.method ?? "GET") === "POST") throw new TypeError("Failed to fetch");
+      const out = { stopped: !before, since: before ? null : since, live: 0, busy: false };
+      return new Response(JSON.stringify(out), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    await act(kind);
+    assert.equal(stopState.known, true);
+    assert.equal(stopState.stopped, !before);
+    assert.equal(stopState.error, "");
+  });
+}

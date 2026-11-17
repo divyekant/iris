@@ -39,10 +39,11 @@
     return true;
   }
 
-  export async function reread(keepError: boolean) {
+  export async function reread() {
     const n = ++newest;
     try {
-      if (show(n, await read<Answer>("stop")) && !keepError) stopState.error = "";
+      // A good read gives the state: an older failure of Stop or Resume no longer applies.
+      if (show(n, await read<Answer>("stop"))) stopState.error = "";
     } catch {
       // With no answer, the state is not known: the band makes no claim.
       // The access state shows the failure of the engine above each view.
@@ -54,7 +55,7 @@
   export async function refresh() {
     // A Stop or a Resume in progress gives the newer state.
     if (stopState.busyAction) return;
-    await reread(false);
+    await reread();
   }
 
   /** Stop all agent work, or resume it. */
@@ -78,7 +79,7 @@
     } finally {
       stopState.busyAction = "";
     }
-    if (failed) await reread(true);
+    if (failed) await reread();
   }
 </script>
 
@@ -101,7 +102,7 @@
     <section class="band" role="status" aria-label="Stop state not known">
       <p class="words">Iris does not know if agent work is stopped now.</p>
       <div class="actions">
-        <button class="again" type="button" disabled={shared.busyAction !== ""} onclick={() => reread(false)}>Check again</button>
+        <button class="again" type="button" disabled={shared.busyAction !== ""} onclick={() => reread()}>Check again</button>
       </div>
     </section>
   {:else if shared.stopped}
