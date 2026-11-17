@@ -435,6 +435,9 @@ machine.
 - One build thread of the engine does these builds, in order. A build can
   wait for the workspace lock with no limit, so no supervisor turn, stop
   or run waits for a build.
+- In the same way, one stop thread of the engine stops the egress proxy
+  of each reaped session. A proxy stop joins the threads of the proxy, so
+  no supervisor turn, stop or run waits for it.
 
 ### Isolation
 

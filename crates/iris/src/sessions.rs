@@ -56,6 +56,10 @@ pub struct Sessions {
     /// build can wait for the workspace lock without a limit, so no
     /// supervisor turn and no stop waits for it.
     builds: mpsc::Sender<i64>,
+    /// The egress proxies that the stop thread stops. A stop joins the
+    /// threads of the proxy, so no supervisor turn and no stop or run
+    /// waits for it.
+    releases: mpsc::Sender<Proxy>,
 }
 
 #[derive(Default)]
@@ -123,6 +127,15 @@ impl Sessions {
                 })
                 .map_err(|e| format!("the build thread did not start: {e}"))?;
         }
+        let (releases, stops) = mpsc::channel::<Proxy>();
+        std::thread::Builder::new()
+            .name("proxy-stops".into())
+            .spawn(move || {
+                for p in stops {
+                    let _ = p.stop();
+                }
+            })
+            .map_err(|e| format!("the proxy stop thread did not start: {e}"))?;
         let s = Arc::new(Sessions {
             store,
             isolation,
@@ -130,6 +143,7 @@ impl Sessions {
             state: Mutex::new(State::default()),
             after: Mutex::new(None),
             builds,
+            releases,
         });
         let live: HashSet<i64> = iris_job::live_sessions(&s.store)
             .map_err(|e| e.to_string())?
@@ -248,6 +262,11 @@ impl Sessions {
         let mut st = self.state();
         st.launching.remove(&job);
         st.stopping.remove(&job);
+    }
+
+    /// Sends `proxy` to the stop thread.
+    fn release(&self, proxy: Proxy) {
+        let _ = self.releases.send(proxy);
     }
 
     /// The live session of `job`, if one exists.
@@ -470,7 +489,7 @@ impl Sessions {
                         if let Some(mut l) = st.running.remove(&s.id) {
                             let _ = std::fs::remove_file(&l.socket_path);
                             if let Some(p) = l.proxy.take() {
-                                let _ = p.stop();
+                                self.release(p);
                             }
                         }
                         st.left.remove(&s.id);
@@ -493,7 +512,7 @@ impl Sessions {
                 .collect();
             for id in reaped {
                 if let Some(p) = st.parked.remove(&id) {
-                    let _ = p.stop();
+                    self.release(p);
                 }
             }
         }
