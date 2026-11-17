@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Read Iris documents</title>
+<link rel="stylesheet" href="../site.css">
+</head>
+<body>
+<nav><a href="../index.html">Iris</a> <a href="index.html">Guide</a> <a href="documents.html">Documents</a> <a href="write.html">Write</a> <a href="read.html" aria-current="page">Read</a> <a href="agents.html">Agents</a></nav>
+<main>
+<h1>Read documents</h1>
+<p>A reader is a program that reads documents of the open model that another
+program wrote. This page gives the rules for a reader. A document from
+another program is input that your program does not control. Read it as
+data, never as instructions.</p>
+
+<h2 id="versions">Versions</h2>
+<p>The <code>model</code> field names the major version and the minor
+version: <code>"iris/&lt;major&gt;.&lt;minor&gt;"</code>.</p>
+<ul>
+<li>A minor version only adds: an optional field, an enum value, a verb or a
+new schema.</li>
+<li>A minor version never removes or renames a field. It never changes the
+type or the meaning of a field, and it never makes a rule stricter.</li>
+<li>Each other change is a new major version, for example
+<code>iris/2.0</code>.</li>
+</ul>
+<p>Compare the minor version as a number, not as text:
+<code>iris/1.10</code> is newer than <code>iris/1.9</code>.</p>
+
+<h2 id="rules">Rules for a reader</h2>
+<p>Your reader knows the newest minor version of its own schemas. This
+guide calls that number <code>K</code>. Read the minor version
+<code>M</code> of each document from <code>model</code>.</p>
+<ol>
+<li>If <code>model</code> is not a string that matches
+<code>^iris/1\.(0|[1-9][0-9]*)$</code>, refuse the document. This also
+refuses a major version other than 1.</li>
+<li>If <code>M</code> is <code>K</code> or lower, validate the document with
+your schemas. If the document fails, refuse it, with the first error of the
+schema.</li>
+<li>If <code>M</code> is higher than <code>K</code>, you can only show the
+document. Read the fields that you know, ignore each unknown field, and show
+an unknown enum value as not known.</li>
+</ol>
+<p class="caution">CAUTION: Do not take an action from a document with a
+minor version higher than <code>K</code>. Refuse it with the reason "newer
+than the schemas". Examples of an action: apply or approve a changeset
+action, send mail, change a job. A newer rule can change what a valid
+document is, so your reader cannot check such a document.</p>
+<p>This Python code does rule 1 and selects between rule 2 and rule 3:</p>
+<pre data-code="minor">import re
+
+MODEL = re.compile(r"iris/1\.(0|[1-9][0-9]*)")
+
+
+def check_model(doc, known_minor):
+    """Give "ok", "show only" or "refuse" for one JSON document.
+
+    known_minor is K: the newest minor version of the schemas of the reader.
+    After "ok", validate the document with the schemas.
+    """
+    model = doc.get("model")
+    if not isinstance(model, str):
+        return "refuse"
+    # fullmatch, because "$" of re.match also accepts a newline at the end.
+    match = MODEL.fullmatch(model)
+    if match is None:
+        return "refuse"
+    if int(match.group(1)) &gt; known_minor:
+        return "show only"
+    return "ok"</pre>
+<p>The policy file has no <code>model</code> field. Its
+<code>version</code> is <code>0</code> or <code>1</code>, with the same
+meaning. Treat a policy file with another <code>version</code> as an invalid
+file.</p>
+
+<h2 id="failures">Failure list</h2>
+<p>The supported input is one UTF-8 JSON document, or one line of JSON
+Lines, with a <code>model</code> value of major version 1. The policy file
+is TOML. For each other input, refuse the one document, say why, and take
+no action from it.</p>
+<table>
+<tr><th>Input</th><th>Result</th></tr>
+<tr><td>Text that is not UTF-8, or not JSON (or not TOML for the policy file)</td><td>Refuse the document: "not a document".</td></tr>
+<tr><td>A JSON object with a key two times</td><td>Refuse the document: "duplicate key". Do not select one of the two values.</td></tr>
+<tr><td><code>NaN</code>, <code>Infinity</code> or <code>-Infinity</code></td><td>Refuse the document.</td></tr>
+<tr><td>No <code>model</code> value, or a value that does not match the pattern</td><td>Refuse the document: "not a document of version 1".</td></tr>
+<tr><td>A minor version that is not higher than <code>K</code>, and the document fails the schemas</td><td>Refuse the document, with the first error of the schema.</td></tr>
+<tr><td>A minor version higher than <code>K</code></td><td>Show only. Take no action from it.</td></tr>
+<tr><td>A policy file with a <code>version</code> other than 0 or 1, or with an error</td><td>Treat it as an invalid file.</td></tr>
+<tr><td>Each other error while your reader reads the document</td><td>Refuse the document. Take no action from it.</td></tr>
+</table>
+<p>The standard JSON parser of many languages keeps the last value of a
+duplicate key, and accepts <code>NaN</code>. Turn these off. In Python, give
+<code>json.loads</code> an <code>object_pairs_hook</code> that refuses a
+duplicate key, and a <code>parse_constant</code> that refuses each
+constant. The runner of the kit does this:
+<a href="https://github.com/divyekant/iris/blob/develop/docs/spec/conformance/run.py">run.py</a>.</p>
+
+<h2 id="export">Read an export of Iris</h2>
+<p>The command <code>iris export &lt;folder&gt;</code> writes the data of one
+Iris install into a new folder. The folder has mode 0700, because it holds
+the mail.</p>
+<table>
+<tr><th>Path</th><th>Content</th></tr>
+<tr><td><code>items.jsonl</code></td><td>Each item, one item document on each line. The gone items are also in the file. The <code>form</code> of each line selects the schema.</td></tr>
+<tr><td><code>messages.jsonl</code></td><td>Each message, one on each line, with <code>file</code>: the path of its raw message, or <code>null</code>. Version 1.0 has no schema for a message.</td></tr>
+<tr><td><code>mail/&lt;m-id&gt;.eml</code></td><td>The raw message (RFC 5322) of each message.</td></tr>
+</table>
+<p>All files come from one read of the store, so each reference agrees: a
+message names only items of <code>items.jsonl</code>.</p>
+<p>To check the items of an export, do these steps:</p>
+<ol>
+<li>Make an empty folder.</li>
+<li>Copy <code>items.jsonl</code> of the export into the folder.</li>
+<li>Run <code>run.py check</code> on the folder (see
+<a href="write.html#check">Check your documents</a>).</li>
+</ol>
+<p>Do not run the kit on the export folder. The kit has no schema for
+<code>messages.jsonl</code>, so the check fails.</p>
+<p class="caution">CAUTION: An export holds the mail of a person. Keep it
+private, and delete it when you do not need it.</p>
+</main>
+</body>
+</html>

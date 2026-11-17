@@ -6,3 +6,17 @@ main { max-width: 40rem; margin: 0 auto; padding: 32px 16px; }
 h1 { font-size: 1.953rem; } h2 { font-size: 1.25rem; margin-top: 32px; }
 a { color: var(--link); }
 .muted { color: var(--muted); }
+/* The builder guide (docs/guide/). */
+:root { --surface: #171717; --line: #262626; }
+nav { max-width: 40rem; margin: 0 auto; padding: 16px 16px 0; display: flex; flex-wrap: wrap; gap: 16px; }
+nav a { text-decoration: none; }
+nav a[aria-current="page"] { color: var(--text); }
+pre { background: var(--surface); padding: 12px; border-radius: 8px; overflow-x: auto;
+  font: 14px/1.4 'SF Mono', 'Cascadia Mono', Menlo, monospace; }
+code { font-family: 'SF Mono', 'Cascadia Mono', Menlo, monospace; }
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border-bottom: 1px solid var(--line); padding: 8px; text-align: left; vertical-align: top; }
+.caution { border-left: 4px solid var(--link); padding-left: 12px; }
+ul.fields { padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 8px; }
+ul.fields li { background: var(--surface); padding: 0 8px; border-radius: 4px;
+  font-family: 'SF Mono', 'Cascadia Mono', Menlo, monospace; }
