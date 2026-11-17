@@ -183,7 +183,7 @@ account. R6-10 decides where this compare lives.
 | `move_to(id, folder)` | `POST /me/messages/{id}/move` `{"destinationId"}` | 201, the message |
 | `create_draft(mime)` | `POST /me/messages`, `text/plain`, base64 MIME | 201, the draft |
 | `send_mime(mime)` | `POST /me/sendMail`, `text/plain`, base64 MIME | 202, no body |
-| `sent_by_message_id(id)` | `GET /me/messages?$filter=internetMessageId eq '<id>'`, each page (a read) | 200, the matching messages |
+| `sent_by_message_id(id)` | `GET /me/messages?$filter=internetMessageId eq '<id>'&$select=id,isDraft,sentDateTime,parentFolderId`, each page (a read) | 200, the matching messages |
 | `draft_etag(id)` | `GET /me/messages/{id}?$select=id` | 200, the `@odata.etag` |
 
 `set_categories` replaces the full list (A6). The caller reads the message
@@ -227,7 +227,10 @@ of the server bytes cannot show a change, and an etag alone is not proof
 4. The completion finds the sent copy: `sent_by_message_id(id)` lists
    the messages of the whole mailbox (`/me/messages`, each folder) with
    `$filter=internetMessageId eq '<id>'` (A15), and follows each page, so
-   a rule or a client that moved the copy does not hide it. It
+   a rule or a client that moved the copy does not hide it. A candidate
+   counts only if its ID is not the ID of the Iris draft, `isDraft` is
+   false and it has a `sentDateTime`: the original draft has the same
+   `Message-ID` and content, and stays in Drafts, so it never counts. It
    reads the `$value` of the copy. It runs the content check of the send
    spec section 6 (the fields of the content hash, the headers that
    change who gets the message), and sets the ledger row `applied` or
@@ -537,7 +540,7 @@ section 7.3). The caller reconciles with reads only.
 | `set_categories` | the answer has the new list | `Error::Api`; 412 means the message changed after the read: nothing changed | as `set_read` | after 412 only: one new read and one new PATCH |
 | `move_to` | 201 with the moved message | `Error::Api` | the caller reads the message: the target folder means applied; any other folder keeps the result unknown, and Iris tells the person | never after an unknown result |
 | `create_draft` | 201 with the draft ID | `Error::Api` | a draft can exist. The caller searches `drafts` for its `Message-ID` header: found means created, not found means failed | never after an unknown result |
-| `send_mime` | 202: the row stays in `writing` until the completion finds and checks the sent copy (section 5) | `Error::Api`; the row fails and the claim goes, as in the send spec | the ledger keeps the claim; recovery searches `sentitems` for the `Message-ID` and runs the completion (spec 2 section 7.5) | never |
+| `send_mime` | 202: the row stays in `writing` until the completion finds and checks the sent copy (section 5) | `Error::Api`; the row fails and the claim goes, as in the send spec | the ledger keeps the claim; recovery runs the search of section 5, step 4 (each folder, no draft) and the completion (spec 2 section 7.5) | never |
 
 ## Open questions
 
