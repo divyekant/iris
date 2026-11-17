@@ -37,7 +37,11 @@ pub fn outbox(store: &Store, limit: u32, after: Option<&str>) -> Result<Value> {
             crate::Error::Query(format!("after {t} is not the next value of a page"))
         })?,
     };
-    Ok(store.read(|c| {
+    // One read transaction: the switch, the count, the page and each draft
+    // come from one snapshot, as the engine changes sends at the same time.
+    Ok(store.read(|conn| {
+        let tx = conn.unchecked_transaction()?;
+        let c: &Connection = &tx;
         let on: Option<i64> =
             c.query_row("SELECT on_at FROM send_switch WHERE id = 1", [], |r| {
                 r.get(0)
@@ -65,6 +69,8 @@ pub fn outbox(store: &Store, limit: u32, after: Option<&str>) -> Result<Value> {
         for (action, draft, state, decided_at, flags) in rows.iter().cloned() {
             sends.push(send(c, action, draft, &state, decided_at, flags, on)?);
         }
+        drop(st);
+        tx.finish()?;
         Ok(json!({
             "sending": {"on": on.is_some(), "since": on.map(rfc3339)},
             "count": count,

@@ -311,3 +311,35 @@ async fn the_api_cannot_change_the_switch() {
     }
     assert_eq!(iris_apply::sending(&s).unwrap(), None);
 }
+
+/// One outbox answer is one snapshot of the store: while sends are approved
+/// at the same time, the count always equals the sends of a last page.
+/// Red if the count and the page come from two reads (a send approved
+/// between them makes the page one longer than the count).
+#[test]
+fn one_outbox_answer_is_one_snapshot() {
+    let dir = temp("snapshot");
+    let s = store(&dir);
+    const N: i64 = 120;
+    more_drafts(&s, N);
+    let writer = {
+        let s = s.clone();
+        std::thread::spawn(move || {
+            for n in 1..=N {
+                approved_send_of(&s, &format!("d-{n}"), now() - 60_000);
+            }
+        })
+    };
+    let mut reads = 0;
+    while !writer.is_finished() || reads == 0 {
+        let v = iris_api::outbox(&s, iris_api::MAX_SENDS, None).unwrap();
+        assert_eq!(v["next"], Value::Null, "{v}");
+        assert_eq!(
+            v["count"].as_u64().unwrap() as usize,
+            v["sends"].as_array().unwrap().len(),
+            "{v}"
+        );
+        reads += 1;
+    }
+    writer.join().unwrap();
+}
