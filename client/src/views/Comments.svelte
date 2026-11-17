@@ -28,9 +28,13 @@
   let keyed = "";
 
   const words = (e: unknown) => (e instanceof Error ? e.message : String(e));
+  // Join by ID: a load that answers after a send must not hide the new comment.
+  function keep(more: Comment[]) {
+    list = [...new Map([...list, ...more].map((x) => [x.id, x])).values()].sort((a, b) => a.id - b.id);
+  }
   function load() {
     get<{ comments: Comment[] }>(path).then(
-      (got) => (list = got.comments),
+      (got) => keep(got.comments),
       (e) => (problem = `Iris could not load the comments. ${words(e)}`),
     );
   }
@@ -39,12 +43,14 @@
     load();
   });
 
-  let body = $derived(text.trim());
-  let ready = $derived(!busy && body.length > 0 && body.length <= MAX && c.state === "open");
+  // The text goes as written. The engine counts characters (code points), not UTF-16 units.
+  let count = $derived([...text].length);
+  let ready = $derived(!busy && text.trim() !== "" && count <= MAX && c.state === "open");
 
   async function send(e: SubmitEvent) {
     e.preventDefault();
     if (!ready) return;
+    const body = text;
     if (body !== keyed) {
       keyed = body;
       key = globalThis.crypto.randomUUID();
@@ -53,7 +59,7 @@
     problem = saved = "";
     try {
       const got = await post<Comment>(path, { revision: c.revision, text: body, key });
-      if (!list.some((x) => x.id === got.id)) list = [...list, got];
+      keep([got]);
       text = keyed = "";
       saved = `Iris gave your comment to ${agent}. The agent reads it in its next session and sends a new revision.`;
     } catch (err) {
@@ -85,10 +91,10 @@
   {:else if c.state === "open"}
     <form onsubmit={send}>
       <label class="hint" for={`${c.id}-comment`}>Tell {agent} what to change. The agent sends a new revision of this request.</label>
-      <textarea id={`${c.id}-comment`} rows="3" maxlength={MAX} bind:value={text} disabled={busy}></textarea>
+      <textarea id={`${c.id}-comment`} rows="3" bind:value={text} disabled={busy}></textarea>
       <div class="row">
         <button type="submit" class="outline" disabled={!ready}>Send to {agent}</button>
-        {#if body.length > MAX - 200}<span class="count">{body.length} of {MAX}</span>{/if}
+        {#if count > MAX - 200}<span class="count">{count} of {MAX}</span>{/if}
       </div>
     </form>
   {/if}

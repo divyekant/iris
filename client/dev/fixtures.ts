@@ -400,20 +400,6 @@ export const comments: Record<string, { id: number; changeset: string; revision:
   "cs-79": [{ id: 1, changeset: "cs-79", revision: 1, text: "Use the price of the October quote, not the list price.", at: "2026-11-17T08:20:00Z" }],
 };
 
-/** POST /api/changesets/{id}/comments on the fixtures: as the engine, only an open changeset of a job takes one. */
-export function commentPost(id: string, body: { revision?: number; text?: string; key?: string }): [number, unknown] {
-  const c = changesets.find((x) => x.id === id);
-  if (!c) return [404, { error: "Not found." }];
-  const text = body.text?.trim() ?? "";
-  if (!text || text.length > 4000 || !/^[A-Za-z0-9_-]{16,64}$/.test(body.key ?? "")) return [400, { error: "A comment has 1 to 4,000 characters and a key." }];
-  if (!c.author.job || c.state !== "open" || body.revision !== c.revision) return [409, { error: "this changeset takes no comment now" }];
-  const list = (comments[id] ??= []);
-  const all = Object.values(comments).flat();
-  const comment = { id: Math.max(0, ...all.map((x) => x.id)) + 1, changeset: id, revision: c.revision, text, at: new Date().toISOString() };
-  list.push(comment);
-  return [200, comment];
-}
-
 /** The draft of each draft and send action of a changeset, with the parts that gave each flag (card R4-07). */
 export const drafts: Record<string, DraftView[]> = {
   "cs-79": [
