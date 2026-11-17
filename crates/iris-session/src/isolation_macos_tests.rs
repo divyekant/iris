@@ -660,11 +660,8 @@ fn a_journal_of_an_earlier_boot_is_removed_and_resumes_nothing() {
     f.w().boot = "200.000000".into();
     s.stop(1).unwrap();
     let w = f.w();
-    assert!(
-        w.signals.is_empty() && w.bootouts.is_empty(),
-        "{:?}",
-        w.signals
-    );
+    assert!(w.signals.is_empty(), "{:?}", w.signals);
+    assert_eq!(w.bootouts, [format!("gui/501/{}", s.name(1))]);
     assert!(w.procs[&pid].stopped);
     drop(w);
     assert!(!s.file(1, "stops").exists());
@@ -761,4 +758,13 @@ fn remove_files_takes_each_file_of_the_session_and_only_those() {
     assert_eq!(s.record(2).unwrap(), Some(rec(51)));
     // A second call finds nothing to remove.
     s.remove_files(1).unwrap();
+}
+
+#[test]
+fn stop_with_no_record_boots_out_a_job_that_a_crash_left() {
+    let (_d, s, f) = setup("norecord");
+    s.stop(1).unwrap();
+    let w = f.w();
+    assert!(w.signals.is_empty());
+    assert_eq!(w.bootouts, [format!("gui/501/{}", s.name(1))]);
 }

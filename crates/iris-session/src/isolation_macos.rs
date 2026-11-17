@@ -421,8 +421,11 @@ impl Seatbelt {
         let Some(rec) = rec.filter(|r| r.boot == boot) else {
             match fs::remove_file(self.file(session, "stops")) {
                 Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-                _ => return Ok(()),
+                _ => {}
             }
+            // A shim that ended after the bootstrap and before the record
+            // can leave the job loaded: remove it, with no signal.
+            return self.bootout(session, end);
         };
         self.recover(session, cid)?;
         // 1. The job, inside the time limit of the stop.

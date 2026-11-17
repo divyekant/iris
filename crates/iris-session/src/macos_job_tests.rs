@@ -308,3 +308,90 @@ fn the_job_refuses_bad_arguments_before_any_change() {
         assert_eq!(job(&sb, &d, &a), hold::BAD_ARGS);
     }
 }
+
+/// The job process of the test below: it runs only in a child process of
+/// the test binary, with `IRIS_TEST_JOB_DIR` set, because `job` changes the
+/// streams, the folder and the environment of its process.
+#[test]
+fn job_child() {
+    let Some(dir) = std::env::var_os("IRIS_TEST_JOB_DIR") else {
+        return;
+    };
+    let me = std::process::id() as i32;
+    let sys = FakeSys(Mutex::new(BTreeMap::from([(me, 50)])));
+    let dir = PathBuf::from(dir);
+    let sb = Seatbelt::with(&dir, Box::new(sys)).unwrap();
+    let code = job(&sb, &dir, &["3".into(), "4000".into()]);
+    std::process::exit(code);
+}
+
+/// A valid handoff: the job writes the record, the hold waits for `start`
+/// on the engine pipe, the agent runs in the handed-off folder with the
+/// handed-off environment, and the shim gets the exit code.
+#[test]
+fn the_job_runs_the_hold_with_the_handoff() {
+    let d = std::env::temp_dir().join(format!("iris-job-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&d);
+    fs::create_dir_all(d.join("work")).unwrap();
+    let d = fs::canonicalize(&d).unwrap();
+    let _dir = Dir(d.clone());
+    let f = files(&d, 3);
+    fs::create_dir_all(f.socket.parent().unwrap()).unwrap();
+    let listener = UnixListener::bind(&f.socket).unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "macos_job::tests::job_child", "--test-threads=1"])
+        .env("IRIS_TEST_JOB_DIR", &d)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let (s, _) = listener.accept().unwrap();
+    // The record came before the connection.
+    let sb = Seatbelt::with(&d, Box::new(FakeSys(Mutex::default()))).unwrap();
+    let rec = sb.record(3).unwrap().unwrap();
+    assert_eq!((rec.coalition, rec.port), (50, Some(4000)));
+    let (engine_r, mut engine_w) = io::pipe().unwrap();
+    let (log_r, log_w) = io::pipe().unwrap();
+    let (mut status_r, status_w) = io::pipe().unwrap();
+    let work = fs::File::open(d.join("work")).unwrap();
+    let fds = [
+        engine_r.as_raw_fd(),
+        log_w.as_raw_fd(),
+        status_w.as_raw_fd(),
+        work.as_raw_fd(),
+    ];
+    let h = Handoff {
+        args: vec![
+            "3".into(),
+            "/bin/sh".into(),
+            "-c".into(),
+            "pwd > seen; echo \"$IRIS_T\" >> seen; [ -z \"$IRIS_TEST_JOB_DIR\" ] && echo clean >> seen".into(),
+        ],
+        env: vec![
+            ("IRIS_T".into(), "handed".into()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+        ],
+    };
+    send_with_fds(&s, &fds, &h.encode()).unwrap();
+    drop((engine_r, log_w, status_w, work));
+    drop(log_r);
+    // No agent before `start`.
+    thread::sleep(Duration::from_millis(200));
+    assert!(!d.join("work/seen").exists());
+    engine_w.write_all(b"start\n").unwrap();
+    let mut status = String::new();
+    status_r.read_to_string(&mut status).unwrap();
+    assert!(status.starts_with("started "), "{status}");
+    assert!(status.contains("exited 0"), "{status}");
+    let mut code = [9u8; 1];
+    (&s).read_exact(&mut code).unwrap();
+    assert_eq!(code[0], 0);
+    assert!(child.wait().unwrap().success());
+    let seen = fs::read_to_string(d.join("work/seen")).unwrap();
+    assert_eq!(
+        seen,
+        format!("{}\nhanded\nclean\n", d.join("work").display())
+    );
+    assert!(sb.home(3).is_dir() && sb.tmp(3).is_dir());
+}
