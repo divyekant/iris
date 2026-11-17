@@ -660,6 +660,7 @@ fn app_notices(store: &Store, after: Option<i64>) -> Result<Value, Failure> {
         "last": last,
         "open": page.open,
         "engine": *ENGINE_START,
+        "start": after.is_none(),
     }))
 }
 

@@ -126,17 +126,29 @@ impl Poll {
     }
 
     /// Read one result. `None` when it is not valid: the state stays, and the
-    /// next call asks again. A valid result is one of these:
-    /// - no notices, with any `last`: no news, or a new start of the app
-    ///   (the first call, or a call after a gap);
+    /// next call asks again. So the cursor never passes a notice that the
+    /// app did not get, unless the engine shows it. A valid result is one
+    /// of these:
+    /// - `start`: a new start of the app (the first call, or a call after a
+    ///   gap). No notices, any `last`: the engine shows the notices up to it;
+    /// - after the first call, no notices and `last` equal to the cursor;
     /// - after the first call, 1 to [`PAGE`] notices with row IDs above the
     ///   cursor, in increasing order, and `last` equal to the largest ID.
     pub fn read(&mut self, r: &Value) -> Option<Page> {
         let last = r["last"].as_u64()?;
         let open = r["open"].as_u64()?;
         let engine = r["engine"].as_u64()?;
+        let start = r["start"].as_bool()?;
         let list = r["notices"].as_array()?;
-        if !list.is_empty() {
+        if start {
+            if !list.is_empty() {
+                return None;
+            }
+        } else if list.is_empty() {
+            if self.last != Some(last) {
+                return None;
+            }
+        } else {
             let ids = list
                 .iter()
                 .map(|n| n["id"].as_str()?.strip_prefix("n-")?.parse::<u64>().ok())
@@ -350,7 +362,7 @@ mod tests {
                         "text": "Results", "message": { "id": format!("m-{i}") } })
             })
             .collect();
-        json!({ "notices": notices, "last": last, "open": ids.len(), "engine": 5 })
+        json!({ "notices": notices, "last": last, "open": ids.len(), "engine": 5, "start": false })
     }
 
     #[test]
@@ -359,7 +371,7 @@ mod tests {
         assert_eq!(p.args(), json!({}));
         // The first answer: no notice, only the last ID.
         let first = p
-            .read(&json!({ "notices": [], "last": 7, "open": 2, "engine": 5 }))
+            .read(&json!({ "notices": [], "last": 7, "open": 2, "engine": 5, "start": true }))
             .unwrap();
         assert_eq!(
             (first.notices.len(), first.open, first.more, first.restarted),
@@ -380,7 +392,7 @@ mod tests {
         assert_eq!(p.args(), json!({ "after": 27 }));
         // A new engine start: the window signs in again.
         let again = p
-            .read(&json!({ "notices": [], "last": 27, "open": 0, "engine": 6 }))
+            .read(&json!({ "notices": [], "last": 27, "open": 0, "engine": 6, "start": false }))
             .unwrap();
         assert!(again.restarted);
         assert!(sign_in_needed(again.restarted, true));
@@ -401,16 +413,17 @@ mod tests {
     #[test]
     fn the_cursor_moves_only_with_a_valid_page() {
         let mut rng = Rng(0x2545_f491_4f6c_dd1d);
-        for _ in 0..20_000 {
+        for _ in 0..30_000 {
             let mut p = Poll::default();
             let first = rng.next().is_multiple_of(3);
             let after = rng.next() % 50;
             if !first {
-                p.read(&json!({ "notices": [], "last": after, "open": 0, "engine": 5 }))
-                    .unwrap();
+                let r =
+                    json!({ "notices": [], "last": after, "open": 0, "engine": 5, "start": true });
+                p.read(&r).unwrap();
             }
-            // Random IDs around the cursor, in random order, and a random
-            // `last`: valid and not valid pages.
+            // Random IDs around the cursor, in random order, a random `last`
+            // and a random `start`: valid and not valid pages.
             let n = (rng.next() % (PAGE as u64 + 3)) as usize;
             let ids: Vec<u64> = (0..n).map(|_| rng.next() % 80).collect();
             let last = match rng.next() % 3 {
@@ -418,26 +431,43 @@ mod tests {
                 1 => rng.next() % 1000,
                 _ => after,
             };
+            let start = rng.next().is_multiple_of(4);
+            let mut answer = page(&ids, last);
+            answer["start"] = json!(start);
             let before = p.args();
-            let valid = ids.is_empty()
-                || (!first
-                    && ids.len() <= PAGE
+            let valid = if start {
+                ids.is_empty()
+            } else if first {
+                false
+            } else if ids.is_empty() {
+                last == after
+            } else {
+                ids.len() <= PAGE
                     && ids.windows(2).all(|w| w[0] < w[1])
                     && ids[0] > after
-                    && ids.last() == Some(&last));
-            let read = p.read(&page(&ids, last));
-            assert_eq!(
-                read.is_some(),
-                valid,
-                "first {first} after {after} {ids:?} last {last}"
-            );
+                    && ids.last() == Some(&last)
+            };
+            let read = p.read(&answer);
+            let case = format!("first {first} start {start} after {after} {ids:?} last {last}");
+            assert_eq!(read.is_some(), valid, "{case}");
             if valid {
-                assert_eq!(p.args(), json!({ "after": last }));
+                assert_eq!(p.args(), json!({ "after": last }), "{case}");
                 assert_eq!(read.unwrap().notices.len(), ids.len());
             } else {
-                assert_eq!(p.args(), before, "a page that is not valid moves nothing");
+                assert_eq!(
+                    p.args(),
+                    before,
+                    "a page that is not valid moves nothing: {case}"
+                );
             }
         }
+        // The case of the review: an empty page with no start and a `last`
+        // above the cursor would skip notices 8 to 100.
+        let mut p = Poll::default();
+        p.read(&json!({ "notices": [], "last": 7, "open": 0, "engine": 5, "start": true }))
+            .unwrap();
+        assert_eq!(p.read(&page(&[], 100)), None);
+        assert_eq!(p.args(), json!({ "after": 7 }));
     }
 
     #[test]

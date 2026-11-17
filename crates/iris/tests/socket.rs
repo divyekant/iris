@@ -1130,6 +1130,7 @@ fn app_notices_give_only_the_new_notices_oldest_first() {
     assert!(engine.as_u64().is_some_and(|e| e > 0), "{r}");
     // A new app gets no old notice, only the last ID (a done notice too).
     let r = ask(json!({}));
+    assert_eq!(r["result"]["start"], json!(true), "{r}");
     assert_eq!(
         (
             &r["result"]["notices"],
@@ -1155,6 +1156,7 @@ fn app_notices_give_only_the_new_notices_oldest_first() {
     assert_eq!(r["result"]["notices"][0]["text"], json!("Results"));
     assert_eq!(r["result"]["last"], json!(2));
     let r = ask(json!({ "after": 2 }));
+    assert_eq!(r["result"]["start"], json!(false), "{r}");
     assert_eq!(
         (
             &r["result"]["notices"],
