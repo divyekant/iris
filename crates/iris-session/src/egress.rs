@@ -56,6 +56,8 @@ pub enum Reason {
     Timeout,
     NotTls,
     SniNotAllowed,
+    /// The proxy had no file descriptor or thread for the connection.
+    NoResources,
 }
 
 impl Reason {
@@ -70,6 +72,7 @@ impl Reason {
             Reason::Timeout => "timeout",
             Reason::NotTls => "not_tls",
             Reason::SniNotAllowed => "sni_not_allowed",
+            Reason::NoResources => "no_resources",
         }
     }
 }
@@ -234,6 +237,28 @@ struct Shared {
     log: Mutex<Log>,
     conns: Mutex<Conns>,
     stopping: AtomicBool,
+    /// A setup failure that a test makes.
+    #[cfg(test)]
+    fault: Mutex<Option<Fault>>,
+}
+
+/// A setup step that can fail.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum Fault {
+    Clone,
+    Spawn,
+}
+
+/// True if a test made the setup step `f` fail.
+#[cfg(test)]
+fn faulted(shared: &Shared, f: Fault) -> bool {
+    *lock(&shared.fault) == Some(f)
+}
+
+#[cfg(not(test))]
+fn faulted(_: &Shared, _: Fault) -> bool {
+    false
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -290,6 +315,8 @@ impl Proxy {
                 cancels: HashMap::new(),
             }),
             stopping: AtomicBool::new(false),
+            #[cfg(test)]
+            fault: Mutex::new(None),
         });
         let s = shared.clone();
         let accept = thread::Builder::new()
@@ -368,27 +395,44 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
             finish(&shared, refuse(stream, Reason::TooMany));
             continue;
         }
-        let Ok(clone) = stream.try_clone() else {
-            continue;
+        let clone = match stream.try_clone() {
+            Ok(clone) if !faulted(&shared, Fault::Clone) => clone,
+            _ => {
+                drop(c);
+                finish(&shared, refuse(stream, Reason::NoResources));
+                continue;
+            }
         };
         let id = c.next;
         c.next += 1;
         c.streams.insert(id, vec![clone]);
         let s = shared.clone();
-        let spawned = thread::Builder::new()
-            .name("iris-egress-conn".into())
-            .spawn(move || {
-                let f = handle(&s, stream, id);
-                lock(&s.conns).cancels.remove(&id);
-                // The connection keeps its place in the count until its
-                // socket closes, so a stop can close it during the drain.
-                finish(&s, f);
-                lock(&s.conns).streams.remove(&id);
-            });
+        let run = move || {
+            let f = handle(&s, stream, id);
+            lock(&s.conns).cancels.remove(&id);
+            // The connection keeps its place in the count until its
+            // socket closes, so a stop can close it during the drain.
+            finish(&s, f);
+            lock(&s.conns).streams.remove(&id);
+        };
+        let spawned = if faulted(&shared, Fault::Spawn) {
+            drop(run);
+            Err(io::Error::other("fault"))
+        } else {
+            thread::Builder::new()
+                .name("iris-egress-conn".into())
+                .spawn(run)
+        };
         match spawned {
             Ok(t) => c.threads.push(t),
             Err(_) => {
-                c.streams.remove(&id);
+                // The thread took the stream with it; the clone is the
+                // same socket, so it gets the answer and the line.
+                let clone = c.streams.remove(&id).and_then(|mut l| l.pop());
+                drop(c);
+                if let Some(clone) = clone {
+                    finish(&shared, refuse(clone, Reason::NoResources));
+                }
             }
         }
     }

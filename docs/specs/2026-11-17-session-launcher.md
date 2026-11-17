@@ -496,7 +496,8 @@ no network stops them. The engine gives each session one narrow path out:
   `port_not_allowed`, `address_not_public`, `too_long`, `too_many` for a
   ninth open connection or a resolver worker past the bound, `timeout`
   for a head or a ClientHello that does not come in 10 s, `not_tls`,
-  `sni_not_allowed`) and no text of the request. For a connection that closes, or
+  `sni_not_allowed`, `no_resources` when the engine has no file
+  descriptor or thread for the connection) and no text of the request. For a connection that closes, or
   that a stop ends, before a full head, the line has `ended` and
   `no_head` or `stopped`. So each connection gets exactly one line.
   Only the proxy writes this file,
