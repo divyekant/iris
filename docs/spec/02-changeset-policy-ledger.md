@@ -939,6 +939,10 @@ and the release step. That specification must meet these constraints:
   approved or a held send.
 - The flags of a draft (section 5.3) come from the content of the draft, at
   submit and again at the release.
+- In the write view of the person (`docs/specs/2026-11-17-write.md`),
+  one press of Send approves the `draft` action and the `send` of the
+  draft that this action makes. The send approval binds to the hash of
+  that draft row.
 - `send` accepts only a draft that Iris made. Iris saves the `Message-ID` that
   it sets in the draft before the call.
 - The engine never makes the `drafts.send` call again. If the result is not
