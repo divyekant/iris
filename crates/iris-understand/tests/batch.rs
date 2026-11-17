@@ -855,8 +855,10 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
     let m = b.add_raw("m", "t2", 1, &honest, &["INBOX"]);
     // A message whose file is missing at the check.
     let lost = b.add_raw("lost", "t3", 1, &honest, &["INBOX"]);
+    // A message that the model got 3 times with no valid answer.
+    let stuck = b.add_raw("stuck", "t4", 1, &honest, &["INBOX"]);
     // The same answer for each message.
-    for _ in 0..pages + 2 {
+    for _ in 0..pages + 3 {
         b.script.push(Ok((
             r#"{"items": [{"form": "feed", "status": "new", "title": "Invoice",
           "quote": "Pay the invoice by Friday.", "confidence": 0.5}], "phishing": false}"#
@@ -890,7 +892,15 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                 "UPDATE message SET content_sha256 = ?2 WHERE id = ?1",
                 rusqlite::params![lost, sha2],
             )?;
-            tx.execute_batch("DROP TABLE link_check; PRAGMA user_version = 17;")?;
+            tx.execute(
+                "UPDATE message SET content_sha256 = ?2, understood_at = NULL, tries = 3
+                 WHERE id = ?1",
+                rusqlite::params![stuck, sha],
+            )?;
+            tx.execute_batch(
+                "DROP TRIGGER link_check_insert; DROP TRIGGER link_check_update;
+                 DROP TABLE link_check; PRAGMA user_version = 17;",
+            )?;
             Ok(())
         })
         .unwrap();
@@ -909,7 +919,7 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
     };
     assert_eq!(
         b.col("SELECT count(*) FROM link_check"),
-        Some(pages as i64 + 2)
+        Some(pages as i64 + 3)
     );
     // One run, with a model that Iris cannot make: the check needs none.
     let fail = |_: &ModelRow| -> Result<Box<dyn Model>, String> { Err("no model".into()) };
@@ -925,6 +935,20 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
         })
         .unwrap();
     assert_eq!(marks, r#"["link"]"#);
+    let stuck_marks: String = b
+        .store
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT hostile FROM message WHERE id = ?1", [stuck], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        stuck_marks, r#"["link"]"#,
+        "failed tries do not hold the check"
+    );
     assert_eq!(items_of(&b, m), 0, "quarantine keeps no item");
     assert!(b.understood(m));
     assert_eq!(b.script.calls(), calls, "no model call");
@@ -955,4 +979,52 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
         .unwrap();
     assert_eq!(marks, r#"["link"]"#);
     assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(0));
+}
+
+#[test]
+fn new_mail_gets_the_link_check_when_iris_cannot_make_the_model() {
+    let b = store("link-new");
+    b.model(false, None);
+    let m = b.add_raw(
+        "m",
+        "t",
+        1,
+        &bank("https://evil.example.net/pay"),
+        &["INBOX"],
+    );
+    let honest = b.add_raw(
+        "h",
+        "t2",
+        1,
+        &bank("https://bank.example.com/pay"),
+        &["INBOX"],
+    );
+    let fail = |_: &ModelRow| -> Result<Box<dyn Model>, String> { Err("no model".into()) };
+    let _ = batch::run(&b.store, &fail, &Limits::default(), NOW);
+    let marks: String = b
+        .store
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT hostile FROM message WHERE id = ?1", [m], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .unwrap();
+    assert_eq!(marks, r#"["link"]"#);
+    assert!(b.understood(m));
+    // The honest message waits for the model, with no row left.
+    assert!(!b.understood(honest));
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(0));
+    // New content needs the check again.
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET content_sha256 = 'x' WHERE id = ?1",
+                [honest],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(1));
 }

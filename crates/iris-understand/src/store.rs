@@ -114,12 +114,15 @@ struct Row {
 /// Rows of `link_check` in one read of [`recheck_links`].
 pub const LINK_CHECKS: i64 = 200;
 
-/// The link check of mail that the engine understood before the mark `link`
-/// (migration 18). It reads each row of `link_check`, in pages of
-/// [`LINK_CHECKS`]. A message with a deceptive link is understood again at
-/// once: the mark makes it hostile, so the run needs no model, and its
-/// items go. Then the row goes. Returns the count of messages that got the
-/// mark.
+/// The link check of each message in `link_check` (migration 18): new
+/// content, and mail that the engine understood before the mark `link`. It
+/// reads each row, in pages of [`LINK_CHECKS`], with no model. A message
+/// with a deceptive link is understood at once: the mark makes it hostile,
+/// so the run needs no model, and its items go. A row goes only when the
+/// store has the result of the check for the content that it read: no
+/// deceptive link, or the mark `link`. Other rows stay for the next run (a
+/// file that Iris cannot read, a change during the check). Returns the
+/// count of messages that got the mark.
 pub fn recheck_links(store: &Store, now_ms: i64) -> Result<u64> {
     let mut marked = 0;
     let mut after = 0;
@@ -139,49 +142,49 @@ pub fn recheck_links(store: &Store, now_ms: i64) -> Result<u64> {
         };
         after = last;
         for id in ids {
-            // A file that Iris cannot read keeps its row: the check runs
-            // again when a sync repairs the file.
-            let Some(mark) = link_mark_of(store, id) else {
+            let Some((mark, sha)) = link_mark_of(store, id) else {
                 continue;
             };
             if mark {
-                // Hostile mail never reaches the model (section 6.7), so no
-                // model is necessary.
-                if understand(store, id, &crate::budget::NoModel, now_ms).is_ok() {
-                    marked += 1;
-                } else {
-                    // The normal path understands it again, with the mark.
-                    store.write(|tx| {
-                        tx.execute(
-                            "UPDATE message SET understood_at = NULL WHERE id = ?1",
-                            [id],
-                        )?;
-                        Ok(())
-                    })?;
-                }
+                // Hostile mail never reaches the model (section 6.7). An
+                // error leaves the row for the next run.
+                let _ = understand(store, id, &crate::budget::NoModel, now_ms);
             }
-            store.write(|tx| {
-                tx.execute("DELETE FROM link_check WHERE message_id = ?1", [id])?;
-                Ok(())
+            // The row goes only for the content that the check read, and,
+            // for a deceptive link, only when the message has the mark.
+            let done = store.write(|tx| {
+                let n = tx.execute(
+                    "DELETE FROM link_check WHERE message_id = ?1 AND EXISTS (
+                       SELECT 1 FROM message m WHERE m.id = ?1
+                         AND (m.content_sha256 IS ?2 OR m.gone_at IS NOT NULL)
+                         AND (NOT ?3 OR EXISTS (
+                           SELECT 1 FROM json_each(coalesce(m.hostile, '[]'))
+                           WHERE value = 'link')))",
+                    params![id, sha, mark],
+                )?;
+                Ok(n > 0)
             })?;
+            marked += u64::from(mark && done);
         }
     }
 }
 
-/// True when the received message `id` has a deceptive link, false when
-/// it has none, is gone or is your own mail. `None` when Iris cannot read
-/// its file now.
-fn link_mark_of(store: &Store, id: i64) -> Option<bool> {
+/// For the received message `id`: true when it has a deceptive link, with
+/// the content hash that the check read. False when it has none, is gone,
+/// is your own mail or has no content. `None` when Iris cannot read the
+/// row or the file now.
+fn link_mark_of(store: &Store, id: i64) -> Option<(bool, Option<String>)> {
     let row = read_row(store, id).ok()?;
     let own = row.labels.iter().any(|l| l == "SENT" || l == "DRAFT");
-    if row.gone || own {
-        return Some(false);
+    if row.gone || own || row.sha.is_none() {
+        return Some((false, row.sha));
     }
     let path = row.sha.as_deref().and_then(|s| store.content_path(s))?;
     let (raw, raw_cut, html_after) = read_raw(&path).ok()?;
     let c = iris_clean::clean_cut(&raw, raw_cut);
     let head = crate::Head::parse(&raw);
-    Some(crate::link_mark(&head, &c.links, c.links_cut || html_after))
+    let mark = crate::link_mark(&head, &c.links, c.links_cut || html_after);
+    Some((mark, row.sha))
 }
 
 /// Run understanding on message `message` (its row ID): steps 1 to 8. Run
