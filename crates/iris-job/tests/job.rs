@@ -648,9 +648,11 @@ fn no_insert_replaces_a_scope_row() {
     }
     let row: (i64, Option<i64>) = store
         .read(|c| {
-            Ok(c.query_row("SELECT thread_id, revoked_at FROM job_scope", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })?)
+            Ok(
+                c.query_row("SELECT thread_id, revoked_at FROM job_scope", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?,
+            )
         })
         .unwrap();
     assert_eq!(row, (5, Some(NOW)));
