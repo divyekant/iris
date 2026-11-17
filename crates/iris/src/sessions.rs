@@ -145,6 +145,12 @@ impl Sessions {
         Ok(s)
     }
 
+    /// The count of egress proxies that run. For tests.
+    pub fn open_proxies(&self) -> usize {
+        let st = self.state();
+        st.parked.len() + st.running.values().filter(|l| l.proxy.is_some()).count()
+    }
+
     /// Calls `f` after each step of each launch. For tests.
     pub fn set_after(&self, f: Arc<AfterStep>) {
         *self.after.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
@@ -430,15 +436,27 @@ impl Sessions {
                                 let _ = p.stop();
                             }
                         }
-                        if let Some(p) = st.parked.remove(&s.id) {
-                            let _ = p.stop();
-                        }
                         st.left.remove(&s.id);
                         done.push(s.job_id);
                     }
                     Err(why) => {
                         st.left.insert(s.id, why);
                     }
+                }
+            }
+            // A parked proxy stops when its session is reaped, by any path:
+            // a turn, or the cleanup of the launch itself.
+            let reaped: Vec<i64> = st
+                .parked
+                .keys()
+                .copied()
+                .filter(|id| {
+                    iris_job::session(&self.store, *id).is_ok_and(|r| r.reaped_ms.is_some())
+                })
+                .collect();
+            for id in reaped {
+                if let Some(p) = st.parked.remove(&id) {
+                    let _ = p.stop();
                 }
             }
         }

@@ -507,6 +507,29 @@ fn a_stop_during_a_revoke_retry_stops_the_new_session_too() {
     );
 }
 
+fn a_failed_launch_that_is_reaped_stops_its_proxy() {
+    // A data folder path too long for the session socket: the bind fails,
+    // and the launch ends and reaps its session.
+    let name = format!("bind{}", "x".repeat(110));
+    let f = fixture_with(&name, "sleep 30", "allow_hosts = [\"example.com\"]\n");
+    let s = sessions(&f);
+    let id = s.run(f.job, "script").unwrap();
+    let end = Instant::now() + Duration::from_secs(20);
+    loop {
+        s.turn(now());
+        let row = session(&f.store, id).unwrap();
+        if row.reaped_ms.is_some() && s.open_proxies() == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < end,
+            "{} proxies run: {row:?}",
+            s.open_proxies()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "session-hold") {
@@ -581,6 +604,10 @@ fn main() {
         (
             "a_stop_during_a_revoke_retry_stops_the_new_session_too",
             a_stop_during_a_revoke_retry_stops_the_new_session_too,
+        ),
+        (
+            "a_failed_launch_that_is_reaped_stops_its_proxy",
+            a_failed_launch_that_is_reaped_stops_its_proxy,
         ),
     ];
     let mut failed = 0;
