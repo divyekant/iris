@@ -61,9 +61,12 @@ with only these changes:
 | The title `Iris open model 1: <name>`, with no `(draft)` | each schema |
 | The description of `attention` names spec 2, section 6.4, in place of "Reserved for specification 2" | `common.schema.json` |
 | The policy `version` accepts `0` and `1`, with the same meaning | `policy.schema.json`, `iris-policy` |
+| The person file gets the required field `model`, as each other JSON document has it | `person.schema.json`, its samples, `iris-workspace`, spec 3 section 7 and the sample of section 12 |
 | Each section of the spec text that says "version 0" says "version 1" | `docs/spec/01-mirror-store-forms.md`, `docs/spec/02-changeset-policy-ledger.md`, `docs/spec/03-job-workspace.md`, `docs/spec/README.md` |
 
-No field, enum value or rule of a schema changes in other ways. The freeze
+No field, enum value or rule of a schema changes in other ways. The person
+file is the one JSON document of version 0 with no `model` field. Without
+it, a reader cannot find the version of a person file (section 4). The freeze
 is a version mark, not a redesign. The fields of version 0 are in use in
 the code and in the web client. A redesign at the freeze makes every
 reader change and gives no gain that a later minor version cannot give.
@@ -98,6 +101,12 @@ These rules go into a new published text,
    `urn:iris:model:2:<name>`.
 6. The maintainer approves each change of the model (as now,
    `docs/spec/README.md`).
+7. The policy file is TOML that a person writes, and it has no `model`
+   field. Its `version` is an integer that names only the major version.
+   The minor rules do not apply to it. Each change of
+   `policy.schema.json` after 1.0 is a new policy `version` (`2`). Iris
+   refuses a policy file with a `version` that it does not know, and goes
+   to observe mode (spec 2, section 6.1: an invalid file fails closed).
 
 ### 3. Rules for a producer
 
@@ -125,19 +134,21 @@ minor version `M` of each document from `model`.
   schemas of its kit. Rule 2.4 makes these schemas accept each document of
   an older minor version.
 - If `M` is higher than `K`, the document can hold fields, enum values and
-  verbs that the reader does not know. The reader must not validate it
-  with the schemas of its kit, because they refuse an unknown field. The
-  reader reads the fields that it knows, and ignores each unknown field.
-- If a reader finds an unknown enum value, it treats the one object that
-  holds the value as not known. It can show the object as not known, or
-  skip it.
+  verbs that the reader does not know. The schemas of the kit refuse an
+  unknown field, so they cannot check the document. The reader can only
+  show the document: it reads the fields that it knows, ignores each
+  unknown field, and shows an unknown enum value as not known.
 
-  CAUTION: A reader must never take an action on an object with an unknown
-  verb or an unknown state. A minor version can add a verb, and a reader
-  of an older version does not know its effect.
+  CAUTION: A reader must not take an action from a document with a minor
+  version higher than its kit. Examples of an action: apply or approve a
+  changeset action, send, change a job. Refuse the document, with the
+  reason "newer than the kit". The reader cannot check the known fields
+  of such a document, because a newer rule can change what a valid
+  document is.
 
 - Refuse a document with a major version other than 1, or with a `model`
   value that does not match `^iris/1\.(0|[1-9][0-9]*)$`.
+- For the policy file, follow rule 2.7.
 
 ### 5. The conformance kit
 
@@ -347,10 +358,11 @@ each session, so the next session gets `iris/1.0` files.
 
 - Data format: the `model` value and the `$id` of each schema. Each other
   field stays.
-- Store: one migration of `item.doc`. The triggers `attention_due_item` and
-  `attention_keep` run on each item one time. `attention_keep` keeps the
-  attention. `attention_due_item` makes the attention thread compute the
-  attention of each item again one time.
+- Store: one migration of `item.doc`. It changes only `$.model`, so the
+  attention of each item stays. The trigger `attention_due_item` queues
+  an item only when its form, `type`, `kind` or `attention` changes
+  (`crates/iris-store/src/schema_8.sql`), so it queues nothing, and
+  `attention_keep` does not apply because `attention` stays.
 - Memory: no change in the `iris` program. The runner and the producer are
   not a part of it.
 - API and screens: no change. The web client does not read `model`
