@@ -90,7 +90,8 @@ writes SQL:
   the first session stopped. So a new build never runs while a process of
   the last session can still use the workspace, after a stop, a revoke, a
   time limit or an exit.
-- An insert needs a job in the state `working`, and NULL in `started_at`,
+- An insert needs a job in the state `working`, and NULL in `helper_pid`,
+  `agent_pgid`, `started_at`,
   `ended_at`, `end_reason`, `exit_code` and `reaped_at`. An insert with the `id` of a row
   fails (the scope rule of R4-02: no replace).
 - An update does one of five moves, and nothing else:
@@ -240,11 +241,23 @@ steps of the workspace spec:
 5. Start the hold helper (held), and write `helper_pid` (the helper move)
    in the same step. If the write fails, close the pipe and wait for the
    helper.
-6. Start: `iris_job::start` in a write transaction, only if the session did
-   not end. If it ended (a revoke or a job move came during steps 3 to 5),
-   close the pipe, wait for the helper, and go back to step 2 once. A second
-   end of the same kind ends the launch with the reason.
-7. Write `start` to the pipe.
+6. Start and release, as one gate: open a write transaction
+   (`BEGIN IMMEDIATE`), and check that the session did not end. If it
+   ended (a revoke or a job move came during steps 3 to 5), roll back,
+   close the pipe, wait for the helper, and go back to step 2 once. A
+   second end of the same kind ends the launch with the reason. Else set
+   `started_at` (`iris_job::start_in`), write `start` to the pipe, and
+   then commit.
+
+   SQLite lets one write transaction run at a time, and a revoke or a job
+   move is a write transaction. So a revoke commits either before the gate
+   (the gate sees the end, and the helper never gets `start`), or after
+   the commit of the gate (the session ran under a valid grant, and the
+   revoke ends it as a running session). No revoke can come between the
+   check and the release. If the commit fails after the write of `start`,
+   the engine closes the pipe and ends the session with `launch_failed`.
+   No revoke came during the gate, so the agent saw only the current
+   grant, and the helper stops it.
 
 Each failure after step 2 ends the session with `launch_failed`, closes the
 pipe, waits for the helper if one started, runs the reap check and removes
@@ -489,7 +502,9 @@ is refused before a row is written.
 |---|---|---|
 | A second `run` of a job with an open session | Refused at step 2 | Store test: second register fails |
 | A `run` of a job that is not `working` | Refused at step 2 | Store test |
-| A revoke during steps 3 to 6 | Step 6 finds the end, the agent never runs | Launch test with a revoke hook |
+| A revoke during steps 3 to 5 | Step 6 finds the end, the helper never gets `start` | Launch test with a revoke hook |
+| A revoke at the same moment as step 6 | Waits for the write lock of the gate; it commits before the check (no start) or after the commit (a running session, ended at once) | Launch test: a revoke from a second connection while the gate holds the lock |
+| A raw insert with `helper_pid` or `agent_pgid` set | Refused by the trigger | Store test |
 | A revoke after step 6 | The trigger ends the session; the supervisor stops the group | Supervisor test |
 | The job moves to `done` while a session runs | Ends with `job_state`; after the reap the engine builds the workspace with no mail | Supervisor test |
 | The agent program is missing | Refused at step 1 | Adapter test |

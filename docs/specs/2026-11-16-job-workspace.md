@@ -443,7 +443,9 @@ can close the gap. The rules are:
      or a sandbox that does not show the workspace yet, R4-05).
   4. In a write transaction, mark the session as started, only if it did
      not end. If it ended, stop the held process and start again at step
-     1. Else let the process run.
+     1. Else let the process run, before the commit of the same
+     transaction, so no revoke can come between the check and the release
+     (the launch gate of `docs/specs/2026-11-17-session-launcher.md`).
 
   A revoke ends each registered session of the job in its own write
   transaction (R4-04). A revoke before the transaction of step 4 makes
