@@ -890,6 +890,11 @@ pub fn parse_answer(verb: &str, line: &[u8]) -> Option<Result<Value, Failure>> {
                             .all(|k| r[k].is_u64())
                         && (r["due"].is_null() || r["due"].is_string())
                 }
+                "wait" => {
+                    r["job"].as_str().and_then(iris_job::parse_job_id).is_some()
+                        && r["state"] == "waiting"
+                        && r["until"].is_string()
+                }
                 "search" => all_of(&r["messages"], |m| m["id"].is_string()),
                 "list" => all_of(&r["items"], item),
                 "show" if r["message"].is_object() => {
