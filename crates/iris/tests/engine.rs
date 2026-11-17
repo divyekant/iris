@@ -129,6 +129,100 @@ fn a_401_after_a_new_token_needs_sign_in() {
     assert!(engine::sync_accounts(&s.store).unwrap().is_empty());
 }
 
+/// A proxy in front of the fake Gmail. For each of the first `times` tokens
+/// (one 401 for each token, counted by the token server calls), the first
+/// raw fetch waits `wait`, then the fake answers HTTP 401: a token that ran
+/// out while the call worked.
+fn expiring_proxy(fake: &FakeGmail, tokens: &TokenServer, times: usize, wait: Duration) -> String {
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let target = fake.addr();
+    let fake = fake.clone();
+    let fired = Arc::new(AtomicUsize::new(0));
+    let calls = tokens.calls.clone();
+    std::thread::spawn(move || {
+        for client in listener.incoming() {
+            let Ok(client) = client else { continue };
+            let server = TcpStream::connect(target).unwrap();
+            let (mut s_read, mut c_write) =
+                (server.try_clone().unwrap(), client.try_clone().unwrap());
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut s_read, &mut c_write);
+                let _ = c_write.shutdown(Shutdown::Both);
+            });
+            let (fake, fired, calls) = (fake.clone(), fired.clone(), calls.clone());
+            std::thread::spawn(move || {
+                let (mut c_read, mut s_write) = (client, server);
+                let mut buf = [0u8; 8192];
+                loop {
+                    let n = match std::io::Read::read(&mut c_read, &mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+                    let raw = buf[..n].windows(10).any(|w| w == b"format=raw");
+                    let token = calls.lock().unwrap().len();
+                    if raw
+                        && token <= times
+                        && fired
+                            .try_update(Ordering::SeqCst, Ordering::SeqCst, |f| {
+                                (f < token).then_some(token)
+                            })
+                            .is_ok()
+                    {
+                        std::thread::sleep(wait);
+                        fake.fail_next(&[401]);
+                    }
+                    if s_write.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                }
+                let _ = s_write.shutdown(Shutdown::Both);
+            });
+        }
+    });
+    format!("http://{addr}/gmail/v1")
+}
+
+#[test]
+fn tokens_that_run_out_during_one_sync_need_no_sign_in() {
+    let s = setup("ran-out", 40);
+    // Each token lives 61 s: 1 s more than the margin, so it runs out 1 s
+    // after it came (a real token lives 1 hour).
+    let short = tokens_answer().1.replace("3600", "61");
+    s.tokens
+        .answers
+        .lock()
+        .unwrap()
+        .extend((0..4).map(|_| (200, short.clone())));
+    // Two 401s, each after the token of the call ran out. The old rule
+    // counted them as two refusals.
+    let mut w = Worker::new(
+        s.store.clone(),
+        gmail(expiring_proxy(
+            &s.fake,
+            &s.tokens,
+            2,
+            Duration::from_millis(1_200),
+        )),
+        s.account,
+        Some(s.tokens.uri.clone()),
+    );
+    let r = w.sync();
+    assert!(r.is_ok(), "{r:?}");
+    // Each new call goes on from the last one: all 40 are in the mirror.
+    assert_eq!(
+        count(
+            &s.store,
+            "SELECT count(*) FROM message WHERE fetched_at IS NOT NULL"
+        ),
+        40
+    );
+    assert_state(&s.store, s.account, STATE_OK);
+    assert_eq!(s.tokens.calls.lock().unwrap().len(), 3);
+}
+
 #[test]
 fn a_refused_refresh_token_needs_sign_in() {
     let s = setup("revoked", 5);

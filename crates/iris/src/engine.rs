@@ -181,6 +181,8 @@ pub struct Worker {
     account: i64,
     test_token_uri: Option<String>,
     token: Option<AccessToken>,
+    /// When `token` came.
+    got: Instant,
     /// The sealed sign-in that gave `token`.
     sealed: Vec<u8>,
 }
@@ -199,6 +201,7 @@ impl Worker {
             account,
             test_token_uri,
             token: None,
+            got: Instant::now(),
             sealed: Vec::new(),
         }
     }
@@ -213,18 +216,24 @@ impl Worker {
         self.call(iris_sync::verify)
     }
 
-    /// Call `f` with an access token. On HTTP 401, get a new access token one
-    /// time and call again. If the new token gets HTTP 401 too, the account
-    /// needs a new sign-in (specification 1, section 4.7).
+    /// Call `f` with an access token. On HTTP 401, get a new access token
+    /// and call again. A 401 from a token that ran out during the call (a
+    /// call of a long first sync can run for hours) is not a refusal: the
+    /// call continues with a new token. If two tokens are refused, the
+    /// account needs a new sign-in (specification 1, section 4.7).
     fn call<T>(
         &mut self,
         f: impl Fn(&Store, &Gmail, i64, &str) -> iris_sync::Result<T>,
     ) -> Result<T> {
-        for _ in 0..2 {
+        let mut refused = 0;
+        while refused < 2 {
             let token = self.access()?;
             match f(&self.store, &self.gmail, self.account, token.expose()) {
                 Err(iris_sync::Error::Gmail(iris_gmail::Error::Unauthorized)) => {
-                    self.token = None;
+                    let expires_at = self.token.take().map(|t| t.expires_at);
+                    if !expires_at.is_some_and(|e| ran_out(self.got, e, Instant::now())) {
+                        refused += 1;
+                    }
                 }
                 r => return Ok(r?),
             }
@@ -250,6 +259,7 @@ impl Worker {
             Ok(t) => {
                 let token = t.token.clone();
                 self.token = Some(t);
+                self.got = Instant::now();
                 self.sealed = sealed;
                 Ok(token)
             }
@@ -477,4 +487,32 @@ pub fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// True if a token that came at `got` and lives to `expires_at` ran out by
+/// `now`: it was usable when it came, and its life (less [`TOKEN_MARGIN`])
+/// is over. A token with a shorter life never counts, so a 401 on it is a
+/// refusal, and the retries of [`Worker::call`] stay bounded.
+fn ran_out(got: Instant, expires_at: Instant, now: Instant) -> bool {
+    expires_at > got + TOKEN_MARGIN && now + TOKEN_MARGIN >= expires_at
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_usable_token_at_its_end_ran_out() {
+        let got = Instant::now();
+        let hour = got + Duration::from_secs(3600);
+        // A 401 one hour later: the token ran out.
+        assert!(ran_out(got, hour, got + Duration::from_secs(3590)));
+        assert!(ran_out(got, hour, got + Duration::from_secs(7200)));
+        // A 401 early in the life of the token: a refusal.
+        assert!(!ran_out(got, hour, got));
+        assert!(!ran_out(got, hour, got + Duration::from_secs(3000)));
+        // A token with a life inside the margin was never usable.
+        let short = got + TOKEN_MARGIN;
+        assert!(!ran_out(got, short, got + Duration::from_secs(3600)));
+    }
 }
