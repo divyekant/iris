@@ -300,6 +300,8 @@ test("a ready draft owed to you shows as a nudge with its text, and only such a 
     [owed, [200, fx.nudgeDraft], "Nudge ready", fx.nudgeDraft.body, ["threads/t-8700/draft"]],
     [owed, [200, { ...fx.nudgeDraft, nudge: false, to: null }], "Draft ready", null, ["threads/t-8700/draft"]],
     [owed, [404, { error: "Not found." }], "Draft ready", null, ["threads/t-8700/draft"]],
+    // A nudge for another commitment of the same thread.
+    [owed, [200, { ...fx.nudgeDraft, item: "c-999" }], "Draft ready", null, ["threads/t-8700/draft"]],
     [owe, [200, fx.nudgeDraft], "Draft ready", null, []],
   ];
   for (const [item, answer, pill, body, want] of cases) {

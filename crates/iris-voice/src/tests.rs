@@ -1202,7 +1202,7 @@ fn evidence(store: &Store, provider: &str, to: &str) {
 /// The person of the ready nudge of thread `t`, or `None`.
 fn ready_to(store: &Store, t: i64) -> Option<String> {
     store
-        .read(|c| Ok(super::ready(c, t)?.and_then(|r| r.3)))
+        .read(|c| Ok(super::ready(c, t)?.and_then(|r| r.to)))
         .unwrap()
 }
 

@@ -45,7 +45,8 @@
     // A failure or a 404 (the draft became stale) keeps "Draft ready".
     get<ThreadDraft>(`threads/${encodeURIComponent(thread)}/draft`).then(
       (d) => {
-        if (live && d.nudge) nudge = d;
+        // A thread can hold two commitments: the nudge is for one of them only.
+        if (live && d.nudge && d.item === item.id) nudge = d;
       },
       () => {},
     );
