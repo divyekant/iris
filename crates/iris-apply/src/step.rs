@@ -36,13 +36,17 @@ impl Step {
     }
 }
 
-/// Run the apply step for `account` at the time `now_ms`.
+/// Run the apply step for `account` at the time `now_ms`. Step 2a reads
+/// the time again for each send: `now_ms` plus the time that the step ran
+/// so far ([`step_clock`]).
 ///
 /// 1. The recovery of each ledger row of the account in `writing`. It runs
 ///    in each turn, also while the switch is off, so a send whose response
 ///    was lost does not stay `held` (issue #400).
 /// 2. Each `approved` action of the account with a Gmail verb, oldest
 ///    first, with [`apply`]. The apply keeps all its checks.
+///    2a. The send of each draft of the write view
+///    ([`iris_changeset::send_written`]), approved by the press of Send.
 /// 3. The move of each `approved` send of the account to `held`
 ///    ([`iris_changeset::hold`]). A send 14 days after its submit expires.
 /// 4. If the switch is on, the release of each `held` send of the account
@@ -58,6 +62,23 @@ pub fn step(
     account: i64,
     now_ms: i64,
 ) -> Result<Step> {
+    let begun = std::time::Instant::now();
+    let clock = move || now_ms + i64::try_from(begun.elapsed().as_millis()).unwrap_or(i64::MAX / 2);
+    step_clock(store, gmail, token, account, &clock)
+}
+
+/// [`step`] with a clock. Steps 1, 2, 3 and 4 use the time at the start of
+/// the step: a later time only makes them wait longer. Step 2a reads the
+/// clock again for each send, because the approval of the send starts its
+/// hold (docs/specs/2026-11-17-write.md, section 3).
+pub fn step_clock(
+    store: &Store,
+    gmail: &Gmail,
+    token: &mut Token<'_>,
+    account: i64,
+    clock: &dyn Fn() -> i64,
+) -> Result<Step> {
+    let now_ms = clock();
     let mut out = Step::default();
     if writing_rows(store, account)? {
         recover(store, gmail, token, account)?;
@@ -69,6 +90,10 @@ pub fn step(
             return Ok(out);
         }
     }
+    // Step 2a: the send of each draft that the write view marked
+    // (docs/specs/2026-11-17-write.md, section 3).
+    iris_changeset::send_written(store, account, clock)
+        .map_err(|e| Error::Store(changeset_error(e)))?;
     iris_changeset::hold(store, account, now_ms).map_err(|e| Error::Store(changeset_error(e)))?;
     let Some(on_at) = crate::sending(store)? else {
         return Ok(out);

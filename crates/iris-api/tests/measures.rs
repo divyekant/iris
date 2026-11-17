@@ -387,13 +387,15 @@ async fn first_brief_runs_to_the_first_brief_with_content() {
     assert_eq!(m["first_brief"]["seconds"], (brief - connect) / 1000);
 }
 
-/// Make the store a store of migration 26 again.
+/// Make the store a store of migration 26 again. Migration 28 (the write
+/// view) runs again after 27, so its table goes too.
 fn downgrade(s: &Store) {
     s.write(|tx| {
         tx.execute_batch(
             "DROP TRIGGER measure_connect;
              DROP TRIGGER person_decision; DROP TABLE person_decision;
-             DROP TABLE use_open; DROP TABLE use_day; DROP TABLE measure_time; PRAGMA user_version = 26;",
+             DROP TABLE use_open; DROP TABLE use_day; DROP TABLE measure_time;
+             DROP TABLE write_send; PRAGMA user_version = 26;",
         )?;
         Ok(())
     })
