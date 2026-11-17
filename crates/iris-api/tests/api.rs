@@ -1549,6 +1549,75 @@ async fn an_ask_that_you_send_is_owed_to_you_with_the_person_and_the_date() {
     assert_eq!(got, want);
 }
 
+#[tokio::test]
+async fn the_draft_route_gives_a_ready_nudge_with_its_person() {
+    let dir = temp("ready-nudge");
+    let (store, _) = filled_n(&dir, 30);
+    exec(&store, "UPDATE message SET understood_at = 1 WHERE ?1", [1]);
+    exec(&store, "DELETE FROM link_check WHERE ?1", [1]);
+    // The newest message of the thread of message 1 is a mail of Dana, not
+    // sent by the owner. Dana promised a thing with a due date: a late promise.
+    let (thread, newest): (i64, i64) = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT thread_id, (SELECT n.id FROM message n WHERE n.thread_id = m.thread_id
+                                     ORDER BY coalesce(n.internal_date, 0) DESC, n.id DESC LIMIT 1)
+                   FROM message m WHERE m.id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    exec(
+        &store,
+        "DELETE FROM message_label WHERE message_id = ?1
+            AND label_id IN (SELECT id FROM label WHERE provider_id = 'SENT')",
+        [newest],
+    );
+    exec(
+        &store,
+        "UPDATE header SET from_addr = 'dana@contoso.example' WHERE message_id = ?1",
+        [newest],
+    );
+    let dana = sender(&store, "dana@contoso.example", Some("person"));
+    add_item(
+        &store,
+        "commitment",
+        "open",
+        1,
+        10,
+        json!({"direction": "owed_to_you", "kind": "task", "owner": party(&dana),
+               "counterparty": {"kind": "self"}, "due": {"date": "2026-11-01"}}),
+    );
+    // The nudge that the engine saved: its `ask` is the key of now.
+    let key = iris_voice::nudge_key_sql("?1", None);
+    exec(
+        &store,
+        &format!(
+            "INSERT INTO reply_draft(thread_id, based_on, body, model, prompt, samples, created_at, ask)
+             VALUES (?1, ?2, 'Any news, Dana?', 'fake', 'nudge/0.1', 0, 1, {key})"
+        ),
+        [thread, newest],
+    );
+    let (status, draft) = get(&store, &format!("/api/threads/t-{thread}/draft")).await;
+    assert_eq!(status, StatusCode::OK, "{draft}");
+    assert_eq!(
+        draft,
+        json!({"thread": format!("t-{thread}"), "based_on": format!("m-{newest}"),
+               "nudge": true, "to": "dana@contoso.example", "body": "Any news, Dana?"})
+    );
+    let (_, brief) = get(&store, "/api/brief").await;
+    assert_eq!(
+        brief["owed_to_you"]["items"][0]["ready"],
+        json!(["draft"]),
+        "{brief}"
+    );
+    // The promise is kept: the nudge is stale.
+    exec(&store, "UPDATE item SET status = 'done' WHERE ?1", [1]);
+    let (status, _) = get(&store, &format!("/api/threads/t-{thread}/draft")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
 /// The draft marks of the items of `section` of a brief: the item ID and
 /// its `ready` field.
 fn ready_marks(section: &Value) -> Vec<(String, Value)> {
