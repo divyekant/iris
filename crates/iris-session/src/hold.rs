@@ -69,14 +69,39 @@ pub fn hold(
         input,
         status,
         log,
-        TERM_WAIT,
-        Duration::ZERO,
+        Tuning {
+            term_wait: TERM_WAIT,
+            drain_delay: Duration::ZERO,
+            fail_thread: None,
+        },
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-/// [`hold`] with another wait between the two signals, and a delay before
-/// the output thread reads, for tests.
+/// The waits of [`hold_with`], and a fault for tests.
+#[derive(Clone, Copy)]
+pub(crate) struct Tuning {
+    /// The wait between `SIGTERM` and `SIGKILL`.
+    pub term_wait: Duration,
+    /// A delay before the output thread reads.
+    pub drain_delay: Duration,
+    /// The name of a helper thread that does not start.
+    pub fail_thread: Option<&'static str>,
+}
+
+impl Tuning {
+    fn spawn(
+        &self,
+        name: &'static str,
+        f: impl FnOnce() + Send + 'static,
+    ) -> io::Result<thread::JoinHandle<()>> {
+        if self.fail_thread == Some(name) {
+            return Err(io::Error::other("test thread failure"));
+        }
+        thread::Builder::new().name(name.into()).spawn(f)
+    }
+}
+
+/// [`hold`] with other waits, for tests.
 pub(crate) fn hold_with(
     isolation: &dyn Isolation,
     session: i64,
@@ -84,8 +109,7 @@ pub(crate) fn hold_with(
     mut input: impl Read + Send + 'static,
     mut status: impl Write,
     log: impl Write,
-    term_wait: Duration,
-    drain_delay: Duration,
+    tuning: Tuning,
 ) -> i32 {
     let mut log = Log {
         out: log,
@@ -112,51 +136,46 @@ pub(crate) fn hold_with(
     let _ = status.flush();
     log.line(&format!("started, process group {pgid}"));
 
-    // Read the output of the agent without end, and drop it: the agent
-    // never blocks on a full pipe, and no byte of it is stored.
+    // 3. Start the three helper threads, then wait for the first of two
+    // events. Each thread is necessary: the output thread reads the output
+    // without end, so the agent never blocks and no byte is stored, and the
+    // other two see the two events. If one thread does not start, the
+    // helper stops the agent now.
     let dropped = Arc::new(AtomicU64::new(0));
     let count = dropped.clone();
+    let drain_delay = tuning.drain_delay;
     // The output thread sends on `drained` when it reads the end of the pipe.
     let (drained_tx, drained) = mpsc::channel::<()>();
-    if thread::Builder::new()
-        .name("iris-hold-output".into())
-        .spawn(move || {
+    let (tx, rx) = mpsc::channel();
+    let exited = tx.clone();
+    let started = tuning
+        .spawn("iris-hold-output", move || {
             thread::sleep(drain_delay);
             drain(output, &count);
             let _ = drained_tx.send(());
         })
-        .is_err()
-    {
-        // The reader is gone with the closure: a write of the agent fails.
-        log.line("the output thread did not start");
-    }
-
-    // 3. Wait for the first of two events. If a thread does not start, the
-    // helper cannot see its event, so it stops the agent now.
-    let (tx, rx) = mpsc::channel();
-    let exited = tx.clone();
-    let waiting = thread::Builder::new()
-        .name("iris-hold-wait".into())
-        .spawn(move || {
-            wait_exit_no_reap(pgid);
-            let _ = exited.send(Event::Exited);
-        });
-    let piping = thread::Builder::new()
-        .name("iris-hold-pipe".into())
-        .spawn(move || {
-            let mut buf = [0u8; 64];
-            loop {
-                match input.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(_) => {}
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                    Err(_) => break,
+        .and_then(|_| {
+            tuning.spawn("iris-hold-wait", move || {
+                wait_exit_no_reap(pgid);
+                let _ = exited.send(Event::Exited);
+            })
+        })
+        .and_then(|_| {
+            tuning.spawn("iris-hold-pipe", move || {
+                let mut buf = [0u8; 64];
+                loop {
+                    match input.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                        Err(_) => break,
+                    }
                 }
-            }
-            let _ = tx.send(Event::PipeEnded);
+                let _ = tx.send(Event::PipeEnded);
+            })
         });
-    if waiting.is_err() || piping.is_err() {
-        log.line("a wait thread did not start");
+    if started.is_err() {
+        log.line("a helper thread did not start");
     } else {
         match rx.recv() {
             Ok(Event::Exited) => log.line("the agent exited"),
@@ -168,7 +187,7 @@ pub(crate) fn hold_with(
     // its process ID (the group ID) cannot go to another process.
     signal_group(pgid, libc::SIGTERM);
     log.line("SIGTERM to the process group");
-    thread::sleep(term_wait);
+    thread::sleep(tuning.term_wait);
     signal_group(pgid, libc::SIGKILL);
     log.line("SIGKILL to the process group");
     match isolation.stop(session) {
@@ -181,12 +200,15 @@ pub(crate) fn hold_with(
     // reads the last bytes and the end of the pipe. Wait for it, so that
     // the count holds each byte. A process that the stop missed can keep
     // the pipe open: then the count is a lower bound, and the log says so.
-    let open = drained.recv_timeout(DRAIN_WAIT).is_err();
+    let end = drained.recv_timeout(DRAIN_WAIT);
     let count = dropped.load(Ordering::SeqCst);
-    log.line(&if open {
-        format!("{line}; at least {count} bytes of output dropped, the output pipe is still open")
-    } else {
-        format!("{line}; {count} bytes of output dropped")
+    log.line(&match end {
+        Ok(()) => format!("{line}; {count} bytes of output dropped"),
+        Err(mpsc::RecvTimeoutError::Timeout) => format!(
+            "{line}; at least {count} bytes of output dropped, the output pipe is still open"
+        ),
+        // The output thread did not start.
+        Err(mpsc::RecvTimeoutError::Disconnected) => format!("{line}; the output was not read"),
     });
     let _ = writeln!(status, "{line}");
     let _ = status.flush();

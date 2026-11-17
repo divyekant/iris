@@ -219,6 +219,9 @@ not the agent:
 3. After the start, the helper waits for two events: the child exits, or
    the pipe ends (the engine stopped, or the engine closed the pipe to stop
    the session).
+   The helper uses one thread to read the output, and one thread for each
+   event. If one of these threads does not start, the helper cannot read
+   the output or see an event, so it does step 4 at once.
 4. On each of the two events, the helper stops the group of the agent. It
    does not reap the agent before the last signal: it sees the exit with
    `waitid(P_PID, pid, WEXITED | WNOWAIT)`, which leaves the agent as a
