@@ -14,16 +14,24 @@
 
   // svelte-ignore state_referenced_locally
   let due = $state(dueDate(item));
+  // The due field follows the item (also after a reload) until the person changes it.
+  let dueEdited = $state(false);
+  $effect(() => {
+    const day = dueDate(item);
+    if (!dueEdited) due = day;
+  });
   let goal = $state("");
   let preview = $state<Preview | null>(null);
   let problem = $state("");
   let note = $state("");
   let sending = $state(false);
 
+  // Only a new ID loads the list again by itself: a reload of the same item does not.
+  let id = $derived(item.id);
   async function load() {
     problem = "";
     try {
-      preview = await get<Preview>(`items/${encodeURIComponent(item.id)}/job`);
+      preview = await get<Preview>(`items/${encodeURIComponent(id)}/job`);
     } catch (error) {
       preview = null;
       problem = (error as Error).message;
@@ -81,9 +89,9 @@
   <div class="due">
     <label>
       <span class="label">Due</span>
-      <input type="date" bind:value={due} />
+      <input type="date" bind:value={due} oninput={() => (dueEdited = true)} />
     </label>
-    {#if due}<button class="quiet" type="button" onclick={() => (due = "")}>No due date</button>{/if}
+    {#if due}<button class="quiet" type="button" onclick={() => ((due = ""), (dueEdited = true))}>No due date</button>{/if}
   </div>
 
   <div class="reads">

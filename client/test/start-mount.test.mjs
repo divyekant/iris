@@ -147,3 +147,36 @@ test("an item that closed after the preview: the page shows the item as it is no
   assert.equal(location.hash, "");
   view.destroy();
 });
+
+test("after a 409, the due field takes the new due date of the item, unless the person changed the field", async () => {
+  for (const edit of [false, true]) {
+    let posts = 0;
+    const asked = serve((method, path) => {
+      if (method === "POST") return ++posts === 1 ? [409, { error: "The mail changed. Look at it again." }] : [201, fx.jobs["j-12"]];
+      if (path.endsWith("/job")) return [200, preview("c-311")];
+      return [200, { ...commitment(), due: { date: "2026-11-24", strict: false } }];
+    });
+    location.hash = "";
+    const view = await mount("/src/views/Item.svelte", { item: commitment() });
+    button(view, "Handle this").click();
+    view.flushSync();
+    await until(() => view.target.querySelector(".thread"));
+    if (edit) {
+      const field = view.target.querySelector("input[type=date]");
+      field.value = "2026-11-19";
+      field.dispatchEvent(new window.Event("input", { bubbles: true }));
+      view.flushSync();
+    }
+    type(view, "Go.");
+    button(view, "Start the job").click();
+    await until(() => view.target.querySelector("[role=alert]"));
+    await until(() => asked.filter(([m, p]) => m === "GET" && p.endsWith("/job")).length >= 2);
+    await until(() => (view.flushSync(), !button(view, "Start the job").disabled));
+    const want = edit ? "2026-11-19" : "2026-11-24";
+    assert.equal(view.target.querySelector("input[type=date]").value, want, `edit ${edit}`);
+    button(view, "Start the job").click();
+    await until(() => location.hash === "#/jobs/j-12");
+    assert.equal(asked.filter(([m]) => m === "POST")[1][2].due, s.endOfDay(want), `edit ${edit}`);
+    view.destroy();
+  }
+});
