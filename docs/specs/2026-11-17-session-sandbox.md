@@ -285,9 +285,14 @@ each adapter program is.
   an issue: a later card can add a list of read paths to `agents.toml`,
   which the person sets.
 - The data folder is always empty in the view: the isolation mounts an
-  empty `tmpfs` there after each read path, and only then gives the
-  workspace. So a data folder inside a read path (for example
-  `/usr/local/iris`) is supported, and the view does not show it.
+  empty `tmpfs` there after each read path and each program file, and
+  only then gives the workspace. So a data folder inside `/usr` (for
+  example `/usr/share/iris`) is supported, and the view does not show it.
+- A program file inside the data folder (the adapter program or the
+  `iris` program) is not in the view, because the empty mount hides it.
+  The agent then does not start, and the session ends with the exit
+  status of `bwrap`. Nothing of the data folder is read. Known limit, with
+  an issue: install the programs outside the data folder.
 - The workspace is mounted after the private home, so the view
   also holds when the data folder is inside `HOME`.
 
@@ -356,7 +361,7 @@ before the agent runs, or `ended` is false.
 | A host process that is not Iris listens on the freed port after an engine crash | The relay can connect to it until the helper stops the agent (the end of the pipe from the engine), and the relay stops at the end of its engine. The agent tool verifies TLS to the model host, so that process cannot read the tunnel | Known limit (issue) |
 | A file view of a host with keys in `/etc/ssl/private` | That folder is not in the view | Linux sandbox test: `/etc/ssl` in the view holds no `private` |
 | A session ends, and its agent connects to the relay during the stop | The relay reaches the proxy of its own session, which keeps its port until the reap check | R4-04e supervisor test: a second session starts while the first one stops, and gets another port |
-| A data folder inside a read path (for example the `iris` program file in a folder of the data folder) | The empty mount of the data folder comes after each read path: the data folder is empty in the view | Linux sandbox test with the program file inside the data folder |
+| A program file inside the data folder (the adapter program or the `iris` program) | The empty mount of the data folder comes after each program file, so it hides the program. The agent does not start, and the data folder stays empty in the view. Known limit (issue) | Linux sandbox test with the program file inside the data folder: the program does not run |
 | A credential file or a Unix socket in a folder that is not in the view (for example `/etc/<file>` not in the list, or `/run`) | Not visible: no read and no connection | Linux sandbox test: a socket and a marker file outside the view, and `/etc/hostname` |
 | `iris job run` on macOS or another system | `system()` gives the reason, and `run` is refused before a row is written | Unit test that runs on each system that is not Linux |
 
