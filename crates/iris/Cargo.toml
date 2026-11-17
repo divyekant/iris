@@ -27,6 +27,7 @@ iris-job = { version = "0.0.0", path = "../iris-job" }
 iris-model = { version = "0.0.0", path = "../iris-model" }
 iris-policy = { version = "0.0.0", path = "../iris-policy" }
 iris-session = { version = "0.0.0", path = "../iris-session" }
+iris-workspace = { version = "0.0.0", path = "../iris-workspace" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
 iris-sync = { version = "0.0.0", path = "../iris-sync" }
 iris-changeset = { version = "0.0.0", path = "../iris-changeset" }

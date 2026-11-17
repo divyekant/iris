@@ -878,6 +878,7 @@ dependencies = [
  "iris-understand",
  "iris-voice",
  "iris-web",
+ "iris-workspace",
  "rusqlite",
  "serde",
  "serde_json",
