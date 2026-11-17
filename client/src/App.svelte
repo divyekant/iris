@@ -105,9 +105,8 @@
         <Handled {changes} {hidden} />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "history"}
-      <!-- The names of the rules: with no policy, a line names the rule by its number. -->
-      {#await Promise.all([get<LedgerPage>("ledger?limit=50"), get<Policy>("policy").catch(() => null)]) then [page, policy]}
-        <Ledger {page} rules={Object.fromEntries((policy?.rules ?? []).map((r) => [r.id, r.name]))} />
+      {#await get<LedgerPage>("ledger?limit=50") then page}
+        <Ledger {page} />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "outbox"}
       {#await loadOutbox() then first}

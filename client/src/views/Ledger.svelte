@@ -3,13 +3,15 @@
   under its day. Each line says what changed, why, who decided it and when,
   and has its own Undo while an undo can start (specification 2, section 7.4).
   The engine applies an undo at its next step, so the line says that Iris
-  puts the messages back.
+  puts the messages back, and the view reads the list again until no undo
+  or change is open.
 -->
 <script lang="ts">
   import { get, own, post, type LedgerEntry, type LedgerPage } from "../api";
   import { byDay, did, status, time, what, who } from "../ledger";
 
-  let { page, rules }: { page: LedgerPage; rules: Record<number, string> } = $props();
+  // `wait`: the time between two reads of the list while an undo or a change is open.
+  let { page, wait = 3000 }: { page: LedgerPage; wait?: number } = $props();
 
   // svelte-ignore state_referenced_locally
   let entries = $state(page.entries);
@@ -20,6 +22,36 @@
   let problem = $state("");
   let groups = $derived(byDay(entries));
   let times = $derived(new Map(entries.map((e) => [e.id, time(e.at)])));
+  let open = $derived(entries.some((e) => e.undo_open || e.state === "writing"));
+  let reads = $state(0);
+
+  // While an undo or a change is open, read the list again, so that each line shows its end.
+  $effect(() => {
+    void reads;
+    if (!open) return;
+    const timer = setTimeout(() => fresh().catch(() => {}).finally(() => reads++), wait);
+    return () => clearTimeout(timer);
+  });
+
+  const row = (id: string) => Number(id.slice(2));
+
+  // Read the list again from the start, as far as the oldest loaded entry, so that each
+  // loaded line is as the engine says now, and a new entry (an undo) shows at the top.
+  async function fresh() {
+    const oldest = entries.at(-1);
+    let list: LedgerEntry[] = [];
+    let after: string | null = null;
+    for (;;) {
+      const p: LedgerPage = await get<LedgerPage>(`ledger?limit=200${after ? `&after=${encodeURIComponent(after)}` : ""}`);
+      list = [...list, ...p.entries];
+      after = p.next;
+      if (!after || (oldest && row(list.at(-1)!.id) <= row(oldest.id))) break;
+    }
+    // Entries never leave the ledger, so the next page after the oldest loaded entry stays the same.
+    if (oldest) list = list.filter((e) => row(e.id) >= row(oldest.id));
+    else next = after;
+    entries = list;
+  }
 
   const MARK: Record<string, string> = {
     archive: "box",
@@ -57,9 +89,7 @@
 
   async function reload(why: string) {
     try {
-      const p = await get<LedgerPage>("ledger?limit=50");
-      entries = p.entries;
-      next = p.next;
+      await fresh();
       problem = why;
     } catch {
       problem = `${why} Iris could not load the list again. Load the page again.`;
@@ -111,7 +141,7 @@
           <p><strong>{did(e)}</strong> {what(e)}</p>
           {#if why(e)}<p class="why">{why(e)}</p>{/if}
           {#if s}<p class="why state"><span class="dot" class:warn={e.state === "failed"}></span>{s}</p>{/if}
-          <p class="meta">{who(e, rules)} · <time datetime={e.at}>{time(e.at)}</time>{#if e.state === "undone"}{" · Undone"}{/if}</p>
+          <p class="meta">{who(e)} · <time datetime={e.at}>{time(e.at)}</time>{#if e.state === "undone"}{" · Undone"}{/if}</p>
           {#if e.undo_open}
             <p class="going"><span class="dot"></span>Iris puts {e.changed === 1 ? "the message" : `${e.changed.toLocaleString("en-US")} messages`} back. This can take a minute.</p>
           {/if}

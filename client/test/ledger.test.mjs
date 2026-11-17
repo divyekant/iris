@@ -23,11 +23,12 @@ test("each verb reads in the past tense, with what it changed", () => {
 test("who decided: the author, and the rule or the person that approved", () => {
   const person = { kind: "person", name: null, job: null, goal: null };
   const agent = { kind: "agent", name: "Claude Code", job: "j-4", goal: "Pay the invoice" };
-  assert.equal(l.who(e({ author: person, decided_by: "person" }), {}), "You");
-  assert.equal(l.who(e({ author: agent, decided_by: "person" }), {}), "An agent, job “Pay the invoice”, approved by you");
-  assert.equal(l.who(e({ author: { ...agent, goal: null }, decided_by: "rule", rule: 3 }), { 3: "Tidy" }), "An agent, allowed by your rule “Tidy”");
-  assert.equal(l.who(e({ author: { kind: "triage" }, decided_by: "rule", rule: 3 }), {}), "Iris triage, allowed by your rule 3");
-  assert.equal(l.who(e({ author: { kind: "local", name: "cron" }, decided_by: "person" }), {}), "cron, approved by you");
+  assert.equal(l.who(e({ author: person, decided_by: "person" })), "You");
+  assert.equal(l.who(e({ author: agent, decided_by: "person" })), "An agent, job “Pay the invoice”, approved by you");
+  // A rule decision shows the reason that the engine recorded, with the name of the rule at that time.
+  assert.equal(l.who(e({ author: { ...agent, goal: null }, decided_by: "rule", rule: 3, reason: "Rule 3 (Tidy) allows archive." })), "An agent. Rule 3 (Tidy) allows archive.");
+  assert.equal(l.who(e({ author: { kind: "triage" }, decided_by: "rule", rule: 3, reason: null })), "Iris triage, allowed by your rule 3");
+  assert.equal(l.who(e({ author: { kind: "local", name: "cron" }, decided_by: "person" })), "cron, approved by you");
 });
 
 test("a failed or a running entry says so; a done entry needs no words", () => {

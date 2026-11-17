@@ -48,15 +48,16 @@ export function what(e: LedgerEntry): string {
   return count(e.messages, "message", "messages");
 }
 
-/** Who decided the entry: the author, and the rule or the person that approved it. */
-export function who(e: LedgerEntry, rules: Record<number, string>): string {
+/**
+ * Who decided the entry: the author, and the rule or the person that approved it. A rule
+ * decision uses the reason that the engine recorded with it, because a rule can get a new
+ * name after the decision (spec 2 section 6.3).
+ */
+export function who(e: LedgerEntry): string {
   const a = e.author;
   const author =
     a.kind === "person" ? "You" : a.kind === "agent" ? (a.goal ? `An agent, job “${a.goal}”` : "An agent") : a.kind === "triage" ? "Iris triage" : (a.name ?? "A local tool");
-  if (e.decided_by === "rule" && e.rule !== null) {
-    const name = rules[e.rule];
-    return `${author}, allowed by your rule ${name ? `“${name}”` : e.rule}`;
-  }
+  if (e.decided_by === "rule") return e.reason ? `${author}. ${e.reason}` : `${author}, allowed by your rule ${e.rule}`;
   return a.kind !== "person" && e.decided_by === "person" ? `${author}, approved by you` : author;
 }
 
