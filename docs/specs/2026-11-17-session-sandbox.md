@@ -75,7 +75,10 @@ spec, with two changes:
 - `system(data_dir: &Path)` takes the data folder. The isolation keeps one
   record for each session in `<data dir>/sessions/`, and it hides the data
   folder in each view (see [Files](#files)). The engine and the helper make the isolation
-  with the same data folder.
+  with the same data folder: the engine gives the helper its resolved
+  data folder as the first argument (`iris session-hold <data dir> ...`,
+  launcher spec, "The hold helper"), never in the arguments or the
+  environment of the agent.
 - A new method `spawn(&self, session, command: &mut process::Command) ->
   io::Result<Child>` starts the command that `command()` gave. The hold
   helper calls it in place of `Command::spawn`. The default method calls

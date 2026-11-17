@@ -204,9 +204,15 @@ A held process must run no code of the agent until step 4 (workspace spec).
 The engine starts the hidden command `iris session-hold` (the same program),
 not the agent:
 
-1. The engine starts `iris session-hold` with a pipe on its standard input,
-   the log file on its standard output, the isolation and the adapter
-   program and arguments as its arguments, and the environment of the agent.
+1. The engine starts `iris session-hold <data dir> <hold args>` with a
+   pipe on its standard input, the log file on its standard output, and
+   the environment of the agent. `<data dir>` is the absolute data folder
+   that the engine resolved (also from `--data`), and `<hold args>` are
+   the session ID, the isolation and the adapter program and arguments.
+   The helper calls `system(<data dir>)` with it. The data folder is an
+   argument of the helper only: the helper does not pass it to the agent,
+   whose arguments are the adapter arguments of `command()` and whose
+   environment has no variable of Iris.
 2. The helper reads one line from the pipe. It runs no code of the agent
    before the line.
    - `start`: the helper starts the agent as its child, in the isolation,
