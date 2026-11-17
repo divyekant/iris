@@ -356,7 +356,8 @@ async fn an_entry_with_no_change_has_no_undo() {
     assert!(v["error"].is_string());
 }
 
-/// The entry of a state verb names its item, and has no undo yet (issue #226).
+/// The entry of a state verb names its item, and its undo (`restore`,
+/// issue #226) sets the item back.
 #[tokio::test]
 async fn a_state_verb_names_its_item() {
     let dir = temp("state");
@@ -401,14 +402,26 @@ async fn a_state_verb_names_its_item() {
     assert_eq!(e["items"], 1);
     assert_eq!(e["title"], doc["title"]);
     assert_eq!(e["messages"], 0);
-    assert_eq!(e["can_undo"], false);
-    let (code, _) = call(
-        &s,
-        true,
-        &format!("/api/ledger/{}/undo", e["id"].as_str().unwrap()),
-    )
-    .await;
-    assert_eq!(code, StatusCode::CONFLICT);
+    assert_eq!(e["can_undo"], true);
+    let undo = format!("/api/ledger/{}/undo", e["id"].as_str().unwrap());
+    let (code, _) = call(&s, true, &undo).await;
+    assert_eq!(code, StatusCode::OK);
+    // The engine applies the `restore` at its next step: the item is open again.
+    iris_apply::apply_states(&s).unwrap();
+    let status: String = s
+        .read(|c| Ok(c.query_row("SELECT status FROM item WHERE id = 1", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(status, "open");
+    let (_, p) = call(&s, false, "/api/ledger").await;
+    let first = p["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["verb"] == "close")
+        .unwrap();
+    assert_eq!(first["state"], "undone");
+    let (code, _) = call(&s, true, &undo).await;
+    assert_eq!(code, StatusCode::CONFLICT, "no second undo");
 }
 
 /// An action with no reason of its own shows the reason of its revision,

@@ -157,6 +157,9 @@ test("a draft or a send names its kind and its recipients", () => {
   // With no draft at hand (a decided action), a mail action names one mail, never its messages.
   assert.equal(r.target(act({ verb: "send", resolved: { messages: ["m-1"] } })), "a mail");
   assert.equal(r.target(act({ verb: "draft" })), "a mail");
+  // The undo of a state entry (issue #226) names its entries, not 0 messages.
+  assert.equal(r.verb(act({ verb: "restore" })), "Undo");
+  assert.equal(r.target(act({ verb: "restore", targets: { ledger: ["l-4"] } })), "1 earlier change");
   const d = (to, cc = [], thread = null) => ({ revision: 1, n: 1, draft: null, thread, readable: true, to: to.map((address) => ({ address })), cc: cc.map((address) => ({ address })), subject: [], body: [] });
   assert.equal(r.to(d(["a@x.org"], [], "t-1")), "a reply to a@x.org");
   assert.equal(r.to(d(["a@x.org"], ["b@x.org"])), "a new mail to a@x.org and b@x.org");
