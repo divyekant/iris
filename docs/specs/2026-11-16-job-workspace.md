@@ -448,8 +448,10 @@ can close the gap. The rules are:
      and cannot read the workspace yet (for example a suspended process,
      or a sandbox that does not show the workspace yet, R4-05).
   4. In a write transaction, mark the session as started, only if it did
-     not end. If it ended, stop the held process and start again at step
-     1. Else let the process run, before the commit of the same
+     not end. If it ended, stop the held process. Start again at step 1
+     only if the end was a revoke (the grant changed); after a stop, a job
+     move or an engine end, the launch ends with no new session. Else let
+     the process run, before the commit of the same
      transaction, so no revoke can come between the check and the release
      (the launch gate of `docs/specs/2026-11-17-session-launcher.md`).
 

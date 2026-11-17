@@ -264,8 +264,10 @@ steps of the workspace spec:
      build. A second `revoke` ends the launch with the reason.
    - Each other reason (`stop`, `job_state`, `engine`): the launch ends
      with that reason, with no retry. So a stop during the launch cancels
-     the run, and `iris job run` prints that the session was stopped
-     before its start and exits with 1.
+     the run. `iris job run` already answered after step 2 (see
+     [The command](#the-command)), so it does not report this end: `iris
+     job session` shows the session as ended with `stop` and no
+     `started_at`.
 
    If the session did not end, then in the same transaction:
    1. Set `started_at` (`iris_job::start_in`).
@@ -514,7 +516,7 @@ The session socket answers these verbs of this card:
   other ID, or a message that is not granted, gets exit code 3 with "not
   in this job", the same answer for an ID that does not exist.
   The engine reads the grant at each call, so a revoke takes effect at
-  once. These verbs come in their own PR (plan, PR 6). Until it merges,
+  once. These verbs come in their own card (R4-04f, see the plan). Until it merges,
   the socket refuses them with exit code 3 and the reason.
 
 R4-03 adds the engine side of the other
@@ -547,7 +549,10 @@ exit code 3.
   and 2. Steps 3 to 7 then run on a thread of the engine, not inside the
   request. So the answer comes in well under the 30 seconds of the socket
   client, also for a slow build. `iris job run` prints the session ID and
-  that the session starts, and exits with 0.
+  that the session is registered, and exits with 0. Exit code 0 means
+  only that the register succeeded. Each later result of the launch (a
+  start, a `launch_failed`, a stop before the start) is in the row, and
+  `iris job session` shows it.
 - `iris job session <j-id>` (host verb) shows the last session of the job:
   its ID, the agent, and its state (`starting`, `running`, `ending`,
   `ended` with the end reason, or `reaped`). It reads the row of the store,
@@ -641,7 +646,7 @@ is refused before a row is written.
 | The agent and its children exit before the helper signals the group | The agent stays a zombie until after the last signal, so its group ID is not reused | Helper test: the agent exits at once, and the helper sends the signals before the reap (test hook that records the order) |
 | A build that takes longer than the socket time-out | `job.run` already answered after the register; the launch goes on; `iris job session` shows it | Launch test with a slow build hook |
 | The answer of `job.run` is lost | The command says the result is unknown and names `iris job session`; a retry is refused with the live session ID | Command test with a socket that closes before the answer |
-| `iris job stop` during steps 3 to 5 of a launch | The launch ends with `stop`, no retry; `run` exits with 1 | Launch test with a stop hook |
+| `iris job stop` during steps 3 to 5 of a launch | The launch ends with `stop`, no retry; `iris job session` shows the end with no start | Launch test with a stop hook |
 | An agent that opens connections without end | The egress log stops at 1 MiB, then counts; the engine memory stays bounded (8 open connections) | Proxy test with 100,000 refused connections and a small limit |
 | The engine is killed and an agent process left the group (`setsid`) | The helper sees the end of the pipe, stops the group and calls `Isolation::stop`; if the helper is killed too, the lifetime rule ends the process | Helper test with the test isolation that records `stop`; R4-05 test of the lifetime rule on each system |
 | An agent that prints a passed key or a file of the agent tool | Nothing of it is stored; the log has only status lines | Helper test: a script prints a marker value to both pipes, and no file of the data folder holds it |
@@ -785,17 +790,20 @@ who does not run `iris job run`.
 
 ## Plan
 
-1. R4-04 PR 1: this spec.
-2. R4-04 PR 2: migration 20 and the session functions in `iris-job`.
-3. R4-04 PR 3: the crate `iris-session`: adapters, `agents.toml`, the hold
-   helper and the launch.
-4. R4-04 PR 4: the egress proxy in `iris-session`.
-5. R4-04 PR 5: the engine: supervisor, reap check, requests, session
-   socket, egress ports, verbs and session mode.
-   The same PR changes the fixed rules of `JOB.md` in `iris-workspace` to
-   the text of the workspace spec (model host, no mailbox credentials).
-6. R4-04 PR 6: the read verbs `search`, `show` and `list` on the session
-   socket.
+Each step is one card of the board, with one PR. Each card has `doneWhen`
+and `dependsOn` on the board.
+
+| Card | PR | Depends on |
+|---|---|---|
+| R4-04 | This spec. | R4-02 |
+| R4-04b | Migration 20 and the session functions in `iris-job`. | R4-04 |
+| R4-04c | The crate `iris-session`: adapters, `agents.toml`, the hold helper and the launch. | R4-04b |
+| R4-04d | The egress proxy in `iris-session`. | R4-04 |
+| R4-04e | The engine: supervisor, reap check, requests, session socket, egress ports, verbs and session mode. It also changes the fixed rules of `JOB.md` in `iris-workspace` to the text of the workspace spec. | R4-04c, R4-04d |
+| R4-04f | The read verbs `search`, `show` and `list` on the session socket. | R4-04e |
+
+R4-05 (the isolation of each system) depends on R4-04c and R4-04d. The
+cards that need a running session (R4-08, R4-11, R5-04) depend on R4-04e.
 
 ## Spec checks
 
