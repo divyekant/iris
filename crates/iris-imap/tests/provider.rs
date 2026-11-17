@@ -506,3 +506,20 @@ fn message_pages_follow_folder_names() {
     assert!(second.messages[0].id.ends_with(":b"), "{second:?}");
     assert_eq!(second.next_page_token, None);
 }
+
+/// A label search window names sequence numbers, not UIDs: a folder whose
+/// UIDs do not start at 1 still lists each match.
+#[test]
+fn search_windows_use_sequence_numbers() {
+    let fake = FakeImap::start(Caps::ALL);
+    let uids: Vec<u32> = (0..30).map(|i| fake.add("INBOX", small(i), &[])).collect();
+    // UIDs 1 to 20 go: the 10 left have UIDs 21 to 30 and sequence numbers 1 to 10.
+    for u in &uids[..20] {
+        fake.remove("INBOX", *u);
+    }
+    fake.set_flags("INBOX", uids[25], &["\\Flagged"]);
+    let mail = provider(&fake);
+    let page = mail.messages(PASSWORD, Some("STARRED"), None).unwrap();
+    assert_eq!(page.messages.len(), 1, "{page:?}");
+    assert!(page.messages[0].id.contains(&format!(":{}:", uids[25])));
+}
