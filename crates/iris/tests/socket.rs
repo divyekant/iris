@@ -1188,6 +1188,7 @@ fn app_notices_give_only_the_new_notices_oldest_first() {
     assert_eq!(r["result"]["last"], json!(28));
     for bad in [
         json!({ "after": -1 }),
+        json!({ "after": null }),
         json!({ "after": "2" }),
         json!({ "after": 1.5 }),
         json!({ "since": 1 }),

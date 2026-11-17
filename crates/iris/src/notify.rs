@@ -96,6 +96,9 @@ struct App {
     /// The largest notice row ID that the app does not show: the `last` of
     /// the call that started the app. `i64::MAX` when no app asked.
     from: i64,
+    /// The largest notice row ID that the app received: the largest `last`
+    /// of its answers. The app shows each notice after `from` up to it.
+    seen: i64,
 }
 
 /// One lock for the call of the app and the choice of the engine: each
@@ -103,6 +106,7 @@ struct App {
 static APP: std::sync::Mutex<App> = std::sync::Mutex::new(App {
     asked_ms: 0,
     from: i64::MAX,
+    seen: i64::MIN,
 });
 
 fn app() -> std::sync::MutexGuard<'static, App> {
@@ -111,21 +115,24 @@ fn app() -> std::sync::MutexGuard<'static, App> {
 }
 
 /// Run one `app.notices` call at `now_ms` under the lock of [`show`].
-/// `read` gets `true` when the app owns the notices: its last call came
-/// [`APP_WAIT_MS`] or less before. With `false` (the first call, or a call
-/// after a gap), the call starts the app again. `read` then gives the `last`
-/// of the answer as `Some`: the app shows only the notices after it, and the
-/// engine shows all others. A notice that the engine shows before the lock
-/// is in the store before `read`, so its row ID is at or below that `last`.
+/// `read` gets `true` when the app owns the notices after its start: its
+/// last call came [`APP_WAIT_MS`] or less before. With `false` (the first
+/// call, or a call after a gap), the call starts the app again. `read` gives
+/// the answer, its `last`, and `true` when the call started the app: the app
+/// shows only the notices after that `last`, and the engine shows all
+/// others. A notice that the engine shows before the lock is in the store
+/// before `read`, so its row ID is at or below that `last`.
 pub fn app_call<T, E>(
     now_ms: i64,
-    read: impl FnOnce(bool) -> Result<(T, Option<i64>), E>,
+    read: impl FnOnce(bool) -> Result<(T, i64, bool), E>,
 ) -> Result<T, E> {
     let mut a = app();
-    let (answer, from) = read(app_live(a.asked_ms, now_ms))?;
-    if let Some(f) = from {
-        a.from = f;
+    let (answer, last, start) = read(app_live(a.asked_ms, now_ms))?;
+    if start {
+        a.from = last;
+        a.seen = last;
     }
+    a.seen = a.seen.max(last);
     a.asked_ms = a.asked_ms.max(now_ms);
     Ok(answer)
 }
@@ -136,18 +143,19 @@ fn app_live(asked_ms: i64, now_ms: i64) -> bool {
     asked_ms > 0 && now_ms - asked_ms <= APP_WAIT_MS
 }
 
-/// True when the app shows notice `id`, so the engine does not: the app is
-/// live (its call at `asked_ms`) and `id` is after the start `from` of the
-/// app.
-pub fn app_shows(id: i64, from: i64, asked_ms: i64, now_ms: i64) -> bool {
-    app_live(asked_ms, now_ms) && id > from
+/// True when the app shows notice `id`, so the engine does not: `id` is
+/// after the start `from` of the app, and the app received it (`seen`) or
+/// is live (its call at `asked_ms`). A notice that the app received stays
+/// with the app also when it waits long in the queue of [`spawn`].
+pub fn app_shows(id: i64, from: i64, seen: i64, asked_ms: i64, now_ms: i64) -> bool {
+    id > from && (id <= seen || app_live(asked_ms, now_ms))
 }
 
 /// [`app_shows`] with the state that the engine recorded, under the lock of
 /// [`app_call`].
 pub fn app_shows_now(id: i64, now_ms: i64) -> bool {
     let a = app();
-    app_shows(id, a.from, a.asked_ms, now_ms)
+    app_shows(id, a.from, a.seen, a.asked_ms, now_ms)
 }
 
 /// True after the first failure, so that a server with no desktop writes
@@ -230,16 +238,19 @@ mod tests {
     #[test]
     fn the_app_shows_the_notices_for_30_seconds_after_its_call() {
         let t = 1_800_000_000_000;
-        let shows = |asked| app_shows(5, 4, asked, t);
+        let shows = |asked| app_shows(5, 4, 4, asked, t);
         assert!(!shows(0));
         assert!(shows(t - 10_000));
         assert!(shows(t - APP_WAIT_MS));
         assert!(!shows(t - APP_WAIT_MS - 1));
         assert!(!shows(t - 31_000));
         // A notice at or before the start of the app: the engine shows it.
-        assert!(!app_shows(4, 4, t, t));
-        assert!(!app_shows(3, 4, t, t));
-        assert!(!app_shows(1, i64::MAX, t, t));
+        assert!(!app_shows(4, 4, 4, t, t));
+        assert!(!app_shows(3, 4, 4, t, t));
+        assert!(!app_shows(1, i64::MAX, i64::MIN, t, t));
+        // A notice that the app received stays with the app after the gap.
+        assert!(app_shows(5, 4, 5, 0, t));
+        assert!(!app_shows(6, 4, 5, t - 31_000, t));
     }
 
     #[test]
@@ -254,7 +265,7 @@ mod tests {
             let engine = std::thread::spawn(move || app_shows_now(5, now));
             std::thread::sleep(Duration::from_millis(100));
             assert!(!engine.is_finished(), "the choice waits for the call");
-            Ok::<_, ()>((engine, Some(4)))
+            Ok::<_, ()>((engine, 4, true))
         })
         .unwrap();
         assert!(engine.join().unwrap(), "the app shows notice 5");
@@ -263,18 +274,21 @@ mod tests {
         assert!(!app_shows_now(4, now));
         // A later call of the live app keeps its start.
         let next = now + 10_000;
-        assert!(app_call(next, |live| Ok::<_, ()>((live, None))).unwrap());
+        // The app received notice 5. A long wait in the queue of the engine
+        // does not give notice 5 to the engine after a gap.
+        assert!(app_call(next, |live| Ok::<_, ()>((live, 5, false))).unwrap());
         assert!(app_shows_now(5, next));
+        assert!(app_shows_now(5, next + APP_WAIT_MS * 10));
         // After a gap the engine shows the notices, and the next call
         // starts the app again after its new `last`.
         let gap = next + APP_WAIT_MS + 1;
         assert!(!app_shows_now(6, gap));
-        assert!(!app_call(gap, |live| Ok::<_, ()>((live, Some(6)))).unwrap());
+        assert!(!app_call(gap, |live| Ok::<_, ()>((live, 6, true))).unwrap());
         assert!(!app_shows_now(6, gap));
         assert!(app_shows_now(7, gap));
         // A failed read records nothing.
         let late = gap + APP_WAIT_MS + 1;
-        assert!(app_call(late, |_| Err::<((), Option<i64>), _>(())).is_err());
+        assert!(app_call(late, |_| Err::<((), i64, bool), _>(())).is_err());
         assert!(!app_shows_now(7, late));
     }
 
