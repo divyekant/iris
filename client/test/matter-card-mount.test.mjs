@@ -140,3 +140,38 @@ test("the answers of the engine: a changed proposal loads the next one, a lost a
     }
   }
 });
+
+test("a held decision is sent when the person leaves: the page closes or the view goes", async () => {
+  for (const leave of ["pagehide", "destroy"]) {
+    const asked = serve(() => [200, view]);
+    const v = await mount("/src/views/MatterCard.svelte", { view, delay: 60_000 });
+    try {
+      button(v, "Not a matter").click();
+      await until(() => button(v, "Undo"));
+      assert.equal(asked.length, 0);
+      if (leave === "pagehide") window.dispatchEvent(new Event("pagehide"));
+      else v.destroy();
+      await until(() => asked.length);
+      assert.deepEqual(asked, [["matters/g-5/decline", {}]], leave);
+    } finally {
+      if (leave !== "destroy") v.destroy();
+    }
+  }
+});
+
+test("on the matter page, a proposal that the engine dropped shows as gone, with no card", async () => {
+  // The decline answers 404, and so does the load of the matter after it.
+  const asked = serve(() => [404, { error: "no such matter" }]);
+  const v = await mount("/src/views/Matter.svelte", { view });
+  try {
+    button(v, "Not a matter").click();
+    // The test holds for the default 5 seconds: send the hold now with pagehide.
+    window.dispatchEvent(new Event("pagehide"));
+    await until(() => /Iris dropped this proposal/.test(text(v.target)));
+    assert.deepEqual(asked.map(([p]) => p), ["matters/g-5/decline", "matters/g-5"]);
+    assert.equal(button(v, "Keep together"), undefined);
+    assert.ok(v.target.querySelector('a[href="#/matters"]'));
+  } finally {
+    v.destroy();
+  }
+});

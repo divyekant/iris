@@ -58,6 +58,16 @@
     pending = hold(() => send(id, choice, body), delay);
   }
 
+  // A held decision is sent when the person leaves: the page closes, or the view of this card goes.
+  $effect(() => {
+    const leave = () => pending?.flush();
+    window.addEventListener("pagehide", leave);
+    return () => {
+      window.removeEventListener("pagehide", leave);
+      leave();
+    };
+  });
+
   function undo() {
     pending?.cancel();
     pending = undefined;
@@ -68,7 +78,9 @@
     pending = undefined;
     phase = { at: "sending", choice };
     try {
-      ondecided?.(await post<MatterView>(`matters/${encodeURIComponent(id)}/${choice}`, body));
+      // Not `ondecided?.(await post(...))`: with no `ondecided`, that skips the request.
+      const answer = await post<MatterView>(`matters/${encodeURIComponent(id)}/${choice}`, body);
+      ondecided?.(answer);
     } catch (error) {
       const status = (error as { status?: number }).status ?? 0;
       // A 4xx answer wrote nothing. With no answer, or a 5xx, Iris cannot say.

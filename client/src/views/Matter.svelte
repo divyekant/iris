@@ -14,6 +14,8 @@
   // svelte-ignore state_referenced_locally
   let view = $state(first);
   let error = $state("");
+  // The engine dropped the matter after the page loaded it (a member changed).
+  let gone = $state(false);
   let matter = $derived(view.matter);
   let commitments = $derived(view.items.commitment);
 
@@ -23,7 +25,8 @@
     try {
       view = await get<MatterView>(`matters/${encodeURIComponent(matter.id)}`);
     } catch (e) {
-      error = own(e);
+      if ((e as { status?: number }).status === 404) gone = true;
+      else error = own(e);
     }
   }
   let sections = $derived(
@@ -44,7 +47,9 @@
   {#if matter.status === "confirmed" && matter.decided}Kept together {day(matter.decided)}.{/if}
 </p>
 {#if error}<p role="alert">{error}</p>{/if}
-{#if matter.status === "proposed"}
+{#if gone}
+  <p class="note">Iris dropped this proposal, because one of its items changed. <a href="#/matters">See the matters</a></p>
+{:else if matter.status === "proposed"}
   <MatterCard {view} all ondecided={decided} />
 {:else}
   {#if matter.status === "declined"}
