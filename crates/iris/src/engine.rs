@@ -260,9 +260,15 @@ impl Worker {
 
     /// The apply step after a sync (docs/specs/2026-11-17-held-outbox.md,
     /// section 4): the recovery, the approved Gmail actions, the held
-    /// outbox and the release of each send whose hold ended. Each error of
-    /// one action goes to standard error. Gives the end of the next hold.
-    pub fn apply_step(&mut self) -> Result<Option<i64>> {
+    /// outbox and the release of each send whose hold ended. Gives the end
+    /// of the next hold, and a report line for each action that did not
+    /// end well. An account that needs a new sign-in gets no step.
+    pub fn apply_step(&mut self) -> Result<Turn> {
+        // No Gmail write for an account that needs a new sign-in, also
+        // when a refreshed token works again: the person must sign in.
+        if !sync_accounts(&self.store)?.contains(&self.account) {
+            return Err(Error::NeedsSignIn);
+        }
         let first = self.access()?;
         let (store, account, uri) = (&self.store, self.account, self.test_token_uri.as_deref());
         let (token, got, sealed) = (&mut self.token, &mut self.got, &mut self.sealed);
@@ -306,12 +312,10 @@ impl Worker {
             return Err(Error::NeedsSignIn);
         }
         let step = step.map_err(Error::Apply)?;
-        for (action, r) in &step.results {
-            if let Err(e) = r {
-                say!("iris: account {account}: action {action}: {e}");
-            }
-        }
-        Ok(step.next)
+        Ok(Turn {
+            next: step.next,
+            reports: reports(&step.results),
+        })
     }
 
     /// Sync and run the apply step each [`SYNC_EVERY`], or at the end of
@@ -326,7 +330,12 @@ impl Worker {
                 Err(e) => say!("iris: account {}: {e}", self.account),
             }
             let next = match self.apply_step() {
-                Ok(n) => n,
+                Ok(turn) => {
+                    for line in &turn.reports {
+                        say!("iris: account {}: {line}", self.account);
+                    }
+                    turn.next
+                }
                 // Another apply runs now: the next turn tries again.
                 Err(Error::Apply(iris_apply::Error::Busy)) => None,
                 Err(e) => {
@@ -341,6 +350,34 @@ impl Worker {
             std::thread::sleep(wait(next, now_ms()));
         }
     }
+}
+
+/// The result of one apply step of a sync thread.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Turn {
+    /// The end of the next hold, in milliseconds since 1970.
+    pub next: Option<i64>,
+    /// One line for each action that failed or gave an error, for the
+    /// standard error of the engine.
+    pub reports: Vec<String>,
+}
+
+/// The report lines of the results of an apply step: each error, each
+/// action that Gmail refused (`failed`), and each write with an unknown
+/// result that the recovery decides later.
+pub fn reports(results: &[(i64, iris_apply::Result<iris_apply::Outcome>)]) -> Vec<String> {
+    use iris_apply::Outcome;
+    results
+        .iter()
+        .filter_map(|(action, r)| match r {
+            Err(e) => Some(format!("action {action}: {e}")),
+            Ok(Outcome::Failed { error, .. }) => Some(format!("action {action} failed: {error}")),
+            Ok(Outcome::Pending) => Some(format!(
+                "action {action}: the result of the Gmail call is not known; the recovery decides"
+            )),
+            Ok(_) => None,
+        })
+        .collect()
 }
 
 /// A valid access token of `account`: `token` while the stored sign-in is

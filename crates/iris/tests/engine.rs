@@ -835,7 +835,8 @@ fn the_apply_step_applies_an_approved_archive() {
     let (action, provider) = approved_archive(&s);
     let calls = s.tokens.calls.lock().unwrap().len();
     s.fake.fail_next(&[401]);
-    assert_eq!(w.apply_step().unwrap(), None);
+    let turn = w.apply_step().unwrap();
+    assert_eq!((turn.next, turn.reports.len()), (None, 0), "{turn:?}");
     assert_eq!(s.tokens.calls.lock().unwrap().len(), calls + 1);
     assert_eq!(action_state(&s.store, action), "applied");
     let meta = gmail(s.fake.base_url()).minimal("t", &provider).unwrap();
@@ -865,7 +866,7 @@ fn a_token_endpoint_error_during_the_apply_step_keeps_the_account() {
     );
     assert_state(&s.store, s.account, STATE_OK);
     assert_eq!(action_state(&s.store, action), "approved");
-    assert_eq!(w.apply_step().unwrap(), None);
+    assert_eq!(w.apply_step().unwrap().next, None);
     assert_eq!(action_state(&s.store, action), "applied");
 }
 
@@ -892,6 +893,39 @@ fn a_refused_token_during_the_recovery_needs_sign_in() {
     let r = w.apply_step();
     assert!(matches!(r, Err(engine::Error::NeedsSignIn)), "{r:?}");
     assert_state(&s.store, s.account, STATE_NEEDS_SIGN_IN);
+}
+
+/// Two refused tokens of a sync mark the account. The apply step after
+/// it makes no Gmail call, also when Gmail takes the next token.
+#[test]
+fn no_apply_step_after_a_sync_needs_sign_in() {
+    let s = setup("apply-after-refusal", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let (action, _) = approved_archive(&s);
+    s.fake.fail_next(&[401, 401]);
+    assert!(matches!(w.sync(), Err(engine::Error::NeedsSignIn)));
+    let r = w.apply_step();
+    assert!(matches!(r, Err(engine::Error::NeedsSignIn)), "{r:?}");
+    assert_eq!(action_state(&s.store, action), "approved");
+}
+
+/// Gmail refuses the write of an action (HTTP 400): the action fails, and
+/// the turn reports it with the error of Gmail.
+#[test]
+fn the_apply_step_reports_a_failed_action() {
+    let s = setup("apply-failed", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let (action, _) = approved_archive(&s);
+    s.fake.fail_next_write(&[400], false);
+    let turn = w.apply_step().unwrap();
+    assert_eq!(action_state(&s.store, action), "failed");
+    assert_eq!(turn.reports.len(), 1, "{turn:?}");
+    assert!(
+        turn.reports[0].starts_with(&format!("action {action} failed: ")),
+        "{turn:?}"
+    );
 }
 
 #[test]
