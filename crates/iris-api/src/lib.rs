@@ -813,14 +813,19 @@ async fn get_outbox(
     .into_response())
 }
 
-/// `GET /api/stop`: `{"stopped": bool, "since": time|null}`
-/// (docs/specs/2026-11-17-stop.md, section 5).
+/// `GET /api/stop`: `{"stopped": bool, "since": time|null, "live": n,
+/// "busy": bool}` (docs/specs/2026-11-17-stop.md, section 5). `live` and
+/// `busy` are measured now, so a client says that no mail leaves only for a
+/// complete stop.
 async fn get_stop(State(s): State<Arc<Store>>) -> Result<Response> {
-    let at = s.read(iris_store::stopped)?;
-    Ok(
-        Json(serde_json::json!({ "stopped": at.is_some(), "since": at.map(rfc3339) }))
-            .into_response(),
-    )
+    let now = iris_apply::stop_state(&s).map_err(apply_error)?;
+    Ok(Json(match now {
+        None => serde_json::json!({ "stopped": false, "since": null, "live": 0, "busy": false }),
+        Some(n) => serde_json::json!({
+            "stopped": true, "since": rfc3339(n.since), "live": n.live, "busy": n.busy,
+        }),
+    })
+    .into_response())
 }
 
 /// `POST /api/stop`: Stop all agent work. The answer adds `sessions` (the

@@ -1224,8 +1224,8 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         Command::Stop { show } => {
             let store = open()?;
             if *show {
-                let at = store.read(iris_store::stopped).map_err(|e| e.to_string())?;
-                println!("{}", stop_state(at));
+                let now = iris_apply::stop_state(&store).map_err(|e| e.to_string())?;
+                println!("{}", stop_state(now.as_ref()));
                 return Ok(());
             }
             let s = iris_apply::stop(&store).map_err(|e| e.to_string())?;
@@ -1709,14 +1709,24 @@ mod tests {
     }
 }
 
-/// The state line of `iris stop --show`.
-fn stop_state(at: Option<i64>) -> String {
-    match at {
-        Some(at) => format!(
-            "Stopped since {}. No action applies and no mail leaves until `iris resume`.",
-            iris_api::rfc3339(at)
-        ),
+/// The state of `iris stop --show`: only a complete stop says that no
+/// mail leaves, as in [`stop_text`].
+fn stop_state(now: Option<&iris_apply::Stopped>) -> String {
+    match now {
         None => "Iris runs. `iris stop` stops all agent work.".into(),
+        Some(s) if s.live == 0 && !s.busy => format!(
+            "Stopped since {}. No action applies and no mail leaves until `iris resume`.",
+            iris_api::rfc3339(s.since)
+        ),
+        Some(s) => {
+            let text = stop_text(s);
+            format!(
+                "The stop switch is set since {}.\n{}",
+                iris_api::rfc3339(s.since),
+                text.split_once('\n')
+                    .map_or(text.as_str(), |(_, rest)| rest)
+            )
+        }
     }
 }
 

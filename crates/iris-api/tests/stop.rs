@@ -55,7 +55,10 @@ async fn stop_and_resume() {
     let (code, v) = call(&s, "GET", "/api/stop", "").await;
     assert_eq!(
         (code, v),
-        (StatusCode::OK, json!({"stopped": false, "since": null}))
+        (
+            StatusCode::OK,
+            json!({"stopped": false, "since": null, "live": 0, "busy": false})
+        )
     );
 
     let (code, v) = call(&s, "POST", "/api/stop", "{}").await;
@@ -92,4 +95,27 @@ async fn other_input_changes_nothing() {
     let (code, _) = call(&s, "POST", "/api/resume", "[]").await;
     assert_eq!(code, StatusCode::BAD_REQUEST);
     assert!(stopped(&s).is_some());
+}
+
+/// GET /api/stop measures the stop now: a held apply lock is `busy`, and a
+/// session that is not reaped is `live`.
+#[tokio::test]
+async fn the_state_says_when_the_stop_is_not_complete() {
+    let dir = temp("state");
+    let s = Arc::new(Store::open(&dir.0).unwrap());
+    let job = iris_job::create(&s, "Tidy the inbox.", None, 1).unwrap();
+    iris_job::register(&s, job, "claude-code", 1).unwrap();
+    iris_apply::stop_wait(&s, std::time::Duration::ZERO).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(s.dir().join(iris_apply::LOCK_FILE))
+        .unwrap();
+    file.try_lock().unwrap();
+    let (_, v) = call(&s, "GET", "/api/stop", "").await;
+    assert_eq!((&v["live"], &v["busy"]), (&json!(1), &json!(true)));
+    drop(file);
+    let (_, v) = call(&s, "GET", "/api/stop", "").await;
+    assert_eq!(v["busy"], json!(false));
 }

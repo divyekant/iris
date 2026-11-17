@@ -36,7 +36,7 @@ mod stop;
 pub use send::{release, sending, set_sending, HOLD_MS, SENT_OTHER};
 pub use state::{apply_state, apply_states};
 pub use step::{step, step_clock, Step};
-pub use stop::{resume, stop, stop_wait, Stopped, STOPPED_CALL};
+pub use stop::{resume, state as stop_state, stop, stop_wait, Stopped, STOPPED_CALL};
 
 use iris_gmail::{Gmail, BATCH_LIMIT};
 use iris_policy::Mode;
