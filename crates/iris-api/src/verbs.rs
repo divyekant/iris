@@ -1,5 +1,6 @@
 //! The state verbs of the web client (specification 2, section 4): the
-//! person closes, declines or defers one commitment. As for an undo
+//! person closes, declines or defers one commitment, skips a feed item,
+//! mutes a conversation or dismisses a signal. As for an undo
 //! (section 7.4), the engine makes a changeset with the author `person` and
 //! one action, and the choice of the person is the approval. The action
 //! applies in the same request, through the one apply path
@@ -12,8 +13,8 @@ use serde_json::{Map, Value};
 
 use crate::{item, Error, Result};
 
-/// The body of a verb request. `reason` is optional for `close` and
-/// `decline`. `defer` needs `date` (`YYYY-MM-DD`).
+/// The body of a verb request. `reason` is optional for each verb but
+/// `defer`, which needs `date` (`YYYY-MM-DD`).
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VerbBody {
@@ -21,10 +22,10 @@ pub struct VerbBody {
     pub date: Option<String>,
 }
 
-/// The most characters of a reason.
-pub const MAX_REASON: usize = 500;
+/// The most characters of a reason: the limit of submit.
+pub use iris_changeset::MAX_REASON;
 
-/// Apply the verb `verb` (`close`, `decline` or `defer`) of the person to
+/// Apply the verb `verb` (`close`, `decline`, `defer`, `skip`, `mute` or `dismiss`) of the person to
 /// the item `id`. Gives the item after the change, or `None` when no item
 /// has the ID. A body that is not valid is [`Error::Query`]. An item that
 /// the verb cannot change (for example, a commitment that is `done`) is
@@ -127,14 +128,16 @@ fn parse(verb: &str, b: &VerbBody) -> Result<(Verb, Map<String, Value>, String)>
         r => r.map(str::to_string),
     };
     let (verb, why) = match verb {
-        "close" | "decline" => {
+        "close" | "decline" | "skip" | "mute" | "dismiss" => {
             if b.date.is_some() {
                 return Err(Error::Query(format!("{verb} takes no date")));
             }
-            let (v, default) = if verb == "close" {
-                (Verb::Close, "Done.")
-            } else {
-                (Verb::Decline, "Declined.")
+            let (v, default) = match verb {
+                "close" => (Verb::Close, "Done."),
+                "decline" => (Verb::Decline, "Declined."),
+                "skip" => (Verb::Skip, "Skipped."),
+                "mute" => (Verb::Mute, "Muted."),
+                _ => (Verb::Dismiss, "Dismissed."),
             };
             let why = reason.unwrap_or_else(|| default.into());
             args.insert("reason".into(), why.clone().into());

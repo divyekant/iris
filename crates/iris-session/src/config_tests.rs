@@ -321,6 +321,7 @@ fn engine_env() -> HashMap<&'static str, &'static str> {
         ("HTTPS_PROXY", "http://engine:1"),
         ("https_proxy", "http://engine:1"),
         ("ANTHROPIC_API_KEY", "k1"),
+        ("CLAUDE_CODE_OAUTH_TOKEN", "k0"),
         ("OPENAI_API_KEY", "k2"),
         ("CODEX_HOME", "/c"),
         ("MY_TOOL_KEY", "k3"),
@@ -355,6 +356,7 @@ fn the_agent_env_has_only_the_listed_variables() {
         keys,
         [
             "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_OAUTH_TOKEN",
             "HOME",
             "HTTPS_PROXY",
             "LANG",
@@ -366,7 +368,7 @@ fn the_agent_env_has_only_the_listed_variables() {
     assert_eq!(c["https_proxy"], "http://127.0.0.1:4000");
     let x = env_of(&adapter(&f, "codex", Some(&path)).unwrap(), Some(4001));
     assert!(x.contains_key("OPENAI_API_KEY") && x.contains_key("CODEX_HOME"));
-    assert!(!x.contains_key("ANTHROPIC_API_KEY"));
+    assert!(!x.contains_key("ANTHROPIC_API_KEY") && !x.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
     // No allowed host: no proxy variable, also when a port is given and
     // the engine has its own proxy variables.
     let m = env_of(&adapter(&f, "mine", Some(&path)).unwrap(), Some(4002));
@@ -405,4 +407,39 @@ fn a_relative_path_entry_is_skipped() {
         adapter(&f, "mine", Some(OsStr::new(&abs))).unwrap().program,
         bin.0.join("my-tool")
     );
+}
+
+/// A file with an execute bit that does not let the engine user run it is
+/// not a program, and the lookup goes on to the next folder of PATH (#432).
+/// Root can run a file with any execute bit, so the check of the first
+/// folder runs only for a user that is not root.
+#[test]
+fn the_lookup_skips_a_file_that_the_engine_cannot_run() {
+    let first = Bin::new("noexec-1", &["my-tool"]);
+    let second = Bin::new("noexec-2", &["my-tool"]);
+    // Only "others" may run the first file; the engine user owns it.
+    std::fs::set_permissions(
+        first.0.join("my-tool"),
+        std::fs::Permissions::from_mode(0o001),
+    )
+    .unwrap();
+    let path = std::env::join_paths([&first.0, &second.0]).unwrap();
+    let f = parse_agents("[agent.mine]\ncommand = [\"my-tool\"]\n").unwrap();
+    let got = adapter(&f, "mine", Some(&path)).unwrap();
+    // SAFETY: geteuid has no memory effects.
+    if unsafe { libc::geteuid() } != 0 {
+        assert_eq!(got.program, second.0.join("my-tool"));
+    }
+    // A file with no execute bit is refused for each user, root too.
+    std::fs::set_permissions(
+        second.0.join("my-tool"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        first.0.join("my-tool"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    assert!(adapter(&f, "mine", Some(&path)).is_err());
 }

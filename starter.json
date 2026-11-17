@@ -67,7 +67,7 @@
   "cloud": {
     "profile": true,
     "keys": [],
-    "apt": [],
+    "apt": ["bubblewrap"],
     "hosts": [
       "crates.io",
       "index.crates.io",

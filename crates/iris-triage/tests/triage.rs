@@ -537,3 +537,50 @@ fn apply_mode_sends_a_draft_and_a_send_to_a_person() {
     );
     assert!(d[0].3.contains("a person decides"), "{}", d[0].3);
 }
+
+/// `skip`, `mute` and `dismiss` (R5-02) are verbs of the policy: a rule can
+/// name them, and the hard limit of hostile mail (spec 2, section 6.5)
+/// denies an agent action on an item from hostile mail.
+#[test]
+fn apply_mode_decides_skip_with_the_rules_and_the_hard_limits() {
+    use iris_changeset::{add_action, create, submit, Author, AuthorKind, Verb};
+    let dir = TempDir::new("applyskip");
+    let (s, a) = store(&dir);
+    item(&s, a, "feed", "g1");
+    item(&s, a, "feed", "g2");
+    s.write(|tx| {
+        tx.execute_batch(
+            "UPDATE item SET doc = json_object('id', 'f-' || id);
+             UPDATE message SET hostile = '[\"phishing\"]' WHERE provider_id = 'g2';",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    apply_policy(
+        &s,
+        &dir,
+        "[[rule]]\nid = 1\nname = \"Skip the feed\"\neffect = \"allow\"\n\
+         verbs = [\"skip\"]\nwhen = { form = \"feed\" }\nby = \"person\"\nadded = 2026-11-10\n",
+    );
+    let who = Author {
+        kind: AuthorKind::Agent,
+        name: Some("t".into()),
+        session: None,
+        job: None,
+    };
+    let cs = create(&s, &who, NOW).unwrap();
+    let mut args = serde_json::Map::new();
+    args.insert("reason".into(), "Old.".into());
+    for id in ["f-1", "f-2"] {
+        add_action(&s, cs, &who, Verb::Skip, &[id], &args, None).unwrap();
+    }
+    submit(&s, cs, &who, "Skip.", NOW).unwrap();
+    s.write(|c| {
+        iris_triage::decide_submitted(c, cs, 1, iris_policy::Author::Local, NOW)
+            .map_err(|e| iris_store::Error::Io(std::io::Error::other(e.to_string())))
+    })
+    .unwrap();
+    let d = decisions(&s, cs);
+    assert_eq!((d[0].0.as_str(), d[0].2), ("approved", Some(1)), "{d:?}");
+    assert_eq!(d[1].0, "denied", "{d:?}");
+}

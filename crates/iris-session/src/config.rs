@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -23,7 +23,7 @@ const MAX_COMMAND: usize = 32;
 const MAX_PASS_ENV: usize = 32;
 const MAX_HOSTS: usize = 16;
 const MAX_BYTES: usize = 64 * 1024;
-const DEFAULT_MINUTES: u32 = 30;
+pub const DEFAULT_MINUTES: u32 = 30;
 const PROXY_NAMES: [&str; 4] = ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY"];
 
 /// The variables that each agent gets, if the engine has them.
@@ -333,7 +333,11 @@ pub fn adapter(file: &AgentsFile, name: &str, path: Option<&OsStr>) -> Result<Ad
                 "Glob".into(),
                 "Grep".into(),
             ],
-            vec!["ANTHROPIC_API_KEY".to_string()],
+            vec![
+                "ANTHROPIC_API_KEY".to_string(),
+                // A token of `claude setup-token`: the session has no home of the person.
+                "CLAUDE_CODE_OAUTH_TOKEN".to_string(),
+            ],
             vec!["api.anthropic.com".to_string()],
         ),
         "codex" => (
@@ -375,8 +379,16 @@ pub fn adapter(file: &AgentsFile, name: &str, path: Option<&OsStr>) -> Result<Ad
 }
 
 fn find_program(program: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+    // A regular file that the engine user may run: access(X_OK) checks the
+    // owner, group and other bits against this user, not only that one
+    // execute bit exists (#432).
     let executable = |p: &Path| {
-        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // SAFETY: c is a valid C string for the call.
+        std::fs::metadata(p).is_ok_and(|m| m.is_file())
+            && unsafe { libc::access(c.as_ptr(), libc::X_OK) } == 0
     };
     if program.contains('/') {
         let p = PathBuf::from(program);

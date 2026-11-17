@@ -34,7 +34,7 @@ mod step;
 
 pub use send::{release, sending, set_sending, HOLD_MS, SENT_OTHER};
 pub use state::{apply_state, apply_states};
-pub use step::{step, Step};
+pub use step::{step, step_clock, Step};
 
 use iris_gmail::{Gmail, BATCH_LIMIT};
 use iris_policy::Mode;
@@ -506,23 +506,17 @@ pub fn apply(
     let mut after = 0;
     loop {
         // A gone message has no provider ID here. An undo of the entry `o`
-        // changes a message only if `o` changed it, and no later entry
-        // changed it, except the actions of the undos of `o`. Step 2 of the
-        // undo of a `trash` changes only a message that an `untrash` of an
-        // undo of `o` changed (section 7.4).
+        // changes a message only if `o` changed it, and no later change of
+        // the message stands ([`later_change_stands`]). Step 2 of the undo
+        // of a `trash` changes only a message that an `untrash` of an undo
+        // of `o` changed (section 7.4).
         let page: Vec<(i64, Option<String>, bool)> = store.read(|c| {
             let mut st = c.prepare_cached(
-                "SELECT am.message_id, m.provider_id,
+                "SELECT am.message_id, m.provider_id, u.ledger_id,
                    u.ledger_id IS NULL
                    OR (EXISTS (SELECT 1 FROM ledger_message lm
                                WHERE lm.ledger_id = u.ledger_id
                                  AND lm.message_id = am.message_id AND lm.done = 1)
-                       AND NOT EXISTS (
-                         SELECT 1 FROM ledger_message lm JOIN ledger l ON l.id = lm.ledger_id
-                         WHERE lm.message_id = am.message_id AND l.id > u.ledger_id
-                           AND (lm.done = 1 OR lm.listed = 'unknown')
-                           AND l.action_id NOT IN (SELECT action_id FROM ledger_undo
-                                                   WHERE ledger_id = u.ledger_id))
                        AND (u.step = 1 OR EXISTS (
                          SELECT 1 FROM ledger_undo f JOIN ledger l ON l.action_id = f.action_id
                          JOIN ledger_message lm ON lm.ledger_id = l.id
@@ -535,9 +529,24 @@ pub fn apply(
                  ORDER BY am.message_id LIMIT ?3",
             )?;
             let rows = st.query_map(params![action, after, BATCH_LIMIT as i64], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                    r.get::<_, bool>(3)?,
+                ))
             })?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
+            let rows: Vec<_> = rows.collect::<rusqlite::Result<_>>()?;
+            let mut page = Vec::with_capacity(rows.len());
+            for (id, provider_id, undo_of, eligible) in rows {
+                let eligible = eligible
+                    && match undo_of {
+                        Some(o) => !later_change_stands(c, o, id)?,
+                        None => true,
+                    };
+                page.push((id, provider_id, eligible));
+            }
+            Ok(page)
         })?;
         let Some(&(last, ..)) = page.last() else {
             break;
@@ -1127,6 +1136,61 @@ impl Run<'_, '_> {
             error,
         })
     }
+}
+
+/// True if a change of `message` by Iris after the ledger entry `o` still
+/// stands, so an undo of `o` must not change the message (section 7.4).
+///
+/// Each later entry with a `done` row of the message is a change. An undo
+/// entry (a link in `ledger_undo`) reverses the change of its target on the
+/// message when its own change stands: a change stands if no undo of it
+/// with a `done` row of the message stands. So an undo of an undo makes
+/// the first change stand again, and a retry of an undo counts as each
+/// other undo. Only an entry that is not the undo of an entry from `o` on
+/// is a root: its chain gives its net change. The undos of `o`, and their
+/// undos, are not later changes. A row with an unknown result outside the
+/// undos of `o` blocks, because its effect is not known.
+///
+/// The history stays in SQLite (section 9): a temporary table holds the
+/// later rows of the message, and one statement for each level of the
+/// undo chains decides `stands`, from the newest level to the oldest.
+fn later_change_stands(c: &Connection, o: i64, message: i64) -> iris_store::Result<bool> {
+    c.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS undo_guard(
+           id INTEGER PRIMARY KEY, target INTEGER, done INTEGER NOT NULL,
+           unknown INTEGER NOT NULL, stands INTEGER);
+         CREATE INDEX IF NOT EXISTS temp.undo_guard_target ON undo_guard(target);
+         DELETE FROM temp.undo_guard;",
+    )?;
+    // An undo changes only messages that its target changed, so each undo
+    // chain of the message is in these rows.
+    c.prepare_cached(
+        "INSERT INTO temp.undo_guard(id, target, done, unknown)
+         SELECT lm.ledger_id,
+                (SELECT x.ledger_id FROM ledger l JOIN ledger_undo x ON x.action_id = l.action_id
+                 WHERE l.id = lm.ledger_id AND x.ledger_id >= ?2),
+                lm.done, coalesce(lm.listed = 'unknown', 0)
+         FROM ledger_message lm WHERE lm.message_id = ?1 AND lm.ledger_id > ?2",
+    )?
+    .execute(params![message, o])?;
+    // Each undo is newer than its target, so each pass decides at least
+    // the entries whose undos are all decided, and the loop ends.
+    let mut decide = c.prepare_cached(
+        "UPDATE temp.undo_guard SET stands = done AND NOT EXISTS (
+           SELECT 1 FROM temp.undo_guard u WHERE u.target = undo_guard.id AND u.stands)
+         WHERE stands IS NULL AND NOT EXISTS (
+           SELECT 1 FROM temp.undo_guard u WHERE u.target = undo_guard.id AND u.stands IS NULL)",
+    )?;
+    while decide.execute([])? > 0 {}
+    Ok(c.prepare_cached(
+        "WITH RECURSIVE under_o(id) AS (
+           SELECT id FROM temp.undo_guard WHERE target = ?1
+           UNION SELECT g.id FROM temp.undo_guard g JOIN under_o ON g.target = under_o.id)
+         SELECT EXISTS (SELECT 1 FROM temp.undo_guard
+                        WHERE id NOT IN (SELECT id FROM under_o)
+                          AND (unknown OR (target IS NULL AND stands)))",
+    )?
+    .query_row([o], |r| r.get(0))?)
 }
 
 fn set_listed(tx: &Connection, ledger: i64, message: i64, why: &str) -> iris_store::Result<()> {

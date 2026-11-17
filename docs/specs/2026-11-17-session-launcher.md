@@ -39,13 +39,15 @@ command. Each tool has its own command line.
    the data folder, `iris.sock` and the network, other than the model hosts
    of the adapter through the egress proxy of the engine (see
    [Isolation](#isolation) and [Model egress](#model-egress)). This card defines the isolation interface.
-   R4-05 gives the isolation of macOS and of Linux. Until R4-05 merges,
-   `iris job run` refuses each run.
+   R4-05 gives the isolation of Linux (sandbox spec,
+   `docs/specs/2026-11-17-session-sandbox.md`). R4-05m gives the
+   isolation of macOS. Until the card of a system merges, `iris job run`
+   refuses each run on that system.
 
 ## Not in scope
 
 - The isolation of each system: no network other than the egress proxy, no
-  data folder and no host socket (R4-05). This card gives the interface and refuses a run with no
+  data folder and no host socket (R4-05 for Linux, R4-05m for macOS). This card gives the interface and refuses a run with no
   isolation, so no agent runs outside an isolation.
 - The write verbs in a session and the one draft changeset of a session
   (R4-03).
@@ -163,9 +165,14 @@ allow_hosts = ["api.my-tool.example"]
 The environment of the agent is empty, then gets only these variables, if
 the engine has them: `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`,
 `TERM`, `TMPDIR`, `SHELL`, and the `pass_env` of the adapter. The built-in
-adapters pass `ANTHROPIC_API_KEY` (`claude-code`) and `OPENAI_API_KEY` and
-`CODEX_HOME` (`codex`): these are the keys of the agent tool, not of the
-mailbox. A session with an egress port also gets `HTTPS_PROXY` and
+adapters pass `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` (a token
+of `claude setup-token`, for a Claude subscription) (`claude-code`), and
+`OPENAI_API_KEY` and `CODEX_HOME` (`codex`): these are the keys of the agent tool, not of the
+mailbox. The Linux sandbox shows no host folder other than the workspace
+and the program files: `HOME` is an empty private folder, and a
+`CODEX_HOME` outside the view is not visible. So the agent tool reads no
+settings or login files of the person, and authenticates only with a key
+variable (sandbox spec, "Files"; known limit with an issue). A session with an egress port also gets `HTTPS_PROXY` and
 `https_proxy`, set by the engine to the port of the session (see
 [Model egress](#model-egress)); a value of the engine for these names is
 never passed. No variable of Iris goes to the agent.
@@ -197,9 +204,15 @@ A held process must run no code of the agent until step 4 (workspace spec).
 The engine starts the hidden command `iris session-hold` (the same program),
 not the agent:
 
-1. The engine starts `iris session-hold` with a pipe on its standard input,
-   the log file on its standard output, the isolation and the adapter
-   program and arguments as its arguments, and the environment of the agent.
+1. The engine starts `iris session-hold <data dir> <hold args>` with a
+   pipe on its standard input, the log file on its standard output, and
+   the environment of the agent. `<data dir>` is the absolute data folder
+   that the engine resolved (also from `--data`), and `<hold args>` are
+   the session ID, the isolation and the adapter program and arguments.
+   The helper calls `system(<data dir>)` with it. The data folder is an
+   argument of the helper only: the helper does not pass it to the agent,
+   whose arguments are the adapter arguments of `command()` and whose
+   environment has no variable of Iris.
 2. The helper reads one line from the pipe. It runs no code of the agent
    before the line.
    - `start`: the helper starts the agent as its child, in the isolation,
@@ -213,9 +226,12 @@ not the agent:
    - If the start of the agent fails, the helper writes one line `failed`
      on its second pipe and exits with no child.
 
-   The helper itself is started inside the outer part of the isolation, so
-   the isolation binds the life of each process of the session to the
-   helper (see [Isolation](#isolation), lifetime rule).
+   The helper runs outside the sandbox of the agent: it is code of Iris,
+   and it needs `/proc`, the data folder and the host loopback address.
+   The agent is its child, inside the sandbox, and the isolation binds the
+   life of each process of the session to the helper (see
+   [Isolation](#isolation), lifetime rule). On Linux the child is `bwrap`,
+   which ends with the helper (`docs/specs/2026-11-17-session-sandbox.md`).
 3. After the start, the helper waits for two events: the child exits, or
    the pipe ends (the engine stopped, or the engine closed the pipe to stop
    the session).
@@ -253,8 +269,11 @@ The helper is the same program as the engine, so no new file is installed.
 
 ### Launch
 
-`iris_session::launch(store, data_dir, job, agent, now)` does the launcher
-steps of the workspace spec:
+`iris_session::launch::Launcher` does the launcher steps of the workspace
+spec. `begin` does steps 1 and 2, so the engine can answer `job.run` with
+the session ID. `finish` does steps 3 to 6. The engine gives the store, the
+data folder, the isolation, the command of the helper, the egress port, its
+environment and its clock:
 
 1. Read `agents.toml` and resolve the adapter. A missing program fails here,
    before a row is written. Get the isolation of the system. If there is
@@ -270,9 +289,12 @@ steps of the workspace spec:
    and the reason.
 5. Start the hold helper (held), and write `helper_pid` (the helper move)
    in the same step. If the write fails, close the pipe and wait for the
-   helper.
-6. Start and release, as one gate: open a write transaction
-   (`BEGIN IMMEDIATE`), and check that the session did not end. If it
+   helper. The arguments of the helper are the session ID, then the
+   program and the arguments that `Isolation::command` gives. The helper
+   starts in the workspace folder, with the environment of the agent only.
+6. Start and release, as one gate: open a write transaction that takes
+   the write lock first (an `UPDATE` that changes no row takes it, as
+   `BEGIN IMMEDIATE` does), and check that the session did not end. If it
    ended during steps 3 to 5, roll back, close the pipe, wait for the
    helper and run the reap check. Then act on the end reason:
    - `revoke`: the grant changed, so go back to step 2 once, with a new
@@ -283,6 +305,18 @@ steps of the workspace spec:
      [The command](#the-command)), so it does not report this end: `iris
      job session` shows the session as ended with `stop` and no
      `started_at`.
+
+   The engine also keeps a stop mark for each job whose stop came during
+   the launch. The gate locks the marks after the store write lock, reads
+   the mark of its job, and holds the lock to the commit. So a stop mark
+   comes before the read (no start) or after the commit (the stop ends a
+   running session). It never comes between the two (issue #517). If the
+   mark is set, the gate rolls back and ends the session with `stop`.
+   This holds also when the end write of the stop failed. If no end write
+   of the gate works either, the session stays open with no start, and
+   the supervisor ends it with `launch_failed` when the store takes the
+   end. The marks have their own lock, and no code waits for the store
+   while it holds that lock. A stop waits for at most one gate.
 
    If the session did not end, then in the same transaction:
    1. Set `started_at` (`iris_job::start_in`).
@@ -307,7 +341,9 @@ steps of the workspace spec:
 
 Each failure after step 2 ends the session with `launch_failed`, closes the
 pipe, waits for the helper if one started, runs the reap check and removes
-the socket. So no live session stays without a process. In step 6, a session
+the socket. The wait for the helper is at most 15 seconds (the helper needs
+5 seconds and the isolation stop). After it, the launch kills the helper,
+and the lifetime rule of the isolation ends each process of the session. So no live session stays without a process. In step 6, a session
 that ended is reaped the same way before step 2 runs again.
 
 ### Supervisor
@@ -325,6 +361,11 @@ each running session:
   cases, run the reap check, which keeps the session live while a process
   of the agent group runs. Then remove the socket file. If the job is
   `done`, build its workspace again after the reap.
+- An open session with no launch thread of this engine and no helper
+  (`helper_pid` NULL, or the helper ended): end it with `launch_failed`, then
+  run the reap check. This covers a launch that failed and could not write
+  the end (for example, a full disk): the launch tries the end write 3
+  times, then reports the session as open, never as ended.
 - A session that ended but did not pass the reap check: run the reap check
   again. The session stays live until the check passes.
 - The session ended in the store (a revoke, a job move, a stop, or a verb
@@ -333,16 +374,25 @@ each running session:
   shutdown order. The default time limit is 30 minutes. `agents.toml` can set
   `[session] max_minutes`, from 1 to 1440.
 
-The shutdown order, the same for each end of a session:
+The shutdown order, the same for each end of a session (also the exit of
+the agent, which the helper reports, and a launch that fails after its
+proxy started):
 
 1. End the grant: the end is in the store. From now on the session socket
    takes no new request (exit code 3).
-2. Finish the accepted requests: each request that passed the check of the
+2. Close the egress proxy of the session (`Proxy::close`, see "Model
+   egress"). This comes before each wait: no step below keeps a tunnel
+   open. The proxy keeps its port bound. The engine stops the proxy
+   (`Proxy::stop`, which frees the port) only after the reap check of the
+   session passes. A launch that fails before the helper starts closes
+   and keeps its proxy in the same way, and the supervisor stops it after
+   the reap check.
+3. Finish the accepted requests: each request that passed the check of the
    session socket before the end gets its reply, for at most 10 seconds.
    Then close the session socket and each of its connections.
-3. Close the pipe of the helper. The helper stops the group and calls
+4. Close the pipe of the helper. The helper stops the group and calls
    `Isolation::stop`.
-4. Call `Isolation::stop` from the engine too, and run the reap check.
+5. Call `Isolation::stop` from the engine too, and run the reap check.
 
 So a verb that ends its own session (`iris done`) gets its reply before
 any process of the agent gets a signal.
@@ -419,6 +469,18 @@ machine.
   removes `sessions/` logs older than 30 days.
 - After the reap of a session of a done job, the engine builds the
   workspace of the job the same way.
+- One build thread of the engine does these builds, in order. A build can
+  wait for the workspace lock with no limit, so no supervisor turn, stop
+  or run waits for a build.
+- In the same way, one stop thread of the engine stops the egress proxy
+  of each reaped session (`Proxy::stop`). A proxy stop joins the threads
+  of the proxy, so no supervisor turn, stop or run waits for it.
+- A supervisor turn does only fast work: the end in the store and the
+  `Proxy::close`. Each ended session gets its own reap thread for the
+  steps that wait: the answers of the accepted requests and the close of
+  the session socket (at most 10 seconds), then the close of the pipe,
+  then `Isolation::stop` and the reap check, which have no time limit. A turn starts no second reap thread for a session while one
+  runs. So a slow session never holds the stop of another session.
 
 ### Isolation
 
@@ -426,10 +488,10 @@ An isolation runs the agent so that it cannot reach the data folder, the
 engine socket `iris.sock`, the socket of another session, or the network.
 The one exception is the egress port of the session (see
 [Model egress](#model-egress)).
-It shows the agent only the workspace (read and write), the programs of the
-system and the folders that the adapter needs (read only, for example the
-settings of the agent tool). It ends each process in it when the session
-ends.
+It shows the agent only the workspace (read and write), a private empty
+home and `/tmp` (read and write), and the programs and system files of the
+sandbox spec (read only). It shows no settings or credential file of the
+person. It ends each process in it when the session ends.
 
 `iris_session::Isolation` is the interface. It gives:
 
@@ -449,18 +511,18 @@ ends.
   call from the engine. For example on Linux, the agent runs in a new PID
   namespace whose first process is a child of the helper with
   `PR_SET_PDEATHSIG`; when the first process of a PID namespace ends, the
-  kernel kills each process in it. R4-05 gives the mechanism of each
+  kernel kills each process in it. R4-05 (Linux) and R4-05m (macOS) give the mechanism of each
   system, and an isolation that cannot keep this rule does not pass the
   check of the system.
 
-The engine calls `stop` on each end of a session, in step 4 of the
+The engine calls `stop` on each end of a session, in step 5 of the
 shutdown order (see [Supervisor](#supervisor)): on a stop, a revoke, a job
 move, a time limit, an exit of the agent, a failed helper, a failed launch,
 and at the engine start for each live session. The
 supervisor calls `stop` again on each turn while the reap check fails. So
 no process of a session runs past its end, also when the helper is gone.
 
-This card gives no isolation for a real system: R4-05 gives one for macOS and one for Linux. With no
+This card gives no isolation for a real system: R4-05 gives one for Linux, and R4-05m one for macOS. With no
 isolation, `iris job run` fails with the reason, so no agent runs as the
 OS user with access to the data folder (spec 2, C2 and C6).
 
@@ -477,6 +539,10 @@ no network stops them. The engine gives each session one narrow path out:
 - The engine listens on one TCP port of `127.0.0.1` for each running
   session, the egress port. The isolation permits a connection to this
   port only. It blocks each other address, also DNS.
+- The proxy takes a client only from the session address of its session
+  (`127.128.0.0` plus the session ID). The relay of the sandbox connects
+  from that address (sandbox spec, "Egress on Linux"). A client from each
+  other address gets `403` and the log word `not_session`.
 - The agent gets `HTTPS_PROXY=http://127.0.0.1:<port>` (and `https_proxy`).
 - The proxy takes only `CONNECT <host>:443`. The host must be in the
   allowed hosts of the adapter: `api.anthropic.com` for `claude-code`,
@@ -504,7 +570,11 @@ no network stops them. The engine gives each session one narrow path out:
   (domain fronting), or a client that hides the name with Encrypted
   Client Hello, is a known limit (issue).
 - The proxy writes one line for each connection to its own file,
-  `<data dir>/sessions/se-<id>.egress.log` (mode `0600`). For an allowed
+  `<data dir>/sessions/se-<id>.egress.log` (mode `0600`). The launch
+  starts one proxy for each session that it registers, after the bind and
+  before the helper, with the log and the peer address of that session.
+  A revoke retry registers a second session, so it gets its own proxy. If
+  the proxy does not start, the session ends with `launch_failed`. For an allowed
   `CONNECT`, the line has the host (a value of the allowed list, as the
   list writes it), the bytes in each direction, and the result
   (`closed`, `stopped` or `connect_failed`). For a refused request, the
@@ -513,7 +583,8 @@ no network stops them. The engine gives each session one narrow path out:
   ninth open connection or a resolver worker past the bound, `timeout`
   for a head or a ClientHello that does not come in 10 s, `not_tls`,
   `sni_not_allowed`, `no_resources` when the engine has no file
-  descriptor or thread for the connection) and no text of the request. For a connection that closes, or
+  descriptor or thread for the connection, `not_session` for a client
+  that is not at the session address) and no text of the request. For a connection that closes, or
   that a stop ends, before a full head, the line has `ended` and
   `no_head` or `stopped`. So each connection gets exactly one line.
   Only the proxy writes this file,
@@ -531,8 +602,28 @@ no network stops them. The engine gives each session one narrow path out:
   and the resolver, not the log or the streams of the proxy. At most 16
   workers live in the Iris process at one time, over all sessions, also
   after a stop; a `CONNECT` past this bound gets `403` with `too_many`.
-- When the session ends, the engine closes the port and each open
-  connection of the session.
+- When the session ends (`ended_at` is set: a stop, a revoke, the exit of
+  the agent or a time limit), the supervisor closes the proxy on its next
+  turn (`Proxy::close`, step 2 of the shutdown order, before each wait). The supervisor turns each second, and a
+  `iris job stop` or a revoke through the engine also wakes it. The close
+  ends each open tunnel and each resolve in progress, and from then on
+  the proxy answers each new connection with a close and the log line
+  `ended reason=stopped`. The close keeps the port bound, and the engine
+  stops the proxy (`Proxy::stop`, which frees the port) only when the
+  reap check of the session passes.
+- Known limit (issue): an end that a store trigger or another process
+  writes is not in step with the proxy. Between the commit of `ended_at`
+  and the next supervisor turn (at most about 1 second), an open tunnel
+  can still send bytes to the model host. The person chose that host for
+  the job, and it had the scope of the session during the whole grant.
+  The end of a grant stops the verbs of the session at once (each verb
+  reads `ended_at` in its transaction). It does not call back what the
+  agent sent before. A gate in each tunnel that reads the store for each
+  byte costs more than this window is worth.
+  The relay of the Linux sandbox (`docs/specs/2026-11-17-session-sandbox.md`)
+  connects to the port while the helper lives, and the reap check
+  confirms that the helper ended. So the port number cannot go to the
+  proxy of another session while a process of this session can reach it.
 
 The engine knows the session from the port, never from the request. An
 adapter with no allowed host gets no egress port and no `HTTPS_PROXY`.
@@ -550,8 +641,10 @@ session from the socket that took the request, never from the request.
 
 The session socket answers these verbs of this card:
 
-- `status`: the job (ID, goal, state, due date) and the counts of the
-  workspace.
+- `status`: the job (ID, goal, state, due date), the session ID of the
+  socket, and the counts of the grant now (threads, messages and items), from the same grant as the
+  build (`iris_workspace::grant_in`). It reads no file of the workspace,
+  which the agent can change.
 - `search`, `show` and `list`: the read verbs with the grant rules of the
   workspace spec ("The same grant limits each verb of a session"). A
   search runs only over granted messages: a message of
@@ -567,8 +660,14 @@ The session socket answers these verbs of this card:
   other ID, or a message that is not granted, gets exit code 3 with "not
   in this job", the same answer for an ID that does not exist.
   The engine reads the grant at each call, so a revoke takes effect at
-  once. These verbs come in their own card (R4-04f, see the plan). Until it merges,
-  the socket refuses them with exit code 3 and the reason.
+  once. Card R4-04f added these verbs. The engine answers `search` with
+  `{"messages": [...]}` (ID, thread, date, From and Subject of each
+  match, newest first, `limit` 1 to 200, default 50), `list` with
+  `{"items": [...]}`, and `show` with `{"message": {...}}` or
+  `{"item": {...}}`. An item has the fields of its workspace file. The ID
+  of an item must have the kind of its form: `c-3` of the record 3 gets
+  "not in this job". In host mode the engine socket has no `search` or
+  `list` (code 2): the host command reads the store.
 
 R4-03 adds the engine side of the other
 session verbs: one entry point that takes the request and the author of the
@@ -579,6 +678,13 @@ above. Until
 then each other verb gets the exit code 3 and the reason. A host verb (for
 example `brief`, `ledger`, `job run`) gets exit code 3 in each case.
 
+Each session socket has its own accept thread and one thread for each
+connection, at most 8 connections at the same time. The engine reads
+only a peer of its own user (`SO_PEERCRED` on Linux, `getpeereid` on
+macOS), and closes other connections with no answer. The engine socket
+`iris.sock` keeps its async server; the sessions use threads, as the
+supervisor does.
+
 The engine checks that the session is open in the store when it takes a
 request, before it runs the verb. A request that arrives after the end
 gets exit code 3. A request that passed the check runs, and its reply goes
@@ -586,12 +692,19 @@ back on the same connection, also when the verb itself ends the session
 (for example `iris done` of R4-03, which moves the job to `done` and so
 ends the session in the same transaction). The engine closes the session
 socket and each of its connections only after the reply of each request
-that passed the check, or after 10 seconds. The supervisor closes the pipe
+that passed the check, or after 10 seconds. The wait covers each answer
+that started, also a refusal, until its last byte is written. The supervisor closes the pipe
 of the helper after that. A request on a connection after the end gets
 exit code 3.
 
 ### The command
 
+- `iris session-hold` is not a verb of the command line: the program
+  checks this first argument before it reads the command line, and the
+  verb list (and the MCP tools) does not show it. Its command line is
+  `iris session-hold <data folder> <hold arguments>`. The helper builds the
+  isolation with the same data folder as the engine, because the isolation
+  keeps a record of each session there (R4-05).
 - `iris job run <j-id> --agent <name>` and `iris job stop <j-id>` are host
   verbs. They send a request on `iris.sock`, so only the engine starts and
   stops sessions.
@@ -605,8 +718,9 @@ exit code 3.
   start, a `launch_failed`, a stop before the start) is in the row, and
   `iris job session` shows it.
 - `iris job session <j-id>` (host verb) shows the last session of the job:
-  its ID, the agent, and its state (`starting`, `running`, `ending`,
-  `ended` with the end reason, or `reaped`). It reads the row of the store,
+  its ID, the agent, and its state: `starting` (open, no start),
+  `running` (open, started), `ending (<reason>)` (ended, not reaped yet)
+  or `ended (<reason>)` (ended and reaped). It reads the row of the store,
   so it works after a time-out or a lost connection of `iris job run`.
 - If the answer of `job.run` is lost (a time-out, a broken connection),
   `iris job run` prints that the result is unknown and tells the person to
@@ -617,7 +731,13 @@ exit code 3.
   the command is in session mode. In session mode the command never opens
   the store, also for the read verbs of host mode. It sends each verb to
   `.iris/socket`. If the socket is not there, the command fails with exit
-  code 4.
+  code 4. `--data` has no effect in session mode. The command refuses
+  each verb that is not a session verb with exit code 3, and sends
+  nothing. The session verbs are `status`, the read verbs `search`,
+  `show` and `list` (R4-04f), and the write verbs `add`, `submit`, `show`
+  of a changeset, `withdraw` and `revise` (R4-03). So
+  `iris changeset --drafts` gets code 3. `iris list [<form>]` is a verb of a
+  session only: in host mode it gets exit code 2.
 
 ## Options not chosen
 
@@ -700,6 +820,9 @@ is refused before a row is written.
 | The answer of `job.run` is lost | The command says the result is unknown and names `iris job session`; a retry is refused with the live session ID | Command test with a socket that closes before the answer |
 | A revoke or a stop during the build, then at once a second `run` | The first session stays live until its launch thread returns after its cleanup; the second `run` is refused at the register until then | Launch test: a build hook that waits, a stop, then a second `run` that fails until the first thread returned |
 | `iris job stop` during steps 3 to 5 of a launch | The launch ends with `stop`, no retry; `iris job session` shows the end with no start | Launch test with a stop hook |
+| `iris job stop` during a launch, and its end write fails once | The gate reads the stop mark: no agent starts, and the launch ends the session with `stop` | Engine test: a trigger refuses the end write of the stop |
+| `iris job stop` during a launch, and no end write works until the launch is over | No agent starts. The session stays open; the supervisor ends it with `launch_failed` when the store takes the end | Engine test: the trigger stays until the helper stopped |
+| A stop mark while the gate waits for `started` | The mark waits for the commit of the gate; then the stop ends a running session | Launch test: a mark 300 ms into a 1 s late helper |
 | An agent that opens connections without end | The egress log stops at 1 MiB, then counts; the engine memory stays bounded (8 open connections) | Proxy test with 200 refused connections and a small limit |
 | The engine is killed and an agent process left the group (`setsid`) | The helper sees the end of the pipe, stops the group and calls `Isolation::stop`; if the helper is killed too, the lifetime rule ends the process | Helper test with the test isolation that records `stop`; R4-05 test of the lifetime rule on each system |
 | An agent that prints a passed key or a file of the agent tool | Nothing of it is stored; the log has only status lines | Helper test: a script prints a marker value to both pipes, and no file of the data folder holds it |
@@ -839,7 +962,7 @@ who does not run `iris job run`.
 
 ## Risks
 
-- `iris job run` does nothing for the person until R4-05 merges. This is
+- `iris job run` does nothing for the person until R4-05 merges (Linux) or R4-05m merges (macOS). This is
   on purpose: no agent runs without an isolation.
 - A wrong adapter line makes the agent fail at once. The log shows the exit
   code, not the error text, because no agent output is stored. The person
@@ -864,12 +987,13 @@ and `dependsOn` on the board.
 | R4-04b | Migration 21 and the session functions in `iris-job`. | R4-04 |
 | R4-04c | The crate `iris-session`: adapters, `agents.toml`, the environment of the agent and the `Isolation` interface. | R4-04b |
 | R4-04g | The hold helper in `iris-session`. | R4-04c |
-| R4-04h | The launch in `iris-session`. | R4-04g |
+| R4-04h | The launch and the reap check (`iris_session::reap::reap_check`) in `iris-session`, and the fix of #432. | R4-04g |
 | R4-04d | The egress proxy in `iris-session`. | R4-04 |
-| R4-04e | The engine: supervisor, reap check, requests, session socket, egress ports, verbs and session mode. It also changes the fixed rules of `JOB.md` in `iris-workspace` to the text of the workspace spec. | R4-04h, R4-04d |
-| R4-04f | The read verbs `search`, `show` and `list` on the session socket. | R4-04e |
+| R4-04e | The engine sessions: the supervisor (it calls the reap check of R4-04h), the end of the open sessions at the engine start, the egress port of each session, `iris job run`, `iris job stop` and `iris job session`, and the hidden `iris session-hold`. | R4-04h, R4-04d |
+| R4-04i | The session socket (`status`, and the verbs of R4-03 as the author of the session) and session mode of the command. It also changes the fixed rules of `JOB.md` in `iris-workspace` to the text of the workspace spec. | R4-04e |
+| R4-04f | The read verbs `search`, `show` and `list` on the session socket. | R4-04i |
 
-R4-05 (the isolation of each system) depends on R4-04c, R4-04d and R4-04g. The
+R4-05 (the isolation of Linux) and R4-05m (macOS) depend on R4-04c, R4-04d and R4-04g. The
 cards that need a running session (R4-08, R4-11, R5-04) depend on R4-04e.
 
 ## Spec checks

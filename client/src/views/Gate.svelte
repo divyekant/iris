@@ -111,7 +111,7 @@
 
 {#snippet asks(sender: GateSender)}
   <ul class="asks">
-    {#each sender.items as item (item.id)}<li><a href={href.item(item.id)}>{item.title}</a></li>{/each}
+    {#each sender.items as item (item.id)}<li><a class="touch" href={href.item(item.id)}>{item.title}</a></li>{/each}
     {#if sender.count > sender.items.length}<li class="more">and {items(sender.count - sender.items.length)} more</li>{/if}
   </ul>
 {/snippet}
@@ -173,9 +173,9 @@
 {/if}
 {#if !declinedList}
   <p class="foot">
-    {#if !more && page.count > page.senders.length}<a href="#/brief/gate">All {page.count}</a>{/if}
-    {#if declined > 0}<a href="#/brief/declined">Ignored {declined}</a>{/if}
-    <a href="#/rules">Let a rule answer</a>
+    {#if !more && page.count > page.senders.length}<a class="touch" href="#/brief/gate">All {page.count}</a>{/if}
+    {#if declined > 0}<a class="touch" href="#/brief/declined">Ignored {declined}</a>{/if}
+    <a class="touch" href="#/rules">Let a rule answer</a>
   </p>
 {/if}
 

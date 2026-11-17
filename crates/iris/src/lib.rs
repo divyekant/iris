@@ -13,6 +13,8 @@ pub mod cost;
 pub mod engine;
 pub mod notify;
 pub mod reply;
+pub mod session_socket;
+pub mod sessions;
 pub mod socket;
 pub mod verbs;
 
@@ -81,6 +83,15 @@ pub enum Command {
     Show {
         id: String,
         /// Print the JSON of the local API (`/api/messages/{id}`). An item is always JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// In a job workspace: list the items of the job, of one form if given.
+    /// A verb of a session only.
+    List {
+        /// commitment, conversation, record, feed or signal.
+        form: Option<String>,
+        /// Print one JSON line for each item.
         #[arg(long)]
         json: bool,
     },
@@ -262,12 +273,36 @@ pub enum Command {
         #[command(subcommand)]
         command: WatchCommand,
     },
+    /// Run, stop or show the session of an agent on a job (`j-3`). Only
+    /// the engine starts and stops sessions.
+    Job {
+        #[command(subcommand)]
+        command: JobCommand,
+    },
     /// The matters that Iris proposes and that you confirmed. Prints the
     /// JSON of the local API (`/api/matters`).
     Matters {
         #[command(subcommand)]
         command: Option<MattersCommand>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum JobCommand {
+    /// Start a session of an agent on the job. The command gives the
+    /// session ID when the engine registered it; `iris job session` shows
+    /// what happened next.
+    Run {
+        id: String,
+        /// The agent: `claude-code`, `codex`, or an agent of `agents.toml`.
+        #[arg(long)]
+        agent: String,
+    },
+    /// Stop the session of the job, and wait up to 15 seconds until each
+    /// of its processes stopped.
+    Stop { id: String },
+    /// Show the last session of the job and its state.
+    Session { id: String },
 }
 
 #[derive(Subcommand)]
@@ -495,13 +530,65 @@ pub fn version_line() -> String {
 /// Run one command. Gives the exit code (specification 2, section 8.4) and
 /// the error text for standard error.
 pub fn run(cli: Cli) -> Result<(), socket::Failure> {
+    // Session mode: never the store or the data folder, only the session
+    // socket.
+    if let Some(path) = session_socket() {
+        return session_run(&path, &cli.command);
+    }
     // The verbs that change changesets go through the engine socket, never
     // through the store (specification 2, section 8.1).
     let data = engine::data_dir(cli.data.clone()).map_err(|e| socket::Failure {
         code: socket::code::ERROR,
         error: e.to_string(),
     });
-    let request = match &cli.command {
+    let request = socket_request(&cli.command)?;
+    if let Command::Job { command } = &cli.command {
+        // A bad job ID is a usage error, before the engine or the store.
+        let (JobCommand::Run { id, .. } | JobCommand::Stop { id } | JobCommand::Session { id }) =
+            command;
+        if iris_job::parse_job_id(id).is_none() {
+            return Err(socket::Failure {
+                code: socket::code::USAGE,
+                error: format!("{id} is not a job ID"),
+            });
+        }
+        let dir = match &data {
+            Ok(d) => d,
+            Err(f) => {
+                return Err(socket::Failure {
+                    code: f.code,
+                    error: f.error.clone(),
+                })
+            }
+        };
+        if let Some(r) = job_request(dir, command) {
+            return r;
+        }
+    }
+    if let Command::List { .. } = &cli.command {
+        return Err(socket::Failure {
+            code: socket::code::USAGE,
+            error: "list is a verb of a session: run it in a job workspace".into(),
+        });
+    }
+    if let Some((verb, args, json)) = request {
+        let out = socket_verb(&data?, verb, args, json)?;
+        print!("{}", out.text);
+        return out.failure.map_or(Ok(()), Err);
+    }
+    run_store(cli).map_err(|error| socket::Failure {
+        code: socket::code::ERROR,
+        error,
+    })
+}
+
+/// The request on the engine socket of a verb that changes changesets
+/// (specification 2, section 8.1): the verb, its arguments and `--json`.
+/// `None` for the other verbs.
+fn socket_request(
+    c: &Command,
+) -> Result<Option<(&'static str, serde_json::Value, bool)>, socket::Failure> {
+    Ok(match c {
         Command::Submit { id, why, json } => Some((
             "submit",
             serde_json::json!({ "changeset": id, "why": why }),
@@ -522,16 +609,247 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
             Some(("revise", serde_json::json!({ "changeset": id }), *json))
         }
         c => add_request(c)?.map(|r| ("add", r, false)),
-    };
-    if let Some((verb, args, json)) = request {
-        let out = socket_verb(&data?, verb, args, json)?;
-        print!("{}", out.text);
-        return out.failure.map_or(Ok(()), Err);
-    }
-    run_store(cli).map_err(|error| socket::Failure {
-        code: socket::code::ERROR,
-        error,
     })
+}
+
+/// The session socket of the job workspace that holds the current folder:
+/// `.iris/socket` of the nearest folder (the current folder or a folder
+/// above it) that has `.iris/`. `None` in host mode.
+pub fn session_socket() -> Option<PathBuf> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        let iris = dir.join(".iris");
+        if iris.is_dir() {
+            return Some(iris.join("socket"));
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+/// One command in session mode
+/// (docs/specs/2026-11-17-session-launcher.md, "The command"): each verb
+/// goes to the session socket at `path`, and the command never opens the
+/// store. Code 4 if the socket does not answer.
+fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failure> {
+    let unreachable = |f: socket::Failure| match f.code {
+        socket::code::UNREACHABLE => socket::Failure {
+            code: f.code,
+            error: format!("the session socket {} does not answer", path.display()),
+        },
+        _ => f,
+    };
+    let denied = |error: &str| socket::Failure {
+        code: socket::code::DENIED,
+        error: error.into(),
+    };
+    // The order of the checks: the socket file, then the class of the
+    // verb, and only then the work of the verb (a draft file is read
+    // only for a verb that a session can send).
+    use std::os::unix::fs::FileTypeExt;
+    let there = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket());
+    if !there {
+        return Err(unreachable(socket::Failure {
+            code: socket::code::UNREACHABLE,
+            error: String::new(),
+        }));
+    }
+    if let Command::Status { json } = c {
+        let r = socket::request_at(
+            path,
+            "status",
+            serde_json::json!({}),
+            socket::ANSWER_WAIT,
+            "iris status",
+        )
+        .map_err(unreachable)?;
+        print!("{}", session_status_text(&r, *json));
+        return Ok(());
+    }
+    // A job has no grant of an account or a draft (docs/specs/2026-11-17-job-verbs.md).
+    if matches!(c, Command::Compose { .. } | Command::Send { .. }) {
+        return Err(denied(
+            "a session cannot draft, send or nudge: a job has no grant of an account or a draft",
+        ));
+    }
+    // The read verbs of a session (R4-04f): only the grant of the job.
+    let read = match c {
+        Command::Search { text, limit, json } => Some((
+            "search",
+            serde_json::json!({ "text": text, "limit": limit }),
+            *json,
+        )),
+        Command::Show { id, json } => Some(("show", serde_json::json!({ "id": id }), *json)),
+        Command::List { form, json } => Some(("list", serde_json::json!({ "form": form }), *json)),
+        _ => None,
+    };
+    if let Some((verb, args, json)) = read {
+        // A read changes nothing: after a lost answer, run it again.
+        let r = socket::request_at(path, verb, args, socket::ANSWER_WAIT, "the same command")
+            .map_err(unreachable)?;
+        print!("{}", session_read_text(&r, json));
+        return Ok(());
+    }
+    // Only the write verbs of a session (R4-03): `drafts`, for example, is
+    // a host verb of the socket.
+    const SESSION_VERBS: [&str; 5] = ["add", "submit", "show", "withdraw", "revise"];
+    let request = socket_request(c)?.filter(|(verb, ..)| SESSION_VERBS.contains(verb));
+    let Some((verb, args, json)) = request else {
+        return Err(denied("this verb is not a verb of a session"));
+    };
+    let out = socket_verb_at(path, verb, args, json).map_err(unreachable)?;
+    print!("{}", out.text);
+    out.failure.map_or(Ok(()), Err)
+}
+
+/// What `iris search`, `iris show` and `iris list` print in session mode.
+/// Mail text is data: each field goes through [`verbs::field`] and the text
+/// of a message through [`verbs::clean`].
+fn session_read_text(r: &serde_json::Value, json: bool) -> String {
+    use std::fmt::Write;
+    let s = |v: &serde_json::Value| verbs::field(v.as_str().unwrap_or("-"));
+    let mut t = String::new();
+    // A list is JSON Lines (specification 2, section 8.3).
+    let list = r["messages"].as_array().or(r["items"].as_array());
+    match (list, json) {
+        (Some(l), true) => l.iter().for_each(|v| {
+            let _ = writeln!(t, "{v}");
+        }),
+        (Some(l), false) => {
+            for v in l {
+                let line = match v["form"].as_str() {
+                    Some(form) => format!("{}  {form}", s(&v["id"])),
+                    None => format!(
+                        "{}  {}  {}  {}",
+                        s(&v["id"]),
+                        v["date"].as_str().and_then(|d| d.get(..10)).unwrap_or("-"),
+                        s(&v["from"]),
+                        s(&v["subject"])
+                    ),
+                };
+                let _ = writeln!(t, "{line}");
+            }
+            if l.is_empty() {
+                t.push_str(if r["items"].is_array() {
+                    "No items.\n"
+                } else {
+                    "No messages.\n"
+                });
+            }
+        }
+        // One JSON document of the object. An item is always JSON, as in
+        // host mode.
+        (None, _) if json || r["item"].is_object() => {
+            let v = if r["item"].is_object() {
+                &r["item"]
+            } else {
+                &r["message"]
+            };
+            let _ = writeln!(t, "{}", serde_json::to_string_pretty(v).unwrap_or_default());
+        }
+        (None, _) => {
+            let m = &r["message"];
+            let names = |v: &serde_json::Value| {
+                let a: Vec<String> = v.as_array().into_iter().flatten().map(s).collect();
+                if a.is_empty() {
+                    "-".into()
+                } else {
+                    a.join(", ")
+                }
+            };
+            let _ = writeln!(t, "ID:      {} (thread {})", s(&m["id"]), s(&m["thread"]));
+            let _ = writeln!(t, "Date:    {}", s(&m["date"]));
+            let from = match m["from_name"].as_str() {
+                Some(n) => verbs::field(&format!("{n} <{}>", m["from"].as_str().unwrap_or("-"))),
+                None => s(&m["from"]),
+            };
+            let _ = writeln!(t, "From:    {from}");
+            let _ = writeln!(t, "To:      {}", names(&m["to"]));
+            if m["cc"].as_array().is_some_and(|a| !a.is_empty()) {
+                let _ = writeln!(t, "Cc:      {}", names(&m["cc"]));
+            }
+            let _ = writeln!(t, "Subject: {}", s(&m["subject"]));
+            if m["items"].as_array().is_some_and(|a| !a.is_empty()) {
+                let _ = writeln!(t, "Items:   {}", names(&m["items"]));
+            }
+            t.push('\n');
+            t.push_str(&verbs::clean(m["text"].as_str().unwrap_or_default()));
+            t.push('\n');
+        }
+    }
+    t
+}
+
+/// What `iris status` prints in session mode.
+fn session_status_text(r: &serde_json::Value, json: bool) -> String {
+    if json {
+        return format!("{r}\n");
+    }
+    let mut t = format!(
+        "{} ({})\nGoal: {}\n",
+        r["job"].as_str().unwrap_or_default(),
+        r["state"].as_str().unwrap_or_default(),
+        r["goal"].as_str().unwrap_or_default()
+    );
+    if let Some(due) = r["due"].as_str() {
+        t.push_str(&format!("Due: {due}\n"));
+    }
+    t.push_str(&format!(
+        "Granted: {} threads, {} messages, {} items\n",
+        r["threads"], r["messages"], r["items"]
+    ));
+    t
+}
+
+/// `iris job run` and `iris job stop`: requests on the engine socket.
+/// `None` for `iris job session`, which reads the store.
+fn job_request(dir: &std::path::Path, c: &JobCommand) -> Option<Result<(), socket::Failure>> {
+    let (verb, id, args) = match c {
+        JobCommand::Run { id, agent } => (
+            "job.run",
+            id,
+            serde_json::json!({ "job": id, "agent": agent }),
+        ),
+        JobCommand::Stop { id } => ("job.stop", id, serde_json::json!({ "job": id })),
+        JobCommand::Session { .. } => return None,
+    };
+    Some(
+        match socket::request_with(
+            dir,
+            verb,
+            args,
+            sessions::STOP_WAIT + std::time::Duration::from_secs(15),
+            // A lost answer: the run may be registered, or the stop may
+            // have ended the session. The store shows which.
+            &format!("iris job session {id}"),
+        ) {
+            Ok(r) => {
+                let session = r["session"].as_str().unwrap_or_default();
+                match verb {
+                    "job.run" => {
+                        println!(
+                            "{session}: registered. Run `iris job session {id}` for its state."
+                        );
+                        Ok(())
+                    }
+                    _ if r["reaped"] == true => {
+                        println!("{session}: stopped.");
+                        Ok(())
+                    }
+                    _ => Err(socket::Failure {
+                        code: socket::code::ERROR,
+                        error: format!(
+                            "{session}: the session ended, but its processes still stop ({}); \
+                         run `iris job session {id}` later",
+                            r["why"].as_str().unwrap_or("reason not known")
+                        ),
+                    }),
+                }
+            }
+            Err(f) => Err(f),
+        },
+    )
 }
 
 /// The `add` request on the engine socket of a verb that adds an action.
@@ -566,8 +884,22 @@ pub fn socket_verb(
     args: serde_json::Value,
     json: bool,
 ) -> Result<Printed, socket::Failure> {
+    socket_verb_at(&dir.join(socket::SOCKET), verb, args, json)
+}
+
+/// [`socket_verb`] on the socket at `path`.
+fn socket_verb_at(
+    path: &std::path::Path,
+    verb: &str,
+    args: serde_json::Value,
+    json: bool,
+) -> Result<Printed, socket::Failure> {
     let id = args["changeset"].as_str().unwrap_or_default().to_string();
-    let r = socket::request(dir, verb, args)?;
+    let recover = format!(
+        "iris changeset {}",
+        args["changeset"].as_str().unwrap_or("--drafts")
+    );
+    let r = socket::request_at(path, verb, args, socket::ANSWER_WAIT, &recover)?;
     let mut failure = None;
     let text = match verb {
         "add" if json => format!("{r}\n"),
@@ -757,7 +1089,10 @@ fn run_store(cli: Cli) -> Result<(), String> {
     ) {
         let attention = open().and_then(|s| {
             iris_policy::refresh_attention(&s, engine::now_ms().div_euclid(1000))
-                .map_err(|e| format!("attention: {e}"))
+                .map_err(|e| format!("attention: {e}"))?;
+            // The measure "time to the first brief" ends at the first brief with content.
+            iris_api::measures::check_brief(&s, engine::now_ms())
+                .map_err(|e| format!("measures: {e}"))
         });
         if let Err(e) = attention {
             return Err(match result {
@@ -786,7 +1121,28 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             print(verbs::search(&open()?, text, *limit, *json))
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
+        // `run` refuses it in host mode, before the store.
+        Command::List { .. } => Err("list is a verb of a session".into()),
         Command::Watch { command } => print(verbs::watch(&open()?, command)),
+        Command::Job {
+            command: JobCommand::Session { id },
+        } => {
+            let job = iris_job::parse_job_id(id).ok_or(format!("{id} is not a job ID"))?;
+            let store = open()?;
+            match sessions::last_session(&store, job)? {
+                Some(s) => {
+                    println!(
+                        "{} {}: {}",
+                        iris_job::format_session_id(s.id),
+                        s.agent,
+                        sessions::state(&s)
+                    );
+                    Ok(())
+                }
+                None => Err(format!("{id} has no session")),
+            }
+        }
+        Command::Job { .. } => Err("the engine socket runs this verb".into()),
         Command::Matters { command } => {
             let store = open()?;
             let text = match command.as_ref().unwrap_or(&MattersCommand::List) {
@@ -1172,6 +1528,33 @@ fn check_loopback(addr: SocketAddr) -> std::io::Result<()> {
     }
 }
 
+/// Start the sessions of jobs: end each open session of the last engine,
+/// and start the supervisor thread. The helper of each session is this
+/// program with `session-hold`.
+pub fn start_sessions(store: Arc<Store>) -> std::io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let data = store.dir().to_path_buf();
+    let helper: Arc<sessions::HelperCommand> = Arc::new(move |args: &[std::ffi::OsString]| {
+        let mut c = std::process::Command::new(&exe);
+        c.arg(SESSION_HOLD).arg(&data).args(args);
+        c
+    });
+    let isolation = iris_session::isolation::system(store.dir())
+        .map(|b| -> Arc<dyn iris_session::isolation::Isolation> { Arc::from(b) });
+    let s = sessions::Sessions::new(store, isolation, helper).map_err(std::io::Error::other)?;
+    let _ = sessions::SESSIONS.set(s.clone());
+    std::thread::Builder::new()
+        .name("sessions".into())
+        .spawn(move || s.supervise_forever())?;
+    Ok(())
+}
+
+/// The hidden first argument of the hold helper of a session. `main` runs
+/// it before the parse of the command line. The command line is
+/// `iris session-hold <data dir> <hold args>`: the helper builds the
+/// isolation with the same data folder as the engine.
+pub const SESSION_HOLD: &str = "session-hold";
+
 /// Serve the engine on `addr` until the process gets Ctrl-C. A thread runs
 /// the sync schedule.
 pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
@@ -1180,6 +1563,7 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
     // The engine lock and the socket come first: a second engine stops here.
     let bound = socket::bind(store.dir())?;
     let api_store = store.clone();
+    start_sessions(store.clone())?;
     let sync = engine::Engine::new(store, gmail, std::env::var("IRIS_TEST_TOKEN_URI").ok());
     std::thread::Builder::new()
         .name("sync".into())

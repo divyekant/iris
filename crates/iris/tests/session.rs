@@ -461,9 +461,10 @@ fn a_session_sees_only_the_changesets_of_its_job() {
     )
     .unwrap_err();
     assert_eq!(e.0, code::USAGE);
+    // `drafts` is a host verb: code 3 in a session (issue #522).
     assert_eq!(
         call(&store, &mine, "drafts", json!({})).unwrap_err().0,
-        code::USAGE
+        code::DENIED
     );
     assert!(call(&store, &theirs, "show", json!({ "changeset": cs })).is_ok());
 }
@@ -618,4 +619,171 @@ fn a_rule_of_a_job_matches_only_that_job() {
     }
     assert_eq!(by[0], json!("rule"), "{by:?}");
     assert_ne!(by[1], json!("rule"), "{by:?}");
+}
+
+/// `status` gives the counts of the grant now: thread 1 (messages 1 and 2)
+/// and the item c-1. A revoke of the thread empties them at once.
+#[test]
+fn status_gives_the_counts_of_the_grant_now() {
+    let (store, job) = fixture("status");
+    let me = session(job, "se-1");
+    let v = call(&store, &me, "status", json!({})).unwrap();
+    assert_eq!(v["job"], iris_job::format_job_id(job), "{v}");
+    assert_eq!(v["goal"], "Get the signed contract.", "{v}");
+    assert_eq!(v["session"], "se-1", "{v}");
+    assert_eq!(v["state"], "working", "{v}");
+    assert_eq!(
+        (&v["threads"], &v["messages"], &v["items"]),
+        (&json!(1), &json!(2), &json!(1)),
+        "{v}"
+    );
+    revoke_scope(&store, job, Ref::Thread(1), By::Person, NOW + 1).unwrap();
+    let v = call(&store, &me, "status", json!({})).unwrap();
+    assert_eq!(
+        (&v["threads"], &v["messages"], &v["items"]),
+        (&json!(0), &json!(0), &json!(0)),
+        "{v}"
+    );
+    // Host mode has no status verb on the socket.
+    let host = socket::local();
+    assert_eq!(
+        call(&store, &host, "status", json!({})).unwrap_err().0,
+        code::USAGE
+    );
+}
+
+/// The read verbs of a session (card R4-04f) give only what the grant holds
+/// now: thread 1 (messages 1 and 2) and the item c-1. Message 7 and the
+/// item c-4 are outside the grant, and give no result.
+#[test]
+fn the_read_verbs_give_only_the_grant() {
+    let (store, job) = fixture("read");
+    let me = session(job, "se-1");
+    let ids = |v: &Value, key: &str| -> Vec<String> {
+        v[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{v}"))
+            .iter()
+            .map(|m| m["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let search = |text: &str| call(&store, &me, "search", json!({ "text": text }));
+    assert_eq!(
+        ids(&search("contract").unwrap(), "messages"),
+        ["m-2", "m-1"]
+    );
+    assert!(ids(&search("dinner").unwrap(), "messages").is_empty());
+    assert!(ids(&search("from:sam@example.com").unwrap(), "messages").is_empty());
+    let hit = &search("contract").unwrap()["messages"][0];
+    assert_eq!(hit["thread"], "t-1", "{hit}");
+    assert_eq!(hit["from"], "dana@example.com", "{hit}");
+
+    let m = call(&store, &me, "show", json!({ "id": "m-1" })).unwrap();
+    assert_eq!(m["message"]["text"], "Here is the contract.", "{m}");
+    assert_eq!(m["message"]["items"], json!(["c-1"]), "{m}");
+    let c = call(&store, &me, "show", json!({ "id": "c-1" })).unwrap();
+    assert_eq!(c["item"]["sources"], json!(["m-1"]), "{c}");
+    // Outside the grant, and an ID of no row: the same answer.
+    for id in ["m-7", "c-4", "m-99", "t-1", "cs-1"] {
+        let e = call(&store, &me, "show", json!({ "id": id })).unwrap_err();
+        assert_eq!(e.0, code::DENIED, "{id}: {e:?}");
+    }
+    assert_eq!(
+        ids(&call(&store, &me, "list", json!({})).unwrap(), "items"),
+        ["c-1"]
+    );
+    let list = |form: &str| call(&store, &me, "list", json!({ "form": form }));
+    assert_eq!(ids(&list("commitment").unwrap(), "items"), ["c-1"]);
+    assert!(ids(&list("record").unwrap(), "items").is_empty());
+    assert_eq!(list("task").unwrap_err().0, code::USAGE);
+    // A search decides each match only from the grant: the record r-9 has
+    // the granted source m-1 and the source m-7 outside the grant, so it is
+    // not a workspace item, and `form:record` finds nothing. A workspace
+    // holds no labels: `label:` is a usage error.
+    store
+        .write(|tx| {
+            tx.execute_batch(
+                r#"INSERT INTO item (id, form, account_id, status, doc, created_at, updated_at)
+                     VALUES (9, 'record', 1, 'open', '{"id":"r-9","form":"record"}', 1, 1);
+                   INSERT INTO item_source (item_id, message_id, role) VALUES (9, 1, 'origin'), (9, 7, 'origin');"#,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(ids(&search("form:record").unwrap(), "messages").is_empty());
+    assert_eq!(
+        ids(&search("form:commitment").unwrap(), "messages"),
+        ["m-1"]
+    );
+    assert_eq!(search("label:INBOX").unwrap_err().0, code::USAGE);
+    // A session has no drafts verb of the host (issue #522).
+    assert_eq!(
+        call(&store, &me, "drafts", json!({})).unwrap_err().0,
+        code::DENIED
+    );
+
+    // A revoke empties each read at once.
+    revoke_scope(&store, job, Ref::Thread(1), By::Person, NOW + 1).unwrap();
+    assert!(ids(&search("contract").unwrap(), "messages").is_empty());
+    assert!(ids(&call(&store, &me, "list", json!({})).unwrap(), "items").is_empty());
+    let e = call(&store, &me, "show", json!({ "id": "m-1" })).unwrap_err();
+    assert_eq!(e.0, code::DENIED, "{e:?}");
+
+    // Host mode: the CLI reads the store, so the socket has no read verbs.
+    let host = socket::local();
+    for verb in ["search", "list"] {
+        assert_eq!(
+            call(&store, &host, verb, json!({})).unwrap_err().0,
+            code::USAGE,
+            "{verb}"
+        );
+    }
+}
+
+/// A read of a session sees one snapshot of the store: the grant and the
+/// text that it gives come from the same state. A writer moves message 1
+/// between two states in single transactions: clean with the text "A", and
+/// a source of a signal (so not granted) with the text "B". `show m-1`
+/// never gives "B".
+#[test]
+fn a_read_sees_the_grant_and_the_text_of_one_snapshot() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (store, job) = fixture("snapshot");
+    let me = session(job, "se-1");
+    let set = |text: &str, signal: bool| {
+        store
+            .write(|tx| {
+                tx.execute("UPDATE body SET text = ?1 WHERE message_id = 1", [text])?;
+                if signal {
+                    tx.execute_batch(
+                        r#"INSERT INTO item (id, form, account_id, status, doc, created_at, updated_at)
+                             VALUES (9, 'signal', 1, 'open', '{"id":"s-9","form":"signal"}', 1, 1);
+                           INSERT INTO item_source (item_id, message_id, role) VALUES (9, 1, 'origin');"#,
+                    )?;
+                } else {
+                    tx.execute_batch(
+                        "DELETE FROM item_source WHERE item_id = 9; DELETE FROM item WHERE id = 9;",
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap()
+    };
+    let done = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            for _ in 0..300 {
+                set("B", true);
+                set("A", false);
+            }
+            done.store(true, Ordering::SeqCst);
+        });
+        let mut reads = 0;
+        while !done.load(Ordering::SeqCst) || reads < 50 {
+            if let Ok(v) = call(&store, &me, "show", json!({ "id": "m-1" })) {
+                assert_ne!(v["message"]["text"], "B", "{v}");
+            }
+            reads += 1;
+        }
+    });
 }

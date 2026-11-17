@@ -286,7 +286,9 @@ fn no_sent_mail_makes_each_address_new() {
 }
 
 /// Submit puts the draft flags on a `draft` action and on the `send` of
-/// its draft, and the document agrees with the schema.
+/// its draft, and the document agrees with the schema. The agent has no
+/// job, so it is marked (spec R4-06), and a new mail has no thread: both
+/// get `outside_thread`.
 #[test]
 fn submit_flags_a_draft_and_its_send() {
     let dir = TempDir::new("submit");
@@ -316,7 +318,7 @@ fn submit_flags_a_draft_and_its_send() {
     let a = one(Verb::Draft, "a-1", &mail);
     assert_eq!(
         a["flags"],
-        json!(["new_recipient", "money", "attachment"]),
+        json!(["new_recipient", "money", "attachment", "outside_thread"]),
         "{a}"
     );
     // The draft that the apply makes: its raw bytes and their hash. The
@@ -336,7 +338,7 @@ fn submit_flags_a_draft_and_its_send() {
     let a = one(Verb::Send, "d-1", &json!({}));
     assert_eq!(
         a["flags"],
-        json!(["new_recipient", "money", "attachment"]),
+        json!(["new_recipient", "money", "attachment", "outside_thread"]),
         "{a}"
     );
     // Raw bytes that do not hash to the row hash: no checked content, so

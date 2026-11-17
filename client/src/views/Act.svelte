@@ -122,7 +122,7 @@
           <span class="muted">It leaves your brief.</span>
           <button class="quiet" type="button" onclick={undo}>Undo</button>
         {:else if phase.at === "done"}
-          <a class="muted" href="#/">Back to the brief</a>
+          <a class="muted touch" href="#/">Back to the brief</a>
         {/if}
       </p>
       {#if phase.at === "held"}<span class="bar" style:animation-duration={`${delay}ms`} aria-hidden="true"></span>{/if}

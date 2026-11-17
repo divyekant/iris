@@ -1,5 +1,6 @@
 import { access } from "./access.svelte.ts";
 import { addPage } from "./format";
+import { active, localDay } from "./measures";
 // The client reads the local API of the engine (crates/iris-api/README.md).
 // The form documents follow docs/spec/schema. The client only reads, except
 // the policy changes of the policy view (spec 2 section 6.3), the decisions of
@@ -200,7 +201,7 @@ export type Action = {
   n: number;
   revision: number;
   verb: string;
-  targets: { threads?: string[]; messages?: string[]; items?: string[]; drafts?: string[]; accounts?: string[] };
+  targets: { threads?: string[]; messages?: string[]; items?: string[]; drafts?: string[]; accounts?: string[]; ledger?: string[] };
   resolved: { messages: string[] };
   args: Record<string, unknown>;
   why: string | null;
@@ -469,6 +470,8 @@ async function call(path: string, accept: string, body?: unknown): Promise<Respo
   // A failed sign-in does not stop a token that this page has from an earlier sign-in.
   const signInError = await ready.then(() => null, (e: Error) => e);
   const headers: Record<string, string> = { accept };
+  // While the person is active, the local day: the engine counts it as a day of use, and a mail view as an open.
+  if (active()) headers["x-iris-day"] = localDay();
   const sent = token;
   if (sent) headers.authorization = `Bearer ${sent}`;
   const init: RequestInit =

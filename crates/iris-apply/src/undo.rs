@@ -18,6 +18,8 @@ fn inverse(verb: &str) -> Option<Verb> {
         "unlabel" => Verb::Label,
         "trash" => Verb::Untrash,
         "untrash" => Verb::Trash,
+        // A state entry: `restore` sets its `pre` values again.
+        v if iris_changeset::STATE_VERBS.contains(&v) => Verb::Restore,
         _ => return None,
     })
 }
@@ -30,7 +32,9 @@ fn inverse(verb: &str) -> Option<Verb> {
 /// Gives the row IDs of the actions, in order. Apply each one with
 /// [`crate::apply`]: the mode `observe` does not hold them, and step 2
 /// waits for step 1. The undo of `trash` has two actions: `untrash`, then
-/// `archive` of each message that had no `INBOX` before the trash.
+/// `archive` of each message that had no `INBOX` before the trash. The undo
+/// of a state entry (`close`, `decline`, `defer`, `correct`) has one action,
+/// `restore`: apply it with [`crate::apply_state`].
 ///
 /// The target of each action is the entry (`{"ledger": ["l-N"]}`): submit
 /// resolves the messages with `done` that are not gone. The apply
@@ -82,15 +86,26 @@ fn make(
         return Err(refused(format!("an undo of l-{ledger} is open")));
     }
     let verb_back = inverse(&verb).ok_or_else(|| refused(format!("{verb} has no undo")))?;
-    if !done(c, ledger, false)? {
+    // A state entry changes items: submit resolves them, and refuses an
+    // entry with no item in the store.
+    let restore = verb_back == Verb::Restore;
+    if !restore && !done(c, ledger, false)? {
         return Err(refused(format!(
             "l-{ledger} changed no message that is in the mirror"
         )));
     }
     let why = format!("Undo of l-{ledger}");
     let cs = iris_changeset::create_in(c, author, now_ms)?;
-    // The same arguments: none, or the label name.
-    add(c, cs, 1, verb_back, &args, &why, ledger)?;
+    // The same arguments: none, or the label name. `restore` takes none.
+    add(
+        c,
+        cs,
+        1,
+        verb_back,
+        if restore { "{}" } else { &args },
+        &why,
+        ledger,
+    )?;
     if verb == "trash" && done(c, ledger, true)? {
         add(c, cs, 2, Verb::Archive, "{}", &why, ledger)?;
     }

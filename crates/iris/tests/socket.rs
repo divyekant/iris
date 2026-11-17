@@ -336,7 +336,14 @@ fn the_command_waits_at_most_the_answer_wait_for_the_whole_answer() {
         }
     });
     let start = Instant::now();
-    let e = socket::request_with(&d, "drafts", json!({}), Duration::from_millis(400)).unwrap_err();
+    let e = socket::request_with(
+        &d,
+        "drafts",
+        json!({}),
+        Duration::from_millis(400),
+        "iris changeset --drafts",
+    )
+    .unwrap_err();
     assert_eq!(e.code, code::ERROR);
     assert!(
         start.elapsed() < Duration::from_secs(2),
@@ -506,7 +513,14 @@ fn a_large_document_streams_and_a_stalled_reader_frees_its_slot() {
     });
     std::thread::sleep(Duration::from_millis(100));
     let start = std::time::Instant::now();
-    let list = socket::request_with(&d, "drafts", json!({}), Duration::from_secs(5)).unwrap();
+    let list = socket::request_with(
+        &d,
+        "drafts",
+        json!({}),
+        Duration::from_secs(5),
+        "iris changeset --drafts",
+    )
+    .unwrap();
     assert_eq!(list, json!({ "changesets": [id] }));
     assert!(
         start.elapsed() < Duration::from_secs(3),
@@ -593,6 +607,14 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
         r#"{"ok":false,"code":9,"error":"x"}"#,
         r#"{"ok":false,"code":3}"#,
         r#"{"ok":"true","result":{"id":"cs-1","state":"draft","actions":[]}}"#,
+        r#"{"ok":true,"result":{"session":"invalid"}}"#,
+        r#"{"ok":true,"result":{"session":"se-0","reaped":true}}"#,
+        r#"{"ok":true,"result":{"session":"se-01","reaped":false}}"#,
+        r#"{"ok":true,"result":{"session":7,"reaped":true}}"#,
+        r#"{"ok":true,"result":{"job":"j-1","goal":"g","state":"working"}}"#,
+        r#"{"ok":true,"result":{"job":"j-1","session":"se-1","goal":"g","state":"working","threads":"1","messages":1,"items":1}}"#,
+        r#"{"ok":true,"result":{"job":"j-1","session":"se-1","goal":"g","state":"working","threads":1,"messages":1,"items":1,"due":5}}"#,
+        r#"{"ok":true,"result":{"job":"x","session":"se-1","goal":"g","state":"working","threads":1,"messages":1,"items":1}}"#,
     ]
     .iter()
     .map(|l| l.as_bytes().to_vec())
@@ -604,19 +626,57 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
                 seed = seed
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(1442695040888963407);
-                let abc = b"{}[]\":,oktruefalseresultcodeerrorid1234 n";
+                let abc = b"{}[]\":,oktruefalseresultcodeerrorid1234 nsessionreaped-jgoalstatethreadsmessagesitemsdueformtextmessageitem";
                 abc[(seed >> 33) as usize % abc.len()]
             })
             .collect();
         lines.push(line);
     }
     for line in &lines {
-        for verb in ["show", "drafts", "add", "submit", "withdraw"] {
+        for verb in [
+            "show", "drafts", "add", "submit", "withdraw", "job.run", "job.stop", "status",
+            "search", "list",
+        ] {
             match socket::parse_answer(verb, line) {
                 None => {}
+                Some(Ok(r)) if verb == "status" => assert!(
+                    r["job"].as_str().and_then(iris_job::parse_job_id).is_some()
+                        && r["session"]
+                            .as_str()
+                            .and_then(iris_job::parse_session_id)
+                            .is_some()
+                        && r["goal"].is_string()
+                        && r["state"].is_string()
+                        && ["threads", "messages", "items"]
+                            .iter()
+                            .all(|k| r[k].is_u64())
+                        && (r["due"].is_null() || r["due"].is_string()),
+                    "{verb} {}",
+                    String::from_utf8_lossy(line)
+                ),
+                Some(Ok(r)) if verb.starts_with("job.") => assert!(
+                    r["session"]
+                        .as_str()
+                        .and_then(iris_job::parse_session_id)
+                        .is_some()
+                        && (verb == "job.run" || r["reaped"].is_boolean()),
+                    "{verb} {}",
+                    String::from_utf8_lossy(line)
+                ),
+                // A read of a session: a list of objects with an ID.
+                Some(Ok(r)) if matches!(verb, "search" | "list") => assert!(
+                    r["messages"]
+                        .as_array()
+                        .or(r["items"].as_array())
+                        .is_some_and(|a| a.iter().all(|e| e["id"].is_string())),
+                    "{verb} {}",
+                    String::from_utf8_lossy(line)
+                ),
                 Some(Ok(r)) => assert!(
                     r.is_object()
                         && (r["changesets"].is_array()
+                            || r["message"]["text"].is_string()
+                            || r["item"]["form"].is_string()
                             || r["changeset"].is_string()
                             || r["id"].is_string()),
                     "{verb} {}",
@@ -629,6 +689,20 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
     let ok = br#"{"ok":true,"result":{"id":"cs-1","state":"draft","actions":[]}}"#;
     assert!(matches!(socket::parse_answer("show", ok), Some(Ok(_))));
     assert!(socket::parse_answer("drafts", ok).is_none());
+    let read = br#"{"ok":true,"result":{"items":[{"id":"c-1","form":"commitment"}]}}"#;
+    assert!(matches!(socket::parse_answer("list", read), Some(Ok(_))));
+    assert!(socket::parse_answer("search", read).is_none());
+    let bad = br#"{"ok":true,"result":{"items":[{"id":"c-1"}]}}"#;
+    assert!(socket::parse_answer("list", bad).is_none());
+    let message = br#"{"ok":true,"result":{"message":{"id":"m-1","text":"x"}}}"#;
+    assert!(matches!(socket::parse_answer("show", message), Some(Ok(_))));
+    let run = br#"{"ok":true,"result":{"session":"se-12"}}"#;
+    assert!(matches!(socket::parse_answer("job.run", run), Some(Ok(_))));
+    let status = br#"{"ok":true,"result":{"job":"j-1","session":"se-2","goal":"g","state":"working","due":null,"threads":1,"messages":2,"items":0}}"#;
+    assert!(matches!(
+        socket::parse_answer("status", status),
+        Some(Ok(_))
+    ));
 }
 
 /// The command adds and submits the write verbs: a new mail to an account
@@ -736,4 +810,200 @@ fn the_cli_adds_draft_and_send() {
     std::fs::write(&file, "to: p@example.org").unwrap();
     let out = iris(&["draft", "a-1", file.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(2));
+}
+
+/// A fake engine: it reads one request line, then sends `answer`, or
+/// closes the connection with no answer if `answer` is `None`.
+fn one_answer(name: &str, answer: Option<&'static str>) -> PathBuf {
+    let d = dir(name);
+    std::fs::create_dir_all(&d).unwrap();
+    let l = std::os::unix::net::UnixListener::bind(d.join(socket::SOCKET)).unwrap();
+    std::thread::spawn(move || {
+        let mut s = l.incoming().next().unwrap().unwrap();
+        let mut line = String::new();
+        BufReader::new(&mut s).read_line(&mut line).unwrap();
+        if let Some(a) = answer {
+            s.write_all(a.as_bytes()).unwrap();
+        }
+    });
+    d
+}
+
+fn job_command(d: &std::path::Path, args: &[&str]) -> Result<(), socket::Failure> {
+    use clap::Parser;
+    let mut all = vec!["iris", "--data", d.to_str().unwrap(), "job"];
+    all.extend_from_slice(args);
+    iris::run(iris::Cli::parse_from(all))
+}
+
+#[test]
+fn a_lost_job_answer_names_the_job_session_command() {
+    for (name, args) in [
+        ("lostrun", &["run", "j-1", "--agent", "script"][..]),
+        ("loststop", &["stop", "j-1"][..]),
+    ] {
+        let d = one_answer(name, None);
+        let e = job_command(&d, args).unwrap_err();
+        assert_eq!(e.code, code::ERROR, "{name}");
+        assert!(
+            e.error.contains("not known") && e.error.contains("iris job session j-1"),
+            "{name}: {}",
+            e.error
+        );
+        assert!(!e.error.contains("iris changeset"), "{name}: {}", e.error);
+    }
+}
+
+#[test]
+fn a_job_answer_of_the_engine_is_a_result() {
+    let d = one_answer(
+        "okrun",
+        Some("{\"ok\":true,\"result\":{\"session\":\"se-1\"}}\n"),
+    );
+    job_command(&d, &["run", "j-1", "--agent", "script"]).unwrap();
+    let d = one_answer(
+        "okstop",
+        Some("{\"ok\":true,\"result\":{\"session\":\"se-1\",\"reaped\":true}}\n"),
+    );
+    job_command(&d, &["stop", "j-1"]).unwrap();
+}
+
+#[test]
+fn a_stop_that_waits_too_long_gives_the_reason() {
+    let d = one_answer(
+        "slowstop",
+        Some("{\"ok\":true,\"result\":{\"session\":\"se-1\",\"reaped\":false,\"why\":\"the helper (process 7) still runs\"}}\n"),
+    );
+    let e = job_command(&d, &["stop", "j-1"]).unwrap_err();
+    assert!(
+        e.error.contains("the helper (process 7) still runs"),
+        "{}",
+        e.error
+    );
+}
+
+#[test]
+fn a_bad_job_id_is_a_usage_error_with_no_engine() {
+    let d = dir("badjob");
+    std::fs::create_dir_all(&d).unwrap();
+    for args in [
+        &["run", "bad", "--agent", "script"][..],
+        &["stop", "j-01"][..],
+        &["session", "x"][..],
+    ] {
+        let e = job_command(&d, args).unwrap_err();
+        assert_eq!(e.code, code::USAGE, "{args:?}: {}", e.error);
+        assert!(e.error.contains("not a job ID"), "{args:?}: {}", e.error);
+    }
+}
+
+/// Session mode: in a folder below `.iris/`, the command sends each verb
+/// to `.iris/socket` and never opens the data folder, also with `--data`.
+#[test]
+fn session_mode_uses_only_the_session_socket() {
+    let root = dir("sessionmode");
+    let work = root.join("workspace");
+    let deep = work.join("drafts");
+    std::fs::create_dir_all(work.join(".iris")).unwrap();
+    std::fs::create_dir_all(&deep).unwrap();
+    let data = root.join("data");
+    let iris = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_iris"))
+            .current_dir(&deep)
+            .arg("--data")
+            .arg(&data)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    // Host mode (no `.iris/` above the folder): `list` is a usage error.
+    let out = Command::new(env!("CARGO_BIN_EXE_iris"))
+        .current_dir(&root)
+        .arg("--data")
+        .arg(&data)
+        .arg("list")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    // No socket: code 4, for a socket verb and for a store verb.
+    let draft = ["draft", "t-1", "missing.json"];
+    for args in [
+        &["status"][..],
+        &["withdraw", "cs-1"],
+        &["search", "x"],
+        &draft,
+    ] {
+        let out = iris(args);
+        assert_eq!(out.status.code(), Some(4), "{args:?}: {out:?}");
+    }
+    // A socket that answers `status`: the command prints the job.
+    let listener = std::os::unix::net::UnixListener::bind(work.join(".iris/socket")).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut verbs = Vec::new();
+        for _ in 0..5 {
+            let (s, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(&s).read_line(&mut line).unwrap();
+            let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let verb = v["verb"].as_str().unwrap().to_string();
+            let item = json!({"model": "iris/0", "id": "c-1", "form": "commitment",
+                "sources": ["m-1"]});
+            let result = match verb.as_str() {
+                "search" => json!({"messages": [{"id": "m-1", "thread": "t-1",
+                    "date": "2025-11-16T08:57:02Z", "from": "dana@example.com",
+                    "from_name": "Dana", "subject": "Contract"}]}),
+                "list" => json!({"items": [item]}),
+                "show" => json!({"item": item}),
+                _ => json!({"job": "j-4", "session": "se-9", "goal": "Get it.",
+                    "state": "working", "threads": 1, "messages": 2, "items": 0}),
+            };
+            verbs.push(format!("{verb} {}", v["args"]));
+            let answer = json!({"ok": true, "result": result});
+            (&s).write_all(format!("{answer}\n").as_bytes()).unwrap();
+        }
+        verbs
+    });
+    let out = iris(&["status"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("j-4 (working)"));
+    // A store verb and a host verb of the socket: code 3, and nothing
+    // reaches the socket.
+    for args in [&["export", "out"][..], &["changeset", "--drafts"], &draft] {
+        let out = iris(args);
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {out:?}");
+    }
+    let out = iris(&["status", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    // The read verbs of a session go to the socket (card R4-04f).
+    let out = iris(&["search", "contract", "--limit", "5"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("m-1"),
+        "{out:?}"
+    );
+    // `--json` prints one JSON document of the object itself.
+    let out = iris(&["show", "c-1", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        (&shown["id"], &shown["form"]),
+        (&json!("c-1"), &json!("commitment"))
+    );
+    let out = iris(&["list", "commitment"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("c-1"),
+        "{out:?}"
+    );
+    assert_eq!(
+        server.join().unwrap(),
+        [
+            "status {}",
+            "status {}",
+            r#"search {"limit":5,"text":"contract"}"#,
+            r#"show {"id":"c-1"}"#,
+            r#"list {"form":"commitment"}"#,
+        ]
+    );
+    assert!(!data.exists(), "the command made the data folder");
 }

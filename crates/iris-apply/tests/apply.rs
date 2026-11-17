@@ -2037,3 +2037,419 @@ fn a_revoke_between_two_calls_stops_the_later_calls() {
     assert_eq!(done, vec![true, false]);
     assert!(b.gmail_labels(ms[1]).contains(&"INBOX".to_string()));
 }
+
+/// The card R2-13, release 2 exit criterion C7 (specification 2, section
+/// 10): 100 actions of each verb, on random messages, are correct at Gmail
+/// and in the mirror, and change no other message. Then the 100 undos, from
+/// the last action to the first, each return Gmail and the mirror to the
+/// state before its action.
+#[test]
+fn hundred_actions_and_hundred_undos_are_correct() {
+    let b = setup("hundred", 60, Some(APPLY_POLICY));
+    let pool = b.messages("1", 60);
+    let labels =
+        |b: &Box| -> Vec<Vec<String>> { pool.iter().map(|&m| b.gmail_labels(m)).collect() };
+    // A fixed seed: a failure repeats.
+    let mut seed: u64 = 0x1215_2013;
+    let mut next = |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    let changes = |verb: &str| -> (&[&str], &[&str]) {
+        match verb {
+            "archive" => (&[], &["INBOX"]),
+            "inbox" => (&["INBOX"], &[]),
+            "read" => (&[], &["UNREAD"]),
+            "unread" => (&["UNREAD"], &[]),
+            // The fake trash also removes `INBOX` (see iris-fakegmail).
+            "trash" => (&["TRASH"], &["INBOX"]),
+            _ => unreachable!(),
+        }
+    };
+    let expected = |verb: &str, labels: &[String]| -> Vec<String> {
+        let (add, remove) = changes(verb);
+        let mut l: Vec<String> = labels
+            .iter()
+            .filter(|x| !remove.contains(&x.as_str()))
+            .cloned()
+            .collect();
+        for a in add {
+            if !l.iter().any(|x| x == a) {
+                l.push((*a).to_string());
+            }
+        }
+        l.sort();
+        l
+    };
+    // Each action, with the labels of the pool before it.
+    let mut done: Vec<(i64, &str, Vec<Vec<String>>)> = Vec::new();
+    for i in 0..100 {
+        let before = labels(&b);
+        // Few trash actions, so the pool stays large.
+        let verb = [
+            "archive", "inbox", "read", "unread", "archive", "inbox", "read", "unread", "trash",
+        ][next(9) as usize];
+        // A message in the trash gets no other action until its undo.
+        let live: Vec<usize> = (0..pool.len())
+            .filter(|&k| !before[k].iter().any(|l| l == "TRASH"))
+            .collect();
+        // The first message needs the change, so each action has an undo.
+        let need: Vec<usize> = live
+            .iter()
+            .copied()
+            .filter(|&k| expected(verb, &before[k]) != before[k])
+            .collect();
+        let mut picked = vec![need[next(need.len() as u64) as usize]];
+        for _ in 0..next(4) {
+            let k = live[next(live.len() as u64) as usize];
+            if !picked.contains(&k) {
+                picked.push(k);
+            }
+        }
+        picked.sort();
+        let ms: Vec<i64> = picked.iter().map(|&k| pool[k]).collect();
+        let changed = picked
+            .iter()
+            .filter(|&&k| expected(verb, &before[k]) != before[k])
+            .count() as u64;
+
+        let a = b.approved(verb, &ms, PERSON);
+        let c = applied(b.apply(a));
+        assert_eq!(
+            (c.changed, c.unchanged, c.gone.len()),
+            (changed, ms.len() as u64 - changed, 0),
+            "action {i}: {verb} {ms:?}"
+        );
+        assert_eq!(b.state(a).0, "applied", "action {i}");
+        for (k, &m) in pool.iter().enumerate() {
+            let at_gmail = b.gmail_labels(m);
+            let want = if picked.contains(&k) {
+                expected(verb, &before[k])
+            } else {
+                before[k].clone()
+            };
+            assert_eq!(at_gmail, want, "action {i}: {verb}, message {m}");
+            assert_eq!(b.mirror_labels(m), at_gmail, "action {i}: mirror of {m}");
+        }
+        done.push((a, verb, before));
+    }
+    let verbs: std::collections::BTreeSet<&str> = done.iter().map(|d| d.1).collect();
+    assert_eq!(verbs.len(), 5, "each verb ran: {verbs:?}");
+
+    for (i, (a, verb, before)) in done.iter().enumerate().rev() {
+        let entry = b.entry(*a);
+        let outcomes = b.undo(*a);
+        assert!(
+            outcomes.iter().all(|o| matches!(o, Outcome::Applied(_))),
+            "undo {i}: {verb} {outcomes:?}"
+        );
+        assert_eq!(b.state(*a).0, "undone", "undo {i}: {verb}");
+        assert_eq!(b.entry_state(entry).0, "undone", "undo {i}: {verb}");
+        for (k, &m) in pool.iter().enumerate() {
+            let at_gmail = b.gmail_labels(m);
+            assert_eq!(at_gmail, before[k], "undo {i}: {verb}, message {m}");
+            assert_eq!(b.mirror_labels(m), at_gmail, "undo {i}: mirror of {m}");
+        }
+    }
+}
+
+/// A later entry blocks the undo of an older entry on the same message
+/// while the later entry stands, also after a failed undo of it (R2-13).
+/// `hundred_actions_and_hundred_undos_are_correct` covers the undone case.
+#[test]
+fn a_later_entry_blocks_the_older_undo_after_a_failed_undo() {
+    let b = setup("undo-stack", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 1);
+    b.fake
+        .modify_labels(&b.provider_id(ms[0]), &[], &["UNREAD"]);
+    let old = b.approved("archive", &ms, PERSON);
+    applied(b.apply(old));
+    let later = b.approved("unread", &ms, PERSON);
+    applied(b.apply(later));
+    assert!(b.gmail_labels(ms[0]).contains(&"UNREAD".to_string()));
+
+    // The undo of the later entry fails: the later entry stands.
+    let actions = iris_apply::undo(&b.store, b.entry(later), now()).unwrap();
+    b.fake.fail_next_write(&[400], false);
+    assert!(matches!(b.apply(actions[0]), Ok(Outcome::Failed { .. })));
+    assert_ne!(b.state(later).0, "undone");
+    let skipped = iris_apply::undo(&b.store, b.entry(old), now()).unwrap();
+    match b.apply(skipped[0]).unwrap() {
+        Outcome::Applied(c) => assert_eq!((c.changed, c.unchanged), (0, 1)),
+        other => panic!("{other:?}"),
+    }
+    assert!(!b.gmail_labels(ms[0]).contains(&"INBOX".to_string()));
+
+    assert_eq!(b.mirror_labels(ms[0]), b.gmail_labels(ms[0]));
+}
+
+/// The invariant of the undo of an older entry `o` (R2-13): it changes a
+/// message only if no later change of the message by Iris stands. A change
+/// stands if no undo of it that changed the message back stands, so an
+/// undo of an undo makes a change stand again. The test keeps its own model
+/// of each entry, undoes entries and undo entries in random order, and
+/// compares Gmail with the model. No `trash`: the 100-action test covers
+/// its undo.
+#[test]
+fn an_undo_in_any_order_changes_only_a_free_message() {
+    let b = setup("undo-any-order", 30, Some(APPLY_POLICY));
+    let pool = b.messages(IN_INBOX, 12);
+    let mut seed: u64 = 0x0513_0476;
+    let mut next = |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    // The label of a verb, and true if the verb adds it.
+    let change = |verb: &str| -> (&str, bool) {
+        match verb {
+            "archive" => ("INBOX", false),
+            "inbox" => ("INBOX", true),
+            "read" => ("UNREAD", false),
+            "unread" => ("UNREAD", true),
+            _ => unreachable!(),
+        }
+    };
+    let inverse = |verb: &str| match verb {
+        "archive" => "inbox",
+        "inbox" => "archive",
+        "read" => "unread",
+        _ => "read",
+    };
+    struct Entry {
+        action: i64,
+        verb: &'static str,
+        changed: Vec<i64>,
+        /// The index of the entry that this entry undoes.
+        target: Option<usize>,
+        undone: bool,
+    }
+    fn stands(e: usize, m: i64, entries: &[Entry]) -> bool {
+        entries[e].changed.contains(&m)
+            && !(e + 1..entries.len())
+                .any(|c| entries[c].target == Some(e) && stands(c, m, entries))
+    }
+    fn under(mut e: usize, o: usize, entries: &[Entry]) -> bool {
+        while let Some(t) = entries[e].target {
+            if t == o {
+                return true;
+            }
+            e = t;
+        }
+        false
+    }
+    let mut entries: Vec<Entry> = Vec::new();
+    let (mut undos, mut nested) = (0, 0);
+    for step in 0..160 {
+        let open: Vec<usize> = (0..entries.len()).filter(|&e| !entries[e].undone).collect();
+        if !open.is_empty() && next(3) == 0 {
+            let o = open[next(open.len() as u64) as usize];
+            let (label, add) = change(entries[o].verb);
+            let before: Vec<Vec<String>> = pool.iter().map(|&m| b.gmail_labels(m)).collect();
+            let expected: Vec<Vec<String>> = pool
+                .iter()
+                .enumerate()
+                .map(|(k, &m)| {
+                    let blocked = (o + 1..entries.len()).any(|l| {
+                        !under(l, o, &entries)
+                            && entries[l].target.is_none_or(|t| t < o)
+                            && stands(l, m, &entries)
+                    });
+                    let free = entries[o].changed.contains(&m) && !blocked;
+                    let has = before[k].iter().any(|l| l == label);
+                    let mut l = before[k].clone();
+                    // The undo changes only a message in the post state.
+                    if free && has == add {
+                        if add {
+                            l.retain(|x| x != label);
+                        } else {
+                            l.push(label.to_string());
+                            l.sort();
+                        }
+                    }
+                    l
+                })
+                .collect();
+            let actions = iris_apply::undo(&b.store, b.entry(entries[o].action), now()).unwrap();
+            assert_eq!(actions.len(), 1);
+            applied(b.apply(actions[0]));
+            let mut changed = Vec::new();
+            for (k, &m) in pool.iter().enumerate() {
+                let now = b.gmail_labels(m);
+                assert_eq!(
+                    now, expected[k],
+                    "step {step}: undo of entry {o}, message {m}"
+                );
+                assert_eq!(b.mirror_labels(m), now);
+                if now != before[k] {
+                    changed.push(m);
+                }
+            }
+            entries[o].undone = true;
+            undos += 1;
+            if entries[o].target.is_some() {
+                nested += 1;
+            }
+            if !changed.is_empty() {
+                let verb = inverse(entries[o].verb);
+                entries.push(Entry {
+                    action: actions[0],
+                    verb,
+                    changed,
+                    target: Some(o),
+                    undone: false,
+                });
+            }
+        } else {
+            let verb = ["archive", "inbox", "read", "unread"][next(4) as usize];
+            let mut ms: Vec<i64> = (0..=next(3))
+                .map(|_| pool[next(pool.len() as u64) as usize])
+                .collect();
+            ms.sort();
+            ms.dedup();
+            let before: Vec<Vec<String>> = ms.iter().map(|&m| b.gmail_labels(m)).collect();
+            let a = b.approved(verb, &ms, PERSON);
+            applied(b.apply(a));
+            let changed: Vec<i64> = ms
+                .iter()
+                .enumerate()
+                .filter(|&(k, &m)| b.gmail_labels(m) != before[k])
+                .map(|(_, &m)| m)
+                .collect();
+            // An entry with no change has no undo: leave it out.
+            if !changed.is_empty() {
+                entries.push(Entry {
+                    action: a,
+                    verb,
+                    changed,
+                    target: None,
+                    undone: false,
+                });
+            }
+        }
+    }
+    assert!(
+        undos >= 30 && nested >= 5,
+        "{undos} undos, {nested} of undo entries"
+    );
+}
+
+/// The case of the review of PR #476: read A, archive B, inbox C, the undo
+/// of B (skipped, as C is later), then the undo of C. B is `undone`, but its
+/// archive stands again, so the undo of A skips the message.
+#[test]
+fn an_undo_that_skipped_a_message_keeps_its_entry_a_blocker() {
+    let b = setup("undo-skip-block", 30, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 1);
+    b.fake
+        .modify_labels(&b.provider_id(ms[0]), &["UNREAD"], &[]);
+    let a = b.approved("read", &ms, PERSON);
+    applied(b.apply(a));
+    let bb = b.approved("archive", &ms, PERSON);
+    applied(b.apply(bb));
+    let c = b.approved("inbox", &ms, PERSON);
+    applied(b.apply(c));
+    b.undo(bb);
+    b.undo(c);
+    assert_eq!(b.state(bb).0, "undone");
+    let labels = b.gmail_labels(ms[0]);
+    assert!(!labels.contains(&"INBOX".to_string()));
+    b.undo(a);
+    assert_eq!(b.gmail_labels(ms[0]), labels);
+}
+
+/// An undo of an undo makes the first later change stand again (review of
+/// PR #476): read A, inbox I, undo I, undo that undo. The message is in the
+/// inbox by I, so the undo of A skips it.
+#[test]
+fn an_undo_of_an_undo_keeps_the_later_change_a_blocker() {
+    let b = setup("undo-undo-block", 30, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 1);
+    let p = b.provider_id(ms[0]);
+    b.fake.modify_labels(&p, &["UNREAD"], &["INBOX"]);
+    let a = b.approved("read", &ms, PERSON);
+    applied(b.apply(a));
+    let i = b.approved("inbox", &ms, PERSON);
+    applied(b.apply(i));
+    let u = iris_apply::undo(&b.store, b.entry(i), now()).unwrap();
+    applied(b.apply(u[0]));
+    let v = iris_apply::undo(&b.store, b.entry(u[0]), now()).unwrap();
+    applied(b.apply(v[0]));
+    let labels = b.gmail_labels(ms[0]);
+    assert!(labels.contains(&"INBOX".to_string()));
+    assert!(!labels.contains(&"UNREAD".to_string()));
+    match &b.undo(a)[..] {
+        [Outcome::Applied(c)] => assert_eq!((c.changed, c.unchanged), (0, 1)),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.gmail_labels(ms[0]), labels);
+}
+
+/// A retry of an undo: the first undo of a `trash` changes one message
+/// back and fails on the other, a second undo changes the other. Both
+/// messages are free for the undo of an older entry (review of PR #476).
+#[test]
+fn a_retried_undo_frees_each_message_that_any_undo_changed_back() {
+    let b = setup("undo-retry-free", 30, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    for &m in &ms {
+        b.fake.modify_labels(&b.provider_id(m), &["UNREAD"], &[]);
+    }
+    let a = b.approved("read", &ms, PERSON);
+    applied(b.apply(a));
+    let t = b.approved("trash", &ms, PERSON);
+    applied(b.apply(t));
+    let first = iris_apply::undo(&b.store, b.entry(t), now()).unwrap();
+    b.fake.fail_next_write(&[0, 400], false);
+    assert!(matches!(b.apply(first[0]), Ok(Outcome::Failed { .. })));
+    for &x in &first[1..] {
+        let _ = b.apply(x);
+    }
+    for o in b.undo(t) {
+        assert!(matches!(o, Outcome::Applied(_)), "{o:?}");
+    }
+    assert_eq!(b.state(t).0, "undone");
+    match &b.undo(a)[..] {
+        [Outcome::Applied(c)] => assert_eq!((c.changed, c.unchanged), (2, 0)),
+        other => panic!("{other:?}"),
+    }
+    for &m in &ms {
+        let l = b.gmail_labels(m);
+        assert!(
+            l.contains(&"UNREAD".to_string()) && l.contains(&"INBOX".to_string()),
+            "{l:?}"
+        );
+        assert_eq!(b.mirror_labels(m), l);
+    }
+}
+
+/// A long chain of undos of undos on one message: the guard decides each
+/// level in SQLite, and the net change of the chain decides (review of
+/// PR #476). 41 undos reverse the `archive`, so the undo of the older
+/// `read` changes the message.
+#[test]
+fn a_long_undo_chain_gives_its_net_change() {
+    let b = setup("undo-chain", 30, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 1);
+    b.fake
+        .modify_labels(&b.provider_id(ms[0]), &["UNREAD"], &[]);
+    let a = b.approved("read", &ms, PERSON);
+    applied(b.apply(a));
+    let mut last = b.approved("archive", &ms, PERSON);
+    applied(b.apply(last));
+    for _ in 0..41 {
+        let u = iris_apply::undo(&b.store, b.entry(last), now()).unwrap();
+        applied(b.apply(u[0]));
+        last = u[0];
+    }
+    assert!(b.gmail_labels(ms[0]).contains(&"INBOX".to_string()));
+    match &b.undo(a)[..] {
+        [Outcome::Applied(c)] => assert_eq!((c.changed, c.unchanged), (1, 0)),
+        other => panic!("{other:?}"),
+    }
+    let l = b.gmail_labels(ms[0]);
+    assert!(l.contains(&"UNREAD".to_string()) && l.contains(&"INBOX".to_string()));
+}
