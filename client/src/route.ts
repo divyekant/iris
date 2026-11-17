@@ -81,10 +81,11 @@ export const href = {
 
 export const NAV = [
   ["#/brief", "Brief"],
-  ["#/write", "Write"],
   ["#/matters", "Matters"],
   ["#/ask", "Ask"],
   ["#/review", "Review"],
+  // The first view of More on a phone: a reply starts from its thread.
+  ["#/write", "Write"],
   ["#/outbox", "Outbox"],
   ["#/jobs", "Jobs"],
   ["#/commitments", "Commitments"],

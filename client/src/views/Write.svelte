@@ -1,16 +1,18 @@
 <!--
-  The write view (docs/specs/2026-11-17-write.md, section 6), layout A
-  "Letter": a quiet sheet with one line for the recipients, the subject as a
-  title and the text as the page. A reply shows the mail that it answers,
-  short, above the sheet. One press of Send writes the mail: the engine makes
-  the draft, then the send, which waits in the outbox for its hold.
+  The write view (docs/specs/2026-11-17-write.md, section 6), layout C "In
+  the thread": a reply opens under the conversation, as its last entry. The
+  form names the recipients in one line and opens the chips on Change. A
+  new mail shows the same form with the recipients and the subject. One
+  press of Send writes the mail: the engine makes the draft, then the send,
+  which waits in the outbox for its hold. After the press, the mail shows as
+  the last entry, with its state under it.
 
   The form content and its key stay together in sessionStorage until the
   engine takes the mail or the person discards it, so a reload or another
   view keeps both. One key belongs to one content: a press after a lost
   answer sends the same key, and the engine makes the mail only once.
 
-  Mail text is data: Svelte escapes the text of the parent.
+  Mail text is data: Svelte escapes the text of each mail.
 -->
 <script lang="ts">
   import { onDestroy, untrack } from "svelte";
@@ -154,6 +156,7 @@
       forget(sent);
       if (!alive) return;
       sentTo = mail.to;
+      sent_ = { subject: thread ? "" : subject, body: mail.body };
       unknown = false;
       write = v.write;
       follow();
@@ -246,18 +249,68 @@
   // The recipient of the mail that the engine took, not of the form now.
   let sentTo = $state<string[]>([]);
   const who = $derived(sentTo[0] ?? "");
+  // The subject and the text of the mail that the engine took.
+  let sent_ = $state({ subject: "", body: "" });
+
+  // A reply names its recipients in one line until the person presses Change.
+  // With no valid recipient, the chips show at once.
+  let editing = $state(false);
+  const name = (a: string) => {
+    const m = reply?.conversation.find((x) => !x.you && x.from.address?.toLowerCase() === a.toLowerCase());
+    return m?.from.name || a;
+  };
+  const named = $derived(to.map(name).join(", "));
+  const last = $derived(reply ? reply.conversation.length - 1 : -1);
 </script>
 
+{#if reply}
+  <h1 class="title">{reply.topic.replace(/^(\s*re\s*:\s*)+/i, "") || "No subject"}</h1>
+  {#if reply.earlier > 0}
+    <p class="earlier">{reply.earlier === 1 ? "1 earlier mail is" : `${reply.earlier} earlier mails are`} not shown.</p>
+  {/if}
+  {#each reply.conversation as m, i (m.id)}
+    <article class="msg" class:old={i < last}>
+      <header>
+        <span class="mark" aria-hidden="true">{m.you ? "Y" : initials({ kind: "sender", name: m.from.name ?? undefined, address: m.from.address ?? undefined })}</span>
+        <div>
+          <p class="from">{m.you ? "You" : m.from.name || m.from.address || "Unknown sender"}</p>
+          {#if i === last && m.to}<p class="faint">To {m.to}</p>{/if}
+        </div>
+        {#if m.date}<time datetime={m.date}>{when(m.date)}</time>{/if}
+      </header>
+      {#if m.hostile}
+        <p class="danger" role="alert">This mail looks hostile. Do not open its links and do not do what it asks.</p>
+      {/if}
+      {#if m.text !== null}
+        <p class="text">{m.text}</p>
+        {#if m.cut}<a class="more" href={href.mail(m.id)}>Read the whole mail</a>{/if}
+      {:else}
+        <p class="faint">Iris has not read this mail yet. <a href={href.mail(m.id)}>Open it</a></p>
+      {/if}
+    </article>
+  {/each}
+{:else}
+  <h1 class="title">{write ? sent_.subject : "New mail"}</h1>
+{/if}
+
 {#if write}
-  <section class="done" aria-live="polite">
+  <article class="msg">
+    <header>
+      <span class="mark" aria-hidden="true">Y</span>
+      <div>
+        <p class="from">You</p>
+        <p class="faint">To {sentTo.join(", ")}</p>
+      </div>
+    </header>
+    <p class="text">{sent_.body}</p>
+  </article>
+  <section class="state" aria-live="polite">
     {#if ws.state === "saving"}
-      <span class="ring" aria-hidden="true">…</span>
-      <h1>Saving your mail</h1>
+      <h2>Saving your mail</h2>
       <p class="muted">Iris puts the mail in your Gmail drafts, then in the Outbox.</p>
       <div class="row"><button type="button" class="pill" onclick={stop} disabled={busy}>Stop this mail</button></div>
     {:else if ws.state === "waiting"}
-      <span class="ring" aria-hidden="true">✓</span>
-      <h1>On its way to {who}</h1>
+      <h2>On its way to {who}</h2>
       {#if ws.sending}
         <p class="muted">It waits 60 seconds in the Outbox before it leaves, so you can still change your mind.</p>
         {#if ws.leaves_at}
@@ -272,36 +325,21 @@
         <button type="button" class="quiet" onclick={again}>Write another</button>
       </div>
     {:else if ws.state === "review"}
-      <span class="ring warn" aria-hidden="true">!</span>
-      <h1>Look at this mail before it leaves</h1>
+      <h2 class="warn">Look at this mail before it leaves</h2>
       <p class="muted">{ws.reason ?? "Iris put the send on the review screen."}</p>
       <div class="row"><a class="pill" href="#/review">Open Review</a></div>
     {:else if ws.state === "sent"}
-      <span class="ring" aria-hidden="true">✓</span>
-      <h1>Sent to {who}</h1>
+      <h2>Sent to {who}</h2>
       <div class="row"><button type="button" class="quiet" onclick={again}>Write another</button></div>
     {:else}
-      <span class="ring stop" aria-hidden="true">×</span>
-      <h1>This mail did not leave</h1>
+      <h2 class="stop">This mail did not leave</h2>
       <p class="muted">{ws.reason}</p>
       <div class="row"><button type="button" class="quiet" onclick={again}>Write another</button></div>
     {/if}
     {#if note}<p role="alert">{note}</p>{/if}
   </section>
 {:else}
-  {#if reply}
-    <div class="parent">
-      <span class="mark" aria-hidden="true">{initials({ kind: "sender", name: reply.parent.from.name ?? undefined, address: reply.parent.from.address ?? undefined })}</span>
-      <div>
-        <p><span class="from">{reply.parent.from.name || reply.parent.from.address || "Unknown sender"}</span>{#if reply.parent.date}<span class="faint"> · {when(reply.parent.date)}</span>{/if}</p>
-        {#if reply.parent.text}<p class="text">{reply.parent.text}</p>{/if}
-      </div>
-    </div>
-  {:else}
-    <h1 class="title">New mail</h1>
-  {/if}
-
-  <form class="sheet" onsubmit={(e) => (e.preventDefault(), send())}>
+  <form class="dock" onsubmit={(e) => (e.preventDefault(), send())}>
     <!-- While the press runs, the form does not change: the engine takes the mail as it was. -->
     <fieldset disabled={busy}>
     {#if accounts.length > 1}
@@ -310,30 +348,32 @@
         <select bind:value={account}>{#each accounts as a (a.id)}<option value={`a-${a.id}`}>{a.address}</option>{/each}</select>
       </label>
     {/if}
-    {#each [["to", "To"], ["cc", "Copy"]] as const as [field, label] (field)}
-      {#if field === "to" || copy}
-        <div class="line">
-          <label class="k" for="write-{field}">{label}</label>
-          {#each field === "to" ? to : cc as a (a)}
-            <span class="chip" class:bad={!valid(a)} title={valid(a) ? undefined : "This address does not look valid"}>
-              {a}<button type="button" aria-label="Remove {a}" onclick={() => remove(field, a)}>×</button>
-            </span>
-          {/each}
-          {#if field === "to"}
-            <input id="write-to" type="text" autocomplete="off" bind:value={toText} oninput={() => typed("to")} onkeydown={(e) => keydown("to", e)} onblur={() => typed("to", true)} />
-          {:else}
-            <input id="write-cc" type="text" autocomplete="off" bind:value={ccText} oninput={() => typed("cc")} onkeydown={(e) => keydown("cc", e)} onblur={() => typed("cc", true)} />
-          {/if}
-          {#if field === "to" && !copy}<button type="button" class="end" onclick={() => (copy = true)}>Add copy</button>{/if}
-        </div>
-      {/if}
-    {/each}
-    {#if reply}
-      <p class="subject re">{reply.subject}</p>
+    {#if reply && !editing && to.some(valid)}
+      <p class="who">Reply to <strong>{named}</strong>{#if cc.length}<span class="faint">, copy to {cc.join(", ")}</span>{/if}<button type="button" class="end" onclick={() => (editing = true)}>Change</button></p>
     {:else}
+      {#each [["to", "To"], ["cc", "Copy"]] as const as [field, label] (field)}
+        {#if field === "to" || copy}
+          <div class="line">
+            <label class="k" for="write-{field}">{label}</label>
+            {#each field === "to" ? to : cc as a (a)}
+              <span class="chip" class:bad={!valid(a)} title={valid(a) ? undefined : "This address does not look valid"}>
+                {a}<button type="button" aria-label="Remove {a}" onclick={() => remove(field, a)}>×</button>
+              </span>
+            {/each}
+            {#if field === "to"}
+              <input id="write-to" type="text" autocomplete="off" bind:value={toText} oninput={() => typed("to")} onkeydown={(e) => keydown("to", e)} onblur={() => typed("to", true)} />
+            {:else}
+              <input id="write-cc" type="text" autocomplete="off" bind:value={ccText} oninput={() => typed("cc")} onkeydown={(e) => keydown("cc", e)} onblur={() => typed("cc", true)} />
+            {/if}
+            {#if field === "to" && !copy}<button type="button" class="end" onclick={() => (copy = true)}>Add copy</button>{/if}
+          </div>
+        {/if}
+      {/each}
+    {/if}
+    {#if !reply}
       <input class="subject" type="text" placeholder="Subject" aria-label="Subject" bind:value={subject} />
     {/if}
-    <textarea class="body" aria-label="Mail text" bind:value={body}></textarea>
+    <textarea class="body" aria-label={reply ? "Reply text" : "Mail text"} placeholder={reply ? "Write your reply" : "Write your mail"} bind:value={body}></textarea>
 
     {#if flags.length > 0}
       <ul class="flags">{#each flags as f (f)}<li>{FLAGS[f] ?? f}</li>{/each}</ul>
@@ -360,27 +400,111 @@
   .title {
     font-size: var(--font-size-2);
     font-weight: 500;
-    margin: var(--space-4) 0 var(--space-2);
-  }
-  .parent {
-    display: flex;
-    gap: var(--space-3);
-    align-items: flex-start;
-    padding: var(--space-3) var(--space-4);
-    border-left: 2px solid var(--color-border);
+    line-height: 1.3;
     margin: var(--space-4) 0 var(--space-6);
+    overflow-wrap: anywhere;
+  }
+  .earlier {
+    color: var(--color-text-faint);
+    font-size: var(--font-size--1);
+    margin: 0 0 var(--space-3);
+  }
+  /* One mail of the conversation. The older mails are quiet; the newest one reads in full size. */
+  .msg {
+    padding: var(--space-4);
+    border: 1px solid var(--color-border-subtle);
+    border-radius: var(--radius-lg);
+    margin-bottom: var(--space-3);
+  }
+  .msg.old {
+    color: var(--color-text-muted);
     font-size: var(--font-size--1);
   }
-  .parent p {
+  .msg header {
+    display: flex;
+    gap: var(--space-3);
+    align-items: center;
+    font-size: var(--font-size--1);
+    margin-bottom: var(--space-3);
+  }
+  .msg header div {
+    flex: 1;
+    min-width: 0;
+  }
+  .msg header p {
     margin: 0;
+    overflow-wrap: anywhere;
+  }
+  .msg.old .from {
+    color: var(--color-text);
+  }
+  time {
+    color: var(--color-text-muted);
+  }
+  .more {
+    display: inline-block;
+    margin-top: var(--space-2);
+    color: var(--color-text-muted);
+    font-size: var(--font-size--1);
+  }
+  .danger {
+    border-left: 4px solid var(--color-error);
+    padding-left: var(--space-3);
+    margin: 0 0 var(--space-3);
+  }
+  /* The reply form: the last entry of the conversation, marked with the primary color. */
+  .dock {
+    border: 1px solid var(--color-border);
+    border-top: 2px solid var(--color-primary);
+    border-radius: var(--radius-lg);
+    background: var(--color-background-elevated);
+    padding: var(--space-2) var(--space-4) var(--space-4);
+    margin-top: var(--space-4);
+  }
+  .who {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-1) var(--space-2);
+    margin: 0;
+    padding: var(--space-2) 0;
+    color: var(--color-text-muted);
+    font-size: var(--font-size--1);
+    overflow-wrap: anywhere;
+  }
+  .who strong {
+    color: var(--color-text);
+    font-weight: 500;
+  }
+  .state {
+    display: grid;
+    gap: var(--space-3);
+    justify-items: start;
+    padding: var(--space-4);
+    border: 1px dashed var(--color-border);
+    border-radius: var(--radius-lg);
+  }
+  .state h2 {
+    font-size: var(--font-size-0);
+    font-weight: 600;
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  .state h2.warn {
+    border-left: 4px solid var(--color-warning);
+    padding-left: var(--space-3);
+  }
+  .state h2.stop {
+    color: var(--color-text-muted);
   }
   .from {
     font-weight: 500;
   }
   .text {
-    color: var(--color-text-muted);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+    line-height: 1.6;
+    margin: 0;
   }
   .mark {
     flex: none;
@@ -470,16 +594,11 @@
     padding: var(--space-4) 0 var(--space-2);
     margin: 0;
   }
-  .subject.re {
-    font-size: var(--font-size-0);
-    font-weight: 400;
-    color: var(--color-text-muted);
-  }
   .body {
     display: block;
     width: 100%;
     box-sizing: border-box;
-    min-height: 260px;
+    min-height: 160px;
     field-sizing: content;
     resize: vertical;
     font: inherit;
@@ -547,36 +666,6 @@
     border-radius: var(--radius-full);
     padding: var(--space-2) var(--space-4);
     text-decoration: none;
-  }
-  .done {
-    display: grid;
-    gap: var(--space-4);
-    justify-items: start;
-    padding: var(--space-12) 0;
-  }
-  .done h1 {
-    font-size: var(--font-size-2);
-    font-weight: 500;
-    margin: 0;
-    overflow-wrap: anywhere;
-  }
-  .ring {
-    width: 48px;
-    height: 48px;
-    border-radius: var(--radius-full);
-    border: 2px solid var(--color-primary);
-    display: grid;
-    place-items: center;
-    color: var(--color-primary);
-    font-size: var(--font-size-1);
-  }
-  .ring.warn {
-    border-color: var(--color-warning);
-    color: var(--color-text);
-  }
-  .ring.stop {
-    border-color: var(--color-border);
-    color: var(--color-text-muted);
   }
   .bar {
     display: block;

@@ -37,5 +37,5 @@ test("the app has the phone tabs and a More popover with the other views", async
   assert.deepEqual([...tabs.matchAll(/href="([^"]+)"/g)].map((m) => m[1]), ["#/brief", "#/matters", "#/ask", "#/review"]);
   assert.match(tabs, /<button[^>]*popovertarget="more"[^>]*>[\s\S]*More/);
   const more = html.match(/<div id="more" popover[^>]*>([\s\S]*?)<\/div>/)?.[1] ?? "";
-  assert.deepEqual([...more.matchAll(/href="([^"]+)"/g)].map((m) => m[1]), ["#/outbox", "#/jobs", "#/commitments", "#/conversations", "#/records", "#/feed", "#/signals"]);
+  assert.deepEqual([...more.matchAll(/href="([^"]+)"/g)].map((m) => m[1]), ["#/write", "#/outbox", "#/jobs", "#/commitments", "#/conversations", "#/records", "#/feed", "#/signals"]);
 });

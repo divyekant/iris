@@ -15,7 +15,7 @@ try {
 }
 
 // c-311: a commitment with a quote. v-88: a conversation with 3 source mails. r-1201: a record.
-const ROUTES = ["#/brief", "#/review", "#/item/c-311", "#/item/v-88", "#/item/r-1201", "#/mail/m-55210"];
+const ROUTES = ["#/brief", "#/review", "#/item/c-311", "#/item/v-88", "#/item/r-1201", "#/mail/m-55210", "#/write", "#/write/t-8841"];
 const WIDTHS = [360, 390, 768];
 const TOUCH = 44;
 

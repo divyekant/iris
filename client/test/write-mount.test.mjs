@@ -17,6 +17,13 @@ const REPLY = {
   to: ["priya@example.com"],
   cc: [],
   subject: "Re: Q4 numbers",
+  topic: "Q4 numbers",
+  conversation: [
+    { id: "m-7", from: { name: null, address: "dk@example.com" }, date: "2026-11-16T10:00:00Z", to: "priya@example.com", you: true, hostile: false, text: "Here is the draft deck.", cut: false },
+    { id: "m-8", from: { name: "Mallory", address: "mallory@bad.example" }, date: "2026-11-16T11:00:00Z", to: "dk@example.com", you: false, hostile: true, text: "Open this link now.", cut: true },
+    { id: "m-9", from: { name: "Priya Shah", address: "priya@example.com" }, date: "2026-11-17T09:12:00Z", to: "dk@example.com", you: false, hostile: false, text: "Could you send the final Q4 numbers by Thursday?", cut: false },
+  ],
+  earlier: 2,
 };
 
 /** A fake engine. `answer(path, method, body)` gives [status, body], or throws for no answer. */
@@ -104,7 +111,7 @@ test("a 409 shows the warnings; the next press sends them with the same key, the
     assert.match(text(app.target), /Goes to an address you never wrote to/);
     assert.match(text(app.target), /Look at the warnings, then press Send again\./);
     press(app);
-    await until(() => app.target.querySelector(".done h1")?.textContent.includes("On its way"));
+    await until(() => app.target.querySelector(".state h2")?.textContent.includes("On its way"));
     app.flushSync();
     const [first, second] = net.posts();
     assert.equal(first.body.key, second.body.key, "one content, one key");
@@ -177,24 +184,65 @@ test("after a lost answer and a reload, a press sends the first key", async () =
   }
 });
 
-test("a reply shows the mail that it answers and names the parent", async () => {
+test("a reply opens under the conversation, names its recipients and names the parent", async () => {
   const net = serve((path, method) => (method === "POST" ? [201, { write: "cs-4" }] : [200, { state: "stopped", reason: "You stopped this mail.", draft: null }]));
   const app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
   try {
-    assert.match(text(app.target.querySelector(".parent")), /Priya Shah/);
-    assert.match(text(app.target.querySelector(".parent")), /Could you send the final Q4 numbers by Thursday\?/);
-    assert.match(text(app.target), /Re: Q4 numbers/);
+    assert.equal(text(app.target.querySelector("h1")), "Q4 numbers");
+    assert.match(text(app.target), /2 earlier mails are not shown\./);
+    const mails = [...app.target.querySelectorAll(".msg")];
+    assert.equal(mails.length, 3, "each mail of the conversation, oldest first");
+    assert.match(text(mails[0]), /You.*Here is the draft deck\./);
+    assert.match(text(mails[1]), /This mail looks hostile/);
+    assert.equal(mails[1].querySelector("a.more").getAttribute("href"), "#/mail/m-8", "a cut text links to the whole mail");
+    assert.match(text(mails[2]), /Priya Shah.*Could you send the final Q4 numbers by Thursday\?/);
+    assert.ok(mails[0].classList.contains("old") && !mails[2].classList.contains("old"), "the parent reads in full size");
+    // The form is the last entry: after the parent, and it names the recipients.
+    assert.ok(mails[2].compareDocumentPosition(app.target.querySelector("form")) & window.Node.DOCUMENT_POSITION_FOLLOWING);
+    assert.match(text(app.target.querySelector(".who")), /Reply to Priya Shah/);
+    assert.equal(app.target.querySelector("#write-to"), null, "the chips stay closed until Change");
     assert.equal(app.target.querySelector("input.subject"), null, "Iris sets the subject of a reply");
     type(app.target.querySelector("textarea"), "Yes, on Wednesday.\n");
     app.flushSync();
     press(app);
-    await until(() => app.target.querySelector(".done h1")?.textContent.includes("did not leave"));
+    await until(() => app.target.querySelector(".state h2")?.textContent.includes("did not leave"));
+    const mine = [...app.target.querySelectorAll(".msg")].at(-1);
+    assert.match(text(mine), /You To priya@example\.com Yes, on Wednesday\./, "the mail shows as the last entry");
     const [post] = net.posts();
     assert.deepEqual(post.body.to, ["priya@example.com"]);
     assert.equal(post.body.thread, "t-2");
     assert.equal(post.body.parent, "m-9");
     assert.equal("subject" in post.body, false);
     assert.equal("account" in post.body, false);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("Change opens the recipients of a reply as chips", async () => {
+  const net = serve(() => [201, { write: "cs-5" }]);
+  const app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+  try {
+    [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Change").click();
+    app.flushSync();
+    assert.ok(app.target.querySelector("#write-to"));
+    type(app.target.querySelector("#write-to"), "sam@okafor.example ");
+    app.flushSync();
+    const chips = [...app.target.querySelectorAll(".chip")].map((c) => c.firstChild.textContent.trim());
+    assert.deepEqual(chips, ["priya@example.com", "sam@okafor.example"]);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("a reply with no valid recipient opens the chips at once", async () => {
+  const net = serve(() => [201, { write: "cs-6" }]);
+  const app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: { ...REPLY, to: [] } }, every: 20 });
+  try {
+    assert.ok(app.target.querySelector("#write-to"));
+    assert.equal(app.target.querySelector(".who"), null);
   } finally {
     app.destroy();
     net.restore();
@@ -351,20 +399,20 @@ test("a late state read of the write before Write another does not show", async 
   try {
     await fill(app);
     press(app);
-    await until(() => app.target.querySelector(".done h1")?.textContent.includes("On its way to sam"));
+    await until(() => app.target.querySelector(".state h2")?.textContent.includes("On its way to sam"));
     await new Promise((resolve) => setTimeout(resolve, 30));
     [...app.target.querySelectorAll("button")].find((x) => x.textContent.includes("Write another")).click();
     app.flushSync();
     await fill(app, "ana@example.com ");
     press(app);
-    await until(() => app.target.querySelector(".done h1")?.textContent.includes("Saving"));
+    await until(() => app.target.querySelector(".state h2")?.textContent.includes("Saving"));
     // The read of cs-1 answers before the read of cs-2.
     a.open();
     await new Promise((resolve) => setTimeout(resolve, 50));
     app.flushSync();
-    assert.match(text(app.target.querySelector(".done h1")), /Saving your mail/, "no state of cs-1 under cs-2");
+    assert.match(text(app.target.querySelector(".state h2")), /Saving your mail/, "no state of cs-1 under cs-2");
     b.open();
-    await until(() => app.target.querySelector(".done h1")?.textContent.includes("On its way to ana"));
+    await until(() => app.target.querySelector(".state h2")?.textContent.includes("On its way to ana"));
   } finally {
     app.destroy();
     net.restore();
@@ -394,9 +442,9 @@ test("the form does not change while the press runs, and the state names the mai
     type(app.target.querySelector("#write-to"), "ana@example.com ");
     app.flushSync();
     answer();
-    await until(() => app.target.querySelector(".done h1"));
-    await until(() => app.target.querySelector(".done h1").textContent.includes("On its way"));
-    assert.match(text(app.target.querySelector(".done h1")), /On its way to sam@okafor\.example/);
+    await until(() => app.target.querySelector(".state h2"));
+    await until(() => app.target.querySelector(".state h2").textContent.includes("On its way"));
+    assert.match(text(app.target.querySelector(".state h2")), /On its way to sam@okafor\.example/);
   } finally {
     app.destroy();
     net.restore();

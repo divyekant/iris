@@ -293,6 +293,21 @@ export type ReplyStart = {
   to: string[];
   cc: string[];
   subject: string;
+  /** The subject of the parent as it is: the title of the view. */
+  topic: string;
+  /** The newest mails of the thread, oldest first; the last one is the parent. */
+  conversation: {
+    id: string;
+    from: Address;
+    date: string | null;
+    to: string | null;
+    you: boolean;
+    hostile: boolean;
+    text: string | null;
+    cut: boolean;
+  }[];
+  /** The count of the older mails that `conversation` leaves out. */
+  earlier: number;
 };
 
 /** GET /api/write/{cs}: the state of one press of Send (write spec, section 4). */

@@ -45,7 +45,7 @@
   {#if message.text !== null}<pre>{message.text}</pre>{/if}
 
   <footer>
-    {#if !message.gone}<a class="reply" href={href.reply(message.thread)}>Reply</a>{/if}
+    {#if !message.gone}<a class="reply touch" href={href.reply(message.thread)}>Reply</a>{/if}
     {#if message.items.length}
       <span>Items from this mail:</span>
       {#each message.items as id (id)}<a class="touch" href={href.item(id)}>{id}</a>{/each}
