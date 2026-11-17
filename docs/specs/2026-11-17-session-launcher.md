@@ -514,6 +514,17 @@ person. It ends each process in it when the session ends.
   kernel kills each process in it. R4-05 (Linux) and R4-05m (macOS) give the mechanism of each
   system, and an isolation that cannot keep this rule does not pass the
   check of the system.
+- The macOS exception (`docs/specs/2026-11-17-session-sandbox-macos.md`,
+  "The change of the lifetime rule"): macOS has no mechanism for the
+  lifetime rule, so on macOS a process of a session can live after the
+  helper ends, until a later `stop` catches it. In its place, `ended` is
+  exact (the kernel counters of the coalition of the session), and the
+  reap check (rule 3) passes only when `ended` is true. Until then the
+  session keeps its workspace and its egress port, the job starts no new
+  session, and the engine calls `stop` again at each turn. The Seatbelt
+  profile keeps such a process away from the data folder, other
+  sessions, other ports and other processes. Linux keeps the lifetime
+  rule.
 
 The engine calls `stop` on each end of a session, in step 5 of the
 shutdown order (see [Supervisor](#supervisor)): on a stop, a revoke, a job

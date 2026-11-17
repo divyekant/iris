@@ -92,9 +92,24 @@ still a child of the engine, with the same pipes):
    to the socket. The shim checks that the peer has the same user ID
    (`getpeereid`) and that the record exists and names the coalition of
    the peer process (`LOCAL_PEERPID`, then `PROC_PIDCOALITIONINFO`). Only
-   then it sends its file descriptors 0, 1 and 2 (the pipe from the
-   engine, the session log and the status pipe) and the hold arguments,
-   with `SCM_RIGHTS`.
+   then it sends, with `SCM_RIGHTS` on the socket:
+   - its file descriptors 0, 1 and 2 (the pipe from the engine, the
+     session log and the status pipe);
+   - a descriptor of its working folder (the workspace, which the launch
+     set);
+   - its whole environment (the agent environment of the launch, with the
+     key variable and the `HTTPS_PROXY` value with the token);
+   - the hold arguments.
+
+   A launchd job does not inherit the environment or the working folder
+   of the shim, so this handoff is their only path. The job definition of
+   launchd holds no variable of the agent, and nothing of the handoff goes
+   to a log. The job process clears its own environment (launchd sets some
+   variables), sets the received one, and calls `fchdir` on the received
+   folder. Then it runs the hold helper. The socket is in the sessions
+   folder (mode `0700`), and the shim checks the user and the coalition of
+   the peer first, so only the job of this session gets the key and the
+   token.
 3. The job process runs the hold helper (`hold`) with these descriptors.
    So the protocol of the helper does not change.
 4. The shim waits for the end of the socket. The job process writes its
@@ -146,7 +161,9 @@ with no agent. Its record names a coalition that ends with it, so a later
       in the coalition of the record, send `SIGSTOP`, then read its
       coalition again. If the process is not in the coalition now (its
       process ID went to another process between the reads), send
-      `SIGCONT` to it. Repeat the scan until one scan finds each live
+      `SIGCONT` to it. Before each `SIGSTOP`, append the process ID and
+      its unique ID (`PROC_PIDUNIQIDENTIFIERINFO`) to the journal
+      `<data dir>/sessions/se-<id>.stops` (with `fsync`). Repeat the scan until one scan finds each live
       member stopped (`pbi_status` is `SSTOP`), the count of these
       members equals `tasks_started - tasks_exited`, and `tasks_started`
       did not change during the scan. Then no member of the coalition can
@@ -159,6 +176,14 @@ with no agent. Its record names a coalition that ends with it, so a later
       Invariant: no process of the session can make `stop` send a signal
       to a process outside the session. Each member is stopped, and the
       profile denies signals outside the sandbox.
+
+   Crash recovery of the journal: at the start of each `stop` (also the
+   `stop` of a new engine after a crash), read the journal of the
+   session. For each entry whose process ID still has the same unique ID
+   and is not in the coalition of the session, send `SIGCONT`. So a
+   process that got a `SIGSTOP` by mistake continues, also after a crash
+   between the `SIGSTOP` and the `SIGCONT`. The reap removes the journal
+   after `ended` is true.
 
    macOS gives no signal by process identity (no `pidfd`). So one race
    stays, which the session cannot cause: between the last read and the
@@ -275,6 +300,8 @@ before the agent runs, or `ended` is false.
 | `stop` does not catch the loop in 5 seconds | `stop` returns an error; the engine tries again at its next turn; the session keeps its port and workspace | Mac acceptance 3 |
 | The agent reads the data folder, the home folder, `~/.ssh`, or another workspace | Refused | Mac acceptance 1 |
 | The agent reads the store key or a home file through `/System/Volumes/Data/...` | Refused | Mac acceptance 1 |
+| The job of a session starts with the environment of launchd, not of the launch | The handoff gives the agent environment and the workspace; the job sets both before the hold | Mac acceptance 2 (the tool finds its key and its token, and runs in the workspace) |
+| The engine crashes between a `SIGSTOP` to a reused process ID and the `SIGCONT` | The journal names the process; the next `stop` sends `SIGCONT` to it | Unit test: a journal entry of a stopped process of another coalition gets `SIGCONT` |
 | The shim ends after the job process got the descriptors, before the agent starts | The record exists (it comes before the handoff), so `ended` reads the coalition | Unit test: the shim refuses the handoff with no record |
 | The agent connects to another port, a public address, UDP or a Unix socket | Refused | Mac acceptance 1 |
 | The agent calls `launchctl`, `open`, `pbpaste` or another system service | Refused (no `mach-lookup`) | Mac acceptance 1 |
@@ -302,7 +329,8 @@ before the agent runs, or `ended` is false.
   `Proxy::start` and the `407` answer.
 - `crates/iris-session/src/config.rs` or the launch: the token in
   `HTTPS_PROXY` of the agent environment.
-- The launcher spec, "Isolation": the macOS form of the lifetime rule.
+- The launcher spec, "Isolation": the macOS exception to the lifetime
+  rule (changed in this PR).
 - `docs/DEPLOYMENT.md`: the Mac needs a signed-in user (GUI domain).
 
 Memory: the shim is one more `iris` process for each session (a few MB)
