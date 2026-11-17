@@ -334,7 +334,9 @@ impl Worker {
             if sync {
                 self.sync_turn();
             }
-            let started = now_ms();
+            // Read before the step, so a mark that commits during the step wakes the next one.
+            // With no read, no early wake: the turn keeps its normal time.
+            let seen = iris_changeset::last_mark(&self.store).unwrap_or(i64::MAX);
             let next = self.apply_turn();
             match sync_accounts(&self.store) {
                 Ok(a) if !a.contains(&self.account) => return,
@@ -342,21 +344,21 @@ impl Worker {
             }
             let end = Instant::now() + wait(next, now_ms());
             until = if sync { end } else { until.min(end) };
-            sync = !self.pause(until, started);
+            sync = !self.pause(until, seen);
         }
     }
 
     /// Sleep until `until`, and look each [`WAKE_EVERY`] for a send mark of
-    /// the write view made after `since` (docs/specs/2026-11-17-write.md,
+    /// the write view newer than `seen` (docs/specs/2026-11-17-write.md,
     /// section 7). Gives true if a new mark woke the thread early.
-    fn pause(&self, until: Instant, since: i64) -> bool {
+    fn pause(&self, until: Instant, seen: i64) -> bool {
         loop {
             let left = until.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return false;
             }
             std::thread::sleep(left.min(WAKE_EVERY));
-            if matches!(iris_changeset::written_since(&self.store, since), Ok(true)) {
+            if matches!(iris_changeset::written_since(&self.store, seen), Ok(true)) {
                 return true;
             }
         }

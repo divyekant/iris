@@ -51,6 +51,3 @@ CREATE TRIGGER write_send_delete BEFORE DELETE ON write_send
 BEGIN
   SELECT RAISE(ABORT, 'iris: a send mark is not deleted');
 END;
-
--- The sync thread looks for a new mark each second (write spec, section 7).
-CREATE INDEX write_send_created ON write_send(created_at);

@@ -36,8 +36,8 @@ pub use flags::{
 };
 pub use outbox::{cancel, cancel_draft, hold, send_of_draft, Cancel, CANCELLED};
 pub use written::{
-    send_written, write_mail, written_since, Mail, Press, Refusal, Written, MARK_MS, NEW_WARNINGS,
-    WRITTEN,
+    last_mark, send_written, write_mail, written_since, Mail, Press, Refusal, Written, MARK_MS,
+    NEW_WARNINGS, WRITTEN,
 };
 
 /// The flag `bulk`: more than this count of messages in one action, or in

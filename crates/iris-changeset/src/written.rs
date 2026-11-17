@@ -196,14 +196,28 @@ pub fn write_mail(
     }
 }
 
-/// True if a send mark was made after `since_ms` (a time of the clock of
-/// the engine). The sync thread runs the apply step early for a new mark
-/// (write spec, section 7).
-pub fn written_since(store: &Store, since_ms: i64) -> Result<bool> {
+/// The newest send mark: its action row ID, or 0 if there is none. A mark
+/// and its action are made in one write transaction, and the store writes
+/// one transaction at a time, so a mark that commits later has a larger
+/// ID. The ID does not depend on the clock.
+pub fn last_mark(store: &Store) -> Result<i64> {
     Ok(store.read(|c| {
         Ok(c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM write_send WHERE created_at > ?1)",
-            [since_ms],
+            "SELECT coalesce(max(action_id), 0) FROM write_send",
+            [],
+            |r| r.get(0),
+        )?)
+    })?)
+}
+
+/// True if a send mark is newer than `mark` (a value of [`last_mark`]).
+/// The sync thread reads [`last_mark`] before each apply step, and runs
+/// the apply step early for a newer mark (write spec, section 7).
+pub fn written_since(store: &Store, mark: i64) -> Result<bool> {
+    Ok(store.read(|c| {
+        Ok(c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM write_send WHERE action_id > ?1)",
+            [mark],
             |r| r.get(0),
         )?)
     })?)

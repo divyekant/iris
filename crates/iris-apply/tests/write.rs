@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use iris_apply::{Outcome, Token, HOLD_MS};
 use iris_changeset::{
-    send_written, write_mail, written_since, Mail, Press, Refusal, Written, MARK_MS,
+    last_mark, send_written, write_mail, written_since, Mail, Press, Refusal, Written, MARK_MS,
 };
 use iris_fakegmail::FakeGmail;
 use iris_gmail::{Config, Gmail};
@@ -454,15 +454,31 @@ fn the_store_guards_the_mark() {
     assert!(r.is_err());
 }
 
-/// The sync thread wakes for a mark made after its last step.
+/// The sync thread wakes for each mark that commits after its read of the
+/// last mark, also in the same millisecond: the cursor is the row ID, not
+/// the clock. Two presses one after the other each move the cursor.
 #[test]
 fn a_new_mark_wakes_the_step() {
     let b = setup("wake");
-    let t = now();
-    assert!(!written_since(&b.store, t - 1).unwrap());
+    let seen = last_mark(&b.store).unwrap();
+    assert_eq!(seen, 0);
+    assert!(!written_since(&b.store, seen).unwrap());
     b.write();
-    assert!(written_since(&b.store, t - 1).unwrap());
-    assert!(!written_since(&b.store, now() + 1).unwrap());
+    // The same millisecond as the press: a clock cursor misses this mark.
+    assert!(written_since(&b.store, seen).unwrap());
+    let first = last_mark(&b.store).unwrap();
+    assert!(!written_since(&b.store, first).unwrap());
+    let other =
+        args(json!({"to": ["sam@example.com"], "cc": [], "subject": "Two", "body": "Hi.\n"}));
+    let r = press(
+        &b.store,
+        Mail::New { account: "a-1" },
+        &other,
+        "key-0000000000000002",
+        &["new_recipient"],
+    );
+    assert!(matches!(r, Ok(Written::New(_))), "{r:?}");
+    assert!(written_since(&b.store, first).unwrap());
 }
 
 /// A second try of one press (a lost answer) finds the first write and
