@@ -773,6 +773,7 @@ dependencies = [
  "iris-synth",
  "iris-triage",
  "iris-understand",
+ "iris-voice",
  "iris-web",
  "iris-workspace",
  "rusqlite",
