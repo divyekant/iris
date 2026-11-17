@@ -12,6 +12,16 @@ use std::process::Child;
 #[path = "isolation_linux.rs"]
 pub mod linux;
 
+/// The macOS sandbox. Its logic builds on each system, so that CI tests it
+/// with a fake of the process facts.
+#[path = "isolation_macos.rs"]
+pub mod macos;
+
+/// The process facts of macOS for [`macos`].
+#[cfg(target_os = "macos")]
+#[path = "isolation_macos_sys.rs"]
+pub mod macos_sys;
+
 /// What the hold helper runs: a program and its arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Command {
@@ -23,10 +33,15 @@ pub struct Command {
 /// engine socket, the socket of another session, or the network other than
 /// the egress port of the session.
 ///
-/// Lifetime rule: when the helper process ends for any reason, also
+/// Lifetime rule (Linux): when the helper process ends for any reason, also
 /// `SIGKILL`, each process in the isolation of the session ends, with no
 /// call from the engine. An isolation that cannot keep this rule must fail
 /// [`Isolation::check`].
+///
+/// macOS has no mechanism for this rule. There, [`Isolation::ended`] is
+/// exact, [`Isolation::stop`] can return an error while a process still
+/// runs, and the engine never reaps a session while `ended` is false
+/// (`docs/specs/2026-11-17-session-sandbox-macos.md`).
 pub trait Isolation: Send + Sync {
     /// Checks that the isolation works on this system. The error is the
     /// reason, for the person.
