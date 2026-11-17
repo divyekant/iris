@@ -33,14 +33,19 @@ command. Each tool has its own command line.
    file `agents.toml`.
 6. The session gets its own socket, `.iris/socket` in the workspace. The
    socket is the only capability of the session. It holds no token.
-7. The engine removes the workspace of each done job.
+7. The engine builds the workspace of each done job again, so its mail files
+   go and the files of the agent stay (workspace spec).
+8. The engine starts an agent only in an isolation that keeps it away from
+   the data folder, `iris.sock` and the network (see
+   [Isolation](#isolation)). This card defines the isolation interface.
+   R4-05 gives the isolation of macOS and of Linux. Until R4-05 merges,
+   `iris job run` refuses each run.
 
 ## Not in scope
 
-- The sandbox: no network and no credentials (R4-05). This card gives the
-  agent no token and no mailbox credential, but an agent process can still
-  read each file that the OS user can read until R4-05. The documentation
-  must say this (spec 2 section 8.6).
+- The isolation of each system: no network, no data folder and no host
+  socket (R4-05). This card gives the interface and refuses a run with no
+  isolation, so no agent runs outside an isolation.
 - The write verbs in a session and the one draft changeset of a session
   (R4-03).
 - The read verbs `search`, `show` and `list` in a session. The session socket
@@ -70,18 +75,30 @@ Migration 20 adds the table `job_session`:
 | `ended_at` | INTEGER | NULL while the session is open. |
 | `end_reason` | TEXT | NULL while open. Else one of `exit`, `stop`, `revoke`, `job_state`, `time_limit`, `engine`, `launch_failed`. |
 | `exit_code` | INTEGER | The exit code of the agent for `exit`, else NULL. |
+| `reaped_at` | INTEGER | NULL until each process of the session stopped. |
 
-An open session is a row with `ended_at IS NULL`. Triggers hold these rules
-for each path that writes SQL:
+A session has two ends. `ended_at` is the end of the grant: from that moment
+the session socket answers nothing. `reaped_at` is the end of the
+processes: the engine sets it after the helper exited and was reaped (see
+[The hold helper](#the-hold-helper)).
 
-- A partial unique index on `job_id WHERE ended_at IS NULL`: one open
-  session for each job. A second `register` fails.
+An open session is a row with `ended_at IS NULL`. A live session is a row
+with `reaped_at IS NULL`. Triggers hold these rules for each path that
+writes SQL:
+
+- A partial unique index on `job_id WHERE reaped_at IS NULL`: one live
+  session for each job. A second `register` fails until the processes of
+  the first session stopped. So a new build never runs while a process of
+  the last session can still use the workspace, after a stop, a revoke, a
+  time limit or an exit.
 - An insert needs a job in the state `working`, and NULL in `started_at`,
-  `ended_at`, `end_reason` and `exit_code`. An insert with the `id` of a row
+  `ended_at`, `end_reason`, `exit_code` and `reaped_at`. An insert with the `id` of a row
   fails (the scope rule of R4-02: no replace).
-- An update does one of two moves, and nothing else:
+- An update does one of three moves, and nothing else:
   - start: `started_at` from NULL to a value, only while `ended_at` is NULL;
-  - end: `ended_at` and `end_reason` from NULL to values, once.
+  - end: `ended_at` and `end_reason` (and `exit_code` for `exit`) from NULL
+    to values, once;
+  - reap: `reaped_at` from NULL to a value, once, only after the end.
 - A delete fails.
 - After a revoke of a scope row of the job (`job_scope.revoked_at` set),
   each open session of the job ends with `revoke`, in the same transaction.
@@ -92,8 +109,8 @@ So a revoke and a job move end the session in the store at once, also when
 the engine is busy. The engine then stops the processes (see
 [Supervisor](#supervisor)).
 
-`iris_job` gives `register`, `start`, `end`, `open_session` and
-`open_sessions`, each with an `_in` form for one transaction.
+`iris_job` gives `register`, `start`, `end`, `reap`, `open_session` and
+`live_sessions`, each with an `_in` form for one transaction.
 
 ### Adapters
 
@@ -133,10 +150,13 @@ adapters pass `ANTHROPIC_API_KEY` (`claude-code`) and `OPENAI_API_KEY` and
 mailbox. No variable of Iris goes to the agent.
 
 The working folder of the agent is the workspace. Its standard input is
-`/dev/null`. Its standard output and standard error go to
-`<data dir>/sessions/se-<id>.log` (mode `0600`, `create_new`). The engine
-writes at most 10 MiB to the log, then drops the rest of the output and
-writes one line that says so.
+`/dev/null`. Its standard output and standard error are pipes to the
+helper. The helper copies both to `<data dir>/sessions/se-<id>.log` (mode
+`0600`, `create_new`, opened by the engine and given to the helper as its
+standard output). The helper writes at most 10 MiB to the log, writes one
+line that says the rest is dropped, and then keeps reading the pipes and
+drops the bytes, so the agent never blocks on a full pipe and the log never
+grows past the limit.
 
 ### The hold helper
 
@@ -144,22 +164,31 @@ A held process must run no code of the agent until step 4 (workspace spec).
 The engine starts the hidden command `iris session-hold` (the same program),
 not the agent:
 
-1. The engine starts `iris session-hold` in a new process group
-   (`process_group(0)`), with a pipe on its standard input, the adapter
+1. The engine starts `iris session-hold` with a pipe on its standard input,
+   the log file on its standard output, the isolation and the adapter
    program and arguments as its arguments, and the environment of the agent.
 2. The helper reads one line from the pipe. It runs no code of the agent
    before the line.
-   - `start`: the helper starts the agent as its child, in the same process
-     group, with the working folder, `/dev/null` input and the log.
+   - `start`: the helper starts the agent as its child, in the isolation,
+     in a new process group of its own (`process_group(0)`). The helper is
+     not in that group, so a signal to the group never reaches the helper.
    - Any other line, or the end of the pipe: the helper exits with no child.
-3. After the start, the helper waits for the child and for the pipe. If the
-   child exits, the helper exits with the code of the child. If the pipe
-   ends (the engine stopped, or the engine closed it to stop the session),
-   the helper sends `SIGTERM` to the process group, waits up to 5 seconds,
-   sends `SIGKILL` to the process group, and exits.
+3. After the start, the helper waits for two events: the child exits, or
+   the pipe ends (the engine stopped, or the engine closed the pipe to stop
+   the session).
+4. On each of the two events, the helper stops the group of the agent:
+   `SIGTERM` to the group, a wait of up to 5 seconds, then `SIGKILL` to the
+   group. It does this also after a normal exit of the agent, so a
+   background child that the agent left in its group stops too. Then the
+   helper reaps the agent, and exits with the exit code of the agent (or
+   the code of the signal).
 
 So the pipe ties the session to the engine: when the engine process ends for
-any reason, the kernel closes the pipe, and the helper stops the agent.
+any reason, the kernel closes the pipe, and the helper stops the agent. The
+helper waits for the group with `kill(-pgid, 0)`: the group has a process
+while the call succeeds. A process that the agent moves out of its group
+(`setsid`) is stopped by the isolation (R4-05), which ends each process of
+the isolation with the session.
 
 The helper is the same program as the engine, so no new file is installed.
 
@@ -169,7 +198,8 @@ The helper is the same program as the engine, so no new file is installed.
 steps of the workspace spec:
 
 1. Read `agents.toml` and resolve the adapter. A missing program fails here,
-   before a row is written.
+   before a row is written. Get the isolation of the system. If there is
+   none, the run fails here with the reason: no isolation on this system.
 2. Register: `iris_job::register` in a write transaction. It fails if the job
    is not `working`, or if the job has an open session.
 3. Build: `iris_workspace::build`, then compare `Built::revoked` with
@@ -187,7 +217,9 @@ steps of the workspace spec:
 7. Write `start` to the pipe.
 
 Each failure after step 2 ends the session with `launch_failed`, closes the
-pipe and removes the socket, so no open session stays without a process.
+pipe, waits for the helper if one started, sets `reaped_at` and removes the
+socket, so no live session stays without a process. In step 6, a session
+that ended is reaped the same way before step 2 runs again.
 
 ### Supervisor
 
@@ -195,8 +227,9 @@ The engine keeps one supervisor thread for all sessions. Each second, and
 after each request on the engine socket that can end a session, it checks
 each running session:
 
-- The helper exited: end the session with `exit` and its exit code, if it is
-  still open.
+- The helper exited: reap it, end the session with `exit` and its exit
+  code if it is still open, then set `reaped_at`. Then remove the socket
+  file. If the job is `done`, build its workspace again.
 - The session ended in the store (a revoke, a job move, a stop): close the
   pipe of the helper.
 - The time limit passed: end the session with `time_limit`, then close the
@@ -208,25 +241,46 @@ each running session:
 `iris job stop <j-id>` ends the open session of the job with `stop`. The
 supervisor closes the pipe, and the helper stops the process group: `SIGTERM`,
 then `SIGKILL` 5 seconds later. The stop time is the moment of the `SIGKILL`:
-no process of the group runs after it. A process that the agent moved to
-another process group (for example a daemon) is not in the group. R4-05 (the
-sandbox) stops such a process. Until then this is a known limit, with a
-GitHub issue.
+no process of the group runs after it. The isolation (R4-05) stops a process
+that left the group.
 
-After the helper exits, the engine removes the socket file. The workspace
-stays for the next session.
+After the helper exits, the engine reaps it, sets `reaped_at` and removes
+the socket file. The workspace stays for the next session.
 
 ### Engine start and stop
 
-- At the start of `iris serve`, before the engine socket opens, each open
-  session ends with `engine`: its helper stopped with the pipe of the last
-  engine, so no process runs. Then the engine removes
-  `workspaces/j-<id>` of each done job, and `sessions/` logs older than 30
-  days.
-- When a session of a job ends and the job is `done`, the engine removes
-  the workspace of the job.
-- The removal of a workspace removes a symbolic link as a link, and never
-  follows it (`std::fs::remove_dir_all`).
+- At the start of `iris serve`, before the engine socket opens, each live
+  session belongs to the last engine. Its helper saw the end of the pipe
+  when that engine stopped, and stops the group within 5 seconds. The new
+  engine ends each open session with `engine`, waits 6 seconds after its
+  own start, then sets `reaped_at` of each of these sessions. Until then a
+  `run` of such a job fails at the register step.
+- Then the engine builds the workspace of each done job whose workspace
+  folder exists (workspace spec, "The granted messages of a job"): the mail
+  files go, and `JOB.md`, `job.json`, `drafts/` and `notes.md` stay. It
+  removes `sessions/` logs older than 30 days.
+- After the reap of a session of a done job, the engine builds the
+  workspace of the job the same way.
+
+### Isolation
+
+An isolation runs the agent so that it cannot reach the data folder, the
+engine socket `iris.sock`, the socket of another session, or the network.
+It shows the agent only the workspace (read and write), the programs of the
+system and the folders that the adapter needs (read only, for example the
+settings of the agent tool). It ends each process in it when the session
+ends.
+
+`iris_session::Isolation` is the interface: it gives the program and the
+arguments that run the adapter command inside the isolation, and a check
+that the isolation works on this system. This card gives no isolation for
+a real system: R4-05 gives one for macOS and one for Linux. With no
+isolation, `iris job run` fails with the reason, so no agent runs as the
+OS user with access to the data folder (spec 2, C2 and C6).
+
+The tests of this card use a test isolation that only the tests can make
+(`#[cfg(test)]` or a test feature that the program does not enable). It
+runs the command with no isolation, for the test scripts only.
 
 ### The session socket
 
@@ -259,6 +313,12 @@ store. A request on the socket of an ended session gets exit code 3.
 
 ## Options not chosen
 
+- A run with no isolation, with a warning: the agent could then read the
+  key, the web secret and `iris.sock` of the data folder, and approve its
+  own changesets (spec 2, C2 and C6). A warning does not keep these.
+- A second OS user for the agent: it needs setup with administrator rights
+  on each system, and it does not stop the network.
+
 - A suspended process (`SIGSTOP`) as the held state: the agent program is
   already loaded, and a stop signal from outside can resume it. The helper
   runs no agent code at all.
@@ -287,18 +347,21 @@ is refused before a row is written.
 | A `run` of a job that is not `working` | Refused at step 2 | Store test |
 | A revoke during steps 3 to 6 | Step 6 finds the end, the agent never runs | Launch test with a revoke hook |
 | A revoke after step 6 | The trigger ends the session; the supervisor stops the group | Supervisor test |
-| The job moves to `done` while a session runs | Ends with `job_state`; then the workspace is removed | Supervisor test |
+| The job moves to `done` while a session runs | Ends with `job_state`; after the reap the engine builds the workspace with no mail | Supervisor test |
 | The agent program is missing | Refused at step 1 | Adapter test |
 | The agent never exits | Ends at the time limit | Supervisor test with a short limit |
-| The agent ignores `SIGTERM` | `SIGKILL` 5 seconds later | Helper test with a `trap '' TERM` script |
+| The agent ignores `SIGTERM` | `SIGKILL` 5 seconds later; the helper is not in the group, so it lives to send it | Helper test with a `trap '' TERM` script |
+| The agent exits and leaves a background child in its group | The helper stops the group after the exit | Helper test with `sleep 100 &` |
+| A `run` right after a stop, a revoke or an exit, before the reap | Refused at the register step until `reaped_at` is set | Store test and launch test |
+| The agent writes without end to its output | The log stops at 10 MiB; the helper keeps reading, so the agent does not block | Helper test with `yes` |
+| A system with no isolation | `run` refused at step 1 | Launch test |
 | The engine is killed (`SIGKILL`) | The pipe ends, the helper stops the group; the next engine start ends the row with `engine` | Helper test: close the pipe |
 | The helper gets a line other than `start`, or the end of the pipe before it | Exits with no child | Helper test |
 | A socket path longer than the system limit | `launch_failed` with the reason | Launch test with a long data folder |
-| The agent writes more than 10 MiB | The log stops at 10 MiB, with one line | Log test |
 | An `agents.toml` with an unknown key, a bad name, or an `IRIS` variable | Refused with the line | Parser test (property test over names) |
 | A raw SQL update or delete of `job_session` outside the two moves | Refused by the triggers | Store test |
 | A request on the session socket for another verb | Exit code 3, nothing changes | Socket test |
-| An agent process that leaves the process group | Not stopped until R4-05 | Known limit |
+| An agent process that leaves the process group | The isolation ends it (R4-05) | R4-05 test |
 
 ## Impact
 
@@ -363,8 +426,17 @@ writes changes only through the verbs, and nothing leaves before `submit`
    no variable outside the list. Red if the script finds one.
 8. In session mode, `iris search` fails with exit code 3 and does not open
    the store. Red if it prints a result.
+9. With no isolation, `iris job run` fails before a session row is written.
+   Red if a row or a process appears.
+10. After `iris job stop`, a second `run` fails until the processes of the
+    first session stopped, then succeeds. Red if a build starts while a
+    process of the first session runs.
+11. An agent that exits and leaves `sleep 100 &` has no running process 6
+    seconds later. Red if the `sleep` runs.
 
 ## Verify
+
+The tests run the generic adapter with test scripts in the test isolation.
 
 ```bash
 cargo test -p iris-job
@@ -379,9 +451,8 @@ who does not run `iris job run`.
 
 ## Risks
 
-- An agent process outside the sandbox can read each file of the OS user,
-  also the data folder. R4-05 closes this. Until then the documentation must
-  say that a session is not a security boundary.
+- `iris job run` does nothing for the person until R4-05 merges. This is
+  on purpose: no agent runs without an isolation.
 - A wrong adapter line makes the agent fail at once. The log shows the error.
 - Rollback: revert the code PRs. The table `job_session` stays and does no
   harm.
