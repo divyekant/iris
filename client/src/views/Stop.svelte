@@ -20,45 +20,63 @@
 <script module lang="ts">
   import { get as read, post, own } from "../api";
 
-  type Answer = { stopped: boolean; since: string | null; live?: number; busy?: boolean };
-  type Shared = { stopped: boolean; since: string | null; live: number; busy: boolean; busyAction: "" | "stop" | "resume"; note: string; error: string };
-  /** One state for the button and the band, read from GET /api/stop. */
-  export const stopState: Shared = $state({ stopped: false, since: null, live: 0, busy: false, busyAction: "", note: "", error: "" });
+  type Answer = { stopped: boolean; since: string | null; live?: number; busy?: boolean; resumed?: boolean };
+  type Shared = { stopped: boolean; since: string | null; live: number; busy: boolean; known: boolean; busyAction: "" | "stop" | "resume"; note: string; error: string };
+  /**
+   * One state for the button and the band. Only an answer of the engine sets
+   * it. `known` is false after a Stop or a Resume with no answer, until a read
+   * of GET /api/stop gives the state again.
+   */
+  export const stopState: Shared = $state({ stopped: false, since: null, live: 0, busy: false, known: true, busyAction: "", note: "", error: "" });
 
   // The number of the newest request. Only the answer of the newest request
   // changes the state, so an older answer never replaces a newer one.
   let newest = 0;
 
-  function show(n: number, a: Answer) {
-    if (n !== newest) return;
-    Object.assign(stopState, { stopped: a.stopped, since: a.since, live: a.stopped ? (a.live ?? 0) : 0, busy: a.stopped && !!a.busy });
+  function show(n: number, a: Answer): boolean {
+    if (n !== newest) return false;
+    Object.assign(stopState, { stopped: a.stopped, since: a.since, live: a.stopped ? (a.live ?? 0) : 0, busy: a.stopped && !!a.busy, known: true });
+    return true;
+  }
+
+  async function reread(keepError: boolean) {
+    const n = ++newest;
+    try {
+      if (show(n, await read<Answer>("stop")) && !keepError) stopState.error = "";
+    } catch {
+      // The access state shows a failure of the engine above each view.
+    }
   }
 
   /** Read the state again: at start, at each new view and when the tab comes back. */
   export async function refresh() {
     // A Stop or a Resume in progress gives the newer state.
     if (stopState.busyAction) return;
-    const n = ++newest;
-    try {
-      show(n, await read<Answer>("stop"));
-    } catch {
-      // The access state shows a failure of the engine above each view.
-    }
+    await reread(false);
   }
 
   /** Stop all agent work, or resume it. */
   export async function act(kind: "stop" | "resume") {
     const n = ++newest;
     Object.assign(stopState, { busyAction: kind, error: "", note: "" });
+    let failed = false;
     try {
       const a = await post<Answer>(kind, {});
       show(n, kind === "resume" ? { ...a, stopped: false, since: null } : a);
-      if (kind === "resume" && n === newest) stopState.note = "Iris runs again. Each held send waits a full minute before it leaves.";
+      // Only a real resume starts a new hold of each held send.
+      if (kind === "resume" && n === newest && a.resumed) stopState.note = "Iris runs again. Each held send waits a full minute before it leaves.";
     } catch (e) {
-      stopState.error = own(e) || (kind === "stop" ? "Iris did not stop. Try again, or run iris stop at the terminal." : "Iris did not resume. Try again.");
+      // The change can have happened with no answer: the state is not known
+      // until the engine says it again.
+      failed = true;
+      Object.assign(stopState, {
+        known: false,
+        error: own(e) || (kind === "stop" ? "Iris did not answer the Stop. Try again, or run iris stop at the terminal." : "Iris did not answer the Resume. Try again."),
+      });
     } finally {
       stopState.busyAction = "";
     }
+    if (failed) await reread(true);
   }
 </script>
 
@@ -81,7 +99,9 @@
     <section class="band" role="status" aria-label="Iris is stopped">
       <div class="words">
         <p><strong>Iris is stopped</strong>{#if shared.since}{" "}<span class="since">since {since(shared.since)}</span>{/if}.</p>
-        {#if shared.live === 0 && !shared.busy}
+        {#if !shared.known}
+          <p class="muted">Iris does not know the state now.</p>
+        {:else if shared.live === 0 && !shared.busy}
           <p class="muted">No agent runs, no action applies and no mail leaves.</p>
         {:else}
           <p class="muted">The stop is not complete yet.</p>

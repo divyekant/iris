@@ -107,3 +107,43 @@ test("a stop with only a Gmail call in progress offers Stop again, and the toolt
     band.destroy();
   }
 });
+
+test("a Resume with no answer makes no claim, and a read of the engine gives the state", async () => {
+  const { stopState } = await load("/src/views/Stop.svelte");
+  Object.assign(stopState, { stopped: true, since, live: 0, busy: false, known: true, note: "", error: "" });
+  let getWorks = false;
+  globalThis.fetch = async (url, init) => {
+    const path = String(url).replace(/^\/api\//, "");
+    // The resume commits in the engine, but its answer is lost.
+    if (path === "resume" || !getWorks) throw new TypeError("Failed to fetch");
+    return new Response(JSON.stringify({ stopped: false, since: null, live: 0, busy: false }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const band = await mount("/src/views/Stop.svelte", { place: "band" });
+  try {
+    [...band.target.querySelectorAll("button")].find((b) => text(b).includes("Resume")).click();
+    await until(() => stopState.known === false && stopState.busyAction === "");
+    band.flushSync();
+    assert.doesNotMatch(text(band.target), /no mail leaves/);
+    assert.match(text(band.target), /does not know the state/);
+    // The next read of the engine gives the state, and clears the old error.
+    getWorks = true;
+    const { refresh } = await load("/src/views/Stop.svelte");
+    await refresh();
+    band.flushSync();
+    assert.equal(stopState.stopped, false);
+    assert.equal(stopState.known, true);
+    assert.equal(stopState.error, "");
+    assert.equal(band.target.querySelector("[role=status]")?.getAttribute("aria-label") ?? null, null);
+  } finally {
+    band.destroy();
+  }
+});
+
+test("a Resume when Iris already runs does not say that a new hold started", async () => {
+  const { act, stopState } = await load("/src/views/Stop.svelte");
+  Object.assign(stopState, { stopped: true, since, live: 0, busy: false, known: true, note: "", error: "" });
+  serve(() => [200, { stopped: false, since: null, resumed: false }]);
+  await act("resume");
+  assert.equal(stopState.stopped, false);
+  assert.equal(stopState.note, "");
+});
