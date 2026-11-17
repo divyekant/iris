@@ -62,8 +62,10 @@ parses the link and calls it only if its scheme and its authority (host
 and port, with no user part) are equal to those of the base URL, and its
 path starts with the path of the base URL. A text prefix is not enough:
 `https://graph.microsoft.com@attacker.example/` starts with the base text.
-Else the client gives `Error::Decode` and sends no request. Thus a changed
-answer cannot send the token to another host.
+Else the client gives `Error::Decode` and sends no request. The client
+also turns off the redirects of `ureq`: an HTTP 3xx answer is an
+`Error::Api` with that status, and the client follows no `Location`.
+Thus a changed answer cannot send the token to another host.
 
 Waits after a refusal:
 
@@ -228,10 +230,28 @@ This mapping is a proposal for R6-10, which owns the provider interface:
 | Graph | Mirror label |
 |---|---|
 | The folder of the message | one label for the folder; `INBOX`, `SENT`, `DRAFT`, `TRASH` and `SPAM` for `inbox`, `sentitems`, `drafts`, `deleteditems` and `junkemail` |
-| Each category | one user label with the category name |
+| Each category | one user label (see the names below) |
 | `isRead` false | `UNREAD` |
 | `flag.flagStatus` `flagged` | `STARRED` |
 | `conversationId` | the thread ID |
+
+Label names must stay distinct, because search, policy rules and label
+actions match label names (spec 2). The names:
+
+- A folder that is not well-known: the label `Folders/<path>`, where the
+  path is the display names from the top folder, joined with `/`. For
+  example `Folders/Receipts/Projects`. Its provider ID is `folder:<id>`.
+- A category: the label with the category name, provider ID
+  `category:<name>`. If the name is a system label name of spec 1 section
+  4.10 (case is not significant), or starts with `Folders/` or
+  `Categories/`, the label is `Categories/<name>`.
+
+Thus no category name gives a folder label or a system label, and two
+sources never give one name. A label action (`label`, `unlabel`) on a
+`Folders/` label gets a definite refusal before any write: a folder is
+not a label, and Iris moves messages only with `archive`, `inbox` and
+`trash`. A label action on a category label writes the category name
+(with no `Categories/` prefix).
 
 Archive in Iris is a move to the well-known `archive` folder. Inbox is a
 move to `inbox`. Trash is a move to `deleteditems`.
@@ -307,6 +327,7 @@ and MIME text of `$value`. All other input fails closed: the call gives
 | An answer that is not JSON, or JSON in another shape | `Error::Decode`, no change | fake returns bad JSON |
 | A JSON answer above 16 MiB | `Error::Decode` | client limit |
 | A `nextLink` or `deltaLink` to another host | `Error::Decode`, no request | unit test |
+| An HTTP 3xx answer with a `Location` | `Error::Api` with the status; no request to the `Location` | fake redirect |
 | A `$value` body above 150 MiB | `Error::Decode`, the sink has a part: discard it | fake with a limit |
 | The connection ends in a page or a body | `Error::Transport`; the caller calls the same link again | fake that cuts |
 | The same message two times in one round | the last one wins | fake replays |
