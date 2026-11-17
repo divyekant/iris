@@ -86,11 +86,13 @@ cannot tell which sender the person wants to see.
 - Each of the three verbs takes exactly one item. Submit denies an action
   with two or more targets.
 - The choice holds after a new run of understanding. The ledger pins the
-  item (spec 1, section 7.5). A new item with the same form, the same origin
-  message and the same quote as a `skipped` feed item or a `dismissed`
-  signal is the same item: it starts with the same status, so it does not
-  come back to the brief. A new item with another quote is a different item
-  and stays visible: the worst result is a duplicate in front of the person. A conversation keeps
+  item (spec 1, section 7.5). After a run writes its items, a new item takes
+  the status of a `skipped` feed item or a `dismissed` signal only on a
+  one-to-one match: exactly one pinned item and exactly one new item of the
+  message with the same form and the same quote. Each other new item stays
+  visible, also when two items share a quote: the worst result is a
+  duplicate in front of the person, never a hidden item that the person
+  did not choose. A conversation keeps
   `muted` at each new message (spec 1, section 6.8).
 
 ### 2. The proposals

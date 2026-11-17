@@ -451,6 +451,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
                 &mut invalid,
             )?);
         }
+        keep_choices(tx, message)?;
         tx.execute(
             "UPDATE message SET understood_at = ?2, retry_at = NULL WHERE id = ?1",
             params![message, now_ms],
@@ -918,42 +919,23 @@ fn put_item(
     }
     // A possible duplicate of a pinned item (`item_pin`): same form, same
     // origin message.
-    // A pinned item with the same quote comes first: it is the same item.
-    let quote = doc["sources"][0]["quote"].as_str().map(str::to_string);
-    let pinned: Option<(i64, String, bool)> = tx
+    let pinned: Option<i64> = tx
         .query_row(
-            "SELECT i.id, i.status, json_extract(i.doc, '$.sources[0].quote') IS ?3
-             FROM item_source s JOIN item i ON i.id = s.item_id
+            "SELECT i.id FROM item_source s JOIN item i ON i.id = s.item_id
              WHERE s.message_id = ?1 AND s.role = 'origin' AND i.form = ?2
                AND EXISTS (SELECT 1 FROM item_pin p WHERE p.item_id = i.id)
-             ORDER BY 3 DESC, i.id LIMIT 1",
-            params![ids.message, form, quote],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+             ORDER BY i.id LIMIT 1",
+            params![ids.message, form],
+            |r| r.get(0),
         )
         .optional()?;
-    // A feed item or a signal that the person skipped or dismissed stays out
-    // of the brief: a new item with the same form, origin and quote is the
-    // same item, and takes the same status. Each other new item stays
-    // visible (docs/specs/2026-11-17-preference-rules.md). Each value is a
-    // valid status of its form.
-    let mut doc = doc;
-    if let Some((_, status, true)) = &pinned {
-        if quote.is_some()
-            && matches!(
-                (form.as_str(), status.as_str()),
-                ("feed", "skipped") | ("signal", "dismissed")
-            )
-        {
-            doc["status"] = Value::from(status.as_str());
-        }
-    }
     tx.execute(
         "UPDATE item SET status = ?2, doc = ?3, duplicate_of = ?4 WHERE id = ?1",
         params![
             id,
             doc["status"].as_str().unwrap_or(""),
             doc.to_string(),
-            pinned.map(|p| p.0)
+            pinned
         ],
     )?;
     tx.execute(
@@ -961,6 +943,39 @@ fn put_item(
         params![id, ids.message],
     )?;
     Ok(id)
+}
+
+/// A feed item that the person skipped, or a signal that the person
+/// dismissed, stays out of the brief after a new run
+/// (docs/specs/2026-11-17-preference-rules.md). The new item takes its
+/// status only on a one-to-one match: exactly one pinned item and exactly
+/// one new item of the message with the same form and the same quote, and
+/// the pinned item has the chosen status. Each other new item stays
+/// visible. Call after the run writes its items: each item of the message
+/// that is not pinned is new.
+fn keep_choices(tx: &Transaction, message: i64) -> rusqlite::Result<()> {
+    tx.execute(
+        "WITH mine AS (
+           SELECT i.id, i.form, i.status,
+                  json_extract(i.doc, '$.sources[0].quote') AS quote,
+                  EXISTS (SELECT 1 FROM item_pin p WHERE p.item_id = i.id) AS pinned
+           FROM item_source s JOIN item i ON i.id = s.item_id
+           WHERE s.message_id = ?1 AND s.role = 'origin' AND i.form IN ('feed', 'signal')
+         ),
+         pair AS (
+           SELECT max(CASE WHEN pinned THEN status END) AS status,
+                  max(CASE WHEN NOT pinned THEN id END) AS new
+           FROM mine WHERE quote IS NOT NULL
+           GROUP BY form, quote
+           HAVING sum(pinned) = 1 AND sum(NOT pinned) = 1
+         )
+         UPDATE item SET status = pair.status,
+                         doc = json_set(item.doc, '$.status', pair.status)
+         FROM pair
+         WHERE item.id = pair.new AND pair.status IN ('skipped', 'dismissed')",
+        [message],
+    )?;
+    Ok(())
 }
 
 /// The row ID of the sender row of `addr`. A new row has no kind:
