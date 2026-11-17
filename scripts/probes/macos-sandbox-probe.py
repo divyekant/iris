@@ -319,9 +319,15 @@ def run_init(outdir, deadline, marker):
     for fn in (run_hopper, run_sleeper):
         if os.fork() == 0:
             fn(outdir, deadline, marker)
+    libc = ctypes.CDLL(None, use_errno=True)
+    # Safety check first: SIGURG (default action: ignore). The probe outside
+    # the sandbox counts it. The SIGKILL loop runs only if the probe says
+    # that it got none (SIGUSR1).
+    r = libc.syscall(37, -1, signal.SIGURG, 0)
+    with open(os.path.join(outdir, "urg.json"), "w") as f:
+        json.dump({"rc": r, "errno": ctypes.get_errno()}, f)
     while not go and time.time() < deadline:
         time.sleep(0.05)
-    libc = ctypes.CDLL(None, use_errno=True)
     t0, passes, signaled, none_in_row = time.time(), 0, 0, 0
     while time.time() - t0 < 5 and none_in_row < 3:
         passes += 1
@@ -343,6 +349,9 @@ def run_init(outdir, deadline, marker):
         json.dump({"passes": passes, "passes_that_signaled": signaled, "seconds": round(time.time() - t0, 3),
                    "last_errno": ctypes.get_errno()}, f)
     os._exit(0)
+
+
+URG = []
 
 
 def test_init_killer(marker, profile, n):
@@ -372,6 +381,18 @@ def test_init_killer(marker, profile, n):
     time.sleep(1.5)
     cid = init["coalition"][0]
     res = {"before": escapers_alive(outdir), "counts_before": coalition_counts(cid)}
+    try:
+        res["urg"] = json.load(open(os.path.join(outdir, "urg.json")))
+    except OSError:
+        res["urg"] = None
+    res["canary_got_urg"] = len(URG)
+    if URG or res["urg"] is None:
+        # kill(-1) reached a process outside the sandbox: never send SIGKILL.
+        for pid in pids_in_coalition(cid):
+            os.kill(pid, signal.SIGKILL)
+        res["bootout"] = bootout(label)
+        res["aborted"] = "kill(-1) is not limited to the sandbox"
+        return res
     os.kill(init["pid"], signal.SIGUSR1)
     for _ in range(400):
         if os.path.exists(os.path.join(outdir, "killer.json")):
@@ -561,7 +582,13 @@ def main():
     write_profile(lifetime_profile, tmp_root, sb_dir, 9, read_extra)
     try:
         report["kill_loop"] = [test_kill_loop(marker, None, 200 + i) for i in range(3)]
-        report["init_killer"] = [test_init_killer(marker, lifetime_profile, 400 + i) for i in range(10)]
+        signal.signal(signal.SIGURG, lambda *_: URG.append(1))
+        report["init_killer"] = []
+        for i in range(10):
+            r = test_init_killer(marker, lifetime_profile, 400 + i)
+            report["init_killer"].append(r)
+            if r.get("aborted") or r.get("error"):
+                break
     finally:
         left = marker_pids(marker)
         report["cleanup_marker_pids_found"] = len(left)
