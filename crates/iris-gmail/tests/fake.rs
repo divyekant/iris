@@ -427,3 +427,17 @@ fn a_draft_search_reads_every_page() {
         .iter()
         .any(|r| r.contains("drafts?") && r.contains("pageToken=2")));
 }
+
+// The send recovery must see each message with the Message-ID, also past
+// the first page of 500 (provider spec, section 2).
+#[test]
+fn messages_with_id_reads_every_page() {
+    let fake = FakeGmail::start(Mailbox::new(3, 2)).unwrap();
+    let gmail = client(&fake);
+    let raw = b"Message-ID: <many@example.com>\r\nSubject: x\r\n\r\ny\r\n";
+    let added: std::collections::BTreeSet<String> =
+        (0..501).map(|_| fake.add_message(raw, &["SENT"])).collect();
+    let found = iris_gmail::Provider::messages_with_id(&gmail, TOKEN, "many@example.com").unwrap();
+    let ids: std::collections::BTreeSet<String> = found.into_iter().map(|m| m.id).collect();
+    assert_eq!(ids, added);
+}

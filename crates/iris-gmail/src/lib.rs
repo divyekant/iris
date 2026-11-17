@@ -829,9 +829,13 @@ fn draft_body(id: Option<&str>, raw: &[u8], thread_id: Option<&str>) -> String {
 /// Escape an ID for one segment of the URL path.
 /// A history ID of Gmail, from the cursor text of the mirror.
 fn parse_history(cursor: &str) -> Result<u64> {
+    // `u64::from_str` also takes a leading `+`, which is not a history ID.
     cursor
-        .parse()
-        .map_err(|_| Error::Decode(format!("not a Gmail history ID: {cursor:?}")))
+        .bytes()
+        .all(|b| b.is_ascii_digit())
+        .then(|| cursor.parse().ok())
+        .flatten()
+        .ok_or_else(|| Error::Decode(format!("not a Gmail history ID: {cursor:?}")))
 }
 
 impl Provider for Gmail {
@@ -863,7 +867,16 @@ impl Provider for Gmail {
     }
     fn messages_with_id(&self, token: &str, message_id: &str) -> Result<Vec<MessageRef>> {
         let q = format!("rfc822msgid:{message_id}");
-        Ok(Gmail::search(self, token, &q, None)?.messages)
+        let mut all = Vec::new();
+        let mut next: Option<String> = None;
+        loop {
+            let page = Gmail::search(self, token, &q, next.as_deref())?;
+            all.extend(page.messages);
+            match page.next_page_token {
+                Some(t) if !t.is_empty() => next = Some(t),
+                _ => return Ok(all),
+            }
+        }
     }
     fn modify(&self, token: &str, ids: &[&str], add: &[&str], remove: &[&str]) -> Result<()> {
         Gmail::batch_modify(self, token, ids, add, remove)
@@ -933,6 +946,94 @@ fn error_of(response: ureq::http::Response<ureq::Body>) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A small random number generator with a fixed seed.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 16) as usize
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            self.next() % n.max(1)
+        }
+
+        /// A short text of digits, signs, letters, spaces and other bytes.
+        fn text(&mut self) -> String {
+            const PARTS: [&str; 10] = [
+                "0",
+                "7",
+                "9",
+                "18446744073709551615",
+                "-",
+                "+",
+                "a",
+                " ",
+                ".",
+                "é",
+            ];
+            (0..self.below(6))
+                .map(|_| PARTS[self.below(PARTS.len())])
+                .collect()
+        }
+    }
+
+    // Property: a cursor is a history ID if and only if it is the decimal
+    // text of a u64, and the call then carries that number.
+    #[test]
+    fn a_cursor_is_accepted_only_as_a_u64() {
+        let mut rng = Rng(0x5eed_1d0c);
+        for _ in 0..20_000 {
+            let text = rng.text();
+            let number = !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+            if let Err(e) = parse_history(&text) {
+                assert!(matches!(e, Error::Decode(_)), "{text:?}: {e}");
+            }
+            assert_eq!(
+                parse_history(&text).ok(),
+                text.parse::<u64>().ok().filter(|_| number)
+            );
+        }
+    }
+
+    // Property: a profile answer gives a profile whose cursor is the decimal
+    // text of its history ID, or Error::Decode. It never gives another
+    // cursor, and never panics.
+    #[test]
+    fn a_profile_answer_gives_a_decimal_cursor_or_a_decode_error() {
+        let mut rng = Rng(0x0dd_ba11);
+        for _ in 0..20_000 {
+            let id = rng.text();
+            let value = match rng.below(4) {
+                0 => serde_json::Value::String(id.clone()),
+                1 => id
+                    .parse::<u64>()
+                    .map(serde_json::Value::from)
+                    .unwrap_or(serde_json::Value::Null),
+                2 => serde_json::Value::Bool(true),
+                _ => serde_json::Value::from(-1),
+            };
+            let mut answer =
+                serde_json::json!({ "emailAddress": "a@example.com", "historyId": value });
+            if rng.below(8) == 0 {
+                answer.as_object_mut().unwrap().remove("emailAddress");
+            }
+            let bytes = answer.to_string();
+            match parse::<ProfileJson>(bytes.as_bytes()) {
+                Ok(p) => {
+                    let cursor = p.history_id.to_string();
+                    assert_eq!(parse_history(&cursor).unwrap(), p.history_id);
+                    assert!(answer["emailAddress"].is_string(), "{bytes}");
+                }
+                Err(Error::Decode(_)) => {}
+                Err(e) => panic!("{bytes}: {e}"),
+            }
+        }
+    }
 
     #[test]
     fn the_gate_lets_at_most_max_gets_run() {
