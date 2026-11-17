@@ -1078,9 +1078,40 @@ fn a_thread_is_late_only_while_each_rule_holds() {
             false,
         ),
         (
-            "a stale draft",
+            "a stale draft of the owner",
             "INSERT INTO reply_draft(thread_id, based_on, body, model, prompt, samples, created_at)
              SELECT ?1, min(id), 'x', 'm', 'p', 0, 1 FROM message",
+            at,
+            false,
+        ),
+        (
+            "a stale nudge",
+            "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
+               created_at)
+             SELECT ?1, min(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'p', 0, 1 FROM message",
+            at,
+            true,
+        ),
+        (
+            "a ready nudge",
+            "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
+               created_at)
+             SELECT ?1, max(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'p', 0, 1
+               FROM message WHERE thread_id = ?1",
+            at,
+            false,
+        ),
+        (
+            "the ask went to another person",
+            "UPDATE header SET to_addrs = 'bo@example.org, ana@example.org'
+              WHERE message_id IN (SELECT id FROM message WHERE thread_id = ?1)",
+            at,
+            false,
+        ),
+        (
+            "the ask went to Ana first",
+            "UPDATE header SET to_addrs = 'ANA@example.org, bo@example.org'
+              WHERE message_id IN (SELECT id FROM message WHERE thread_id = ?1)",
             at,
             true,
         ),
@@ -1089,6 +1120,10 @@ fn a_thread_is_late_only_while_each_rule_holds() {
         let (b, t) = asked(&format!("late-{}", name.replace(' ', "-")));
         b.store
             .write(|tx| {
+                tx.execute(
+                    "CREATE TEMP TABLE nudge_intent AS SELECT ?1 AS intent",
+                    [NUDGE_INTENT],
+                )?;
                 tx.execute(sql, [t])?;
                 Ok(())
             })
@@ -1100,34 +1135,63 @@ fn a_thread_is_late_only_while_each_rule_holds() {
     // Ana answers: not late. The owner sends a nudge: late again only
     // after the wait.
     let (b, t) = asked("late-answer");
-    let add = |id: &str, date: i64, label: &str, from: &str| {
+    let add = |id: &str, date: i64, label: &str, from: &str, to: &str| {
         b.store
-            .put_messages(
-                1,
-                &[msg(
-                    id,
-                    "t-ask",
-                    date,
-                    label,
-                    from,
-                    "x@example.org",
-                    Some("Hi"),
-                )],
-            )
+            .put_messages(1, &[msg(id, "t-ask", date, label, from, to, Some("Hi"))])
             .unwrap();
         understood(&b.store);
     };
-    add("answer", 2000, "INBOX", "ana@example.org");
+    add("answer", 2000, "INBOX", "ana@example.org", "me@example.com");
     assert!(late_threads(&b.store, at + 5000).is_empty());
-    add("nudge", 3000, "SENT", "me@example.com");
+    add("nudge", 3000, "SENT", "me@example.com", "ana@example.org");
     assert!(late_threads(&b.store, 3000 + LATE_AFTER_MS - 1).is_empty());
     assert_eq!(late_threads(&b.store, 3000 + LATE_AFTER_MS), [t]);
+}
 
+#[test]
+fn a_nudge_is_saved_only_while_the_thread_is_late() {
+    let now = 1000 + LATE_AFTER_MS;
     // A nudge draft makes the thread not late until the thread changes.
+    let (b, t) = asked("nudge-saved");
     let fake = Fake::new(r#"{"body": "Hi Ana, any news on the slides? D"}"#);
-    write(&b.store, t, Some(NUDGE_INTENT), &fake, 1).unwrap();
-    assert!(late_threads(&b.store, 3000 + LATE_AFTER_MS).is_empty());
+    nudge(&b.store, t, &fake, now).unwrap();
+    assert!(late_threads(&b.store, now).is_empty());
     let data: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
     assert_eq!(data["intent"], NUDGE_INTENT);
-    assert_eq!(data["reply_to"], "x@example.org");
+    assert_eq!(data["reply_to"], "ana@example.org");
+    assert_eq!(saved(&b.store, t).unwrap().1.as_deref(), Some(NUDGE_INTENT));
+
+    // A thread that is not late gets no call.
+    let (b, t) = asked("nudge-not-late");
+    let fake = Fake::new(r#"{"body": "x"}"#);
+    assert!(matches!(
+        nudge(&b.store, t, &fake, now - 1),
+        Err(Error::Changed)
+    ));
+    assert!(fake.calls.borrow().is_empty());
+
+    // The item changes during the call: nothing is saved.
+    for (name, sql) in [
+        ("done", "UPDATE item SET status = 'done'"),
+        ("hidden", "UPDATE item SET doc = json_set(doc, '$.attention', json_object('state', 'hidden'))"),
+        ("due later", "UPDATE item SET doc = json_set(doc, '$.due', json_object('date', '2999-01-01'))"),
+        ("a draft of the owner", "INSERT INTO reply_draft(thread_id, based_on, body, model, prompt, samples, created_at)
+                                  SELECT thread_id, id, 'mine', 'm', 'p', 0, 1 FROM message WHERE provider_id = 'ask'"),
+    ] {
+        let (b, t) = asked(&format!("nudge-during-{}", name.replace(' ', "-")));
+        let store = &b.store;
+        let mut fake = Fake::new(r#"{"body": "x"}"#);
+        fake.during = Some(Box::new(move || {
+            store
+                .write(|tx| {
+                    tx.execute(sql, [])?;
+                    Ok(())
+                })
+                .unwrap();
+        }));
+        assert!(matches!(nudge(store, t, &fake, now), Err(Error::Changed)), "{name}");
+        assert_eq!(fake.calls.borrow().len(), 1, "{name}");
+        let body = saved(store, t).map(|s| s.0);
+        assert_ne!(body.as_deref(), Some("x"), "{name}");
+    }
 }

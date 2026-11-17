@@ -212,39 +212,75 @@ pub const LATE_AFTER_MS: i64 = 2 * 86_400_000;
 /// - its newest message that counts is from the owner (`SENT`) and is at
 ///   least [`LATE_AFTER_MS`] old, so the person did not answer, and a
 ///   nudge that the owner sent starts the wait again;
+/// - the reply to that message goes to the person that owes ([`recipient`]
+///   is the address of the sender row of the commitment owner);
 /// - [`write`] can make a draft: no message that counts is hostile or waits
 ///   for understanding;
-/// - it has no draft that the person can use now ([`ready_sql`]), so a
-///   draft of the owner is never replaced.
+/// - it has no draft of the owner (a draft with another intent than
+///   [`NUDGE_INTENT`], stale or not), so a nudge never replaces it, and no
+///   nudge that the person can use now ([`ready_sql`]).
 pub fn late(c: &Connection, now_ms: i64) -> rusqlite::Result<Vec<(i64, i64)>> {
     let newest = in_thread!("t.id");
     let all = in_thread!("n.thread");
     let ready = ready_sql("SELECT n.thread");
     let mut st = c.prepare_cached(&format!(
-        "WITH t(id) AS (
-           SELECT DISTINCT om.thread_id FROM item
+        "WITH t(id, me, owner) AS (
+           SELECT DISTINCT om.thread_id, a.address, s.address FROM item
              JOIN item_source os ON os.item_id = item.id AND os.role = 'origin'
              JOIN message om ON om.id = os.message_id
+             JOIN account a ON a.id = om.account_id
+             JOIN sender s ON s.id =
+                  CAST(substr(json_extract(item.doc, '$.owner.sender'), 3) AS INTEGER)
             WHERE item.form = 'commitment' AND item.status = 'open'
               AND json_extract(item.doc, '$.direction') = 'owed_to_you'
               AND coalesce(json_extract(item.doc, '$.attention.state'), 'shown') = 'shown'
-              AND (SELECT kind FROM sender WHERE id =
-                     CAST(substr(json_extract(item.doc, '$.owner.sender'), 3) AS INTEGER)) = 'person'
+              AND s.kind = 'person'
               AND coalesce(unixepoch(coalesce(json_extract(item.doc, '$.due.at'),
                                               json_extract(item.doc, '$.due.date')), 'subsec') * 1000,
                            0) < ?1),
-         n(thread, newest) AS (SELECT t.id, (SELECT m.id {newest} {NEWEST} LIMIT 1) FROM t)
-         SELECT n.thread, n.newest FROM n JOIN message nm ON nm.id = n.newest
+         n(thread, me, owner, newest) AS
+           (SELECT t.id, t.me, t.owner, (SELECT m.id {newest} {NEWEST} LIMIT 1) FROM t)
+         SELECT n.thread, n.newest, n.me, n.owner FROM n JOIN message nm ON nm.id = n.newest
           WHERE coalesce(nm.internal_date, 0) <= ?1 - ?2
             AND EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                          WHERE ml.message_id = nm.id AND l.provider_id = 'SENT')
             AND NOT EXISTS (SELECT 1 {all}
                              AND ({HOSTILE} OR b.message_id IS NULL OR m.understood_at IS NULL))
+            AND NOT EXISTS (SELECT 1 FROM reply_draft d
+                             WHERE d.thread_id = n.thread AND coalesce(d.intent, '') <> ?3)
             AND NOT {ready}
-          ORDER BY n.newest"
+          ORDER BY n.newest, n.owner"
     ))?;
-    let rows = st.query_map([now_ms, LATE_AFTER_MS], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    rows.collect()
+    let rows = st.query_map(params![now_ms, LATE_AFTER_MS, NUDGE_INTENT], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+        ))
+    })?;
+    let mut out: Vec<(i64, i64)> = Vec::new();
+    for row in rows {
+        let (thread, newest, me, owner) = row?;
+        if out.last().is_some_and(|l| l.0 == thread) {
+            continue;
+        }
+        // The same recipient rule as `write`, on the same snapshot.
+        let to = recipient(&snapshot(c, thread)?.newest, &me);
+        if to.is_some_and(|to| to.eq_ignore_ascii_case(owner.trim())) {
+            out.push((thread, newest));
+        }
+    }
+    Ok(out)
+}
+
+/// Writes a nudge of `thread` ([`write`] with [`NUDGE_INTENT`]). The thread
+/// must be [`late`] before the call and again in the write of the draft, so
+/// a commitment that is done, hidden or answered during the call gets no
+/// nudge.
+pub fn nudge(store: &Store, thread: i64, model: &dyn Model, now_ms: i64) -> Result<Saved> {
+    let still = |c: &Connection| Ok(late(c, now_ms)?.iter().any(|(t, _)| *t == thread));
+    write_when(store, thread, Some(NUDGE_INTENT), model, now_ms, &still)
 }
 
 fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
@@ -494,6 +530,19 @@ pub fn write(
     model: &dyn Model,
     now_ms: i64,
 ) -> Result<Saved> {
+    write_when(store, thread, intent, model, now_ms, &|_| Ok(true))
+}
+
+/// [`write`], with one more condition `still` that must be true before the
+/// call and in the write of the draft. Else [`Error::Changed`].
+fn write_when(
+    store: &Store,
+    thread: i64,
+    intent: Option<&str>,
+    model: &dyn Model,
+    now_ms: i64,
+    still: &dyn Fn(&Connection) -> rusqlite::Result<bool>,
+) -> Result<Saved> {
     let intent = intent.map(str::trim).filter(|i| !i.is_empty());
     if intent.is_some_and(|i| i.chars().count() > MAX_INTENT) {
         return Err(Error::LongIntent);
@@ -525,7 +574,8 @@ pub fn write(
     // before the request leaves still does not stop the call (as in
     // understanding). Issue #250.
     let ids: Vec<i64> = samples.iter().map(|s| s.id).collect();
-    let same = store.read(|c| Ok(snapshot(c, thread)? == snap && samples_ok(c, account, &ids)?))?;
+    let same = store
+        .read(|c| Ok(snapshot(c, thread)? == snap && samples_ok(c, account, &ids)? && still(c)?))?;
     if !same {
         return Err(Error::Changed);
     }
@@ -539,7 +589,7 @@ pub fn write(
             // added, removed or changed a message makes this run save nothing.
             // The samples too: a sample marked hostile during the call
             // makes this run save nothing (issue #459).
-            if snapshot(tx, thread)? != snap || !samples_ok(tx, account, &ids)? {
+            if snapshot(tx, thread)? != snap || !samples_ok(tx, account, &ids)? || !still(tx)? {
                 return Ok(false);
             }
             tx.execute(

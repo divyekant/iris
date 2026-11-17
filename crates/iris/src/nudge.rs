@@ -107,13 +107,7 @@ fn call(
         })
         .map_err(|e| e.to_string())?;
     let budgeted = Budgeted::new(model, store, run, Some(row));
-    let result = iris_voice::write(
-        store,
-        thread,
-        Some(iris_voice::NUDGE_INTENT),
-        &budgeted,
-        now_ms,
-    );
+    let result = iris_voice::nudge(store, thread, &budgeted, now_ms);
     let s = budgeted.state();
     let stop = if s.refused || s.overrun {
         "budget"
