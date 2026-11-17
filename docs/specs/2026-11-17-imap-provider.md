@@ -135,9 +135,10 @@ Each folder label has the kind `system`, a folder that the person made
 too: the provider refuses each folder change (section 7), and the
 provider spec (section 4) gives `system` to each folder that a provider
 cannot change as a user label. So a `label` action cannot target a
-folder. A message in the `\Archive` folder has its folder label and none
-of the seven fixed labels: the mirror shows it as archived, as a Gmail
-message with no `INBOX`.
+folder. A message in the `\Archive` folder has its folder label, no
+`INBOX`, `SPAM` or `TRASH`, and the flag labels `UNREAD` and `STARRED` of
+its flags: the mirror shows it as archived, as a Gmail message with no
+`INBOX`.
 
 
 `labels` gives the fixed labels `INBOX`, `UNREAD`, `STARRED`, `UNSENT`,
@@ -293,7 +294,11 @@ times after an unknown result (spec 2 section 7.2).
   exists, the command refuses it unless that account is `imap` with the
   same host, port and user: then it only replaces the sealed password.
   So an address never gets the mirror and the apply state of another
-  mailbox. To move an address to another mailbox, the person removes the
+  mailbox. The Gmail sign-in (`iris account add`, `save_sign_in`) gets
+  the same rule: if the address has an account of another provider, it
+  refuses before it changes the sealed token or any account state. The
+  check of the provider and the write of the token run in one store
+  transaction. To move an address to another mailbox, the person removes the
   account first.
 - The engine worker of an IMAP account uses `Imap`, with the password as
   the token. `Unauthorized` marks the account `needs_sign_in`, as for
@@ -337,6 +342,7 @@ times after an unknown result (spec 2 section 7.2).
 | A read of a message in a deleted folder | `NotFound` | `folder_gone` |
 | A `STORE` `OK` with no `FETCH` for a target UID | `Transport` | `modify_unconfirmed` |
 | `add-imap` of an address that another mailbox has | refused, nothing written | `add_imap_other_mailbox` |
+| A Gmail sign-in of an address of an IMAP account | refused, nothing written | `gmail_sign_in_imap_address` |
 
 ## Impact
 
