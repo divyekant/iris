@@ -1025,7 +1025,9 @@ pub fn notes(store: &Store, job: i64) -> Result<Option<Vec<u8>>> {
     let mut out = None;
     store.read(|c| {
         out = c
-            .query_row("SELECT text FROM job_notes WHERE job_id = ?1", [job], |r| r.get(0))
+            .query_row("SELECT text FROM job_notes WHERE job_id = ?1", [job], |r| {
+                r.get(0)
+            })
             .optional()?;
         Ok(())
     })?;

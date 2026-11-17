@@ -77,7 +77,10 @@ fn a_build_saves_the_notes_and_keeps_the_file() {
         notes(&store, job).unwrap().as_deref(),
         Some(&b"Dana has the contract."[..])
     );
-    assert_eq!(fs::read(ws.join("notes.md")).unwrap(), b"Dana has the contract.");
+    assert_eq!(
+        fs::read(ws.join("notes.md")).unwrap(),
+        b"Dana has the contract."
+    );
 }
 
 #[test]
@@ -136,7 +139,10 @@ fn a_link_a_folder_or_a_fifo_keeps_the_last_copy() {
     fs::remove_file(ws.join("notes.md")).unwrap();
     std::os::unix::fs::symlink(&secret, ws.join("notes.md")).unwrap();
     assert_not_a_file(&store, job, &ws);
-    assert!(fs::symlink_metadata(ws.join("notes.md")).unwrap().file_type().is_symlink());
+    assert!(fs::symlink_metadata(ws.join("notes.md"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
 
     fs::remove_file(ws.join("notes.md")).unwrap();
     fs::create_dir(ws.join("notes.md")).unwrap();
