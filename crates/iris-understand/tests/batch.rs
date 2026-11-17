@@ -899,6 +899,7 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
             )?;
             tx.execute_batch(
                 "DROP TRIGGER link_check_insert; DROP TRIGGER link_check_update;
+                 DROP TRIGGER link_check_label;
                  DROP TABLE link_check; PRAGMA user_version = 17;",
             )?;
             Ok(())
@@ -1117,4 +1118,25 @@ fn mail_that_loses_the_sent_label_gets_the_link_check() {
         })
         .unwrap();
     assert_eq!(marks, r#"["link"]"#);
+}
+
+#[test]
+fn a_label_change_during_a_check_queues_the_message_again() {
+    let b = store("link-race");
+    let raw = bank("https://evil.example.net/pay");
+    let m = b.add_raw("s", "t", 1, &raw, &["SENT"]);
+    // A check reads this row while the message is your own mail.
+    let read = b.col("SELECT id FROM link_check");
+    // A sync removes SENT before the check ends: the row is new.
+    b.add_raw("s", "t", 1, &raw, &["INBOX"]);
+    let now = b.col(&format!("SELECT id FROM link_check WHERE message_id = {m}"));
+    assert!(now > read, "{now:?} {read:?}");
+    // The end of the old check removes only the row that it read.
+    b.store
+        .write(|tx| {
+            tx.execute("DELETE FROM link_check WHERE id = ?1", [read])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(1));
 }

@@ -487,8 +487,10 @@ fn a_link_with_an_unknown_named_reference_cuts_the_links() {
     ] {
         assert!(clean(&html(body)).links_cut, "{body}");
     }
-    // Known references, and an `&` with no name and `;`, are read.
+    // Known references, an `&` with no name and `;`, and an empty anchor
+    // (a person sees no link) do not cut.
     for body in [
+        "<a href=\"https&colon;//evil.example.net/\"></a><p>Hello</p>",
         "<a href=\"https://shop.example.com/?a=1&amp;b=2\">Terms &amp; rules</a>",
         "<a href=\"https://shop.example.com/?a=1&b=2\">AT&T news</a>",
     ] {

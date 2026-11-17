@@ -458,11 +458,12 @@ fn open_effect(tag: &Tag, w: &mut Writer) {
             // The href as a browser reads it: `https:x.com` is a web link.
             let href = crate::browser_href(tag.attr("href").unwrap_or(""));
             let lower = href.to_ascii_lowercase();
-            // An unknown reference can hide a web target (`https&colon;`).
-            w.unread |= unknown_entity(&href);
+            // An unknown reference can hide a web target (`https&colon;`):
+            // such a link is open too, so that its shown text cuts the list.
             if ["http:", "https:", "mailto:"]
                 .iter()
                 .any(|p| lower.starts_with(p))
+                || unknown_entity(&href)
             {
                 w.link = Some((href, w.out.len()));
                 w.shown.clear();

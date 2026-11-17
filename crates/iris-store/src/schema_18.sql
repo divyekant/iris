@@ -11,8 +11,12 @@
 -- The rows at the migration: each live message. Mail understood before the
 -- mark had no link check.
 
+-- `id` changes each time a trigger queues the message again, so a check
+-- that read an older state does not remove the row of a newer one.
 CREATE TABLE link_check (
-  message_id INTEGER PRIMARY KEY REFERENCES message(id) ON DELETE CASCADE
+  -- AUTOINCREMENT: a new row never gets the ID of an older one.
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id INTEGER NOT NULL UNIQUE REFERENCES message(id) ON DELETE CASCADE
 );
 
 INSERT INTO link_check(message_id)
@@ -22,18 +26,20 @@ INSERT INTO link_check(message_id)
 CREATE TRIGGER link_check_insert AFTER INSERT ON message
   WHEN NEW.content_sha256 IS NOT NULL AND NEW.gone_at IS NULL
 BEGIN
-  -- No OR IGNORE: the conflict rule of the outer statement would replace it.
-  INSERT INTO link_check(message_id) SELECT NEW.id
-    WHERE NOT EXISTS (SELECT 1 FROM link_check WHERE message_id = NEW.id);
+  -- A new row, with a new ID. No OR IGNORE or OR REPLACE: the conflict
+  -- rule of the outer statement would replace it.
+  DELETE FROM link_check WHERE message_id = NEW.id;
+  INSERT INTO link_check(message_id) VALUES (NEW.id);
 END;
 
 CREATE TRIGGER link_check_update AFTER UPDATE OF content_sha256, gone_at ON message
   WHEN NEW.content_sha256 IS NOT NULL AND NEW.gone_at IS NULL
    AND (OLD.content_sha256 IS NOT NEW.content_sha256 OR OLD.gone_at IS NOT NULL)
 BEGIN
-  -- No OR IGNORE: the conflict rule of the outer statement would replace it.
-  INSERT INTO link_check(message_id) SELECT NEW.id
-    WHERE NOT EXISTS (SELECT 1 FROM link_check WHERE message_id = NEW.id);
+  -- A new row, with a new ID. No OR IGNORE or OR REPLACE: the conflict
+  -- rule of the outer statement would replace it.
+  DELETE FROM link_check WHERE message_id = NEW.id;
+  INSERT INTO link_check(message_id) VALUES (NEW.id);
 END;
 
 -- The check skips your own mail (`SENT`, `DRAFT`). When such a label goes,
@@ -41,7 +47,7 @@ END;
 CREATE TRIGGER link_check_label AFTER DELETE ON message_label
   WHEN (SELECT provider_id FROM label WHERE id = OLD.label_id) IN ('SENT', 'DRAFT')
 BEGIN
+  DELETE FROM link_check WHERE message_id = OLD.message_id;
   INSERT INTO link_check(message_id) SELECT m.id FROM message m
-    WHERE m.id = OLD.message_id AND m.content_sha256 IS NOT NULL AND m.gone_at IS NULL
-      AND NOT EXISTS (SELECT 1 FROM link_check WHERE message_id = OLD.message_id);
+    WHERE m.id = OLD.message_id AND m.content_sha256 IS NOT NULL AND m.gone_at IS NULL;
 END;

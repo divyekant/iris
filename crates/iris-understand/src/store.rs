@@ -128,21 +128,22 @@ pub fn recheck_links(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Resu
     let mut marked = 0;
     let mut after = 0;
     loop {
-        let ids: Vec<i64> = store.read(|c| {
+        let rows: Vec<(i64, i64)> = store.read(|c| {
             let mut st = c.prepare(
-                "SELECT message_id FROM link_check WHERE message_id > ?1
-                 ORDER BY message_id LIMIT ?2",
+                "SELECT id, message_id FROM link_check WHERE id > ?1 ORDER BY id LIMIT ?2",
             )?;
-            let ids = st
-                .query_map([after, LINK_CHECKS], |r| r.get(0))?
+            let rows = st
+                .query_map([after, LINK_CHECKS], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?;
-            Ok(ids)
+            Ok(rows)
         })?;
-        let Some(&last) = ids.last() else {
+        let Some(&(last, _)) = rows.last() else {
             return Ok(marked);
         };
         after = last;
-        for id in ids {
+        for (row, id) in rows {
+            // The row ID first: a trigger that queues the message again
+            // after this read gives it a new row, which this check keeps.
             let Some((mark, sha)) = link_mark_of(store, id) else {
                 continue;
             };
@@ -155,10 +156,20 @@ pub fn recheck_links(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Resu
                 // error leaves the row for the next run.
                 let _ = understand(store, id, &crate::budget::NoModel, now_ms);
             }
-            // The row goes only for the content that the check read, and,
-            // for a deceptive link, only when the message has the mark.
+            // The row goes only for the state that the check read (the same
+            // row, the same content), and, for a deceptive link, only when
+            // the message has the mark.
             let done = store.write(|tx| {
-                if !mark {
+                let n = tx.execute(
+                    "DELETE FROM link_check WHERE id = ?1 AND EXISTS (
+                       SELECT 1 FROM message m WHERE m.id = ?2
+                         AND (m.content_sha256 IS ?3 OR m.gone_at IS NOT NULL)
+                         AND (NOT ?4 OR EXISTS (
+                           SELECT 1 FROM json_each(coalesce(m.hostile, '[]'))
+                           WHERE value = 'link')))",
+                    params![row, id, sha, mark],
+                )?;
+                if n > 0 && !mark {
                     // A mark of earlier content goes: the check of this
                     // content found no deceptive link.
                     tx.execute(
@@ -171,15 +182,6 @@ pub fn recheck_links(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Resu
                         params![id, sha],
                     )?;
                 }
-                let n = tx.execute(
-                    "DELETE FROM link_check WHERE message_id = ?1 AND EXISTS (
-                       SELECT 1 FROM message m WHERE m.id = ?1
-                         AND (m.content_sha256 IS ?2 OR m.gone_at IS NOT NULL)
-                         AND (NOT ?3 OR EXISTS (
-                           SELECT 1 FROM json_each(coalesce(m.hostile, '[]'))
-                           WHERE value = 'link')))",
-                    params![id, sha, mark],
-                )?;
                 Ok(n > 0)
             })?;
             marked += u64::from(mark && done);
