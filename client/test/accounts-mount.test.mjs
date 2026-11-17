@@ -89,7 +89,7 @@ test("the accounts view never says up to date while a copy runs or after a faile
     [{ ...base, last_sync: { ...base.last_sync, result: "error: Gmail: HTTP 500" } }, /last sync failed/],
     [{ ...base, last_sync: { ...base.last_sync, kind: "verify", result: "2 differences, 0 skipped, then error: HTTP 401" } }, /last sync failed/],
     [{ ...base, mirror_ready_at: null, sync: { kind: "first", step: 1 } }, /copies this mailbox now/],
-    [{ ...base, mirror_ready_at: null, sync: { kind: "first", step: 1 }, last_sync: { ...base.last_sync, kind: "first", result: "error: Gmail: HTTP 500" } }, /last sync failed/],
+    [{ ...base, mirror_ready_at: null, sync: { kind: "first", step: 1 }, last_sync: { ...base.last_sync, kind: "first", result: "error: Gmail: HTTP 500" } }, /last try of the first copy failed\. Iris tries again/],
     [base, /Up to date/],
   ];
   for (const [account, want] of cases) {
@@ -98,6 +98,10 @@ test("the accounts view never says up to date while a copy runs or after a faile
       const row = text(view.target.querySelector(".accounts li"));
       assert.match(row, want, JSON.stringify(account));
       if (want.source !== "Up to date") assert.doesNotMatch(row, /Up to date/);
+      // A failed try is no stop: Iris tries again, so only a refused sign-in gets the error dot.
+      const dot = view.target.querySelector(".tone");
+      assert.equal(dot.classList.contains("stopped"), account.state === "needs_sign_in");
+      if (/failed/.test(want.source)) assert.ok(dot.classList.contains("retry"));
     } finally {
       view.destroy();
     }
