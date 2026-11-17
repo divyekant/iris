@@ -915,6 +915,7 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                  DROP TABLE use_open; DROP TABLE use_day; DROP TABLE measure_time;
                  DROP TABLE write_send; DROP TABLE comment_delivery;
                  DROP TABLE changeset_comment;
+                 DROP TRIGGER job_notes_end; DROP TABLE job_notes;
                  PRAGMA user_version = 19;",
             )?;
             Ok(())
