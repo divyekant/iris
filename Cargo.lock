@@ -1127,6 +1127,7 @@ version = "0.0.0"
 name = "iris-session"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "httparse",
  "iris-job",
  "iris-store",
