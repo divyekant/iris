@@ -1036,12 +1036,21 @@ order: 2, 4, 1, 3, 5, 0. The printed result gives the state of each action.
 The engine offers the same verbs as Model Context Protocol (MCP) tools, for an
 agent that does not work in a folder. The rules for the MCP interface:
 
+- `iris mcp` serves the tools on standard input and output
+  (`crates/iris-mcp`, card R5-11).
 - One MCP tool for each verb of the command, with the same name and the same
-  arguments.
-- The engine makes a session socket for each MCP job. The MCP interface never
-  uses `iris.sock`, so the session limits apply. MCP gives no verb that the
-  command does not have.
-- The results are the same JSON documents as `--json`.
+  arguments. `iris changeset --drafts` is the tool `drafts`, and the file of
+  `iris draft` is the object `draft`. MCP gives no verb that the command
+  does not have, and no verb of the person or of the host (`serve`,
+  `account`, `model`, `sending`, `backup`).
+- Each tool call takes the path of its verb in the same mode, so MCP adds
+  no power. In host mode: the read verbs read the store (section 8.1), and
+  the other verbs go through `iris.sock` with the author `local`. In
+  session mode, the MCP interface uses the session socket, so the session
+  limits apply. The command has no session mode yet, so `iris mcp` has
+  host mode only (issue #440).
+- The results are the same JSON documents as `--json`. A failed call gives
+  the error text and the exit code of section 8.4 (`(exit code N)`).
 
 ### 8.6 The web client and the trust boundary
 
