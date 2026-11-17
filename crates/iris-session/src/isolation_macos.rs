@@ -191,6 +191,46 @@ impl Seatbelt {
         Ok(())
     }
 
+    /// The resource coalition of `pid`, or `None` if no process has the ID.
+    pub fn coalition_of(&self, pid: i32) -> io::Result<Option<u64>> {
+        Ok(self.sys.proc(pid)?.map(|p| p.coalition))
+    }
+
+    /// Writes the record of `session` for this process: the boot time and
+    /// the coalition of this process (the job process of the session), and
+    /// the egress port.
+    pub fn write_own_record(&self, session: i64, port: Option<u16>) -> io::Result<()> {
+        let coalition = self
+            .coalition_of(std::process::id() as i32)?
+            .ok_or_else(|| io::Error::other("this process has no coalition"))?;
+        let rec = Record {
+            boot: self.sys.boot_time()?,
+            coalition,
+            port,
+        };
+        self.write_record(session, &rec)
+    }
+
+    /// Removes the files of an ended session: the private home and `/tmp`,
+    /// the record, the stop journal, the stop lock and the job definition.
+    /// The reap calls it only after `stop` returned `Ok` and `ended` is
+    /// true.
+    pub fn remove_files(&self, session: i64) -> io::Result<()> {
+        for dir in [self.home(session), self.tmp(session)] {
+            match fs::remove_dir_all(&dir) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+        }
+        for ext in ["sandbox", "stops", "stop.lock", "plist", "hold"] {
+            match fs::remove_file(self.file(session, ext)) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// The record of the session, or `None` if there is none.
     pub fn record(&self, session: i64) -> io::Result<Option<Record>> {
         match fs::read_to_string(self.file(session, "sandbox")) {
@@ -381,8 +421,11 @@ impl Seatbelt {
         let Some(rec) = rec.filter(|r| r.boot == boot) else {
             match fs::remove_file(self.file(session, "stops")) {
                 Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-                _ => return Ok(()),
+                _ => {}
             }
+            // A shim that ended after the bootstrap and before the record
+            // can leave the job loaded: remove it, with no signal.
+            return self.bootout(session, end);
         };
         self.recover(session, cid)?;
         // 1. The job, inside the time limit of the stop.
@@ -520,6 +563,10 @@ impl Isolation for Seatbelt {
 
     fn stop(&self, session: i64) -> io::Result<()> {
         self.stop_with(session, STOP_WAIT)
+    }
+
+    fn remove_files(&self, session: i64) -> io::Result<()> {
+        Seatbelt::remove_files(self, session)
     }
 
     fn ended(&self, session: i64) -> io::Result<bool> {
