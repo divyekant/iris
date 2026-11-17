@@ -324,6 +324,13 @@ pub enum JobCommand {
     Stop { id: String },
     /// Show the last session of the job and its state.
     Session { id: String },
+    /// Answer the question of the job. Iris starts a new session of the
+    /// job with the answer in `JOB.md`.
+    Answer {
+        id: String,
+        /// The answer, at most 10000 characters.
+        text: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -565,8 +572,10 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
     let request = socket_request(&cli.command)?;
     if let Command::Job { command } = &cli.command {
         // A bad job ID is a usage error, before the engine or the store.
-        let (JobCommand::Run { id, .. } | JobCommand::Stop { id } | JobCommand::Session { id }) =
-            command;
+        let (JobCommand::Run { id, .. }
+        | JobCommand::Stop { id }
+        | JobCommand::Session { id }
+        | JobCommand::Answer { id, .. }) = command;
         if iris_job::parse_job_id(id).is_none() {
             return Err(socket::Failure {
                 code: socket::code::USAGE,
@@ -858,7 +867,7 @@ fn job_request(dir: &std::path::Path, c: &JobCommand) -> Option<Result<(), socke
             serde_json::json!({ "job": id, "agent": agent }),
         ),
         JobCommand::Stop { id } => ("job.stop", id, serde_json::json!({ "job": id })),
-        JobCommand::Session { .. } => return None,
+        JobCommand::Session { .. } | JobCommand::Answer { .. } => return None,
     };
     Some(
         match socket::request_with(
@@ -1189,6 +1198,18 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
                 }
                 None => Err(format!("{id} has no session")),
             }
+        }
+        Command::Job {
+            command: JobCommand::Answer { id, text },
+        } => {
+            let job = iris_job::parse_job_id(id).ok_or(format!("{id} is not a job ID"))?;
+            let store = open()?;
+            iris_api::job_row(&store, id)
+                .map_err(|e| e.to_string())?
+                .ok_or(format!("no job has the ID {id}"))?;
+            iris_api::answer_job(&store, job, text, engine::now_ms()).map_err(|e| e.to_string())?;
+            println!("{id}: answered. Iris starts a new session of the job.");
+            Ok(())
         }
         Command::Job { .. } => Err("the engine socket runs this verb".into()),
         Command::Matters { command } => {
