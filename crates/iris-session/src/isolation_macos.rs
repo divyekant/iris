@@ -26,6 +26,8 @@ use super::{Command, Isolation};
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// The longest run of the freeze and kill loop of one `stop`.
 const STOP_WAIT: Duration = Duration::from_secs(5);
+/// The longest run of `check`.
+const CHECK_WAIT: Duration = Duration::from_secs(5);
 /// The pause between two scans of the freeze, so that a `SIGSTOP` takes
 /// effect.
 const SCAN_PAUSE: Duration = Duration::from_millis(2);
@@ -47,9 +49,9 @@ pub trait Sys: Send + Sync {
     fn boot_time(&self) -> io::Result<String>;
     /// The process IDs of the system (`proc_listallpids`).
     fn pids(&self) -> io::Result<Vec<i32>>;
-    /// The facts of `pid`, or `None` if no such process runs or a read
-    /// failed.
-    fn proc(&self, pid: i32) -> Option<Proc>;
+    /// The facts of `pid`. `Ok(None)` only if no process has the ID
+    /// (`ESRCH`); each other failure of a read is an error.
+    fn proc(&self, pid: i32) -> io::Result<Option<Proc>>;
     /// `(tasks_started, tasks_exited)` of the coalition `cid`, or `None` if
     /// the coalition is gone (`ESRCH`).
     fn counts(&self, cid: u64) -> io::Result<Option<(u64, u64)>>;
@@ -58,6 +60,11 @@ pub trait Sys: Send + Sync {
     /// Removes the launchd job `label`. A job that is not loaded is not an
     /// error.
     fn bootout(&self, label: &str) -> io::Result<()>;
+    /// Runs `argv` with no input and no output, and gives its exit code.
+    /// It kills the program and gives an error after `wait`.
+    fn run(&self, argv: &[OsString], wait: Duration) -> io::Result<i32>;
+    /// The user ID of this process.
+    fn uid(&self) -> u32;
 }
 
 /// The record of a session: the boot, the coalition of its launchd job and
@@ -75,11 +82,22 @@ impl Record {
         format!("{} {} {}\n", self.boot, self.coalition, port)
     }
 
+    /// The record is one line, `<sec>.<usec> <coalition> <port or ->`,
+    /// with 6 digits of microseconds. Each other text is not valid.
     fn parse(text: &str) -> Option<Record> {
-        let p: Vec<&str> = text.split_whitespace().collect();
+        let line = text.strip_suffix('\n')?;
+        let p: Vec<&str> = line.split(' ').collect();
         let [boot, cid, port] = p[..] else {
             return None;
         };
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        let (sec, usec) = boot.split_once('.')?;
+        if !digits(sec) || !digits(usec) || usec.len() != 6 || !digits(cid) {
+            return None;
+        }
+        if port != "-" && !digits(port) {
+            return None;
+        }
         Some(Record {
             boot: boot.to_string(),
             coalition: cid.parse().ok().filter(|c| *c > 0)?,
@@ -199,13 +217,9 @@ impl Seatbelt {
 
     fn read_journal(&self, session: i64) -> io::Result<Vec<i32>> {
         match fs::read_to_string(self.file(session, "stops")) {
-            Ok(t) => t
-                .split_whitespace()
-                .map(|p| {
-                    p.parse()
-                        .map_err(|_| io::Error::other("the stop journal is not valid"))
-                })
-                .collect(),
+            Ok(t) => {
+                parse_journal(&t).ok_or_else(|| io::Error::other("the stop journal is not valid"))
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(e) => Err(e),
         }
@@ -254,8 +268,16 @@ impl Seatbelt {
     /// The table of the spec. The process that has the ID now is the one
     /// that Iris can have stopped.
     fn resolved(&self, pid: i32, cid: Option<u64>) -> bool {
-        let ok = |p: Option<Proc>| p.is_none_or(|p| Some(p.coalition) == cid || !p.stopped);
-        if ok(self.sys.proc(pid)) {
+        // A read that fails leaves the entry.
+        let ok = |p: io::Result<Option<Proc>>| match p {
+            Ok(p) => p.is_none_or(|p| Some(p.coalition) == cid || !p.stopped),
+            Err(_) => false,
+        };
+        let first = self.sys.proc(pid);
+        if first.is_err() {
+            return false;
+        }
+        if ok(first) {
             return true;
         }
         self.sys.signal(pid, libc::SIGCONT).is_ok() && ok(self.sys.proc(pid))
@@ -272,7 +294,9 @@ impl Seatbelt {
         let mut frozen = BTreeMap::new();
         let mut settled = true;
         for pid in self.sys.pids()? {
-            let Some(p) = self.sys.proc(pid) else {
+            // A process that cannot be read (for example of another user)
+            // is skipped: if it is a member, the count below does not match.
+            let Ok(Some(p)) = self.sys.proc(pid) else {
                 continue;
             };
             if p.coalition != cid {
@@ -287,7 +311,8 @@ impl Seatbelt {
             let _ = self.sys.signal(pid, libc::SIGSTOP);
             // The ID can have gone to a process of another coalition
             // between the reads: let that process run again.
-            if self.sys.proc(pid).map(|q| q.coalition) != Some(cid) {
+            let now = self.sys.proc(pid).ok().flatten().map(|q| q.coalition);
+            if now != Some(cid) {
                 let _ = self.sys.signal(pid, libc::SIGCONT);
             }
         }
@@ -305,6 +330,8 @@ impl Seatbelt {
             let same = self
                 .sys
                 .proc(pid)
+                .ok()
+                .flatten()
                 .is_some_and(|p| p.stopped && p.coalition == cid && p.unique == unique);
             if same {
                 let _ = self.sys.signal(pid, libc::SIGKILL);
@@ -321,7 +348,7 @@ impl Seatbelt {
         // outside it, does the work.
         let me = self
             .sys
-            .proc(std::process::id() as i32)
+            .proc(std::process::id() as i32)?
             .map(|p| p.coalition);
         if cid.is_some() && me == cid {
             return Ok(());
@@ -363,16 +390,51 @@ impl Seatbelt {
 }
 
 impl Isolation for Seatbelt {
-    /// The counters of the coalition of this process. The sandbox and the
-    /// GUI domain of launchd come with the shim (R4-05m, part C).
+    /// In 5 seconds: `sandbox-exec` runs `/usr/bin/true` with the profile
+    /// of a test session, the GUI domain of launchd exists, and the
+    /// counters of the coalition of this process give a result.
     fn check(&self) -> Result<(), String> {
+        let end = Instant::now() + CHECK_WAIT;
+        let left = || end.saturating_duration_since(Instant::now());
+        let test = self.sessions.join("check");
+        let paths = Paths {
+            workspace: test.clone(),
+            home: test.clone(),
+            tmp: test,
+            programs: vec!["/usr/bin/true".into()],
+        };
+        let mut argv: Vec<OsString> = vec![SANDBOX_EXEC.into()];
+        argv.extend(sandbox_args(&paths, None));
+        argv.push("/usr/bin/true".into());
+        let sandbox = "the macOS sandbox (sandbox-exec) does not work";
+        match self.sys.run(&argv, left()) {
+            Ok(0) => {}
+            Ok(c) => return Err(format!("{sandbox}: exit code {c}")),
+            Err(e) => return Err(format!("{sandbox}: {e}")),
+        }
+        let domain = format!("gui/{}", self.sys.uid());
+        let argv: Vec<OsString> = vec!["/bin/launchctl".into(), "print".into(), domain.into()];
+        if self.sys.run(&argv, left()).ok() != Some(0) {
+            return Err(
+                "agent sessions on macOS need a person signed in to the Mac \
+                        (no launchd GUI domain)"
+                    .into(),
+            );
+        }
         let me = self
             .sys
             .proc(std::process::id() as i32)
+            .ok()
+            .flatten()
             .ok_or("the coalition of this process cannot be read")?;
-        self.sys
-            .counts(me.coalition)
-            .map_err(|e| format!("the coalition counters cannot be read: {e}"))?;
+        match self.sys.counts(me.coalition) {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err("the coalition of this process is gone".into()),
+            Err(e) => return Err(format!("the coalition counters cannot be read: {e}")),
+        }
+        if left().is_zero() {
+            return Err("the check of the macOS sandbox took more than 5 seconds".into());
+        }
         Ok(())
     }
 
@@ -398,14 +460,8 @@ impl Isolation for Seatbelt {
                 .flatten()
                 .collect(),
         };
-        let (text, params) = profile(&paths, egress_port);
-        let mut a: Vec<OsString> = Vec::new();
-        for (k, v) in params {
-            let mut d = OsString::from(format!("{k}="));
-            d.push(v);
-            a.extend(["-D".into(), d]);
-        }
-        a.extend(["-p".into(), text.into(), "/usr/bin/env".into()]);
+        let mut a = sandbox_args(&paths, egress_port);
+        a.push("/usr/bin/env".into());
         let var = |k: &str, v: &Path| {
             let mut s = OsString::from(format!("{k}="));
             s.push(v);
@@ -445,6 +501,36 @@ impl Isolation for Seatbelt {
             Some(rec) => self.coalition_ended(&rec),
         }
     }
+}
+
+/// The options of `sandbox-exec` for the profile of `paths`: each
+/// parameter, then the profile text.
+fn sandbox_args(paths: &Paths, egress_port: Option<u16>) -> Vec<OsString> {
+    let (text, params) = profile(paths, egress_port);
+    let mut a: Vec<OsString> = Vec::new();
+    for (k, v) in params {
+        let mut d = OsString::from(format!("{k}="));
+        d.push(v);
+        a.extend(["-D".into(), d]);
+    }
+    a.extend(["-p".into(), text.into()]);
+    a
+}
+
+/// The stop journal: one process ID (greater than 0) on each line, each
+/// line with its end. `None` for each other text.
+fn parse_journal(text: &str) -> Option<Vec<i32>> {
+    if text.is_empty() {
+        return Some(Vec::new());
+    }
+    text.strip_suffix('\n')?
+        .split('\n')
+        .map(|l| {
+            let ok = !l.is_empty() && l.bytes().all(|b| b.is_ascii_digit());
+            ok.then(|| l.parse::<i32>().ok().filter(|p| *p > 0))
+                .flatten()
+        })
+        .collect()
 }
 
 /// The system folders that the agent can read (never all of `/System`,

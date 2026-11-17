@@ -32,6 +32,12 @@ struct World {
     cont_fails: BTreeSet<i32>,
     /// A `SIGCONT` leaves these process IDs stopped.
     stay_stopped: BTreeSet<i32>,
+    /// A read of these process IDs fails.
+    read_fails: BTreeSet<i32>,
+    /// After a `SIGSTOP` to one of these, a read of it fails.
+    fail_after_stop: BTreeSet<i32>,
+    /// The exit code of each program for `run`, or an error if absent.
+    exits: BTreeMap<String, i32>,
     next_pid: i32,
     next_unique: u64,
 }
@@ -91,19 +97,23 @@ impl Sys for Fake {
         Ok(self.w().procs.keys().copied().collect())
     }
 
-    fn proc(&self, pid: i32) -> Option<Proc> {
+    fn proc(&self, pid: i32) -> io::Result<Option<Proc>> {
         if pid == std::process::id() as i32 {
-            return Some(Proc {
+            return Ok(Some(Proc {
                 coalition: 1,
                 stopped: false,
                 unique: 1,
-            });
+            }));
         }
-        self.w().procs.get(&pid).map(|p| Proc {
+        let w = self.w();
+        if w.read_fails.contains(&pid) {
+            return Err(io::Error::other("fake"));
+        }
+        Ok(w.procs.get(&pid).map(|p| Proc {
             coalition: p.coalition,
             stopped: p.stopped,
             unique: p.unique,
-        })
+        }))
     }
 
     fn counts(&self, cid: u64) -> io::Result<Option<(u64, u64)>> {
@@ -120,6 +130,9 @@ impl Sys for Fake {
         w.signals.push((pid, sig));
         if sig == libc::SIGCONT && w.cont_fails.contains(&pid) {
             return Err(io::Error::other("fake"));
+        }
+        if sig == libc::SIGSTOP && w.fail_after_stop.contains(&pid) {
+            w.read_fails.insert(pid);
         }
         if sig == libc::SIGSTOP {
             if let Some(c) = w.reuse_on_stop.remove(&pid) {
@@ -159,6 +172,19 @@ impl Sys for Fake {
     fn bootout(&self, label: &str) -> io::Result<()> {
         self.w().bootouts.push(label.to_string());
         Ok(())
+    }
+
+    fn run(&self, argv: &[OsString], _wait: Duration) -> io::Result<i32> {
+        let program = argv[0].to_string_lossy().into_owned();
+        self.w()
+            .exits
+            .get(&program)
+            .copied()
+            .ok_or_else(|| io::Error::other("fake: no such program"))
+    }
+
+    fn uid(&self) -> u32 {
+        501
     }
 }
 
@@ -203,7 +229,17 @@ fn a_record_reads_back_and_a_bad_record_is_an_error() {
     };
     s.write_record(2, &none).unwrap();
     assert_eq!(s.record(2).unwrap(), Some(none));
-    for bad in ["", "1 2", "b 0 -", "b x -", "b 3 0", "b 3 70000", "b 3 - x"] {
+    for bad in [
+        "",
+        "1 2",
+        "1.000001 0 -\n",
+        "bad 50 4000\n",
+        "1.0001 50 -\n",
+        "1.000001 3 0\n",
+        "1.000001 3 70000\n",
+        "1.000001 3 -",
+        "1.000001  3 -\n",
+    ] {
         fs::write(s.file(3, "sandbox"), bad).unwrap();
         assert!(s.record(3).is_err(), "{bad:?}");
     }
@@ -456,5 +492,158 @@ fn no_path_reaches_the_profile_text() {
         let (text, params) = profile(&paths(&w), Some(1));
         assert_eq!(strip_params(&text), base, "{w:?}");
         assert!(params.iter().any(|(_, v)| v == Path::new(&w)));
+    }
+}
+
+#[test]
+fn a_failed_read_after_a_sigstop_keeps_the_entry_and_fails_the_stop() {
+    let (_d, s, f) = setup("unknown");
+    s.write_record(1, &rec(50)).unwrap();
+    let pid = f.add(50, false);
+    // The process of the session ends, its ID goes to a process of
+    // coalition 60 at the SIGSTOP, and each later read of it fails.
+    f.w().counts.get_mut(&50).unwrap().1 += 1;
+    let q = f.add(50, false);
+    f.w().reuse_on_stop.insert(pid, 60);
+    f.w().fail_after_stop.insert(pid);
+    let e = s.stop(1).unwrap_err();
+    assert!(e.to_string().contains("1 processes"), "{e}");
+    assert_eq!(s.read_journal(1).unwrap(), [pid]);
+    assert!(!f.w().procs.contains_key(&q));
+    // When the read works again, the next stop sends SIGCONT and resolves it.
+    f.w().read_fails.clear();
+    s.stop(1).unwrap();
+    assert!(!f.w().procs[&pid].stopped);
+    assert!(s.read_journal(1).unwrap().is_empty());
+}
+
+#[test]
+fn check_needs_the_sandbox_the_gui_domain_and_the_counters() {
+    let (_d, s, f) = setup("check");
+    let ok = |f: &Fake| {
+        let mut w = f.w();
+        w.exits.insert(SANDBOX_EXEC.into(), 0);
+        w.exits.insert("/bin/launchctl".into(), 0);
+        w.counts.insert(1, (3, 1));
+        w.counts_fail = false;
+    };
+    ok(&f);
+    s.check().unwrap();
+    f.w().exits.insert(SANDBOX_EXEC.into(), 65);
+    assert!(s.check().unwrap_err().contains("sandbox-exec"));
+    f.w().exits.remove(SANDBOX_EXEC);
+    assert!(s.check().unwrap_err().contains("sandbox-exec"));
+    ok(&f);
+    f.w().exits.insert("/bin/launchctl".into(), 113);
+    assert!(s.check().unwrap_err().contains("GUI domain"));
+    ok(&f);
+    f.w().counts.remove(&1);
+    assert!(s.check().unwrap_err().contains("gone"));
+    ok(&f);
+    f.w().counts_fail = true;
+    assert!(s.check().unwrap_err().contains("counters"));
+}
+
+/// Random text: a record parses only as the oracle says, and each valid
+/// record reads back the same.
+#[test]
+fn no_random_text_is_a_record_but_the_valid_form() {
+    fn oracle(t: &str) -> bool {
+        let Some(line) = t.strip_suffix('\n') else {
+            return false;
+        };
+        let p: Vec<&str> = line.split(' ').collect();
+        let num = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        p.len() == 3
+            && p[0]
+                .split_once('.')
+                .is_some_and(|(a, b)| num(a) && num(b) && b.len() == 6)
+            && num(p[1])
+            && p[1].parse::<u64>().is_ok_and(|c| c > 0)
+            && (p[2] == "-" || (num(p[2]) && p[2].parse::<u16>().is_ok_and(|x| x > 0)))
+    }
+    let mut seed = 11u64;
+    let mut next = |n: u64| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) % n
+    };
+    let alphabet = b"0123456789. -\nx";
+    let mut valid = 0;
+    for _ in 0..50_000 {
+        let t: String = if next(2) == 0 {
+            let len = next(24);
+            (0..len)
+                .map(|_| alphabet[next(alphabet.len() as u64) as usize] as char)
+                .collect()
+        } else {
+            let mut t = Record {
+                boot: format!("{}.{:06}", next(1 << 40), next(1_000_000)),
+                coalition: next(1 << 20),
+                port: (next(3) > 0).then(|| next(70_000) as u16),
+            }
+            .to_line();
+            // Cut or change one byte.
+            if next(3) == 0 {
+                let i = next(t.len() as u64) as usize;
+                t.replace_range(
+                    i..i + 1,
+                    &(alphabet[next(alphabet.len() as u64) as usize] as char).to_string(),
+                );
+            }
+            t
+        };
+        let got = Record::parse(&t);
+        assert_eq!(got.is_some(), oracle(&t), "{t:?}");
+        if let Some(r) = got {
+            valid += 1;
+            assert_eq!(Record::parse(&r.to_line()), Some(r));
+        }
+    }
+    assert!(valid > 5000, "{valid}");
+}
+
+/// Random text: the journal parses only as one positive process ID on each
+/// whole line.
+#[test]
+fn no_random_text_is_a_journal_but_the_valid_form() {
+    let mut seed = 5u64;
+    let mut next = |n: u64| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) % n
+    };
+    let alphabet = b"0123456789\n -x";
+    for _ in 0..50_000 {
+        let t: String = if next(2) == 0 {
+            let len = next(20);
+            (0..len)
+                .map(|_| alphabet[next(alphabet.len() as u64) as usize] as char)
+                .collect()
+        } else {
+            (0..next(4))
+                .map(|_| format!("{}\n", next(1 << 31)))
+                .collect()
+        };
+        let lines: Option<Vec<i32>> = if t.is_empty() {
+            Some(Vec::new())
+        } else {
+            t.strip_suffix('\n').and_then(|b| {
+                b.split('\n')
+                    .map(|l| {
+                        (!l.is_empty() && l.bytes().all(|c| c.is_ascii_digit()))
+                            .then(|| l.parse::<i32>().ok().filter(|p| *p > 0))
+                            .flatten()
+                    })
+                    .collect()
+            })
+        };
+        assert_eq!(parse_journal(&t), lines, "{t:?}");
+        if let Some(p) = &lines {
+            let back: String = p.iter().map(|x| format!("{x}\n")).collect();
+            assert_eq!(parse_journal(&back).as_ref(), Some(p));
+        }
     }
 }

@@ -478,5 +478,13 @@ Close issue #508.
 ## Plan
 
 1. R4-05m spec: this file.
-2. R4-05m code: the macOS isolation, the shim and the job verb, the egress
-   peer, and the Mac acceptance.
+2. R4-05m code, in three PRs, so that each one stays small:
+   1. The egress token and peer (PR #611).
+   2. The isolation logic (`isolation_macos.rs`): the profile, the
+      record, `ended`, `stop` with the freeze and the journal, and
+      `check`, with the real process facts (`isolation_macos_sys.rs`).
+      `system()` still refuses macOS after this PR, because no code makes
+      the launchd job and the record yet.
+   3. The shim, the `session-job` verb and the handoff, the private home
+      and `/tmp`, their removal at the reap, and `system()` on macOS.
+3. The Mac acceptance, after the third code PR.

@@ -2,10 +2,11 @@
 //! the coalition counters and `launchctl`. macOS only. The Mac acceptance
 //! of R4-05m tests it.
 
-use std::ffi::{c_int, c_void};
+use std::ffi::{c_int, c_void, OsString};
 use std::io;
 use std::mem::{size_of, MaybeUninit};
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use super::macos::{Proc, Sys};
 
@@ -48,16 +49,25 @@ extern "C" {
 /// The real process facts of macOS.
 pub struct MacSys;
 
-/// Reads the `flavor` of `pid` into `T`. `None` if the size is not the
-/// full size of `T` (no such process, or no permission).
-fn pidinfo<T: Copy>(pid: i32, flavor: c_int) -> Option<T> {
+/// Reads the `flavor` of `pid` into `T`. `Ok(None)` if no process has the
+/// ID (`ESRCH`). Each other failure, also a short read, is an error.
+fn pidinfo<T: Copy>(pid: i32, flavor: c_int) -> io::Result<Option<T>> {
     let mut v = MaybeUninit::<T>::zeroed();
     let size = size_of::<T>() as c_int;
     // SAFETY: the buffer has `size` bytes, and the kernel writes at most
     // `size` bytes. A zeroed `T` of plain integers is a valid value.
     let n = unsafe { libc::proc_pidinfo(pid, flavor, 0, v.as_mut_ptr().cast(), size) };
-    // SAFETY: the buffer was zeroed, so each byte is set.
-    (n == size).then(|| unsafe { v.assume_init() })
+    if n == size {
+        // SAFETY: the buffer was zeroed, so each byte is set.
+        return Ok(Some(unsafe { v.assume_init() }));
+    }
+    let e = io::Error::last_os_error();
+    if n <= 0 && e.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(None);
+    }
+    Err(io::Error::other(format!(
+        "proc_pidinfo {flavor} of {pid}: {n} bytes ({e})"
+    )))
 }
 
 impl Sys for MacSys {
@@ -101,14 +111,19 @@ impl Sys for MacSys {
         Ok(buf)
     }
 
-    fn proc(&self, pid: i32) -> Option<Proc> {
-        let coalition = pidinfo::<[u64; 5]>(pid, PIDCOALITIONINFO)?[0];
-        let info = pidinfo::<BsdInfoUniq>(pid, PIDT_BSDINFOWITHUNIQID)?;
-        Some(Proc {
+    fn proc(&self, pid: i32) -> io::Result<Option<Proc>> {
+        let Some(c) = pidinfo::<[u64; 5]>(pid, PIDCOALITIONINFO)? else {
+            return Ok(None);
+        };
+        let Some(info) = pidinfo::<BsdInfoUniq>(pid, PIDT_BSDINFOWITHUNIQID)? else {
+            return Ok(None);
+        };
+        let coalition = c[0];
+        Ok(Some(Proc {
             coalition,
             stopped: info.bsd.pbi_status == libc::SSTOP,
             unique: info.uniq.unique,
-        })
+        }))
     }
 
     fn counts(&self, cid: u64) -> io::Result<Option<(u64, u64)>> {
@@ -139,9 +154,37 @@ impl Sys for MacSys {
         Ok(())
     }
 
-    fn bootout(&self, label: &str) -> io::Result<()> {
+    fn uid(&self) -> u32 {
         // SAFETY: getuid cannot fail.
-        let uid = unsafe { libc::getuid() };
+        unsafe { libc::getuid() }
+    }
+
+    fn run(&self, argv: &[OsString], wait: Duration) -> io::Result<i32> {
+        let (program, args) = argv.split_first().ok_or(io::ErrorKind::InvalidInput)?;
+        let mut child = std::process::Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let end = Instant::now() + wait;
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return status
+                    .code()
+                    .ok_or_else(|| io::Error::other(format!("{status}")));
+            }
+            if Instant::now() >= end {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn bootout(&self, label: &str) -> io::Result<()> {
+        let uid = self.uid();
         let status = std::process::Command::new("/bin/launchctl")
             .arg("bootout")
             .arg(format!("gui/{uid}/{label}"))
