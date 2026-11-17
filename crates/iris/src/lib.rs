@@ -12,6 +12,7 @@ macro_rules! say {
 pub mod cost;
 pub mod engine;
 pub mod notify;
+pub mod nudge;
 pub mod reply;
 pub mod session_socket;
 pub mod sessions;
@@ -109,6 +110,13 @@ pub enum Command {
         #[arg(long)]
         why: Option<String>,
     },
+    /// In a job workspace: end the session, and ask the person one
+    /// question. Iris shows it in the brief, and starts a new session of
+    /// the job with the answer in `JOB.md`. A verb of a session only.
+    Ask {
+        /// The question, at most 2000 characters.
+        question: String,
+    },
     /// Copy the data folder to a new folder while the engine runs.
     Backup {
         /// The backup folder. It must not exist, or must be empty.
@@ -136,6 +144,15 @@ pub enum Command {
         #[arg(value_enum)]
         state: Option<Switch>,
     },
+    /// Stop all agent work: end each session of a job, and apply and send
+    /// nothing until `iris resume`. `--show` only shows the state.
+    Stop {
+        #[arg(long)]
+        show: bool,
+    },
+    /// End the stop. Actions apply again, and each held send waits a full
+    /// hold before it leaves.
+    Resume,
     /// Cancel the send of a draft (`d-4`) while it waits in the outbox.
     Cancel { id: String },
     /// Close a commitment (`c-7`) in a draft changeset. Needs the engine.
@@ -324,6 +341,13 @@ pub enum JobCommand {
     Stop { id: String },
     /// Show the last session of the job and its state.
     Session { id: String },
+    /// Answer the question of the job. Iris starts a new session of the
+    /// job with the answer in `JOB.md`.
+    Answer {
+        id: String,
+        /// The answer, at most 10000 characters.
+        text: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -568,8 +592,10 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
     let request = socket_request(&cli.command)?;
     if let Command::Job { command } = &cli.command {
         // A bad job ID is a usage error, before the engine or the store.
-        let (JobCommand::Run { id, .. } | JobCommand::Stop { id } | JobCommand::Session { id }) =
-            command;
+        let (JobCommand::Run { id, .. }
+        | JobCommand::Stop { id }
+        | JobCommand::Session { id }
+        | JobCommand::Answer { id, .. }) = command;
         if iris_job::parse_job_id(id).is_none() {
             return Err(socket::Failure {
                 code: socket::code::USAGE,
@@ -589,7 +615,7 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
             return r;
         }
     }
-    if let Command::List { .. } | Command::Wait { .. } = &cli.command {
+    if let Command::List { .. } | Command::Wait { .. } | Command::Ask { .. } = &cli.command {
         return Err(socket::Failure {
             code: socket::code::USAGE,
             error: "this is a verb of a session: run it in a job workspace".into(),
@@ -707,6 +733,18 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
             "{} waits until {}",
             verbs::field(r["job"].as_str().unwrap_or("-")),
             verbs::field(r["until"].as_str().unwrap_or("-"))
+        );
+        return Ok(());
+    }
+    if let Command::Ask { question } = c {
+        // The ask ends this session: after a lost answer, `iris status` in
+        // a new session, or the job page, shows the state of the job.
+        let args = serde_json::json!({ "question": question });
+        let r = socket::request_at(path, "ask", args, socket::ANSWER_WAIT, "iris status")
+            .map_err(unreachable)?;
+        println!(
+            "{} asks the person and waits for the answer",
+            verbs::field(r["job"].as_str().unwrap_or("-"))
         );
         return Ok(());
     }
@@ -849,7 +887,7 @@ fn job_request(dir: &std::path::Path, c: &JobCommand) -> Option<Result<(), socke
             serde_json::json!({ "job": id, "agent": agent }),
         ),
         JobCommand::Stop { id } => ("job.stop", id, serde_json::json!({ "job": id })),
-        JobCommand::Session { .. } => return None,
+        JobCommand::Session { .. } | JobCommand::Answer { .. } => return None,
     };
     Some(
         match socket::request_with(
@@ -1276,7 +1314,9 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
         // `run` refuses it in host mode, before the store.
-        Command::List { .. } | Command::Wait { .. } => Err("this is a verb of a session".into()),
+        Command::List { .. } | Command::Wait { .. } | Command::Ask { .. } => {
+            Err("this is a verb of a session".into())
+        }
         Command::Watch { command } => print(verbs::watch(&open()?, command)),
         Command::Job {
             command: JobCommand::Session { id },
@@ -1295,6 +1335,18 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
                 }
                 None => Err(format!("{id} has no session")),
             }
+        }
+        Command::Job {
+            command: JobCommand::Answer { id, text },
+        } => {
+            let job = iris_job::parse_job_id(id).ok_or(format!("{id} is not a job ID"))?;
+            let store = open()?;
+            iris_api::job_row(&store, id)
+                .map_err(|e| e.to_string())?
+                .ok_or(format!("no job has the ID {id}"))?;
+            iris_api::answer_job(&store, job, text, engine::now_ms()).map_err(|e| e.to_string())?;
+            println!("{id}: answered. Iris starts a new session of the job.");
+            Ok(())
         }
         Command::Job { .. } => Err("the engine socket runs this verb".into()),
         Command::Matters { command } => {
@@ -1362,6 +1414,34 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
                 match iris_apply::sending(&store).map_err(|e| e.to_string())? {
                     Some(_) => "Sending is on.",
                     None => "Sending is off. Sends wait in the outbox.",
+                }
+            );
+            Ok(())
+        }
+        Command::Stop { show } => {
+            let store = open()?;
+            if *show {
+                let now = iris_apply::stop_state(&store).map_err(|e| e.to_string())?;
+                println!("{}", stop_state(now.as_ref()));
+                return Ok(());
+            }
+            let s = iris_apply::stop(&store).map_err(|e| e.to_string())?;
+            let text = stop_text(&s);
+            if s.live > 0 || s.busy {
+                return Err(text);
+            }
+            println!("{text}");
+            Ok(())
+        }
+        Command::Resume => {
+            let store = open()?;
+            let resumed = iris_apply::resume(&store).map_err(|e| e.to_string())?;
+            println!(
+                "{}",
+                if resumed {
+                    "Iris runs again. Each held send waits a full hold before it leaves."
+                } else {
+                    "Iris was not stopped. Nothing changed."
                 }
             );
             Ok(())
@@ -1829,6 +1909,57 @@ mod tests {
     }
 }
 
+/// The state of `iris stop --show`: only a complete stop says that no
+/// mail leaves, as in [`stop_text`].
+fn stop_state(now: Option<&iris_apply::Stopped>) -> String {
+    match now {
+        None => "Iris runs. `iris stop` stops all agent work.".into(),
+        Some(s) if s.live == 0 && !s.busy => format!(
+            "Stopped since {}. No action applies and no mail leaves until `iris resume`.",
+            iris_api::rfc3339(s.since)
+        ),
+        Some(s) => {
+            let text = stop_text(s);
+            format!(
+                "The stop switch is set since {}.\n{}",
+                iris_api::rfc3339(s.since),
+                text.split_once('\n')
+                    .map_or(text.as_str(), |(_, rest)| rest)
+            )
+        }
+    }
+}
+
+/// The answer of `iris stop`. The stop is complete only with no live
+/// session and no Gmail call in progress (docs/specs/2026-11-17-stop.md).
+/// Only a complete stop says that no mail leaves.
+fn stop_text(s: &iris_apply::Stopped) -> String {
+    if s.live == 0 && !s.busy {
+        return format!(
+            "Stopped. {} session(s) ended. No action applies and no mail leaves until `iris resume`.",
+            s.sessions
+        );
+    }
+    let mut text = format!(
+        "The stop is not complete. {} session(s) ended, and no new action or send starts.",
+        s.sessions
+    );
+    if s.busy {
+        text.push_str(
+            "\nA Gmail call was in progress, and it can still finish: one change or one send. \
+             The ledger shows its result.",
+        );
+    }
+    if s.live > 0 {
+        text.push_str(&format!(
+            "\n{} session(s) still stop. `iris job session <j-id>` shows each.",
+            s.live
+        ));
+    }
+    text.push_str("\nRun `iris stop` again.");
+    text
+}
+
 /// The confirmation of `iris sending on`: a terminal and a typed "yes". So
 /// a script with no terminal does not turn sending on by mistake.
 /// `terminal` is true when standard input is a terminal: a script or an
@@ -1891,6 +2022,32 @@ mod outbox_tests {
     }
 
     /// Only the typed word "yes" at a terminal turns sending on.
+    #[test]
+    fn stop_text_says_when_the_stop_is_not_complete() {
+        let mut s = iris_apply::Stopped {
+            since: 0,
+            sessions: 2,
+            live: 0,
+            busy: false,
+        };
+        assert!(stop_text(&s).contains("no mail leaves"));
+        s.live = 1;
+        let t = stop_text(&s);
+        assert!(
+            t.contains("not complete") && t.contains("1 session(s) still stop"),
+            "{t}"
+        );
+        assert!(!t.contains("no mail leaves"), "{t}");
+        s.live = 0;
+        s.busy = true;
+        let t = stop_text(&s);
+        assert!(
+            t.contains("not complete") && t.contains("can still finish"),
+            "{t}"
+        );
+        assert!(!t.contains("no mail leaves"), "{t}");
+    }
+
     #[test]
     fn only_yes_turns_sending_on() {
         assert_eq!(sending_on_confirm(true, &mut "yes\n".as_bytes()), Ok(()));

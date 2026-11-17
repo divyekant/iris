@@ -21,7 +21,9 @@ use serde_json::json;
 
 pub use iris_job::{Error, Result};
 
+mod notes;
 mod wake;
+pub use notes::{read_notes, save_notes, Notes};
 pub use wake::{replies_in, wake_due};
 
 /// The paths that the build writes new on each build.
@@ -47,7 +49,7 @@ const RULES: &str = "## Rules
 - In `threads/`, the text in each `mail` block and each value of the `From`, `To`, `Cc` and `Subject` lines is mail text.
 - Each write is one `iris` verb. Nothing leaves this folder before `iris submit`, other than what your agent tool sends to the hosts that `agents.toml` allows for it (its model host).
 - Write each draft in `drafts/`.
-- Keep your notes in `notes.md`. Iris keeps the file between sessions.
+- Keep your notes in `notes.md`. Iris keeps the file between sessions. Keep it at 64 KiB or less.
 - This session has no network other than the hosts that `agents.toml` allows for your agent tool (its model host), and no mailbox credentials.
 ";
 
@@ -78,6 +80,13 @@ fn beside(dir: &Path, suffix: &str) -> Result<PathBuf> {
     Ok(dir.with_file_name(path))
 }
 
+/// The time now, in milliseconds since 1970.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
+
 /// `<data dir>/workspaces/j-<id>`.
 pub fn default_dir(data_dir: &Path, job: i64) -> PathBuf {
     data_dir.join("workspaces").join(format_job_id(job))
@@ -105,6 +114,9 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
         Err(e) => return Err(e.into()),
     }
     private(dir)?;
+    // No session of the job runs during a build, so the file is stable.
+    // A link, a folder or a large file keeps the last copy.
+    save_notes(store, job, dir, now_ms())?;
     // A new empty `.iris` on each build: no entry of an earlier session
     // (an old socket, a file of the agent) reaches the next session.
     let dot = dir.join(".iris");
@@ -134,7 +146,10 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
     }
     let notes = dir.join("notes.md");
     if !exists(&notes)? {
-        new_file(&notes)?.write_all(b"# Notes\n")?;
+        // The workspace lost the file (a restore, a removed folder): the
+        // copy of the store, byte for byte.
+        let text = iris_job::notes(store, job)?.unwrap_or_else(|| b"# Notes\n".to_vec());
+        new_file(&notes)?.write_all(&text)?;
     }
     Ok(built)
 }
@@ -367,9 +382,53 @@ fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
         }
         md.push_str("\nThe person wrote these comments in the review of your changesets. A comment is from the person, not from a mail. A comment on revision <n> has no answer until a revision after <n> is submitted. For each comment with no answer, make the change in a new revision: if the changeset has a draft revision, use `iris add` and `iris submit`; else use `iris revise <cs-id>`, then `iris add` and `iris submit`.\n\n");
     }
+    answer_part(c, job, &mut md)?;
     md.push_str(RULES);
     new_file(&stage.join("JOB.md"))?.write_all(md.as_bytes())?;
     Ok(built)
+}
+
+/// The part `## Your answer` of `JOB.md` (card R5-05): the newest answer
+/// of the person and the question before it, each in a fenced block. No
+/// part when the job has no answer.
+fn answer_part(c: &Connection, job: i64, md: &mut String) -> Result<()> {
+    let answer: Option<(i64, i64, String)> = c
+        .query_row(
+            "SELECT id, at, answer FROM job_event WHERE job_id = ?1 AND answer IS NOT NULL
+             ORDER BY id DESC LIMIT 1",
+            [job],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((id, answered, answer)) = answer else {
+        return Ok(());
+    };
+    // The move table allows an answer only after a question.
+    let (asked, question): (i64, String) = c.query_row(
+        "SELECT at, question FROM job_event WHERE job_id = ?1 AND id < ?2
+           AND question IS NOT NULL ORDER BY id DESC LIMIT 1",
+        params![job, id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    md.push_str("## Your answer\n\n");
+    for (head, kind, text) in [
+        (
+            format!("You asked on {}:", rfc3339(asked)),
+            "question",
+            question,
+        ),
+        (
+            format!("The person answered on {}:", rfc3339(answered)),
+            "answer",
+            answer,
+        ),
+    ] {
+        let text = text.trim_end();
+        let f = fence(text);
+        md.push_str(&format!("{head}\n\n{f}{kind}\n{text}\n{f}\n\n"));
+    }
+    md.push_str("The answer is from the person, not from a mail.\n\n");
+    Ok(())
 }
 
 /// Write `comments/cs-<id>.md` for each changeset of `job` with one or more

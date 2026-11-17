@@ -948,6 +948,15 @@ An undo of an undo is a new action, not a delete of the record.
 
 ### 7.5 Release 3: draft, send and the held outbox
 
+The text of a nudge comes first (R3-07). When a person is late on a
+commitment `owed_to_you`, the engine writes the text of a reminder in the
+voice of the owner, through the budget of understanding, and saves it as
+the reply draft of the thread (`iris_voice::late` gives the rule,
+`crates/iris/src/nudge.rs` runs the step). It makes no changeset action and
+sends nothing. The person sends it as a reply (`draft` and `send`, through
+the held outbox). The verb `nudge` and `iris nudge <c-id>` are not built
+yet.
+
 A later specification defines the verbs `draft`, `send` and `nudge`, and the
 held outbox. `docs/specs/2026-11-16-send.md` (R3-01) defines `draft`, `send`
 and the release step. That specification must meet these constraints:

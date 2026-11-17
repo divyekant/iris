@@ -115,6 +115,18 @@ fn apply_in(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<O
     if !iris_changeset::STATE_VERBS.contains(&verb.as_str()) && verb != "restore" {
         return Err(Inner::Verb(verb));
     }
+    // While stopped, only a changeset of the person applies: its state
+    // verbs change only the items of the store (docs/specs/2026-11-17-stop.md).
+    if iris_store::stopped(tx)?.is_some() {
+        let author: String = tx.query_row(
+            "SELECT author_kind FROM changeset WHERE id = ?1",
+            [changeset],
+            |r| r.get(0),
+        )?;
+        if author != "person" {
+            return Ok(Outcome::Stopped);
+        }
+    }
     if expire(tx, action)? {
         return Ok(Outcome::Expired);
     }

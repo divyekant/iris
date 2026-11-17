@@ -156,6 +156,7 @@
   <div class="act">
     <div class="row">
       <button class="pill" type="button" onclick={() => away && choose(away.verb)}>{away.label}</button>
+      {@render more?.()}
     </div>
   </div>
 {/if}

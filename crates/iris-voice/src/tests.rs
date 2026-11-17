@@ -974,3 +974,611 @@ fn a_draft_is_ready_exactly_while_the_checks_of_write_pass_on_its_message() {
     understood(&b.store);
     assert!(!ready(&b.store, t) && !checks_pass_on(&b.store, t));
 }
+
+/// A mailbox with one ask that the owner sent to Ana at the time 1000, and
+/// the open commitment owed to you that understanding made of it.
+fn asked(name: &str) -> (Box_, i64) {
+    let (b, _) = mailbox(name);
+    b.store
+        .put_messages(
+            1,
+            &[msg(
+                "ask",
+                "t-ask",
+                1000,
+                "SENT",
+                "me@example.com",
+                "ana@example.org",
+                Some("Ana, can you send the slides?"),
+            )],
+        )
+        .unwrap();
+    understood(&b.store);
+    let t = thread_of(&b.store, "t-ask");
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sender(address, kind) VALUES ('ana@example.org', 'person')",
+                [],
+            )?;
+            let s = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 VALUES ('commitment', 1, 'open', json_object('direction', 'owed_to_you',
+                         'title', 'Send the slides',
+                         'sources', json_array(json_object('role', 'origin',
+                                                           'quote', 'can you send the slides?')),
+                         'owner', json_object('kind', 'sender', 'sender', 's-' || ?1)), 1, 1)",
+                [s],
+            )?;
+            tx.execute(
+                "INSERT INTO item_source(item_id, message_id, role)
+                 SELECT last_insert_rowid(), m.id, 'origin' FROM message m
+                  WHERE m.provider_id = 'ask'",
+                [],
+            )?;
+            // iris-senders writes the `sent` evidence of each recipient.
+            tx.execute(
+                "INSERT INTO sender_evidence(message_id, address, rule, content_sha256) SELECT id, 'ana@example.org', 'sent', content_sha256 FROM message WHERE provider_id = 'ask'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    (b, t)
+}
+
+fn late_threads(store: &Store, now: i64) -> Vec<i64> {
+    store
+        .read(|c| Ok(late(c, now, None, 100)?))
+        .unwrap()
+        .into_iter()
+        .map(|l| l.thread)
+        .collect()
+}
+
+#[test]
+fn a_thread_is_late_only_while_each_rule_holds() {
+    let at = 1000 + LATE_AFTER_MS;
+    // Each change, as SQL on thread ?1, and the time of the check.
+    let cases: &[(&str, &str, i64, bool)] = &[
+        ("late", "UPDATE thread SET id = id WHERE id = ?1", at, true),
+        ("too soon", "UPDATE thread SET id = id WHERE id = ?1", at - 1, false),
+        (
+            "due later",
+            "UPDATE item SET doc = json_set(doc, '$.due', json_object('date', '2999-01-01')) WHERE ?1 > 0",
+            at,
+            false,
+        ),
+        (
+            "due passed",
+            "UPDATE item SET doc = json_set(doc, '$.due', json_object('at', '1970-01-01T00:00:01Z')) WHERE ?1 > 0",
+            at,
+            true,
+        ),
+        ("a service", "UPDATE sender SET kind = 'service' WHERE ?1 > 0", at, false),
+        ("a stranger", "UPDATE sender SET kind = 'stranger' WHERE ?1 > 0", at, false),
+        ("done", "UPDATE item SET status = 'done' WHERE ?1 > 0", at, false),
+        (
+            "you owe",
+            "UPDATE item SET doc = json_set(doc, '$.direction', 'you_owe') WHERE ?1 > 0",
+            at,
+            false,
+        ),
+        (
+            "hidden",
+            "UPDATE item SET doc = json_set(doc, '$.attention', json_object('state', 'hidden')) WHERE ?1 > 0",
+            at,
+            false,
+        ),
+        (
+            "hostile",
+            "UPDATE message SET hostile = '[\"spoof\"]' WHERE thread_id = ?1",
+            at,
+            false,
+        ),
+        (
+            "not understood",
+            "UPDATE message SET understood_at = NULL WHERE thread_id = ?1",
+            at,
+            false,
+        ),
+        (
+            "a ready draft",
+            "INSERT INTO reply_draft(thread_id, based_on, body, model, prompt, samples, created_at)
+             SELECT ?1, max(id), 'x', 'm', 'p', 0, 1 FROM message WHERE thread_id = ?1",
+            at,
+            false,
+        ),
+        (
+            "a stale draft of the owner",
+            "INSERT INTO reply_draft(thread_id, based_on, body, model, prompt, samples, created_at)
+             SELECT ?1, min(id), 'x', 'm', 'p', 0, 1 FROM message",
+            at,
+            false,
+        ),
+        (
+            "a stale nudge with a key",
+            "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
+               created_at, ask)
+             SELECT ?1, min(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'p', 0, 1, '{}'
+               FROM message",
+            at,
+            true,
+        ),
+        (
+            "a ready nudge of another commitment",
+            "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
+               created_at, ask)
+             SELECT ?1, max(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'p', 0, 1, '{}'
+               FROM message WHERE thread_id = ?1",
+            at,
+            true,
+        ),
+        (
+            "the ask went to another person",
+            "UPDATE sender_evidence SET address = 'bo@example.org' WHERE ?1 > 0",
+            at,
+            false,
+        ),
+        (
+            "Ana is the second recipient",
+            "INSERT INTO sender_evidence(message_id, address, rule, content_sha256) SELECT id, 'bo@example.org', 'sent', content_sha256 FROM message WHERE provider_id = 'ask' AND ?1 > 0",
+            at,
+            true,
+        ),
+        (
+            "the content of the ask changed",
+            "UPDATE message SET content_sha256 = 'other' WHERE thread_id = ?1",
+            at,
+            false,
+        ),
+        (
+            "due today",
+            "UPDATE item SET doc = json_set(doc, '$.due', json_object('date', '1970-01-03')) WHERE ?1 > 0",
+            at,
+            false,
+        ),
+        (
+            "due yesterday",
+            "UPDATE item SET doc = json_set(doc, '$.due', json_object('date', '1970-01-02')) WHERE ?1 > 0",
+            at,
+            true,
+        ),
+        (
+            "due at the second before",
+            "UPDATE item SET doc = json_set(doc, '$.due', json_object('at', '1970-01-03T00:00:00+00:00')) WHERE ?1 > 0",
+            at,
+            true,
+        ),
+    ];
+    for (name, sql, now, want) in cases {
+        let (b, t) = asked(&format!("late-{}", name.replace(' ', "-")));
+        b.store
+            .write(|tx| {
+                tx.execute(
+                    "CREATE TEMP TABLE nudge_intent AS SELECT ?1 AS intent",
+                    [NUDGE_INTENT],
+                )?;
+                tx.execute(sql, [t])?;
+                Ok(())
+            })
+            .unwrap();
+        let want: Vec<i64> = if *want { vec![t] } else { vec![] };
+        assert_eq!(late_threads(&b.store, *now), want, "{name}");
+    }
+
+    // Ana answers: not late. The owner sends a nudge: late again only
+    // after the wait.
+    let (b, t) = asked("late-answer");
+    let add = |id: &str, date: i64, label: &str, from: &str, to: &str| {
+        b.store
+            .put_messages(1, &[msg(id, "t-ask", date, label, from, to, Some("Hi"))])
+            .unwrap();
+        understood(&b.store);
+        evidence(&b.store, id, to);
+    };
+    add("answer", 2000, "INBOX", "ana@example.org", "me@example.com");
+    assert!(late_threads(&b.store, at + 5000).is_empty());
+    add("nudge", 3000, "SENT", "me@example.com", "ana@example.org");
+    assert!(late_threads(&b.store, 3000 + LATE_AFTER_MS - 1).is_empty());
+    assert_eq!(late_threads(&b.store, 3000 + LATE_AFTER_MS), [t]);
+}
+
+/// The `sent` evidence of iris-senders: message `provider` went to `to`.
+fn evidence(store: &Store, provider: &str, to: &str) {
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO sender_evidence(message_id, address, rule, content_sha256)
+                 SELECT id, ?2, 'sent', content_sha256 FROM message WHERE provider_id = ?1",
+                [provider, to],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// The person of the ready nudge of thread `t`, or `None`.
+fn ready_to(store: &Store, t: i64) -> Option<String> {
+    store
+        .read(|c| Ok(super::ready(c, t)?.and_then(|r| r.3)))
+        .unwrap()
+}
+
+/// The one late thread at `now`.
+fn one_late(store: &Store, now: i64) -> Late {
+    let mut l = store.read(|c| Ok(late(c, now, None, 100)?)).unwrap();
+    assert_eq!(l.len(), 1, "{l:?}");
+    l.remove(0)
+}
+
+#[test]
+fn a_nudge_is_saved_only_while_the_thread_is_late() {
+    let now = 1000 + LATE_AFTER_MS;
+    // A nudge draft makes the thread not late until the thread changes.
+    let (b, t) = asked("nudge-saved");
+    let fake = Fake::new(r#"{"body": "Hi Ana, any news on the slides? D"}"#);
+    // The ask went to Bo first and to Ana: the nudge goes to Ana, the
+    // person of the commitment, not to the first recipient.
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE header SET to_addrs = 'bo@example.org, ana@example.org'
+                  WHERE message_id IN (SELECT id FROM message WHERE thread_id = ?1)",
+                [t],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    evidence(&b.store, "ask", "bo@example.org");
+    let l = one_late(&b.store, now);
+    nudge(&b.store, &l, &fake, now).unwrap();
+    assert!(late_threads(&b.store, now).is_empty());
+    let data: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
+    assert_eq!(data["intent"], NUDGE_INTENT);
+    assert_eq!(data["reply_to"], "ana@example.org");
+    assert_eq!(
+        data["commitment"],
+        json!({"title": "Send the slides", "kind": null, "amount": null, "due": null,
+               "quote": "can you send the slides?"})
+    );
+    assert!(fake.calls.borrow()[0]
+        .0
+        .contains("\"commitment\": only in a reminder"));
+    assert_eq!(saved(&b.store, t).unwrap().1.as_deref(), Some(NUDGE_INTENT));
+    let prompt: String = b
+        .store
+        .read(|c| Ok(c.query_row("SELECT prompt FROM reply_draft", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(prompt, NUDGE_PROMPT);
+    let to = ready_to(&b.store, t);
+    assert_eq!(to.as_deref(), Some("ana@example.org"));
+
+    // A correction of the commitment after the save: the nudge is stale,
+    // and the thread is late again for the new commitment. A close: stale.
+    let set = |sql: &str| {
+        b.store
+            .write(|tx| {
+                tx.execute(sql, [])?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    set("UPDATE item SET doc = json_set(doc, '$.title', 'Send the deck')");
+    assert_eq!(ready_to(&b.store, t), None);
+    assert_eq!(late_threads(&b.store, now), [t]);
+    set("UPDATE item SET doc = json_set(doc, '$.title', 'Send the slides')");
+    assert!(ready_to(&b.store, t).is_some());
+    // A correction of the amount: stale.
+    set("UPDATE item SET doc = json_set(doc, '$.amount', json_object('value', '10', 'currency', 'USD'))");
+    assert_eq!(ready_to(&b.store, t), None);
+    set("UPDATE item SET doc = json_remove(doc, '$.amount')");
+    assert!(ready_to(&b.store, t).is_some());
+    set("UPDATE item SET status = 'done'");
+    assert_eq!(ready_to(&b.store, t), None);
+
+    // A long thread: the origin of the ask is out of the six newest
+    // messages, and the commitment is in the data all the same.
+    let (b, _) = asked("nudge-long");
+    for i in 0..8 {
+        let (label, from, to) = match i % 2 {
+            0 => ("INBOX", "ana@example.org", "me@example.com"),
+            _ => ("SENT", "me@example.com", "ana@example.org"),
+        };
+        b.store
+            .put_messages(
+                1,
+                &[msg(
+                    &format!("more{i}"),
+                    "t-ask",
+                    1001 + i,
+                    label,
+                    from,
+                    to,
+                    Some("ok"),
+                )],
+            )
+            .unwrap();
+        evidence(&b.store, &format!("more{i}"), to);
+    }
+    understood(&b.store);
+    let fake = Fake::new(r#"{"body": "x"}"#);
+    let l = one_late(&b.store, 1008 + LATE_AFTER_MS);
+    nudge(&b.store, &l, &fake, 1008 + LATE_AFTER_MS).unwrap();
+    let data: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
+    assert_eq!(data["thread"].as_array().unwrap().len(), 6);
+    assert_eq!(data["commitment"]["quote"], "can you send the slides?");
+
+    // A thread that is not late gets no call.
+    let (b, _) = asked("nudge-not-late");
+    let fake = Fake::new(r#"{"body": "x"}"#);
+    let l = one_late(&b.store, now);
+    assert!(matches!(
+        nudge(&b.store, &l, &fake, now - 1),
+        Err(Error::Changed)
+    ));
+    assert!(fake.calls.borrow().is_empty());
+
+    // The item changes during the call: nothing is saved.
+    for (name, sql) in [
+        ("done", "UPDATE item SET status = 'done'"),
+        ("hidden", "UPDATE item SET doc = json_set(doc, '$.attention', json_object('state', 'hidden'))"),
+        ("due later", "UPDATE item SET doc = json_set(doc, '$.due', json_object('date', '2999-01-01'))"),
+        ("a draft of the owner", "INSERT INTO reply_draft(thread_id, based_on, body, model, prompt, samples, created_at)
+                                  SELECT thread_id, id, 'mine', 'm', 'p', 0, 1 FROM message WHERE provider_id = 'ask'"),
+    ] {
+        let (b, t) = asked(&format!("nudge-during-{}", name.replace(' ', "-")));
+        let store = &b.store;
+        let mut fake = Fake::new(r#"{"body": "x"}"#);
+        fake.during = Some(Box::new(move || {
+            store
+                .write(|tx| {
+                    tx.execute(sql, [])?;
+                    Ok(())
+                })
+                .unwrap();
+        }));
+        let l = one_late(store, now);
+        assert!(matches!(nudge(store, &l, &fake, now), Err(Error::Changed)), "{name}");
+        assert_eq!(fake.calls.borrow().len(), 1, "{name}");
+        let body = saved(store, t).map(|s| s.0);
+        assert_ne!(body.as_deref(), Some("x"), "{name}");
+    }
+}
+
+#[test]
+fn a_nudge_is_stale_when_its_person_changes_and_a_second_commitment_waits() {
+    let now = 1000 + LATE_AFTER_MS;
+    let (b, t) = asked("nudge-group");
+    let set = |sql: &str| {
+        b.store
+            .write(|tx| {
+                tx.execute(sql, [])?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    // The ask went to Ana and Bo. Bo is a person too.
+    evidence(&b.store, "ask", "bo@example.org");
+    set("INSERT INTO sender(address, kind) VALUES ('bo@example.org', 'person')");
+    let l = one_late(&b.store, now);
+    nudge(&b.store, &l, &Fake::new(r#"{"body": "Hi Ana"}"#), now).unwrap();
+    assert_eq!(ready_to(&b.store, t).as_deref(), Some("ana@example.org"));
+
+    // A second late commitment of the same thread, owed by Bo: the nudge
+    // of the first stays, and no call replaces it.
+    set("INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+         SELECT form, account_id, status,
+                json_set(doc, '$.title', 'Book the room',
+                         '$.owner.sender', 's-' || (SELECT id FROM sender WHERE address = 'bo@example.org')),
+                2, 2 FROM item WHERE id = 1");
+    set("INSERT INTO item_source(item_id, message_id, role)
+         SELECT 2, message_id, role FROM item_source WHERE item_id = 1");
+    assert!(late_threads(&b.store, now).is_empty());
+    assert_eq!(ready_to(&b.store, t).as_deref(), Some("ana@example.org"));
+
+    // The first is done: the nudge to Ana is stale, and the thread is late
+    // for Bo.
+    set("UPDATE item SET status = 'done' WHERE id = 1");
+    assert_eq!(ready_to(&b.store, t), None);
+    assert_eq!(one_late(&b.store, now).to(), "bo@example.org");
+
+    // A correction of the person of the commitment (Ana to Bo): the nudge
+    // to Ana is stale.
+    let (b, t) = asked("nudge-owner-fix");
+    b.store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO sender_evidence(message_id, address, rule, content_sha256) SELECT id, 'bo@example.org', 'sent', content_sha256 FROM message WHERE provider_id = 'ask';
+                 INSERT INTO sender(address, kind) VALUES ('bo@example.org', 'person');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let l = one_late(&b.store, now);
+    nudge(&b.store, &l, &Fake::new(r#"{"body": "Hi Ana"}"#), now).unwrap();
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE item SET doc = json_set(doc, '$.owner.sender',
+                   's-' || (SELECT id FROM sender WHERE address = 'bo@example.org'))",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(ready_to(&b.store, t), None);
+    assert_eq!(one_late(&b.store, now).to(), "bo@example.org");
+}
+
+#[test]
+fn a_promise_of_the_person_is_late_after_its_due_date() {
+    let (b, _) = mailbox("nudge-promise");
+    b.store
+        .put_messages(
+            1,
+            &[msg(
+                "promise",
+                "t-promise",
+                1000,
+                "INBOX",
+                "ana@example.org",
+                "me@example.com",
+                Some("I will send the slides by Friday."),
+            )],
+        )
+        .unwrap();
+    understood(&b.store);
+    let t = thread_of(&b.store, "t-promise");
+    let set = |sql: &str| {
+        b.store
+            .write(|tx| {
+                tx.execute_batch(sql)?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    set(
+        "INSERT INTO sender(address, kind) VALUES ('ana@example.org', 'person');
+         INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+         VALUES ('commitment', 1, 'open', json_object('direction', 'owed_to_you',
+                 'title', 'Send the slides',
+                 'owner', json_object('kind', 'sender', 'sender', 's-1')), 1, 1);
+         INSERT INTO item_source(item_id, message_id, role)
+         SELECT 1, id, 'origin' FROM message WHERE provider_id = 'promise';",
+    );
+    // No due date: a promise is not late.
+    assert!(late_threads(&b.store, 1_000_000_000).is_empty());
+    set("UPDATE item SET doc = json_set(doc, '$.due', json_object('date', '1970-01-03'))");
+    // During the due day: not late. After it: late, to Ana.
+    assert!(late_threads(&b.store, 3 * 86_400_000 - 1).is_empty());
+    let l = one_late(&b.store, 3 * 86_400_000);
+    assert_eq!((l.thread, l.to()), (t, "ana@example.org".to_string()));
+    let fake = Fake::new(r#"{"body": "Hi Ana, any news? D"}"#);
+    nudge(&b.store, &l, &fake, 3 * 86_400_000).unwrap();
+    assert_eq!(ready_to(&b.store, t).as_deref(), Some("ana@example.org"));
+    // Another sender wrote last in the thread: no nudge.
+    b.store
+        .put_messages(
+            1,
+            &[msg(
+                "other",
+                "t-promise",
+                2000,
+                "INBOX",
+                "cy@example.org",
+                "me@example.com",
+                Some("Hi all"),
+            )],
+        )
+        .unwrap();
+    understood(&b.store);
+    assert_eq!(ready_to(&b.store, t), None);
+    assert!(late_threads(&b.store, 3 * 86_400_000).is_empty());
+}
+
+#[test]
+fn the_tries_order_the_pages_and_only_an_invalid_answer_blocks() {
+    let now = 1000 + LATE_AFTER_MS;
+    let (b, t) = asked("nudge-tries");
+    // A second late thread: an ask to Ana in another thread.
+    b.store
+        .put_messages(
+            1,
+            &[msg(
+                "ask2",
+                "t-ask2",
+                900,
+                "SENT",
+                "me@example.com",
+                "ana@example.org",
+                Some("Ana, can you book the room?"),
+            )],
+        )
+        .unwrap();
+    understood(&b.store);
+    evidence(&b.store, "ask2", "ana@example.org");
+    let t2 = thread_of(&b.store, "t-ask2");
+    b.store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 SELECT form, account_id, status, json_set(doc, '$.title', 'Book the room'), 2, 2
+                   FROM item WHERE id = 1;
+                 INSERT INTO item_source(item_id, message_id, role)
+                 SELECT last_insert_rowid(), id, 'origin' FROM message WHERE provider_id = 'ask2';
+                 INSERT INTO model_setting(id, provider, base_url, model, version, max_tokens,
+                   timeout_s) VALUES (1, 'local', 'http://127.0.0.1:1/v1', 'm', 1, 1000, 60);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let page = |limit| {
+        b.store
+            .read(|c| Ok(late(c, now, None, limit)?))
+            .unwrap()
+            .into_iter()
+            .map(|l| l.thread)
+            .collect::<Vec<_>>()
+    };
+    let try_ = |thread: i64, version: i64, blocked: bool, at: i64| {
+        b.store
+            .write(|tx| {
+                let l = late(tx, now, Some(thread), 1)?.remove(0);
+                tried(tx, &l, version, blocked, at)?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    // No try yet: the oldest newest message (by row ID) first, one page of
+    // one thread.
+    assert_eq!(page(1), [t]);
+    // A try moves the thread to the end: the next page has the other one.
+    try_(t, 1, false, 5);
+    assert_eq!(page(1), [t2]);
+    assert_eq!(page(10), [t2, t]);
+    try_(t2, 1, false, 6);
+    assert_eq!(page(10), [t, t2]);
+    // A blocked try: no call for the same key and model version.
+    try_(t, 1, true, 7);
+    assert_eq!(page(10), [t2]);
+    // A newer mail of the owner in the thread: a new try once it is late.
+    b.store
+        .put_messages(
+            1,
+            &[msg(
+                "again",
+                "t-ask",
+                2000,
+                "SENT",
+                "me@example.com",
+                "ana@example.org",
+                Some("Any news?"),
+            )],
+        )
+        .unwrap();
+    understood(&b.store);
+    evidence(&b.store, "again", "ana@example.org");
+    assert_eq!(page(10), [t2]);
+    assert_eq!(
+        b.store
+            .read(|c| Ok(late(c, 2000 + LATE_AFTER_MS, None, 10)?))
+            .unwrap()
+            .iter()
+            .map(|l| l.thread)
+            .collect::<Vec<_>>(),
+        [t2, t]
+    );
+    // A blocked try is for one model version. (Thread t waits for its new
+    // mail to be late.)
+    try_(t2, 1, true, 8);
+    assert_eq!(page(10), Vec::<i64>::new());
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE model_setting SET version = 2", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(page(10), [t2]);
+}

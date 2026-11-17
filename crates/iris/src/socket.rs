@@ -422,7 +422,7 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
         Some("app.notices") => {
             only(&["after"])?;
             let after = match args.get("after") {
-                None | Some(Value::Null) => None,
+                None => None,
                 Some(v) => Some(
                     v.as_u64()
                         .and_then(|n| i64::try_from(n).ok())
@@ -434,8 +434,8 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
                 // showed the notices: the app starts again after `last`.
                 let after = after.filter(|_| live);
                 let r = app_notices(store, after)?;
-                let from = after.is_none().then(|| r["last"].as_i64().unwrap_or(0));
-                Ok((r, from))
+                let last = r["last"].as_i64().unwrap_or(0);
+                Ok((r, last, after.is_none()))
             })
             .map(Done::Value)
         }
@@ -540,6 +540,11 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
             wait(store, me, args).map(Done::Value)
         }
         Some("wait") => Err(usage("wait is a verb of a session")),
+        Some("ask") if session => {
+            only(&["question"])?;
+            ask(store, me, args).map(Done::Value)
+        }
+        Some("ask") => Err(usage("ask is a verb of a session")),
         // The read verbs of a session (card R4-04f): only what the grant
         // holds now. The host command reads the store, not the socket.
         Some("search") if session => {
@@ -660,6 +665,7 @@ fn app_notices(store: &Store, after: Option<i64>) -> Result<Value, Failure> {
         "last": last,
         "open": page.open,
         "engine": *ENGINE_START,
+        "start": after.is_none(),
     }))
 }
 
@@ -728,6 +734,38 @@ fn wait(
         "state": "waiting",
         "until": iris_api::rfc3339(until_ms),
         "reply": thread.map(|t| format!("t-{t}")),
+    }))
+}
+
+/// `ask` of a session (card R5-05): the job moves to `needs_you` with the
+/// question, and the same transaction ends the session with `job_state`.
+/// The answer of the person starts a new session ([`iris_job::woken`]).
+fn ask(
+    store: &Store,
+    me: &Author,
+    args: &serde_json::Map<String, Value>,
+) -> Result<Value, Failure> {
+    let job = me
+        .job
+        .as_deref()
+        .and_then(iris_job::parse_job_id)
+        .ok_or_else(|| Failure::new(code::ERROR, "the session has no job"))?;
+    let question = text(args, "question")?.ok_or_else(|| usage("give the question"))?;
+    iris_job::check_text(question, 2000).map_err(usage)?;
+    let session = me
+        .session
+        .as_deref()
+        .and_then(iris_job::parse_session_id)
+        .ok_or_else(|| Failure::new(code::ERROR, "the session has no ID"))?;
+    let now = crate::engine::now_ms();
+    iris_job::session_ask(store, session, job, question, now).map_err(|e| match e {
+        iris_job::Error::Refused(why) => Failure::new(code::DENIED, why),
+        e => Failure::new(code::ERROR, e.to_string()),
+    })?;
+    Ok(json!({
+        "job": iris_job::format_job_id(job),
+        "state": "needs_you",
+        "question": question,
     }))
 }
 
@@ -956,6 +994,11 @@ pub fn parse_answer(verb: &str, line: &[u8]) -> Option<Result<Value, Failure>> {
                     r["job"].as_str().and_then(iris_job::parse_job_id).is_some()
                         && r["state"] == "waiting"
                         && r["until"].is_string()
+                }
+                "ask" => {
+                    r["job"].as_str().and_then(iris_job::parse_job_id).is_some()
+                        && r["state"] == "needs_you"
+                        && r["question"].is_string()
                 }
                 "search" => all_of(&r["messages"], |m| m["id"].is_string()),
                 "list" => all_of(&r["items"], item),

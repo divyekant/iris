@@ -1249,6 +1249,7 @@ dependencies = [
  "iris-spec",
  "iris-store",
  "iris-talk",
+ "libc",
  "rusqlite",
  "serde_json",
 ]

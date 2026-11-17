@@ -1084,3 +1084,106 @@ fn sending_on_after_a_wait_gets_a_full_hold() {
     }
     assert_eq!(b.sends(), 0);
 }
+
+/// While stopped, no held send leaves: not by the release, not by the step.
+/// After the resume, each held send waits a full hold again
+/// (docs/specs/2026-11-17-stop.md).
+#[test]
+fn no_send_leaves_while_stopped_and_resume_gets_a_full_hold() {
+    let b = setup("stop");
+    let (s, _) = b.new_mail(AGED);
+    iris_apply::stop(&b.store).unwrap();
+    assert_eq!(b.release(s).unwrap(), Outcome::Stopped);
+    let step = b.step();
+    assert!(step.results.is_empty(), "{:?}", step.results);
+    assert_eq!(b.sends(), 0);
+    assert_eq!(b.state(s), "held");
+    let resumed = now();
+    assert!(iris_apply::resume(&b.store).unwrap());
+    // A second resume changes nothing: the hold does not move again.
+    let on = iris_apply::sending(&b.store).unwrap();
+    std::thread::sleep(Duration::from_millis(5));
+    assert!(!iris_apply::resume(&b.store).unwrap());
+    assert_eq!(iris_apply::sending(&b.store).unwrap(), on);
+    match b.release(s) {
+        Ok(Outcome::Hold(until)) => assert!(until >= resumed + HOLD_MS, "{until}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.sends(), 0);
+}
+
+/// The step still runs the recovery while stopped: a send whose answer was
+/// lost gets its true state in the ledger.
+#[test]
+fn the_step_recovers_a_lost_send_while_stopped() {
+    let b = setup("stop-recover");
+    let (s, _) = b.new_mail(AGED);
+    // The send goes out, its response is lost, and the search of the
+    // recovery fails: the row stays in `writing`.
+    b.fake.fail_next_write(&[503], true);
+    b.fake.fail_next_matching("rfc822msgid", 400);
+    assert!(b.release(s).is_err());
+    assert_eq!((ledger(&b.store, s).0.as_str(), b.sends()), ("writing", 1));
+    iris_apply::stop(&b.store).unwrap();
+    let out = b.step();
+    assert!(out.results.is_empty(), "{:?}", out.results);
+    assert_eq!((b.state(s).as_str(), b.sends()), ("applied", 1));
+}
+
+/// A stop and a resume during the read of the draft at Gmail, after the
+/// first hold check of the release: the claim reads the new hold, and the
+/// send waits a full hold again (docs/specs/2026-11-17-stop.md, section 3).
+#[test]
+fn a_stop_and_resume_during_the_release_restart_the_hold() {
+    let b = setup("stop-race");
+    let (s, provider) = b.new_mail(AGED);
+    let other = Store::open(b.store.dir()).unwrap();
+    let resumed = std::sync::Arc::new(std::sync::Mutex::new(0));
+    let at = resumed.clone();
+    b.fake.before_next_matching(
+        &format!("GET /gmail/v1/users/me/drafts/{provider}"),
+        move || {
+            // The release holds the apply lock: no wait for it.
+            iris_apply::stop_wait(&other, Duration::ZERO).unwrap();
+            *at.lock().unwrap() = now();
+            assert!(iris_apply::resume(&other).unwrap());
+        },
+    );
+    match b.release(s) {
+        Ok(Outcome::Hold(until)) => assert!(until >= *resumed.lock().unwrap() + HOLD_MS, "{until}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.sends(), 0);
+    assert_eq!(b.state(s), "held");
+}
+
+/// A writer that holds the store delays `iris resume`. The hold then counts
+/// from the end of that wait, not from the call (as issue #420).
+#[test]
+fn resume_after_a_wait_gets_a_full_hold() {
+    let b = setup("resume-wait");
+    let (s, _) = b.new_mail(AGED);
+    iris_apply::stop(&b.store).unwrap();
+    let store = std::sync::Arc::new(Store::open(b.store.dir()).unwrap());
+    let (go, started) = std::sync::mpsc::channel();
+    let blocker = {
+        let store = store.clone();
+        std::thread::spawn(move || {
+            store
+                .write(|_| {
+                    go.send(()).unwrap();
+                    std::thread::sleep(Duration::from_millis(400));
+                    Ok(now())
+                })
+                .unwrap()
+        })
+    };
+    started.recv().unwrap();
+    assert!(iris_apply::resume(&store).unwrap());
+    let freed = blocker.join().unwrap();
+    match b.release(s) {
+        Ok(Outcome::Hold(until)) => assert!(until >= freed + HOLD_MS, "{until}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.sends(), 0);
+}
