@@ -185,8 +185,10 @@ engine computes them from the store. Nothing leaves the machine.
 - `undo`: `{"applied", "undone"}`. `applied` counts the applied actions, and
   not an undo. `undone` counts the actions of them that an undo reversed.
 
-Each request of the web client has the header `x-iris-day: YYYY-MM-DD`, the
-local date of the person. The API counts the measures from it:
+Each request of the web client while the person is active (an input of the
+person in the last 5 minutes) has the header `x-iris-day: YYYY-MM-DD`, the
+local date of the person. A poll of a tab that nobody uses has no header.
+The API counts the measures from it:
 
 - The first request of a day counts a use of that day, before the request
   runs. So a read of the measures already has the day.

@@ -526,9 +526,9 @@ test("each measure says when it has no data, and the sentence names a missed tar
   assert.equal(rows({ ...mixed, mirror: [{ ...mixed.mirror[0], differences: 2 }, none] }, now)[2].tone, "missed");
 });
 
-test("each request of the web client sends the local day, so the engine counts the use and each mail view", async () => {
+test("each request while the person is active sends the local day, and a poll of an idle tab does not", async () => {
   const { get } = await load("/src/api.ts");
-  const { localDay } = await load("/src/measures.ts");
+  const { localDay, noteInput, ACTIVE_MS } = await load("/src/measures.ts");
   const saved = globalThis.fetch;
   const sent = [];
   globalThis.fetch = async (url, init) => {
@@ -536,9 +536,14 @@ test("each request of the web client sends the local day, so the engine counts t
     return new Response("{}", { status: 200 });
   };
   try {
+    // Invariant: a request sends the day only within ACTIVE_MS of an input of the person.
+    noteInput(Date.now() - ACTIVE_MS - 1000);
+    await get("notices");
+    noteInput();
     await get("status");
     await get("messages/m-1");
     assert.deepEqual(sent, [
+      ["/api/notices", undefined],
       ["/api/status", localDay()],
       ["/api/messages/m-1", localDay()],
     ]);

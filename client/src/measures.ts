@@ -1,7 +1,28 @@
 // The measures of the manifesto, "How we measure Iris" (card R5-12). The engine
 // computes them on this machine (GET /api/measures). Nothing leaves the machine.
-// Each request of the web client sends the local day (header x-iris-day, in api.ts):
-// the engine counts the day as a day of use, and a mail view as an open.
+// Each request of the web client while the person is active sends the local day (header
+// x-iris-day, in api.ts): the engine counts the day as a day of use, and a mail view as an
+// open. A poll of a tab that nobody uses sends no day, so it is not a day of use.
+
+/** The time after the last input of the person in which a request counts as use. */
+export const ACTIVE_MS = 5 * 60_000;
+let input = -Infinity;
+
+/** Note an input of the person: the load of the page, a key, a pointer, a focus or a visible tab. */
+export function noteInput(now = Date.now()) {
+  input = now;
+}
+
+/** True when the person gave an input in the last ACTIVE_MS. */
+export function active(now = Date.now()): boolean {
+  return now - input <= ACTIVE_MS;
+}
+
+if (typeof addEventListener === "function" && typeof document !== "undefined") {
+  noteInput();
+  for (const name of ["pointerdown", "keydown", "wheel", "touchstart", "focus"]) addEventListener(name, () => noteInput(), { capture: true, passive: true });
+  document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && noteInput());
+}
 
 export type Measures = {
   days: { day: string; opens: number }[];
