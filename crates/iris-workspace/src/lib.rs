@@ -128,6 +128,11 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
     remove(&stage)?;
     new_dir(&stage)?;
 
+    // A restore of the notes that stopped can leave its file beside the
+    // workspace.
+    let part = beside(dir, ".notes")?;
+    remove(&part)?;
+
     let built = write_stage(store, job, &stage)?;
 
     // A crash in this loop can leave an owned path absent. A session starts
@@ -149,7 +154,7 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
         // The workspace lost the file (a restore, a removed folder): the
         // copy of the store, byte for byte.
         let text = iris_job::notes(store, job)?.unwrap_or_else(|| b"# Notes\n".to_vec());
-        new_file(&notes)?.write_all(&text)?;
+        publish_new(&part, &notes, |f| f.write_all(&text))?;
     }
     Ok(built)
 }
@@ -811,6 +816,27 @@ fn private(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Make `path` with the bytes that `write` gives, as one step: `notes.md`
+/// is there complete or not at all (issue #604). The bytes go to `part`
+/// (beside the workspace, so the agent cannot write it) and to the disk,
+/// then a hard link puts them at `path`. The link fails if `path` is there,
+/// so it never replaces a file. A stop before the link leaves no `path`, and
+/// the next build removes `part` and writes again.
+fn publish_new(
+    part: &Path,
+    path: &Path,
+    write: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<()> {
+    let done = (|| {
+        let mut f = new_file(part)?;
+        write(&mut f)?;
+        f.sync_all()?;
+        fs::hard_link(part, path)
+    })();
+    let _ = fs::remove_file(part);
+    done
+}
+
 /// A new file with mode 0600. Fails if the path is there, also as a link, so
 /// no write goes through a link.
 fn new_file(path: &Path) -> io::Result<File> {
@@ -823,7 +849,8 @@ fn new_file(path: &Path) -> io::Result<File> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fence, line};
+    use super::{fence, line, publish_new};
+    use std::io::{self, Write};
 
     /// Each text over the letters "`", "a" and a new line, up to 9 long: no
     /// line of the text can close the fence (a line of only backticks, at
@@ -850,6 +877,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Issue #604: a restore that stops partway leaves no `notes.md`, so the
+    /// next build cannot save a part of the notes over the full copy. The
+    /// retry writes the full bytes.
+    #[test]
+    fn a_restore_that_stops_partway_leaves_no_file() {
+        let dir = std::env::temp_dir().join(format!("iris-ws-publish-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (part, path) = (dir.join(".notes"), dir.join("notes.md"));
+        let failed = publish_new(&part, &path, |f| {
+            f.write_all(b"half of the")?;
+            Err(io::Error::other("the disk is full"))
+        });
+        assert!(failed.is_err());
+        assert!(!path.exists());
+        assert!(!part.exists());
+        // A stop with no cleanup (a crash) leaves `part`: the build removes
+        // it first. Here the retry finds it and must not use it.
+        std::fs::write(&part, b"half of the").unwrap();
+        assert!(publish_new(&part, &path, |f| f.write_all(b"x")).is_err());
+        assert!(!path.exists());
+        publish_new(&part, &path, |f| f.write_all(b"half of the notes")).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"half of the notes");
+        // A file that is there stays.
+        assert!(publish_new(&part, &path, |f| f.write_all(b"new")).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"half of the notes");
+        assert!(!part.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

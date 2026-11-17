@@ -156,8 +156,8 @@ The build makes `notes.md` when it is not there (spec 3, section 3). The
 change: the new file holds the copy of the store if one exists. Else it
 holds `# Notes` and a line end, as now.
 
-The build writes the restored file as each new file: mode `0600`,
-`create_new`. A link at `notes.md` stays as it is (`exists` is true for a
+The build writes the restored file beside the workspace first (mode `0600`,
+`create_new`), syncs it, then links it to `notes.md` (issue #604). A link at `notes.md` stays as it is (`exists` is true for a
 link), as now.
 
 ### The rules for the agent
@@ -230,6 +230,7 @@ stays as it is, and the session starts.
 | A folder. | `NotAFile`. | Unit test. |
 | No `notes.md`, and a copy in the store. | The build writes the copy, byte for byte. | Unit test. |
 | No `notes.md`, and no copy. | The build writes `# Notes`. | Existing test. |
+| A restore stops partway (a full disk, a crash). | No `notes.md` is there: the build writes the bytes to `.<workspace>.notes` beside the workspace, syncs them, then makes `notes.md` with a hard link, which never replaces a file. The next build removes the old part and writes again, so it never saves a part over the copy (issue #604). | Unit test `a_restore_that_stops_partway_leaves_no_file`. |
 | The job moves to `done` by any path, with or without its folder. | The copy is deleted in the same transaction. A later save writes nothing, and a build writes `# Notes`. | Unit test: finish by the agent, finish and cancel by the person. |
 | The engine crashes during the reap write. | The transaction keeps the session live with the old copy, or reaped with the new copy. The next engine start reaps the session again. | SQLite; the existing restart test of R4-04. |
 | A backup runs during a reap. | The backup holds the state before or after the reap transaction, never a reaped session without its save. | Review: one transaction. |
