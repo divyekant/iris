@@ -228,7 +228,7 @@ pub fn dismiss(store: &Store, id: i64, now: i64) -> Result<bool> {
 
 /// What a pass read last. A pass runs again only when it changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Mark([i64; 5]);
+pub struct Mark([i64; 6]);
 
 /// Writes the open proposals again from the decided actions, if the
 /// decisions, the active policy or the hour changed since `last`. Gives the
@@ -282,15 +282,19 @@ pub fn refresh(store: &Store, now: i64, last: &mut Option<Mark>) -> Result<Optio
 }
 
 fn mark(tx: &Connection, now: i64) -> Result<Mark> {
-    let (count, at, undone): (i64, i64, i64) = tx.query_row(
-        "SELECT count(*), coalesce(max(decided_at), 0), coalesce(sum(state = 'undone'), 0)
+    // The pass reads `applied` and `undone` apart from the other states, so
+    // a move into either one (also `approved` to `applied`, with no new
+    // decision time) changes the mark.
+    let (count, at, undone, applied): (i64, i64, i64, i64) = tx.query_row(
+        "SELECT count(*), coalesce(max(decided_at), 0), coalesce(sum(state = 'undone'), 0),
+                coalesce(sum(state = 'applied'), 0)
          FROM changeset_action WHERE decided_by = 'person' OR state = 'undone'",
         [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
     let version = crate::active(tx)?.version.unwrap_or(0);
     // Each hour too, for a change of a fact that a rule reads (a sender kind).
-    Ok(Mark([count, at, undone, version, now.div_euclid(3600)]))
+    Ok(Mark([count, at, undone, applied, version, now.div_euclid(3600)]))
 }
 
 /// The key of a row: the verb (`hide` for a `hide` rule), the condition,
@@ -485,7 +489,11 @@ fn choices(conn: &Connection, policy: &mut Policy, now: i64, found: &mut Found) 
         if facts.sender_kind == SenderKind::SelfOwner {
             continue;
         }
-        let hostile = kind(&facts) == SenderKind::Hostile;
+        // Hostile mail gives no candidate and no count: neither a choice
+        // nor a refusal on it is evidence of a preference.
+        if kind(&facts) == SenderKind::Hostile {
+            continue;
+        }
         let Ok(sender) = crate::check_sender(facts.sender.clone()) else {
             if !chosen {
                 blocked.insert(f);
@@ -515,9 +523,9 @@ fn choices(conn: &Connection, policy: &mut Policy, now: i64, found: &mut Found) 
         policy.rules.pop();
         let changed = base == Attention::Shown && with == Attention::Hidden { rule: u32::MAX };
         let c = counts.entry((f, sender)).or_default();
-        c.sourced |= chosen && !hostile;
+        c.sourced |= chosen;
         match (changed, chosen) {
-            (true, true) if !hostile => c.yes += 1,
+            (true, true) => c.yes += 1,
             (true, false) => c.no += 1,
             _ => {}
         }

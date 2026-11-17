@@ -330,3 +330,42 @@ fn an_item_that_a_rule_hides_already_does_not_count() {
     );
     assert!(hides(&refresh(&store)).is_empty());
 }
+
+/// A choice or a refusal on hostile mail does not count at all: a refusal
+/// on hostile mail does not stop the proposal from the valid choices.
+#[test]
+fn a_hostile_refusal_does_not_count() {
+    let (_dir, store) = store("hostile-refusal");
+    choices(&store, "skip", "feed", "news@shop.example", MIN_APPROVALS);
+    let i = item(&store, "feed", "news@shop.example", true, false);
+    chose(&store, "skip", i, "undone");
+    let i = item(&store, "feed", "news@shop.example", true, false);
+    chose(&store, "skip", i, "applied");
+    assert_eq!(
+        hides(&refresh(&store)),
+        vec![("news@shop.example".into(), Form::Feed, MIN_APPROVALS)]
+    );
+}
+
+/// The mark changes when a choice moves from `approved` to `applied`, so
+/// the next refresh counts the choice.
+#[test]
+fn an_apply_after_a_pass_runs_the_pass_again() {
+    let (_dir, store) = store("apply-mark");
+    choices(&store, "skip", "feed", "news@shop.example", MIN_APPROVALS - 1);
+    let i = item(&store, "feed", "news@shop.example", false, false);
+    chose(&store, "skip", i, "approved");
+    let mut mark = None;
+    propose::refresh(&store, NOW, &mut mark).unwrap();
+    assert!(hides(&store.read(propose::open).unwrap()).is_empty());
+    store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE changeset_action SET state = 'applied' WHERE state = 'approved'",
+                [],
+            )?)
+        })
+        .unwrap();
+    assert!(propose::refresh(&store, NOW, &mut mark).unwrap().is_some());
+    assert_eq!(hides(&store.read(propose::open).unwrap()).len(), 1);
+}
