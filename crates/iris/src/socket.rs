@@ -429,11 +429,15 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
                         .ok_or_else(|| usage("after must be a whole number, 0 or more"))?,
                 ),
             };
-            let r = app_notices(store, after)?;
-            // A first call: the app shows only the notices after `last`.
-            let from = after.is_none().then(|| r["last"].as_i64().unwrap_or(0));
-            crate::notify::app_asked(crate::engine::now_ms(), from);
-            Ok(Done::Value(r))
+            crate::notify::app_call(crate::engine::now_ms(), |live| {
+                // A first call, or a call after a gap in which the engine
+                // showed the notices: the app starts again after `last`.
+                let after = after.filter(|_| live);
+                let r = app_notices(store, after)?;
+                let from = after.is_none().then(|| r["last"].as_i64().unwrap_or(0));
+                Ok((r, from))
+            })
+            .map(Done::Value)
         }
         Some("drafts") if session => Err(Failure::new(
             code::DENIED,
