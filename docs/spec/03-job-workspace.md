@@ -10,8 +10,9 @@
 
 A job workspace is a folder for one job. An agent of the job works in this
 folder. This specification gives the layout of the folder and the format of
-each file, so that another tool can build the same folder from the same
-mail and the same job.
+each file, so that another tool can build the same folder (section 10) from
+the same inputs: the mail, the job and its scope, as one read transaction
+gives them.
 
 This specification is a part of version 0 of the open model. The schemas in
 [`schema/`](schema/) are the normative copy of each JSON file. If this text
@@ -29,6 +30,8 @@ and a schema do not agree, the schema is correct and this text has a defect.
 | Your address | The address of each account, and the `From` address of each of your messages. |
 | ID | The ID of a row, with its prefix: `j-` job, `t-` thread, `m-` message, `c-` commitment, `r-` record, `p-` sender. See specification 1, section 5.7. |
 | Date | An RFC 3339 date-time in UTC, with three digits of milliseconds and `Z`. Example: `2026-11-14T09:00:00.000Z`. The thread files, the people files and `JOB.md` use only this form. `schema/common.schema.json` defines it as `utcDateTime`. |
+| Address | The bare address of a mailbox (RFC 5322 `addr-spec`), in lower case: a local part, `@`, and a domain with no white space. A display name is not a part of it. |
+| Message date | The Gmail internal date of the message. If the message has no internal date, the date of its `Date` header. If it has neither, `1970-01-01T00:00:00.000Z`. |
 | One line | A value in which each control character (Unicode category `Cc`, also CR and LF) is changed into one space. |
 
 ## 3. The folder
@@ -104,7 +107,7 @@ item (`schema/jobitem.schema.json`): `model`, `id`, `form` and `sources`.
 There is one file `threads/t-<id>.md` for each thread with one or more
 granted messages. The file holds the granted messages of the thread, and
 nothing about the other messages of the thread. The messages are in order
-of their date, then of the number of their `m-` ID, oldest first.
+of their message date, then of the number of their `m-` ID, oldest first.
 
 The file has these lines, in this order:
 
@@ -116,7 +119,7 @@ The file has these lines, in this order:
 
    ```
    <empty line>
-   ## m-<id>, <date>
+   ## m-<id>, <message date>
    <empty line>
    From: <name> <<address>>
    To: <addresses>
@@ -128,7 +131,7 @@ The file has these lines, in this order:
    <fence>
    ```
 
-   - Each address is the bare address, in lowercase.
+   - Each address is an address (section 2).
    - `From: <address>` has no name when the message has no display name.
      A display name that is empty or only spaces counts as no name.
    - `To` and `Cc` give the addresses with `, ` between them. The `To` line
@@ -158,10 +161,10 @@ from the messages in the thread files where the address is a party:
 | Field | Value |
 |---|---|
 | `id` | The `p-` ID of the sender row. |
-| `address` | The address, in lowercase. |
+| `address` | The address (section 2). |
 | `names` | Each display name of `From` in the messages that the person sent, in UTF-8 byte order, each name one time. |
-| `first` | The date of the oldest message. |
-| `last` | The date of the newest message. |
+| `first` | The message date of the oldest message. |
+| `last` | The message date of the newest message. |
 | `from_them` | The count of the messages that the person sent. |
 | `from_you` | The count of your messages. |
 | `threads` | The `t-` ID of each thread, in order of the number of the ID. |
@@ -204,7 +207,10 @@ Its dates follow `schema/job.schema.json`.
 
 ## 10. The same folder
 
-Two builds give the same folder when these conditions are true:
+Two builds from the same inputs give the same folder when these conditions
+are true for the paths that the build owns (section 3) and for `.iris/`.
+The agent paths `drafts/` and `notes.md` are not a part of the comparison,
+because the agent writes them.
 
 - They have the same paths and the same modes.
 - Each Markdown file is the same, byte for byte.
@@ -226,6 +232,11 @@ rules:
 - Read the job, the scope and the mail in one read transaction, so that all
   files agree.
 - Let one build of a workspace run at a time.
+- Build only while no session of the job runs. The build replaces the
+  files and `.iris/` that a session uses. The session launcher (R4-04)
+  registers the session, builds, and only then lets the agent run. A
+  builder that is not the launcher builds only a workspace with no
+  registered session.
 - Start a session of the job only after a build that ended with no error.
 
 ### 11.1 Failure list
