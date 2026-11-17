@@ -251,10 +251,12 @@ fn check_item(c: &Connection, form: &str, row: i64) -> rusqlite::Result<Check> {
             |r| r.get(0),
         )
         .optional()?;
-    match status.as_deref() {
-        None => return Ok(Check::NotFound),
-        Some("gone") => return Ok(Check::Refused("The item is gone.")),
-        Some(_) => {}
+    // The statuses of the item page: a commitment that is open, a
+    // conversation that is active or quiet.
+    match (form, status.as_deref()) {
+        (_, None) => return Ok(Check::NotFound),
+        ("commitment", Some("open")) | ("conversation", Some("active" | "quiet")) => {}
+        _ => return Ok(Check::Refused("The item is not open any more.")),
     }
     let mut q = c.prepare_cached("SELECT message_id FROM item_source WHERE item_id = ?1")?;
     let sources = q

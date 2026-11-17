@@ -29,6 +29,8 @@ impl Drop for Dir {
 /// (message 4). Conversation 3 is thread 1. Item 4 is a record. Commitment 5
 /// is gone. Commitment 6 has a source that is not understood (message 5).
 /// Commitment 9 shares its source (message 8) with signal 10.
+/// Commitment 11 is done, conversation 12 is muted, conversation 13 is
+/// quiet; each has the source message 1.
 fn open(name: &str) -> Dir {
     let dir = std::env::temp_dir().join(format!("iris-api-start-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -55,17 +57,21 @@ INSERT INTO header (message_id, date, from_addr, subject) VALUES
 INSERT INTO item (id, form, account_id, status, doc, created_at, updated_at) VALUES
   (1, 'commitment', 1, 'open', '{}', 1, 1),
   (2, 'commitment', 1, 'open', '{}', 1, 1),
-  (3, 'conversation', 1, 'open', '{}', 1, 1),
+  (3, 'conversation', 1, 'active', '{}', 1, 1),
   (4, 'record', 1, 'open', '{}', 1, 1),
   (5, 'commitment', 1, 'gone', '{}', 1, 1),
   (6, 'commitment', 1, 'open', '{}', 1, 1),
   (7, 'commitment', 1, 'open', '{}', 1, 1),
   (9, 'commitment', 1, 'open', '{}', 1, 1),
-  (10, 'signal', 1, 'open', '{}', 1, 1);
+  (10, 'signal', 1, 'open', '{}', 1, 1),
+  (11, 'commitment', 1, 'done', '{}', 1, 1),
+  (12, 'conversation', 1, 'muted', '{}', 1, 1),
+  (13, 'conversation', 1, 'quiet', '{}', 1, 1);
 INSERT INTO item_source (item_id, message_id, role) VALUES
   (1, 1, 'origin'), (1, 2, 'update'), (2, 3, 'origin'), (2, 4, 'evidence'),
   (3, 1, 'origin'), (3, 6, 'update'), (4, 3, 'origin'), (5, 1, 'origin'), (6, 5, 'origin'),
-  (9, 8, 'origin'), (10, 8, 'origin');
+  (9, 8, 'origin'), (10, 8, 'origin'), (11, 1, 'origin'), (12, 1, 'origin'),
+  (13, 1, 'origin');
 "#,
         )?;
         Ok(())
@@ -221,6 +227,8 @@ async fn no_job_starts_from_an_item_that_an_agent_cannot_read() {
         ("c-6", StatusCode::CONFLICT),    // a source that is not understood
         ("c-7", StatusCode::CONFLICT),    // no source
         ("c-9", StatusCode::CONFLICT),    // the source of a signal
+        ("c-11", StatusCode::CONFLICT),   // done
+        ("v-12", StatusCode::CONFLICT),   // muted
         ("r-4", StatusCode::BAD_REQUEST), // a record
         ("m-1", StatusCode::BAD_REQUEST),
         ("c-0", StatusCode::BAD_REQUEST),
@@ -429,4 +437,25 @@ async fn a_grant_writes_one_rule_for_an_open_job() {
         .await;
     assert_eq!(got, StatusCode::CONFLICT, "{v}");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+}
+
+#[tokio::test]
+async fn an_item_that_closed_after_the_preview_starts_no_job() {
+    let d = open("closed");
+    let seen = d.preview("c-1").await;
+    d.1.write(|tx| {
+        tx.execute("UPDATE item SET status = 'done' WHERE id = 1", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let (code, v) = d
+        .post(
+            "/api/jobs",
+            json!({"item": "c-1", "goal": "Go.", "messages": seen}),
+        )
+        .await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+    assert_eq!(d.jobs(), 0);
+    // A quiet conversation can start a job.
+    assert_eq!(d.start("v-13").await.0, StatusCode::CREATED);
 }
