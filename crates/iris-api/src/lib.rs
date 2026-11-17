@@ -155,6 +155,10 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/changesets/{id}/drafts", get(get_drafts))
         .route("/api/changesets/{id}/decide", post(post_decide))
         .route("/api/changesets/{id}/withdraw", post(post_withdraw))
+        .route(
+            "/api/changesets/{id}/comments",
+            get(get_comments).post(post_comment),
+        )
         .route("/api/messages", get(get_messages))
         .route("/api/messages/{id}", get(get_message))
         .route("/api/messages/{id}/raw", get(get_raw))
@@ -312,6 +316,38 @@ async fn post_withdraw(
         })
         .await,
     )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommentBody {
+    revision: i64,
+    text: String,
+    key: String,
+}
+
+/// A review comment of the person on the newest revision of a changeset of
+/// a job (docs/specs/2026-11-17-review-comments.md). The answer is the
+/// comment. A retry with the same key gives the same comment.
+async fn post_comment(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<CommentBody>, JsonRejection>,
+) -> Result<Response> {
+    let Some(row) = changeset_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    let b = body(b)?;
+    let c = review::comment(&s, row, b.revision, &b.text, &b.key, now_ms())?;
+    Ok(Json(c).into_response())
+}
+
+/// Each review comment of a changeset, oldest first.
+async fn get_comments(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    let Some(row) = changeset_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    Ok(Json(review::comments(&s, row)?).into_response())
 }
 
 #[derive(Deserialize)]

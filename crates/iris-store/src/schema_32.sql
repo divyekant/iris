@@ -1,20 +1,49 @@
--- Migration 32: the nudges of card R3-07. First, the commitment of a nudge. A nudge is a reply
--- draft with the fixed nudge intent of iris-voice. `ask` is the commitment
--- that the model got (title, due and quote, as JSON text), so a nudge is
--- ready only while its commitment is the same. NULL for other drafts.
+-- Migration 32: review comments (docs/specs/2026-11-17-review-comments.md,
+-- card R4-08). One row for each comment of the person on a revision of a
+-- changeset of a job, and the delivery of the comments to the sessions of
+-- the job. Nothing changes or removes a row.
 
-ALTER TABLE reply_draft ADD COLUMN ask TEXT;
-
--- The last nudge try of each thread, so the engine keeps no list in
--- memory. `blocked` is 1 after the model gave an answer that is not a
--- valid draft: no new call for the same key, newest message and model
--- version. Each try
--- moves the thread to the end of the order of the next tries.
-CREATE TABLE nudge_try (
-  thread_id INTEGER PRIMARY KEY REFERENCES thread(id) ON DELETE CASCADE,
-  key TEXT NOT NULL,
-  newest INTEGER NOT NULL,
-  version INTEGER NOT NULL,
-  blocked INTEGER NOT NULL CHECK (blocked IN (0, 1)),
-  tried_at INTEGER NOT NULL
+CREATE TABLE changeset_comment (
+  -- AUTOINCREMENT: the engine never uses an ID again.
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  changeset_id INTEGER NOT NULL REFERENCES changeset(id),
+  revision INTEGER NOT NULL CHECK (revision >= 1),
+  text TEXT NOT NULL CHECK (
+    length(trim(text)) > 0 AND length(text) <= 4000 AND instr(text, char(0)) = 0
+  ),
+  -- The client makes the key, so that a retry after a lost answer writes
+  -- no second row.
+  key TEXT NOT NULL CHECK (
+    length(key) BETWEEN 16 AND 64 AND key NOT GLOB '*[^A-Za-z0-9_-]*'
+  ),
+  at_ms INTEGER NOT NULL,
+  UNIQUE (changeset_id, key)
 );
+
+CREATE TRIGGER changeset_comment_keep BEFORE UPDATE ON changeset_comment
+BEGIN
+  SELECT RAISE(ABORT, 'a comment never changes');
+END;
+
+CREATE TRIGGER changeset_comment_stay BEFORE DELETE ON changeset_comment
+BEGIN
+  SELECT RAISE(ABORT, 'a comment is never removed');
+END;
+
+-- The highest comment ID that the build of a started session read. The
+-- launch writes the row in its gate, the transaction that sets started_at.
+-- A comment with a higher ID than each row of its job is pending.
+CREATE TABLE comment_delivery (
+  session_id INTEGER PRIMARY KEY REFERENCES job_session(id),
+  comment_id INTEGER NOT NULL REFERENCES changeset_comment(id)
+);
+
+CREATE TRIGGER comment_delivery_keep BEFORE UPDATE ON comment_delivery
+BEGIN
+  SELECT RAISE(ABORT, 'a delivery never changes');
+END;
+
+CREATE TRIGGER comment_delivery_stay BEFORE DELETE ON comment_delivery
+BEGIN
+  SELECT RAISE(ABORT, 'a delivery is never removed');
+END;
