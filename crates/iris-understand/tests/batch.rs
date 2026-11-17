@@ -901,7 +901,10 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                 "DROP TRIGGER link_check_insert; DROP TRIGGER link_check_update;
                  DROP TRIGGER link_check_label; DROP TRIGGER link_check_attention_add;
                  DROP TRIGGER link_check_attention_end;
-                 DROP TABLE link_check; PRAGMA user_version = 19;",
+                 DROP TABLE link_check;
+                 -- Migration 21 runs again after 20.
+                 DROP TRIGGER job_session_revoke; DROP TRIGGER job_session_job_state;
+                 DROP TABLE job_session; PRAGMA user_version = 19;",
             )?;
             Ok(())
         })
