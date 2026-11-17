@@ -2,9 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use iris_changeset::{
-    add_action, add_action_in, approve, approve_in, create, create_in, decide, decide_in, revise,
-    submit, submit_in, transaction, write_document, ActionId, Author, AuthorKind, By, Error, State,
-    Verb, BULK,
+    add_action, add_action_in, approve, approve_in, create, create_in, decide, decide_in, expire,
+    revise, submit, submit_in, transaction, withdraw, write_document, ActionId, Author, AuthorKind,
+    By, Error, State, Verb, BULK,
 };
 use iris_store::{NewMessage, Store};
 use serde_json::{json, Map, Value};
@@ -33,7 +33,7 @@ fn agent() -> Author {
         kind: AuthorKind::Agent,
         name: Some("Claude Code".into()),
         session: Some("se-12".into()),
-        job: Some("j-142".into()),
+        job: None,
     }
 }
 
@@ -70,13 +70,25 @@ fn store(dir: &TempDir) -> Store {
     )
     .unwrap();
     s.write(|tx| {
-        for form in ["commitment", "record"] {
+        // The examples of the open model, as items c-1 and r-2. The
+        // commitment has message 1 as its origin.
+        for (form, file, id) in [
+            ("commitment", "commitment-you-owe.json", "c-1"),
+            ("record", "record-receipt.json", "r-2"),
+        ] {
+            let mut doc =
+                iris_spec::read_json(&iris_spec::schema_dir().join("examples").join(file));
+            doc["id"] = json!(id);
             tx.execute(
                 "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
-                 VALUES (?1, ?2, 'open', '{}', 0, 0)",
-                rusqlite::params![form, a],
+                 VALUES (?1, ?2, ?3, ?4, 0, 0)",
+                rusqlite::params![form, a, doc["status"].as_str().unwrap(), doc.to_string()],
             )?;
         }
+        tx.execute(
+            "INSERT INTO item_source(item_id, message_id, role) VALUES (1, 1, 'origin')",
+            [],
+        )?;
         // Policy version 1, with the rule IDs 1 to 4.
         tx.execute_batch(
             "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES ('a', 'h1', 0);
@@ -92,10 +104,18 @@ fn args(v: Value) -> Map<String, Value> {
     v.as_object().unwrap().clone()
 }
 
+/// The JSON document of a changeset. Each document of each test agrees
+/// with the published changeset schema (R2-12).
 fn doc(s: &Store, cs: i64) -> Value {
     let mut out = Vec::new();
     write_document(s, cs, &mut out).unwrap();
-    serde_json::from_slice(&out).unwrap()
+    let d: Value = serde_json::from_slice(&out).unwrap();
+    let errors: Vec<String> = iris_spec::validator("changeset")
+        .iter_errors(&d)
+        .map(|e| format!("{e} at {}", e.instance_path()))
+        .collect();
+    assert!(errors.is_empty(), "{errors:#?}");
+    d
 }
 
 fn refused<T: std::fmt::Debug>(r: Result<T, Error>) {
@@ -180,9 +200,8 @@ fn submit_denies_an_action_that_is_not_valid() {
         (Verb::Archive, &["c-1"], json!({})),
         (Verb::Archive, &["t-3"], json!({})),
         (Verb::Archive, &["m-1"], json!({"label": "x"})),
-        // Part 2 of R2-01 adds these verbs.
-        (Verb::Label, &["m-1"], json!({"label": "Finance"})),
-        (Verb::Close, &["c-1"], json!({"reason": "Done."})),
+        (Verb::Label, &["m-1"], json!({"label": "INBOX"})),
+        (Verb::Close, &["t-1"], json!({"reason": "Done."})),
         (Verb::Untrash, &["m-3"], json!({})),
     ];
     for (verb, targets, a) in &cases {
@@ -200,6 +219,8 @@ fn submit_denies_an_action_that_is_not_valid() {
             (33, r#"{"messages":[]}"#, "{}"),
             (35, r#"{"messages":["m-1"]}"#, " { } "),
             (36, r#"{"messages":["m-1"]}"#, r#""x""#),
+            (37, r#"{"messages":["m-1","m-1"]}"#, "{}"),
+            (38, r#"{"messages":["m-01"]}"#, "{}"),
         ] {
             tx.execute(
                 "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
@@ -287,8 +308,8 @@ fn add_and_submit_refusals() {
         &s,
         cs,
         &agent(),
-        Verb::Close,
-        &["c-1", "r-2"],
+        Verb::Correct,
+        &["c-1", "r-1"],
         &Map::new(),
         None,
     ));
@@ -511,12 +532,28 @@ fn first_contact_flag_for_a_stranger_thread() {
 }
 
 /// Fuzz test of the target rows that the product does not control: random
-/// JSON shapes and IDs, written as another writer would. Submit never
-/// panics, and an action is `proposed` only with one or more messages.
+/// verbs, JSON shapes, IDs and arguments, written as another writer would.
+/// Submit never panics. A mailbox action is `proposed` only with one or
+/// more messages, a state action only with items of its kind, a draft only
+/// with one account or one thread, and a send only with the one draft.
 #[test]
 fn random_target_rows() {
     let dir = TempDir::new("fuzz");
     let s = store(&dir);
+    // Draft d-1: a reply in thread t-1, from a draft action of its own.
+    s.write(|tx| {
+        tx.execute_batch(
+            "INSERT INTO changeset(author_kind, created_at) VALUES ('agent', 0);
+             INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+               VALUES (last_insert_rowid(), 1, 1, 'draft', '{}', '{}');
+             INSERT INTO draft(account_id, thread_id, provider_id, message_id_hdr, content,
+                               hash, raw, action_id, created_at, updated_at)
+               VALUES (1, 1, 'r1', 'iris.1@example.com', '{}', 'h', x'00',
+                       last_insert_rowid(), 0, 0);",
+        )?;
+        Ok(())
+    })
+    .unwrap();
     let mut x: u64 = 0x2545_f491_4f6c_dd1d;
     let mut next = move |n: u64| {
         x ^= x << 13;
@@ -524,12 +561,18 @@ fn random_target_rows() {
         x ^= x << 17;
         x % n
     };
-    let keys = ["threads", "messages", "items", "x", ""];
+    let keys = [
+        "threads", "messages", "items", "accounts", "drafts", "x", "",
+    ];
     let ids = [
         "t-1", "t-2", "t-3", "t-9", "m-1", "m-3", "m-5", "c-1", "r-2", "p-1", "x", "m-0", "1",
+        "a-1", "a-2", "d-1", "d-9",
     ];
-    let mut proposed = 0;
-    for round in 0..200 {
+    let verbs = [
+        "archive", "close", "decline", "defer", "correct", "draft", "send",
+    ];
+    let (mut proposed, mut state, mut write) = (0, 0, 0);
+    for round in 0..400 {
         let cs = create(&s, &agent(), NOW).unwrap();
         s.write(|tx| {
             for n in 1..=8 {
@@ -548,7 +591,29 @@ fn random_target_rows() {
                     };
                     targets.insert(keys[next(keys.len() as u64) as usize].into(), v);
                 }
+                let v = next(verbs.len() as u64) as usize;
+                let verb = verbs[v];
+                // A third of the rows get a target of the right kind for the verb.
+                if next(3) == 0 {
+                    let fits = [
+                        json!({"threads": ["t-1"]}),
+                        json!({"items": ["c-1"]}),
+                        json!({"items": ["c-1"]}),
+                        json!({"items": ["c-1"]}),
+                        json!({"items": ["r-2"]}),
+                        [json!({"accounts": ["a-1"]}), json!({"threads": ["t-1"]})]
+                            [next(2) as usize]
+                            .clone(),
+                        json!({"drafts": ["d-1"]}),
+                    ];
+                    targets = fits[v].as_object().unwrap().clone();
+                }
                 let args = [
+                    "{\"reason\":\"Done.\"}",
+                    "{\"date\":\"2028-02-29\"}",
+                    "{\"date\":\"2027-02-29\"}",
+                    "{\"field\":\"due.date\",\"value\":\"2026-12-01\"}",
+                    "{\"field\":\"fields.order\",\"value\":\"EB-1\"}",
                     "{}",
                     " { } ",
                     "[]",
@@ -557,24 +622,84 @@ fn random_target_rows() {
                     "\"x\"",
                     "0",
                     "{\"\":{}}",
-                ][next(16).saturating_sub(8) as usize];
+                    "{\"to\":[\"p@x.org\"],\"subject\":\"Hi\",\"body\":\"B\"}",
+                    "{\"to\":[\"p@x.org\"],\"body\":\"B\"}",
+                    "{\"to\":[\"p@x.org\"],\"subject\":\"\",\"body\":\"B\"}",
+                    "{\"to\":[],\"body\":\"B\"}",
+                    "{\"to\":\"p@x.org\",\"body\":1}",
+                ];
+                // Half the rows get the valid shape of the verb, the rest any shape.
+                let fit = [5, 0, 0, 1, 3 + next(2) as usize, 13 + next(2) as usize, 5][v];
+                let args = args[if next(2) == 0 {
+                    fit
+                } else {
+                    next(args.len() as u64) as usize
+                }];
                 tx.execute(
                     "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
-                     VALUES (?1, 1, ?2, 'archive', ?3, ?4)",
-                    rusqlite::params![cs, n, Value::Object(targets).to_string(), args],
+                     VALUES (?1, 1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![cs, n, verb, Value::Object(targets).to_string(), args],
                 )?;
             }
             Ok(())
         })
         .unwrap();
         submit(&s, cs, &agent(), "Fuzz.", NOW).unwrap();
-        for a in doc(&s, cs)["actions"].as_array().unwrap() {
+        // The rows of another writer can break the schema (issue #158), so
+        // only the proposed actions go through the schema check.
+        let mut out = Vec::new();
+        write_document(&s, cs, &mut out).unwrap();
+        let mut d: Value = serde_json::from_slice(&out).unwrap();
+        let all = d["actions"].as_array().unwrap().clone();
+        d["actions"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|a| a["decision"]["state"] == "proposed");
+        if !d["actions"].as_array().unwrap().is_empty() {
+            let errors: Vec<String> = iris_spec::validator("changeset")
+                .iter_errors(&d)
+                .map(|e| format!("{e} at {}", e.instance_path()))
+                .collect();
+            assert!(errors.is_empty(), "round {round}: {errors:#?}");
+        }
+        for a in &all {
             let resolved = a["resolved"]["messages"].as_array().unwrap();
             match a["decision"]["state"].as_str().unwrap() {
-                "proposed" => {
+                "proposed" if a["verb"] == "draft" => {
+                    let t = &a["targets"];
+                    assert!(
+                        t == &json!({"accounts": ["a-1"]})
+                            || t["threads"].as_array().is_some_and(|l| l.len() == 1),
+                        "round {round}: {a}"
+                    );
+                    write += 1;
+                }
+                "proposed" if a["verb"] == "send" => {
+                    assert_eq!(
+                        a["targets"],
+                        json!({"drafts": ["d-1"]}),
+                        "round {round}: {a}"
+                    );
+                    assert_eq!(a["args"], json!({}), "round {round}: {a}");
+                    write += 1;
+                }
+                "proposed" if a["verb"] == "archive" => {
                     assert!(!resolved.is_empty(), "round {round}: {a}");
                     assert_eq!(a["args"], json!({}), "round {round}: {a}");
                     proposed += 1;
+                }
+                "proposed" => {
+                    // The fixture has the commitment c-1 and the record r-2.
+                    let kinds: &[&str] = match a["verb"].as_str().unwrap() {
+                        "correct" => &["c-1", "r-2"],
+                        _ => &["c-1"],
+                    };
+                    let items = a["targets"]["items"].as_array().unwrap();
+                    assert!(!items.is_empty(), "round {round}: {a}");
+                    for i in items {
+                        assert!(kinds.contains(&i.as_str().unwrap()), "round {round}: {a}");
+                    }
+                    state += 1;
                 }
                 "denied" => assert!(resolved.is_empty(), "round {round}: {a}"),
                 other => panic!("round {round}: {other}"),
@@ -582,6 +707,8 @@ fn random_target_rows() {
         }
     }
     assert!(proposed > 0, "the test reaches the proposed path");
+    assert!(state > 0, "the test reaches a proposed state action");
+    assert!(write > 0, "the test reaches a proposed draft or send");
 }
 
 /// Submit gives the messages from the targets only: a row of another
@@ -1056,4 +1183,531 @@ fn one_review_decision_is_all_or_nothing() {
     for (n, state) in [(1, "approved"), (2, "approved"), (3, "denied")] {
         assert_eq!(hash_doc(&s, cs, 1, n)["decision"]["state"], state);
     }
+}
+
+/// `label` and `unlabel` take one user label name. A system label, by name
+/// or ID and in any case, changes only through its own verb (section 4).
+#[test]
+fn label_takes_one_user_label() {
+    let dir = TempDir::new("label");
+    let s = store(&dir);
+    // A system label of the store that is not in the Gmail list.
+    s.write(|tx| {
+        Ok(tx.execute(
+            "INSERT INTO label(account_id, provider_id, name, kind)
+             VALUES (1, 'Label_9', 'Muted', 'system'), (1, 'Label_10', 'Épinglé', 'system'),
+               (1, 'Label_11', 'Σ', 'system')",
+            [],
+        )?)
+    })
+    .unwrap();
+    let cs = create(&s, &agent(), NOW).unwrap();
+    let cases: [(Verb, Value, bool); 24] = [
+        (Verb::Label, json!({"label": "Finance"}), true),
+        (Verb::Unlabel, json!({"label": "Finance"}), true),
+        // A new label: the apply makes it (section 7.2).
+        (Verb::Label, json!({"label": "Trips/2026"}), true),
+        (Verb::Label, json!({"label": "inbox"}), false),
+        (Verb::Unlabel, json!({"label": "Unread"}), false),
+        (Verb::Label, json!({"label": "category_promotions"}), false),
+        (Verb::Label, json!({"label": "MUTED"}), false),
+        (Verb::Label, json!({"label": "label_9"}), false),
+        (Verb::Label, json!({}), false),
+        (Verb::Label, json!({"label": ""}), false),
+        // A name with a space at an end is a user label too (#204).
+        (Verb::Label, json!({"label": " Finance"}), true),
+        (Verb::Label, json!({"label": " "}), false),
+        // The whole name is compared: a spaced name is not the system label.
+        (Verb::Label, json!({"label": " INBOX"}), true),
+        (Verb::Label, json!({"label": "Muted "}), true),
+        (Verb::Unlabel, json!({"label": " Σ"}), true),
+        (Verb::Label, json!({"label": 7}), false),
+        (Verb::Label, json!({"label": "Finance", "x": 1}), false),
+        (Verb::Label, json!({"name": "Finance"}), false),
+        (Verb::Unlabel, json!({"label": ["Finance"]}), false),
+        (Verb::Unlabel, json!({"label": "SENT"}), false),
+        // No regard to case, also outside ASCII.
+        (Verb::Label, json!({"label": "épinglé"}), false),
+        (Verb::Label, json!({"label": "ÉPINGLÉ"}), false),
+        // Case folding, not a lower case: σ, ς and Σ are one letter.
+        (Verb::Label, json!({"label": "ς"}), false),
+        (Verb::Unlabel, json!({"label": "σ"}), false),
+    ];
+    for (verb, a, _) in &cases {
+        add_action(&s, cs, &agent(), *verb, &["t-1"], &args(a.clone()), None).unwrap();
+    }
+    submit(&s, cs, &agent(), "Labels.", NOW).unwrap();
+    for (i, (verb, a, ok)) in cases.iter().enumerate() {
+        let d = hash_doc(&s, cs, 1, i as i64 + 1);
+        let expect = if *ok { "proposed" } else { "denied" };
+        assert_eq!(d["decision"]["state"], expect, "{} {a}", verb.as_str());
+        if *ok {
+            assert_eq!(d["resolved"]["messages"], json!(["m-1", "m-2"]), "{d}");
+        }
+    }
+}
+
+/// An action names each target once: two spellings of one ID are one
+/// target. The check is linear: 200,000 targets take well under a second.
+#[test]
+fn an_action_names_each_target_once() {
+    let dir = TempDir::new("once");
+    let s = store(&dir);
+    let cs = create(&s, &agent(), NOW).unwrap();
+    for targets in [
+        &["m-1", "m-1"][..],
+        &["m-1", "m-01"],
+        &["t-2", "t-1", "t-02"],
+    ] {
+        refused(add_action(
+            &s,
+            cs,
+            &agent(),
+            Verb::Archive,
+            targets,
+            &Map::new(),
+            None,
+        ));
+    }
+    let many: Vec<String> = (1..=200_000).map(|n| format!("m-{n}")).collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    let start = std::time::Instant::now();
+    add_action(&s, cs, &agent(), Verb::Archive, &many, &Map::new(), None).unwrap();
+    assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
+}
+
+/// The state verbs (section 4) take items: `close`, `decline` and `defer`
+/// take commitments, `correct` takes any item. Each argument has one shape.
+#[test]
+fn state_verbs_take_items() {
+    let dir = TempDir::new("state");
+    let s = store(&dir);
+    let cs = create(&s, &agent(), NOW).unwrap();
+    let cases: [(Verb, &[&str], Value, bool); 22] = [
+        (Verb::Close, &["c-1"], json!({"reason": "Done."}), true),
+        (Verb::Decline, &["c-1"], json!({"reason": "No time."}), true),
+        (Verb::Defer, &["c-1"], json!({"date": "2028-02-29"}), true),
+        (
+            Verb::Correct,
+            &["c-1"],
+            json!({"field": "due.date", "value": "2026-12-01"}),
+            true,
+        ),
+        (
+            Verb::Correct,
+            &["r-2"],
+            json!({"field": "fields.order", "value": "EB-1"}),
+            true,
+        ),
+        (Verb::Close, &["r-2"], json!({"reason": "Done."}), false),
+        (Verb::Close, &["c-9"], json!({"reason": "Done."}), false),
+        // The prefix does not fit the item.
+        (
+            Verb::Correct,
+            &["s-1"],
+            json!({"field": "title", "value": "x"}),
+            false,
+        ),
+        (Verb::Close, &["c-1"], json!({}), false),
+        (Verb::Close, &["c-1"], json!({"reason": " "}), false),
+        (
+            Verb::Decline,
+            &["c-1"],
+            json!({"reason": "x", "why": "y"}),
+            false,
+        ),
+        (Verb::Defer, &["c-1"], json!({"date": "2026-02-29"}), false),
+        (Verb::Defer, &["c-1"], json!({"date": "2026-13-01"}), false),
+        (Verb::Defer, &["c-1"], json!({"date": "2026-1-01"}), false),
+        (Verb::Defer, &["c-1"], json!({"date": 20260101}), false),
+        (
+            Verb::Correct,
+            &["c-1"],
+            json!({"field": "status", "value": "done"}),
+            false,
+        ),
+        (
+            Verb::Correct,
+            &["c-1"],
+            json!({"field": "due.date", "value": 7}),
+            false,
+        ),
+        (Verb::Correct, &["c-1"], json!({"field": "due.date"}), false),
+        (
+            Verb::Correct,
+            &["c-1"],
+            json!({"field": "", "value": "x"}),
+            false,
+        ),
+        (
+            Verb::Correct,
+            &["r-2"],
+            json!({"field": "issuer.sender", "value": "p-1"}),
+            false,
+        ),
+        (Verb::Archive, &["c-1"], json!({}), false),
+        (Verb::Close, &["m-1"], json!({"reason": "Done."}), false),
+    ];
+    for (verb, targets, a, _) in &cases {
+        add_action(&s, cs, &agent(), *verb, targets, &args(a.clone()), None).unwrap();
+    }
+    submit(&s, cs, &agent(), "Tidy up.", NOW).unwrap();
+    for (i, (verb, targets, a, ok)) in cases.iter().enumerate() {
+        let d = hash_doc(&s, cs, 1, i as i64 + 1);
+        let expect = if *ok { "proposed" } else { "denied" };
+        assert_eq!(
+            d["decision"]["state"],
+            expect,
+            "{} {targets:?} {a}: {d}",
+            verb.as_str()
+        );
+        // A state verb has no bulk flag and no first_contact flag.
+        assert_eq!(d["flags"], json!([]), "{d}");
+    }
+    // The origin message of the commitment is the resolved message, for the
+    // rules. The record has no origin row in this store.
+    assert_eq!(
+        hash_doc(&s, cs, 1, 1)["resolved"]["messages"],
+        json!(["m-1"])
+    );
+    assert_eq!(hash_doc(&s, cs, 1, 5)["resolved"]["messages"], json!([]));
+}
+
+/// `correct` takes items of any form in one action (section 4): the form
+/// of each item does not need to agree. Each item must pass the rules of a
+/// correction, so a field of the commitment only denies the record.
+#[test]
+fn correct_takes_items_of_two_forms() {
+    let dir = TempDir::new("forms");
+    let s = store(&dir);
+    let cs = create(&s, &agent(), NOW).unwrap();
+    let a = args(json!({"field": "due.date", "value": "2026-12-01"}));
+    add_action(&s, cs, &agent(), Verb::Correct, &["c-1", "r-2"], &a, None).unwrap();
+    submit(&s, cs, &agent(), "Fix the dates.", NOW).unwrap();
+    let d = hash_doc(&s, cs, 1, 1);
+    assert_eq!(d["targets"], json!({"items": ["c-1", "r-2"]}), "{d}");
+    assert_eq!(d["decision"]["state"], "denied", "{d}");
+    let why = d["decision"]["reason"].as_str().unwrap();
+    assert!(why.contains("r-2") && !why.contains("target"), "{why}");
+}
+
+/// An item that an open action names is pinned (specification 1, section
+/// 7.5): understanding does not delete it. A decided action does not pin.
+#[test]
+fn an_open_action_pins_its_items() {
+    let dir = TempDir::new("pin");
+    let s = store(&dir);
+    let pins = |s: &Store| -> Vec<i64> {
+        s.read(|c| {
+            let mut st = c.prepare("SELECT item_id FROM item_pin ORDER BY 1")?;
+            let v = st
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(v)
+        })
+        .unwrap()
+    };
+    let cs = create(&s, &agent(), NOW).unwrap();
+    add_action(
+        &s,
+        cs,
+        &agent(),
+        Verb::Close,
+        &["c-1"],
+        &args(json!({"reason": "Done."})),
+        None,
+    )
+    .unwrap();
+    add_action(
+        &s,
+        cs,
+        &agent(),
+        Verb::Close,
+        &["r-2"],
+        &args(json!({"reason": "Done."})),
+        None,
+    )
+    .unwrap();
+    assert_eq!(pins(&s), Vec::<i64>::new(), "a draft does not pin");
+    submit(&s, cs, &agent(), "Done.", NOW).unwrap();
+    assert_eq!(pins(&s), vec![1], "a denied action does not pin");
+    decide(&s, at(cs, 1, 1), State::InReview, By::Policy, None, NOW).unwrap();
+    assert_eq!(pins(&s), vec![1]);
+    decide(
+        &s,
+        at(cs, 1, 1),
+        State::Denied,
+        By::Person,
+        Some("No."),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(pins(&s), Vec::<i64>::new());
+    // The rows of a submitted action do not change.
+    for sql in [
+        "DELETE FROM action_item",
+        "UPDATE action_item SET item_id = 2",
+        "INSERT OR REPLACE INTO action_item(action_id, item_id) VALUES (1, 1)",
+        "INSERT INTO action_item(action_id, item_id) VALUES (1, 2)",
+    ] {
+        assert!(s.write(|tx| Ok(tx.execute(sql, [])?)).is_err(), "{sql}");
+    }
+}
+
+/// Claim an approved action with a ledger row in `writing`, as the apply
+/// does before its first write call (migration 11).
+fn start_writing(s: &Store, cs: i64, n: i64) {
+    s.write(|tx| {
+        Ok(tx.execute(
+            "INSERT INTO ledger(action_id, ops, state, undo, at)
+             SELECT id, '{}', 'writing', 'inverse', 1 FROM changeset_action
+             WHERE changeset_id = ?1 AND n = ?2",
+            rusqlite::params![cs, n],
+        )?)
+    })
+    .unwrap();
+}
+
+/// A withdraw (section 5.5) comes from the author or the person. It
+/// cancels each open action and each draft action. An action whose
+/// provider calls started stays `approved`, to end as applied or failed.
+#[test]
+fn a_withdraw_cancels_the_open_actions() {
+    let dir = TempDir::new("withdraw");
+    let s = store(&dir);
+    let cs = create(&s, &agent(), NOW).unwrap();
+    for m in ["m-1", "m-2", "m-4"] {
+        add_action(&s, cs, &agent(), Verb::Archive, &[m], &Map::new(), None).unwrap();
+    }
+    submit(&s, cs, &agent(), "Archive.", NOW).unwrap();
+    approve(&s, at(cs, 1, 1), &hash(&s, cs, 1, 1), NOW).unwrap();
+    approve(&s, at(cs, 1, 2), &hash(&s, cs, 1, 2), NOW).unwrap();
+    decide(&s, at(cs, 1, 3), State::InReview, By::Policy, None, NOW).unwrap();
+    start_writing(&s, cs, 1);
+    let other = Author {
+        session: Some("se-13".into()),
+        ..agent()
+    };
+    refused(withdraw(&s, cs, Some(&other)));
+    assert!(matches!(withdraw(&s, 999, None), Err(Error::NotFound)));
+    withdraw(&s, cs, Some(&agent())).unwrap();
+    let d = doc(&s, cs);
+    assert_eq!(d["state"], "withdrawn");
+    let states: Vec<&Value> = (0..3)
+        .map(|i| &d["actions"][i]["decision"]["state"])
+        .collect();
+    assert_eq!(
+        states,
+        [&json!("approved"), &json!("cancelled"), &json!("cancelled")]
+    );
+    assert_eq!(d["actions"][1]["decision"]["by"], "author");
+    refused(withdraw(&s, cs, None));
+    refused(revise(&s, cs, &agent()));
+
+    // A draft: the person withdraws it, and it takes no new action.
+    let draft = create(&s, &agent(), NOW).unwrap();
+    add_action(
+        &s,
+        draft,
+        &agent(),
+        Verb::Archive,
+        &["m-1"],
+        &Map::new(),
+        None,
+    )
+    .unwrap();
+    withdraw(&s, draft, None).unwrap();
+    assert_eq!(
+        doc(&s, draft)["actions"][0]["decision"]["state"],
+        "cancelled"
+    );
+    refused(add_action(
+        &s,
+        draft,
+        &agent(),
+        Verb::Archive,
+        &["m-2"],
+        &Map::new(),
+        None,
+    ));
+}
+
+/// The expiry (section 5.5): 14 days after its submit, each open action
+/// becomes `expired`, by `expiry`. Not one millisecond before. An action
+/// whose provider calls started continues to its end.
+#[test]
+fn open_actions_expire_14_days_after_the_submit() {
+    const EXPIRY: i64 = 14 * 24 * 60 * 60 * 1000;
+    let dir = TempDir::new("expire");
+    let s = store(&dir);
+    let cs = create(&s, &agent(), NOW).unwrap();
+    for m in ["m-1", "m-2", "m-4", "t-1"] {
+        add_action(&s, cs, &agent(), Verb::Archive, &[m], &Map::new(), None).unwrap();
+    }
+    add_action(&s, cs, &agent(), Verb::Archive, &["m-9"], &Map::new(), None).unwrap();
+    submit(&s, cs, &agent(), "Archive.", NOW).unwrap();
+    approve(&s, at(cs, 1, 1), &hash(&s, cs, 1, 1), NOW).unwrap();
+    approve(&s, at(cs, 1, 2), &hash(&s, cs, 1, 2), NOW).unwrap();
+    decide(&s, at(cs, 1, 3), State::InReview, By::Policy, None, NOW).unwrap();
+    start_writing(&s, cs, 1);
+    // A draft of another changeset has no submit, so it does not expire.
+    let draft = create(&s, &agent(), NOW).unwrap();
+    add_action(
+        &s,
+        draft,
+        &agent(),
+        Verb::Archive,
+        &["m-1"],
+        &Map::new(),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(expire(&s, NOW + EXPIRY - 1).unwrap(), 0);
+    assert_eq!(expire(&s, NOW + EXPIRY).unwrap(), 3);
+    assert_eq!(expire(&s, NOW + EXPIRY + 1).unwrap(), 0);
+    let d = doc(&s, cs);
+    let states: Vec<&Value> = (0..5)
+        .map(|i| &d["actions"][i]["decision"]["state"])
+        .collect();
+    assert_eq!(
+        states,
+        [
+            &json!("approved"),
+            &json!("expired"),
+            &json!("expired"),
+            &json!("expired"),
+            &json!("denied")
+        ]
+    );
+    assert_eq!(d["actions"][1]["decision"]["by"], "expiry");
+    assert_eq!(
+        d["state"], "open",
+        "the action with a writing ledger row is still open"
+    );
+    assert!(doc(&s, draft)["actions"][0]["decision"].is_null());
+}
+
+/// Random `ledger` targets (section 7.4): submit proposes an undo only for
+/// the exact target of its own linked entry, with the changed messages of
+/// the entry, and denies each other shape with no message row.
+#[test]
+fn random_ledger_targets() {
+    let dir = TempDir::new("fuzz-ledger");
+    let s = store(&dir);
+    // Entry l-1: an archive of messages 1 and 2, applied.
+    let cs = create(&s, &agent(), NOW).unwrap();
+    add_action(
+        &s,
+        cs,
+        &agent(),
+        Verb::Archive,
+        &["m-1", "m-2"],
+        &Map::new(),
+        None,
+    )
+    .unwrap();
+    submit(&s, cs, &agent(), "Archive.", NOW).unwrap();
+    s.write(|tx| {
+        tx.execute_batch(
+            "UPDATE changeset_action SET state = 'approved', decided_by = 'person',
+               decided_at = 1 WHERE id = 1;
+             INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+             VALUES (1, 1, '{}', 'writing', 'inverse', 1);
+             INSERT INTO ledger_message(ledger_id, message_id, call, pre, post)
+             VALUES (1, 1, 1, '[\"INBOX\"]', '[]'), (1, 2, 1, '[\"INBOX\"]', '[]');
+             UPDATE ledger SET call = 1;
+             UPDATE ledger_message SET done = 1;
+             UPDATE ledger SET state = 'applied';",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let person = Author {
+        kind: AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = move |n: u64| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x % n
+    };
+    let ids = [
+        json!("l-1"),
+        json!("l-2"),
+        json!("l-01"),
+        json!("l-0"),
+        json!("l-"),
+        json!("l-1 "),
+        json!("L-1"),
+        json!("m-1"),
+        json!(1),
+        json!(null),
+        json!("l-99999999999999999999"),
+    ];
+    let (mut proposed, mut denied) = (0, 0);
+    for round in 0..300 {
+        let list: Vec<Value> = (0..next(3))
+            .map(|_| ids[next(ids.len() as u64) as usize].clone())
+            .collect();
+        let mut targets = Map::new();
+        targets.insert("ledger".into(), json!(list));
+        if next(6) == 0 {
+            targets.insert("messages".into(), json!(["m-1"]));
+        }
+        let targets = Value::Object(targets).to_string();
+        let exact = targets == "{\"ledger\":[\"l-1\"]}";
+        let cs = create(&s, &person, NOW).unwrap();
+        let action = s
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+                     VALUES (?1, 1, 1, 'inbox', ?2, '{}')",
+                    rusqlite::params![cs, targets],
+                )?;
+                Ok(tx.last_insert_rowid())
+            })
+            .unwrap();
+        // The link needs the whole entry as the target (migration 23).
+        let linked = next(3) != 0
+            && s.write(|tx| {
+                Ok(tx.execute(
+                    "INSERT INTO ledger_undo(action_id, ledger_id, step) VALUES (?1, 1, 1)",
+                    [action],
+                )?)
+            })
+            .map_err(|e| assert!(!exact && e.to_string().contains("iris:"), "{e}"))
+            .is_ok();
+        submit(&s, cs, &person, "Undo.", NOW).unwrap();
+        let mut out = Vec::new();
+        write_document(&s, cs, &mut out).unwrap();
+        let d: Value = serde_json::from_slice(&out).unwrap();
+        let a = &d["actions"][0];
+        let resolved = a["resolved"]["messages"].as_array().unwrap();
+        match a["decision"]["state"].as_str().unwrap() {
+            "proposed" => {
+                assert!(linked && exact, "round {round}: {a}");
+                assert_eq!(resolved, &vec![json!("m-1"), json!("m-2")], "round {round}");
+                let errors: Vec<String> = iris_spec::validator("changeset")
+                    .iter_errors(&d)
+                    .map(|e| format!("{e} at {}", e.instance_path()))
+                    .collect();
+                assert!(errors.is_empty(), "round {round}: {errors:#?}");
+                proposed += 1;
+                // The next round can link the entry again.
+                withdraw(&s, cs, Some(&person)).unwrap();
+            }
+            "denied" => {
+                assert!(!(linked && exact), "round {round}: {a}");
+                assert!(resolved.is_empty(), "round {round}: {a}");
+                denied += 1;
+            }
+            other => panic!("round {round}: {other}"),
+        }
+    }
+    assert!(proposed > 0 && denied > 0, "{proposed} {denied}");
 }

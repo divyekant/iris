@@ -262,7 +262,10 @@ lose a rerun:
 
 `iris_understand::batch::run(store, connect, &Limits, now) -> Report`:
 
-1. Take the run lock. Insert the run row.
+1. Take the run lock. Insert the run row. Then the link check of each row
+   of `link_check` (spec 1, migration 20), with no model: a deceptive
+   message is understood at once with no model call, and counts in
+   `messages` and toward `Limits::max_messages`.
 2. In one write: `iris_senders::refresh`, then `rerun_senders` for the rows
    that became or stopped being hostile. No model call.
 3. Read `model_setting` and make the `Budgeted` model.

@@ -1,6 +1,6 @@
 // Words for the review screen (R2-06): a changeset of spec 2 section 5.1 in
 // plain sentences. Pure functions, so the tests need no DOM.
-import type { Action, Changeset, Item, Target } from "./api";
+import type { Action, Changeset, DraftView, Item, Target } from "./api";
 import { href } from "./route";
 
 const n = (count: number, one: string, many: string) => `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`;
@@ -33,6 +33,10 @@ export function verb(a: Action): string {
       return `Defer to ${arg(a, "until") || arg(a, "date")}`;
     case "correct":
       return `Correct ${arg(a, "field") || "a field of"}`;
+    case "send":
+      return "Send";
+    case "draft":
+      return "Write the draft of";
     default:
       return a.verb;
   }
@@ -40,6 +44,8 @@ export function verb(a: Action): string {
 
 /** What the action changes: the real count of messages at submit, and the threads that the author named. */
 export function target(a: Action): string {
+  // A draft or a send writes one mail: its messages are the thread, not the change.
+  if (mail(a)) return "a mail";
   const messages = a.resolved.messages.length;
   const threads = a.targets.threads?.length ?? 0;
   const items = a.targets.items?.length ?? 0;
@@ -74,7 +80,15 @@ export const messageRow = (m: Target): Row =>
   m.gone ? { id: m.id, gone: true } : { id: m.id, gone: false, href: href.mail(m.id), who: m.from.name || m.from.address || "Unknown sender", what: m.subject || "(no subject)", when: m.date };
 
 export const itemRow = (id: string, item: Item | null): Row =>
-  item ? { id, gone: false, href: href.item(id), who: FORMS[item.form] ?? item.form, what: item.title, when: null } : { id, gone: true };
+  item && item.status !== "gone" ? { id, gone: false, href: href.item(id), who: FORMS[item.form] ?? item.form, what: item.title, when: null } : { id, gone: true };
+
+/** The words of the decide button: what happens to the ticked and the unticked changes. */
+export function plan(chosen: number, open: number): string {
+  const no = open - chosen;
+  if (chosen === 0) return open === 1 ? "Deny the change" : `Deny all ${open}`;
+  if (no === 0) return open === 1 ? "Approve the change" : `Approve all ${open}`;
+  return `Approve ${chosen}, deny ${no}`;
+}
 
 /** The IDs that an action changes: its items, or the messages that submit resolved. */
 export const targets = (a: Action) => (a.targets.items?.length ? a.targets.items : a.resolved.messages);
@@ -109,12 +123,13 @@ export function pages(fetch: (ids: string[], items: boolean) => Promise<Row[]>) 
 
 /** Why a person must look (spec 2 section 5.3), in words. */
 export const FLAGS: Record<string, string> = {
-  bulk: "Changes more than 500 messages",
+  // Spec 2 section 5.3: the action, its changeset or the recent actions of the author cross 500 messages.
+  bulk: "Part of a change to more than 500 messages",
   first_contact: "The thread is with a sender you do not know",
   new_recipient: "Goes to an address you never wrote to",
   outside_thread: "Goes to an address that is not in the thread",
-  money: "Promises an amount of money",
-  date: "Promises a date",
+  money: "Names an amount of money",
+  date: "Names a date",
   attachment: "Mentions an attachment",
   untrusted_content: "Holds text from another message",
 };
@@ -125,12 +140,13 @@ export const waits = (a: Action) => a.decision?.state === "proposed" || a.decisi
 const OPEN = ["proposed", "in_review", "approved", "held"];
 
 /**
- * The actions to show: each submitted action of the newest revision, and an
- * action of an older revision that is still open (spec 2 section 5.5). A
- * draft action has no decision yet, and a replaced action is history.
+ * The actions to show: each submitted action of the newest revision, an
+ * action of an older revision that is still open (spec 2 section 5.5), and
+ * each action that a withdraw cancelled. A draft action has no decision yet,
+ * and a replaced action is history.
  */
 export function shown(c: Changeset): Action[] {
-  return c.actions.filter((a) => a.decision && a.decision.state !== "replaced" && (a.revision === c.revision || OPEN.includes(a.decision.state)));
+  return c.actions.filter((a) => a.decision && a.decision.state !== "replaced" && (a.revision === c.revision || OPEN.includes(a.decision.state) || a.decision.state === "cancelled"));
 }
 
 /** Who asked, for the head of the request. */
@@ -159,7 +175,8 @@ export function outcome(a: Action): string {
     case "expired":
       return "Expired: no decision in 14 days";
     case "cancelled":
-      return "The author withdrew it";
+      // by is always "author" here: it names the event (a withdraw or a new revision), not who withdrew (issue 221).
+      return "Withdrawn";
     default:
       return "";
   }
@@ -174,3 +191,34 @@ export function short(value: string | null | undefined, now = new Date()): strin
   return date.toLocaleString("en-US", { month: "short", day: "numeric", year, hour: "numeric", minute: "2-digit" });
 }
 
+
+/** The verbs whose action holds a mail text: the review shows the draft (card R4-07). */
+export const mail = (a: Action) => a.verb === "send" || a.verb === "draft";
+
+/** What a draft or a send writes, in words: "a reply to dana@acme.example", "a new mail to ana@x.org and 2 more". */
+export function to(d: DraftView): string {
+  const kind = d.thread ? "a reply" : "a new mail";
+  if (!d.readable) return kind;
+  const list = [...d.to, ...d.cc].map((r) => r.address);
+  return `${kind} to ${list.length > 2 ? `${list[0]} and ${list.length - 1} more` : list.join(" and ")}`;
+}
+
+/** The short words beside a marked part of a draft (option C of card R4-07, the owner's pick). */
+export const TAGS: Record<string, string> = {
+  new_recipient: "new address",
+  money: "amount",
+  date: "date",
+  attachment: "no file attached",
+  untrusted_content: "copied from another mail",
+};
+
+/**
+ * The flags of an action that no part of its draft shows, in words. A flag
+ * that the draft marks shows only as its mark and tag. A flag with no mark
+ * (for example, the owner wrote to the address after the submit, or Iris
+ * cannot read the draft) keeps its line.
+ */
+export function unmarked(a: Action, d: DraftView | undefined): string[] {
+  const on = new Set(d?.readable ? [...d.to, ...d.cc, ...d.subject, ...d.body].flatMap((p) => p.flags ?? []) : []);
+  return a.flags.filter((f) => !on.has(f)).map((f) => FLAGS[f] ?? f);
+}

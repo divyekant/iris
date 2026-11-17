@@ -39,23 +39,54 @@ const QUOTE_CHARS: usize = 500;
 const NAME_CHARS: usize = 200;
 const NO_SUBJECT: &str = "(no subject)";
 
-/// One message that the conversation counts.
-struct Mail {
-    id: i64,
-    at: i64,
+/// One understood message of a thread, with the rule of the conversation.
+pub struct Mail {
+    pub id: i64,
+    pub at: i64,
     /// Lowercase.
-    from: String,
-    from_name: Option<String>,
-    to: Vec<String>,
-    cc: Vec<String>,
-    subject: String,
-    text: String,
-    mine: bool,
-    service: bool,
-    gone: bool,
+    pub from: String,
+    pub from_name: Option<String>,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub subject: String,
+    pub text: String,
+    pub mine: bool,
+    pub service: bool,
+    pub gone: bool,
     /// Not a draft and not hostile mail. A message counts when it is clean,
     /// not gone, and from you or from an address.
-    clean: bool,
+    pub clean: bool,
+}
+
+impl Mail {
+    /// The conversation rule: the message counts for a reader when it is
+    /// clean, not gone, and from you or from an address.
+    pub fn for_reader(&self) -> bool {
+        !self.gone && self.clean && (self.mine || !self.from.is_empty())
+    }
+}
+
+/// Your addresses: the address of each account of the store and the From
+/// of each of your sent messages (an alias), lowercase. One row at a time.
+pub fn your_addresses(conn: &Connection) -> rusqlite::Result<std::collections::BTreeSet<String>> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut q = conn.prepare_cached("SELECT lower(address) FROM account")?;
+    for a in q.query_map([], |r| r.get::<_, String>(0))? {
+        out.insert(a?);
+    }
+    let mut q = conn.prepare_cached(
+        "SELECT h.from_addr FROM message m JOIN header h ON h.message_id = m.id
+         WHERE EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                      WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
+           AND NOT EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                          WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT')",
+    )?;
+    for from in q.query_map([], |r| r.get::<_, Option<String>>(0))? {
+        if let Some(a) = from?.and_then(|f| addresses(&f).into_iter().next()) {
+            out.insert(a);
+        }
+    }
+    Ok(out)
 }
 
 /// The conversation item of a thread, as the store has it.
@@ -103,10 +134,7 @@ pub fn update(
         .map(|m| (m.at, m.id))
         .collect();
     let origin_only_gone = |origin: i64| all.iter().any(|m| m.id == origin && m.gone && m.clean);
-    let mails: Vec<&Mail> = all
-        .iter()
-        .filter(|m| !m.gone && m.clean && (m.mine || !m.from.is_empty()))
-        .collect();
+    let mails: Vec<&Mail> = all.iter().filter(|m| m.for_reader()).collect();
     let existing = existing(conn, thread)?;
 
     let Some(old) = existing else {
@@ -376,64 +404,81 @@ pub fn set_field(doc: &mut Value, field: &str, value: Value) -> bool {
     true
 }
 
+/// One understood message, also when it is gone, or `None`. A message is
+/// for a reader when it is `clean` and not `gone`: then it is not a draft
+/// and not hostile mail (specification 1, section 6.7). It reads one body,
+/// so a caller can go through a large thread with bounded memory.
+pub fn message(conn: &Connection, id: i64) -> rusqlite::Result<Option<Mail>> {
+    let mut q = conn.prepare_cached(&format!(
+        "{MAIL_SELECT} WHERE m.id = ?1 AND m.understood_at IS NOT NULL"
+    ))?;
+    q.query_row([id], |r| mail_of(conn, r)).optional()
+}
+
+/// The columns that [`mail_of`] reads.
+const MAIL_SELECT: &str =
+    "SELECT m.id, COALESCE(m.internal_date, h.date, 0) AS at, h.from_addr, h.from_name,
+            h.to_addrs, h.cc_addrs, COALESCE(b.subject, h.subject), b.text, m.hostile,
+            EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                   WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
+            EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                   WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT'),
+            m.gone_at IS NOT NULL
+     FROM message m LEFT JOIN header h ON h.message_id = m.id
+     LEFT JOIN body b ON b.message_id = m.id";
+
 /// Each message of the thread that is understood or `current`, also when it
 /// is gone, oldest first. The content cleanup can delete the header of a gone
 /// message: then only its row decides.
 fn mails(conn: &Connection, thread: i64, current: Option<i64>) -> rusqlite::Result<Vec<Mail>> {
-    let mut q = conn.prepare_cached(
-        "SELECT m.id, COALESCE(m.internal_date, h.date, 0) AS at, h.from_addr, h.from_name,
-                h.to_addrs, h.cc_addrs, COALESCE(b.subject, h.subject), b.text, m.hostile,
-                EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                       WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
-                EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                       WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT'),
-                m.gone_at IS NOT NULL
-         FROM message m LEFT JOIN header h ON h.message_id = m.id
-         LEFT JOIN body b ON b.message_id = m.id
-         WHERE m.thread_id = ?1
+    let mut q = conn.prepare_cached(&format!(
+        "{MAIL_SELECT} WHERE m.thread_id = ?1
            AND (m.understood_at IS NOT NULL OR m.id IS ?2)
-         ORDER BY at, m.id",
-    )?;
-    let rows = q.query_map(params![thread, current], |r| {
-        let hostile: Option<String> = r.get(8)?;
-        let sent: bool = r.get(9)?;
-        let draft: bool = r.get(10)?;
-        let gone: bool = r.get(11)?;
-        let from = r
-            .get::<_, Option<String>>(2)?
-            .and_then(|f| addresses(&f).into_iter().next())
-            // A From that is not an address gives no party.
-            .unwrap_or_default();
-        // The kind of the parsed address: sender rows hold bare addresses.
-        let kind: Option<String> = conn
-            .prepare_cached("SELECT kind FROM sender WHERE address = ?1")?
-            .query_row([&from], |r| r.get(0))
-            .optional()?
-            .flatten();
-        // Only the label SENT makes a message yours: anyone can write the
-        // mailbox address in From (spec 1 section 6.7).
-        let mine = sent;
-        let hostile = marked(hostile.as_deref()) || (!mine && kind.as_deref() == Some("hostile"));
-        let mail = Mail {
-            id: r.get(0)?,
-            at: r.get(1)?,
-            from_name: r
-                .get::<_, Option<String>>(3)?
-                .map(|n| decode_name(&n))
-                .filter(|n| !n.trim().is_empty()),
-            to: addresses(r.get::<_, Option<String>>(4)?.as_deref().unwrap_or("")),
-            cc: addresses(r.get::<_, Option<String>>(5)?.as_deref().unwrap_or("")),
-            subject: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
-            text: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
-            service: !mine && kind.as_deref() == Some("service"),
-            mine,
-            from,
-            gone,
-            clean: !draft && !hostile,
-        };
-        Ok(mail)
-    })?;
+         ORDER BY at, m.id"
+    ))?;
+    let rows = q.query_map(params![thread, current], |r| mail_of(conn, r))?;
     rows.collect()
+}
+
+/// One row of [`MAIL_SELECT`] as a [`Mail`].
+fn mail_of(conn: &Connection, r: &rusqlite::Row) -> rusqlite::Result<Mail> {
+    let hostile: Option<String> = r.get(8)?;
+    let sent: bool = r.get(9)?;
+    let draft: bool = r.get(10)?;
+    let gone: bool = r.get(11)?;
+    let from = r
+        .get::<_, Option<String>>(2)?
+        .and_then(|f| addresses(&f).into_iter().next())
+        // A From that is not an address gives no party.
+        .unwrap_or_default();
+    // The kind of the parsed address: sender rows hold bare addresses.
+    let kind: Option<String> = conn
+        .prepare_cached("SELECT kind FROM sender WHERE address = ?1")?
+        .query_row([&from], |r| r.get(0))
+        .optional()?
+        .flatten();
+    // Only the label SENT makes a message yours: anyone can write the
+    // mailbox address in From (spec 1 section 6.7).
+    let mine = sent;
+    let hostile = marked(hostile.as_deref()) || (!mine && kind.as_deref() == Some("hostile"));
+    let mail = Mail {
+        id: r.get(0)?,
+        at: r.get(1)?,
+        from_name: r
+            .get::<_, Option<String>>(3)?
+            .map(|n| decode_name(&n))
+            .filter(|n| !n.trim().is_empty()),
+        to: addresses(r.get::<_, Option<String>>(4)?.as_deref().unwrap_or("")),
+        cc: addresses(r.get::<_, Option<String>>(5)?.as_deref().unwrap_or("")),
+        subject: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+        text: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
+        service: !mine && kind.as_deref() == Some("service"),
+        mine,
+        from,
+        gone,
+        clean: !draft && !hostile,
+    };
+    Ok(mail)
 }
 
 /// True if the `hostile` column holds one or more marks. A value that is not

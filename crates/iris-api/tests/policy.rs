@@ -100,7 +100,7 @@ async fn the_first_start_has_no_rules_and_no_file() {
     let v = d.get().await;
     assert_eq!(
         v,
-        json!({ "mode": "observe", "version": null, "next_id": 1, "rules": [], "error": null, "file": { "state": "missing" } })
+        json!({ "mode": "observe", "version": null, "next_id": 1, "rules": [], "proposals": [], "error": null, "file": { "state": "missing" } })
     );
     let (code, status) = d.call("GET", "/api/status", None, true).await;
     assert_eq!((code, &status["mode"]), (StatusCode::OK, &json!("observe")));
@@ -269,9 +269,103 @@ async fn each_policy_endpoint_needs_the_sign_in() {
         ("POST", "/api/policy/discard"),
         ("POST", "/api/policy/mode"),
         ("POST", "/api/policy/remove"),
+        ("POST", "/api/policy/accept"),
+        ("POST", "/api/policy/dismiss"),
     ] {
         let (code, _) = d.call(method, uri, Some(json!({})), false).await;
         assert_eq!(code, StatusCode::UNAUTHORIZED, "{uri}");
     }
+    assert!(!d.0.join(iris_policy::FILE).exists());
+}
+
+/// `n` archive actions of an agent on one new message from `from` each,
+/// that the person decided with `state`. Then a pass of the engine, if `pass`.
+fn decided(store: &Store, from: &str, n: usize, state: &str, pass: bool) {
+    store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT OR IGNORE INTO account(id, provider, address) VALUES (1, 'gmail', 'me@x.example');
+                 INSERT OR IGNORE INTO thread(id, account_id, provider_id) VALUES (1, 1, 't');
+                 INSERT OR IGNORE INTO sender(address, kind) VALUES ('deals@acme.example', 'service');",
+            )?;
+            for _ in 0..n {
+                let k: i64 = tx.query_row("SELECT count(*) FROM message", [], |r| r.get(0))?;
+                tx.execute(
+                    "INSERT INTO message(account_id, thread_id, provider_id, internal_date) VALUES (1, 1, ?1, 0)",
+                    [format!("m{k}")],
+                )?;
+                let m = tx.last_insert_rowid();
+                tx.execute("INSERT INTO header(message_id, from_addr) VALUES (?1, ?2)", rusqlite::params![m, from])?;
+                tx.execute("INSERT INTO changeset(author_kind, created_at) VALUES ('agent', 0)", [])?;
+                let cs = tx.last_insert_rowid();
+                tx.execute(
+                    "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args, hash)
+                     VALUES (?1, 1, 1, 'archive', ?2, '{}', 'h')",
+                    rusqlite::params![cs, format!("{{\"messages\":[\"m-{m}\"]}}")],
+                )?;
+                let a = tx.last_insert_rowid();
+                tx.execute("INSERT INTO action_message(action_id, message_id) VALUES (?1, ?2)", [a, m])?;
+                tx.execute("UPDATE changeset SET why = 'w', submitted_at = 1 WHERE id = ?1", [cs])?;
+                tx.execute(
+                    "UPDATE changeset_action SET state = ?2, decided_by = 'person', decided_at = 2,
+                     reason = CASE ?2 WHEN 'denied' THEN 'no' END WHERE id = ?1",
+                    rusqlite::params![a, state],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    if pass {
+        iris_policy::propose::refresh(store, 1_800_000_000, &mut None).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_proposal_goes_into_the_file_only_on_accept() {
+    let d = open("proposal");
+    decided(&d.1, "deals@acme.example", 12, "approved", true);
+    let v = d.get().await;
+    let p = &v["proposals"][0];
+    assert_eq!((&p["id"], &p["approvals"]), (&json!(1), &json!(12)), "{v}");
+    assert_eq!(p["rule"]["name"], "Archive mail from deals@acme.example");
+    assert_eq!(p["rule"]["by"], "proposal");
+    assert_eq!(p["rule"]["when"], json!({ "sender": "deals@acme.example" }));
+    assert_eq!(
+        v["proposals"][1]["rule"]["when"],
+        json!({ "sender_kind": "service" })
+    );
+    assert!(
+        !d.0.join(iris_policy::FILE).exists(),
+        "no file before the accept"
+    );
+
+    let (code, v) = d.post("dismiss", json!({ "id": 2 })).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["proposals"].as_array().unwrap().len(), 1);
+    let (code, _) = d.post("dismiss", json!({ "id": 2 })).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+
+    let (code, v) = d.post("accept", json!({ "version": null, "id": 1 })).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["proposals"], json!([]));
+    assert_eq!(v["rules"][0]["by"], "proposal");
+    assert_eq!(v["rules"][0]["verbs"], json!(["archive"]));
+    let text = std::fs::read_to_string(d.0.join(iris_policy::FILE)).unwrap();
+    assert!(text.contains("approved 12 of 12 archive actions"), "{text}");
+    let (code, _) = d
+        .post("accept", json!({ "version": v["version"], "id": 1 }))
+        .await;
+    assert_eq!(code, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn an_accept_after_a_new_refusal_is_a_409() {
+    let d = open("stale");
+    decided(&d.1, "deals@acme.example", 10, "approved", true);
+    assert_eq!(d.get().await["proposals"][0]["id"], 1);
+    // The refusal comes before the next pass of the engine.
+    decided(&d.1, "deals@acme.example", 1, "denied", false);
+    let (code, e) = d.post("accept", json!({ "version": null, "id": 1 })).await;
+    assert_eq!(code, StatusCode::CONFLICT, "{e}");
     assert!(!d.0.join(iris_policy::FILE).exists());
 }

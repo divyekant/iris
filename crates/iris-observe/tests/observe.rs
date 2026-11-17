@@ -43,6 +43,9 @@ fn fill_items(store: &Store, mailbox: &Mailbox) {
                     [FakeGmail::id_of(i)],
                 )?;
             }
+            // Each batch run first ends the link check of new mail (store
+            // migration 20).
+            tx.execute("DELETE FROM link_check", [])?;
             // The engine marks hostile mail (specification 1, section 6.7).
             tx.execute(
                 "INSERT INTO sender(address, kind) VALUES ('h@example.net', 'hostile')",
@@ -177,6 +180,22 @@ fn the_first_run_proposes_archives_and_makes_zero_writes_to_gmail() {
             serde_json::json!([]),
             "400 messages is not bulk"
         );
+    }
+
+    // A message that waits for its link check is in no rule: its items can
+    // be of hostile mail. Each rule loses one message.
+    let mut waits = Vec::new();
+    for (rule, ids) in &expected {
+        let row: i64 = ids[0][2..].parse().unwrap();
+        store
+            .write(|tx| Ok(tx.execute("INSERT INTO link_check(message_id) VALUES (?1)", [row])?))
+            .unwrap();
+        waits.push((*rule, ids.len() - 1));
+    }
+    let got = counts(&store, account).unwrap();
+    for (rule, n) in &got {
+        let want = waits.iter().find(|(w, _)| *w == rule.why()).unwrap().1;
+        assert_eq!(*n as usize, want, "count of {rule:?} with a queued message");
     }
 
     // Observe mode sends nothing to Gmail, and the first sync only reads.

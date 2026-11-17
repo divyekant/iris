@@ -1,0 +1,168 @@
+<!--
+  Notices by rule (card R5-08): each notice that is not done, above every view.
+  A notice comes only from a `notify` rule of the person. The card opens the mail.
+-->
+<script lang="ts">
+  import { own } from "../api";
+  import { follow } from "../clock";
+  import { when } from "../format";
+  import { doneNotice, loadNotices, NOTICE_POLL, type Notice } from "../notices";
+  import { href } from "../route";
+
+  let { first, poll = NOTICE_POLL }: { first?: Notice[]; poll?: number } = $props();
+
+  // svelte-ignore state_referenced_locally
+  let notices = $state<Notice[]>(first ?? []);
+  let gone = $state(new Set<string>());
+  let busy = $state("");
+  let error = $state("");
+  // The first three show. The rest wait behind one line.
+  const SHOW = 3;
+  let open = $state(false);
+  let list = $derived(notices.filter((n) => !gone.has(n.id)));
+  let shown = $derived(open ? list : list.slice(0, SHOW));
+
+  $effect(() => {
+    if (!poll) return;
+    return follow(loadNotices, (n) => (notices = n), poll);
+  });
+
+  async function done(n: Notice) {
+    busy = n.id;
+    error = "";
+    try {
+      await doneNotice(n.id);
+      gone = new Set([...gone, n.id]);
+    } catch (e) {
+      // A 404: the notice is gone already.
+      if ((e as { status?: number }).status === 404) gone = new Set([...gone, n.id]);
+      else error = own(e) || "Iris could not close the notice. Try again.";
+    } finally {
+      busy = "";
+    }
+  }
+</script>
+
+{#if list.length}
+  <section class="notices" aria-label="Notices by your rules">
+    {#each shown as n (n.id)}
+      <article class="notice">
+        <span class="dot" aria-hidden="true"></span>
+        <div class="body">
+          <p class="rule">{n.rule_name || `Rule ${n.rule}`}</p>
+          {#if n.message}
+            <a class="title" href={href.mail(n.message.id)}>{n.title}: {n.text}</a>
+          {:else}
+            <p class="title">{n.title}: {n.text}</p>
+          {/if}
+          <p class="detail">{when(n.created)}{n.message ? "" : ". The mail left your mailbox."}</p>
+        </div>
+        <button type="button" onclick={() => done(n)} disabled={busy === n.id}>Done</button>
+      </article>
+    {/each}
+    {#if list.length > SHOW && !open}
+      <button class="more" type="button" onclick={() => (open = true)}>Show {list.length - SHOW} more</button>
+    {/if}
+    {#if error}<p class="error" role="alert">{error}</p>{/if}
+  </section>
+{/if}
+
+<style>
+  .notices {
+    display: grid;
+    gap: var(--space-2);
+    margin-bottom: var(--space-8);
+  }
+  .notice {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid var(--color-border-subtle);
+    border-left: 4px solid var(--color-primary);
+    border-radius: var(--radius-md);
+    background: var(--color-background-elevated);
+    transition: border-color var(--transition-fast);
+  }
+  .notice:hover {
+    border-color: var(--color-primary);
+  }
+  .dot {
+    flex: none;
+    width: 8px;
+    height: 8px;
+    margin-top: var(--space-2);
+    border-radius: var(--radius-full);
+    background: var(--color-primary);
+  }
+  .body {
+    flex: 1;
+    min-width: 0;
+  }
+  .rule,
+  .detail {
+    margin: 0;
+    color: var(--color-text-muted);
+    font-size: var(--font-size--1);
+    overflow-wrap: anywhere;
+  }
+  .title {
+    display: block;
+    margin: var(--space-1) 0;
+    color: var(--color-text);
+    text-decoration: none;
+    font-weight: 500;
+    overflow-wrap: anywhere;
+  }
+  /* The title link covers the card, so the whole card opens the mail. */
+  a.title::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: var(--radius-md);
+  }
+  a.title:focus-visible {
+    outline: none;
+  }
+  a.title:focus-visible::after {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+  button {
+    position: relative;
+    z-index: 1;
+    flex: none;
+    padding: var(--space-1) var(--space-3);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-full);
+    background: transparent;
+    color: var(--color-text);
+    font: inherit;
+    font-size: var(--font-size--1);
+    cursor: pointer;
+    transition: border-color var(--transition-fast);
+  }
+  button:hover:not(:disabled) {
+    border-color: var(--color-primary);
+  }
+  button:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .more {
+    justify-self: start;
+  }
+  .error {
+    margin: 0;
+    border-left: 4px solid var(--color-error);
+    padding-left: var(--space-2);
+    font-size: var(--font-size--1);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .notice,
+    button {
+      transition: none;
+    }
+  }
+</style>

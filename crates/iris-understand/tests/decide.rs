@@ -664,3 +664,36 @@ fn read_holds_for_generated_answers() {
     }
     assert!(some > 0);
 }
+
+/// R3-06: the model can tell an ask that you send from an ask to you. The
+/// data of sent mail names the sender kind `self`, and the instruction says
+/// what that line means for the direction of a commitment.
+#[test]
+fn the_instruction_explains_the_sender_kind_of_sent_mail() {
+    let none = |_: &str| Vec::new();
+    let labels = ["SENT".to_string()];
+    let cx = Context {
+        me: ME,
+        kind: Kind::SelfOwner,
+        labels: &labels,
+        internal_date: Some(NOW),
+        now_ms: NOW,
+        known_person: &none,
+        existing: &[],
+        thread: &[],
+        same_sender: &[],
+        known: &[],
+    };
+    let raw = format!("From: {ME}\nTo: ana@example.org\nSubject: Slides\n\nCan you send me the slides by Friday?\n");
+    let a = analyze(raw.as_bytes(), &cx);
+    let line = format!("Sender kind: {}", Kind::SelfOwner.name());
+    assert!(prompt::data(&a, &cx).contains(&format!("{line}\n")));
+    let rule = INSTRUCTION
+        .lines()
+        .find(|l| l.contains(&format!("\"{line}\"")))
+        .expect("the instruction names the sender kind of sent mail");
+    assert!(
+        rule.contains("owed_to_you") && rule.contains("you_owe"),
+        "{rule}"
+    );
+}

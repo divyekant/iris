@@ -4,7 +4,6 @@
 //! each run. [`estimate`] gives the size of the work and changes nothing.
 
 use std::fmt;
-use std::fs::{File, OpenOptions, TryLockError};
 
 use iris_model::{cost, Usage};
 use iris_store::Store;
@@ -92,21 +91,14 @@ impl From<rusqlite::Error> for Error {
 /// The run lock: an OS file lock on [`LOCK_FILE`]. While a value exists, no
 /// other runner can start, in this process or in another one. The OS
 /// releases it when the process ends, also after a crash.
-pub struct RunLock(#[allow(dead_code)] File);
+pub struct RunLock(#[allow(dead_code)] iris_store::FileLock);
 
 /// Takes the run lock, or gives [`Error::Busy`].
 pub fn lock(store: &Store) -> Result<RunLock, Error> {
-    let f = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(store.dir().join(LOCK_FILE))
-        .map_err(|e| Error::Store(e.into()))?;
-    match f.try_lock() {
-        Ok(()) => Ok(RunLock(f)),
-        Err(TryLockError::WouldBlock) => Err(Error::Busy),
-        Err(TryLockError::Error(e)) => Err(Error::Store(e.into())),
+    match iris_store::FileLock::try_take(&store.dir().join(LOCK_FILE)) {
+        Ok(Some(l)) => Ok(RunLock(l)),
+        Ok(None) => Err(Error::Busy),
+        Err(e) => Err(Error::Store(e.into())),
     }
 }
 
@@ -292,7 +284,8 @@ pub fn run(store: &Store, connect: Connect, limits: &Limits, now_ms: i64) -> Res
     Ok(report)
 }
 
-fn clock_ms() -> i64 {
+/// The wall clock in milliseconds since the Unix epoch.
+pub fn clock_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
@@ -307,6 +300,18 @@ fn run_messages(
     limits: &Limits,
     now_ms: i64,
 ) -> Result<Stop, Error> {
+    // Step 1: the link check of each new or old content (migration 20),
+    // with no model, so a model error cannot hold it back. Each message
+    // that it understands counts toward the run limit.
+    let done =
+        store::recheck_links(store, now_ms, limits.max_messages).map_err(Error::Understand)?;
+    store.write(|tx| {
+        tx.execute(
+            "UPDATE understand_run SET messages = messages + ?2 WHERE id = ?1",
+            params![run, i64_of(done)],
+        )?;
+        Ok(())
+    })?;
     // Step 2 before step 3: the refresh needs no model, so a model that
     // cannot be made does not keep stale items of a changed sender. Its
     // resets come before the main pass, which sees them.
@@ -327,7 +332,7 @@ fn run_messages(
         run,
         limits,
         now_ms,
-        done: 0,
+        done,
         since_refresh: 0,
         rerun: false,
     };
@@ -632,13 +637,32 @@ pub fn retry_after(c: &Connection) -> rusqlite::Result<Option<i64>> {
 /// marks of that wait (`WAITS_RETRY` only: a budget refusal of the same
 /// run keeps its mark). A run that made no call changes nothing.
 fn end_wait(tx: &Transaction, stop: &Stop, r: &Report, ended: i64) -> rusqlite::Result<()> {
-    if matches!(stop, Stop::Model | Stop::Unknown | Stop::Error) {
+    update_wait(
+        tx,
+        matches!(stop, Stop::Model | Stop::Unknown | Stop::Error),
+        r.calls > 0,
+        ended,
+    )
+}
+
+/// The one writer of the wait after model errors, for each caller that can
+/// call the model (the runner and the proposal step of matters), under the
+/// run lock. `failed`: the model or the call failed (a refused key, a
+/// server error, an unknown result); this starts or doubles the wait.
+/// Else `called` (the model answered) ends the wait and clears its marks.
+pub fn update_wait(
+    tx: &Transaction,
+    failed: bool,
+    called: bool,
+    ended: i64,
+) -> rusqlite::Result<()> {
+    if failed {
         tx.execute(
             "UPDATE model_setting SET retry_failures = retry_failures + 1,
                     retry_at = ?1 + min(?2 << min(retry_failures, 6), ?3)",
             params![ended, RETRY_FIRST_MS, RETRY_MAX_MS],
         )?;
-    } else if r.calls > 0 {
+    } else if called {
         let waited: bool =
             tx.query_row("SELECT retry_failures > 0 FROM model_setting", [], |r| {
                 r.get(0)

@@ -5,7 +5,7 @@ fn main() -> std::process::ExitCode {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("iris: {e}");
-            std::process::ExitCode::FAILURE
+            std::process::ExitCode::from(e.code)
         }
     }
 }

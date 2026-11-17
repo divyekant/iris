@@ -7,7 +7,9 @@ use std::sync::Arc;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use iris_api::Auth;
-use iris_changeset::{add_action, create, revise, submit, Author, AuthorKind, Verb};
+use iris_changeset::{
+    add_action, create, decide, revise, submit, ActionId, Author, AuthorKind, By, State, Verb,
+};
 use iris_store::{Header, NewMessage, Store};
 use serde_json::{json, Map, Value};
 use tower::ServiceExt;
@@ -444,5 +446,218 @@ async fn refuses_a_decision_that_is_not_valid() {
         StatusCode::NOT_FOUND
     );
     // A decision needs a POST.
+    assert_eq!(get(&s, &uri).await.0, StatusCode::METHOD_NOT_ALLOWED);
+}
+
+fn parse(id: &str) -> i64 {
+    id.strip_prefix("cs-").unwrap().parse().unwrap()
+}
+
+/// What Iris handled without the person: each action that an `allow` rule
+/// approved, with the message count and the reason, and no other action.
+/// The brief count and the full list agree, page by page.
+#[tokio::test]
+async fn lists_each_action_that_a_rule_decided() {
+    let dir = temp("handled");
+    let s = store(&dir);
+    s.write(|tx| {
+        tx.execute_batch(
+            "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES ('a', 'h1', 0);
+             INSERT INTO policy_rule_id(id) VALUES (1), (2);",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let rule = By::Rule { id: 2, policy: 1 };
+    let at = |changeset, n| ActionId {
+        changeset,
+        revision: 1,
+        n,
+    };
+    // Five changesets: actions 1 approved by the rule, 2 waits, 3 in review.
+    let mut want = Vec::new();
+    for i in 0..5 {
+        let cs = changeset(
+            &s,
+            "Old mail.",
+            &[&["m-1", "m-2"], &["m-3"], &["m-3"]],
+            NOW + i,
+        );
+        decide(
+            &s,
+            at(cs, 1),
+            State::Approved,
+            rule,
+            Some("Rule 2 allows it."),
+            NOW + i,
+        )
+        .unwrap();
+        decide(
+            &s,
+            at(cs, 3),
+            State::InReview,
+            By::Policy,
+            Some("No rule."),
+            NOW + i,
+        )
+        .unwrap();
+        want.insert(0, format!("cs-{cs}"));
+    }
+    let (_, b) = get(&s, "/api/brief").await;
+    assert_eq!(b["handled"], json!({"count": 10, "verbs": {"archive": 10}}));
+    let mut got = Vec::new();
+    let mut after = String::new();
+    loop {
+        let (code, p) = get(&s, &format!("/api/handled?limit=2{after}")).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(p["count"], 5);
+        for a in p["actions"].as_array().unwrap() {
+            assert_eq!(a["args"], json!({}));
+            assert_eq!(a["n"], 1);
+            assert_eq!(a["verb"], "archive");
+            assert_eq!(a["messages"], 2);
+            assert_eq!(a["state"], "approved");
+            assert_eq!(a["rule"], 2);
+            assert_eq!(a["policy"], 1);
+            assert_eq!(a["why"], "Old mail.");
+            assert_eq!(a["reason"], "Rule 2 allows it.");
+            got.push(a["changeset"].as_str().unwrap().to_string());
+        }
+        match p["next"].as_str() {
+            Some(n) => after = format!("&after={n}"),
+            None => break,
+        }
+    }
+    assert_eq!(got, want);
+    // A rule decision in each later state stays: a failed apply can have
+    // changed some messages (spec 2 section 7.2). The moves after approved
+    // need the ledger (R2-03), so the test writes the state with no trigger.
+    let first = parse(&want[4]);
+    s.write(|tx| {
+        tx.execute_batch("DROP TRIGGER action_state")?;
+        for (state, n) in [("failed", 1), ("undone", 2)] {
+            tx.execute(
+                "UPDATE changeset_action SET state = ?1
+                     WHERE changeset_id = ?2 AND n = ?3",
+                rusqlite::params![state, first + n, 1],
+            )?;
+        }
+        // An approved action that the author withdraws gets the decision
+        // of the author and changed nothing: not handled.
+        tx.execute(
+            "UPDATE changeset_action SET state = 'cancelled', decided_by = 'author',
+               rule = NULL, policy = NULL
+             WHERE changeset_id = ?1 AND n = 1",
+            [first + 4],
+        )?;
+        // In review waits for the person: not handled.
+        tx.execute(
+            "UPDATE changeset_action SET state = 'in_review'
+                 WHERE changeset_id = ?1 AND n = 1",
+            [first + 3],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, b) = get(&s, "/api/brief").await;
+    assert_eq!(b["handled"], json!({"count": 6, "verbs": {"archive": 6}}));
+    let (_, p) = get(&s, "/api/handled?limit=200").await;
+    assert_eq!(p["count"], 3);
+    let states: Vec<&str> = p["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["state"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, ["undone", "failed", "approved"]);
+    for bad in [
+        "/api/handled?after=x",
+        "/api/handled?after=01",
+        "/api/handled?limit=0",
+    ] {
+        assert_eq!(get(&s, bad).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+}
+
+#[tokio::test]
+async fn the_person_withdraws_an_open_changeset() {
+    let dir = temp("withdraw");
+    let s = store(&dir);
+    let cs = changeset(&s, "Clean up.", &[&["t-1"], &["m-3"]], NOW);
+    let (_, doc) = get(&s, &format!("/api/changesets/cs-{cs}")).await;
+    let hash = doc["actions"][0]["hash"].as_str().unwrap().to_string();
+    // One action approved (it waits for apply), one waits for the person.
+    let approve = json!({ "actions": [{ "revision": 1, "n": 1, "approve": true, "hash": hash }] });
+    let decide = format!("/api/changesets/cs-{cs}/decide");
+    assert_eq!(
+        post(&s, &decide, &approve.to_string()).await.0,
+        StatusCode::OK
+    );
+
+    let uri = format!("/api/changesets/cs-{cs}/withdraw");
+    let (code, after) = post(&s, &uri, "").await;
+    assert_eq!(code, StatusCode::OK, "{after}");
+    // The answer is the changeset after the withdraw: each open action is cancelled.
+    assert_eq!(after["state"], "withdrawn");
+    assert_eq!(states(&s, cs).await, ["cancelled", "cancelled"]);
+    assert_eq!(get(&s, "/api/changesets").await.1["changesets"], json!([]));
+    assert_eq!(
+        get(&s, "/api/brief").await.1["review"],
+        json!({ "changesets": 0, "actions": 0 })
+    );
+    // A second withdraw, or a decision after the withdraw, is a conflict.
+    assert_eq!(post(&s, &uri, "").await.0, StatusCode::CONFLICT);
+    let deny = json!({ "actions": [{ "revision": 1, "n": 2, "approve": false }] }).to_string();
+    assert_eq!(post(&s, &decide, &deny).await.0, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn withdraws_each_changeset_once() {
+    let dir = temp("withdraw-states");
+    let s = store(&dir);
+    // A changeset with a new revision that is a draft: the open action and the draft action are cancelled.
+    let draft = changeset(&s, "Clean up.", &[&["t-1"]], NOW);
+    revise(&s, draft, &agent()).unwrap();
+    add_action(
+        &s,
+        draft,
+        &agent(),
+        Verb::Archive,
+        &["m-3"],
+        &Map::new(),
+        None,
+    )
+    .unwrap();
+    let uri = format!("/api/changesets/cs-{draft}/withdraw");
+    let (code, after) = post(&s, &uri, "").await;
+    assert_eq!(code, StatusCode::OK, "{after}");
+    assert_eq!(after["state"], "withdrawn");
+    let all: Vec<&str> = after["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["decision"]["state"].as_str().unwrap_or("draft"))
+        .collect();
+    assert_eq!(all, ["cancelled", "cancelled"], "{after}");
+
+    // A closed changeset: the person denied its only action. The denial stays.
+    let closed = changeset(&s, "Read.", &[&["m-3"]], NOW);
+    let deny = json!({ "actions": [{ "revision": 1, "n": 1, "approve": false }] }).to_string();
+    assert_eq!(
+        post(&s, &format!("/api/changesets/cs-{closed}/decide"), &deny)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let (code, after) = post(&s, &format!("/api/changesets/cs-{closed}/withdraw"), "").await;
+    assert_eq!(code, StatusCode::OK, "{after}");
+    assert_eq!(after["state"], "withdrawn");
+    assert_eq!(states(&s, closed).await, ["denied"]);
+
+    assert_eq!(post(&s, &uri, "").await.0, StatusCode::CONFLICT);
+    assert_eq!(
+        post(&s, "/api/changesets/cs-99/withdraw", "").await.0,
+        StatusCode::NOT_FOUND
+    );
     assert_eq!(get(&s, &uri).await.0, StatusCode::METHOD_NOT_ALLOWED);
 }

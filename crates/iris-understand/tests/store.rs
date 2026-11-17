@@ -118,7 +118,8 @@ impl Box_ {
     fn add_in(&self, id: &str, thread: &str, date: i64, raw: &str, labels: &[&str]) -> i64 {
         let raw = raw.replace('\n', "\r\n");
         let sha = self.store.put_content(raw.as_bytes()).unwrap();
-        self.store
+        let id = self
+            .store
             .put_messages(
                 self.account,
                 &[NewMessage {
@@ -130,7 +131,10 @@ impl Box_ {
                     ..NewMessage::default()
                 }],
             )
-            .unwrap()[0]
+            .unwrap()[0];
+        // Step 1 of each batch run: the link check of new content.
+        iris_understand::store::recheck_links(&self.store, NOW, None).unwrap();
+        id
     }
 
     fn kind(&self, addr: &str, name: &str, kind: &str) {
@@ -300,7 +304,7 @@ fn the_model_gives_a_commitment_and_the_mail_stays_in_the_data() {
     assert_eq!(item["form"], "commitment");
     assert_eq!(item["due"]["date"], "2026-01-02");
     assert_eq!(item["derived"]["model"], "fake-1");
-    assert_eq!(item["derived"]["prompt"], "understand/0.2");
+    assert_eq!(item["derived"]["prompt"], "understand/0.3");
     assert_eq!(item["counterparty"]["address"], "bo@example.org");
     assert_eq!(
         item["sources"][0]["quote"],
@@ -410,6 +414,56 @@ fn a_new_run_keeps_a_corrected_item_and_marks_the_new_one() {
         b.col::<Option<i64>>("SELECT duplicate_of FROM item WHERE id = ?1", third),
         Some(second)
     );
+}
+
+/// An item that an open changeset action names is pinned too (`item_pin`,
+/// specification 1, section 7.5). A decided action does not pin.
+#[test]
+fn a_new_run_keeps_an_item_that_an_open_action_names() {
+    let b = store("rerun-action");
+    let m = b.add("1", ASK, &["INBOX"]);
+    let item = understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW)
+        .unwrap()
+        .items[0];
+    // A submitted `close` action on the item: the triggers of migration 7
+    // propose it at submit.
+    b.store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0);
+                 INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+                 VALUES (1, 1, 1, 'close', '{}', '{\"reason\":\"Done.\"}');",
+            )?;
+            tx.execute(
+                "INSERT INTO action_item(action_id, item_id) VALUES (1, ?1)",
+                [item],
+            )?;
+            tx.execute_batch(
+                "UPDATE changeset_action SET hash = 'h' WHERE id = 1;
+                 UPDATE changeset SET why = 'Done.', submitted_at = 1 WHERE id = 1;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let out = understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW).unwrap();
+    assert_eq!(b.items().len(), 2, "the pinned item stays");
+    assert_eq!(
+        b.col::<Option<i64>>("SELECT duplicate_of FROM item WHERE id = ?1", out.items[0]),
+        Some(item)
+    );
+    // After a denial the action does not pin: the next run replaces both.
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE changeset_action SET state = 'denied', decided_by = 'person',
+                   reason = 'No.', decided_at = 2 WHERE id = 1",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW).unwrap();
+    assert_eq!(b.items().len(), 1);
 }
 
 #[test]
@@ -1512,6 +1566,64 @@ fn a_message_over_the_read_limit_is_cut_text_for_the_model() {
     // The fixed code rule does not fire on cut text: the model reads it.
     assert_eq!((out.calls, fake.calls.borrow().len()), (1, 1));
     assert!(fake.calls.borrow()[0].1.contains("Your code: 482913"));
+    // The body ends before the cut: the link list is whole, no mark.
+    let marks: String = b.col("SELECT hostile FROM message WHERE id = ?1", m);
+    assert_eq!(marks, "[]");
+}
+
+#[test]
+fn an_html_body_past_the_read_limit_is_a_link_mark() {
+    let b = store("large-link");
+    // The attachment comes first, so the HTML body (with its link) is past
+    // the read limit. A mail client still shows it.
+    let big = "A".repeat(iris_understand::store::RAW_LIMIT as usize);
+    let raw = format!(
+        "From: Bank <alerts@bank.example>\nTo: owner@example.com\nSubject: Sign in\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=b\n\n--b\nContent-Type: application/octet-stream\n\n{big}\n--b\nContent-Type: text/html\n\n<a href=\"https://evil.example.net/\">bank.example</a>\n--b--\n"
+    );
+    let m = b.add("1", &raw, &["INBOX"]);
+    let fake = Fake::default();
+    understand(&b.store, m, &fake, NOW).unwrap();
+    let marks: String = b.col("SELECT hostile FROM message WHERE id = ?1", m);
+    assert_eq!(marks, r#"["link"]"#);
+    assert!(
+        fake.calls.borrow().is_empty(),
+        "hostile mail never reaches the model"
+    );
+}
+
+#[test]
+fn an_html_body_after_a_plain_body_and_the_read_limit_is_a_link_mark() {
+    let b = store("large-link-plain");
+    // A plain part comes first, so the read part has a body. The HTML
+    // part with the link is still past the read limit.
+    let big = "A".repeat(iris_understand::store::RAW_LIMIT as usize);
+    let raw = format!(
+        "From: Bank <alerts@bank.example>\nTo: owner@example.com\nSubject: Sign in\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=b\n\n--b\nContent-Type: text/plain\n\nSee the note.\n--b\nContent-Type: application/octet-stream\n\n{big}\n--b\nContent-Type: Text/HTML; charset=utf-8\n\n<a href=\"https://evil.example.net/\">bank.example</a>\n--b--\n"
+    );
+    let m = b.add("1", &raw, &["INBOX"]);
+    let fake = Fake::default();
+    understand(&b.store, m, &fake, NOW).unwrap();
+    let marks: String = b.col("SELECT hostile FROM message WHERE id = ?1", m);
+    assert_eq!(marks, r#"["link"]"#);
+    assert!(fake.calls.borrow().is_empty());
+}
+
+#[test]
+fn text_html_in_an_attachment_past_the_read_limit_is_no_mark() {
+    let b = store("large-plain");
+    // The words `text/html` are in the body of a plain attachment, past
+    // the read limit. No part header has the type, so no HTML part is there.
+    let big = "A".repeat(iris_understand::store::RAW_LIMIT as usize);
+    let raw = format!(
+        "From: Bo Ren <bo@example.org>\nTo: owner@example.com\nSubject: Logs\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=b\n\n--b\nContent-Type: text/plain\n\nThe logs.\n--b\nContent-Type: text/plain; name=log.txt\n\n{big}\nContent-Type: text/html\nsent as text/html\n--b--\n"
+    );
+    let m = b.add("1", &raw, &["INBOX"]);
+    understand(&b.store, m, &Fake::default(), NOW).unwrap();
+    let marks: String = b.col(
+        "SELECT coalesce(hostile, '[]') FROM message WHERE id = ?1",
+        m,
+    );
+    assert_eq!(marks, "[]");
 }
 
 #[test]

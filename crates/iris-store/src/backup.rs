@@ -1,13 +1,16 @@
 //! The backup of a live data folder (specification 1, section 5.1), the
 //! backup lock, and the content cleanup of gone messages (section 4.5).
 
-use std::fs::{self, File, TryLockError};
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
 
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 
-use crate::{content, lock, make_private_dir, settings, sync_dir, Error, Result, Store};
+use crate::{
+    content, lock, make_private_dir, new_private_dir, settings, sync_dir, Error, FileLock, Result,
+    Store,
+};
 
 /// How long the store keeps the content of a gone message (section 4.5).
 pub const GONE_KEEP_MS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -18,7 +21,7 @@ const CLEAN_BATCH: i64 = 500;
 /// The backup lock. While a value of this type exists, no other holder of
 /// the lock can run: in this process or in another one. Drop it to release
 /// the lock.
-pub struct BackupLock(#[allow(dead_code)] File);
+pub struct BackupLock(#[allow(dead_code)] FileLock);
 
 /// What `policy.toml` must hold before [`Store::write_policy`] replaces it.
 #[derive(Clone, Copy, Debug)]
@@ -54,30 +57,14 @@ pub struct Cleaned {
 }
 
 impl Store {
-    fn lock_file(&self) -> Result<File> {
-        Ok(fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(self.dir.join("backup.lock"))?)
-    }
-
     /// Take the backup lock. Wait while another holder has it.
     pub fn backup_lock(&self) -> Result<BackupLock> {
-        let f = self.lock_file()?;
-        f.lock()?;
-        Ok(BackupLock(f))
+        Ok(BackupLock(FileLock::take(&self.dir.join("backup.lock"))?))
     }
 
     /// Take the backup lock, or give `None` if another holder has it.
     pub fn try_backup_lock(&self) -> Result<Option<BackupLock>> {
-        let f = self.lock_file()?;
-        match f.try_lock() {
-            Ok(()) => Ok(Some(BackupLock(f))),
-            Err(TryLockError::WouldBlock) => Ok(None),
-            Err(TryLockError::Error(e)) => Err(e.into()),
-        }
+        Ok(FileLock::try_take(&self.dir.join("backup.lock"))?.map(BackupLock))
     }
 
     /// Copy the data folder to `dest` while the engine runs (section 5.1).
@@ -86,14 +73,8 @@ impl Store {
     /// refers to and that is not there is an error: the copy is not complete.
     pub fn backup(&self, dest: &Path) -> Result<u64> {
         let _lock = self.backup_lock()?;
-        if dest.exists() && fs::read_dir(dest)?.next().is_some() {
-            return Err(Error::Io(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "the backup folder is not empty",
-            )));
-        }
         // The copy holds the key and the mail.
-        make_private_dir(dest)?;
+        new_private_dir(dest)?;
         let dest_content = dest.join("content");
         make_private_dir(&dest_content)?;
 

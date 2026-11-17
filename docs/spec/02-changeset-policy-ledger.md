@@ -70,15 +70,19 @@ not have the label `SPAM` or `TRASH`.
 | `defer` | commitment | date | none (Iris state) | set the old value (below) | 2 |
 | `decline` | commitment | reason | none (Iris state) | set the old value (below) | 2 |
 | `correct` | any item | field, value | none (Iris state) | set the old value (below) | 2 |
-| `draft` | thread, or none for new mail | file with the text | a later specification (section 7.5) | a later specification | 3 |
-| `send` | a draft | none | `drafts.send`, after the hold (section 7.5) | none: final after the hold | 3 |
+| `skip` | feed item | reason | none (Iris state) | set the old value (below) | 5 |
+| `mute` | conversation | reason | none (Iris state) | set the old value (below) | 5 |
+| `dismiss` | signal | reason | none (Iris state) | set the old value (below) | 5 |
+| `draft` | one thread (a reply) or one account (`a-N`, a new mail) | recipients, subject, text | `drafts.create` (section 7.5) | none: Iris never deletes a draft. The change of a draft and its undo come in a later card | 3 |
+| `send` | one draft (`d-N`) | none | `drafts.send`, after the hold (section 7.5) | none: final after the hold | 3 |
 | `nudge` | commitment `owed_to_you` | none | makes a `draft` action, then a `send` action | as `draft` and `send` | 3 |
 | `wait` | thread, or a date | until | none | not applicable | 5 |
 | `ask` | none | question, options | none | not applicable | 5 |
 
 Iris has no verb for a permanent delete, and no verb to empty the trash.
 Gmail deletes a message in the trash for good after 30 days. After that time,
-the undo of `trash` is not possible, and the ledger shows the entry as final.
+the undo of `trash` is not possible, and the ledger shows the entry as final:
+the view `ledger_can_undo` of migration 23 no longer lists it (section 7.1).
 
 `label` and `unlabel` accept only a label of kind `user` (specification 1,
 section 5.5). At submit, the engine refuses a label name that is the same as
@@ -86,7 +90,8 @@ the name or the ID of a system label, with no regard to case. A system label (`I
 others) changes only through its own verb, so that no `label` action can go
 past a rule or a hard limit that names that verb.
 
-A verb that changes Iris state (`close`, `defer`, `decline`, `correct`) goes
+A verb that changes Iris state (`close`, `defer`, `decline`, `correct`,
+`skip`, `mute`, `dismiss`) goes
 through a changeset too. This gives each change one path, one review and one
 ledger. The state verbs set these values:
 
@@ -95,6 +100,9 @@ ledger. The state verbs set these values:
 | `close` | `status` `done` |
 | `decline` | `status` `declined` |
 | `defer` | `status` `deferred` and `deferred_until` |
+| `skip` | `status` `skipped`, from `new` or `read` |
+| `mute` | `status` `muted`, from `active` or `quiet` |
+| `dismiss` | `status` `dismissed`, from `active` |
 | `correct` | The field of the item. `correct` changes only items. A person changes the kind of a sender only in the web client (specification 1, section 6.7). |
 
 When an action of a state verb applies, the engine writes in one SQLite
@@ -103,7 +111,31 @@ transaction:
 - A `correction` row with `by` set to the changeset ID (specification 1,
   section 5.5). So the item is pinned, and a rebuild keeps the change.
 - A ledger row with the state `applied`, the old values as `pre` and the new
-  values as `post` (section 7.1).
+  values as `post` (section 7.1). `pre` and `post` map each item ID to its
+  fields, for example `{"c-7": {"status": "open"}}`.
+
+The engine applies each approved action of a state verb at the next tick,
+with no provider call. These rules apply:
+
+- A state verb changes no mailbox. So, in the mode `observe`, an action that
+  a person approved applies, as an undo does. An action that a rule approved
+  waits in the mode `observe`.
+- An action that a rule approved goes to review first, as a mailbox verb
+  does, until the engine evaluates the rule again before the apply (issue
+  #168).
+- `close`, `decline` and `defer` change only a commitment with the status
+  `open` or `deferred` (specification 1, section 6.8). `close` and `decline`
+  remove `deferred_until`. If an item does not agree (for example,
+  understanding closed it after the submit), the ledger row is `failed` with
+  the reason and the undo `none`, and no item changes.
+
+When the person closes, declines or defers a commitment in the web client,
+the engine makes a changeset with the author `person` and one action, as for
+an undo (section 7.4). The choice of the person is the approval. The engine
+submits and approves the action in one transaction, and then applies it in
+the same request. If the submit denies the action (for example, a date that
+is not valid), nothing stays. If the engine stops before the apply, the next
+tick applies the approved action.
 
 The undo of the action sets the old values and deletes the correction row, in
 one transaction, with its own ledger row. If the current value is not the
@@ -173,15 +205,15 @@ documents in `schema/examples/` (files `changeset*.json`).
 | `state` | `draft` (the newest revision is not submitted), `open` (one or more actions are open, section 5.2), `closed` (no action is open) or `withdrawn`. |
 | `actions[].n` | The number of the action in the changeset, from 1. |
 | `actions[].revision` | The revision of the action. The document lists the actions of each revision, because an old revision can keep decided actions and `approved` actions. |
-| `actions[].targets` | What the author named: `threads`, `messages` or `items`. |
-| `actions[].args` | The arguments of the verb (section 4), as one JSON object. `label` and `unlabel`: `label`. `close` and `decline`: `reason`. `defer`: `date`. `correct`: `field` and `value`. Each other verb: none (`{}`). A `denied` or `cancelled` action, and a draft action, can hold arguments that do not fit the verb, because only submit checks them. |
+| `actions[].targets` | What the author named: `threads`, `messages` or `items`. The write verbs of release 3 also name `accounts` (`a-N`, a new mail) or `drafts` (`d-N`), with exactly one target (`docs/specs/2026-11-16-send.md`, section 4). |
+| `actions[].args` | The arguments of the verb (section 4), as one JSON object. `label` and `unlabel`: `label`. `close` and `decline`: `reason`. `defer`: `date`. `correct`: `field` and `value`. `draft`: `to`, `cc`, `subject` and `body` (a reply has no `subject`; `docs/specs/2026-11-16-send.md`, section 1). Each other verb, `send` too: none (`{}`). A `denied` or `cancelled` action, and a draft action, can hold arguments that do not fit the verb, because only submit checks them. |
 | `actions[].resolved` | The message IDs at submit. Review shows these, and apply uses only these. The engine keeps them in a child table, and writes the document by streaming (section 9). |
 | `actions[].flags` | Why a person must look: see section 5.3. |
-| `actions[].hash` | `null` in a triage proposal that the engine does not store (release 1). Else the SHA-256 (hex) of the `verb`, the `targets` text, the `args` text and the `resolved` message IDs, from submit. Each of the three texts has its length in bytes first (8 bytes, big-endian). Then each message ID follows, in the order of the store row IDs, with a comma after it. An approval names it (section 5.5). A submitted action does not change, but the engine can add a flag before apply (section 5.4). `null` before submit. |
+| `actions[].hash` | `null` in a triage proposal that the engine does not store (release 1). Else the SHA-256 (hex) of the `verb`, the `targets` text, the `args` text and the `resolved` message IDs, from submit. Each of the three texts has its length in bytes first (8 bytes, big-endian). Then each message ID follows, in the order of the store row IDs, with a comma after it. For an action with a draft target (release 3), the content hash of the draft follows (`docs/specs/2026-11-16-send.md`, section 5). An approval names it (section 5.5). A submitted action does not change, but the engine can add a flag before apply (section 5.4). `null` before submit. |
 | `actions[].decision.state` | See section 5.2. |
 | `actions[].decision.rule`, `actions[].decision.policy` | For a decision by a rule: the rule `id` and the policy version (section 6.3). Together they name one rule text. |
 | `actions[].decision.by` | Who decided: `rule` (with `rule`, its ID), `person`, `policy` (the default or the mode), `limit` (a hard limit), `engine` (a target or an argument that is not valid), `author` (a withdraw or a new revision) or `expiry`. A draft action has the decision `null`. An `applied` or `failed` action keeps the decision that approved it. The ledger names it, and records the apply (section 7.1). |
-| `actions[].ledger` | The ledger entry, after apply. Required for `undone`. Before the ledger (R2-03), an `applied` or `failed` action has none (section 7.2). |
+| `actions[].ledger` | The ledger entry, after apply. Required for `applied`, `failed` and `undone`. An action that was applied before the ledger (migration 11) has an entry with no messages and no undo. |
 
 ### 5.2 States of an action
 
@@ -190,12 +222,12 @@ documents in `schema/examples/` (files `changeset*.json`).
 | `proposed` | Submitted, and the policy did not decide it, or the mode is `observe`. | `approved`, `in_review`, `denied`, `expired`, `cancelled`, `replaced` |
 | `in_review` | Waits for a person. | `approved`, `denied`, `expired`, `cancelled`, `replaced` |
 | `approved` | An `allow` rule (`decision.by` `rule`) or a person approved it. The engine applies it next. | `applied`, `failed`, `held`, `in_review`, `denied`, `expired`, `cancelled` |
-| `held` | A send in the held outbox (release 3). | `applied`, `failed`, `cancelled` |
-| `applied` | The provider accepted the change. The ledger has the entry. Before the ledger (R2-03), the action has no entry and the document has no `ledger` (section 7.2). | `undone` |
+| `held` | A send in the held outbox (release 3). | `applied`, `failed`, `cancelled` (a withdraw), `expired`, `denied` (by `engine`: the draft changed or is gone, `docs/specs/2026-11-16-send.md`; by `person`: the cancel in the outbox, `docs/specs/2026-11-17-held-outbox.md`) |
+| `applied` | The provider accepted the change. The ledger has the entry. | `undone` |
 | `failed` | The provider refused it, or recovery could not confirm each message. The ledger lists the messages that changed. | `undone`, only when the ledger lists one or more changed messages |
 | `denied` | The policy, a hard limit or a person refused it. `reason` says why. | none |
 | `expired` | No decision or no apply in 14 days after submit (section 5.5). | none |
-| `cancelled` | The author withdrew the changeset, or a person cancelled a held send. | none |
+| `cancelled` | The author withdrew the changeset. A person who cancels a held send denies it (`denied` by `person`). | none |
 | `replaced` | A new revision replaced the action before a decision. | none |
 | `undone` | The undo is applied. The undo has its own ledger entry. | none |
 
@@ -208,10 +240,10 @@ The engine adds flags. An author cannot remove a flag.
 
 | Flag | When |
 |---|---|
-| `new_recipient` | A `send` goes to an address that the owner never sent mail to. |
-| `outside_thread` | A `send` goes to an address that is not in the thread, after the session read external mail (release 4). |
-| `money` | The text of a draft promises an amount of money. |
-| `date` | The text of a draft promises a date. |
+| `new_recipient` | A `draft` or a `send` goes to an address that the owner never sent mail to. |
+| `outside_thread` | A `draft` or a `send` goes to an address that is not in the thread, and its author read mail that you did not send (`docs/specs/2026-11-17-hostile-input-limits.md`). |
+| `money` | The text of a draft names an amount of money (`docs/specs/2026-11-17-send-checks.md`). |
+| `date` | The text of a draft names a date (`docs/specs/2026-11-17-send-checks.md`). |
 | `attachment` | The text refers to an attachment, and none is attached, or an attachment is attached. |
 | `first_contact` | The target thread is with a `stranger`. |
 | `untrusted_content` | The text of the draft contains text from an external message. |
@@ -231,8 +263,9 @@ content of the draft (section 7.5).
 6. The engine returns one result for each action, and the exit code of
    section 8.4.
 
-If the policy mode is `observe`, step 5 does not run, and each action stays
-`proposed`. A `proposed` action has no decision columns (section 5.6), so the
+If the policy mode is `observe`, the rules do not run in step 5, and each
+action stays `proposed`, except an action that a hard limit denies (section
+6.5): it gets `denied` by `limit` in both modes. A `proposed` action has no decision columns (section 5.6), so the
 engine does not store what the policy would do. The triage changeset of
 release 2 follows the mode of the active policy, as each other changeset does
 (specification 1, section 8). Release 1 computes the triage proposal and does
@@ -273,14 +306,18 @@ that a rule approved at the same time cannot together go past the limit of
 - A comment goes back to the author. In release 4, the comment arrives as a
   file in the workspace. The author submits a new revision.
 - `iris withdraw` withdraws a changeset. The engine accepts it only from the
-  author of the changeset: the same `kind`, `name` and `session`. The person
+  author of the changeset: the same `kind`, `name` and `session`. For an
+  author with a job (release 4), the author is the job: the same `kind` and
+  `job`, so a later session of the job continues its changesets
+  (`docs/specs/2026-11-17-job-verbs.md`). The same rule applies to each
+  change of a changeset by its author: add, revise and submit. The person
   can withdraw each changeset in the web client. Each open action becomes
   `cancelled`, except an action with a ledger row in the state `writing`,
-  which continues to its end. Before the ledger (R2-02), the mark
-  `applying` of migration 9 has this effect in place of the `writing` row
-  (section 7.2). Applied actions stay.
-- 14 days after submit, each open action that is not `held`, and has no
-  ledger row in the state `writing`, becomes `expired`. The changeset is `closed` when no action is open.
+  which continues to its end. Applied actions stay.
+- 14 days after submit, each open action that has no ledger row in the
+  state `writing`, and is not an undo (section 7.4), becomes `expired`. A
+  `held` send expires too (`docs/specs/2026-11-17-held-outbox.md`). The
+  changeset is `closed` when no action is open.
 
 ### 5.6 Failure list of the changeset store
 
@@ -300,14 +337,14 @@ section 5.1) keep other users out.
 
 | Input or event | Failure mode | Safe result |
 |---|---|---|
-| A text that is not an ID, a sender ID, or IDs of two kinds in one action | The action names nothing that it can change | `add_action` refuses it. Nothing is written. |
+| A text that is not an ID, a sender ID, IDs of two groups in one action (threads, messages and items), or one target two times | The action names nothing that it can change | `add_action` refuses it. Nothing is written. The items of all forms are one group: a `correct` action can name a commitment and a record. |
 | An ID that is not in the mirror, a gone message, or a target of the wrong kind for the verb | Apply changes the wrong object | Submit gives the action `denied`, by `engine`, with the reason. |
-| No target, or targets that give no message (each message of the thread is gone or in `SPAM` or `TRASH`) | A `proposed` action that changes nothing | Submit gives the action `denied`. |
+| No target, or mailbox verb targets that give no message (each message of the thread is gone or in `SPAM` or `TRASH`) | A `proposed` action that changes nothing | Submit gives the action `denied`. A state verb changes its items, so an item with no origin message is a valid target. A write verb (`draft`, `send`, release 3) writes mail, so it needs no message: an account target (`a-N`) gives no message, a draft target (`d-N`) gives the messages of the thread of the draft, for the checks only, and the thread target of a `draft` gives one message, the parent of the reply (`docs/specs/2026-11-16-send.md`, section 3). |
 | Targets in two or more accounts | One approval changes two mailboxes, and the apply has no one account | Submit gives the action `denied`. One action changes one account. |
-| Arguments that do not fit the verb, or the verb `untrash` from an author | A rule or a limit for one verb is bypassed | Submit gives the action `denied`. Until each verb has its argument checks, submit denies the verb. Only the undo of a `trash` makes `untrash` (section 7.4). |
+| Arguments that do not fit the verb, or the verb `untrash` from an author | A rule or a limit for one verb is bypassed | Submit gives the action `denied`. Until each verb has its argument checks, submit denies the verb. Only the undo of a `trash` makes `untrash` (section 7.4): submit denies an `untrash` action with no link in `ledger_undo` (migration 23). |
 | A row with targets or arguments of a wrong shape, from another writer | A panic of the engine | Submit gives the action `denied`. A text that is not JSON cannot be stored (`CHECK`). |
 | A state move that section 5.2 does not allow, from any writer | A decided action changes, or skips the review | The trigger `action_state` refuses the write. The list of moves is in the trigger, not in a table. |
-| An expiry before 14 days, or with a time after the clock of the database | An action expires before the person can decide | The trigger `action_state` refuses the write. |
+| An expiry before 14 days, or with a time after the clock of the database | An action expires before the person can decide | The trigger `action_state` refuses the write. The routine `expire` (each engine tick) expires each `proposed`, `in_review` and `approved` action 14 days or more after its submit, except an action that has a ledger row in `writing` (migration 11): recovery ends that action as `applied` or `failed`. |
 | A rule decision with a policy version that is not active, or a rule ID that the active policy does not have | A decision names no rule text, or a rule that the person removed | The trigger `action_state` refuses the write. The policy of the first start has no rule, so no rule decides under it. |
 | A change of a submitted action, from any writer | The person approves one action, and another applies | The triggers refuse the write. Only the engine adds a flag, to an open action, and a flag does not go away. |
 | A new action in a submitted revision, an action that changes its ID or moves to another revision, an insert that replaces an action, or a state for an action while its revision is a draft | The changeset state does not agree with its actions, and an action skips the submit | The triggers refuse the write. An action goes only into the draft revision, and gets a state only with the submit of its revision. |
@@ -320,8 +357,8 @@ section 5.1) keep other users out.
 | The submit of a new revision while older actions are `proposed` or `in_review` | An action that the author revised gets an approval | The trigger `changeset_submit` replaces them in the same write. Only that submit replaces an action, with no check of the clock (the marker `changeset.replacing` is set once for each revision, in its submit): an older action that comes back to review after the submit stays for the person. |
 | A new revision with a new reason | The reason that the person saw for an older revision is lost | The table `changeset_revision` keeps the reason and the submit time of each submitted revision. Its rows do not change. |
 | A withdraw while an action is open | A withdrawn changeset applies an action | The trigger `changeset_withdraw` cancels each open action and each draft action in the same write. A withdrawn changeset stays withdrawn. |
-| A withdraw while the ledger has a row in `writing` for an action (section 5.5) | The provider changed the messages, and recovery cannot record the result | Migration 7 has no ledger and no apply. Migration 9 (R2-02) adds the mark `applying`, which the apply sets before its first write call: the withdraw keeps a marked action `approved`, and the action can then only become `applied` or `failed`. The migration of the ledger (R2-03) replaces the mark with the ledger row in `writing`. |
-| A move to `applied`, `failed` or `undone` | A state with no ledger entry, or an apply that changes the decision | Migration 9 (R2-02) adds the moves `approved` to `applied` and `approved` to `failed`, and keeps on them the decision that approved the action. The ledger migration (R2-03) adds the check of the ledger entry to these moves, and the moves to `undone` (section 7.1). |
+| A withdraw while the ledger has a row in `writing` for an action (section 5.5) | The provider changed the messages, and recovery cannot record the result | The trigger `changeset_withdraw` (migration 11) keeps such an action `approved`. The trigger `action_state` then allows only `applied` or `failed`, as the row ends. Migration 11 replaces the mark `applying` of migration 9 with the row. |
+| A move to `applied`, `failed` or `undone` | A state with no ledger entry, or an apply that changes the decision | Only the state of the ledger entry moves the action: the trigger `ledger_state` writes the same state to the action, and the trigger `action_state` refuses the move when the entry has another state. The action keeps the decision that approved it (section 7.1). |
 | An approval while a new revision is a draft, of a replaced action, or with another hash | The person approves what they did not see | `approve` refuses it. An older action that a rule approved and that came back to review gets the approval with its hash (section 5.5). |
 | Two writers at the same time | Two moves of one action | The engine has one write connection. Each request is one transaction, and the trigger checks the state at the time of the write. |
 | A crash in a submit or a decision, or a failed commit | Half a submit, or a success for a change that is not stored | The transaction rolls back, and the call gives the error. |
@@ -397,8 +434,8 @@ added = 2026-11-10
 |---|---|---|
 | `id` | yes | A positive integer, unique in the file. |
 | `name` | yes | One line that the brief and the ledger show. |
-| `effect` | yes | `allow`, `review` or `deny` (actions); `hide` or `bundle` (attention). |
-| `verbs` | for `allow`, `review` and `deny` | The verbs of section 4. |
+| `effect` | yes | `allow`, `review` or `deny` (actions); `hide`, `bundle` or `notify` (attention). |
+| `verbs` | for `allow`, `review` and `deny` | The verbs of section 4, except `draft` and `send`: a rule with these verbs is refused until R3-03 (`docs/specs/2026-11-16-send.md`). |
 | `when` | yes | The conditions. Each condition must match. |
 | `by` | yes | `person` (written by the person) or `proposal` (proposed by Iris and accepted by the person). |
 | `added` | yes | The date. |
@@ -445,7 +482,7 @@ valid when:
   cannot make a rule wider than the person wrote it.
 - A value is not one of the values above, or two rules have the same `id`.
 - `when` has no condition, or a `name` has more than one line.
-- A `hide` or a `bundle` rule has `verbs`, `author` or `job`. An item has no
+- A `hide`, a `bundle` or a `notify` rule has `verbs`, `author` or `job`. An item has no
   author and no job, so such a rule could never match.
 - The file is larger than 256 KiB, or has more than 1,000 rules (section 9).
 
@@ -537,6 +574,13 @@ rule that matches and has the lowest `id`. With no match, the item is `shown`. T
 records the rule in its `attention` field (specification 1, section 6.1).
 Hidden is never deleted: a `hide` rule changes only what the brief shows.
 
+A `notify` rule does not change the attention of an item. It gives one
+notice for each new mail that it matches, in the web client and in the
+system (`docs/specs/2026-11-16-notices.md`). It matches with the reading of
+a `review` rule: an item condition matches when one or more items of the
+message have the value. With no `notify` rule that matches, no notice
+appears.
+
 The engine evaluates the attention of an item again at these times:
 
 - When the active policy changes, for each item, in the same transaction.
@@ -561,12 +605,13 @@ in the file.
 | Limit | Result |
 |---|---|
 | A `send` never goes at once. | It waits in the held outbox for the hold delay, after the approval (release 3). |
-| A `send` with the flag `new_recipient`, `outside_thread`, `money` or `date`. | Review, even if a rule allows it. |
+| A `draft` or a `send` with the flag `new_recipient`, `outside_thread`, `money` or `date`. | Review, even if a rule allows it. Only a person approves it (store migration 23). |
 | An action with the flag `bulk`. | Review, even if a rule allows it. |
-| An action by an author other than `person`, whose target has hostile mail: a message with a hostile mark, or a message from a `hostile` sender (specification 1, section 6.7). For a thread or a draft target, each message of the thread counts. | Only `archive`, `trash` and `label`. Other verbs are denied. |
+| An action by an author other than `person`, whose target has hostile mail: a message with a hostile mark, a message that waits for its link check (a `link_check` row), or a message from a `hostile` sender (specification 1, section 6.7). For a thread or a draft target, each message of the thread counts. | Only `archive`, `trash` and `label`. Other verbs are denied. |
 | Stop is on (release 4). | No provider write. Actions in the outbox wait. |
-| Mode is `observe`. | Nothing applies, except an undo by the person (section 7.4). |
+| Mode is `observe`. | Nothing applies, except an undo by the person (section 7.4) and a state verb that the person approved (section 4). |
 | A permanent delete. | No verb exists. |
+| Hostile mail: a message with a hostile mark, a message that waits for its link check, or a message from a `hostile` sender. | No notice, even if a `notify` rule matches. |
 
 The hard limits treat `local` and `triage` as agents.
 
@@ -577,6 +622,70 @@ Iris proposes a rule after a pattern: for example, the person approved 14 of
 store, not a line in the file. When the person accepts it, the engine adds the
 rule to the file with `by = "proposal"`. A proposal never changes the file
 without the person.
+
+The proposal is a row of the table `rule_proposal` (store migration 15).
+The engine (crate `iris-policy`, module `propose`) writes the open rows
+again when a decision of the person, an undo, the active policy or the hour
+changes:
+
+- It reads the newest 2,000 actions of an author other than `person`, with
+  the verb `archive`, `read`, `unread`, `inbox` or `trash`, that the person
+  approved (the states `approved`, `held`, `applied` and `failed`) or
+  refused (`denied` by the person, or `undone`). `label` and `unlabel` are
+  not in the list, because a rule cannot name the label. The state verbs
+  change items, not mail.
+- A candidate is one verb and one condition: the `sender` address or the
+  `sender_kind` that each message of one approved action has. An action on
+  hostile mail (a hostile mark, or a sender of the kind `hostile`) gives no
+  candidate and counts as no approval, and `hostile` is never a candidate.
+- The candidate rule is added to the active policy. An action counts for it
+  only when the rule changes the decision of that action to approved
+  (section 6.4), with the author, the job and the flag `bulk` of the
+  action. The engine proposes the rule when 10 or more approvals count and
+  no refusal counts.
+- A refusal that the engine cannot read again (a message row or its
+  header is gone) stops each proposal of its verb.
+- The pass holds the facts of one action at a time, and one count for each
+  key. It skips a bulk action, because a bulk action stays in review with
+  each rule (section 6.5), so it holds the facts of 500 messages or fewer.
+  It runs on a read connection and holds no write lock.
+- The person accepts or dismisses a proposal in the web client. An accept
+  is a change of section 6.3: the engine adds the rule at the end of the
+  file, with the next rule ID, `by = "proposal"`, the date and a comment,
+  and marks the row `accepted` in the same transaction. The accept runs the
+  same count again in that transaction. If a decision after the last pass
+  breaks the pattern, the accept adds nothing and the web client gets a
+  409. A dismiss changes
+  no file. Iris never proposes an accepted or a dismissed rule again.
+- An open row that no longer has the pattern goes away.
+
+The pass also proposes a `hide` rule from the choices of the person
+(card R5-02, `docs/specs/2026-11-17-preference-rules.md`):
+
+- It reads the newest 2,000 actions of the author `person` with the verb
+  `skip`, `mute` or `dismiss`, `applied` (a choice) or `undone` (a
+  refusal).
+- A candidate is a `hide` rule with two conditions: the `sender` of the
+  origin message of the item, and the `form` of the item. Hostile mail
+  and an origin message from the person (sender kind `you`) give no
+  candidate. A choice counts only when the rule, added to the
+  active policy, changes the attention of its item from shown to hidden.
+- The engine proposes the rule when 10 or more choices count and no
+  refusal counts. A refusal that the engine cannot read again stops each
+  `hide` proposal of its form.
+- An undone choice whose item, origin message, header or sender cannot
+  be read again stops each `hide` proposal of its form.
+- The row has `verb = 'hide'` and the `form` (store migration 23). An
+  `allow` row has the form `''`.
+
+Failure list of the proposals:
+
+| Input or event | Failure mode | Safe result |
+|---|---|---|
+| A decision after the last pass | An accept adds a rule that a new refusal contradicts | The accept counts again in its transaction, and refuses (409). |
+| A crash after the file write of an accept, before its commit | The file has the rule, and the row stays open | The file is a change of section 6.3. Each policy that becomes active (an accept, a confirmation) marks as accepted each open row whose rule it has with `by = "proposal"`. A discard leaves the row open. |
+| A failed commit of a pass | The pass is lost | The engine keeps the mark of a pass only after its commit, so the next tick runs it again. |
+| A message of a decided action that the cleanup changed | A refusal does not count | A refusal that the engine cannot read again stops each proposal of its verb. |
 
 ## 7. The ledger
 
@@ -592,16 +701,15 @@ or with a change of Iris state:
 | Column | Meaning |
 |---|---|
 | `id` | `l-` and a number. |
-| `changeset`, `revision`, `action` | The action that the entry applies. |
-| `verb` | The verb. |
-| `author` | The author of the changeset. |
-| `decided_by` | `rule` with its ID and the policy version (section 6.3), or `person`. |
-| `ops` | The provider operations, as JSON: the labels to add and remove, and the number of calls. For a state verb, the field. |
-| `pre`, `post` | For a state verb only: the old and the new values. |
+| `action` | The action that the entry applies. One entry for each action. The changeset, the revision, the verb, the author and the decision (`rule` with its ID and the policy version of section 6.3, or `person`) come from the action row. That row does not change after the submit, and an applied action keeps the decision that approved it. |
+| `account` | The mailbox of the provider calls. None for a state verb. |
+| `ops` | The provider operations, as JSON: the call (`batchModify` for each 1,000 messages, or `trash` or `untrash` for each message), the labels to add and remove, and the number of calls. Only an undo of `trash` writes `untrash` (section 7.4). For a state verb, the field. For `draft` and `send` (release 3): the call (`drafts.create` or `drafts.send`), the `Message-ID`, the `Date`, the content hash and, for a send, the Gmail draft ID (`docs/specs/2026-11-16-send.md`). |
+| `pre`, `post` | For a state verb: the old and the new values. For `draft`: `post` only, the content with its reply headers. |
 | `call` | The number of the last provider call that the engine started, from 1. 0 before the first call. |
-| `state` | `writing`, `applied`, `failed` or `undone`. |
+| `state` | `writing`, `applied`, `failed` or `undone`. The trigger `ledger_state` moves the action to the same state. |
+| `error` | The refusal of the provider, or why the engine could not confirm each message. |
 | `history_id` | The Gmail history ID after the apply. |
-| `undo` | `inverse` (an undo exists) or `none` (final, for example a sent message). |
+| `undo` | `inverse` (the verb has an undo) or `none` (final, for example a sent message, or an action applied before the ledger). The column records the verb, and does not change. An undo is available now only if the entry is `applied` or `failed`, has `inverse`, and has a message with `done` that is not gone (section 7.4). The view `ledger_can_undo` (migration 23) lists these entries, and `iris_apply::undo` refuses each other entry. Else the ledger shows the entry as final, for example after Gmail deleted each message of a `trash` entry. |
 | `undone_by` | The ledger entry of the undo. |
 | `at` | The time. |
 
@@ -614,12 +722,14 @@ The `ledger_message` table has one row for each message of the entry:
 | `pre` | The labels that the action changes, before the action. For `trash`, also if the message had `INBOX`. |
 | `post` | The labels that the action changes, after the action, as the engine expects them. For `trash`: the label `TRASH`. |
 | `done` | True when the provider confirmed the change of the message. |
+| `listed` | Why a message has no `done` after the recovery (section 7.3): `skipped` (its call never started, and it has the target state now), `gone`, or `unknown` (its call started, and the engine cannot confirm the change). |
 
 ### 7.2 Apply
 
-1. If the action adds a user label that the mirror does not have, call
-   `labels.create`. If Gmail answers that the label exists, or the result is
-   not known, call `labels.list` and use the user label with that name. If
+1. If the action adds a user label that Gmail does not have (`labels.list`),
+   call `labels.create`. If Gmail answers with an error (for example, the
+   label exists) or the result is not known, call `labels.list` again and use
+   the user label with that name. If
    no label of kind `user` has that name, the action is `failed`. The label
    stays after an undo, so this step has no ledger entry.
 2. Read the labels of each message of the action at Gmail (`format=minimal`).
@@ -639,9 +749,10 @@ The `ledger_message` table has one row for each message of the entry:
    1. Set `call` of the row to the number of the call, and commit.
    2. Call the provider.
    3. If the call succeeds, set `done` for its messages, and commit.
-5. After the last call, set the state `applied` if each message has `done`,
-   else `failed` (section 7.3). Save the history ID. Update the mirror with
-   the new labels.
+5. After the last call, set the state `failed` after a clear refusal (step
+   6), or when one or more messages are `unknown` (section 7.3). Else set
+   `applied`: a gone or a skipped message does not fail the row. Save the
+   history ID. Update the mirror with the new labels.
 6. Act on each other result of a call as follows:
 
 | Result | Meaning | The engine |
@@ -654,36 +765,41 @@ The `ledger_message` table has one row for each message of the entry:
 While a ledger row is in the state `writing`, the engine applies no other
 action that has a message of that row. The other action waits.
 
-#### Failure list of the apply before the ledger (R2-02)
+#### Failure list of the apply and the ledger
 
 The crate `iris-apply` applies the verbs `archive`, `inbox`, `read`,
-`unread` and `trash`. It comes before the ledger (R2-03), so it has no
-`writing` row, no list of the messages of each call and no recovery. In
-place of the `writing` row, migration 9 adds the mark `applying` to the
-action. The apply sets it before the first write call of the action. No
-provider call of an action is made two times: after the mark, each end
-other than success is `failed`.
+`unread`, `trash`, `label` and `unlabel`, with the ledger (migration 11).
+No provider call of an action is made two times. The ledger row in
+`writing` is the claim of the action: the transaction that adds it checks
+the expiry and the mode again.
 
 | Input or event | Failure mode | Safe result |
 |---|---|---|
-| An action 14 days or more after its submit (section 5.5) | An action applies after the person stopped to expect it | The apply sets `expired`, by `expiry`, with no call. |
-| The mode is `observe`, also when the person changes it during the reads of step 2 | An action applies without the mode `apply` | The action stays `approved` and waits. The transaction that sets the mark, or that closes an action with no write call, checks the mode and the expiry again. |
-| A token of another mailbox | The Gmail IDs of one mailbox change messages of another | Before step 2, and after each new token, the address of the Gmail profile must be the address of the account. Else the apply changes nothing (`OtherMailbox`), or the new token counts as no token. |
-| An action that a rule approved | A rule that the person removed applies the action, or two rule approvals of one author go past the `bulk` limit of 500 messages in one hour (section 5.4) | The bulk count of the last hour needs the ledger. So the engine sends each rule approval to `in_review`, by `engine`, and only a person approval applies. |
+| An action 14 days or more after its submit (section 5.5) | An action applies after the person stopped to expect it | The apply sets `expired`, by `expiry`, with no call. An action with a row in `writing`, and an undo, do not expire. |
+| The mode is `observe`, also when the person changes it during the reads of step 2 | An action applies without the mode `apply` | The action stays `approved` and waits. The claim transaction checks the mode and the expiry again. A row in `writing` continues to its end (section 5.4). |
+| A token of another mailbox | The Gmail IDs of one mailbox change messages of another | Before step 2, and after each new token, the address of the Gmail profile must be the address of the account. Else the apply changes nothing (`OtherMailbox`), or the new token counts as no token. A row in `writing` recovers only with a token of its own account. |
+| An action that a rule approved | A rule that the person removed applies the action, or two rule approvals of one author go past the `bulk` limit of 500 messages in one hour (section 5.4) | Until the engine counts the ledger rows of the last hour (issue #168), the engine sends each rule approval to `in_review`, by `engine`, and only a person approval applies. |
 | The hash of the rows does not agree with the hash of the approval | The person approved one action, and another applies | The engine denies the action, by `engine`. |
 | A message of another account | One token changes two mailboxes | The engine denies the action, by `engine`. |
-| A message that is gone in the mirror, or HTTP 404 in step 2 | A call on a message that does not exist | The apply skips it, and lists it in the result. |
-| A message that already has the target state | A call that changes nothing, and an undo that changes the message | The apply skips it, and counts it. |
-| HTTP 401 | Gmail did not run the call | The apply gets a new access token one time, and makes the call one time again. If there is no new token or a second 401: before the mark, the action stays as it was; after the mark, it is `failed`. The apply then sets `Token.refused`, and the caller sets the account to "needs sign-in", as after a sync. |
-| A read that fails | No label state for step 2 | Before the mark, the action stays as it was, and the next apply does each check again. After the mark, it is `failed`. |
-| An unknown result of a write (a timeout, a lost connection, HTTP 5xx) | Gmail can have applied the call, and the person can reverse the change before a call again | The action is `failed`, and the error says that the result is not known. Iris does not call Gmail again for the action. The next sync writes the labels to the mirror. |
-| A stop of the engine after the mark | The result of a call is not known | The next apply finds the mark and sets `failed`, with no call. |
-| Two applies at the same time, in one process or in two | Two applies send the same call, or one fails the action of the other | Each apply holds the file lock `apply.lock` of the data folder. A second apply gets `Busy` and changes nothing. While the lock is held, a mark is the mark of an apply that stopped. The mark is set only from 0, so only one apply can set it. |
+| A message that is gone in the mirror, or HTTP 404 in step 2 | A call on a message that does not exist | The apply skips it, and lists it in the result. A message that is gone in the mirror after the claim is listed `gone`, with no call. |
+| A message that already has the target state | A call that changes nothing, and an undo that changes the message | The apply skips it, and counts it. It has no ledger message row. |
+| HTTP 401 | Gmail did not run the call | The apply gets a new access token one time, and makes the call one time again. If there is no new token or a second 401: before the claim, the action stays as it was; after the claim, the row is `failed`, as for a clear refusal. The apply then sets `Token.refused`, and the caller sets the account to "needs sign-in", as after a sync. |
+| A read that fails | No label state for step 2 or for the recovery | Before the claim, the action stays as it was, and the next apply does each check again. In the recovery, the row stays in `writing` with what the earlier reads confirmed, and the next apply of an action of the account continues the recovery. |
+| An unknown result of a write (a timeout, a lost connection, HTTP 5xx) | Gmail can have applied the call, and the person can reverse the change before a call again | The recovery of section 7.3 runs at once. It reads each message of the call: the `post` state gives `done`, each other state gives `unknown`, and no call is made again for the message. One or more `unknown` messages make the row `failed`. |
+| A stop of the engine after the claim | The result of a call is not known | The row stays in `writing`. The next apply of the action, or of another action of the account, or `iris_apply::recover` at start, runs the recovery. |
+| Two applies at the same time, in one process or in two | Two applies send the same call, or one fails the action of the other | Each apply holds the file lock `apply.lock` of the data folder. A second apply gets `Busy` and changes nothing. While the lock is held, a row in `writing` is the row of an apply that stopped. The ledger allows one entry for each action, and only an approved action gets one. |
+| A row in `writing` of another action with the same messages | Two applies change one message, and the recovery of the first row reads the change of the second | Before its own checks (the expiry, the mode, the rule and the hash), the apply runs the recovery of each row of the account in `writing`, so such a row ends also when the action waits or is refused. The trigger `ledger_message_insert` refuses a message that a row in `writing` has. |
 | A sync of the account during the apply | The apply writes to the mirror labels that it read before the sync saved newer labels | The apply also holds the sync lock of the account (specification 1, section 4.2). While a sync runs, the apply gets `Busy` and changes nothing. |
-| A clear refusal (HTTP 400, another 4xx) | The rest of the action is not valid | The action becomes `failed`. The messages of the earlier calls keep the change. The result has the error. |
-| A withdraw or an expiry during the apply | Gmail changed messages of a cancelled action | A withdraw keeps a marked action `approved`, and it cancels an action with no mark. A marked action can only become `applied` or `failed`. The apply that set the mark ends it. The ledger row in `writing` replaces the mark in R2-03 (section 5.5). |
-| A message that changed at Gmail after the last sync | The mirror keeps labels that Gmail does not have | The mirror gets the labels of step 2 for each message: as read for a message with the target state, with the change of the call for a changed message, and as the `trash` answer gives them. The apply changes only the label rows that differ, so the triggers on the labels of a message (the model wait, the attention) see only real changes. |
-| A store error after a provider call | The mirror does not have the new labels | The next sync writes the labels from the history of Gmail. |
+| A clear refusal (HTTP 400, another 4xx) | The rest of the action is not valid | The row becomes `failed`, with the error. The messages of the earlier calls keep the change and `done`. No later call is made. |
+| A withdraw or an expiry during the apply | Gmail changed messages of a cancelled action | A withdraw keeps an action with a row in `writing` `approved`, and it cancels an action with no row. Such an action can only become `applied` or `failed`, as its row ends (section 5.5). |
+| A message that changed at Gmail after the last sync | The mirror keeps labels that Gmail does not have | The mirror gets the labels of each read of step 2 and of the recovery. After a `batchModify` call, the mirror gets the change of the call; after a `trash` call, the labels of the answer. The apply changes only the label rows that differ, so the triggers on the labels of a message (the model wait, the attention) see only real changes. |
+| A store error after a provider call | The ledger does not have `done`, or the mirror does not have the new labels | The row stays in `writing` at the number of the call, and the recovery reads the messages of the call. The next sync writes the labels from the history of Gmail. |
+| An action applied before the ledger (migration 9) | An applied action with no entry, or a marked action whose calls are not known | Migration 11 adds an entry with no messages and the undo `none`. An action with the mark `applying` becomes `failed`, with no call. |
+| The label name of `label` or `unlabel` | The mirror can be one sync interval behind Gmail, and Gmail refuses two labels whose names differ only in case | Before step 2, the apply reads `labels.list` and finds the label of the name, with no regard to case (the Unicode case folding of submit). The mirror gets the label row. |
+| A label name that is the name or the ID of a system label at Gmail | A `label` action changes a system label | Submit refuses the name. If Gmail has a system label that submit does not know, the engine denies the action, by `engine`, with no call. |
+| A `label` action of a label that Gmail does not have | No label to add | Before step 2, the apply calls `labels.create` one time, with no ledger entry: the label stays after an undo (step 1). After an error or an unknown result, it reads `labels.list` and uses the user label of the name. With no such label, the action is `failed`, with a ledger entry of no message. |
+| An `unlabel` action of a label that Gmail does not have | A call that changes nothing | Each message has the target state. The action is `applied` with no write call. |
+| A label deleted at Gmail between `labels.list` and `batchModify` | Gmail refuses the call (HTTP 400) | A clear refusal: the row is `failed`. |
 
 ### 7.3 Recovery
 
@@ -697,8 +813,9 @@ For each message of the row:
 - `done` is true: skip the message. The provider confirmed it, and a later
   change by the person must stay.
 - Its `call` is greater than `call` of the row: the engine never started its
-  call. Read its labels again as in step 2 of section 7.2, save the new
-  `pre`, and keep the message for step 4 of section 7.2.
+  call. Read its labels again as in step 2 of section 7.2. A message that
+  has the target state now is `skipped`, and a gone message is `gone`.
+  Else save the new `pre`, and keep the message for step 4 of section 7.2.
 - Each other message: its call started, and its result is not known. Read
   the labels at Gmail (`format=minimal`).
   - Gmail returns HTTP 404: the message is gone. It is not in `done`, and the
@@ -707,13 +824,14 @@ For each message of the row:
   - Each other state, `pre` included: the engine cannot tell if the call did
     not reach the message, or if the person reversed the change in Gmail
     after the call. The engine never calls the provider again for the
-    message. It lists the message for the person, who can approve a new
-    changeset for it.
+    message. It lists the message `unknown` for the person, who can approve
+    a new changeset for it.
 
 Then, if messages remain whose call never started, the apply continues with
-their calls (section 7.2, step 4). Else, the row becomes `applied` when each
-message has `done`, and `failed` when one or more messages are listed. In
-both cases, the undo applies only to each message with `done`.
+their calls (section 7.2, step 4). Else, the row becomes `failed` when one
+or more messages are listed as not known (`unknown`), and `applied` in each
+other case. A gone message does not fail the row, as in step 2 of section
+7.2. In both cases, the undo applies only to each message with `done`.
 
 The brief shows the listed messages in one line, until the person dismisses
 it. A state verb never stays in the state `writing`, because one transaction
@@ -721,48 +839,103 @@ applies it.
 
 ### 7.4 Undo
 
-1. The person selects undo on a ledger entry, in the web client.
-2. The engine makes a changeset with author `person` and one action: the
-   inverse of the entry. The choice of the person is the approval. The rules,
-   the mode `observe` and the flag `bulk` do not apply to an undo. Only Stop
-   (release 4) holds it.
-3. The engine reads the labels at Gmail as in step 2 of section 7.2. The
-   inverse changes only the messages with `done` that still have the `post`
-   state of the entry. A message that changed after the entry (for example,
-   the person moved it in Gmail) stays as it is. The result lists these
-   messages.
-4. For `trash`, the undo changeset has two actions, and each one is an
-   ordinary action with its own ledger entry and recovery:
+1. The person selects undo on a ledger entry, in the web client. The entry
+   must be `applied` or `failed`, with the undo `inverse`, and with one or
+   more messages with `done` that are not gone. No other undo of the entry
+   is open.
+2. The engine (`iris_apply::undo`) makes a changeset with author `person`
+   and one action: the inverse of the entry (`archive` and `inbox`, `read`
+   and `unread`, `label` and `unlabel` of the same name, `trash` and
+   `untrash`). Its target is the entry (`{"ledger": ["l-N"]}`), and submit
+   resolves the messages with `done` that are not gone, in SQL, so no list
+   of message IDs is in memory (section 9). Only an action with the link
+   of migration 23 to that entry can target an entry. The undo of `label`
+   or `unlabel` changes the label of the entry by its ID (from `ops`), so a
+   rename of the label at Gmail after the entry does not change the undo.
+   An undo does not expire (section 5.5): the person approved it, and
+   action 2 must apply also after a long stop.
+   One transaction submits it, and the person approves it: the choice of
+   the person is the approval. The table `ledger_undo` (migration 23) links
+   the action to the entry. The rules, the mode `observe` and the flag
+   `bulk` do not apply to an undo. Only Stop (release 4) holds it.
+3. The apply reads the labels at Gmail as in step 2 of section 7.2. The
+   inverse changes only the messages that still have the `post` state of
+   the entry, and that no later ledger entry changed (`done`, or listed
+   `unknown`), except the actions of the undos of the same entry. A
+   message that changed after the entry (for example, the person moved it
+   in Gmail, or a later action of Iris changed it) stays as it is. The
+   result counts these messages as unchanged. Known limit (issue #225):
+   a change in Gmail outside Iris that puts the message back in the `post`
+   state is not detected, and the undo reverses it.
+4. For `trash`, the undo changeset has one or two actions, and each one is
+   an ordinary action with its own ledger entry and recovery. Action 2
+   exists only if one or more messages of action 1 had no `INBOX` in `pre`
+   of the entry:
    1. `messages.untrash` for each message that still has `TRASH`. Only an
-      undo makes this action, with the verb `untrash`. Its `post` is "no
-      `TRASH`".
-   2. After action 1, `archive` for each message that has `INBOX` now and
-      had no `INBOX` in `pre` (for example an archived message that
-      `messages.untrash` put in the inbox).
+      undo makes this action, with the verb `untrash`: submit denies
+      `untrash` with no link. Its `post` is "no `TRASH`".
+   2. `archive` of each message whose `pre` in the entry has no `INBOX`
+      (for example an archived message that `messages.untrash` put in the
+      inbox). It changes only the messages that an `untrash` of an undo of
+      the entry changed (`done`), and that have `INBOX` now. Until action 1
+      ends, the apply of action 2 waits. After action 1 ends, `applied` or
+      `failed`, action 2 applies: the caller applies each action of the
+      undo in order.
 
    The undo never sets a full label set, so a label that the person added
    while the message was in the trash stays. If the engine stops between the
    two actions, action 2 is still `approved`, and it applies after the start
    (section 7.2, step 2 reads the labels again).
-5. The undo gets its own ledger entry. The first entry gets `undone_by`, and
-   its action gets the state `undone`.
+5. Each action of the undo gets its own ledger entry. When the last action
+   of the undo becomes `applied`, and each action of the undo is
+   `applied`, the same transaction sets `undone_by` of the first entry to
+   the entry of action 1, and the trigger `ledger_state` moves its action
+   to `undone`. If an action of the undo fails, the first entry keeps its
+   state, and the person can undo it again: the next undo skips each
+   message that is back, and its action 2 archives each message that an
+   earlier `untrash` changed.
 
 An undo of an undo is a new action, not a delete of the record.
+
+#### Failure list of the undo
+
+| Input or event | Failure mode | Safe result |
+|---|---|---|
+| An undo of an entry in `writing`, `undone`, or with the undo `none` | The undo changes messages of an apply that did not end, or reverses a change two times | `undo` refuses it (`Error::Undo`). The trigger `ledger_undo_insert` refuses the link. |
+| A second undo while an undo of the entry is open | Two undos change the same messages, or a one-action undo ends the entry while action 2 of another undo waits | `undo` refuses it until each action of the open undo ended. The trigger refuses a link while an action of another undo changeset of the entry is open, and a second link of the same step in one changeset. Action 2 of a `trash` undo applies also after a failed action 1, so the undo ends. |
+| A link of an action whose target is not the whole entry (`{"ledger": ["l-N"]}`), whose verb is not the inverse of the entry, with other arguments, a step 2 of an entry that is not `trash`, or a step 2 with no step 1 of the same entry in the same changeset | A link lets an action skip the mode, or makes `untrash` for an entry that is not a trash | The trigger `ledger_undo_insert` refuses the link. The end of a ledger entry records an undo only when the entry of step 1 exists, so it never fails on the link. The trigger `ledger_undo_action` refuses a change of the verb, the targets or the arguments of a linked action, also in a draft. Submit denies a linked action with another target, and also denies `untrash` unless the action is step 1 of the undo of a `trash` entry. The apply changes only the messages that the entry changed, whatever the targets. |
+| An entry with no message with `done`, or each such message gone | An undo that changes nothing | `undo` refuses it. Nothing is written. |
+| A message that changed at Gmail after the entry | The undo reverses a change of the person | The apply reads the labels at Gmail, and skips the message if it does not have the `post` state. A change outside Iris that ends in the `post` state is not detected (issue #225). |
+| A message that a later entry of Iris changed (for example `archive`, `inbox`, `archive`, then the undo of the first `archive`) | The undo reverses the later action | The apply skips each message with a later `ledger_message` row with `done` or `unknown`, except the rows of the undos of the same entry. |
+| A gone message, or HTTP 404 | A call on a message that does not exist | `undo` leaves a gone message out of the targets. The apply lists a message that Gmail does not have as gone. |
+| The mode `observe` | The person cannot reverse a change while Iris observes | The mode does not hold an undo. The apply checks the link of migration 23. |
+| Action 2 of the undo of `trash` before action 1 ends | An `archive` of a message that is still in the trash, or that `untrash` did not change | The apply of action 2 waits. Action 2 changes only the messages with `done` in the entry of action 1. |
+| A failed undo, or an unknown result, in action 1 or action 2 | Some messages are back, others are not, and the entry shows `undone` | The undo entry is `failed`, with its recovery. The first entry becomes `undone` only when each action of the undo is `applied`. Else it keeps its state, and a new undo skips each message that is back. |
+| A write of `undone_by` with an entry that is not its undo | The ledger shows a wrong undo | The trigger `ledger_undone_by` refuses it: only the entry of action 1 of its own undo makes an entry `undone`. |
+| An undo of `label` or `unlabel` whose label Gmail deleted after the entry | The undo makes again a label that the person deleted, or Gmail refuses the call | Before step 2, the apply reads `labels.list`. If the label ID of the entry is not there, the engine denies the undo action, by `engine`, with no write call. The entry keeps its state. |
 
 ### 7.5 Release 3: draft, send and the held outbox
 
 A later specification defines the verbs `draft`, `send` and `nudge`, and the
-held outbox. That specification must meet these constraints:
+held outbox. `docs/specs/2026-11-16-send.md` (R3-01) defines `draft`, `send`
+and the release step. That specification must meet these constraints:
 
 - A `send` never goes at once. After the approval, it waits in the held
   outbox for the hold delay (default 60 seconds). The outbox survives a
   restart.
-- A cancel of a held send succeeds only while the send is held. Cancel and
-  release run on the one write connection, so only one of the two can win.
+- A cancel of a send succeeds only while the send is `approved` or `held`
+  and has no ledger row (the release did not claim it). It moves the send
+  to `denied` by `person`. Cancel and release run on the one write
+  connection, so only one of the two can win.
+- The send switch (`docs/specs/2026-11-17-held-outbox.md`) is off until the
+  owner turns it on with `iris sending on`. While it is off, no send leaves
+  the held outbox. The hold starts at the later of the approval and the
+  time the switch went on.
 - The approval of a send binds to a hash of the draft content: the
   recipients, the subject, the body and the attachments. Before the release,
   the engine reads the draft at Gmail again. If the hash is different, the
-  send goes back to review. No `draft` action can change a draft that has an
+  engine denies the send, and a new send action of the draft goes to
+  review. No `draft` action can change a draft that has an
   approved or a held send.
 - The flags of a draft (section 5.3) come from the content of the draft, at
   submit and again at the release.
@@ -772,8 +945,10 @@ held outbox. That specification must meet these constraints:
   known, the engine searches at Gmail, not in the mirror. Until it finds the
   sent message or a set time passes, the send has a state that blocks a new
   send of the same draft.
-- The undo of a `draft` action restores the old content of the draft. It
-  never deletes a draft of the person.
+- The undo of a `draft` action that changes a draft restores the old
+  content of the draft. It never deletes a draft of the person. So a
+  draft create has no undo, and no `draft` action can change a draft
+  until its undo exists (R3-01 makes only creates).
 - Each verb records its result in the ledger and has a crash test.
 
 ## 8. The iris command
@@ -805,7 +980,28 @@ The policy governs mailbox actions (sections 4 to 6). The writes in
 the table are not mailbox actions, so they do not go through the policy.
 Release 1 has no verb that adds an action, so no request can skip the policy.
 The socket comes with the first verb that adds an action (release 2). Then
-each verb goes through the socket.
+each verb that adds, submits or withdraws an action goes through the socket
+(`docs/specs/2026-11-16-engine-socket.md`). In host mode, the read verbs
+(`status`, `search`, `show`, `brief` and `list`) keep the exception of
+release 1: they change nothing, so they cannot skip the policy. In session
+mode (release 4), each read verb goes through the session socket, and the
+engine applies the current grant of the job of the session
+(`docs/specs/2026-11-16-job-workspace.md`). A session never opens the store
+directly: the direct path is for host mode only.
+
+Release 3 exception (`docs/specs/2026-11-17-held-outbox.md`, sections 3
+and 5): `iris sending on|off`, `iris sending` and `iris cancel <d-N>` open
+the data folder directly, in host mode only, and do not need a running
+engine. They change no mailbox, so they cannot skip the policy:
+
+| Verb | Local writes | Rules |
+|---|---|---|
+| `sending on` | The send switch, after a typed `yes` at a terminal | Held-outbox spec, section 3 |
+| `sending off` | The send switch, after it holds `apply.lock` (at most 20 seconds) | Held-outbox spec, section 3 |
+| `cancel <d-N>` | The open send of the draft becomes `denied` by `person` | Held-outbox spec, section 5 |
+
+One engine runs on a data folder: `iris serve` holds the lock `engine.lock` in the data folder while it
+runs.
 
 | Mode | When | Socket | Who |
 |---|---|---|---|
@@ -838,7 +1034,7 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris serve [--addr <addr>]` | Starts the engine. The default address is `127.0.0.1:4800`. The engine refuses an address that is not a loopback address, until open question 1 has a decision. | host | 0 |
 | `iris service install` | Installs and starts the background service that runs `iris serve`: a launchd agent on macOS, a systemd user unit on Linux. If a call to the service manager fails or its result is not known, the service file stays and the command returns the error. The state of the service manager is then not known: a second `install` finishes the work, and `remove` undoes it. Both are safe to repeat. | host | 1 |
 | `iris service remove` | Stops the background service and removes its file. If the stop fails, or if launchd cannot say if the agent runs, the file stays and the command returns the error. A second remove tries again. On Linux with no running systemd (`/run/systemd/system` is absent), nothing can run the unit, so it deletes the file with no `systemctl` call. If systemd runs and the stop fails (also when `systemctl` is not found), the file stays and the command returns the error. After a good stop, a failed `systemctl --user daemon-reload` is not an error, because the unit is stopped and disabled. | host | 1 |
-| `iris status` | Shows the account, the sync, the mode and the counts. | both | 1 |
+| `iris status` | Host mode: shows the account, the sync, the mode and the counts of the mailbox. Session mode: shows only the job (its ID, goal, state and due date) and the counts of the workspace. It shows no account, sync or mailbox count. | both | 1 |
 | `iris mirror sync` | Runs an incremental sync now, then one run of understanding inside the approved budget. If another run holds the run lock, it waits for that run to end. | host | 1 |
 | `iris mirror verify` | Compares the mirror with Gmail (specification 1, section 4.8). | host | 1 |
 | `iris rebuild [--since-prompt <v>]` | Runs understanding again. | host | 1 |
@@ -846,13 +1042,14 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris understand --estimate`, `iris understand --approve <code> --budget <usd>`, `iris understand [--max-cost <usd>] [--max-messages <n>]` | Shows the estimate and its approval code, approves a budget for paid runs after the estimate, and runs understanding on the pending messages. | host | 1 |
 | `iris backup <path>` | Copies the data folder while the engine runs. | host | 1 |
 | `iris export <path>` | Writes each item as JSON Lines, and copies the raw messages. | host | 1 |
-| `iris brief` | Shows the brief. | both | 1 |
-| `iris search <query>` | Full-text search (specification 1, section 5.6). In session mode, it adds the threads that match to `threads/`. | both | 1 |
-| `iris show <id>` | Shows one item or message. Release 1 has no read path for a thread or a sender, so a thread and a sender come in a later release. | both | 1 |
-| `iris list <form> [filters]` | Lists items of one form. | both | 1 |
+| `iris brief` | Shows the brief. | host | 1 |
+| `iris search <query>` | Full-text search (specification 1, section 5.6). In session mode, it searches only the messages that the job grants (`docs/specs/2026-11-16-job-workspace.md`), and it adds nothing to the workspace. | both | 1 |
+| `iris show <id>` | Shows one item or message. Release 1 has no read path for a thread or a sender, so a thread and a sender come in a later release. In session mode, only an item or a message that the job grants, and an item is a job item (`id`, `form` and `sources`, with no text of the model and no status). | both | 1 |
+| `iris list <form> [filters]` | Lists items of one form. In session mode, only the items of the workspace, with the fields of `show`. | both | 1 |
 | `iris archive`, `inbox`, `label`, `unlabel`, `read`, `unread`, `trash` `<ids> [--changeset <cs-id>]` | Adds an action to a draft changeset. | both | 2 |
 | `iris close`, `defer`, `decline`, `correct` `<id> [--changeset <cs-id>]` | Adds a state action to a draft changeset. | both | 2 |
 | `iris changeset <cs-id>` | Shows a changeset. | both | 2 |
+| `iris revise <cs-id>` | Starts a new draft revision of a submitted changeset of the same author, after a review comment (section 5.5). | both | 4 |
 | `iris submit <cs-id> --why <text>` | Submits a draft changeset, and prints one result for each action. | both | 2 |
 | `iris withdraw <cs-id>` | Withdraws a changeset of the same author (section 5.5). Applied actions stay. | both | 2 |
 | `iris ledger [filters]` | Lists ledger entries. | host | 2 |
@@ -868,6 +1065,16 @@ Each command that adds an action prints the changeset ID and the action
 number, and changes nothing outside the draft changeset. Nothing leaves the
 engine before `submit`.
 
+In session mode, each message that an action changes must be in the
+current grant of the job (`docs/specs/2026-11-16-job-workspace.md`): the
+engine checks each message that a target resolves to, at `submit` and again
+just before the apply. A message outside the grant at `submit` makes the
+submit fail with no change. A message that left the grant before the apply
+makes the action refused, with the reason. Each item target must be an item
+of the workspace now, by the same two checks. `iris draft`, `iris send` and `iris nudge` are
+refused in session mode until a card defines their grant, and `submit`
+refuses each draft or send action in a changeset of a session.
+
 ### 8.3 Output
 
 - The default output is short text for a person or an agent to read. In a
@@ -879,7 +1086,9 @@ engine before `submit`.
   program reads these commands with `--json`, where the command has it.
 - `--json` prints the open model documents (specification 1, section 6, and
   section 5.1 here). One JSON document for one object, and JSON Lines for a
-  list.
+  list. Exception: in session mode, an item is a job item
+  (`jobitem.schema.json`, `docs/specs/2026-11-16-job-workspace.md`), not the
+  full item document.
 - The command writes errors to standard error. An error message says what
   failed and what to do.
 

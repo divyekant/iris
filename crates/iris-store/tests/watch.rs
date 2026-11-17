@@ -1,0 +1,288 @@
+//! Watches (card R5-07): one notice for the first new message that matches.
+
+use std::fs;
+use std::path::PathBuf;
+
+use iris_store::{Body, Error, Header, NewMessage, Store, SINCE_MARGIN_MS, WAIT_MAX};
+
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(name: &str) -> TempDir {
+        let dir = std::env::temp_dir().join(format!("iris-watch-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        TempDir(dir)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+const NOW: i64 = 1_794_700_800_000; // 2026-11-15
+
+fn msg(id: &str, date: i64, labels: &[&str], subject: &str, body: bool) -> NewMessage {
+    NewMessage {
+        provider_id: id.into(),
+        thread_provider_id: format!("t-{id}"),
+        internal_date: Some(date),
+        labels: labels.iter().map(|l| l.to_string()).collect(),
+        header: Header {
+            from_addr: Some(format!("{id}@example.com")),
+            from_name: Some("Ana Lee".into()),
+            subject: Some(subject.into()),
+            ..Header::default()
+        },
+        body: body.then(|| Body {
+            subject: subject.into(),
+            sender: format!("Ana Lee {id}@example.com"),
+            text: "The text.".into(),
+        }),
+        ..NewMessage::default()
+    }
+}
+
+fn setup(dir: &TempDir) -> (Store, i64) {
+    let store = Store::open(&dir.0).unwrap();
+    let acc = store.add_account("gmail", "owner@example.com").unwrap();
+    store
+        .put_labels(
+            acc,
+            &[
+                ("INBOX", "INBOX", "system"),
+                ("SENT", "SENT", "system"),
+                ("DRAFT", "DRAFT", "system"),
+            ],
+        )
+        .unwrap();
+    (store, acc)
+}
+
+fn put(store: &Store, acc: i64, m: NewMessage) -> i64 {
+    store.put_messages(acc, &[m]).unwrap()[0]
+}
+
+#[test]
+fn a_watch_gives_one_notice_for_the_first_new_match() {
+    let dir = TempDir::new("one");
+    let (store, acc) = setup(&dir);
+    let old = put(
+        &store,
+        acc,
+        msg("old", NOW - 60_000, &["INBOX"], "Visa decision", true),
+    );
+    let w = store.add_watch("  visa  ", NOW).unwrap();
+    assert_eq!(
+        store.check_watches(NOW).unwrap(),
+        [],
+        "mail from before the watch"
+    );
+
+    put(
+        &store,
+        acc,
+        msg("other", NOW + 1, &["INBOX"], "Lunch", true),
+    );
+    assert_eq!(store.check_watches(NOW + 2).unwrap(), []);
+
+    let first = put(
+        &store,
+        acc,
+        msg("v1", NOW + 3, &["INBOX"], "Your visa", true),
+    );
+    let second = put(
+        &store,
+        acc,
+        msg("v2", NOW + 4, &["INBOX"], "Visa again", true),
+    );
+    assert!(old < first && first < second);
+    assert_eq!(store.check_watches(NOW + 5).unwrap(), [(w, first)]);
+    // One notice: the watch does not match again.
+    assert_eq!(store.check_watches(NOW + 6).unwrap(), []);
+    let got = store.watch(w).unwrap().unwrap();
+    assert_eq!(got.text, "visa");
+    assert_eq!((got.message, got.arrived_at), (Some(first), Some(NOW + 5)));
+
+    assert!(store.remove_watch(w).unwrap());
+    assert!(!store.remove_watch(w).unwrap());
+    assert_eq!(store.watches().unwrap(), []);
+}
+
+#[test]
+fn a_watch_skips_mail_that_is_not_a_safe_new_arrival() {
+    let dir = TempDir::new("skip");
+    let (store, acc) = setup(&dir);
+    let w = store.add_watch("from:ana", NOW).unwrap();
+    // Each of these matches the search, but none is a safe new arrival.
+    let pending = put(&store, acc, msg("a", NOW, &["INBOX"], "x", false));
+    put(
+        &store,
+        acc,
+        msg("b", NOW - SINCE_MARGIN_MS - 1, &["INBOX"], "x", true),
+    );
+    put(&store, acc, msg("c", NOW, &["SENT"], "x", true));
+    put(&store, acc, msg("d", NOW, &["DRAFT"], "x", true));
+    let marked = put(&store, acc, msg("e", NOW, &["INBOX"], "x", true));
+    let _hostile_sender = put(&store, acc, msg("f", NOW, &["INBOX"], "x", true));
+    let gone = put(&store, acc, msg("g", NOW, &["INBOX"], "x", true));
+    store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET hostile = '[\"spoof\"]' WHERE id = ?1",
+                [marked],
+            )?;
+            tx.execute(
+                "INSERT INTO sender(address, kind) VALUES ('F@example.com', 'hostile')",
+                [],
+            )?;
+            tx.execute("UPDATE message SET gone_at = 1 WHERE id = ?1", [gone])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(store.check_watches(NOW).unwrap(), []);
+
+    // The clean text of the first message comes with its hostile check.
+    store
+        .put_body(
+            pending,
+            &Body {
+                subject: "x".into(),
+                sender: "Ana Lee a@example.com".into(),
+                text: "t".into(),
+            },
+        )
+        .unwrap();
+    // Mail just before the watch that was not in the mirror can match.
+    assert_eq!(store.check_watches(NOW).unwrap(), [(w, pending)]);
+}
+
+#[test]
+fn a_watch_needs_a_valid_text_and_a_free_place() {
+    let dir = TempDir::new("add");
+    let (store, _) = setup(&dir);
+    for bad in ["", "   ", "from:", "form:email", &"x".repeat(501)] {
+        assert!(store.add_watch(bad, NOW).is_err(), "{bad:?}");
+    }
+    assert!(store.add_watch(&"x".repeat(500), NOW).is_ok());
+    for _ in 1..WAIT_MAX {
+        store.add_watch("visa", NOW).unwrap();
+    }
+    assert!(matches!(store.add_watch("visa", NOW), Err(Error::Watch(_))));
+    assert_eq!(store.watches().unwrap().len() as i64, WAIT_MAX);
+}
+
+/// The invariant: a watch matches at most one time, and its message is the
+/// lowest new row ID that the same search finds and that is a safe arrival.
+/// Random mailboxes and random check times.
+#[test]
+fn a_watch_matches_the_first_safe_arrival_of_the_search() {
+    let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    for round in 0..40 {
+        let dir = TempDir::new(&format!("prop-{round}"));
+        let (store, acc) = setup(&dir);
+        let words = ["visa", "lunch", "invoice"];
+        let pre = next(4);
+        for i in 0..pre {
+            put(
+                &store,
+                acc,
+                msg(
+                    &format!("p{i}"),
+                    NOW,
+                    &["INBOX"],
+                    words[next(3) as usize],
+                    true,
+                ),
+            );
+        }
+        let text = words[next(3) as usize];
+        let w = store.add_watch(text, NOW).unwrap();
+        let mut safe = Vec::new();
+        let mut fired = None;
+        for i in 0..next(12) {
+            let subject = words[next(3) as usize];
+            let label = ["INBOX", "SENT", "DRAFT"][next(3) as usize];
+            let body = next(4) != 0;
+            let date = NOW - SINCE_MARGIN_MS + next(3) as i64 * SINCE_MARGIN_MS - 1;
+            let id = put(
+                &store,
+                acc,
+                msg(&format!("n{i}"), date, &[label], subject, body),
+            );
+            if subject == text && label == "INBOX" && body && date >= NOW - SINCE_MARGIN_MS {
+                safe.push(id);
+            }
+            if next(3) == 0 {
+                for (got_w, m) in store.check_watches(NOW).unwrap() {
+                    assert_eq!(got_w, w);
+                    assert!(fired.is_none(), "round {round}: a second notice");
+                    fired = Some(m);
+                }
+                assert_eq!(fired, safe.first().copied(), "round {round}");
+            }
+        }
+        for (_, m) in store.check_watches(NOW).unwrap() {
+            assert!(fired.is_none(), "round {round}: a second notice");
+            fired = Some(m);
+        }
+        assert_eq!(fired, safe.first().copied(), "round {round}");
+        if let Some(m) = fired {
+            assert!(store.search(text, 200).unwrap().contains(&m));
+        }
+    }
+}
+
+/// The invariant: only `remove_watch` ends a watch. The cleanup of a gone
+/// message keeps the notice of a watch that matched it.
+#[test]
+fn the_cleanup_of_the_gone_message_keeps_the_notice() {
+    let dir = TempDir::new("clean");
+    let (store, acc) = setup(&dir);
+    let w = store.add_watch("visa", NOW).unwrap();
+    let m = put(&store, acc, msg("v", NOW, &["INBOX"], "Visa", true));
+    assert_eq!(store.check_watches(NOW).unwrap(), [(w, m)]);
+    store
+        .write(|tx| Ok(tx.execute("UPDATE message SET gone_at = 1 WHERE id = ?1", [m])?))
+        .unwrap();
+    store.clean_gone(NOW).unwrap();
+    let gone: i64 = store
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM message", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(gone, 0, "the cleanup deleted the message row");
+    let got = store.watch(w).unwrap().unwrap();
+    assert_eq!((got.message, got.arrived_at), (Some(m), Some(NOW)));
+    assert_eq!(store.check_watches(NOW).unwrap(), [], "no second notice");
+}
+
+#[test]
+fn a_watch_waits_for_the_link_check() {
+    let dir = TempDir::new("link-check");
+    let (store, acc) = setup(&dir);
+    let w = store.add_watch("from:ana", NOW).unwrap();
+    let id = put(&store, acc, msg("a", NOW, &["INBOX"], "x", true));
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO link_check(message_id) VALUES (?1)",
+                [id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(store.check_watches(NOW).unwrap(), []);
+    store
+        .write(|tx| {
+            tx.execute("DELETE FROM link_check WHERE message_id = ?1", [id])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(store.check_watches(NOW).unwrap(), [(w, id)]);
+}

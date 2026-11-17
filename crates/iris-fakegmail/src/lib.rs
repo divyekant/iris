@@ -5,9 +5,12 @@
 //! credentials. It accepts any `Authorization: Bearer` token.
 //!
 //! Supported: `users.getProfile`, `users.labels.list`, `users.labels.get`,
-//! `users.messages.list` (paging, `labelIds`, `includeSpamTrash`, no `q`),
-//! `users.messages.get` (`raw`, `metadata`, `minimal`), `users.messages.send`,
-//! `users.messages.batchModify`, `users.messages.trash` and
+//! `users.messages.list` (paging, `labelIds`, `includeSpamTrash`, and `q`
+//! only as `rfc822msgid:<id>`), `users.messages.get` (`raw`, `metadata`,
+//! `minimal`), `users.messages.send`, `users.drafts.create`,
+//! `.get` (`raw`), `.list` (`q` as above) and `.send`,
+//! `users.messages.batchModify`, `users.messages.trash`,
+//! `users.messages.untrash`, `users.labels.create` and
 //! `users.history.list` (paging, `historyTypes`). The JSON has the shape
 //! of the real API. The fake returns 400 for `format=full` and for an absent
 //! format, because the real default is `full` and the fake does not build it.
@@ -129,8 +132,19 @@ struct Store {
     /// answer: `(status, applied)`. With `applied`, the fake makes the change
     /// first, as when Gmail applies a call and the answer is lost.
     write_failures: VecDeque<(u16, bool)>,
+    /// A failure for the next request whose log line contains the text.
+    path_failure: Option<(String, u16)>,
+    /// The most items on one list page, below `maxResults`.
+    page_limit: usize,
+    /// A draft edit that the next `drafts.get` of the draft starts, after
+    /// its answer: the person edits the draft between a read and a send.
+    edit_after_get: Option<(String, Vec<u8>)>,
     /// Each request: method, path and query.
     log: Vec<String>,
+    /// The drafts: (draft id, message index). A sent or deleted draft
+    /// leaves the list.
+    drafts: Vec<(String, usize)>,
+    next_draft: u64,
 }
 
 impl Store {
@@ -190,7 +204,12 @@ impl Store {
             history_floor: HISTORY_BASE,
             failures: VecDeque::new(),
             write_failures: VecDeque::new(),
+            path_failure: None,
+            page_limit: usize::MAX,
+            edit_after_get: None,
             log: Vec::new(),
+            drafts: Vec::new(),
+            next_draft: 1,
         }
     }
 
@@ -253,6 +272,45 @@ impl Store {
         });
         self.record(i, Kind::Added, Vec::new());
         i
+    }
+
+    /// The message index of the draft `id`.
+    fn draft(&self, id: &str) -> Option<usize> {
+        self.drafts.iter().find(|(d, _)| d == id).map(|&(_, i)| i)
+    }
+
+    /// Replace the message of the draft `id` with `raw`, as Gmail does: a
+    /// new message, and the old one is deleted. Returns false if there is
+    /// no such draft.
+    fn replace_draft(&mut self, id: &str, raw: Vec<u8>) -> bool {
+        let Some(pos) = self.drafts.iter().position(|(d, _)| d == id) else {
+            return false;
+        };
+        let old = self.drafts[pos].1;
+        let thread = self.msgs[old].thread.clone();
+        self.msgs[old].deleted = true;
+        self.record(old, Kind::Deleted, Vec::new());
+        let i = self.add(raw, Some(thread), BTreeSet::from(["DRAFT".to_string()]));
+        self.drafts[pos].1 = i;
+        true
+    }
+
+    fn draft_json(&self, id: &str, i: usize) -> Value {
+        json!({ "id": id, "message": { "id": gmail_id(i as u64), "threadId": self.msgs[i].thread, "labelIds": ["DRAFT"] } })
+    }
+
+    /// True if the `Message-ID` of message `i` is `want` (with or without
+    /// the angle brackets), as the Gmail search `rfc822msgid:` finds it.
+    fn has_message_id(&self, i: usize, want: &str) -> bool {
+        let bare = |v: &str| {
+            v.trim()
+                .trim_start_matches('<')
+                .trim_end_matches('>')
+                .to_ascii_lowercase()
+        };
+        headers_of(&self.raw(i))
+            .iter()
+            .any(|(n, v)| n.eq_ignore_ascii_case("message-id") && bare(v) == bare(want))
     }
 
     fn label_json(&self, l: &Label) -> Value {
@@ -438,6 +496,13 @@ impl FakeGmail {
         self.store.lock().unwrap().failures.extend(statuses);
     }
 
+    /// The next request whose log line (for example
+    /// `GET /gmail/v1/users/me/drafts?q=...`) contains `text` gets this
+    /// HTTP status code in place of an answer.
+    pub fn fail_next_matching(&self, text: &str, status: u16) {
+        self.store.lock().unwrap().path_failure = Some((text.to_string(), status));
+    }
+
     /// The next write requests (POST) get these HTTP status codes, one
     /// each, in place of an answer. Status 0 lets one write pass. With
     /// `applied`, the fake makes the change first, so the result at the
@@ -446,6 +511,43 @@ impl FakeGmail {
         let mut s = self.store.lock().unwrap();
         s.write_failures
             .extend(statuses.iter().map(|&c| (c, applied)));
+    }
+
+    /// Give at most `n` items on each page of `messages.list` and
+    /// `drafts.list`, as Gmail can give fewer items than `maxResults`.
+    pub fn set_page_limit(&self, n: usize) {
+        self.store.lock().unwrap().page_limit = n.max(1);
+    }
+
+    /// Change the message of a draft, as the person does in Gmail. Returns
+    /// false if there is no such draft. Makes no request log line.
+    pub fn edit_draft(&self, id: &str, raw: &[u8]) -> bool {
+        self.store.lock().unwrap().replace_draft(id, raw.to_vec())
+    }
+
+    /// Change the message of draft `id` just after the next `drafts.get`
+    /// of it answers, as a person who edits the draft at that moment.
+    pub fn edit_draft_after_get(&self, id: &str, raw: &[u8]) {
+        self.store.lock().unwrap().edit_after_get = Some((id.to_string(), raw.to_vec()));
+    }
+
+    /// Delete a draft, as the person does in Gmail. Returns false if there
+    /// is no such draft.
+    pub fn delete_draft(&self, id: &str) -> bool {
+        let mut s = self.store.lock().unwrap();
+        let Some(pos) = s.drafts.iter().position(|(d, _)| d == id) else {
+            return false;
+        };
+        let (_, i) = s.drafts.remove(pos);
+        s.msgs[i].deleted = true;
+        s.record(i, Kind::Deleted, Vec::new());
+        true
+    }
+
+    /// The IDs of the drafts now.
+    pub fn draft_ids(&self) -> Vec<String> {
+        let s = self.store.lock().unwrap();
+        s.drafts.iter().map(|(d, _)| d.clone()).collect()
     }
 
     /// Each request so far, as `GET /gmail/v1/users/me/messages?maxResults=5`.
@@ -459,7 +561,10 @@ type Shared = Arc<Mutex<Store>>;
 fn router(store: Shared) -> Router {
     Router::new()
         .route("/gmail/v1/users/{user}/profile", get(profile))
-        .route("/gmail/v1/users/{user}/labels", get(labels))
+        .route(
+            "/gmail/v1/users/{user}/labels",
+            get(labels).post(create_label),
+        )
         .route("/gmail/v1/users/{user}/labels/{id}", get(label))
         .route("/gmail/v1/users/{user}/messages", get(list))
         .route("/gmail/v1/users/{user}/messages/send", post(send))
@@ -468,8 +573,18 @@ fn router(store: Shared) -> Router {
             post(batch_modify),
         )
         .route("/gmail/v1/users/{user}/messages/{id}/trash", post(trash))
+        .route(
+            "/gmail/v1/users/{user}/messages/{id}/untrash",
+            post(untrash),
+        )
         .route("/gmail/v1/users/{user}/messages/{id}", get(message))
         .route("/gmail/v1/users/{user}/history", get(history))
+        .route(
+            "/gmail/v1/users/{user}/drafts",
+            get(list_drafts).post(create_draft),
+        )
+        .route("/gmail/v1/users/{user}/drafts/send", post(send_draft))
+        .route("/gmail/v1/users/{user}/drafts/{id}", get(get_draft))
         .layer(middleware::from_fn_with_state(store.clone(), log_and_fail))
         .with_state(store)
 }
@@ -482,10 +597,21 @@ async fn log_and_fail(State(s): State<Shared>, req: Request, next: Next) -> Resp
             Some(q) => format!("{} {}?{q}", req.method(), req.uri().path()),
             None => format!("{} {}", req.method(), req.uri().path()),
         };
+        let matched = s
+            .path_failure
+            .as_ref()
+            .is_some_and(|(t, _)| line.contains(t.as_str()));
         s.log.push(line);
+        if matched {
+            let (_, c) = s.path_failure.take().expect("checked");
+            return error(
+                StatusCode::from_u16(c).unwrap_or(StatusCode::BAD_REQUEST),
+                "Injected failure.",
+            );
+        }
         match s.failures.pop_front() {
             Some(c) => Some((c, false)),
-            None if req.method() == axum::http::Method::POST => s.write_failures.pop_front(),
+            None if req.method() != axum::http::Method::GET => s.write_failures.pop_front(),
             None => None,
         }
     };
@@ -506,6 +632,7 @@ fn error(code: StatusCode, message: &str) -> Response {
         401 => ("UNAUTHENTICATED", "authError"),
         403 | 429 => ("RESOURCE_EXHAUSTED", "rateLimitExceeded"),
         404 => ("NOT_FOUND", "notFound"),
+        409 => ("ALREADY_EXISTS", "conflict"),
         _ => ("UNAVAILABLE", "backendError"),
     };
     let body = json!({ "error": {
@@ -553,6 +680,8 @@ struct Params {
     include_spam_trash: bool,
     format: Option<String>,
     metadata_headers: Vec<String>,
+    /// The `Message-ID` of `q=rfc822msgid:<id>`.
+    rfc822msgid: Option<String>,
 }
 
 impl Params {
@@ -577,13 +706,19 @@ impl Params {
                 "includeSpamTrash" => p.include_spam_trash = value == "true",
                 "format" => p.format = Some(value),
                 "metadataHeaders" => p.metadata_headers.push(value.to_ascii_lowercase()),
-                // Refused, so a test does not get an unfiltered list by mistake.
-                "q" => {
-                    return Err(error(
-                        StatusCode::BAD_REQUEST,
-                        "The fake does not support q.",
-                    ))
-                }
+                // Other searches are refused, so a test does not get an
+                // unfiltered list by mistake.
+                "q" => match value.trim().strip_prefix("rfc822msgid:") {
+                    Some(id) if !id.trim().is_empty() && !id.contains(char::is_whitespace) => {
+                        p.rfc822msgid = Some(id.to_string())
+                    }
+                    _ => {
+                        return Err(error(
+                            StatusCode::BAD_REQUEST,
+                            "The fake supports only q=rfc822msgid:<id>.",
+                        ))
+                    }
+                },
                 _ => {}
             }
         }
@@ -637,6 +772,46 @@ async fn labels(State(s): State<Shared>, Path(user): Path<String>, h: HeaderMap)
     Json(json!({ "labels": labels })).into_response()
 }
 
+#[derive(Deserialize)]
+struct CreateLabelBody {
+    name: String,
+}
+
+/// `labels.create`. As Gmail, a name that a label has already, with no
+/// regard to case (Unicode case folding), gives HTTP 409.
+async fn create_label(
+    State(s): State<Shared>,
+    Path(user): Path<String>,
+    h: HeaderMap,
+    body: Result<Json<CreateLabelBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(e) = check(&h, &user) {
+        return e;
+    }
+    let Ok(Json(body)) = body else {
+        return error(StatusCode::BAD_REQUEST, "Invalid JSON payload received.");
+    };
+    let mut s = s.lock().unwrap();
+    // Unicode case folding, as the changeset store and the apply.
+    let name = unicase::UniCase::new(body.name.as_str());
+    if s.labels.iter().any(|l| {
+        unicase::UniCase::new(l.name.as_str()) == name
+            || unicase::UniCase::new(l.id.as_str()) == name
+    }) {
+        return error(StatusCode::CONFLICT, "Label name exists or conflicts");
+    }
+    let id = format!("Label_{}", s.next_label);
+    s.next_label += 1;
+    let label = Label {
+        id,
+        name: body.name,
+        system: false,
+    };
+    let v = s.label_json(&label);
+    s.labels.push(label);
+    Json(v).into_response()
+}
+
 async fn label(
     State(s): State<Shared>,
     Path((user, id)): Path<(String, String)>,
@@ -682,6 +857,7 @@ async fn list(
         Err(e) => return e,
     };
     let s = s.lock().unwrap();
+    let size = size.min(s.page_limit);
     let hidden = |m: &Msg| {
         !p.include_spam_trash && (m.labels.contains("SPAM") || m.labels.contains("TRASH"))
     };
@@ -690,7 +866,12 @@ async fn list(
         .rev()
         .filter(|&i| {
             let m = &s.msgs[i];
-            !m.deleted && !hidden(m) && p.label_ids.iter().all(|l| m.labels.contains(l))
+            !m.deleted
+                && !hidden(m)
+                && p.label_ids.iter().all(|l| m.labels.contains(l))
+                && p.rfc822msgid
+                    .as_ref()
+                    .is_none_or(|q| s.has_message_id(i, q))
         })
         .collect();
     let items = matches
@@ -883,6 +1064,25 @@ async fn trash(
     Json(s.with_labels(i)).into_response()
 }
 
+/// shortcut: the fake untrash removes `TRASH` and adds `INBOX`, the
+/// inverse of the fake trash; check the real label effect at Gmail before a
+/// test depends on `INBOX` after it (issue #172).
+async fn untrash(
+    State(s): State<Shared>,
+    Path((user, id)): Path<(String, String)>,
+    h: HeaderMap,
+) -> Response {
+    if let Err(e) = check(&h, &user) {
+        return e;
+    }
+    let mut s = s.lock().unwrap();
+    let Some(i) = s.index(&id) else {
+        return error(StatusCode::NOT_FOUND, "Requested entity was not found.");
+    };
+    change_labels(&mut s, i, &["INBOX".into()], &["TRASH".into()]);
+    Json(s.with_labels(i)).into_response()
+}
+
 /// Add and remove labels of message `i`, with the history records.
 fn change_labels(s: &mut Store, i: usize, add: &[String], remove: &[String]) {
     let added: Vec<String> = add
@@ -963,4 +1163,180 @@ async fn history(
     let mut body = json!({ "historyId": s.latest_history().to_string() });
     page(&mut body, "history", records, offset, size, matches.len());
     Json(body).into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DraftMessage {
+    raw: String,
+    thread_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DraftBody {
+    message: DraftMessage,
+}
+
+fn draft_raw(body: &DraftBody) -> Result<Vec<u8>, Response> {
+    base64::decode(&body.message.raw)
+        .filter(|r| !r.is_empty())
+        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "Invalid value for ByteString: raw"))
+}
+
+async fn create_draft(
+    State(s): State<Shared>,
+    Path(user): Path<String>,
+    h: HeaderMap,
+    body: Result<Json<DraftBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(e) = check(&h, &user) {
+        return e;
+    }
+    let Ok(Json(body)) = body else {
+        return error(StatusCode::BAD_REQUEST, "Invalid JSON payload received.");
+    };
+    let raw = match draft_raw(&body) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let mut s = s.lock().unwrap();
+    let i = s.add(
+        raw,
+        body.message.thread_id,
+        BTreeSet::from(["DRAFT".to_string()]),
+    );
+    let id = format!("r{:015}", s.next_draft);
+    s.next_draft += 1;
+    s.drafts.push((id.clone(), i));
+    Json(s.draft_json(&id, i)).into_response()
+}
+
+async fn get_draft(
+    State(s): State<Shared>,
+    Path((user, id)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
+    h: HeaderMap,
+) -> Response {
+    if let Err(e) = check(&h, &user) {
+        return e;
+    }
+    let p = match Params::parse(query) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if p.format.as_deref() != Some("raw") {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "The fake supports only format=raw for a draft.",
+        );
+    }
+    let mut s = s.lock().unwrap();
+    let Some(i) = s.draft(&id) else {
+        return error(StatusCode::NOT_FOUND, "Requested entity was not found.");
+    };
+    let mut body = s.draft_json(&id, i);
+    body["message"]["raw"] = Value::String(base64::encode_url(&s.raw(i)));
+    if s.edit_after_get.as_ref().is_some_and(|(d, _)| *d == id) {
+        let (_, raw) = s.edit_after_get.take().expect("checked");
+        s.replace_draft(&id, raw);
+    }
+    Json(body).into_response()
+}
+
+async fn list_drafts(
+    State(s): State<Shared>,
+    Path(user): Path<String>,
+    RawQuery(query): RawQuery,
+    h: HeaderMap,
+) -> Response {
+    if let Err(e) = check(&h, &user) {
+        return e;
+    }
+    let p = match Params::parse(query) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let (start, size) = match p.bounds() {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let s = s.lock().unwrap();
+    let size = size.min(s.page_limit);
+    let matching: Vec<&(String, usize)> = s
+        .drafts
+        .iter()
+        .filter(|&&(_, i)| {
+            p.rfc822msgid
+                .as_ref()
+                .is_none_or(|q| s.has_message_id(i, q))
+        })
+        .collect();
+    let total = matching.len();
+    let items: Vec<Value> = matching
+        .into_iter()
+        .skip(start)
+        .take(size)
+        .map(|(d, i)| {
+            let mut v = s.draft_json(d, *i);
+            v["message"]
+                .as_object_mut()
+                .expect("object")
+                .remove("labelIds");
+            v
+        })
+        .collect();
+    let mut body = json!({ "resultSizeEstimate": total });
+    page(&mut body, "drafts", items, start, size, total);
+    Json(body).into_response()
+}
+
+#[derive(Deserialize)]
+struct SendDraftBody {
+    id: String,
+    message: Option<DraftMessage>,
+}
+
+/// Like Gmail: the draft leaves the drafts, and its text goes out as a new
+/// message with the label `SENT` in the thread of the draft. A `message`
+/// in the request replaces the text of the draft first, and its `threadId`
+/// (or none: a new thread) is the thread of the sent message.
+async fn send_draft(
+    State(s): State<Shared>,
+    Path(user): Path<String>,
+    h: HeaderMap,
+    body: Result<Json<SendDraftBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(e) = check(&h, &user) {
+        return e;
+    }
+    let Ok(Json(body)) = body else {
+        return error(StatusCode::BAD_REQUEST, "Invalid JSON payload received.");
+    };
+    let given = match &body.message {
+        Some(m) => match base64::decode(&m.raw).filter(|r| !r.is_empty()) {
+            Some(r) => Some(r),
+            None => return error(StatusCode::BAD_REQUEST, "Invalid value for ByteString: raw"),
+        },
+        None => None,
+    };
+    let mut s = s.lock().unwrap();
+    let Some(pos) = s.drafts.iter().position(|(d, _)| *d == body.id) else {
+        return error(StatusCode::NOT_FOUND, "Requested entity was not found.");
+    };
+    if let Some(raw) = given {
+        s.replace_draft(&body.id, raw);
+    }
+    let (_, old) = s.drafts.remove(pos);
+    // A message in the request goes into the thread of its `threadId`, or
+    // into a new thread with none, so a test sees a dropped thread ID.
+    let thread = match &body.message {
+        Some(m) => m.thread_id.clone(),
+        None => Some(s.msgs[old].thread.clone()),
+    };
+    let raw = s.raw(old);
+    s.msgs[old].deleted = true;
+    s.record(old, Kind::Deleted, Vec::new());
+    let i = s.add(raw, thread, BTreeSet::from(["SENT".to_string()]));
+    Json(json!({ "id": gmail_id(i as u64), "threadId": s.msgs[i].thread, "labelIds": ["SENT"] }))
+        .into_response()
 }

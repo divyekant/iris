@@ -97,8 +97,6 @@ on macOS, `~/.local/share/iris` on Linux. `--data <path>` or the variable
 `IRIS_DATA` changes the folder. The refresh token and the client file are
 encrypted with the `key` file of the data folder.
 
-CAUTION: The backup folder holds the key and your mail. Keep it private.
-
 `iris serve` prints the sign-in address of the local API, with a one-time
 code. The web client uses this address when its sign-in (PR #27, tracker item R1-18) merges. A
 program can exchange the code for a token with `POST /api/session`
@@ -117,6 +115,39 @@ object, and JSON Lines for a list.
 | `iris mirror sync` | One sync of each account now |
 | `iris mirror verify` | A compare of the mirror with Gmail, and a check of the content files |
 
+## Changesets from the terminal
+
+These commands talk to the running engine through the socket `iris.sock` in
+the data folder. They do not read the store. Start the engine with
+`iris serve` first. With no engine, they exit with code 4.
+
+| Command | Does |
+|---|---|
+| `iris changeset <cs-id>` | Shows a changeset and the state of each action. Add `--json` for the document. |
+| `iris changeset --drafts` | Lists your draft changesets, newest first. |
+| `iris withdraw <cs-id>` | Withdraws a changeset that the command made. Applied actions stay. |
+| `iris close <c-id>` | Adds `close` of a commitment to a draft changeset. `--reason` is optional. |
+| `iris decline <c-id>` | Adds `decline` of a commitment to a draft changeset. `--reason` is optional. |
+| `iris defer <c-id> --date <YYYY-MM-DD>` | Adds `defer` of a commitment to a draft changeset. |
+| `iris correct <id> --field <path> --value <json>` | Adds a correction of one field of an item to a draft changeset. |
+| `iris archive`, `inbox`, `read`, `unread`, `trash <ids>` | Adds the mail action on threads (`t-3`) or messages (`m-42`) to a draft changeset. |
+| `iris label`, `unlabel <ids> --label <name>` | Adds or removes a label in a draft changeset. |
+| `iris submit <cs-id> --why <text>` | Submits the draft. The policy decides each action. Prints the state of each action. |
+
+Each add command makes a new draft changeset and prints its ID. Add
+`--changeset <cs-id>` to add to a draft that exists, and `--why <text>` to
+give the reason of the action. A draft does nothing until you submit it.
+
+`iris submit` exits with one of these codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | Each action of the new revision is applied. |
+| 5 | One or more actions are open: they wait for your approval in the web client, or for the apply. |
+| 3 | The policy or a hard limit denied one or more actions. |
+| 2 | The request is not correct, or the engine refused an action, for example a wrong target. |
+| 1 | An error. Run `iris changeset <cs-id>` to see the state. |
+
 The sync stores the raw messages only. After each sync, `iris serve` and
 `iris mirror sync` run the understanding step, so words and the `from:` and
 `to:` filters find the new mail. The free steps run with no model. Paid model
@@ -124,6 +155,20 @@ calls run only inside an approved budget (see "Understand the mail").
 
 The text of a message is data. `iris show` removes the control characters, so
 a message cannot send commands to your terminal.
+
+## Watch for a mail
+
+A watch tells you one time when a new mail matches a search text.
+
+| Command | Does |
+|---|---|
+| `iris watch add "<text>"` | Starts a watch, for example `iris watch add "visa from:embassy"`. The text uses the syntax of `iris search`. |
+| `iris watch list` | Shows each watch. A watch `waits`, or it `arrived` with the mail that matched. |
+| `iris watch remove <id>` | Removes the watch (`w-3`). |
+
+Test the text with `iris search` first. Only mail that arrives after the
+watch can match. `iris serve` checks each minute. Mail that you send, drafts
+and hostile mail never match.
 
 ## Understand the mail
 
@@ -144,11 +189,51 @@ A hosted model makes no call before you approve a budget. Each
 `iris model set` clears the budget, so a new estimate and a new approval are
 necessary.
 
+## Back up, export and move
+
+CAUTION: A backup folder and an export folder hold your mail. A backup folder
+also holds the key. Keep them private.
+
 To copy the data folder while the engine runs, run:
 
 ```bash
 target/release/iris backup <empty-folder>
 ```
+
+The backup is a complete data folder. Iris opens it as it is, at any path.
+
+To get your data in open formats, run:
+
+```bash
+target/release/iris export <empty-folder>
+```
+
+| File | Content |
+|---|---|
+| `items.jsonl` | One item on each line, as the open model gives it |
+| `messages.jsonl` | One message on each line, as `iris show <id> --json` gives it, with `file`: the path of its raw message |
+| `mail/<id>.eml` | The raw message. A mail program can open it. |
+
+The export holds no secret: no key, no sign-in and no model key.
+
+To move Iris to another machine, do these steps:
+
+1. On the old machine, stop the engine. If the background service runs it,
+   run `iris service remove`.
+2. Run `iris backup <empty-folder>`.
+3. Copy the backup folder to the data folder of the new machine:
+   `~/Library/Application Support/iris` on macOS, `~/.local/share/iris` on
+   Linux. If Iris ran on the new machine before, move its data folder away
+   first. Use a private channel, for example `scp -r`.
+4. On the new machine, install Iris and run `iris status`. Make sure that
+   it shows your accounts.
+5. Run `iris service install`.
+
+CAUTION: Do not run the engine on two machines with the same data. Two
+engines can apply one change two times.
+
+The sign-in and the OAuth client file move with the backup, so the new
+machine needs no new sign-in.
 
 ## Layout
 

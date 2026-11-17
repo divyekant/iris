@@ -50,6 +50,11 @@ fn split_addr(v: &str) -> (Option<String>, Option<String>) {
 /// A store with the first `COUNT` synthetic messages, in the label INBOX
 /// (and SENT for the mail of the owner). Gives the store and the mailbox.
 fn filled(dir: &TempDir) -> (Arc<Store>, Mailbox) {
+    filled_n(dir, COUNT)
+}
+
+/// [`filled`] with the first `count` synthetic messages.
+fn filled_n(dir: &TempDir, count: usize) -> (Arc<Store>, Mailbox) {
     let store = Store::open(&dir.0).unwrap();
     let acc = store.add_account("gmail", "owner@example.com").unwrap();
     store
@@ -58,9 +63,9 @@ fn filled(dir: &TempDir) -> (Arc<Store>, Mailbox) {
             &[("INBOX", "INBOX", "system"), ("SENT", "SENT", "system")],
         )
         .unwrap();
-    let mailbox = Mailbox::new(11, COUNT);
+    let mailbox = Mailbox::new(11, count);
     let mut batch = Vec::new();
-    for i in 0..COUNT {
+    for i in 0..count {
         let raw = mailbox.raw(i);
         let truth = mailbox.truth(i);
         let text = String::from_utf8_lossy(&raw).replace("\r\n ", " ");
@@ -867,33 +872,29 @@ async fn brief_follows_the_queries_of_section_8() {
     assert_eq!(b["not_understood"], 1);
     // Message 21 got the date 0 above: it is the oldest fetched message.
     assert_eq!(b["oldest_fetched"], "1970-01-01T00:00:00Z");
-    // The triage proposal of observe mode, computed when the brief opens.
+    // The triage proposal: the stored triage changeset, not a count of the
+    // brief. Before the first triage run, nothing waits.
+    assert_eq!(b["proposal"], json!({"count": 0, "verbs": {}}));
+    // Triage leaves out mail that waits for its link check: end the checks,
+    // as the first step of a batch run does.
+    iris_understand::store::recheck_links(&store, NOW, None).unwrap();
+    iris_triage::run(&store, 1, NOW).unwrap();
     let want: u64 = iris_observe::counts(&store, 1)
         .unwrap()
         .iter()
         .map(|(_, n)| n)
         .sum();
     assert!(want > 0);
+    let (_, after_run) = get(&store, "/api/brief").await;
     assert_eq!(
-        b["proposal"],
+        after_run["proposal"],
         json!({"count": want, "verbs": {"archive": want}})
     );
-    // The full proposal: a changeset with the message IDs of each action.
-    let (code, p) = get(&store, "/api/proposal").await;
-    assert_eq!(code, StatusCode::OK);
-    let cs = &p["changesets"].as_array().unwrap()[0];
-    assert!(cs["id"].as_str().unwrap().starts_with("cs-"));
-    let actions = cs["actions"].as_array().unwrap();
-    let targets: usize = actions
-        .iter()
-        .map(|a| {
-            assert_eq!(a["decision"]["state"], "proposed");
-            let ids = a["targets"]["messages"].as_array().unwrap();
-            assert!(ids.iter().all(|m| m.as_str().unwrap().starts_with("m-")));
-            ids.len()
-        })
-        .sum();
-    assert_eq!(targets as u64, want);
+    // Observe mode: no rule decided an action, so Iris handled nothing.
+    assert_eq!(after_run["handled"], json!({"count": 0, "verbs": {}}));
+    // The old in-memory proposal is gone: the review lists the stored one.
+    let (code, _) = get(&store, "/api/proposal").await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
 
     // Pages of one section: the same items in the same order as the brief.
     let mut paged = Vec::new();
@@ -1119,17 +1120,6 @@ async fn needs_the_token_of_the_one_time_sign_in() {
     let res = send("POST", "/api/session", &[], &body).await.unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
     assert_eq!(auth.sign_in_url(), None);
-}
-
-#[tokio::test]
-async fn a_proposal_that_fails_before_its_first_part_is_a_500() {
-    let dir = temp("proposal-error");
-    let (store, _) = filled(&dir);
-    // The store cannot read the items, so the triage counts fail.
-    exec(&store, "DROP TABLE item_source", []);
-    let (code, v) = get(&store, "/api/proposal").await;
-    assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(v["error"].is_string());
 }
 
 #[tokio::test]
@@ -1361,6 +1351,35 @@ async fn each_item_of_the_brief_is_shown_bundled_or_hidden_once() {
         let mut sorted = rules.clone();
         sorted.sort();
         assert_eq!(rules, sorted, "bundles in the order of the rule IDs");
+        // The list of hidden items, page by page, has each hidden item once,
+        // with its rule and reason. With no action, the count of what Iris
+        // handled is the hidden count.
+        let mut hidden = Vec::new();
+        let mut after = String::new();
+        loop {
+            let (code, p) = get(&store, &format!("/api/brief/hidden?limit=5{after}")).await;
+            assert_eq!(code, StatusCode::OK);
+            assert_eq!(p["count"], b["hidden"]);
+            for item in p["items"].as_array().unwrap() {
+                assert_eq!(item["attention"]["state"], "hidden");
+                assert_eq!(item["attention"]["reason"], "r");
+                hidden.push(item["id"].as_str().unwrap().to_string());
+            }
+            match p["next"].as_str() {
+                Some(n) => after = format!("&after={n}"),
+                None => break,
+            }
+        }
+        let mut unique = hidden.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), hidden.len(), "seed {seed}");
+        assert_eq!(
+            hidden.len() as i64,
+            b["hidden"].as_i64().unwrap(),
+            "seed {seed}"
+        );
+        assert_eq!(b["handled"], json!({"count": b["hidden"], "verbs": {}}));
         // No policy: a bundle page is there only while the brief lists it.
         for rule in 1..=9u64 {
             let (code, _) = get(&store, &format!("/api/brief/bundle-{rule}")).await;
@@ -1446,4 +1465,86 @@ async fn a_bundle_has_the_name_of_its_rule_and_a_bad_bundle_name_is_a_404() {
     let (_, b) = get(&store, "/api/brief").await;
     assert_eq!(b["feed"]["count"], 2);
     assert!(b["bundles"].as_array().unwrap().is_empty());
+}
+
+/// Gives the answer that the test puts in `next`, once.
+struct Oracle(std::cell::RefCell<Option<String>>);
+
+impl iris_understand::Model for Oracle {
+    fn name(&self) -> &str {
+        "oracle"
+    }
+
+    fn ask(&self, _: &str, _: &str) -> Result<iris_model::Reply, iris_model::Error> {
+        let text = self.0.borrow_mut().take();
+        Ok(iris_model::Reply {
+            text: text.unwrap_or_else(|| r#"{"items": [], "phishing": false}"#.into()),
+            usage: iris_model::Usage::default(),
+            stop: iris_model::Stop::End,
+        })
+    }
+}
+
+/// R3-06: an ask in your own sent mail shows under "Owed to you", with the
+/// person you asked and the date. The whole path runs: understanding of the
+/// sent message (with a model that gives the true answer), the sender axis,
+/// and the brief. The recipient never wrote to you.
+#[tokio::test]
+async fn an_ask_that_you_send_is_owed_to_you_with_the_person_and_the_date() {
+    let dir = temp("owed-sent");
+    // Asks of the owner are rare in the synthetic mailbox.
+    let (store, mb) = filled_n(&dir, 1500);
+    let mut want = Vec::new();
+    for i in 0..mb.len() {
+        let t = mb.truth(i);
+        let f: std::collections::BTreeMap<_, _> = mb.fields(i).into_iter().collect();
+        if t.sender != Sender::Owner
+            || f.get("direction").map(String::as_str) != Some("owed_to_you")
+        {
+            continue;
+        }
+        let raw = String::from_utf8_lossy(&mb.raw(i)).replace("\r\n ", " ");
+        let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+        let to = split_addr(&field(head, "To").unwrap()).1.unwrap();
+        // The subject can be MIME encoded: quote the ask in the body.
+        let quote = body.lines().find(|l| l.starts_with("Can you")).unwrap();
+        let item = json!({"form": "commitment", "title": "Send it", "quote": quote,
+                          "direction": "owed_to_you", "kind": "task",
+                          "due": {"date": f["due.date"]}});
+        let model = Oracle(std::cell::RefCell::new(Some(
+            json!({"items": [item], "phishing": false}).to_string(),
+        )));
+        let row: i64 = store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT id FROM message WHERE provider_id = ?1",
+                    [format!("g{i}")],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        let out = iris_understand::store::understand(&store, row, &model, NOW).unwrap();
+        assert_eq!(out.items.len(), 1, "message {i}: {out:?}");
+        want.push((to, f["due.date"].clone()));
+    }
+    assert!(!want.is_empty(), "the mailbox has no sent ask");
+    let (code, brief) = get(&store, "/api/brief").await;
+    assert_eq!(code, StatusCode::OK);
+    let owed = &brief["owed_to_you"];
+    assert_eq!(owed["count"], want.len(), "{owed}");
+    let mut got: Vec<(String, String)> = owed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| {
+            assert_eq!(d["counterparty"]["kind"], "self", "{d}");
+            (
+                d["owner"]["address"].as_str().unwrap().to_string(),
+                d["due"]["date"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    got.sort();
+    want.sort();
+    assert_eq!(got, want);
 }

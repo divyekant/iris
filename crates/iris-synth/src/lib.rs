@@ -88,6 +88,8 @@ pub mod traits {
     pub const SPOOFED_NAME: u8 = 4;
     pub const ODD_ENCODING: u8 = 8;
     pub const BIG_ATTACHMENT: u8 = 16;
+    /// The traits that only hostile mail has.
+    pub const HOSTILE: u8 = PROMPT_INJECTION | PHISHING_LINK | SPOOFED_NAME;
 
     pub const NAMES: [(u8, &str); 5] = [
         (PROMPT_INJECTION, "prompt_injection"),
@@ -129,6 +131,13 @@ pub struct Truth {
 }
 
 impl Truth {
+    /// The message is hostile mail: it must go to quarantine (spec 1
+    /// section 6.7). The sender kind can still be `stranger`, when the
+    /// domain of the sender looks like no known domain.
+    pub fn hostile(&self) -> bool {
+        self.traits & traits::HOSTILE != 0
+    }
+
     /// One JSON line for the ground-truth file. All strings are plain ASCII.
     pub fn json_line(&self) -> String {
         let traits: Vec<String> = traits::NAMES
@@ -285,11 +294,25 @@ fn plan_thread(seed: u64, thread: u32, out: &mut Vec<Meta>) {
             form,
             sender: if owner { Sender::Owner } else { sender },
             stranger_thread: sender == Sender::Stranger,
-            truth: if owner { Sender::Owner } else { sender },
+            truth: if owner {
+                Sender::Owner
+            } else if unrelated_domain(thread, traits) {
+                // The kind follows the rules of the address: no near copy.
+                Sender::Stranger
+            } else {
+                sender
+            },
             traits: t,
         });
         date += 600 + r.below(2 * 86_400) as i64;
     }
+}
+
+/// A hostile sender of thread `thread` with these traits sends from a
+/// domain that it owns and that looks like no known domain: a quarter of
+/// the phishing links. DKIM and DMARC pass for its domain.
+pub(crate) fn unrelated_domain(thread: u32, traits: u8) -> bool {
+    thread % 4 == 1 && traits & traits::PHISHING_LINK != 0
 }
 
 #[cfg(test)]
@@ -323,7 +346,7 @@ mod tests {
         assert_eq!(hash(42, 2000), GOLDEN_42_2000, "got {:#x}", hash(42, 2000));
     }
 
-    const GOLDEN_42_2000: u64 = 0x300f_c186_69b7_f8d7;
+    const GOLDEN_42_2000: u64 = 0x9b51_976e_7661_1b66;
 
     #[test]
     fn full_mailbox_has_every_form_sender_and_trait() {

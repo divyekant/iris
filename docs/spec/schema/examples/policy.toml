@@ -39,3 +39,11 @@ verbs = ["archive", "inbox", "label", "unlabel", "read", "unread", "trash"]
 when = { sender = "@bank.example" }
 by = "person"
 added = 2026-11-10
+
+[[rule]]
+id = 5
+name = "Tell me at once about mail from the clinic"
+effect = "notify"
+when = { sender = "@clinic.example" }
+by = "person"
+added = 2026-11-16

@@ -1,6 +1,6 @@
 [package]
 name = "iris-api"
-description = "The local API of Iris: JSON for the web client and the read verbs, and the policy changes of the web client."
+description = "The local API of Iris: JSON for the web client and the read verbs, the policy changes and the state verbs of the web client."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,16 +11,26 @@ publish.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
 getrandom = "=0.4.3"
 futures-util = { version = "0.3", default-features = false }
+iris-apply = { version = "0.0.0", path = "../iris-apply" }
 iris-changeset = { version = "0.0.0", path = "../iris-changeset" }
-iris-observe = { version = "0.0.0", path = "../iris-observe" }
+iris-job = { version = "0.0.0", path = "../iris-job" }
+iris-matters = { version = "0.0.0", path = "../iris-matters" }
 iris-policy = { version = "0.0.0", path = "../iris-policy" }
+iris-senders = { version = "0.0.0", path = "../iris-senders" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
+iris-understand = { version = "0.0.0", path = "../iris-understand" }
+iris-workspace = { version = "0.0.0", path = "../iris-workspace" }
 rusqlite = "=0.43.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["rt", "sync"] }
 
 [dev-dependencies]
+iris-compose = { version = "0.0.0", path = "../iris-compose" }
+iris-model = { version = "0.0.0", path = "../iris-model" }
+iris-spec = { version = "0.0.0", path = "../iris-spec" }
+iris-observe = { version = "0.0.0", path = "../iris-observe" }
+iris-triage = { version = "0.0.0", path = "../iris-triage" }
 iris-web = { version = "0.0.0", path = "../iris-web" }
 iris-synth = { version = "0.0.0", path = "../iris-synth" }
 rusqlite = "=0.43.0"

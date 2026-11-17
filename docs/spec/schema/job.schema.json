@@ -1,0 +1,312 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:model:0:job",
+  "title": "Iris open model 0 (draft): job",
+  "description": "Draft. One job: a goal with limits for an agent, its state and the events of each state change. See docs/specs/2026-11-16-job-store.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "model",
+    "id",
+    "goal",
+    "created",
+    "updated",
+    "state",
+    "events"
+  ],
+  "properties": {
+    "model": {
+      "const": "iris/0"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^j-[1-9][0-9]*$"
+    },
+    "goal": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "due": {
+      "$ref": "urn:iris:model:0:common#/$defs/dateTime"
+    },
+    "created": {
+      "$ref": "urn:iris:model:0:common#/$defs/dateTime"
+    },
+    "updated": {
+      "$ref": "urn:iris:model:0:common#/$defs/dateTime"
+    },
+    "state": {
+      "enum": [
+        "working",
+        "waiting",
+        "needs_you",
+        "done"
+      ]
+    },
+    "wait": {
+      "$ref": "#/$defs/wait"
+    },
+    "question": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "end": {
+      "$ref": "#/$defs/end"
+    },
+    "events": {
+      "$comment": "The first event is the create: the state working, by the person.",
+      "type": "array",
+      "minItems": 1,
+      "prefixItems": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/event"
+            },
+            {
+              "properties": {
+                "state": {
+                  "const": "working"
+                },
+                "by": {
+                  "const": "person"
+                }
+              },
+              "not": {
+                "required": [
+                  "answer"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "items": {
+        "$ref": "#/$defs/event"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "waiting"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "wait"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "wait"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "needs_you"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "question"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "question"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "done"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "end"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "end"
+          ]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "wait": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "until"
+      ],
+      "properties": {
+        "thread": {
+          "$ref": "urn:iris:model:0:common#/$defs/threadId"
+        },
+        "until": {
+          "$ref": "urn:iris:model:0:common#/$defs/dateTime"
+        }
+      }
+    },
+    "end": {
+      "enum": [
+        "complete",
+        "cancel"
+      ]
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "at",
+        "state",
+        "by"
+      ],
+      "properties": {
+        "at": {
+          "$ref": "urn:iris:model:0:common#/$defs/dateTime"
+        },
+        "state": {
+          "enum": [
+            "working",
+            "waiting",
+            "needs_you",
+            "done"
+          ]
+        },
+        "by": {
+          "enum": [
+            "person",
+            "agent",
+            "engine"
+          ]
+        },
+        "wait": {
+          "$ref": "#/$defs/wait"
+        },
+        "question": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "answer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 10000
+        },
+        "end": {
+          "$ref": "#/$defs/end"
+        },
+        "why": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "waiting"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "wait"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "wait"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "needs_you"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "question"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "question"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "done"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "end"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "end"
+              ]
+            }
+          }
+        },
+        {
+          "$comment": "An answer only on the move from needs_you to working. The store checks the order of the events.",
+          "if": {
+            "required": [
+              "answer"
+            ]
+          },
+          "then": {
+            "properties": {
+              "state": {
+                "const": "working"
+              },
+              "by": {
+                "const": "person"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

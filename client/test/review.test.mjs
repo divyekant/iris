@@ -45,17 +45,19 @@ test("the review shows the newest revision and the open actions of an older one,
 
 test("the review route opens the review", () => {
   assert.deepEqual(parse("#/review"), { view: "review" });
+  assert.deepEqual(parse("#/handled"), { view: "handled" });
+  assert.deepEqual(parse("#/outbox"), { view: "outbox" });
 });
 
 test("the review says who asks and why, and each change with its count and flags", async () => {
   const t = text(await render("/src/views/Review.svelte", { changesets: fx.changesets, mode: "observe" }));
-  assert.match(t, /2 requests ask for 4 changes\./);
+  assert.match(t, /3 requests ask for 6 changes\./);
   assert.match(t, /Iris is in observe mode/);
   assert.match(t, /Claude Code .*Priya needs the Q4 numbers by Friday/);
   assert.match(t, /Add the label “Finance” to 2 messages The Q4 thread/);
   assert.match(t, /Archive 3 messages in 2 threads/);
   assert.match(t, /The thread is with a sender you do not know/);
-  assert.match(t, /Iris triage .*Archive 612 messages Changes more than 500 messages/);
+  assert.match(t, /Iris triage .*Archive 612 messages Part of a change to more than 500 messages/);
   // The action that a rule approved is not a question: it shows under the decisions.
   assert.match(t, /One more change has a decision Archive 1 message Approved by rule 1/);
   assert.match(t, /Iris makes none of these changes before you approve them\./);
@@ -129,4 +131,46 @@ test("the pages of each action are keyed by revision and number, and a slow load
   // With all rows loaded, nothing more is asked.
   assert.deepEqual((await loader.more(now, 5)).map((x) => x.id), ["m-8", "m-9"]);
   assert.equal(calls.length, 3);
+});
+
+test("the decide button says what happens to the ticked and the unticked changes", () => {
+  assert.equal(r.plan(3, 3), "Approve all 3");
+  assert.equal(r.plan(1, 1), "Approve the change");
+  assert.equal(r.plan(2, 3), "Approve 2, deny 1");
+  assert.equal(r.plan(0, 3), "Deny all 3");
+  assert.equal(r.plan(0, 1), "Deny the change");
+});
+
+test("an item with the status gone shows as gone, and the bulk flag names no count of the action", () => {
+  const item = { ...fx.items[0], status: "gone" };
+  assert.deepEqual(r.itemRow(item.id, item), { id: item.id, gone: true });
+  assert.equal(r.itemRow(fx.items[0].id, fx.items[0]).gone, false);
+  // Spec 2 section 5.3: the flag can come from the changeset or the author, so a small action can have it.
+  assert.doesNotMatch(r.FLAGS.bulk, /^Changes/);
+  assert.match(r.FLAGS.bulk, /Part of a change to more than 500 messages/);
+});
+
+// Card R4-07: a draft or a send in words, and the flags that its draft does not mark.
+test("a draft or a send names its kind and its recipients", () => {
+  assert.equal(r.verb(act({ verb: "send" })), "Send");
+  assert.equal(r.verb(act({ verb: "draft" })), "Write the draft of");
+  // With no draft at hand (a decided action), a mail action names one mail, never its messages.
+  assert.equal(r.target(act({ verb: "send", resolved: { messages: ["m-1"] } })), "a mail");
+  assert.equal(r.target(act({ verb: "draft" })), "a mail");
+  const d = (to, cc = [], thread = null) => ({ revision: 1, n: 1, draft: null, thread, readable: true, to: to.map((address) => ({ address })), cc: cc.map((address) => ({ address })), subject: [], body: [] });
+  assert.equal(r.to(d(["a@x.org"], [], "t-1")), "a reply to a@x.org");
+  assert.equal(r.to(d(["a@x.org"], ["b@x.org"])), "a new mail to a@x.org and b@x.org");
+  assert.equal(r.to(d(["a@x.org", "b@x.org"], ["c@x.org"])), "a new mail to a@x.org and 2 more");
+  assert.equal(r.to({ revision: 1, n: 1, draft: "d-1", thread: null, readable: false }), "a new mail");
+});
+
+test("a flag that the draft marks has no line; a flag with no mark keeps its words", () => {
+  const a = act({ verb: "send", flags: ["new_recipient", "money", "first_contact"] });
+  const d = { revision: 1, n: 1, draft: "d-1", thread: null, readable: true, to: [{ address: "a@x.org" }], cc: [], subject: [{ text: "Hi" }], body: [{ text: "$5", flags: ["money"] }] };
+  assert.deepEqual(r.unmarked(a, d), [r.FLAGS.new_recipient, r.FLAGS.first_contact]);
+  // No draft yet, or a draft that Iris cannot read: each flag keeps its words.
+  assert.deepEqual(r.unmarked(a, undefined).length, 3);
+  assert.deepEqual(r.unmarked(a, { revision: 1, n: 1, draft: "d-1", thread: null, readable: false }).length, 3);
+  // Each flag has a tag.
+  for (const f of ["new_recipient", "money", "date", "attachment", "untrusted_content"]) assert.ok(r.TAGS[f], f);
 });
