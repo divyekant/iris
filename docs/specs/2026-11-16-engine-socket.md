@@ -78,6 +78,8 @@ Request:
 | `drafts` | `{}` | Answer: `{"changesets": ["cs-12", ...]}`, each changeset of the author `local` whose newest revision is a draft, the newest first, at most 200. |
 | `submit` | `{"changeset", "why"}` | Submits the draft revision. Answer: the changeset document after the submit. |
 | `withdraw` | `{"changeset"}` | Withdraws a changeset of the same author (section 5.5). Answer: the changeset document after the withdraw. |
+| `sign-in` | `{}` | Host only. A new one-time sign-in address of the web client, for 2 minutes (`docs/specs/2026-11-17-mac-app.md`). Answer: `{"url": "http://<addr>/#code=<code>"}`. |
+| `app.notices` | `{"after"?}` | Host only. The notices for the Mac app (`docs/specs/2026-11-17-mac-app.md`). Answer: `{"notices": [...], "last": <n>, "open": <k>}`. |
 
 Answer:
 

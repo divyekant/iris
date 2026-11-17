@@ -326,7 +326,7 @@ An error is `{"error": "<reason>"}`:
 |---|---|
 | 400 | The search text, an ID, a filter or a request body is not valid. |
 | 401 | The request has no `Authorization: Bearer` token of the sign-in, or a wrong one. |
-| 403 | The `Host` is not the bound address, the `Origin` is another origin, or the sign-in code is not valid or was used. |
+| 403 | The `Host` is not the bound address, the `Origin` is another origin, or the sign-in code is not valid, was used or ended. |
 | 405 | The code exchange was not a `POST`. |
 | 404 | No object has the ID, or the path is not an endpoint. |
 | 409 | A gate answer is for a sender that is not at the gate now: its kind is not `stranger`, or a rule took its items out. A policy change cannot apply: the policy or the file changed after the person saw it, the file is not valid, or the rule does not exist. Read the policy again. A review decision cannot apply: read the changeset again. |
@@ -336,12 +336,15 @@ An error is `{"error": "<reason>"}`:
 
 The API follows specification 2, section 8.6. At each start, `Auth::new(addr)`
 makes a random web secret of 32 bytes and a one-time code. `iris serve`
-prints (and opens) the sign-in address `http://<addr>/#code=<code>`.
+prints the sign-in address `http://<addr>/#code=<code>`. `Auth::sign_in()`
+makes one more code, for 2 minutes (`CODE_LIFE`). At most 8 codes wait
+(`CODES_MAX`): a new code ends the oldest code of `sign_in`. `iris open`
+gets such a code through the engine socket.
 
 1. The client page reads the code from the fragment of the address. The
    browser does not send a fragment to a server.
 2. The client sends `POST /api/session` with `{"code": "<code>"}`. The answer
-   is `{"token": "<secret>"}`, one time only. A wrong or used code gives 403.
+   is `{"token": "<secret>"}`, one time only. A wrong, used or ended code gives 403.
 3. The client keeps the token in the storage of its origin (for example
    `sessionStorage`), and sends `Authorization: Bearer <token>` with each
    request. A request without it gives 401.
@@ -349,7 +352,7 @@ prints (and opens) the sign-in address `http://<addr>/#code=<code>`.
 The API does not use a cookie. A browser sends a cookie to each port of a host,
 so a server of another OS user on another loopback port could get it. Storage
 belongs to one origin, with its port. A download of `/raw` needs the header
-too: fetch it, then save the blob. For a new code, start `iris serve` again.
+too: fetch it, then save the blob. For a new code, run `iris open`.
 
 ## Bound address only
 

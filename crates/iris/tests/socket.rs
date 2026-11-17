@@ -1007,3 +1007,118 @@ fn session_mode_uses_only_the_session_socket() {
     );
     assert!(!data.exists(), "the command made the data folder");
 }
+
+/// Send one request with `socket::answer_as` and parse the answer line.
+fn answer_as(store: &Store, me: &Author, request: Value) -> Value {
+    let mut out = Vec::new();
+    socket::answer_as(store, me, request.to_string().as_bytes(), &mut out).unwrap();
+    serde_json::from_slice(&out).unwrap()
+}
+
+#[test]
+fn sign_in_gives_a_new_address_each_time() {
+    let (_, d) = engine("sign-in");
+    let auth = socket::AUTH
+        .get_or_init(|| Arc::new(iris_api::Auth::new("127.0.0.1:4800".parse().unwrap()).unwrap()));
+    let url = |_| {
+        socket::request(&d, "sign-in", json!({})).unwrap()["url"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let (a, b) = (url(0), url(1));
+    assert!(a.starts_with("http://127.0.0.1:4800/#code="), "{a}");
+    assert_ne!(a, b);
+    // The start code stays as it was.
+    assert!(auth.sign_in_url().is_some());
+    let e = socket::request(&d, "sign-in", json!({ "x": 1 })).unwrap_err();
+    assert_eq!(e.code, code::USAGE);
+    // `iris open --print` prints a new address. With no engine: code 4.
+    let open = |data: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_iris"))
+            .arg("--data")
+            .arg(data)
+            .args(["open", "--print"])
+            .output()
+            .unwrap()
+    };
+    let out = open(&d);
+    assert_eq!(out.status.code(), Some(0));
+    let printed = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        printed.starts_with("http://127.0.0.1:4800/#code="),
+        "{printed}"
+    );
+    assert!(![a, b].contains(&printed.trim().to_string()));
+    let none = dir("open-none");
+    std::fs::create_dir_all(&none).unwrap();
+    assert_eq!(
+        open(&none).status.code(),
+        Some(i32::from(code::UNREACHABLE))
+    );
+}
+
+#[test]
+fn a_session_cannot_sign_in_or_read_the_notices_of_the_app() {
+    let d = dir("app-session");
+    let store = Store::open(&d).unwrap();
+    let mut me = agent();
+    me.job = Some("j-1".into());
+    for verb in ["sign-in", "app.notices"] {
+        let r = answer_as(&store, &me, json!({ "v": 1, "verb": verb, "args": {} }));
+        assert_eq!(r["code"], json!(code::DENIED), "{verb}: {r}");
+        assert!(r.get("result").is_none(), "{verb}: {r}");
+    }
+}
+
+#[test]
+fn app_notices_give_only_the_new_notices_oldest_first() {
+    let d = dir("app-notices");
+    let store = Store::open(&d).unwrap();
+    let ask = |args: Value| {
+        answer_as(
+            &store,
+            &socket::local(),
+            json!({ "v": 1, "verb": "app.notices", "args": args }),
+        )
+    };
+    // No notice: nothing, and the last ID is 0.
+    let r = ask(json!({}));
+    assert_eq!(r["result"], json!({ "notices": [], "last": 0, "open": 0 }));
+    store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO notice(message_id, rule, rule_name, policy_version, title, text, created_at)
+                 VALUES (1, 7, 'Clinic', 1, 'Dr Lee', 'Results', 0),
+                        (2, 7, 'Clinic', 1, 'Dr Lee', 'Moved', 0),
+                        (3, 7, 'Clinic', 1, 'Dr Lee', 'Done', 0);
+                 UPDATE notice SET done_at = 1 WHERE id = 3;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    // A new app gets no old notice, only the last ID.
+    let r = ask(json!({}));
+    assert_eq!(r["result"], json!({ "notices": [], "last": 2, "open": 2 }));
+    let r = ask(json!({ "after": 0 }));
+    let ids: Vec<&str> = r["result"]["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["n-1", "n-2"]);
+    assert_eq!(r["result"]["notices"][0]["text"], json!("Results"));
+    assert_eq!(r["result"]["last"], json!(2));
+    let r = ask(json!({ "after": 2 }));
+    assert_eq!(r["result"], json!({ "notices": [], "last": 2, "open": 2 }));
+    for bad in [
+        json!({ "after": -1 }),
+        json!({ "after": "2" }),
+        json!({ "after": 1.5 }),
+        json!({ "since": 1 }),
+    ] {
+        let r = ask(bad.clone());
+        assert_eq!(r["code"], json!(code::USAGE), "{bad}: {r}");
+    }
+}

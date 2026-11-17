@@ -209,6 +209,13 @@ pub enum Command {
     /// input and output, for an MCP client. The same verbs, author and
     /// policy as the command.
     Mcp,
+    /// Open the web client of the running engine in the browser, with a new
+    /// one-time sign-in address. Needs the engine.
+    Open {
+        /// Print the address and open nothing.
+        #[arg(long)]
+        print: bool,
+    },
     /// Show a changeset (`cs-12`), or list your drafts. Needs the engine.
     #[command(arg_required_else_help = true)]
     Changeset {
@@ -541,6 +548,9 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
         code: socket::code::ERROR,
         error: e.to_string(),
     });
+    if let Command::Open { print } = &cli.command {
+        return open_web(&data?, *print);
+    }
     let request = socket_request(&cli.command)?;
     if let Command::Job { command } = &cli.command {
         // A bad job ID is a usage error, before the engine or the store.
@@ -885,6 +895,40 @@ pub fn socket_verb(
     json: bool,
 ) -> Result<Printed, socket::Failure> {
     socket_verb_at(&dir.join(socket::SOCKET), verb, args, json)
+}
+
+/// `iris open`: a new sign-in address from the engine (the socket verb
+/// `sign-in`, `docs/specs/2026-11-17-mac-app.md`), opened in the browser or
+/// printed.
+fn open_web(dir: &std::path::Path, print: bool) -> Result<(), socket::Failure> {
+    let r = socket::request_with(
+        dir,
+        "sign-in",
+        serde_json::json!({}),
+        socket::ANSWER_WAIT,
+        "iris open",
+    )?;
+    let url = r["url"].as_str().unwrap_or_default();
+    let opener = match std::env::consts::OS {
+        "macos" => Some("/usr/bin/open"),
+        "linux" => Some("xdg-open"),
+        _ => None,
+    };
+    let opened = !print
+        && opener.is_some_and(|o| {
+            std::process::Command::new(o)
+                .arg(url)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        });
+    if !opened {
+        // The address is for this person only: it works one time, for 2 minutes.
+        println!("{url}");
+    }
+    Ok(())
 }
 
 /// [`socket_verb`] on the socket at `path`.
@@ -1233,7 +1277,8 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         | Command::Label(_)
         | Command::Unlabel(_)
         | Command::Compose { .. }
-        | Command::Send { .. } => unreachable!("run() sends these verbs to the socket"),
+        | Command::Send { .. }
+        | Command::Open { .. } => unreachable!("run() sends these verbs to the socket"),
         Command::Understand {
             estimate,
             approve,
@@ -1590,6 +1635,8 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
             std::future::pending::<()>().await
         };
         // The one-time code of the API sign-in (specification 2, section 8.6).
+        // `iris open` asks the socket for more codes.
+        let _ = socket::AUTH.set(auth.clone());
         if let Some(url) = auth.sign_in_url() {
             say!("iris: sign-in address of the local API: {url}");
         }

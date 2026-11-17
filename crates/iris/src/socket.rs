@@ -34,6 +34,9 @@ pub const ANSWER_WAIT: Duration = Duration::from_secs(30);
 /// The most drafts that `drafts` lists.
 pub const MAX_DRAFTS: i64 = 200;
 
+/// The sign-in of the web API, for the verb `sign-in`. `serve` sets it.
+pub static AUTH: std::sync::OnceLock<Arc<iris_api::Auth>> = std::sync::OnceLock::new();
+
 /// The exit codes of specification 2, section 8.4.
 pub mod code {
     pub const ERROR: u8 = 1;
@@ -402,6 +405,34 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
             iris_changeset::withdraw(store, cs, Some(me)).map_err(|e| failure(e, cs))?;
             Ok(Done::Document(cs))
         }
+        Some(v @ ("sign-in" | "app.notices")) if session => Err(Failure::new(
+            code::DENIED,
+            format!("{v} is a host verb: a session cannot run it"),
+        )),
+        Some("sign-in") => {
+            only(&[])?;
+            let auth = AUTH.get().ok_or_else(|| {
+                Failure::new(code::ERROR, "the web server of the engine is not ready")
+            })?;
+            let url = auth
+                .sign_in()
+                .map_err(|e| Failure::new(code::ERROR, format!("sign-in: {e}")))?;
+            Ok(Done::Value(json!({ "url": url })))
+        }
+        Some("app.notices") => {
+            only(&["after"])?;
+            let after = match args.get("after") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(
+                    v.as_u64()
+                        .and_then(|n| i64::try_from(n).ok())
+                        .ok_or_else(|| usage("after must be a whole number, 0 or more"))?,
+                ),
+            };
+            let r = app_notices(store, after)?;
+            crate::notify::app_asked(crate::engine::now_ms());
+            Ok(Done::Value(r))
+        }
         Some("drafts") if session => Err(Failure::new(
             code::DENIED,
             "drafts is a host verb: a session cannot run it",
@@ -585,6 +616,33 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
         Some(other) => Err(usage(format!("unknown verb {other}"))),
         None => Err(usage("the request has no verb")),
     }
+}
+
+/// `app.notices`: the notices that are not done and are newer than `after`,
+/// oldest first. With no `after`, no notices: only `last`, so a new app
+/// shows no old notice. `open` counts the notices that are not done (at
+/// most [`iris_policy::notice::LIST_MAX`]).
+fn app_notices(store: &Store, after: Option<i64>) -> Result<Value, Failure> {
+    let all = iris_api::notices(store).map_err(|e| Failure::new(code::ERROR, e.to_string()))?;
+    let row = |n: &iris_api::Notice| match iris_store::parse_id(&n.id) {
+        Some((Kind::Notice, r)) => r,
+        _ => 0,
+    };
+    let max = all.iter().map(row).max().unwrap_or(0);
+    let new: Vec<Value> = match after {
+        None => Vec::new(),
+        Some(a) => all
+            .iter()
+            .rev()
+            .filter(|n| row(n) > a)
+            .map(|n| serde_json::to_value(n).expect("plain JSON"))
+            .collect(),
+    };
+    let last = match after {
+        None => max,
+        Some(a) => all.iter().map(row).filter(|r| *r > a).max().unwrap_or(a),
+    };
+    Ok(json!({ "notices": new, "last": last, "open": all.len() }))
 }
 
 /// `status` of a session: the job, and the counts of its grant now.
@@ -802,6 +860,10 @@ pub fn parse_answer(verb: &str, line: &[u8]) -> Option<Result<Value, Failure>> {
         true => {
             let r = &answer["result"];
             let valid = match verb {
+                "sign-in" => r["url"].is_string(),
+                "app.notices" => {
+                    r["notices"].is_array() && r["last"].is_u64() && r["open"].is_u64()
+                }
                 "drafts" => r["changesets"]
                     .as_array()
                     .is_some_and(|a| a.iter().all(Value::is_string)),
