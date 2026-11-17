@@ -956,8 +956,9 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
 /// Spec 2, section 6.5: an author other than the person writes no mail
 /// into a thread with hostile mail. True if the action is such a write:
 /// each message of the threads of its resolved messages and of its draft
-/// counts, also a gone message, not only the resolved ones. The apply
-/// checks it again.
+/// counts, also a gone message, not only the resolved ones. A gone message
+/// with no header (after the content cleanup) counts as hostile, because
+/// its sender is no longer known. The apply checks it again.
 pub fn hostile(c: &Connection, action: i64) -> Result<bool> {
     Ok(c.query_row(
         "SELECT cs.author_kind <> 'person' AND EXISTS (
@@ -969,7 +970,10 @@ pub fn hostile(c: &Connection, action: i64) -> Result<bool> {
                                  UNION
                                  SELECT d.thread_id FROM action_draft ad
                                  JOIN draft d ON d.id = ad.draft_id WHERE ad.action_id = a.id)
-             AND ((m.hostile IS NOT NULL AND m.hostile NOT IN ('', '[]')) OR p.kind = 'hostile'))
+             AND ((m.hostile IS NOT NULL AND m.hostile NOT IN ('', '[]')) OR p.kind = 'hostile'
+                  -- A gone message after the cleanup has no header, so its
+                  -- sender is not known: it counts as hostile evidence.
+                  OR (m.gone_at IS NOT NULL AND h.message_id IS NULL)))
          FROM changeset_action a JOIN changeset cs ON cs.id = a.changeset_id WHERE a.id = ?1",
         [action],
         |r| r.get(0),

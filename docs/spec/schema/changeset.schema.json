@@ -1011,7 +1011,7 @@
           }
         },
         {
-          "$comment": "A checked draft of new mail has a subject; a checked reply has none, because the subject of the parent decides it (send spec, section 1).",
+          "$comment": "A checked draft of new mail has a subject and no resolved message; a checked reply has no subject (the subject of the parent decides it) and exactly one resolved message, its parent (send spec, sections 1 and 3).",
           "if": {
             "properties": {
               "verb": {
@@ -1034,12 +1034,19 @@
                 "required": [
                   "subject"
                 ]
+              },
+              "resolved": {
+                "properties": {
+                  "messages": {
+                    "maxItems": 0
+                  }
+                }
               }
             }
           }
         },
         {
-          "$comment": "See the rule above: a checked reply has no subject.",
+          "$comment": "See the rule above: a checked reply has no subject and one parent.",
           "if": {
             "properties": {
               "verb": {
@@ -1061,6 +1068,14 @@
               "args": {
                 "properties": {
                   "subject": false
+                }
+              },
+              "resolved": {
+                "properties": {
+                  "messages": {
+                    "minItems": 1,
+                    "maxItems": 1
+                  }
                 }
               }
             }

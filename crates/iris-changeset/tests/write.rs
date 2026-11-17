@@ -226,6 +226,23 @@ fn only_a_person_writes_into_a_hostile_thread() {
             "proposed"
         );
     }
+    // A gone message after the content cleanup has no header: its sender
+    // is not known, so an agent cannot write into the thread.
+    s.write(|tx| {
+        tx.execute("UPDATE message SET hostile = NULL WHERE id = 1", [])?;
+        tx.execute("UPDATE message SET gone_at = 1 WHERE id = 1", [])?;
+        Ok(tx.execute("DELETE FROM header WHERE message_id = 1", [])?)
+    })
+    .unwrap();
+    for (verb, t, a) in [
+        (Verb::Draft, "t-1", REPLY()),
+        (Verb::Send, "d-1", json!({})),
+    ] {
+        let got = one(&s, AuthorKind::Agent, verb, &[t], a);
+        assert_eq!(state(&got), "denied", "{verb:?}");
+    }
+    s.write(|tx| Ok(tx.execute("UPDATE message SET hostile = '[\"link\"]' WHERE id = 1", [])?))
+        .unwrap();
     // Each message of the thread is gone: the send still reads the thread
     // of its draft, and the gone hostile message counts.
     s.write(|tx| Ok(tx.execute("UPDATE message SET gone_at = 1 WHERE thread_id = 1", [])?))
