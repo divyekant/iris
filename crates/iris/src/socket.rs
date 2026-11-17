@@ -498,6 +498,11 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
             status(store, me).map(Done::Value)
         }
         Some("status") => Err(usage("status is a verb of a session")),
+        Some("wait") if session => {
+            only(&["until", "reply", "why"])?;
+            wait(store, me, args).map(Done::Value)
+        }
+        Some("wait") => Err(usage("wait is a verb of a session")),
         // The read verbs of a session (card R4-04f): only what the grant
         // holds now. The host command reads the store, not the socket.
         Some("search") if session => {
@@ -604,6 +609,70 @@ fn status(store: &Store, me: &Author) -> Result<Value, Failure> {
         "threads": threads,
         "messages": messages,
         "items": items,
+    }))
+}
+
+/// `wait` of a session (docs/specs/2026-11-17-wait.md): the job moves to
+/// `waiting`, and the same transaction ends the session with `job_state`.
+/// The reap thread sends this answer before the agent gets a signal.
+fn wait(
+    store: &Store,
+    me: &Author,
+    args: &serde_json::Map<String, Value>,
+) -> Result<Value, Failure> {
+    let job = me
+        .job
+        .as_deref()
+        .and_then(iris_job::parse_job_id)
+        .ok_or_else(|| Failure::new(code::ERROR, "the session has no job"))?;
+    let until = text(args, "until")?
+        .ok_or_else(|| usage("give the end of the wait: --until YYYY-MM-DD"))?;
+    let until_ms = iris_store::day_ms(until).map_err(|e| usage(e.to_string()))?;
+    let now = crate::engine::now_ms();
+    if until_ms <= now {
+        return Err(usage(format!(
+            "{until} is not in the future (the day starts at 00:00 UTC)"
+        )));
+    }
+    let thread = match text(args, "reply")? {
+        None => None,
+        Some(t) => match iris_store::parse_id(t) {
+            Some((iris_store::Kind::Thread, row)) => Some(row),
+            _ => return Err(usage(format!("{t} is not a thread ID"))),
+        },
+    };
+    // A reply wake adds the new messages of the thread to the grant, so
+    // the thread must be a thread of the scope. The wake rule checks the
+    // scope again: a revoke after this check leaves a wait for the date.
+    if let Some(t) = thread {
+        let scoped: bool = store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM job_scope
+                       WHERE job_id = ?1 AND thread_id = ?2 AND revoked_at IS NULL)",
+                    rusqlite::params![job, t],
+                    |r| r.get(0),
+                )?)
+            })
+            .map_err(|e| Failure::new(code::ERROR, format!("store: {e}")))?;
+        if !scoped {
+            return Err(Failure::new(
+                code::DENIED,
+                format!("t-{t} is not a thread of the scope of the job"),
+            ));
+        }
+    }
+    let why = text(args, "why")?;
+    let w = iris_job::Wait { thread, until_ms };
+    iris_job::wait(store, job, w, why, now).map_err(|e| match e {
+        iris_job::Error::Refused(why) => Failure::new(code::DENIED, why),
+        e => Failure::new(code::ERROR, e.to_string()),
+    })?;
+    Ok(json!({
+        "job": iris_job::format_job_id(job),
+        "state": "waiting",
+        "until": iris_api::rfc3339(until_ms),
+        "reply": thread.map(|t| format!("t-{t}")),
     }))
 }
 

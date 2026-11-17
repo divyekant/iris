@@ -62,6 +62,10 @@ pub struct Sessions {
     /// lock is held. A stop waits here for at most one gate.
     stop_marks: Mutex<HashSet<i64>>,
     after: Mutex<Option<Arc<AfterStep>>>,
+    /// The wakes (job, time of the wake) whose session this engine tried to
+    /// start: one try for each wake and engine. After a failed start, the
+    /// person runs `iris job run`.
+    tried: Mutex<HashSet<(i64, i64)>>,
     /// The done jobs whose workspace the build thread builds again. A
     /// build can wait for the workspace lock without a limit, so no
     /// supervisor turn and no stop waits for it.
@@ -153,6 +157,7 @@ impl Sessions {
             state: Mutex::new(State::default()),
             stop_marks: Mutex::default(),
             after: Mutex::new(None),
+            tried: Mutex::default(),
             builds,
             releases,
         });
@@ -679,10 +684,53 @@ impl Sessions {
         }
     }
 
-    /// The supervisor thread: one turn each [`TURN`].
+    /// The wake of R5-04 (docs/specs/2026-11-17-wait.md): wakes each
+    /// waiting job whose reply came or whose wait ended at `now`, then starts
+    /// one session for each job that a wake of the engine moved to `working`,
+    /// with the agent of its last session. A job with a live session (the
+    /// session of the wait before its reap) gets its session at a later call.
+    pub fn wake(self: &Arc<Self>, now: i64) {
+        if let Err(e) = iris_job::wake_due(&self.store, now) {
+            say!("iris: the wake of the waiting jobs failed: {e}");
+        }
+        let Ok(woken) = iris_job::woken(&self.store) else {
+            return;
+        };
+        for (job, at, agent) in woken {
+            if self.live_of(job).is_some() || self.state().launching.contains(&job) {
+                continue;
+            }
+            let first = self
+                .tried
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert((job, at));
+            if !first {
+                continue;
+            }
+            if let Err(e) = self.run(job, &agent) {
+                say!(
+                    "iris: {}: the session after the wake did not start: {e}",
+                    iris_job::format_job_id(job)
+                );
+            }
+        }
+    }
+
+    /// Starts a new session of `job` with the agent of its last session.
+    /// For a caller that gives a working job new input (for example a
+    /// review comment, R4-08).
+    pub fn resume(self: &Arc<Self>, job: i64) -> Result<i64, String> {
+        let last = last_session(&self.store, job)?.ok_or("the job has no session")?;
+        self.run(job, &last.agent)
+    }
+
+    /// The supervisor thread: one turn and one wake each [`TURN`].
     pub fn supervise_forever(self: Arc<Self>) {
         loop {
-            self.turn(now_ms());
+            let now = now_ms();
+            self.turn(now);
+            self.wake(now);
             std::thread::sleep(TURN);
         }
     }

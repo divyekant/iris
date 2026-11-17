@@ -833,6 +833,159 @@ fn the_end_of_a_session_closes_its_proxy_before_the_reap() {
     until(&s, &f, id, |r| r.reaped_ms.is_some());
 }
 
+/// The day `days` after today, UTC, as `YYYY-MM-DD`, and its start in
+/// milliseconds.
+fn day(days: i64) -> (String, i64) {
+    let ms = (now() / 86_400_000 + days) * 86_400_000;
+    (iris_api::rfc3339(ms)[..10].to_string(), ms)
+}
+
+/// The agent of a running session sends `wait`: the session ends with
+/// `job_state` and the supervisor reaps it.
+fn wait(s: &Arc<Sessions>, f: &Fixture, args: serde_json::Value) -> Session {
+    let id = s.run(f.job, "script").unwrap();
+    until(s, f, id, |r| r.started_ms.is_some());
+    let v = ask(f, "wait", args).unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["result"]["state"], "waiting", "{v}");
+    let row = until(s, f, id, |r| r.reaped_ms.is_some());
+    assert_eq!(row.end, Some(EndReason::JobState));
+    row
+}
+
+/// The newest session of the job after `after`, once the wake started it.
+fn next_session(s: &Arc<Sessions>, f: &Fixture, after: i64) -> Session {
+    let next = last_session(&f.store, f.job).unwrap().unwrap();
+    assert!(next.id > after, "no new session after the wake");
+    assert_eq!(next.agent, "script");
+    until(s, f, next.id, |r| r.started_ms.is_some())
+}
+
+fn a_job_waits_three_days_and_continues() {
+    let f = fixture("wait3", "sleep 30");
+    let s = sessions(&f);
+    let (until_day, until_ms) = day(3);
+    let first = s.run(f.job, "script").unwrap();
+    until(&s, &f, first, |r| r.started_ms.is_some());
+    fs::write(
+        workspace(&f).join("notes.md"),
+        "# Notes\nDana has the contract.\n",
+    )
+    .unwrap();
+    let _ = s.stop(f.job).unwrap();
+    let first = wait(
+        &s,
+        &f,
+        serde_json::json!({ "until": until_day, "why": "Dana reads it." }),
+    );
+    // One day later (a fake clock): the job still waits, and no session starts.
+    s.wake(until_ms - 2 * 86_400_000);
+    assert_eq!(
+        iris_job::get(&f.store, f.job).unwrap().state,
+        iris_job::State::Waiting
+    );
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first.id);
+    // At the end of the wait: the engine wakes the job and starts a session
+    // of the same agent, with the notes of the agent.
+    s.wake(until_ms);
+    let events = iris_job::events(&f.store, f.job).unwrap();
+    let woke = events.last().unwrap();
+    assert_eq!(
+        (woke.state, woke.by),
+        (iris_job::State::Working, By::Engine)
+    );
+    assert_eq!(woke.why.as_deref(), Some("time"));
+    let next = next_session(&s, &f, first.id);
+    let notes = fs::read_to_string(workspace(&f).join("notes.md")).unwrap();
+    assert!(notes.contains("Dana has the contract."), "{notes}");
+    // A second wake call starts no second session.
+    s.wake(until_ms + 1000);
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, next.id);
+    let _ = s.stop(f.job).unwrap();
+}
+
+fn a_reply_on_the_wait_thread_wakes_the_job() {
+    let f = fixture("waitreply", "sleep 30");
+    let s = sessions(&f);
+    let (until_day, _) = day(3);
+    // A thread outside the scope is refused, and the session stays open.
+    let id = s.run(f.job, "script").unwrap();
+    until(&s, &f, id, |r| r.started_ms.is_some());
+    f.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO thread (id, account_id, provider_id) VALUES (6, 1, 'b')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let v = ask(
+        &f,
+        "wait",
+        serde_json::json!({ "until": until_day, "reply": "t-6" }),
+    )
+    .unwrap();
+    assert_eq!(v["code"], 3, "{v}");
+    let v = ask(&f, "wait", serde_json::json!({ "until": "2020-01-01" })).unwrap();
+    assert_eq!(v["code"], 2, "{v}");
+    let _ = s.stop(f.job).unwrap();
+    let first = wait(
+        &s,
+        &f,
+        serde_json::json!({ "until": until_day, "reply": "t-5" }),
+    );
+    // Mail that you sent on the thread is not a reply.
+    let message = |id: i64, sent: bool| {
+        f.store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO message
+                       (id, account_id, thread_id, provider_id, fetched_at, understood_at)
+                     VALUES (?1, 1, 5, ?2, 1, 1)",
+                    rusqlite::params![id, format!("m{id}")],
+                )?;
+                if sent {
+                    tx.execute_batch(
+                        "INSERT OR IGNORE INTO label (id, account_id, provider_id, name, kind)
+                         VALUES (1, 1, 'SENT', 'SENT', 'system');",
+                    )?;
+                    tx.execute("INSERT INTO message_label VALUES (?1, 1)", [id])?;
+                }
+                Ok(())
+            })
+            .unwrap()
+    };
+    message(40, true);
+    s.wake(now());
+    assert_eq!(
+        iris_job::get(&f.store, f.job).unwrap().state,
+        iris_job::State::Waiting
+    );
+    message(41, false);
+    s.wake(now());
+    let woke = iris_job::events(&f.store, f.job).unwrap().pop().unwrap();
+    assert_eq!(
+        (woke.state, woke.by),
+        (iris_job::State::Working, By::Engine)
+    );
+    assert_eq!(woke.why.as_deref(), Some("reply"));
+    // The reply is in the grant of the next session.
+    let granted: bool = f
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM job_scope_message WHERE message_id = 41)",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(granted);
+    next_session(&s, &f, first.id);
+    let _ = s.stop(f.job).unwrap();
+}
+
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "session-hold") {
@@ -844,6 +997,14 @@ fn main() {
         .filter_map(|a| a.to_str())
         .find(|a| !a.starts_with('-'));
     let tests: &[(&str, fn())] = &[
+        (
+            "a_job_waits_three_days_and_continues",
+            a_job_waits_three_days_and_continues,
+        ),
+        (
+            "a_reply_on_the_wait_thread_wakes_the_job",
+            a_reply_on_the_wait_thread_wakes_the_job,
+        ),
         (
             "an_exit_of_the_agent_ends_and_reaps_the_session",
             an_exit_of_the_agent_ends_and_reaps_the_session,
