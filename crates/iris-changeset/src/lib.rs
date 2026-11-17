@@ -118,11 +118,13 @@ names!(
 
 names!(
     /// The verbs of release 2 (section 4), and `draft` and `send` of
-    /// release 3 (`docs/specs/2026-11-16-send.md`).
+    /// release 3 (`docs/specs/2026-11-16-send.md`). Only an undo makes
+    /// `untrash` and `restore` (section 7.4).
     Verb {
         Archive = "archive", Inbox = "inbox", Label = "label", Unlabel = "unlabel",
         Read = "read", Unread = "unread", Trash = "trash", Untrash = "untrash", Close = "close",
         Defer = "defer", Decline = "decline", Correct = "correct", Draft = "draft", Send = "send",
+        Restore = "restore",
     }
 );
 
@@ -664,7 +666,7 @@ pub fn submit_in(
         // A denied action has no message and no draft row (`clear`), so
         // `first_contact` finds no thread for it. A send whose thread has
         // only gone messages has no message row but keeps its draft thread.
-        let mailbox = !STATE_VERBS.contains(&verb.as_str());
+        let mailbox = !STATE_VERBS.contains(&verb.as_str()) && verb != "restore";
         // The flag `bulk` does not apply to an undo (section 7.4).
         let undo: bool = c.query_row(
             "SELECT EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = ?1)",
@@ -687,6 +689,9 @@ pub fn submit_in(
         if WRITE_VERBS.contains(&verb.as_str()) {
             if let Some((account, content)) = action_content(c, id)? {
                 flags.extend(draft_flags(c, &account, &content)?);
+                if marked_in(c, changeset)? && !outside_marks(c, id, &content)?.is_empty() {
+                    flags.push("outside_thread");
+                }
             }
         }
         c.execute(
@@ -879,6 +884,89 @@ fn next_action(
     .optional()?)
 }
 
+/// True when the author of `changeset` read mail that you did not send
+/// (spec R4-06, "The mark"). Only the person and an agent whose job scope
+/// is your own mail are not marked; each other author is.
+pub fn marked_in(c: &Connection, changeset: i64) -> Result<bool> {
+    let (kind, job): (String, Option<String>) = c.query_row(
+        "SELECT author_kind, author_job FROM changeset WHERE id = ?1",
+        [changeset],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(
+        match (
+            kind.as_str(),
+            job.as_deref().and_then(iris_job::parse_job_id),
+        ) {
+            ("person", _) => false,
+            ("agent", Some(job)) => iris_job::reads_outside_in(c, job)?,
+            _ => true,
+        },
+    )
+}
+
+/// The marks of the flag `outside_thread` (spec R4-06): each address of
+/// `to` and `cc` of `content` that is not in From, To or Cc of a live
+/// message of the threads of `action`, and is not one of your addresses. A
+/// new mail has no thread. Submit gives the flag to a marked author when
+/// this list is not empty.
+pub fn outside_marks(
+    c: &Connection,
+    action: i64,
+    content: &iris_compose::Content,
+) -> Result<Vec<Mark>> {
+    // Memory holds the recipients that no row names yet (at most the
+    // recipients of the draft) and one header row, never a list of the
+    // addresses of the thread or of one header.
+    let mut open: HashSet<String> = content
+        .to
+        .iter()
+        .chain(&content.cc)
+        .map(|a| a.trim().to_ascii_lowercase())
+        .collect();
+    iris_talk::each_your_address(c, |a| {
+        open.remove(&a);
+        !open.is_empty()
+    })?;
+    if !open.is_empty() {
+        let mut st = c.prepare(&format!(
+            "SELECT h.from_addr, h.to_addrs, h.cc_addrs
+             FROM changeset_action a, message t JOIN header h ON h.message_id = t.id
+             WHERE a.id = ?1 AND t.gone_at IS NULL AND t.thread_id IN ({ACTION_THREADS})"
+        ))?;
+        let mut rows = st.query([action])?;
+        while let (false, Some(r)) = (open.is_empty(), rows.next()?) {
+            for i in 0..3 {
+                if let Some(v) = r.get::<_, Option<String>>(i)? {
+                    iris_senders::head::each_address(&v, |a, _| {
+                        open.remove(&a);
+                    });
+                }
+            }
+        }
+    }
+    let to = content
+        .to
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (Field::To(i), a));
+    let cc = content
+        .cc
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (Field::Cc(i), a));
+    Ok(to
+        .chain(cc)
+        .filter(|(_, a)| open.contains(&a.trim().to_ascii_lowercase()))
+        .map(|(field, a)| Mark {
+            flag: "outside_thread",
+            field,
+            range: 0..a.len(),
+            source: None,
+        })
+        .collect())
+}
+
 /// The flag `first_contact` (section 5.3): a thread of a resolved message has
 /// mail from a sender of the kind `stranger`.
 fn first_contact(c: &Connection, action: i64) -> Result<bool> {
@@ -970,6 +1058,22 @@ fn supported(
                 (true, true) => Ok(()),
                 (true, false) => Err("untrash takes no arguments".into()),
                 (false, _) => Err("only the undo of a trash makes untrash".into()),
+            }
+        }
+        // Only the undo of a state entry makes restore (section 7.4).
+        Verb::Restore => {
+            let undo: bool = c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM ledger_undo u JOIN ledger l ON l.id = u.ledger_id
+                                JOIN changeset_action o ON o.id = l.action_id
+                                WHERE u.action_id = ?1 AND u.step = 1
+                                  AND o.verb IN ('close', 'decline', 'defer', 'correct'))",
+                [action],
+                |r| r.get(0),
+            )?;
+            match (undo, args.is_empty()) {
+                (true, true) => Ok(()),
+                (true, false) => Err("restore takes no arguments".into()),
+                (false, _) => Err("only the undo of a state entry makes restore".into()),
             }
         }
         // The content checks need the target: see check_draft.
@@ -1231,6 +1335,26 @@ fn resolve_undo(c: &Connection, action: i64, ids: &[Value]) -> Result<Option<Str
         return Ok(Some(
             "only an undo of the entry targets a ledger entry".into(),
         ));
+    }
+    // The undo of a state entry: the items of the entry, which pins them
+    // while the undo is open. The apply sets back only the items that
+    // still have the `post` values of the entry.
+    let state: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM ledger l JOIN changeset_action o ON o.id = l.action_id
+                        WHERE l.id = ?1 AND o.verb IN ('close', 'decline', 'defer', 'correct'))",
+        [ledger],
+        |r| r.get(0),
+    )?;
+    if state {
+        let n = c.execute(
+            "INSERT INTO action_item(action_id, item_id)
+             SELECT ?1, ai.item_id FROM ledger l
+             JOIN action_item ai ON ai.action_id = l.action_id
+             JOIN item i ON i.id = ai.item_id
+             WHERE l.id = ?2",
+            params![action, ledger],
+        )?;
+        return Ok((n == 0).then(|| "the entry has no item to change".into()));
     }
     let n = c.execute(
         "INSERT INTO action_message(action_id, message_id)

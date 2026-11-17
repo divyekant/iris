@@ -148,6 +148,33 @@ give the reason of the action. A draft does nothing until you submit it.
 | 2 | The request is not correct, or the engine refused an action, for example a wrong target. |
 | 1 | An error. Run `iris changeset <cs-id>` to see the state. |
 
+## Agents through MCP
+
+`iris mcp` serves the same verbs as MCP (Model Context Protocol) tools, on
+standard input and output. Use it with an agent that speaks MCP but does not
+use a terminal. Each tool has the name and the arguments of its verb:
+`status`, `search`, `show`, `draft`, `send`, `close`, `decline`, `defer`,
+`correct`, `archive`, `inbox`, `read`, `unread`, `trash`, `label`,
+`unlabel`, `submit`, `changeset`, `drafts`, `withdraw`, `revise`,
+`watch_add`, `watch_list`, `watch_remove`, `matters_list` and
+`matters_show`. The result is what the verb prints with `--json`, or its
+text where the verb has no `--json` (`watch_add` and `watch_remove`). A tool
+that adds an action gives the JSON `{"changeset": ..., "n": ...}`.
+
+The tools take the same path as the command, with the same author (`local`),
+the same policy and the same review. The read tools and the watch tools use
+the store directly. The other tools need the engine: start `iris serve`
+first. A failed tool call
+gives the error line and the exit code of the command. MCP has no tool to
+approve, to deny or to change the policy. Only the web client does these
+steps.
+
+Add Iris to the MCP settings of the agent. For example:
+
+```json
+{ "mcpServers": { "iris": { "command": "iris", "args": ["mcp"] } } }
+```
+
 The sync stores the raw messages only. After each sync, `iris serve` and
 `iris mirror sync` run the understanding step, so words and the `from:` and
 `to:` filters find the new mail. The free steps run with no model. Paid model

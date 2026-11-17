@@ -201,7 +201,7 @@ export type Action = {
   n: number;
   revision: number;
   verb: string;
-  targets: { threads?: string[]; messages?: string[]; items?: string[]; drafts?: string[]; accounts?: string[] };
+  targets: { threads?: string[]; messages?: string[]; items?: string[]; drafts?: string[]; accounts?: string[]; ledger?: string[] };
   resolved: { messages: string[] };
   args: Record<string, unknown>;
   why: string | null;

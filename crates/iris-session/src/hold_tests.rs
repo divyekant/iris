@@ -379,3 +379,19 @@ fn a_helper_thread_that_does_not_start_stops_the_agent_at_once() {
         }
     }
 }
+
+#[test]
+fn hold_main_refuses_arguments_that_it_cannot_read() {
+    let iso = TestIsolation::default();
+    for args in [
+        &[][..],
+        &["7"][..],
+        &["0", "/bin/true"][..],
+        &["-3", "/bin/true"][..],
+        &["x", "/bin/true"][..],
+    ] {
+        let args: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
+        assert_eq!(hold_main(&iso, &args), BAD_ARGS, "{args:?}");
+    }
+    assert!(iso.calls.lock().unwrap().is_empty());
+}

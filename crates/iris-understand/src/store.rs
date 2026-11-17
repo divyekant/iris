@@ -946,11 +946,7 @@ fn put_item(
 
 /// The row ID of the sender row of `addr`. A new row has no kind:
 /// iris-senders decides it.
-pub(crate) fn sender_row(
-    tx: &Transaction,
-    addr: &str,
-    name: Option<&str>,
-) -> rusqlite::Result<i64> {
+pub fn sender_row(tx: &Transaction, addr: &str, name: Option<&str>) -> rusqlite::Result<i64> {
     let addr = addr.to_ascii_lowercase();
     tx.execute(
         "INSERT INTO sender(address, name) VALUES (?1, ?2) ON CONFLICT(address) DO NOTHING",
