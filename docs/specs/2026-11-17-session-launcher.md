@@ -70,7 +70,7 @@ Migration 20 adds the table `job_session`:
 | `registered_at` | INTEGER NOT NULL | Milliseconds. |
 | `started_at` | INTEGER | NULL until step 4 of the launch. |
 | `ended_at` | INTEGER | NULL while the session is open. |
-| `end_reason` | TEXT | NULL while open. Else one of `exit`, `stop`, `revoke`, `job_state`, `time_limit`, `engine`, `launch_failed`. |
+| `end_reason` | TEXT | NULL while open. Else one of `exit`, `stop`, `revoke`, `job_state`, `time_limit`, `engine`, `launch_failed`, `helper_failed`. |
 | `exit_code` | INTEGER | The exit code of the agent for `exit`, else NULL. |
 | `helper_pid` | INTEGER | NULL until step 5 of the launch. The process ID of the hold helper. |
 | `agent_pgid` | INTEGER | NULL until the helper starts the agent. The process group ID of the agent. |
@@ -219,8 +219,9 @@ not the agent:
    3. `SIGKILL` to the group.
    4. `Isolation::stop` of the session, which ends each process that left
       the group.
-   5. The reap of the agent (only now). Then the helper exits with the
-      exit code of the agent (or the code of the signal).
+   5. The reap of the agent (only now). Then the helper writes one status
+      line to the engine on its second pipe, `exited <code>` or
+      `signaled <signal>`, and exits.
 
    The helper does these steps also after a normal exit of the agent, so a
    background child that the agent left in its group stops too.
@@ -298,16 +299,36 @@ The engine keeps one supervisor thread for all sessions. Each second, and
 after each request on the engine socket that can end a session, it checks
 each running session:
 
-- The helper exited: reap it, end the session with `exit` and its exit
-  code if it is still open, then run the reap check. Then remove the socket
-  file. If the job is `done`, build its workspace again after the reap.
+- The helper exited: reap it. If the helper wrote `exited <code>` or
+  `signaled <signal>`, the agent result is known: end the session with
+  `exit` and that code (a signal gives NULL) if it is still open. If the
+  helper exited with no such line (it was killed, or it failed), the
+  agent result is unknown: end the session with `helper_failed` and NULL
+  in `exit_code`, if it is still open, and call `Isolation::stop`. In both
+  cases, run the reap check, which keeps the session live while a process
+  of the agent group runs. Then remove the socket file. If the job is
+  `done`, build its workspace again after the reap.
 - A session that ended but did not pass the reap check: run the reap check
   again. The session stays live until the check passes.
-- The session ended in the store (a revoke, a job move, a stop): close the
-  pipe of the helper.
-- The time limit passed: end the session with `time_limit`, then close the
-  pipe. The default time limit is 30 minutes. `agents.toml` can set
+- The session ended in the store (a revoke, a job move, a stop, or a verb
+  of the session that ended it): run the shutdown order below.
+- The time limit passed: end the session with `time_limit`, then run the
+  shutdown order. The default time limit is 30 minutes. `agents.toml` can set
   `[session] max_minutes`, from 1 to 1440.
+
+The shutdown order, the same for each end of a session:
+
+1. End the grant: the end is in the store. From now on the session socket
+   takes no new request (exit code 3).
+2. Finish the accepted requests: each request that passed the check of the
+   session socket before the end gets its reply, for at most 10 seconds.
+   Then close the session socket and each of its connections.
+3. Close the pipe of the helper. The helper stops the group and calls
+   `Isolation::stop`.
+4. Call `Isolation::stop` from the engine too, and run the reap check.
+
+So a verb that ends its own session (`iris done`) gets its reply before
+any process of the agent gets a signal.
 
 ### Stop
 
@@ -404,9 +425,10 @@ ends.
   system, and an isolation that cannot keep this rule does not pass the
   check of the system.
 
-The engine calls `stop` on each end of a session, after it closes the pipe:
-on a stop, a revoke, a job move, a time limit, an exit of the agent, a
-failed launch, and at the engine start for each live session. The
+The engine calls `stop` on each end of a session, in step 4 of the
+shutdown order (see [Supervisor](#supervisor)): on a stop, a revoke, a job
+move, a time limit, an exit of the agent, a failed helper, a failed launch,
+and at the engine start for each live session. The
 supervisor calls `stop` again on each turn while the reap check fails. So
 no process of a session runs past its end, also when the helper is gone.
 
@@ -588,7 +610,7 @@ is refused before a row is written.
 | A `list` or `show` of an item whose source became hostile after the build | Not listed; `show` gives "not in this job" | Socket test |
 | A verb that ends its own session (`iris done`) | Its reply comes back; the next request gets exit code 3 | Socket test with a test verb that ends the session |
 | `iris job stop` while a process that left the group still runs | Exit code 1 with the reason; the supervisor keeps calling `Isolation::stop` | Supervisor test with a test isolation whose `stop` fails once |
-| The helper is killed and the agent group lives | The reap check fails on rule 2; the session stays live and a `run` is refused | Supervisor test: kill the helper, keep the group |
+| The helper is killed and the agent group lives | The session ends with `helper_failed` and no exit code; the engine calls `Isolation::stop`; the reap check fails on rule 2 until the group is empty, and a `run` is refused | Supervisor test: kill the helper, keep the group |
 | The engine restarts while the group still runs | The session stays live until the group is empty; no time sets `reaped_at` | Supervisor test with a group that ignores `SIGTERM` for 8 seconds |
 | `kill` gives an error other than `ESRCH` | The check fails; the session stays live | Unit test of the check with a fake `kill` |
 | A `CONNECT` to a host that is not allowed, or a port other than 443, or a request that is not `CONNECT` | `403`, closed, one egress log line with a fixed reason and no request text | Proxy test: `CONNECT <marker>:443` leaves no marker in the log |
