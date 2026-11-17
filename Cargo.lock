@@ -982,6 +982,7 @@ name = "iris-session"
 version = "0.0.0"
 dependencies = [
  "httparse",
+ "rustls",
 ]
 
 [[package]]

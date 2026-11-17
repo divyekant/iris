@@ -10,3 +10,7 @@ publish.workspace = true
 [dependencies]
 # Already in Cargo.lock (through hyper). Parses the CONNECT request head.
 httparse = "=1.10.1"
+# Already in Cargo.lock (through ureq). Parses the TLS ClientHello of a
+# tunnel, to check its server name. No handshake: the proxy reads only the
+# first message.
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "ring"] }
