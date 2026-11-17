@@ -121,6 +121,34 @@ contrast of each text color, of `primary` and of each semantic color on each
 background, and the contrast of `on-primary` on `primary`. It also checks that
 no view has a color literal.
 
+## Project site
+
+The project site is the static HTML in `docs/` (`index.html`, `privacy.html`
+and the builder guide in `docs/guide/`). GitHub Pages serves it from
+`develop` `/docs`. `docs/site.css` holds its styles. The site has no script.
+
+The site uses only the dark palette. Each site variable is a token of this
+file:
+
+| Site variable | Token | Use |
+|---|---|---|
+| `--bg` | `background` | Page background |
+| `--text` | `text` | Main text, the current page in the menu |
+| `--muted` | `text-muted` | The date of the privacy policy |
+| `--link` | `primary` | Links, the line of a caution |
+| `--surface` | `background-surface` | Code blocks, field names |
+| `--line` | `border` | Lines between table rows |
+
+Site parts:
+
+- The menu (`nav`) at the top of each guide page. The current page has
+  `aria-current="page"` and the `text` color.
+- A code block (`pre`), with the mono font, radius `md` and a side scroll.
+- A table, with a side scroll on a narrow screen.
+- A caution (`.caution`): a 4px line of `primary` on the left.
+- A field list (`ul.fields`): the required fields of a document, as chips
+  with radius `sm`.
+
 ## Rules
 
 - Each color comes from a token.
