@@ -20,7 +20,7 @@ const WIDTHS = [360, 390, 768];
 const TOUCH = 44;
 
 // The controls in the page that are smaller than TOUCH, and the overflow to the right.
-// A link inside a sentence is exempt (WCAG 2.5.8). A link with an absolute ::after
+// A control inside a sentence (its parent has text of its own) is exempt (WCAG 2.5.8). A link with an absolute ::after
 // covers its positioned parent, so that parent is its target. A checkbox or a radio
 // in a label has the label as its target.
 function measure(touch) {
@@ -37,10 +37,18 @@ function measure(touch) {
       if (label) box = label.getBoundingClientRect();
     }
     const parent = e.parentElement;
-    if (style.display === "inline" && parent && parent.textContent.trim().length > e.textContent.trim().length + 2) continue;
+    if (parent && [...parent.childNodes].some((n) => n.nodeType === Node.TEXT_NODE && n.textContent.trim())) continue;
     if (box.height < touch || box.width < touch) small.push(`${e.tagName.toLowerCase()} "${(e.textContent || "").trim().slice(0, 30)}" ${Math.round(box.width)}x${Math.round(box.height)}`);
   }
   return { overflow: document.documentElement.scrollWidth - innerWidth, small };
+}
+
+// Ask one question on the Ask view, and wait for the answer and its sources.
+async function ask(page, question) {
+  const answers = await page.getByRole("list", { name: "Sources" }).count();
+  await page.locator("main form input").fill(question);
+  await page.locator("main form button[type=submit]").click();
+  await page.getByRole("list", { name: "Sources" }).nth(answers).waitFor();
 }
 
 // The fixtures dev server and a browser, closed after the tests.
@@ -73,6 +81,14 @@ test("the brief, the review, an item and a mail fit a phone", { skip: !playwrigh
       assert.equal(overflow, 0, `${route} at ${width} px scrolls sideways`);
       assert.deepEqual(small, [], `${route} at ${width} px has small controls`);
     }
+    // A job that waits, with its mail links.
+    await page.goto(base + "#/job/j-12");
+    await page.waitForSelector("main h1, main h2");
+    assert.deepEqual((await page.evaluate(measure, TOUCH)).small, [], `a waiting job at ${width} px has small controls`);
+    // An Ask answer, with its sources.
+    await page.goto(base + "#/ask");
+    await ask(page, "What do I owe Dana?");
+    assert.deepEqual((await page.evaluate(measure, TOUCH)).small, [], `an Ask answer at ${width} px has small controls`);
     // The edit state of a proposed matter has a checkbox for each item.
     await page.goto(base + "#/brief");
     await page.getByRole("button", { name: "Keep together" }).click();
@@ -156,4 +172,42 @@ test("the page keeps out of the notch and the home indicator", { skip: !playwrig
     }
     await page.close();
   }
+});
+
+// Each element that sticks to the bottom of the screen (position sticky or fixed) is above the tabs.
+function covered() {
+  const tabs = document.querySelector(".tabs");
+  if (!tabs || getComputedStyle(tabs).display === "none") return [];
+  const bar = tabs.getBoundingClientRect();
+  const out = [];
+  for (const e of document.querySelectorAll("body *")) {
+    if (e.closest(".tabs, #more")) continue;
+    const style = getComputedStyle(e);
+    if (style.position !== "sticky" && style.position !== "fixed") continue;
+    const box = e.getBoundingClientRect();
+    if (box.height && box.bottom > bar.top + 0.5 && box.top < bar.bottom) out.push(`${e.tagName.toLowerCase()}.${e.className.split(" ")[0]} ends at ${Math.round(box.bottom)}, tabs start at ${Math.round(bar.top)}`);
+  }
+  return out;
+}
+
+test("the tabs cover nothing that sticks to the bottom of the screen", { skip: !playwright && "Playwright is not installed" }, async () => {
+  const { base, browser } = await serve();
+  const page = await browser.newPage({ viewport: { width: 360, height: 640 }, isMobile: true, hasTouch: true, reducedMotion: "reduce" });
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setSafeAreaInsetsOverride", { insets: { top: 0, right: 0, bottom: 34, left: 0 } });
+  for (const route of ROUTES) {
+    await page.goto(base + route);
+    await page.waitForSelector("main h1, main h2");
+    assert.deepEqual(await page.evaluate(covered), [], route);
+  }
+  // A long Ask conversation: the question box sticks to the bottom while the page scrolls.
+  await page.goto(base + "#/ask");
+  await ask(page, "What do I owe Dana?");
+  await ask(page, "And what does Dana owe me?");
+  await page.evaluate(() => scrollTo(0, 200));
+  assert.equal(await page.locator("main form").evaluate((f) => getComputedStyle(f).position), "sticky");
+  assert.deepEqual(await page.evaluate(covered), [], "a long Ask conversation");
+  await page.locator("main form input").tap();
+  await page.locator("main form input").fill("One more question");
+  await page.locator("main form button[type=submit]").tap();
 });

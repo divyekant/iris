@@ -320,12 +320,19 @@
       padding: 0;
     }
   }
+  /* The height of the phone tabs. An element that sticks to the bottom of the screen sits above it. */
+  :global(:root) {
+    --tabs-height: 0px;
+  }
   .tabs,
   #more {
     display: none;
   }
   /* A phone: the tabs stay at the bottom, in reach of the thumb. */
   @media (max-width: 600px) {
+    :global(:root) {
+      --tabs-height: calc(var(--space-16) + env(safe-area-inset-bottom));
+    }
     header {
       position: static;
       padding: max(var(--space-3), env(safe-area-inset-top)) max(var(--space-4), env(safe-area-inset-right)) var(--space-3) max(var(--space-4), env(safe-area-inset-left));
@@ -337,7 +344,7 @@
       padding: var(--space-4) max(var(--space-4), env(safe-area-inset-right)) var(--space-12) max(var(--space-4), env(safe-area-inset-left));
     }
     .site {
-      padding: var(--space-6) max(var(--space-4), env(safe-area-inset-right)) calc(var(--space-24) + env(safe-area-inset-bottom)) max(var(--space-4), env(safe-area-inset-left));
+      padding: var(--space-6) max(var(--space-4), env(safe-area-inset-right)) calc(var(--space-8) + var(--tabs-height)) max(var(--space-4), env(safe-area-inset-left));
     }
     .tabs {
       position: fixed;
@@ -349,7 +356,8 @@
       overflow: visible;
       mask-image: none;
       padding: 0 max(var(--space-2), env(safe-area-inset-right)) env(safe-area-inset-bottom) max(var(--space-2), env(safe-area-inset-left));
-      border-top: 1px solid var(--color-border-subtle);
+      /* A shadow line, not a border, so that the bar is exactly --tabs-height high. */
+      box-shadow: 0 -1px 0 var(--color-border-subtle);
       background: var(--color-background-elevated);
     }
     .tabs a,
@@ -384,11 +392,11 @@
       color: var(--color-primary);
     }
     #more {
-      inset: auto max(var(--space-2), env(safe-area-inset-right)) calc(var(--space-16) + var(--space-2) + env(safe-area-inset-bottom)) auto;
+      inset: auto max(var(--space-2), env(safe-area-inset-right)) calc(var(--tabs-height) + var(--space-2)) auto;
       margin: 0;
       min-width: calc(var(--space-32) + var(--space-16));
       /* A short screen: the list scrolls, so each view stays in reach. */
-      max-height: calc(100dvh - var(--space-16) - var(--space-4) - env(safe-area-inset-bottom) - max(var(--space-2), env(safe-area-inset-top)));
+      max-height: calc(100dvh - var(--tabs-height) - var(--space-4) - max(var(--space-2), env(safe-area-inset-top)));
       overflow-y: auto;
       box-sizing: border-box;
       padding: var(--space-2);
