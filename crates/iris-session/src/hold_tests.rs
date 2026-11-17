@@ -59,6 +59,10 @@ impl Run {
 }
 
 fn run(script: &str, term_wait: Duration) -> Run {
+    run_with(script, term_wait, Duration::ZERO)
+}
+
+fn run_with(script: &str, term_wait: Duration, drain_delay: Duration) -> Run {
     let (in_r, in_w) = io::pipe().unwrap();
     let (st_r, st_w) = io::pipe().unwrap();
     let log = Buf::default();
@@ -68,7 +72,9 @@ fn run(script: &str, term_wait: Duration) -> Run {
         args: vec!["-c".into(), script.into()],
     };
     let (iso, out) = (isolation.clone(), log.clone());
-    let done = thread::spawn(move || hold_with(&*iso, 7, &command, in_r, st_w, out, term_wait));
+    let done = thread::spawn(move || {
+        hold_with(&*iso, 7, &command, in_r, st_w, out, term_wait, drain_delay)
+    });
     Run {
         input: Some(in_w),
         status: BufReader::new(st_r),
@@ -258,6 +264,7 @@ fn a_failed_spawn_writes_failed() {
         st_w,
         log.clone(),
         Duration::ZERO,
+        Duration::ZERO,
     );
     assert_eq!(code, 1);
     let mut s = String::new();
@@ -288,4 +295,20 @@ fn the_log_stays_inside_its_limit() {
     }
     assert!(log.out.len() as u64 <= LOG_LIMIT);
     assert!(log.out.ends_with(b"\n"));
+}
+
+#[test]
+fn the_count_holds_each_byte_that_the_agent_wrote() {
+    // The output thread starts late, so the bytes are still in the pipe
+    // when the agent is reaped.
+    let mut r = run_with(
+        "head -c 1000 /dev/zero; exit 0",
+        Duration::ZERO,
+        Duration::from_millis(300),
+    );
+    r.send("start\n");
+    r.line();
+    assert_eq!(r.line(), "exited 0");
+    let (_, log, _) = r.end();
+    assert!(log.contains("; 1000 bytes of output dropped"), "{log}");
 }
