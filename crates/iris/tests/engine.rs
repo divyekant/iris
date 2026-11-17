@@ -936,3 +936,71 @@ fn a_sync_thread_wakes_at_the_end_of_a_hold() {
     assert_eq!(engine::wait(Some(0), 5_000), min);
     assert_eq!(engine::wait(Some(i64::MAX), 0), engine::SYNC_EVERY);
 }
+
+/// A press of Send while the sync thread waits for its next turn wakes it
+/// early: the draft and the send come within seconds, not after the full
+/// wait of the turn (docs/specs/2026-11-17-write.md, section 7).
+#[test]
+fn a_press_of_send_wakes_the_waiting_thread() {
+    let s = setup("write-wake", 3);
+    s.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO policy_version(text, sha256, confirmed_at)
+                 VALUES ('version = 0\nmode = \"apply\"\n', 'h', 0)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let worker = s.worker(s.account);
+    std::thread::spawn(move || worker.run());
+    wait_for(
+        &s.store,
+        "SELECT count(*) FROM account WHERE mirror_ready_at IS NOT NULL",
+        Duration::from_secs(30),
+    );
+    // Let the first turn end: the thread now waits for its next turn.
+    std::thread::sleep(Duration::from_secs(2));
+    let account = format!("a-{}", s.account);
+    let mut args = serde_json::Map::new();
+    args.insert("to".into(), serde_json::json!(["sam@example.com"]));
+    args.insert("cc".into(), serde_json::json!([]));
+    args.insert("subject".into(), serde_json::json!("Dinner"));
+    args.insert("body".into(), serde_json::json!("Hi Sam.\n"));
+    let mut flags: Vec<String> = Vec::new();
+    for _ in 0..2 {
+        let press = iris_changeset::Press {
+            mail: iris_changeset::Mail::New { account: &account },
+            args: &args,
+            key: "key-wake-000000000001",
+            flags: &flags,
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        match iris_changeset::write_mail(&s.store, &press, now).unwrap() {
+            Ok(_) => break,
+            Err(iris_changeset::Refusal::Flags(f)) => flags = f,
+            Err(other) => panic!("{other:?}"),
+        }
+    }
+    // The turn waits up to SYNC_EVERY (60 seconds). The early wake runs
+    // the apply step in about one second.
+    wait_for(
+        &s.store,
+        "SELECT count(*) FROM write_send WHERE send_action_id IS NOT NULL",
+        Duration::from_secs(10),
+    );
+    // End the thread: an account that needs a new sign-in leaves the list.
+    s.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE account SET state = ?1 WHERE id = ?2",
+                rusqlite::params![STATE_NEEDS_SIGN_IN, s.account],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}

@@ -220,7 +220,7 @@ documents in `schema/examples/` (files `changeset*.json`).
 | `actions[].n` | The number of the action in the changeset, from 1. |
 | `actions[].revision` | The revision of the action. The document lists the actions of each revision, because an old revision can keep decided actions and `approved` actions. |
 | `actions[].targets` | What the author named: `threads`, `messages` or `items`. The write verbs of release 3 also name `accounts` (`a-N`, a new mail) or `drafts` (`d-N`), with exactly one target (`docs/specs/2026-11-16-send.md`, section 4). |
-| `actions[].args` | The arguments of the verb (section 4), as one JSON object. `label` and `unlabel`: `label`. `close` and `decline`: `reason`. `defer`: `date`. `correct`: `field` and `value`. `draft`: `to`, `cc`, `subject` and `body` (a reply has no `subject`; `docs/specs/2026-11-16-send.md`, section 1). Each other verb, `send` too: none (`{}`). A `denied` or `cancelled` action, and a draft action, can hold arguments that do not fit the verb, because only submit checks them. |
+| `actions[].args` | The arguments of the verb (section 4), as one JSON object. `label` and `unlabel`: `label`. `close`, `decline`, `skip`, `mute` and `dismiss`: `reason` (500 characters or fewer; `docs/specs/2026-11-17-preference-rules.md`). `defer`: `date`. `correct`: `field` and `value`. `draft`: `to`, `cc`, `subject` and `body` (a reply has no `subject`; `docs/specs/2026-11-16-send.md`, section 1). Each other verb, `send` too: none (`{}`). A `denied` or `cancelled` action, and a draft action, can hold arguments that do not fit the verb, because only submit checks them. |
 | `actions[].resolved` | The message IDs at submit. Review shows these, and apply uses only these. The engine keeps them in a child table, and writes the document by streaming (section 9). |
 | `actions[].flags` | Why a person must look: see section 5.3. |
 | `actions[].hash` | `null` in a triage proposal that the engine does not store (release 1). Else the SHA-256 (hex) of the `verb`, the `targets` text, the `args` text and the `resolved` message IDs, from submit. Each of the three texts has its length in bytes first (8 bytes, big-endian). Then each message ID follows, in the order of the store row IDs, with a comma after it. For an action with a draft target (release 3), the content hash of the draft follows (`docs/specs/2026-11-16-send.md`, section 5). An approval names it (section 5.5). A submitted action does not change, but the engine can add a flag before apply (section 5.4). `null` before submit. |
@@ -689,7 +689,7 @@ The pass also proposes a `hide` rule from the choices of the person
   `hide` proposal of its form.
 - An undone choice whose item, origin message, header or sender cannot
   be read again stops each `hide` proposal of its form.
-- The row has `verb = 'hide'` and the `form` (store migration 23). An
+- The row has `verb = 'hide'` and the `form` (store migration 30). An
   `allow` row has the form `''`.
 
 Failure list of the proposals:
@@ -861,7 +861,7 @@ applies it.
 2. The engine (`iris_apply::undo`) makes a changeset with author `person`
    and one action: the inverse of the entry (`archive` and `inbox`, `read`
    and `unread`, `label` and `unlabel` of the same name, `trash` and
-   `untrash`, and `restore` for a `close`, `decline`, `defer` or `correct`
+   `untrash`, and `restore` for a `close`, `decline`, `defer`, `correct`, `skip`, `mute` or `dismiss`
    entry). Its target is the entry (`{"ledger": ["l-N"]}`), and submit
    resolves the messages with `done` that are not gone, in SQL, so no list
    of message IDs is in memory (section 9). For `restore`, submit resolves
@@ -1164,7 +1164,8 @@ agent that does not work in a folder. The rules for the MCP interface:
   verb that the command does not have. It gives no verb of the person
   (`sending`, `cancel`), no verb of the host (`serve`, `account`,
   `mirror`, `backup`, `export`, `service`, `model`, `understand`, `mcp`),
-  and not `matters propose`, which spends model budget. A test checks
+  and not `matters propose` or `write` (the draft in your voice, R3-05),
+  which spend model budget. A test checks
   that each verb is a tool or is in this list.
 - Each tool call takes the path of its verb in the same mode, so MCP adds
   no power. In host mode, these are the paths:

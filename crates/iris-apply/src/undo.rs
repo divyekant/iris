@@ -19,7 +19,7 @@ fn inverse(verb: &str) -> Option<Verb> {
         "trash" => Verb::Untrash,
         "untrash" => Verb::Trash,
         // A state entry: `restore` sets its `pre` values again.
-        "close" | "decline" | "defer" | "correct" => Verb::Restore,
+        v if iris_changeset::STATE_VERBS.contains(&v) => Verb::Restore,
         _ => return None,
     })
 }

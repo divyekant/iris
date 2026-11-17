@@ -28,9 +28,6 @@ use serde_json::{json, Map, Value};
 
 use crate::{expire, now, Counts, Error, Outcome, Result};
 
-/// The state verbs.
-const VERBS: &str = "'close', 'decline', 'defer', 'correct', 'restore'";
-
 /// The actions that [`apply_states`] reads in one page (specification 2,
 /// section 9: no list of changesets in memory).
 const PAGE: i64 = 100;
@@ -45,8 +42,10 @@ pub fn apply_states(store: &Store) -> Result<usize> {
         let page: Vec<i64> = store.read(|c| {
             let mut st = c.prepare_cached(&format!(
                 "SELECT id FROM changeset_action
-                 WHERE state = 'approved' AND verb IN ({VERBS}) AND id > ?1
-                 ORDER BY id LIMIT ?2"
+                 WHERE state = 'approved' AND verb IN ({}) AND id > ?1
+                 ORDER BY id LIMIT ?2",
+                // `restore` is the undo of a state entry.
+                iris_changeset::sql_list(iris_changeset::STATE_VERBS.iter().chain(&["restore"]))
             ))?;
             let rows = st.query_map([after, PAGE], |r| r.get(0))?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -113,10 +112,7 @@ fn apply_in(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<O
         )
         .optional()?;
     let (verb, hash, decided_by, changeset, args) = row.ok_or(Inner::NotApproved)?;
-    if !matches!(
-        verb.as_str(),
-        "close" | "decline" | "defer" | "correct" | "restore"
-    ) {
+    if !iris_changeset::STATE_VERBS.contains(&verb.as_str()) && verb != "restore" {
         return Err(Inner::Verb(verb));
     }
     if expire(tx, action)? {
@@ -169,6 +165,8 @@ fn apply_in(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<O
             f.push("status".into());
             f
         }
+        // `skip`, `mute` and `dismiss` change the status only.
+        "skip" | "mute" | "dismiss" => vec!["status".into()],
         // `close` and `decline` remove `deferred_until`: the undo needs it.
         _ => vec!["status".into(), "deferred_until".into()],
     };
@@ -277,17 +275,18 @@ fn restore(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<Ou
     // `later`: the item is gone, or a state entry after this entry names it.
     // The value check alone misses a later action that set the same values.
     let rows: Vec<(i64, String, bool)> = {
-        let mut st = tx.prepare(
+        let mut st = tx.prepare(&format!(
             "SELECT i.id, i.doc, i.status = 'gone' OR EXISTS (
                SELECT 1 FROM action_item x
                JOIN changeset_action o ON o.id = x.action_id
                JOIN ledger l ON l.action_id = o.id
                WHERE x.item_id = i.id AND x.action_id != ?1 AND l.id > ?2
                  AND l.state != 'failed'
-                 AND o.verb IN ('close', 'decline', 'defer', 'correct', 'restore'))
+                 AND o.verb IN ({}))
              FROM action_item ai JOIN item i ON i.id = ai.item_id
              WHERE ai.action_id = ?1 ORDER BY i.id",
-        )?;
+            iris_changeset::sql_list(iris_changeset::STATE_VERBS.iter().chain(&["restore"]))
+        ))?;
         let rows = st.query_map(params![action, entry], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })?;
@@ -478,6 +477,23 @@ fn plan(
                     .into_iter()
                     .collect()
             }
+            "skip" | "mute" | "dismiss" => {
+                // Specification 1, section 6.8: the form and the statuses of each verb.
+                let (want, from): (&str, &[&str]) = match verb {
+                    "skip" => ("feed", &["new", "read"]),
+                    "mute" => ("conversation", &["active", "quiet"]),
+                    _ => ("signal", &["active"]),
+                };
+                if form != want || !from.contains(&status.as_str()) {
+                    return Ok(Err(format!(
+                        "{id} is {status}: {verb} changes a {want} that is {}",
+                        from.join(" or ")
+                    )));
+                }
+                [("status".to_string(), json!(new_status(verb)))]
+                    .into_iter()
+                    .collect()
+            }
             _ => {
                 // Specification 1, section 6.8: from `open` (or `deferred`) only.
                 if form != "commitment" || !matches!(status.as_str(), "open" | "deferred") {
@@ -579,6 +595,9 @@ fn new_status(verb: &str) -> &'static str {
     match verb {
         "close" => "done",
         "decline" => "declined",
+        "skip" => "skipped",
+        "mute" => "muted",
+        "dismiss" => "dismissed",
         _ => "deferred",
     }
 }
