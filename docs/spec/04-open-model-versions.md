@@ -122,5 +122,9 @@ The kit checks the formats `date` and `date-time`, and does not check
 `email`, because validators do not agree on `email`. Each invalid fixture
 fails also when a validator accepts each `email` text.
 
+The runner refuses a JSON document with arrays and objects nested deeper
+than 256 levels, also if the document passes the schemas. A producer must
+not write such a document.
+
 A producer conforms when `run.py check` on a folder with its documents
 exits 0. [`conformance/README.md`](conformance/README.md) gives the steps.
