@@ -207,18 +207,27 @@ not the agent:
 3. After the start, the helper waits for two events: the child exits, or
    the pipe ends (the engine stopped, or the engine closed the pipe to stop
    the session).
-4. On each of the two events, the helper stops the group of the agent:
-   `SIGTERM` to the group, a wait of up to 5 seconds, then `SIGKILL` to the
-   group. Then it calls `Isolation::stop` of the session, which ends each
-   process that left the group. It does this also after a normal exit of the agent, so a
-   background child that the agent left in its group stops too. Then the
-   helper reaps the agent, and exits with the exit code of the agent (or
-   the code of the signal).
+4. On each of the two events, the helper stops the group of the agent. It
+   does not reap the agent before the last signal: it sees the exit with
+   `waitid(P_PID, pid, WEXITED | WNOWAIT)`, which leaves the agent as a
+   zombie. A zombie keeps its process ID, so the system cannot give the
+   group ID to another process, and a signal to the group never reaches
+   an unrelated process. The steps:
+   1. `SIGTERM` to the group.
+   2. A wait of 5 seconds. The helper cannot end the wait early from a
+      check of the group, because the zombie keeps the group alive.
+   3. `SIGKILL` to the group.
+   4. `Isolation::stop` of the session, which ends each process that left
+      the group.
+   5. The reap of the agent (only now). Then the helper exits with the
+      exit code of the agent (or the code of the signal).
+
+   The helper does these steps also after a normal exit of the agent, so a
+   background child that the agent left in its group stops too.
 
 So the pipe ties the session to the engine: when the engine process ends for
-any reason, the kernel closes the pipe, and the helper stops the agent. The
-helper waits for the group with `kill(-pgid, 0)`: the group has a process
-while the call succeeds. A process that the agent moves out of its group
+any reason, the kernel closes the pipe, and the helper stops the agent. A
+process that the agent moves out of its group
 (`setsid`) is stopped by `Isolation::stop`, which the helper calls on the
 end of the pipe with no engine. If the helper is killed too, the lifetime
 rule of the isolation ends each process of the session. So no process of a
@@ -255,19 +264,28 @@ steps of the workspace spec:
    - Each other reason (`stop`, `job_state`, `engine`): the launch ends
      with that reason, with no retry. So a stop during the launch cancels
      the run, and `iris job run` prints that the session was stopped
-     before its start and exits with 1. Else set
-   `started_at` (`iris_job::start_in`), write `start` to the pipe, and
-   then commit.
+     before its start and exits with 1.
+
+   If the session did not end, then in the same transaction:
+   1. Set `started_at` (`iris_job::start_in`).
+   2. Write `start` to the pipe.
+   3. Wait for the line `started <pgid>` of the helper, for at most 2
+      seconds. Write `agent_pgid` (`iris_job::set_agent_in`).
+   4. Commit.
+
+   If the line does not come in 2 seconds, or the commit fails, roll
+   back, close the pipe, and end the session with `launch_failed`. The
+   helper then stops the agent if it started one.
 
    SQLite lets one write transaction run at a time, and a revoke or a job
    move is a write transaction. So a revoke commits either before the gate
    (the gate sees the end, and the helper never gets `start`), or after
-   the commit of the gate (the session ran under a valid grant, and the
-   revoke ends it as a running session). No revoke can come between the
-   check and the release. If the commit fails after the write of `start`,
-   the engine closes the pipe and ends the session with `launch_failed`.
-   No revoke came during the gate, so the agent saw only the current
-   grant, and the helper stops it.
+   the commit of the gate. At that commit the agent process exists and its
+   group is in the store, so the revoke ends a running session, and the
+   supervisor stops it. No revoke can come between the check and the
+   spawn. The gate holds the write lock for at most 2 seconds, less than
+   the `busy_timeout` of 5 seconds of the store, so a revoke waits and
+   then succeeds.
 
 Each failure after step 2 ends the session with `launch_failed`, closes the
 pipe, waits for the helper if one started, runs the reap check and removes
@@ -574,6 +592,9 @@ is refused before a row is written.
 | The engine restarts while the group still runs | The session stays live until the group is empty; no time sets `reaped_at` | Supervisor test with a group that ignores `SIGTERM` for 8 seconds |
 | `kill` gives an error other than `ESRCH` | The check fails; the session stays live | Unit test of the check with a fake `kill` |
 | A `CONNECT` to a host that is not allowed, or a port other than 443, or a request that is not `CONNECT` | `403`, closed, one egress log line with a fixed reason and no request text | Proxy test: `CONNECT <marker>:443` leaves no marker in the log |
+| A revoke right after the gate commits, before the agent reads a file | The agent exists at the commit (the gate waited for `started`), so the revoke ends a running session and the supervisor stops it | Launch test: revoke hook right after the commit; the session ends with `revoke` and its group stops |
+| The helper does not confirm the spawn in 2 seconds | Roll back; `launch_failed`; the helper stops a late agent | Launch test with a helper that waits 3 seconds |
+| The agent and its children exit before the helper signals the group | The agent stays a zombie until after the last signal, so its group ID is not reused | Helper test: the agent exits at once, and the helper sends the signals before the reap (test hook that records the order) |
 | `iris job stop` during steps 3 to 5 of a launch | The launch ends with `stop`, no retry; `run` exits with 1 | Launch test with a stop hook |
 | An agent that opens connections without end | The egress log stops at 1 MiB, then counts; the engine memory stays bounded (8 open connections) | Proxy test with 100,000 refused connections and a small limit |
 | The engine is killed and an agent process left the group (`setsid`) | The helper sees the end of the pipe, stops the group and calls `Isolation::stop`; if the helper is killed too, the lifetime rule ends the process | Helper test with the test isolation that records `stop`; R4-05 test of the lifetime rule on each system |
