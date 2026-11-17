@@ -110,7 +110,7 @@ recipients.
 
 ### 4. The store limit
 
-Migration 23 adds one trigger on `changeset_action`, `BEFORE UPDATE OF
+Migration 25 adds one trigger on `changeset_action`, `BEFORE UPDATE OF
 state, flags`. After the update, an `approved` `draft` or `send` whose flags
 have `new_recipient`, `outside_thread`, `money` or `date` must have
 `decided_by = 'person'`. Else the store aborts with "iris: only a person
@@ -226,17 +226,17 @@ scripts/local-ci/run.sh
 
 ## Rollout
 
-Migration 23 runs at the next start. It adds a trigger only, and no current
+Migration 25 runs at the next start. It adds a trigger only, and no current
 code path approves a `draft` or a `send` by rule.
 
 ## Risks
 
 - A wrong mark gives a missing flag. The person still approves each send.
 - Rollback: add a migration that drops the trigger, and revert the flag
-  code. Do not revert migration 23 alone: a program with fewer migrations
+  code. Do not revert migration 25 alone: a program with fewer migrations
   does not open a newer store.
 
 ## Plan
 
 1. R4-06: this spec.
-2. R4-06: the mark, the flag, migration 23 and the property test (one PR).
+2. R4-06: the mark, the flag, migration 25 and the property test (one PR).
