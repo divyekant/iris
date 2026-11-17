@@ -2,7 +2,7 @@
 
 - Date: 2026-11-17
 - Card: R6-03 (part A)
-- Status: Draft
+- Status: Agreed
 
 ## Problem
 
@@ -199,7 +199,7 @@ parses. All other input gives an error, and the caller ends the session.
 | A message below `<from>` in `list` | dropped | `list_range` |
 | A server with no TLS | handshake error, no plain fallback | `no_plain` |
 | A folder name with CR, LF, NUL or 8-bit bytes | `Error::Name`, nothing sent | `bad_name` |
-| A server without `IMAP4rev1` | `Error::Missing` | `rev2_only` |
+| A server without `IMAP4rev1` | `Error::Protocol` (the parser refuses its `CAPABILITY` list) | `rev2_only` |
 | A status response with a byte above 127 just after `]` (this input makes `imap-proto` 0.17 panic) | `Error::Protocol`, checked before the parser | fuzz test |
 | A quoted folder name with escapes | the escapes removed | `folders_and_examine` |
 
