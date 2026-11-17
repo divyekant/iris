@@ -348,6 +348,7 @@ with a schema name of the kit.
 | A file that is not valid UTF-8, JSON or TOML | That file fails with the parse error. Exit 1. | `test_run.py` runs `check` on each bad file |
 | A JSON object with a key two times | That file fails ("duplicate key"). | same |
 | `NaN`, `Infinity` or `-Infinity` | That file fails. | same |
+| JSON with arrays and objects nested deeper than 256 levels (also if it passes the schemas) | That document fails ("nesting deeper than 256 levels") before the parse, so no Python version runs out of stack. Exit 1. Issue #555. | `test_run.py`, a property test of the depth scan |
 | A name with no schema of the kit | That file fails ("no schema"). It is not skipped. | same |
 | An `items` file with a line that has no `form`, or an unknown `form` | That line fails. | same |
 | An empty `.jsonl` line | That line fails. | same |
