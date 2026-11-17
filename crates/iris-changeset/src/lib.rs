@@ -611,7 +611,7 @@ pub fn submit_in(
         clear(c, id)?;
         let resolved = resolve(c, id, verb, &targets)?;
         if let (Some(job), Some(grant)) = (job, &grant) {
-            if let Some(why) = outside_grant(c, id, job, grant)? {
+            if let Some(why) = outside_grant(c, id, job, grant, Phase::Submit)? {
                 return Err(Error::Denied(why));
             }
         }
@@ -741,20 +741,31 @@ pub fn grant_denial(c: &Connection, action: i64) -> Result<Option<String>> {
         return Ok(None);
     };
     let grant = grant_of(c, job)?;
-    outside_grant(c, action, job, &grant)
+    outside_grant(c, action, job, &grant, Phase::Apply)
+}
+
+/// When the grant check runs: the targets are only declared at submit,
+/// and resolved to rows after it.
+#[derive(Clone, Copy, PartialEq)]
+enum Phase {
+    Submit,
+    Apply,
 }
 
 /// The checks of one action against the grant of its job: no draft or
-/// send, each declared target granted, each resolved message granted, each
-/// item an item of the workspace. Invariant: an action of a session is in
-/// the grant only when each target that it names, and each row that the
-/// targets give, is in the grant. The declared targets are checked first,
-/// so a target that gives no row (all gone, a bad ID) cannot pass.
+/// send, each resolved message granted, each item an item of the workspace.
+/// Invariant: an action of a session changes only granted rows, and a
+/// target that gives no row never passes. At submit, each declared target
+/// must also be in the grant, so a target that gives no row (each message
+/// gone, no such row, an ID that does not parse) fails. After submit, the
+/// rows are fixed: the check reads them, not the targets, because sync can
+/// move a granted message to another thread. An action with no row fails.
 fn outside_grant(
     c: &Connection,
     action: i64,
     job: i64,
     grant: &iris_workspace::Grant,
+    phase: Phase,
 ) -> Result<Option<String>> {
     let j = iris_job::format_job_id(job);
     let (verb, targets): (String, String) = c.query_row(
@@ -767,33 +778,45 @@ fn outside_grant(
             "a session of {j} cannot {verb}: a job has no grant of an account or a draft"
         )));
     }
-    // Fail closed: a target list that does not parse is outside the grant.
     let outside = || Ok(Some(format!("the targets are outside the grant of {j}")));
-    let Ok(groups) = serde_json::from_str::<Map<String, Value>>(&targets) else {
-        return outside();
-    };
-    for ids in groups.values() {
-        let Value::Array(ids) = ids else {
+    if phase == Phase::Submit {
+        // Fail closed: a target list that does not parse is outside the grant.
+        let Ok(groups) = serde_json::from_str::<Map<String, Value>>(&targets) else {
             return outside();
         };
-        for id in ids {
-            let Some((kind, row)) = id.as_str().and_then(parse_id) else {
+        for ids in groups.values() {
+            let Value::Array(ids) = ids else {
                 return outside();
             };
-            let granted = match kind {
-                Kind::Thread => grant.has_thread(row),
-                Kind::Message => grant.messages.contains(&row),
-                Kind::Commitment
-                | Kind::Conversation
-                | Kind::Record
-                | Kind::Feed
-                | Kind::Signal => grant.items.contains(&row),
-                _ => false,
-            };
-            if !granted {
-                let id = format_id(kind, row);
-                return Ok(Some(format!("{id} is outside the grant of {j}")));
+            for id in ids {
+                let Some((kind, row)) = id.as_str().and_then(parse_id) else {
+                    return outside();
+                };
+                let granted = match kind {
+                    Kind::Thread => grant.has_thread(row),
+                    Kind::Message => grant.messages.contains(&row),
+                    Kind::Commitment
+                    | Kind::Conversation
+                    | Kind::Record
+                    | Kind::Feed
+                    | Kind::Signal => grant.items.contains(&row),
+                    _ => false,
+                };
+                if !granted {
+                    let id = format_id(kind, row);
+                    return Ok(Some(format!("{id} is outside the grant of {j}")));
+                }
             }
+        }
+    } else {
+        let rows: bool = c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM action_message WHERE action_id = ?1)
+                 OR EXISTS (SELECT 1 FROM action_item WHERE action_id = ?1)",
+            [action],
+            |r| r.get(0),
+        )?;
+        if !rows {
+            return outside();
         }
     }
     let mut q = c.prepare_cached(

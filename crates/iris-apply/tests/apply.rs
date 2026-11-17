@@ -113,6 +113,20 @@ impl Box {
     ) -> i64 {
         let ids: Vec<String> = messages.iter().map(|m| format!("\"m-{m}\"")).collect();
         let targets = format!("{{\"messages\":[{}]}}", ids.join(","));
+        self.approved_targets(verb, args, &targets, messages, decision, submitted)
+    }
+
+    /// As `approved_args`, with the targets `targets` and the resolved
+    /// messages `messages`.
+    fn approved_targets(
+        &self,
+        verb: &str,
+        args: &str,
+        targets: &str,
+        messages: &[i64],
+        decision: &str,
+        submitted: i64,
+    ) -> i64 {
         self.store
             .write(|tx| {
                 let job = self.job.lock().unwrap().map(iris_job::format_job_id);
@@ -1314,6 +1328,53 @@ fn a_session_action_applies_only_inside_the_grant() {
     }
     assert_eq!(b.state(a), ("denied".into(), "engine".into()));
     assert_eq!(b.calls("batchModify"), before);
+    assert!(b.gmail_labels(ms[1]).contains(&"INBOX".to_string()));
+}
+
+/// After submit, the apply checks the resolved rows, not the targets: a
+/// thread action applies when sync moves each granted message to another
+/// thread. An action with no row is outside the grant.
+#[test]
+fn a_session_thread_action_applies_after_sync_moves_its_mail() {
+    let b = setup("grant-moved", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    session_job(&b, &ms[..1]);
+    let thread: i64 = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT thread_id FROM message WHERE id = ?1",
+                [ms[0]],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    let targets = format!("{{\"threads\":[\"t-{thread}\"]}}");
+    let a = b.approved_targets("archive", "{}", &targets, &ms[..1], PERSON, now());
+    // Sync moves each message of the thread to a new thread after the
+    // submit, so the grant holds no message of the old thread.
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO thread(account_id, provider_id) VALUES (?1, 'moved')",
+                [b.account],
+            )?;
+            let t = tx.last_insert_rowid();
+            tx.execute(
+                "UPDATE message SET thread_id = ?1 WHERE thread_id = ?2",
+                [t, thread],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    applied(b.apply(a));
+
+    let targets = format!("{{\"messages\":[\"m-{}\"]}}", ms[1]);
+    let a = b.approved_targets("archive", "{}", &targets, &[], PERSON, now());
+    match b.apply(a) {
+        Ok(Outcome::Denied(why)) => assert!(why.contains("outside the grant"), "{why}"),
+        other => panic!("{other:?}"),
+    }
     assert!(b.gmail_labels(ms[1]).contains(&"INBOX".to_string()));
 }
 
