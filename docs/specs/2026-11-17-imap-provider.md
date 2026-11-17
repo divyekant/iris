@@ -99,6 +99,7 @@ thread.
 | `SPAM` | `SPAM` | system | a folder with `\Junk` |
 | `TRASH` | `TRASH` | system | a folder with `\Trash` |
 | A folder label | `folder:<name>` | system for a special-use folder, else user | each other folder, also `\Sent`, `\Drafts` and `\Archive` |
+| `UNSENT` | `UNSENT` | system | a folder with `\Drafts`, or the `\Draft` flag |
 | A keyword label | `kw:<keyword>` | user | a keyword flag (no `\` at the start) |
 
 No IMAP message gets `SENT` or `DRAFT`. Each of the two labels is proof
@@ -106,13 +107,23 @@ that the owner wrote the mail (the sender axis, the hostile checks, the
 known people). Anyone can move or copy a received message into the Sent
 or the Drafts folder, and any client can set the `\Draft` flag. So a
 message in the `\Sent` or the `\Drafts` folder gets the system label
-`folder:<name>` only, and the `\Draft` flag gives no label. The send card
-gives `SENT` to the copies that Iris itself sent.
+`folder:<name>` only. The send card gives `SENT` to the copies that Iris
+itself sent.
+
+A draft must still stay out of the understanding (spec 1 section 6.7).
+So a message in the `\Drafts` folder or with the `\Draft` flag gets the
+system label `UNSENT`. `UNSENT` is not proof of authorship: the sender
+axis and the hostile checks ignore it. The understanding skips a message
+with `UNSENT` as it skips one with `DRAFT`: the engine part of this card
+adds `UNSENT` to each query of `crates/iris-understand` that excludes
+`DRAFT` (`batch.rs` and the item query of `store.rs`). No IMAP account
+can sync before that part, because only that part adds the account.
 
 A message in the `\Archive` folder has the label `folder:<name>` and no
 `INBOX`: the mirror shows it as archived.
 
-`labels` gives the fixed labels `INBOX`, `UNREAD`, `STARRED`, `SPAM` and `TRASH` that apply, each folder label, and a
+`labels` gives the fixed labels `INBOX`, `UNREAD`, `STARRED`, `UNSENT`,
+`SPAM` and `TRASH` that apply, each folder label, and a
 keyword label for each keyword in the `PERMANENTFLAGS` and the `FLAGS` of
 each folder. It gives no counts.
 
@@ -160,6 +171,7 @@ For each folder of the list now:
 |---|---|
 | The folder is not in `from` | `Added` for each message of the folder |
 | A new `UIDVALIDITY` | `HistoryExpired` |
+| No `HIGHESTMODSEQ` (`NOMODSEQ`) now or in `from` | `HistoryExpired`, also when nothing else changed: a flag change leaves no other trace. The resync then gets `Api` 400 `noCondstore` from `profile` (section 6) |
 | `HIGHESTMODSEQ`, `UIDNEXT` and the count are the same | nothing |
 | `QRESYNC` | Windows with `CHANGEDSINCE`: `Added` (the full label set) for each changed message. Then `Deleted` for each `VANISHED` UID |
 | `CONDSTORE` only | Windows as above. Then the search of the new UIDs: removed = count in `from` - (count now - the new UIDs here now). If removed is not 0, `HistoryExpired`. A removal after the `EXAMINE` makes it `HistoryExpired` too, which is safe. A UID from the `UIDNEXT` of `from` up to the `UIDNEXT` of now that is not here now came and went after `from` (the first sync can list it): `Deleted` |
@@ -179,7 +191,9 @@ mirror does not have.
 
 ### 6. Reads
 
-- `profile`: the address of the account, as the person gave it to
+- `profile`: `Api` 400 `noCondstore` if the server has no `CONDSTORE` or
+  if the `EXAMINE` of a folder gives no `HIGHESTMODSEQ` (limit issue #629).
+  Else the address of the account, as the person gave it to
   `iris account add-imap` (section 8), not the IMAP user name. The sync
   and the apply compare it with the address of the account row. Counts 0
   (the trait allows 0), and the cursor of now.
@@ -187,10 +201,13 @@ mirror does not have.
   (section 2). Each page is one window of 2,000 sequence numbers of one
   folder, from the top down: newest first in each folder, `INBOX` first. The
   provider spec (`messages`) allows this order for a folder provider.
-  With a folder label, `INBOX`, `SPAM` or `TRASH`, only that folder. With `UNREAD`, `STARRED` or a keyword
-  label, `UID SEARCH` (`UNSEEN`, `FLAGGED`, `KEYWORD <k>`) in each folder,
-  then a `UID FETCH` of at most 500 of the found UIDs, from the highest
-  down. The bound of the token is then a UID.
+  With a folder label, `INBOX`, `SPAM` or `TRASH`, only that folder. With
+  `UNREAD`, `STARRED`, `UNSENT` or a keyword label, each folder, and each
+  window is `UID SEARCH <low>:<high> <key>` (`UNSEEN`, `FLAGGED`, `DRAFT`,
+  `KEYWORD <k>`) on the sequence numbers of the window, then a `UID FETCH`
+  of the found UIDs. So one answer holds at most 2,000 UIDs, under the
+  1 MiB response limit of the client. For `UNSENT`, each message of a
+  `\Drafts` folder counts with no search.
 - `minimal` and `raw`: `EXAMINE` of the folder of the ID, then
   a `UID FETCH`. A new `UIDVALIDITY`, or no message with the UID, is
   `NotFound`. A refused `EXAMINE` of a folder that is not in the LIST now
@@ -305,8 +322,9 @@ times after an unknown result (spec 2 section 7.2).
 - `iris-sync` treats `Added` of a message that it has as a full label set.
   Evidence: `crates/iris-sync/src/lib.rs`, `apply`, `Op::Set`.
 - A server with `CONDSTORE` gives `HIGHESTMODSEQ` for each folder that it
-  can. `pending`: a folder with `NOMODSEQ` gets a full compare by
-  `HistoryExpired` at each change, which is slow but correct.
+  can. `pending`: a folder with `NOMODSEQ` stops the sync of the account
+  with `noCondstore` (limit issue #629), so a wrong assumption gives a
+  clear refusal, not a wrong mirror.
 - `UIDNEXT` comes with each `EXAMINE`. `pending`: without it, the
   provider uses the highest UID + 1 from a `UID FETCH *`.
 

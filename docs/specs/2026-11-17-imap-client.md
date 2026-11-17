@@ -114,7 +114,9 @@ The part B spec (`docs/specs/2026-11-17-imap-provider.md`, section 5)
 replaces this section. The changes: a server without `CONDSTORE` cannot
 sync (limit issue #629), and a full compare is a full resync of the
 mirror (`HistoryExpired`), because the provider cursor cannot hold the
-UID set of a folder. The text below is the first plan.
+UID set of a folder. Part B also reads its pages in windows of sequence
+numbers (`Session::window`), not of UIDs, because UIDs can be sparse. The
+text below is the first plan.
 
 The client gives the reads. Part B does the sync with them. The mode is
 chosen for each folder at each sync, from the `EXAMINE` result, not from
