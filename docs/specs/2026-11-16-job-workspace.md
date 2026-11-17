@@ -204,10 +204,14 @@ these rules:
   engine checks the resolved messages at `submit`, and again just before
   the apply. A message outside the grant at `submit` makes the submit fail
   with no change. A message that left the grant before the apply makes the
-  action refused, with the reason, and nothing changes in the mailbox.
+  action refused, with the reason, and no message changes.
+- The engine checks the grant before the first provider call of the
+  action, also `labels.create` (spec 2 apply step 1), and again at the
+  cutoff. A revoke between the two can leave a new label in Gmail with no
+  message on it. The action is refused and no message changes.
 - The cutoff of the apply check is the write transaction that moves the
-  action to the state before the provider call (spec 2). The check of the
-  grant runs in that same transaction. A revoke is a write transaction
+  action to the state before the provider call that changes a message
+  (spec 2). The check of the grant runs in that same transaction. A revoke is a write transaction
   too, and SQLite runs one write transaction at a time. So a revoke that
   commits before the cutoff makes the action refused. A revoke that
   commits after the cutoff does not stop that one provider call: the
@@ -369,9 +373,15 @@ can close the gap. The rules are:
   gives the revoke count of the scope that the build read
   (`Built::revoked`), and `iris_job::revoked_count(store, job)` gives the
   current count. Revokes only grow, so a revoke during a build makes the
-  two counts differ. The launcher (R4-04) builds again until they agree,
-  then starts the session. A revoke while a session runs ends that
-  session (R4-04), and the next session starts after a new build.
+  two counts differ. The launcher (R4-04) does these steps in order:
+  1. Register the session of the job in a write transaction.
+  2. Build, and compare the two counts. If they differ, build again.
+  3. Start the agent of the session.
+
+  A revoke ends each registered session of the job, also one that is in
+  step 2 or 3 and has no running agent yet (R4-04). A revoke before step 1
+  is in the first build. A revoke after step 1 ends the session before or
+  while its agent reads, and the next session starts with step 1 again.
 - An engine change of eligibility (a message that becomes hostile mail,
   gone or a signal source) after the read of a build stays in the files
   until the next build. This is a known limit, with a GitHub issue.
