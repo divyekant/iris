@@ -57,6 +57,17 @@ def coalition(pid):
     return (buf[0], buf[1])
 
 
+def coalition_counts(cid):
+    """(tasks_started, tasks_exited) of a resource coalition, or an error."""
+    buf = (ctypes.c_uint64 * 128)()
+    f = ctypes.CDLL(None, use_errno=True).coalition_info_resource_usage
+    f.argtypes = [ctypes.c_uint64, ctypes.c_void_p, ctypes.c_size_t]
+    r = f(cid, buf, ctypes.sizeof(buf))
+    if r != 0:
+        return "error rc=%d errno=%d" % (r, ctypes.get_errno())
+    return (buf[0], buf[1])
+
+
 def all_pids():
     lp = libproc()
     n = lp.proc_listallpids(None, 0)
@@ -90,6 +101,8 @@ def beat(fd, n):
 def run_hopper(outdir, deadline, marker):
     """setsid, then fork and let the parent exit, again and again."""
     del marker
+    if os.fork():
+        os._exit(0)
     os.setsid()
     fd = os.open(os.path.join(outdir, "hop.beat"), os.O_WRONLY | os.O_CREAT, 0o600)
     n, last = 0, 0.0
@@ -241,6 +254,59 @@ def test_launchd(marker, profile, how, n):
     return res
 
 
+def kill_loop(cid, limit=5.0):
+    """Stop then kill each member of the coalition until a scan and the
+    counters say it is empty. Gives the pass count and the result."""
+    t0, passes, empty_scans = time.time(), 0, 0
+    while time.time() - t0 < limit:
+        passes += 1
+        members = pids_in_coalition(cid)
+        for sig in (signal.SIGSTOP, signal.SIGKILL):
+            for pid in members:
+                try:
+                    os.kill(pid, sig)
+                except OSError:
+                    pass
+        c = coalition_counts(cid)
+        if not members and isinstance(c, tuple) and c[0] == c[1]:
+            break
+        empty_scans = empty_scans + 1 if not members else 0
+        time.sleep(0.01)
+    return {"passes": passes, "seconds": round(time.time() - t0, 3), "counts_end": coalition_counts(cid),
+            "empty_scans_at_end": empty_scans}
+
+
+def test_kill_loop(marker, profile, n):
+    """A launchd helper with escapers; bootout, then the coalition kill loop."""
+    outdir = tempfile.mkdtemp(prefix="iris-probe-")
+    label = "com.iris.probe.loop.%d.%d" % (os.getpid(), n)
+    deadline = time.time() + DEADLINE_S
+    helper, err = start_job(label, outdir, deadline, marker, profile)
+    if err:
+        return {"error": err}
+    time.sleep(1.5)
+    cid = helper["coalition"][0]
+    res = {"before": escapers_alive(outdir), "counts_before": coalition_counts(cid)}
+    res["bootout"] = bootout(label)
+    time.sleep(0.5)
+    res["after_bootout"] = escapers_alive(outdir)
+    res["single_scan_kill"] = None
+    members = pids_in_coalition(cid)
+    for pid in members:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    time.sleep(1.5)
+    res["after_single_scan_kill"] = escapers_alive(outdir)
+    res["counts_after_single_scan_kill"] = coalition_counts(cid)
+    res["loop"] = kill_loop(cid)
+    time.sleep(1.5)
+    res["after_loop"] = escapers_alive(outdir)
+    res["counts_after_loop"] = coalition_counts(cid)
+    return res
+
+
 # --- containment test ------------------------------------------------------
 
 
@@ -302,9 +368,12 @@ def test_containment(marker):
         "marker": marker,
     }
     env = {"HOME": priv, "TMPDIR": priv, "PATH": "/usr/bin:/bin"}
+    script = os.path.join(priv, "probe.py")
+    with open(os.path.abspath(__file__)) as src, open(script, "w") as dst:
+        dst.write(src.read())
     t0 = time.time()
     r = subprocess.run(
-        ["/usr/bin/sandbox-exec", "-f", profile, os.path.realpath(sys.executable), os.path.abspath(__file__), "inside", json.dumps(args)],
+        ["/usr/bin/sandbox-exec", "-f", profile, os.path.realpath(sys.executable), script, "inside", json.dumps(args)],
         capture_output=True, text=True, env=env, timeout=60,
     )
     res = {"rc": r.returncode, "seconds": round(time.time() - t0, 3), "stderr": r.stderr.strip()[-600:]}
@@ -409,9 +478,10 @@ def main():
     write_profile(lifetime_profile, tmp_root, sb_dir, 9, read_extra)
     try:
         report["baseline_plain_child_sigkill"] = test_baseline(marker, None)
-        report["launchd_bootout"] = [test_launchd(marker, None, "bootout", i) for i in range(ROUNDS)]
-        report["launchd_sigkill"] = [test_launchd(marker, None, "sigkill", i) for i in range(ROUNDS)]
-        report["launchd_bootout_sandboxed"] = [test_launchd(marker, lifetime_profile, "bootout", 100 + i) for i in range(2)]
+        report["launchd_bootout"] = [test_launchd(marker, None, "bootout", 0)]
+        report["launchd_sigkill"] = [test_launchd(marker, None, "sigkill", 1)]
+        report["kill_loop"] = [test_kill_loop(marker, None, 200 + i) for i in range(ROUNDS)]
+        report["kill_loop_sandboxed"] = [test_kill_loop(marker, lifetime_profile, 300 + i) for i in range(2)]
         report["containment"] = test_containment(marker)
     finally:
         left = marker_pids(marker)
