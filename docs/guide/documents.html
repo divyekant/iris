@@ -28,7 +28,7 @@ fields. The schema is
 (<code>$defs/item</code>).</p>
 <table>
 <tr><th>Field</th><th>Required</th><th>Value</th></tr>
-<tr><td><code>model</code></td><td>yes</td><td><code>"iris/1.0"</code></td></tr>
+<tr><td><code>model</code></td><td>yes</td><td><code>"iris/1.1"</code>, or <code>"iris/1.0"</code> for a document of version 1.0.</td></tr>
 <tr><td><code>id</code></td><td>yes</td><td>The ID of the item, with the prefix of its form.</td></tr>
 <tr><td><code>form</code></td><td>yes</td><td><code>commitment</code>, <code>conversation</code>, <code>record</code>, <code>feed</code> or <code>signal</code>.</td></tr>
 <tr><td><code>status</code></td><td>yes</td><td>The state of the item. Each form has its own values.</td></tr>
@@ -38,6 +38,7 @@ fields. The schema is
 <tr><td><code>derived</code></td><td>yes</td><td>Who made the item. <code>by</code> is <code>rule</code> (with <code>rule</code>), <code>model</code> (with <code>model</code> and <code>prompt</code>) or <code>person</code>.</td></tr>
 <tr><td><code>confidence</code></td><td>no</td><td>A number from 0 to 1. Not permitted when <code>derived.by</code> is <code>person</code>.</td></tr>
 <tr><td><code>matter</code></td><td>no</td><td>The <code>g-</code> ID of the matter of the item, or <code>null</code>.</td></tr>
+<tr><td><code>account</code></td><td>no</td><td>Since version 1.1. The <code>a-</code> ID of the account (the mailbox) of the item. Not permitted in a document of version 1.0.</td></tr>
 <tr><td><code>ready</code></td><td>no</td><td><code>["draft"]</code> when Iris prepared a reply draft. The engine sets it when it reads the item.</td></tr>
 <tr><td><code>attention</code></td><td>no</td><td><code>state</code> is <code>shown</code>, <code>bundled</code> or <code>hidden</code>, with the policy rule and the reason.</td></tr>
 </table>

@@ -17,9 +17,9 @@ the conformance kit.</p>
 <h2 id="rules">Rules for a producer</h2>
 <ol>
 <li>Write only the fields of the minor version that your program claims.
-For version 1.0, write only the fields of the 1.0 schemas.</li>
-<li>Write the <code>model</code> value of that version:
-<code>"iris/1.0"</code>.</li>
+For version 1.0, do not write <code>account</code>, the field of 1.1.</li>
+<li>Write the <code>model</code> value of that version: <code>"iris/1.1"</code>
+or <code>"iris/1.0"</code>.</li>
 <li>Make sure that each document passes the schema of its kind, with the
 format checks of <code>date</code> and <code>date-time</code>.</li>
 <li>Do not write a key two times in one JSON object.</li>
