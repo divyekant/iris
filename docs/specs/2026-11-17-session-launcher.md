@@ -143,9 +143,13 @@ allow_hosts = ["api.my-tool.example"]
 - `command` has 1 to 32 strings. The first string is the program.
 - `pass_env` names environment variables that the session gets, if the
   engine has them. Each name is `[A-Z_][A-Z0-9_]*`. A name that starts with
-  `IRIS` is refused.
-- `allow_hosts` names the hosts that the agent can reach through the egress
-  proxy, at most 16. Each one is a DNS name in lower case, with no port and
+  `IRIS` is refused. The proxy names (`HTTPS_PROXY`, `HTTP_PROXY`,
+  `ALL_PROXY`, `NO_PROXY`, in any case) are refused, because only the
+  engine sets them.
+- `allow_hosts` names the HTTPS hosts that the agent can reach through the
+  egress proxy, at most 16. The person sets them, and Iris does not check
+  that a host is a model host: the agent tool can send the workspace to
+  each of them. The built-in adapters have only their model host. Each one is a DNS name in lower case, with no port and
   no wildcard. An IP address is refused. The default is no host: the agent
   has no network.
 - The engine reads the file at each `run`. An error in the file refuses the
@@ -555,6 +559,8 @@ is refused before a row is written.
 | An agent that prints a passed key or a file of the agent tool | Nothing of it is stored; the log has only status lines | Helper test: a script prints a marker value to both pipes, and no file of the data folder holds it |
 | A connection to the egress port of another session | The other session is not reached: each port belongs to one session, and the isolation permits only its own port | R4-05 test |
 | An `allow_hosts` entry with a port, a wildcard or an IP address | Refused with the line | Parser test |
+| A `pass_env` with a proxy name, in any case | Refused with the line | Parser test |
+| An adapter with no allowed host while the engine has `HTTPS_PROXY` | The agent gets no proxy variable | Launch test |
 
 ## Impact
 
@@ -596,8 +602,10 @@ only waits: its resident memory is small, and the build measures it
 ## External writes
 
 The launcher writes nothing outside the product. The agent writes changes
-to the mailbox only through the verbs, and nothing leaves before `submit`
-(spec 2).
+to the mailbox only through the verbs, and no change reaches the mailbox
+before `submit` (spec 2). `submit` gates changes to the mailbox only: the
+agent tool can send the data of the workspace to an allowed host of its
+adapter at any time of the session, before any `submit`.
 
 The agent tool calls its model host through the egress proxy. Each call is
 a request of the agent tool, on the account and the key of the agent tool,
