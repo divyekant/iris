@@ -59,11 +59,15 @@ CREATE TABLE job_notes (
 - `text` is a BLOB: the store keeps the bytes as they are. Iris does not
   check UTF-8 and does not change line ends.
 - 65,536 bytes (64 KiB) is the limit, `iris_job::NOTES_MAX` (issue #563).
-- Nothing deletes a row. The job store deletes no job (issue #249).
+- Only the end of a job deletes its row (see "Remove the notes").
 
-`iris-job` gets two functions: `notes(store, job) -> Option<Vec<u8>>` and
-`save_notes(store, job, &[u8], now)`. `save_notes` refuses a text over the
-limit with `Error::Refused` and writes nothing.
+`iris-job` gets three functions: `notes(store, job) -> Option<Vec<u8>>`,
+`save_notes(store, job, &[u8], now) -> bool` and `drop_notes`.
+`save_notes` refuses a text over the limit with `Error::Refused` and writes
+nothing. `drop_notes(store, job) -> bool` deletes the copy if the job is
+done, and gives `true` for a done job. For a done job, `save_notes` does
+the same delete, saves nothing and gives `false`. Each function does its
+state check and its write in one write transaction.
 
 ### Save the notes (`iris_workspace::save_notes`)
 
@@ -76,6 +80,11 @@ and saves it in the store. The result:
 | `Notes::Absent` | No `notes.md`. | No change. |
 | `Notes::NotAFile` | A link, a folder, a FIFO, a socket or a device. | No change. |
 | `Notes::TooLarge` | A regular file of more than 64 KiB. | No change. |
+| `Notes::Done` | The job is done (any file, or none). | The copy of the job is deleted. |
+
+For a done job, `save_notes` reads no file: it calls `drop_notes` and gives
+`Done`. The state check and the delete are in one write transaction, and
+the move to `done` cannot go back, so a later save cannot write a new copy.
 
 The read:
 
@@ -161,18 +170,25 @@ sample of `JOB.md`.
 The workspace spec (`docs/specs/2026-11-16-job-workspace.md`, "Text that
 the build does not check") lets the person delete the workspace folder to
 remove the agent files, for example notes that quote mail of an ended
-grant. With this design, the build writes the copy back. So the removal
-path changes:
+grant. With this design, the build writes the copy back. So the rules
+change:
 
-1. The person edits `notes.md` (or empties it) while no session of the job
-   runs.
-2. The next build saves the edit, and the copy of the store is the edit.
-   The store keeps no older copy.
+- **A done job.** A done job gets no new session, so its notes have no
+  more use. `iris_job::save_notes` of a done job deletes the copy of the
+  job and saves nothing, in one write transaction. The reap of the last
+  session and each build of a done job (`build_done`, also at each engine
+  start) call it. So the copy goes when the job is done, also when the
+  person deleted the workspace folder first: the reap calls the save with
+  no file (`Absent` for an open job, `Done` for a done job).
+- **An open job** (working, waiting or needs you). The person edits
+  `notes.md` while no session of the job runs. The next build or reap
+  saves the edit, and the store keeps no older copy. A deleted folder does
+  not remove the notes of an open job: the build of the next session
+  writes the copy back. The person can stop that session, edit `notes.md`
+  and run the job again.
 
-A deleted folder no longer removes the notes. The workspace spec changes in
-this PR to say so. The next build of a working or waiting job comes at its
-next session; of a done job, at the next engine start (`Sessions::new`).
-Until then, the old copy stays in the store (issue in the code PR).
+For an open job whose folder is gone, no verb clears the copy before the
+next session. This is a known limit, with an issue in the code PR.
 
 ## Options not chosen
 
@@ -209,6 +225,7 @@ stays as it is, and the session starts.
 | A folder. | `NotAFile`. | Unit test. |
 | No `notes.md`, and a copy in the store. | The build writes the copy, byte for byte. | Unit test. |
 | No `notes.md`, and no copy. | The build writes `# Notes`. | Existing test. |
+| The job is done, with or without its folder. | The copy is deleted at the reap or the next build; no build restores it. | Unit test. |
 | The workspace folder is gone, and the job wakes. | The launch build makes the folder and restores the notes. | Engine test with the fake clock. |
 | The agent changes the file after the reap and before the build. | Not possible: no process of the job runs between a reap and the next launch. | The reap check (R4-04). |
 | A launch of the job runs, or a newer session of the job is live, at the reap. | The reap thread does not save. The build of that launch and the reap of that session save. | Review: the check and the mark are one step under the state lock, which `run` also takes for its mark. |
@@ -220,7 +237,7 @@ stays as it is, and the session starts.
 ## Impact
 
 - `crates/iris-store/src/schema_<N>.sql`: the table `job_notes`.
-- `crates/iris-job`: `NOTES_MAX`, `notes`, `save_notes`.
+- `crates/iris-job`: `NOTES_MAX`, `notes`, `save_notes`, `drop_notes`.
 - `crates/iris-workspace`: `save_notes`, the restore in `build`, the rule
   line. New dependency: `libc` (already in `Cargo.lock`).
 - `crates/iris/src/sessions.rs`: the save in `reap_one`.
