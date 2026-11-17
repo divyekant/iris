@@ -146,6 +146,13 @@ class Runner(unittest.TestCase):
                 (Path(d) / "feed.schema.json").write_text("{")
                 with contextlib.redirect_stderr(io.StringIO()):
                     self.assertEqual(run.main(["self-test"]), 2)
+                # A schema that is not there.
+                for p in (HERE.parent / "schema").glob("*.schema.json"):
+                    if p.name != "feed.schema.json":
+                        (Path(d) / p.name).write_text(p.read_text())
+                (Path(d) / "feed.schema.json").unlink()
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(run.main(["check", str(HERE)]), 2)
             finally:
                 run.SPEC, run.SCHEMAS = spec, schemas
 

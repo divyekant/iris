@@ -22,6 +22,8 @@ SCHEMAS = SPEC / "schema"
 FORMS = ("commitment", "conversation", "record", "feed", "signal")
 MODEL = re.compile(r"^iris/1\.(0|[1-9][0-9]*)$")
 SUFFIXES = (".json", ".jsonl", ".toml")
+# Each schema of kit 1.0. A kit copy without one of them is not complete.
+REQUIRED = FORMS + ("common", "sender", "matter", "changeset", "policy", "job", "jobitem", "person")
 
 
 class KitError(Exception):
@@ -51,6 +53,9 @@ def load_validators():
         schema = json.loads(path.read_text(encoding="utf-8"))
         schemas[path.name.split(".")[0]] = schema
         registry = registry.with_resource(schema["$id"], Resource.from_contents(schema))
+    missing = sorted(set(REQUIRED) - set(schemas))
+    if missing:
+        raise KitError(f"the kit has no schema {', '.join(missing)}")
     ids = {s["$id"] for s in schemas.values()}
     validators = {}
     for name, schema in schemas.items():
