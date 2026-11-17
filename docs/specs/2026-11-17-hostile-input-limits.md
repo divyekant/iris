@@ -99,10 +99,11 @@ stored raw bytes of the draft of a `send`.
 Submit (`iris_changeset::submit_in`) adds `outside_thread` to a `draft` or a
 `send` action when the changeset author is marked
 (`iris_changeset::marked_in`) and the content has an outside address
-(`iris_changeset::outside_marks` is not empty). The drafts API of the
-review (`crates/iris-api/src/drafts.rs`) shows the mark `outside_thread`
-on each outside address of an action with the flag, so the flag is not in
-`unmarked`. Submit reads the mark and the thread addresses in its own
+(`iris_changeset::outside_marks` is not empty). The flag has no mark on
+a field: the drafts API of the review lists it in `unmarked`, and the
+review screen shows it in words ("Goes to an address that is not in the
+thread"). A mark on each address waits for a short tag in the review
+screen, a screen change for the owner to pick. Submit reads the mark and the thread addresses in its own
 transaction. The release does not compute the flag again: the person
 approved the action with the flag in view, and the content hash binds the
 recipients.
@@ -168,7 +169,6 @@ the thread messages in the store, the scope rows of the job.
 - `crates/iris-job`: `reads_outside_in`.
 - `crates/iris-changeset`: the flag at submit (`submit_in`, `marked_in`,
   `outside_marks`).
-- `crates/iris-api`: the drafts API shows the marks of `outside_thread`.
 - An agent with no job is marked, so its new mail gets `outside_thread`.
   Tests of the other draft flags use a person author or expect the flag.
 - `docs/spec/02-changeset-policy-ledger.md`: sections 5.3 and 6.5.

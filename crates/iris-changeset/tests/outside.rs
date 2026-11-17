@@ -423,3 +423,91 @@ fn a_flag_added_after_a_rule_approval_is_refused() {
     })
     .unwrap();
 }
+
+/// The store limit for a `send`: a send of a marked author to a draft with
+/// an outside address gets the flag, and no rule approval passes, at the
+/// move to approved or by a flag added after a rule approval.
+#[test]
+fn the_store_limit_holds_for_a_send() {
+    let dir = TempDir::new("send");
+    let s = store(&dir);
+    s.write(|tx| {
+        tx.execute_batch(
+            "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES ('', '', 0);
+             INSERT INTO policy_rule_id(id) VALUES (1);
+             INSERT INTO sender_evidence(message_id, address, rule) VALUES (2, 'priya@example.com', 'sent');",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let local = author(AuthorKind::Local, None);
+    // A draft row for each draft action, as the apply writes it.
+    let send = |draft_action: i64, to: &str, provider: &str| -> (i64, Vec<String>) {
+        let c = iris_compose::Content {
+            to: vec![to.into()],
+            cc: Vec::new(),
+            subject: "Plan".into(),
+            body: "See you.".into(),
+        }
+        .check()
+        .unwrap();
+        let hdr = format!("iris.{provider}@example.com");
+        let raw = iris_compose::compose(OWNER, &hdr, &c, None, 1);
+        let hash = iris_compose::hash(&c, None);
+        let d: i64 = s
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO draft(account_id, provider_id, message_id_hdr, content, hash, raw,
+                                       action_id, created_at, updated_at)
+                     VALUES (1, ?1, ?2, '{}', ?3, ?4, ?5, 0, 0)",
+                    rusqlite::params![provider, hdr, hash, raw, draft_action],
+                )?;
+                Ok(tx.last_insert_rowid())
+            })
+            .unwrap();
+        let cs = create(&s, &local, NOW).unwrap();
+        let n = add_action(
+            &s,
+            cs,
+            &local,
+            Verb::Send,
+            &[&format!("d-{d}")],
+            &Map::new(),
+            None,
+        )
+        .unwrap();
+        submit(&s, cs, &local, "Send", NOW).unwrap();
+        s.read(|c| {
+            let (a, f): (i64, String) = c.query_row(
+                "SELECT id, flags FROM changeset_action WHERE changeset_id = ?1 AND n = ?2",
+                rusqlite::params![cs, n],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            Ok((a, serde_json::from_str(&f).unwrap()))
+        })
+        .unwrap()
+    };
+    let (d1, _) = draft(&s, &local, "a-1", &["priya@example.com"], &[]);
+    let (d2, _) = draft(&s, &local, "a-1", &["priya@example.com"], &[]);
+    // A new mail to eve: outside, so flagged, and no rule approves it.
+    let (a, f) = send(d1, "eve@evil.example", "r1");
+    assert!(f.contains(&"outside_thread".to_string()), "{f:?}");
+    assert!(rule_approve(&s, a)
+        .unwrap_err()
+        .contains("only a person approves"));
+    // A send to your own address has no warning flag: a rule approval
+    // passes, and a warning flag added later is refused.
+    let (a, f) = send(d2, OWNER, "r2");
+    assert!(f.is_empty(), "{f:?}");
+    rule_approve(&s, a).unwrap();
+    let e = s
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE changeset_action SET flags = '[\"outside_thread\"]' WHERE id = ?1",
+                [a],
+            )?)
+        })
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("only a person approves"), "{e}");
+}

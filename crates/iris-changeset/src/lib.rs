@@ -897,7 +897,7 @@ pub fn marked_in(c: &Connection, changeset: i64) -> Result<bool> {
 /// `to` and `cc` of `content` that is not in From, To or Cc of a live
 /// message of the threads of `action`, and is not one of your addresses. A
 /// new mail has no thread. Submit gives the flag to a marked author when
-/// this list is not empty; the review shows the marks.
+/// this list is not empty.
 pub fn outside_marks(
     c: &Connection,
     action: i64,
