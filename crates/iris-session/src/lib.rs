@@ -19,4 +19,5 @@ pub mod egress;
 pub mod hold;
 pub mod isolation;
 pub mod launch;
+pub mod peer;
 pub mod reap;

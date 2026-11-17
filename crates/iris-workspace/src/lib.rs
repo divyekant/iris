@@ -161,6 +161,11 @@ pub struct Grant {
 }
 
 impl Grant {
+    /// The count of threads with one or more granted messages.
+    pub fn threads(&self) -> usize {
+        self.threads.len()
+    }
+
     /// If the grant holds one or more messages of `thread`.
     pub fn has_thread(&self, thread: i64) -> bool {
         self.threads.contains_key(&thread)

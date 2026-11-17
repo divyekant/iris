@@ -13,6 +13,7 @@ pub mod cost;
 pub mod engine;
 pub mod notify;
 pub mod reply;
+pub mod session_socket;
 pub mod sessions;
 pub mod socket;
 pub mod verbs;

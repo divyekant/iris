@@ -19,6 +19,7 @@ use std::process::{self, Child, ChildStderr, ChildStdin};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
+use iris_changeset::{Author, AuthorKind};
 use iris_job::{format_session_id, EndReason, Session};
 use iris_session::config::Adapter;
 use iris_session::egress::{session_peer, Proxy, SystemResolver};
@@ -28,6 +29,7 @@ use iris_session::reap::reap_check;
 use iris_store::Store;
 
 use crate::engine::now_ms;
+use crate::session_socket::{Handler, IsOpen, Server, DRAIN_WAIT};
 
 /// The time between two supervisor turns.
 pub const TURN: Duration = Duration::from_secs(1);
@@ -91,8 +93,10 @@ struct Live {
     /// The pipe to the helper. `None` after the shutdown closed it.
     pipe: Option<ChildStdin>,
     status: ChildStderr,
-    /// Held open until R4-04i serves it. The shutdown closes it.
-    socket: Option<UnixListener>,
+    /// The server of the session socket. The reap thread closes it after
+    /// the accepted requests got their answer (step 3 of the shutdown
+    /// order), then closes the pipe.
+    server: Option<Server>,
     socket_path: PathBuf,
     proxy: Option<Proxy>,
     /// The time limit of the session, in milliseconds.
@@ -326,6 +330,12 @@ impl Sessions {
     /// Steps 3 to 6, on the launch thread.
     fn launch(&self, isolation: &dyn Isolation, begun: iris_session::launch::Begun) {
         let job = begun.job();
+        let author = Author {
+            kind: AuthorKind::Agent,
+            name: Some(begun.agent().to_string()),
+            session: Some(format_session_id(begun.session)),
+            job: Some(iris_job::format_job_id(job)),
+        };
         let limit_ms = i64::from(begun.max_minutes()) * 60_000;
         let hook = self.hook();
         let after = |step: Step, s: i64| {
@@ -362,13 +372,14 @@ impl Sessions {
         match outcome {
             Outcome::Running(r) => {
                 let proxy = proxies.remove(&r.session);
+                let server = self.serve(r.session, r.socket, author);
                 st.running.insert(
                     r.session,
                     Live {
                         child: r.helper,
                         pipe: Some(r.pipe),
                         status: r.status,
-                        socket: Some(r.socket),
+                        server,
                         socket_path: r.socket_path,
                         proxy,
                         limit_ms,
@@ -499,11 +510,18 @@ impl Sessions {
                     false
                 }
             };
+            // Steps 3 and 4 of the shutdown order wait, so the reap thread
+            // does them.
+            let (server, pipe) = st
+                .running
+                .get_mut(&s.id)
+                .map(|l| (l.server.take(), l.pipe.take()))
+                .unwrap_or_default();
             let me = self.clone();
             let (id, job) = (s.id, s.job_id);
             let spawned = std::thread::Builder::new()
                 .name(format!("reap-{}", format_session_id(id)))
-                .spawn(move || me.reap_one(id, job, helper_reaped));
+                .spawn(move || me.reap_one(id, job, helper_reaped, server, pipe));
             // With no thread, the next turn tries again.
             if spawned.is_ok() {
                 st.busy.insert(id);
@@ -553,23 +571,64 @@ impl Sessions {
         Some(false)
     }
 
+    /// Starts the server of the session socket, with the author of the
+    /// session. If its thread does not start, the session ends with
+    /// `launch_failed`: an agent with no socket cannot do its job.
+    fn serve(&self, session: i64, socket: UnixListener, me: Author) -> Option<Server> {
+        let store = self.store.clone();
+        let handler: Arc<Handler> =
+            Arc::new(move |line, mut out| crate::socket::answer_as(&store, &me, line, &mut out));
+        let store = self.store.clone();
+        let is_open: Arc<IsOpen> = Arc::new(move || {
+            iris_job::session(&store, session).is_ok_and(|s| s.ended_ms.is_none())
+        });
+        match Server::start(socket, handler, is_open) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                say!(
+                    "iris: {}: the session socket did not start: {e}",
+                    format_session_id(session)
+                );
+                let _ = iris_job::end(
+                    &self.store,
+                    session,
+                    EndReason::LaunchFailed,
+                    None,
+                    now_ms(),
+                );
+                None
+            }
+        }
+    }
+
     /// The fast part of the shutdown order, under the state lock: the grant
-    /// ended in the store; close the socket and the pipe (the helper stops
-    /// the group), and send the egress proxy to the stop thread, which
-    /// closes its port and its connections. The reap thread stops the
-    /// isolation.
+    /// ended in the store; close the egress proxy (its connections end;
+    /// the stop thread frees its port after the reap). The reap thread
+    /// does the rest: the session socket, the pipe and the isolation.
     fn shutdown(&self, l: &mut Live) {
-        l.socket = None;
-        l.pipe = None;
         if let Some(p) = &l.proxy {
             p.close();
         }
     }
 
-    /// The reap thread of one ended session: the isolation stop, then the
-    /// reap check. On a reap, it removes the session from the state and
-    /// sends its job to the build thread.
-    fn reap_one(&self, session: i64, job: i64, helper_reaped: bool) {
+    /// The reap thread of one ended session: the answers of the accepted
+    /// requests and the close of the session socket, the close of the pipe
+    /// (the helper stops the group), the isolation stop, then the reap
+    /// check. So a verb that ends its own session gets its answer before
+    /// a process of the agent gets a signal. On a reap, it removes the
+    /// session from the state and sends its job to the build thread.
+    fn reap_one(
+        &self,
+        session: i64,
+        job: i64,
+        helper_reaped: bool,
+        server: Option<Server>,
+        pipe: Option<ChildStdin>,
+    ) {
+        if let Some(s) = server {
+            s.shutdown(DRAIN_WAIT);
+        }
+        drop(pipe);
         if let Ok(iso) = &self.isolation {
             let _ = iso.stop(session);
         }

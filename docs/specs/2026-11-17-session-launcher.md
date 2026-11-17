@@ -475,10 +475,11 @@ machine.
 - In the same way, one stop thread of the engine stops the egress proxy
   of each reaped session (`Proxy::stop`). A proxy stop joins the threads
   of the proxy, so no supervisor turn, stop or run waits for it.
-- A supervisor turn does only fast work: the end in the store, the
-  `Proxy::close`, and the close of the socket and the pipe. Each ended session gets its own reap
-  thread for `Isolation::stop` and the reap check, which have no time
-  limit. A turn starts no second reap thread for a session while one
+- A supervisor turn does only fast work: the end in the store and the
+  `Proxy::close`. Each ended session gets its own reap thread for the
+  steps that wait: the answers of the accepted requests and the close of
+  the session socket (at most 10 seconds), then the close of the pipe,
+  then `Isolation::stop` and the reap check, which have no time limit. A turn starts no second reap thread for a session while one
   runs. So a slow session never holds the stop of another session.
 
 ### Isolation
@@ -641,7 +642,9 @@ session from the socket that took the request, never from the request.
 The session socket answers these verbs of this card:
 
 - `status`: the job (ID, goal, state, due date) and the counts of the
-  workspace.
+  grant now (threads, messages and items), from the same grant as the
+  build (`iris_workspace::grant_in`). It reads no file of the workspace,
+  which the agent can change.
 - `search`, `show` and `list`: the read verbs with the grant rules of the
   workspace spec ("The same grant limits each verb of a session"). A
   search runs only over granted messages: a message of
@@ -668,6 +671,13 @@ session (kind `agent`, `name` the adapter, `session` `se-<id>`, `job`
 above. Until
 then each other verb gets the exit code 3 and the reason. A host verb (for
 example `brief`, `ledger`, `job run`) gets exit code 3 in each case.
+
+Each session socket has its own accept thread and one thread for each
+connection, at most 8 connections at the same time. The engine reads
+only a peer of its own user (`SO_PEERCRED` on Linux, `getpeereid` on
+macOS), and closes other connections with no answer. The engine socket
+`iris.sock` keeps its async server; the sessions use threads, as the
+supervisor does.
 
 The engine checks that the session is open in the store when it takes a
 request, before it runs the verb. A request that arrives after the end
