@@ -1,6 +1,8 @@
 //! The store rules of matters (migration 16) and the writes of the person.
 
-use iris_matters::{check_title, clean, confirm, decline, insert_proposal, write, Error};
+use iris_matters::{
+    check_title, clean, confirm, confirm_forms, decline, insert_proposal, write, Error,
+};
 use iris_store::{NewMessage, Store};
 use rusqlite::{params, Connection};
 
@@ -99,6 +101,41 @@ fn sql(b: &Box, text: &str) -> rusqlite::Result<usize> {
 }
 
 const FORMS: [&str; 5] = ["record", "conversation", "commitment", "record", "feed"];
+
+/// A member with another form than its row is not a member, and a matter
+/// that is not there answers `NotFound` before any check of the members.
+#[test]
+fn confirm_forms_checks_each_form_in_the_decision() {
+    let b = setup("forms", 4, &FORMS);
+    let m = propose(&b, &[1, 2, 3]).unwrap();
+    for wrong in [
+        vec![(1, "conversation")],
+        vec![(1, "record"), (2, "record")],
+        vec![(3, "record"), (1, "record")],
+    ] {
+        assert!(
+            matches!(
+                confirm_forms(&b.store, m, "Trip", &wrong, 2),
+                Err(Error::Bad(_))
+            ),
+            "{wrong:?}"
+        );
+    }
+    assert_eq!(status(&b, m), "proposed");
+    assert!(matches!(
+        confirm_forms(&b.store, 99, "Trip", &[(1, "conversation")], 2),
+        Err(Error::NotFound)
+    ));
+    confirm_forms(
+        &b.store,
+        m,
+        "Trip",
+        &[(2, "conversation"), (1, "record")],
+        2,
+    )
+    .unwrap();
+    assert_eq!(pinned(&b), vec![1, 2]);
+}
 
 #[test]
 fn confirm_keeps_some_members_and_pins_them() {

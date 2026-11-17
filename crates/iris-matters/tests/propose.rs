@@ -292,12 +292,15 @@ fn the_request_stays_in_its_bound() {
     let f = fake(vec![]);
     run(&b, &f, Gate::Now, NOW);
     let data = f.data.borrow()[0].clone();
-    let bytes = Shared(f.clone()).request_bytes(
-        iris_matters::propose::INSTRUCTION,
-        &iris_model::data_block(&data),
-    );
+    // The bound of the texts of the call itself: `ask` gets `data`, and the
+    // client makes the data block.
+    let bytes = Shared(f.clone()).request_bytes(iris_matters::propose::INSTRUCTION, &data);
     assert!(bytes <= MAX_REQUEST, "{bytes}");
     assert!(data.lines().count() < 300, "the bound cut lines");
+    // The step stops only when one more line does not fit: the room that
+    // is left is less than the bound of the longest line.
+    let longest = data.lines().map(|l| l.len() + 1).max().unwrap() as u64;
+    assert!(MAX_REQUEST - bytes < 6 * (longest + 8), "{bytes}");
 }
 
 /// Random answers over random IDs never write a member that the call did

@@ -150,17 +150,42 @@ fn status(tx: &Transaction, matter: i64) -> Result<String> {
 /// = 0. One transaction: a second confirm, or a confirm of a proposal that
 /// is not valid now, gets `Conflict` and changes nothing.
 pub fn confirm(store: &Store, matter: i64, title: &str, keep: &[i64], now: i64) -> Result<()> {
+    let keep: Vec<_> = keep.iter().map(|row| (*row, None)).collect();
+    confirm_with(store, matter, title, keep, now)
+}
+
+/// [`confirm`] with the form that the person names for each member (from the
+/// kind of its ID). A member whose row has another form is not a member. The
+/// check runs in the decision transaction, after the check of the matter.
+pub fn confirm_forms(
+    store: &Store,
+    matter: i64,
+    title: &str,
+    keep: &[(i64, &str)],
+    now: i64,
+) -> Result<()> {
+    let keep: Vec<_> = keep.iter().map(|(row, form)| (*row, Some(*form))).collect();
+    confirm_with(store, matter, title, keep, now)
+}
+
+fn confirm_with(
+    store: &Store,
+    matter: i64,
+    title: &str,
+    mut keep: Vec<(i64, Option<&str>)>,
+    now: i64,
+) -> Result<()> {
     let title = check_title(title).ok_or(Error::Bad("the title must be 1 to 80 characters"))?;
     if keep.is_empty() || keep.len() > MAX_ITEMS {
         return Err(Error::Bad("keep 1 to 50 items"));
     }
-    let mut sorted = keep.to_vec();
-    sorted.sort_unstable();
-    sorted.dedup();
-    if sorted.len() != keep.len() {
+    let n = keep.len();
+    keep.sort_unstable();
+    keep.dedup_by_key(|(row, _)| *row);
+    if keep.len() != n {
         return Err(Error::Bad("an item is two times in the list"));
     }
-    write(store, |tx| confirm_in(tx, matter, &title, &sorted, now))
+    write(store, |tx| confirm_in(tx, matter, &title, &keep, now))
 }
 
 /// The check before each decision: `matter` is a proposal that is valid now.
@@ -180,12 +205,19 @@ fn decidable(tx: &Transaction, matter: i64) -> Result<()> {
     Ok(())
 }
 
-fn confirm_in(tx: &Transaction, matter: i64, title: &str, keep: &[i64], now: i64) -> Result<()> {
+fn confirm_in(
+    tx: &Transaction,
+    matter: i64,
+    title: &str,
+    keep: &[(i64, Option<&str>)],
+    now: i64,
+) -> Result<()> {
     decidable(tx, matter)?;
-    for item in keep {
+    for (item, form) in keep {
         let member: bool = tx.query_row(
-            "SELECT EXISTS (SELECT 1 FROM matter_item WHERE matter_id = ?1 AND item_id = ?2)",
-            params![matter, item],
+            "SELECT EXISTS (SELECT 1 FROM matter_item mi JOIN item ON item.id = mi.item_id
+                WHERE mi.matter_id = ?1 AND mi.item_id = ?2 AND (?3 IS NULL OR item.form = ?3))",
+            params![matter, item, form],
             |r| r.get(0),
         )?;
         if !member {
@@ -204,7 +236,7 @@ fn confirm_in(tx: &Transaction, matter: i64, title: &str, keep: &[i64], now: i64
     let list = format!(
         "[{}]",
         keep.iter()
-            .map(i64::to_string)
+            .map(|(row, _)| row.to_string())
             .collect::<Vec<_>>()
             .join(",")
     );

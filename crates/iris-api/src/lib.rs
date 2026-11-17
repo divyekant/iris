@@ -28,6 +28,7 @@ mod auth;
 mod export;
 pub mod gate;
 mod jobs;
+mod matters;
 mod notice;
 pub mod policy;
 mod read;
@@ -38,6 +39,7 @@ pub use ask::{answer, AskAnswer, AskSource, Connect};
 pub use auth::{Auth, SIGN_IN};
 pub use export::{export, Exported};
 pub use jobs::*;
+pub use matters::{confirm_matter, decline_matter, matter, matters};
 pub use notice::*;
 pub use read::*;
 pub use review::*;
@@ -157,6 +159,10 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/notices/{id}/done", post(post_notice_done))
         .route("/api/watches", get(get_watches).post(post_watch))
         .route("/api/watches/{id}/remove", post(post_watch_remove))
+        .route("/api/matters", get(get_matters))
+        .route("/api/matters/{id}", get(get_matter))
+        .route("/api/matters/{id}/confirm", post(post_matter_confirm))
+        .route("/api/matters/{id}/decline", post(post_matter_decline))
         // No fallback: `iris_web::router()` has the fallback of the server.
         .route("/api", any(|| async { not_found() }))
         .route("/api/{*rest}", any(|| async { not_found() }))
@@ -659,6 +665,41 @@ async fn post_watch_remove(
         return Ok(not_found());
     }
     Ok(Json(serde_json::json!({ "removed": id })).into_response())
+}
+
+/// The valid proposals and the confirmed matters.
+async fn get_matters(State(s): State<Arc<Store>>) -> Result<Response> {
+    Ok(Json(matters(&s)?).into_response())
+}
+
+/// One matter with its members. A proposal that is not valid now is 404.
+async fn get_matter(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    Ok(matter(&s, &id)?.map_or_else(not_found, |d| Json(d).into_response()))
+}
+
+#[derive(Deserialize)]
+struct MatterConfirm {
+    title: String,
+    items: Vec<String>,
+}
+
+/// The person confirms a proposal: the title and the members to keep.
+async fn post_matter_confirm(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<MatterConfirm>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    Ok(confirm_matter(&s, &id, &b.title, &b.items, now_ms())?
+        .map_or_else(not_found, |d| Json(d).into_response()))
+}
+
+/// The person declines a proposal.
+async fn post_matter_decline(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+) -> Result<Response> {
+    Ok(decline_matter(&s, &id, now_ms())?.map_or_else(not_found, |d| Json(d).into_response()))
 }
 
 fn now_s() -> i64 {

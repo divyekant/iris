@@ -244,3 +244,53 @@ fn a_watch_gives_one_notice_for_a_new_synced_mail() {
     let (ok, _, err) = iris(&store, &["watch", "remove", "m-1"]);
     assert!(!ok && err.contains("not a watch ID"), "{err}");
 }
+
+/// `iris matters` and `iris matters show` print the JSON of the routes, and
+/// `iris matters propose` with no model makes no call.
+#[test]
+fn matters_verbs_are_the_api_matters() {
+    use rusqlite::params;
+    let store = Store::open(&data_dir("matters")).unwrap();
+    let a = store.add_account("gmail", "owner@example.com").unwrap();
+    let msgs: Vec<iris_store::NewMessage> = (0..2)
+        .map(|t| iris_store::NewMessage {
+            provider_id: format!("g{t}"),
+            thread_provider_id: format!("gt{t}"),
+            ..Default::default()
+        })
+        .collect();
+    let ids = store.put_messages(a, &msgs).unwrap();
+    store
+        .write(|tx| {
+            for (i, form) in ["record", "commitment"].iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                     VALUES (?1, ?2, 'open', '{}', 0, 0)",
+                    params![form, a],
+                )?;
+                tx.execute(
+                    "INSERT INTO item_source(item_id, message_id, role) VALUES (?1, ?2, 'origin')",
+                    params![tx.last_insert_rowid(), ids[i]],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    iris_matters::write(&store, |tx| {
+        iris_matters::insert_proposal(tx, "Trip", "fake", None, &[1, 2], 1_000)
+    })
+    .unwrap();
+    assert_eq!(
+        json(&store, &["matters"]),
+        iris_api::matters(&store).unwrap()
+    );
+    assert_eq!(
+        json(&store, &["matters", "show", "g-1"]),
+        iris_api::matter(&store, "g-1").unwrap().unwrap()
+    );
+    let (ok, _, err) = iris(&store, &["matters", "show", "g-9"]);
+    assert!(!ok && err.contains("no matter g-9"), "{err}");
+    let (ok, out, err) = iris(&store, &["matters", "propose"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("no model is set"), "{out}");
+}

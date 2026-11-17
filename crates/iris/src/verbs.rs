@@ -212,6 +212,19 @@ pub fn field(text: &str) -> String {
         .collect()
 }
 
+/// `iris matters` and `iris matters show <id>`: the JSON of the routes
+/// `/api/matters` and `/api/matters/{id}`. They write nothing.
+pub fn matters(store: &Store, command: &crate::MattersCommand) -> Output {
+    let err = |e: iris_api::Error| e.to_string();
+    let v = match command {
+        crate::MattersCommand::Show { id } => iris_api::matter(store, id)
+            .map_err(err)?
+            .ok_or_else(|| format!("no matter {id}, or a proposal that is not valid now"))?,
+        _ => iris_api::matters(store).map_err(err)?,
+    };
+    serde_json::to_string_pretty(&v).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
