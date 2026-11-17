@@ -113,6 +113,37 @@ pub fn comment_pending_in(c: &Connection, job: i64) -> Result<bool> {
     )?)
 }
 
+/// Each job in `working` or `waiting` with a pending comment, whose newest
+/// session started (spec, section 5, stage 2): the job ID, its state and
+/// its highest comment ID. A
+/// job whose newest launch failed is left out, so a failed launch does not
+/// start again until the person runs `iris job run`.
+pub fn commented_jobs_in(c: &Connection) -> Result<Vec<(i64, String, i64)>> {
+    let mut q = c.prepare_cached(
+        "SELECT j.id, j.state FROM job j
+         WHERE j.state IN ('working', 'waiting')
+           AND (SELECT started_at FROM job_session WHERE job_id = j.id
+                ORDER BY id DESC LIMIT 1) IS NOT NULL
+         ORDER BY j.id",
+    )?;
+    let jobs = q
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<(i64, String)>>>()?;
+    let mut out = Vec::new();
+    for (job, state) in jobs {
+        if comment_pending_in(c, job)? {
+            let top: i64 = c.query_row(
+                "SELECT max(k.id) FROM changeset_comment k JOIN changeset s ON s.id = k.changeset_id
+                 WHERE s.author_job = ?1",
+                [iris_job::format_job_id(job)],
+                |r| r.get(0),
+            )?;
+            out.push((job, state, top));
+        }
+    }
+    Ok(out)
+}
+
 /// Each comment of `changeset`, oldest first.
 pub fn comments_in(c: &Connection, changeset: i64) -> Result<Vec<Comment>> {
     let mut q = c.prepare_cached(
