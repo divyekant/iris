@@ -315,7 +315,8 @@ fn lines(c: &Connection, model: &dyn Model, version: i64, now: i64) -> rusqlite:
             }
         }
         let next = format!("{text}{line}\n");
-        if model.request_bytes(INSTRUCTION, &iris_model::data_block(&next)) > MAX_REQUEST {
+        // The same texts as the call: the client makes the data block.
+        if model.request_bytes(INSTRUCTION, &next) > MAX_REQUEST {
             break;
         }
         text = next;
