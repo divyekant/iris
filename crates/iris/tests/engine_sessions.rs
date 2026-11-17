@@ -209,13 +209,13 @@ fn the_session_socket_answers_status_and_refuses_other_verbs() {
     assert_eq!(v["result"]["job"], format!("j-{}", f.job), "{v}");
     assert_eq!(v["result"]["goal"], "Get the contract.", "{v}");
     assert_eq!(v["result"]["state"], "working", "{v}");
-    for verb in ["job.run", "brief", "search", "list", "status.all"] {
+    for verb in ["job.run", "brief", "drafts", "status.all"] {
         let v = ask(&f, verb, serde_json::json!({})).unwrap();
         assert_eq!(v["code"], 3, "{verb}: {v}");
     }
-    // The read form of show (a message or an item) waits for R4-04f.
-    let v = ask(&f, "show", serde_json::json!({"message": "m-1"})).unwrap();
-    assert_eq!(v["code"], 3, "{v}");
+    // The read verbs of the session (R4-04f) answer on the socket.
+    let v = ask(&f, "list", serde_json::json!({})).unwrap();
+    assert_eq!(v["ok"], true, "{v}");
     // A request after the end in the store gets code 3, before any turn.
     iris_job::end(&f.store, id, EndReason::Stop, None, now()).unwrap();
     let v = ask(&f, "status", serde_json::json!({})).unwrap();

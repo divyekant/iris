@@ -461,9 +461,10 @@ fn a_session_sees_only_the_changesets_of_its_job() {
     )
     .unwrap_err();
     assert_eq!(e.0, code::USAGE);
+    // `drafts` is a host verb: code 3 in a session (issue #522).
     assert_eq!(
         call(&store, &mine, "drafts", json!({})).unwrap_err().0,
-        code::USAGE
+        code::DENIED
     );
     assert!(call(&store, &theirs, "show", json!({ "changeset": cs })).is_ok());
 }
@@ -649,4 +650,68 @@ fn status_gives_the_counts_of_the_grant_now() {
         call(&store, &host, "status", json!({})).unwrap_err().0,
         code::USAGE
     );
+}
+
+/// The read verbs of a session (card R4-04f) give only what the grant holds
+/// now: thread 1 (messages 1 and 2) and the item c-1. Message 7 and the
+/// item c-4 are outside the grant, and give no result.
+#[test]
+fn the_read_verbs_give_only_the_grant() {
+    let (store, job) = fixture("read");
+    let me = session(job, "se-1");
+    let ids = |v: &Value, key: &str| -> Vec<String> {
+        v[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{v}"))
+            .iter()
+            .map(|m| m["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let search = |text: &str| call(&store, &me, "search", json!({ "text": text }));
+    assert_eq!(
+        ids(&search("contract").unwrap(), "messages"),
+        ["m-2", "m-1"]
+    );
+    assert!(ids(&search("dinner").unwrap(), "messages").is_empty());
+    assert!(ids(&search("from:sam@example.com").unwrap(), "messages").is_empty());
+    let hit = &search("contract").unwrap()["messages"][0];
+    assert_eq!(hit["thread"], "t-1", "{hit}");
+    assert_eq!(hit["from"], "dana@example.com", "{hit}");
+
+    let m = call(&store, &me, "show", json!({ "id": "m-1" })).unwrap();
+    assert_eq!(m["message"]["text"], "Here is the contract.", "{m}");
+    assert_eq!(m["message"]["items"], json!(["c-1"]), "{m}");
+    let c = call(&store, &me, "show", json!({ "id": "c-1" })).unwrap();
+    assert_eq!(c["item"]["sources"], json!(["m-1"]), "{c}");
+    // Outside the grant, and an ID of no row: the same answer.
+    for id in ["m-7", "c-4", "m-99", "t-1", "cs-1"] {
+        let e = call(&store, &me, "show", json!({ "id": id })).unwrap_err();
+        assert_eq!(e.0, code::DENIED, "{id}: {e:?}");
+    }
+    assert_eq!(
+        ids(&call(&store, &me, "list", json!({})).unwrap(), "items"),
+        ["c-1"]
+    );
+    // A session has no drafts verb of the host (issue #522).
+    assert_eq!(
+        call(&store, &me, "drafts", json!({})).unwrap_err().0,
+        code::DENIED
+    );
+
+    // A revoke empties each read at once.
+    revoke_scope(&store, job, Ref::Thread(1), By::Person, NOW + 1).unwrap();
+    assert!(ids(&search("contract").unwrap(), "messages").is_empty());
+    assert!(ids(&call(&store, &me, "list", json!({})).unwrap(), "items").is_empty());
+    let e = call(&store, &me, "show", json!({ "id": "m-1" })).unwrap_err();
+    assert_eq!(e.0, code::DENIED, "{e:?}");
+
+    // Host mode: the CLI reads the store, so the socket has no read verbs.
+    let host = socket::local();
+    for verb in ["search", "list"] {
+        assert_eq!(
+            call(&store, &host, verb, json!({})).unwrap_err().0,
+            code::USAGE,
+            "{verb}"
+        );
+    }
 }
