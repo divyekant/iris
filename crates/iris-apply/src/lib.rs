@@ -507,7 +507,9 @@ pub fn apply(
     loop {
         // A gone message has no provider ID here. An undo of the entry `o`
         // changes a message only if `o` changed it, and no later entry
-        // changed it, except the actions of the undos of `o`. Step 2 of the
+        // changed it, except the actions of the undos of `o`. A later entry
+        // that is `undone`, and the undo of it, change nothing in sum, so
+        // they do not count: undo, then undo again, works. Step 2 of the
         // undo of a `trash` changes only a message that an `untrash` of an
         // undo of `o` changed (section 7.4).
         let page: Vec<(i64, Option<String>, bool)> = store.read(|c| {
@@ -522,7 +524,11 @@ pub fn apply(
                          WHERE lm.message_id = am.message_id AND l.id > u.ledger_id
                            AND (lm.done = 1 OR lm.listed = 'unknown')
                            AND l.action_id NOT IN (SELECT action_id FROM ledger_undo
-                                                   WHERE ledger_id = u.ledger_id))
+                                                   WHERE ledger_id = u.ledger_id)
+                           AND l.state <> 'undone'
+                           AND l.action_id NOT IN (
+                             SELECT x.action_id FROM ledger_undo x
+                             JOIN ledger e ON e.id = x.ledger_id WHERE e.state = 'undone'))
                        AND (u.step = 1 OR EXISTS (
                          SELECT 1 FROM ledger_undo f JOIN ledger l ON l.action_id = f.action_id
                          JOIN ledger_message lm ON lm.ledger_id = l.id
