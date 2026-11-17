@@ -41,7 +41,7 @@ mod verbs;
 mod watch;
 mod write;
 pub use ask::{answer, AskAnswer, AskSource, Connect};
-pub use auth::{Auth, SIGN_IN};
+pub use auth::{Auth, CODE_LIFE, SIGN_IN};
 pub use drafts::write_drafts;
 pub use export::{export, Exported};
 pub use jobs::*;

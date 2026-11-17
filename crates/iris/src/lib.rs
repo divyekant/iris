@@ -900,7 +900,7 @@ pub fn socket_verb(
 /// `iris open`: a new sign-in address from the engine (the socket verb
 /// `sign-in`, `docs/specs/2026-11-17-mac-app.md`), printed or opened in the
 /// browser. The code never goes into the arguments of a process: another
-/// OS user can read them. The browser gets the path of [`OPEN_PAGE`].
+/// OS user can read them. The browser gets the path of a new page of [`open_page`].
 fn open_web(dir: &std::path::Path, print: bool) -> Result<(), socket::Failure> {
     let r = socket::request_with(
         dir,
@@ -930,16 +930,20 @@ fn open_web(dir: &std::path::Path, print: bool) -> Result<(), socket::Failure> {
     Ok(())
 }
 
-/// The redirect page of `iris open` in the data folder.
-pub const OPEN_PAGE: &str = "open.html";
+/// The redirect pages of `iris open` in the data folder:
+/// `open-<pid>-<ns>.html`, one page for each call.
+pub const OPEN_PAGE: (&str, &str) = ("open-", ".html");
 
-/// Write the redirect page to `url` with mode `0600`: a new file, then a
-/// rename, so the command never writes through a file or a link that is
-/// there. Gives the path of the page.
+/// Write a new redirect page to `url` with mode `0600`. Each call gets its
+/// own file, so two calls never give the browser the same page. The file is
+/// new (`create_new`), so the command never writes through a file or a link
+/// that is there. Pages older than the life of a code are removed. Gives the
+/// path of the page.
 pub fn open_page(dir: &std::path::Path, url: &str) -> std::io::Result<PathBuf> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    // The engine gives `http://<ip>:<port>/#code=<hex>`: nothing to escape.
+    // The engine gives `http://<ip>:<port>/#code=<hex>`. Only these bytes,
+    // so the page needs no HTML escape.
     let plain = url
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b":/.#=[]".contains(&b));
@@ -948,14 +952,18 @@ pub fn open_page(dir: &std::path::Path, url: &str) -> std::io::Result<PathBuf> {
             "the engine gave an address that is not valid",
         ));
     }
-    let path = dir.join(OPEN_PAGE);
-    let new = dir.join(format!(".{OPEN_PAGE}.{}", std::process::id()));
-    let _ = std::fs::remove_file(&new);
+    remove_old_pages(dir);
+    let ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let (start, end) = OPEN_PAGE;
+    let path = dir.join(format!("{start}{}-{ns}{end}", std::process::id()));
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(&new)?;
+        .open(&path)?;
     f.write_all(
         format!(
             "<!doctype html><meta charset=\"utf-8\"><title>Iris</title>\
@@ -964,8 +972,30 @@ pub fn open_page(dir: &std::path::Path, url: &str) -> std::io::Result<PathBuf> {
         .as_bytes(),
     )?;
     f.sync_all()?;
-    std::fs::rename(&new, &path)?;
     Ok(path)
+}
+
+/// Remove the redirect pages whose code ended: older than
+/// [`iris_api::CODE_LIFE`].
+fn remove_old_pages(dir: &std::path::Path) {
+    let (start, end) = OPEN_PAGE;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > iris_api::CODE_LIFE);
+        if name.starts_with(start) && name.ends_with(end) && old {
+            // A link is removed, not followed.
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 /// The command that opens `page` in the browser on the system `os`. Its

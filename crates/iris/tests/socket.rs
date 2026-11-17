@@ -1182,15 +1182,36 @@ fn iris_open_keeps_the_code_out_of_process_arguments() {
     let d = dir("open-page");
     std::fs::create_dir_all(&d).unwrap();
     let url = "http://127.0.0.1:4800/#code=0123abcd";
-    // A link at the path is replaced, never written through.
+    // An old page is removed. A link with the name of a page is never
+    // written through.
+    let old = d.join("open-1-1.html");
+    std::fs::write(&old, b"old").unwrap();
+    let ago = std::time::SystemTime::now() - iris_api::CODE_LIFE * 2;
+    std::fs::File::options()
+        .write(true)
+        .open(&old)
+        .unwrap()
+        .set_modified(ago)
+        .unwrap();
     let target = d.join("target");
     std::fs::write(&target, b"mine").unwrap();
-    std::os::unix::fs::symlink(&target, d.join(iris::OPEN_PAGE)).unwrap();
+    std::os::unix::fs::symlink(&target, d.join("open-2-2.html")).unwrap();
     let page = iris::open_page(&d, url).unwrap();
     assert_eq!(std::fs::read(&target).unwrap(), b"mine");
+    assert!(
+        std::fs::symlink_metadata(&old).is_err(),
+        "the old page is gone"
+    );
     let m = std::fs::symlink_metadata(&page).unwrap();
     assert!(m.file_type().is_file());
     assert_eq!(m.permissions().mode() & 0o777, 0o600);
+    // Two opens before the browser reads either page: two pages, each with
+    // its own code. A new page stays.
+    let other = "http://127.0.0.1:4800/#code=4567ef01";
+    let second = iris::open_page(&d, other).unwrap();
+    assert_ne!(page, second);
+    assert!(std::fs::read_to_string(&second).unwrap().contains(other));
+    assert!(page.exists());
     let html = std::fs::read_to_string(&page).unwrap();
     assert!(html.contains(&format!("content=\"0;url={url}\"")), "{html}");
     for os in ["macos", "linux"] {
