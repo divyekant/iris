@@ -304,7 +304,8 @@ pub fn nudge_key_sql(thread: &str, now: Option<&str>) -> String {
 /// - it has no draft of the owner (a draft with no `ask`), stale or not,
 ///   so a nudge never replaces it, and no draft that is ready
 ///   ([`ready_sql`]): a ready nudge has the same key;
-/// - its last try is not blocked for the same key and model version.
+/// - its last try is not blocked for the same key, newest message and
+///   model version.
 pub fn late(
     c: &Connection,
     now_ms: i64,
@@ -333,7 +334,7 @@ pub fn late(
             AND NOT EXISTS (SELECT 1 FROM reply_draft d
                              WHERE d.thread_id = k.thread AND d.ask IS NULL)
             AND NOT {ready}
-            AND NOT (coalesce(nt.blocked, 0) = 1 AND nt.key = k.key
+            AND NOT (coalesce(nt.blocked, 0) = 1 AND nt.key = k.key AND nt.newest = k.newest
                      AND nt.version IS (SELECT version FROM model_setting))
           ORDER BY coalesce(nt.tried_at, 0), k.newest
           LIMIT ?3"
@@ -350,7 +351,7 @@ pub fn late(
 
 /// Records a try of the nudge of `late` for the model version `version`.
 /// `blocked`: the model gave an answer that is not a valid draft, so the
-/// same key and version get no new call.
+/// same key, newest message and version get no new call.
 pub fn tried(
     c: &Connection,
     late: &Late,
@@ -359,11 +360,11 @@ pub fn tried(
     now_ms: i64,
 ) -> rusqlite::Result<()> {
     c.execute(
-        "INSERT INTO nudge_try(thread_id, key, version, blocked, tried_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(thread_id) DO UPDATE SET key = excluded.key, version = excluded.version,
-           blocked = excluded.blocked, tried_at = excluded.tried_at",
-        params![late.thread, late.key, version, blocked, now_ms],
+        "INSERT INTO nudge_try(thread_id, key, newest, version, blocked, tried_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(thread_id) DO UPDATE SET key = excluded.key, newest = excluded.newest,
+           version = excluded.version, blocked = excluded.blocked, tried_at = excluded.tried_at",
+        params![late.thread, late.key, late.newest, version, blocked, now_ms],
     )?;
     Ok(())
 }

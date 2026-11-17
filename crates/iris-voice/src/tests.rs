@@ -1538,12 +1538,42 @@ fn the_tries_order_the_pages_and_only_an_invalid_answer_blocks() {
     // A blocked try: no call for the same key and model version.
     try_(t, 1, true, 7);
     assert_eq!(page(10), [t2]);
-    // A new model version: the thread is late again.
+    // A newer mail of the owner in the thread: a new try once it is late.
+    b.store
+        .put_messages(
+            1,
+            &[msg(
+                "again",
+                "t-ask",
+                2000,
+                "SENT",
+                "me@example.com",
+                "ana@example.org",
+                Some("Any news?"),
+            )],
+        )
+        .unwrap();
+    understood(&b.store);
+    evidence(&b.store, "again", "ana@example.org");
+    assert_eq!(page(10), [t2]);
+    assert_eq!(
+        b.store
+            .read(|c| Ok(late(c, 2000 + LATE_AFTER_MS, None, 10)?))
+            .unwrap()
+            .iter()
+            .map(|l| l.thread)
+            .collect::<Vec<_>>(),
+        [t2, t]
+    );
+    // A blocked try is for one model version. (Thread t waits for its new
+    // mail to be late.)
+    try_(t2, 1, true, 8);
+    assert_eq!(page(10), Vec::<i64>::new());
     b.store
         .write(|tx| {
             tx.execute("UPDATE model_setting SET version = 2", [])?;
             Ok(())
         })
         .unwrap();
-    assert_eq!(page(10), [t2, t]);
+    assert_eq!(page(10), [t2]);
 }
