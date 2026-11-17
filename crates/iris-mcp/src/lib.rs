@@ -279,45 +279,18 @@ pub fn tools() -> Vec<Tool> {
         .collect()
 }
 
-/// Check the arguments of a tool call against its schema. The schema and
-/// the check come from the same list, so they agree.
+/// Check the arguments of a tool call with a JSON Schema validator and the
+/// schema that `tools/list` publishes, so the check accepts each value that
+/// the schema allows, and only those values.
 fn check(spec: &Spec, args: &Map<String, Value>) -> Result<(), String> {
-    for key in args.keys() {
-        if !args_of(spec).any(|a| a.name == key) {
-            return Err(format!("{}: unknown argument `{key}`", spec.name));
-        }
-    }
-    for a in args_of(spec) {
-        let Some(v) = args.get(a.name) else {
-            if a.required {
-                return Err(format!(
-                    "{}: the argument `{}` is missing",
-                    spec.name, a.name
-                ));
-            }
-            continue;
-        };
-        let ok = match a.kind {
-            Kind::Text => v.is_string(),
-            Kind::Ids => v
-                .as_array()
-                .is_some_and(|l| !l.is_empty() && l.iter().all(Value::is_string)),
-            Kind::Object => v.is_object(),
-            Kind::Json => true,
-            Kind::Limit => v.as_u64().is_some_and(|n| (1..=200).contains(&n)),
-        };
-        if !ok {
-            let want = match a.kind {
-                Kind::Text => "a string",
-                Kind::Ids => "a list of one or more ID strings",
-                Kind::Object => "a JSON object",
-                Kind::Json => "JSON",
-                Kind::Limit => "an integer from 1 to 200",
-            };
-            return Err(format!("{}: `{}` must be {want}", spec.name, a.name));
-        }
-    }
-    Ok(())
+    let schema = Value::Object(schema(spec));
+    let validator = jsonschema::options()
+        .with_draft(jsonschema::Draft::Draft202012)
+        .build(&schema)
+        .expect("a valid tool schema");
+    validator
+        .validate(&Value::Object(args.clone()))
+        .map_err(|e| format!("{}: {e}", spec.name))
 }
 
 /// Turn a tool call into its request. `None`: no tool has this name. An
@@ -361,7 +334,8 @@ fn request(spec: &Spec, args: &Map<String, Value>) -> Call {
         "status" => Call::Status,
         "search" => Call::Search {
             text: text("text").unwrap_or_default(),
-            limit: args.get("limit").and_then(Value::as_u64).unwrap_or(50) as u32,
+            // The schema allows an integer with a decimal point, for example 50.0.
+            limit: args.get("limit").and_then(Value::as_f64).unwrap_or(50.0) as u32,
         },
         "show" => Call::Show {
             id: text("id").unwrap_or_default(),
@@ -545,6 +519,101 @@ mod tests {
         for (name, a) in bad {
             assert!(call(name, &args(a.clone())).unwrap().is_err(), "{name} {a}");
         }
+    }
+
+    /// A small deterministic generator (xorshift), so the test needs no crate.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn pick<T: Clone>(&mut self, list: &[T]) -> T {
+            list[(self.next() % list.len() as u64) as usize].clone()
+        }
+    }
+
+    /// Property: for any arguments, a tool call is refused or gives a request
+    /// with values of the right type and range. It never panics.
+    #[test]
+    fn any_arguments_give_a_refusal_or_a_valid_request() {
+        let values = [
+            json!(null),
+            json!(true),
+            json!(0),
+            json!(1),
+            json!(50),
+            json!(50.0),
+            json!(1e2),
+            json!(200),
+            json!(200.0),
+            json!(200.5),
+            json!(201),
+            json!(-1),
+            json!(1.5),
+            json!(18446744073709551615u64),
+            json!(""),
+            json!("m-1"),
+            json!("x\u{0}y"),
+            json!([]),
+            json!(["m-1"]),
+            json!(["m-1", 2]),
+            json!([["m-1"]]),
+            json!({}),
+            json!({ "to": ["p@example.org"], "body": "hi" }),
+        ];
+        let names: Vec<String> = SPECS
+            .iter()
+            .flat_map(|s| args_of(s).map(|a| a.name.to_string()))
+            .chain(["extra".to_string()])
+            .collect();
+        let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+        let mut accepted = 0;
+        for _ in 0..20_000 {
+            let spec = rng.pick(&SPECS.iter().collect::<Vec<_>>());
+            let mut a = Map::new();
+            for _ in 0..(rng.next() % 5) {
+                a.insert(rng.pick(&names), rng.pick(&values));
+            }
+            let Ok(c) = call(spec.name, &a).unwrap() else {
+                continue;
+            };
+            accepted += 1;
+            match c {
+                Call::Search { limit, .. } => {
+                    assert!((1..=200).contains(&limit), "{a:?}");
+                    if let Some(n) = a.get("limit") {
+                        assert_eq!(limit as f64, n.as_f64().unwrap(), "{a:?}");
+                    }
+                }
+                Call::Socket { verb: "add", args } => {
+                    let t = args["targets"].as_array().unwrap();
+                    assert!(!t.is_empty() && t.iter().all(Value::is_string), "{args}");
+                    assert!(args["args"].is_object(), "{args}");
+                }
+                Call::Socket { args, .. } => {
+                    for k in ["changeset", "why"] {
+                        let v = &args[k];
+                        assert!(v.is_null() || v.is_string(), "{args}");
+                    }
+                }
+                Call::Status | Call::Show { .. } => {}
+            }
+        }
+        assert!(accepted > 100, "only {accepted} calls were valid");
+        // An integer with a decimal point is an integer for the schema.
+        let c = call("search", &args(json!({ "text": "x", "limit": 50.0 })));
+        assert_eq!(
+            c.unwrap().unwrap(),
+            Call::Search {
+                text: "x".into(),
+                limit: 50
+            }
+        );
     }
 
     #[test]
