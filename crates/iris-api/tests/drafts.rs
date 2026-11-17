@@ -8,7 +8,7 @@ use std::sync::Arc;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use iris_api::Auth;
-use iris_changeset::{add_action, create, submit, Author, AuthorKind, Verb};
+use iris_changeset::{add_action, create, revise, submit, Author, AuthorKind, Verb};
 use iris_store::{Header, NewMessage, Store};
 use serde_json::{json, Map, Value};
 use tower::ServiceExt;
@@ -277,9 +277,22 @@ async fn the_drafts_stream_one_at_a_time_and_name_a_flag_with_no_mark() {
         )?)
     })
     .unwrap();
+    // A flag of the thread has no words: it is in `unmarked` too.
+    s.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE changeset_action SET flags = json_insert(flags, '$[#]', 'first_contact') WHERE n = 1",
+            [],
+        )?)
+    })
+    .unwrap();
     let (code, v) = get(&s, &format!("/api/changesets/cs-{cs}/drafts")).await;
     assert_eq!(code, StatusCode::OK, "{v}");
     let d = &v["drafts"][0];
     assert_eq!(d["cc"], json!([{"address": "legal@new.example"}]));
-    assert_eq!(d["unmarked"], json!(["new_recipient"]));
+    assert_eq!(d["unmarked"], json!(["new_recipient", "first_contact"]));
+
+    // While a new revision is a draft, nothing waits for the review.
+    revise(&s, cs, &agent()).unwrap();
+    let (code, v) = get(&s, &format!("/api/changesets/cs-{cs}/drafts")).await;
+    assert_eq!((code, v), (StatusCode::OK, json!({"drafts": []})));
 }

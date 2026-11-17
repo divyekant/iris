@@ -5,11 +5,12 @@
 use std::io::Write;
 use std::ops::Range;
 
-use iris_changeset::{action_content, draft_marks, Field, Mark, DRAFT_FLAGS};
+use iris_changeset::{action_content, draft_marks, Field, Mark};
 use iris_store::{format_id, Kind, Store};
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 
+use crate::review::OPEN;
 use crate::{Error, Result};
 
 /// Writes `{"drafts": [...]}` to `out`: one entry for each `draft` and
@@ -19,8 +20,10 @@ use crate::{Error, Result};
 ///
 /// An action whose content Iris cannot read (a `send` whose stored bytes
 /// do not hash to the draft hash) has `"readable": false` and no text.
-/// `unmarked` names each draft flag of the action with no mark in the
-/// text: the evidence of the flag changed after the submit.
+/// `unmarked` names each flag of the action with no mark in the text: a
+/// flag of the thread or the author (`first_contact`), or a draft flag
+/// whose evidence changed after the submit. A changeset that is not open
+/// (a new revision is a draft) gives no entries.
 pub fn write_drafts(store: &Store, changeset: i64, out: &mut impl Write) -> Result<()> {
     out.write_all(b"{\"drafts\":[").map_err(io)?;
     let mut after = (0, 0);
@@ -47,11 +50,17 @@ fn next_draft(
 ) -> iris_store::Result<Option<((i64, i64), Value)>> {
     let row = c
         .query_row(
-            "SELECT id, revision, n, flags FROM changeset_action
-             WHERE changeset_id = ?1 AND verb IN ('draft', 'send')
-               AND state IN ('proposed', 'in_review')
-               AND (revision, n) > (?2, ?3)
-             ORDER BY revision, n LIMIT 1",
+            // Only an open changeset: the review list and the decisions
+            // read the same condition.
+            &format!(
+                "SELECT a.id, a.revision, a.n, a.flags FROM changeset_action a
+                 JOIN changeset c ON c.id = a.changeset_id
+                 WHERE a.changeset_id = ?1 AND {OPEN}
+                   AND a.verb IN ('draft', 'send')
+                   AND a.state IN ('proposed', 'in_review')
+                   AND (a.revision, a.n) > (?2, ?3)
+                 ORDER BY a.revision, a.n LIMIT 1"
+            ),
             [changeset, revision, n],
             |r| {
                 Ok((
@@ -107,9 +116,10 @@ fn next_draft(
             marks
         }
     };
-    let unmarked: Vec<&str> = DRAFT_FLAGS
-        .into_iter()
-        .filter(|f| flags.iter().any(|x| x == f) && !marks.iter().any(|m| m.flag == *f))
+    let unmarked: Vec<&str> = flags
+        .iter()
+        .map(String::as_str)
+        .filter(|f| !marks.iter().any(|m| m.flag == *f))
         .collect();
     v["unmarked"] = unmarked.into();
     Ok(Some(((revision, n), v)))

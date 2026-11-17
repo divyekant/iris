@@ -27,7 +27,7 @@ pub struct Review {
 /// is a draft is not open: the store refuses an approval until the submit
 /// (section 5.5). The list and the counts both use this condition, so the
 /// brief counts only what the review shows.
-const OPEN: &str = "c.state = 'open'";
+pub(crate) const OPEN: &str = "c.state = 'open'";
 
 pub(crate) fn review_counts(c: &Connection) -> rusqlite::Result<Review> {
     c.query_row(
