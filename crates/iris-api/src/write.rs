@@ -376,3 +376,78 @@ fn valid_address(a: &str) -> bool {
         .check()
         .is_ok()
 }
+
+/// A draft of the reply to the thread `t-N` in the voice of the person, from
+/// `intent` (R3-04 intent path). One model call through the budget of
+/// understanding (`iris_voice::draft`). `None` if the thread does not exist.
+/// The person reads and edits the text before Send: the draft sends nothing.
+pub fn draft(
+    store: &Store,
+    connect: &crate::Connect,
+    thread: &str,
+    parent: &str,
+    intent: &str,
+    now_ms: fn() -> i64,
+) -> Result<Option<Value>> {
+    use iris_voice::{Error as V, Failure as F};
+    let Some((Kind::Thread, row)) = parse_id(thread) else {
+        return Ok(None);
+    };
+    let (exists, now_parent): (bool, Option<i64>) = store.read(|c| {
+        let exists = c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM thread WHERE id = ?1)",
+            [row],
+            |r| r.get(0),
+        )?;
+        Ok((exists, iris_changeset::reply_parent(c, row)?))
+    })?;
+    if !exists {
+        return Ok(None);
+    }
+    // The draft answers the mail that the form shows. A newer parent costs
+    // no call: the person reads the new mail first. The draft gives
+    // `based_on`, so the client can check it again after the call.
+    if now_parent.map(|m| format_id(Kind::Message, m)).as_deref() != Some(parent) {
+        return Err(Error::Conflict(
+            "A new mail came into this thread. Read it, then ask again.".into(),
+        ));
+    }
+    let intent = (!intent.trim().is_empty()).then_some(intent);
+    let d = iris_voice::draft(store, row, intent, &|r| connect(r), now_ms(), &now_ms).map_err(
+        |e| match e {
+            F::Busy => Error::Unavailable(
+                "Iris reads mail with the model now. Try again in a minute.".into(),
+            ),
+            F::NoModel => {
+                Error::Unavailable("No model is set. Set one with `iris model set`.".into())
+            }
+            F::Connect(why) => Error::Unavailable(why),
+            F::Budget(_) => Error::Unavailable(
+                "The model budget is used. Approve a new budget with `iris understand --estimate`, then `--approve`.".into(),
+            ),
+            F::Draft(V::NoThread(_)) | F::Draft(V::NotReady) => Error::Conflict(
+                "Iris did not read each mail of this thread yet. Try again in a few minutes.".into(),
+            ),
+            F::Draft(V::Hostile) => Error::Conflict(
+                "This thread has hostile mail. Iris writes no draft for it.".into(),
+            ),
+            F::Draft(V::LongIntent) => Error::Query(format!(
+                "Write the intent in {} characters or fewer.",
+                iris_voice::MAX_INTENT
+            )),
+            F::Draft(V::Changed) => Error::Conflict(
+                "A new mail came into this thread while Iris wrote. Try again.".into(),
+            ),
+            F::Draft(V::BadAnswer(why)) => Error::Model(format!("The model gave no valid draft: {why}.")),
+            F::Draft(V::Model(e)) => Error::Model(e.to_string()),
+            F::Draft(V::Store(e)) | F::Store(e) => Error::Store(e),
+        },
+    )?;
+    Ok(Some(json!({
+        "body": d.saved.body,
+        "based_on": format_id(Kind::Message, d.saved.based_on),
+        "samples": d.saved.samples,
+        "unknown_cost": d.unknown_cost,
+        "overrun": d.overrun,
+    })))
+}
