@@ -122,9 +122,25 @@ The cursor is text with one line for each folder:
 `<UIDVALIDITY> <UIDNEXT> <HIGHESTMODSEQ> <count> <folder>`. `profile` makes
 it from an `EXAMINE` of each folder.
 
-`changes(from, page)` gives one folder for each page. The page token is the
-name of the folder (section 2) and the cursor lines of the folders before
-it. For each folder of the list now:
+`changes(from, page)` gives one window of at most 2,000 UIDs of one
+folder for each page, from the highest UID down. So a page holds at most
+2,000 `Added` records and the `Deleted` records of the same UID range. The
+page token holds:
+
+- the next UID window (its highest UID),
+- the cursor line of the folder of the page, from the `EXAMINE` before its
+  first window,
+- the count of UIDs below the `UIDNEXT` of that `EXAMINE` and at or above
+  the `UIDNEXT` of `from`, from the windows so far (for `CONDSTORE` only),
+- the cursor lines of the folders before it.
+
+The cursor line of a folder joins the lines of the folders before it only
+after its last window. The first window of a folder reaches UID
+4294967295, so that it gets the `VANISHED` UIDs above the last message.
+Each window is `UID FETCH <low>:<high> (...) (CHANGEDSINCE <modseq>
+[VANISHED])`, or a plain `UID FETCH` for a folder that is not in `from`.
+
+For each folder of the list now:
 
 | Case | Result |
 |---|---|
@@ -132,7 +148,7 @@ it. For each folder of the list now:
 | A new `UIDVALIDITY` | `HistoryExpired` |
 | `HIGHESTMODSEQ`, `UIDNEXT` and the count are the same | nothing |
 | `QRESYNC` | `changes(since)`: `Added` (the full label set) for each changed message, `Deleted` for each `VANISHED` UID |
-| `CONDSTORE` only | `changes(since)` as above. Removed mail: removed = count in `from` - (count now - the count of UIDs at or above the `UIDNEXT` of `from`). If removed is above 0, `HistoryExpired`. A UID from the `UIDNEXT` of `from` up to the `UIDNEXT` of now that is not in the folder now came and went after `from` (the first sync can list it): `Deleted` |
+| `CONDSTORE` only | `changes(since)` as above. A UID of the window, from the `UIDNEXT` of `from` up to the `UIDNEXT` of now, that is not in the folder now came and went after `from` (the first sync can list it): `Deleted`. At the last window: removed = count in `from` - (count now - the counted new UIDs). If removed is not 0, `HistoryExpired`. A removal after the `EXAMINE` makes it `HistoryExpired` too, which is safe |
 
 A folder in `from` that is not in the list now gives `HistoryExpired`. The
 last page carries the cursor of now, made from the `EXAMINE` results of
@@ -161,8 +177,11 @@ mirror does not have.
   label, `UID SEARCH` (`UNSEEN`, `FLAGGED`, `KEYWORD <k>`) in each folder.
 - `minimal` and `raw`: `EXAMINE` of the folder of the ID, then
   a `UID FETCH`. A new `UIDVALIDITY`, or no message with the UID, is
-  `NotFound`. `raw` gives the `INTERNALDATE` in milliseconds and the
-  thread of section 3.
+  `NotFound`. A refused `EXAMINE` of a folder that is not in the LIST now
+  is `NotFound` too, so that a resync marks the old messages of a deleted
+  folder gone (`iris-sync`, `check_unlisted`). A refused `EXAMINE` of a
+  folder in the LIST stays `Api` 400. `raw` gives the `INTERNALDATE` in
+  milliseconds and the thread of section 3.
 - `metadata` and `messages_with_id`: `Api` 400 `notSupported`. Only the
   drafts and the send use them (provider spec, section 6), and they are
   not in scope.
@@ -171,7 +190,7 @@ mirror does not have.
 
 | Call | Result |
 |---|---|
-| `modify` with only `UNREAD`, `STARRED` and `kw:` labels | `SELECT` of the folder of each ID, a check of its `UIDVALIDITY`, then `UID STORE <uid> +FLAGS.SILENT` or `-FLAGS.SILENT` |
+| `modify` with only `UNREAD`, `STARRED` and `kw:` labels | `SELECT` of the folder of each ID, a check of its `UIDVALIDITY`, then `UID STORE <uids> +FLAGS` or `-FLAGS` (not `.SILENT`) |
 | `modify` with any other label | `Api` 400 `notSupported`, before any write |
 | `create_label(name)` | `Api` 400 `notSupported` until the flag writes. With the flag writes: `kw:<name>` if the name is a valid atom, else `Api` 400 `badName` |
 | `trash`, `untrash` | `Api` 400 `notSupported` |
@@ -187,9 +206,14 @@ written. A different value after a `STORE` of an earlier folder is
 `modify` in parts. A `NO` to the first `STORE` with nothing sent before is
 `Api` 400.
 
-`UID STORE` with `.SILENT` changes only the named flags. A second apply of
-the same flag change gives the same flags, but the apply never calls it
-two times after an unknown result (spec 2 section 7.2).
+`UID STORE` without `.SILENT` gives an untagged `FETCH` with the flags of
+each message that it changed or matched. An `OK` counts as success only if
+each target UID came back with the asked flags. A UID with no `FETCH`
+(another client removed or moved the message) or with other flags is
+`Transport` (unknown): the apply reads the labels again and does not call
+again. `UID STORE` changes only the named flags. A second apply of the
+same flag change gives the same flags, but the apply never calls it two
+times after an unknown result (spec 2 section 7.2).
 
 ### 8. The engine
 
@@ -200,7 +224,12 @@ two times after an unknown result (spec 2 section 7.2).
   as the Gmail refresh token does. It is never in a log.
 - `iris account add-imap <address> --host <host> [--port 993] [--user
   <user>]` reads the password from the terminal with no echo, signs in
-  once to check it, and saves the account.
+  once to check it, and saves the account. If an account with the address
+  exists, the command refuses it unless that account is `imap` with the
+  same host, port and user: then it only replaces the sealed password.
+  So an address never gets the mirror and the apply state of another
+  mailbox. To move an address to another mailbox, the person removes the
+  account first.
 - The engine worker of an IMAP account uses `Imap`, with the password as
   the token. `Unauthorized` marks the account `needs_sign_in`, as for
   Gmail.
@@ -234,6 +263,10 @@ two times after an unknown result (spec 2 section 7.2).
 | A `modify` with a label that moves mail | `Api` 400, nothing sent | `modify_refuses_moves` |
 | A lost connection after the first `STORE` | `Transport` | `modify_unknown` |
 | A wrong password | `Unauthorized` | `wrong_password` |
+| A new folder with more than 2,000 messages | pages of at most 2,000 records | `changes_pages` |
+| A read of a message in a deleted folder | `NotFound` | `folder_gone` |
+| A `STORE` `OK` with no `FETCH` for a target UID | `Transport` | `modify_unconfirmed` |
+| `add-imap` of an address that another mailbox has | refused, nothing written | `add_imap_other_mailbox` |
 
 ## Impact
 
@@ -260,7 +293,8 @@ two times after an unknown result (spec 2 section 7.2).
 
 `UID STORE` of `\Seen`, `\Flagged` and keywords.
 
-- Success: the server answers `OK`. The apply marks the action applied.
+- Success: the server answers `OK`, and each target UID came back in a
+  `FETCH` with the asked flags. The apply marks the action applied.
 - Definite rejection: `NO` or `BAD` to the first `STORE`, before any other
   write. `Api` 400. The apply marks the action failed.
 - Unknown: a lost connection or a time-out after a `STORE` was sent, or a
