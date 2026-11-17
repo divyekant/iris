@@ -155,7 +155,8 @@ The granted messages of a job:
   moves to another thread stays granted, in the file of its thread now.
   No other message of the thread is granted
   by the thread ref, also not a reply: the reply headers come from the
-  sender, so they cannot grant mail. A new message comes into the
+  sender, so they cannot grant mail. One exception, below: the reply that
+  wakes a job that waits on the thread. A new message comes into the
   workspace only when the person or the engine for the person adds it,
   again (`add_scope` of the thread adds the messages of the thread now to
   its list) or as an item. The wake of a
@@ -526,7 +527,7 @@ Markdown and JSON with `serde_json`.
 | A revoke by an agent | Refused | Unit test, and raw SQL |
 | A revoke during a build | `Built::revoked` differs from `revoked_count`, so the launcher builds again before the session (R4-04) | Unit test: the count grows on each revoke and the build gives the count it read |
 | An add of a ref whose row does not exist | Refused | Unit test |
-| A message that the store adds to a scope thread after the add, also with an older date, or that a fetch moves into the thread from another thread | Not granted until the person adds it, also a reply | Unit test: a reply, an old-dated backfill and a moved message stay out; a new add of the thread grants them |
+| A message that the store adds to a scope thread after the add, also with an older date, or that a fetch moves into the thread from another thread | Not granted until the person adds it, also a reply. Exception: a reply that wakes a job that waits on the thread joins the list at the wake (`docs/specs/2026-11-17-wait.md`) | Unit test: a reply, an old-dated backfill and a moved message stay out; a new add of the thread grants them. The wake exception: `crates/iris-workspace/tests/wake.rs` |
 | A revoke at the same time as the apply of a session action | Before the cutoff: the action is refused. After the cutoff: the provider call goes on, and the ledger shows it (R4-03) | Test with R4-03 |
 | A revoke, a hostile mark, a gone message or a signal after the read of a build | The files keep the message until the next build (known limit). The read verbs see the change at once (R4-03, R4-04) | Unit test: the next build drops a revoked ref |
 | Two builds of one workspace at the same time | The second waits for the lock of the first | Unit test: a held lock makes `try` fail, and a build after it succeeds |
@@ -583,8 +584,9 @@ None.
    if another message of its thread, or another item of the same source,
    is in the folder.
 4. A second build after a new message in a scope thread does not have the
-   new message. After the person adds the thread again, the next build has
-   it. Both builds keep `drafts/` and `notes.md`. Red if the new message is
+   new message, when no wait of the job is on that thread. After the person
+   adds the thread again, the next build has it. (A reply that wakes a job
+   that waits on the thread joins at the wake: `docs/specs/2026-11-17-wait.md`.) Both builds keep `drafts/` and `notes.md`. Red if the new message is
    in a file before the new add, or if the agent files change.
 5. A link that the agent made does not make the build change a file outside
    the folder. Red if the target changes.
