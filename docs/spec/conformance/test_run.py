@@ -6,6 +6,8 @@ import contextlib
 import io
 import json
 import os
+import random
+import re
 import subprocess
 import sys
 import tempfile
@@ -89,6 +91,37 @@ class Runner(unittest.TestCase):
                     run.load_validators()
             finally:
                 run.SCHEMAS = old
+
+    def test_each_jsonl_line_gets_its_own_verdict(self):
+        # Property test: a random mix of good and bad lines; check names
+        # each bad line and no good line.
+        good = json.dumps(GOOD)
+        bad = ["not json", "{\"form\": \"memo\"}", "", "{\"a\": 1, \"a\": 2}",
+               json.dumps(dict(GOOD, status="lost"))]
+        rng = random.Random(7)
+        for _ in range(60):
+            lines, want = [], set()
+            for n in range(1, rng.randint(1, 8) + 1):
+                if rng.random() < 0.5:
+                    lines.append(good)
+                else:
+                    lines.append(rng.choice(bad))
+                    want.add(n)
+            code, out = check({"items.jsonl": "\n".join(lines) + "\n"})
+            got = {int(m) for m in re.findall(r"items\.jsonl:(\d+):", out)}
+            self.assertEqual(got, want, lines)
+            self.assertEqual(code, 1 if want else 0)
+
+    def test_a_file_that_cannot_be_read_is_exit_2(self):
+        def refuse(self):
+            raise PermissionError("no access")
+        old = Path.read_bytes
+        Path.read_bytes = refuse
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(check({"signal-a.json": "{}"})[0], 2)
+        finally:
+            Path.read_bytes = old
 
     def test_usage_is_exit_2(self):
         with contextlib.redirect_stderr(io.StringIO()):

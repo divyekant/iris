@@ -360,6 +360,8 @@ with a schema name of the kit.
 | A validator with a different `email` check | Same verdict on each fixture (section 5.4). | `conformance.rs` |
 | `produce.py` with an output path that exists | Exit 1. Nothing is written. | `test_run.py` |
 | A very large file | The runner reads it into memory. The runner is a test tool, not a part of the product. | none (issue) |
+| A file or a folder that cannot be read (`OSError`) | Exit 2 with the error. It is not a verdict on a document. | `test_run.py` |
+| A `.jsonl` file with a bad line among good lines | Each bad line fails with its own reason. The other lines are still checked. | `test_run.py`, a property test |
 | Any other error | Exit 2 with the error. | none |
 
 Crash recovery: the store migration of section 6 runs in the migration

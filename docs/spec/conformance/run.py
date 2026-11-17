@@ -109,31 +109,47 @@ def toml_value(value):
     return value
 
 
+def select(base, doc):
+    """The schema name of one document, or None (no form of the five)."""
+    if base != "items":
+        return base
+    form = doc.get("form") if isinstance(doc, dict) else None
+    return form if form in FORMS else None
+
+
 def documents(path):
-    """Each (label, schema name or None, document) of one file."""
-    text = path.read_bytes().decode("utf-8")
+    """Each (label, schema name, document, parse error) of one file. A
+    `.jsonl` line that does not parse is one entry with its error, so the
+    other lines are still checked. An OSError goes to the caller."""
+    data = path.read_bytes()
     base = re.split(r"[-.]", path.name, maxsplit=1)[0]
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as e:
+        return [(path.name, None, None, f"not UTF-8: {e}")]
     if path.suffix == ".toml":
-        return [(path.name, "policy", toml_value(tomllib.loads(text)))]
+        try:
+            return [(path.name, "policy", toml_value(tomllib.loads(text)), None)]
+        except (ValueError, tomllib.TOMLDecodeError) as e:
+            return [(path.name, None, None, str(e))]
     if path.suffix == ".json":
-        docs = [(path.name, parse_json(text))]
+        lines = [(path.name, text)]
     else:
-        lines = text.split("\n")
-        if lines and lines[-1] == "":
-            lines.pop()
-        docs = []
-        for n, line in enumerate(lines, 1):
-            label = f"{path.name}:{n}"
-            if not line.strip():
-                raise ValueError(f"{label}: an empty line")
-            docs.append((label, parse_json(line)))
+        raw = text.split("\n")
+        if raw and raw[-1] == "":
+            raw.pop()
+        lines = [(f"{path.name}:{n}", line) for n, line in enumerate(raw, 1)]
     out = []
-    for label, doc in docs:
-        name = base
-        if base == "items":
-            form = doc.get("form") if isinstance(doc, dict) else None
-            name = form if form in FORMS else None
-        out.append((label, name, doc))
+    for label, line in lines:
+        if not line.strip():
+            out.append((label, None, None, "an empty line"))
+            continue
+        try:
+            doc = parse_json(line)
+        except ValueError as e:
+            out.append((label, None, None, str(e)))
+            continue
+        out.append((label, select(base, doc), doc, None))
     return out
 
 
@@ -157,14 +173,11 @@ def verdict(validators, minor, name, doc):
 
 
 def check_file(validators, minor, path):
-    """Each failure of one file, as text."""
-    try:
-        docs = documents(path)
-    except (UnicodeDecodeError, ValueError, tomllib.TOMLDecodeError) as e:
-        return [f"{path.name}: {e}"], 0
+    """Each failure of one file, as text, and the count of documents."""
     fails = []
-    for label, name, doc in docs:
-        reason = verdict(validators, minor, name, doc)
+    docs = documents(path)
+    for label, name, doc, error in docs:
+        reason = error or verdict(validators, minor, name, doc)
         if reason:
             fails.append(f"{label}: {reason}")
     return fails, len(docs)
@@ -215,7 +228,9 @@ def main(argv):
             return check(load_validators(), minor, Path(argv[1]))
         print("usage: run.py self-test | run.py check <folder> | run.py --version", file=sys.stderr)
         return 2
-    except KitError as e:
+    except (KitError, OSError) as e:
+        # A file or a folder that cannot be read is not a verdict on a
+        # document: exit 2, as for each other error of the kit.
         print(f"error: {e}", file=sys.stderr)
         return 2
 
