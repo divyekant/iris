@@ -571,7 +571,7 @@ impl Launcher<'_> {
             .map_err(|e| format!("cannot read the session: {e}"))
             .and_then(|s| reap_check(self.store, self.isolation, &s, helper_reaped, (self.now)()));
         match checked {
-            Ok(()) => String::new(),
+            Ok(_) => String::new(),
             Err(why) => format!("; the session stays live: {why}"),
         }
     }

@@ -6,6 +6,7 @@ use std::io;
 
 use iris_job::Session;
 use iris_store::Store;
+use iris_workspace::{default_dir, read_notes, Notes};
 
 use crate::isolation::Isolation;
 
@@ -16,15 +17,19 @@ use crate::isolation::Isolation;
 /// gave its exit): a helper that is a zombie of this engine still answers
 /// `kill(pid, 0)`.
 ///
-/// If each rule holds, it sets `reaped_at` and gives `Ok`. Else it gives
-/// the reason, and the session stays live.
+/// If each rule holds, it reads `notes.md` of the job, and sets `reaped_at`
+/// and saves the copy of the notes in one write transaction
+/// (docs/specs/2026-11-17-job-memory.md). The session is live until that
+/// transaction commits, so no new session of the job can write the file
+/// during the read. It gives the result of the save: a bad `notes.md` does
+/// not stop the reap. Else it gives the reason, and the session stays live.
 pub fn reap_check(
     store: &Store,
     isolation: &dyn Isolation,
     session: &Session,
     helper_reaped: bool,
     now_ms: i64,
-) -> Result<(), String> {
+) -> Result<Notes, String> {
     if session.ended_ms.is_none() {
         return Err("the session did not end".into());
     }
@@ -53,7 +58,14 @@ pub fn reap_check(
         Ok(false) => return Err("the isolation still holds a process of the session".into()),
         Err(e) => return Err(format!("the isolation check failed: {e}")),
     }
-    iris_job::reap(store, session.id, now_ms).map_err(|e| format!("the reap write failed: {e}"))
+    let read = read_notes(&default_dir(store.dir(), session.job_id));
+    let saved = iris_job::reap_with_notes(store, session.id, read.as_deref().ok(), now_ms)
+        .map_err(|e| format!("the reap write failed: {e}"))?;
+    Ok(match (read, saved) {
+        (Err(why), _) => why,
+        (Ok(_), true) => Notes::Saved,
+        (Ok(_), false) => Notes::Done,
+    })
 }
 
 /// `kill(target, 0)`: a process ID, or a group ID as a negative number.
