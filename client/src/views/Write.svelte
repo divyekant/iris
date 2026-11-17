@@ -15,6 +15,7 @@
 <script lang="ts">
   import { onDestroy, untrack } from "svelte";
   import { get, own, post, type Account, type ReplyStart, type WriteState } from "../api";
+  import { chips, unique } from "../chips";
   import { initials, when } from "../format";
   import { FLAGS } from "../review";
   import { href } from "../route";
@@ -31,7 +32,18 @@
   const accounts = "accounts" in start ? start.accounts : [];
   const place = `iris.write.${thread ?? "new"}`;
 
-  type Saved = { account: string; to: string[]; cc: string[]; subject: string; body: string; key: string; sig: string; flags: string[] };
+  type Saved = {
+    account: string;
+    to: string[];
+    cc: string[];
+    subject: string;
+    body: string;
+    key: string;
+    sig: string;
+    flags: string[];
+    toText?: string;
+    ccText?: string;
+  };
   function storage(): Storage | undefined {
     try {
       return globalThis.sessionStorage;
@@ -47,9 +59,11 @@
       return null;
     }
   }
-  const forget = () => {
+  // Remove the saved form only if it is still the form of the press with `sent`:
+  // a late answer must not remove a newer form of the same place.
+  const forget = (sent?: string) => {
     try {
-      storage()?.removeItem(place);
+      if (sent === undefined || restore()?.key === sent) storage()?.removeItem(place);
     } catch {
       // The browser blocks the storage: nothing to remove.
     }
@@ -57,14 +71,14 @@
 
   const saved = restore();
   let account = $state(saved?.account ?? reply?.account ?? (accounts[0] ? `a-${accounts[0].id}` : ""));
-  let to = $state<string[]>(saved?.to ?? reply?.to ?? []);
-  const startCc = saved?.cc ?? reply?.cc ?? [];
+  let to = $state<string[]>(unique(saved?.to ?? reply?.to ?? []));
+  const startCc = unique(saved?.cc ?? reply?.cc ?? []);
   let cc = $state<string[]>(startCc);
   let subject = $state(saved?.subject ?? "");
   let body = $state(saved?.body ?? "");
   let copy = $state(startCc.length > 0);
-  let toText = $state("");
-  let ccText = $state("");
+  let toText = $state(saved?.toText ?? "");
+  let ccText = $state(saved?.ccText ?? "");
   // The key of the press and the content that it belongs to. A new content gets a new key.
   let key = $state(saved?.key ?? "");
   let sig = $state(saved?.sig ?? "");
@@ -85,28 +99,26 @@
         flags = [];
         unknown = false;
       }
-      try {
-        storage()?.setItem(place, JSON.stringify({ account, to, cc, subject, body, key, sig, flags }));
-      } catch {
-        // With no storage, the form lives until the page closes.
-      }
     });
+  });
+  // Save each part of the form that a reload must keep: the text of an address
+  // not yet a chip, and the warnings that the next press sends, too.
+  $effect(() => {
+    const form: Saved = { account, to, cc, subject, body, key, sig, flags, toText, ccText };
+    if (write) return;
+    try {
+      storage()?.setItem(place, JSON.stringify(form));
+    } catch {
+      // With no storage, the form lives until the page closes.
+    }
   });
 
   const ADDRESS = /^[^\s@,<>]+@[^\s@,<>]+\.[^\s@,<>]+$/;
   const valid = (a: string) => ADDRESS.test(a);
   let ready = $derived(to.some(valid) && (thread !== null || subject.trim() !== "") && !busy);
 
-  /** Make chips of the text of a field: a comma, a space or the end of the text ends an address. */
-  function chips(list: string[], text: string): [string[], string] {
-    const parts = text.split(/[\s,;]+/);
-    const rest = /[\s,;]$/.test(text) ? "" : (parts.pop() ?? "");
-    const add = parts.map((p) => p.trim()).filter((p) => p && !list.includes(p));
-    return [[...list, ...add], rest];
-  }
   function typed(field: "to" | "cc", end = false) {
-    const text = (field === "to" ? toText : ccText) + (end ? " " : "");
-    const [list, rest] = chips(field === "to" ? to : cc, text);
+    const [list, rest] = chips(field === "to" ? to : cc, field === "to" ? toText : ccText, end);
     if (field === "to") [to, toText] = [list, rest];
     else [cc, ccText] = [list, rest];
   }
@@ -135,9 +147,11 @@
     busy = true;
     problem = "";
     const target = thread ? { thread, parent: reply?.parent.id } : { account, subject };
+    const sent = key;
     try {
       const v = await post<{ write: string }>("write", { ...target, to, cc, body, key, flags });
-      forget();
+      forget(sent);
+      if (!alive) return;
       unknown = false;
       write = v.write;
       follow();
@@ -168,9 +182,11 @@
   let timer: ReturnType<typeof setTimeout> | undefined;
   async function read() {
     const mine = ++started;
+    const id = write;
     try {
-      const v = await get<WriteState>(`write/${encodeURIComponent(write)}`);
-      if (mine <= applied) return;
+      const v = await get<WriteState>(`write/${encodeURIComponent(id)}`);
+      // A read of an earlier write (before Write another) does not count.
+      if (mine <= applied || id !== write) return;
       applied = mine;
       ws = v;
     } catch {
@@ -179,9 +195,11 @@
   }
   const open = () => ws.state === "saving" || ws.state === "waiting";
   function follow() {
+    const id = write;
+    clearTimeout(timer);
     const loop = async () => {
       await read();
-      if (alive && open()) timer = setTimeout(loop, every);
+      if (alive && id === write && open()) timer = setTimeout(loop, every);
     };
     void loop();
   }
@@ -217,6 +235,7 @@
 
   function again() {
     if (thread) return void (location.hash = "#/write");
+    clearTimeout(timer);
     [write, to, cc, subject, body, note, toText, ccText] = ["", [], [], "", "", "", "", ""];
     ws = { state: "saving" };
     copy = false;

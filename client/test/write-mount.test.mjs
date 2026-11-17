@@ -225,3 +225,148 @@ test("Stop in saving withdraws the write; a 409 says that the mail cannot stop",
     net.restore();
   }
 });
+
+test("a reload keeps an address that is not a chip yet, and the warnings that the next press sends", async () => {
+  const net = serve((path, method, body) => {
+    if (method === "POST" && path === "write") {
+      return body.flags.length ? [201, { write: "cs-3" }] : [409, { error: "Look at the warnings, then press Send again.", flags: ["new_recipient"] }];
+    }
+    return [200, { state: "saving" }];
+  });
+  let app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS } });
+  try {
+    type(app.target.querySelector("#write-to"), "sam@okafor.exa");
+    app.flushSync();
+    app.destroy();
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS } });
+    assert.equal(app.target.querySelector("#write-to").value, "sam@okafor.exa", "the open text of the field");
+    type(app.target.querySelector("#write-to"), "sam@okafor.example ");
+    app.flushSync();
+    type(app.target.querySelector("input.subject"), "Dinner on Saturday?");
+    type(app.target.querySelector("textarea"), "Hi Sam,\n");
+    app.flushSync();
+    press(app);
+    await until(() => app.target.querySelector(".flags"));
+    // The reload after the warnings: the next press sends them, with the same key.
+    app.destroy();
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS } });
+    press(app);
+    await until(() => net.posts().length === 2);
+    const [first, second] = net.posts();
+    assert.deepEqual(second.body.flags, ["new_recipient"]);
+    assert.equal(second.body.key, first.body.key);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("a late answer of a view that closed does not remove the newer form", async () => {
+  let answer;
+  const late = new Promise((resolve) => (answer = resolve));
+  const saved = globalThis.fetch;
+  let posts = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url).replace(/^\/api\//, "");
+    if (init.method === "POST" && path === "write" && ++posts === 1) {
+      await late;
+      return new Response(JSON.stringify({ write: "cs-3" }), { status: 201 });
+    }
+    return new Response(JSON.stringify({ state: "saving" }), { status: 200 });
+  };
+  let app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS } });
+  try {
+    await fill(app);
+    press(app);
+    app.destroy();
+    window.sessionStorage.clear();
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS } });
+    await fill(app, "ana@example.com ");
+    const newer = JSON.parse(window.sessionStorage.getItem("iris.write.new"));
+    answer();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const kept = JSON.parse(window.sessionStorage.getItem("iris.write.new"));
+    assert.equal(kept?.key, newer.key, "the newer form stays");
+    assert.deepEqual(kept.to, ["ana@example.com"]);
+  } finally {
+    app.destroy();
+    globalThis.fetch = saved;
+  }
+});
+
+test("a long mail goes without keepalive, a short one with it", async () => {
+  const saved = globalThis.fetch;
+  const sent = [];
+  globalThis.fetch = async (url, init = {}) => {
+    if (init.method === "POST") sent.push({ size: new TextEncoder().encode(init.body).length, keepalive: init.keepalive });
+    return new Response(JSON.stringify(init.method === "POST" ? { write: "cs-3" } : { state: "saving" }), { status: 201 });
+  };
+  for (const size of [100, 70 * 1024, 256 * 1024]) {
+    window.sessionStorage.clear();
+    const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS } });
+    try {
+      await fill(app);
+      type(app.target.querySelector("textarea"), "x".repeat(size));
+      app.flushSync();
+      press(app);
+      await until(() => sent.length && sent.at(-1).size > size);
+    } finally {
+      app.destroy();
+    }
+  }
+  globalThis.fetch = saved;
+  assert.deepEqual(sent.map((s) => s.keepalive), [true, false, false]);
+});
+
+test("a late state read of the write before Write another does not show", async () => {
+  const gate = () => {
+    let open;
+    const p = new Promise((resolve) => (open = resolve));
+    return { p, open };
+  };
+  const a = gate();
+  const b = gate();
+  let writes = 0;
+  let aHeld = false;
+  const net = serve(() => [500, {}]);
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url).replace(/^\/api\//, "");
+    if (init.method === "POST" && path === "write") return new Response(JSON.stringify({ write: `cs-${++writes}` }), { status: 201 });
+    if (path === "write/cs-1") {
+      // A read of cs-1 hangs from the second one on, and answers after Write another.
+      if (aHeld) {
+        await a.p;
+        return new Response(JSON.stringify({ state: "sent", draft: "d-1" }), { status: 200 });
+      }
+      aHeld = true;
+      return new Response(JSON.stringify({ state: "waiting", draft: "d-1", sending: false, leaves_at: null }), { status: 200 });
+    }
+    if (path === "write/cs-2") {
+      await b.p;
+      return new Response(JSON.stringify({ state: "waiting", draft: "d-2", sending: false, leaves_at: null }), { status: 200 });
+    }
+    return new Response("{}", { status: 404 });
+  };
+  const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 10 });
+  try {
+    await fill(app);
+    press(app);
+    await until(() => app.target.querySelector(".done h1")?.textContent.includes("On its way to sam"));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    [...app.target.querySelectorAll("button")].find((x) => x.textContent.includes("Write another")).click();
+    app.flushSync();
+    await fill(app, "ana@example.com ");
+    press(app);
+    await until(() => app.target.querySelector(".done h1")?.textContent.includes("Saving"));
+    // The read of cs-1 answers before the read of cs-2.
+    a.open();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    app.flushSync();
+    assert.match(text(app.target.querySelector(".done h1")), /Saving your mail/, "no state of cs-1 under cs-2");
+    b.open();
+    await until(() => app.target.querySelector(".done h1")?.textContent.includes("On its way to ana"));
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});

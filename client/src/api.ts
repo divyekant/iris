@@ -452,6 +452,10 @@ export function newest(): () => () => boolean {
   };
 }
 
+/** The browser limit of all keepalive bodies in flight is 64 KiB: keep a margin for others. */
+export const KEEPALIVE_MAX = 60 * 1024;
+export const keepable = (json: string) => new TextEncoder().encode(json).length <= KEEPALIVE_MAX;
+
 // Each request of each view goes through here, so the access state covers every path.
 async function call(path: string, accept: string, body?: unknown): Promise<Response> {
   // A failed sign-in does not stop a token that this page has from an earlier sign-in.
@@ -461,11 +465,13 @@ async function call(path: string, accept: string, body?: unknown): Promise<Respo
   if (active()) headers["x-iris-day"] = localDay();
   const sent = token;
   if (sent) headers.authorization = `Bearer ${sent}`;
+  const json = body === undefined ? undefined : JSON.stringify(body);
   const init: RequestInit =
-    body === undefined
+    json === undefined
       ? { headers }
       : // keepalive: a POST that starts as the page closes still reaches the engine (Act.svelte).
-        { method: "POST", keepalive: true, headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify(body) };
+        // A browser refuses a keepalive body over 64 KiB, so a larger body (a long mail) goes without it.
+        { method: "POST", keepalive: keepable(json), headers: { ...headers, "content-type": "application/json" }, body: json };
   const response = await fetch(`/api/${path}`, init).catch(() => fail(UNREACHABLE));
   if (response.status === 401) {
     // The engine does not know the token (for example after a restart of iris serve).
