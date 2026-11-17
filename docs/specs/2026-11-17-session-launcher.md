@@ -438,6 +438,11 @@ machine.
 - In the same way, one stop thread of the engine stops the egress proxy
   of each reaped session. A proxy stop joins the threads of the proxy, so
   no supervisor turn, stop or run waits for it.
+- A supervisor turn does only fast work: the end in the store and the
+  close of the socket and the pipe. Each ended session gets its own reap
+  thread for `Isolation::stop` and the reap check, which have no time
+  limit. A turn starts no second reap thread for a session while one
+  runs. So a slow session never holds the stop of another session.
 
 ### Isolation
 

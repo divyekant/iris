@@ -141,7 +141,7 @@ fn now() -> i64 {
 }
 
 /// Runs supervisor turns until `done` holds for the session, at most 20 s.
-fn until(s: &Sessions, f: &Fixture, id: i64, done: impl Fn(&Session) -> bool) -> Session {
+fn until(s: &Arc<Sessions>, f: &Fixture, id: i64, done: impl Fn(&Session) -> bool) -> Session {
     let end = Instant::now() + Duration::from_secs(20);
     loop {
         s.turn(now());
@@ -256,9 +256,9 @@ fn the_engine_start_ends_each_open_session_of_the_last_engine() {
     let s = sessions(&f);
     let row = session(&f.store, id).unwrap();
     assert_eq!(row.end, Some(EndReason::Engine));
-    // No helper and no group: the reap check passes on the next turn.
-    s.turn(now());
-    assert!(session(&f.store, id).unwrap().reaped_ms.is_some());
+    // No helper and no group: the reap check passes on the reap thread of
+    // the next turn.
+    until(&s, &f, id, |r| r.reaped_ms.is_some());
 }
 
 fn with_no_isolation_each_run_is_refused() {
@@ -365,7 +365,14 @@ fn an_orphan_session_gets_a_stop_while_its_helper_runs() {
     iris_job::set_helper(&f.store, id, i64::from(helper.id())).unwrap();
     let s = sessions(&f);
     s.turn(now());
-    assert!(stopped(id), "the isolation stop comes before the reap");
+    let end = Instant::now() + Duration::from_secs(20);
+    while !stopped(id) {
+        assert!(
+            Instant::now() < end,
+            "the isolation stop comes before the reap"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert_eq!(session(&f.store, id).unwrap().reaped_ms, None);
     helper.kill().unwrap();
     helper.wait().unwrap();
