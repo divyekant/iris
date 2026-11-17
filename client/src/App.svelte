@@ -92,7 +92,8 @@
 <div id="more" popover ontoggle={(e) => (moreOpen = (e as ToggleEvent).newState === "open")}>
   <ul>
     {#each MORE as [link, label] (link)}
-      <li><a href={link} aria-current={active === link ? "page" : undefined}>{label}</a></li>
+      <!-- A view closes More, also the view that is open, where the hash does not change. -->
+      <li><a href={link} aria-current={active === link ? "page" : undefined} onclick={() => document.getElementById("more")?.hidePopover()}>{label}</a></li>
     {/each}
   </ul>
 </div>
