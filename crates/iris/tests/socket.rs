@@ -981,13 +981,15 @@ fn session_mode_uses_only_the_session_socket() {
         String::from_utf8_lossy(&out.stdout).contains("m-1"),
         "{out:?}"
     );
+    // `--json` prints one JSON document of the object itself.
     let out = iris(&["show", "c-1", "--json"]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
-    assert!(
-        String::from_utf8_lossy(&out.stdout).contains("\"c-1\""),
-        "{out:?}"
+    let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        (&shown["id"], &shown["form"]),
+        (&json!("c-1"), &json!("commitment"))
     );
-    let out = iris(&["list"]);
+    let out = iris(&["list", "commitment"]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("c-1"),
@@ -1000,7 +1002,7 @@ fn session_mode_uses_only_the_session_socket() {
             "status {}",
             r#"search {"limit":5,"text":"contract"}"#,
             r#"show {"id":"c-1"}"#,
-            "list {}",
+            r#"list {"form":"commitment"}"#,
         ]
     );
     assert!(!data.exists(), "the command made the data folder");

@@ -692,6 +692,10 @@ fn the_read_verbs_give_only_the_grant() {
         ids(&call(&store, &me, "list", json!({})).unwrap(), "items"),
         ["c-1"]
     );
+    let list = |form: &str| call(&store, &me, "list", json!({ "form": form }));
+    assert_eq!(ids(&list("commitment").unwrap(), "items"), ["c-1"]);
+    assert!(ids(&list("record").unwrap(), "items").is_empty());
+    assert_eq!(list("task").unwrap_err().0, code::USAGE);
     // A session has no drafts verb of the host (issue #522).
     assert_eq!(
         call(&store, &me, "drafts", json!({})).unwrap_err().0,
@@ -714,4 +718,52 @@ fn the_read_verbs_give_only_the_grant() {
             "{verb}"
         );
     }
+}
+
+/// A read of a session sees one snapshot of the store: the grant and the
+/// text that it gives come from the same state. A writer moves message 1
+/// between two states in single transactions: clean with the text "A", and
+/// a source of a signal (so not granted) with the text "B". `show m-1`
+/// never gives "B".
+#[test]
+fn a_read_sees_the_grant_and_the_text_of_one_snapshot() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (store, job) = fixture("snapshot");
+    let me = session(job, "se-1");
+    let set = |text: &str, signal: bool| {
+        store
+            .write(|tx| {
+                tx.execute("UPDATE body SET text = ?1 WHERE message_id = 1", [text])?;
+                if signal {
+                    tx.execute_batch(
+                        r#"INSERT INTO item (id, form, account_id, status, doc, created_at, updated_at)
+                             VALUES (9, 'signal', 1, 'open', '{"id":"s-9","form":"signal"}', 1, 1);
+                           INSERT INTO item_source (item_id, message_id, role) VALUES (9, 1, 'origin');"#,
+                    )?;
+                } else {
+                    tx.execute_batch(
+                        "DELETE FROM item_source WHERE item_id = 9; DELETE FROM item WHERE id = 9;",
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap()
+    };
+    let done = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            for _ in 0..300 {
+                set("B", true);
+                set("A", false);
+            }
+            done.store(true, Ordering::SeqCst);
+        });
+        let mut reads = 0;
+        while !done.load(Ordering::SeqCst) || reads < 50 {
+            if let Ok(v) = call(&store, &me, "show", json!({ "id": "m-1" })) {
+                assert_ne!(v["message"]["text"], "B", "{v}");
+            }
+            reads += 1;
+        }
+    });
 }
