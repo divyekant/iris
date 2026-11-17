@@ -154,6 +154,12 @@ with no agent. Its record names a coalition that ends with it, so a later
 
 `stop(session)`:
 
+`stop` holds the lock file `<data dir>/sessions/se-<id>.stop.lock`
+(`iris_store::FileLock`, an exclusive `flock`) for its whole run: the
+journal recovery, each signal and each journal write. The helper and the
+engine both call `stop`, so the lock serializes them. A second caller
+waits for the lock, then sees the result of the first.
+
 1. `launchctl bootout` of the job. A job that is not loaded is not an
    error.
 2. Until `ended` is true or 5 seconds pass, do a freeze, then a kill:
@@ -203,7 +209,9 @@ with no agent. Its record names a coalition that ends with it, so a later
    `SIGKILL`, a process outside the sandbox kills the stopped member,
    launchd reaps it, and the system gives the same process ID to a new
    process. The window is one system call. Known limit (issue).
-3. Return `Ok` if `ended` is true, else an error that names the count of
+3. Return `Ok` only if `ended` is true and the journal is empty (see the
+   recovery of the journal below). Else return an error that names the
+   count of
    live processes.
 
 `name(session)` is the label of the job.
@@ -386,7 +394,7 @@ the same label, and a job of one session never acts on another session.
 
 | Write | Success | Definite rejection | Unknown result (time-out, crash, lost answer) | Retry |
 |---|---|---|---|---|
-| `launchctl bootstrap` (the shim) | The job process connects; the hold runs | The shim exits with 1 (`failed`); `launch_failed` | The shim waits at most 1 second for the connection, then runs `bootout` and exits with 1. If the shim crashed, the job process finds no shim at the socket and exits before it writes the record, so no agent runs. The job can stay loaded with no process | Never: the launch does not retry a bootstrap. The reap calls `stop`, and `stop` runs `bootout` first |
+| `launchctl bootstrap` (the shim) | The job process connects; the hold runs | The shim exits with 1 (`failed`); `launch_failed` | The shim waits at most 1 second for the connection, then runs `bootout` and exits with 1. If the shim crashed, the job process writes its record, finds no shim at the socket, and exits with no agent. The record stays, and names a coalition that ends with the job process: `ended` gives true, and the reap of the session removes the record. If the reap came before the late record, the record stays on disk: it holds no secret, its session ID is never used again, and its coalition is gone, so each later `ended` gives true. The job can stay loaded with no process | Never: the launch does not retry a bootstrap. The reap calls `stop`, and `stop` runs `bootout` first |
 | `launchctl bootout` (`stop`) | The job is removed | "No such process" (the job is not loaded): taken as success | `stop` does not depend on it: `ended` reads the coalition, not launchd | Each `stop` runs `bootout` again, and the reap calls `stop` until the check passes. A new engine reaps each open session at its start (launcher spec), so it removes the job of each session that a crash left |
 
 ## Open questions

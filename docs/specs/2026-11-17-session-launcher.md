@@ -343,7 +343,7 @@ Each failure after step 2 ends the session with `launch_failed`, closes the
 pipe, waits for the helper if one started, runs the reap check and removes
 the socket. The wait for the helper is at most 15 seconds (the helper needs
 5 seconds and the isolation stop). After it, the launch kills the helper,
-and the lifetime rule of the isolation ends each process of the session. So no live session stays without a process. In step 6, a session
+and the lifetime rule of the isolation ends each process of the session (on macOS: the reap check waits until `stop` ended each process, see the macOS exception in [Isolation](#isolation)). So no live session stays without a process. In step 6, a session
 that ended is reaped the same way before step 2 runs again.
 
 ### Supervisor
@@ -531,7 +531,9 @@ shutdown order (see [Supervisor](#supervisor)): on a stop, a revoke, a job
 move, a time limit, an exit of the agent, a failed helper, a failed launch,
 and at the engine start for each live session. The
 supervisor calls `stop` again on each turn while the reap check fails. So
-no process of a session runs past its end, also when the helper is gone.
+on Linux no process of a session runs past its end, also when the helper
+is gone. On macOS a process can run past the end until a `stop` catches
+it, and the session is not reaped before that (the macOS exception).
 
 This card gives no isolation for a real system: R4-05 gives one for Linux, and R4-05m one for macOS. With no
 isolation, `iris job run` fails with the reason, so no agent runs as the
@@ -843,7 +845,7 @@ is refused before a row is written.
 | `iris job stop` during a launch, and no end write works until the launch is over | No agent starts. The session stays open; the supervisor ends it with `launch_failed` when the store takes the end | Engine test: the trigger stays until the helper stopped |
 | A stop mark while the gate waits for `started` | The mark waits for the commit of the gate; then the stop ends a running session | Launch test: a mark 300 ms into a 1 s late helper |
 | An agent that opens connections without end | The egress log stops at 1 MiB, then counts; the engine memory stays bounded (8 open connections) | Proxy test with 200 refused connections and a small limit |
-| The engine is killed and an agent process left the group (`setsid`) | The helper sees the end of the pipe, stops the group and calls `Isolation::stop`; if the helper is killed too, the lifetime rule ends the process | Helper test with the test isolation that records `stop`; R4-05 test of the lifetime rule on each system |
+| The engine is killed and an agent process left the group (`setsid`) | The helper sees the end of the pipe, stops the group and calls `Isolation::stop`; if the helper is killed too, the lifetime rule ends the process on Linux; on macOS the new engine calls `stop` at its start and on each turn, and reaps the session only when `ended` is true | Helper test with the test isolation that records `stop`; R4-05 test of the lifetime rule on each system |
 | An agent that prints a passed key or a file of the agent tool | Nothing of it is stored; the log has only status lines | Helper test: a script prints a marker value to both pipes, and no file of the data folder holds it |
 | A connection to the egress port of another session | The other session is not reached: each port belongs to one session, and the isolation permits only its own port | R4-05 test |
 | An `allow_hosts` entry with a port, a wildcard or an IP address | Refused with the line | Parser test |
