@@ -4,12 +4,14 @@
 //! the real helper as its own process, as the engine does.
 
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use iris_job::{add_scope, create, revoke_scope, session, By, EndReason, Ref};
@@ -127,7 +129,8 @@ fn launch(
         data_dir: &f.data,
         isolation: &Plain,
         helper,
-        egress_port: None,
+        egress: &|_, _| Ok(None),
+        stop_marks: &Mutex::default(),
         env: &env,
         now: &now,
         after,
@@ -324,6 +327,69 @@ fn a_stop_during_the_launch_cancels_it_with_no_retry() {
     assert!(iris_job::register(&f.store, f.job, "script", NOW + 3).is_ok());
 }
 
+/// A stop mark that comes while the gate waits for the helper either
+/// comes before the gate reads it (no start) or after the commit of the
+/// start. It never comes between the read and the commit.
+fn a_stop_mark_during_the_gate_waits_for_its_commit() {
+    let f = fixture("stop-gate", "data", "sleep 30");
+    // The real helper, 1 s late: the gate waits for `started` with the
+    // store write lock held.
+    let slow = |args: &[OsString]| {
+        let mut c = Process::new("/bin/sh");
+        c.args(["-c", "sleep 1; exec \"$0\" \"$@\""])
+            .arg(std::env::current_exe().unwrap())
+            .arg("session-hold")
+            .args(args);
+        c
+    };
+    let marks: Mutex<HashSet<i64>> = Mutex::default();
+    // `Some(true)`: the mark came while the start was not committed.
+    let early = Mutex::new(None);
+    let outcome = std::thread::scope(|sc| {
+        let after = |step: Step, session: i64| {
+            if step != Step::HelperStarted {
+                return;
+            }
+            let (f, marks, early) = (&f, &marks, &early);
+            sc.spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                let mut m = marks.lock().unwrap();
+                let started = session_started(f, session);
+                m.insert(f.job);
+                *early.lock().unwrap() = Some(!started);
+            });
+        };
+        let l = Launcher {
+            store: &f.store,
+            data_dir: &f.data,
+            isolation: &Plain,
+            helper: &slow,
+            egress: &|_, _| Ok(None),
+            stop_marks: &marks,
+            env: &env,
+            now: &now,
+            after: &after,
+        };
+        let begun = l.begin(f.job, "script").unwrap();
+        l.finish(begun)
+    });
+    let early = early.lock().unwrap().expect("the stop thread did not run");
+    match outcome {
+        Outcome::Running(r) => {
+            assert!(!early, "the agent started after a stop mark");
+            stop(&f, r, EndReason::Stop);
+        }
+        _ => assert!(early, "no start, and no mark before the commit"),
+    }
+}
+
+fn session_started(f: &Fixture, session: i64) -> bool {
+    iris_job::session(&f.store, session)
+        .unwrap()
+        .started_ms
+        .is_some()
+}
+
 fn a_late_helper_fails_the_launch() {
     let f = fixture("late", "data", "touch started.txt; sleep 30");
     // This helper reads the start but never confirms it.
@@ -369,7 +435,8 @@ fn a_missing_program_fails_before_a_session_row() {
         data_dir: &f.data,
         isolation: &Plain,
         helper: &real_helper,
-        egress_port: None,
+        egress: &|_, _| Ok(None),
+        stop_marks: &Mutex::default(),
         env: &env,
         now: &now,
         after: &|_, _| {},
@@ -463,6 +530,10 @@ fn main() {
         (
             "a_stop_during_the_launch_cancels_it_with_no_retry",
             a_stop_during_the_launch_cancels_it_with_no_retry,
+        ),
+        (
+            "a_stop_mark_during_the_gate_waits_for_its_commit",
+            a_stop_mark_during_the_gate_waits_for_its_commit,
         ),
         (
             "a_late_helper_fails_the_launch",

@@ -60,6 +60,8 @@ pub enum Reason {
     SniNotAllowed,
     /// The proxy had no file descriptor or thread for the connection.
     NoResources,
+    /// The client address is not the session address of the proxy.
+    NotSession,
 }
 
 impl Reason {
@@ -75,8 +77,39 @@ impl Reason {
             Reason::NotTls => "not_tls",
             Reason::SniNotAllowed => "sni_not_allowed",
             Reason::NoResources => "no_resources",
+            Reason::NotSession => "not_session",
         }
     }
+}
+
+/// The first address of the session addresses: `127.128.0.0`.
+const SESSION_BASE: u32 = 0x7F80_0000;
+/// The largest session ID that has a session address (`127.255.255.254`).
+pub const SESSION_MAX: i64 = 0x7F_FFFE;
+
+/// The loopback address of `session`. The relay of a sandbox connects from
+/// this address, and the proxy of the session takes no other client. Session
+/// IDs are never used again, so no two sessions get the same address. None
+/// for an ID outside `1..=SESSION_MAX`.
+pub fn session_peer(session: i64) -> Option<Ipv4Addr> {
+    if !(1..=SESSION_MAX).contains(&session) {
+        return None;
+    }
+    Some(Ipv4Addr::from(SESSION_BASE + session as u32))
+}
+
+/// Connects to `127.0.0.1:<port>` from the loopback address `from`, with
+/// `socket2` (bind before connect). `Socket::new` sets close-on-exec. Linux takes
+/// each address of `127.0.0.0/8` as a local address with no setup.
+pub fn connect_from(from: Ipv4Addr, port: u16) -> io::Result<TcpStream> {
+    use socket2::{Domain, SockAddr, Socket, Type};
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+    socket.bind(&SockAddr::from(SocketAddr::from((from, 0))))?;
+    socket.connect(&SockAddr::from(SocketAddr::from((
+        Ipv4Addr::LOCALHOST,
+        port,
+    ))))?;
+    Ok(socket.into())
 }
 
 /// True if a connection to `ip` can leave the machine to the public internet.
@@ -232,6 +265,8 @@ struct Shared {
     allowed: Vec<String>,
     resolver: Arc<dyn Resolve>,
     public_only: bool,
+    /// The only client address that the proxy takes. None only in tests.
+    peer: Option<Ipv4Addr>,
     /// The live resolver workers of the process (one count for all proxies).
     /// A worker can outlive its connection and the proxy, so it holds only
     /// this count, the resolver and the name.
@@ -286,13 +321,19 @@ pub struct Proxy {
 
 impl Proxy {
     /// Starts the proxy on a free port of `127.0.0.1`. `log` is the egress
-    /// log of the session, open for append.
-    pub fn start(allowed: Vec<String>, log: File, resolver: Box<dyn Resolve>) -> io::Result<Proxy> {
+    /// log of the session, open for append. `peer` is the session address
+    /// ([`session_peer`]): the proxy refuses a client from another address.
+    pub fn start(
+        allowed: Vec<String>,
+        log: File,
+        resolver: Box<dyn Resolve>,
+        peer: Ipv4Addr,
+    ) -> io::Result<Proxy> {
         static WORKERS: OnceLock<Arc<AtomicUsize>> = OnceLock::new();
         let workers = WORKERS
             .get_or_init(|| Arc::new(AtomicUsize::new(0)))
             .clone();
-        Proxy::start_with(allowed, log, resolver, true, LOG_LIMIT, workers)
+        Proxy::start_with(allowed, log, resolver, true, Some(peer), LOG_LIMIT, workers)
     }
 
     /// `public_only` is false only in tests, which use a loopback server.
@@ -301,6 +342,7 @@ impl Proxy {
         file: File,
         resolver: Box<dyn Resolve>,
         public_only: bool,
+        peer: Option<Ipv4Addr>,
         log_limit: u64,
         workers: Arc<AtomicUsize>,
     ) -> io::Result<Proxy> {
@@ -311,6 +353,7 @@ impl Proxy {
             allowed,
             resolver: Arc::from(resolver),
             public_only,
+            peer,
             workers,
             log: Mutex::new(Log {
                 file,
@@ -351,6 +394,23 @@ impl Proxy {
         self.port
     }
 
+    /// Ends each open connection and each resolve in progress, and answers
+    /// each later connection with a close and `ended reason=stopped`. The
+    /// port stays bound until [`Proxy::stop`], so it cannot go to the proxy
+    /// of another session. Call it when the grant of the session ends.
+    pub fn close(&self) {
+        // The accept loop reads `stopping` while it holds this lock, so no
+        // connection is added after the shutdowns below.
+        let c = lock(&self.shared.conns);
+        self.shared.stopping.store(true, Ordering::SeqCst);
+        for s in c.streams.values().flatten() {
+            let _ = s.shutdown(Shutdown::Both);
+        }
+        for tx in c.cancels.values() {
+            let _ = tx.send(Phase::Cancel);
+        }
+    }
+
     /// Closes the port and each open connection, waits for each thread, and
     /// writes the count of dropped log lines.
     pub fn stop(mut self) -> io::Result<()> {
@@ -367,16 +427,8 @@ impl Proxy {
         // cannot fail when the process has none left.
         drop(self.wake.take());
         let mut panicked = accept.join().is_err();
-        let threads = {
-            let mut c = lock(&self.shared.conns);
-            for s in c.streams.values().flatten() {
-                let _ = s.shutdown(Shutdown::Both);
-            }
-            for tx in c.cancels.values() {
-                let _ = tx.send(Phase::Cancel);
-            }
-            std::mem::take(&mut c.threads)
-        };
+        self.close();
+        let threads = std::mem::take(&mut lock(&self.shared.conns).threads);
         for t in threads {
             panicked |= t.join().is_err();
         }
@@ -437,8 +489,8 @@ fn wait(listener: &TcpListener, woken: &UnixStream) -> bool {
 
 fn accept_loop(listener: TcpListener, woken: UnixStream, shared: Arc<Shared>) {
     while wait(&listener, &woken) {
-        let stream = match listener.accept() {
-            Ok((stream, _)) => stream,
+        let (stream, from) = match listener.accept() {
+            Ok(accepted) => accepted,
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
             Err(_) => continue,
         };
@@ -448,8 +500,12 @@ fn accept_loop(listener: TcpListener, woken: UnixStream, shared: Arc<Shared>) {
             finish(&shared, refuse(stream, Reason::NoResources));
             continue;
         }
+        let mut c = lock(&shared.conns);
         if shared.stopping.load(Ordering::SeqCst) {
-            // A client accepted during the stop gets its line and a close.
+            // Each client accepted after a close, from any address, gets
+            // its line and a close.
+            drop(c);
+            drop(stream);
             finish(
                 &shared,
                 Finish {
@@ -459,7 +515,14 @@ fn accept_loop(listener: TcpListener, woken: UnixStream, shared: Arc<Shared>) {
             );
             continue;
         }
-        let mut c = lock(&shared.conns);
+        if shared
+            .peer
+            .is_some_and(|peer| from.ip() != IpAddr::V4(peer))
+        {
+            drop(c);
+            finish(&shared, refuse(stream, Reason::NotSession));
+            continue;
+        }
         c.threads.retain(|t| !t.is_finished());
         if c.streams.len() >= MAX_CONNECTIONS {
             drop(c);

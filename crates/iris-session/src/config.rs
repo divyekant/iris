@@ -23,7 +23,7 @@ const MAX_COMMAND: usize = 32;
 const MAX_PASS_ENV: usize = 32;
 const MAX_HOSTS: usize = 16;
 const MAX_BYTES: usize = 64 * 1024;
-const DEFAULT_MINUTES: u32 = 30;
+pub const DEFAULT_MINUTES: u32 = 30;
 const PROXY_NAMES: [&str; 4] = ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY"];
 
 /// The variables that each agent gets, if the engine has them.
@@ -333,7 +333,11 @@ pub fn adapter(file: &AgentsFile, name: &str, path: Option<&OsStr>) -> Result<Ad
                 "Glob".into(),
                 "Grep".into(),
             ],
-            vec!["ANTHROPIC_API_KEY".to_string()],
+            vec![
+                "ANTHROPIC_API_KEY".to_string(),
+                // A token of `claude setup-token`: the session has no home of the person.
+                "CLAUDE_CODE_OAUTH_TOKEN".to_string(),
+            ],
             vec!["api.anthropic.com".to_string()],
         ),
         "codex" => (

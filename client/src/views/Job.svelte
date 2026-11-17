@@ -32,7 +32,7 @@
     <p class="question">{job.question}</p>
   {:else}
     <p class="said">{now(job)}</p>
-    {#if mail}<p class="mail"><a href={mail.link}>{mail.subject}</a></p>{/if}
+    {#if mail}<p class="mail"><a class="touch" href={mail.link}>{mail.subject}</a></p>{/if}
   {/if}
 </section>
 
@@ -48,7 +48,7 @@
         <div class="body">
           {#if newDay(i)}<p class="day">{day(s.at)}</p>{/if}
           <p class="text">{s.text}{#if s.link}{" "}<a href={s.link.href}>{s.link.text}</a>{/if}</p>
-          {#if s.mail}<p class="mail"><a href={s.mail.link}>{s.mail.subject}</a></p>{/if}
+          {#if s.mail}<p class="mail"><a class="touch" href={s.mail.link}>{s.mail.subject}</a></p>{/if}
           {#if s.quote}<p class="quote">{s.quote}</p>{/if}
         </div>
       </li>
