@@ -4,6 +4,7 @@
 use super::*;
 use std::io::{BufRead, BufReader};
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 
 /// A small random number source for the property tests.
@@ -248,8 +249,15 @@ fn proxy(name: &str, to: SocketAddr, public_only: bool, log_limit: u64) -> Box_ 
         .append(true)
         .open(&log)
         .unwrap();
-    let proxy =
-        Proxy::start_with(allowed(), file, Box::new(Fixed(to)), public_only, log_limit).unwrap();
+    let proxy = Proxy::start_with(
+        allowed(),
+        file,
+        Box::new(Fixed(to)),
+        public_only,
+        log_limit,
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .unwrap();
     Box_ {
         proxy,
         log: LogFile(log),
@@ -279,14 +287,20 @@ fn an_allowed_connect_reaches_the_host_and_logs_its_bytes() {
     let b = proxy("ok", echo(), false, LOG_LIMIT);
     let (mut s, line) = send(&b.proxy, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
     assert!(line.starts_with("HTTP/1.1 200"), "{line}");
-    s.write_all(b"ping").unwrap();
-    let mut got = [0u8; 4];
+    let mut sent = hello("api.example.test");
+    sent.extend_from_slice(b"ping");
+    s.write_all(&sent).unwrap();
+    let mut got = vec![0u8; sent.len()];
     s.read_exact(&mut got).unwrap();
-    assert_eq!(&got, b"ping");
+    assert_eq!(got, sent);
     drop(s);
     b.proxy.stop().unwrap();
     let text = log_text(&b.log);
-    assert!(text.contains("host=api.example.test up=4 down=4"), "{text}");
+    let n = sent.len();
+    assert!(
+        text.contains(&format!("host=api.example.test up={n} down={n}")),
+        "{text}"
+    );
 }
 
 #[test]
@@ -385,7 +399,15 @@ fn a_stop_does_not_wait_for_a_stalled_resolver() {
         .append(true)
         .open(&log)
         .unwrap();
-    let proxy = Proxy::start_with(allowed(), file, Box::new(Stalled), false, LOG_LIMIT).unwrap();
+    let proxy = Proxy::start_with(
+        allowed(),
+        file,
+        Box::new(Stalled),
+        false,
+        LOG_LIMIT,
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .unwrap();
     let mut s = TcpStream::connect(("127.0.0.1", proxy.port())).unwrap();
     s.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\n\r\n")
         .unwrap();
@@ -436,7 +458,7 @@ fn each_connection_writes_one_log_line() {
 }
 
 /// A stalled resolver that counts its calls.
-struct Counted(Arc<std::sync::atomic::AtomicUsize>);
+struct Counted(Arc<AtomicUsize>);
 
 impl Resolve for Counted {
     fn resolve(&self, _host: &str, _port: u16) -> io::Result<Vec<SocketAddr>> {
@@ -447,41 +469,45 @@ impl Resolve for Counted {
     }
 }
 
-/// Timed-out connects leave their resolver workers behind: the proxy keeps
-/// at most MAX_CONNECTIONS of them, and refuses each CONNECT past the bound.
+/// Timed-out connects leave their resolver workers behind, also after a
+/// stop. The process keeps at most MAX_RESOLVERS of them over all proxies,
+/// and refuses each CONNECT past the bound.
 #[test]
-fn stalled_resolver_workers_stay_bounded() {
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let log = std::env::temp_dir().join(format!("iris-egress-bound-{}.log", std::process::id()));
-    let _ = std::fs::remove_file(&log);
-    let guard = LogFile(log.clone());
-    let file = File::options()
-        .create_new(true)
-        .append(true)
-        .open(&log)
+fn stalled_resolver_workers_stay_bounded_over_proxies() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let workers = Arc::new(AtomicUsize::new(0));
+    let mut too_many = 0;
+    for (i, tries) in [(0, MAX_RESOLVERS + 8), (1, 4)] {
+        let log =
+            std::env::temp_dir().join(format!("iris-egress-bound-{i}-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&log);
+        let guard = LogFile(log.clone());
+        let file = File::options()
+            .create_new(true)
+            .append(true)
+            .open(&log)
+            .unwrap();
+        let proxy = Proxy::start_with(
+            allowed(),
+            file,
+            Box::new(Counted(calls.clone())),
+            false,
+            LOG_LIMIT,
+            workers.clone(),
+        )
         .unwrap();
-    let proxy = Proxy::start_with(
-        allowed(),
-        file,
-        Box::new(Counted(calls.clone())),
-        false,
-        LOG_LIMIT,
-    )
-    .unwrap();
-    for _ in 0..3 * MAX_CONNECTIONS {
-        let (_s, line) = send(&proxy, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
-        assert!(!line.starts_with("HTTP/1.1 200"), "{line}");
+        for _ in 0..tries {
+            let (_s, line) = send(&proxy, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
+            assert!(!line.starts_with("HTTP/1.1 200"), "{line}");
+        }
+        let t = Instant::now();
+        proxy.stop().unwrap();
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+        too_many += log_text(&guard).matches("reason=too_many").count();
     }
-    assert_eq!(calls.load(Ordering::SeqCst), MAX_CONNECTIONS);
-    let t = Instant::now();
-    proxy.stop().unwrap();
-    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
-    let text = log_text(&guard);
-    assert_eq!(
-        text.matches("reason=too_many").count(),
-        2 * MAX_CONNECTIONS,
-        "{text}"
-    );
+    assert_eq!(calls.load(Ordering::SeqCst), MAX_RESOLVERS);
+    assert_eq!(workers.load(Ordering::SeqCst), MAX_RESOLVERS);
+    assert_eq!(too_many, 8 + 4);
 }
 
 /// A refused connection keeps its place in the count until its socket
@@ -500,4 +526,54 @@ fn a_refused_connection_counts_until_it_closes() {
     for s in &mut held {
         assert_eq!(s.read(&mut buf).unwrap_or(0), 0);
     }
+}
+
+/// The first bytes of a TLS connection (the ClientHello) with `name` in the
+/// server name indication (SNI), made by rustls.
+fn hello(name: &str) -> Vec<u8> {
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(rustls::RootCertStore::empty())
+    .with_no_client_auth();
+    let name = rustls::pki_types::ServerName::try_from(name.to_string()).unwrap();
+    let mut c = rustls::ClientConnection::new(Arc::new(config), name).unwrap();
+    let mut out = Vec::new();
+    c.write_tls(&mut out).unwrap();
+    out
+}
+
+/// Two names can share one address. The tunnel opens only for a TLS
+/// connection whose SNI is the host of the CONNECT, so a CONNECT to an
+/// allowed host cannot reach another site at the same address.
+#[test]
+fn a_tunnel_needs_the_sni_of_its_allowed_host() {
+    let b = proxy("sni", echo(), false, LOG_LIMIT);
+    let cases: [(&[u8], &str); 4] = [
+        (&hello("other-site.test"), "reason=sni_not_allowed"),
+        (&hello("other.example.test"), "reason=sni_not_allowed"),
+        (b"\x16\x03\x01\x00\x05hello", "reason=not_tls"),
+        (b"GET / HTTP/1.1\r\n\r\n", "reason=not_tls"),
+    ];
+    for (bytes, want) in cases {
+        let (mut s, line) = send(&b.proxy, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
+        assert!(line.starts_with("HTTP/1.1 200"), "{line}");
+        s.write_all(bytes).unwrap();
+        let mut buf = [0u8; 64];
+        // Nothing comes back from the host: the proxy closes the tunnel.
+        assert_eq!(s.read(&mut buf).unwrap_or(0), 0, "{want}");
+        thread::sleep(Duration::from_millis(50));
+        assert!(log_text(&b.log).contains(want), "{want}");
+    }
+    let (mut s, _) = send(&b.proxy, "CONNECT API.example.test:443 HTTP/1.1\r\n\r\n");
+    let sent = hello("api.EXAMPLE.test");
+    s.write_all(&sent).unwrap();
+    let mut got = vec![0u8; sent.len()];
+    s.read_exact(&mut got).unwrap();
+    assert_eq!(got, sent);
+    drop(s);
+    b.proxy.stop().unwrap();
+    assert!(!log_text(&b.log).contains("other"), "{}", log_text(&b.log));
 }
