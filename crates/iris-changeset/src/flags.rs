@@ -221,12 +221,7 @@ pub fn draft_flags(c: &Connection, account: &str, content: &Content) -> Result<V
         if a.eq_ignore_ascii_case(account) {
             continue;
         }
-        let known: bool = c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM sender_evidence WHERE address = ?1 AND rule = 'sent')",
-            [a.to_ascii_lowercase()],
-            |r| r.get(0),
-        )?;
-        if !known {
+        if !iris_senders::sent_to(c, &a.to_ascii_lowercase())? {
             new = true;
             break;
         }

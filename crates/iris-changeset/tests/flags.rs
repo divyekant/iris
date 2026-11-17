@@ -235,6 +235,37 @@ fn each_case_of_the_test_set_gives_its_flag() {
     assert_eq!(got, vec!["untrusted_content"]);
 }
 
+/// Evidence counts only while its message is a sent message that is not
+/// gone (issue #377): stale evidence makes the address new.
+#[test]
+fn stale_sent_evidence_makes_the_address_new() {
+    let flags = |s: &Store| {
+        s.read(|c| Ok(draft_flags(c, OWNER, &content("priya@example.com", "Hi", "Hi.")).unwrap()))
+            .unwrap()
+    };
+    let dir = TempDir::new("gone");
+    let s = store(&dir);
+    assert!(flags(&s).is_empty());
+    s.write(|tx| Ok(tx.execute("UPDATE message SET gone_at = 1 WHERE id = 2", [])?))
+        .unwrap();
+    assert_eq!(flags(&s), vec!["new_recipient"]);
+    let dir = TempDir::new("unsent");
+    let s = store(&dir);
+    s.write(|tx| Ok(tx.execute("DELETE FROM message_label WHERE message_id = 2", [])?))
+        .unwrap();
+    assert_eq!(flags(&s), vec!["new_recipient"]);
+    let dir = TempDir::new("changed");
+    let s = store(&dir);
+    s.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE sender_evidence SET content_sha256 = 'other' WHERE message_id = 2",
+            [],
+        )?)
+    })
+    .unwrap();
+    assert_eq!(flags(&s), vec!["new_recipient"]);
+}
+
 /// A store with no `sent` evidence: each address is new.
 #[test]
 fn no_sent_mail_makes_each_address_new() {

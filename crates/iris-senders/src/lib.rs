@@ -372,6 +372,21 @@ fn decide_message(
     })
 }
 
+/// True when the owner sent mail to `addr` (lower case): a `sent` evidence
+/// row whose message is a sent message, not gone, with the same bytes.
+/// The changeset flag `new_recipient` uses the same rule.
+pub fn sent_to(conn: &Connection, addr: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM sender_evidence e JOIN message s ON s.id = e.message_id
+              WHERE e.address = ?1 AND e.rule = 'sent' AND s.content_sha256 IS e.content_sha256
+                AND {SENT_NOT_DRAFT})"
+        ),
+        [addr],
+        |r| r.get(0),
+    )
+}
+
 /// True when the message `s` is not gone and has the label `SENT` and not
 /// `DRAFT`.
 const SENT_NOT_DRAFT: &str =
@@ -431,16 +446,7 @@ fn rules(conn: &Connection, addr: &str) -> rusqlite::Result<(Kind, String)> {
     // decision makes the recipients `person`. Spec 1 section 6.7 accepts
     // this: "The first sync fetches newest first, so a known person can be a
     // stranger for some time."
-    let sent: bool = conn.query_row(
-        &format!(
-            "SELECT EXISTS (SELECT 1 FROM sender_evidence e JOIN message s ON s.id = e.message_id
-              WHERE e.address = ?1 AND e.rule = 'sent' AND s.content_sha256 IS e.content_sha256
-                AND {SENT_NOT_DRAFT})"
-        ),
-        [addr],
-        |r| r.get(0),
-    )?;
-    if sent {
+    if sent_to(conn, addr)? {
         return Ok((Kind::Person, "sent".into()));
     }
     // shortcut: this query reads each message from the address, so its cost

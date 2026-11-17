@@ -396,23 +396,21 @@ fn a_stranger_thread_flags_first_contact_with_gone_messages() {
         )?)
     })
     .unwrap();
-    // The owner wrote to priya before: no new_recipient flag here.
-    s.write(|tx| {
-        Ok(tx.execute(
-            "INSERT INTO sender_evidence(message_id, address, rule) VALUES (1, 'priya@example.com', 'sent')",
-            [],
-        )?)
-    })
-    .unwrap();
+    // A stranger: the owner never wrote to priya, so new_recipient too.
     let flags = |a: &Value| a["flags"].clone();
     let got = one(&s, AuthorKind::Person, Verb::Draft, &["t-1"], REPLY());
-    assert_eq!(flags(&got), json!(["first_contact"]), "{got}");
+    assert_eq!(
+        flags(&got),
+        json!(["first_contact", "new_recipient"]),
+        "{got}"
+    );
     s.write(|tx| Ok(tx.execute("UPDATE message SET gone_at = 1 WHERE thread_id = 1", [])?))
         .unwrap();
     let got = one(&s, AuthorKind::Person, Verb::Send, &["d-1"], json!({}));
     assert_eq!(state(&got), "proposed", "{got}");
+    // The draft row has no content, so the send has no draft flags.
     assert_eq!(flags(&got), json!(["first_contact"]), "{got}");
     // A new mail has no thread, so no thread can make it a first contact.
     let got = one(&s, AuthorKind::Person, Verb::Draft, &["a-1"], MAIL());
-    assert_eq!(flags(&got), json!([]), "{got}");
+    assert_eq!(flags(&got), json!(["new_recipient"]), "{got}");
 }
