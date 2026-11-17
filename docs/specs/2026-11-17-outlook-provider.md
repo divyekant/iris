@@ -144,7 +144,8 @@ account. R6-10 decides where this compare lives.
 | `move_to(id, folder)` | `POST /me/messages/{id}/move` `{"destinationId"}` | 201, the message |
 | `create_draft(mime)` | `POST /me/messages`, `text/plain`, base64 MIME | 201, the draft |
 | `send_mime(mime)` | `POST /me/sendMail`, `text/plain`, base64 MIME | 202, no body |
-| `delete_draft(id)` | `DELETE /me/messages/{id}` | 204 |
+| `draft_etag(id)` | `GET /me/messages/{id}?$select=id` | 200, the `@odata.etag` |
+| `delete_draft(id, etag)` | `DELETE /me/messages/{id}` with `If-Match: <etag>` | 204, or 412 |
 
 `set_categories` replaces the full list (A6). The caller reads the message
 with its `@odata.etag` first, and sends the full new list with
@@ -156,9 +157,26 @@ The send binds the approved bytes. Iris never sends a draft by its ID,
 because the person or another client can change a draft at the server
 after the approval. `send_mime` sends the stored raw bytes of the approved
 draft (the same bytes that the approval hash covers, as for Gmail in spec
-`2026-11-16-send.md`). After a send, Iris deletes the server draft with
-`delete_draft`, so that the person does not send it a second time from
-Outlook. A failed delete leaves a draft and changes no sent mail.
+`2026-11-16-send.md`).
+
+Graph builds the MIME text of a draft again at each read (A4), so a hash
+of the server bytes cannot show a change. The etag shows it. The release
+of a send does these steps:
+
+1. `create_draft` keeps the `@odata.etag` of the new draft with the draft
+   row.
+2. Before the send, `draft_etag` reads the server draft. If the draft is
+   gone (404), or its etag is not the kept etag, the person or another
+   client changed it: the release denies the send ("The draft changed
+   after the approval."), as spec 2 section 7.5 and the send spec require.
+3. `send_mime` sends the stored bytes.
+4. `delete_draft` deletes the server draft with `If-Match` and the kept
+   etag, so that the person does not send it a second time from Outlook.
+   A draft that changed after step 2 gives 412, and Iris leaves it in
+   place. A failed delete leaves a draft and changes no sent mail.
+
+If Graph ignores `If-Match` on `DELETE` (A14), Iris does not delete the
+draft: it stays in Drafts, and the outbox tells the person.
 
 ### 6. Map to the mirror
 
@@ -299,8 +317,8 @@ Each assumption has the evidence of a Microsoft Learn page, read on
 - A12. Consent to an unverified multitenant app can be blocked in a work
   tenant with risk-based step-up consent. Evidence:
   <https://learn.microsoft.com/en-us/entra/identity-platform/publisher-verification-overview>.
-- A14. A `PATCH` of a message with `If-Match` and an old `@odata.etag`
-  gives HTTP 412. Evidence: `pending` (OData v4 rule; the message-update
+- A14. A `PATCH` or a `DELETE` of a message with `If-Match` and an old
+  `@odata.etag` gives HTTP 412, and a change of a draft changes its etag. Evidence: `pending` (OData v4 rule; the message-update
   page does not state it). The release gate tests it on the real mailbox.
   If Graph ignores `If-Match`, Iris turns off category writes for Outlook
   accounts (label and unlabel give a definite refusal), and the rest works.
@@ -322,12 +340,12 @@ section 7.3). The caller reconciles with reads only.
 
 | Call | Success | Definite rejection (4xx, not 429) | Unknown result (time-out, lost answer, 429, 5xx) | Retry |
 |---|---|---|---|---|
-| `set_read`, `set_flag` | the answer has the new state | `Error::Api`, the mirror does not change | the caller reads the message: the target state means applied, any other state means failed | never after an unknown result |
+| `set_read`, `set_flag` | the answer has the new state | `Error::Api`, the mirror does not change | the caller reads the message: the target state means applied; any other state keeps the result unknown, because another client can have reversed the write. Iris tells the person (spec 2 section 7.3) | never after an unknown result |
 | `set_categories` | the answer has the new list | `Error::Api`; 412 means the message changed after the read: nothing changed | as `set_read` | after 412 only: one new read and one new PATCH |
-| `move_to` | 201 with the moved message | `Error::Api` | the caller reads the message: its `parentFolderId` shows the result | never after an unknown result |
+| `move_to` | 201 with the moved message | `Error::Api` | the caller reads the message: the target folder means applied; any other folder keeps the result unknown, and Iris tells the person | never after an unknown result |
 | `create_draft` | 201 with the draft ID | `Error::Api` | a draft can exist. The caller searches `drafts` for its `Message-ID` header: found means created, not found means failed | never after an unknown result |
 | `send_mime` | 202 | `Error::Api` | the ledger keeps the claim, and the caller looks in `sentitems` for the `Message-ID` (spec 2 section 7.5) | never |
-| `delete_draft` | 204 | `Error::Api`; 404 means the draft is gone, which is the target | the caller reads the draft: 404 means deleted | never after an unknown result |
+| `delete_draft` | 204 | `Error::Api`; 404 means the draft is gone, which is the target; 412 means the draft changed, and Iris leaves it | the caller reads the draft: 404 means deleted, else the draft stays | never after an unknown result |
 
 ## Open questions
 
