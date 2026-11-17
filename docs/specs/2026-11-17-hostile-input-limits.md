@@ -2,7 +2,7 @@
 
 - Date: 2026-11-17
 - Card: R4-06
-- Status: Draft
+- Status: Built
 
 ## Problem
 
@@ -97,15 +97,20 @@ stored raw bytes of the draft of a `send`.
 ### 3. The flag
 
 Submit (`iris_changeset::submit_in`) adds `outside_thread` to a `draft` or a
-`send` action when the changeset author is marked and the content has an
-outside address. Submit reads the mark and the thread addresses in its own
+`send` action when the changeset author is marked
+(`iris_changeset::marked_in`) and the content has an outside address
+(`iris_changeset::outside_marks` is not empty). The flag has no mark on
+a field: the drafts API of the review lists it in `unmarked`, and the
+review screen shows it in words ("Goes to an address that is not in the
+thread"). A mark on each address waits for a short tag in the review
+screen, a screen change for the owner to pick. Submit reads the mark and the thread addresses in its own
 transaction. The release does not compute the flag again: the person
 approved the action with the flag in view, and the content hash binds the
 recipients.
 
 ### 4. The store limit
 
-Migration 23 adds one trigger on `changeset_action`, `BEFORE UPDATE OF
+Migration 25 adds one trigger on `changeset_action`, `BEFORE UPDATE OF
 state, flags`. After the update, an `approved` `draft` or `send` whose flags
 have `new_recipient`, `outside_thread`, `money` or `date` must have
 `decided_by = 'person'`. Else the store aborts with "iris: only a person
@@ -160,14 +165,21 @@ the thread messages in the store, the scope rows of the job.
 
 ## Impact
 
-- `crates/iris-store`: `schema_23.sql` (one trigger), the migration list.
+- `crates/iris-store`: `schema_25.sql` (one trigger), the migration list.
 - `crates/iris-job`: `reads_outside_in`.
-- `crates/iris-changeset`: the flag at submit (`flags.rs`, `submit_in`).
+- `crates/iris-changeset`: the flag at submit (`submit_in`, `marked_in`,
+  `outside_marks`).
+- An agent with no job is marked, so its new mail gets `outside_thread`.
+  Tests of the other draft flags use a person author or expect the flag.
 - `docs/spec/02-changeset-policy-ledger.md`: sections 5.3 and 6.5.
 - No API, schema or screen change. The flag name exists in
   `docs/spec/schema/changeset.schema.json`.
-- Memory: one bounded set of thread addresses for each write action at
-  submit.
+- Memory: the check holds only the recipients of the draft (at most the
+  limit of `Content::check`). It streams your addresses and the thread
+  headers, one row at a time, and removes each recipient that a row names
+  (`iris_senders::head::each_address`, one address at a time). It never
+  holds a list of the addresses of the thread or of one header. The text of
+  one header row is in memory while the check reads it.
 
 ## Assumptions
 
@@ -214,17 +226,17 @@ scripts/local-ci/run.sh
 
 ## Rollout
 
-Migration 23 runs at the next start. It adds a trigger only, and no current
+Migration 25 runs at the next start. It adds a trigger only, and no current
 code path approves a `draft` or a `send` by rule.
 
 ## Risks
 
 - A wrong mark gives a missing flag. The person still approves each send.
 - Rollback: add a migration that drops the trigger, and revert the flag
-  code. Do not revert migration 23 alone: a program with fewer migrations
+  code. Do not revert migration 25 alone: a program with fewer migrations
   does not open a newer store.
 
 ## Plan
 
 1. R4-06: this spec.
-2. R4-06: the mark, the flag, migration 23 and the property test (one PR).
+2. R4-06: the mark, the flag, migration 25 and the property test (one PR).

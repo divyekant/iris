@@ -177,6 +177,13 @@ fn comment_name(entry: &str, addr: &str) -> Option<String> {
 /// brackets. Each entry gives (lowercase address, display name).
 pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
     let mut out = Vec::new();
+    each_address(v, |a, name| out.push((a, name)));
+    out
+}
+
+/// [`addresses`] one entry at a time, with no list in memory: call `f`
+/// with each (lowercase address, display name).
+pub fn each_address(v: &str, mut f: impl FnMut(String, Option<String>)) {
     let (mut quoted, mut angle, mut start, mut comment) = (false, false, 0, 0u32);
     let mut push = |entry: &str| {
         let s = strip_comments(entry);
@@ -196,7 +203,7 @@ pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
             // The sender rows keep the decoded name: the spoof check
             // compares it with the decoded name of a later `From`.
             let name = decode_name(&name.trim_matches('"').replace("\\\"", "\""));
-            out.push((addr, (!name.is_empty()).then_some(name)));
+            f(addr, (!name.is_empty()).then_some(name));
         }
     };
     for (i, c) in v.char_indices() {
@@ -218,7 +225,6 @@ pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
         }
     }
     push(&v[start..]);
-    out
 }
 
 #[cfg(test)]

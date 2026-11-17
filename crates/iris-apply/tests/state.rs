@@ -681,7 +681,7 @@ fn submit_denies_restore_with_no_undo_link() {
     assert_eq!(b.one("SELECT status FROM item WHERE id = 1"), json!("done"));
 }
 
-/// The link of an undo to a state entry (migration 24) takes only `restore`
+/// The link of an undo to a state entry (migration 26) takes only `restore`
 /// with no arguments, as step 1.
 #[test]
 fn the_link_of_a_state_undo_takes_only_restore() {
@@ -926,7 +926,7 @@ fn the_undo_of_a_correction_of_an_array_element_sets_it_back() {
     assert_eq!(b.one("SELECT status FROM item WHERE id = 1"), json!("kept"));
 }
 
-/// An entry from before migration 24 has no IDs of its correction rows in
+/// An entry from before migration 26 has no IDs of its correction rows in
 /// `ops`, so it has no undo: the undo could not remove its corrections.
 #[test]
 fn a_state_entry_with_no_correction_ids_has_no_undo() {

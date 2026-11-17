@@ -619,7 +619,7 @@ in the file.
 | Limit | Result |
 |---|---|
 | A `send` never goes at once. | It waits in the held outbox for the hold delay, after the approval (release 3). |
-| A `draft` or a `send` with the flag `new_recipient`, `outside_thread`, `money` or `date`. | Review, even if a rule allows it. Only a person approves it (store migration 23). |
+| A `draft` or a `send` with the flag `new_recipient`, `outside_thread`, `money` or `date`. | Review, even if a rule allows it. Only a person approves it (store migration 25). |
 | An action with the flag `bulk`. | Review, even if a rule allows it. |
 | An action by an author other than `person`, whose target has hostile mail: a message with a hostile mark, a message that waits for its link check (a `link_check` row), or a message from a `hostile` sender (specification 1, section 6.7). For a thread or a draft target, each message of the thread counts. | Only `archive`, `trash` and `label`. Other verbs are denied. |
 | Stop is on (release 4). | No provider write. Actions in the outbox wait. |
@@ -723,7 +723,7 @@ or with a change of Iris state:
 | `state` | `writing`, `applied`, `failed` or `undone`. The trigger `ledger_state` moves the action to the same state. |
 | `error` | The refusal of the provider, or why the engine could not confirm each message. |
 | `history_id` | The Gmail history ID after the apply. |
-| `undo` | `inverse` (the verb has an undo) or `none` (final, for example a sent message, or an action applied before the ledger). The column records the verb, and does not change. An undo is available now only if the entry is `applied` or `failed`, has `inverse`, and has a message with `done` that is not gone, or, for a state entry, an item in `post` and the IDs of its correction rows in `ops` (section 7.4). A state entry from before migration 24 has no such IDs, so it has no undo. The view `ledger_can_undo` (migration 23) lists these entries, and `iris_apply::undo` refuses each other entry. Else the ledger shows the entry as final, for example after Gmail deleted each message of a `trash` entry. |
+| `undo` | `inverse` (the verb has an undo) or `none` (final, for example a sent message, or an action applied before the ledger). The column records the verb, and does not change. An undo is available now only if the entry is `applied` or `failed`, has `inverse`, and has a message with `done` that is not gone, or, for a state entry, an item in `post` and the IDs of its correction rows in `ops` (section 7.4). A state entry from before migration 26 has no such IDs, so it has no undo. The view `ledger_can_undo` (migration 23) lists these entries, and `iris_apply::undo` refuses each other entry. Else the ledger shows the entry as final, for example after Gmail deleted each message of a `trash` entry. |
 | `undone_by` | The ledger entry of the undo. |
 | `at` | The time. |
 
@@ -923,7 +923,7 @@ An undo of an undo is a new action, not a delete of the record.
 | The undo of a `correct` of an array element (`fields.items.0`) | The undo changes nothing and still marks the entry `undone` | The apply sets each field with the path rule of a correction (`iris_talk::set_field`), with array indices. If a path does not fit the item, the item stays as it is and counts as unchanged. |
 | The undo of a `correct` of a field whose parent was missing (`due.date` with no `due`) | The undo leaves an empty parent, and the item is not valid | The apply removes each parent object that becomes empty, and checks the restored item against the schemas. An item that is not valid stays as it is and counts as unchanged. |
 | The undo of a `correct` that changes more than its field (an address of the owner makes the whole party `self`) | The undo sets only the field back, and the party stays `self` | The entry holds the top-level value of the field, and the undo sets the whole value back. |
-| The undo of a `correct` of a party address | The party keeps the sender ID of the corrected address | The apply of `restore` sets the sender ID of each party from its address, with the rule of a correction. Migration 24 links `restore` with no arguments only to a state entry, as step 1. |
+| The undo of a `correct` of a party address | The party keeps the sender ID of the corrected address | The apply of `restore` sets the sender ID of each party from its address, with the rule of a correction. Migration 26 links `restore` with no arguments only to a state entry, as step 1. |
 | An undo of an entry in `writing`, `undone`, or with the undo `none` | The undo changes messages of an apply that did not end, or reverses a change two times | `undo` refuses it (`Error::Undo`). The trigger `ledger_undo_insert` refuses the link. |
 | A second undo while an undo of the entry is open | Two undos change the same messages, or a one-action undo ends the entry while action 2 of another undo waits | `undo` refuses it until each action of the open undo ended. The trigger refuses a link while an action of another undo changeset of the entry is open, and a second link of the same step in one changeset. Action 2 of a `trash` undo applies also after a failed action 1, so the undo ends. |
 | A link of an action whose target is not the whole entry (`{"ledger": ["l-N"]}`), whose verb is not the inverse of the entry, with other arguments, a step 2 of an entry that is not `trash`, or a step 2 with no step 1 of the same entry in the same changeset | A link lets an action skip the mode, or makes `untrash` for an entry that is not a trash | The trigger `ledger_undo_insert` refuses the link. The end of a ledger entry records an undo only when the entry of step 1 exists, so it never fails on the link. The trigger `ledger_undo_action` refuses a change of the verb, the targets or the arguments of a linked action, also in a draft. Submit denies a linked action with another target, and also denies `untrash` unless the action is step 1 of the undo of a `trash` entry. The apply changes only the messages that the entry changed, whatever the targets. |
@@ -962,6 +962,10 @@ and the release step. That specification must meet these constraints:
   approved or a held send.
 - The flags of a draft (section 5.3) come from the content of the draft, at
   submit and again at the release.
+- In the write view of the person (`docs/specs/2026-11-17-write.md`),
+  one press of Send approves the `draft` action and the `send` of the
+  draft that this action makes. The send approval binds to the hash of
+  that draft row.
 - `send` accepts only a draft that Iris made. Iris saves the `Message-ID` that
   it sets in the draft before the call.
 - The engine never makes the `drafts.send` call again. If the result is not
@@ -1044,6 +1048,15 @@ is the person. In release 1, the person gives no agent host access to that
 folder (an agent with host access could approve a budget). Release 2 moves
 the approval to the web client (section 8.6).
 
+Release 3 exception: `iris write` (card R3-05) opens the data folder
+directly, as `understand` does, and needs no running engine. It writes one
+reply draft of a thread (table `reply_draft`), a run row, and the cost of one
+model call from the approved budget. It holds the run lock of `understand`
+during the call. It is not a mailbox action: the draft stays in the store, and
+nothing goes to Gmail. So it does not go through the policy or the socket.
+The `draft` verb that adds a Gmail draft action (section 8.2) goes through the
+socket.
+
 The command has no verb to approve, to deny or to change the policy. Only the
 web client does these steps, for the person. The person has no terminal client
 (decision of the maintainer). In host mode, a changeset has the author `local`
@@ -1077,6 +1090,7 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris withdraw <cs-id>` | Withdraws a changeset of the same author (section 5.5). Applied actions stay. | both | 2 |
 | `iris ledger [filters]` | Lists ledger entries. | host | 2 |
 | `iris draft <thread> <file>`, `iris send <draft>`, `iris nudge <c-id>` | Adds write actions. | both | 3 |
+| `iris write <t-id or m-id> [--intent <text>]` | Writes a draft of a reply in the voice of the owner with one model call, saves it in the store and prints it. It sends nothing and adds no action. It opens the store directly (section 8.1). | host | 3 |
 | `iris wait`, `iris ask` | Ends the session and waits, or asks the person. | session | 5 |
 
 Without `--changeset`, a command that adds an action makes a new draft
@@ -1134,12 +1148,60 @@ order: 2, 4, 1, 3, 5, 0. The printed result gives the state of each action.
 The engine offers the same verbs as Model Context Protocol (MCP) tools, for an
 agent that does not work in a folder. The rules for the MCP interface:
 
+- `iris mcp` serves the tools on standard input and output
+  (`crates/iris-mcp`, card R5-11).
 - One MCP tool for each verb of the command, with the same name and the same
-  arguments.
-- The engine makes a session socket for each MCP job. The MCP interface never
-  uses `iris.sock`, so the session limits apply. MCP gives no verb that the
-  command does not have.
-- The results are the same JSON documents as `--json`.
+  arguments. A verb with subcommands gives one tool for each subcommand,
+  with an underscore (`watch_add`, `watch_list`, `watch_remove`,
+  `matters_list`, `matters_show`). `iris changeset --drafts` is the tool
+  `drafts`, and the file of `iris draft` is the object `draft`. MCP gives no
+  verb that the command does not have. It gives no verb of the person
+  (`sending`, `cancel`), no verb of the host (`serve`, `account`,
+  `mirror`, `backup`, `export`, `service`, `model`, `understand`, `mcp`),
+  and not `matters propose`, which spends model budget. A test checks
+  that each verb is a tool or is in this list.
+- Each tool call takes the path of its verb in the same mode, so MCP adds
+  no power. In host mode, these are the paths:
+
+  | Tools | Path |
+  |---|---|
+  | `status`, `search`, `show`, `matters_list`, `matters_show` | Read the store directly (section 8.1). |
+  | `watch_add`, `watch_list`, `watch_remove` | Read and write the watch rows of the store directly, as `iris watch` does. A watch changes no mailbox, so it does not go through the policy. |
+  | All other tools | A request on `iris.sock`, with the author `local`. |
+
+  In
+  session mode, the MCP interface uses the session socket, so the session
+  limits apply. The command has no session mode yet, so `iris mcp` has
+  host mode only (issue #440).
+- The result of a call is what its verb prints on standard output: with
+  `--json` where the verb has it (section 8.3), else the text of the verb.
+  Two exceptions:
+
+  | Tools | Result |
+  |---|---|
+  | `watch_add`, `watch_remove` | The text of the verb (`w-1: Iris tells you ...`, `w-1 removed.`), because the verb has no `--json`. The line starts with the watch ID. |
+  | Each tool that adds an action | The JSON of the engine answer (`{"changeset": ..., "n": ...}`). The verb prints `<cs-id> <n>` and has no `--json`. |
+
+  `matters_list` and `matters_show` give JSON, because the verb always
+  prints JSON. A verb that ends with a code that is not 0 gives an error
+  result: the printed text, then the error line of standard error
+  (`iris: <error>`), then `exit code N` (section 8.4).
+
+Failure list of `iris mcp` (the client is input that Iris does not
+control):
+
+| Input or event | Result |
+|---|---|
+| Supported input: JSON-RPC 2.0 messages of MCP, one on each line, at most 2 MiB a line. A tool call names a tool of `tools/list` with the arguments of its schema. | The request of the verb, as above. |
+| A line that is not JSON, or a line over 2 MiB | The server drops the line, answers nothing and reads the next line. No request goes to the engine. |
+| A tool that does not exist | An error of the protocol (`invalid params`). No request goes to the engine. |
+| A missing, unknown or wrong argument | An error result with code 2. No request goes to the engine. |
+| Calls at the same time | At most 4 calls run at the same time. The others wait. Each call is one request on the socket, and the engine orders the writes. Each add with no `changeset` makes its own draft. |
+| The answer of the engine is lost (time-out, the engine stops) | Code 1, "the result is not known", as for the command. The client reads the state with `changeset` or `drafts`. |
+| The client stops or closes standard input during a call | The server stops after the running calls end (at most the answer wait of 30 seconds). The answer of a running call is lost. The client reads the state with `changeset` or `drafts`. |
+| A retry of `submit` after a lost answer | The engine refuses a changeset that is not a draft (code 2) and changes nothing. `changeset` gives the state. |
+| A retry of an add after a lost answer | Can add a second action. Before a retry, the client reads the draft with `changeset`. Nothing leaves before `submit`. |
+| All other input | An error result or an error of the protocol. No request goes to the engine. |
 
 ### 8.6 The web client and the trust boundary
 
