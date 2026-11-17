@@ -364,6 +364,11 @@ impl Sessions {
                 if let Some(p) = proxy {
                     st.parked.insert(session, p);
                 }
+                // Each reap asks for the build of a done job: the turns for
+                // their reaps, and this launch for a reap in its cleanup.
+                if iris_job::session(&self.store, session).is_ok_and(|r| r.reaped_ms.is_some()) {
+                    let _ = self.builds.send(job);
+                }
             }
             None => {}
         }
