@@ -31,11 +31,20 @@ export function did(e: LedgerEntry): string {
       return `Deferred to ${arg(e, "until") || arg(e, "date")}`;
     case "correct":
       return "Corrected";
+    case "skip":
+      return "Skipped";
+    case "mute":
+      return "Muted";
+    case "dismiss":
+      return "Dismissed";
+    case "restore":
+      return "Restored";
     case "send":
       return "Sent";
     case "draft":
       return "Wrote the draft of";
     default:
+      // A verb that the changeset schema does not have yet: test/ledger.test.mjs checks each one.
       return e.verb;
   }
 }

@@ -153,6 +153,17 @@ test("the line of an open undo promises no count of messages", async () => {
   }
 });
 
+// The undo of a state entry changes items, not messages: its line says so.
+test("the line of an open undo of an item speaks of items", async () => {
+  const close = { ...fx.ledger.entries.find((e) => e.verb === "close"), can_undo: false, undo_open: true };
+  const app = await mount("/src/views/Ledger.svelte", { page: { next: null, entries: [close] }, wait: 60000 });
+  try {
+    assert.match(text(app.target.querySelector(".going")), /An item that changed again, or that is gone, stays as it is\./);
+  } finally {
+    app.destroy();
+  }
+});
+
 // A read of the list again and Show more never overlap: if they did, the read again (started
 // first, ended last) put back the list of before, without the new page, and kept its cursor.
 test("a read of the list again does not drop a page that Show more added", async () => {

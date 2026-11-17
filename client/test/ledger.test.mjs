@@ -20,6 +20,23 @@ test("each verb reads in the past tense, with what it changed", () => {
   assert.equal(words({ verb: "send" }), "Sent a mail");
 });
 
+// Each verb that a changeset (and so the ledger) can hold has words: the list comes from the
+// schema, so that a new verb without words makes this test fail.
+test("each verb of the changeset schema has past-tense words", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const schema = JSON.parse(await readFile(new URL("../../docs/spec/schema/changeset.schema.json", import.meta.url), "utf8"));
+  const verbs = schema.$defs.verb.enum;
+  assert.ok(verbs.includes("restore") && verbs.includes("mute"));
+  for (const verb of verbs) {
+    const said = l.did(e({ verb, args: { label: "L", until: "2026-11-20" } }));
+    assert.match(said, /^[A-Z]/, verb);
+    assert.notEqual(said.toLowerCase(), verb, verb);
+  }
+  const words = (x) => `${l.did(e(x))} ${l.what(e(x))}`;
+  assert.equal(words({ verb: "mute", items: 1, title: "Lunch plans" }), "Muted “Lunch plans”");
+  assert.equal(words({ verb: "restore", items: 1, title: "Lunch plans" }), "Restored “Lunch plans”");
+});
+
 test("who decided: the author, and the rule or the person that approved", () => {
   const person = { kind: "person", name: null, job: null, goal: null };
   const agent = { kind: "agent", name: "Claude Code", job: "j-4", goal: "Pay the invoice" };

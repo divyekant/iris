@@ -3,7 +3,7 @@
   under its day. Each line says what changed, why, who decided it and when,
   and has its own Undo while an undo can start (specification 2, section 7.4).
   The engine applies an undo at its next step. The line says that Iris undoes
-  the change on each message that did not change again or go, and the view
+  the change on each message or item that did not change again or go, and the view
   reads the list again until no undo or change is open.
 -->
 <script lang="ts">
@@ -131,7 +131,7 @@
 </script>
 
 <h1>What Iris did</h1>
-<p class="lead">Each change that Iris made to your mail, newest first. Undo puts back each message that did not change again since.</p>
+<p class="lead">Each change that Iris made to your mail, newest first. Undo puts back each message or item that did not change again since.</p>
 {#if problem}<p role="alert">{problem}</p>{/if}
 
 {#if entries.length === 0}
@@ -159,7 +159,7 @@
           {#if s}<p class="why state"><span class="dot" class:warn={e.state === "failed"}></span>{s}</p>{/if}
           <p class="meta">{who(e)} · <time datetime={e.at}>{time(e.at)}</time>{#if e.state === "undone"}{" · Undone"}{/if}</p>
           {#if e.undo_open}
-            <p class="going"><span class="dot"></span>Iris undoes the change. A message that changed again, or that is gone, stays as it is. This can take a minute.</p>
+            <p class="going"><span class="dot"></span>Iris undoes the change. {e.items > 0 ? "An item" : "A message"} that changed again, or that is gone, stays as it is. This can take a minute.</p>
           {/if}
         </div>
         {#if e.can_undo && !e.undo_open}
