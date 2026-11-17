@@ -214,12 +214,12 @@ documents in `schema/examples/` (files `changeset*.json`).
 | `proposed` | Submitted, and the policy did not decide it, or the mode is `observe`. | `approved`, `in_review`, `denied`, `expired`, `cancelled`, `replaced` |
 | `in_review` | Waits for a person. | `approved`, `denied`, `expired`, `cancelled`, `replaced` |
 | `approved` | An `allow` rule (`decision.by` `rule`) or a person approved it. The engine applies it next. | `applied`, `failed`, `held`, `in_review`, `denied`, `expired`, `cancelled` |
-| `held` | A send in the held outbox (release 3). | `applied`, `failed`, `cancelled`, `denied` (by `engine`: the draft changed or is gone, `docs/specs/2026-11-16-send.md`) |
+| `held` | A send in the held outbox (release 3). | `applied`, `failed`, `cancelled` (a withdraw), `expired`, `denied` (by `engine`: the draft changed or is gone, `docs/specs/2026-11-16-send.md`; by `person`: the cancel in the outbox, `docs/specs/2026-11-17-held-outbox.md`) |
 | `applied` | The provider accepted the change. The ledger has the entry. | `undone` |
 | `failed` | The provider refused it, or recovery could not confirm each message. The ledger lists the messages that changed. | `undone`, only when the ledger lists one or more changed messages |
 | `denied` | The policy, a hard limit or a person refused it. `reason` says why. | none |
 | `expired` | No decision or no apply in 14 days after submit (section 5.5). | none |
-| `cancelled` | The author withdrew the changeset, or a person cancelled a held send. | none |
+| `cancelled` | The author withdrew the changeset. A person who cancels a held send denies it (`denied` by `person`). | none |
 | `replaced` | A new revision replaced the action before a decision. | none |
 | `undone` | The undo is applied. The undo has its own ledger entry. | none |
 
@@ -306,8 +306,9 @@ that a rule approved at the same time cannot together go past the limit of
   can withdraw each changeset in the web client. Each open action becomes
   `cancelled`, except an action with a ledger row in the state `writing`,
   which continues to its end. Applied actions stay.
-- 14 days after submit, each open action that is not `held`, and has no
-  ledger row in the state `writing`, becomes `expired`. The changeset is `closed` when no action is open.
+- 14 days after submit, each open action that has no ledger row in the
+  state `writing`, becomes `expired`. A `held` send expires too
+  (`docs/specs/2026-11-17-held-outbox.md`). The changeset is `closed` when no action is open.
 
 ### 5.6 Failure list of the changeset store
 
@@ -847,8 +848,14 @@ and the release step. That specification must meet these constraints:
 - A `send` never goes at once. After the approval, it waits in the held
   outbox for the hold delay (default 60 seconds). The outbox survives a
   restart.
-- A cancel of a held send succeeds only while the send is held. Cancel and
-  release run on the one write connection, so only one of the two can win.
+- A cancel of a send succeeds only while the send is `approved` or `held`
+  and has no ledger row (the release did not claim it). It moves the send
+  to `denied` by `person`. Cancel and release run on the one write
+  connection, so only one of the two can win.
+- The send switch (`docs/specs/2026-11-17-held-outbox.md`) is off until the
+  owner turns it on with `iris sending on`. While it is off, no send leaves
+  the held outbox. The hold starts at the later of the approval and the
+  time the switch went on.
 - The approval of a send binds to a hash of the draft content: the
   recipients, the subject, the body and the attachments. Before the release,
   the engine reads the draft at Gmail again. If the hash is different, the
