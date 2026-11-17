@@ -241,3 +241,137 @@ fn writes_refuse_before_any_command() {
     ));
     assert_eq!(fake.commands().len(), before);
 }
+
+/// All changes from `from`, flat.
+fn change_list(mail: &dyn Provider, from: &str) -> Vec<iris_provider::Change> {
+    let mut page = None;
+    let mut out = Vec::new();
+    loop {
+        let p = mail.changes(PASSWORD, from, page.as_deref()).unwrap();
+        out.extend(p.history.into_iter().flat_map(|h| h.changes));
+        match p.next_page_token {
+            Some(t) => page = Some(t),
+            None => return out,
+        }
+    }
+}
+
+#[test]
+fn came_and_went_after_the_cursor() {
+    for caps in [
+        Caps::ALL,
+        Caps {
+            qresync: false,
+            ..Caps::ALL
+        },
+    ] {
+        let (fake, _) = filled(caps, 3);
+        let mail = provider(&fake);
+        let c = cursor(&mail);
+        // The first sync can list this message after the cursor.
+        let uid = fake.add("INBOX", Mailbox::new(14, 1).raw(0), &[]);
+        fake.remove("INBOX", uid);
+        let deleted: Vec<String> = change_list(&mail, &c)
+            .into_iter()
+            .filter_map(|ch| match ch {
+                iris_provider::Change::Deleted(m) => Some(m.id),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            deleted
+                .iter()
+                .any(|id| id.ends_with(&format!(":{uid}:INBOX"))),
+            "{caps:?}: {deleted:?}"
+        );
+    }
+}
+
+/// The invariant of the mirror: after each sync, verify finds zero
+/// differences, for a random run of adds, removals and flag changes.
+#[test]
+fn random_changes_keep_zero_differences() {
+    for (seed, caps) in [
+        (3u64, Caps::ALL),
+        (
+            5,
+            Caps {
+                qresync: false,
+                ..Caps::ALL
+            },
+        ),
+    ] {
+        let (fake, mut live) = filled(caps, 10);
+        let mail = provider(&fake);
+        let store = Store::open(&data_dir(&format!("random-{seed}"))).unwrap();
+        let account = store.add_account("imap", OWNER).unwrap();
+        first_sync(&store, &mail, account, PASSWORD).unwrap();
+        let extra = Mailbox::new(seed, 40);
+        let flags: [&[&str]; 4] = [&[], &["\\Seen"], &["\\Flagged", "\\Draft"], &["$K"]];
+        let mut rng = seed;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let mut used = 0;
+        for _round in 0..6 {
+            for _ in 0..4 {
+                match next() % 3 {
+                    0 if used < extra.len() => {
+                        let folder = ["INBOX", "Archive", "Sent"][(next() % 3) as usize];
+                        let f = flags[(next() % 4) as usize];
+                        live.push((folder, fake.add(folder, extra.raw(used), f)));
+                        used += 1;
+                    }
+                    1 if !live.is_empty() => {
+                        let (f, uid) = live.remove((next() % live.len() as u64) as usize);
+                        fake.remove(f, uid);
+                    }
+                    _ if !live.is_empty() => {
+                        let (f, uid) = live[(next() % live.len() as u64) as usize];
+                        fake.set_flags(f, uid, flags[(next() % 4) as usize]);
+                    }
+                    _ => {}
+                }
+            }
+            sync(&store, &mail, account, PASSWORD).unwrap();
+            assert_clean(&store, &mail, account);
+        }
+    }
+}
+
+#[test]
+fn labels_of_special_folders_and_flags() {
+    let fake = FakeImap::start(Caps::ALL);
+    fake.create("Sent", Some("\\Sent"));
+    let sent = fake.add("Sent", Mailbox::new(15, 1).raw(0), &["\\Seen"]);
+    let draft = fake.add("INBOX", Mailbox::new(16, 1).raw(0), &["\\Seen", "\\Draft"]);
+    let mail = provider(&fake);
+    let validity = |f: &str| {
+        let c = cursor(&mail);
+        c.lines()
+            .find(|l| l.ends_with(&format!(" {f}")))
+            .unwrap()
+            .split(' ')
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    let labels = |id: String| mail.minimal(PASSWORD, &id).unwrap().label_ids;
+    // No IMAP message gets SENT (spec section 4).
+    assert_eq!(
+        labels(format!("{}:{sent}:Sent", validity("Sent"))),
+        vec!["folder:Sent"]
+    );
+    assert_eq!(
+        labels(format!("{}:{draft}:INBOX", validity("INBOX"))),
+        vec!["INBOX", "DRAFT"]
+    );
+    // A label that labels() does not give is never reported as made.
+    assert!(matches!(
+        mail.create_label(PASSWORD, "Work"),
+        Err(Error::Api { status: 400, .. })
+    ));
+}

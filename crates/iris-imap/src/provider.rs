@@ -97,6 +97,7 @@ fn mail_folders<S: Read + Write>(s: &mut Session<S>) -> Result<Vec<Folder>> {
     Ok(s.folders()
         .map_err(read_error)?
         .into_iter()
+        // shortcut: mail only in `\All` (Gmail over IMAP) does not sync, issue #633.
         .filter(|f| f.selectable && !matches!(f.special, Some(Special::All | Special::Flagged)))
         .collect())
 }
@@ -126,6 +127,9 @@ fn labels_of(f: &Folder, flags: &[String]) -> Vec<String> {
     }
     if has("\\Flagged") {
         out.push("STARRED".into());
+    }
+    if has("\\Draft") && out[0] != "DRAFT" {
+        out.push("DRAFT".into());
     }
     out.extend(
         flags
@@ -241,7 +245,8 @@ fn folder_changes<S: Read + Write>(
         return Ok(None);
     }
     let modseq = now.highest_modseq.unwrap_or(0);
-    if modseq == old.modseq && now.exists == old.count {
+    let next = now.uidnext.unwrap_or(0);
+    if modseq == old.modseq && now.exists == old.count && next == old.next {
         return Ok(Some(out));
     }
     if old.modseq == 0 || modseq == 0 {
@@ -278,8 +283,21 @@ fn folder_changes<S: Read + Write>(
     if !s.qresync() {
         // Removed = count before - (count now - new messages now) (spec section 5).
         let kept = now.exists as i64 - new_uids.len() as i64;
-        if old.next == 0 || kept != old.count as i64 {
+        if old.next == 0 || next < old.next || kept != old.count as i64 {
             return Ok(None);
+        }
+        // A UID from the `UIDNEXT` of `from` that is not here now came and
+        // went after `from`: the first sync can have listed it. Delete it.
+        if u64::from(next - old.next) >= VANISHED_MAX {
+            return Ok(None);
+        }
+        for uid in (old.next..next).filter(|u| !new_uids.contains(u)) {
+            let id = message_id(now.uidvalidity, uid, &f.name);
+            out.push(Change::Deleted(HistoryMessage {
+                thread_id: id.clone(),
+                id,
+                label_ids: Vec::new(),
+            }));
         }
     }
     Ok(Some(out))
@@ -545,19 +563,10 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
         Err(not_supported())
     }
 
-    fn create_label(&self, _: &str, name: &str) -> Result<Label> {
-        if !crate::is_atom(name) {
-            return Err(api("badName", "a keyword must be an IMAP atom"));
-        }
-        Ok(Label {
-            id: format!("kw:{name}"),
-            name: name.to_owned(),
-            kind: "user".into(),
-            messages_total: None,
-            messages_unread: None,
-            threads_total: None,
-            threads_unread: None,
-        })
+    fn create_label(&self, _: &str, _: &str) -> Result<Label> {
+        // shortcut: a keyword exists only after a STORE, which part B code 2
+        // adds. Until then a label that labels() does not give is a lie.
+        Err(not_supported())
     }
 
     fn drafts_with_id(&self, _: &str, _: &str) -> Result<Vec<Draft>> {
