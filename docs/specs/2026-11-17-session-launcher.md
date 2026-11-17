@@ -171,8 +171,8 @@ mailbox. A session with an egress port also gets `HTTPS_PROXY` and
 never passed. No variable of Iris goes to the agent.
 
 The working folder of the agent is the workspace. Its standard input is
-`/dev/null`. Its standard output and standard error are pipes to the
-helper. The helper reads both pipes and drops the bytes: no output of the
+`/dev/null`. Its standard output and standard error go to one pipe to the
+helper. The helper reads the pipe and drops the bytes: no output of the
 agent is stored. The agent can read a credential (a passed key, or a file
 of the agent tool), and a filter cannot find each form of it, so the only
 safe log of agent output is none. The helper reads without end, so the
@@ -204,7 +204,10 @@ not the agent:
      Then the helper writes one line `started <pgid>` on its standard
      error, which is a second pipe to the engine. The engine writes
      `agent_pgid` (the spawn move).
-   - Any other line, or the end of the pipe: the helper exits with no child.
+   - Any other line, a line longer than 64 bytes, or the end of the pipe:
+     the helper exits with no child.
+   - If the start of the agent fails, the helper writes one line `failed`
+     on its second pipe and exits with no child.
 
    The helper itself is started inside the outer part of the isolation, so
    the isolation binds the life of each process of the session to the
