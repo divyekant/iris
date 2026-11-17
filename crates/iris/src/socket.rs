@@ -618,6 +618,11 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
     }
 }
 
+/// The start of this engine process, in milliseconds since 1970: a new
+/// value tells the Mac app that the engine started again, with a new web
+/// secret, so the app signs its window in again.
+static ENGINE_START: std::sync::LazyLock<i64> = std::sync::LazyLock::new(crate::engine::now_ms);
+
 /// The most notices of one `app.notices` answer. The app asks again at
 /// once while an answer is full.
 pub const APP_NOTICES_MAX: i64 = 20;
@@ -639,7 +644,12 @@ fn app_notices(store: &Store, after: Option<i64>) -> Result<Value, Failure> {
         Some(a) => page.notices.iter().map(|(r, _)| *r).max().unwrap_or(a),
     };
     let notices: Vec<&iris_api::Notice> = page.notices.iter().map(|(_, n)| n).collect();
-    Ok(json!({ "notices": notices, "last": last, "open": page.open }))
+    Ok(json!({
+        "notices": notices,
+        "last": last,
+        "open": page.open,
+        "engine": *ENGINE_START,
+    }))
 }
 
 /// `status` of a session: the job, and the counts of its grant now.
@@ -859,7 +869,10 @@ pub fn parse_answer(verb: &str, line: &[u8]) -> Option<Result<Value, Failure>> {
             let valid = match verb {
                 "sign-in" => r["url"].is_string(),
                 "app.notices" => {
-                    r["notices"].is_array() && r["last"].is_u64() && r["open"].is_u64()
+                    r["notices"].is_array()
+                        && r["last"].is_u64()
+                        && r["open"].is_u64()
+                        && r["engine"].is_u64()
                 }
                 "drafts" => r["changesets"]
                     .as_array()

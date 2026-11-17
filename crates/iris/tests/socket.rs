@@ -1084,7 +1084,14 @@ fn app_notices_give_only_the_new_notices_oldest_first() {
     };
     // No notice: nothing, and the last ID is 0.
     let r = ask(json!({}));
-    assert_eq!(r["result"], json!({ "notices": [], "last": 0, "open": 0 }));
+    assert_eq!(
+        (
+            &r["result"]["notices"],
+            &r["result"]["last"],
+            &r["result"]["open"]
+        ),
+        (&json!([]), &json!(0), &json!(0))
+    );
     store
         .write(|tx| {
             tx.execute_batch(
@@ -1097,9 +1104,19 @@ fn app_notices_give_only_the_new_notices_oldest_first() {
             Ok(())
         })
         .unwrap();
+    // The start of the engine stays the same in one process.
+    let engine = r["result"]["engine"].clone();
+    assert!(engine.as_u64().is_some_and(|e| e > 0), "{r}");
     // A new app gets no old notice, only the last ID (a done notice too).
     let r = ask(json!({}));
-    assert_eq!(r["result"], json!({ "notices": [], "last": 3, "open": 2 }));
+    assert_eq!(
+        (
+            &r["result"]["notices"],
+            &r["result"]["last"],
+            &r["result"]["open"]
+        ),
+        (&json!([]), &json!(3), &json!(2))
+    );
     let r = ask(json!({ "after": 0 }));
     let ids: Vec<&str> = r["result"]["notices"]
         .as_array()
@@ -1111,7 +1128,14 @@ fn app_notices_give_only_the_new_notices_oldest_first() {
     assert_eq!(r["result"]["notices"][0]["text"], json!("Results"));
     assert_eq!(r["result"]["last"], json!(2));
     let r = ask(json!({ "after": 2 }));
-    assert_eq!(r["result"], json!({ "notices": [], "last": 2, "open": 2 }));
+    assert_eq!(
+        (
+            &r["result"]["notices"],
+            &r["result"]["last"],
+            &r["result"]["open"]
+        ),
+        (&json!([]), &json!(2), &json!(2))
+    );
     // A long list comes in pages of APP_NOTICES_MAX, oldest first.
     store
         .write(|tx| {
@@ -1131,6 +1155,7 @@ fn app_notices_give_only_the_new_notices_oldest_first() {
     assert_eq!(page[0]["id"], json!("n-4"));
     assert_eq!(r["result"]["last"], json!(23));
     assert_eq!(r["result"]["open"], json!(27));
+    assert_eq!(r["result"]["engine"], engine);
     let r = ask(json!({ "after": 23 }));
     assert_eq!(r["result"]["notices"].as_array().unwrap().len(), 5);
     assert_eq!(r["result"]["last"], json!(28));
