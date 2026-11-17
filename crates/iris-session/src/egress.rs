@@ -29,7 +29,11 @@ pub const LOG_RESERVE: u64 = 4096;
 /// The time that a client has to send its request head.
 const HEAD_TIME: Duration = Duration::from_secs(10);
 /// The time to connect to one address of the model host.
-const CONNECT_TIME: Duration = Duration::from_secs(10);
+const CONNECT_TIME: Duration = if cfg!(test) {
+    Duration::from_millis(300)
+} else {
+    Duration::from_secs(10)
+};
 /// The time that a refusal waits for the rest of the request before it closes.
 const DRAIN_TIME: Duration = Duration::from_secs(1);
 /// The relay buffer of each direction.

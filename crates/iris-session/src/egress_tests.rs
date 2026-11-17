@@ -434,3 +434,38 @@ fn each_connection_writes_one_log_line() {
         drop(held);
     }
 }
+
+/// A stalled resolver that counts its calls.
+struct Counted(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Resolve for Counted {
+    fn resolve(&self, _host: &str, _port: u16) -> io::Result<Vec<SocketAddr>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        loop {
+            thread::park();
+        }
+    }
+}
+
+/// Timed-out connects leave their resolver workers behind: the proxy keeps
+/// at most MAX_CONNECTIONS of them, and refuses each CONNECT past the bound.
+#[test]
+fn stalled_resolver_workers_stay_bounded() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let log = std::env::temp_dir().join(format!("iris-egress-bound-{}.log", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+    let guard = LogFile(log.clone());
+    let file = File::options().create_new(true).append(true).open(&log).unwrap();
+    let proxy =
+        Proxy::start_with(allowed(), file, Box::new(Counted(calls.clone())), false, LOG_LIMIT).unwrap();
+    for _ in 0..3 * MAX_CONNECTIONS {
+        let (_s, line) = send(&proxy, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
+        assert!(!line.starts_with("HTTP/1.1 200"), "{line}");
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), MAX_CONNECTIONS);
+    let t = Instant::now();
+    proxy.stop().unwrap();
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    let text = log_text(&guard);
+    assert_eq!(text.matches("reason=too_many").count(), 2 * MAX_CONNECTIONS, "{text}");
+}
