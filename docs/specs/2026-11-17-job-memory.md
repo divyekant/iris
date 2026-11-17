@@ -112,9 +112,16 @@ reads the file only while no process of the job can write it.
 
    If both are true, it marks the job as `launching`. `Sessions::run` sets
    the same mark under the same lock, and refuses a job with the mark, so
-   no new session starts until the mark ends. `Sessions::wake` skips a job
-   with the mark. Then the reap thread calls `save_notes` without the state
-   lock, and ends the mark (`launch_over`).
+   no new session starts until the mark ends. Then the reap thread calls
+   `save_notes` without the state lock, and ends the mark (`launch_over`).
+
+   `Sessions::wake` skips a job with the mark. But the mark can come after
+   the check of `wake` and before its start. `wake` records each
+   (job, last session) pair that it tries, and tries a pair once. So the
+   start of `wake` tells a busy refusal (the mark, or a live session) from
+   a failure. On a busy refusal, `wake` removes the pair from its record,
+   and its next call (1 second later) tries again. A failure keeps the pair,
+   as now (R5-04: a failed start waits for the next engine start).
 
    If a check fails, a newer session or its launch can write `notes.md`.
    The reap thread does not save. The build of that launch saved the notes
@@ -149,6 +156,24 @@ Spec 3 changes in the same PR as the code: section 3 (the build reads
 `notes.md` and can make it from the copy), the rules of section 9, and the
 sample of `JOB.md`.
 
+### Remove the notes
+
+The workspace spec (`docs/specs/2026-11-16-job-workspace.md`, "Text that
+the build does not check") lets the person delete the workspace folder to
+remove the agent files, for example notes that quote mail of an ended
+grant. With this design, the build writes the copy back. So the removal
+path changes:
+
+1. The person edits `notes.md` (or empties it) while no session of the job
+   runs.
+2. The next build saves the edit, and the copy of the store is the edit.
+   The store keeps no older copy.
+
+A deleted folder no longer removes the notes. The workspace spec changes in
+this PR to say so. The next build of a working or waiting job comes at its
+next session; of a done job, at the next engine start (`Sessions::new`).
+Until then, the old copy stays in the store (issue in the code PR).
+
 ## Options not chosen
 
 - Keep the notes in the store only, and write the file new at each build.
@@ -158,6 +183,8 @@ sample of `JOB.md`.
 - Add `workspaces/` to the backup. The backup then copies mail text of each
   workspace again (the threads are already in the store) and the files of
   `drafts/`. A backup must stay the size of the store.
+- A verb to clear the copy (`iris job forget-notes`). An edit of the file
+  does the same work with no new verb.
 - Cut a file over the limit to 64 KiB. A cut note can mislead the agent at a
   restore. The design keeps the last good copy.
 - Save at each write of the agent (a file watch). Each platform has its own
@@ -185,7 +212,8 @@ stays as it is, and the session starts.
 | The workspace folder is gone, and the job wakes. | The launch build makes the folder and restores the notes. | Engine test with the fake clock. |
 | The agent changes the file after the reap and before the build. | Not possible: no process of the job runs between a reap and the next launch. | The reap check (R4-04). |
 | A launch of the job runs, or a newer session of the job is live, at the reap. | The reap thread does not save. The build of that launch and the reap of that session save. | Review: the check and the mark are one step under the state lock, which `run` also takes for its mark. |
-| A launch starts while the reap thread saves. | `run` refuses it (the job has the mark); `wake` tries again at its next call. | Review, as above. |
+| A launch starts while the reap thread saves. | `run` refuses it (the job has the mark). | Review, as above. |
+| `wake` checks the job, then the reap sets the mark, then `wake` starts the job. | The start is refused as busy. `wake` keeps no record of the try, and its next call starts the session. | Review of the order; the engine test of R5-04 shows that the next call starts one session. |
 | A crash during the save. | The transaction gives the old copy or the new copy. | SQLite. |
 | A store error at the build save. | The build stops with an error. No session starts. | Unit test with a read-only store, if the build can make one; else review. |
 

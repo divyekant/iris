@@ -307,7 +307,9 @@ of that mail ends later (a revoke, or the message becomes hostile mail or
 gone), the quote stays: the build does not know which text is a quote, and
 a change would alter the record of the job. The agent saw the text while it
 was granted. This is a known limit, with a GitHub issue. The person can
-delete the workspace folder to remove the agent files.
+delete the workspace folder to remove `drafts/`. To remove text from the
+notes, the person edits `notes.md`: the store keeps a copy of the notes, and
+a build writes it back to a new folder (`docs/specs/2026-11-17-job-memory.md`).
 
 ### The layout
 
