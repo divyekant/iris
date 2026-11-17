@@ -56,8 +56,8 @@ function.
 | `new_recipient` | An address of `to` or `cc` has no `sender_evidence` row with the rule `sent`, and is not the account address. A typing error in a known address (a wrong recipient) is a new address, so it gets this flag. |
 | `money` | The body or the subject names an amount: a currency sign (`$`, `€`, `£`, `¥`, `₹`) next to a digit, or a number next to a currency code or word (`USD`, `EUR`, `GBP`, `INR`, `JPY`, `CAD`, `AUD`, `CHF`, `dollar(s)`, `euro(s)`, `pound(s)`, `rupee(s)`). |
 | `date` | The body or the subject names a date: a month name or its short form next to a number, a weekday name, `today`, `tonight`, `tomorrow`, `next week`, `next month`, `end of the day`, `end of the week`, `EOD`, `EOW`, an ISO date (`2026-11-17`) or a numeric date (`17/11`, `11/17/2026`). |
-| `attachment` | The body or the subject has a word of the attachment group: `attach`, `attached`, `attachment(s)`, `enclosed`. Iris drafts have no attachments (issue #235), so a mention always means a missing attachment. |
-| `untrusted_content` | The body has a run of 8 words that is a phrase in the clean text (`message_fts`) of an external message: a message with no `SENT` and no `DRAFT` label. Spec 1 and `iris-senders` mark mail of the owner by these labels, not by `From`, because any sender can write the address of the account in `From`. |
+| `attachment` | The body or the subject has a word of the attachment group: `attach`, `attaches`, `attached`, `attaching`, `attachment(s)`, `enclose`, `enclosed`, `encloses`, or a file kind (`pdf`, `doc`, `docx`, `xls`, `xlsx`, `ppt`, `pptx`, `csv`, `zip`, `screenshot(s)`). Iris drafts have no attachments (issue #235), so a mention always means a missing attachment. |
+| `untrusted_content` | The subject or the body has a run of 8 words that is a phrase in the clean text (`message_fts`) of an external message: a message with no `SENT` and no `DRAFT` label. Spec 1 and `iris-senders` mark mail of the owner by these labels, not by `From`, because any sender can write the address of the account in `From`. |
 
 `money` and `date` flag each amount and each date that the text names,
 not only a promise: a rule cannot tell a promise from a mention, and a
@@ -70,7 +70,8 @@ card).
 Words match with no case difference and on word bounds. A match inside a
 longer word does not count (`attachments` counts, `reattach` does not).
 
-The `untrusted_content` check splits the body into words as the full-text
+Each rule reads the subject and the body, each as its own text. The
+`untrusted_content` check splits each of the two into words as the full-text
 index does (letters and digits; each other character ends a word). It
 queries each run of 8 words that starts at word 0, 8, 16 and so on, as an
 FTS5 phrase, and stops at the first match. So a copied run of 15 words or
@@ -159,7 +160,8 @@ None.
 
 ## Acceptance criteria
 
-1. The test set gives each flag: a mention of an attachment, a typing
+1. The test set gives each flag: a mention of an attachment (also only a
+   file kind, "I included the report PDF"), a copied run in the subject, a typing
    error in a known address, a new address, an amount, a date, and a run
    of 15 words from a message of another person. Red if a rule is removed.
 2. A draft with none of these gives no draft flag. Red if a rule matches
