@@ -546,6 +546,38 @@ pub fn after_sync(store: &Store, now_ms: i64) -> Result<AfterSync, String> {
     }
 }
 
+/// The proposal step of matters (`docs/specs/2026-11-16-matters.md`):
+/// `Gate::Hourly` from `iris serve`, `Gate::Now` from `iris matters
+/// propose`. The text says what the step did; `None` when an
+/// understanding run holds the lock, so the step did nothing.
+pub fn propose_matters(
+    store: &Store,
+    gate: iris_matters::Gate,
+    now_ms: i64,
+) -> Result<Option<String>, String> {
+    use iris_matters::Skip;
+    let connect = |row: &ModelRow| connect(store, row);
+    let o = match iris_matters::propose(store, &connect, gate, now_ms) {
+        Ok(o) => o,
+        Err(iris_matters::Error::Busy) => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    let what = match o.skip {
+        Some(Skip::NoModel) => "no model is set".to_string(),
+        Some(Skip::Wait) => "the wait after a model error is not over".into(),
+        Some(Skip::Hourly) => "the last call is less than 1 hour old".into(),
+        Some(Skip::Few) => "the candidates come from fewer than 2 threads".into(),
+        Some(Skip::Same) => "the candidates did not change since the last answer".into(),
+        Some(Skip::Budget) => "the budget cannot pay the call; approve a budget to go on".into(),
+        None if o.failed => "the model call failed; the step tries again after the wait".into(),
+        None => format!("{} new proposals, {} dropped", o.proposed, o.dropped),
+    };
+    Ok(Some(format!(
+        "Matters: {what}. {} proposals that were not valid now are gone.",
+        o.cleaned
+    )))
+}
+
 fn report_of(store: &Store, r: &Report) -> Result<String, String> {
     let left = store
         .read(|c| Ok(model_row(c)?))

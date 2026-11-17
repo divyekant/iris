@@ -296,16 +296,24 @@ pub const UNDERSTAND_EVERY: Duration = Duration::from_secs(10);
 /// only pending mail, so a turn with nothing to do reads no message.
 fn understand_loop(store: Arc<Store>) {
     loop {
-        match crate::cost::after_sync(&store, now_ms()) {
-            Ok(crate::cost::AfterSync::Busy) => {
-                std::thread::sleep(BUSY_RETRY);
-                continue;
-            }
-            Ok(_) => {}
-            Err(e) => say!("iris: understand: {e}"),
-        }
-        std::thread::sleep(UNDERSTAND_EVERY);
+        std::thread::sleep(understand_turn(&store, now_ms()));
     }
+}
+
+/// One turn of the understanding thread. The answer is the time until the
+/// next turn. After each run, idle or not, the proposal step of matters
+/// runs with its hourly gate, so a mailbox that is already understood
+/// still gets proposals.
+pub fn understand_turn(store: &Store, now_ms: i64) -> Duration {
+    match crate::cost::after_sync(store, now_ms) {
+        Ok(crate::cost::AfterSync::Busy) => return BUSY_RETRY,
+        Ok(_) => {}
+        Err(e) => say!("iris: understand: {e}"),
+    }
+    if let Err(e) = crate::cost::propose_matters(store, iris_matters::Gate::Hourly, now_ms) {
+        say!("iris: matters: {e}");
+    }
+    UNDERSTAND_EVERY
 }
 
 /// The time between two turns of the attention thread.

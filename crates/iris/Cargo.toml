@@ -21,6 +21,7 @@ iris-apply = { version = "0.0.0", path = "../iris-apply" }
 iris-service = { version = "0.0.0", path = "../iris-service" }
 iris-auth = { version = "0.0.0", path = "../iris-auth" }
 iris-gmail = { version = "0.0.0", path = "../iris-gmail" }
+iris-matters = { version = "0.0.0", path = "../iris-matters" }
 iris-model = { version = "0.0.0", path = "../iris-model" }
 iris-policy = { version = "0.0.0", path = "../iris-policy" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
