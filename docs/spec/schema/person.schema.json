@@ -9,9 +9,9 @@
   "properties": {
     "id": { "$ref": "urn:iris:model:0:common#/$defs/senderId" },
     "address": {
-      "$comment": "The bare address in lower case: a local part, @, and a domain with no white space. See docs/spec/03-job-workspace.md, section 2.",
+      "$comment": "The bare address in lower case: a local part (an atom with no @, quote or white space, or one quoted string), @, and a domain with no @ or white space. See docs/spec/03-job-workspace.md, section 2.",
       "type": "string",
-      "pattern": "^[^A-Z]+@[^A-Z@\\s]+$"
+      "pattern": "^(?:[^A-Z@\"\\s]+|\"(?:[^\"\\\\A-Z]|\\\\[^A-Z])*\")@[^A-Z@\\s]+$"
     },
     "names": {
       "type": "array",

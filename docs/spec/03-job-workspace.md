@@ -30,7 +30,7 @@ and a schema do not agree, the schema is correct and this text has a defect.
 | Your address | The address of each account, and the `From` address of each of your messages. |
 | ID | The ID of a row, with its prefix: `j-` job, `t-` thread, `m-` message, `c-` commitment, `r-` record, `p-` sender. See specification 1, section 5.7. |
 | Date | An RFC 3339 date-time in UTC, with three digits of milliseconds and `Z`. Example: `2026-11-14T09:00:00.000Z`. The thread files, the people files and `JOB.md` use only this form. `schema/common.schema.json` defines it as `utcDateTime`. |
-| Address | The bare address of a mailbox (RFC 5322 `addr-spec`), in lower case: a local part, `@`, and a domain with no white space. A display name is not a part of it. |
+| Address | The bare address of a mailbox (RFC 5322 `addr-spec`), in lower case: a local part, `@`, and a domain with no `@` or white space. The local part is an atom with no `@`, `"` or white space, or one quoted string. A display name is not a part of it. |
 | Message date | The Gmail internal date of the message. If the message has no internal date, the date of its `Date` header. If it has neither, `1970-01-01T00:00:00.000Z`. |
 | One line | A value in which each control character (Unicode category `Cc`, also CR and LF) is changed into one space. |
 
