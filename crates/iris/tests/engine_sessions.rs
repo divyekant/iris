@@ -23,6 +23,8 @@ use iris_store::Store;
 struct Plain;
 
 static STOPPED: Mutex<Vec<i64>> = Mutex::new(Vec::new());
+/// The sessions whose isolation stop waits until the test removes them.
+static SLOW_STOP: Mutex<Vec<i64>> = Mutex::new(Vec::new());
 
 fn stopped(session: i64) -> bool {
     STOPPED.lock().unwrap().contains(&session)
@@ -50,6 +52,9 @@ impl Isolation for Plain {
     }
     fn stop(&self, session: i64) -> std::io::Result<()> {
         STOPPED.lock().unwrap().push(session);
+        while SLOW_STOP.lock().unwrap().contains(&session) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
         Ok(())
     }
     fn ended(&self, _session: i64) -> std::io::Result<bool> {
@@ -599,6 +604,40 @@ fn a_job_done_during_the_launch_gets_its_workspace_again() {
     gone(&marker);
 }
 
+fn a_slow_isolation_stop_does_not_hold_a_stop_of_another_job() {
+    let f = fixture("slowiso", "sleep 30");
+    let other = create(&f.store, "Other.", None, NOW).unwrap();
+    add_scope(&f.store, other, Ref::Thread(5), By::Person, NOW).unwrap();
+    let s = sessions(&f);
+    let a = s.run(f.job, "script").unwrap();
+    until(&s, &f, a, |r| r.started_ms.is_some());
+    let b = s.run(other, "script").unwrap();
+    until(&s, &f, b, |r| r.started_ms.is_some());
+    // The isolation stop of A waits 25 s.
+    SLOW_STOP.lock().unwrap().push(a);
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(25));
+        SLOW_STOP.lock().unwrap().retain(|x| *x != a);
+    });
+    let stop_a = {
+        let (s, job) = (s.clone(), f.job);
+        std::thread::spawn(move || s.stop(job))
+    };
+    while !stopped(a) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let t = Instant::now();
+    let result = s.stop(other).unwrap();
+    let took = t.elapsed();
+    assert!(
+        took < Duration::from_secs(15),
+        "the stop of B took {took:?}"
+    );
+    assert_eq!(result, (b, Ok(())));
+    let _ = stop_a.join().unwrap();
+    until(&s, &f, a, |r| r.reaped_ms.is_some());
+}
+
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "session-hold") {
@@ -685,6 +724,10 @@ fn main() {
         (
             "a_job_done_during_the_launch_gets_its_workspace_again",
             a_job_done_during_the_launch_gets_its_workspace_again,
+        ),
+        (
+            "a_slow_isolation_stop_does_not_hold_a_stop_of_another_job",
+            a_slow_isolation_stop_does_not_hold_a_stop_of_another_job,
         ),
     ];
     let mut failed = 0;
