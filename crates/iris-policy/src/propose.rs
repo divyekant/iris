@@ -294,7 +294,14 @@ fn mark(tx: &Connection, now: i64) -> Result<Mark> {
     )?;
     let version = crate::active(tx)?.version.unwrap_or(0);
     // Each hour too, for a change of a fact that a rule reads (a sender kind).
-    Ok(Mark([count, at, undone, applied, version, now.div_euclid(3600)]))
+    Ok(Mark([
+        count,
+        at,
+        undone,
+        applied,
+        version,
+        now.div_euclid(3600),
+    ]))
 }
 
 /// The key of a row: the verb (`hide` for a `hide` rule), the condition,

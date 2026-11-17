@@ -352,7 +352,13 @@ fn a_hostile_refusal_does_not_count() {
 #[test]
 fn an_apply_after_a_pass_runs_the_pass_again() {
     let (_dir, store) = store("apply-mark");
-    choices(&store, "skip", "feed", "news@shop.example", MIN_APPROVALS - 1);
+    choices(
+        &store,
+        "skip",
+        "feed",
+        "news@shop.example",
+        MIN_APPROVALS - 1,
+    );
     let i = item(&store, "feed", "news@shop.example", false, false);
     chose(&store, "skip", i, "approved");
     let mut mark = None;
