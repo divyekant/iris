@@ -73,7 +73,9 @@
   const back = () => (history.length > 1 ? history.back() : (location.hash = "#/brief"));
 </script>
 
-<header>
+<!-- The Mac app drags its window by the empty part of this bar and of its
+     view row (apps/mac). A link still opens its view. -->
+<header data-tauri-drag-region>
   <a class="name touch" href="#/brief">
     <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
       <circle cx="12" cy="12" r="9" fill="none" stroke="var(--color-primary)" stroke-width="2" />
@@ -81,7 +83,7 @@
     </svg>
     Iris
   </a>
-  <nav aria-label="Views">
+  <nav aria-label="Views" data-tauri-drag-region>
     {#each NAV as [link, label] (link)}
       <a href={link} aria-current={active === link ? "page" : undefined}>{label}</a>
     {/each}
@@ -258,6 +260,14 @@
     padding: max(var(--space-3), env(safe-area-inset-top)) max(var(--space-6), env(safe-area-inset-right)) var(--space-3) max(var(--space-6), env(safe-area-inset-left));
     border-bottom: 1px solid var(--color-border-subtle);
     background: var(--color-background);
+  }
+  /* The Mac app (apps/mac) sets data-shell="mac": the window buttons sit at
+     the left of this bar, and the menu bar of the Mac names the app. */
+  :global(:root[data-shell="mac"]) header {
+    padding-left: calc(var(--space-16) + var(--space-8));
+  }
+  :global(:root[data-shell="mac"]) .name {
+    display: none;
   }
   .name {
     display: flex;

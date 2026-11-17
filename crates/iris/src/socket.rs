@@ -422,7 +422,7 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
         Some("app.notices") => {
             only(&["after"])?;
             let after = match args.get("after") {
-                None | Some(Value::Null) => None,
+                None => None,
                 Some(v) => Some(
                     v.as_u64()
                         .and_then(|n| i64::try_from(n).ok())
@@ -434,8 +434,8 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
                 // showed the notices: the app starts again after `last`.
                 let after = after.filter(|_| live);
                 let r = app_notices(store, after)?;
-                let from = after.is_none().then(|| r["last"].as_i64().unwrap_or(0));
-                Ok((r, from))
+                let last = r["last"].as_i64().unwrap_or(0);
+                Ok((r, last, after.is_none()))
             })
             .map(Done::Value)
         }
@@ -665,6 +665,7 @@ fn app_notices(store: &Store, after: Option<i64>) -> Result<Value, Failure> {
         "last": last,
         "open": page.open,
         "engine": *ENGINE_START,
+        "start": after.is_none(),
     }))
 }
 
