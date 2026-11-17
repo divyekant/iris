@@ -295,8 +295,11 @@ fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
 
     new_dir(&stage.join("threads"))?;
     let mut people = People::new();
-    for (t, (account, mails)) in &threads {
-        let written = write_thread(c, *t, *account, mails, &stage.join("threads"), &mut people)?;
+    // You are no person of the scope: the address of each account and each
+    // alias of your sent mail, in every account.
+    let me = iris_talk::your_addresses(c)?;
+    for (t, (_, mails)) in &threads {
+        let written = write_thread(c, *t, mails, &me, &stage.join("threads"), &mut people)?;
         built.threads += 1;
         built.messages += written;
     }
@@ -343,8 +346,8 @@ fn clean(c: &Connection, m: &iris_talk::Mail) -> rusqlite::Result<bool> {
 fn write_thread(
     c: &Connection,
     thread: i64,
-    account: i64,
     granted: &BTreeSet<(i64, i64)>,
+    me: &BTreeSet<String>,
     folder: &Path,
     people: &mut People,
 ) -> Result<u32> {
@@ -369,9 +372,6 @@ fn write_thread(
         if n == 1 { "message" } else { "messages" }
     )?;
     writeln!(f)?;
-    // You are no person of the scope: the account address and each alias
-    // of your sent mail.
-    let me = iris_talk::your_addresses(c, account)?;
     for (_, id) in granted {
         let m = &mail(*id)?;
         // The people of the scope come only from the messages in this file.

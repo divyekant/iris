@@ -66,27 +66,22 @@ impl Mail {
     }
 }
 
-/// Your addresses in `account`: the account address and the From of each of
-/// your sent messages (an alias), lowercase. One row at a time.
-pub fn your_addresses(
-    conn: &Connection,
-    account: i64,
-) -> rusqlite::Result<std::collections::BTreeSet<String>> {
+/// Your addresses: the address of each account of the store and the From
+/// of each of your sent messages (an alias), lowercase. One row at a time.
+pub fn your_addresses(conn: &Connection) -> rusqlite::Result<std::collections::BTreeSet<String>> {
     let mut out = std::collections::BTreeSet::new();
-    out.insert(conn.query_row(
-        "SELECT lower(address) FROM account WHERE id = ?1",
-        [account],
-        |r| r.get(0),
-    )?);
+    let mut q = conn.prepare_cached("SELECT lower(address) FROM account")?;
+    for a in q.query_map([], |r| r.get::<_, String>(0))? {
+        out.insert(a?);
+    }
     let mut q = conn.prepare_cached(
         "SELECT h.from_addr FROM message m JOIN header h ON h.message_id = m.id
-         WHERE m.account_id = ?1
-           AND EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+         WHERE EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                       WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
            AND NOT EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                           WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT')",
     )?;
-    for from in q.query_map([account], |r| r.get::<_, Option<String>>(0))? {
+    for from in q.query_map([], |r| r.get::<_, Option<String>>(0))? {
         if let Some(a) = from?.and_then(|f| addresses(&f).into_iter().next()) {
             out.insert(a);
         }

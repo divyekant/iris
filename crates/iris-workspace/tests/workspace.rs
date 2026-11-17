@@ -784,7 +784,10 @@ fn your_other_account_is_not_a_person() {
     let ws = tmp.0.join("ws");
     build(&store, job, &ws).unwrap();
     let (paths, _) = walk(&ws);
-    for p in paths.iter().filter(|p| p.starts_with("people/") && p.ends_with(".json")) {
+    for p in paths
+        .iter()
+        .filter(|p| p.starts_with("people/") && p.ends_with(".json"))
+    {
         let text = fs::read_to_string(ws.join(p)).unwrap();
         assert!(!text.contains("me@home.example"), "{p}: {text}");
     }
