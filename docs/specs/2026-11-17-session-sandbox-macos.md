@@ -83,7 +83,7 @@ still a child of the engine, with the same pipes):
    Linux. On macOS this process is the "shim". It makes the socket
    `<data dir>/sessions/se-<id>.hold` (mode `0600`) and loads the launchd
    job `com.iris.session.<tag>.<id>` in the domain `gui/<uid>` with
-   `launchctl bootstrap`. `<tag>` is the first 8 hex digits of the SHA-256
+   `launchctl bootstrap`. `<tag>` is the full SHA-256, in 64 hex digits,
    of the real path of the data folder, so two data folders do not share a
    label. The job runs `iris session-job <data dir> <id>`, with
    `RunAtLoad` true and `KeepAlive` false.
@@ -160,8 +160,17 @@ journal recovery, each signal and each journal write. The helper and the
 engine both call `stop`, so the lock serializes them. A second caller
 waits for the lock, then sees the result of the first.
 
+0. If the caller is in the coalition of the record (the hold helper in
+   the job process calls `stop` after the agent exits), return `Ok` and do
+   nothing. A process cannot freeze its own coalition: it would stop
+   itself while it holds the lock, and `bootout` would end it. The
+   `stop` of the engine, which runs outside the coalition, does the work
+   (see below). The `ended` of the engine stays false while the helper
+   runs, so this early `Ok` does not let the reap pass.
 1. `launchctl bootout` of the job. A job that is not loaded is not an
-   error.
+   error. The label holds the full SHA-256 of the data folder and the
+   session ID, so `bootout` never acts on a job of another data folder or
+   another session.
 2. Until `ended` is true or 5 seconds pass, do a freeze, then a kill:
    1. Freeze: scan the processes (`proc_listallpids`). For each process
       in the coalition of the record, send `SIGSTOP`, then read its
@@ -325,6 +334,7 @@ before the agent runs, or `ended` is false.
 | The engine crashes between a `SIGSTOP` to a reused process ID and the `SIGCONT` | The journal names the process; the next `stop` sends `SIGCONT` to it | Unit test: a journal entry of a stopped process of another coalition gets `SIGCONT` |
 | `SIGCONT` to a journal entry fails, or the process stays stopped | The entry stays; `stop` returns an error and the reap waits | Unit test: an entry whose read fails stays in the journal, and `stop` gives an error |
 | The agent reads the arguments or the environment of another process (`sysctl kern.procargs2`, `ps`) | Refused | Mac acceptance 1 |
+| The hold helper calls `stop` from inside the coalition | `Ok` with no action; the stop of the engine, outside the coalition, freezes and kills, the helper too | Unit test: `stop` from a process in the coalition of the record sends no signal |
 | The shim ends after the job process got the descriptors, before the agent starts | The record exists (it comes before the handoff), so `ended` reads the coalition | Unit test: the shim refuses the handoff with no record |
 | The agent connects to another port, a public address, UDP or a Unix socket other than its session socket | Refused | Mac acceptance 1 |
 | The agent runs `iris status` (the session socket `.iris/socket`) | Works | Mac acceptance 1 |
