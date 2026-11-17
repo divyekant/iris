@@ -466,8 +466,13 @@ Each assumption has the evidence of a Microsoft Learn page, read on
 - A6. `PATCH` keeps the fields that the body does not name; a collection
   in the body replaces the full collection. Evidence:
   <https://learn.microsoft.com/en-us/graph/api/message-update>. The replace
-  of the collection is `pending` (standard OData, not stated); the caller
-  always sends the full list, which is correct under both readings.
+  of the collection is `pending` (standard OData, not stated). Iris checks
+  each answer: the 200 answer of the PATCH has the `categories` of the
+  message, and the write is applied only if that list equals the
+  requested list (as a set). Else the result is a definite failure with
+  the reason "Outlook kept other categories", and Iris turns off category
+  writes for the account (label and unlabel give a definite refusal)
+  until a new release. The release gate tests an `unlabel`.
 - A7. Well-known folder names work in each language of the mailbox.
   Evidence: <https://learn.microsoft.com/en-us/graph/api/resources/mailfolder>.
 - A8. Error body `{"error":{"code","message"}}`. Evidence:
