@@ -1,0 +1,315 @@
+//! The macOS part of the app: the window, the menu bar icon and the notices
+//! (`docs/specs/2026-11-17-mac-app.md`, shape A).
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use mac_notification_sys::{Notification, NotificationResponse};
+use tauri::image::Image;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::webview::PageLoadEvent;
+use tauri::{
+    ActivationPolicy, AppHandle, LogicalPosition, Manager, RunEvent, TitleBarStyle, Url,
+    WebviewUrl, WebviewWindowBuilder, WindowEvent,
+};
+
+use crate::engine;
+
+const MAIN: &str = "main";
+const TRAY: &str = "iris";
+/// The bundle ID of the app (`tauri.conf.json`).
+const ID: &str = "io.github.divyekant.iris.app";
+/// The address of the "Start Iris" button of the local page. The app stops
+/// the navigation and starts the engine: the page needs no Tauri command.
+const START: &str = "start.iris.invalid";
+/// The most notices that wait for a click at the same time. Each one holds
+/// a small thread. More notices show with no click action.
+const WAIT_MAX: usize = 20;
+
+const TRAY_ICON: &[u8] = include_bytes!("../icons/tray.png");
+const TRAY_DOT: &[u8] = include_bytes!("../icons/tray-dot.png");
+
+/// Runs before each page: the client adds room for the window buttons in
+/// its top bar (`client/src/App.svelte`).
+const INIT: &str = r#"document.documentElement.dataset.shell = "mac";"#;
+
+struct Shell {
+    home: PathBuf,
+    /// The engine socket.
+    socket: PathBuf,
+    /// The route to open after the next page load.
+    route: Mutex<Option<String>>,
+    /// The menu item with the count of notices.
+    count: Mutex<Option<MenuItem<tauri::Wry>>>,
+    /// The last count that the menu bar shows. `u64::MAX` before the first.
+    open: AtomicU64,
+}
+
+pub fn run() {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let socket = engine::socket(&home, std::env::var_os("IRIS_DATA").map(PathBuf::from));
+    let app = tauri::Builder::default()
+        .manage(Shell {
+            home,
+            socket,
+            route: Mutex::new(None),
+            count: Mutex::new(None),
+            open: AtomicU64::new(u64::MAX),
+        })
+        .setup(|app| {
+            let open = MenuItem::with_id(app, "open", "Open Iris", true, None::<&str>)?;
+            let count = MenuItem::with_id(app, "notices", "No notices", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit Iris", true, None::<&str>)?;
+            let sep = PredefinedMenuItem::separator(app)?;
+            let menu = Menu::with_items(app, &[&open, &count, &sep, &quit])?;
+            *app.state::<Shell>().count.lock().unwrap() = Some(count);
+            TrayIconBuilder::with_id(TRAY)
+                .icon(Image::from_bytes(TRAY_ICON)?)
+                .icon_as_template(true)
+                .tooltip("Iris")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, e| match e.id().as_ref() {
+                    "open" => show(app, None),
+                    "notices" => show(app, Some("#/brief".into())),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, e| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = e
+                    {
+                        show(tray.app_handle(), None);
+                    }
+                })
+                .build(app)?;
+            show(app.handle(), None);
+            let handle = app.handle().clone();
+            std::thread::Builder::new()
+                .name("notices".into())
+                .spawn(move || notices(handle))?;
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("the Iris app could not start");
+    app.run(|app, event| match event {
+        // The window closed: stay in the menu bar. "Quit Iris" gives a code.
+        RunEvent::ExitRequested {
+            api, code: None, ..
+        } => api.prevent_exit(),
+        // The web view ended with the window: leave the Dock too.
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::Destroyed,
+            ..
+        } if label == MAIN => {
+            let _ = app.set_activation_policy(ActivationPolicy::Accessory);
+        }
+        RunEvent::Reopen { .. } => show(app, None),
+        _ => {}
+    });
+}
+
+/// Open the window, or bring it to the front. With a route, show that view.
+fn show(app: &AppHandle, route: Option<String>) {
+    if let Some(w) = app.get_webview_window(MAIN) {
+        if let Some(r) = route {
+            let _ = w.eval(format!("location.hash = {}", serde_json::Value::from(r)));
+        }
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+        return;
+    }
+    let shell = app.state::<Shell>();
+    *shell.route.lock().unwrap() = route;
+    let _ = app.set_activation_policy(ActivationPolicy::Regular);
+    let handle = app.clone();
+    let built = WebviewWindowBuilder::new(app, MAIN, address(&shell))
+        .title("Iris")
+        .inner_size(1100.0, 760.0)
+        .min_inner_size(420.0, 480.0)
+        .title_bar_style(TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(LogicalPosition::new(20.0, 22.0))
+        .initialization_script(INIT)
+        .on_navigation(move |url| navigate(&handle, url))
+        .on_page_load(|w, p| {
+            let engine = engine::is_engine(p.url().scheme(), p.url().host_str(), p.url().port());
+            if p.event() == PageLoadEvent::Finished && engine {
+                let route = w.state::<Shell>().route.lock().unwrap().take();
+                if let Some(r) = route {
+                    let _ = w.eval(format!("location.hash = {}", serde_json::Value::from(r)));
+                }
+            }
+        })
+        .build();
+    if let Ok(w) = built {
+        let _ = w.set_focus();
+    }
+}
+
+/// The page of the window: a new sign-in address of the engine, or the local
+/// page when no engine answers.
+fn address(shell: &Shell) -> WebviewUrl {
+    let sign_in = engine::request(&shell.socket, "sign-in", serde_json::json!({}));
+    let url = sign_in
+        .ok()
+        .and_then(|r| {
+            r["url"]
+                .as_str()
+                .and_then(engine::checked_url)
+                .map(str::to_owned)
+        })
+        .and_then(|u| Url::parse(&u).ok());
+    match url {
+        Some(u) => WebviewUrl::External(u),
+        None if engine::program(&shell.home, |p| p.exists()).is_some() => {
+            WebviewUrl::App("index.html".into())
+        }
+        None => WebviewUrl::App("missing.html".into()),
+    }
+}
+
+/// Allow the engine and the local pages in the window. "Start Iris" starts
+/// the engine. Each other address opens in the default browser.
+fn navigate(app: &AppHandle, url: &Url) -> bool {
+    if url.host_str() == Some(START) {
+        start(app.clone());
+        return false;
+    }
+    if url.scheme() == "tauri" || engine::is_engine(url.scheme(), url.host_str(), url.port()) {
+        return true;
+    }
+    if matches!(url.scheme(), "http" | "https" | "mailto") {
+        let _ = std::process::Command::new("/usr/bin/open")
+            .arg(url.as_str())
+            .status();
+    }
+    false
+}
+
+/// "Start Iris": `iris service install` (safe to repeat), then load the
+/// client again.
+fn start(app: AppHandle) {
+    std::thread::spawn(move || {
+        let shell = app.state::<Shell>();
+        if let Some(iris) = engine::program(&shell.home, |p| p.exists()) {
+            let _ = std::process::Command::new(iris)
+                .args(["service", "install"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        // The engine needs a moment to bind its socket.
+        for _ in 0..20 {
+            if engine::request(&shell.socket, "app.notices", serde_json::json!({})).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        let h = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Some(w) = h.get_webview_window(MAIN) {
+                if let WebviewUrl::External(u) = address(&h.state::<Shell>()) {
+                    let _ = w.navigate(u);
+                }
+            }
+        });
+    });
+}
+
+/// The notice thread: ask the engine each [`engine::POLL`], show each new
+/// notice, and keep the menu bar dot current.
+fn notices(app: AppHandle) {
+    let _ = mac_notification_sys::set_application(ID);
+    let socket = app.state::<Shell>().socket.clone();
+    let waiting = Arc::new(AtomicUsize::new(0));
+    let mut poll = engine::Poll::default();
+    loop {
+        let page = engine::request(&socket, "app.notices", poll.args())
+            .ok()
+            .and_then(|r| poll.read(&r));
+        if let Some(page) = page {
+            if page.restarted {
+                sign_in_again(&app);
+            }
+            menu_bar(&app, page.open);
+            for n in page.notices {
+                notify(&app, n, &waiting);
+            }
+            if page.more {
+                continue;
+            }
+        }
+        std::thread::sleep(engine::POLL);
+    }
+}
+
+/// The engine started again with a new web secret: load a new sign-in
+/// address in the open window (issue #547).
+fn sign_in_again(app: &AppHandle) {
+    let h = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = h.get_webview_window(MAIN) {
+            if let WebviewUrl::External(u) = address(&h.state::<Shell>()) {
+                let _ = w.navigate(u);
+            }
+        }
+    });
+}
+
+/// The dot on the menu bar icon and the count in the menu.
+fn menu_bar(app: &AppHandle, open: u64) {
+    let shell = app.state::<Shell>();
+    if shell.open.swap(open, Ordering::Relaxed) == open {
+        return;
+    }
+    if let Some(tray) = app.tray_by_id(TRAY) {
+        let icon = if open == 0 { TRAY_ICON } else { TRAY_DOT };
+        let _ = Image::from_bytes(icon).map(|i| tray.set_icon(Some(i)));
+        let _ = tray.set_icon_as_template(true);
+    }
+    let text = match open {
+        0 => "No notices".to_string(),
+        1 => "1 notice".to_string(),
+        n => format!("{n} notices"),
+    };
+    if let Some(item) = shell.count.lock().unwrap().as_ref() {
+        let _ = item.set_text(text);
+    }
+}
+
+/// Show one notice. A click opens its route in the window. If the notice API
+/// fails, the fixed `osascript` of the engine shows it.
+fn notify(app: &AppHandle, n: engine::Notice, waiting: &Arc<AtomicUsize>) {
+    let wait = waiting.fetch_add(1, Ordering::Relaxed) < WAIT_MAX;
+    let waiting = waiting.clone();
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let sent = Notification::new()
+            .title(&n.title)
+            .message(&n.body)
+            .wait_for_click(wait)
+            .send();
+        match sent {
+            Ok(NotificationResponse::Click) => {
+                let h = app.clone();
+                let _ = app.run_on_main_thread(move || show(&h, Some(n.route)));
+            }
+            Ok(_) => {}
+            Err(_) => {
+                let _ = engine::osascript(&n.title, &n.body).status();
+            }
+        }
+        waiting.fetch_sub(1, Ordering::Relaxed);
+    });
+}

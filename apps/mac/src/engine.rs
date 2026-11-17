@@ -1,0 +1,356 @@
+//! The engine side of the Mac app: the paths, one request on the engine
+//! socket, and the state of the notices. Standard library and `serde_json`
+//! only, so CI tests this file on Linux.
+
+// On Linux only the tests use this file.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use serde_json::{json, Value};
+
+/// The time between two `app.notices` calls. The engine waits 30 seconds
+/// before it shows the notices itself again.
+pub const POLL: Duration = Duration::from_secs(10);
+/// The most notices of one answer of the engine (`APP_NOTICES_MAX`).
+pub const PAGE: usize = 20;
+/// The longest wait for the answer of the engine.
+const WAIT: Duration = Duration::from_secs(5);
+/// The longest answer line.
+const MAX_ANSWER: u64 = 1 << 20;
+
+/// The engine socket in the data folder: `IRIS_DATA` when the app starts
+/// from a terminal with it, else the default folder of macOS. A start from
+/// Finder has no `IRIS_DATA` (issue #541).
+pub fn socket(home: &Path, data: Option<PathBuf>) -> PathBuf {
+    data.unwrap_or_else(|| home.join("Library/Application Support/iris"))
+        .join("iris.sock")
+}
+
+/// The `iris` program. A Mac app gets no `PATH` of a shell, so the app looks
+/// at the path of `scripts/install.sh` first, then at the paths of Homebrew.
+pub fn program(home: &Path, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    [
+        home.join(".local/bin/iris"),
+        PathBuf::from("/opt/homebrew/bin/iris"),
+        PathBuf::from("/usr/local/bin/iris"),
+    ]
+    .into_iter()
+    .find(|p| exists(p))
+}
+
+/// Send one request to the engine socket at `path`, and give the result.
+pub fn request(path: &Path, verb: &str, args: Value) -> Result<Value, String> {
+    let mut s = UnixStream::connect(path).map_err(|e| format!("no engine: {e}"))?;
+    s.set_read_timeout(Some(WAIT)).map_err(|e| e.to_string())?;
+    s.set_write_timeout(Some(WAIT)).map_err(|e| e.to_string())?;
+    let mut line = json!({ "v": 1, "verb": verb, "args": args }).to_string();
+    line.push('\n');
+    s.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+    let mut answer = String::new();
+    BufReader::new((&s).take(MAX_ANSWER))
+        .read_line(&mut answer)
+        .map_err(|e| e.to_string())?;
+    let a: Value = serde_json::from_str(&answer).map_err(|_| "not an answer".to_string())?;
+    match a["ok"].as_bool() {
+        Some(true) => Ok(a["result"].clone()),
+        Some(false) => Err(a["error"].as_str().unwrap_or("refused").to_string()),
+        None => Err("not an answer".into()),
+    }
+}
+
+/// The sign-in address of the engine, only when it is a loopback address
+/// with a code: `http://127.0.0.1:<port>/#code=<hex>` or the same on `[::1]`.
+/// The web view loads no other address from the socket.
+pub fn checked_url(url: &str) -> Option<&str> {
+    let rest = url
+        .strip_prefix("http://127.0.0.1:")
+        .or_else(|| url.strip_prefix("http://[::1]:"))?;
+    let (port, code) = rest.split_once("/#code=")?;
+    let port_ok = !port.is_empty() && port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit());
+    let code_ok =
+        !code.is_empty() && code.len() <= 64 && code.bytes().all(|b| b.is_ascii_hexdigit());
+    (port_ok && code_ok).then_some(url)
+}
+
+/// True when `url` is the web client of the engine: a loopback address with
+/// a port.
+pub fn is_engine(scheme: &str, host: Option<&str>, port: Option<u16>) -> bool {
+    scheme == "http" && matches!(host, Some("127.0.0.1" | "[::1]")) && port.is_some()
+}
+
+/// One notice to show.
+#[derive(Debug, PartialEq)]
+pub struct Notice {
+    pub title: String,
+    pub body: String,
+    /// The route of the web client that a click opens.
+    pub route: String,
+}
+
+/// One answer of `app.notices`.
+#[derive(Debug, PartialEq)]
+pub struct Page {
+    pub notices: Vec<Notice>,
+    /// The count of notices that are not done.
+    pub open: u64,
+    /// True when the page was full: ask again at once.
+    pub more: bool,
+    /// True when the engine started again since the last answer: the open
+    /// window needs a new sign-in (issue #547).
+    pub restarted: bool,
+}
+
+/// The state of the notices: the largest notice row ID that the app read.
+#[derive(Debug, Default)]
+pub struct Poll {
+    last: Option<u64>,
+    /// The start of the engine in the last answer.
+    engine: Option<u64>,
+}
+
+impl Poll {
+    /// The args of the next call. The first call has no `after`: the engine
+    /// gives only `last`, so the app shows no old notice.
+    pub fn args(&self) -> Value {
+        match self.last {
+            None => json!({}),
+            Some(n) => json!({ "after": n }),
+        }
+    }
+
+    /// Read one result. `None` when it is not valid: the state stays, and the
+    /// next call asks again.
+    pub fn read(&mut self, r: &Value) -> Option<Page> {
+        let last = r["last"].as_u64()?;
+        let open = r["open"].as_u64()?;
+        let engine = r["engine"].as_u64()?;
+        let list = r["notices"].as_array()?;
+        let notices = list.iter().map(notice).collect::<Option<Vec<_>>>()?;
+        self.last = Some(last);
+        let restarted = self.engine.is_some_and(|e| e != engine);
+        self.engine = Some(engine);
+        Some(Page {
+            more: notices.len() >= PAGE,
+            notices,
+            open,
+            restarted,
+        })
+    }
+}
+
+fn notice(v: &Value) -> Option<Notice> {
+    let s = |k: &str| v[k].as_str();
+    // The mail ID goes into the route only when it is a plain ID (`m-42`).
+    let route = match v["message"]["id"].as_str() {
+        Some(id) if plain_id(id) => format!("#/mail/{id}"),
+        _ => "#/brief".to_string(),
+    };
+    Some(Notice {
+        title: s("rule_name")?.to_string(),
+        body: format!("{}: {}", s("title")?, s("text")?),
+        route,
+    })
+}
+
+fn plain_id(id: &str) -> bool {
+    let Some((kind, n)) = id.split_once('-') else {
+        return false;
+    };
+    kind.len() == 1
+        && kind.bytes().all(|b| b.is_ascii_lowercase())
+        && !n.is_empty()
+        && n.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The system notice when the notice API of the app fails: the fixed script
+/// of the engine (`crates/iris/src/notify.rs`). The words are arguments,
+/// never part of the script.
+pub fn osascript(title: &str, body: &str) -> Command {
+    let mut c = Command::new("/usr/bin/osascript");
+    c.args([
+        "-e",
+        "on run argv",
+        "-e",
+        "display notification (item 2 of argv) with title (item 1 of argv)",
+        "-e",
+        "end run",
+    ]);
+    // `osascript` reads a first word that starts with `-` as an option.
+    c.args([format!("Iris: {title}"), body.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    c
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_loopback_sign_in_address_loads() {
+        for ok in [
+            "http://127.0.0.1:4800/#code=0a1b2c",
+            "http://[::1]:4800/#code=ff",
+        ] {
+            assert_eq!(checked_url(ok), Some(ok));
+        }
+        for bad in [
+            "http://127.0.0.1.evil.example:4800/#code=00",
+            "https://127.0.0.1:4800/#code=00",
+            "http://localhost:4800/#code=00",
+            "http://127.0.0.1:4800/#code=",
+            "http://127.0.0.1:4800/#code=zz",
+            "http://127.0.0.1:/#code=00",
+            "http://127.0.0.1:4800/x#code=00",
+            "http://127.0.0.1:4800/#code=00&x=1",
+            "javascript:alert(1)",
+            "",
+        ] {
+            assert_eq!(checked_url(bad), None, "{bad}");
+        }
+        assert!(is_engine("http", Some("127.0.0.1"), Some(4800)));
+        assert!(!is_engine("https", Some("127.0.0.1"), Some(4800)));
+        assert!(!is_engine("http", Some("example.com"), Some(4800)));
+        assert!(!is_engine("http", Some("127.0.0.1"), None));
+    }
+
+    #[test]
+    fn the_program_comes_from_the_install_path_first() {
+        let home = Path::new("/Users/p");
+        let all = |_: &Path| true;
+        assert_eq!(program(home, all), Some(home.join(".local/bin/iris")));
+        let brew = |p: &Path| p.starts_with("/opt/homebrew") || p.starts_with("/usr/local");
+        assert_eq!(
+            program(home, brew),
+            Some(PathBuf::from("/opt/homebrew/bin/iris"))
+        );
+        assert_eq!(program(home, |_| false), None);
+        assert_eq!(
+            socket(home, None),
+            PathBuf::from("/Users/p/Library/Application Support/iris/iris.sock")
+        );
+        assert_eq!(
+            socket(home, Some("/tmp/d".into())),
+            PathBuf::from("/tmp/d/iris.sock")
+        );
+    }
+
+    fn page(ids: &[u64], last: u64) -> Value {
+        let notices: Vec<Value> = ids
+            .iter()
+            .map(|i| {
+                json!({ "id": format!("n-{i}"), "rule_name": "Clinic", "title": "Dr Lee",
+                        "text": "Results", "message": { "id": format!("m-{i}") } })
+            })
+            .collect();
+        json!({ "notices": notices, "last": last, "open": ids.len(), "engine": 5 })
+    }
+
+    #[test]
+    fn the_poll_asks_after_the_last_notice_and_reads_pages() {
+        let mut p = Poll::default();
+        assert_eq!(p.args(), json!({}));
+        // The first answer: no notice, only the last ID.
+        let first = p
+            .read(&json!({ "notices": [], "last": 7, "open": 2, "engine": 5 }))
+            .unwrap();
+        assert_eq!(
+            (first.notices.len(), first.open, first.more, first.restarted),
+            (0, 2, false, false)
+        );
+        assert_eq!(p.args(), json!({ "after": 7 }));
+        let ids: Vec<u64> = (8..8 + PAGE as u64).collect();
+        let full = p.read(&page(&ids, 27)).unwrap();
+        assert!(full.more && !full.restarted);
+        assert_eq!(
+            full.notices[0],
+            Notice {
+                title: "Clinic".into(),
+                body: "Dr Lee: Results".into(),
+                route: "#/mail/m-8".into()
+            }
+        );
+        assert_eq!(p.args(), json!({ "after": 27 }));
+        // A new engine start: the window signs in again.
+        let again = p
+            .read(&json!({ "notices": [], "last": 27, "open": 0, "engine": 6 }))
+            .unwrap();
+        assert!(again.restarted);
+        // A result that is not valid changes nothing.
+        for bad in [
+            json!(null),
+            json!({ "notices": [], "open": 1 }),
+            json!({ "notices": [{}], "last": 30, "open": 1 }),
+        ] {
+            assert_eq!(p.read(&bad), None);
+            assert_eq!(p.args(), json!({ "after": 27 }));
+        }
+    }
+
+    #[test]
+    fn a_click_opens_the_mail_or_the_brief() {
+        let n = |message: Value| {
+            notice(&json!({ "rule_name": "r", "title": "t", "text": "x", "message": message }))
+                .unwrap()
+                .route
+        };
+        assert_eq!(n(json!({ "id": "m-42" })), "#/mail/m-42");
+        assert_eq!(n(json!(null)), "#/brief");
+        for odd in ["m-", "-1", "mm-1", "m-1/../x", "m-1#x", "M-1", "m-1 "] {
+            assert_eq!(n(json!({ "id": odd })), "#/brief", "{odd}");
+        }
+    }
+
+    #[test]
+    fn the_fallback_notice_passes_words_as_arguments() {
+        let evil = r#"" & do shell script "rm -rf ~" & "#;
+        let c = osascript(evil, evil);
+        let a: Vec<String> = c
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(c.get_program(), "/usr/bin/osascript");
+        assert_eq!(a[a.len() - 2], format!("Iris: {evil}"));
+        assert_eq!(a[a.len() - 1], evil);
+        assert!(a[..a.len() - 2].iter().all(|x| !x.contains("rm -rf")));
+    }
+
+    #[test]
+    fn a_request_with_no_engine_or_a_bad_answer_is_an_error() {
+        let d = std::env::temp_dir().join(format!("iris-mac-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let path = d.join("iris.sock");
+        assert!(request(&path, "app.notices", json!({})).is_err());
+        let l = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let serve = move |answer: &'static str| {
+            let (mut s, _) = l.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&s).read_line(&mut line).unwrap();
+            let v: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(
+                (v["v"].clone(), v["verb"].clone()),
+                (json!(1), json!("sign-in"))
+            );
+            s.write_all(answer.as_bytes()).unwrap();
+        };
+        let t = std::thread::spawn(move || {
+            serve("{\"ok\":true,\"result\":{\"url\":\"u\"}}\n");
+            serve("{\"ok\":false,\"code\":3,\"error\":\"no\"}\n");
+            serve("not json\n");
+        });
+        assert_eq!(
+            request(&path, "sign-in", json!({})),
+            Ok(json!({ "url": "u" }))
+        );
+        assert_eq!(request(&path, "sign-in", json!({})), Err("no".into()));
+        assert!(request(&path, "sign-in", json!({})).is_err());
+        t.join().unwrap();
+    }
+}

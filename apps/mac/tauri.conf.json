@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Iris",
+  "version": "0.1.0",
+  "identifier": "io.github.divyekant.iris.app",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; style-src 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "icon": ["icons/icon.png"],
+    "category": "Productivity",
+    "copyright": "Apache-2.0",
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
+  }
+}
