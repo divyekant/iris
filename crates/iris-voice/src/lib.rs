@@ -145,13 +145,17 @@ struct Snapshot {
 }
 
 /// SQL that is true when the message `m`, with the header `h`, is hostile
-/// mail: a hostile mark, the label `SPAM`, or a `hostile` sender (spec 1
+/// mail: `may_be_hostile!()` (a mark, or a link check to come), the label
+/// `SPAM`, or a `hostile` sender (spec 1
 /// section 6.7). No hostile mail goes to the model.
-const HOSTILE: &str = "((m.hostile IS NOT NULL AND m.hostile NOT IN ('', '[]'))
-           OR EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                      WHERE ml.message_id = m.id AND l.provider_id = 'SPAM')
-           OR EXISTS (SELECT 1 FROM sender s
-                      WHERE s.address = h.from_addr COLLATE NOCASE AND s.kind = 'hostile'))";
+const HOSTILE: &str = concat!(
+    "(",
+    iris_store::may_be_hostile!(),
+    " OR EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                 WHERE ml.message_id = m.id AND l.provider_id = 'SPAM')
+      OR EXISTS (SELECT 1 FROM sender s
+                 WHERE s.address = h.from_addr COLLATE NOCASE AND s.kind = 'hostile'))"
+);
 
 /// The messages of thread `?1` that count.
 const IN_THREAD: &str = "FROM message m

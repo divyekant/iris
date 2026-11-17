@@ -16,7 +16,7 @@ const READS: [&str; 4] = ["m.hostile", "(hostile", "SET hostile", "FROM link_che
 
 /// Each place that may read them, the count of matches of [`READS`] (one
 /// condition on the marks gives two), and why.
-const ALLOWED: [(&str, usize, &str); 8] = [
+const ALLOWED: [(&str, usize, &str); 9] = [
     (
         "iris-store/src/lib.rs",
         3,
@@ -53,6 +53,11 @@ const ALLOWED: [(&str, usize, &str); 8] = [
         "Message::hostile of the policy facts, which read may_be_hostile",
     ),
     ("iris/src/verbs.rs", 2, "shows the marks of a message"),
+    (
+        "iris-voice/src/tests.rs",
+        2,
+        "the tests of the draft gate write hostile marks",
+    ),
 ];
 
 fn sources(dir: &Path, out: &mut Vec<(String, String)>) {

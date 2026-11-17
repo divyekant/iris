@@ -751,3 +751,29 @@ fn mail_cannot_forge_the_intent() {
     assert_eq!(thread.last().unwrap()["text"], forged.trim());
     assert_eq!(v.as_object().unwrap().len(), 6);
 }
+
+/// A message that waits for its link check can be hostile: no call.
+#[test]
+fn a_message_that_waits_for_its_link_check_gets_no_call() {
+    let (b, t) = mailbox("link-check");
+    b.store
+        .write(|tx| {
+            let cols: Vec<String> = tx
+                .prepare("SELECT name FROM pragma_table_info('link_check')")?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            assert!(cols.iter().any(|c| c == "message_id"), "{cols:?}");
+            tx.execute(
+                "INSERT INTO link_check(message_id) SELECT id FROM message WHERE provider_id = 'in'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let fake = Fake::new(r#"{"body": "x"}"#);
+    assert!(matches!(
+        write(&b.store, t, None, &fake, 1),
+        Err(Error::Hostile)
+    ));
+    assert!(fake.calls.borrow().is_empty());
+}
