@@ -70,9 +70,25 @@ impl Mail {
 /// of each of your sent messages (an alias), lowercase. One row at a time.
 pub fn your_addresses(conn: &Connection) -> rusqlite::Result<std::collections::BTreeSet<String>> {
     let mut out = std::collections::BTreeSet::new();
+    each_your_address(conn, |a| {
+        out.insert(a);
+        true
+    })?;
+    Ok(out)
+}
+
+/// Call `f` with each of your addresses (see [`your_addresses`]), one row
+/// at a time, with no set in memory. A repeated address can come more than
+/// once. Stops when `f` gives `false`.
+pub fn each_your_address(
+    conn: &Connection,
+    mut f: impl FnMut(String) -> bool,
+) -> rusqlite::Result<()> {
     let mut q = conn.prepare_cached("SELECT lower(address) FROM account")?;
     for a in q.query_map([], |r| r.get::<_, String>(0))? {
-        out.insert(a?);
+        if !f(a?) {
+            return Ok(());
+        }
     }
     let mut q = conn.prepare_cached(
         "SELECT h.from_addr FROM message m JOIN header h ON h.message_id = m.id
@@ -83,10 +99,12 @@ pub fn your_addresses(conn: &Connection) -> rusqlite::Result<std::collections::B
     )?;
     for from in q.query_map([], |r| r.get::<_, Option<String>>(0))? {
         if let Some(a) = from?.and_then(|f| addresses(&f).into_iter().next()) {
-            out.insert(a);
+            if !f(a) {
+                return Ok(());
+            }
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// The conversation item of a thread, as the store has it.

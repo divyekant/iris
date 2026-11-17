@@ -511,3 +511,46 @@ fn the_store_limit_holds_for_a_send() {
         .to_string();
     assert!(e.contains("only a person approves"), "{e}");
 }
+
+/// A large thread with many other addresses: the flag stays right. The
+/// check holds only the recipients of the draft in memory, not the
+/// addresses of the thread (by construction in `outside_marks`).
+#[test]
+fn a_large_thread_gives_the_same_answer() {
+    let dir = TempDir::new("large");
+    let s = store(&dir);
+    let cc: Vec<String> = (0..2000).map(|i| format!("p{i}@crowd.example")).collect();
+    let batch: Vec<NewMessage> = (0..20)
+        .map(|k| NewMessage {
+            provider_id: format!("big{k}"),
+            thread_provider_id: "gt1".into(),
+            internal_date: Some(2),
+            header: Header {
+                from_addr: Some("priya@example.com".into()),
+                to_addrs: Some(OWNER.into()),
+                cc_addrs: Some(cc[k * 100..(k + 1) * 100].join(", ")),
+                message_id_hdr: Some(format!("<big{k}@x.org>")),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .collect();
+    s.put_messages(1, &batch).unwrap();
+    let local = author(AuthorKind::Local, None);
+    let (_, f) = draft(
+        &s,
+        &local,
+        "t-1",
+        &["p1999@crowd.example"],
+        &["P0@CROWD.example"],
+    );
+    assert!(!f.contains(&"outside_thread".to_string()), "{f:?}");
+    let (_, f) = draft(
+        &s,
+        &local,
+        "t-1",
+        &["p1999@crowd.example"],
+        &["eve@evil.example"],
+    );
+    assert!(f.contains(&"outside_thread".to_string()), "{f:?}");
+}

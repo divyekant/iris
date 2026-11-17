@@ -174,8 +174,10 @@ the thread messages in the store, the scope rows of the job.
 - `docs/spec/02-changeset-policy-ledger.md`: sections 5.3 and 6.5.
 - No API, schema or screen change. The flag name exists in
   `docs/spec/schema/changeset.schema.json`.
-- Memory: one bounded set of thread addresses for each write action at
-  submit.
+- Memory: the check holds only the recipients of the draft (at most the
+  limit of `Content::check`). It streams your addresses and the thread
+  headers, one row at a time, and removes each recipient that a row names.
+  It never holds the addresses of the thread.
 
 ## Assumptions
 

@@ -903,21 +903,32 @@ pub fn outside_marks(
     action: i64,
     content: &iris_compose::Content,
 ) -> Result<Vec<Mark>> {
-    let mut known = iris_talk::your_addresses(c)?;
-    let mut st = c.prepare(&format!(
-        "SELECT h.from_addr, h.to_addrs, h.cc_addrs
-         FROM changeset_action a, message t JOIN header h ON h.message_id = t.id
-         WHERE a.id = ?1 AND t.gone_at IS NULL AND t.thread_id IN ({ACTION_THREADS})"
-    ))?;
-    let mut rows = st.query([action])?;
-    while let Some(r) = rows.next()? {
-        for i in 0..3 {
-            if let Some(v) = r.get::<_, Option<String>>(i)? {
-                known.extend(
-                    iris_senders::head::addresses(&v)
-                        .into_iter()
-                        .map(|(a, _)| a),
-                );
+    // Memory holds only the recipients that no row names yet (at most the
+    // recipients of the draft), never the addresses of the thread.
+    let mut open: HashSet<String> = content
+        .to
+        .iter()
+        .chain(&content.cc)
+        .map(|a| a.trim().to_ascii_lowercase())
+        .collect();
+    iris_talk::each_your_address(c, |a| {
+        open.remove(&a);
+        !open.is_empty()
+    })?;
+    if !open.is_empty() {
+        let mut st = c.prepare(&format!(
+            "SELECT h.from_addr, h.to_addrs, h.cc_addrs
+             FROM changeset_action a, message t JOIN header h ON h.message_id = t.id
+             WHERE a.id = ?1 AND t.gone_at IS NULL AND t.thread_id IN ({ACTION_THREADS})"
+        ))?;
+        let mut rows = st.query([action])?;
+        while let (false, Some(r)) = (open.is_empty(), rows.next()?) {
+            for i in 0..3 {
+                if let Some(v) = r.get::<_, Option<String>>(i)? {
+                    for (a, _) in iris_senders::head::addresses(&v) {
+                        open.remove(&a);
+                    }
+                }
             }
         }
     }
@@ -933,7 +944,7 @@ pub fn outside_marks(
         .map(|(i, a)| (Field::Cc(i), a));
     Ok(to
         .chain(cc)
-        .filter(|(_, a)| !known.contains(&a.trim().to_ascii_lowercase()))
+        .filter(|(_, a)| open.contains(&a.trim().to_ascii_lowercase()))
         .map(|(field, a)| Mark {
             flag: "outside_thread",
             field,
