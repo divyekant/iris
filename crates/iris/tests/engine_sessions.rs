@@ -121,6 +121,16 @@ fn workspace(f: &Fixture) -> PathBuf {
     f.store.dir().join(format!("workspaces/j-{}", f.job))
 }
 
+/// Waits until `path` is gone, at most 20 s: the engine builds the
+/// workspace of a done job on its own thread.
+fn gone(path: &Path) {
+    let end = Instant::now() + Duration::from_secs(20);
+    while path.exists() {
+        assert!(Instant::now() < end, "{} stays", path.display());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn now() -> i64 {
     iris::engine::now_ms()
 }
@@ -293,7 +303,7 @@ fn a_done_job_gets_its_workspace_again_after_the_reap() {
     .unwrap();
     let row = until(&s, &f, id, |r| r.reaped_ms.is_some());
     assert_eq!(row.end, Some(EndReason::JobState));
-    assert!(!marker.exists(), "the workspace is built again");
+    gone(&marker);
     assert!(workspace(&f).join("JOB.md").exists());
 }
 
@@ -322,7 +332,7 @@ fn the_engine_start_builds_each_done_job_again() {
     )
     .unwrap();
     let _s = sessions(&f);
-    assert!(!marker.exists(), "the workspace is built again");
+    gone(&marker);
     assert!(workspace(&f).join("JOB.md").exists());
     assert!(!old.exists(), "a log older than 30 days goes");
     assert!(new.exists());
@@ -387,6 +397,8 @@ fn a_slow_rebuild_does_not_hold_a_stop_of_another_job() {
     until(&s, &f, b, |r| r.started_ms.is_some());
     // The test holds the build lock of the workspace of job A: the
     // rebuild of the done job waits for it.
+    let marker = workspace(&f).join(".iris/marker");
+    fs::write(&marker, "x").unwrap();
     let lock = f.store.dir().join(format!("workspaces/.j-{}.lock", f.job));
     let held = iris_store::FileLock::take(&lock).unwrap();
     iris_job::finish(
@@ -398,21 +410,7 @@ fn a_slow_rebuild_does_not_hold_a_stop_of_another_job() {
         now(),
     )
     .unwrap();
-    let supervisor = {
-        let (s, store) = (s.clone(), f.store.clone());
-        std::thread::spawn(move || {
-            let end = Instant::now() + Duration::from_secs(20);
-            while Instant::now() < end && session(&store, a).unwrap().reaped_ms.is_none() {
-                s.turn(now());
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        })
-    };
-    let end = Instant::now() + Duration::from_secs(20);
-    while session(&f.store, a).unwrap().reaped_ms.is_none() {
-        assert!(Instant::now() < end, "job A is not reaped");
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    // The turns of this stop reap A, which asks for its rebuild.
     let (tx, rx) = std::sync::mpsc::channel();
     {
         let s = s.clone();
@@ -421,9 +419,18 @@ fn a_slow_rebuild_does_not_hold_a_stop_of_another_job() {
         });
     }
     let stopped = rx.recv_timeout(Duration::from_secs(20));
+    let a_reaped = session(&f.store, a).unwrap().reaped_ms.is_some();
+    let built_early = !marker.exists();
     drop(held);
-    supervisor.join().unwrap();
     assert_eq!(stopped.expect("the stop came back").unwrap(), (b, Ok(())));
+    assert!(a_reaped, "a turn reaped A");
+    assert!(!built_early, "the rebuild waits for the lock");
+    // After the lock, the rebuild of A comes.
+    let end = Instant::now() + Duration::from_secs(20);
+    while marker.exists() {
+        assert!(Instant::now() < end, "no rebuild of A");
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn the_time_limit_of_the_run_holds_after_a_config_change() {

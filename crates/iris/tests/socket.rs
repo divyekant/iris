@@ -607,6 +607,10 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
         r#"{"ok":false,"code":9,"error":"x"}"#,
         r#"{"ok":false,"code":3}"#,
         r#"{"ok":"true","result":{"id":"cs-1","state":"draft","actions":[]}}"#,
+        r#"{"ok":true,"result":{"session":"invalid"}}"#,
+        r#"{"ok":true,"result":{"session":"se-0","reaped":true}}"#,
+        r#"{"ok":true,"result":{"session":"se-01","reaped":false}}"#,
+        r#"{"ok":true,"result":{"session":7,"reaped":true}}"#,
     ]
     .iter()
     .map(|l| l.as_bytes().to_vec())
@@ -618,16 +622,27 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
                 seed = seed
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(1442695040888963407);
-                let abc = b"{}[]\":,oktruefalseresultcodeerrorid1234 n";
+                let abc = b"{}[]\":,oktruefalseresultcodeerrorid1234 nsessionreaped-";
                 abc[(seed >> 33) as usize % abc.len()]
             })
             .collect();
         lines.push(line);
     }
     for line in &lines {
-        for verb in ["show", "drafts", "add", "submit", "withdraw"] {
+        for verb in [
+            "show", "drafts", "add", "submit", "withdraw", "job.run", "job.stop",
+        ] {
             match socket::parse_answer(verb, line) {
                 None => {}
+                Some(Ok(r)) if verb.starts_with("job.") => assert!(
+                    r["session"]
+                        .as_str()
+                        .and_then(iris_job::parse_session_id)
+                        .is_some()
+                        && (verb == "job.run" || r["reaped"].is_boolean()),
+                    "{verb} {}",
+                    String::from_utf8_lossy(line)
+                ),
                 Some(Ok(r)) => assert!(
                     r.is_object()
                         && (r["changesets"].is_array()
@@ -643,6 +658,8 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
     let ok = br#"{"ok":true,"result":{"id":"cs-1","state":"draft","actions":[]}}"#;
     assert!(matches!(socket::parse_answer("show", ok), Some(Ok(_))));
     assert!(socket::parse_answer("drafts", ok).is_none());
+    let run = br#"{"ok":true,"result":{"session":"se-12"}}"#;
+    assert!(matches!(socket::parse_answer("job.run", run), Some(Ok(_))));
 }
 
 /// The command adds and submits the write verbs: a new mail to an account
