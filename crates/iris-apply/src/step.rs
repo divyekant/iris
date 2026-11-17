@@ -43,6 +43,8 @@ impl Step {
 ///    was lost does not stay `held` (issue #400).
 /// 2. Each `approved` action of the account with a Gmail verb, oldest
 ///    first, with [`apply`]. The apply keeps all its checks.
+///    2a. The send of each draft of the write view
+///    ([`iris_changeset::send_written`]), approved by the press of Send.
 /// 3. The move of each `approved` send of the account to `held`
 ///    ([`iris_changeset::hold`]). A send 14 days after its submit expires.
 /// 4. If the switch is on, the release of each `held` send of the account
@@ -69,6 +71,10 @@ pub fn step(
             return Ok(out);
         }
     }
+    // Step 2a: the send of each draft that the write view marked
+    // (docs/specs/2026-11-17-write.md, section 3).
+    iris_changeset::send_written(store, account, now_ms)
+        .map_err(|e| Error::Store(changeset_error(e)))?;
     iris_changeset::hold(store, account, now_ms).map_err(|e| Error::Store(changeset_error(e)))?;
     let Some(on_at) = crate::sending(store)? else {
         return Ok(out);
