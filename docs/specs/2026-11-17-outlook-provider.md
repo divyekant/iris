@@ -183,7 +183,7 @@ account. R6-10 decides where this compare lives.
 | `move_to(id, folder)` | `POST /me/messages/{id}/move` `{"destinationId"}` | 201, the message |
 | `create_draft(mime)` | `POST /me/messages`, `text/plain`, base64 MIME | 201, the draft |
 | `send_mime(mime)` | `POST /me/sendMail`, `text/plain`, base64 MIME | 202, no body |
-| `sent_by_message_id(id)` | `GET /me/mailFolders/sentitems/messages?$filter=internetMessageId eq '<id>'` (a read) | 200, at most one message |
+| `sent_by_message_id(id)` | `GET /me/messages?$filter=internetMessageId eq '<id>'`, each page (a read) | 200, the matching messages |
 | `draft_etag(id)` | `GET /me/messages/{id}?$select=id` | 200, the `@odata.etag` |
 
 `set_categories` replaces the full list (A6). The caller reads the message
@@ -225,15 +225,20 @@ of the server bytes cannot show a change, and an etag alone is not proof
    stored bytes. The answer 202 has no message ID, so the row stays in
    `writing`.
 4. The completion finds the sent copy: `sent_by_message_id(id)` lists
-   `sentitems` with `$filter=internetMessageId eq '<id>'` (A15), and
+   the messages of the whole mailbox (`/me/messages`, each folder) with
+   `$filter=internetMessageId eq '<id>'` (A15), and follows each page, so
+   a rule or a client that moved the copy does not hide it. It
    reads the `$value` of the copy. It runs the content check of the send
    spec section 6 (the fields of the content hash, the headers that
    change who gets the message), and sets the ledger row `applied` or
    writes the error "Outlook sent other content than the approved
    content". If no copy is there yet, the row stays in `writing`, and
    each later recovery turn searches again. Recovery never calls
-   `send_mime` again. After 24 hours with no copy, the row fails with
-   the unknown result kept, as for Gmail (issue #280).
+   `send_mime` again. If the search itself fails (an error or a refused
+   filter), the result stays unknown: Iris never reads a failed search as
+   "no copy". After 24 hours with no copy, the row fails with the result
+   "unknown" kept and the claim kept, as for Gmail (issue #280): Iris
+   does not say that the mail did not leave.
 
 Iris does not delete the server draft after the send, because spec 2
 says that Iris never deletes a draft, and a delete is a mailbox write
@@ -469,9 +474,11 @@ Each assumption has the evidence of a Microsoft Learn page, read on
   of the collection is `pending` (standard OData, not stated). Iris checks
   each answer: the 200 answer of the PATCH has the `categories` of the
   message, and the write is applied only if that list equals the
-  requested list (as a set). Else the result is a definite failure with
-  the reason "Outlook kept other categories", and Iris turns off category
-  writes for the account (label and unlabel give a definite refusal)
+  requested list (as a set). Else Graph changed something, but not the
+  request: the result is unknown, as an unknown result of section 5 (no
+  second call). The mirror takes the list of the answer, the ledger keeps
+  the row with the note "Outlook kept other categories", Iris tells the
+  person, and Iris turns off category writes for the account (label and unlabel give a definite refusal)
   until a new release. The release gate tests an `unlabel`.
 - A7. Well-known folder names work in each language of the mailbox.
   Evidence: <https://learn.microsoft.com/en-us/graph/api/resources/mailfolder>.
@@ -495,14 +502,14 @@ Each assumption has the evidence of a Microsoft Learn page, read on
   accounts (label and unlabel give a definite refusal), and the rest works.
   A draft edit that keeps its etag is still caught: the release also
   compares the content hash of the read back (section 5, step 2).
-- A15. A list of a folder with `$filter=internetMessageId eq '<id>'`
-  finds the sent copy, and the `$value` of the copy keeps the fields of
-  the content hash. Evidence: `pending`; the release gate tests it. If the
-  filter fails, the completion lists the newest page of `sentitems` and
-  compares `internetMessageId`. If the content changes at Graph (for
-  example a converted body), the completion writes the content error and
-  each later release stops, as the send spec requires: no wrong send is
-  marked good.
+- A15. A list of `/me/messages` with `$filter=internetMessageId eq '<id>'`
+  finds the sent copy in each folder, and the `$value` of the copy keeps
+  the fields of the content hash. Evidence: `pending`; the release gate
+  tests it. If Graph refuses the filter, each search fails, and each
+  Outlook send stays unknown until a new release: the outbox tells the
+  person, and no wrong result is marked good. If the content changes at
+  Graph (for example a converted body), the completion writes the content
+  error and each later release stops, as the send spec requires.
 - A16. A provenance field that proves owner authorship of a message in
   Sent Items (for example the MAPI property `PidTagMessageFlags`), and the
   authserv-id that Exchange Online writes in `Authentication-Results`,
