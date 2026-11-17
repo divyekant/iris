@@ -17,6 +17,10 @@ use crate::{Auth, Entry, Folder, Search, Session, Special};
 /// understanding skips it as it skips `DRAFT`.
 pub const UNSENT: &str = "UNSENT";
 
+/// The label of a message in a `\Sent` folder (spec section 4): not proof
+/// of authorship. The understanding skips it as it skips `DRAFT`.
+pub const SENT_COPY: &str = "SENT_COPY";
+
 /// The messages of one page of [`Provider::messages`], and of one page of
 /// [`Provider::changes`] for a new folder.
 const WINDOW: u32 = 2000;
@@ -87,6 +91,16 @@ fn read_error(e: crate::Error) -> Error {
     }
 }
 
+/// The error of a read in `changes`: an answer above the response limit
+/// (a long `VANISHED` list) starts a full resync, which reads in bounded
+/// windows (spec section 1).
+fn change_error(e: crate::Error) -> Error {
+    match e {
+        crate::Error::TooLarge => Error::HistoryExpired,
+        e => read_error(e),
+    }
+}
+
 fn api(reason: &str, message: &str) -> Error {
     Error::Api {
         status: 400,
@@ -138,9 +152,9 @@ fn folder_label(f: &Folder) -> (String, String, &'static str) {
     match f.special {
         Some(Special::Junk) => fixed("SPAM"),
         Some(Special::Trash) => fixed("TRASH"),
-        // `\Sent` and `\Drafts` too: no IMAP message gets SENT or DRAFT (spec section 4).
-        Some(_) => (format!("folder:{}", f.name), f.name.clone(), "system"),
-        None => (format!("folder:{}", f.name), f.name.clone(), "user"),
+        // `\Sent`, `\Drafts` and `\Archive` too: no IMAP message gets SENT
+        // or DRAFT, and an archived message has no system label (spec section 4).
+        _ => (format!("folder:{}", f.name), f.name.clone(), "user"),
     }
 }
 
@@ -156,6 +170,9 @@ fn labels_of(f: &Folder, flags: &[String]) -> Vec<String> {
     }
     if has("\\Draft") || f.special == Some(Special::Drafts) {
         out.push(UNSENT.into());
+    }
+    if f.special == Some(Special::Sent) {
+        out.push(SENT_COPY.into());
     }
     out.extend(
         flags
@@ -308,7 +325,7 @@ fn removals<S: Read + Write>(
                 out.extend(r.map(|uid| deleted(mark.validity, uid, &f.name)));
             }
         })
-        .map_err(read_error)?;
+        .map_err(change_error)?;
         return Ok((n <= u64::from(DELETES_MAX)).then_some(out));
     }
     // `CONDSTORE` only (spec section 5).
@@ -317,7 +334,7 @@ fn removals<S: Read + Write>(
     }
     let present: BTreeSet<u32> = if mark.next > old.next {
         s.search(None, Search::Uids(old.next, mark.next - 1))
-            .map_err(read_error)?
+            .map_err(change_error)?
             .into_iter()
             .filter(|u| (old.next..mark.next).contains(u))
             .collect()
@@ -374,7 +391,7 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
                 threads_unread: None,
             };
             let mut out: BTreeMap<String, Label> = BTreeMap::new();
-            for id in ["UNREAD", "STARRED", UNSENT] {
+            for id in ["UNREAD", "STARRED", UNSENT, SENT_COPY] {
                 out.insert(id.into(), label(id, id, "system"));
             }
             for f in mail_folders(s)? {
@@ -421,6 +438,7 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
             };
             let folder_match = |f: &Folder| match label {
                 None => true,
+                Some(SENT_COPY) => f.special == Some(Special::Sent),
                 Some(_) if search.is_some() => true,
                 Some(l) => folder_label(f).0 == l,
             };
@@ -513,7 +531,7 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
                 .iter()
                 .find(|f| f.name == name)
                 .ok_or(Error::HistoryExpired)?;
-            let now = s.examine(&f.name).map_err(read_error)?;
+            let now = s.examine(&f.name).map_err(change_error)?;
             let (mark, high) = match at {
                 At::Folder(_) => (mark_of(&now), now.exists),
                 // Removals since the token lower `EXISTS`.
@@ -546,7 +564,7 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
                     s.window(low, high, before.map(|b| b.modseq), |e| {
                         changes.push(Change::Added(history_message(f, mark.validity, &e)))
                     })
-                    .map_err(read_error)?;
+                    .map_err(change_error)?;
                 }
                 if low > 1 {
                     let at = At::Window {
@@ -713,6 +731,18 @@ mod tests {
         assert_eq!(h("\r\n"), "id");
         assert_eq!(thread_of(None, "id"), "id");
         assert_eq!(h("References: \r\n\r\n"), "id");
+    }
+
+    #[test]
+    fn changes_too_large() {
+        assert!(matches!(
+            change_error(crate::Error::TooLarge),
+            Error::HistoryExpired
+        ));
+        assert!(matches!(
+            read_error(crate::Error::TooLarge),
+            Error::Decode(_)
+        ));
     }
 
     #[test]

@@ -15,7 +15,7 @@
 
 mod provider;
 
-pub use provider::{Imap, UNSENT};
+pub use provider::{Imap, SENT_COPY, UNSENT};
 
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};

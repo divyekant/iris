@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use iris_fakeimap::{Caps, FakeImap, PASSWORD, USER};
-use iris_imap::{Imap, UNSENT};
+use iris_imap::{Imap, SENT_COPY, UNSENT};
 use iris_provider::{Error, Provider};
 use iris_store::Store;
 use iris_sync::{first_sync, sync, verify};
@@ -365,10 +365,19 @@ fn labels_of_special_folders_and_flags() {
     };
     let labels = |id: String| mail.minimal(PASSWORD, &id).unwrap().label_ids;
     // No IMAP message gets SENT (spec section 4).
+    // SENT_COPY keeps it out of the understanding of received mail.
     assert_eq!(
         labels(format!("{}:{sent}:Sent", validity("Sent"))),
-        vec!["folder:Sent"]
+        vec!["folder:Sent", SENT_COPY]
     );
+    let copies = mail.messages(PASSWORD, Some(SENT_COPY), None).unwrap();
+    assert_eq!(copies.messages.len(), 1);
+    // Each folder label is a user label, so no folder is a system label.
+    for l in mail.labels(PASSWORD).unwrap() {
+        if l.id.starts_with("folder:") {
+            assert_eq!(l.kind, "user", "{l:?}");
+        }
+    }
     // Nor DRAFT: a folder or a flag is not proof that the owner wrote it.
     // UNSENT keeps the draft out of the understanding.
     assert_eq!(
