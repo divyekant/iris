@@ -120,7 +120,8 @@ parent changes in the mirror.
 A page gives a list of changes and one of two links:
 
 - `More(nextLink)`: call it for the next page.
-- `Done(deltaLink)`: the end of this round. Store it for the next sync.
+- `Done(deltaLink)`: the end of this round. Keep it for the next sync
+  (see "Commit" below).
 
 A change is one of:
 
@@ -132,11 +133,21 @@ A change is one of:
   a move gives `Removed` in one folder and `Message` in another, with the
   same immutable ID. The rounds of two folders are not one snapshot: if
   the round of the new folder ran before the move, only the `Removed` of
-  the old folder shows the move. Thus, after the round of each folder,
-  the caller reads each removed message that no round gave as `Message`
-  with `message(id)` (`GET /me/messages/{id}?$select=...`): HTTP 404 means
-  gone, and a message means a move, with its new folder. The message
-  stays in the mirror until this read gives 404.
+  the old folder shows the move, and a message can move again after a
+  round gave it as `Message`. Thus, after the round of each folder, the
+  caller reads each removed message by ID with `message(id)`
+  (`GET /me/messages/{id}?$select=...`), also when a round gave it as
+  `Message`: HTTP 404 means gone, and a message gives its folder now. The
+  message stays in the mirror until this read gives 404.
+
+Commit: the new delta links of a sync become durable only in the same
+transaction as all the changes of the sync and the results of the reads
+by ID. Until that commit, the store keeps the old links. A crash before
+the commit loses nothing: the next sync starts from the old links, and
+Graph gives the changes again (A1). The changes and the reads of one
+sync are a set of IDs with their state; the sync keeps them on disk in
+the store, page by page, as `iris-sync` does for Gmail, so memory stays
+flat.
 
 A token that Graph does not accept any more gives HTTP 410, or another 4xx
 with a code such as `syncStateNotFound` (A1). The client gives
@@ -295,6 +306,11 @@ actions match label names (spec 2). The names:
   `Categories/<name>`. Each of these compares uses the Unicode case
   folding of the label lookup of spec 2, so `folders/x` also gets the
   prefix.
+- If two or more category names of the account are equal under that case
+  folding (for example `Travel` and `travel`), each of them gets the
+  label `Categories/<name> #<hex>`, where `<hex>` is the hex of the UTF-8
+  bytes of the exact name. Exact names differ, so the labels differ, and
+  a label action by such a name writes the exact category.
 
 Thus no category name gives a folder label or a system label, and two
 sources never give one name. A label action (`label`, `unlabel`) on a
