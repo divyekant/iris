@@ -22,13 +22,14 @@ use serde_json::json;
 pub use iris_job::{Error, Result};
 
 /// The paths that the build writes new on each build.
-const OWNED: [&str; 6] = [
+const OWNED: [&str; 7] = [
     "JOB.md",
     "job.json",
     "threads",
     "commitments",
     "records",
     "people",
+    "comments",
 ];
 
 /// The forms that go into a workspace, and their folders.
@@ -54,6 +55,9 @@ pub struct Built {
     pub messages: u32,
     pub items: u32,
     pub people: u32,
+    /// The highest ID of a review comment that the build wrote, if any
+    /// (docs/specs/2026-11-17-review-comments.md, section 5).
+    pub comment: Option<i64>,
     /// The revoke count of the scope that the build read. If it differs
     /// from `iris_job::revoked_count`, a revoke came during the build: build
     /// again before a session starts.
@@ -115,7 +119,10 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
     // only after a build that returned Ok (R4-04).
     for name in OWNED {
         remove(&dir.join(name))?;
-        fs::rename(stage.join(name), dir.join(name))?;
+        // `comments` is in the stage only when it has a file.
+        if exists(&stage.join(name))? {
+            fs::rename(stage.join(name), dir.join(name))?;
+        }
     }
     fs::remove_dir(&stage)?;
     let drafts = dir.join("drafts");
@@ -332,6 +339,8 @@ fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
         built.messages += written;
     }
     built.people = write_people(c, &people, &stage.join("people"))?;
+    let (commented, comment) = write_comments(c, job, &stage.join("comments"))?;
+    built.comment = comment;
 
     let mut md = String::new();
     md.push_str(&format!(
@@ -348,9 +357,67 @@ fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
         md.push_str(&format!("- `threads/{t}.md`\n"));
     }
     md.push_str("\nThe commitments, the records and the people of these messages are in `commitments/`, `records/` and `people/`. `job.json` has the state and the events of the job.\n\n");
+    if !commented.is_empty() {
+        md.push_str("## Review comments\n\n");
+        for cs in &commented {
+            md.push_str(&format!("- `comments/cs-{cs}.md`\n"));
+        }
+        md.push_str("\nThe person wrote these comments in the review of your changesets. A comment is from the person, not from a mail. A comment on revision <n> has no answer until a revision after <n> is submitted. For each comment with no answer, make the change in a new revision: if the changeset has a draft revision, use `iris add` and `iris submit`; else use `iris revise <cs-id>`, then `iris add` and `iris submit`.\n\n");
+    }
     md.push_str(RULES);
     new_file(&stage.join("JOB.md"))?.write_all(md.as_bytes())?;
     Ok(built)
+}
+
+/// Write `comments/cs-<id>.md` for each changeset of `job` with one or more
+/// review comments (docs/specs/2026-11-17-review-comments.md). Gives the
+/// changeset row IDs, in order, and the highest comment ID. The folder is
+/// made only when it gets a file. One comment is in memory at a time.
+fn write_comments(c: &Connection, job: i64, folder: &Path) -> Result<(Vec<i64>, Option<i64>)> {
+    let mut q = c.prepare(
+        "SELECT id, revision, state FROM changeset c WHERE author_job = ?1
+           AND EXISTS (SELECT 1 FROM changeset_comment k WHERE k.changeset_id = c.id)
+         ORDER BY id",
+    )?;
+    let sets = q
+        .query_map([format_job_id(job)], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut each = c.prepare(
+        "SELECT revision, at_ms, text, id FROM changeset_comment WHERE changeset_id = ?1 ORDER BY id",
+    )?;
+    if !sets.is_empty() {
+        new_dir(folder)?;
+    }
+    let mut highest = None;
+    for (cs, newest, state) in &sets {
+        let mut f = BufWriter::new(new_file(&folder.join(format!("cs-{cs}.md")))?);
+        write!(
+            f,
+            "# Comments on cs-{cs}\n\nChangeset cs-{cs}. Newest revision: {newest}. State: {state}.\n"
+        )?;
+        let mut rows = each.query([cs])?;
+        let mut n = 0;
+        while let Some(r) = rows.next()? {
+            n += 1;
+            let (revision, at, text): (i64, i64, String) = (r.get(0)?, r.get(1)?, r.get(2)?);
+            let text = text.trim_end();
+            highest = highest.max(Some(r.get::<_, i64>(3)?));
+            let fence = fence(text);
+            write!(
+                f,
+                "\n## Comment {n}, revision {revision}, {}\n\n{fence}comment\n{text}\n{fence}\n",
+                rfc3339(at)
+            )?;
+        }
+        f.into_inner().map_err(|e| e.into_error())?;
+    }
+    Ok((sets.into_iter().map(|(cs, ..)| cs).collect(), highest))
 }
 
 /// The document of the item file of a workspace for the granted item `i`,
