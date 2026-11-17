@@ -99,6 +99,7 @@ and saves it in the store. The result:
 | `Notes::NotAFile` | A link, a folder, a FIFO, a socket or a device. | No change. |
 | `Notes::TooLarge` | A regular file of more than 64 KiB. | No change. |
 | `Notes::Done` | The job is done. | No copy (the trigger ignores the write). |
+| `Notes::Unreadable` | Another I/O error of the open or the read (for example, the agent removed the read permission). | No change. |
 
 The read:
 
@@ -109,7 +110,8 @@ The read:
 3. Read at most 65,537 bytes. More than 65,536 gives `TooLarge`.
 4. Save the bytes in one write transaction.
 
-An I/O error other than these cases and a store error are `Err`. Memory:
+`read_notes(dir)` does steps 1 to 3 with no store, for the reap. A store
+error is `Err`. Memory:
 one buffer of at most 64 KiB + 1.
 
 ### When Iris saves the notes
@@ -121,53 +123,31 @@ reads the file only while no process of the job can write it.
    session of the job runs (section 11 of spec 3). Before it makes the agent
    paths, the build calls `save_notes`. The result does not stop the build,
    but an `Err` does.
-2. **At each reap** (`Sessions::reap_one`, `crates/iris/src/sessions.rs`).
-   After the reap check passed, no process of the reaped session runs. The
-   reap check writes `reaped_at` before the reap thread takes the state
-   lock, so a new session of the job can start in that gap. So, under the
-   state lock, the reap thread checks two things and sets one mark, in one
-   step:
+2. **At each reap**, in the reap write (`iris_session::reap::reap_check`).
+   The reap check confirms rules 1 to 3: the helper ended, the group of
+   the agent is empty, and the isolation holds no process of the session.
+   Then no process of the job runs, and the session is still live in the
+   store (`reaped_at` is NULL), so `Sessions::run` refuses a new session of
+   the job. The reap check reads `notes.md` now (`iris_workspace::read_notes`),
+   and writes the copy and `reaped_at` in **one write transaction**
+   (`iris_job::reap_with_notes`). So:
 
-   1. No launch of the job has the `launching` mark.
-   2. The job has no live session (`reaped_at` is NULL) other than the
-      reaped one. The reaped one is not live, so the check is: no live
-      session of the job.
+   - No new session can write the file during the read: the job has a live
+     session until the transaction commits.
+   - No backup and no crash can see a reaped session without the save of
+     its notes: the backup reads a committed state (`VACUUM INTO`), and a
+     crash keeps the old state or the new state.
 
-   If both are true, it marks the job as `launching`. `Sessions::run` sets
-   the same mark under the same lock, and refuses a job with the mark, so
-   no new session starts until the mark ends. Then the reap thread calls
-   `save_notes` without the state lock, and ends the mark (`launch_over`).
-
-   `Sessions::wake` skips a job with the mark. But the mark can come after
-   the check of `wake` and before its start. `wake` records each
-   (job, last session) pair that it tries, and tries a pair once. So the
-   start of `wake` tells a busy refusal (the mark, or a live session) from
-   a failure. On a busy refusal, `wake` removes the pair from its record,
-   and its next call (1 second later) tries again. A failure keeps the pair,
-   as now (R5-04: a failed start waits for the next engine start).
-
-   If a check fails, a newer session or its launch can write `notes.md`.
-   The reap thread does not save. The build of that launch saved the notes
-   before its agent started, and the reap of that session saves them at its
-   end.
-
-   A `TooLarge` or `NotAFile` result, or an error, writes one line in the
-   engine log with the job ID. The reap does not fail.
-
-3. **At each engine start** (`Sessions::new`). The reap check writes
-   `reaped_at` before the reap save. A crash of the engine between the two
-   leaves a reaped session with no save. So, at the start, before the
-   supervisor runs and before `Sessions::new` returns (no `run` and no
-   `wake` can start a session yet), the engine saves the notes of each open
-   job (working, waiting, needs you) that has no live session. A job with a
-   live session (an open session of the last engine) gets its save at the
-   reap of that session. A failed save writes one line in the engine log,
-   and the start goes on. Cost: one read of at most 64 KiB and one write
-   for each open job.
+   A `TooLarge`, `NotAFile` or `Unreadable` result reaps with no save, and
+   the engine writes one line in its log with the job ID. The reap does not
+   fail on the notes, so an agent cannot keep its session live with a bad
+   `notes.md`. A store error fails the reap write, as now, and the next
+   turn tries the reap again.
 
 The save at the reap keeps the copy current while a job waits. So a backup
-taken during a wait of 3 days holds the notes of the last session. After a
-crash of the engine, the copy is current again at the next engine start.
+taken during a wait of 3 days holds the notes of the last session. A backup
+taken while a session runs holds the copy of the earlier save: the store
+saves the notes only while no process of the job runs.
 
 ### Restore the notes
 
@@ -250,12 +230,12 @@ stays as it is, and the session starts.
 | No `notes.md`, and a copy in the store. | The build writes the copy, byte for byte. | Unit test. |
 | No `notes.md`, and no copy. | The build writes `# Notes`. | Existing test. |
 | The job moves to `done` by any path, with or without its folder. | The copy is deleted in the same transaction. A later save writes nothing, and a build writes `# Notes`. | Unit test: finish by the agent, finish and cancel by the person. |
-| The engine crashes after `reaped_at` and before the reap save. | The next engine start saves the notes of the job. | Unit test of the start save. |
+| The engine crashes during the reap write. | The transaction keeps the session live with the old copy, or reaped with the new copy. The next engine start reaps the session again. | SQLite; the existing restart test of R4-04. |
+| A backup runs during a reap. | The backup holds the state before or after the reap transaction, never a reaped session without its save. | Review: one transaction. |
+| `notes.md` has no read permission. | `Unreadable`. The reap and the build go on. The copy stays. | Unit test. |
 | The workspace folder is gone, and the job wakes. | The launch build makes the folder and restores the notes. | Engine test with the fake clock. |
 | The agent changes the file after the reap and before the build. | Not possible: no process of the job runs between a reap and the next launch. | The reap check (R4-04). |
-| A launch of the job runs, or a newer session of the job is live, at the reap. | The reap thread does not save. The build of that launch and the reap of that session save. | Review: the check and the mark are one step under the state lock, which `run` also takes for its mark. |
-| A launch starts while the reap thread saves. | `run` refuses it (the job has the mark). | Review, as above. |
-| `wake` checks the job, then the reap sets the mark, then `wake` starts the job. | The start is refused as busy. `wake` keeps no record of the try, and its next call starts the session. | Review of the order; the engine test of R5-04 shows that the next call starts one session. |
+| A new session of the job starts during the reap read. | Not possible: the reaped session is live until the reap transaction commits, and `run` refuses a job with a live session. | Engine test: run during a reap is refused (existing R4-04 rule). |
 | A crash during the save. | The transaction gives the old copy or the new copy. | SQLite. |
 | A store error at the build save. | The build stops with an error. No session starts. | Unit test with a read-only store, if the build can make one; else review. |
 
@@ -265,7 +245,8 @@ stays as it is, and the session starts.
 - `crates/iris-job`: `NOTES_MAX`, `notes`, `save_notes`.
 - `crates/iris-workspace`: `save_notes`, the restore in `build`, the rule
   line. New dependency: `libc` (already in `Cargo.lock`).
-- `crates/iris/src/sessions.rs`: the save in `reap_one` and in `Sessions::new`, and the busy refusal of `wake`.
+- `crates/iris-session/src/reap.rs`: the read of the notes and the reap write with the notes.
+- `crates/iris/src/sessions.rs`: one log line for a reap with no save.
 - `docs/spec/03-job-workspace.md`: sections 3, 9 and the sample.
 - Memory: one buffer of at most 64 KiB + 1 during a save. Disk: at most
   64 KiB in `iris.db` for each job.
@@ -279,10 +260,10 @@ stays as it is, and the session starts.
   `iris_session::launch` (the launch builds before the helper starts).
 - After the reap check, no process of the session runs:
   `iris_session::reap::reap_check` (rules 1 to 3).
-- `Sessions::run` sets the `launching` mark under the state lock and refuses
-  a job that has it; `Sessions::wake` skips it: `crates/iris/src/sessions.rs`.
-- The reap check writes `reaped_at` before the reap thread takes the state
-  lock: `Sessions::reap_one`.
+- `Sessions::run` refuses a job with a live session (`reaped_at` is NULL):
+  `crates/iris/src/sessions.rs`, `live_of`.
+- The backup copies a committed state of `iris.db` (`VACUUM INTO`):
+  `crates/iris-store/src/backup.rs`.
 - `O_NOFOLLOW` and `O_NONBLOCK` exist on macOS and Linux: POSIX.1-2008.
 
 ## External writes
@@ -338,11 +319,10 @@ See the failure list and the acceptance criteria.
 ## Spec checks
 
 - [x] Each assumption holds with a second caller: two builds of one workspace
-  take the build lock; a reap save and a launch of one job exclude each other
-  by the `launching` mark, and the reap save also skips when a newer session
-  of the job is live.
-- [x] Each assumption holds when an outcome is unknown: a crash during a save
-  keeps the old or the new copy; the next reap or build saves again.
+  take the build lock; a reap read and a launch of one job exclude each other,
+  because the session is live until the reap transaction commits.
+- [x] Each assumption holds when an outcome is unknown: the save and the reap
+  are one transaction, so a crash or a backup sees both or neither.
 - [x] Each dropped mechanism was dropped for a reason (Options not chosen).
 - [x] No "idempotent" step is check-then-act: the save is one upsert.
 - [x] Each property has a test (failure list).
