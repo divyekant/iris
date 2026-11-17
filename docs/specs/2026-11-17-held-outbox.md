@@ -68,7 +68,7 @@ for `decided_at + HOLD_MS`. It changes to the later of the two times, so a
 send that waited while the switch was off gets a full hold after the switch
 goes on.
 
-### 2. Migration 21
+### 2. Migration 22
 
 - Trigger `action_state` (spec R3-01, section 5.1):
   - accepts `approved>held`, `held>applied`, `held>failed`, `held>denied`
@@ -191,7 +191,7 @@ Supported input: actions of the store that passed submit.
 
 ## Impact
 
-- `crates/iris-store`: migration 21.
+- `crates/iris-store`: migration 22.
 - `crates/iris-changeset`: `cancel`.
 - `crates/iris-apply`: the gate and the claim accept `held`; the switch; the
   hold start.
@@ -241,7 +241,7 @@ scripts/local-ci/run.sh
 
 ## Rollout
 
-Migration 21 adds the switch in the off state. Nothing is sent until the
+Migration 22 adds the switch in the off state. Nothing is sent until the
 owner turns it on after the Mac check of issue #302.
 
 ## Risks
@@ -251,14 +251,14 @@ owner turns it on after the Mac check of issue #302.
 - The engine now applies approved mailbox actions with no command. The
   policy mode `observe` still stops each one.
 - Rollback: run `iris sending off` first, so no send leaves. A program
-  without migration 21 refuses the database (`UnknownSchema`), so a revert
+  without migration 22 refuses the database (`UnknownSchema`), so a revert
   of the code is not a rollback. Fix forward with a new PR. A restore of
   the backup from before the migration loses each change after it.
 
 ## Plan
 
 1. R3-02 part 1: this spec.
-2. R3-02 part 2: migration 21, `cancel`, the gate, the switch and the
+2. R3-02 part 2: migration 22, `cancel`, the gate, the switch and the
    commands.
 3. R3-02 part 3: the apply step of the engine.
 4. R3-02 part 4: the API and the outbox view, with the layout pick.

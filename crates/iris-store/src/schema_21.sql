@@ -1,122 +1,119 @@
--- Migration 21: the held outbox, the cancel and the send switch (card
--- R3-02, docs/specs/2026-11-17-held-outbox.md).
+-- Migration 21: the sessions of a job (card R4-04b,
+-- docs/specs/2026-11-17-session-launcher.md).
 --
--- A send moves from `approved` to `held`, and leaves `held` by the release
--- (`applied`, `failed`, `denied` by `engine`), by the cancel of a person
--- (`denied` by `person`, reason "Cancelled in the outbox."), by a withdraw
--- (`cancelled`) or by the expiry. A claimed send (a ledger row in
--- `writing`) ends only as its row ends.
+-- One row for each session of an agent on a job. A session has two ends:
+-- `ended_at` is the end of the grant (the session socket answers nothing
+-- after it), and `reaped_at` is the end of the processes (the reap check of
+-- the engine passed). An open session has `ended_at IS NULL`. A live session
+-- has `reaped_at IS NULL`. A row is never deleted.
 
-DROP TRIGGER changeset_withdraw;
-
-CREATE TRIGGER changeset_withdraw AFTER UPDATE OF state ON changeset
-WHEN new.state = 'withdrawn' AND old.state <> 'withdrawn'
-BEGIN
-  UPDATE changeset_action SET state = 'cancelled', decided_by = 'author', rule = NULL,
-    policy = NULL, reason = NULL, decided_at = CAST(unixepoch('subsec') * 1000 AS INTEGER)
-  WHERE changeset_id = new.id
-    AND (state IS NULL OR state IN ('proposed', 'in_review')
-         OR (state IN ('approved', 'held')
-             AND NOT EXISTS (SELECT 1 FROM ledger l
-                             WHERE l.action_id = changeset_action.id AND l.state = 'writing')));
-END;
-
-DROP TRIGGER action_state;
-
-CREATE TRIGGER action_state BEFORE UPDATE OF state ON changeset_action
-WHEN coalesce(old.state, '') || '>' || coalesce(new.state, '') NOT IN (
-    '>proposed', '>cancelled',
-    'proposed>approved', 'proposed>in_review', 'proposed>denied', 'proposed>expired',
-    'proposed>cancelled', 'proposed>replaced',
-    'in_review>approved', 'in_review>denied', 'in_review>expired', 'in_review>cancelled',
-    'in_review>replaced',
-    'approved>in_review', 'approved>denied', 'approved>expired', 'approved>cancelled',
-    'approved>applied', 'approved>failed', 'applied>undone', 'failed>undone',
-    -- The held outbox (docs/specs/2026-11-17-held-outbox.md, section 1).
-    'approved>held', 'held>applied', 'held>failed', 'held>denied', 'held>expired',
-    'held>cancelled')
-  -- Only a send waits in the held outbox.
-  OR (new.state = 'held' AND new.verb <> 'send')
-  -- A held send keeps the decision that approved it.
-  OR (old.state = 'approved' AND new.state = 'held'
-      AND (new.decided_by IS NOT old.decided_by OR new.rule IS NOT old.rule
-           OR new.policy IS NOT old.policy OR new.reason IS NOT old.reason
-           OR new.decided_at IS NOT old.decided_at))
-  -- A held send is denied by the release (engine) or by the cancel of a
-  -- person (the reason says so).
-  OR (old.state = 'held' AND new.state = 'denied'
-      AND new.decided_by NOT IN ('engine', 'person'))
-  OR (new.state = 'denied' AND new.decided_by = 'person' AND new.verb = 'send'
-      AND old.state IN ('approved', 'held') AND new.reason IS NOT 'Cancelled in the outbox.')
-  -- An applied, failed or undone action has its ledger entry in the same
-  -- state (section 7.1). The trigger ledger_state writes this move.
-  OR (new.state IN ('applied', 'failed', 'undone')
-      AND NOT EXISTS (SELECT 1 FROM ledger WHERE action_id = new.id AND state = new.state))
-  -- An applied, failed or undone action keeps the decision that approved
-  -- it (section 5.1): the apply is not a decision.
-  OR (new.state IN ('applied', 'failed', 'undone')
-      AND (new.decided_by IS NOT old.decided_by OR new.rule IS NOT old.rule
-           OR new.policy IS NOT old.policy OR new.reason IS NOT old.reason
-           OR new.decided_at IS NOT old.decided_at))
-  -- An action in review waits for a person (section 5.2).
-  OR (old.state = 'in_review' AND new.state IN ('approved', 'denied')
-      AND new.decided_by IS NOT 'person')
-  -- An action whose provider calls started ends as applied or failed.
-  OR (old.state IN ('approved', 'held') AND new.state NOT IN ('applied', 'failed')
-      AND EXISTS (SELECT 1 FROM ledger WHERE action_id = old.id AND state = 'writing'))
-  -- A withdrawn changeset applies nothing more (section 5.5). An action
-  -- with a ledger row ends as its row ends.
-  OR (new.state IN ('in_review', 'approved', 'held')
-      AND (SELECT state FROM changeset WHERE id = new.changeset_id) = 'withdrawn')
-  OR (old.state IS NULL AND new.state <> 'cancelled'
-      AND (new.hash IS NULL OR new.submitted_at IS NULL
-           OR NOT EXISTS (SELECT 1 FROM changeset WHERE id = new.changeset_id
-                          AND revision = new.revision
-                          AND submitted_at IS new.submitted_at)))
-  -- No approval while a new revision is a draft (section 5.5): its submit
-  -- replaces the older actions with no decision.
-  OR (new.state = 'approved'
-      AND (SELECT submitted_at FROM changeset WHERE id = new.changeset_id) IS NULL)
-  -- An action is cancelled only with a withdraw of its changeset.
-  OR (new.state = 'cancelled'
-      AND (SELECT state FROM changeset WHERE id = new.changeset_id) <> 'withdrawn')
-  -- Replaced only in the submit of a newer revision (trigger
-  -- changeset_submit). An older action that comes back to review after the
-  -- submit stays for the person (section 5.5).
-  OR (new.state = 'replaced'
-      AND NOT EXISTS (SELECT 1 FROM changeset WHERE id = new.changeset_id
-                      AND replacing = revision AND revision > new.revision
-                      AND submitted_at IS new.decided_at))
-  -- Expired only 14 days after its submit (section 5.5), and not at a time
-  -- after the clock of the database.
-  OR (new.state = 'expired'
-      AND (new.decided_at IS NULL OR new.decided_at - old.submitted_at < 1209600000
-           OR new.decided_at > unixepoch('subsec') * 1000))
-  -- A rule decision names a rule ID of the active policy (section 6.3).
-  OR (new.decided_by IS 'rule' AND new.state IN ('in_review', 'approved', 'denied')
-      AND (new.policy IS NOT (SELECT max(version) FROM policy_version)
-           OR NOT EXISTS (SELECT 1 FROM policy_rule_id
-                          WHERE id = new.rule AND removed_at IS NULL)))
-BEGIN
-  SELECT RAISE(ABORT, 'iris: this state change of an action is not allowed');
-END;
-
-DROP TRIGGER ledger_insert;
-
-CREATE TRIGGER ledger_insert BEFORE INSERT ON ledger
-WHEN new.state <> 'writing' OR new.call <> 0 OR new.error IS NOT NULL
-  OR new.history_id IS NOT NULL OR new.undone_by IS NOT NULL
-  OR NOT EXISTS (SELECT 1 FROM changeset_action WHERE id = new.action_id
-                 AND (state = 'approved' OR (state = 'held' AND verb = 'send')))
-BEGIN
-  SELECT RAISE(ABORT, 'iris: a new ledger entry claims an approved action or a held send');
-END;
-
--- The send switch: one row. `on_at` is NULL while sending is off. Only the
--- owner turns it on (`iris sending on`).
-CREATE TABLE send_switch (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  on_at INTEGER CHECK (on_at IS NULL OR (typeof(on_at) = 'integer' AND on_at >= 0)),
-  changed_at INTEGER NOT NULL CHECK (typeof(changed_at) = 'integer' AND changed_at >= 0)
+CREATE TABLE job_session (
+  -- AUTOINCREMENT: a session ID is never used again. The ID se-<id> needs a
+  -- positive ID.
+  id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  job_id INTEGER NOT NULL REFERENCES job(id),
+  -- instr: length and GLOB stop at a NUL, so a NUL is refused first.
+  agent TEXT NOT NULL CHECK (typeof(agent) = 'text' AND instr(agent, char(0)) = 0
+    AND length(agent) BETWEEN 1 AND 64
+    AND agent NOT GLOB '*[^a-z0-9-]*'),
+  registered_at INTEGER NOT NULL CHECK (typeof(registered_at) = 'integer'
+    AND registered_at BETWEEN 0 AND 253402300799999),
+  -- A process ID of 0 or 1 is never valid here: kill(0) and kill(-1) signal
+  -- other processes than the session.
+  helper_pid INTEGER CHECK (helper_pid IS NULL OR (typeof(helper_pid) = 'integer'
+    AND helper_pid BETWEEN 2 AND 2147483647)),
+  agent_pgid INTEGER CHECK (agent_pgid IS NULL OR (typeof(agent_pgid) = 'integer'
+    AND agent_pgid BETWEEN 2 AND 2147483647)),
+  started_at INTEGER CHECK (started_at IS NULL OR (typeof(started_at) = 'integer'
+    AND started_at BETWEEN 0 AND 253402300799999)),
+  ended_at INTEGER CHECK (ended_at IS NULL OR (typeof(ended_at) = 'integer'
+    AND ended_at BETWEEN 0 AND 253402300799999)),
+  end_reason TEXT CHECK (end_reason IS NULL OR end_reason IN ('exit', 'stop', 'revoke',
+    'job_state', 'time_limit', 'engine', 'launch_failed', 'helper_failed')),
+  exit_code INTEGER CHECK (exit_code IS NULL OR (typeof(exit_code) = 'integer'
+    AND exit_code BETWEEN 0 AND 255)),
+  reaped_at INTEGER CHECK (reaped_at IS NULL OR (typeof(reaped_at) = 'integer'
+    AND reaped_at BETWEEN 0 AND 253402300799999)),
+  CHECK ((ended_at IS NULL) = (end_reason IS NULL)),
+  CHECK (exit_code IS NULL OR end_reason = 'exit'),
+  CHECK (reaped_at IS NULL OR ended_at IS NOT NULL),
+  CHECK (agent_pgid IS NULL OR helper_pid IS NOT NULL)
 );
-INSERT INTO send_switch(id, on_at, changed_at) VALUES (1, NULL, 0);
+
+-- One live session for each job. A second register fails until the
+-- processes of the first session stopped.
+CREATE UNIQUE INDEX job_session_live ON job_session(job_id) WHERE reaped_at IS NULL;
+
+-- A BEFORE trigger runs before INSERT OR REPLACE deletes a row, so the ID
+-- check stops a replace. An insert is a register: a job in `working` with
+-- no live session, and NULL in each column that a move sets.
+CREATE TRIGGER job_session_insert BEFORE INSERT ON job_session
+WHEN EXISTS (SELECT 1 FROM job_session WHERE id = new.id)
+  OR NOT EXISTS (SELECT 1 FROM job WHERE id = new.job_id AND state = 'working')
+  OR EXISTS (SELECT 1 FROM job_session WHERE job_id = new.job_id AND reaped_at IS NULL)
+  OR new.helper_pid IS NOT NULL OR new.agent_pgid IS NOT NULL
+  OR new.started_at IS NOT NULL OR new.ended_at IS NOT NULL OR new.end_reason IS NOT NULL
+  OR new.exit_code IS NOT NULL OR new.reaped_at IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'job: a session starts for a job in working with no live session, with no move done');
+END;
+
+-- An update does one of five moves, and nothing else:
+--   helper: helper_pid set once, while the session is live;
+--   spawn:  agent_pgid set once, after the helper, while the session is live;
+--   start:  started_at set once, while the session is open;
+--   end:    ended_at and end_reason (and exit_code) set once;
+--   reap:   reaped_at set once, after the end.
+CREATE TRIGGER job_session_update BEFORE UPDATE ON job_session
+WHEN NOT (
+  new.id IS old.id AND new.job_id IS old.job_id AND new.agent IS old.agent
+  AND new.registered_at IS old.registered_at
+  AND (
+    (old.helper_pid IS NULL AND new.helper_pid IS NOT NULL AND old.reaped_at IS NULL
+      AND new.agent_pgid IS old.agent_pgid AND new.started_at IS old.started_at
+      AND new.ended_at IS old.ended_at AND new.end_reason IS old.end_reason
+      AND new.exit_code IS old.exit_code AND new.reaped_at IS old.reaped_at)
+    OR (old.agent_pgid IS NULL AND new.agent_pgid IS NOT NULL AND old.helper_pid IS NOT NULL
+      AND old.reaped_at IS NULL
+      AND new.helper_pid IS old.helper_pid AND new.started_at IS old.started_at
+      AND new.ended_at IS old.ended_at AND new.end_reason IS old.end_reason
+      AND new.exit_code IS old.exit_code AND new.reaped_at IS old.reaped_at)
+    OR (old.started_at IS NULL AND new.started_at IS NOT NULL AND old.ended_at IS NULL
+      AND new.helper_pid IS old.helper_pid AND new.agent_pgid IS old.agent_pgid
+      AND new.ended_at IS old.ended_at AND new.end_reason IS old.end_reason
+      AND new.exit_code IS old.exit_code AND new.reaped_at IS old.reaped_at)
+    OR (old.ended_at IS NULL AND new.ended_at IS NOT NULL
+      AND new.helper_pid IS old.helper_pid AND new.agent_pgid IS old.agent_pgid
+      AND new.started_at IS old.started_at AND new.reaped_at IS old.reaped_at)
+    OR (old.reaped_at IS NULL AND new.reaped_at IS NOT NULL AND old.ended_at IS NOT NULL
+      AND new.helper_pid IS old.helper_pid AND new.agent_pgid IS old.agent_pgid
+      AND new.started_at IS old.started_at AND new.ended_at IS old.ended_at
+      AND new.end_reason IS old.end_reason AND new.exit_code IS old.exit_code)
+  )
+)
+BEGIN
+  SELECT RAISE(ABORT, 'job: a session changes only by one of its five moves');
+END;
+
+CREATE TRIGGER job_session_delete BEFORE DELETE ON job_session
+BEGIN
+  SELECT RAISE(ABORT, 'job: a session row is never deleted');
+END;
+
+-- A revoke of a scope row ends each open session of its job, in the same
+-- transaction, so the grant of a running agent ends with the revoke.
+CREATE TRIGGER job_session_revoke AFTER UPDATE OF revoked_at ON job_scope
+WHEN old.revoked_at IS NULL AND new.revoked_at IS NOT NULL
+BEGIN
+  UPDATE job_session SET ended_at = new.revoked_at, end_reason = 'revoke'
+  WHERE job_id = new.job_id AND ended_at IS NULL;
+END;
+
+-- A move of the job out of `working` ends each open session of the job, at
+-- the time of the move.
+CREATE TRIGGER job_session_job_state AFTER UPDATE OF state ON job
+WHEN new.state <> 'working'
+BEGIN
+  UPDATE job_session SET ended_at = new.updated_at, end_reason = 'job_state'
+  WHERE job_id = new.id AND ended_at IS NULL;
+END;

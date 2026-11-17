@@ -7,7 +7,7 @@ use rusqlite::params;
 use crate::{expire_in, write, Result};
 
 /// The reason of a cancel. The store accepts a send `denied` by `person`
-/// only with this reason (migration 21).
+/// only with this reason (migration 22).
 pub const CANCELLED: &str = "Cancelled in the outbox.";
 
 /// Move each `approved` send of `account` to `held`, in one transaction.
