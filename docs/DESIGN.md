@@ -48,6 +48,8 @@ background.
 - Base unit 4px. Use multiples only: 0, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128.
 - Radii: none 0, sm 4, md 8, lg 12, full 9999.
 - Transitions: fast 120ms ease, normal 200ms ease.
+- Touch target: `--size-touch`, 44px. On a phone (600px wide or less) or a touch screen, each button, summary, select and text input is at least 44px high and wide. A link that stands alone (not in a sentence) has the class `touch`, which gives it the same size. A link in a sentence keeps its text size (WCAG 2.5.8).
+- Phone width: from 360px, no view scrolls sideways. `client/test/phone.test.mjs` checks the brief, the review, an item and a mail at 360, 390 and 768px.
 
 ## Parts
 
@@ -55,8 +57,9 @@ Add each shared part here when it is built. The parts are in `client/src/views/`
 
 | Part | File | Use |
 |---|---|---|
-| Header | `App.svelte` | The Iris mark (a `primary` ring around a dot, like an iris), and one link for each view. The active link has a `primary` line under it. On a phone the links scroll in one row. |
-| Opening | `Brief.svelte` | The greeting and the date in muted text, then one sentence in `font-size-4` that says what needs you. |
+| Header | `App.svelte` | The Iris mark (a `primary` ring around a dot, like an iris), and one link for each view. The active link has a `primary` line under it. On a phone the header has the mark only, and it scrolls away with the page. |
+| Tabs | `App.svelte` | Phone only (card R6-05). A bar at the bottom of the screen with the first four views of `NAV` and "More". Each tab is a 24px line icon over a `font-size--2` label; the active tab is `primary`. "More" is a native popover above the bar with the other views, one 44px row each. It closes when a view opens. The bar keeps clear of the home indicator (`safe-area-inset-bottom`). |
+| Opening | `Brief.svelte` | The greeting and the date in muted text, then one sentence in `font-size-4` (`font-size-2` on a phone) that says what needs you. |
 | Line | `Line.svelte` | The round mark with the initials of the other party, the title, and one muted line of detail. The whole line opens the item. The envelope opens the source mail. An `unread` dot marks a conversation that waits for you. |
 | Bundle line | `Bundle.svelte` | One `bundle` rule on one line, in the section "Bundled by your rules" of the brief: a stack mark (a round mark with the count, and a second mark behind it), the rule name, and one muted line that names up to 3 senders. A chevron takes the place of the envelope. The whole line opens the list of the bundle. |
 | Handled count | `Brief.svelte` | The section "Handled without you" of the brief: the count, one muted sentence with the hidden items and the messages that a rule decided (an approved change can still wait to apply, so the brief does not say "changed"), and the link "See what and why". It does not show when the count is 0. |
