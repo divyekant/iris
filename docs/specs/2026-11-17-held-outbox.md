@@ -68,7 +68,7 @@ for `decided_at + HOLD_MS`. It changes to the later of the two times, so a
 send that waited while the switch was off gets a full hold after the switch
 goes on.
 
-### 2. Migration 20
+### 2. Migration 21
 
 - Trigger `action_state` (spec R3-01, section 5.1):
   - accepts `approved>held`, `held>applied`, `held>failed`, `held>denied`
@@ -91,16 +91,19 @@ goes on.
 
 - `iris sending on` sets `on_at` to the time now. `iris sending off` sets
   it to `NULL`. `iris sending` shows the state. The commands run on the
-  owner's machine only (the local socket of the program, as each command).
+  owner's machine only. They open the store directly, not through the
+  socket, so no socket time limit applies to them.
+- `iris sending on` needs a terminal and the typed word `yes`. A script or
+  an agent without a terminal cannot turn sending on.
 - The release reads the switch in the claim transaction. If the switch is
-  off, the release makes no call and gives `Outcome::Hold`, and the send
+  off, the release makes no call and gives `Outcome::SendingOff`, and the send
   stays `held`. A switch that goes off during a hold stops the send.
 - The release holds the apply lock (`apply.lock`) from before its claim to
   the end of its `drafts.send` call. `iris sending off` takes the same lock
-  before it writes the switch, and tries for up to 20 seconds. The command
-  waits at most 30 seconds for an answer (`ANSWER_WAIT` in
-  `crates/iris/src/socket.rs`), so the engine always answers in time. So when the
-  command says "Sending is off.", no send call is in progress, and each
+  before it writes the switch, and tries for up to 20 seconds (`OFF_WAIT`).
+  This limit stays under the 30 seconds of `ANSWER_WAIT` in
+  `crates/iris/src/socket.rs`, so a later socket form of the command also
+  answers in time. So when the command says "Sending is off.", no send call is in progress, and each
   later claim reads the switch as off. If the lock stays busy, the command
   writes nothing and says "A send is in progress. Run the command again."
   `iris sending on` needs no lock: the next claim reads it.
@@ -135,14 +138,16 @@ lock) ends the step: the next turn tries again.
   or `held` to `denied` by `person` with the reason "Cancelled in the
   outbox.", in one transaction with `UPDATE ... WHERE id = ?1 AND verb =
   'send' AND state IN ('approved', 'held') AND NOT EXISTS (ledger row)`. It
-  gives `true` if the row changed.
+  gives `Cancel::Done` if the row changed, `Cancel::Started` if a ledger
+  row of the send exists, and `Cancel::NotOpen` for all other cases.
 - The release claims with `UPDATE ... WHERE state = 'held'` in its claim
   transaction. Both run on the one write connection of the store, so only
   one of the two commits. A cancel after the claim changes nothing and
   says "The send started. It cannot be cancelled."
-- The command `iris cancel <action>` and the API
-  `POST /api/actions/<id>/cancel` call it. Each is local only, as each
-  command and each API call.
+- The command `iris cancel <d-N>` takes the ID of a draft, finds the send
+  action of the draft and calls it. The API
+  `POST /api/actions/<id>/cancel` calls it with the action ID. Each is
+  local only, as each command and each API call.
 
 ### 6. The outbox view
 
@@ -186,7 +191,7 @@ Supported input: actions of the store that passed submit.
 
 ## Impact
 
-- `crates/iris-store`: migration 20.
+- `crates/iris-store`: migration 21.
 - `crates/iris-changeset`: `cancel`.
 - `crates/iris-apply`: the gate and the claim accept `held`; the switch; the
   hold start.
@@ -236,7 +241,7 @@ scripts/local-ci/run.sh
 
 ## Rollout
 
-Migration 20 adds the switch in the off state. Nothing is sent until the
+Migration 21 adds the switch in the off state. Nothing is sent until the
 owner turns it on after the Mac check of issue #302.
 
 ## Risks
@@ -246,14 +251,14 @@ owner turns it on after the Mac check of issue #302.
 - The engine now applies approved mailbox actions with no command. The
   policy mode `observe` still stops each one.
 - Rollback: run `iris sending off` first, so no send leaves. A program
-  without migration 20 refuses the database (`UnknownSchema`), so a revert
+  without migration 21 refuses the database (`UnknownSchema`), so a revert
   of the code is not a rollback. Fix forward with a new PR. A restore of
   the backup from before the migration loses each change after it.
 
 ## Plan
 
 1. R3-02 part 1: this spec.
-2. R3-02 part 2: migration 20, `cancel`, the gate, the switch and the
+2. R3-02 part 2: migration 21, `cancel`, the gate, the switch and the
    commands.
 3. R3-02 part 3: the apply step of the engine.
 4. R3-02 part 4: the API and the outbox view, with the layout pick.

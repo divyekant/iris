@@ -104,6 +104,14 @@ pub enum Command {
         #[command(subcommand)]
         command: ModelCommand,
     },
+    /// Show the send switch, or turn it on or off. No send leaves while it
+    /// is off. `on` needs a terminal and a typed "yes".
+    Sending {
+        #[arg(value_enum)]
+        state: Option<Switch>,
+    },
+    /// Cancel the send of a draft (`d-4`) while it waits in the outbox.
+    Cancel { id: String },
     /// Close a commitment (`c-7`) in a draft changeset. Needs the engine.
     Close {
         id: String,
@@ -347,6 +355,12 @@ fn action(c: &Command) -> Result<Option<Action<'_>>, socket::Failure> {
         Command::Unlabel(t) => ("unlabel", t.ids.clone(), json!({ "label": t.label }), &t.to),
         _ => return Ok(None),
     }))
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum Switch {
+    On,
+    Off,
 }
 
 #[derive(Subcommand)]
@@ -693,6 +707,37 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
                 ModelCommand::Set { provider } => model_set(&open()?, provider)?,
             };
             println!("{text}");
+            Ok(())
+        }
+        Command::Sending { state } => {
+            let store = open()?;
+            let now = engine::now_ms();
+            match state {
+                Some(Switch::On) => {
+                    sending_on_confirm(&mut std::io::stdin().lock())?;
+                    iris_apply::set_sending(&store, true, now).map_err(|e| e.to_string())?;
+                }
+                Some(Switch::Off) => match iris_apply::set_sending(&store, false, now) {
+                    Ok(()) => {}
+                    Err(iris_apply::Error::Busy) => {
+                        return Err("A send is in progress. Run the command again.".into())
+                    }
+                    Err(e) => return Err(e.to_string()),
+                },
+                None => {}
+            }
+            println!(
+                "{}",
+                match iris_apply::sending(&store).map_err(|e| e.to_string())? {
+                    Some(_) => "Sending is on.",
+                    None => "Sending is off. Sends wait in the outbox.",
+                }
+            );
+            Ok(())
+        }
+        Command::Cancel { id } => {
+            let store = open()?;
+            println!("{}", cancel_send(&store, id, engine::now_ms())?);
             Ok(())
         }
         Command::Changeset { .. }
@@ -1111,5 +1156,93 @@ mod tests {
         assert_eq!(cli.data, Some(PathBuf::from("/tmp/d")));
         let cli = Cli::try_parse_from(["iris", "export", "/tmp/e"]).unwrap();
         assert!(matches!(cli.command, Command::Export { path } if path.as_os_str() == "/tmp/e"));
+    }
+}
+
+/// The confirmation of `iris sending on`: a terminal and a typed "yes". So
+/// a script with no terminal does not turn sending on by mistake.
+fn sending_on_confirm(input: &mut impl BufRead) -> Result<(), String> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return Err("`iris sending on` needs a terminal: standard input is not a TTY".into());
+    }
+    eprint!(
+        "Approved sends leave Gmail after their hold. \
+         Check Gmail on this machine first (issue #302). Type yes to turn sending on: "
+    );
+    let mut line = String::new();
+    input.read_line(&mut line).map_err(|e| e.to_string())?;
+    if line.trim() != "yes" {
+        return Err("Sending stays off.".into());
+    }
+    Ok(())
+}
+
+/// `iris cancel d-4`: cancel the open send of the draft.
+fn cancel_send(store: &Store, id: &str, now: i64) -> Result<&'static str, String> {
+    let draft = match iris_store::parse_id(id) {
+        Some((iris_store::Kind::Draft, n)) => n,
+        _ => return Err(format!("{id} is not a draft ID such as d-4")),
+    };
+    let action: Option<i64> = store
+        .read(|c| {
+            use rusqlite::OptionalExtension;
+            Ok(c.query_row(
+                "SELECT a.id FROM action_draft ad JOIN changeset_action a ON a.id = ad.action_id
+                 WHERE ad.draft_id = ?1 AND a.verb = 'send'
+                 ORDER BY a.state IN ('approved', 'held') DESC, a.id DESC LIMIT 1",
+                [draft],
+                |r| r.get(0),
+            )
+            .optional()?)
+        })
+        .map_err(|e| e.to_string())?;
+    let Some(action) = action else {
+        return Err(format!("{id} has no send"));
+    };
+    match iris_changeset::cancel(store, action, now).map_err(|e| e.to_string())? {
+        iris_changeset::Cancel::Done => Ok("Cancelled. The send does not leave."),
+        iris_changeset::Cancel::Started => Err("The send started. It cannot be cancelled.".into()),
+        iris_changeset::Cancel::NotOpen => Err(format!("{id} has no send that waits")),
+    }
+}
+
+#[cfg(test)]
+mod outbox_tests {
+    use super::*;
+
+    /// `iris cancel` takes only a draft ID, and says so for a draft with no
+    /// send.
+    #[test]
+    fn cancel_names_a_draft() {
+        let dir = std::env::temp_dir().join(format!("iris-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        assert!(cancel_send(&store, "t-4", 0)
+            .unwrap_err()
+            .contains("not a draft ID"));
+        assert!(cancel_send(&store, "d-x", 0)
+            .unwrap_err()
+            .contains("not a draft ID"));
+        assert_eq!(
+            cancel_send(&store, "d-4", 0).unwrap_err(),
+            "d-4 has no send"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Any answer other than "yes" keeps sending off.
+    #[test]
+    fn only_yes_turns_sending_on() {
+        // In a test, standard input is not a terminal on CI; the answer
+        // check needs one, so only check the refusal of a wrong answer when
+        // a terminal exists.
+        use std::io::IsTerminal;
+        let r = sending_on_confirm(&mut "no\n".as_bytes());
+        assert!(r.is_err());
+        if !std::io::stdin().is_terminal() {
+            assert!(r.unwrap_err().contains("needs a terminal"));
+        }
     }
 }

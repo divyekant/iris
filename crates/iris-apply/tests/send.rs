@@ -53,6 +53,8 @@ fn setup(name: &str) -> Box {
             )?;
             // No sender is hostile in these tests.
             tx.execute("UPDATE message SET hostile = NULL", [])?;
+            // The switch is on since time 0: the hold counts from the approval.
+            tx.execute("UPDATE send_switch SET on_at = 0 WHERE id = 1", [])?;
             tx.execute("DELETE FROM sender WHERE kind = 'hostile'", [])?;
             Ok(())
         })
@@ -88,6 +90,18 @@ impl Box {
     /// Submit one action by a person, and approve it, `age` milliseconds
     /// ago. Gives the action ID.
     fn approved(&self, verb: Verb, target: &str, args: Value, age: i64) -> i64 {
+        self.approved_after(verb, target, args, age, now())
+    }
+
+    /// As [`Box::approved`], with the submit at `submitted`.
+    fn approved_after(
+        &self,
+        verb: Verb,
+        target: &str,
+        args: Value,
+        age: i64,
+        submitted: i64,
+    ) -> i64 {
         let who = Author {
             kind: AuthorKind::Person,
             name: None,
@@ -97,7 +111,7 @@ impl Box {
         let cs = create(&self.store, &who, now()).unwrap();
         let args: Map<String, Value> = args.as_object().unwrap().clone();
         add_action(&self.store, cs, &who, verb, &[target], &args, None).unwrap();
-        submit(&self.store, cs, &who, "Write.", now()).unwrap();
+        submit(&self.store, cs, &who, "Write.", submitted).unwrap();
         self.store
             .write(|tx| {
                 let id: i64 = tx.query_row(
@@ -130,7 +144,10 @@ impl Box {
         apply(&self.store, &self.gmail, &mut token, self.account, action)
     }
 
+    /// The release, after the move of the approved sends to `held`, as the
+    /// apply step of the engine does.
     fn release(&self, action: i64) -> iris_apply::Result<Outcome> {
+        iris_changeset::hold(&self.store, self.account, now()).unwrap();
         let (t, mut renew) = self.token();
         let mut token = Token {
             token: t,
@@ -324,7 +341,7 @@ fn a_send_waits_for_its_hold() {
         Ok(Outcome::Hold(until)) => assert!(until > now()),
         other => panic!("{other:?}"),
     }
-    assert_eq!((b.state(s).as_str(), b.sends()), ("approved", 0));
+    assert_eq!((b.state(s).as_str(), b.sends()), ("held", 0));
 }
 
 /// Acceptance 2: with an unknown result, one `drafts/send` request only,
@@ -365,7 +382,7 @@ fn an_unknown_send_that_did_not_go_out_never_goes_again() {
     b.fake.fail_next_write(&[503], false);
     assert_eq!(b.release(s).unwrap(), Outcome::Pending);
     assert_eq!(b.release(s).unwrap(), Outcome::Pending);
-    assert_eq!((b.state(s).as_str(), b.sends()), ("approved", 1));
+    assert_eq!((b.state(s).as_str(), b.sends()), ("held", 1));
     // The ledger keeps each entry: move the claim time back, as a clock.
     let hour = 60 * 60 * 1000 + 1;
     let day = 24 * hour;
@@ -783,4 +800,136 @@ fn a_reply_subject_with_a_new_warning_denies_the_draft() {
     }
     assert_eq!(b.state(a), "denied");
     assert_eq!(b.posts("/drafts"), creates);
+}
+
+/// The held outbox (docs/specs/2026-11-17-held-outbox.md): the changeset of
+/// an action.
+fn changeset_of(b: &Box, action: i64) -> i64 {
+    b.store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT changeset_id FROM changeset_action WHERE id = ?1",
+                [action],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap()
+}
+
+/// Acceptance 4: with the switch off, no send leaves, and the send stays
+/// held. When the switch goes on, the hold counts from that time.
+#[test]
+fn no_send_leaves_while_the_switch_is_off() {
+    let b = setup("switch");
+    let (s, _) = b.new_mail(AGED);
+    iris_apply::set_sending(&b.store, false, now()).unwrap();
+    assert_eq!(iris_apply::sending(&b.store).unwrap(), None);
+    assert_eq!(b.release(s).unwrap(), Outcome::SendingOff);
+    assert_eq!((b.state(s).as_str(), b.sends()), ("held", 0));
+    // On again: a full hold from now, though the approval is old.
+    let on = now();
+    iris_apply::set_sending(&b.store, true, on).unwrap();
+    match b.release(s) {
+        Ok(Outcome::Hold(until)) => assert!(until >= on + HOLD_MS, "{until}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.sends(), 0);
+    // A second "on" keeps the first time, so it does not restart a hold.
+    iris_apply::set_sending(&b.store, true, on + 5_000).unwrap();
+    assert_eq!(iris_apply::sending(&b.store).unwrap(), Some(on));
+}
+
+/// Acceptance 2: a cancel of a held send removes it, and no send goes out.
+/// A cancel after the claim changes nothing.
+#[test]
+fn a_cancel_removes_a_held_send() {
+    let b = setup("cancel");
+    let (s, _) = b.new_mail(AGED);
+    iris_changeset::hold(&b.store, b.account, now()).unwrap();
+    assert_eq!(b.state(s), "held");
+    assert_eq!(
+        iris_changeset::cancel(&b.store, s, now()).unwrap(),
+        iris_changeset::Cancel::Done
+    );
+    assert_eq!(b.state(s), "denied");
+    assert!(matches!(b.release(s), Err(Error::NotApproved(_))));
+    assert_eq!(b.sends(), 0);
+    assert_eq!(
+        iris_changeset::cancel(&b.store, s, now()).unwrap(),
+        iris_changeset::Cancel::NotOpen
+    );
+    // A send that the release claimed: the cancel says it started.
+    let (s2, _) = b.new_mail(AGED);
+    assert!(matches!(b.release(s2), Ok(Outcome::Applied(_))));
+    assert_eq!(
+        iris_changeset::cancel(&b.store, s2, now()).unwrap(),
+        iris_changeset::Cancel::Started
+    );
+    assert_eq!(b.state(s2), "applied");
+}
+
+/// A withdraw of the changeset cancels its held send, and no send goes out.
+#[test]
+fn a_withdraw_cancels_a_held_send() {
+    let b = setup("withdraw");
+    let (s, _) = b.new_mail(AGED);
+    iris_changeset::hold(&b.store, b.account, now()).unwrap();
+    iris_changeset::withdraw(&b.store, changeset_of(&b, s), None).unwrap();
+    assert_eq!(b.state(s), "cancelled");
+    assert!(matches!(b.release(s), Err(Error::NotApproved(_))));
+    assert_eq!(b.sends(), 0);
+}
+
+/// Acceptance 5: an approval 14 days after its submit never moves to held,
+/// and a held send expires the same way.
+#[test]
+fn an_expired_send_never_leaves() {
+    let b = setup("expiry");
+    let old = now() - 15 * 24 * 60 * 60 * 1000;
+    let mail = |b: &Box| {
+        let a = b.approved(Verb::Draft, "a-1", mail(), 0);
+        assert!(matches!(b.apply(a), Ok(Outcome::Applied(_))));
+        b.draft(a).0
+    };
+    // An approved send, 15 days after its submit: expired, never held.
+    let d = mail(&b);
+    let s = b.approved_after(Verb::Send, &d, json!({}), AGED, old);
+    iris_changeset::hold(&b.store, b.account, now()).unwrap();
+    assert_eq!(b.state(s), "expired");
+    assert!(matches!(b.release(s), Err(Error::NotApproved(_))));
+    // A held send expires the same way at the expiry tick (the switch was
+    // off for 15 days).
+    let d = mail(&b);
+    let s2 = b.approved_after(Verb::Send, &d, json!({}), AGED, old);
+    b.sql(
+        "UPDATE changeset_action SET state = 'held' WHERE id = ?1",
+        [s2],
+    );
+    assert_eq!(b.state(s2), "held");
+    iris_changeset::expire(&b.store, now()).unwrap();
+    assert_eq!(b.state(s2), "expired");
+    assert_eq!(b.sends(), 0);
+}
+
+/// Acceptance 3: `sending off` waits for the apply lock, which a release
+/// holds during its call, and writes the switch only after it.
+#[test]
+fn sending_off_waits_for_a_send_in_progress() {
+    let b = setup("off-wait");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(b.store.dir().join(iris_apply::LOCK_FILE))
+        .unwrap();
+    file.try_lock().unwrap();
+    let start = std::time::Instant::now();
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        drop(file);
+    });
+    iris_apply::set_sending(&b.store, false, now()).unwrap();
+    assert!(start.elapsed() >= Duration::from_millis(300));
+    assert_eq!(iris_apply::sending(&b.store).unwrap(), None);
+    holder.join().unwrap();
 }

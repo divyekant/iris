@@ -53,10 +53,15 @@ fn allowed(from: Option<&str>) -> &'static [&'static str] {
             "replaced",
         ],
         Some("in_review") => &["approved", "denied", "expired", "cancelled", "replaced"],
-        // approved to held comes with release 3. applied, failed and
-        // undone come only with the state of the ledger entry (migration
-        // 10, trigger ledger_state): see the_ledger_moves_the_action.
+        // approved to held only for a send (migration 21): this action is an
+        // archive. applied, failed and undone come only with the state of
+        // the ledger entry (migration 10, trigger ledger_state): see
+        // the_ledger_moves_the_action.
         Some("approved") => &["in_review", "denied", "expired", "cancelled"],
+        // The moves out of the held outbox (migration 21). The helper denies
+        // by `rule`, and only the engine or a person denies a held send:
+        // iris-changeset tests/outbox.rs covers those moves.
+        Some("held") => &["expired", "cancelled"],
         Some(_) => &[],
     }
 }
