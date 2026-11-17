@@ -77,8 +77,12 @@ Waits after a refusal:
   also not after 429 or 503. A time-out, a lost answer, 429 and 5xx of a
   write give an unknown result (`Error::write_result_unknown`), and the
   caller reconciles it with a read (see "External writes").
-- HTTP 401: `Error::Unauthorized`. The caller gets a new access token one
-  time.
+- HTTP 401: `Error::Unauthorized`. Graph refused the token before it
+  ran the call, so a 401 is a definite rejection, not an unknown result,
+  also for a write. The caller gets a new access token one time and makes
+  the call one more time with it (spec 2 section 7.2). This is the only
+  second request of a write. A second 401 stops the call: the account
+  needs a new sign-in.
 - HTTP 404: `Error::NotFound`.
 - Other status: `Error::Api { status, code, message }`, with `code` from the
   Graph error body `{"error":{"code","message"}}` (A8).
@@ -547,7 +551,7 @@ section 7.3). The caller reconciles with reads only.
 | `set_read`, `set_flag` | the answer has the new state | `Error::Api`, the mirror does not change | the caller reads the message: the target state means applied; any other state keeps the result unknown, because another client can have reversed the write. Iris tells the person (spec 2 section 7.3) | never after an unknown result |
 | `set_categories` | the answer has the new list | `Error::Api`; 412 means the message changed after the read: nothing changed | as `set_read` | after 412 only: one new read and one new PATCH |
 | `move_to` | 201 with the moved message | `Error::Api` | the caller reads the message: the target folder means applied; any other folder keeps the result unknown, and Iris tells the person | never after an unknown result |
-| `create_draft` | 201 with the draft ID | `Error::Api` | a draft can exist. The caller searches `drafts` for its `Message-ID` header: found means created, not found means failed | never after an unknown result |
+| `create_draft` | 201 with the draft ID | `Error::Api` | a draft can exist, now or later. The caller searches `drafts` for its `Message-ID` header: found means created. Not found keeps the result unknown: the action stays in `writing`, each recovery turn searches again, and the review shows "Outlook did not confirm the draft yet". Submit denies a new draft action for the same thread while one is unknown. After 24 hours with no draft, the row fails with "unknown" kept, as for a send | never after an unknown result |
 | `send_mime` | 202: the row stays in `writing` until the completion finds and checks the sent copy (section 5) | `Error::Api`; the row fails and the claim goes, as in the send spec | the ledger keeps the claim; recovery runs the search of section 5, step 5 (each folder, no draft) and the completion (spec 2 section 7.5) | never |
 
 ## Open questions
