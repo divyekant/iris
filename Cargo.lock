@@ -984,6 +984,8 @@ dependencies = [
  "httparse",
  "libc",
  "rustls",
+ "serde",
+ "toml",
 ]
 
 [[package]]
