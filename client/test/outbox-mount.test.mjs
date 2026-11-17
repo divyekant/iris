@@ -112,6 +112,92 @@ test("the cards follow the engine: a cancel note stays, and a new send of the dr
   }
 });
 
+
+/** A fetch whose GET answers wait for `open()`, one gate for each read. */
+function gated(state) {
+  const asked = [];
+  const waits = [];
+  const saved = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url).replace(/^\/api\//, "");
+    const method = init.method ?? "GET";
+    asked.push(`${method} ${path}`);
+    if (method === "POST") {
+      const draft = path.split("/")[1];
+      state.sends = state.sends.filter((x) => x.draft !== draft);
+      return new Response(JSON.stringify({ cancelled: draft }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    // The answer is the state at the time of the read, sent when the gate opens.
+    const body = JSON.stringify({ ...fx.outbox(), count: state.sends.length, sends: state.sends, next: null });
+    await new Promise((open) => waits.push(open));
+    return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+  };
+  return { asked, waits, restore: () => (globalThis.fetch = saved) };
+}
+
+test("a send stays off while its cancel runs, so a second click sends nothing", async () => {
+  const state = { sends: fx.outbox().sends };
+  const net = gated(state);
+  const app = await mount("/src/views/Outbox.svelte", { first: { ...fx.outbox(), sends: state.sends }, every: 60_000 });
+  try {
+    const first = () => app.target.querySelector("li.card button");
+    first().click();
+    // The cancel answered; its read of the outbox waits.
+    await until(() => net.waits.length === 1);
+    app.flushSync();
+    assert.equal(first().disabled, true);
+    first().click();
+    assert.equal(net.asked.filter((a) => a.startsWith("POST")).length, 1);
+    net.waits.shift()();
+    await until(() => app.target.querySelectorAll("li.card").length === 2);
+    app.flushSync();
+    assert.equal(first().disabled, false);
+    assert.doesNotMatch(app.target.querySelector(".notes").textContent, /Not found/);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("a read that started before a cancel does not put the send back", async () => {
+  const state = { sends: fx.outbox().sends };
+  const net = gated(state);
+  const app = await mount("/src/views/Outbox.svelte", { first: { ...fx.outbox(), sends: state.sends }, every: 20 });
+  try {
+    // A poll starts and waits: its answer holds all three sends.
+    await until(() => net.waits.length === 1);
+    const old = net.waits.shift();
+    app.target.querySelector("li.card button").click();
+    // The read of the cancel: two sends. It ends first.
+    await until(() => net.waits.length === 1);
+    net.waits.shift()();
+    await until(() => app.target.querySelectorAll("li.card").length === 2);
+    // The older poll ends last. Its three sends do not apply.
+    old();
+    await new Promise((r) => setTimeout(r, 30));
+    app.flushSync();
+    assert.equal(app.target.querySelectorAll("li.card").length, 2);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("a send approved while the view is open shows at the next read", async () => {
+  let sends = fx.outbox().sends.slice(0, 1);
+  const net = serve(() => [200, { ...fx.outbox(), count: sends.length, sends }]);
+  const app = await mount("/src/views/Outbox.svelte", { first: { ...fx.outbox(), count: 1, sends }, every: 20 });
+  try {
+    assert.equal(app.target.querySelectorAll("li.card").length, 1);
+    sends = fx.outbox().sends;
+    await until(() => app.target.querySelectorAll("li.card").length === 3);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+// Last: it cancels d-16 in the fixture state of this file.
 test("the fixture server cancels a send, as the API does", () => {
   const before = fx.outbox().sends.length;
   assert.deepEqual(fx.outboxPost("/outbox/d-16/cancel"), [200, { cancelled: "d-16" }]);

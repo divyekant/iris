@@ -7,11 +7,11 @@
 -->
 <script lang="ts">
   import { onDestroy } from "svelte";
-  import { loadOutbox, own, post, type Outbox, type OutboxSend } from "../api";
-  import { poll } from "../clock";
+  import { loadOutbox, newest, own, post, type Outbox, type OutboxSend } from "../api";
   import { FLAGS } from "../review";
 
-  let { first }: { first: Outbox } = $props();
+  // `every`: the ms between two reads of the outbox (a prop for the tests).
+  let { first, every = 5000 }: { first: Outbox; every?: number } = $props();
 
   // svelte-ignore state_referenced_locally
   let box = $state(first);
@@ -21,11 +21,26 @@
   // sends that the engine gives, so a new send of the same draft shows too.
   let notes = $state<string[]>([]);
 
+  // Each read of the outbox gets a number. Only the newest read applies, so
+  // an older read cannot put back a send that a newer read left out.
+  const turn = newest();
+
+  async function refresh(fresh = turn()) {
+    try {
+      const v = await loadOutbox();
+      if (fresh()) box = v;
+    } catch {
+      // The engine can restart. The next read tries again.
+    }
+  }
+
   const tick = setInterval(() => (now = Date.now()), 1000);
-  const stop = poll(loadOutbox, (v) => (box = v), 5000);
+  // No read starts while a cancel runs: the cancel reads the outbox when it ends.
+  // svelte-ignore state_referenced_locally
+  const reads = setInterval(() => busy || refresh(), every);
   onDestroy(() => {
     clearInterval(tick);
-    stop();
+    clearInterval(reads);
   });
 
 
@@ -58,6 +73,8 @@
 
   async function cancel(s: OutboxSend) {
     busy = s.draft;
+    // A read that started before the cancel does not apply after it.
+    const fresh = turn();
     try {
       await post(`outbox/${encodeURIComponent(s.draft)}/cancel`, {});
       notes = [...notes, `${name(s)} is cancelled. It does not leave.`];
@@ -65,14 +82,10 @@
       // A 409: the release claimed the send. The note stays after its card goes.
       const started = (e as { status?: number }).status === 409;
       notes = [...notes, started ? `${name(s)} started to send. It cannot be cancelled.` : `${name(s)}: ${own(e)}`];
-    } finally {
-      busy = "";
     }
-    try {
-      box = await loadOutbox();
-    } catch {
-      // The poll tries again.
-    }
+    // Each Cancel stays off until the view shows the outbox after this cancel.
+    await refresh(fresh);
+    busy = "";
   }
 </script>
 
