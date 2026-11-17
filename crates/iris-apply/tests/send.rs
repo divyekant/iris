@@ -581,3 +581,18 @@ fn a_large_draft_at_gmail_is_not_sent() {
         .unwrap();
     assert_eq!((foreign, b.sends()), (true, 0));
 }
+
+/// The apply writes only to the mailbox that the action names: a new mail
+/// of another account is denied, and no draft is made in this mailbox.
+#[test]
+fn a_new_mail_of_another_account_makes_no_draft() {
+    let b = setup("other");
+    let other = b.store.add_account("gmail", "other@example.com").unwrap();
+    let a = b.approved(Verb::Draft, &format!("a-{other}"), mail(), 0);
+    match b.apply(a) {
+        Ok(Outcome::Denied(why)) => assert!(why.contains("another account"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.posts("/drafts"), 0);
+    assert_eq!(b.state(a), "denied");
+}

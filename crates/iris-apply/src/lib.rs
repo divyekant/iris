@@ -1068,10 +1068,17 @@ fn check(
         decide(store, action, "in_review", reason)?;
         return Ok(Some(Outcome::Review(reason.into())));
     }
+    // Each mailbox that the action names: the account of each message,
+    // of its draft, and each account target of a new mail. All must be the
+    // mailbox of this apply.
     let other_account: bool = store.read(|c| {
         Ok(c.query_row(
             "SELECT EXISTS (SELECT 1 FROM action_message am JOIN message m ON m.id = am.message_id
-               WHERE am.action_id = ?1 AND m.account_id <> ?2)",
+               WHERE am.action_id = ?1 AND m.account_id <> ?2)
+             OR EXISTS (SELECT 1 FROM action_draft ad JOIN draft d ON d.id = ad.draft_id
+               WHERE ad.action_id = ?1 AND d.account_id <> ?2)
+             OR EXISTS (SELECT 1 FROM changeset_action a, json_each(a.targets, '$.accounts') t
+               WHERE a.id = ?1 AND t.value <> 'a-' || ?2)",
             params![action, account],
             |r| r.get(0),
         )?)
@@ -1086,7 +1093,7 @@ fn check(
     let reason = if now_hash.1 != approved_hash.unwrap_or_default() {
         Some("The action changed after its approval.")
     } else if other_account {
-        Some("The action has messages of another account.")
+        Some("The action names another account.")
     } else {
         None
     };

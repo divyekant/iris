@@ -581,3 +581,40 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
     assert!(matches!(socket::parse_answer("show", ok), Some(Ok(_))));
     assert!(socket::parse_answer("drafts", ok).is_none());
 }
+
+/// The command adds and submits the write verbs: a new mail to an account
+/// and a send of a draft keep their targets and arguments.
+#[test]
+fn the_command_adds_and_submits_draft_and_send() {
+    let (store, d) = engine("write");
+    mailbox(&store);
+    store
+        .write(|tx| {
+            // The draft that an applied draft action made at Gmail.
+            tx.execute_batch(
+                "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0);
+                 INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+                   VALUES (1, 1, 1, 'draft', '{\"accounts\":[\"a-1\"]}', '{}');
+                 INSERT INTO draft(account_id, provider_id, message_id_hdr, content, hash, raw,
+                                   action_id, created_at, updated_at)
+                   VALUES (1, 'r1', 'iris.1@example.com', '{}', 'h1', x'00', 1, 0, 0);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let mail = json!({ "to": ["p@example.org"], "subject": "Hi", "body": "Hello" });
+    for (verb, target, args, key) in [
+        ("draft", "a-1", mail, "accounts"),
+        ("send", "d-1", json!({}), "drafts"),
+    ] {
+        let r = add(&d, verb, &[target], args.clone(), None);
+        let cs = r["changeset"].as_str().unwrap();
+        let doc =
+            socket::request(&d, "submit", json!({ "changeset": cs, "why": "Write." })).unwrap();
+        let a = &doc["actions"][0];
+        assert_eq!(a["verb"], json!(verb), "{doc}");
+        assert_eq!(a["targets"][key], json!([target]), "{doc}");
+        assert_eq!(a["args"], args, "{doc}");
+        assert_eq!(a["decision"]["state"], json!("proposed"), "{doc}");
+    }
+}
