@@ -92,15 +92,35 @@ pub const APP_WAIT_MS: i64 = 30_000;
 /// when no app asked.
 static APP_ASKED: AtomicI64 = AtomicI64::new(0);
 
-/// Record an `app.notices` call at `now_ms`.
-pub fn app_asked(now_ms: i64) {
+/// The largest notice row ID that the app does not show: the `last` of its
+/// first call, which gives no notices. `i64::MAX` when no app asked.
+static APP_FROM: AtomicI64 = AtomicI64::new(i64::MAX);
+
+/// Record an `app.notices` call at `now_ms`. `from` is the `last` of a first
+/// call (no `after`): the app shows only the notices after it.
+pub fn app_asked(now_ms: i64, from: Option<i64>) {
+    if let Some(f) = from {
+        APP_FROM.store(f, Ordering::Relaxed);
+    }
     APP_ASKED.fetch_max(now_ms, Ordering::Relaxed);
 }
 
-/// True when an app asked for the notices [`APP_WAIT_MS`] or less before
-/// `now_ms`, after the call at `asked_ms`.
-pub fn app_shows(asked_ms: i64, now_ms: i64) -> bool {
-    asked_ms > 0 && now_ms - asked_ms <= APP_WAIT_MS
+/// True when the app shows notice `id`, so the engine does not: an app
+/// asked [`APP_WAIT_MS`] or less before `now_ms` (the call at `asked_ms`),
+/// and `id` is after the start `from` of the app. Each notice is shown by the
+/// app or by the engine, also a notice that came during the first call.
+pub fn app_shows(id: i64, from: i64, asked_ms: i64, now_ms: i64) -> bool {
+    asked_ms > 0 && now_ms - asked_ms <= APP_WAIT_MS && id > from
+}
+
+/// [`app_shows`] with the calls that the engine recorded.
+pub fn app_shows_now(id: i64, now_ms: i64) -> bool {
+    app_shows(
+        id,
+        APP_FROM.load(Ordering::Relaxed),
+        APP_ASKED.load(Ordering::Relaxed),
+        now_ms,
+    )
 }
 
 /// True after the first failure, so that a server with no desktop writes
@@ -110,7 +130,7 @@ static FAILED: AtomicBool = AtomicBool::new(false);
 /// Shows one system notice for `n`. A failure writes one log line the first
 /// time. The notice stays in the web client either way.
 pub fn show(n: &iris_policy::notice::Notice) {
-    if app_shows(APP_ASKED.load(Ordering::Relaxed), crate::engine::now_ms()) {
+    if app_shows_now(n.id, crate::engine::now_ms()) {
         return;
     }
     let title = format!("Iris: {}", n.rule_name);
@@ -183,11 +203,16 @@ mod tests {
     #[test]
     fn the_app_shows_the_notices_for_30_seconds_after_its_call() {
         let t = 1_800_000_000_000;
-        assert!(!app_shows(0, t));
-        assert!(app_shows(t - 10_000, t));
-        assert!(app_shows(t - APP_WAIT_MS, t));
-        assert!(!app_shows(t - APP_WAIT_MS - 1, t));
-        assert!(!app_shows(t - 31_000, t));
+        let shows = |asked| app_shows(5, 4, asked, t);
+        assert!(!shows(0));
+        assert!(shows(t - 10_000));
+        assert!(shows(t - APP_WAIT_MS));
+        assert!(!shows(t - APP_WAIT_MS - 1));
+        assert!(!shows(t - 31_000));
+        // A notice at or before the start of the app: the engine shows it.
+        assert!(!app_shows(4, 4, t, t));
+        assert!(!app_shows(3, 4, t, t));
+        assert!(!app_shows(1, i64::MAX, t, t));
     }
 
     #[test]

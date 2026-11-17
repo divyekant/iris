@@ -1117,6 +1117,12 @@ fn app_notices_give_only_the_new_notices_oldest_first() {
         ),
         (&json!([]), &json!(3), &json!(2))
     );
+    // The first call started the app after notice 3: the engine still shows
+    // notices 1 to 3 itself (a notice of the first call is not lost), and
+    // leaves a later notice to the app.
+    let now = iris::engine::now_ms();
+    assert!((1..=3).all(|id| !iris::notify::app_shows_now(id, now)));
+    assert!(iris::notify::app_shows_now(4, now));
     let r = ask(json!({ "after": 0 }));
     let ids: Vec<&str> = r["result"]["notices"]
         .as_array()

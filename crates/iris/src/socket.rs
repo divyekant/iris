@@ -430,7 +430,9 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
                 ),
             };
             let r = app_notices(store, after)?;
-            crate::notify::app_asked(crate::engine::now_ms());
+            // A first call: the app shows only the notices after `last`.
+            let from = after.is_none().then(|| r["last"].as_i64().unwrap_or(0));
+            crate::notify::app_asked(crate::engine::now_ms(), from);
             Ok(Done::Value(r))
         }
         Some("drafts") if session => Err(Failure::new(
