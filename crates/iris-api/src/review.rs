@@ -481,3 +481,47 @@ pub fn handled(store: &Store, limit: u32, after: Option<&str>) -> Result<Handled
         next,
     })
 }
+
+/// A review comment of the person (docs/specs/2026-11-17-review-comments.md,
+/// section 3). A text or a key that breaks the rules is a 400, a refusal of
+/// the state is a 409. Nothing is written in either case.
+pub fn comment(
+    store: &Store,
+    changeset: i64,
+    revision: i64,
+    text: &str,
+    key: &str,
+    now_ms: i64,
+) -> Result<Value> {
+    if let Some(why) = iris_changeset::check_comment(text, key) {
+        return Err(Error::Query(why));
+    }
+    let c = iris_changeset::transaction(store, |c| {
+        iris_changeset::comment_in(c, changeset, revision, text, key, now_ms)
+    })
+    .map_err(|e| conflict(e, "the changeset is not in the store"))?;
+    Ok(comment_doc(&c))
+}
+
+/// Each review comment of `changeset`, oldest first.
+pub fn comments(store: &Store, changeset: i64) -> Result<Value> {
+    let mut out = None;
+    store.read(|c| {
+        out = Some(iris_changeset::comments_in(c, changeset));
+        Ok(())
+    })?;
+    let all = out
+        .expect("the read ran")
+        .map_err(|e| conflict(e, "the changeset is not in the store"))?;
+    Ok(serde_json::json!({ "comments": all.iter().map(comment_doc).collect::<Vec<_>>() }))
+}
+
+fn comment_doc(c: &iris_changeset::Comment) -> Value {
+    serde_json::json!({
+        "id": c.id,
+        "changeset": iris_changeset::format_changeset_id(c.changeset),
+        "revision": c.revision,
+        "text": c.text,
+        "at": crate::rfc3339(c.at_ms),
+    })
+}
