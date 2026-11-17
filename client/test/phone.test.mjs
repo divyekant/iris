@@ -95,6 +95,16 @@ test("on a phone, More opens the other views and a tap goes to one", { skip: !pl
   await more.getByRole("link", { name: "Jobs" }).tap();
   await page.waitForURL(/#\/jobs$/);
   await more.waitFor({ state: "hidden", timeout: 2000 });
+
+  // A short screen (a narrow window in landscape): the list fits above the tabs and scrolls.
+  await page.setViewportSize({ width: 600, height: 390 });
+  await tabs.getByRole("button", { name: "More" }).tap();
+  const box = await more.boundingBox();
+  assert.ok(box.y >= 0, `More starts at ${box.y} px`);
+  const last = more.getByRole("link", { name: "Signals" });
+  await last.scrollIntoViewIfNeeded();
+  await last.tap();
+  await page.waitForURL(/#\/signals$/);
   assert.equal(await tabs.getByRole("button", { name: "More" }).evaluate((b) => b.classList.contains("current")), true);
 });
 

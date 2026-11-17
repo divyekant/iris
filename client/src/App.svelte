@@ -387,6 +387,10 @@
       inset: auto max(var(--space-2), env(safe-area-inset-right)) calc(var(--space-16) + var(--space-2) + env(safe-area-inset-bottom)) auto;
       margin: 0;
       min-width: calc(var(--space-32) + var(--space-16));
+      /* A short screen: the list scrolls, so each view stays in reach. */
+      max-height: calc(100dvh - var(--space-16) - var(--space-4) - env(safe-area-inset-bottom) - max(var(--space-2), env(safe-area-inset-top)));
+      overflow-y: auto;
+      box-sizing: border-box;
       padding: var(--space-2);
       border: 1px solid var(--color-border);
       border-radius: var(--radius-lg);
