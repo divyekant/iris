@@ -566,12 +566,19 @@ pub fn submit_in(
         // The flags of a mailbox verb: a state verb changes no message, and
         // has no target thread. A write verb (draft, send) changes no
         // message either, but its thread can be a first contact.
-        let valid = count > 0 && !STATE_VERBS.contains(&verb.as_str());
+        // A denied action has no message and no draft row (`clear`), so
+        // `first_contact` finds no thread for it. A send whose thread has
+        // only gone messages has no message row but keeps its draft thread.
+        let mailbox = !STATE_VERBS.contains(&verb.as_str());
         let mut flags = Vec::new();
-        if valid && !WRITE_VERBS.contains(&verb.as_str()) && (count > BULK || total > BULK) {
+        if mailbox
+            && count > 0
+            && !WRITE_VERBS.contains(&verb.as_str())
+            && (count > BULK || total > BULK)
+        {
             flags.push("bulk");
         }
-        if valid && first_contact(c, id)? {
+        if mailbox && first_contact(c, id)? {
             flags.push("first_contact");
         }
         c.execute(
@@ -620,17 +627,28 @@ fn next_action(
 /// mail from a sender of the kind `stranger`.
 fn first_contact(c: &Connection, action: i64) -> Result<bool> {
     Ok(c.query_row(
-        "SELECT EXISTS (
-           SELECT 1 FROM action_message am
-           JOIN message m ON m.id = am.message_id
-           JOIN message t ON t.thread_id = m.thread_id
-           JOIN header h ON h.message_id = t.id
-           JOIN sender p ON p.address = h.from_addr
-           WHERE am.action_id = ?1 AND p.kind = 'stranger')",
+        &format!(
+            "SELECT EXISTS (
+               SELECT 1 FROM message t
+               JOIN header h ON h.message_id = t.id
+               JOIN sender p ON p.address = h.from_addr
+               WHERE t.thread_id IN ({ACTION_THREADS}) AND p.kind = 'stranger')
+             FROM changeset_action a WHERE a.id = ?1"
+        ),
         [action],
         |r| r.get(0),
     )?)
 }
+
+/// The threads of the action `a`: the threads of its messages and the
+/// thread of its draft. The thread of a draft stays when each message of
+/// the thread is gone, so the hostile check and the flags read the same
+/// threads.
+const ACTION_THREADS: &str = "SELECT t.thread_id FROM action_message am
+       JOIN message t ON t.id = am.message_id WHERE am.action_id = a.id
+     UNION
+     SELECT d.thread_id FROM action_draft ad
+       JOIN draft d ON d.id = ad.draft_id WHERE ad.action_id = a.id";
 
 /// The Gmail system labels (Gmail API, labels guide). The store also has the
 /// system labels of each account in `label`.
@@ -961,20 +979,18 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
 /// its sender is no longer known. The apply checks it again.
 pub fn hostile(c: &Connection, action: i64) -> Result<bool> {
     Ok(c.query_row(
-        "SELECT cs.author_kind <> 'person' AND EXISTS (
+        &format!(
+            "SELECT cs.author_kind <> 'person' AND EXISTS (
            SELECT 1 FROM message m
            LEFT JOIN header h ON h.message_id = m.id
            LEFT JOIN sender p ON p.address = h.from_addr
-           WHERE m.thread_id IN (SELECT t.thread_id FROM action_message am
-                                 JOIN message t ON t.id = am.message_id WHERE am.action_id = a.id
-                                 UNION
-                                 SELECT d.thread_id FROM action_draft ad
-                                 JOIN draft d ON d.id = ad.draft_id WHERE ad.action_id = a.id)
+           WHERE m.thread_id IN ({ACTION_THREADS})
              AND ((m.hostile IS NOT NULL AND m.hostile NOT IN ('', '[]')) OR p.kind = 'hostile'
                   -- A gone message after the cleanup has no header, so its
                   -- sender is not known: it counts as hostile evidence.
                   OR (m.gone_at IS NOT NULL AND h.message_id IS NULL)))
-         FROM changeset_action a JOIN changeset cs ON cs.id = a.changeset_id WHERE a.id = ?1",
+         FROM changeset_action a JOIN changeset cs ON cs.id = a.changeset_id WHERE a.id = ?1"
+        ),
         [action],
         |r| r.get(0),
     )?)
