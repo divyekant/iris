@@ -201,3 +201,15 @@ test("a draft answer stays when a newer question of another job comes", async ()
     view.destroy();
   }
 });
+
+test("the brief loads the questions when it opens with none given", async () => {
+  // App mounts the brief with no questions: the brief asks the engine.
+  const asked = serve((path) => (path.startsWith("jobs") ? [200, { jobs: [job()], next: null }] : [200, path.startsWith("watches") ? [] : { proposed: [], confirmed: [] }]));
+  const view = await mount("/src/views/Brief.svelte", { watches: [], proposed: null, brief: fx.brief, now: new Date("2026-11-16T09:05:00Z"), poll: 0 });
+  try {
+    await until(() => /Pay the full amount, or ask Brightline/.test(text(view.target)));
+    assert.ok(asked.some(([m, p]) => m === "GET" && p === "jobs?state=needs_you&limit=200"));
+  } finally {
+    view.destroy();
+  }
+});
