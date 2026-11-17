@@ -298,12 +298,15 @@
       {#if missing.length && !problem}<p>Iris loads everything that these changes touch, so that you see it before you decide.</p>{/if}
       {#if !asking}{@render ask()}{/if}
     </div>
-  {:else if c.state === "open" && !asking}
+  {:else}
+    <!-- The comments stay on screen after the decisions; only an open request takes a new one. -->
     {@render comments()}
-    <div class="decide">
-      <p>No change of this request waits for your decision.</p>
-      {@render ask()}
-    </div>
+    {#if c.state === "open" && !asking}
+      <div class="decide">
+        <p>No change of this request waits for your decision.</p>
+        {@render ask()}
+      </div>
+    {/if}
   {/if}
   {#if asking}{@render question()}{/if}
   {#if c.state === "withdrawn" && !saved}<p class="saved">This request is withdrawn.</p>{/if}

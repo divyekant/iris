@@ -163,3 +163,15 @@ test("a comment of only white space is not sent", async () => {
     view.destroy();
   }
 });
+
+test("the comments stay after the last decision, with no link", async () => {
+  serve(() => [200, {}]);
+  const view = await mount("/src/views/Request.svelte", { changeset: { ...changeset(job), state: "closed" } });
+  try {
+    await until(() => view.target.querySelectorAll(".comments li").length === 1);
+    assert.equal(view.target.querySelector(".comments button"), null);
+    assert.equal(view.target.querySelector(".comments textarea"), null);
+  } finally {
+    view.destroy();
+  }
+});
