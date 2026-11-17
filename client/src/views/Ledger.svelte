@@ -2,9 +2,9 @@
   What Iris did (card R2-07, option A): each ledger entry, newest first,
   under its day. Each line says what changed, why, who decided it and when,
   and has its own Undo while an undo can start (specification 2, section 7.4).
-  The engine applies an undo at its next step, so the line says that Iris
-  puts the messages back, and the view reads the list again until no undo
-  or change is open.
+  The engine applies an undo at its next step. The line says that Iris undoes
+  the change on each message that did not change again or go, and the view
+  reads the list again until no undo or change is open.
 -->
 <script lang="ts">
   import { get, own, post, type LedgerEntry, type LedgerPage } from "../api";
@@ -25,11 +25,21 @@
   let open = $derived(entries.some((e) => e.undo_open || e.state === "writing"));
   let reads = $state(0);
 
+  // Each change to the list (read again, Show more, Undo) runs in turn, never two at the same
+  // time, so that each one starts from the list that the one before left, and no older answer
+  // writes over a newer list or cursor.
+  let last: Promise<unknown> = Promise.resolve();
+  function inTurn<T>(work: () => Promise<T>): Promise<T> {
+    const p = last.then(work);
+    last = p.catch(() => {});
+    return p;
+  }
+
   // While an undo or a change is open, read the list again, so that each line shows its end.
   $effect(() => {
     void reads;
     if (!open) return;
-    const timer = setTimeout(() => fresh().catch(() => {}).finally(() => reads++), wait);
+    const timer = setTimeout(() => inTurn(fresh).catch(() => {}).finally(() => reads++), wait);
     return () => clearTimeout(timer);
   });
 
@@ -76,10 +86,12 @@
     loading = true;
     problem = "";
     try {
-      const p = await get<LedgerPage>(`ledger?limit=50&after=${encodeURIComponent(next ?? "")}`);
-      const seen = new Set(entries.map((e) => e.id));
-      entries = [...entries, ...p.entries.filter((e) => !seen.has(e.id))];
-      next = p.next;
+      await inTurn(async () => {
+        const p = await get<LedgerPage>(`ledger?limit=50&after=${encodeURIComponent(next ?? "")}`);
+        const seen = new Set(entries.map((e) => e.id));
+        entries = [...entries, ...p.entries.filter((e) => !seen.has(e.id))];
+        next = p.next;
+      });
     } catch (e) {
       problem = own(e);
     } finally {
@@ -100,14 +112,18 @@
     busy = e.id;
     problem = "";
     try {
-      const after = await post<LedgerEntry>(`ledger/${e.id}/undo`, {});
-      entries = entries.map((x) => (x.id === e.id ? after : x));
-    } catch (err) {
-      const status = (err as { status?: number }).status;
-      // A 409 is a definite refusal: nothing was written. With no answer or a 5xx, the result is unknown.
-      if (status === 409) await reload(`Iris did not start the undo: ${own(err)} Here is the list as it is now.`);
-      else if (status === undefined || status >= 500) await reload("Iris does not know if the undo started. Here is the list as it is now.");
-      else problem = own(err);
+      await inTurn(async () => {
+        try {
+          const after = await post<LedgerEntry>(`ledger/${e.id}/undo`, {});
+          entries = entries.map((x) => (x.id === e.id ? after : x));
+        } catch (err) {
+          const status = (err as { status?: number }).status;
+          // A 409 is a definite refusal: nothing was written. With no answer or a 5xx, the result is unknown.
+          if (status === 409) await reload(`Iris did not start the undo: ${own(err)} Here is the list as it is now.`);
+          else if (status === undefined || status >= 500) await reload("Iris does not know if the undo started. Here is the list as it is now.");
+          else problem = own(err);
+        }
+      });
     } finally {
       busy = "";
     }
@@ -115,7 +131,7 @@
 </script>
 
 <h1>What Iris did</h1>
-<p class="lead">Each change that Iris made to your mail, newest first. Undo puts the messages back as they were.</p>
+<p class="lead">Each change that Iris made to your mail, newest first. Undo puts back each message that did not change again since.</p>
 {#if problem}<p role="alert">{problem}</p>{/if}
 
 {#if entries.length === 0}
@@ -143,7 +159,7 @@
           {#if s}<p class="why state"><span class="dot" class:warn={e.state === "failed"}></span>{s}</p>{/if}
           <p class="meta">{who(e)} · <time datetime={e.at}>{time(e.at)}</time>{#if e.state === "undone"}{" · Undone"}{/if}</p>
           {#if e.undo_open}
-            <p class="going"><span class="dot"></span>Iris puts {e.changed === 1 ? "the message" : `${e.changed.toLocaleString("en-US")} messages`} back. This can take a minute.</p>
+            <p class="going"><span class="dot"></span>Iris undoes the change. A message that changed again, or that is gone, stays as it is. This can take a minute.</p>
           {/if}
         </div>
         {#if e.can_undo && !e.undo_open}

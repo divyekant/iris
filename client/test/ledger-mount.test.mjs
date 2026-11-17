@@ -12,7 +12,9 @@ function serve(answers) {
   globalThis.fetch = async (url, init) => {
     const path = String(url).replace(/^\/api\//, "");
     asked.push(`${init?.method ?? "GET"} ${path}`);
-    const [status, body] = answers[`${init?.method ?? "GET"} ${path}`] ?? [404, { error: "Not found." }];
+    let answer = answers[`${init?.method ?? "GET"} ${path}`] ?? [404, { error: "Not found." }];
+    if (typeof answer === "function") answer = await answer();
+    const [status, body] = answer;
     if (status === 0) throw new TypeError("Failed to fetch");
     return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   };
@@ -37,7 +39,7 @@ test("each line says what, why and who, and the undo starts once", async () => {
     const buttons = () => [...app.target.querySelectorAll("li button")];
     assert.equal(buttons().length, page.entries.filter((e) => e.can_undo && !e.undo_open).length);
     buttons()[0].click();
-    await until(() => text(app.target).includes("Iris puts 18 messages back"));
+    await until(() => text(app.target).includes("Iris undoes the change."));
     app.flushSync();
     assert.equal(buttons().length, page.entries.filter((e) => e.can_undo && !e.undo_open).length - 1);
     assert.deepEqual(net.asked, [`POST ledger/${first.id}/undo`]);
@@ -121,7 +123,7 @@ for (const [name, end] of [
       app.flushSync();
       const t = text(app.target);
       assert.match(t, /The undo of the change at/);
-      assert.doesNotMatch(t, /Iris puts 18 messages back/);
+      assert.doesNotMatch(t, /Iris undoes the change\./);
       if (name === "done") assert.match(t, /Undone/);
       else assert.match(t, /Failed\. 0 of 18 messages changed\. Gmail refused the call\./);
       const undos = [...app.target.querySelectorAll("li")].slice(0, 2).map((li) => li.querySelector("button") !== null);
@@ -136,3 +138,50 @@ for (const [name, end] of [
     }
   });
 }
+
+// The undo line promises no count: the undo skips each message that changed again or is gone
+// (specification 2, section 7.4), so `changed` is not the count that the undo puts back.
+test("the line of an open undo promises no count of messages", async () => {
+  const first = { ...fx.ledger.entries[0], changed: 18, can_undo: false, undo_open: true };
+  const app = await mount("/src/views/Ledger.svelte", { page: { next: null, entries: [first] }, wait: 60000 });
+  try {
+    const line = text(app.target.querySelector(".going"));
+    assert.match(line, /Iris undoes the change\. A message that changed again, or that is gone, stays as it is\./);
+    assert.doesNotMatch(line, /\d/);
+  } finally {
+    app.destroy();
+  }
+});
+
+// A read of the list again and Show more never overlap: if they did, the read again (started
+// first, ended last) put back the list of before, without the new page, and kept its cursor.
+test("a read of the list again does not drop a page that Show more added", async () => {
+  const gate = () => {
+    let open;
+    const p = new Promise((r) => (open = r));
+    return { wait: () => p, open };
+  };
+  const [held, again] = [gate(), gate()];
+  const entries = fx.ledger.entries.map((e, i) => (i === 0 ? { ...e, can_undo: false, undo_open: true } : e));
+  const extra = { ...fx.ledger.entries.at(-1), id: "l-9", at: "2026-11-01T10:00:00Z" };
+  const net = serve({
+    "GET ledger?limit=50&after=25": async () => (await held.wait(), [200, { entries: [extra], next: "8" }]),
+    "GET ledger?limit=200": async () => (await again.wait(), [200, { entries: [{ ...entries[0], undo_open: false }, ...entries.slice(1), extra], next: "8" }]),
+  });
+  const app = await mount("/src/views/Ledger.svelte", { page: { entries, next: "25" }, wait: 10 });
+  try {
+    app.target.querySelector("button.more").click();
+    await new Promise((r) => setTimeout(r, 50));
+    held.open();
+    await until(() => app.target.querySelectorAll("li").length === entries.length + 1);
+    again.open();
+    await until(() => net.asked.includes("GET ledger?limit=200") && !app.target.querySelector(".going"));
+    await new Promise((r) => setTimeout(r, 50));
+    app.flushSync();
+    assert.equal(app.target.querySelectorAll("li").length, entries.length + 1);
+    assert.equal(app.target.querySelector("button.more") !== null, true);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
