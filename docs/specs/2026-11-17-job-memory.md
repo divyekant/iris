@@ -68,9 +68,10 @@ BEGIN
 END;
 ```
 
-An upsert that finds a row runs the UPDATE path, not the INSERT trigger. A
-done job has no row (the first trigger deleted it), so each upsert of a
-done job is an INSERT, and the second trigger ignores it.
+SQLite runs the BEFORE INSERT trigger on each upsert, also on one that
+takes the UPDATE path. The trigger checks the state of the job, not the
+row, so it ignores each save of a done job on both paths. A done job also
+has no row: the first trigger deleted it.
 
 - One row for each job, at most. A new save replaces the row (`INSERT ...
   ON CONFLICT(job_id) DO UPDATE`).
