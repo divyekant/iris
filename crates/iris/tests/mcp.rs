@@ -106,10 +106,9 @@ impl Client {
         }
     }
 
-    /// Call a tool. Gives what the command prints, and the exit code from
-    /// the last block of an error result (0 for a result that is not an
-    /// error).
-    fn run(&mut self, name: &str, args: Value) -> (String, u8) {
+    /// Call a tool. Gives what the command prints on standard output, its
+    /// exit code, and what it prints on standard error.
+    fn run3(&mut self, name: &str, args: Value) -> (String, u8, String) {
         let r = self.ask("tools/call", json!({ "name": name, "arguments": args }));
         let result = &r["result"];
         let mut blocks: Vec<String> = result["content"]
@@ -119,25 +118,29 @@ impl Client {
             .map(|b| b["text"].as_str().unwrap().to_string())
             .collect();
         if result["isError"] != json!(true) {
-            return (blocks.concat(), 0);
+            return (blocks.concat(), 0, String::new());
         }
+        let code = blocks.pop().unwrap();
+        let code = code
+            .strip_prefix("exit code ")
+            .and_then(|c| c.parse().ok())
+            .unwrap_or_else(|| panic!("no exit code in {r}"));
         let error = blocks.pop().unwrap();
-        let code = error
-            .rsplit_once("(exit code ")
-            .and_then(|(_, c)| c.trim_end_matches(')').parse().ok())
-            .unwrap_or_else(|| panic!("no exit code in {error}"));
-        (blocks.concat(), code)
+        (blocks.concat(), code, format!("{error}\n"))
     }
 
-    /// The error text of a call that fails with `code`.
+    /// [`Client::run3`] without the error text.
+    fn run(&mut self, name: &str, args: Value) -> (String, u8) {
+        let (text, code, _) = self.run3(name, args);
+        (text, code)
+    }
+
+    /// The error line of a call that fails with `code`.
     fn error(&mut self, name: &str, args: Value, code: u8) -> String {
-        let r = self.ask("tools/call", json!({ "name": name, "arguments": args }));
-        let text = r["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap_or_default();
-        assert_eq!(r["result"]["isError"], json!(true), "{r}");
-        assert!(text.ends_with(&format!("(exit code {code})")), "{text}");
-        text.to_string()
+        let (text, got, error) = self.run3(name, args);
+        assert_eq!((text.as_str(), got), ("", code), "{error}");
+        assert!(error.starts_with("iris: "), "{error}");
+        error
     }
 
     fn ok(&mut self, name: &str, args: Value) -> Value {
@@ -212,10 +215,12 @@ fn a_client_reads_the_mail_and_submits_a_changeset() {
         json!("proposed"),
         "{doc}"
     );
-    assert_eq!(
-        c.ok("changeset", json!({ "changeset": cs }))["id"],
-        json!(cs)
-    );
+    assert_eq!(c.ok("changeset", json!({ "changeset": cs })), doc);
+    // A retry of the submit, for example after a lost answer, changes
+    // nothing: the engine refuses it, and `changeset` gives the state.
+    let (_, code, _) = c.run3("submit", json!({ "changeset": cs, "why": "Again." }));
+    assert_eq!(code, socket::code::USAGE);
+    assert_eq!(c.ok("changeset", json!({ "changeset": cs })), doc);
 
     // Hostile mail: the hard limit denies `read`, as for the command.
     let (_, row) = iris_store::parse_id(&m).unwrap();
@@ -268,14 +273,22 @@ fn each_tool_gives_the_output_and_the_code_of_its_verb() {
         (
             String::from_utf8(out.stdout).unwrap(),
             out.status.code().unwrap() as u8,
+            String::from_utf8(out.stderr).unwrap(),
         )
+    };
+    let cli2 = |args: &[&str]| {
+        let (text, code, _) = cli(args);
+        (text, code)
     };
     let (text, _) = c.run("search", json!({ "text": "label:INBOX", "limit": 1 }));
     let m: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
     let m = m["id"].as_str().unwrap().to_string();
     // No draft: no line on both paths.
     assert_eq!(c.run("drafts", json!({})), (String::new(), 0));
-    assert_eq!(cli(&["changeset", "--drafts", "--json"]), (String::new(), 0));
+    assert_eq!(
+        cli2(&["changeset", "--drafts", "--json"]),
+        (String::new(), 0)
+    );
     let draft = c.ok("archive", json!({ "ids": [m] }))["changeset"]
         .as_str()
         .unwrap()
@@ -294,8 +307,20 @@ fn each_tool_gives_the_output_and_the_code_of_its_verb() {
         .as_str()
         .unwrap()
         .to_string();
-    let (_, code) = c.run("submit", json!({ "changeset": denied, "why": "x" }));
+    // A submit that ends with code 3, on each path: the same code and the
+    // same error line, with the ID of its own changeset.
+    let other = c.ok("read", json!({ "ids": [m] }))["changeset"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (_, code, error) = c.run3("submit", json!({ "changeset": denied, "why": "x" }));
     assert_eq!(code, socket::code::DENIED);
+    let (_, cli_code, cli_error) = cli(&["submit", &other, "--why", "x", "--json"]);
+    assert_eq!(
+        (code, error),
+        (cli_code, cli_error.replace(&other, &denied))
+    );
+    c.ok("withdraw", json!({ "changeset": other }));
     let cases: Vec<(Vec<&str>, &str, Value)> = vec![
         (vec!["status", "--json"], "status", json!({})),
         (
@@ -332,7 +357,7 @@ fn each_tool_gives_the_output_and_the_code_of_its_verb() {
         ),
     ];
     for (argv, tool, args) in cases {
-        let mcp = c.run(tool, args);
+        let mcp = c.run3(tool, args);
         assert_eq!(mcp, cli(&argv), "{argv:?}");
     }
     // A withdraw and a revise change the changeset: each gives the document
@@ -340,15 +365,15 @@ fn each_tool_gives_the_output_and_the_code_of_its_verb() {
     // way on both paths.
     for (tool, cs) in [("withdraw", &draft), ("revise", &denied)] {
         let mcp = c.run(tool, json!({ "changeset": cs }));
-        assert_eq!(mcp, cli(&["changeset", cs, "--json"]), "{tool}");
-        let again = c.run(tool, json!({ "changeset": cs }));
+        assert_eq!(mcp, cli2(&["changeset", cs, "--json"]), "{tool}");
+        let again = c.run3(tool, json!({ "changeset": cs }));
         assert_ne!(again.1, 0, "{tool}");
         assert_eq!(again, cli(&[tool, cs, "--json"]), "{tool}");
     }
     // After the withdraw and the revise: only the revised changeset is a draft.
     let drafts = c.run("drafts", json!({}));
     assert_eq!(drafts, (format!("\"{denied}\"\n"), 0));
-    assert_eq!(drafts, cli(&["changeset", "--drafts", "--json"]));
+    assert_eq!(drafts, cli2(&["changeset", "--drafts", "--json"]));
     c.stop();
 }
 

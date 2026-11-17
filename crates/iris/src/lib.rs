@@ -572,7 +572,7 @@ pub fn socket_verb(
             if code != 0 {
                 failure = Some(socket::Failure {
                     code,
-                    error: format!("{id}: not each action is applied"),
+                    error: format!("{id}: not each action is applied (exit code {code})"),
                 });
             }
             changeset_text(&r, json)
@@ -581,6 +581,9 @@ pub fn socket_verb(
     };
     Ok(Printed { text, failure })
 }
+
+/// The most tool calls of `iris mcp` that run at the same time.
+pub const MCP_CALLS: usize = 4;
 
 /// `iris mcp`: serve the MCP tools on standard input and output. Each tool
 /// call takes the path of its verb: the engine socket, or a read verb on
@@ -610,9 +613,11 @@ fn mcp(dir: PathBuf) -> Result<(), String> {
             Call::Show { id } => read(open().and_then(|s| verbs::show(&s, &id, true))),
         }
     };
-    // rmcp uses timers for its time limits.
+    // rmcp uses timers for its time limits. At most MCP_CALLS calls run at
+    // the same time; the others wait in the queue of the runtime.
     tokio::runtime::Builder::new_current_thread()
         .enable_time()
+        .max_blocking_threads(MCP_CALLS)
         .build()
         .map_err(|e| format!("mcp: {e}"))?
         .block_on(iris_mcp::serve(Arc::new(run)))

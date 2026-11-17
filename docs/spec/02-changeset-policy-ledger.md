@@ -1049,8 +1049,28 @@ agent that does not work in a folder. The rules for the MCP interface:
   session mode, the MCP interface uses the session socket, so the session
   limits apply. The command has no session mode yet, so `iris mcp` has
   host mode only (issue #440).
-- The results are the same JSON documents as `--json`. A failed call gives
-  the error text and the exit code of section 8.4 (`(exit code N)`).
+- The result of a call is what the verb prints with `--json` (section
+  8.3). A verb that ends with a code that is not 0 gives an error result:
+  the printed text, then the error line of standard error (`iris: <error>`),
+  then `exit code N` (section 8.4). A tool that adds an action gives the
+  JSON of the engine answer (`{"changeset": ..., "n": ...}`), because the
+  command has no `--json` for it.
+
+Failure list of `iris mcp` (the client is input that Iris does not
+control):
+
+| Input or event | Result |
+|---|---|
+| Supported input: JSON-RPC 2.0 messages of MCP, one on each line, at most 2 MiB a line. A tool call names a tool of `tools/list` with the arguments of its schema. | The request of the verb, as above. |
+| A line that is not JSON, or a line over 2 MiB | The server drops the line, answers nothing and reads the next line. No request goes to the engine. |
+| A tool that does not exist | An error of the protocol (`invalid params`). No request goes to the engine. |
+| A missing, unknown or wrong argument | An error result with code 2. No request goes to the engine. |
+| Calls at the same time | At most 4 calls run at the same time. The others wait. Each call is one request on the socket, and the engine orders the writes. Each add with no `changeset` makes its own draft. |
+| The answer of the engine is lost (time-out, the engine stops) | Code 1, "the result is not known", as for the command. The client reads the state with `changeset` or `drafts`. |
+| The client stops or closes standard input during a call | The server stops after the running calls end (at most the answer wait of 30 seconds). The answer of a running call is lost. The client reads the state with `changeset` or `drafts`. |
+| A retry of `submit` after a lost answer | The engine refuses a changeset that is not a draft (code 2) and changes nothing. `changeset` gives the state. |
+| A retry of an add after a lost answer | Can add a second action. Before a retry, the client reads the draft with `changeset`. Nothing leaves before `submit`. |
+| All other input | An error result or an error of the protocol. No request goes to the engine. |
 
 ### 8.6 The web client and the trust boundary
 

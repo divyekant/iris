@@ -161,7 +161,7 @@ result is the JSON of `--json`.
 The tools take the same path as the command, with the same author (`local`),
 the same policy and the same review. The read tools read the store. The
 other tools need the engine: start `iris serve` first. A failed tool call
-gives the error text and the exit code of the command. MCP has no tool to
+gives the error line and the exit code of the command. MCP has no tool to
 approve, to deny or to change the policy. Only the web client does these
 steps.
 

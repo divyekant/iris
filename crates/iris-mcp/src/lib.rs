@@ -401,8 +401,9 @@ impl Outcome {
         }
     }
 
-    /// The tool result: the printed text, then the error with its exit
-    /// code. A code that is not 0 is an error result.
+    /// The tool result: the printed text, then the error line of the
+    /// command (`iris: <error>`, as on standard error), then `exit code N`.
+    /// A code that is not 0 is an error result.
     fn result(self) -> CallToolResult {
         let mut content = Vec::new();
         if !self.text.is_empty() {
@@ -411,7 +412,8 @@ impl Outcome {
         match self.failure {
             None => CallToolResult::success(content),
             Some((code, error)) => {
-                content.push(ContentBlock::text(format!("{error} (exit code {code})")));
+                content.push(ContentBlock::text(format!("iris: {error}")));
+                content.push(ContentBlock::text(format!("exit code {code}")));
                 CallToolResult::error(content)
             }
         }
