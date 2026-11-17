@@ -288,9 +288,16 @@ each running session:
 
 `iris job stop <j-id>` ends the open session of the job with `stop`. The
 supervisor closes the pipe, and the helper stops the process group: `SIGTERM`,
-then `SIGKILL` 5 seconds later. The stop time is the moment of the `SIGKILL`:
-no process of the group runs after it. The isolation (R4-05) stops a process
-that left the group.
+then `SIGKILL` 5 seconds later, then `Isolation::stop`, which ends each
+process that left the group. The grant ends at the end in the store: from
+that moment the session socket answers nothing.
+
+The stop is complete when the reap check passes (`reaped_at` set): only
+then does no process of the session run. `iris job stop` waits up to 15
+seconds for `reaped_at`. If it is set, the command prints that the session
+stopped and exits with 0. Else it prints that the session ended but its
+processes still stop, with the reason of the reap check, and exits with 1.
+The supervisor keeps the stop going in each case.
 
 After the helper exits, the engine reaps it, runs the reap check and
 removes the socket file. The workspace stays for the next session.
@@ -434,9 +441,17 @@ The session socket answers these verbs of this card:
   workspace.
 - `search`, `show` and `list`: the read verbs with the grant rules of the
   workspace spec ("The same grant limits each verb of a session"). A
-  search runs only over the messages of `job_scope_message` of the active
-  refs of the job, and adds nothing to the workspace. `show` and `list`
-  give only the items of the workspace, with the fields of the item file.
+  search runs only over granted messages: a message of
+  `job_scope_message` of an active ref of the job that is also clean mail
+  now (the predicate of the workspace build: `Mail::for_reader`, not
+  hostile, not gone, not a signal source). It adds nothing to the
+  workspace. `list` gives only the items of the workspace, with the fields
+  of the item file. `show <i-id>` gives an item of the workspace with the
+  same fields. `show <m-id>` gives a granted message (the same check as
+  search) with the fields of a message of a thread file of the workspace:
+  ID, date, the clean From, To, Cc and Subject, and the clean text. Any
+  other ID, or a message that is not granted, gets exit code 3 with "not
+  in this job", the same answer for an ID that does not exist.
   The engine reads the grant at each call, so a revoke takes effect at
   once. These verbs come in their own PR (plan, PR 6). Until it merges,
   the socket refuses them with exit code 3 and the reason.
@@ -526,6 +541,8 @@ is refused before a row is written.
 | An agent process that leaves the process group | `Isolation::stop` ends it on each end of the session; the reap check needs `ended` | Test isolation that records the calls; R4-05 test on each system |
 | A done job with a live session at the engine start | The build waits for the reap check of the session | Supervisor test |
 | A `search` in a session for a word of a message outside the grant | No result | Socket test |
+| A `search` or `show` in a session of a listed message that is now hostile, gone or a signal source | No result; `show` gives "not in this job" | Socket test |
+| `iris job stop` while a process that left the group still runs | Exit code 1 with the reason; the supervisor keeps calling `Isolation::stop` | Supervisor test with a test isolation whose `stop` fails once |
 | The helper is killed and the agent group lives | The reap check fails on rule 2; the session stays live and a `run` is refused | Supervisor test: kill the helper, keep the group |
 | The engine restarts while the group still runs | The session stays live until the group is empty; no time sets `reaped_at` | Supervisor test with a group that ignores `SIGTERM` for 8 seconds |
 | `kill` gives an error other than `ESRCH` | The check fails; the session stays live | Unit test of the check with a fake `kill` |
@@ -607,9 +624,9 @@ limit of 8 connections bound it. This is a known limit with an issue.
    does not run, or runs in another folder.
 2. A second `run` of the same job fails while the first session is open.
    Red if two sessions of one job are open.
-3. `iris job stop` ends the session, and no process of the group runs 6
-   seconds later, also when the script ignores `SIGTERM`. Red if a process
-   of the group runs.
+3. `iris job stop` ends the session and exits with 0, and when it returns
+   no process of the session runs, also when the script ignores `SIGTERM`.
+   Red if it exits with 0 while a process of the session runs.
 4. A revoke during the build makes the agent never start. Red if the script
    writes its marker file.
 5. A revoke while the agent runs ends the session with `revoke`, and stops
