@@ -7,7 +7,6 @@
 //! backstop in the store.
 
 use iris_store::Store;
-use rusqlite::params;
 
 use crate::{lock, now, Error, Result};
 
@@ -44,10 +43,12 @@ pub fn stop(store: &Store) -> Result<Stopped> {
 /// [`stop`] with the longest wait.
 pub fn stop_wait(store: &Store, wait: std::time::Duration) -> Result<Stopped> {
     let (since, sessions) = store.write(|tx| {
+        // The clock of SQLite, read after the write lock, as in `resume`.
         tx.execute(
             "UPDATE stop_switch SET
-               stopped_at = coalesce(stopped_at, ?1), changed_at = ?1 WHERE id = 1",
-            params![now()],
+               stopped_at = coalesce(stopped_at, CAST(unixepoch('subsec') * 1000 AS INTEGER)),
+               changed_at = CAST(unixepoch('subsec') * 1000 AS INTEGER) WHERE id = 1",
+            [],
         )?;
         let open: Vec<i64> = {
             let mut st = tx.prepare("SELECT id FROM job_session WHERE ended_at IS NULL")?;
@@ -128,18 +129,23 @@ fn measure(store: &Store, wait: std::time::Duration) -> Result<(usize, bool)> {
 /// time of the resume, so each held send waits a full hold again and the
 /// person can cancel it. Gives `false` if Iris was not stopped.
 pub fn resume(store: &Store) -> Result<bool> {
+    // SQLite reads the clock in the statement, after it holds the write
+    // lock: the hold counts from the resume, also after a wait for another
+    // writer (as `set_sending`, issue #420).
     Ok(store.write(|tx| {
-        let at = now();
         let n = tx.execute(
-            "UPDATE stop_switch SET stopped_at = NULL, changed_at = ?1
+            "UPDATE stop_switch SET stopped_at = NULL,
+               changed_at = CAST(unixepoch('subsec') * 1000 AS INTEGER)
              WHERE id = 1 AND stopped_at IS NOT NULL",
-            params![at],
+            [],
         )?;
         if n == 1 {
             tx.execute(
-                "UPDATE send_switch SET on_at = ?1, changed_at = ?1
+                "UPDATE send_switch SET
+                   on_at = (SELECT changed_at FROM stop_switch WHERE id = 1),
+                   changed_at = (SELECT changed_at FROM stop_switch WHERE id = 1)
                  WHERE id = 1 AND on_at IS NOT NULL",
-                params![at],
+                [],
             )?;
         }
         Ok(n == 1)

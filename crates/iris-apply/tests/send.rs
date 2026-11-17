@@ -1156,3 +1156,34 @@ fn a_stop_and_resume_during_the_release_restart_the_hold() {
     assert_eq!(b.sends(), 0);
     assert_eq!(b.state(s), "held");
 }
+
+/// A writer that holds the store delays `iris resume`. The hold then counts
+/// from the end of that wait, not from the call (as issue #420).
+#[test]
+fn resume_after_a_wait_gets_a_full_hold() {
+    let b = setup("resume-wait");
+    let (s, _) = b.new_mail(AGED);
+    iris_apply::stop(&b.store).unwrap();
+    let store = std::sync::Arc::new(Store::open(b.store.dir()).unwrap());
+    let (go, started) = std::sync::mpsc::channel();
+    let blocker = {
+        let store = store.clone();
+        std::thread::spawn(move || {
+            store
+                .write(|_| {
+                    go.send(()).unwrap();
+                    std::thread::sleep(Duration::from_millis(400));
+                    Ok(now())
+                })
+                .unwrap()
+        })
+    };
+    started.recv().unwrap();
+    assert!(iris_apply::resume(&store).unwrap());
+    let freed = blocker.join().unwrap();
+    match b.release(s) {
+        Ok(Outcome::Hold(until)) => assert!(until >= freed + HOLD_MS, "{until}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.sends(), 0);
+}
