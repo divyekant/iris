@@ -839,16 +839,22 @@ fn bank(target: &str) -> String {
 fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
     let b = store("link-upgrade");
     b.model(false, None);
-    let ok = b.add("ok", "t1", 1, &["INBOX"]);
-    let m = b.add_raw(
-        "m",
-        "t2",
-        1,
-        &bank("https://bank.example.com/pay"),
-        &["INBOX"],
-    );
-    // The same answer for both messages: the quote is only in `m`.
-    for _ in 0..2 {
+    // More messages than one page of the check, and `m` after them.
+    let pages = iris_understand::store::LINK_CHECKS as usize + 5;
+    let honest = bank("https://bank.example.com/pay");
+    let ok = b.add_raw("ok", "t1", 1, &honest, &["INBOX"]);
+    for i in 1..pages {
+        b.add_raw(
+            &format!("ok{i}"),
+            &format!("t1-{i}"),
+            1,
+            &honest,
+            &["INBOX"],
+        );
+    }
+    let m = b.add_raw("m", "t2", 1, &honest, &["INBOX"]);
+    // The same answer for each message.
+    for _ in 0..=pages {
         b.script.push(Ok((
             r#"{"items": [{"form": "feed", "status": "new", "title": "Invoice",
           "quote": "Pay the invoice by Friday.", "confidence": 0.5}], "phishing": false}"#
@@ -892,8 +898,13 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
         account,
         script,
     };
-    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(2));
-    b.run(&Limits::default()).unwrap();
+    assert_eq!(
+        b.col("SELECT count(*) FROM link_check"),
+        Some(pages as i64 + 1)
+    );
+    // One run, with a model that Iris cannot make: the check needs none.
+    let fail = |_: &ModelRow| -> Result<Box<dyn Model>, String> { Err("no model".into()) };
+    let _ = batch::run(&b.store, &fail, &Limits::default(), NOW);
     let marks: String = b
         .store
         .read(|c| {

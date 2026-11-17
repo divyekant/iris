@@ -2,10 +2,10 @@
 -- section 6.7).
 --
 -- Mail that the engine understood before this migration had no link check.
--- One row for each such message. The batch runner reads each message once
+-- One row for each such message. Each batch run first reads all rows
 -- (`iris_understand::store::recheck_links`): if the message has a deceptive
--- link, the runner understands it again, with no model call, so it goes to
--- quarantine. Then the row goes.
+-- link, the runner understands it again at once, with no model, so it goes
+-- to quarantine. Then the row goes.
 
 CREATE TABLE link_check (
   message_id INTEGER PRIMARY KEY REFERENCES message(id) ON DELETE CASCADE

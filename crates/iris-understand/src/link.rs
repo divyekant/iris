@@ -55,15 +55,28 @@ pub fn deceptive(links: &[Link], cut: bool, from_domain: &str, authenticated: bo
 
 /// The host of a link text that is a web address: `https://www.x.com/a`,
 /// `www.x.com` or `x.com`. A text with other words is not a web address. A
-/// text that starts with `http://`, `https://` or `www.` is one web address
-/// also across lines (`https://bank.com<br>/login`).
+/// text that starts with `http://`, `https://` or `www.` starts with a web
+/// address, also across lines: a next word continues it when it starts
+/// with `.`, `/`, `?`, `#` or `:`, or when the address so far ends with `.`,
+/// `-` or `/` (`https://bank.com<br>/login`, `https://bank.<br>com`). Other
+/// words after it are a description (`https://bank.com<br>View account`).
 fn shown_host(shown: &str) -> Option<String> {
     let lower = shown.trim().to_lowercase();
     let lower = if ["http://", "https://", "www."]
         .iter()
         .any(|p| lower.starts_with(p))
     {
-        lower.split_whitespace().collect::<String>()
+        let mut words = lower.split_whitespace();
+        let mut address = words.next()?.to_string();
+        for w in words {
+            let joins =
+                w.starts_with(['.', '/', '?', '#', ':']) || address.ends_with(['.', '-', '/']);
+            if !joins {
+                break;
+            }
+            address.push_str(w);
+        }
+        address
     } else if lower.contains(char::is_whitespace) {
         return None;
     } else {
@@ -290,6 +303,34 @@ mod tests {
         ] {
             assert!(!one(s, t, "x.org", false), "{s} {t}");
         }
+    }
+
+    #[test]
+    fn words_after_a_shown_address_are_not_its_host() {
+        for text in [
+            "https://bank.com\nView your account",
+            "https://bank.com/login  Sign in now",
+            "www.bank.com\n\nto your account",
+        ] {
+            assert!(!one(text, "https://bank.com/x", "x.org", false), "{text}");
+            assert!(
+                one(text, "https://evil.example.net/", "x.org", false),
+                "{text}"
+            );
+        }
+        // A host across lines is one host.
+        assert!(one(
+            "https://bank.\ncom/login",
+            "https://evil.example.net/",
+            "x.org",
+            false
+        ));
+        assert!(!one(
+            "https://bank.\ncom/login",
+            "https://bank.com/",
+            "x.org",
+            false
+        ));
     }
 
     #[test]

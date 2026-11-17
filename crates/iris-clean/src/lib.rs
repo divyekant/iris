@@ -231,18 +231,14 @@ impl PartScan {
     }
 }
 
-/// The `boundary` parameter of a lowercase `Content-Type` value: quoted or
-/// a token. `None` if there is none, or if it is empty.
+/// The `boundary` parameter of a lowercase `Content-Type` value, through
+/// the MIME parser (quotes, white space and RFC 2231 forms). `None` if
+/// there is none, or if it is empty.
 fn boundary(value: &[u8]) -> Option<Vec<u8>> {
-    let at = value.windows(9).position(|w| w == b"boundary=")? + 9;
-    let rest = &value[at..];
-    let b = match rest.strip_prefix(b"\"") {
-        Some(q) => q.split(|&c| c == b'"').next()?,
-        None => rest
-            .split(|c| *c == b';' || c.is_ascii_whitespace())
-            .next()?,
-    };
-    (!b.is_empty()).then(|| b.to_vec())
+    let field = [&b"Content-Type:"[..], value, b"\r\n\r\n"].concat();
+    let head = MessageParser::new().parse_headers(&field)?;
+    let b = head.content_type()?.attribute("boundary")?;
+    (!b.is_empty()).then(|| b.to_ascii_lowercase().into_bytes())
 }
 
 /// An href as the URL standard reads it before the parse: no control

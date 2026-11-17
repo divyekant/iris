@@ -154,6 +154,11 @@ fn html_part_in_finds_an_html_part_header_past_the_cut() {
         ),
         // The header ends past the cut, so its body is past the cut.
         (b"--b\r\nContent-Type: text/html", b"\r\n\r\n<p>"),
+        // A boundary with white space around `=`.
+        (
+            b"--b\r\nContent-Type: multipart/related; boundary = \"in\"\r\n\r\n",
+            b"--in\r\nContent-Type: text/html\r\n\r\n",
+        ),
         // A nested multipart declares its own boundary.
         (
             b"--b\r\nContent-Type: multipart/alternative; boundary=in\r\n\r\n",
@@ -339,7 +344,14 @@ fn generated_parts_give_the_html_answer_of_their_headers() {
     let mut r = Rng(0xD1B5_4A32_D192_ED03);
     let mut found = 0;
     for _ in 0..3000 {
-        let mut bytes = TOP.to_vec();
+        let tops: [&[u8]; 5] = [
+            TOP,
+            b"Content-Type: multipart/mixed; boundary=b\r\n\r\n",
+            b"Content-Type: multipart/mixed; boundary = \"b\"\r\n\r\n",
+            b"Content-Type: Multipart/Mixed;\r\n BOUNDARY=\r\n b ; x=y\r\n\r\n",
+            b"Content-Type: multipart/mixed; charset=x;\tboundary =b\r\n\r\n",
+        ];
+        let mut bytes = tops[r.below(tops.len())].to_vec();
         // For each part: its start, the start of its body, and its type.
         let mut parts = Vec::new();
         for _ in 0..r.below(5) {

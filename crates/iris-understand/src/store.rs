@@ -111,62 +111,77 @@ struct Row {
     phishing: bool,
 }
 
-/// Rows of `link_check` in one call of [`recheck_links`].
+/// Rows of `link_check` in one read of [`recheck_links`].
 pub const LINK_CHECKS: i64 = 200;
 
 /// The link check of mail that the engine understood before the mark `link`
-/// (migration 18). For each of at most [`LINK_CHECKS`] rows of `link_check`:
-/// if the message has a deceptive link, it is not understood any more, so
-/// the next run gives it the mark and no model call. Then the row goes.
-/// Returns the count of messages to understand again.
-pub fn recheck_links(store: &Store) -> Result<u64> {
-    let ids: Vec<i64> = store.read(|c| {
-        let mut st = c.prepare("SELECT message_id FROM link_check ORDER BY message_id LIMIT ?1")?;
-        let ids = st
-            .query_map([LINK_CHECKS], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(ids)
-    })?;
-    let mut again = 0;
-    for id in ids {
-        let row = read_row(store, id).ok();
-        let path = row
-            .as_ref()
-            .filter(|r| !r.gone)
-            .and_then(|r| r.sha.as_deref())
-            .and_then(|s| store.content_path(s));
-        let mark = match (&row, path) {
-            (Some(row), Some(path)) => {
-                let sent = row.labels.iter().any(|l| l == "SENT" || l == "DRAFT");
-                // A file that Iris cannot read gets no mark here: the sync
-                // check fetches it again, and then understanding runs again.
-                !sent
-                    && read_raw(&path).is_ok_and(|(raw, raw_cut, html_after)| {
-                        let c = iris_clean::clean_cut(&raw, raw_cut);
-                        let head = crate::Head::parse(&raw);
-                        crate::link_mark(&head, &c.links, c.links_cut || html_after)
-                    })
-            }
-            _ => false,
-        };
-        let sha = row.and_then(|r| r.sha);
-        again += store.write(|tx| {
-            // Only for the content that this check read: a sync that changed
-            // the message makes it understood again anyway.
-            let n = if mark {
-                tx.execute(
-                    "UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL
-                     WHERE id = ?1 AND content_sha256 IS ?2 AND understood_at IS NOT NULL",
-                    params![id, sha],
-                )?
-            } else {
-                0
-            };
-            tx.execute("DELETE FROM link_check WHERE message_id = ?1", [id])?;
-            Ok(n as u64)
+/// (migration 18). It reads each row of `link_check`, in pages of
+/// [`LINK_CHECKS`]. A message with a deceptive link is understood again at
+/// once: the mark makes it hostile, so the run needs no model, and its
+/// items go. Then the row goes. Returns the count of messages that got the
+/// mark.
+pub fn recheck_links(store: &Store, now_ms: i64) -> Result<u64> {
+    let mut marked = 0;
+    let mut after = 0;
+    loop {
+        let ids: Vec<i64> = store.read(|c| {
+            let mut st = c.prepare(
+                "SELECT message_id FROM link_check WHERE message_id > ?1
+                 ORDER BY message_id LIMIT ?2",
+            )?;
+            let ids = st
+                .query_map([after, LINK_CHECKS], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(ids)
         })?;
+        let Some(&last) = ids.last() else {
+            return Ok(marked);
+        };
+        after = last;
+        for id in ids {
+            if link_mark_of(store, id) {
+                // Hostile mail never reaches the model (section 6.7), so no
+                // model is necessary.
+                if understand(store, id, &crate::budget::NoModel, now_ms).is_ok() {
+                    marked += 1;
+                } else {
+                    // The normal path understands it again, with the mark.
+                    store.write(|tx| {
+                        tx.execute(
+                            "UPDATE message SET understood_at = NULL WHERE id = ?1",
+                            [id],
+                        )?;
+                        Ok(())
+                    })?;
+                }
+            }
+            store.write(|tx| {
+                tx.execute("DELETE FROM link_check WHERE message_id = ?1", [id])?;
+                Ok(())
+            })?;
+        }
     }
-    Ok(again)
+}
+
+/// True when the received message `id` that is not gone has a deceptive
+/// link. A file that Iris cannot read gets no mark here: the sync check
+/// fetches it again, and then understanding runs again.
+fn link_mark_of(store: &Store, id: i64) -> bool {
+    let Ok(row) = read_row(store, id) else {
+        return false;
+    };
+    let path = row.sha.as_deref().and_then(|s| store.content_path(s));
+    let own = row.labels.iter().any(|l| l == "SENT" || l == "DRAFT");
+    match path {
+        Some(path) if !row.gone && !own => {
+            read_raw(&path).is_ok_and(|(raw, raw_cut, html_after)| {
+                let c = iris_clean::clean_cut(&raw, raw_cut);
+                let head = crate::Head::parse(&raw);
+                crate::link_mark(&head, &c.links, c.links_cut || html_after)
+            })
+        }
+        _ => false,
+    }
 }
 
 /// Run understanding on message `message` (its row ID): steps 1 to 8. Run
