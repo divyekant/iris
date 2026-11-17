@@ -159,9 +159,10 @@ The granted messages of a job:
   workspace only when the person or the engine for the person adds it,
   again (`add_scope` of the thread adds the messages of the thread now to
   its list) or as an item. The wake of a
-  waiting job (R5-04) shows the person a new message of a scope thread, so
-  the person can add it. Until R5-04, a reply stays out of the workspace
-  (known limit, with a GitHub issue).
+  waiting job (R5-04, `docs/specs/2026-11-17-wait.md`) adds the reply on
+  the wait thread of the job, after understanding and the hostile gate.
+  Each other new message stays out until the person adds it (known limit,
+  issue #354).
 - An item of the scope that is not `gone` grants each clean message of its
   list: the source messages (`item_source`) of the item at the add, in
   `job_scope_message`. A source that understanding adds to the item later
