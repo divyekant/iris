@@ -2,7 +2,7 @@
 
 - Date: 2026-11-17
 - Card: R6-03 (part A)
-- Status: Draft
+- Status: Agreed
 
 ## Problem
 
@@ -78,7 +78,7 @@ All reads use UIDs, never message sequence numbers.
 |---|---|---|
 | `folders` | `LIST "" "*"` | name (as the server sends it), delimiter, special use (`\Sent`, `\Trash`, `\Drafts`, `\Junk`, `\Archive`, `\All`, `\Flagged`), and if it can be selected |
 | `examine(folder)` | `EXAMINE "<folder>"`, with `(CONDSTORE)` when the server has it | `UIDVALIDITY`, `UIDNEXT`, the count, and `HIGHESTMODSEQ` or none |
-| `changes(since, each)` | `UID FETCH 1:* (UID FLAGS INTERNALDATE RFC822.SIZE) (CHANGEDSINCE <since>)`, plus `VANISHED` when `QRESYNC` is on | each changed message (an entry) and each removed UID range |
+| `changes(since, each)` | `UID FETCH 1:4294967295 (UID FLAGS INTERNALDATE RFC822.SIZE) (CHANGEDSINCE <since>)`, plus `VANISHED` when `QRESYNC` is on | each changed message (an entry) and each removed UID range |
 | `list(from, to, each)` | `UID FETCH <from>:<to> (UID FLAGS INTERNALDATE RFC822.SIZE)` | each message in the range (an entry) |
 | `fetch_raw(uid, sink)` | `UID FETCH <uid> (UID BODY.PEEK[])` | the RFC 5322 bytes, streamed to the sink |
 
@@ -89,6 +89,11 @@ All reads use UIDs, never message sequence numbers.
   from its `Message-ID`, `In-Reply-To` and `References` headers in the raw
   bytes, as spec 1 does for a message with no provider thread. It can use
   `THREADID` (RFC 8474) later, where the server has it.
+- `changes` asks for the UIDs `1:4294967295`, not `1:*`. `*` is the
+  largest UID now, so a removed UID above it would get no `VANISHED`.
+- No error holds server text. A server can echo the password or the token
+  in any answer, also after the sign-in. `Error::Refused` holds only the
+  first word of the command.
 - `EXAMINE` opens a folder read-only. The client never uses `SELECT`, so
   no read sets `\Seen` and no read changes the mailbox. `BODY.PEEK[]`
   does not set `\Seen` either.
@@ -199,7 +204,7 @@ parses. All other input gives an error, and the caller ends the session.
 | A message below `<from>` in `list` | dropped | `list_range` |
 | A server with no TLS | handshake error, no plain fallback | `no_plain` |
 | A folder name with CR, LF, NUL or 8-bit bytes | `Error::Name`, nothing sent | `bad_name` |
-| A server without `IMAP4rev1` | `Error::Missing` | `rev2_only` |
+| A server without `IMAP4rev1` | `Error::Protocol` (the parser refuses its `CAPABILITY` list) | `rev2_only` |
 | A status response with a byte above 127 just after `]` (this input makes `imap-proto` 0.17 panic) | `Error::Protocol`, checked before the parser | fuzz test |
 | A quoted folder name with escapes | the escapes removed | `folders_and_examine` |
 
