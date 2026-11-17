@@ -588,6 +588,39 @@ fn a_stop_before_the_register_stops_the_launch() {
     assert!(row.reaped_ms.is_some(), "{row:?}");
 }
 
+/// Issue #517: a stop whose end write fails still stops the launch. The
+/// gate reads the stop mark, so no agent starts.
+fn a_stop_with_a_failed_end_write_starts_no_agent() {
+    let f = fixture("stopnoend", "sleep 30");
+    let s = sessions(&f);
+    let no_end = "CREATE TRIGGER no_end BEFORE UPDATE OF ended_at ON job_session
+                  BEGIN SELECT RAISE(ABORT, 'no end'); END;";
+    f.store
+        .write(|tx| {
+            tx.execute_batch(no_end)?;
+            Ok(())
+        })
+        .unwrap();
+    let stopped = Arc::new(Mutex::new(None));
+    let (store, job, me, seen) = (f.store.clone(), f.job, s.clone(), stopped.clone());
+    s.set_after(Arc::new(move |step, _| match step {
+        // The stop comes during the launch, and its end write fails.
+        Step::Bound => *seen.lock().unwrap() = Some(me.stop(job).is_err()),
+        Step::HelperStarted => store
+            .write(|tx| {
+                tx.execute_batch("DROP TRIGGER no_end;")?;
+                Ok(())
+            })
+            .unwrap(),
+        _ => {}
+    }));
+    let id = s.run(f.job, "script").unwrap();
+    let row = until(&s, &f, id, |r| r.reaped_ms.is_some() || r.started_ms.is_some());
+    assert_eq!(*stopped.lock().unwrap(), Some(true), "the end write did not fail");
+    assert_eq!(row.started_ms, None, "the agent started after a stop: {row:?}");
+    assert_eq!(row.end, Some(EndReason::Stop), "{row:?}");
+}
+
 fn a_job_done_during_the_launch_gets_its_workspace_again() {
     let f = fixture("donelaunch", "sleep 30");
     let s = sessions(&f);
@@ -778,6 +811,10 @@ fn main() {
         (
             "a_stop_before_the_register_stops_the_launch",
             a_stop_before_the_register_stops_the_launch,
+        ),
+        (
+            "a_stop_with_a_failed_end_write_starts_no_agent",
+            a_stop_with_a_failed_end_write_starts_no_agent,
         ),
         (
             "a_job_done_during_the_launch_gets_its_workspace_again",
