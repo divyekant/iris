@@ -516,8 +516,19 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
             Ok(Done::Value(json!({ "messages": found })))
         }
         Some("list") if session => {
-            only(&[])?;
-            let items = grant_read(store, me, |c, g| g.list(c))?;
+            only(&["form"])?;
+            // A form of specification 1. A workspace holds only commitments
+            // and records, so each other form gives an empty list.
+            const FORMS: [&str; 5] = ["commitment", "conversation", "record", "feed", "signal"];
+            let form = text(args, "form")?;
+            if let Some(f) = form.filter(|f| !FORMS.contains(f)) {
+                return Err(usage(format!(
+                    "{f} is not a form: give one of {}",
+                    FORMS.join(", ")
+                )));
+            }
+            let mut items = grant_read(store, me, |c, g| g.list(c))?;
+            items.retain(|i| form.is_none_or(|f| i["form"] == f));
             Ok(Done::Value(json!({ "items": items })))
         }
         Some("show") if session && !args.contains_key("changeset") => {
@@ -576,27 +587,21 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
 
 /// `status` of a session: the job, and the counts of its grant now.
 fn status(store: &Store, me: &Author) -> Result<Value, Failure> {
-    let job = me
-        .job
-        .as_deref()
-        .and_then(iris_job::parse_job_id)
-        .ok_or_else(|| Failure::new(code::ERROR, "the session has no job"))?;
-    let read = store.read(|c| {
-        let j = iris_job::get_in(c, job).map_err(|e| iris_store::Error::Query(e.to_string()))?;
-        let g = iris_workspace::grant_in(c, job)
-            .map_err(|e| iris_store::Error::Query(e.to_string()))?;
-        Ok((j, g))
-    });
-    let (j, g) = read.map_err(|e| Failure::new(code::ERROR, e.to_string()))?;
+    let job = me.job.as_deref().and_then(iris_job::parse_job_id);
+    // The job and the counts of its grant from one snapshot.
+    let (j, threads, messages, items) = grant_read(store, me, |c, g| {
+        let j = iris_job::get_in(c, job.unwrap_or_default())?;
+        Ok((j, g.threads(), g.messages.len(), g.items.len()))
+    })?;
     Ok(json!({
         "job": iris_job::format_job_id(j.id),
         "session": me.session,
         "goal": j.goal,
         "state": j.state.as_str(),
         "due": j.due_ms.map(iris_api::rfc3339),
-        "threads": g.threads(),
-        "messages": g.messages.len(),
-        "items": g.items.len(),
+        "threads": threads,
+        "messages": messages,
+        "items": items,
     }))
 }
 
@@ -612,11 +617,17 @@ fn grant_read<T>(
         .as_deref()
         .and_then(iris_job::parse_job_id)
         .ok_or_else(|| Failure::new(code::ERROR, "the session has no job"))?;
+    let query = |e: iris_workspace::Error| iris_store::Error::Query(e.to_string());
     store
         .read(|c| {
-            let g = iris_workspace::grant_in(c, job)
-                .map_err(|e| iris_store::Error::Query(e.to_string()))?;
-            f(c, &g).map_err(|e| iris_store::Error::Query(e.to_string()))
+            // One read transaction: the grant and the read see one snapshot
+            // of the store, so a write between them (a message that becomes
+            // hostile, a revoke) cannot show what the grant left out.
+            let tx = c.unchecked_transaction()?;
+            let g = iris_workspace::grant_in(&tx, job).map_err(query)?;
+            let out = f(&tx, &g).map_err(query)?;
+            tx.finish()?;
+            Ok(out)
         })
         .map_err(|e| Failure::new(code::ERROR, e.to_string()))
 }

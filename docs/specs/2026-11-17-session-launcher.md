@@ -736,7 +736,7 @@ exit code 3.
   nothing. The session verbs are `status`, the read verbs `search`,
   `show` and `list` (R4-04f), and the write verbs `add`, `submit`, `show`
   of a changeset, `withdraw` and `revise` (R4-03). So
-  `iris changeset --drafts` gets code 3. `iris list` is a verb of a
+  `iris changeset --drafts` gets code 3. `iris list [<form>]` is a verb of a
   session only: in host mode it gets exit code 2.
 
 ## Options not chosen

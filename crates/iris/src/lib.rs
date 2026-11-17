@@ -86,9 +86,11 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// In a job workspace: list the items of the job. A verb of a session
-    /// only.
+    /// In a job workspace: list the items of the job, of one form if given.
+    /// A verb of a session only.
     List {
+        /// commitment, conversation, record, feed or signal.
+        form: Option<String>,
         /// Print one JSON line for each item.
         #[arg(long)]
         json: bool,
@@ -679,7 +681,7 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
             *json,
         )),
         Command::Show { id, json } => Some(("show", serde_json::json!({ "id": id }), *json)),
-        Command::List { json } => Some(("list", serde_json::json!({}), *json)),
+        Command::List { form, json } => Some(("list", serde_json::json!({ "form": form }), *json)),
         _ => None,
     };
     if let Some((verb, args, json)) = read {
@@ -736,9 +738,14 @@ fn session_read_text(r: &serde_json::Value, json: bool) -> String {
                 });
             }
         }
-        // An item is always JSON, as in host mode.
+        // One JSON document of the object. An item is always JSON, as in
+        // host mode.
         (None, _) if json || r["item"].is_object() => {
-            let v = if json { r } else { &r["item"] };
+            let v = if r["item"].is_object() {
+                &r["item"]
+            } else {
+                &r["message"]
+            };
             let _ = writeln!(t, "{}", serde_json::to_string_pretty(v).unwrap_or_default());
         }
         (None, _) => {
