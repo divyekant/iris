@@ -1175,7 +1175,8 @@ fn ready_draft() -> String {
 
 /// The document of an item row (id, form, status, doc, and the column
 /// [`MATTER`] by name). The row is the true copy of the ID, the status and
-/// the matter, so they replace the values of the document. Each output of
+/// the matter, so they replace the values of the document. A stored `ready`
+/// is removed: only [`read_section`] sets it, from the store. Each output of
 /// an item (the API, the read verbs, the export) uses this function.
 pub(crate) fn doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     doc_at(r, 0)
@@ -1194,6 +1195,8 @@ pub(crate) fn doc_at(r: &rusqlite::Row, at: usize) -> rusqlite::Result<Value> {
             map.insert("id".into(), id.into());
         }
         map.insert("status".into(), Value::String(r.get(at + 2)?));
+        // The engine computes `ready` on each brief read: a stored value is never shown.
+        map.remove("ready");
         let matter: Option<i64> = r.get("matter")?;
         map.insert(
             "matter".into(),

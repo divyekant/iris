@@ -1611,6 +1611,18 @@ async fn an_item_shows_a_ready_draft_of_its_thread_until_the_draft_is_stale() {
     wrong["ready"] = json!(["dinner"]);
     assert!(!schema.is_valid(&wrong), "{wrong}");
 
+    // A `ready` value in the stored document is never shown: the engine
+    // computes the field on each read. Both items store a wrong value.
+    exec(
+        &store,
+        "UPDATE item SET doc = json_set(doc, '$.ready', json('[\"draft\"]')) WHERE ?1",
+        [1],
+    );
+    let (_, brief) = get(&store, "/api/brief").await;
+    assert_eq!(ready_marks(&brief["you_owe"]), want);
+    let (_, one) = get(&store, &format!("/api/items/c-{without}")).await;
+    assert_eq!(one["ready"], Value::Null, "{one}");
+
     // Hostile mail in the thread: the draft is not ready.
     exec(
         &store,
