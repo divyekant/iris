@@ -168,25 +168,29 @@ const rules: Rule[] = [
     when: { sender: "@bank.example" },
     line: 35,
   }),
+  // Notify rules (R5-08): the rules of the notices below.
+  rule({ id: 7, name: "Mail from the clinic", effect: "notify", when: { sender: "@clinic.example" }, added: "2026-11-16", line: 44 }),
+  rule({ id: 8, name: "Replies from Dana", effect: "notify", when: { sender: "dana@harbor.example" }, added: "2026-11-16", line: 51 }),
+  rule({ id: 9, name: "Bank security codes", effect: "notify", when: { sender: "@bank.example", form: "signal" }, added: "2026-11-16", line: 58 }),
 ];
 
 export const policy: Policy = {
   mode: "observe",
   version: 3,
-  next_id: 6,
+  next_id: 10,
   rules,
   proposals: [
     {
       id: 1,
       approvals: 14,
       created_at: 1794787200,
-      rule: rule({ id: 6, name: "Archive mail from deals@acme.example", effect: "allow", verbs: ["archive"], when: { sender: "deals@acme.example" }, by: "proposal", added: "2026-11-16", line: 0 }),
+      rule: rule({ id: 10, name: "Archive mail from deals@acme.example", effect: "allow", verbs: ["archive"], when: { sender: "deals@acme.example" }, by: "proposal", added: "2026-11-16", line: 0 }),
     },
     {
       id: 2,
       approvals: 11,
       created_at: 1794790800,
-      rule: rule({ id: 6, name: "Mark mail from services as read", effect: "allow", verbs: ["read"], when: { sender_kind: "service" }, by: "proposal", added: "2026-11-16", line: 0 }),
+      rule: rule({ id: 10, name: "Mark mail from services as read", effect: "allow", verbs: ["read"], when: { sender_kind: "service" }, by: "proposal", added: "2026-11-16", line: 0 }),
     },
   ],
   error: null,

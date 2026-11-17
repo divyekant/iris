@@ -97,3 +97,17 @@ test("with the props of App, the notices load from the engine, and a later poll 
     polled.destroy();
   }
 });
+
+test("each fixture notice has its notify rule, and the Rules screen shows the Notify group", async () => {
+  const notify = fx.policy.rules.filter((r) => r.effect === "notify");
+  for (const n of fx.notices) {
+    assert.ok(notify.some((r) => r.id === n.rule && r.name === n.rule_name), n.id);
+  }
+  assert.ok(fx.policy.next_id > Math.max(...fx.policy.rules.map((r) => r.id)));
+  const view = await mount("/src/views/Rules.svelte", { policy: { ...fx.policy, file: { state: "same" } }, every: 0 });
+  try {
+    assert.match(text(view.target), /Notify.*Mail from the clinic/);
+  } finally {
+    view.destroy();
+  }
+});
