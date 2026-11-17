@@ -978,6 +978,13 @@ name = "iris-service"
 version = "0.0.0"
 
 [[package]]
+name = "iris-session"
+version = "0.0.0"
+dependencies = [
+ "httparse",
+]
+
+[[package]]
 name = "iris-spec"
 version = "0.0.0"
 dependencies = [
