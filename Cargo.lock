@@ -702,6 +702,7 @@ dependencies = [
  "iris-compose",
  "iris-fakegmail",
  "iris-gmail",
+ "iris-job",
  "iris-matters",
  "iris-model",
  "iris-policy",
@@ -787,10 +788,12 @@ name = "iris-changeset"
 version = "0.0.0"
 dependencies = [
  "iris-compose",
+ "iris-job",
  "iris-spec",
  "iris-store",
  "iris-talk",
  "iris-understand",
+ "iris-workspace",
  "rusqlite",
  "serde_json",
  "sha2",
