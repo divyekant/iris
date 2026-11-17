@@ -1,6 +1,6 @@
 <script lang="ts">
   import { access } from "./access.svelte.ts";
-  import { followSignIn, get, loadBrief, loadOutbox, own, type Changeset, type GatePage, type HandledPage, type JobDetail, type JobPage, type MatterList, type MatterView, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
+  import { followSignIn, get, loadBrief, loadOutbox, own, type Changeset, type GatePage, type HandledPage, type JobDetail, type JobPage, type MatterList, type MatterView, type Item as ItemData, type Message as MessageData, type Page, type Policy, type ReplyStart, type Status } from "./api";
   import { home } from "./format";
   import type { Measures as MeasuresData } from "./measures";
   import { NAV, parse, SECTIONS, type Route } from "./route";
@@ -17,6 +17,7 @@
   import Review from "./views/Review.svelte";
   import Handled from "./views/Handled.svelte";
   import Outbox from "./views/Outbox.svelte";
+  import Write from "./views/Write.svelte";
   import Gate from "./views/Gate.svelte";
   import Jobs from "./views/Jobs.svelte";
   import Job from "./views/Job.svelte";
@@ -76,7 +77,7 @@
   {#if access.none && !["home", "setup", "brief"].includes(route.view)}
     <p class="problem">Iris has no account yet. <a href="#/setup">Set up Iris</a> to copy your mail.</p>
   {/if}
-  {#if route.view === "item" || route.view === "start" || route.view === "mail" || route.view === "section" || route.view === "bundle" || route.view === "handled" || route.view === "gate" || route.view === "job" || route.view === "matter"}
+  {#if route.view === "item" || route.view === "start" || route.view === "mail" || route.view === "section" || route.view === "bundle" || route.view === "handled" || route.view === "gate" || route.view === "job" || route.view === "matter" || (route.view === "write" && route.thread)}
     <button class="back" type="button" onclick={back}>Back</button>
   {/if}
   {#key hash}
@@ -108,6 +109,13 @@
       {#await loadOutbox() then first}
         <Outbox {first} />
       {:catch error}{@render failed(error)}{/await}
+    {:else if route.view === "write"}
+      {#if route.thread}
+        {@const thread = route.thread}
+        {#await get<ReplyStart>(`threads/${encodeURIComponent(thread)}/reply`) then reply}<Write start={{ thread, reply }} />{:catch error}{@render failed(error)}{/await}
+      {:else}
+        {#await get<Status>("status") then status}<Write start={{ accounts: status.accounts }} />{:catch error}{@render failed(error)}{/await}
+      {/if}
     {:else if route.view === "gate"}
       {@const path = route.declined ? "gate/declined?limit=50" : "gate?limit=50"}
       {#await get<GatePage>(path) then page}

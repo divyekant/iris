@@ -10,7 +10,8 @@ export type Route =
   | { view: "section"; key: SectionKey }
   | { view: "bundle"; rule: number }
   | { view: "gate"; declined: boolean }
-  | { view: "item" | "mail" | "job" | "matter" | "start"; id: string };
+  | { view: "item" | "mail" | "job" | "matter" | "start"; id: string }
+  | { view: "write"; thread: string | null };
 
 const LISTS = { commitments: "commitment", conversations: "conversation", feed: "feed", signals: "signal" } as const;
 
@@ -25,6 +26,9 @@ export const SECTIONS: Record<SectionKey, string> = {
 
 /** The canonical job ID (docs/spec/schema/job.schema.json). Up to 18 digits keeps it inside an i64. */
 export const JOB_ID = /^j-[1-9]\d{0,17}$/;
+
+/** The ID of a mail thread (`t-N`). */
+export const THREAD_ID = /^t-[1-9]\d{0,17}$/;
 
 /** The canonical matter ID (docs/spec/schema/matter.schema.json). */
 export const MATTER_ID = /^g-[1-9]\d{0,17}$/;
@@ -56,6 +60,11 @@ export function parse(hash: string): Route {
     if (parts.length === 1 || (parts.length === 2 && parts[1] === "")) return { view: list };
     return parts.length === 2 && ID.test(id) ? { view: one, id } : { view: "home" };
   }
+  // #/write: a new mail. #/write/t-4: a reply in the thread t-4 (card R3-04).
+  if (name === "write") {
+    if (parts.length === 1 || (parts.length === 2 && parts[1] === "")) return { view: "write", thread: null };
+    return parts.length === 2 && THREAD_ID.test(id) ? { view: "write", thread: id } : { view: "home" };
+  }
   if (name === "setup" || name === "brief" || name === "ask" || name === "measures" || name === "rules" || name === "review" || name === "handled" || name === "outbox") return { view: name };
   return { view: "home" };
 }
@@ -67,10 +76,12 @@ export const href = {
   bundle: (rule: number) => `#/brief/bundle/${rule}`,
   job: (id: string) => `#/jobs/${encodeURIComponent(id)}`,
   matter: (id: string) => `#/matters/${encodeURIComponent(id)}`,
+  reply: (thread: string) => `#/write/${encodeURIComponent(thread)}`,
 };
 
 export const NAV = [
   ["#/brief", "Brief"],
+  ["#/write", "Write"],
   ["#/matters", "Matters"],
   ["#/ask", "Ask"],
   ["#/review", "Review"],

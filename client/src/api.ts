@@ -286,6 +286,23 @@ export async function loadOutbox(): Promise<Outbox> {
   return { ...first, sends, next: null };
 }
 
+/** GET /api/threads/{t}/reply: the start values of a reply (write spec, section 5). */
+export type ReplyStart = {
+  account: string;
+  parent: { id: string; from: Address; date: string | null; text: string | null };
+  to: string[];
+  cc: string[];
+  subject: string;
+};
+
+/** GET /api/write/{cs}: the state of one press of Send (write spec, section 4). */
+export type WriteState =
+  | { state: "saving" }
+  | { state: "waiting"; draft: string; sending: boolean; leaves_at: string | null }
+  | { state: "review"; draft: string; reason: string | null }
+  | { state: "sent"; draft: string }
+  | { state: "stopped"; reason: string; draft: string | null };
+
 /** A message summary, or only the ID of a message that is not in the mirror any more. */
 export type Target = (Summary & { gone?: false }) | { id: string; gone: true };
 
