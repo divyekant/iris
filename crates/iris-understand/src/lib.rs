@@ -198,13 +198,13 @@ pub fn analyze(raw: &[u8], cx: &Context) -> Analysis {
 /// The DMARC result of the message. It counts only with its `header.from`
 /// domain, and only for the domain of the From address.
 fn dmarc_of(head: &Head) -> Option<&str> {
-    let from_domain = head::domain(head.from_addr.as_deref().unwrap_or(""));
+    let from_domain = head::ascii_domain(head::domain(head.from_addr.as_deref().unwrap_or("")));
     head.auth
         .as_ref()
         .filter(|a| {
             a.dmarc_from
                 .as_deref()
-                .is_some_and(|d| d.eq_ignore_ascii_case(from_domain))
+                .is_some_and(|d| head::ascii_domain(d) == from_domain)
         })
         .and_then(|a| a.dmarc.as_deref())
 }

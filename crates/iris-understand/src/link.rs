@@ -31,10 +31,7 @@ pub fn deceptive(links: &[Link], cut: bool, from_domain: &str, authenticated: bo
         return true;
     }
     // One form for each host: punycode, as for the shown and target hosts.
-    let from = match Host::parse(from_domain) {
-        Ok(Host::Domain(d)) => d,
-        _ => from_domain.to_lowercase(),
-    };
+    let from = crate::head::ascii_domain(from_domain);
     let owner = registrable(&from);
     for Link { text, href } in links {
         let Some(shown) = shown_host(text) else {

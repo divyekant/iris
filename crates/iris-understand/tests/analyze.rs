@@ -347,3 +347,34 @@ fn the_link_check_reads_the_text_that_a_person_sees() {
         assert!(run(&html_body(body), &[], &[], &[]).is_empty(), "{body}");
     }
 }
+
+#[test]
+fn each_name_of_one_domain_is_the_same_domain() {
+    // A header can name a domain in Unicode (`münchen.de`) and an
+    // authentication result in punycode (`xn--mnchen-3ya.de`), or the
+    // other way. Each check compares one form.
+    let forms = [
+        ("münchen.de", "xn--mnchen-3ya.de"),
+        ("xn--mnchen-3ya.de", "münchen.de"),
+        ("MÜNCHEN.de", "xn--mnchen-3ya.de"),
+    ];
+    for (from, auth) in forms {
+        let head = format!(
+            "Authentication-Results: mx.google.com; dkim=pass header.d={auth}; dmarc=pass header.from={auth}\n"
+        );
+        // The owner of the shown domain links through a click counter.
+        let own = format!(
+            "{head}From: Shop <alerts@{from}>\nSubject: Your account\nContent-Type: text/html; charset=utf-8\n\n\
+             <p><a href=\"https://click.mailer.example.org/r/1\">https://www.münchen.de/konto</a></p>\n"
+        );
+        assert!(run(&own, &[], &[], &[]).is_empty(), "{from} {auth}");
+        // A known name from another address that passes DMARC and DKIM for
+        // its own domain is not a spoof.
+        let name = format!("{head}From: Ana Lee <ana@{from}>\nSubject: Hi\n\nCall me.\n");
+        assert!(run(&name, &[], ANA, &[]).is_empty(), "{from} {auth}");
+    }
+    // A DMARC fail for the punycode form is a fail for the Unicode form.
+    let fail = "Authentication-Results: mx.google.com; dmarc=fail header.from=xn--mnchen-3ya.de\n\
+                From: Shop <alerts@münchen.de>\nSubject: Hi\n\nHi.\n";
+    assert_eq!(run(fail, &[], &[], &[]), vec![Mark::Dmarc]);
+}
