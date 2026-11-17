@@ -122,9 +122,17 @@ and arguments of the adapter:
    blocked on file descriptor 4, so it cannot exit by itself. A process ID
    stays with its process until the reap, so if the init still runs after
    the reads, the values are the ones of the init. Else `spawn` fails.
-4. Write the record `<data dir>/sessions/se-<id>.sandbox` (mode `0600`,
-   `create_new`): the boot ID (`/proc/sys/kernel/random/boot_id`), the
-   init process ID, its start time and the namespace inode.
+4. Publish the record `<data dir>/sessions/se-<id>.sandbox`: the boot ID
+   (`/proc/sys/kernel/random/boot_id`), the init process ID, its start
+   time and the namespace inode. Write the line to the temporary file
+   `se-<id>.sandbox.tmp` (mode `0600`, truncated: only the helper of this
+   session writes it), `fsync` it, then link it to the record name
+   (`link`, which fails if the record exists), `fsync` the folder and
+   remove the temporary file. So a record is complete or absent, also
+   after a crash. A crash before the link leaves no record: the init waits
+   on file descriptor 4 and ends with the helper (`--die-with-parent`), so
+   the program of the adapter did not run, and `ended` is true. A crash
+   can leave the temporary file: it holds four numbers and no secret.
 5. If the session has an egress port: make the listener of the session in
    its network namespace (see [Egress on Linux](#egress-on-linux)).
 6. Write one byte to file descriptor 4. `bwrap` runs the program of the

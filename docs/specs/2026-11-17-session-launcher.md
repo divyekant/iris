@@ -554,13 +554,23 @@ no network stops them. The engine gives each session one narrow path out:
   workers live in the Iris process at one time, over all sessions, also
   after a stop; a `CONNECT` past this bound gets `403` with `too_many`.
 - When the session ends (`ended_at` is set: a stop, a revoke, the exit of
-  the agent or a time limit), the engine closes the proxy at once
-  (`Proxy::close`). The close ends each open tunnel and each resolve in
-  progress, and from then on the proxy answers each new connection with
-  a close and the log line `ended reason=stopped`. So no byte goes to the
-  model host after the grant ended. The close keeps the port bound, and
-  the engine stops the proxy (`Proxy::stop`, which frees the port) only
-  when the reap check of the session passes.
+  the agent or a time limit), the supervisor closes the proxy on its next
+  turn (`Proxy::close`). The supervisor turns each second, and a
+  `iris job stop` or a revoke through the engine also wakes it. The close
+  ends each open tunnel and each resolve in progress, and from then on
+  the proxy answers each new connection with a close and the log line
+  `ended reason=stopped`. The close keeps the port bound, and the engine
+  stops the proxy (`Proxy::stop`, which frees the port) only when the
+  reap check of the session passes.
+- Known limit (issue): an end that a store trigger or another process
+  writes is not in step with the proxy. Between the commit of `ended_at`
+  and the next supervisor turn (at most about 1 second), an open tunnel
+  can still send bytes to the model host. The person chose that host for
+  the job, and it had the scope of the session during the whole grant.
+  The end of a grant stops the verbs of the session at once (each verb
+  reads `ended_at` in its transaction). It does not call back what the
+  agent sent before. A gate in each tunnel that reads the store for each
+  byte costs more than this window is worth.
   The relay of the Linux sandbox (`docs/specs/2026-11-17-session-sandbox.md`)
   connects to the port while the helper lives, and the reap check
   confirms that the helper ended. So the port number cannot go to the
