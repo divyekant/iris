@@ -1722,24 +1722,31 @@ fn stop_state(at: Option<i64>) -> String {
 
 /// The answer of `iris stop`. The stop is complete only with no live
 /// session and no Gmail call in progress (docs/specs/2026-11-17-stop.md).
+/// Only a complete stop says that no mail leaves.
 fn stop_text(s: &iris_apply::Stopped) -> String {
+    if s.live == 0 && !s.busy {
+        return format!(
+            "Stopped. {} session(s) ended. No action applies and no mail leaves until `iris resume`.",
+            s.sessions
+        );
+    }
     let mut text = format!(
-        "Stopped. {} session(s) ended. No action applies and no mail leaves until `iris resume`.",
+        "The stop is not complete. {} session(s) ended, and no new action or send starts.",
         s.sessions
     );
     if s.busy {
         text.push_str(
-            "\nA Gmail call was in progress. It ends, and the ledger shows its result. \
-             No later call starts.",
+            "\nA Gmail call was in progress, and it can still finish: one change or one send. \
+             The ledger shows its result.",
         );
     }
     if s.live > 0 {
         text.push_str(&format!(
-            "\nThe stop is not complete: {} session(s) still stop. \
-             `iris job session <j-id>` shows each. Run `iris stop` again.",
+            "\n{} session(s) still stop. `iris job session <j-id>` shows each.",
             s.live
         ));
     }
+    text.push_str("\nRun `iris stop` again.");
     text
 }
 
@@ -1813,12 +1820,22 @@ mod outbox_tests {
             live: 0,
             busy: false,
         };
-        assert!(!stop_text(&s).contains("not complete"));
+        assert!(stop_text(&s).contains("no mail leaves"));
         s.live = 1;
-        assert!(stop_text(&s).contains("not complete: 1 session(s)"));
+        let t = stop_text(&s);
+        assert!(
+            t.contains("not complete") && t.contains("1 session(s) still stop"),
+            "{t}"
+        );
+        assert!(!t.contains("no mail leaves"), "{t}");
         s.live = 0;
         s.busy = true;
-        assert!(stop_text(&s).contains("ledger shows its result"));
+        let t = stop_text(&s);
+        assert!(
+            t.contains("not complete") && t.contains("can still finish"),
+            "{t}"
+        );
+        assert!(!t.contains("no mail leaves"), "{t}");
     }
 
     #[test]

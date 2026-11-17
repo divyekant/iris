@@ -1129,3 +1129,30 @@ fn the_step_recovers_a_lost_send_while_stopped() {
     assert!(out.results.is_empty(), "{:?}", out.results);
     assert_eq!((b.state(s).as_str(), b.sends()), ("applied", 1));
 }
+
+/// A stop and a resume during the read of the draft at Gmail, after the
+/// first hold check of the release: the claim reads the new hold, and the
+/// send waits a full hold again (docs/specs/2026-11-17-stop.md, section 3).
+#[test]
+fn a_stop_and_resume_during_the_release_restart_the_hold() {
+    let b = setup("stop-race");
+    let (s, provider) = b.new_mail(AGED);
+    let other = Store::open(b.store.dir()).unwrap();
+    let resumed = std::sync::Arc::new(std::sync::Mutex::new(0));
+    let at = resumed.clone();
+    b.fake.before_next_matching(
+        &format!("GET /gmail/v1/users/me/drafts/{provider}"),
+        move || {
+            // The release holds the apply lock: no wait for it.
+            iris_apply::stop_wait(&other, Duration::ZERO).unwrap();
+            *at.lock().unwrap() = now();
+            assert!(iris_apply::resume(&other).unwrap());
+        },
+    );
+    match b.release(s) {
+        Ok(Outcome::Hold(until)) => assert!(until >= *resumed.lock().unwrap() + HOLD_MS, "{until}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.sends(), 0);
+    assert_eq!(b.state(s), "held");
+}
