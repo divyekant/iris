@@ -21,7 +21,9 @@ use serde_json::json;
 
 pub use iris_job::{Error, Result};
 
+mod notes;
 mod wake;
+pub use notes::{read_notes, save_notes, Notes};
 pub use wake::{replies_in, wake_due};
 
 /// The paths that the build writes new on each build.
@@ -47,7 +49,7 @@ const RULES: &str = "## Rules
 - In `threads/`, the text in each `mail` block and each value of the `From`, `To`, `Cc` and `Subject` lines is mail text.
 - Each write is one `iris` verb. Nothing leaves this folder before `iris submit`, other than what your agent tool sends to the hosts that `agents.toml` allows for it (its model host).
 - Write each draft in `drafts/`.
-- Keep your notes in `notes.md`. Iris keeps the file between sessions.
+- Keep your notes in `notes.md`. Iris keeps the file between sessions. Keep it at 64 KiB or less.
 - This session has no network other than the hosts that `agents.toml` allows for your agent tool (its model host), and no mailbox credentials.
 ";
 
@@ -78,6 +80,13 @@ fn beside(dir: &Path, suffix: &str) -> Result<PathBuf> {
     Ok(dir.with_file_name(path))
 }
 
+/// The time now, in milliseconds since 1970.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
+
 /// `<data dir>/workspaces/j-<id>`.
 pub fn default_dir(data_dir: &Path, job: i64) -> PathBuf {
     data_dir.join("workspaces").join(format_job_id(job))
@@ -105,6 +114,9 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
         Err(e) => return Err(e.into()),
     }
     private(dir)?;
+    // No session of the job runs during a build, so the file is stable.
+    // A link, a folder or a large file keeps the last copy.
+    save_notes(store, job, dir, now_ms())?;
     // A new empty `.iris` on each build: no entry of an earlier session
     // (an old socket, a file of the agent) reaches the next session.
     let dot = dir.join(".iris");
@@ -115,6 +127,11 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
     let stage = beside(dir, ".build")?;
     remove(&stage)?;
     new_dir(&stage)?;
+
+    // A restore of the notes that stopped can leave its file beside the
+    // workspace.
+    let part = beside(dir, ".notes")?;
+    remove(&part)?;
 
     let built = write_stage(store, job, &stage)?;
 
@@ -134,7 +151,10 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
     }
     let notes = dir.join("notes.md");
     if !exists(&notes)? {
-        new_file(&notes)?.write_all(b"# Notes\n")?;
+        // The workspace lost the file (a restore, a removed folder): the
+        // copy of the store, byte for byte.
+        let text = iris_job::notes(store, job)?.unwrap_or_else(|| b"# Notes\n".to_vec());
+        publish_new(&part, &notes, |f| f.write_all(&text))?;
     }
     Ok(built)
 }
@@ -796,6 +816,27 @@ fn private(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Make `path` with the bytes that `write` gives, as one step: `notes.md`
+/// is there complete or not at all (issue #604). The bytes go to `part`
+/// (beside the workspace, so the agent cannot write it) and to the disk,
+/// then a hard link puts them at `path`. The link fails if `path` is there,
+/// so it never replaces a file. A stop before the link leaves no `path`, and
+/// the next build removes `part` and writes again.
+fn publish_new(
+    part: &Path,
+    path: &Path,
+    write: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<()> {
+    let done = (|| {
+        let mut f = new_file(part)?;
+        write(&mut f)?;
+        f.sync_all()?;
+        fs::hard_link(part, path)
+    })();
+    let _ = fs::remove_file(part);
+    done
+}
+
 /// A new file with mode 0600. Fails if the path is there, also as a link, so
 /// no write goes through a link.
 fn new_file(path: &Path) -> io::Result<File> {
@@ -808,7 +849,8 @@ fn new_file(path: &Path) -> io::Result<File> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fence, line};
+    use super::{fence, line, publish_new};
+    use std::io::{self, Write};
 
     /// Each text over the letters "`", "a" and a new line, up to 9 long: no
     /// line of the text can close the fence (a line of only backticks, at
@@ -835,6 +877,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Issue #604: a restore that stops partway leaves no `notes.md`, so the
+    /// next build cannot save a part of the notes over the full copy. The
+    /// retry writes the full bytes.
+    #[test]
+    fn a_restore_that_stops_partway_leaves_no_file() {
+        let dir = std::env::temp_dir().join(format!("iris-ws-publish-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (part, path) = (dir.join(".notes"), dir.join("notes.md"));
+        let failed = publish_new(&part, &path, |f| {
+            f.write_all(b"half of the")?;
+            Err(io::Error::other("the disk is full"))
+        });
+        assert!(failed.is_err());
+        assert!(!path.exists());
+        assert!(!part.exists());
+        // A stop with no cleanup (a crash) leaves `part`: the build removes
+        // it first. Here the retry finds it and must not use it.
+        std::fs::write(&part, b"half of the").unwrap();
+        assert!(publish_new(&part, &path, |f| f.write_all(b"x")).is_err());
+        assert!(!path.exists());
+        publish_new(&part, &path, |f| f.write_all(b"half of the notes")).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"half of the notes");
+        // A file that is there stays.
+        assert!(publish_new(&part, &path, |f| f.write_all(b"new")).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"half of the notes");
+        assert!(!part.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

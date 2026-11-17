@@ -1102,3 +1102,64 @@ pub fn live_sessions_in(c: &Connection) -> Result<Vec<Session>> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(all)
 }
+
+/// The most bytes of the copy of `notes.md` of a job
+/// (docs/specs/2026-11-17-job-memory.md). The CHECK of `job_notes` has the
+/// same value.
+pub const NOTES_MAX: usize = 65_536;
+
+/// The copy of the notes of `job` in the store, if one was saved.
+pub fn notes(store: &Store, job: i64) -> Result<Option<Vec<u8>>> {
+    let mut out = None;
+    store.read(|c| {
+        out = c
+            .query_row("SELECT text FROM job_notes WHERE job_id = ?1", [job], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+/// Replace the copy of the notes of `job` with `text`, as it is. A text of
+/// more than [`NOTES_MAX`] bytes is refused, and the old copy stays. Gives
+/// false for a done job: it has no copy (migration 35).
+pub fn save_notes(store: &Store, job: i64, text: &[u8], now_ms: i64) -> Result<bool> {
+    transaction(store, |c| save_notes_in(c, job, text, now_ms))
+}
+
+pub fn save_notes_in(c: &Connection, job: i64, text: &[u8], now_ms: i64) -> Result<bool> {
+    if text.len() > NOTES_MAX {
+        return Err(Error::Refused(format!(
+            "the notes have {} bytes, more than {NOTES_MAX}",
+            text.len()
+        )));
+    }
+    get_in(c, job)?;
+    let n = c.execute(
+        "INSERT INTO job_notes (job_id, text, saved_ms) VALUES (?1, ?2, ?3)
+         ON CONFLICT(job_id) DO UPDATE SET text = excluded.text, saved_ms = excluded.saved_ms",
+        params![job, text, now_ms],
+    )?;
+    Ok(n == 1)
+}
+
+/// Reap `session` and, if `notes` is given, save it as the copy of the
+/// notes of its job, in one write transaction: no backup and no crash sees
+/// the reap without the save (docs/specs/2026-11-17-job-memory.md). Gives
+/// the result of the save (false: no notes, or a done job).
+pub fn reap_with_notes(
+    store: &Store,
+    session: i64,
+    notes: Option<&[u8]>,
+    now_ms: i64,
+) -> Result<bool> {
+    transaction(store, |c| {
+        reap_in(c, session, now_ms)?;
+        match notes {
+            Some(text) => save_notes_in(c, session_in(c, session)?.job_id, text, now_ms),
+            None => Ok(false),
+        }
+    })
+}

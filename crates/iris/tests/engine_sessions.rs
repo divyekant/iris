@@ -897,7 +897,7 @@ fn a_job_waits_three_days_and_continues() {
     assert_eq!(woke.why.as_deref(), Some("time"));
     let next = next_session(&s, &f, first.id);
     let notes = fs::read_to_string(workspace(&f).join("notes.md")).unwrap();
-    assert!(notes.contains("Dana has the contract."), "{notes}");
+    assert_eq!(notes, "# Notes\nDana has the contract.\n");
     // A second wake call starts no second session.
     s.wake(until_ms + 1000);
     assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, next.id);
@@ -1014,6 +1014,34 @@ fn a_reply_on_the_wait_thread_wakes_the_job() {
         .unwrap();
     assert_eq!(granted, vec![41]);
     next_session(&s, &f, first.id);
+    let _ = s.stop(f.job).unwrap();
+}
+
+/// R5-06 (docs/specs/2026-11-17-job-memory.md): the reap saves the notes in
+/// the store, and a job whose workspace folder is lost during the wait
+/// gets the same bytes at the wake.
+fn a_lost_workspace_gets_the_notes_at_the_wake() {
+    let f = fixture("memory", "sleep 30");
+    let s = sessions(&f);
+    let (until_day, until_ms) = day(3);
+    let first = s.run(f.job, "script").unwrap();
+    until(&s, &f, first, |r| r.started_ms.is_some());
+    // The session changes the notes after its build: only the reap can
+    // save these bytes. Not UTF-8, a NUL, a CR and no line end at the end.
+    let text: &[u8] = b"# Notes\r\nDana \xff\x00 has it";
+    fs::write(workspace(&f).join("notes.md"), text).unwrap();
+    let v = ask(&f, "wait", serde_json::json!({ "until": until_day })).unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    until(&s, &f, first, |r| r.reaped_ms.is_some());
+    // The reap transaction saved the notes.
+    assert_eq!(
+        iris_job::notes(&f.store, f.job).unwrap().as_deref(),
+        Some(text)
+    );
+    fs::remove_dir_all(workspace(&f)).unwrap();
+    s.wake(until_ms);
+    next_session(&s, &f, first);
+    assert_eq!(fs::read(workspace(&f).join("notes.md")).unwrap(), text);
     let _ = s.stop(f.job).unwrap();
 }
 
@@ -1236,6 +1264,103 @@ fn a_failed_start_for_a_comment_is_tried_once() {
     let _ = s.stop(f.job).unwrap();
 }
 
+/// A fixture whose first session submitted a changeset, still live. Gives
+/// the sessions, the first session and the changeset ID.
+fn commented(name: &str) -> (Fixture, Arc<Sessions>, i64, String) {
+    let f = fixture(name, "sleep 30");
+    f.store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO message (id, account_id, thread_id, provider_id, internal_date, understood_at)
+                   VALUES (1, 1, 5, 'm1', 1000, 1);
+                 INSERT INTO header (message_id, date, from_addr, to_addrs, subject)
+                   VALUES (1, 1000, 'dana@example.com', 'me@example.com', 'Contract');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    add_scope(&f.store, f.job, Ref::Thread(5), By::Person, NOW).unwrap();
+    let s = sessions(&f);
+    let first = s.run(f.job, "script").unwrap();
+    until(&s, &f, first, |r| r.started_ms.is_some());
+    let v = ask(
+        &f,
+        "add",
+        serde_json::json!({"verb": "archive", "targets": ["m-1"]}),
+    )
+    .unwrap();
+    let cs = v["result"]["changeset"].as_str().unwrap().to_string();
+    let v = ask(
+        &f,
+        "submit",
+        serde_json::json!({"changeset": cs, "why": "Old."}),
+    )
+    .unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    let row = iris_changeset::parse_changeset_id(&cs).unwrap();
+    iris_changeset::transaction(&f.store, |c| {
+        iris_changeset::comment_in(c, row, 1, "Keep it.", "k-0123456789abcdef", now())
+    })
+    .unwrap();
+    (f, s, first, cs)
+}
+
+/// A comment while a session is live: no second session starts while it
+/// runs, and exactly one session starts after it ends (spec, section 5).
+fn a_comment_during_a_session_starts_one_session_after_it() {
+    let (f, s, first, cs) = commented("comment-live");
+    s.wake(now());
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first);
+    let _ = s.stop(f.job).unwrap();
+    until(&s, &f, first, |r| r.reaped_ms.is_some());
+    s.wake(now());
+    let next = next_session(&s, &f, first);
+    assert!(workspace(&f).join(format!("comments/{cs}.md")).exists());
+    assert!(
+        !pending(&f),
+        "the gate of the new session delivered the comment"
+    );
+    // After the session ends, a new engine (no memory of its tries) starts no third session.
+    let _ = s.stop(f.job).unwrap();
+    until(&s, &f, next.id, |r| r.reaped_ms.is_some());
+    let again = sessions(&f);
+    again.wake(now());
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, next.id);
+}
+
+/// True if a comment on a changeset of the job has no delivery yet.
+fn pending(f: &Fixture) -> bool {
+    iris_changeset::transaction(&f.store, |c| iris_changeset::comment_pending_in(c, f.job)).unwrap()
+}
+
+/// The live session moves the job to `waiting` after a comment: the wake
+/// of the engine moves it back, and one session starts with the comment.
+fn a_comment_wakes_a_job_that_waits_after_it() {
+    let (f, s, first, cs) = commented("comment-wait");
+    let (until_day, _) = day(3);
+    let v = ask(
+        &f,
+        "wait",
+        serde_json::json!({ "until": until_day, "why": "Later." }),
+    )
+    .unwrap();
+    assert_eq!(v["result"]["state"], "waiting", "{v}");
+    until(&s, &f, first, |r| r.reaped_ms.is_some());
+    s.wake(now());
+    let woke = iris_job::events(&f.store, f.job).unwrap().pop().unwrap();
+    assert_eq!(
+        (woke.by, woke.why.as_deref()),
+        (By::Engine, Some("comment"))
+    );
+    next_session(&s, &f, first);
+    assert!(workspace(&f).join(format!("comments/{cs}.md")).exists());
+    assert!(
+        !pending(&f),
+        "the gate of the new session delivered the comment"
+    );
+    let _ = s.stop(f.job).unwrap();
+}
+
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "session-hold") {
@@ -1247,6 +1372,14 @@ fn main() {
         .filter_map(|a| a.to_str())
         .find(|a| !a.starts_with('-'));
     let tests: &[(&str, fn())] = &[
+        (
+            "a_comment_during_a_session_starts_one_session_after_it",
+            a_comment_during_a_session_starts_one_session_after_it,
+        ),
+        (
+            "a_comment_wakes_a_job_that_waits_after_it",
+            a_comment_wakes_a_job_that_waits_after_it,
+        ),
         (
             "an_answer_starts_a_session_with_the_answer",
             an_answer_starts_a_session_with_the_answer,
@@ -1266,6 +1399,10 @@ fn main() {
         (
             "a_job_waits_three_days_and_continues",
             a_job_waits_three_days_and_continues,
+        ),
+        (
+            "a_lost_workspace_gets_the_notes_at_the_wake",
+            a_lost_workspace_gets_the_notes_at_the_wake,
         ),
         (
             "a_reply_on_the_wait_thread_wakes_the_job",

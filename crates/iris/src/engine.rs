@@ -489,7 +489,7 @@ fn understand_loop(store: Arc<Store>) {
 /// One turn of the understanding thread. The answer is the time until the
 /// next turn. After each run, idle or not, the proposal step of matters
 /// runs with its hourly gate, so a mailbox that is already understood
-/// still gets proposals.
+/// still gets proposals. Then the nudge step ([`crate::nudge::step`]).
 pub fn understand_turn(store: &Store, now_ms: i64) -> Duration {
     match crate::cost::after_sync(store, now_ms) {
         Ok(crate::cost::AfterSync::Busy) => return BUSY_RETRY,
@@ -498,6 +498,10 @@ pub fn understand_turn(store: &Store, now_ms: i64) -> Duration {
     }
     if let Err(e) = crate::cost::propose_matters(store, iris_matters::Gate::Hourly, now_ms) {
         say!("iris: matters: {e}");
+    }
+    let connect = |row: &iris_understand::budget::ModelRow| crate::cost::connect(store, row);
+    if let Err(e) = crate::nudge::step(store, &connect, now_ms) {
+        say!("iris: nudge: {e}");
     }
     UNDERSTAND_EVERY
 }
@@ -526,10 +530,13 @@ fn attention_loop(store: Arc<Store>) {
         // Notices by rule (R5-08): the row commits first, so a crash before
         // the system notice still leaves the notice in the web client. The
         // system notice runs on its own thread: this loop never waits for it.
+        // The Mac app shows some notices: the engine chooses before the queue.
         match iris_policy::notice::refresh(&store, now_ms()) {
-            Ok(new) => new.into_iter().for_each(|n| {
-                let _ = system.try_send(n);
-            }),
+            Ok(new) => crate::notify::for_system(new, now_ms())
+                .into_iter()
+                .for_each(|n| {
+                    let _ = system.try_send(n);
+                }),
             Err(e) => say!("iris: notices: {e}"),
         }
         // The measure "time to the first brief" ends at the first brief with content.

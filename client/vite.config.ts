@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
-import { act, answer, answerJob, answerSender, askAnswer, replyDraft, decide, noticePost, undoEntry, outboxPost, policyPost, raw, startJob, watchPost, withdraw } from "./dev/fixtures.ts";
+import { act, answer, answerJob, answerSender, askAnswer, replyDraft, decide, noticePost, undoEntry, outboxPost, policyPost, raw, startJob, stopPost, watchPost, withdraw } from "./dev/fixtures.ts";
 import { engineProxy } from "./dev/proxy.ts";
 
 // `pnpm dev` sends /api to an engine on 127.0.0.1:4800 (`iris serve`).
@@ -90,6 +90,13 @@ export default defineConfig(({ mode }) => {
               res.setHeader("content-type", "application/json");
               res.end(JSON.stringify(done ?? { error: "Not found." }));
             });
+            return;
+          }
+          const stop = req.method === "POST" ? stopPost(url) : undefined;
+          if (stop) {
+            res.statusCode = stop[0];
+            res.setHeader("content-type", "application/json");
+            res.end(JSON.stringify(stop[1]));
             return;
           }
           const cancel = req.method === "POST" ? outboxPost(url) : undefined;

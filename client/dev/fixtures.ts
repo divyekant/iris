@@ -554,11 +554,29 @@ const jobPage = (state: string | null) => {
   return { jobs: list, next: null };
 };
 
+/** The stop switch of the fixtures (docs/specs/2026-11-17-stop.md). */
+let stoppedAt: string | null = null;
+
+/** POST /api/stop and /api/resume, as the API answers. */
+export function stopPost(path: string): [number, unknown] | undefined {
+  if (path === "/stop") {
+    stoppedAt ??= new Date().toISOString();
+    return [200, { stopped: true, since: stoppedAt, sessions: 1, live: 0, busy: false }];
+  }
+  if (path === "/resume") {
+    const resumed = stoppedAt !== null;
+    stoppedAt = null;
+    return [200, { stopped: false, since: null, resumed }];
+  }
+  return undefined;
+}
+
 export function answer(path: string): unknown {
   const url = new URL(path, "http://local/");
   const q = url.searchParams;
   const [name, id] = url.pathname.slice(1).split("/");
   if (name === "status") return status;
+  if (name === "stop" && !id) return { stopped: stoppedAt !== null, since: stoppedAt, live: 0, busy: false };
   if (name === "brief" && id?.startsWith("bundle-")) {
     const bundle = brief.bundles?.find((b) => `bundle-${b.rule}` === id);
     return bundle ? { count: bundle.count, items: bundle.items, next: null } : undefined;

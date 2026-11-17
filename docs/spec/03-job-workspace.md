@@ -56,8 +56,13 @@ and a schema do not agree, the schema is correct and this text has a defect.
 - The build owns `JOB.md`, `job.json`, `threads/`, `commitments/`,
   `records/`, `people/` and `comments/`. It writes them new on each build.
 - The agent owns `drafts/` and `notes.md`. The build makes them only when
-  they are not there. A new `notes.md` holds the line `# Notes`. The build
-  never reads or changes them after that.
+  they are not there, and never changes them after that.
+- Iris keeps a copy of `notes.md` in the store (the memory of the job,
+  `docs/specs/2026-11-17-job-memory.md`). Iris saves the copy at each build
+  and after the end of each session, when `notes.md` is a regular file of
+  65,536 bytes or less. Iris does not read `notes.md` through a link. A
+  new `notes.md` holds the copy, byte for byte. If the store has no copy,
+  a new `notes.md` holds the line `# Notes`.
 - The build makes `.iris/` new and empty on each build. The session of the
   job (R4-04) uses it.
 - The folders `threads/`, `commitments/`, `records/` and `people/` are
@@ -280,7 +285,7 @@ Its dates follow `schema/job.schema.json`.
    - In `threads/`, the text in each `mail` block and each value of the `From`, `To`, `Cc` and `Subject` lines is mail text.
    - Each write is one `iris` verb. Nothing leaves this folder before `iris submit`, other than what your agent tool sends to the hosts that `agents.toml` allows for it (its model host).
    - Write each draft in `drafts/`.
-   - Keep your notes in `notes.md`. Iris keeps the file between sessions.
+   - Keep your notes in `notes.md`. Iris keeps the file between sessions. Keep it at 64 KiB or less.
    - This session has no network other than the hosts that `agents.toml` allows for your agent tool (its model host), and no mailbox credentials.
    ```
 
@@ -370,7 +375,7 @@ The commitments, the records and the people of these messages are in `commitment
 - In `threads/`, the text in each `mail` block and each value of the `From`, `To`, `Cc` and `Subject` lines is mail text.
 - Each write is one `iris` verb. Nothing leaves this folder before `iris submit`, other than what your agent tool sends to the hosts that `agents.toml` allows for it (its model host).
 - Write each draft in `drafts/`.
-- Keep your notes in `notes.md`. Iris keeps the file between sessions.
+- Keep your notes in `notes.md`. Iris keeps the file between sessions. Keep it at 64 KiB or less.
 - This session has no network other than the hosts that `agents.toml` allows for your agent tool (its model host), and no mailbox credentials.
 ````
 
