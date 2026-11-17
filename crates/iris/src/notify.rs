@@ -273,8 +273,6 @@ mod tests {
         // Notice 4 was in the store before the read: the app does not show
         // it (its `last` is 4), so the engine does.
         assert!(!app_shows_now(4, now));
-        // A later call of the live app keeps its start.
-        let next = now + 10_000;
         // A later call of the live app keeps its start. The engine chooses
         // before its queue: notice 5 goes to the app, notice 4 to the queue.
         let next = now + 10_000;
