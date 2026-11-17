@@ -206,3 +206,20 @@ for (const kind of ["stop", "resume"]) {
     assert.equal(stopState.error, "");
   });
 }
+
+test("a rejected Stop keeps its error when the read shows that Iris still runs", async () => {
+  const { act, stopState } = await load("/src/views/Stop.svelte");
+  Object.assign(stopState, { stopped: false, since: null, live: 0, busy: false, known: true, note: "", error: "" });
+  serve((method) => (method === "POST" ? [500, { error: "database: locked" }] : [200, { stopped: false, since: null, live: 0, busy: false }]));
+  const band = await mount("/src/views/Stop.svelte", { place: "band" });
+  try {
+    await act("stop");
+    band.flushSync();
+    assert.equal(stopState.known, true);
+    assert.equal(stopState.stopped, false);
+    assert.notEqual(stopState.error, "");
+    assert.ok(band.target.querySelector("[role=alert]"));
+  } finally {
+    band.destroy();
+  }
+});

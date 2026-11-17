@@ -32,6 +32,9 @@
   // The number of the newest request. Only the answer of the newest request
   // changes the state, so an older answer never replaces a newer one.
   let newest = 0;
+  // The action of the error on the screen: the error goes only when a read
+  // shows that this action took effect.
+  let failedAction: "" | "stop" | "resume" = "";
 
   function show(n: number, a: Answer): boolean {
     if (n !== newest) return false;
@@ -42,8 +45,10 @@
   export async function reread() {
     const n = ++newest;
     try {
-      // A good read gives the state: an older failure of Stop or Resume no longer applies.
-      if (show(n, await read<Answer>("stop"))) stopState.error = "";
+      if (show(n, await read<Answer>("stop")) && failedAction && stopState.stopped === (failedAction === "stop")) {
+        failedAction = "";
+        stopState.error = "";
+      }
     } catch {
       // With no answer, the state is not known: the band makes no claim.
       // The access state shows the failure of the engine above each view.
@@ -61,6 +66,7 @@
   /** Stop all agent work, or resume it. */
   export async function act(kind: "stop" | "resume") {
     const n = ++newest;
+    failedAction = "";
     Object.assign(stopState, { busyAction: kind, error: "", note: "" });
     let failed = false;
     try {
@@ -72,6 +78,7 @@
       // The change can have happened with no answer: the state is not known
       // until the engine says it again.
       failed = true;
+      failedAction = kind;
       Object.assign(stopState, {
         known: false,
         error: own(e) || (kind === "stop" ? "Iris did not answer the Stop. Try again, or run iris stop at the terminal." : "Iris did not answer the Resume. Try again."),
