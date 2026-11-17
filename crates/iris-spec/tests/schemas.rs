@@ -71,3 +71,21 @@ fn each_form_has_a_schema_and_a_sample() {
         assert!(has_sample, "{name} has no sample in examples/");
     }
 }
+
+/// `changeset-agent-restore.json` fails only for its author: the same
+/// document of a person, with its restore approved by the person, passes.
+#[test]
+fn restore_is_valid_only_from_a_person() {
+    let path = schema_dir().join("examples/invalid/changeset-agent-restore.json");
+    let mut doc = read_json(&path);
+    doc["author"] = serde_json::json!({ "kind": "person" });
+    let actions = doc["actions"].as_array_mut().unwrap();
+    actions.retain(|a| a["verb"] == "restore");
+    actions[0]["decision"] =
+        serde_json::json!({ "state": "approved", "by": "person", "at": "2026-11-16T09:17:41Z" });
+    let errors: Vec<String> = validator("changeset")
+        .iter_errors(&doc)
+        .map(|e| format!("{} at {}", e, e.instance_path()))
+        .collect();
+    assert!(errors.is_empty(), "{errors:#?}");
+}

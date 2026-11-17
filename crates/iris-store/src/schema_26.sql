@@ -1,53 +1,83 @@
--- Migration 26: the send mark of the write view (card R3-04,
--- docs/specs/2026-11-17-write.md, section 3).
+-- Migration 26: the undo of a state entry (specification 2, sections 4
+-- and 7.4, issue #226).
 --
--- One press of Send in the write view approves a `draft` action of the
--- person and asks for the send of the draft that the action makes. The
--- mark keeps that ask until the draft exists at Gmail. Step 2a of the
--- apply step then makes the send and writes its ID here.
+-- 1. The verb `restore` joins the verb CHECK of changeset_action, as in
+--    migration 18. Only an undo makes it: it sets the `pre` values of a
+--    `close`, `decline`, `defer` or `correct` entry again.
+-- 2. The trigger ledger_undo_insert accepts `restore` with no arguments as
+--    step 1 of the undo of a state entry.
+-- 3. The view ledger_can_undo lists a state entry with one or more items in
+--    `post`: a state entry changes no message.
+-- A state entry needs the IDs of its correction rows in `ops`, so an entry
+-- from before this migration has no undo: its undo cannot remove its
+-- corrections, and the next conversation update would set them again.
 
-CREATE TABLE write_send (
-  -- The approved `draft` action of a write.
-  action_id INTEGER PRIMARY KEY REFERENCES changeset_action(id),
-  -- The `send` action that step 2a made. NULL before step 2a.
-  send_action_id INTEGER UNIQUE REFERENCES changeset_action(id),
-  -- The key of the press. A second try with the same key and the same mail
-  -- finds this write and makes no second mail.
-  request_key TEXT NOT NULL UNIQUE
-    CHECK (length(request_key) BETWEEN 16 AND 64 AND request_key NOT GLOB '*[^A-Za-z0-9-]*'),
-  -- The SHA-256 of the target and the args of the press.
-  request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
-  -- The warnings that the person saw at the press, as a JSON list. A send
-  -- with another warning goes to review.
-  flags TEXT NOT NULL CHECK (json_valid(flags) AND json_type(flags) = 'array'),
-  created_at INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at >= 0)
-);
+PRAGMA writable_schema = ON;
+UPDATE sqlite_schema
+SET sql = replace(sql, '''draft'', ''send''))', '''draft'', ''send'', ''restore''))')
+WHERE type = 'table' AND name = 'changeset_action';
+PRAGMA writable_schema = RESET;
 
--- Only the write path makes a mark: an approved `draft` action that the
--- person decided, in a changeset of the author `person`, with no send yet.
-CREATE TRIGGER write_send_insert BEFORE INSERT ON write_send
-WHEN new.send_action_id IS NOT NULL
-  OR NOT EXISTS (SELECT 1 FROM changeset_action a JOIN changeset c ON c.id = a.changeset_id
-                 WHERE a.id = new.action_id AND a.verb = 'draft' AND a.state = 'approved'
-                   AND a.decided_by = 'person' AND c.author_kind = 'person')
+CREATE TEMP TABLE migration_26 (ok INTEGER CHECK (ok = 1));
+INSERT INTO migration_26
+SELECT instr(sql, '''send'', ''restore'')') > 0
+FROM sqlite_schema WHERE type = 'table' AND name = 'changeset_action';
+DROP TABLE migration_26;
+
+DROP TRIGGER ledger_undo_insert;
+
+CREATE TRIGGER ledger_undo_insert BEFORE INSERT ON ledger_undo
+WHEN NOT EXISTS (SELECT 1 FROM changeset_action a JOIN changeset c ON c.id = a.changeset_id
+                 WHERE a.id = new.action_id AND a.state IS NULL AND c.author_kind = 'person')
+  OR NOT EXISTS (SELECT 1 FROM ledger WHERE id = new.ledger_id
+                   AND state IN ('applied', 'failed') AND undo = 'inverse')
+  -- The target is the entry. Step 1 is the inverse of the verb of the
+  -- entry, with the same arguments. Step 2 is the `archive` after the `untrash` of a `trash`.
+  OR NOT EXISTS (SELECT 1 FROM changeset_action a, ledger l
+                 JOIN changeset_action o ON o.id = l.action_id
+                 WHERE a.id = new.action_id AND l.id = new.ledger_id
+                   -- The target is the whole entry.
+                   AND json(a.targets) = json_object('ledger', json_array('l-' || l.id))
+                   AND ((new.step = 1 AND json(a.args) = json(o.args)
+                         AND o.verb || '>' || a.verb IN (
+                           'archive>inbox', 'inbox>archive', 'read>unread', 'unread>read',
+                           'label>unlabel', 'unlabel>label', 'trash>untrash', 'untrash>trash'))
+                        -- The undo of a state entry: `restore`, with no arguments.
+                        -- An entry from before migration 26 has no IDs of its
+                        -- correction rows, so it has no undo.
+                        OR (new.step = 1 AND json(a.args) = '{}' AND a.verb = 'restore'
+                            AND o.verb IN ('close', 'decline', 'defer', 'correct')
+                            AND json_type(l.ops, '$.corrections') = 'array')
+                        OR (new.step = 2 AND o.verb = 'trash' AND a.verb = 'archive'
+                            -- Step 1 of the same entry, in the same changeset.
+                            AND EXISTS (SELECT 1 FROM ledger_undo u1
+                                        JOIN changeset_action a1 ON a1.id = u1.action_id
+                                        WHERE u1.ledger_id = new.ledger_id AND u1.step = 1
+                                          AND a1.changeset_id = a.changeset_id))))
+  -- One open undo of an entry: no open action of another undo changeset,
+  -- and one action of each step in the same changeset.
+  OR EXISTS (SELECT 1 FROM ledger_undo u JOIN changeset_action a ON a.id = u.action_id
+             JOIN changeset_action na ON na.id = new.action_id
+             WHERE u.ledger_id = new.ledger_id
+               AND coalesce(a.state, 'proposed') IN ('proposed', 'in_review', 'approved')
+               AND (a.changeset_id <> na.changeset_id OR u.step = new.step))
 BEGIN
-  SELECT RAISE(ABORT, 'iris: a send mark needs an approved draft action of the person');
+  SELECT RAISE(ABORT, 'iris: this undo link is not allowed');
 END;
 
--- A mark changes once: `send_action_id` from NULL to a `send` action of
--- the person. The other fields do not change.
-CREATE TRIGGER write_send_update BEFORE UPDATE ON write_send
-WHEN new.action_id IS NOT old.action_id OR new.created_at IS NOT old.created_at
-  OR new.request_key IS NOT old.request_key OR new.request_hash IS NOT old.request_hash
-  OR new.flags IS NOT old.flags
-  OR old.send_action_id IS NOT NULL OR new.send_action_id IS NULL
-  OR NOT EXISTS (SELECT 1 FROM changeset_action a JOIN changeset c ON c.id = a.changeset_id
-                 WHERE a.id = new.send_action_id AND a.verb = 'send' AND c.author_kind = 'person')
-BEGIN
-  SELECT RAISE(ABORT, 'iris: a send mark changes only once, to a send of the person');
-END;
+DROP VIEW ledger_can_undo;
 
-CREATE TRIGGER write_send_delete BEFORE DELETE ON write_send
-BEGIN
-  SELECT RAISE(ABORT, 'iris: a send mark is not deleted');
-END;
+CREATE VIEW ledger_can_undo AS
+  SELECT l.id AS ledger_id FROM ledger l
+  WHERE l.state IN ('applied', 'failed') AND l.undo = 'inverse'
+    AND (EXISTS (SELECT 1 FROM ledger_message lm
+                 JOIN message m ON m.id = lm.message_id AND m.gone_at IS NULL
+                 WHERE lm.ledger_id = l.id AND lm.done = 1)
+         -- A state entry changed items, not messages: its `post` holds them.
+         OR EXISTS (SELECT 1 FROM changeset_action o, json_each(l.post) p
+                    WHERE o.id = l.action_id
+                      AND o.verb IN ('close', 'decline', 'defer', 'correct')
+                      AND json_type(l.ops, '$.corrections') = 'array'))
+    AND NOT EXISTS (SELECT 1 FROM ledger_undo u JOIN changeset_action a ON a.id = u.action_id
+                    WHERE u.ledger_id = l.id
+                      AND coalesce(a.state, 'proposed') IN ('proposed', 'in_review', 'approved'));
