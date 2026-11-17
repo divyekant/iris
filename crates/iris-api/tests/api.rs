@@ -1791,6 +1791,10 @@ async fn the_brief_shows_the_items_of_each_account() {
     let mut wrong = items[0].clone();
     wrong["account"] = json!("a-0");
     assert!(!schema.is_valid(&wrong), "{wrong}");
+    // A field of 1.1 in a document that claims 1.0 is not valid (spec 4, rule 2.8).
+    let mut old = items[0].clone();
+    old["model"] = json!("iris/1.0");
+    assert!(!schema.is_valid(&old), "{old}");
     // The status lists both accounts, so the client can name each one.
     let (_, status) = get(&store, "/api/status").await;
     let addresses: Vec<&str> = status["accounts"]

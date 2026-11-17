@@ -44,6 +44,10 @@ reads them (a reader). Iris is a producer and a reader.
    last stays in force, and the status of the file shows the error. If no
    policy was ever confirmed, Iris uses the policy of the first start,
    which is observe mode.
+8. Each field that a minor version adds has a condition in the schema: a
+   document that claims an older minor version and holds the field is not
+   valid. So a reader of the older version never gets a document that it
+   must refuse, from a producer that passed the kit.
 
 ## 3. Rules for a producer
 

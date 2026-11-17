@@ -213,6 +213,13 @@
     },
     "item": {
       "description": "The fields of each item of each form.",
+      "allOf": [
+        {
+          "description": "A field of a minor version is refused in a document that claims an older minor version (specification 4, rule 2.8). account: since 1.1.",
+          "if": { "properties": { "model": { "const": "iris/1.0" } }, "required": ["model"] },
+          "then": { "not": { "required": ["account"] } }
+        }
+      ],
       "type": "object",
       "required": [
         "model",
