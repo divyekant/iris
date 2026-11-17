@@ -1,0 +1,333 @@
+//! The client against the fake Graph server (spec acceptance criteria 1 to 5).
+
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use iris_fakegraph::FakeGraph;
+use iris_graph::{Change, Config, Error, Graph, Next};
+use iris_synth::Mailbox;
+
+const TOKEN: &str = "test-token";
+
+fn setup(count: usize) -> (FakeGraph, Graph, Mailbox) {
+    let fake = FakeGraph::start(Mailbox::new(7, count)).unwrap();
+    let graph = Graph::new(Config {
+        base_url: fake.base_url(),
+        backoff_start: Duration::from_millis(5),
+        backoff_max: Duration::from_millis(50),
+        ..Config::default()
+    });
+    (fake, graph, Mailbox::new(7, count))
+}
+
+/// One full round of a folder from `link`: the state of each message that
+/// the round names (true: in the folder), and the new delta link.
+fn round(graph: &Graph, folder: &str, link: Option<String>) -> (BTreeMap<String, bool>, String) {
+    let mut seen = BTreeMap::new();
+    let mut link = link;
+    loop {
+        let page = graph.delta(TOKEN, folder, link.as_deref()).unwrap();
+        for c in page.changes {
+            match c {
+                Change::Message(m) => {
+                    assert_eq!(m.parent_folder_id, folder);
+                    seen.insert(m.id, true)
+                }
+                Change::Removed(id) => seen.insert(id, false),
+            };
+        }
+        match page.next {
+            Next::More(l) => link = Some(l),
+            Next::Done(l) => return (seen, l),
+        }
+    }
+}
+
+#[test]
+fn a_full_sync_finds_each_folder_and_each_message() {
+    let (fake, graph, mailbox) = setup(300);
+    fake.set_page_limit(17);
+    let folders = graph.folders(TOKEN).unwrap();
+    let names: Vec<&str> = folders.iter().map(|f| f.display_name.as_str()).collect();
+    for want in ["Inbox", "Receipts", "Projects", "Old", "Archive", "Hidden"] {
+        assert!(names.contains(&want), "{want} in {names:?}");
+    }
+    assert!(
+        !names.contains(&"Unread mail"),
+        "a search folder is left out"
+    );
+    let inbox = folders.iter().find(|f| f.display_name == "Inbox").unwrap();
+    assert_eq!(inbox.well_known, Some("inbox"));
+    let old = folders.iter().find(|f| f.display_name == "Old").unwrap();
+    assert_eq!(old.parent_folder_id.as_deref(), Some("F-projects"));
+
+    let mut mirror = BTreeMap::new();
+    for f in &folders {
+        let (seen, _) = round(&graph, &f.id, None);
+        for (id, here) in seen {
+            assert!(here);
+            assert!(mirror.insert(id, f.id.clone()).is_none(), "one folder each");
+        }
+    }
+    assert_eq!(mirror, fake.messages());
+
+    let id = FakeGraph::id_of(4);
+    let mut raw = Vec::new();
+    let n = graph.raw(TOKEN, &id, &mut raw).unwrap();
+    assert_eq!(raw, mailbox.raw(4));
+    assert_eq!(n, raw.len() as u64);
+}
+
+#[test]
+fn a_move_keeps_the_id_and_a_delete_is_removed() {
+    let (fake, graph, _) = setup(120);
+    let inbox = FakeGraph::folder_id("Inbox");
+    let archive = FakeGraph::folder_id("Archive");
+    let (first, in_link) = round(&graph, inbox, None);
+    let (_, ar_link) = round(&graph, archive, None);
+    let moved = first.keys().next().unwrap().clone();
+    let deleted = first.keys().nth(1).unwrap().clone();
+    let read = first.keys().nth(2).unwrap().clone();
+    assert!(fake.move_message(&moved, archive));
+    assert!(fake.delete_message(&deleted));
+    assert!(fake.set_read(&read, false));
+    let added = fake.add_message(b"Subject: new\r\n\r\nhello\r\n", inbox);
+
+    let (inbox_changes, _) = round(&graph, inbox, Some(in_link));
+    let want: BTreeMap<String, bool> = [
+        (moved.clone(), false),
+        (deleted, false),
+        (read, true),
+        (added, true),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(inbox_changes, want);
+    let (archive_changes, _) = round(&graph, archive, Some(ar_link));
+    assert_eq!(archive_changes, [(moved, true)].into_iter().collect());
+}
+
+#[test]
+fn an_expired_link_asks_for_a_new_round() {
+    let (fake, graph, _) = setup(40);
+    let inbox = FakeGraph::folder_id("Inbox");
+    let (_, link) = round(&graph, inbox, None);
+    fake.add_message(b"Subject: x\r\n\r\ny\r\n", inbox);
+    fake.expire_delta_before(fake.seq() + 1);
+    assert!(matches!(
+        graph.delta(TOKEN, inbox, Some(&link)),
+        Err(Error::DeltaReset)
+    ));
+    // A new round with no link works.
+    round(&graph, inbox, None);
+}
+
+#[test]
+fn a_link_to_another_host_sends_no_request() {
+    let (fake, graph, _) = setup(60);
+    fake.set_page_limit(5);
+    fake.set_link_host("http://127.0.0.1:1");
+    let inbox = FakeGraph::folder_id("Inbox");
+    let page = graph.delta(TOKEN, inbox, None);
+    assert!(matches!(page, Err(Error::Decode(_))), "{page:?}");
+    assert_eq!(fake.requests().len(), 1);
+}
+
+#[test]
+fn at_most_four_requests_run_at_the_same_time() {
+    let (fake, graph, _) = setup(20);
+    fake.set_delay(Duration::from_millis(40));
+    std::thread::scope(|s| {
+        for i in 0..10 {
+            let graph = &graph;
+            s.spawn(move || {
+                let mut sink = Vec::new();
+                graph.raw(TOKEN, &FakeGraph::id_of(i), &mut sink).unwrap();
+            });
+        }
+    });
+    assert_eq!(fake.most_running(), iris_graph::MAX_RUNNING);
+}
+
+#[test]
+fn a_read_waits_after_429_and_503() {
+    let (fake, graph, _) = setup(5);
+    fake.fail_next(&[(429, Some(0)), (503, None)]);
+    let me = graph.me(TOKEN).unwrap();
+    assert_eq!(me.address(), iris_synth::OWNER);
+    assert_eq!(fake.requests().len(), 3);
+}
+
+#[test]
+fn errors_keep_the_graph_code() {
+    let (fake, graph, _) = setup(5);
+    fake.fail_next(&[(400, None)]);
+    match graph.me(TOKEN) {
+        Err(Error::Api { status, code, .. }) => {
+            assert_eq!((status, code.as_str()), (400, "Injected"))
+        }
+        other => panic!("{other:?}"),
+    }
+    fake.fail_next(&[(401, None)]);
+    assert!(matches!(graph.me(TOKEN), Err(Error::Unauthorized)));
+    assert!(matches!(
+        graph.raw(TOKEN, "AAMkffffffff", &mut Vec::new()),
+        Err(Error::NotFound)
+    ));
+}
+
+#[test]
+fn a_removed_message_is_read_by_id() {
+    let (fake, graph, _) = setup(60);
+    let inbox = FakeGraph::folder_id("Inbox");
+    let (first, _) = round(&graph, inbox, None);
+    let moved = first.keys().next().unwrap().clone();
+    let deleted = first.keys().nth(1).unwrap().clone();
+    fake.move_message(&moved, FakeGraph::folder_id("Old"));
+    fake.delete_message(&deleted);
+    let m = graph.message(TOKEN, &moved).unwrap();
+    assert_eq!(m.parent_folder_id, "F-old");
+    assert!(matches!(
+        graph.message(TOKEN, &deleted),
+        Err(Error::NotFound)
+    ));
+}
+
+#[test]
+fn a_redirect_is_not_followed() {
+    let (fake, graph, _) = setup(5);
+    fake.fail_next(&[(302, None)]);
+    match graph.me(TOKEN) {
+        Err(Error::Api { status, .. }) => assert_eq!(status, 302),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(fake.requests().len(), 1);
+}
+
+#[test]
+fn a_call_stops_at_its_time_limit_when_graph_keeps_refusing() {
+    let (fake, _, _) = setup(5);
+    let graph = Graph::new(Config {
+        base_url: fake.base_url(),
+        backoff_start: Duration::from_millis(20),
+        backoff_max: Duration::from_millis(40),
+        timeout: Duration::from_millis(400),
+        ..Config::default()
+    });
+    fake.fail_next(&[(429, None); 1000]);
+    let start = std::time::Instant::now();
+    let got = graph.me(TOKEN);
+    assert!(matches!(got, Err(Error::Transport(_))), "{got:?}");
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+    // A Retry-After past the limit also ends the call, with no wait.
+    let (fake, _, _) = setup(5);
+    let graph = Graph::new(Config {
+        base_url: fake.base_url(),
+        timeout: Duration::from_millis(400),
+        ..Config::default()
+    });
+    fake.fail_next(&[(503, Some(60))]);
+    let start = std::time::Instant::now();
+    assert!(matches!(graph.me(TOKEN), Err(Error::Transport(_))));
+    assert!(start.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
+fn an_answer_in_another_shape_is_a_decode_error() {
+    let (fake, graph, _) = setup(5);
+    let inbox = FakeGraph::folder_id("Inbox").to_string();
+    let link = format!(
+        "{}/v1.0/me/mailFolders/{inbox}/messages/delta?$deltatoken=1",
+        fake.base_url().trim_end_matches("/v1.0")
+    );
+    // A delta link with no `value`: no link may be stored.
+    let body = format!(r#"{{"@odata.deltaLink":"{link}"}}"#);
+    fake.answer_next(&[&body]);
+    let got = graph.delta(TOKEN, &inbox, None);
+    assert!(matches!(got, Err(Error::Decode(_))), "{got:?}");
+    // A page with both links.
+    let body = format!(r#"{{"value":[],"@odata.nextLink":"{link}","@odata.deltaLink":"{link}"}}"#);
+    fake.answer_next(&[&body]);
+    let got = graph.delta(TOKEN, &inbox, None);
+    assert!(matches!(got, Err(Error::Decode(_))), "{got:?}");
+    // The same page with one link is good: the test above fails for the right reason.
+    fake.answer_next(&[&format!(r#"{{"value":[],"@odata.deltaLink":"{link}"}}"#)]);
+    assert!(graph.delta(TOKEN, &inbox, None).is_ok());
+    // A message with no isRead.
+    let id = FakeGraph::id_of(0);
+    fake.answer_next(&[&format!(
+        r#"{{"id":"{id}","conversationId":"c","parentFolderId":"{inbox}","categories":[],
+        "flag":{{"flagStatus":"notFlagged"}},"isDraft":false}}"#
+    )]);
+    let got = graph.message(TOKEN, &id);
+    assert!(matches!(got, Err(Error::Decode(_))), "{got:?}");
+    // A folder list with no `value`, after 7 well-known folders not found.
+    fake.fail_next(&[(404, None); 7]);
+    fake.answer_next(&["{}"]);
+    let got = graph.folders(TOKEN);
+    assert!(matches!(got, Err(Error::Decode(_))), "{got:?}");
+}
+
+#[test]
+fn a_received_message_moved_to_drafts_is_not_a_draft() {
+    let (fake, graph, _) = setup(30);
+    let inbox = FakeGraph::folder_id("Inbox");
+    let drafts = FakeGraph::folder_id("Drafts");
+    let (_, link) = round(&graph, drafts, None);
+    let id = fake
+        .messages()
+        .into_iter()
+        .find(|(_, f)| *f == inbox)
+        .unwrap()
+        .0;
+    assert!(fake.move_message(&id, drafts));
+    let page = graph.delta(TOKEN, drafts, Some(&link)).unwrap();
+    let m = page
+        .changes
+        .iter()
+        .find_map(|c| match c {
+            Change::Message(m) if m.id == id => Some(m),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!m.is_draft);
+    // A message that was a draft from the start is one.
+    let draft = fake.add_message(b"Subject: d\r\n\r\nx\r\n", drafts);
+    assert!(graph.message(TOKEN, &draft).unwrap().is_draft);
+}
+
+#[test]
+fn a_raw_message_above_the_limit_is_refused() {
+    let (fake, _, _) = setup(5);
+    let graph = Graph::new(Config {
+        base_url: fake.base_url(),
+        raw_limit: 1000,
+        ..Config::default()
+    });
+    let big = fake.add_message(&vec![b'a'; 1001], FakeGraph::folder_id("Inbox"));
+    let mut sink = Vec::new();
+    let got = graph.raw(TOKEN, &big, &mut sink);
+    assert!(matches!(got, Err(Error::Decode(_))), "{got:?}");
+    assert!(sink.len() <= 1000, "{}", sink.len());
+    let fits = fake.add_message(&vec![b'a'; 1000], FakeGraph::folder_id("Inbox"));
+    let mut sink = Vec::new();
+    assert_eq!(graph.raw(TOKEN, &fits, &mut sink).unwrap(), 1000);
+}
+
+#[test]
+fn a_retry_after_above_the_backoff_cap_is_kept() {
+    // setup() caps our own waits at 50 ms.
+    let (fake, graph, _) = setup(5);
+    fake.fail_next(&[(429, Some(1))]);
+    let start = std::time::Instant::now();
+    graph.me(TOKEN).unwrap();
+    assert!(
+        start.elapsed() >= Duration::from_secs(1),
+        "{:?}",
+        start.elapsed()
+    );
+}
