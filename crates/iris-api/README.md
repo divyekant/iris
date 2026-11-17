@@ -150,6 +150,27 @@ decisions write in one transaction. If one is refused (a hash that changed,
 an action that has a decision, a new revision that is a draft, or an action
 that is not in the changeset), nothing is written and the answer is a 409.
 
+## Ledger
+
+Each change that Iris made, and its undo (card R2-07, specification 2,
+section 7).
+
+| Endpoint | Does |
+|---|---|
+| `GET /api/ledger?limit=&after=` | `{"entries": [...], "next"}`: each ledger entry, the newest first. `limit` is 1 to 200, default 50. `after` is the `next` value of the page before. An `after` that is not such a value is a 400. |
+| `POST /api/ledger/{id}/undo` | No body. The person undoes the entry `id` (`l-12`): the engine makes an approved changeset of the person with the inverse action (section 7.4), and applies it at its next step. The answer is the entry after the start, with `undo_open` true. An entry with no undo now (an open undo, the state `writing` or `undone`, the undo `none`, or no changed message that is not gone) is a 409 with the reason, and nothing is written. An ID that no entry has, or that is not in the form `l-<n>`, is a 404. |
+
+Each entry is `{"id", "verb", "args", "state", "at", "error", "messages",
+"changed", "items", "title", "changeset", "author", "decided_by", "rule",
+"policy", "reason", "why", "can_undo", "undo_open", "undone_by", "undo_of"}`:
+
+- `state` is `writing`, `applied`, `failed` or `undone`. `error` is the reason of a failure.
+- `messages` counts the messages of the entry. `changed` counts the messages that Gmail confirmed. A `failed` entry can have changed some messages.
+- `items` counts the items of a state verb (`close`, `decline`, `defer`, `correct`). `title` is the title of the first item.
+- `author` is `{"kind", "name", "job", "goal"}`: `goal` is the goal of the job of an agent.
+- `decided_by` is `rule` (with `rule` and `policy`) or `person`. `reason` is the reason of the decision, and `why` is the reason of the author.
+- `can_undo` is true when an undo can start now (the view `ledger_can_undo`). `undo_open` is true while an undo waits or applies. `undone_by` is the entry of the undo. `undo_of` is the entry that this entry undoes.
+
 ## State verbs
 
 The person closes, declines or defers one commitment (specification 2,

@@ -1,0 +1,178 @@
+//! The ledger of the web client (card R2-07, specification 2, section 7):
+//! each change that Iris made, newest first, with who decided it and why,
+//! and the undo of an entry (section 7.4).
+
+use iris_store::Store;
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
+use serde_json::Value;
+
+use crate::{Error, Result};
+
+/// One ledger entry, with the action that it applies.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct LedgerEntry {
+    /// `l-` and the row ID.
+    pub id: String,
+    pub verb: String,
+    pub args: Value,
+    /// `writing`, `applied`, `failed` or `undone`.
+    pub state: String,
+    pub at: String,
+    /// Why the entry failed, or why the engine could not confirm each message.
+    pub error: Option<String>,
+    /// The messages of the entry, and the messages that Gmail confirmed.
+    pub messages: i64,
+    pub changed: i64,
+    /// The items of a state verb, and the title of the first item.
+    pub items: i64,
+    pub title: Option<String>,
+    pub changeset: String,
+    pub author: Author,
+    /// Who approved it: `rule` (with `rule`) or `person`.
+    pub decided_by: Option<String>,
+    pub rule: Option<i64>,
+    pub policy: Option<i64>,
+    /// The reason of the decision, and the reason of the author.
+    pub reason: Option<String>,
+    pub why: Option<String>,
+    /// True when an undo can start now (view `ledger_can_undo`).
+    pub can_undo: bool,
+    /// True while an undo of the entry waits to apply or applies.
+    pub undo_open: bool,
+    /// The entry of the undo, after the undo.
+    pub undone_by: Option<String>,
+    /// The entry that this entry undoes.
+    pub undo_of: Option<String>,
+}
+
+/// The author of the changeset of an entry. `goal` is the goal of the job of
+/// an agent.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct Author {
+    pub kind: String,
+    pub name: Option<String>,
+    pub job: Option<String>,
+    pub goal: Option<String>,
+}
+
+/// One page of [`ledger`].
+#[derive(Debug, Serialize, PartialEq)]
+pub struct LedgerPage {
+    pub entries: Vec<LedgerEntry>,
+    /// The `after` value of the next page, or `None` on the last page.
+    pub next: Option<String>,
+}
+
+const ENTRY: &str = "SELECT l.id, a.verb, a.args, l.state, l.at, l.error,
+        (SELECT count(*) FROM ledger_message lm WHERE lm.ledger_id = l.id),
+        (SELECT count(*) FROM ledger_message lm WHERE lm.ledger_id = l.id AND lm.done = 1),
+        (SELECT count(*) FROM action_item ai WHERE ai.action_id = a.id),
+        (SELECT json_extract(i.doc, '$.title') FROM action_item ai JOIN item i ON i.id = ai.item_id
+         WHERE ai.action_id = a.id ORDER BY ai.item_id LIMIT 1),
+        a.changeset_id, c.author_kind, c.author_name, c.author_job, j.goal,
+        a.decided_by, a.rule, a.policy, a.reason, coalesce(a.why, c.why),
+        EXISTS (SELECT 1 FROM ledger_can_undo v WHERE v.ledger_id = l.id),
+        EXISTS (SELECT 1 FROM ledger_undo u JOIN changeset_action o ON o.id = u.action_id
+                WHERE u.ledger_id = l.id
+                  AND coalesce(o.state, 'proposed') IN ('proposed', 'in_review', 'approved')),
+        l.undone_by,
+        (SELECT u.ledger_id FROM ledger_undo u WHERE u.action_id = a.id)
+     FROM ledger l
+     JOIN changeset_action a ON a.id = l.action_id
+     JOIN changeset c ON c.id = a.changeset_id
+     LEFT JOIN job j ON c.author_job = 'j-' || j.id";
+
+fn entry(r: &rusqlite::Row) -> rusqlite::Result<LedgerEntry> {
+    let l = |n: Option<i64>| n.map(|n| format!("l-{n}"));
+    Ok(LedgerEntry {
+        id: format!("l-{}", r.get::<_, i64>(0)?),
+        verb: r.get(1)?,
+        // A CHECK of the store keeps `args` valid JSON.
+        args: serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or(Value::Null),
+        state: r.get(3)?,
+        at: crate::rfc3339(r.get(4)?),
+        error: r.get(5)?,
+        messages: r.get(6)?,
+        changed: r.get(7)?,
+        items: r.get(8)?,
+        title: r.get(9)?,
+        changeset: iris_changeset::format_changeset_id(r.get(10)?),
+        author: Author {
+            kind: r.get(11)?,
+            name: r.get(12)?,
+            job: r.get(13)?,
+            goal: r.get(14)?,
+        },
+        decided_by: r.get(15)?,
+        rule: r.get(16)?,
+        policy: r.get(17)?,
+        reason: r.get(18)?,
+        why: r.get(19)?,
+        can_undo: r.get(20)?,
+        undo_open: r.get(21)?,
+        undone_by: l(r.get(22)?),
+        undo_of: l(r.get(23)?),
+    })
+}
+
+/// The ledger entries, newest first. `after` is the `next` value of the
+/// page before. Keyset on the row ID: a row ID never changes, so a page
+/// does not repeat or skip an entry.
+pub fn ledger(store: &Store, limit: u32, after: Option<&str>) -> Result<LedgerPage> {
+    if !(1..=crate::MAX_LIMIT).contains(&limit) {
+        return Err(Error::Query(format!(
+            "limit must be 1 to {}",
+            crate::MAX_LIMIT
+        )));
+    }
+    let before = match after {
+        None => i64::MAX,
+        Some(t) => crate::review::parse_after(t)
+            .ok_or_else(|| Error::Query(format!("after {t} is not the next value of a page")))?,
+    };
+    let mut entries: Vec<LedgerEntry> = store.read(|c| {
+        let mut st = c.prepare_cached(&format!(
+            "{ENTRY} WHERE l.id < ?1 ORDER BY l.id DESC LIMIT ?2"
+        ))?;
+        let rows = st.query_map(params![before, limit + 1], entry)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    })?;
+    let more = entries.len() > limit as usize;
+    entries.truncate(limit as usize);
+    let next = more
+        .then(|| entries.last().map(|e| e.id["l-".len()..].to_string()))
+        .flatten();
+    Ok(LedgerPage { entries, next })
+}
+
+fn one(c: &Connection, id: i64) -> rusqlite::Result<Option<LedgerEntry>> {
+    c.query_row(&format!("{ENTRY} WHERE l.id = ?1"), [id], entry)
+        .optional()
+}
+
+/// The row ID of `l-<n>`, only in its canonical form.
+fn parse_id(id: &str) -> Option<i64> {
+    id.strip_prefix("l-").and_then(crate::review::parse_after)
+}
+
+/// Start the undo of the entry `id` (`l-<n>`), approved by the person
+/// (section 7.4). The engine applies it at its next step. Gives the entry
+/// after the start, or `None` when no entry has the ID. An entry with no
+/// undo now (for example, an open undo, or no changed message) is
+/// [`Error::Conflict`] with the reason, and nothing is written.
+pub fn undo_entry(store: &Store, id: &str, now_ms: i64) -> Result<Option<LedgerEntry>> {
+    let Some(n) = parse_id(id) else {
+        return Ok(None);
+    };
+    if store.read(|c| Ok(one(c, n)?))?.is_none() {
+        return Ok(None);
+    }
+    match iris_apply::undo(store, n, now_ms) {
+        Ok(_) => {}
+        Err(iris_apply::Error::Store(e)) => return Err(Error::Store(e)),
+        Err(iris_apply::Error::Undo(why)) => return Err(Error::Conflict(why)),
+        Err(e) => return Err(Error::Store(iris_store::Error::Query(e.to_string()))),
+    }
+    Ok(store.read(|c| Ok(one(c, n)?))?)
+}
