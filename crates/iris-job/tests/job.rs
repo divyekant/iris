@@ -277,9 +277,11 @@ fn the_text_limits() {
     ));
     refused(create(&store, "G", Some(-1), NOW));
     refused(create(&store, "G", None, 253_402_300_800_000));
+    // The question is 1 ms after the create, which has the same time.
     ask(&store, job, "Which?", None, NOW).unwrap();
-    refused(answer(&store, job, &"a".repeat(10_001), None, NOW));
-    answer(&store, job, &"a".repeat(10_000), None, NOW).unwrap();
+    assert_eq!(get(&store, job).unwrap().updated_ms, NOW + 1);
+    refused(answer(&store, job, &"a".repeat(10_001), None, NOW + 1));
+    answer(&store, job, &"a".repeat(10_000), None, NOW + 1).unwrap();
     agree(&store, job);
 }
 

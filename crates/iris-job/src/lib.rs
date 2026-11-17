@@ -324,7 +324,8 @@ pub fn session_ask(
     })
 }
 
-/// The agent asks the person one question.
+/// The agent asks the person one question. The time of the question is
+/// `now_ms`, or 1 ms after the newest event of the job if that is later.
 pub fn ask(store: &Store, job: i64, question: &str, why: Option<&str>, now_ms: i64) -> Result<()> {
     transaction(store, |c| ask_in(c, job, question, why, now_ms))
 }
@@ -336,12 +337,17 @@ pub fn ask_in(
     why: Option<&str>,
     now_ms: i64,
 ) -> Result<()> {
+    // A question is later than each earlier event of its job, so the
+    // `updated` time of a job in `needs_you` names one question: an answer
+    // binds to it ([`Asked`]), even when the clock gives the same
+    // millisecond twice.
+    let at = now_ms.max(get_in(c, job)?.updated_ms.saturating_add(1));
     let m = Move {
         question: Some(question),
         why,
         ..Move::default()
     };
-    add_event(c, job, State::NeedsYou, By::Agent, m, now_ms)
+    add_event(c, job, State::NeedsYou, By::Agent, m, at)
 }
 
 /// The engine (a reply or the end of the wait) or the person ends the wait.

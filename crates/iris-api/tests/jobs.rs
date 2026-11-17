@@ -457,8 +457,8 @@ async fn an_answer_to_an_older_question_is_refused() {
     .await;
     assert_eq!(code, StatusCode::OK);
     for question in ["Which card?", "Which date?"] {
-        // The answer has the time of the clock, so the next ask comes after it.
-        let at = iris_job::get(&s, job).unwrap().updated_ms + 1;
+        // The agent asks again in the same millisecond as the answer.
+        let at = iris_job::get(&s, job).unwrap().updated_ms;
         ask(&s, job, question, None, at).unwrap();
         // The old answer of tab A does not reach the new question.
         let (code, v) = post(
