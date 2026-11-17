@@ -87,19 +87,6 @@ These environment variables change the script:
 | `IRIS_NO_SERVICE=1` | Do not install the background service. |
 | `IRIS_DOWNLOAD_URL` | Download the release files from this folder URL, not from GitHub. The tests use it with a `file://` URL. |
 
-### Agent sessions on Linux
-
-An agent session runs in a sandbox. On Linux, the sandbox needs the program
-`bwrap` from the package `bubblewrap`. Install it before you run a job with
-an agent:
-
-```bash
-sudo apt install bubblewrap
-```
-
-If `bwrap` is not installed, or the system does not permit a user
-namespace, `iris job run` stops with the reason, and no agent runs.
-
 ### The background service
 
 The crate `iris-service` writes the service file. The service runs
