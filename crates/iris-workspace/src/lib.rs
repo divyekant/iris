@@ -404,8 +404,12 @@ fn write_thread(
     )?;
     for m in &mails {
         // The people of the scope come only from the messages in this file.
-        let parties = std::iter::once((&m.from, m.from_name.as_ref()))
-            .chain(m.to.iter().chain(&m.cc).map(|a| (a, None)));
+        // One entry for each address, so each count counts messages.
+        let mut parties: BTreeMap<&String, Option<&String>> = BTreeMap::new();
+        parties.insert(&m.from, m.from_name.as_ref());
+        for a in m.to.iter().chain(&m.cc) {
+            parties.entry(a).or_insert(None);
+        }
         for (address, name) in parties {
             if address.is_empty() || *address == me {
                 continue;
@@ -416,7 +420,7 @@ fn write_thread(
             p.last = p.last.max(m.at);
             if m.mine {
                 p.from_you += 1;
-            } else if *address == m.from {
+            } else if address == &m.from {
                 p.from_them += 1;
                 if let Some(n) = name {
                     p.names.insert(n.clone());
