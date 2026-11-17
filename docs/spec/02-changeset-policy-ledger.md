@@ -849,6 +849,10 @@ and the release step. That specification must meet these constraints:
   restart.
 - A cancel of a held send succeeds only while the send is held. Cancel and
   release run on the one write connection, so only one of the two can win.
+- The send switch (`docs/specs/2026-11-17-held-outbox.md`) is off until the
+  owner turns it on with `iris sending on`. While it is off, no send leaves
+  the held outbox. The hold starts at the later of the approval and the
+  time the switch went on.
 - The approval of a send binds to a hash of the draft content: the
   recipients, the subject, the body and the attachments. Before the release,
   the engine reads the draft at Gmail again. If the hash is different, the
