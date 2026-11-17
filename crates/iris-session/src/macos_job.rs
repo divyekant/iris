@@ -198,13 +198,28 @@ pub fn recv_with_fds(sock: &UnixStream, count: usize) -> io::Result<(Vec<OwnedFd
         hdr.msg_control = cbuf.as_mut_ptr().cast();
         hdr.msg_controllen = space as _;
         let n = libc::recvmsg(sock.as_raw_fd(), &mut hdr, 0);
+        if n < 0 {
+            // The control buffer holds nothing of this call.
+            return Err(io::Error::last_os_error());
+        }
+        let end = cbuf.as_ptr() as usize + (hdr.msg_controllen as usize).min(space);
         let mut c = libc::CMSG_FIRSTHDR(&hdr);
         while !c.is_null() {
+            let len = (*c).cmsg_len as usize;
+            let head = libc::CMSG_LEN(0) as usize;
+            if len < head || c as usize + len > end {
+                return Err(io::Error::other("the handoff has a bad control header"));
+            }
             if (*c).cmsg_level == libc::SOL_SOCKET && (*c).cmsg_type == libc::SCM_RIGHTS {
                 let data = libc::CMSG_DATA(c) as *const RawFd;
-                let k = ((*c).cmsg_len as usize - libc::CMSG_LEN(0) as usize) / 4;
-                for i in 0..k {
-                    fds.push(OwnedFd::from_raw_fd(std::ptr::read_unaligned(data.add(i))));
+                for i in 0..(len - head) / 4 {
+                    let fd = OwnedFd::from_raw_fd(std::ptr::read_unaligned(data.add(i)));
+                    // No descriptor of the handoff goes to a child process:
+                    // only the copies on 0, 1 and 2 (dup2 clears the flag).
+                    if libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    fds.push(fd);
                 }
             }
             c = libc::CMSG_NXTHDR(&hdr, c);
@@ -426,6 +441,8 @@ pub fn job(seatbelt: &Seatbelt, data_dir: &Path, args: &[OsString]) -> i32 {
     if apply(seatbelt, session, &fds, &handoff).is_err() {
         return 1;
     }
+    // The copies on 0, 1 and 2 and the folder stay; the originals close.
+    drop(fds);
     let code = run_hold(seatbelt, session, &handoff.args, &stream);
     let _ = (&stream).write_all(&[code.clamp(0, 255) as u8]);
     code

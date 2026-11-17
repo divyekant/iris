@@ -188,6 +188,9 @@ fn descriptors_and_a_message_cross_the_socket() {
     let (fds, msg) = recv_with_fds(&b, HANDOFF_FDS).unwrap();
     assert_eq!(msg, b"hello");
     for (i, fd) in fds.into_iter().enumerate() {
+        // SAFETY: fcntl on an open descriptor.
+        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+        assert_eq!(flags & libc::FD_CLOEXEC, libc::FD_CLOEXEC);
         let mut w = fs::File::from(fd);
         w.write_all(&[i as u8]).unwrap();
         drop(w);
@@ -198,6 +201,15 @@ fn descriptors_and_a_message_cross_the_socket() {
     // The wrong count of descriptors is refused.
     send_with_fds(&a, &raw[..2], b"x").unwrap();
     assert!(recv_with_fds(&b, HANDOFF_FDS).is_err());
+}
+
+/// A failed receive gives its error and reads no control data.
+#[test]
+fn a_failed_receive_gives_its_error() {
+    let (_a, b) = UnixStream::pair().unwrap();
+    b.set_nonblocking(true).unwrap();
+    let e = recv_with_fds(&b, HANDOFF_FDS).unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
 }
 
 /// Random handoffs read back the same; random bytes never pass as a
@@ -325,20 +337,28 @@ fn job_child() {
     std::process::exit(code);
 }
 
-/// A valid handoff: the job writes the record, the hold waits for `start`
-/// on the engine pipe, the agent runs in the handed-off folder with the
-/// handed-off environment, and the shim gets the exit code.
-#[test]
-fn the_job_runs_the_hold_with_the_handoff() {
-    let d = std::env::temp_dir().join(format!("iris-job-{}", std::process::id()));
+/// The side of the shim of a job child process.
+struct Started {
+    child: std::process::Child,
+    sock: UnixStream,
+    engine: io::PipeWriter,
+    status: io::PipeReader,
+    dir: PathBuf,
+    _dir: Dir,
+}
+
+/// Starts `job_child` in a new folder and hands off `agent` (a `/bin/sh -c`
+/// script) with the engine pipe, the log, the status pipe and `work`.
+fn start_job(name: &str, agent: &str) -> Started {
+    let d = std::env::temp_dir().join(format!("iris-job-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(d.join("work")).unwrap();
     let d = fs::canonicalize(&d).unwrap();
-    let _dir = Dir(d.clone());
+    let guard = Dir(d.clone());
     let f = files(&d, 3);
     fs::create_dir_all(f.socket.parent().unwrap()).unwrap();
     let listener = UnixListener::bind(&f.socket).unwrap();
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "macos_job::tests::job_child", "--test-threads=1"])
         .env("IRIS_TEST_JOB_DIR", &d)
         .stdin(std::process::Stdio::null())
@@ -347,13 +367,9 @@ fn the_job_runs_the_hold_with_the_handoff() {
         .spawn()
         .unwrap();
     let (s, _) = listener.accept().unwrap();
-    // The record came before the connection.
-    let sb = Seatbelt::with(&d, Box::new(FakeSys(Mutex::default()))).unwrap();
-    let rec = sb.record(3).unwrap().unwrap();
-    assert_eq!((rec.coalition, rec.port), (50, Some(4000)));
-    let (engine_r, mut engine_w) = io::pipe().unwrap();
+    let (engine_r, engine_w) = io::pipe().unwrap();
     let (log_r, log_w) = io::pipe().unwrap();
-    let (mut status_r, status_w) = io::pipe().unwrap();
+    let (status_r, status_w) = io::pipe().unwrap();
     let work = fs::File::open(d.join("work")).unwrap();
     let fds = [
         engine_r.as_raw_fd(),
@@ -362,36 +378,91 @@ fn the_job_runs_the_hold_with_the_handoff() {
         work.as_raw_fd(),
     ];
     let h = Handoff {
-        args: vec![
-            "3".into(),
-            "/bin/sh".into(),
-            "-c".into(),
-            "pwd > seen; echo \"$IRIS_T\" >> seen; [ -z \"$IRIS_TEST_JOB_DIR\" ] && echo clean >> seen".into(),
-        ],
+        args: vec!["3".into(), "/bin/sh".into(), "-c".into(), agent.into()],
         env: vec![
             ("IRIS_T".into(), "handed".into()),
             ("PATH".into(), "/usr/bin:/bin".into()),
         ],
     };
     send_with_fds(&s, &fds, &h.encode()).unwrap();
-    drop((engine_r, log_w, status_w, work));
-    drop(log_r);
+    drop((engine_r, log_w, status_w, work, log_r));
+    Started {
+        child,
+        sock: s,
+        engine: engine_w,
+        status: status_r,
+        dir: d,
+        _dir: guard,
+    }
+}
+
+/// A valid handoff: the job writes the record, the hold waits for `start`
+/// on the engine pipe, the agent runs in the handed-off folder with the
+/// handed-off environment and only the three streams, and the shim gets
+/// the exit code.
+#[test]
+fn the_job_runs_the_hold_with_the_handoff() {
+    let mut j = start_job(
+        "run",
+        "pwd > seen; echo \"$IRIS_T\" >> seen; [ -z \"$IRIS_TEST_JOB_DIR\" ] && echo clean >> seen; ls /dev/fd/ > fds",
+    );
+    let d = j.dir.clone();
+    // The record came before the connection.
+    let sb = Seatbelt::with(&d, Box::new(FakeSys(Mutex::default()))).unwrap();
+    let rec = sb.record(3).unwrap().unwrap();
+    assert_eq!((rec.coalition, rec.port), (50, Some(4000)));
     // No agent before `start`.
     thread::sleep(Duration::from_millis(200));
     assert!(!d.join("work/seen").exists());
-    engine_w.write_all(b"start\n").unwrap();
+    j.engine.write_all(b"start\n").unwrap();
     let mut status = String::new();
-    status_r.read_to_string(&mut status).unwrap();
+    j.status.read_to_string(&mut status).unwrap();
     assert!(status.starts_with("started "), "{status}");
     assert!(status.contains("exited 0"), "{status}");
     let mut code = [9u8; 1];
-    (&s).read_exact(&mut code).unwrap();
+    (&j.sock).read_exact(&mut code).unwrap();
     assert_eq!(code[0], 0);
-    assert!(child.wait().unwrap().success());
+    assert!(j.child.wait().unwrap().success());
     let seen = fs::read_to_string(d.join("work/seen")).unwrap();
     assert_eq!(
         seen,
         format!("{}\nhanded\nclean\n", d.join("work").display())
     );
+    // 0, 1 and 2, and the folder that `ls` opens: no descriptor of the
+    // handoff (engine pipe, log, status, folder) reaches the agent.
+    let fds = fs::read_to_string(d.join("work/fds")).unwrap();
+    assert!(
+        fds.split_whitespace().count() <= 4
+            && fds.split_whitespace().all(|n| ["0", "1", "2", "3"].contains(&n)),
+        "{fds}"
+    );
     assert!(sb.home(3).is_dir() && sb.tmp(3).is_dir());
+}
+
+/// The end of the shim stops a running agent, while the engine pipe stays
+/// open (spec, step 5).
+#[test]
+fn the_end_of_the_shim_stops_the_agent() {
+    let mut j = start_job("shim", "echo up > up; exec sleep 60");
+    j.engine.write_all(b"start\n").unwrap();
+    let up = j.dir.join("work/up");
+    let t = Instant::now();
+    while !up.exists() {
+        assert!(t.elapsed() < Duration::from_secs(10), "the agent did not start");
+        thread::sleep(Duration::from_millis(20));
+    }
+    drop(j.sock);
+    let t = Instant::now();
+    loop {
+        if j.child.try_wait().unwrap().is_some() {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(20), "the job did not end");
+        thread::sleep(Duration::from_millis(20));
+    }
+    // The status pipe ends: no process of the session holds it.
+    let mut status = String::new();
+    j.status.read_to_string(&mut status).unwrap();
+    assert!(status.starts_with("started "), "{status}");
+    drop(j.engine);
 }
