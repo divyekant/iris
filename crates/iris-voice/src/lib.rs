@@ -21,6 +21,9 @@ use iris_understand::Model;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
+mod run;
+pub use run::{draft, Connect, Drafted, Failure};
+
 /// The version of the prompt. `reply_draft.prompt` records it.
 pub const PROMPT: &str = "draft/0.1";
 /// The most sent messages that show the voice of the owner.

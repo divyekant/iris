@@ -133,6 +133,7 @@ pub fn router_with_model(store: Arc<Store>, auth: Arc<Auth>, connect: Connect) -
 fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Router {
     let ask = Router::new()
         .route("/api/ask", post(post_ask))
+        .route("/api/threads/{id}/draft", post(post_draft))
         .with_state((store.clone(), connect));
     Router::new()
         .route("/api/status", get(get_status))
@@ -332,6 +333,32 @@ async fn post_ask(
         .await
         .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;
     Ok(Json(a).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DraftBody {
+    /// What the reply must say, in the words of the person. Empty: Iris
+    /// writes the reply from the thread alone.
+    #[serde(default)]
+    intent: String,
+}
+
+/// A draft of the reply in the voice of the person (R3-04 intent path,
+/// R3-05). The model call runs on a blocking thread, so the other requests
+/// go on. The draft is saved in the store; nothing goes to Gmail.
+async fn post_draft(
+    State((s, connect)): State<(Arc<Store>, Option<Connect>)>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<DraftBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let connect =
+        connect.ok_or_else(|| Error::Unavailable("This engine has no model client.".into()))?;
+    let d = tokio::task::spawn_blocking(move || write::draft(&s, &connect, &id, &b.intent, now_ms))
+        .await
+        .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;
+    Ok(d.map_or_else(not_found, |v| Json(v).into_response()))
 }
 
 #[derive(Deserialize)]
