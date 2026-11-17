@@ -5,6 +5,7 @@
   the ledger (spec 2 section 4).
 -->
 <script lang="ts">
+  import type { Snippet } from "svelte";
   import { get, post, type Item } from "../api";
   import { day, first, firstName, hold, HOLD, nextWeek, said, started, type Verb } from "../act";
 
@@ -14,7 +15,8 @@
     onchange,
     delay = HOLD,
     clock = () => new Date(),
-  }: { item: Item; onchange: (item: Item) => void; delay?: number; clock?: () => Date } = $props();
+    more,
+  }: { item: Item; onchange: (item: Item) => void; delay?: number; clock?: () => Date; more?: Snippet } = $props();
 
   type Phase =
     | { at: "idle" }
@@ -135,6 +137,7 @@
       </button>
       <button class="pill" type="button" aria-expanded={later} onclick={openLater}>Later</button>
       <button class="quiet" type="button" onclick={() => choose("decline")}>Decline</button>
+      {@render more?.()}
     </div>
     {#if later}
       <div class="when">

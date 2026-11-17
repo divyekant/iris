@@ -1266,8 +1266,6 @@ fn session_job(b: &Box, ms: &[i64]) -> i64 {
         .write(|tx| {
             tx.execute_batch(
                 "UPDATE message SET understood_at = 1;
-                 -- The link check (R5-10) ran: a message with no check
-                 -- may be hostile, so it is outside each grant.
                  DELETE FROM link_check;
                  INSERT OR IGNORE INTO header(message_id, from_addr)
                    SELECT id, 'dana@example.com' FROM message;

@@ -165,6 +165,10 @@ async fn a_commitment_starts_a_job_with_the_item_and_the_threads_of_its_sources(
         .collect();
     assert!(errors.is_empty(), "{errors:?}: {job}");
     assert_eq!(job["events"][0]["by"], json!("person"));
+    // The same document as the `job` field of the job page (issue #398).
+    let (code, page) = d.get("/api/jobs/j-1").await;
+    assert_eq!(code, StatusCode::OK, "{page}");
+    assert_eq!(page["job"], job);
     // Not thread 3, which holds no source of the item.
     let mut scope = d.scope("j-1");
     scope.sort();

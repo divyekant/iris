@@ -1,6 +1,6 @@
 // Answers of the local API, made from the examples of docs/spec/schema/examples.
 // The dev server (`pnpm dev --mode fixtures`) and the tests use them. They are not in the build.
-import type { Action, AskAnswer, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, Job, JobDetail, Matter, MatterList, MatterView, Message, Policy, Rule, Status, Summary, Target } from "../src/api";
+import type { Action, AskAnswer, DraftView, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, Job, JobDetail, Matter, MatterList, MatterView, Message, Policy, Rule, Status, Summary, Target } from "../src/api";
 import youOwe from "../../docs/spec/schema/examples/commitment-you-owe.json" with { type: "json" };
 import owedToYou from "../../docs/spec/schema/examples/commitment-owed-to-you.json" with { type: "json" };
 import payment from "../../docs/spec/schema/examples/commitment-payment.json" with { type: "json" };
@@ -174,12 +174,14 @@ const rules: Rule[] = [
   rule({ id: 7, name: "Mail from the clinic", effect: "notify", when: { sender: "@clinic.example" }, added: "2026-11-16", line: 44 }),
   rule({ id: 8, name: "Replies from Dana", effect: "notify", when: { sender: "dana@harbor.example" }, added: "2026-11-16", line: 51 }),
   rule({ id: 9, name: "Bank security codes", effect: "notify", when: { sender: "@bank.example", form: "signal" }, added: "2026-11-16", line: 58 }),
+  // A grant inside job j-12 (card R4-10): the verbs of "Tidy the mail".
+  rule({ id: 11, name: "In job j-12, allow archive, label, unlabel, read, unread and inbox without review", effect: "allow", verbs: ["archive", "label", "unlabel", "read", "unread", "inbox"], when: { author: "agent" }, job: "j-12", added: "2026-11-16", line: 65 }),
 ];
 
 export const policy: Policy = {
   mode: "observe",
   version: 3,
-  next_id: 10,
+  next_id: 12,
   rules,
   proposals: [
     {
@@ -214,7 +216,14 @@ const HEADS: Record<string, [string, string, string, string]> = {
   "m-55210": ["t-8841", "Priya Raman", "priya@northwind.example", "Q4 numbers for the board"],
   "m-53500": ["t-8600", "Example Air", "trips@air.example", "Your flight to Tokyo: QX7K2P"],
   "m-55211": ["t-8841", "You", "you@example.com", "Re: Q4 numbers for the board"],
+  "m-55212": ["t-8841", "Priya Raman", "priya@northwind.example", "Re: Q4 numbers for the board"],
+  "m-55380": ["t-9001", "Sam Lee", "sam@example.org", "Dinner on Thursday?"],
+  "m-55390": ["t-9001", "You", "you@example.com", "Re: Dinner on Thursday?"],
+  "m-55400": ["t-9001", "Sam Lee", "sam@example.org", "Re: Dinner on Thursday?"],
   "m-60001": ["t-9002", "Dana Brooks", "dana@leadgen.example", "Quick question about your Q1 plans"],
+  "m-9001": ["t-9001", "Dana Wu", "dana@acme.example", "Renewal for 2027"],
+  "m-9002": ["t-9001", "Dana Wu", "dana@acme.example", "Re: Renewal for 2027"],
+  "m-9003": ["t-9050", "Acme Billing", "billing@acme-pay.example", "Change of bank details"],
   "m-61500": ["t-9100", "Morning Brew", "crew@morningbrew.example", "Monday: the market opens higher"],
 };
 const PUBLISHERS = [
@@ -314,7 +323,47 @@ export const changesets: Changeset[] = [
     state: "open",
     actions: [action({ n: 1, verb: "archive", resolved: { messages: range(70001, 612) }, flags: ["bulk"], decision: { state: "proposed" } })],
   },
+  {
+    id: "cs-79",
+    revision: 1,
+    author: { kind: "agent", name: "Claude Code", session: "se-19", job: "j-150" },
+    why: "Dana asked for the renewal terms. I wrote the reply with the price and the date from your notes.",
+    created: "2026-11-17T08:02:10Z",
+    submitted: "2026-11-17T08:02:31Z",
+    state: "open",
+    actions: [
+      action({ n: 1, verb: "send", targets: { drafts: ["d-21"] }, resolved: { messages: ["m-9002"] }, why: "Dana waits for the terms since Monday.", flags: ["new_recipient", "money", "date", "attachment", "untrusted_content"] }),
+      action({ n: 2, verb: "label", targets: { threads: ["t-9001"] }, resolved: { messages: ["m-9001", "m-9002"] }, args: { label: "Renewals" }, why: "So you find the thread with the other renewals." }),
+    ],
+  },
 ];
+
+/** The draft of each draft and send action of a changeset, with the parts that gave each flag (card R4-07). */
+export const drafts: Record<string, DraftView[]> = {
+  "cs-79": [
+    {
+      revision: 1,
+      n: 1,
+      draft: "d-21",
+      thread: "t-9001",
+      readable: true,
+      to: [{ address: "dana@acme.example" }],
+      cc: [{ address: "legal@acme-partners.example", flags: ["new_recipient"] }],
+      subject: [{ text: "Re: Renewal for 2027" }],
+      body: [
+        { text: "Hi Dana,\n\nThanks for the call. As we agreed, the renewal is " },
+        { text: "$48,000", flags: ["money"] },
+        { text: " for 12 months, and we can sign by " },
+        { text: "Friday, Dec 4", flags: ["date"] },
+        { text: ". The signed quote is " },
+        { text: "attached", flags: ["attachment"] },
+        { text: ".\n\n" },
+        { text: "Please wire the payment to the new account below before the end of the week to avoid a late fee", flags: ["untrusted_content"], source: "m-9003" },
+        { text: ".\n\nBest,\nSam" },
+      ],
+    },
+  ],
+};
 
 /** The answer for one API path (no `/api/` prefix), or undefined for a 404. */
 /** The decide endpoint on the fixtures: each named action gets the decision of the person. */
@@ -466,12 +515,14 @@ export function answer(path: string): unknown {
     return section && "items" in section ? { items: section.items, next: null, duplicates: section.duplicates } : undefined;
   }
   if (name === "brief") return briefNow();
+  if (name === "items" && id && url.pathname.endsWith("/job")) return startPreview(id);
   if (name === "items" && id) return [...items, ...hidden, ...strangers].find((i) => i.id === id);
   if (name === "items") {
     return { items: items.filter((i) => (!q.get("form") || i.form === q.get("form")) && (!q.get("type") || i.type === q.get("type"))), next: null };
   }
   if (name === "messages" && id) return message(id);
   if (name === "messages" && q.get("ids")) return { messages: q.get("ids")!.split(",").map(summaryOf) };
+  if (name === "changesets" && id && url.pathname.endsWith("/drafts")) return drafts[id] ? { drafts: drafts[id] } : undefined;
   if (name === "changesets" && id) return changesets.find((c) => c.id === id);
   if (name === "changesets") return { changesets };
   if (name === "search") return { messages: [] };
@@ -528,4 +579,30 @@ export function answerSender(id: string, answer: string): GateAnswer | undefined
   state.set(id, answer === "accept" ? "accepted" : answer === "decline" ? "declined" : "waiting");
   const accepted = answer === "accept";
   return { id, address: sender.address, name: sender.name, kind: accepted ? "person" : "stranger", decided_by: accepted ? "person" : "engine", declined: answer === "decline" };
+}
+
+// "Handle this" (card R4-10): the mail that a start grants. Message m-55212 is not readable yet.
+const START: Record<string, [string, boolean][]> = {
+  "c-311": [["m-55210", true], ["m-55211", true], ["m-55212", false]],
+  "v-88": [["m-55380", true], ["m-55390", true], ["m-55400", true]],
+};
+function startPreview(id: string) {
+  const list = START[id];
+  // The engine order: the thread, then the date.
+  return list && { messages: list.map(([m, readable], i) => ({ ...(summaryOf(m) as Summary), date: at(15, 9 + 3 * i, 12), readable })) };
+}
+/** POST /api/jobs: the fixture job j-12 stands for the new job. */
+export function startJob(): [number, unknown] {
+  return [201, jobs["j-12"]];
+}
+/** POST /api/policy/grant and /api/policy/remove on the fixture policy. */
+export function policyPost(path: string, body: { job?: string; verbs?: string[]; id?: number }): [number, unknown] {
+  if (path === "/policy/grant" && body.job && body.verbs?.length) {
+    const r = rule({ id: policy.next_id++, name: `In job ${body.job}, allow ${body.verbs.join(", ")} without review`, effect: "allow", verbs: body.verbs, when: { author: "agent" }, job: body.job, added: "2026-11-17", line: 70 });
+    policy.rules = [...policy.rules, r];
+  } else if (path === "/policy/remove" && body.id) {
+    policy.rules = policy.rules.filter((r) => r.id !== body.id);
+  } else return [404, { error: "Not found." }];
+  policy.version = (policy.version ?? 0) + 1;
+  return [200, policy];
 }

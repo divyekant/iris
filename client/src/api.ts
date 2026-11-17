@@ -200,7 +200,7 @@ export type Action = {
   n: number;
   revision: number;
   verb: string;
-  targets: { threads?: string[]; messages?: string[]; items?: string[] };
+  targets: { threads?: string[]; messages?: string[]; items?: string[]; drafts?: string[]; accounts?: string[] };
   resolved: { messages: string[] };
   args: Record<string, unknown>;
   why: string | null;
@@ -208,6 +208,21 @@ export type Action = {
   hash: string | null;
   decision: Decision | null;
 };
+
+/** A part of a draft text, with the draft flags that its words gave (card R4-07). `source` is the mail of copied text. */
+export type Part = { text: string; flags?: string[]; source?: string };
+/** A recipient of a draft, with the flag `new_recipient` if the owner never wrote to the address. */
+export type Recipient = { address: string; flags?: string[] };
+/**
+ * GET /api/changesets/{id}/drafts: the draft of each `draft` and `send`
+ * action that waits, as the review shows it. Each part of the text carries
+ * the flags of the action that its words gave. An action whose text Iris
+ * cannot read has `readable: false` and no text.
+ */
+export type DraftView = { revision: number; n: number; draft: string | null; thread: string | null } & (
+  | { readable: true; to: Recipient[]; cc: Recipient[]; subject: Part[]; body: Part[] }
+  | { readable: false }
+);
 
 export type Changeset = {
   id: string;
@@ -436,7 +451,8 @@ export async function get<T>(path: string): Promise<T> {
 export async function post<T>(path: string, body: unknown): Promise<T> {
   const response = await call(path, "application/json", body);
   const answer = await response.json().catch(() => null);
-  if (!response.ok) throw Object.assign(new Error(answer?.error ?? `The engine answered ${response.status}.`), { status: response.status });
+  // The body goes with the error too: a 409 of a start names the open job.
+  if (!response.ok) throw Object.assign(new Error(answer?.error ?? `The engine answered ${response.status}.`), { status: response.status, body: answer });
   return answer as T;
 }
 
