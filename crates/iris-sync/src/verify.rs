@@ -178,7 +178,7 @@ fn compare(
     let mut changed: HashSet<String> = HashSet::new();
     let mut page_token: Option<String> = None;
     loop {
-        let page = mail.changes(token, &v, page_token.as_deref())?;
+        let page = mail.changes(token, v, page_token.as_deref())?;
         for record in &page.history {
             for change in &record.changes {
                 let m = match change {

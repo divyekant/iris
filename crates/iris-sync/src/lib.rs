@@ -611,7 +611,7 @@ fn incremental(
 ) -> Result<String> {
     let mut page_token: Option<String> = None;
     loop {
-        let page = mail.changes(token, &from, page_token.as_deref())?;
+        let page = mail.changes(token, from, page_token.as_deref())?;
         // After history.list: Gmail makes no history record for a new name
         // or a delete of a label. A label that a record of this page names
         // was made before this call.
