@@ -1004,3 +1004,58 @@ fn a_press_of_send_wakes_the_waiting_thread() {
         })
         .unwrap();
 }
+
+/// R6-02: two mailboxes in one data folder. Both fakes come from the same
+/// seed, so the Gmail IDs of messages, threads and labels are the same in
+/// both: each row of the store must stay with its own account.
+#[test]
+fn two_accounts_sync_with_zero_differences() {
+    let s = setup("two-mailboxes", 30);
+    let other = FakeGmail::start(Mailbox::new(7, 30)).unwrap();
+    other.set_address("second@example.com");
+    let second = sign_in(
+        &s.store,
+        &gmail(other.base_url()),
+        &client_json(),
+        "refresh-two",
+    );
+    assert_ne!(second, s.account);
+    let worker_of = |account: i64, fake: &FakeGmail| {
+        Worker::new(
+            s.store.clone(),
+            gmail(fake.base_url()),
+            account,
+            Some(s.tokens.uri.clone()),
+        )
+    };
+    let verify_both = || {
+        for (account, fake) in [(s.account, &s.fake), (second, &other)] {
+            let report = worker_of(account, fake).verify().unwrap();
+            assert_eq!(
+                report.total, 0,
+                "account {account}: {:?}",
+                report.differences
+            );
+        }
+    };
+    worker_of(s.account, &s.fake).sync().unwrap();
+    worker_of(second, &other).sync().unwrap();
+    let per_account = |account: i64| {
+        count(
+            &s.store,
+            &format!(
+                "SELECT count(*) FROM message WHERE account_id = {account} AND gone_at IS NULL"
+            ),
+        )
+    };
+    assert_eq!((per_account(s.account), per_account(second)), (30, 30));
+    verify_both();
+
+    // A change in one mailbox changes only the mirror of that account.
+    assert!(other.delete_message(&FakeGmail::id_of(0)));
+    other.modify_labels(&FakeGmail::id_of(1), &["STARRED"], &[]);
+    worker_of(second, &other).sync().unwrap();
+    worker_of(s.account, &s.fake).sync().unwrap();
+    assert_eq!((per_account(s.account), per_account(second)), (30, 29));
+    verify_both();
+}

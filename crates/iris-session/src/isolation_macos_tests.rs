@@ -660,11 +660,8 @@ fn a_journal_of_an_earlier_boot_is_removed_and_resumes_nothing() {
     f.w().boot = "200.000000".into();
     s.stop(1).unwrap();
     let w = f.w();
-    assert!(
-        w.signals.is_empty() && w.bootouts.is_empty(),
-        "{:?}",
-        w.signals
-    );
+    assert!(w.signals.is_empty(), "{:?}", w.signals);
+    assert_eq!(w.bootouts, [format!("gui/501/{}", s.name(1))]);
     assert!(w.procs[&pid].stopped);
     drop(w);
     assert!(!s.file(1, "stops").exists());
@@ -736,4 +733,38 @@ fn the_command_runs_the_program_in_the_profile_with_the_private_folders() {
         a[env + 4..],
         [real(&program), "--task".into(), "a b".into()]
     );
+}
+
+#[test]
+fn remove_files_takes_each_file_of_the_session_and_only_those() {
+    let (_d, s, _f) = setup("remove");
+    s.write_record(1, &rec(50)).unwrap();
+    s.write_record(2, &rec(51)).unwrap();
+    for dir in [s.home(1), s.tmp(1)] {
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("sub/f"), "x").unwrap();
+    }
+    s.journal(1, 5).unwrap();
+    for ext in ["stop.lock", "plist", "hold"] {
+        fs::write(s.file(1, ext), "").unwrap();
+    }
+    s.remove_files(1).unwrap();
+    for p in [s.home(1), s.tmp(1)] {
+        assert!(!p.exists(), "{}", p.display());
+    }
+    for ext in ["sandbox", "stops", "stop.lock", "plist", "hold"] {
+        assert!(!s.file(1, ext).exists(), "{ext}");
+    }
+    assert_eq!(s.record(2).unwrap(), Some(rec(51)));
+    // A second call finds nothing to remove.
+    s.remove_files(1).unwrap();
+}
+
+#[test]
+fn stop_with_no_record_boots_out_a_job_that_a_crash_left() {
+    let (_d, s, f) = setup("norecord");
+    s.stop(1).unwrap();
+    let w = f.w();
+    assert!(w.signals.is_empty());
+    assert_eq!(w.bootouts, [format!("gui/501/{}", s.name(1))]);
 }

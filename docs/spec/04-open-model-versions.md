@@ -1,6 +1,6 @@
 # Specification 4: the versions of the open model
 
-- Status: version 1.0
+- Status: version 1.1
 - Design: `docs/specs/2026-11-17-open-model-v1.md` (card R6-07)
 
 ## 1. Purpose
@@ -44,6 +44,10 @@ reads them (a reader). Iris is a producer and a reader.
    last stays in force, and the status of the file shows the error. If no
    policy was ever confirmed, Iris uses the policy of the first start,
    which is observe mode.
+8. Each field that a minor version adds has a condition in the schema: a
+   document that claims an older minor version and holds the field is not
+   valid. So a reader of the older version never gets a document that it
+   must refuse, from a producer that passed the kit.
 
 ## 3. Rules for a producer
 
@@ -101,7 +105,7 @@ action from it.
 ## 6. The conformance kit
 
 The kit checks the documents of a producer with no Iris code. Its version
-is in [`VERSION`](VERSION) (`1.0`), and it names the newest minor version
+is in [`VERSION`](VERSION) (`1.1`), and it names the newest minor version
 that it knows.
 
 | Path | Content |
@@ -128,3 +132,10 @@ not write such a document.
 
 A producer conforms when `run.py check` on a folder with its documents
 exits 0. [`conformance/README.md`](conformance/README.md) gives the steps.
+
+## 7. Minor versions
+
+| Version | Adds | Card |
+|---|---|---|
+| 1.0 | The first stable version. | R6-07 |
+| 1.1 | The optional field `account` (an `a-` ID) of each item. | R6-02 |
