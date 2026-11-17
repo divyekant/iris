@@ -173,13 +173,25 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
     let model = Budgeted::new(inner.as_ref(), store, run, Some(&row));
     let reply = model.ask(INSTRUCTION, &data);
     let state = model.state();
+    // The wait starts at the end of the call, as in an understanding run.
+    let ended = batch::clock_ms().max(now);
     // The outcome of the call decides each write below:
     // - no call went out (the budget refused it): undo the attempt;
-    // - a call with no usable answer, or an unknown result: the wait;
-    // - an answer: the fingerprint, and proposals only from a complete one.
+    // - no answer of the known format, or an unknown result: the wait;
+    // - an answer: the fingerprint, and proposals only from a complete one
+    //   (`Some(Some(..))`); a refused or cut answer is `Some(None)`.
     let refused = matches!(reply, Err(iris_model::Error::Budget(_))) && !state.store_failed;
+    let answer: Option<Option<Value>> = match &reply {
+        Err(_) => None,
+        Ok(r) if r.stop != Stop::End => Some(None),
+        Ok(r) => r
+            .json()
+            .ok()
+            .filter(|v| v.get("matters").is_some_and(Value::is_array))
+            .map(Some),
+    };
     let failed = !refused
-        && (reply.is_err()
+        && (answer.is_none()
             || state.key_refused
             || state.server_failed
             || state.unknown
@@ -193,23 +205,22 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
         }
         tx.execute(
             "UPDATE understand_run SET ended_at = ?2, stop = ?3 WHERE id = ?1",
-            params![run, now, if failed { "model" } else { "done" }],
+            params![run, ended, if failed { "model" } else { "done" }],
         )?;
-        batch::update_wait(tx, failed, !failed, now)?;
-        let Ok(reply) = &reply else {
+        batch::update_wait(tx, failed, !failed, ended)?;
+        let Some(answer) = &answer else {
             return Ok((0, 0));
         };
+        // An answer: the same set gives the same answer, so the fingerprint
+        // stays, also for a refused or cut answer, which is not a grouping.
         tx.execute(
             "UPDATE matter_run SET candidates = ?1 WHERE id = 1",
             [&print],
         )?;
-        // A refused or cut answer is not a grouping. The same set gives the
-        // same answer, so the fingerprint stays.
-        if reply.stop != Stop::End {
-            return Ok((0, 0));
+        match answer {
+            Some(v) => save(tx, v, &sent, &name, run, now),
+            None => Ok((0, 0)),
         }
-        let answer = reply.json().unwrap_or(Value::Null);
-        save(tx, &answer, &sent, &name, run, now)
     })?;
     if let Some(e) = model.take_error() {
         return Err(Error::Store(e));

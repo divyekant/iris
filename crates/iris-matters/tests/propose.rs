@@ -456,3 +456,40 @@ fn the_outcome_of_the_call_decides_the_writes() {
         assert_eq!(run(&b, &f, Gate::Now, NOW + 1).skip, Some(Skip::Same));
     }
 }
+
+/// An answer of an unknown format is a failed call: it starts the wait and
+/// writes no fingerprint, so the same set is tried again after the wait.
+/// The wait starts at the end of the call, by the wall clock.
+#[test]
+fn an_unknown_answer_waits_and_tries_again() {
+    for text in ["not json", "{\"groups\": []}", "{\"matters\": 3}"] {
+        let b = setup("unknown", 2, &titles(2), &["record"]);
+        let f = fake(vec![
+            Ok(text.to_string()),
+            answer(json!([{"title": "T", "items": ["r-1", "r-2"]}])),
+        ]);
+        let o = run(&b, &f, Gate::Now, NOW);
+        assert!(o.failed, "{text}");
+        assert_eq!(
+            col(
+                &b,
+                "SELECT count(*) FROM matter_run WHERE candidates IS NULL"
+            ),
+            1
+        );
+        assert_eq!(run(&b, &f, Gate::Now, NOW + 1).skip, Some(Skip::Wait));
+        let later = col(&b, "SELECT retry_at FROM model_setting") + 1;
+        assert_eq!(run(&b, &f, Gate::Now, later).proposed, 1, "{text}");
+    }
+    // A step whose `now` is long past (a slow call): the wait starts at the
+    // end of the call, so it is not over at once.
+    let b = setup("slow", 2, &titles(2), &["record"]);
+    let f = fake(vec![Err(ModelError::Transport("time-out".into()))]);
+    let past = 1_000_000_000_000;
+    run(&b, &f, Gate::Now, past);
+    let clock = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    assert!(col(&b, "SELECT retry_at FROM model_setting") > clock);
+}

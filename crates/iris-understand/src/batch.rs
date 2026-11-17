@@ -284,7 +284,8 @@ pub fn run(store: &Store, connect: Connect, limits: &Limits, now_ms: i64) -> Res
     Ok(report)
 }
 
-fn clock_ms() -> i64 {
+/// The wall clock in milliseconds since the Unix epoch.
+pub fn clock_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
