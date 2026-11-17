@@ -62,7 +62,7 @@ with only these changes:
 | The description of `attention` names spec 2, section 6.4, in place of "Reserved for specification 2" | `common.schema.json` |
 | The policy `version` accepts `0` and `1`, with the same meaning | `policy.schema.json`, `iris-policy` |
 | The person file gets the required field `model`, as each other JSON document has it | `person.schema.json`, its samples, `iris-workspace`, spec 3 section 7 and the sample of section 12 |
-| Each section of the spec text that says "version 0" says "version 1" | `docs/spec/01-mirror-store-forms.md`, `docs/spec/02-changeset-policy-ledger.md`, `docs/spec/03-job-workspace.md`, `docs/spec/README.md` |
+| Each text that says "version 0", `iris/0` or `urn:iris:model:0` says the version 1 value. The freeze PR finds each one with `grep -rn -e 'iris/0' -e 'urn:iris:model:0' -e 'version 0' docs README.md`, and changes only a hit that names the open model | `docs/spec/01-mirror-store-forms.md`, `docs/spec/02-changeset-policy-ledger.md`, `docs/spec/03-job-workspace.md`, `docs/spec/README.md`, and the design specs `docs/specs/2026-11-16-job-store.md` and `docs/specs/2026-11-16-matters.md` |
 
 No field, enum value or rule of a schema changes in other ways. The person
 file is the one JSON document of version 0 with no `model` field. Without
@@ -115,8 +115,9 @@ A producer writes documents of the model. Iris is one producer.
 - Write only the fields of the minor version that the producer claims.
 - Write the `model` value of the minor version that the producer claims,
   for example `"iris/1.0"`.
-- Write each document so that it passes the schema of its kind, with no
-  `format` check (section 5.4).
+- Write each document so that it passes the schema of its kind, with the
+  `date` and `date-time` format checks of the kit (section 5.4). The kit
+  does not check `email`.
 - Do not write a key two times in one JSON object.
 - Do not write `NaN`, `Infinity` or `-Infinity`.
 
