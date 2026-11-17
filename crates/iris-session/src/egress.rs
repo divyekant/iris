@@ -12,7 +12,7 @@ use std::io::{self, Read, Write};
 use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -216,8 +216,11 @@ struct Conns {
 
 struct Shared {
     allowed: Vec<String>,
-    resolver: Box<dyn Resolve>,
+    resolver: Arc<dyn Resolve>,
     public_only: bool,
+    /// The live resolver workers. A worker can outlive its connection and
+    /// the proxy, so it holds only this count, the resolver and the name.
+    workers: Arc<AtomicUsize>,
     log: Mutex<Log>,
     conns: Mutex<Conns>,
     stopping: AtomicBool,
@@ -254,8 +257,9 @@ impl Proxy {
         let port = listener.local_addr()?.port();
         let shared = Arc::new(Shared {
             allowed,
-            resolver,
+            resolver: Arc::from(resolver),
             public_only,
+            workers: Arc::new(AtomicUsize::new(0)),
             log: Mutex::new(Log {
                 file,
                 written,
@@ -468,12 +472,14 @@ enum Phase {
     Up(TcpStream),
     NotPublic,
     Failed,
+    /// [`MAX_CONNECTIONS`] resolver workers are still live.
+    Busy,
     /// A stop came first.
     Cancel,
 }
 
 /// Reads the head of one connection, checks it, and relays the tunnel.
-fn handle(shared: &Arc<Shared>, mut client: TcpStream, id: u64) -> Finish {
+fn handle(shared: &Shared, mut client: TcpStream, id: u64) -> Finish {
     let mut head = Vec::with_capacity(512);
     let end = Instant::now() + HEAD_TIME;
     let stopped_or = |e: End| {
@@ -522,6 +528,7 @@ fn handle(shared: &Arc<Shared>, mut client: TcpStream, id: u64) -> Finish {
     let upstream = match connect(shared, host, id) {
         Phase::Up(u) => u,
         Phase::NotPublic => return refuse(client, Reason::AddressNotPublic),
+        Phase::Busy => return refuse(client, Reason::TooMany),
         Phase::Failed => {
             return Finish {
                 end: tunnel(host, 0, 0, "connect_failed"),
@@ -564,9 +571,10 @@ fn handle(shared: &Arc<Shared>, mut client: TcpStream, id: u64) -> Finish {
 /// Resolves the host and connects to a checked address, in a worker thread,
 /// so that a stalled resolver cannot hold the connection or a stop. The wait
 /// ends at [`CONNECT_TIME`] or at a stop, whichever comes first. A worker
-/// that is still in the resolver then ends later, by itself, and its
-/// connection (if any) is dropped.
-fn connect(shared: &Arc<Shared>, host: usize, id: u64) -> Phase {
+/// that is still in the resolver stays until the resolver returns, and keeps
+/// its place in the count: at most [`MAX_CONNECTIONS`] workers live at one
+/// time, and a CONNECT past the bound gets `too_many`.
+fn connect(shared: &Shared, host: usize, id: u64) -> Phase {
     let (tx, rx) = mpsc::channel();
     {
         let mut c = lock(&shared.conns);
@@ -575,27 +583,59 @@ fn connect(shared: &Arc<Shared>, host: usize, id: u64) -> Phase {
         }
         c.cancels.insert(id, tx.clone());
     }
-    let s = shared.clone();
+    // Take a place in the count before the spawn; the worker gives it back
+    // when it ends, also on a panic.
+    let workers = shared.workers.clone();
+    let took = workers.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+        (n < MAX_CONNECTIONS).then_some(n + 1)
+    });
+    if took.is_err() {
+        return Phase::Busy;
+    }
+    let place = Place(workers);
+    let resolver = shared.resolver.clone();
+    let name = shared.allowed[host].clone();
+    let public_only = shared.public_only;
     let deadline = Instant::now() + CONNECT_TIME;
     let spawned = thread::Builder::new()
         .name("iris-egress-resolve".into())
         .spawn(move || {
-            let _ = tx.send(resolve_and_connect(&s, host, deadline));
+            let _place = place;
+            let _ = tx.send(resolve_and_connect(
+                &*resolver,
+                &name,
+                public_only,
+                deadline,
+            ));
         });
     if spawned.is_err() {
         return Phase::Failed;
     }
-    rx.recv_timeout(CONNECT_TIME + Duration::from_secs(1))
+    rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
         .unwrap_or(Phase::Failed)
 }
 
-fn resolve_and_connect(shared: &Shared, host: usize, deadline: Instant) -> Phase {
-    let Ok(addrs) = shared.resolver.resolve(&shared.allowed[host], 443) else {
+/// A place in the count of resolver workers, given back on drop.
+struct Place(Arc<AtomicUsize>);
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn resolve_and_connect(
+    resolver: &dyn Resolve,
+    name: &str,
+    public_only: bool,
+    deadline: Instant,
+) -> Phase {
+    let Ok(addrs) = resolver.resolve(name, 443) else {
         return Phase::Failed;
     };
     let checked: Vec<SocketAddr> = addrs
         .into_iter()
-        .filter(|a| !shared.public_only || is_public(a.ip()))
+        .filter(|a| !public_only || is_public(a.ip()))
         .collect();
     if checked.is_empty() {
         return Phase::NotPublic;

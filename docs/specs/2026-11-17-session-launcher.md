@@ -484,14 +484,11 @@ no network stops them. The engine gives each session one narrow path out:
   (`closed`, `stopped` or `connect_failed`). For a refused request, the
   line has only a fixed reason (`not_connect`, `host_not_allowed`,
   `port_not_allowed`, `address_not_public`, `too_long`, `too_many` for a
-  ninth open connection, `timeout` for a head that does not come in
+  ninth open connection or a ninth live resolver worker, `timeout` for a head that does not come in
   10 s) and no text of the request. For a connection that closes, or
   that a stop ends, before a full head, the line has `ended` and
   `no_head` or `stopped`. So each connection gets exactly one line.
-- The proxy resolves and connects in a worker thread, for at most 10 s.
-  A stop does not wait for the worker: a stalled resolver cannot hold the
-  end of a session. A worker that is still in the resolver ends by itself
-  later, and drops its connection. Only the proxy writes this file,
+  Only the proxy writes this file,
   so it needs no shared append path with the helper. The file has a limit
   of 1 MiB. At the limit the proxy writes one line that says the rest is
   dropped, then only counts: at the end of the session it writes one last
@@ -499,6 +496,13 @@ no network stops them. The engine gives each session one narrow path out:
   two logs of a session never pass 64 KiB and 1 MiB. An egress line holds
   no text of the agent: only a value of the allowed list, numbers and
   fixed words.
+- The proxy resolves and connects in a worker thread, for at most 10 s.
+  A stop does not wait for the worker: a stalled resolver cannot hold the
+  end of a session. A worker that is still in the resolver stays until the
+  resolver returns, then drops its connection. It holds only the host name
+  and the resolver, not the log or the streams of the proxy. At most 8
+  workers live for each proxy at one time; a `CONNECT` past this bound
+  gets `403` with `too_many`.
 - When the session ends, the engine closes the port and each open
   connection of the session.
 

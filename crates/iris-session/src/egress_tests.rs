@@ -455,9 +455,19 @@ fn stalled_resolver_workers_stay_bounded() {
     let log = std::env::temp_dir().join(format!("iris-egress-bound-{}.log", std::process::id()));
     let _ = std::fs::remove_file(&log);
     let guard = LogFile(log.clone());
-    let file = File::options().create_new(true).append(true).open(&log).unwrap();
-    let proxy =
-        Proxy::start_with(allowed(), file, Box::new(Counted(calls.clone())), false, LOG_LIMIT).unwrap();
+    let file = File::options()
+        .create_new(true)
+        .append(true)
+        .open(&log)
+        .unwrap();
+    let proxy = Proxy::start_with(
+        allowed(),
+        file,
+        Box::new(Counted(calls.clone())),
+        false,
+        LOG_LIMIT,
+    )
+    .unwrap();
     for _ in 0..3 * MAX_CONNECTIONS {
         let (_s, line) = send(&proxy, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
         assert!(!line.starts_with("HTTP/1.1 200"), "{line}");
@@ -467,5 +477,9 @@ fn stalled_resolver_workers_stay_bounded() {
     proxy.stop().unwrap();
     assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
     let text = log_text(&guard);
-    assert_eq!(text.matches("reason=too_many").count(), 2 * MAX_CONNECTIONS, "{text}");
+    assert_eq!(
+        text.matches("reason=too_many").count(),
+        2 * MAX_CONNECTIONS,
+        "{text}"
+    );
 }
