@@ -615,9 +615,18 @@ fn a_stop_with_a_failed_end_write_starts_no_agent() {
         _ => {}
     }));
     let id = s.run(f.job, "script").unwrap();
-    let row = until(&s, &f, id, |r| r.reaped_ms.is_some() || r.started_ms.is_some());
-    assert_eq!(*stopped.lock().unwrap(), Some(true), "the end write did not fail");
-    assert_eq!(row.started_ms, None, "the agent started after a stop: {row:?}");
+    let row = until(&s, &f, id, |r| {
+        r.reaped_ms.is_some() || r.started_ms.is_some()
+    });
+    assert_eq!(
+        *stopped.lock().unwrap(),
+        Some(true),
+        "the end write did not fail"
+    );
+    assert_eq!(
+        row.started_ms, None,
+        "the agent started after a stop: {row:?}"
+    );
     assert_eq!(row.end, Some(EndReason::Stop), "{row:?}");
 }
 
