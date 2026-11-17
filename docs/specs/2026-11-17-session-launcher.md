@@ -163,22 +163,20 @@ never passed. No variable of Iris goes to the agent.
 
 The working folder of the agent is the workspace. Its standard input is
 `/dev/null`. Its standard output and standard error are pipes to the
-helper. The helper copies both to `<data dir>/sessions/se-<id>.log` (mode
-`0600`, `create_new`, opened by the engine and given to the helper as its
-standard output). The helper writes at most 10 MiB to the log, writes one
-line that says the rest is dropped, and then keeps reading the pipes and
-drops the bytes, so the agent never blocks on a full pipe and the log never
-grows past the limit.
+helper. The helper reads both pipes and drops the bytes: no output of the
+agent is stored. The agent can read a credential (a passed key, or a file
+of the agent tool), and a filter cannot find each form of it, so the only
+safe log of agent output is none. The helper reads without end, so the
+agent never blocks on a full pipe.
 
-The log never holds a secret value that the session passed. Before each
-write, the helper replaces each value of a passed secret variable with
-`[hidden]`. The secret variables are the keys of the built-in adapters
-(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) and each `pass_env` variable. A
-value shorter than 8 bytes is refused at the run, because a short value
-can hide normal text. The filter keeps the last bytes of each chunk (the
-length of the longest value, less one) until the next chunk, so a value
-split across two reads is also found. An encoded form of a value (for
-example Base64) is not found: this is a known limit with an issue.
+The session log `<data dir>/sessions/se-<id>.log` (mode `0600`,
+`create_new`, opened by the engine and given to the helper as its
+standard output) holds only status lines that the helper writes from
+fixed text and numbers: the start, the process group ID, each signal that
+the helper sends, the exit code or signal of the agent, the count of
+output bytes that the helper dropped, and the result of `Isolation::stop`.
+A status line holds no text of the agent. The log has a limit of 64 KiB.
+The agent writes its own notes in `notes.md` of the workspace.
 
 ### The hold helper
 
@@ -417,7 +415,9 @@ no network stops them. The engine gives each session one narrow path out:
   of 1 MiB. At the limit the proxy writes one line that says the rest is
   dropped, then only counts: at the end of the session it writes one last
   line with the count of dropped lines, inside a reserved 4 KiB. So the
-  two logs of a session never pass 10 MiB and 1 MiB.
+  two logs of a session never pass 64 KiB and 1 MiB. An egress line holds
+  the host of the `CONNECT` line, which the proxy checked against the
+  allowed hosts, so it holds no text of the agent.
 - When the session ends, the engine closes the port and each open
   connection of the session.
 
@@ -491,6 +491,9 @@ store. A request on the socket of an ended session gets exit code 3.
 - A proxy that opens TLS to read requests: it needs a local certificate
   authority that the agent tool trusts, and it adds no rule that the host
   list does not give.
+- A log of agent output with a filter of secret values: a filter finds only
+  the exact values that Iris passed, not a key that the agent reads from a
+  file or prints in another form.
 - A wait of a fixed time before `reaped_at`: a process that ignores the
   signals, or a stuck kill, would let a new build run beside it.
 
@@ -530,7 +533,7 @@ is refused before a row is written.
 | The agent ignores `SIGTERM` | `SIGKILL` 5 seconds later; the helper is not in the group, so it lives to send it | Helper test with a `trap '' TERM` script |
 | The agent exits and leaves a background child in its group | The helper stops the group after the exit | Helper test with `sleep 100 &` |
 | A `run` right after a stop, a revoke or an exit, before the reap | Refused at the register step until `reaped_at` is set | Store test and launch test |
-| The agent writes without end to its output | The log stops at 10 MiB; the helper keeps reading, so the agent does not block | Helper test with `yes` |
+| The agent writes without end to its output | The helper drops the bytes and counts them; the agent does not block | Helper test with `yes` |
 | A system with no isolation | `run` refused at step 1 | Launch test |
 | The engine is killed (`SIGKILL`) | The pipe ends, the helper stops the group; the next engine start ends the row with `engine` | Helper test: close the pipe |
 | The helper gets a line other than `start`, or the end of the pipe before it | Exits with no child | Helper test |
@@ -549,8 +552,7 @@ is refused before a row is written.
 | A `CONNECT` to a host that is not allowed, or a port other than 443, or a request that is not `CONNECT` | `403`, closed, one egress log line | Proxy test |
 | An agent that opens connections without end | The egress log stops at 1 MiB, then counts; the engine memory stays bounded (8 open connections) | Proxy test with 100,000 refused connections and a small limit |
 | The engine is killed and an agent process left the group (`setsid`) | The helper sees the end of the pipe, stops the group and calls `Isolation::stop`; if the helper is killed too, the lifetime rule ends the process | Helper test with the test isolation that records `stop`; R4-05 test of the lifetime rule on each system |
-| An agent that prints a passed key | The log has `[hidden]` in place of the value, also when a read splits the value | Helper property test: random chunk splits of output with the value |
-| A `pass_env` value shorter than 8 bytes | The run is refused with the name | Adapter test |
+| An agent that prints a passed key or a file of the agent tool | Nothing of it is stored; the log has only status lines | Helper test: a script prints a marker value to both pipes, and no file of the data folder holds it |
 | A connection to the egress port of another session | The other session is not reached: each port belongs to one session, and the isolation permits only its own port | R4-05 test |
 | An `allow_hosts` entry with a port, a wildcard or an IP address | Refused with the line | Parser test |
 
@@ -569,8 +571,8 @@ is refused before a row is written.
 Memory: the supervisor holds one small record for each running session
 (the child handle, the pipes, the session ID, the egress listener). The
 proxy uses one thread and two 16 KiB buffers for each open connection, at
-most 8 connections for each session. The log copy uses a buffer of
-64 KiB for each session. The helper is a second copy of the program, but it
+most 8 connections for each session. The helper reads the output of the
+agent with one 16 KiB buffer. The helper is a second copy of the program, but it
 only waits: its resident memory is small, and the build measures it
 (open question 1).
 
@@ -583,7 +585,7 @@ only waits: its resident memory is small, and the build measures it
   network. Evidence: pending, the same check. The same tolerance.
 - `claude` and `codex` send their HTTPS calls through `HTTPS_PROXY` with
   `CONNECT`. Evidence: pending, the same check on the Mac. If a tool does
-  not, it fails at its first model call and the log shows the refused
+  not, it fails at its first model call and the egress log shows no
   connection. No mail leaves.
 - The kernel closes the write end of the pipe when the engine process ends
   for any reason, also `SIGKILL`. Evidence: POSIX `exit` and `close` rules.
@@ -677,7 +679,9 @@ who does not run `iris job run`.
 
 - `iris job run` does nothing for the person until R4-05 merges. This is
   on purpose: no agent runs without an isolation.
-- A wrong adapter line makes the agent fail at once. The log shows the error.
+- A wrong adapter line makes the agent fail at once. The log shows the exit
+  code, not the error text, because no agent output is stored. The person
+  runs the adapter line by hand to see the error.
 - Rollback: revert the code PRs. The table `job_session` stays and does no
   harm.
 
