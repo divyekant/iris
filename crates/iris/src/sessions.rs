@@ -7,6 +7,7 @@
 //! limit, stops a session that ended in the store (a stop, a revoke, a job
 //! move), and runs the reap check until it passes.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::OpenOptions;
@@ -35,6 +36,12 @@ pub const STOP_WAIT: Duration = Duration::from_secs(15);
 /// The command of the hold helper, from its arguments.
 pub type HelperCommand = dyn Fn(&[OsString]) -> process::Command + Send + Sync;
 
+/// A call after each step of a launch, with the session. For tests.
+pub type AfterStep = dyn Fn(Step, i64) + Send + Sync;
+
+/// The age of a session log that the engine start removes.
+const LOG_DAYS: u64 = 30;
+
 /// The sessions of the engine. The engine sets one in [`SESSIONS`] at its
 /// start, and the engine socket uses it for `job.run` and `job.stop`.
 pub struct Sessions {
@@ -44,6 +51,7 @@ pub struct Sessions {
     isolation: Result<Arc<dyn Isolation>, String>,
     helper: Arc<HelperCommand>,
     state: Mutex<State>,
+    after: Mutex<Option<Arc<AfterStep>>>,
 }
 
 #[derive(Default)]
@@ -76,7 +84,8 @@ pub static SESSIONS: OnceLock<Arc<Sessions>> = OnceLock::new();
 impl Sessions {
     /// The sessions of the engine of `store`. At the engine start, each
     /// open session belongs to the last engine: it ends with `engine`, and
-    /// the supervisor reaps it.
+    /// the supervisor reaps it. Then each done job with no live session
+    /// gets its workspace again, and the session logs older than 30 days go.
     pub fn new(
         store: Arc<Store>,
         isolation: Result<Arc<dyn Isolation>, String>,
@@ -89,12 +98,67 @@ impl Sessions {
                     .map_err(|e| e.to_string())?;
             }
         }
-        Ok(Arc::new(Sessions {
+        let s = Arc::new(Sessions {
             store,
             isolation,
             helper,
             state: Mutex::new(State::default()),
-        }))
+            after: Mutex::new(None),
+        });
+        let live: HashSet<i64> = iris_job::live_sessions(&s.store)
+            .map_err(|e| e.to_string())?
+            .iter()
+            .map(|l| l.job_id)
+            .collect();
+        for job in iris_job::list(&s.store, iris_job::State::Done).map_err(|e| e.to_string())? {
+            if !live.contains(&job.id) {
+                s.build_done(job.id);
+            }
+        }
+        s.remove_old_logs();
+        Ok(s)
+    }
+
+    /// Calls `f` after each step of each launch. For tests.
+    pub fn set_after(&self, f: Arc<AfterStep>) {
+        *self.after.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+    }
+
+    /// Builds the workspace of `job` again if the job is done and its
+    /// workspace folder exists: the mail files go, and the files of the
+    /// agent stay. Call it only while the job has no live session.
+    fn build_done(&self, job: i64) {
+        let dir = iris_workspace::default_dir(self.data_dir(), job);
+        let done = iris_job::get(&self.store, job).is_ok_and(|j| j.state == iris_job::State::Done);
+        if !done || std::fs::symlink_metadata(&dir).is_err() {
+            return;
+        }
+        if let Err(e) = iris_workspace::build(&self.store, job, &dir) {
+            say!(
+                "iris: {}: the workspace of the done job was not built again: {e}",
+                iris_job::format_job_id(job)
+            );
+        }
+    }
+
+    /// Removes the files of `sessions/` older than [`LOG_DAYS`].
+    fn remove_old_logs(&self) {
+        let Ok(entries) = std::fs::read_dir(self.data_dir().join("sessions")) else {
+            return;
+        };
+        let age = Duration::from_secs(LOG_DAYS * 86_400);
+        for e in entries.flatten() {
+            let old = e
+                .metadata()
+                .ok()
+                .filter(|m| m.is_file())
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|a| a > age);
+            if old {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -171,10 +235,36 @@ impl Sessions {
         } else {
             self.egress(session, begun.allow_hosts().to_vec()).map(Some)
         };
+        let hook = self.after.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let outcome = match proxy {
             Ok(proxy) => {
                 let port = proxy.as_ref().map(Proxy::port);
-                let outcome = self.launcher(isolation, port, &|_, _| {}).finish(begun);
+                // A revoke retry registers a new session: the egress log
+                // moves to it before its build, so the log of the session
+                // that runs always has its name.
+                let logged = Cell::new(session);
+                let after = |step: Step, s: i64| {
+                    if step == Step::Registered && proxy.is_some() && s != logged.get() {
+                        match move_log(&self.egress_log(logged.get()), &self.egress_log(s)) {
+                            Ok(()) => logged.set(s),
+                            Err(e) => {
+                                // The launch sees the end and stops.
+                                say!("iris: {}: no egress log: {e}", format_session_id(s));
+                                let _ = iris_job::end(
+                                    &self.store,
+                                    s,
+                                    EndReason::LaunchFailed,
+                                    None,
+                                    now_ms(),
+                                );
+                            }
+                        }
+                    }
+                    if let Some(h) = &hook {
+                        h(step, s);
+                    }
+                };
+                let outcome = self.launcher(isolation, port, &after).finish(begun);
                 Some((outcome, proxy))
             }
             Err(why) => {
@@ -231,9 +321,15 @@ impl Sessions {
             .append(true)
             .create_new(true)
             .mode(0o600)
-            .open(dir.join(format!("{}.egress.log", format_session_id(session))))
+            .open(self.egress_log(session))
             .map_err(|e| e.to_string())?;
         Proxy::start(allowed, log, Box::new(SystemResolver)).map_err(|e| e.to_string())
+    }
+
+    fn egress_log(&self, session: i64) -> PathBuf {
+        self.data_dir()
+            .join("sessions")
+            .join(format!("{}.egress.log", format_session_id(session)))
     }
 
     /// `job.stop`: ends the open session of `job` with `stop`, then waits
@@ -277,14 +373,19 @@ impl Sessions {
             if st.launching.contains(&s.job_id) {
                 continue;
             }
-            match st.running.get_mut(&s.id) {
+            let reaped = match st.running.get_mut(&s.id) {
                 Some(l) => {
-                    if self.supervise(&s, l, now) {
+                    let reaped = self.supervise(&s, l, now);
+                    if reaped {
                         let l = st.running.remove(&s.id).expect("present");
                         let _ = std::fs::remove_file(&l.socket_path);
                     }
+                    reaped
                 }
                 None => self.orphan(&s, now),
+            };
+            if reaped {
+                self.build_done(s.job_id);
             }
         }
     }
@@ -344,12 +445,17 @@ impl Sessions {
 
     /// A live session with no launch thread and no helper of this engine:
     /// a session of the last engine, or a launch that could not write its
-    /// end. End it, then run the reap check.
-    fn orphan(&self, s: &Session, now: i64) {
+    /// end. End it, stop its isolation (on each turn: a process of the
+    /// agent can still run), then run the reap check. Gives true when it is
+    /// reaped.
+    fn orphan(&self, s: &Session, now: i64) -> bool {
         if s.ended_ms.is_none() {
             let _ = iris_job::end(&self.store, s.id, EndReason::LaunchFailed, None, now);
         }
-        self.reap(s.id, false, now);
+        if let Ok(iso) = &self.isolation {
+            let _ = iso.stop(s.id);
+        }
+        self.reap(s.id, false, now)
     }
 
     fn reap(&self, session: i64, helper_reaped: bool, now: i64) -> bool {
@@ -381,6 +487,12 @@ impl Sessions {
             std::thread::sleep(TURN);
         }
     }
+}
+
+/// Moves a log file to a new name, and never over a file of that name.
+fn move_log(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(from, to)?;
+    std::fs::remove_file(from)
 }
 
 /// The last session of `job`, if one exists.

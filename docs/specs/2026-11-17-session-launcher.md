@@ -517,7 +517,11 @@ no network stops them. The engine gives each session one narrow path out:
   (domain fronting), or a client that hides the name with Encrypted
   Client Hello, is a known limit (issue).
 - The proxy writes one line for each connection to its own file,
-  `<data dir>/sessions/se-<id>.egress.log` (mode `0600`). For an allowed
+  `<data dir>/sessions/se-<id>.egress.log` (mode `0600`). The engine
+  starts the proxy before the build. If a revoke makes the launch register
+  a second session, the engine moves the log to the name of the second
+  session before its build, and never over a file of that name. If the
+  move fails, the second session ends with `launch_failed`. For an allowed
   `CONNECT`, the line has the host (a value of the allowed list, as the
   list writes it), the bytes in each direction, and the result
   (`closed`, `stopped` or `connect_failed`). For a refused request, the

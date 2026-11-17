@@ -336,7 +336,14 @@ fn the_command_waits_at_most_the_answer_wait_for_the_whole_answer() {
         }
     });
     let start = Instant::now();
-    let e = socket::request_with(&d, "drafts", json!({}), Duration::from_millis(400)).unwrap_err();
+    let e = socket::request_with(
+        &d,
+        "drafts",
+        json!({}),
+        Duration::from_millis(400),
+        "iris changeset --drafts",
+    )
+    .unwrap_err();
     assert_eq!(e.code, code::ERROR);
     assert!(
         start.elapsed() < Duration::from_secs(2),
@@ -506,7 +513,14 @@ fn a_large_document_streams_and_a_stalled_reader_frees_its_slot() {
     });
     std::thread::sleep(Duration::from_millis(100));
     let start = std::time::Instant::now();
-    let list = socket::request_with(&d, "drafts", json!({}), Duration::from_secs(5)).unwrap();
+    let list = socket::request_with(
+        &d,
+        "drafts",
+        json!({}),
+        Duration::from_secs(5),
+        "iris changeset --drafts",
+    )
+    .unwrap();
     assert_eq!(list, json!({ "changesets": [id] }));
     assert!(
         start.elapsed() < Duration::from_secs(3),
@@ -782,7 +796,10 @@ fn a_lost_job_answer_names_the_job_session_command() {
 
 #[test]
 fn a_job_answer_of_the_engine_is_a_result() {
-    let d = one_answer("okrun", Some("{\"ok\":true,\"result\":{\"session\":\"se-1\"}}\n"));
+    let d = one_answer(
+        "okrun",
+        Some("{\"ok\":true,\"result\":{\"session\":\"se-1\"}}\n"),
+    );
     job_command(&d, &["run", "j-1", "--agent", "script"]).unwrap();
     let d = one_answer(
         "okstop",

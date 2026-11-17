@@ -277,7 +277,15 @@ fn a_done_job_gets_its_workspace_again_after_the_reap() {
     // A file of the last build: the next build removes `.iris`.
     let marker = workspace(&f).join(".iris/marker");
     fs::write(&marker, "x").unwrap();
-    iris_job::finish(&f.store, f.job, By::Person, iris_job::End::Cancel, None, now()).unwrap();
+    iris_job::finish(
+        &f.store,
+        f.job,
+        By::Person,
+        iris_job::End::Cancel,
+        None,
+        now(),
+    )
+    .unwrap();
     let row = until(&s, &f, id, |r| r.reaped_ms.is_some());
     assert_eq!(row.end, Some(EndReason::JobState));
     assert!(!marker.exists(), "the workspace is built again");
@@ -299,7 +307,15 @@ fn the_engine_start_builds_each_done_job_again() {
     file.set_modified(std::time::SystemTime::now() - Duration::from_secs(31 * 86_400))
         .unwrap();
     drop(file);
-    iris_job::finish(&f.store, f.job, By::Person, iris_job::End::Cancel, None, NOW).unwrap();
+    iris_job::finish(
+        &f.store,
+        f.job,
+        By::Person,
+        iris_job::End::Cancel,
+        None,
+        NOW,
+    )
+    .unwrap();
     let _s = sessions(&f);
     assert!(!marker.exists(), "the workspace is built again");
     assert!(workspace(&f).join("JOB.md").exists());
@@ -344,8 +360,14 @@ fn a_revoke_retry_gives_the_egress_log_to_the_new_session() {
         std::thread::sleep(Duration::from_millis(100));
     };
     let log = |id: i64| f.store.dir().join(format!("sessions/se-{id}.egress.log"));
-    assert!(log(second).exists(), "the running session has its egress log");
-    assert!(!log(first).exists(), "no log has the name of the first session");
+    assert!(
+        log(second).exists(),
+        "the running session has its egress log"
+    );
+    assert!(
+        !log(first).exists(),
+        "no log has the name of the first session"
+    );
     s.stop(f.job).unwrap();
 }
 

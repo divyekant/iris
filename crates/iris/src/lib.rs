@@ -591,6 +591,9 @@ fn job_request(dir: &std::path::Path, c: &JobCommand) -> Option<Result<(), socke
             verb,
             args,
             sessions::STOP_WAIT + std::time::Duration::from_secs(15),
+            // A lost answer: the run may be registered, or the stop may
+            // have ended the session. The store shows which.
+            &format!("iris job session {id}"),
         ) {
             Ok(r) => {
                 let session = r["session"].as_str().unwrap_or_default();
@@ -613,20 +616,6 @@ fn job_request(dir: &std::path::Path, c: &JobCommand) -> Option<Result<(), socke
                         ),
                     }),
                 }
-            }
-            // A lost answer: the run may be registered. A second run is safe:
-            // the register refuses it while the first session is live.
-            Err(f)
-                if verb == "job.run"
-                    && !matches!(f.code, socket::code::USAGE | socket::code::DENIED) =>
-            {
-                Err(socket::Failure {
-                    code: f.code,
-                    error: format!(
-                        "{}; the result is not known: run `iris job session {id}`",
-                        f.error
-                    ),
-                })
             }
             Err(f) => Err(f),
         },
