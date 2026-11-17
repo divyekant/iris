@@ -545,6 +545,7 @@ const NOT_TOOLS: &[&str] = &[
     "understand",
     "mcp",
     "matters_propose",
+    "write",
 ];
 
 /// Each verb of the command is a tool, or it is in `NOT_TOOLS`. Each tool is
