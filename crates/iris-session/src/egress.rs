@@ -13,7 +13,7 @@ use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
 };
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex, MutexGuard};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,6 +21,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const HEAD_MAX: usize = 8 * 1024;
 /// The most connections that a session can have open at one time.
 pub const MAX_CONNECTIONS: usize = 8;
+/// The most resolver workers that the Iris process keeps live, over all
+/// proxies. A worker that waits on a stalled resolver keeps its place.
+pub const MAX_RESOLVERS: usize = 16;
+/// The largest ClientHello that the proxy reads.
+const HELLO_MAX: usize = 16 * 1024;
 /// The size limit of the egress log.
 pub const LOG_LIMIT: u64 = 1024 * 1024;
 /// The end of the log that only the limit line and the count line can use.
@@ -49,6 +54,8 @@ pub enum Reason {
     TooLong,
     TooMany,
     Timeout,
+    NotTls,
+    SniNotAllowed,
 }
 
 impl Reason {
@@ -61,6 +68,8 @@ impl Reason {
             Reason::TooLong => "too_long",
             Reason::TooMany => "too_many",
             Reason::Timeout => "timeout",
+            Reason::NotTls => "not_tls",
+            Reason::SniNotAllowed => "sni_not_allowed",
         }
     }
 }
@@ -218,8 +227,9 @@ struct Shared {
     allowed: Vec<String>,
     resolver: Arc<dyn Resolve>,
     public_only: bool,
-    /// The live resolver workers. A worker can outlive its connection and
-    /// the proxy, so it holds only this count, the resolver and the name.
+    /// The live resolver workers of the process (one count for all proxies).
+    /// A worker can outlive its connection and the proxy, so it holds only
+    /// this count, the resolver and the name.
     workers: Arc<AtomicUsize>,
     log: Mutex<Log>,
     conns: Mutex<Conns>,
@@ -241,7 +251,11 @@ impl Proxy {
     /// Starts the proxy on a free port of `127.0.0.1`. `log` is the egress
     /// log of the session, open for append.
     pub fn start(allowed: Vec<String>, log: File, resolver: Box<dyn Resolve>) -> io::Result<Proxy> {
-        Proxy::start_with(allowed, log, resolver, true, LOG_LIMIT)
+        static WORKERS: OnceLock<Arc<AtomicUsize>> = OnceLock::new();
+        let workers = WORKERS
+            .get_or_init(|| Arc::new(AtomicUsize::new(0)))
+            .clone();
+        Proxy::start_with(allowed, log, resolver, true, LOG_LIMIT, workers)
     }
 
     /// `public_only` is false only in tests, which use a loopback server.
@@ -251,6 +265,7 @@ impl Proxy {
         resolver: Box<dyn Resolve>,
         public_only: bool,
         log_limit: u64,
+        workers: Arc<AtomicUsize>,
     ) -> io::Result<Proxy> {
         let written = file.metadata()?.len();
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
@@ -259,7 +274,7 @@ impl Proxy {
             allowed,
             resolver: Arc::from(resolver),
             public_only,
-            workers: Arc::new(AtomicUsize::new(0)),
+            workers,
             log: Mutex::new(Log {
                 file,
                 written,
@@ -471,7 +486,7 @@ enum Phase {
     Up(TcpStream),
     NotPublic,
     Failed,
-    /// [`MAX_CONNECTIONS`] resolver workers are still live.
+    /// [`MAX_RESOLVERS`] resolver workers are still live.
     Busy,
     /// A stop came first.
     Cancel,
@@ -554,8 +569,28 @@ fn handle(shared: &Shared, mut client: TcpStream, id: u64) -> Finish {
             list.push(clone);
         }
     }
+    // The tunnel opens only for a TLS ClientHello whose server name is the
+    // host of the CONNECT: two names can share one address.
+    if client
+        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .is_err()
+    {
+        return Finish {
+            end: tunnel(host, 0, 0, "closed"),
+            answer: None,
+        };
+    }
+    let first = match read_hello(
+        shared,
+        &mut client,
+        head[len..].to_vec(),
+        &shared.allowed[host],
+    ) {
+        Ok(first) => first,
+        Err(end) => return Finish { end, answer: None },
+    };
     let _ = client.set_read_timeout(None);
-    let (up, down) = relay(client, upstream, &head[len..]);
+    let (up, down) = relay(client, upstream, &first);
     let result = if shared.stopping.load(Ordering::SeqCst) {
         "stopped"
     } else {
@@ -571,8 +606,8 @@ fn handle(shared: &Shared, mut client: TcpStream, id: u64) -> Finish {
 /// so that a stalled resolver cannot hold the connection or a stop. The wait
 /// ends at [`CONNECT_TIME`] or at a stop, whichever comes first. A worker
 /// that is still in the resolver stays until the resolver returns, and keeps
-/// its place in the count: at most [`MAX_CONNECTIONS`] workers live at one
-/// time, and a CONNECT past the bound gets `too_many`.
+/// its place in the count: at most [`MAX_RESOLVERS`] workers of the process
+/// live at one time, and a CONNECT past the bound gets `too_many`.
 fn connect(shared: &Shared, host: usize, id: u64) -> Phase {
     let (tx, rx) = mpsc::channel();
     {
@@ -586,7 +621,7 @@ fn connect(shared: &Shared, host: usize, id: u64) -> Phase {
     // when it ends, also on a panic.
     let workers = shared.workers.clone();
     let took = workers.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-        (n < MAX_CONNECTIONS).then_some(n + 1)
+        (n < MAX_RESOLVERS).then_some(n + 1)
     });
     if took.is_err() {
         return Phase::Busy;
@@ -652,14 +687,73 @@ fn resolve_and_connect(
     Phase::Failed
 }
 
+/// Reads the client bytes until they hold a full ClientHello, and checks
+/// that its server name is `name` (ASCII case is ignored). Gives the bytes
+/// read, which the tunnel sends to the host first. `buf` holds the bytes
+/// that came after the head.
+fn read_hello(
+    shared: &Shared,
+    client: &mut TcpStream,
+    mut buf: Vec<u8>,
+    name: &str,
+) -> Result<Vec<u8>, End> {
+    let end = Instant::now() + HEAD_TIME;
+    loop {
+        match check_hello(&buf, name) {
+            Ok(true) => return Ok(buf),
+            Ok(false) => {}
+            Err(r) => return Err(End::Refused(r)),
+        }
+        let left = end.saturating_duration_since(Instant::now());
+        if left.is_zero() || client.set_read_timeout(Some(left)).is_err() {
+            return Err(End::Refused(Reason::Timeout));
+        }
+        let mut chunk = [0u8; 1024];
+        let room = (HELLO_MAX - buf.len()).min(chunk.len());
+        match client.read(&mut chunk[..room]) {
+            Ok(0) | Err(_) if shared.stopping.load(Ordering::SeqCst) => return Err(End::Stopped),
+            Ok(0) => return Err(End::Refused(Reason::NotTls)),
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(End::Refused(Reason::Timeout))
+            }
+            Err(_) => return Err(End::Refused(Reason::NotTls)),
+        }
+    }
+}
+
+/// Checks the first bytes of a tunnel with the ClientHello parser of
+/// rustls. `Ok(false)` means that the ClientHello is not complete.
+fn check_hello(buf: &[u8], name: &str) -> Result<bool, Reason> {
+    let mut acceptor = rustls::server::Acceptor::default();
+    let mut rd = buf;
+    while !rd.is_empty() {
+        match acceptor.read_tls(&mut rd) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => return Err(Reason::NotTls),
+        }
+    }
+    match acceptor.accept() {
+        Ok(None) if buf.len() >= HELLO_MAX => Err(Reason::TooLong),
+        Ok(None) => Ok(false),
+        Ok(Some(accepted)) => match accepted.client_hello().server_name() {
+            Some(sni) if sni.eq_ignore_ascii_case(name) => Ok(true),
+            _ => Err(Reason::SniNotAllowed),
+        },
+        Err(_) => Err(Reason::NotTls),
+    }
+}
+
 /// Relays both directions until both end. Gives the bytes sent up (client to
 /// host) and down. `rest` holds the bytes that came after the head.
-fn relay(mut client: TcpStream, mut upstream: TcpStream, rest: &[u8]) -> (u64, u64) {
-    if client
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .is_err()
-        || upstream.write_all(rest).is_err()
-    {
+fn relay(client: TcpStream, mut upstream: TcpStream, rest: &[u8]) -> (u64, u64) {
+    if upstream.write_all(rest).is_err() {
         let _ = client.shutdown(Shutdown::Both);
         let _ = upstream.shutdown(Shutdown::Both);
         return (0, 0);
