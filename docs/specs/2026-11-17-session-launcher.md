@@ -253,8 +253,11 @@ The helper is the same program as the engine, so no new file is installed.
 
 ### Launch
 
-`iris_session::launch(store, data_dir, job, agent, now)` does the launcher
-steps of the workspace spec:
+`iris_session::launch::Launcher` does the launcher steps of the workspace
+spec. `begin` does steps 1 and 2, so the engine can answer `job.run` with
+the session ID. `finish` does steps 3 to 6. The engine gives the store, the
+data folder, the isolation, the command of the helper, the egress port, its
+environment and its clock:
 
 1. Read `agents.toml` and resolve the adapter. A missing program fails here,
    before a row is written. Get the isolation of the system. If there is
@@ -270,9 +273,12 @@ steps of the workspace spec:
    and the reason.
 5. Start the hold helper (held), and write `helper_pid` (the helper move)
    in the same step. If the write fails, close the pipe and wait for the
-   helper.
-6. Start and release, as one gate: open a write transaction
-   (`BEGIN IMMEDIATE`), and check that the session did not end. If it
+   helper. The arguments of the helper are the session ID, then the
+   program and the arguments that `Isolation::command` gives. The helper
+   starts in the workspace folder, with the environment of the agent only.
+6. Start and release, as one gate: open a write transaction that takes
+   the write lock first (an `UPDATE` that changes no row takes it, as
+   `BEGIN IMMEDIATE` does), and check that the session did not end. If it
    ended during steps 3 to 5, roll back, close the pipe, wait for the
    helper and run the reap check. Then act on the end reason:
    - `revoke`: the grant changed, so go back to step 2 once, with a new
@@ -307,7 +313,9 @@ steps of the workspace spec:
 
 Each failure after step 2 ends the session with `launch_failed`, closes the
 pipe, waits for the helper if one started, runs the reap check and removes
-the socket. So no live session stays without a process. In step 6, a session
+the socket. The wait for the helper is at most 15 seconds (the helper needs
+5 seconds and the isolation stop). After it, the launch kills the helper,
+and the lifetime rule of the isolation ends each process of the session. So no live session stays without a process. In step 6, a session
 that ended is reaped the same way before step 2 runs again.
 
 ### Supervisor
@@ -325,6 +333,11 @@ each running session:
   cases, run the reap check, which keeps the session live while a process
   of the agent group runs. Then remove the socket file. If the job is
   `done`, build its workspace again after the reap.
+- An open session with no launch thread of this engine and no helper
+  (`helper_pid` NULL, or the helper ended): end it with `launch_failed`, then
+  run the reap check. This covers a launch that failed and could not write
+  the end (for example, a full disk): the launch tries the end write 3
+  times, then reports the session as open, never as ended.
 - A session that ended but did not pass the reap check: run the reap check
   again. The session stays live until the check passes.
 - The session ended in the store (a revoke, a job move, a stop, or a verb
@@ -864,9 +877,9 @@ and `dependsOn` on the board.
 | R4-04b | Migration 21 and the session functions in `iris-job`. | R4-04 |
 | R4-04c | The crate `iris-session`: adapters, `agents.toml`, the environment of the agent and the `Isolation` interface. | R4-04b |
 | R4-04g | The hold helper in `iris-session`. | R4-04c |
-| R4-04h | The launch in `iris-session`. | R4-04g |
+| R4-04h | The launch and the reap check (`iris_session::reap::reap_check`) in `iris-session`, and the fix of #432. | R4-04g |
 | R4-04d | The egress proxy in `iris-session`. | R4-04 |
-| R4-04e | The engine: supervisor, reap check, requests, session socket, egress ports, verbs and session mode. It also changes the fixed rules of `JOB.md` in `iris-workspace` to the text of the workspace spec. | R4-04h, R4-04d |
+| R4-04e | The engine: supervisor (it calls the reap check of R4-04h), requests, session socket, egress ports, verbs and session mode. It also changes the fixed rules of `JOB.md` in `iris-workspace` to the text of the workspace spec. | R4-04h, R4-04d |
 | R4-04f | The read verbs `search`, `show` and `list` on the session socket. | R4-04e |
 
 R4-05 (the isolation of each system) depends on R4-04c, R4-04d and R4-04g. The

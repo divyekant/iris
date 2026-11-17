@@ -1125,7 +1125,11 @@ name = "iris-session"
 version = "0.0.0"
 dependencies = [
  "httparse",
+ "iris-job",
+ "iris-store",
+ "iris-workspace",
  "libc",
+ "rusqlite",
  "rustls",
  "serde",
  "toml",
