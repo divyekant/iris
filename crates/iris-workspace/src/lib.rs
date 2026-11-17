@@ -264,7 +264,8 @@ pub fn grant_in(c: &Connection, job: i64) -> Result<Grant> {
         }
         let s = sources(c, i)?;
         // An item goes in only if one grant holds each of its sources: the
-        // thread refs, or its own item ref. A message of an item ref grants
+        // thread refs together (each source in the list of a thread ref,
+        // workspace spec, build step 2), or its own item ref. A message of an item ref grants
         // no other item, because one message can feed more than one item.
         let all_in = |g: &BTreeSet<i64>| s.iter().all(|m| g.contains(m));
         if !s.is_empty() && (all_in(&by_thread) || by_item.get(&i).is_some_and(all_in)) {
