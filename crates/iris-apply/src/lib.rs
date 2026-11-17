@@ -1150,69 +1150,47 @@ impl Run<'_, '_> {
 /// is a root: its chain gives its net change. The undos of `o`, and their
 /// undos, are not later changes. A row with an unknown result outside the
 /// undos of `o` blocks, because its effect is not known.
+///
+/// The history stays in SQLite (section 9): a temporary table holds the
+/// later rows of the message, and one statement for each level of the
+/// undo chains decides `stands`, from the newest level to the oldest.
 fn later_change_stands(c: &Connection, o: i64, message: i64) -> iris_store::Result<bool> {
-    use std::collections::{HashMap, HashSet};
-    // The later rows of the message: entry -> done.
-    let mut done: HashMap<i64, bool> = HashMap::new();
-    let mut unknown: HashSet<i64> = HashSet::new();
-    let mut st = c.prepare_cached(
-        "SELECT lm.ledger_id, lm.done, lm.listed = 'unknown' FROM ledger_message lm
-         WHERE lm.message_id = ?1 AND lm.ledger_id > ?2",
+    c.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS undo_guard(
+           id INTEGER PRIMARY KEY, target INTEGER, done INTEGER NOT NULL,
+           unknown INTEGER NOT NULL, stands INTEGER);
+         CREATE INDEX IF NOT EXISTS temp.undo_guard_target ON undo_guard(target);
+         DELETE FROM temp.undo_guard;",
     )?;
-    for r in st.query_map(params![message, o], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, bool>(1)?,
-            r.get::<_, Option<bool>>(2)?,
-        ))
-    })? {
-        let (l, d, u) = r?;
-        done.insert(l, d);
-        if u == Some(true) {
-            unknown.insert(l);
-        }
-    }
-    if done.is_empty() {
-        return Ok(false);
-    }
-    // The undo links from `o` on, of the undo entries with a row of the
-    // message: target entry -> its undo entries. An undo changes only
-    // messages that its target changed, so each chain of the message is
-    // here, and the maps hold only the history of this one message.
-    let mut undos: HashMap<i64, Vec<i64>> = HashMap::new();
-    let mut target_of: HashMap<i64, i64> = HashMap::new();
-    let mut st = c.prepare_cached(
-        "SELECT x.ledger_id, lm.ledger_id FROM ledger_message lm
-         JOIN ledger l ON l.id = lm.ledger_id
-         JOIN ledger_undo x ON x.action_id = l.action_id
-         WHERE lm.message_id = ?1 AND lm.ledger_id > ?2 AND x.ledger_id >= ?2",
+    // An undo changes only messages that its target changed, so each undo
+    // chain of the message is in these rows.
+    c.prepare_cached(
+        "INSERT INTO temp.undo_guard(id, target, done, unknown)
+         SELECT lm.ledger_id,
+                (SELECT x.ledger_id FROM ledger l JOIN ledger_undo x ON x.action_id = l.action_id
+                 WHERE l.id = lm.ledger_id AND x.ledger_id >= ?2),
+                lm.done, coalesce(lm.listed = 'unknown', 0)
+         FROM ledger_message lm WHERE lm.message_id = ?1 AND lm.ledger_id > ?2",
+    )?
+    .execute(params![message, o])?;
+    // Each undo is newer than its target, so each pass decides at least
+    // the entries whose undos are all decided, and the loop ends.
+    let mut decide = c.prepare_cached(
+        "UPDATE temp.undo_guard SET stands = done AND NOT EXISTS (
+           SELECT 1 FROM temp.undo_guard u WHERE u.target = undo_guard.id AND u.stands)
+         WHERE stands IS NULL AND NOT EXISTS (
+           SELECT 1 FROM temp.undo_guard u WHERE u.target = undo_guard.id AND u.stands IS NULL)",
     )?;
-    for r in st.query_map(params![message, o], |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
-    })? {
-        let (target, undo) = r?;
-        undos.entry(target).or_default().push(undo);
-        target_of.insert(undo, target);
-    }
-    // The chain of an entry ends in an undo of `o`.
-    let under_o = |mut l: i64| loop {
-        match target_of.get(&l) {
-            Some(&t) if t == o => return true,
-            Some(&t) => l = t,
-            None => return false,
-        }
-    };
-    // Each undo is later than its target, so the recursion ends.
-    fn stands(l: i64, done: &HashMap<i64, bool>, undos: &HashMap<i64, Vec<i64>>) -> bool {
-        done.get(&l).copied().unwrap_or(false)
-            && !undos
-                .get(&l)
-                .is_some_and(|us| us.iter().any(|&u| stands(u, done, undos)))
-    }
-    Ok(done.keys().any(|&l| {
-        !under_o(l)
-            && (unknown.contains(&l) || (!target_of.contains_key(&l) && stands(l, &done, &undos)))
-    }))
+    while decide.execute([])? > 0 {}
+    Ok(c.prepare_cached(
+        "WITH RECURSIVE under_o(id) AS (
+           SELECT id FROM temp.undo_guard WHERE target = ?1
+           UNION SELECT g.id FROM temp.undo_guard g JOIN under_o ON g.target = under_o.id)
+         SELECT EXISTS (SELECT 1 FROM temp.undo_guard
+                        WHERE id NOT IN (SELECT id FROM under_o)
+                          AND (unknown OR (target IS NULL AND stands)))",
+    )?
+    .query_row([o], |r| r.get(0))?)
 }
 
 fn set_listed(tx: &Connection, ledger: i64, message: i64, why: &str) -> iris_store::Result<()> {

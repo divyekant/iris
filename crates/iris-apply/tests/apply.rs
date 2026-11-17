@@ -2425,3 +2425,31 @@ fn a_retried_undo_frees_each_message_that_any_undo_changed_back() {
         assert_eq!(b.mirror_labels(m), l);
     }
 }
+
+/// A long chain of undos of undos on one message: the guard decides each
+/// level in SQLite, and the net change of the chain decides (review of
+/// PR #476). 41 undos reverse the `archive`, so the undo of the older
+/// `read` changes the message.
+#[test]
+fn a_long_undo_chain_gives_its_net_change() {
+    let b = setup("undo-chain", 30, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 1);
+    b.fake
+        .modify_labels(&b.provider_id(ms[0]), &["UNREAD"], &[]);
+    let a = b.approved("read", &ms, PERSON);
+    applied(b.apply(a));
+    let mut last = b.approved("archive", &ms, PERSON);
+    applied(b.apply(last));
+    for _ in 0..41 {
+        let u = iris_apply::undo(&b.store, b.entry(last), now()).unwrap();
+        applied(b.apply(u[0]));
+        last = u[0];
+    }
+    assert!(b.gmail_labels(ms[0]).contains(&"INBOX".to_string()));
+    match &b.undo(a)[..] {
+        [Outcome::Applied(c)] => assert_eq!((c.changed, c.unchanged), (1, 0)),
+        other => panic!("{other:?}"),
+    }
+    let l = b.gmail_labels(ms[0]);
+    assert!(l.contains(&"UNREAD".to_string()) && l.contains(&"INBOX".to_string()));
+}
