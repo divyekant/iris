@@ -213,19 +213,8 @@ pub struct DeltaPage {
 }
 
 #[derive(Deserialize)]
-struct Removed {}
-
-#[derive(Deserialize)]
-struct DeltaItem {
-    #[serde(rename = "@removed")]
-    removed: Option<Removed>,
-    #[serde(flatten)]
-    message: serde_json::Value,
-}
-
-#[derive(Deserialize)]
 struct DeltaJson {
-    value: Vec<DeltaItem>,
+    value: Vec<serde_json::Value>,
     #[serde(rename = "@odata.nextLink")]
     next_link: Option<String>,
     #[serde(rename = "@odata.deltaLink")]
@@ -364,19 +353,11 @@ impl Graph {
             }
             other => other?,
         };
-        let mut changes = Vec::with_capacity(page.value.len());
-        for item in page.value {
-            if item.removed.is_some() {
-                let id = item.message["id"]
-                    .as_str()
-                    .ok_or_else(|| Error::Decode("a removed item has no id".into()))?;
-                changes.push(Change::Removed(id.to_string()));
-            } else {
-                let m: Message = serde_json::from_value(item.message)
-                    .map_err(|e| Error::Decode(e.to_string()))?;
-                changes.push(Change::Message(m));
-            }
-        }
+        let changes = page
+            .value
+            .into_iter()
+            .map(change)
+            .collect::<Result<Vec<_>>>()?;
         let next = match (page.next_link, page.delta_link) {
             (Some(n), None) => Next::More(self.checked(&n)?),
             (None, Some(d)) => Next::Done(self.checked(&d)?),
@@ -504,7 +485,8 @@ impl Graph {
                 // Graph's own Retry-After is kept; the cap is for our waits.
                 let after = retry_after(&response)
                     .unwrap_or_else(|| jitter(wait).min(self.config.backoff_max));
-                if Instant::now() + after >= deadline {
+                // No Instant addition: a huge Retry-After must not overflow.
+                if after >= deadline.saturating_duration_since(Instant::now()) {
                     return Err(late());
                 }
                 std::thread::sleep(after);
@@ -524,6 +506,28 @@ impl Graph {
                 }
             });
         }
+    }
+}
+
+/// One item of a delta page. An item with `@removed` must have a reason
+/// of Graph (`deleted` or `changed`) and an ID; any other shape is
+/// [`Error::Decode`], so a wrong answer never removes a message.
+fn change(mut item: serde_json::Value) -> Result<Change> {
+    let bad = |e: String| Error::Decode(format!("a delta item: {e}"));
+    let obj = item
+        .as_object_mut()
+        .ok_or_else(|| bad("not an object".into()))?;
+    let Some(removed) = obj.remove("@removed") else {
+        return serde_json::from_value(item)
+            .map(Change::Message)
+            .map_err(|e| bad(e.to_string()));
+    };
+    if !matches!(removed["reason"].as_str(), Some("deleted" | "changed")) {
+        return Err(bad("@removed has no known reason".into()));
+    }
+    match obj.get("id").and_then(|v| v.as_str()) {
+        Some(id) if !id.is_empty() => Ok(Change::Removed(id.to_string())),
+        _ => Err(bad("a removed item has no id".into())),
     }
 }
 
@@ -601,12 +605,16 @@ mod tests {
     struct Rng(u64);
 
     impl Rng {
-        fn pick<'a>(&mut self, from: &[&'a str]) -> &'a str {
+        fn below(&mut self, n: usize) -> usize {
             self.0 = self
                 .0
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
-            from[((self.0 >> 33) % from.len() as u64) as usize]
+            ((self.0 >> 33) % n as u64) as usize
+        }
+
+        fn pick<'a>(&mut self, from: &[&'a str]) -> &'a str {
+            from[self.below(from.len())]
         }
     }
 
@@ -677,6 +685,68 @@ mod tests {
             }
         }
         assert!(passed > 0, "no generated link passed");
+    }
+
+    /// Property: a delta item is a removal only with a known reason and an
+    /// ID, a message only with each required field, and else `Decode`.
+    #[test]
+    fn delta_items_of_another_shape_are_refused() {
+        use serde_json::{json, Value};
+        let removed = [
+            None,
+            Some(Value::Null),
+            Some(json!({})),
+            Some(json!({"reason": "deleted"})),
+            Some(json!({"reason": "changed"})),
+            Some(json!({"reason": "x"})),
+            Some(json!("deleted")),
+            Some(json!(1)),
+        ];
+        let ids = [None, Some(json!("")), Some(json!("AAMk1")), Some(json!(5))];
+        let fields = [
+            ("conversationId", json!("c")),
+            ("parentFolderId", json!("f")),
+            ("categories", json!(["a"])),
+            ("isRead", json!(true)),
+            ("flag", json!({"flagStatus": "flagged"})),
+            ("isDraft", json!(false)),
+        ];
+        let mut rng = Rng(11);
+        for _ in 0..5_000 {
+            let r = removed[rng.below(removed.len())].clone();
+            let id = ids[rng.below(ids.len())].clone();
+            // Leave out one field, or none (index == len).
+            let gone = rng.below(fields.len() + 1);
+            let mut item = serde_json::Map::new();
+            if let Some(r) = &r {
+                item.insert("@removed".into(), r.clone());
+            }
+            if let Some(id) = &id {
+                item.insert("id".into(), id.clone());
+            }
+            for (i, (k, v)) in fields.iter().enumerate() {
+                if i != gone {
+                    item.insert((*k).into(), v.clone());
+                }
+            }
+            let got = change(Value::Object(item.clone()));
+            let id_str = id.as_ref().and_then(|v| v.as_str());
+            match &r {
+                None => {
+                    let ok = id_str.is_some() && gone == fields.len();
+                    assert_eq!(matches!(got, Ok(Change::Message(_))), ok, "{item:?}");
+                }
+                Some(r) => {
+                    let reason = matches!(r["reason"].as_str(), Some("deleted" | "changed"));
+                    let ok = reason && id_str.is_some_and(|s| !s.is_empty());
+                    assert_eq!(matches!(got, Ok(Change::Removed(_))), ok, "{item:?}");
+                }
+            }
+            if got.is_err() {
+                assert!(matches!(got, Err(Error::Decode(_))));
+            }
+        }
+        assert!(matches!(change(json!([])), Err(Error::Decode(_))));
     }
 
     #[test]
