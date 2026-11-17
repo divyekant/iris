@@ -47,7 +47,15 @@ fn setup(name: &str) -> (TempDir, Store, i64) {
 fn a_session_id_is_se_and_the_row() {
     assert_eq!(format_session_id(7), "se-7");
     assert_eq!(parse_session_id("se-7"), Some(7));
-    for bad in ["se-", "se-0", "se-07", "se--1", "j-7", "se-7x", "se-99999999999999999999"] {
+    for bad in [
+        "se-",
+        "se-0",
+        "se-07",
+        "se--1",
+        "j-7",
+        "se-7x",
+        "se-99999999999999999999",
+    ] {
         assert_eq!(parse_session_id(bad), None, "{bad}");
     }
 }
@@ -90,11 +98,26 @@ fn a_session_starts_only_for_a_working_job_and_a_good_agent_name() {
     for bad in ["", "Claude", "a b", "a_b", "é", &"a".repeat(65)] {
         refused(register(&store, job, bad, NOW));
     }
-    register(&store, job, &"a".repeat(64), NOW).map(|_| ()).unwrap();
+    register(&store, job, &"a".repeat(64), NOW)
+        .map(|_| ())
+        .unwrap();
     let (_d2, store2, job2) = setup("register-wait");
-    wait(&store2, job2, Wait { thread: None, until_ms: NOW + 10 }, None, NOW).unwrap();
+    wait(
+        &store2,
+        job2,
+        Wait {
+            thread: None,
+            until_ms: NOW + 10,
+        },
+        None,
+        NOW,
+    )
+    .unwrap();
     refused(register(&store2, job2, "codex", NOW));
-    assert!(matches!(register(&store2, 99, "codex", NOW), Err(Error::NotFound)));
+    assert!(matches!(
+        register(&store2, 99, "codex", NOW),
+        Err(Error::NotFound)
+    ));
 }
 
 #[test]
@@ -132,7 +155,17 @@ fn a_job_move_ends_the_open_session_with_job_state() {
     let t = register(&store, other, "codex", NOW).unwrap();
     end(&store, t, EndReason::Stop, None, NOW + 1).unwrap();
     reap(&store, t, NOW + 2).unwrap();
-    wait(&store, other, Wait { thread: None, until_ms: NOW + 99 }, None, NOW + 3).unwrap();
+    wait(
+        &store,
+        other,
+        Wait {
+            thread: None,
+            until_ms: NOW + 99,
+        },
+        None,
+        NOW + 3,
+    )
+    .unwrap();
     assert_eq!(session(&store, t).unwrap().end, Some(EndReason::Stop));
 }
 
@@ -180,7 +213,14 @@ fn no_insert_replaces_or_skips_a_move_and_no_row_is_deleted() {
     // is reaped, so only the column under test can refuse the insert.
     end(&store, s, EndReason::Stop, None, NOW).unwrap();
     reap(&store, s, NOW).unwrap();
-    for col in ["helper_pid", "agent_pgid", "started_at", "ended_at", "exit_code", "reaped_at"] {
+    for col in [
+        "helper_pid",
+        "agent_pgid",
+        "started_at",
+        "ended_at",
+        "exit_code",
+        "reaped_at",
+    ] {
         assert!(!sql(&store, &ins(&format!(", {col}"), ", 5")), "{col}");
     }
     assert!(!sql(&store, &ins(", end_reason", ", 'stop'")));
@@ -190,7 +230,10 @@ fn no_insert_replaces_or_skips_a_move_and_no_row_is_deleted() {
         &format!("INSERT OR REPLACE INTO job_session (id, job_id, agent, registered_at) VALUES ({s}, {job}, 'x', 1)")
     ));
     assert_eq!(session(&store, s).unwrap().reaped_ms, Some(NOW));
-    assert!(!sql(&store, &format!("DELETE FROM job_session WHERE id = {s}")));
+    assert!(!sql(
+        &store,
+        &format!("DELETE FROM job_session WHERE id = {s}")
+    ));
     // A raw insert for a job with a live session fails too.
     assert!(sql(&store, &ins("", "")));
     assert!(!sql(&store, &ins("", "")));
@@ -249,7 +292,9 @@ fn a_raw_update_succeeds_only_for_one_of_the_five_moves() {
     let (_d, store, _) = setup("model");
     let mut seed: u64 = 0x5eed;
     let mut next = |n: usize| {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((seed >> 33) as usize) % n
     };
     let mut checked = 0;
@@ -287,9 +332,17 @@ fn a_raw_update_succeeds_only_for_one_of_the_five_moves() {
     // The fixed columns never change.
     let job = create(&store, "Fixed.", None, NOW).unwrap();
     let s = register(&store, job, "codex", NOW).unwrap();
-    for set in ["job_id = 1", "agent = 'y'", "registered_at = 2", "id = 9999"] {
+    for set in [
+        "job_id = 1",
+        "agent = 'y'",
+        "registered_at = 2",
+        "id = 9999",
+    ] {
         assert!(
-            !sql(&store, &format!("UPDATE job_session SET {set} WHERE id = {s}")),
+            !sql(
+                &store,
+                &format!("UPDATE job_session SET {set} WHERE id = {s}")
+            ),
             "{set}"
         );
     }
