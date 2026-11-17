@@ -931,7 +931,11 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
         |r| r.get(0),
     )?;
     let content = if reply {
-        if !content.subject.is_empty() {
+        // The field itself, also an empty one: the schema of a checked reply
+        // has no subject.
+        let has_subject = serde_json::from_str::<Map<String, Value>>(args)
+            .is_ok_and(|m| m.contains_key("subject"));
+        if has_subject {
             return Ok(Some("a reply takes no subject: Iris sets it".into()));
         }
         // The apply reads the Message-ID of the parent at Gmail: the mirror

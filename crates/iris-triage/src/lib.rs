@@ -218,7 +218,27 @@ pub fn decide_submitted(
         .optional()?
     {
         last = n;
-        let verb = iris_policy::Verb::from_name(&verb).expect("the CHECK of the table");
+        let id_n = ActionId {
+            changeset,
+            revision,
+            n,
+        };
+        // No rule decides a verb that the policy does not know: `draft` and
+        // `send` (spec R3-01, issue #239). Each goes to a person, in the mode
+        // `apply`; in the mode `observe` it stays proposed, as other actions.
+        let Some(verb) = iris_policy::Verb::from_name(&verb) else {
+            if apply {
+                decide_in(
+                    c,
+                    id_n,
+                    State::InReview,
+                    By::Policy,
+                    Some("No rule can allow a draft or a send: a person decides."),
+                    now_ms,
+                )?;
+            }
+            continue;
+        };
         let bulk = serde_json::from_str::<Vec<String>>(&flags)
             .map_err(|e| Error::Refused(format!("flags: {e}")))?
             .iter()
@@ -262,18 +282,7 @@ pub fn decide_submitted(
             (None, _) if bulk || to == State::Denied => By::Limit,
             (None, _) => By::Policy,
         };
-        decide_in(
-            c,
-            ActionId {
-                changeset,
-                revision,
-                n,
-            },
-            to,
-            by,
-            Some(&d.reason),
-            now_ms,
-        )?;
+        decide_in(c, id_n, to, by, Some(&d.reason), now_ms)?;
     }
     Ok(())
 }
