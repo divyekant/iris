@@ -427,15 +427,7 @@ impl Sessions {
             .mode(0o600)
             .open(self.egress_log(session))
             .map_err(|e| e.to_string())?;
-        // macOS has no session address: the peer is 127.0.0.1, and the token
-        // of the session tells its processes from all others.
-        let (peer, token) = if cfg!(target_os = "macos") {
-            let token = new_token().map_err(|e| format!("no token: {e}"))?;
-            (Ipv4Addr::LOCALHOST, Some(token))
-        } else {
-            let peer = session_peer(session).ok_or("the session ID has no peer address")?;
-            (peer, None)
-        };
+        let (peer, token) = egress_identity(session, cfg!(target_os = "macos"))?;
         Proxy::start(allowed, log, Box::new(SystemResolver), peer, token).map_err(|e| e.to_string())
     }
 
@@ -863,5 +855,39 @@ pub fn state(s: &Session) -> String {
         (Some(_), None, _) => "running".into(),
         (_, Some(e), None) => format!("ending ({})", e.as_str()),
         (_, Some(e), Some(_)) => format!("ended ({})", e.as_str()),
+    }
+}
+
+/// The client address and the token of the proxy of `session`. macOS has
+/// no session address: the peer is 127.0.0.1, and a new token of the
+/// session tells its processes from all others. Linux has the session
+/// address and no token.
+fn egress_identity(session: i64, macos: bool) -> Result<(Ipv4Addr, Option<String>), String> {
+    if macos {
+        let token = new_token().map_err(|e| format!("no token: {e}"))?;
+        return Ok((Ipv4Addr::LOCALHOST, Some(token)));
+    }
+    let peer = session_peer(session).ok_or("the session ID has no peer address")?;
+    Ok((peer, None))
+}
+
+#[cfg(test)]
+mod egress_tests {
+    use super::*;
+
+    #[test]
+    fn macos_gets_a_new_token_and_linux_the_session_address() {
+        let (peer, a) = egress_identity(5, true).unwrap();
+        assert_eq!(peer, Ipv4Addr::LOCALHOST);
+        let a = a.unwrap();
+        assert_eq!(a.len(), 64);
+        assert!(a.bytes().all(|b| b.is_ascii_hexdigit()));
+        let (_, b) = egress_identity(5, true).unwrap();
+        assert_ne!(Some(a), b, "each session gets its own token");
+        assert_eq!(
+            egress_identity(5, false).unwrap(),
+            (session_peer(5).unwrap(), None)
+        );
+        assert!(egress_identity(0, false).is_err());
     }
 }

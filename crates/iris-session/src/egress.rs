@@ -114,15 +114,28 @@ pub fn new_token() -> io::Result<String> {
     Ok(b.iter().map(|x| format!("{x:02x}")).collect())
 }
 
-/// True if `head` (a full request head) has a `Proxy-Authorization: Basic`
-/// header with `iris:<token>`. The compare of the value takes the same time
+/// The token check of a request head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Auth {
+    /// The head is not complete yet.
+    Partial,
+    /// The head is complete, and no `Proxy-Authorization` header has the
+    /// value `Basic` + base64 of `iris:<token>`. A head that does not parse
+    /// is `Bad` too.
+    Bad,
+    Good,
+}
+
+/// Checks the token of `head`. The compare of a value takes the same time
 /// for each value of the same length.
-fn has_token(head: &[u8], token: &str) -> bool {
+fn auth(head: &[u8], token: &str) -> Auth {
     use base64::Engine;
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
-    if !matches!(req.parse(head), Ok(httparse::Status::Complete(_))) {
-        return false;
+    match req.parse(head) {
+        Ok(httparse::Status::Complete(_)) => {}
+        Ok(httparse::Status::Partial) => return Auth::Partial,
+        Err(_) => return Auth::Bad,
     }
     let want = format!(
         "Basic {}",
@@ -134,7 +147,11 @@ fn has_token(head: &[u8], token: &str) -> bool {
             found |= same(h.value, want.as_bytes());
         }
     }
-    found
+    if found {
+        Auth::Good
+    } else {
+        Auth::Bad
+    }
 }
 
 /// Compares `a` and `b` in a time that depends only on their lengths.
@@ -755,10 +772,35 @@ fn handle(shared: &Shared, mut client: TcpStream, id: u64) -> Finish {
         }
     };
     let (host, len) = loop {
-        match check_head(&head, &shared.allowed) {
-            Ok(Some(found)) => break found,
-            Ok(None) => {}
-            Err(r) => return refuse(client, r),
+        // With a token, the token comes first: a client with no token gets
+        // 407 for each request, also for a host that is not allowed.
+        let ready = match &shared.token {
+            None => true,
+            Some(t) => match auth(&head, t) {
+                // A head that fills the limit and is still not complete
+                // gives no token.
+                Auth::Partial if head.len() < HEAD_MAX => false,
+                Auth::Partial => {
+                    return Finish {
+                        end: End::Refused(Reason::NotSession),
+                        answer: Some((client, AUTH_REQUIRED)),
+                    }
+                }
+                Auth::Good => true,
+                Auth::Bad => {
+                    return Finish {
+                        end: End::Refused(Reason::NotSession),
+                        answer: Some((client, AUTH_REQUIRED)),
+                    }
+                }
+            },
+        };
+        if ready {
+            match check_head(&head, &shared.allowed) {
+                Ok(Some(found)) => break found,
+                Ok(None) => {}
+                Err(r) => return refuse(client, r),
+            }
         }
         let left = end.saturating_duration_since(Instant::now());
         if left.is_zero() || client.set_read_timeout(Some(left)).is_err() {
@@ -790,14 +832,6 @@ fn handle(shared: &Shared, mut client: TcpStream, id: u64) -> Finish {
             }
         }
     };
-    if let Some(token) = &shared.token {
-        if !has_token(&head[..len], token) {
-            return Finish {
-                end: End::Refused(Reason::NotSession),
-                answer: Some((client, AUTH_REQUIRED)),
-            };
-        }
-    }
     let upstream = match connect(shared, host, id) {
         Phase::Up(u) => u,
         Phase::NotPublic => return refuse(client, Reason::AddressNotPublic),

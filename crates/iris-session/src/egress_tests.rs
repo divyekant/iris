@@ -846,6 +846,11 @@ fn the_proxy_takes_only_the_token_of_its_session() {
     cut.pop();
     let refused = [
         "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n".to_string(),
+        // The token comes before the host and port checks.
+        "CONNECT blocked.example:443 HTTP/1.1\r\n\r\n".to_string(),
+        "CONNECT api.example.test:80 HTTP/1.1\r\n\r\n".to_string(),
+        "GET / HTTP/1.1\r\n\r\n".to_string(),
+        with(&format!("iris:{other}")).replace("api.example.test", "blocked.example"),
         with(&format!("iris:{other}")),
         with(&format!("iris:{cut}")),
         with(&format!("root:{mine}")),
@@ -869,6 +874,71 @@ fn the_proxy_takes_only_the_token_of_its_session() {
         "{text}"
     );
     assert!(!text.contains(&mine) && !text.contains(&other), "{text}");
+}
+
+/// An oracle for [`auth`]: split the head into lines, and look for a
+/// header line with the name `Proxy-Authorization` (any case) whose value,
+/// with the spaces and tabs at its ends taken out, is `want`.
+fn auth_oracle(head: &str, want: &str) -> bool {
+    head.split("\r\n").skip(1).any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("proxy-authorization")
+                && value.trim_matches([' ', '\t']) == want
+        })
+    })
+}
+
+/// Random heads with random authorization headers: only the exact value of
+/// the token passes, also with other headers, duplicates and mutations.
+#[test]
+fn no_random_authorization_passes_but_the_token() {
+    use base64::Engine;
+    let b64 = |s: &[u8]| base64::engine::general_purpose::STANDARD.encode(s);
+    let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let want = format!("Basic {}", b64(format!("iris:{token}").as_bytes()));
+    let mut rng = Rng(7);
+    let mut good = 0;
+    for _ in 0..20_000 {
+        let mut lines = vec!["CONNECT api.example.test:443 HTTP/1.1".to_string()];
+        for _ in 0..rng.next(4) {
+            let name = [
+                "Proxy-Authorization",
+                "proxy-authorization",
+                "PROXY-AUTHORIZATION",
+                "Proxy-Authorizatio",
+                "Authorization",
+                "Host",
+            ][rng.next(6) as usize];
+            let mut value = match rng.next(6) {
+                0 => want.clone(),
+                1 => format!("basic {}", b64(format!("iris:{token}").as_bytes())),
+                2 => format!("Basic {}", b64(format!("iris:{}", &token[1..]).as_bytes())),
+                3 => format!("Basic {}", b64(format!("IRIS:{token}").as_bytes())),
+                4 => format!("Basic {}", b64(&[rng.next(256) as u8; 9])),
+                _ => format!("Basic  {}", b64(format!("iris:{token}").as_bytes())),
+            };
+            // A mutation of one byte of the value.
+            if rng.next(4) == 0 && !value.is_empty() {
+                let i = rng.next(value.len() as u64) as usize;
+                let c = b"aZ9+/= x"[rng.next(8) as usize] as char;
+                value.replace_range(i..i + 1, &c.to_string());
+            }
+            lines.push(format!(
+                "{name}:{}{value}",
+                [" ", "", "\t"][rng.next(3) as usize]
+            ));
+        }
+        let head = format!("{}\r\n\r\n", lines.join("\r\n"));
+        let got = auth(head.as_bytes(), token);
+        let expect = auth_oracle(&head, &want);
+        assert_eq!(got == Auth::Good, expect, "{head:?}");
+        assert_ne!(got, Auth::Partial, "{head:?}");
+        good += usize::from(expect);
+        // Each cut of the head before its end is not complete.
+        let cut = rng.next(head.len() as u64 - 1) as usize;
+        assert_ne!(auth(&head.as_bytes()[..cut], token), Auth::Good, "{head:?}");
+    }
+    assert!(good > 1000, "{good}");
 }
 
 /// The grant ends: the tunnel ends at once, a new client gets no tunnel,
