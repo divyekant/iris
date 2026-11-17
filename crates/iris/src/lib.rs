@@ -207,6 +207,16 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Start a new draft revision of a submitted changeset of yours, after
+    /// a review comment. Add the new actions with `--changeset`, then
+    /// submit. Needs the engine.
+    Revise {
+        /// The changeset ID, for example cs-12.
+        id: String,
+        /// Print the changeset document.
+        #[arg(long)]
+        json: bool,
+    },
     /// Understand the mail: an estimate, the approval of a budget, or a run.
     Understand {
         /// Print the estimate and an approval code. No model call.
@@ -506,6 +516,10 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
             let r = socket::request(&data?, "withdraw", serde_json::json!({ "changeset": id }))?;
             Some(changeset_text(&r, *json))
         }
+        Command::Revise { id, json } => {
+            let r = socket::request(&data?, "revise", serde_json::json!({ "changeset": id }))?;
+            Some(changeset_text(&r, *json))
+        }
         _ => None,
     };
     if let Some(text) = text {
@@ -697,6 +711,7 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         }
         Command::Changeset { .. }
         | Command::Withdraw { .. }
+        | Command::Revise { .. }
         | Command::Submit { .. }
         | Command::Close { .. }
         | Command::Decline { .. }

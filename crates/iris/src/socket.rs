@@ -289,7 +289,20 @@ const OK: &[u8] = b"{\"ok\":true,\"result\":";
 /// first byte, the error ends the connection, and the command says that the
 /// result is not known.
 pub fn answer(store: &Store, line: &[u8], out: &mut impl Write) -> std::io::Result<()> {
-    match work(store, line) {
+    answer_as(store, &local(), line, out)
+}
+
+/// [`answer`] for the author that the socket of the connection names: the
+/// person in host mode (`local`), or an agent session of a job on the
+/// session socket of R4-04 (docs/specs/2026-11-17-job-verbs.md). A request
+/// never names its author.
+pub fn answer_as(
+    store: &Store,
+    me: &Author,
+    line: &[u8],
+    out: &mut impl Write,
+) -> std::io::Result<()> {
+    match work(store, me, line) {
         Err(f) => out.write_all(&failure_line(&f)),
         Ok(Done::Value(v)) => {
             out.write_all(OK)?;
@@ -325,7 +338,7 @@ fn text<'a>(
     }
 }
 
-fn work(store: &Store, line: &[u8]) -> Result<Done, Failure> {
+fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
     let request: Value =
         serde_json::from_slice(line).map_err(|e| usage(format!("the request is not JSON: {e}")))?;
     let Some(fields) = request.as_object() else {
@@ -357,25 +370,40 @@ fn work(store: &Store, line: &[u8]) -> Result<Done, Failure> {
             .transpose()
     };
     let need = || changeset()?.ok_or_else(|| usage("give the changeset ID, for example cs-12"));
-    let me = local();
+    let session = me.job.is_some();
     match request["verb"].as_str() {
         Some("show") => {
             only(&["changeset"])?;
-            Ok(Done::Document(need()?))
+            let cs = need()?;
+            // A session sees only the changesets of its job, and the answer
+            // for another job is the answer for no changeset.
+            if session && !of_job(store, cs, me)? {
+                return Err(failure(iris_changeset::Error::NotFound, cs));
+            }
+            Ok(Done::Document(cs))
         }
         Some("withdraw") => {
             only(&["changeset"])?;
             let cs = need()?;
-            iris_changeset::withdraw(store, cs, Some(&me)).map_err(|e| failure(e, cs))?;
+            iris_changeset::withdraw(store, cs, Some(me)).map_err(|e| failure(e, cs))?;
             Ok(Done::Document(cs))
         }
+        Some("drafts") if session => Err(usage("a session has no drafts verb")),
         Some("drafts") => {
             only(&[])?;
             drafts(store).map(Done::Value)
         }
         Some("add") => {
             only(&["verb", "targets", "args", "why", "changeset"])?;
-            let verb = text(args, "verb")?
+            let verb = text(args, "verb")?;
+            if session && matches!(verb, Some("draft" | "send" | "nudge")) {
+                return Err(Failure::new(
+                    code::DENIED,
+                    "a session cannot draft, send or nudge: a job has no grant of an \
+                     account or a draft",
+                ));
+            }
+            let verb = verb
                 .and_then(Verb::parse)
                 .ok_or_else(|| usage("verb must be a verb of specification 2, section 4"))?;
             let targets: Vec<&str> = args["targets"]
@@ -394,16 +422,26 @@ fn work(store: &Store, line: &[u8]) -> Result<Done, Failure> {
             let (cs, n) = iris_changeset::transaction(store, |c| {
                 let cs = match given {
                     Some(cs) => cs,
-                    None => iris_changeset::create_in(c, &me, now)?,
+                    // A session has one draft changeset: its newest draft.
+                    None => match session_draft(c, me)? {
+                        Some(cs) => cs,
+                        None => iris_changeset::create_in(c, me, now)?,
+                    },
                 };
                 let n =
-                    iris_changeset::add_action_in(c, cs, &me, verb, &targets, &action_args, why)?;
+                    iris_changeset::add_action_in(c, cs, me, verb, &targets, &action_args, why)?;
                 Ok((cs, n))
             })
             .map_err(|e| failure(e, given.unwrap_or_default()))?;
             Ok(Done::Value(
                 json!({ "changeset": format_changeset_id(cs), "n": n }),
             ))
+        }
+        Some("revise") => {
+            only(&["changeset"])?;
+            let cs = need()?;
+            iris_changeset::revise(store, cs, me).map_err(|e| failure(e, cs))?;
+            Ok(Done::Document(cs))
         }
         Some("submit") => {
             only(&["changeset", "why"])?;
@@ -412,12 +450,12 @@ fn work(store: &Store, line: &[u8]) -> Result<Done, Failure> {
             let now = crate::engine::now_ms();
             // The submit and the decisions of the policy in one transaction.
             iris_changeset::transaction(store, |c| {
-                iris_changeset::submit_in(c, cs, &me, why, now)?;
+                iris_changeset::submit_in(c, cs, me, why, now)?;
                 let revision: i64 =
                     c.query_row("SELECT revision FROM changeset WHERE id = ?1", [cs], |r| {
                         r.get(0)
                     })?;
-                iris_triage::decide_submitted(c, cs, revision, iris_policy::Author::Local, now)
+                iris_triage::decide_submitted(c, cs, revision, policy_author(me), now)
             })
             .map_err(|e| failure(e, cs))?;
             Ok(Done::Document(cs))
@@ -433,7 +471,49 @@ fn failure(e: iris_changeset::Error, cs: i64) -> Failure {
             usage(format!("no changeset {}", format_changeset_id(cs)))
         }
         iris_changeset::Error::Refused(why) => usage(why),
+        iris_changeset::Error::Denied(why) => Failure::new(code::DENIED, why),
         iris_changeset::Error::Store(e) => Failure::new(code::ERROR, format!("store: {e}")),
+    }
+}
+
+/// True if the changeset `cs` has the job of the session `me`.
+fn of_job(store: &Store, cs: i64, me: &Author) -> Result<bool, Failure> {
+    store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM changeset WHERE id = ?1 AND author_job IS ?2)",
+                rusqlite::params![cs, me.job],
+                |r| r.get(0),
+            )?)
+        })
+        .map_err(|e| Failure::new(code::ERROR, format!("store: {e}")))
+}
+
+/// The newest draft changeset of the job of the session `me`, or `None` in
+/// host mode. The job has one draft changeset.
+fn session_draft(c: &rusqlite::Connection, me: &Author) -> iris_changeset::Result<Option<i64>> {
+    if me.job.is_none() {
+        return Ok(None);
+    }
+    use rusqlite::OptionalExtension;
+    Ok(c.query_row(
+        "SELECT id FROM changeset
+         WHERE author_kind = ?1 AND author_job = ?2 AND state = 'draft'
+         ORDER BY id DESC LIMIT 1",
+        rusqlite::params![me.kind.as_str(), me.job],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
+/// The author of the policy (spec 2, section 6.2) for the author of a
+/// request.
+fn policy_author(me: &Author) -> iris_policy::Author {
+    match me.kind {
+        AuthorKind::Local => iris_policy::Author::Local,
+        AuthorKind::Agent => iris_policy::Author::Agent,
+        AuthorKind::Person => iris_policy::Author::Person,
+        AuthorKind::Triage => iris_policy::Author::Triage,
     }
 }
 
