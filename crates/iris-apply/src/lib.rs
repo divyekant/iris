@@ -29,7 +29,7 @@
 mod send;
 mod state;
 
-pub use send::{release, HOLD_MS, SENT_OTHER};
+pub use send::{release, sending, set_sending, HOLD_MS, SENT_OTHER};
 pub use state::{apply_state, apply_states};
 
 use iris_gmail::{Gmail, BATCH_LIMIT};
@@ -127,8 +127,11 @@ pub enum Outcome {
     /// 14 days passed after the submit: the state is `expired`.
     Expired,
     /// A send waits for its hold delay until this time, in milliseconds
-    /// since 1970. The action stays `approved`.
+    /// since 1970. The action stays `held`.
     Hold(i64),
+    /// The send switch is off (`iris sending on` turns it on). The send
+    /// stays `held`, and no call is made.
+    SendingOff,
     /// The result of a `drafts.create` or `drafts.send` call is not known
     /// yet. The ledger row stays in `writing`, and the recovery decides
     /// later. No call is made again.
@@ -1004,7 +1007,7 @@ fn set_listed(tx: &Connection, ledger: i64, message: i64, why: &str) -> iris_sto
 }
 
 /// Milliseconds since the Unix epoch.
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
@@ -1080,20 +1083,20 @@ pub(crate) fn deny_outside_grant(
     tx.execute(
         "UPDATE changeset_action SET state = 'denied', decided_by = 'engine', rule = NULL,
            policy = NULL, reason = ?2, decided_at = ?3
-         WHERE id = ?1 AND state = 'approved'",
+         WHERE id = ?1 AND state IN ('approved', 'held')",
         params![action, why, now()],
     )?;
     Ok(Some(why))
 }
 
-/// Expire an approved action 14 days after its submit (section 5.5), if it
+/// Expire an approved action or a held send 14 days after its submit (section 5.5), if it
 /// has no ledger row in `writing`. Gives `true` if it expired.
 fn expire(tx: &Connection, action: i64) -> iris_store::Result<bool> {
     let expired = tx.execute(
         "UPDATE changeset_action SET state = 'expired', decided_by = 'expiry', rule = NULL,
            policy = NULL, reason = NULL,
            decided_at = CAST(unixepoch('subsec') * 1000 AS INTEGER)
-         WHERE id = ?1 AND state = 'approved'
+         WHERE id = ?1 AND state IN ('approved', 'held')
            AND NOT EXISTS (SELECT 1 FROM ledger WHERE action_id = ?1 AND state = 'writing')
            AND CAST(unixepoch('subsec') * 1000 AS INTEGER) - submitted_at >= ?2",
         params![action, EXPIRY_MS],
@@ -1233,7 +1236,7 @@ fn decide(store: &Store, action: i64, state: &str, reason: &str) -> Result<()> {
         Ok(tx.execute(
             "UPDATE changeset_action SET state = ?2, decided_by = 'engine', rule = NULL,
                policy = NULL, reason = ?3, decided_at = ?4
-             WHERE id = ?1 AND state = 'approved'",
+             WHERE id = ?1 AND state IN ('approved', 'held')",
             params![action, state, reason, now],
         )?)
     })?;

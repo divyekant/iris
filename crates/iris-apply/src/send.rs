@@ -235,10 +235,18 @@ fn claim(
         if let Some(o) = gate(tx, action)? {
             return Ok(Some(Err(o)));
         }
+        // A send leaves only from `held`, and only while the switch is on.
+        // The switch is read here, in the transaction of the claim; the
+        // apply lock that the caller holds keeps `iris sending off` out
+        // until the call ends.
+        if draft.is_some() && switch_on(tx)?.is_none() {
+            return Ok(Some(Err(Outcome::SendingOff)));
+        }
+        let state = if draft.is_some() { "held" } else { "approved" };
         let free: bool = tx.query_row(
-            "SELECT EXISTS (SELECT 1 FROM changeset_action WHERE id = ?1 AND state = 'approved')
+            "SELECT EXISTS (SELECT 1 FROM changeset_action WHERE id = ?1 AND state = ?3)
                AND NOT EXISTS (SELECT 1 FROM ledger_send WHERE draft_id = ?2)",
-            params![action, draft],
+            params![action, draft, state],
             |r| r.get(0),
         )?;
         if !free {
@@ -500,7 +508,7 @@ pub fn release(
         Ok(c.query_row(
             "SELECT a.verb, a.hash, a.decided_by, a.decided_at,
                     (SELECT id FROM ledger WHERE action_id = a.id AND state = 'writing')
-             FROM changeset_action a WHERE a.id = ?1 AND a.state = 'approved'",
+             FROM changeset_action a WHERE a.id = ?1 AND a.state = 'held'",
             [action],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
@@ -556,8 +564,13 @@ pub fn release(
     if stopped {
         return Err(Error::SendStopped);
     }
-    let until = decided_at + HOLD_MS;
-    if decided_by == "person" && now() < until {
+    // The hold starts at the later of the approval and the time the switch
+    // went on (docs/specs/2026-11-17-held-outbox.md, section 1).
+    let Some(on_at) = store.read(switch_on)? else {
+        return Ok(Outcome::SendingOff);
+    };
+    let until = decided_at.max(on_at) + HOLD_MS;
+    if now() < until {
         return Ok(Outcome::Hold(until));
     }
     if let Some(o) = check(store, account, action, &decided_by, approved_hash)? {
@@ -637,7 +650,7 @@ fn changed_at_gmail(
         let n = tx.execute(
             "UPDATE changeset_action SET state = 'denied', decided_by = 'engine', rule = NULL,
                policy = NULL, reason = ?2, decided_at = ?3
-             WHERE id = ?1 AND state = 'approved'",
+             WHERE id = ?1 AND state IN ('approved', 'held')",
             params![action, why, t],
         )?;
         if n == 1 {
@@ -666,4 +679,57 @@ fn changeset_error(e: iris_changeset::Error) -> iris_store::Error {
         iris_changeset::Error::Store(e) => e,
         other => iris_store::Error::Query(other.to_string()),
     }
+}
+
+/// The time the send switch went on, or `None` while it is off.
+fn switch_on(c: &rusqlite::Connection) -> iris_store::Result<Option<i64>> {
+    Ok(
+        c.query_row("SELECT on_at FROM send_switch WHERE id = 1", [], |r| {
+            r.get(0)
+        })?,
+    )
+}
+
+/// The state of the send switch: the time it went on, or `None` while off.
+pub fn sending(store: &Store) -> Result<Option<i64>> {
+    Ok(store.read(switch_on)?)
+}
+
+/// The longest wait of `iris sending off` for the apply lock. It is
+/// shorter than the answer wait of the socket command (30 seconds).
+pub const OFF_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Turn the send switch on or off (`iris sending on|off`) at the time of
+/// the write. Off takes the
+/// apply lock first, which the release holds from its claim to the end of
+/// `drafts.send`: when off returns, no send call is in progress, and each
+/// later claim reads off. If the lock stays busy for [`OFF_WAIT`], nothing
+/// changes and the answer is [`Error::Busy`].
+pub fn set_sending(store: &Store, on: bool) -> Result<()> {
+    let _lock = if on {
+        None
+    } else {
+        let start = std::time::Instant::now();
+        loop {
+            match super::lock(store) {
+                Ok(l) => break Some(l),
+                Err(Error::Busy) if start.elapsed() < OFF_WAIT => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    };
+    // The clock is read here, after the lock and the confirmation of the
+    // caller, so a hold always counts from the moment the switch changed.
+    let now_ms = super::now();
+    store.write(|tx| {
+        tx.execute(
+            "UPDATE send_switch SET on_at = CASE WHEN ?1 THEN coalesce(on_at, ?2) END,
+               changed_at = ?2 WHERE id = 1",
+            params![on, now_ms],
+        )?;
+        Ok(())
+    })?;
+    Ok(())
 }

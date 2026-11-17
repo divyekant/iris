@@ -104,6 +104,14 @@ pub enum Command {
         #[command(subcommand)]
         command: ModelCommand,
     },
+    /// Show the send switch, or turn it on or off. No send leaves while it
+    /// is off. `on` needs a terminal and a typed "yes".
+    Sending {
+        #[arg(value_enum)]
+        state: Option<Switch>,
+    },
+    /// Cancel the send of a draft (`d-4`) while it waits in the outbox.
+    Cancel { id: String },
     /// Close a commitment (`c-7`) in a draft changeset. Needs the engine.
     Close {
         id: String,
@@ -357,6 +365,12 @@ fn action(c: &Command) -> Result<Option<Action<'_>>, socket::Failure> {
         Command::Unlabel(t) => ("unlabel", t.ids.clone(), json!({ "label": t.label }), &t.to),
         _ => return Ok(None),
     }))
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum Switch {
+    On,
+    Off,
 }
 
 #[derive(Subcommand)]
@@ -707,6 +721,40 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
                 ModelCommand::Set { provider } => model_set(&open()?, provider)?,
             };
             println!("{text}");
+            Ok(())
+        }
+        Command::Sending { state } => {
+            let store = open()?;
+            match state {
+                Some(Switch::On) => {
+                    {
+                        use std::io::IsTerminal;
+                        let stdin = std::io::stdin();
+                        sending_on_confirm(stdin.is_terminal(), &mut stdin.lock())?;
+                    }
+                    iris_apply::set_sending(&store, true).map_err(|e| e.to_string())?;
+                }
+                Some(Switch::Off) => match iris_apply::set_sending(&store, false) {
+                    Ok(()) => {}
+                    Err(iris_apply::Error::Busy) => {
+                        return Err("A send is in progress. Run the command again.".into())
+                    }
+                    Err(e) => return Err(e.to_string()),
+                },
+                None => {}
+            }
+            println!(
+                "{}",
+                match iris_apply::sending(&store).map_err(|e| e.to_string())? {
+                    Some(_) => "Sending is on.",
+                    None => "Sending is off. Sends wait in the outbox.",
+                }
+            );
+            Ok(())
+        }
+        Command::Cancel { id } => {
+            let store = open()?;
+            println!("{}", cancel_send(&store, id, engine::now_ms())?);
             Ok(())
         }
         Command::Changeset { .. }
@@ -1126,5 +1174,211 @@ mod tests {
         assert_eq!(cli.data, Some(PathBuf::from("/tmp/d")));
         let cli = Cli::try_parse_from(["iris", "export", "/tmp/e"]).unwrap();
         assert!(matches!(cli.command, Command::Export { path } if path.as_os_str() == "/tmp/e"));
+    }
+}
+
+/// The confirmation of `iris sending on`: a terminal and a typed "yes". So
+/// a script with no terminal does not turn sending on by mistake.
+/// `terminal` is true when standard input is a terminal: a script or an
+/// agent without a terminal cannot turn sending on.
+fn sending_on_confirm(terminal: bool, input: &mut impl BufRead) -> Result<(), String> {
+    if !terminal {
+        return Err("`iris sending on` needs a terminal: standard input is not a TTY".into());
+    }
+    eprint!(
+        "Approved sends leave Gmail after their hold. \
+         Check Gmail on this machine first (issue #302). Type yes to turn sending on: "
+    );
+    let mut line = String::new();
+    input.read_line(&mut line).map_err(|e| e.to_string())?;
+    if line.trim() != "yes" {
+        return Err("Sending stays off.".into());
+    }
+    Ok(())
+}
+
+/// `iris cancel d-4`: cancel the open send of the draft.
+fn cancel_send(store: &Store, id: &str, now: i64) -> Result<&'static str, String> {
+    let draft = match iris_store::parse_id(id) {
+        Some((iris_store::Kind::Draft, n)) => n,
+        _ => return Err(format!("{id} is not a draft ID such as d-4")),
+    };
+    let action: Option<i64> = store
+        .read(|c| {
+            use rusqlite::OptionalExtension;
+            Ok(c.query_row(
+                "SELECT a.id FROM action_draft ad JOIN changeset_action a ON a.id = ad.action_id
+                 WHERE ad.draft_id = ?1 AND a.verb = 'send'
+                 ORDER BY a.state IN ('approved', 'held') DESC, a.id DESC LIMIT 1",
+                [draft],
+                |r| r.get(0),
+            )
+            .optional()?)
+        })
+        .map_err(|e| e.to_string())?;
+    let Some(action) = action else {
+        return Err(format!("{id} has no send"));
+    };
+    match iris_changeset::cancel(store, action, now).map_err(|e| e.to_string())? {
+        iris_changeset::Cancel::Done => Ok("Cancelled. The send does not leave."),
+        iris_changeset::Cancel::Started => Err("The send started. It cannot be cancelled.".into()),
+        iris_changeset::Cancel::NotOpen => Err(format!("{id} has no send that waits")),
+    }
+}
+
+#[cfg(test)]
+mod outbox_tests {
+    use super::*;
+
+    /// `iris cancel` takes only a draft ID, and says so for a draft with no
+    /// send.
+    #[test]
+    fn cancel_names_a_draft() {
+        let dir = std::env::temp_dir().join(format!("iris-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        assert!(cancel_send(&store, "t-4", 0)
+            .unwrap_err()
+            .contains("not a draft ID"));
+        assert!(cancel_send(&store, "d-x", 0)
+            .unwrap_err()
+            .contains("not a draft ID"));
+        assert_eq!(
+            cancel_send(&store, "d-4", 0).unwrap_err(),
+            "d-4 has no send"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Only the typed word "yes" at a terminal turns sending on.
+    #[test]
+    fn only_yes_turns_sending_on() {
+        assert_eq!(sending_on_confirm(true, &mut "yes\n".as_bytes()), Ok(()));
+        assert_eq!(sending_on_confirm(true, &mut "  yes \n".as_bytes()), Ok(()));
+        for answer in ["no\n", "\n", "", "yes please\n", "y\n", "YES!\n"] {
+            assert_eq!(
+                sending_on_confirm(true, &mut answer.as_bytes()),
+                Err("Sending stays off.".to_string()),
+                "{answer:?}"
+            );
+        }
+        let r = sending_on_confirm(false, &mut "yes\n".as_bytes());
+        assert!(r.unwrap_err().contains("needs a terminal"));
+    }
+
+    /// A store with account 1 and draft d-1 (a new mail that the apply
+    /// made), and a function that submits and approves a send of d-1.
+    fn draft_store(name: &str) -> (std::path::PathBuf, Store) {
+        let dir = std::env::temp_dir().join(format!("iris-cancel-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        store.add_account("gmail", "owner@example.com").unwrap();
+        store
+            .write(|tx| {
+                tx.execute_batch(
+                    "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0);
+                     INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+                       VALUES (1, 1, 1, 'draft', '{\"accounts\":[\"a-1\"]}', '{}');",
+                )?;
+                let c = iris_compose::Content {
+                    to: vec!["priya@example.com".into()],
+                    cc: Vec::new(),
+                    subject: "Plan".into(),
+                    body: "Hello".into(),
+                }
+                .check()
+                .unwrap();
+                let raw =
+                    iris_compose::compose("owner@example.com", "iris.1@example.com", &c, None, 1);
+                tx.execute(
+                    "INSERT INTO draft(account_id, provider_id, message_id_hdr, content, hash,
+                                       raw, action_id, created_at, updated_at)
+                     VALUES (1, 'r1', 'iris.1@example.com', '{}', ?1, ?2, 1, 0, 0)",
+                    rusqlite::params![iris_compose::hash(&c, None), raw],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        (dir, store)
+    }
+
+    /// Submit a send of d-1 as the person, and approve it. Gives its ID.
+    fn approved_send(store: &Store) -> i64 {
+        let who = iris_changeset::Author {
+            kind: iris_changeset::AuthorKind::Person,
+            name: None,
+            session: None,
+            job: None,
+        };
+        let now = engine::now_ms();
+        let cs = iris_changeset::create(store, &who, now).unwrap();
+        let verb = iris_changeset::Verb::Send;
+        iris_changeset::add_action(store, cs, &who, verb, &["d-1"], &Default::default(), None)
+            .unwrap();
+        iris_changeset::submit(store, cs, &who, "Send.", now).unwrap();
+        store
+            .write(|tx| {
+                let id: i64 = tx.query_row(
+                    "SELECT id FROM changeset_action WHERE changeset_id = ?1",
+                    [cs],
+                    |r| r.get(0),
+                )?;
+                let n = tx.execute(
+                    "UPDATE changeset_action SET state = 'approved', decided_by = 'person',
+                       decided_at = ?2 WHERE id = ?1 AND state IN ('proposed', 'in_review')",
+                    rusqlite::params![id, now],
+                )?;
+                assert_eq!(n, 1, "the send was not proposed");
+                Ok(id)
+            })
+            .unwrap()
+    }
+
+    fn decision(store: &Store, action: i64) -> (String, String, String) {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT state, decided_by, coalesce(reason, '') FROM changeset_action
+                     WHERE id = ?1",
+                    [action],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?)
+            })
+            .unwrap()
+    }
+
+    /// `iris cancel d-1` cancels an approved send and a held send of the
+    /// draft. A second cancel finds no send that waits.
+    #[test]
+    fn cancel_removes_the_send_of_a_draft() {
+        let (dir, store) = draft_store("send");
+        let want = (
+            "denied".to_string(),
+            "person".to_string(),
+            iris_changeset::CANCELLED.to_string(),
+        );
+        let s = approved_send(&store);
+        let now = engine::now_ms();
+        assert_eq!(
+            cancel_send(&store, "d-1", now),
+            Ok("Cancelled. The send does not leave.")
+        );
+        assert_eq!(decision(&store, s), want);
+        assert_eq!(
+            cancel_send(&store, "d-1", now).unwrap_err(),
+            "d-1 has no send that waits"
+        );
+        // A held send: the cancel finds the open send, not the old one.
+        let s = approved_send(&store);
+        assert_eq!(iris_changeset::hold(&store, 1, now).unwrap(), 1);
+        assert_eq!(decision(&store, s).0, "held");
+        assert_eq!(
+            cancel_send(&store, "d-1", now),
+            Ok("Cancelled. The send does not leave.")
+        );
+        assert_eq!(decision(&store, s), want);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

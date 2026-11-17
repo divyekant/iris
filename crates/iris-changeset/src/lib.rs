@@ -28,10 +28,12 @@ use sha2::{Digest, Sha256};
 use unicase::UniCase;
 
 mod flags;
+mod outbox;
 pub use flags::{
     action_content, attachment_spans, date_spans, draft_flags, draft_marks, has_attachment,
     has_date, has_money, money_spans, names, new_flags, words, Field, Mark, DRAFT_FLAGS,
 };
+pub use outbox::{cancel, hold, Cancel, CANCELLED};
 
 /// The flag `bulk`: more than this count of messages in one action, or in
 /// one revision (section 5.3).
@@ -467,7 +469,7 @@ pub fn expire_in(c: &Connection, now_ms: i64) -> Result<usize> {
     Ok(c.execute(
         "UPDATE changeset_action SET state = 'expired', decided_by = 'expiry', rule = NULL,
            policy = NULL, reason = 'no decision or apply in 14 days', decided_at = ?1
-         WHERE state IN ('proposed', 'in_review', 'approved')
+         WHERE state IN ('proposed', 'in_review', 'approved', 'held')
            AND NOT EXISTS (SELECT 1 FROM ledger l
                            WHERE l.action_id = changeset_action.id AND l.state = 'writing')
            AND submitted_at <= ?1 - ?2",
