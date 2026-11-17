@@ -621,3 +621,104 @@ fn only_the_person_or_the_engine_changes_a_scope() {
     revoke_scope(&store, job, Ref::Item(9), By::Person, NOW + 6).unwrap();
     assert_eq!(scope(&store, job).unwrap(), [Ref::Thread(5)]);
 }
+
+/// No statement removes or replaces a scope row: not a delete, and not an
+/// insert with the ID of a row (INSERT OR REPLACE runs no delete trigger).
+#[test]
+fn no_insert_replaces_a_scope_row() {
+    use iris_job::{add_scope, revoke_scope, revoked_count, Ref};
+    let dir = TempDir::new("replace");
+    let store = Store::open(&dir.0).unwrap();
+    let job = create(&store, "Goal.", None, NOW).unwrap();
+    assert!(sql(
+        &store,
+        r#"INSERT INTO account (id, provider, address) VALUES (1, 'gmail', 'me@example.com');
+           INSERT INTO thread (id, account_id, provider_id) VALUES (5, 1, 'a'), (6, 1, 'b');"#
+    ));
+    add_scope(&store, job, Ref::Thread(5), By::Person, NOW).unwrap();
+    revoke_scope(&store, job, Ref::Thread(5), By::Person, NOW).unwrap();
+    let id: i64 = store
+        .read(|c| Ok(c.query_row("SELECT id FROM job_scope", [], |r| r.get(0))?))
+        .unwrap();
+    for verb in ["INSERT OR REPLACE", "REPLACE", "INSERT"] {
+        let text = format!(
+            "{verb} INTO job_scope (id, job_id, thread_id, by, at) VALUES ({id}, {job}, 6, 'person', 1)"
+        );
+        assert!(!sql(&store, &text), "{text}");
+    }
+    let row: (i64, Option<i64>) = store
+        .read(|c| {
+            Ok(c.query_row("SELECT thread_id, revoked_at FROM job_scope", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?)
+        })
+        .unwrap();
+    assert_eq!(row, (5, Some(NOW)));
+    assert_eq!(revoked_count(&store, job).unwrap(), 1);
+}
+
+/// Each ref grants its list: the messages of the thread, or the sources of
+/// the item, at each add. A later message enters only with a new add.
+#[test]
+fn an_add_takes_the_list_of_the_ref_now() {
+    use iris_job::{add_scope, Ref};
+    let dir = TempDir::new("list");
+    let store = Store::open(&dir.0).unwrap();
+    let job = create(&store, "Goal.", None, NOW).unwrap();
+    assert!(sql(
+        &store,
+        r#"INSERT INTO account (id, provider, address) VALUES (1, 'gmail', 'me@example.com');
+           INSERT INTO thread (id, account_id, provider_id) VALUES (5, 1, 'a'), (6, 1, 'b');
+           INSERT INTO message (id, account_id, thread_id, provider_id, internal_date)
+             VALUES (1, 1, 5, 'm1', 1), (2, 1, 5, 'm2', 2), (3, 1, 6, 'm3', 3);
+           INSERT INTO item (id, form, account_id, status, doc, created_at, updated_at)
+             VALUES (9, 'commitment', 1, 'open', '{}', 1, 1);
+           INSERT INTO item_source (item_id, message_id, role) VALUES (9, 3, 'origin');"#
+    ));
+    let list = |store: &Store| -> Vec<(Option<i64>, Option<i64>, i64)> {
+        store
+            .read(|c| {
+                let mut q = c.prepare(
+                    "SELECT s.thread_id, s.item_id, l.message_id FROM job_scope s
+                     JOIN job_scope_message l ON l.scope_id = s.id
+                     WHERE s.revoked_at IS NULL ORDER BY s.id, l.message_id",
+                )?;
+                let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+                Ok(rows.collect::<rusqlite::Result<_>>()?)
+            })
+            .unwrap()
+    };
+    add_scope(&store, job, Ref::Thread(5), By::Person, NOW).unwrap();
+    add_scope(&store, job, Ref::Item(9), By::Person, NOW).unwrap();
+    let first = vec![(Some(5), None, 1), (Some(5), None, 2), (None, Some(9), 3)];
+    assert_eq!(list(&store), first);
+    // A later message of thread 5, a message moved into it, and a new source
+    // of item 9 stay out of the lists.
+    assert!(sql(
+        &store,
+        r#"INSERT INTO message (id, account_id, thread_id, provider_id, internal_date)
+             VALUES (4, 1, 5, 'm4', 4), (5, 1, 6, 'm5', 5);
+           UPDATE message SET thread_id = 5 WHERE id = 3;
+           INSERT INTO item_source (item_id, message_id, role) VALUES (9, 5, 'evidence');"#
+    ));
+    assert_eq!(list(&store), first);
+    // A list holds only a message of the thread or a source of the item.
+    assert!(!sql(
+        &store,
+        "INSERT INTO job_scope_message (scope_id, message_id) VALUES (1, 5)"
+    ));
+    // The person adds the refs again: the lists take the messages now.
+    add_scope(&store, job, Ref::Thread(5), By::Person, NOW + 1).unwrap();
+    add_scope(&store, job, Ref::Item(9), By::Person, NOW + 1).unwrap();
+    assert_eq!(
+        list(&store),
+        [
+            (Some(5), None, 1),
+            (Some(5), None, 2),
+            (Some(5), None, 3),
+            (Some(5), None, 4),
+            (None, Some(9), 3),
+            (None, Some(9), 5)
+        ]
+    );
+}
