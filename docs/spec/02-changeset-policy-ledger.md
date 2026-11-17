@@ -665,7 +665,8 @@ The pass also proposes a `hide` rule from the choices of the person
   refusal).
 - A candidate is a `hide` rule with two conditions: the `sender` of the
   origin message of the item, and the `form` of the item. Hostile mail
-  gives no candidate. A choice counts only when the rule, added to the
+  and an origin message from the person (sender kind `you`) give no
+  candidate. A choice counts only when the rule, added to the
   active policy, changes the attention of its item from shown to hidden.
 - The engine proposes the rule when 10 or more choices count and no
   refusal counts. A refusal that the engine cannot read again stops each

@@ -35,9 +35,11 @@ cannot tell which sender the person wants to see.
 - Opens as a signal. The opens of R5-12 have no item and no sender. A
   later card adds them when the store records the item of each open
   (issue #433).
-- A verb that undoes a mute or a skip. The undo of a state verb is card
-  #226 (after the R2-03 undo). The pass reads `undone` already, so the
-  undo becomes a refusal when it exists.
+- An undo of a mute, a skip or a dismiss after it applied. The undo of a
+  state verb is card #226 (after the R2-03 undo). Until then, each of
+  the three verbs has a hold (section 1), as `close` has: PRODUCT.md asks
+  for "an undo or a hold". The pass reads `undone` already, so the undo
+  becomes a refusal when it exists.
 - A proposal with a `sender_kind` condition. A `hide` rule for each
   service hides too much mail. The proposal names one address.
 - A `hide` rule for commitments or records. An obligation or a receipt
@@ -67,6 +69,11 @@ cannot tell which sender the person wants to see.
   409 with the reason.
 - The ledger entry has `pre` and `post` of the field `status`, so the
   undo of #226 can restore it.
+- The hold: the web client sends a verb only after the Undo time of
+  `close` (`HOLD` in `client/src/act.ts`). In that time, the person can
+  click Undo, and the client sends nothing. The client PR (R5-02d) shows
+  the three verbs only with this hold. The local API does not hold, as
+  for `close`.
 - The engine keeps a `muted` conversation muted when a new message
   arrives (`iris-talk`, already built). A `skipped` feed item and a
   `dismissed` signal keep their status. Only `gone` replaces each one.
@@ -90,6 +97,12 @@ in the same read transaction:
   `when = { sender = "<address>", form = "<form>" }`. The address is the
   `sender` of the origin message. An action whose origin message has no
   address, a hostile mark or a `hostile` sender gives no candidate.
+- An origin message from the person (sender kind `you`: the label `SENT`
+  or `DRAFT`, spec 1 section 6.7) gives no candidate, and its choice and
+  its refusal do not count. A conversation that the person started has
+  the person's own message as its origin, so a rule from it would hide
+  each conversation that the person starts, not the mail of one
+  correspondent.
 - The candidate rule is added to the active policy, with the next rule
   ID. A choice counts only when the rule changes the attention of the
   item from `shown` to `hidden` (`Policy::attention`). A choice on an
@@ -180,6 +193,8 @@ and an item of another status (409). None of these changes an item.
 | Two passes with the same decisions | A second open row for the same rule | `form` is never NULL, so the unique key holds and the upsert updates the row | Unit test |
 | Migration 23 after a deleted proposal | A new proposal gets the ID of a deleted one, and a stale accept names another rule | The migration keeps the `seq` of `sqlite_sequence` | Migration test |
 | A choice on hostile mail | A rule learned from an attack | No candidate, no count | Unit test |
+| A mute of conversations that the person started | A rule that hides each conversation that the person starts | An origin from the person gives no candidate | Unit test |
+| A click on a verb by mistake | An item leaves the brief, with no undo until #226 | The client hold: Undo in the Undo time sends nothing | Client test (R5-02d) |
 | A sender address that a rule cannot hold | A proposal that the file refuses | `check_sender` refuses it; no candidate | Unit test |
 | An old program reads the new table | It reads a `hide` row as a verb | `open` skips a row that it cannot read (R5-01) | Existing behavior |
 
