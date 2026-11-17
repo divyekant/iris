@@ -197,11 +197,14 @@ impl Sessions {
             return Err(refuse(self.live_of(job)));
         }
         if let Some(id) = self.live_of(job) {
-            self.state().launching.remove(&job);
+            self.launch_over(job);
             return Err(refuse(Some(id)));
         }
         let hook = self.hook();
         let after = |step: Step, s: i64| {
+            if step == Step::Registered {
+                self.registered(job, s);
+            }
             if let Some(h) = &hook {
                 h(step, s);
             }
@@ -210,7 +213,7 @@ impl Sessions {
         let begun = match begun {
             Ok(b) => b,
             Err(e) => {
-                self.state().launching.remove(&job);
+                self.launch_over(job);
                 return Err(e);
             }
         };
@@ -222,10 +225,26 @@ impl Sessions {
         if let Err(e) = spawned {
             // The session stays open with no launch thread: the next turn
             // ends it with `launch_failed`.
-            self.state().launching.remove(&job);
+            self.launch_over(job);
             return Err(format!("the launch thread did not start: {e}"));
         }
         Ok(session)
+    }
+
+    /// Each register of a launch (the first and a revoke retry): if a stop
+    /// of the job came during the launch, end the new session with `stop`.
+    /// The launch sees the end and starts no agent.
+    fn registered(&self, job: i64, session: i64) {
+        if self.state().stopping.contains(&job) {
+            let _ = iris_job::end(&self.store, session, EndReason::Stop, None, now_ms());
+        }
+    }
+
+    /// The launch of `job` is over: a stop no longer waits for it.
+    fn launch_over(&self, job: i64) {
+        let mut st = self.state();
+        st.launching.remove(&job);
+        st.stopping.remove(&job);
     }
 
     /// The live session of `job`, if one exists.
@@ -278,12 +297,8 @@ impl Sessions {
                 // that runs always has its name.
                 let logged = Cell::new(session);
                 let after = |step: Step, s: i64| {
-                    if step == Step::Registered
-                        && s != session
-                        && self.state().stopping.contains(&job)
-                    {
-                        // The launch sees the end and stops.
-                        let _ = iris_job::end(&self.store, s, EndReason::Stop, None, now_ms());
+                    if step == Step::Registered {
+                        self.registered(job, s);
                     }
                     if step == Step::Registered && proxy.is_some() && s != logged.get() {
                         match move_log(&self.egress_log(logged.get()), &self.egress_log(s)) {
@@ -323,6 +338,8 @@ impl Sessions {
                 None
             }
         };
+        // One lock: no turn sees the launch over before the running
+        // session is in the map.
         let mut st = self.state();
         st.launching.remove(&job);
         st.stopping.remove(&job);
@@ -389,14 +406,26 @@ impl Sessions {
         }
         let end = Instant::now() + STOP_WAIT;
         loop {
-            let last = last_session(&self.store, job)?.ok_or("the job has no session")?;
-            if last.ended_ms.is_none() {
-                iris_job::end(&self.store, last.id, EndReason::Stop, None, now_ms())
-                    .map_err(|e| e.to_string())?;
+            // A launch can be before its first register: no session yet.
+            if let Some(last) = last_session(&self.store, job)? {
+                if last.ended_ms.is_none() {
+                    iris_job::end(&self.store, last.id, EndReason::Stop, None, now_ms())
+                        .map_err(|e| e.to_string())?;
+                }
             }
             self.turn(now_ms());
             let launching = self.state().launching.contains(&job);
-            let last = last_session(&self.store, job)?.ok_or("the job has no session")?;
+            let last = last_session(&self.store, job)?;
+            let Some(last) = last else {
+                if !launching {
+                    return Err("the job has no session".into());
+                }
+                if Instant::now() >= end {
+                    return Err("the launch of the job still runs, with no session".into());
+                }
+                std::thread::sleep(Duration::from_millis(200));
+                continue;
+            };
             if !launching && last.reaped_ms.is_some() {
                 return Ok((last.id, Ok(())));
             }
