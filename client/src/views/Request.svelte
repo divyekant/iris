@@ -23,7 +23,10 @@
   let decided = $derived(actions.filter((a) => !waits(a)));
   // The unticked changes. A change that is not in this list is ticked, also one that comes with a new revision.
   let off: Record<string, boolean> = $state({});
-  let chosen = $derived(open.filter((a) => !off[key(a)]));
+  // Spec 2 section 5.5: an approval needs the final text. A mail action whose draft Iris cannot read can only be denied.
+  const unreadable = (a: (typeof actions)[number]) => mail(a) && drafts?.[key(a)]?.readable === false;
+  const approves = (a: (typeof actions)[number]) => !off[key(a)] && !unreadable(a);
+  let chosen = $derived(open.filter(approves));
   // "more" only beside changes that wait.
   let more = $derived(open.length ? "more " : "");
   let busy = $state(false);
@@ -61,15 +64,24 @@
   $effect(() => {
     if (!mails || drafts || draftsFailed) return;
     get<{ drafts: DraftView[] }>(`changesets/${encodeURIComponent(c.id)}/drafts`).then(
-      (got) => (drafts = Object.fromEntries(got.drafts.map((d) => [`${d.revision}.${d.n}`, d]))),
+      (got) => {
+        const map: Record<string, DraftView> = Object.fromEntries(got.drafts.map((d) => [`${d.revision}.${d.n}`, d]));
+        // The answer leaves out an action that is not open now: the request changed after it loaded.
+        if (open.some((a) => mail(a) && !map[key(a)])) {
+          draftsFailed = true;
+          refresh("This request changed after you opened it. Here it is as it is now.");
+        } else drafts = map;
+      },
       (e) => {
         draftsFailed = true;
         problem = e instanceof Error ? e.message : String(e);
       },
     );
   });
-  // A mail action is complete when its draft loaded: the person sees the final text before the decision.
-  const complete = (a: (typeof actions)[number]) => (mail(a) ? !!drafts?.[key(a)] : (rows[key(a)]?.length ?? -1) >= new Set(targets(a)).size);
+  // An action is complete when each of its rows loaded, and for a mail action its draft too:
+  // the person sees the real messages and the final text before the decision.
+  const rowsDone = (a: (typeof actions)[number]) => (rows[key(a)]?.length ?? -1) >= new Set(targets(a)).size;
+  const complete = (a: (typeof actions)[number]) => rowsDone(a) && (!mail(a) || !!drafts?.[key(a)]);
   function load(a: (typeof actions)[number]) {
     loader.more(a, PAGE).then(
       (list) => {
@@ -84,13 +96,14 @@
   // Spec 2 section 5.5: the review shows each action fully resolved. Each page of rows that
   // arrives starts the next one, until each waiting change has all of its rows.
   $effect(() => {
-    for (const a of open) if (!complete(a) && !failed[key(a)]) load(a);
+    for (const a of open) if (!rowsDone(a) && !failed[key(a)]) load(a);
   });
   // The person decides only when the screen has every row of each waiting change.
   let missing = $derived(open.filter((a) => !complete(a)));
   function retry() {
     problem = "";
     failed = {};
+    drafts = null;
     draftsFailed = false;
   }
 
@@ -147,7 +160,7 @@
     if (!ready) return;
     busy = true;
     problem = saved = "";
-    const all = open.map((a) => ({ revision: a.revision, n: a.n, approve: !off[key(a)], hash: a.hash }));
+    const all = open.map((a) => ({ revision: a.revision, n: a.n, approve: approves(a), hash: a.hash }));
     // More than 500 changes go in batches of 500. Each batch is one transaction of the engine.
     let done = 0;
     try {
@@ -193,7 +206,7 @@
       <p class="text">{@render text(d.body)}</p>
     </div>
   {:else}
-    <p class="because">Iris cannot show the text of this draft. Deny it, or ask the author for a new one.</p>
+    <p class="because">Iris cannot show the text of this draft, so you can only deny it. Ask the author for a new one.</p>
   {/if}
 {/snippet}
 
@@ -258,14 +271,14 @@
       {#each open as a (key(a))}
         {@const id = `${c.id}-${key(a)}`}
         {@const d = drafts?.[key(a)]}
-        <li class:off={off[key(a)]}>
-          <input type="checkbox" {id} checked={!off[key(a)]} disabled={busy} onchange={(e) => (off[key(a)] = !e.currentTarget.checked)} />
+        <li class:off={!approves(a)}>
+          <input type="checkbox" {id} checked={approves(a)} disabled={busy || unreadable(a)} onchange={(e) => (off[key(a)] = !e.currentTarget.checked)} />
           <div class="body">
             <label class="what" for={id}><b>{verb(a)}</b> {mail(a) ? (d ? to(d) : "a mail") : target(a)}</label>
             {#if detail(a)}<p class="because">{detail(a)}</p>{/if}
             {#if a.why}<p class="because">{a.why}</p>{/if}
             {#each mail(a) ? unmarked(a, d) : a.flags.map((f) => FLAGS[f] ?? f) as words (words)}<p class="flag">{words}</p>{/each}
-            {#if off[key(a)]}<p class="denied">Iris will deny this change.</p>{/if}
+            {#if !approves(a)}<p class="denied">Iris will deny this change.</p>{/if}
             {#if d}{@render draft(d)}{/if}
             {@render lines(a)}
           </div>

@@ -452,10 +452,53 @@ test("a draft that Iris cannot read says so, and keeps each flag in words", asyn
   const cs = fx.changesets.find((c) => c.id === "cs-79");
   const view = await mount("/src/views/Request.svelte", { changeset: structuredClone(cs) });
   try {
-    await until(() => text(view.target).includes("Iris cannot show the text of this draft."));
+    await until(() => text(view.target).includes("Iris cannot show the text of this draft"));
     const send = view.target.querySelectorAll(".actions > li")[0];
     assert.equal(send.querySelectorAll(".flag").length, 5);
     assert.equal(send.querySelector(".mail"), null);
+    // Spec 2 section 5.5: no approval without the final text. The person can only deny it.
+    const box = send.querySelector("input[type=checkbox]");
+    assert.equal(box.checked, false);
+    assert.equal(box.disabled, true);
+    assert.match(text(send), /Iris will deny this change\./);
+    const button = await until(() => {
+      const b = view.target.querySelector("button.primary");
+      return !b.disabled && b;
+    });
+    assert.equal(button.textContent, "Approve 1, deny 1");
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a reply shows the message that it answers, and waits for it before the decision", async () => {
+  let open;
+  const gate = new Promise((done) => (open = done));
+  serve({ "messages?ids=m-9002": async () => (await gate, [200, fx.answer("/messages?ids=m-9002")]) });
+  const cs = fx.changesets.find((c) => c.id === "cs-79");
+  const view = await mount("/src/views/Request.svelte", { changeset: structuredClone(cs) });
+  try {
+    const send = () => view.target.querySelectorAll(".actions > li")[0];
+    await until(() => send().querySelector(".mail"));
+    assert.equal(view.target.querySelector("button.primary").disabled, true);
+    open();
+    await until(() => send().querySelector(".messages a[href]"));
+    await until(() => !view.target.querySelector("button.primary").disabled);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a drafts answer with no entry for a waiting send loads the request again and offers a retry", async () => {
+  const asked = serve({ "changesets/cs-79/drafts": [200, { drafts: [] }] });
+  const cs = fx.changesets.find((c) => c.id === "cs-79");
+  const view = await mount("/src/views/Request.svelte", { changeset: structuredClone(cs) });
+  try {
+    const alert = await until(() => view.target.querySelector("[role=alert]"));
+    assert.match(alert.textContent, /This request changed after you opened it\./);
+    assert.ok(asked.includes("changesets/cs-79"));
+    assert.equal(view.target.querySelector("button.primary").disabled, true);
+    assert.ok(alert.querySelector("button.more"), "a retry");
   } finally {
     view.destroy();
   }

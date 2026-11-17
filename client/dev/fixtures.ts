@@ -330,7 +330,7 @@ export const changesets: Changeset[] = [
     submitted: "2026-11-17T08:02:31Z",
     state: "open",
     actions: [
-      action({ n: 1, verb: "send", targets: { drafts: ["d-21"] }, resolved: { messages: [] }, why: "Dana waits for the terms since Monday.", flags: ["new_recipient", "money", "date", "attachment", "untrusted_content"] }),
+      action({ n: 1, verb: "send", targets: { drafts: ["d-21"] }, resolved: { messages: ["m-9002"] }, why: "Dana waits for the terms since Monday.", flags: ["new_recipient", "money", "date", "attachment", "untrusted_content"] }),
       action({ n: 2, verb: "label", targets: { threads: ["t-9001"] }, resolved: { messages: ["m-9001", "m-9002"] }, args: { label: "Renewals" }, why: "So you find the thread with the other renewals." }),
     ],
   },
