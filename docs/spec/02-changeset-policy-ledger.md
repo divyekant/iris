@@ -298,7 +298,11 @@ that a rule approved at the same time cannot together go past the limit of
 - A comment goes back to the author. In release 4, the comment arrives as a
   file in the workspace. The author submits a new revision.
 - `iris withdraw` withdraws a changeset. The engine accepts it only from the
-  author of the changeset: the same `kind`, `name` and `session`. The person
+  author of the changeset: the same `kind`, `name` and `session`. For an
+  author with a job (release 4), the author is the job: the same `kind` and
+  `job`, so a later session of the job continues its changesets
+  (`docs/specs/2026-11-17-job-verbs.md`). The same rule applies to each
+  change of a changeset by its author: add, revise and submit. The person
   can withdraw each changeset in the web client. Each open action becomes
   `cancelled`, except an action with a ledger row in the state `writing`,
   which continues to its end. Applied actions stay.
@@ -951,6 +955,7 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris archive`, `inbox`, `label`, `unlabel`, `read`, `unread`, `trash` `<ids> [--changeset <cs-id>]` | Adds an action to a draft changeset. | both | 2 |
 | `iris close`, `defer`, `decline`, `correct` `<id> [--changeset <cs-id>]` | Adds a state action to a draft changeset. | both | 2 |
 | `iris changeset <cs-id>` | Shows a changeset. | both | 2 |
+| `iris revise <cs-id>` | Starts a new draft revision of a submitted changeset of the same author, after a review comment (section 5.5). | both | 4 |
 | `iris submit <cs-id> --why <text>` | Submits a draft changeset, and prints one result for each action. | both | 2 |
 | `iris withdraw <cs-id>` | Withdraws a changeset of the same author (section 5.5). Applied actions stay. | both | 2 |
 | `iris ledger [filters]` | Lists ledger entries. | host | 2 |
