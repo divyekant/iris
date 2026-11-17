@@ -186,3 +186,37 @@ fn a_wake_by_the_person_starts_no_session() {
     iris_job::wake(&f.store, f.job, By::Person, None, NOW + 2).unwrap();
     assert!(woken(&f.store).unwrap().is_empty());
 }
+
+#[test]
+fn a_wait_needs_an_open_session_and_a_thread_of_the_scope() {
+    let f = fixture("open");
+    sql(
+        &f.store,
+        "INSERT INTO thread (id, account_id, provider_id) VALUES (6, 1, 'b');",
+    );
+    let job = create(&f.store, "Pay the invoice.", None, NOW).unwrap();
+    add_scope(&f.store, job, Ref::Thread(5), By::Person, NOW).unwrap();
+    let w = |thread| Wait {
+        thread,
+        until_ms: NOW + DAY,
+    };
+    // A revoke ends the session: its wait is refused, and the job works on.
+    let s = register(&f.store, job, "claude-code", NOW).unwrap();
+    revoke_scope(&f.store, job, Ref::Thread(5), By::Person, NOW + 1).unwrap();
+    let r = iris_job::session_wait(&f.store, s, job, w(None), None, NOW + 2);
+    assert!(matches!(r, Err(iris_job::Error::Refused(_))), "{r:?}");
+    assert_eq!(get(&f.store, job).unwrap().state, State::Working);
+    // A thread outside the scope is refused; a thread of the scope is not.
+    iris_job::reap(&f.store, s, NOW + 2).unwrap();
+    add_scope(&f.store, job, Ref::Thread(5), By::Person, NOW + 3).unwrap();
+    let s = register(&f.store, job, "claude-code", NOW + 3).unwrap();
+    let r = iris_job::session_wait(&f.store, s, job, w(Some(6)), None, NOW + 4);
+    assert!(matches!(r, Err(iris_job::Error::Refused(_))), "{r:?}");
+    // A session of another job is refused.
+    let r = iris_job::session_wait(&f.store, s, f.job, w(None), None, NOW + 4);
+    assert!(matches!(r, Err(iris_job::Error::Refused(_))), "{r:?}");
+    iris_job::session_wait(&f.store, s, job, w(Some(5)), None, NOW + 4).unwrap();
+    assert_eq!(get(&f.store, job).unwrap().state, State::Waiting);
+    let end = iris_job::session(&f.store, s).unwrap().end;
+    assert_eq!(end, Some(iris_job::EndReason::JobState));
+}

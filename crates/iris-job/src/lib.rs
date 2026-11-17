@@ -242,6 +242,50 @@ pub fn wait_in(c: &Connection, job: i64, w: Wait, why: Option<&str>, now_ms: i64
     add_event(c, job, State::Waiting, By::Agent, m, now_ms)
 }
 
+/// `iris wait` of the session `session` of `job` (docs/specs/2026-11-17-wait.md):
+/// one transaction checks that the session is open and, for a reply wait,
+/// that the thread is an active thread ref of the scope, then writes the
+/// wait. The move ends the session with `job_state`, so the start path of
+/// the wake finds it. A session that a revoke or a stop ended, or a thread
+/// outside the scope, is refused, and nothing changes.
+pub fn session_wait(
+    store: &Store,
+    session: i64,
+    job: i64,
+    w: Wait,
+    why: Option<&str>,
+    now_ms: i64,
+) -> Result<()> {
+    transaction(store, |c| {
+        let open: bool = c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM job_session
+               WHERE id = ?1 AND job_id = ?2 AND ended_at IS NULL)",
+            params![session, job],
+            |r| r.get(0),
+        )?;
+        if !open {
+            return Err(Error::Refused(format!(
+                "{} is not open",
+                format_session_id(session)
+            )));
+        }
+        if let Some(t) = w.thread {
+            let scoped: bool = c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM job_scope
+                   WHERE job_id = ?1 AND thread_id = ?2 AND revoked_at IS NULL)",
+                params![job, t],
+                |r| r.get(0),
+            )?;
+            if !scoped {
+                return Err(Error::Refused(format!(
+                    "t-{t} is not a thread of the scope of the job"
+                )));
+            }
+        }
+        wait_in(c, job, w, why, now_ms)
+    })
+}
+
 /// The agent asks the person one question.
 pub fn ask(store: &Store, job: i64, question: &str, why: Option<&str>, now_ms: i64) -> Result<()> {
     transaction(store, |c| ask_in(c, job, question, why, now_ms))

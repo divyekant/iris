@@ -904,6 +904,31 @@ fn a_job_waits_three_days_and_continues() {
     let _ = s.stop(f.job).unwrap();
 }
 
+/// The supervisor loop of the engine wakes a job at the end of its wait,
+/// with its own clock.
+fn the_supervisor_loop_wakes_the_job() {
+    use std::sync::atomic::AtomicI64;
+    let f = fixture("waitloop", "sleep 30");
+    let s = sessions(&f);
+    let (until_day, until_ms) = day(3);
+    let clock = Arc::new(AtomicI64::new(now()));
+    {
+        let (s, clock) = (s.clone(), clock.clone());
+        std::thread::spawn(move || s.supervise_with(&move || clock.load(Ordering::SeqCst)));
+    }
+    let first = wait(&s, &f, serde_json::json!({ "until": until_day }));
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first.id);
+    clock.store(until_ms, Ordering::SeqCst);
+    let end = Instant::now() + Duration::from_secs(20);
+    while last_session(&f.store, f.job).unwrap().unwrap().id == first.id {
+        assert!(Instant::now() < end, "the loop did not wake the job");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    next_session(&s, &f, first.id);
+    let _ = s.stop(f.job).unwrap();
+}
+
 fn a_reply_on_the_wait_thread_wakes_the_job() {
     let f = fixture("waitreply", "sleep 30");
     let s = sessions(&f);
@@ -1010,6 +1035,10 @@ fn main() {
         (
             "a_reply_on_the_wait_thread_wakes_the_job",
             a_reply_on_the_wait_thread_wakes_the_job,
+        ),
+        (
+            "the_supervisor_loop_wakes_the_job",
+            the_supervisor_loop_wakes_the_job,
         ),
         (
             "an_exit_of_the_agent_ends_and_reaps_the_session",

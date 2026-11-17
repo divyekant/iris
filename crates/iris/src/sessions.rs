@@ -727,10 +727,15 @@ impl Sessions {
 
     /// The supervisor thread: one turn and one wake each [`TURN`].
     pub fn supervise_forever(self: Arc<Self>) {
+        self.supervise_with(&now_ms)
+    }
+
+    /// [`Sessions::supervise_forever`] with the clock `now`. For tests.
+    pub fn supervise_with(self: Arc<Self>, now: &dyn Fn() -> i64) {
         loop {
-            let now = now_ms();
-            self.turn(now);
-            self.wake(now);
+            let t = now();
+            self.turn(t);
+            self.wake(t);
             std::thread::sleep(TURN);
         }
     }

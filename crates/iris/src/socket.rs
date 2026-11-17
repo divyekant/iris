@@ -641,30 +641,14 @@ fn wait(
             _ => return Err(usage(format!("{t} is not a thread ID"))),
         },
     };
-    // A reply wake adds the new messages of the thread to the grant, so
-    // the thread must be a thread of the scope. The wake rule checks the
-    // scope again: a revoke after this check leaves a wait for the date.
-    if let Some(t) = thread {
-        let scoped: bool = store
-            .read(|c| {
-                Ok(c.query_row(
-                    "SELECT EXISTS (SELECT 1 FROM job_scope
-                       WHERE job_id = ?1 AND thread_id = ?2 AND revoked_at IS NULL)",
-                    rusqlite::params![job, t],
-                    |r| r.get(0),
-                )?)
-            })
-            .map_err(|e| Failure::new(code::ERROR, format!("store: {e}")))?;
-        if !scoped {
-            return Err(Failure::new(
-                code::DENIED,
-                format!("t-{t} is not a thread of the scope of the job"),
-            ));
-        }
-    }
+    let session = me
+        .session
+        .as_deref()
+        .and_then(iris_job::parse_session_id)
+        .ok_or_else(|| Failure::new(code::ERROR, "the session has no ID"))?;
     let why = text(args, "why")?;
     let w = iris_job::Wait { thread, until_ms };
-    iris_job::wait(store, job, w, why, now).map_err(|e| match e {
+    iris_job::session_wait(store, session, job, w, why, now).map_err(|e| match e {
         iris_job::Error::Refused(why) => Failure::new(code::DENIED, why),
         e => Failure::new(code::ERROR, e.to_string()),
     })?;
