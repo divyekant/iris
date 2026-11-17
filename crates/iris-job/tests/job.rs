@@ -681,9 +681,10 @@ fn an_add_takes_the_list_of_the_ref_now() {
                 let mut q = c.prepare(
                     "SELECT s.thread_id, s.item_id, l.message_id FROM job_scope s
                      JOIN job_scope_message l ON l.scope_id = s.id
-                     WHERE s.revoked_at IS NULL ORDER BY s.id, l.message_id",
+                     WHERE s.revoked_at IS NULL AND s.job_id = ?1
+                     ORDER BY s.id, l.message_id",
                 )?;
-                let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+                let rows = q.query_map([job], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
                 Ok(rows.collect::<rusqlite::Result<_>>()?)
             })
             .unwrap()
@@ -707,6 +708,30 @@ fn an_add_takes_the_list_of_the_ref_now() {
         &store,
         "INSERT INTO job_scope_message (scope_id, message_id) VALUES (1, 5)"
     ));
+    // A list grows only while its ref is active and its job is not done.
+    let other = create(&store, "Other.", None, NOW).unwrap();
+    add_scope(&store, other, Ref::Thread(5), By::Person, NOW).unwrap();
+    iris_job::revoke_scope(&store, other, Ref::Thread(5), By::Person, NOW).unwrap();
+    let done = create(&store, "Done.", None, NOW).unwrap();
+    add_scope(&store, done, Ref::Item(9), By::Person, NOW).unwrap();
+    finish(&store, done, By::Person, End::Cancel, None, NOW).unwrap();
+    // Message 6 comes to thread 5 and to the sources of item 9 after the
+    // revoke and the finish. It is valid for both refs, so only the state of
+    // the ref or of the job refuses it.
+    assert!(sql(
+        &store,
+        r#"INSERT INTO message (id, account_id, thread_id, provider_id, internal_date)
+             VALUES (6, 1, 5, 'm6', 6);
+           INSERT INTO item_source (item_id, message_id, role) VALUES (9, 6, 'evidence');"#
+    ));
+    for j in [other, done] {
+        let m = 6;
+        let text = format!(
+            "INSERT INTO job_scope_message (scope_id, message_id)
+             SELECT id, {m} FROM job_scope WHERE job_id = {j}"
+        );
+        assert!(!sql(&store, &text), "{text}");
+    }
     // The person adds the refs again: the lists take the messages now.
     add_scope(&store, job, Ref::Thread(5), By::Person, NOW + 1).unwrap();
     add_scope(&store, job, Ref::Item(9), By::Person, NOW + 1).unwrap();
@@ -717,8 +742,10 @@ fn an_add_takes_the_list_of_the_ref_now() {
             (Some(5), None, 2),
             (Some(5), None, 3),
             (Some(5), None, 4),
+            (Some(5), None, 6),
             (None, Some(9), 3),
-            (None, Some(9), 5)
+            (None, Some(9), 5),
+            (None, Some(9), 6)
         ]
     );
 }
