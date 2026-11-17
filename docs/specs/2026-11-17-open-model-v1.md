@@ -182,12 +182,21 @@ requirements.txt`.
 
 | Command | Does |
 |---|---|
-| `python3 run.py self-test` | Validates each file of `examples/` (each must pass) and of `examples/invalid/` (each must fail). Prints one line for each file that does not give the expected result. |
+| `python3 run.py self-test` | Validates each `.json`, `.jsonl` and `.toml` file of `examples/` (each must pass) and of `examples/invalid/` (each must fail). Prints one line for each file that does not give the expected result. |
 | `python3 run.py check <folder>` | Validates each `.json`, `.jsonl` and `.toml` file at the top level of the folder against the schemas of the kit. A document with a minor version higher than the kit fails ("newer than the kit"), because the kit cannot check it. A `.jsonl` file holds one document on each line. Prints one line for each file or line that fails. |
 | `python3 run.py --version` | Prints the kit version from `docs/spec/VERSION`. |
 
 The runner selects the schema by the file name: the text before the first
-`-` or `.`. A `.toml` file is a policy file. The runner converts TOML to
+`-` or `.`. A `.toml` file is a policy file. One name is special: in a
+file with the name `items` (`items.json` or `items.jsonl`, as `iris
+export` writes it), the runner selects the schema of each document by its
+`form` field, so one file can hold items of each form. An item with no
+`form`, or with a `form` that is not one of the five forms, fails.
+
+The runner checks `items.jsonl` of `iris export`. It does not check the
+export folder as a whole: `messages.jsonl` has no schema in version 1.0
+(issue #444), so `run.py check` on the export folder fails that file
+("no schema"). The runner converts TOML to
 JSON with the same verdict as `crates/iris-spec/tests/policy.rs`: a TOML
 date or time becomes its RFC 3339 text (section "Assumptions").
 
@@ -337,6 +346,7 @@ with a schema name of the kit.
 | A JSON object with a key two times | That file fails ("duplicate key"). | same |
 | `NaN`, `Infinity` or `-Infinity` | That file fails. | same |
 | A name with no schema of the kit | That file fails ("no schema"). It is not skipped. | same |
+| An `items` file with a line that has no `form`, or an unknown `form` | That line fails. | same |
 | An empty `.jsonl` line | That line fails. | same |
 | A folder with no `.json`, `.jsonl` or `.toml` file | Exit 1 ("no documents"). | same |
 | A subfolder | Not read. | same |
@@ -459,3 +469,7 @@ The `spec-kit` test runs the producer into a new temporary folder.
    field that a schema does not allow, or if it writes nothing (exit 1).
 8. `run.py check` on a folder with a bad file exits 1 and names the file.
    Red if the runner skips the file.
+9. A new valid sample `docs/spec/schema/examples/items.jsonl` holds one
+   item of each of the five forms, in the format of `iris export`.
+   `run.py self-test` passes it, and `conformance.rs` validates each line
+   by its `form`. Red if the runner selects the schema by the file name.
