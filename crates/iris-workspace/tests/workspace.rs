@@ -763,3 +763,29 @@ fn an_alias_of_yours_is_not_a_person() {
     }
     assert!(!people.is_empty());
 }
+
+/// You are each account of the store: a granted message that names your
+/// other account gives no people file for it.
+#[test]
+fn your_other_account_is_not_a_person() {
+    let tmp = TempDir::new("accounts");
+    let store = store(&tmp.0.join("data"));
+    store
+        .write(|tx| {
+            Ok(tx.execute_batch(
+                "INSERT INTO account (id, provider, address) VALUES (2, 'gmail', 'me@home.example');
+                 INSERT INTO sender (address, name, kind) VALUES ('me@home.example', 'Me', 'person');
+                 UPDATE header SET cc_addrs = 'me@home.example' WHERE message_id = 9;",
+            )?)
+        })
+        .unwrap();
+    let job = create(&store, "Goal.", None, NOW).unwrap();
+    add_scope(&store, job, Ref::Thread(1), By::Person, NOW).unwrap();
+    let ws = tmp.0.join("ws");
+    build(&store, job, &ws).unwrap();
+    let (paths, _) = walk(&ws);
+    for p in paths.iter().filter(|p| p.starts_with("people/") && p.ends_with(".json")) {
+        let text = fs::read_to_string(ws.join(p)).unwrap();
+        assert!(!text.contains("me@home.example"), "{p}: {text}");
+    }
+}
