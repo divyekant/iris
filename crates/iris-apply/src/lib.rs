@@ -31,10 +31,12 @@
 mod send;
 mod state;
 mod step;
+mod stop;
 
 pub use send::{release, sending, set_sending, HOLD_MS, SENT_OTHER};
 pub use state::{apply_state, apply_states};
 pub use step::{step, step_clock, Step};
+pub use stop::{resume, state as stop_state, stop, stop_wait, Stopped, STOPPED_CALL};
 
 use iris_gmail::{Gmail, BATCH_LIMIT};
 use iris_policy::Mode;
@@ -143,6 +145,9 @@ pub enum Outcome {
     /// The send switch is off (`iris sending on` turns it on). The send
     /// stays `held`, and no call is made.
     SendingOff,
+    /// Iris is stopped (`iris resume` ends the stop). The action stays
+    /// `approved` or `held`, and no call is made.
+    Stopped,
     /// The result of a `drafts.create` or `drafts.send` call is not known
     /// yet. The ledger row stays in `writing`, and the recovery decides
     /// later. No call is made again.
@@ -778,8 +783,8 @@ impl<'a, 'b> Run<'a, 'b> {
                 .iter()
                 .filter_map(|(id, p)| p.clone().map(|p| (*id, p)))
                 .collect();
-            // The cutoff: a revoke that commits before this transaction
-            // stops the call and each later call of the action.
+            // The cutoff: a revoke or a stop that commits before this
+            // transaction stops the call and each later call of the action.
             let action = self.store.read(|c| {
                 Ok(c.query_row(
                     "SELECT action_id FROM ledger WHERE id = ?1",
@@ -788,6 +793,9 @@ impl<'a, 'b> Run<'a, 'b> {
                 )?)
             })?;
             let outside = self.store.write(|tx| {
+                if iris_store::stopped(tx)?.is_some() {
+                    return Ok(Some(STOPPED_CALL.to_string()));
+                }
                 if let Some(why) = outside_grant(tx, action)? {
                     return Ok(Some(why));
                 }
@@ -1235,6 +1243,10 @@ fn writing_rows(store: &Store, account: i64) -> Result<bool> {
 /// `observe` (section 5.4). Gives the outcome if the action does not apply
 /// now.
 fn gate(tx: &Connection, action: i64) -> iris_store::Result<Option<Outcome>> {
+    // The stop comes first: while stopped, nothing about the action changes.
+    if iris_store::stopped(tx)?.is_some() {
+        return Ok(Some(Outcome::Stopped));
+    }
     if expire(tx, action)? {
         return Ok(Some(Outcome::Expired));
     }

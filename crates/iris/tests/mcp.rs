@@ -541,6 +541,8 @@ const NOT_TOOLS: &[&str] = &[
     "service",
     "model",
     "sending",
+    "stop",
+    "resume",
     "cancel",
     "understand",
     "mcp",

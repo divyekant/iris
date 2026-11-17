@@ -178,6 +178,8 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/notices/{id}/done", post(post_notice_done))
         .route("/api/watches", get(get_watches).post(post_watch))
         .route("/api/watches/{id}/remove", post(post_watch_remove))
+        .route("/api/stop", get(get_stop).post(post_stop))
+        .route("/api/resume", post(post_resume))
         .route("/api/outbox", get(get_outbox))
         .route("/api/outbox/{draft}/cancel", post(post_outbox_cancel))
         .route("/api/write", post(post_write))
@@ -877,6 +879,58 @@ async fn get_outbox(
         q.after.as_deref(),
     )?)
     .into_response())
+}
+
+/// `GET /api/stop`: `{"stopped": bool, "since": time|null, "live": n,
+/// "busy": bool}` (docs/specs/2026-11-17-stop.md, section 5). `live` and
+/// `busy` are measured now, so a client says that no mail leaves only for a
+/// complete stop.
+async fn get_stop(State(s): State<Arc<Store>>) -> Result<Response> {
+    let now = iris_apply::stop_state(&s).map_err(apply_error)?;
+    Ok(Json(match now {
+        None => serde_json::json!({ "stopped": false, "since": null, "live": 0, "busy": false }),
+        Some(n) => serde_json::json!({
+            "stopped": true, "since": rfc3339(n.since), "live": n.live, "busy": n.busy,
+        }),
+    })
+    .into_response())
+}
+
+/// `POST /api/stop`: Stop all agent work. The answer adds `sessions` (the
+/// sessions that this stop ended), `live` (the sessions that are not reaped
+/// yet) and `busy` (a Gmail call still ran). The stop is complete only when
+/// `live` is 0 and `busy` is false. The wait of up to 20 seconds runs on a
+/// blocking thread, so the other routes still answer.
+async fn post_stop(State(s): State<Arc<Store>>, _: NoBody) -> Result<Response> {
+    let done = tokio::task::spawn_blocking(move || iris_apply::stop(&s))
+        .await
+        .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))?
+        .map_err(apply_error)?;
+    Ok(Json(serde_json::json!({
+        "stopped": true,
+        "since": rfc3339(done.since),
+        "sessions": done.sessions,
+        "live": done.live,
+        "busy": done.busy,
+    }))
+    .into_response())
+}
+
+/// `POST /api/resume`: end the stop. `resumed` is false if Iris was not
+/// stopped; then nothing changed.
+async fn post_resume(State(s): State<Arc<Store>>, _: NoBody) -> Result<Response> {
+    let resumed = iris_apply::resume(&s).map_err(apply_error)?;
+    Ok(
+        Json(serde_json::json!({ "stopped": false, "since": null, "resumed": resumed }))
+            .into_response(),
+    )
+}
+
+fn apply_error(e: iris_apply::Error) -> Error {
+    match e {
+        iris_apply::Error::Store(e) => Error::Store(e),
+        other => Error::Unavailable(other.to_string()),
+    }
 }
 
 /// Cancel the send of a draft (`d-N`) in the outbox. 409 if the release
