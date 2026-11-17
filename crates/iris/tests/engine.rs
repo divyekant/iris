@@ -754,3 +754,79 @@ fn a_tick_finds_the_mail_of_a_watch() {
     e.tick().unwrap();
     assert_eq!(store.watch(w).unwrap().unwrap().message, Some(m));
 }
+
+/// The apply step after a sync (held-outbox spec, section 4): an approved
+/// archive goes to Gmail. A 401 during the step gets a new token one time.
+#[test]
+fn the_apply_step_applies_an_approved_archive() {
+    let s = setup("apply-step", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let (message, provider): (i64, String) = s
+        .store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO policy_version(text, sha256, confirmed_at)
+                 VALUES ('version = 0\nmode = \"apply\"\n', 'h', 0)",
+                [],
+            )?;
+            Ok(tx.query_row(
+                "SELECT m.id, m.provider_id FROM message m JOIN message_label ml
+                   ON ml.message_id = m.id JOIN label l ON l.id = ml.label_id
+                 WHERE l.provider_id = 'INBOX' ORDER BY m.id LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    let person = iris_changeset::Author {
+        kind: iris_changeset::AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    let now = engine::now_ms();
+    let cs = iris_changeset::create(&s.store, &person, now).unwrap();
+    iris_changeset::add_action(
+        &s.store,
+        cs,
+        &person,
+        iris_changeset::Verb::Archive,
+        &[&format!("m-{message}")],
+        &serde_json::Map::new(),
+        None,
+    )
+    .unwrap();
+    iris_changeset::submit(&s.store, cs, &person, "Done.", now).unwrap();
+    let hash: String = s
+        .store
+        .read(|c| Ok(c.query_row("SELECT hash FROM changeset_action", [], |r| r.get(0))?))
+        .unwrap();
+    let action = iris_changeset::ActionId {
+        changeset: cs,
+        revision: 1,
+        n: 1,
+    };
+    iris_changeset::approve(&s.store, action, &hash, now).unwrap();
+    let calls = s.tokens.calls.lock().unwrap().len();
+    s.fake.fail_next(&[401]);
+    assert_eq!(w.apply_step().unwrap(), None);
+    assert_eq!(s.tokens.calls.lock().unwrap().len(), calls + 1);
+    let state: String = s
+        .store
+        .read(|c| Ok(c.query_row("SELECT state FROM changeset_action", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(state, "applied");
+    let meta = gmail(s.fake.base_url()).minimal("t", &provider).unwrap();
+    assert!(!meta.label_ids.contains(&"INBOX".to_string()), "{meta:?}");
+    assert_state(&s.store, s.account, STATE_OK);
+}
+
+#[test]
+fn a_sync_thread_wakes_at_the_end_of_a_hold() {
+    let min = Duration::from_secs(1);
+    assert_eq!(engine::wait(None, 0), engine::SYNC_EVERY);
+    assert_eq!(engine::wait(Some(10_000), 0), Duration::from_secs(10));
+    assert_eq!(engine::wait(Some(0), 5_000), min);
+    assert_eq!(engine::wait(Some(i64::MAX), 0), engine::SYNC_EVERY);
+}

@@ -674,7 +674,7 @@ fn changed_at_gmail(
     Ok(Outcome::Denied(why.into()))
 }
 
-fn changeset_error(e: iris_changeset::Error) -> iris_store::Error {
+pub(crate) fn changeset_error(e: iris_changeset::Error) -> iris_store::Error {
     match e {
         iris_changeset::Error::Store(e) => e,
         other => iris_store::Error::Query(other.to_string()),

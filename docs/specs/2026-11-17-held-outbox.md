@@ -113,24 +113,32 @@ goes on.
 
 ### 4. The apply step of the engine
 
-The sync thread of each account runs the apply step after each sync:
+The sync thread of each account runs the apply step after each sync
+(`iris_apply::step`, called by `Worker::apply_step`):
 
-1. Apply each `approved` action of the account whose verb is a Gmail verb
+1. Run the recovery of each ledger row of the account in `writing`. This
+   step runs in each turn, also while the switch is off, so a send whose
+   response was lost does not stay `held` (issue #400). The recovery makes
+   no `drafts.send` call.
+2. Apply each `approved` action of the account whose verb is a Gmail verb
    (`archive`, `inbox`, `read`, `unread`, `trash`, `label`, `unlabel`,
    `draft`), oldest first, with `iris_apply::apply`. The apply keeps all
    its checks: the policy mode, the expiry, the lock, the ledger and the
-   recovery.
-2. Move each `approved` send of the account to `held`, in one
+   recovery. The account of an action is the account of its messages, of
+   its draft, or of its account target (a new mail).
+3. Move each `approved` send of the account to `held`, in one
    transaction. A send whose submit is 14 days old or older becomes
    `expired` in place of `held`. The claim of the release checks the same
    expiry again.
-3. If the switch is on, call `iris_apply::release` for each `held` send of
+4. If the switch is on, call `iris_apply::release` for each `held` send of
    the account whose hold ended, oldest first.
 
 The thread sleeps until the earlier of the next sync (60 seconds) and the
-end of the next hold. An error of one action goes to standard error, and
-the step goes on with the next action. `Busy` (another apply holds the
-lock) ends the step: the next turn tries again.
+end of the next hold, and at least 1 second. An error of one action goes
+to standard error, and the step goes on with the next action. `Busy`
+(another apply holds the lock) and a refused token end the step: the
+next turn tries again. After a refused token, the account needs a new
+sign-in, as after a sync.
 
 ### 5. The cancel
 

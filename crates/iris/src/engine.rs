@@ -33,6 +33,8 @@ pub enum Error {
     Gmail(iris_gmail::Error),
     Store(iris_store::Error),
     Sync(iris_sync::Error),
+    /// The apply step (docs/specs/2026-11-17-held-outbox.md, section 4).
+    Apply(iris_apply::Error),
     /// The account has no stored sign-in, or Google refused it.
     NeedsSignIn,
 }
@@ -44,6 +46,7 @@ impl fmt::Display for Error {
             Error::Gmail(e) => write!(f, "Gmail: {e}"),
             Error::Store(e) => write!(f, "store: {e}"),
             Error::Sync(e) => write!(f, "sync: {e}"),
+            Error::Apply(e) => write!(f, "apply: {e}"),
             Error::NeedsSignIn => {
                 f.write_str("the account needs a new sign-in: run `iris account add <client.json>`")
             }
@@ -245,37 +248,55 @@ impl Worker {
     /// A valid access token: the token in memory while the stored sign-in
     /// is the one that gave it, else a new one from the stored sign-in.
     fn access(&mut self) -> Result<Secret> {
-        let (mut client, refresh, sealed) = load_grant(&self.store, self.account)?;
-        // A new sign-in (`iris account add`) replaces the token in memory too.
-        if let Some(t) = &self.token {
-            if sealed == self.sealed && t.expires_at > Instant::now() + TOKEN_MARGIN {
-                return Ok(t.token.clone());
-            }
-        }
-        if let Some(uri) = &self.test_token_uri {
-            client = client.with_test_token_uri(uri)?;
-        }
-        match client.refresh(&refresh) {
-            Ok(t) => {
-                let token = t.token.clone();
-                self.token = Some(t);
-                self.got = Instant::now();
-                self.sealed = sealed;
-                Ok(token)
-            }
-            // Google refused the refresh token: only a new sign-in helps. A
-            // network or server error keeps the account, and the next turn
-            // tries again (specification 1, section 4.7).
-            Err(iris_auth::Error::Revoked) => {
-                mark_needs_sign_in(&self.store, self.account, &sealed)?;
-                Err(Error::NeedsSignIn)
-            }
-            Err(e) => Err(e.into()),
-        }
+        access(
+            &self.store,
+            self.account,
+            self.test_token_uri.as_deref(),
+            &mut self.token,
+            &mut self.got,
+            &mut self.sealed,
+        )
     }
 
-    /// Sync each [`SYNC_EVERY`] until the account leaves the list of
-    /// [`sync_accounts`]. Each error goes to standard error.
+    /// The apply step after a sync (docs/specs/2026-11-17-held-outbox.md,
+    /// section 4): the recovery, the approved Gmail actions, the held
+    /// outbox and the release of each send whose hold ended. Each error of
+    /// one action goes to standard error. Gives the end of the next hold.
+    pub fn apply_step(&mut self) -> Result<Option<i64>> {
+        let first = self.access()?;
+        let (store, account, uri) = (&self.store, self.account, self.test_token_uri.as_deref());
+        let (token, got, sealed) = (&mut self.token, &mut self.got, &mut self.sealed);
+        // After HTTP 401 the apply asks for a new token: the token in
+        // memory goes, and the stored sign-in gives a new one.
+        let mut renew = || {
+            *token = None;
+            access(store, account, uri, token, got, sealed)
+                .ok()
+                .map(|t| t.expose().to_string())
+        };
+        let mut t = iris_apply::Token {
+            token: first.expose().to_string(),
+            renew: &mut renew,
+            refused: false,
+        };
+        let step = iris_apply::step(store, &self.gmail, &mut t, account, now_ms());
+        let refused = t.refused;
+        let step = step.map_err(Error::Apply)?;
+        for (action, r) in &step.results {
+            if let Err(e) = r {
+                say!("iris: account {account}: action {action}: {e}");
+            }
+        }
+        if refused {
+            mark_needs_sign_in(&self.store, account, &self.sealed)?;
+            return Err(Error::NeedsSignIn);
+        }
+        Ok(step.next)
+    }
+
+    /// Sync and run the apply step each [`SYNC_EVERY`], or at the end of
+    /// the next hold if it comes first, until the account leaves the list
+    /// of [`sync_accounts`]. Each error goes to standard error.
     pub fn run(mut self) {
         loop {
             match self.sync() {
@@ -284,13 +305,71 @@ impl Worker {
                 Err(Error::Sync(iris_sync::Error::OtherSync)) => {}
                 Err(e) => say!("iris: account {}: {e}", self.account),
             }
+            let next = match self.apply_step() {
+                Ok(n) => n,
+                // Another apply runs now: the next turn tries again.
+                Err(Error::Apply(iris_apply::Error::Busy)) => None,
+                Err(e) => {
+                    say!("iris: account {}: {e}", self.account);
+                    None
+                }
+            };
             match sync_accounts(&self.store) {
                 Ok(a) if !a.contains(&self.account) => return,
                 _ => {}
             }
-            std::thread::sleep(SYNC_EVERY);
+            std::thread::sleep(wait(next, now_ms()));
         }
     }
+}
+
+/// A valid access token of `account`: `token` while the stored sign-in is
+/// the one that gave it (`sealed`), else a new one from the stored sign-in.
+fn access(
+    store: &Store,
+    account: i64,
+    test_token_uri: Option<&str>,
+    token: &mut Option<AccessToken>,
+    got: &mut Instant,
+    sealed_now: &mut Vec<u8>,
+) -> Result<Secret> {
+    let (mut client, refresh, sealed) = load_grant(store, account)?;
+    // A new sign-in (`iris account add`) replaces the token in memory too.
+    if let Some(t) = token {
+        if sealed == *sealed_now && t.expires_at > Instant::now() + TOKEN_MARGIN {
+            return Ok(t.token.clone());
+        }
+    }
+    if let Some(uri) = test_token_uri {
+        client = client.with_test_token_uri(uri)?;
+    }
+    match client.refresh(&refresh) {
+        Ok(t) => {
+            let new = t.token.clone();
+            *token = Some(t);
+            *got = Instant::now();
+            *sealed_now = sealed;
+            Ok(new)
+        }
+        // Google refused the refresh token: only a new sign-in helps. A
+        // network or server error keeps the account, and the next turn
+        // tries again (specification 1, section 4.7).
+        Err(iris_auth::Error::Revoked) => {
+            mark_needs_sign_in(store, account, &sealed)?;
+            Err(Error::NeedsSignIn)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The wait of a sync thread after its turn: [`SYNC_EVERY`], or less if
+/// the hold of a send ends before (`next`, in milliseconds since 1970).
+/// Never less than one second.
+pub fn wait(next: Option<i64>, now_ms: i64) -> Duration {
+    let hold = next.map_or(SYNC_EVERY, |n| {
+        Duration::from_millis(n.saturating_sub(now_ms).max(0) as u64)
+    });
+    hold.min(SYNC_EVERY).max(Duration::from_secs(1))
 }
 
 /// The time between two tries of a run that another run blocks.

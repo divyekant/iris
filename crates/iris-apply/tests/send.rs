@@ -157,6 +157,17 @@ impl Box {
         release(&self.store, &self.gmail, &mut token, self.account, action)
     }
 
+    /// The apply step of the engine at the time now.
+    fn step(&self) -> iris_apply::Step {
+        let (t, mut renew) = self.token();
+        let mut token = Token {
+            token: t,
+            renew: &mut renew,
+            refused: false,
+        };
+        iris_apply::step(&self.store, &self.gmail, &mut token, self.account, now()).unwrap()
+    }
+
     /// The `d-N` ID and the Gmail draft ID of the draft of `action`.
     fn draft(&self, action: i64) -> (String, String) {
         self.store
@@ -936,4 +947,77 @@ fn sending_off_waits_for_a_send_in_progress() {
     assert!(start.elapsed() >= Duration::from_millis(300));
     assert_eq!(iris_apply::sending(&b.store).unwrap(), None);
     holder.join().unwrap();
+}
+
+/// The apply step applies an approved draft, then releases an approved
+/// send whose hold ended: one `drafts.send` (held-outbox spec, section 4).
+#[test]
+fn the_step_makes_the_draft_and_sends_it() {
+    let b = setup("step-send");
+    let a = b.approved(Verb::Draft, "a-1", mail(), 0);
+    let first = b.step();
+    assert!(
+        matches!(first.results[..], [(x, Ok(Outcome::Applied(_)))] if x == a),
+        "{:?}",
+        first.results
+    );
+    let (d, _) = b.draft(a);
+    let s = b.approved(Verb::Send, &d, json!({}), AGED);
+    let second = b.step();
+    assert!(
+        matches!(second.results[..], [(x, Ok(Outcome::Applied(_)))] if x == s),
+        "{:?}",
+        second.results
+    );
+    assert_eq!((b.state(s).as_str(), b.sends()), ("applied", 1));
+    // A third step finds nothing to do.
+    let third = b.step();
+    assert!(third.results.is_empty() && third.next.is_none());
+    assert_eq!(b.sends(), 1);
+}
+
+/// A new approval waits in the outbox, and the step names the end of its
+/// hold as the time to wake.
+#[test]
+fn the_step_holds_a_new_send_and_names_its_end() {
+    let b = setup("step-hold");
+    let (s, _) = b.new_mail(0);
+    let before = now();
+    let out = b.step();
+    assert!(out.results.is_empty(), "{:?}", out.results);
+    let next = out.next.expect("a time to wake");
+    assert!(next > before && next <= now() + HOLD_MS, "{next}");
+    assert_eq!((b.state(s).as_str(), b.sends()), ("held", 0));
+}
+
+/// While the switch is off, the step holds the send, makes no call and
+/// names no time to wake.
+#[test]
+fn the_step_sends_nothing_while_the_switch_is_off() {
+    let b = setup("step-off");
+    let (s, _) = b.new_mail(AGED);
+    iris_apply::set_sending(&b.store, false, now()).unwrap();
+    let out = b.step();
+    assert!(out.results.is_empty() && out.next.is_none(), "{out:?}");
+    assert_eq!((b.state(s).as_str(), b.sends()), ("held", 0));
+}
+
+/// Issue #400: a send whose response was lost stays in `writing`. The
+/// switch then goes off, and nothing else waits. The step still runs the
+/// recovery, so the send that left Gmail becomes `applied`, with no new
+/// call.
+#[test]
+fn the_step_recovers_a_lost_send_while_the_switch_is_off() {
+    let b = setup("step-recover");
+    let (s, _) = b.new_mail(AGED);
+    // The send goes out, its response is lost, and the search of the
+    // recovery fails: the row stays in `writing`.
+    b.fake.fail_next_write(&[503], true);
+    b.fake.fail_next_matching("rfc822msgid", 400);
+    assert!(b.release(s).is_err());
+    assert_eq!((ledger(&b.store, s).0.as_str(), b.sends()), ("writing", 1));
+    iris_apply::set_sending(&b.store, false, now()).unwrap();
+    let out = b.step();
+    assert!(out.results.is_empty(), "{:?}", out.results);
+    assert_eq!((b.state(s).as_str(), b.sends()), ("applied", 1));
 }
