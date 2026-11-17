@@ -28,6 +28,21 @@ pub enum Notes {
     Unreadable(String),
 }
 
+impl Notes {
+    /// The line for the engine log when a save kept the last copy, or
+    /// `None` when there is nothing to report. Each reap and build path
+    /// uses this one text.
+    pub fn problem(&self) -> Option<String> {
+        let why = match self {
+            Notes::Saved | Notes::Done | Notes::Absent => return None,
+            Notes::NotAFile => "notes.md is not a regular file".to_string(),
+            Notes::TooLarge => format!("notes.md is larger than {NOTES_MAX} bytes"),
+            Notes::Unreadable(e) => format!("notes.md cannot be read: {e}"),
+        };
+        Some(format!("the store keeps its last copy of the notes: {why}"))
+    }
+}
+
 /// Read `<dir>/notes.md` for a save: the bytes of a regular file of at most
 /// [`NOTES_MAX`] bytes, else the reason that there are none. Read it only
 /// while no process of the job can write the file.

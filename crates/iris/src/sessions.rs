@@ -27,7 +27,6 @@ use iris_session::isolation::Isolation;
 use iris_session::launch::{Egress, Launcher, Outcome, Step};
 use iris_session::reap::reap_check;
 use iris_store::Store;
-use iris_workspace::Notes;
 
 use crate::engine::now_ms;
 use crate::session_socket::{Handler, IsOpen, Server, DRAIN_WAIT};
@@ -671,12 +670,10 @@ impl Sessions {
             .map_err(|e| format!("no isolation: {e}"))?;
         let s = iris_job::session(&self.store, session).map_err(|e| e.to_string())?;
         match reap_check(&self.store, &**iso, &s, helper_reaped, now) {
-            Ok(Notes::Saved | Notes::Done | Notes::Absent) => Ok(()),
-            Ok(why) => {
-                say!(
-                    "iris: {}: the store keeps its last copy of the notes: {why:?}",
-                    iris_job::format_job_id(s.job_id)
-                );
+            Ok(notes) => {
+                if let Some(p) = notes.problem() {
+                    say!("iris: {}: {p}", iris_job::format_job_id(s.job_id));
+                }
                 Ok(())
             }
             Err(why) => {
