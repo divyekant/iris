@@ -182,6 +182,14 @@ The forms `feed`, `signal` and
 
 The build reads nothing else from the mailbox.
 
+The thread file holds the clean body text of each message (`body.text`),
+not the text of its attachments. Understanding reads the attachment text
+from the raw message, and the store does not keep it, so a record from a
+PDF invoice can have facts that the workspace does not show. The agent
+sees the item file and the body. This is a known limit, with a GitHub
+issue: a later card adds the clean attachment text of the granted
+messages, with the same grant rules and a size limit.
+
 Each value in a file that the build writes comes from the granted
 messages, from the job and its scope, or is identity data. Identity data
 is the ID of a row, the form of an item and the kind `person` of a sender.
@@ -392,15 +400,18 @@ can close the gap. The rules are:
   two counts differ. The launcher (R4-04) does these steps in order:
   1. Register the session of the job in a write transaction.
   2. Build, and compare the two counts. If they differ, build again.
-  3. In a write transaction, mark the session as started, only if it did
-     not end. If it ended, stop here and start again at step 1.
-  4. Start the agent process of the session.
+  3. Make the agent process in a held state: it runs no code of the agent
+     and cannot read the workspace yet (for example a suspended process,
+     or a sandbox that does not show the workspace yet, R4-05).
+  4. In a write transaction, mark the session as started, only if it did
+     not end. If it ended, stop the held process and start again at step
+     1. Else let the process run.
 
   A revoke ends each registered session of the job in its own write
-  transaction, also one that is in step 2, 3 or 4 and has no running agent
-  yet (R4-04). The engine stops the agent process of an ended session as
-  soon as the process exists, before the process gets the session socket,
-  so the agent of an ended session reads no file. A revoke before step 1
+  transaction (R4-04). A revoke before the transaction of step 4 makes
+  step 4 stop the held process, so the agent reads no file of the old
+  grant. A revoke after step 4 ends a running session: the agent could
+  read the files while the grant was valid, as in each running session. A revoke before step 1
   is in the first build. A revoke after step 1 ends the session before or
   while its agent reads, and the next session starts with step 1 again.
 - An engine change of eligibility (a message that becomes hostile mail,
