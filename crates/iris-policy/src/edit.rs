@@ -4,7 +4,9 @@
 //! other text and comments.
 
 use crate::active::{active, check, record, Checked};
-use crate::{line_of, parse, sha256_hex, Error, Mode, Policy};
+use crate::{
+    line_of, parse, sha256_hex, Author, By, Effect, Error, Mode, Policy, Rule, Verb, When,
+};
 use iris_store::{PolicyExpect, Result, Store};
 use std::path::PathBuf;
 use toml_edit::{DocumentMut, Item, Value};
@@ -19,7 +21,7 @@ mode = \"observe\"
 ";
 
 /// One change that the person makes in the web client.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Change {
     Mode(Mode),
     /// Remove the rule with this ID. Iris never uses the ID again.
@@ -27,6 +29,37 @@ pub enum Change {
     /// Add the rule of the open proposal with this ID (spec 2, section 6.6),
     /// with `by = "proposal"` and the next rule ID.
     Accept(i64),
+    /// Add a grant inside one job (`docs/specs/2026-11-17-start-job.md`):
+    /// an `allow` rule for `verbs` with `when = { author = "agent" }` and
+    /// `job`, with `by = "person"` and the next rule ID. The caller checks
+    /// that the job is open.
+    Grant {
+        job: String,
+        verbs: Vec<Verb>,
+    },
+}
+
+/// The rule of a grant inside `job`, with the ID `id`, added on `added`.
+pub fn grant_rule(id: u32, job: &str, verbs: &[Verb], added: &str) -> Rule {
+    let names: Vec<&str> = verbs.iter().map(|v| v.name()).collect();
+    let list = match names.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => names.join(""),
+    };
+    Rule {
+        id,
+        name: format!("In job {job}, allow {list} without review"),
+        effect: Effect::Allow,
+        verbs: verbs.to_vec(),
+        when: When {
+            author: Some(Author::Agent),
+            ..When::default()
+        },
+        by: By::Person,
+        added: added.to_string(),
+        job: Some(job.to_string()),
+        line: 0,
+    }
 }
 
 /// The result of a change.
@@ -92,19 +125,27 @@ pub fn change(store: &Store, seen: Option<i64>, change: Change, now: i64) -> Res
                 if Some(&l.sha256) == active.sha256.as_ref() => {}
             _ => return Ok(Edited::FileChanged),
         }
-        let added = match change {
-            Change::Accept(id) => match crate::propose::current(tx, id, now)? {
-                Some(p) => Some((
-                    id,
-                    p.rule(crate::next_rule_id(tx)?, &crate::propose::date(now)),
-                    p.approvals,
-                )),
+        let today = crate::propose::date(now);
+        let added = match &change {
+            Change::Accept(id) => match crate::propose::current(tx, *id, now)? {
+                Some(p) => {
+                    let verb = p.verb.name();
+                    let n = p.approvals;
+                    Some((
+                        p.rule(crate::next_rule_id(tx)?, &today),
+                        format!("Iris proposed this rule after you approved {n} of {n} {verb} actions."),
+                    ))
+                }
                 None => return Ok(Edited::NoRule),
             },
+            Change::Grant { job, verbs } => Some((
+                grant_rule(crate::next_rule_id(tx)?, job, verbs, &today),
+                format!("You gave this grant inside job {job}, on the job page."),
+            )),
             _ => None,
         };
         let edited = match &added {
-            Some((_, rule, approvals)) => add_rule(&base, rule, *approvals).map(Some),
+            Some((rule, why)) => add_rule(&base, rule, why).map(Some),
             None => edit_text(&base, change),
         };
         let text = match edited {
@@ -178,7 +219,7 @@ pub fn edit_text(text: &str, change: Change) -> std::result::Result<Option<Strin
             *v = Value::from(mode.name());
             *v.decor_mut() = decor;
         }
-        Change::Accept(_) => return Ok(None),
+        Change::Accept(_) | Change::Grant { .. } => return Ok(None),
         Change::Remove(id) => {
             let Some(rules) = doc.get_mut("rule").and_then(Item::as_array_of_tables_mut) else {
                 return Ok(None);
@@ -223,9 +264,11 @@ pub fn edit_text(text: &str, change: Change) -> std::result::Result<Option<Strin
     Ok(Some(doc.to_string()))
 }
 
-/// Adds `rule` at the end of the text, as one `[[rule]]` table with a
-/// comment that says why Iris proposed it. Keeps all other text.
-fn add_rule(text: &str, rule: &crate::Rule, approvals: i64) -> std::result::Result<String, Error> {
+/// Adds `rule` at the end of the text, as one `[[rule]]` table with the
+/// comment `why` above it. Keeps all other text. It writes the conditions
+/// that a proposal or a grant can have: `sender`, `sender_kind` and
+/// `author`.
+fn add_rule(text: &str, rule: &crate::Rule, why: &str) -> std::result::Result<String, Error> {
     let mut doc = parse_doc(text)?;
     let mut t = toml_edit::Table::new();
     t.insert("id", toml_edit::value(i64::from(rule.id)));
@@ -240,6 +283,9 @@ fn add_rule(text: &str, rule: &crate::Rule, approvals: i64) -> std::result::Resu
     if let Some(k) = rule.when.sender_kind {
         when.insert("sender_kind", k.name().into());
     }
+    if let Some(a) = rule.when.author {
+        when.insert("author", a.name().into());
+    }
     t.insert("when", toml_edit::value(when));
     t.insert("by", toml_edit::value(rule.by.name()));
     let added: toml_edit::Datetime = rule.added.parse().map_err(|_| Error {
@@ -247,10 +293,10 @@ fn add_rule(text: &str, rule: &crate::Rule, approvals: i64) -> std::result::Resu
         message: format!("the date {} is not valid", rule.added),
     })?;
     t.insert("added", toml_edit::value(added));
-    let verb = rule.verbs.first().map_or("", |v| v.name());
-    t.decor_mut().set_prefix(format!(
-        "\n# Iris proposed this rule after you approved {approvals} of {approvals} {verb} actions.\n"
-    ));
+    if let Some(job) = &rule.job {
+        t.insert("job", toml_edit::value(job.as_str()));
+    }
+    t.decor_mut().set_prefix(format!("\n# {why}\n"));
     if doc.get("rule").is_none() {
         doc.insert("rule", Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
     }
