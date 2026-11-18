@@ -800,7 +800,7 @@ test("each status answer sets the accounts that need sign-in, and the app shows 
   try {
     globalThis.fetch = async () => new Response(JSON.stringify({ ...fx.status, accounts: [account] }));
     await get("status");
-    assert.deepEqual(access.locked, [account.address]);
+    assert.deepEqual(access.locked, [{ address: account.address, provider: account.provider }]);
     // The views start API calls while they render. Keep them pending.
     globalThis.fetch = () => new Promise(() => {});
     for (const hash of ["", "#/setup", "#/brief", "#/mail/m-55210"]) {
@@ -814,6 +814,15 @@ test("each status answer sets the accounts that need sign-in, and the app shows 
     assert.deepEqual(access.locked, []);
     globalThis.fetch = () => new Promise(() => {});
     assert.doesNotMatch(text(await render("/src/App.svelte")), /stopped the sign-in/);
+    // An IMAP account: the mail server refused, and the notice gives the IMAP command, not the Gmail one.
+    const imap = { ...account, provider: "imap" };
+    globalThis.fetch = async () => new Response(JSON.stringify({ ...fx.status, accounts: [imap] }));
+    await get("status");
+    globalThis.fetch = () => new Promise(() => {});
+    const t = text(await render("/src/App.svelte"));
+    assert.match(t, /The mail server stopped the sign-in/);
+    assert.match(t, new RegExp(`iris account add-imap ${imap.address.replace(".", "\\.")} --host (<|&lt;)server>`));
+    assert.doesNotMatch(t, /client\.json/);
   } finally {
     globalThis.fetch = saved;
     delete globalThis.location;
@@ -889,7 +898,7 @@ test("the brief and setup say that the copy stopped for an account that needs si
   const brief = { ...fx.brief, oldest_fetched: "2026-09-01T00:00:00Z" };
   const b = text(await render("/src/views/Brief.svelte", { brief, status, now: NOW, poll: 0 }));
   assert.doesNotMatch(b, /still copies|copy continues/);
-  assert.match(b, /Iris copied 20,000 of 84,212 messages, then Google stopped the sign-in\. This brief covers the mail since/);
+  assert.match(b, /Iris copied 20,000 of 84,212 messages, then the sign-in stopped\. This brief covers the mail since/);
   const early = text(await render("/src/views/Brief.svelte", { brief: { ...brief, oldest_fetched: null }, status, now: NOW, poll: 0 }));
   assert.doesNotMatch(early, /copy continues/);
   const t = text(await render("/src/views/Setup.svelte", { status, poll: 0 }));

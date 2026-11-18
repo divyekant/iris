@@ -63,6 +63,19 @@ test("the accounts view lists each account with its state and how to add one", a
   }
 });
 
+test("a stopped IMAP account names the mail server and the IMAP sign-in command", async () => {
+  const stopped = { ...fx.status.accounts[1], provider: "imap", state: "needs_sign_in" };
+  const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [stopped] }, poll: 0 });
+  try {
+    const row = text(view.target.querySelector(".accounts li"));
+    assert.match(row, /The mail server refused the sign-in/);
+    assert.match(row, /iris account add-imap you@northwind\.example --host <server>/);
+    assert.doesNotMatch(row, /Google|client\.json/);
+  } finally {
+    view.destroy();
+  }
+});
+
 test("a status answer sets the account pills of the brief, and a later one-account answer removes them", async () => {
   const answer = (status) => (globalThis.fetch = async () => new Response(JSON.stringify(status), { status: 200, headers: { "content-type": "application/json" } }));
   const item = fx.items.find((i) => i.account === "a-2");

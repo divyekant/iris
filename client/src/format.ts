@@ -219,6 +219,17 @@ export function across(status: Status | null): string {
 }
 
 /**
+ * Who refused the sign-in of an account, and the command that signs it in
+ * again on the machine that runs Iris. The command differs for each provider.
+ */
+export function signIn(a: Pick<Account, "address" | "provider">): { who: string; command: string; detail: string } {
+  if (a.provider === "gmail") return { who: "Google", command: "iris account add client.json", detail: "with the client file of this account" };
+  if (a.provider === "imap")
+    return { who: "The mail server", command: `iris account add-imap ${a.address} --host <server>`, detail: "with the server and the user of this account" };
+  return { who: "The provider", command: "iris account --help", detail: "to see the sign-in command of this provider" };
+}
+
+/**
  * A short name for each account, by its `a-` ID, so a line can say which mailbox
  * an item came from (card R6-02). The first part that tells the accounts apart:
  * the name of the domain ("gmail"), the part before "@", or the whole address.
