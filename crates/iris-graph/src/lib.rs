@@ -100,6 +100,9 @@ pub enum Error {
     Decode(String),
     /// The sink of a raw message failed.
     Sink(std::io::Error),
+    /// Graph accepted a write and answered with another state than the
+    /// request: an unknown result (spec section 5 and A6).
+    Differs(String),
 }
 
 impl std::fmt::Display for Error {
@@ -116,6 +119,7 @@ impl std::fmt::Display for Error {
             Error::Transport(e) => write!(f, "network error: {e}"),
             Error::Decode(e) => write!(f, "bad answer from Graph: {e}"),
             Error::Sink(e) => write!(f, "cannot write the raw message: {e}"),
+            Error::Differs(e) => write!(f, "Graph answered with another state: {e}"),
         }
     }
 }
@@ -128,7 +132,7 @@ impl Error {
     /// 5xx and an unfollowed 3xx give an unknown result.
     pub fn write_result_unknown(&self) -> bool {
         match self {
-            Error::Transport(_) => true,
+            Error::Transport(_) | Error::Differs(_) => true,
             Error::Api { status, .. } => *status >= 500 || *status == 429 || *status < 400,
             _ => false,
         }
@@ -844,7 +848,7 @@ fn sure(ok: bool, m: Message) -> Result<Message> {
     if ok {
         Ok(m)
     } else {
-        Err(Error::Transport(format!(
+        Err(Error::Differs(format!(
             "Graph accepted the write of {} but answered with another state",
             m.id
         )))

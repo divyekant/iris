@@ -195,9 +195,9 @@ impl Change {
         [BATCH, "trash", "untrash"].into_iter().find(|c| *c == call)
     }
 
-    /// A change of `INBOX`. On a folder provider (Outlook) it moves the
-    /// message, so its folder label changes too, and `add` and `remove` do
-    /// not name that label.
+    /// A change of `INBOX`. On a provider that moves folders (Outlook) it
+    /// moves the message, so its folder label changes too, and `add` and
+    /// `remove` do not name that label.
     fn moves(&self) -> bool {
         self.add.iter().chain(&self.remove).any(|l| l == "INBOX")
     }
@@ -858,7 +858,7 @@ impl<'a, 'b> Run<'a, 'b> {
                     if change.single() {
                         mirror(self.store, self.account, &labels);
                     } else {
-                        if change.moves() {
+                        if change.moves() && self.mail.moves_folders() {
                             self.mirror_read(&live);
                         } else {
                             let ids: Vec<i64> = live.iter().map(|(id, _)| *id).collect();

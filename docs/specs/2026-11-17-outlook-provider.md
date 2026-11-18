@@ -350,12 +350,14 @@ section 4 on these rules:
   because the master list needs `MailboxSettings.ReadWrite` and a
   category that is not on the list is not mirrored. The person makes the
   category in Outlook first. Known limit with its own issue.
-- After a successful `modify` that changes `INBOX` (a move), the apply
+- `moves_folders()` of the provider trait is true for Outlook. After a
+  successful `modify` that changes `INBOX` (a move) on such a provider, the apply
   reads the labels of each message (`minimal`) and writes them to the
   mirror, so that the mirror has one folder label before the next sync.
   If a read fails, the reads stop, and each message with no read keeps
   its complete labels from before the move until the next sync. The
-  mirror never has a message with no folder label or with two.
+  mirror never has a message with no folder label or with two. Gmail
+  keeps the add and remove change of the call, with no read.
 - Each write of `modify` has `If-Match` on the newest etag of the
   message, also `isRead` and the flag. Thus a message that another
   client moves after the read of the plan does not move: the 412 read
@@ -603,7 +605,10 @@ Each assumption has the evidence of a Microsoft Learn page, read on
   second call). The mirror takes the list of the answer, the ledger keeps
   the row with the note "Outlook kept other categories", Iris tells the
   person, and Iris turns off category writes for the account (label and unlabel give a definite refusal)
-  until a new release. The release gate tests an `unlabel`.
+  until a new release. The release gate tests an `unlabel`. R6-15: the
+  Graph client gives `Error::Differs` for such an answer, and the provider
+  turns off its category writes in memory, before any request. Card R6-16
+  stores the switch with the account and shows the notice (limit #675).
 - A7. Well-known folder names work in each language of the mailbox.
   Evidence: <https://learn.microsoft.com/en-us/graph/api/resources/mailfolder>.
 - A8. Error body `{"error":{"code","message"}}`. Evidence:

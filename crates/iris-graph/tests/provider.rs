@@ -238,3 +238,45 @@ fn a_move_by_another_client_stops_the_planned_move() {
     let l = outlook.minimal(TOKEN, &a).unwrap().label_ids;
     assert!(!l.contains(&"UNREAD".to_string()), "{l:?}");
 }
+
+/// Graph accepts a category PATCH and keeps another list (A6): the result
+/// is unknown, and each later category write of the provider is refused
+/// before any request. Other writes go on.
+#[test]
+fn a_kept_category_list_turns_off_category_writes() {
+    let fake = FakeGraph::start(Mailbox::new(3, 60)).unwrap();
+    let (outlook, a, b) = warm(&fake);
+    let etag = fake.etag_of(&a).unwrap();
+    // The read of the plan has no category; the PATCH answer keeps
+    // another list.
+    let kept = format!(
+        r#"{{"id":"{a}","@odata.etag":{etag:?},"conversationId":"c",
+        "parentFolderId":"F-inbox","categories":["Other"],"isRead":true,
+        "flag":{{"flagStatus":"notFlagged"}},"isDraft":false,
+        "receivedDateTime":"2026-11-17T10:00:00Z","internetMessageId":null}}"#
+    );
+    let n = fake.requests().len();
+    let plan_read = format!(
+        r#"{{"id":"{a}","@odata.etag":{etag:?},"conversationId":"c",
+        "parentFolderId":"F-inbox","categories":[],"isRead":true,
+        "flag":{{"flagStatus":"notFlagged"}},"isDraft":false,
+        "receivedDateTime":"2026-11-17T10:00:00Z","internetMessageId":null}}"#
+    );
+    fake.answer_next(&[&plan_read, &kept]);
+    let e = outlook
+        .modify(TOKEN, &[&a], &["category:Blue"], &[])
+        .unwrap_err();
+    assert!(e.write_result_unknown(), "{e}");
+    let after = fake.requests().len();
+    assert!(after > n);
+    for (add, remove) in [
+        (&["category:Blue"][..], &[][..]),
+        (&[][..], &["category:Other"][..]),
+    ] {
+        let e = outlook.modify(TOKEN, &[&b], add, remove).unwrap_err();
+        assert!(matches!(e, Error::Api { status: 400, .. }), "{e}");
+        assert!(!e.write_result_unknown());
+    }
+    assert_eq!(fake.requests().len(), after, "no request after the switch");
+    outlook.modify(TOKEN, &[&b], &["STARRED"], &[]).unwrap();
+}

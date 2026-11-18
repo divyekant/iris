@@ -228,6 +228,14 @@ pub struct DraftRaw {
 /// `create_draft`, `send_draft`) is made one time: see
 /// [`Error::write_result_unknown`] and spec section 6.
 pub trait Provider: Send + Sync {
+    /// True if a change of `INBOX` moves the message to another folder, so
+    /// that its folder label changes too (Outlook). Then the apply reads
+    /// the labels back after the write. A label provider (Gmail) and a
+    /// provider that refuses each move (IMAP) keep the default.
+    fn moves_folders(&self) -> bool {
+        false
+    }
+
     /// The mailbox of `token` and the cursor of now.
     fn profile(&self, token: &str) -> Result<Profile>;
     /// Each label of the mailbox.

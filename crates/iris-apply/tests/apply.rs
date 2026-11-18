@@ -447,11 +447,23 @@ fn the_mirror_gets_the_labels_of_gmail() {
         .modify_labels(&b.provider_id(ms[1]), &["Label_1"], &[]);
     assert_ne!(b.mirror_labels(ms[0]), b.gmail_labels(ms[0]));
     let a = b.approved("archive", &ms, PERSON);
+    let n = b.fake.requests().len();
     let c = applied(b.apply(a));
+    let log = b.fake.requests();
     assert_eq!((c.changed, c.unchanged), (2, 1));
     for &m in &ms {
         assert_eq!(b.mirror_labels(m), b.gmail_labels(m));
     }
+    // Gmail labels are not folders: the mirror takes the change of the
+    // call, with no read of a message after the batchModify.
+    let at = log[n..]
+        .iter()
+        .position(|r| r.contains("batchModify"))
+        .unwrap();
+    assert!(
+        !log[n + at + 1..].iter().any(|r| r.contains("/messages/")),
+        "{log:?}"
+    );
 }
 
 /// A withdraw keeps an action with a ledger row in `writing`. The next

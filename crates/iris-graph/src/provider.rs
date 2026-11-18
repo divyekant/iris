@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use iris_provider::{
@@ -60,6 +61,9 @@ struct Page {
 pub struct Outlook {
     graph: Graph,
     known: Mutex<HashMap<String, &'static str>>,
+    /// True after Graph kept another category list than the request (A6):
+    /// each later category write gets a definite refusal.
+    categories_off: AtomicBool,
 }
 
 impl Outlook {
@@ -67,6 +71,7 @@ impl Outlook {
         Outlook {
             graph,
             known: Mutex::new(HashMap::new()),
+            categories_off: AtomicBool::new(false),
         }
     }
 
@@ -133,9 +138,13 @@ impl Outlook {
                     .ok_or_else(|| Error::Decode(format!("message {id} has no etag")))
             };
             let m = match &op {
-                Op::Categories(list) => {
-                    tag().and_then(|e| self.graph.set_categories(token, id, list, &e))
-                }
+                Op::Categories(list) => tag()
+                    .and_then(|e| self.graph.set_categories(token, id, list, &e))
+                    .inspect_err(|e| {
+                        if matches!(e, Error::Differs(_)) {
+                            self.categories_off.store(true, Ordering::Relaxed);
+                        }
+                    }),
                 Op::Read(read) => {
                     tag().and_then(|e| self.graph.set_read(token, id, *read, Some(&e)))
                 }
@@ -334,6 +343,7 @@ fn map(e: Error) -> iris_provider::Error {
         Error::Transport(t) => P::Transport(t),
         Error::Decode(d) => P::Decode(d),
         Error::Sink(s) => P::Sink(s),
+        Error::Differs(d) => P::Transport(d),
     }
 }
 
@@ -457,6 +467,11 @@ fn text_of<T: Serialize>(value: &T) -> String {
 }
 
 impl iris_provider::Provider for Outlook {
+    /// `archive` and `inbox` move the message between folders.
+    fn moves_folders(&self) -> bool {
+        true
+    }
+
     /// The cursor of now is the empty cursor: Graph has no cheap cursor of
     /// now, so the next `changes` starts a new round of each folder.
     fn profile(&self, token: &str) -> iris_provider::Result<Profile> {
@@ -687,6 +702,14 @@ impl iris_provider::Provider for Outlook {
     ) -> iris_provider::Result<()> {
         if ids.len() > iris_provider::BATCH_LIMIT {
             return refuse(format!("more than {} messages", iris_provider::BATCH_LIMIT));
+        }
+        if self.categories_off.load(Ordering::Relaxed)
+            && add.iter().chain(remove).any(|l| l.starts_with("category:"))
+        {
+            return refuse(
+                "Outlook kept other categories than Iris asked for: category writes are off until a new release (A6)"
+                    .into(),
+            );
         }
         let known = self.known(token).map_err(map)?;
         let mut plans = Vec::with_capacity(ids.len());
