@@ -118,6 +118,26 @@ spelling. A flag write (section 7) sends the lowercase keyword too.
 `\Trash`. A server can list two such folders: both give the label, and
 `messages` with the label pages through each of them.
 
+A server does not have to send the special-use attributes (RFC 6154).
+If no folder of the LIST has one of `\Sent`, `\Drafts`, `\Junk` or
+`\Trash`, each folder with no attribute whose last name part (after the
+last hierarchy delimiter) is a common name of that role gets the role,
+with no case:
+
+| Role | Common names |
+|---|---|
+| `\Sent` | `Sent`, `Sent Items`, `Sent Messages`, `Sent Mail` |
+| `\Drafts` | `Drafts`, `Draft` |
+| `\Junk` | `Junk`, `Spam`, `Junk E-mail`, `Junk Email`, `Bulk Mail` |
+| `\Trash` | `Trash`, `Deleted Items`, `Deleted Messages`, `Bin` |
+
+A folder with the attribute wins: if one folder has `\Junk`, a folder
+named `Spam` with no attribute is an ordinary folder. The mapping errs to
+the safe side: a folder named `Sent` gets `SENT_COPY`, so its mail stays
+out of the understanding, and never gets `SENT`. A role folder with
+another name (for example `Gesendet`) on a server with no attributes is
+an ordinary folder: limit issue #648 (English names only).
+
 No IMAP message gets `SENT` or `DRAFT`. Each of the two labels is proof
 that the owner wrote the mail (the sender axis, the hostile checks, the
 known people). Anyone can move or copy a received message into the Sent
@@ -284,7 +304,7 @@ mirror does not have.
 |---|---|
 | `modify` with only `UNREAD`, `STARRED` and `kw:` labels | `SELECT` of the folder of each ID, a check of its `UIDVALIDITY`, then `UID STORE <uids> +FLAGS` or `-FLAGS` (not `.SILENT`) |
 | `modify` with any other label | `Api` 400 `notSupported`, before any write |
-| `create_label(name)` | `Api` 400 `notSupported` until the flag writes. With the flag writes: `kw:<name>` if the name is a valid atom, else `Api` 400 `badName` |
+| `create_label(name)` | `Api` 400 `notSupported` until the flag writes. With the flag writes: the label ID `kw:` and the name in lowercase ASCII (section 4), with the name as given, if the name is a valid atom, else `Api` 400 `badName`. So `create_label("Todo")` gives `kw:todo`, the same ID that `labels`, `minimal` and `changes` give after the write, and the ledger and the undo use that ID |
 | `trash`, `untrash` | `Api` 400 `notSupported` |
 | drafts and send | `Api` 400 `notSupported` |
 
@@ -367,6 +387,8 @@ times after an unknown result (spec 2 section 7.2).
 | A LIST order change between two message pages | each folder once | `message_pages_follow_folder_names` |
 | A `NO` to a `STORE` | `Transport` | `modify_refused` |
 | A `\Sent` folder message | `SENT_COPY`, no `SENT` | `labels_of_special_folders_and_flags` |
+| A server with no special-use attributes | the common names give the roles; an attribute wins | `special_folders_by_name`, `an_attribute_wins_over_a_name` |
+| `create_label("Todo")`, then a sync and an undo | the ID `kw:todo` everywhere | `create_label_case` (flag writes) |
 | Two folders with `\Junk` | `SPAM` on the mail of both, zero differences | `two_junk_folders_and_keyword_case` |
 | One keyword in two spellings (`$Todo`, `$todo`) | one label `kw:$todo`, zero differences | `two_junk_folders_and_keyword_case` |
 | An answer of `changes` above 1 MiB | `HistoryExpired` | `changes_too_large` |
@@ -432,7 +454,10 @@ times after an unknown result (spec 2 section 7.2).
    message or a `\Draft` message has no `DRAFT` label.
 4. Two folders with `\Junk` both give `SPAM`, and two spellings of one
    keyword give one label, with zero differences in `verify`.
-5. A message of an IMAP account with `Authentication-Results:
+5. On a server with no special-use attributes, a folder named `Sent
+   Items` gives `SENT_COPY`, `Drafts` gives `UNSENT` and `Spam` gives
+   `SPAM`.
+6. A message of an IMAP account with `Authentication-Results:
    mx.google.com; dkim=pass` has no trusted authentication result.
 
 ## Verify
