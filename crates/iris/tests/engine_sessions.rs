@@ -136,6 +136,16 @@ fn gone(path: &Path) {
     }
 }
 
+/// Waits until `path` exists, at most 20 s: the build removes the old
+/// files first and writes the new files after, on its own thread.
+fn appears(path: &Path) {
+    let end = Instant::now() + Duration::from_secs(20);
+    while !path.exists() {
+        assert!(Instant::now() < end, "{} does not come", path.display());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn now() -> i64 {
     iris::engine::now_ms()
 }
@@ -348,7 +358,7 @@ fn a_done_job_gets_its_workspace_again_after_the_reap() {
     let row = until(&s, &f, id, |r| r.reaped_ms.is_some());
     assert_eq!(row.end, Some(EndReason::JobState));
     gone(&marker);
-    assert!(workspace(&f).join("JOB.md").exists());
+    appears(&workspace(&f).join("JOB.md"));
 }
 
 fn the_engine_start_builds_each_done_job_again() {
@@ -382,7 +392,7 @@ fn the_engine_start_builds_each_done_job_again() {
     .unwrap();
     let _s = sessions(&f);
     gone(&marker);
-    assert!(workspace(&f).join("JOB.md").exists());
+    appears(&workspace(&f).join("JOB.md"));
     assert!(!old.exists(), "a log older than 30 days goes");
     assert!(
         !old_egress.exists(),
