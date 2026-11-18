@@ -107,6 +107,17 @@ threads. This is part of limit issue #631 (threads from headers only).
 | `UNSENT` | `UNSENT` | system | a folder with `\Drafts`, or the `\Draft` flag |
 | A keyword label | `kw:<keyword>` | user | a keyword flag (no `\` at the start) |
 
+IMAP compares keywords with no case (RFC 3501 section 9, note 1). So the
+ID of a keyword label is `kw:` and the keyword in lowercase ASCII, in
+each folder: `$Todo` and `$todo` give the one label `kw:$todo`. The name
+of the label is the first spelling in folder order (section 2). A search
+for the label sends the lowercase keyword, and the server matches each
+spelling. A flag write (section 7) sends the lowercase keyword too.
+
+`SPAM` is each folder with `\Junk`, and `TRASH` is each folder with
+`\Trash`. A server can list two such folders: both give the label, and
+`messages` with the label pages through each of them.
+
 No IMAP message gets `SENT` or `DRAFT`. Each of the two labels is proof
 that the owner wrote the mail (the sender axis, the hostile checks, the
 known people). Anyone can move or copy a received message into the Sent
@@ -242,7 +253,8 @@ mirror does not have.
   (section 2). Each page is one window of 2,000 sequence numbers of one
   folder, from the top down: newest first in each folder, `INBOX` first. The
   provider spec (`messages`) allows this order for a folder provider.
-  With a folder label, `INBOX`, `SPAM` or `TRASH`, only that folder. With
+  With a folder label or `INBOX`, only that folder. With `SPAM` or `TRASH`, each
+  folder with `\Junk` or `\Trash`, in folder order. With
   `SENT_COPY`, only the `\Sent` folders, all of their messages. With
   `UNREAD`, `STARRED`, `UNSENT` or a keyword label, each folder, and each
   window is `UID SEARCH <low>:<high> <key>` (`UNSEEN`, `FLAGGED`, `DRAFT`,
@@ -355,6 +367,8 @@ times after an unknown result (spec 2 section 7.2).
 | A LIST order change between two message pages | each folder once | `message_pages_follow_folder_names` |
 | A `NO` to a `STORE` | `Transport` | `modify_refused` |
 | A `\Sent` folder message | `SENT_COPY`, no `SENT` | `labels_of_special_folders_and_flags` |
+| Two folders with `\Junk` | `SPAM` on the mail of both, zero differences | `two_junk_folders_and_keyword_case` |
+| One keyword in two spellings (`$Todo`, `$todo`) | one label `kw:$todo`, zero differences | `two_junk_folders_and_keyword_case` |
 | An answer of `changes` above 1 MiB | `HistoryExpired` | `changes_too_large` |
 | A read of a message in a deleted folder | `NotFound` | `folder_gone` |
 | A `STORE` `OK` with no `FETCH` for a target UID | `Transport` | `modify_unconfirmed` |
@@ -416,7 +430,9 @@ times after an unknown result (spec 2 section 7.2).
    of `INBOX` sends nothing.
 3. A `\Sent` folder message has no `SENT` label, and a `\Drafts` folder
    message or a `\Draft` message has no `DRAFT` label.
-4. A message of an IMAP account with `Authentication-Results:
+4. Two folders with `\Junk` both give `SPAM`, and two spellings of one
+   keyword give one label, with zero differences in `verify`.
+5. A message of an IMAP account with `Authentication-Results:
    mx.google.com; dkim=pass` has no trusted authentication result.
 
 ## Verify
