@@ -595,6 +595,94 @@ fn a_new_sent_or_draft_label_clears_the_understanding() {
     assert_eq!(understood(&store, a), None);
 }
 
+/// The invariant of migration 37: for each writer of `message_label` (here
+/// `put_messages` and a plain SQL write, as the sync and the apply mirror
+/// do), a message loses its understanding exactly when its set of SENT and
+/// DRAFT changes. Random label sets from a fixed seed.
+#[test]
+fn each_label_writer_clears_the_understanding_only_for_a_sent_or_draft_change() {
+    let dir = TempDir::new("ownerprop");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(
+            acc,
+            &[("SENT", "SENT", "system"), ("DRAFT", "DRAFT", "system")],
+        )
+        .unwrap();
+    let names = ["INBOX", "SENT", "DRAFT", "Label_1"];
+    let mut m = msg("a", "t1", 1, &["INBOX"], "s", "apple");
+    m.content_sha256 = Some(store.put_content(b"raw a").unwrap());
+    let a = store.put_messages(acc, &[m.clone()]).unwrap()[0];
+    let owner = |store: &Store| -> Vec<String> {
+        store
+            .read(|c| {
+                let mut st = c.prepare(
+                    "SELECT l.provider_id FROM message_label ml JOIN label l ON l.id = ml.label_id
+                     WHERE ml.message_id = ?1 AND l.provider_id IN ('SENT', 'DRAFT')
+                     ORDER BY l.provider_id",
+                )?;
+                let v = st
+                    .query_map([a], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                Ok(v)
+            })
+            .unwrap()
+    };
+    let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for round in 0..300 {
+        store
+            .write(|tx| Ok(tx.execute("UPDATE message SET understood_at = 4 WHERE id = ?1", [a])?))
+            .unwrap();
+        let before = owner(&store);
+        let pick = next();
+        let set: Vec<String> = names
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| pick >> i & 1 == 1)
+            .map(|(_, n)| n.to_string())
+            .collect();
+        if round % 2 == 0 {
+            m.labels = set;
+            store.put_messages(acc, &[m.clone()]).unwrap();
+        } else {
+            // One plain add or remove, as a mirror write does.
+            let label = names[(pick >> 8) as usize % names.len()];
+            let sql = if pick >> 12 & 1 == 1 {
+                "INSERT OR IGNORE INTO message_label(message_id, label_id)
+                 SELECT ?1, id FROM label WHERE account_id = ?2 AND provider_id = ?3"
+            } else {
+                "DELETE FROM message_label WHERE message_id = ?1 AND label_id =
+                   (SELECT id FROM label WHERE account_id = ?2 AND provider_id = ?3)"
+            };
+            store
+                .write(|tx| Ok(tx.execute(sql, rusqlite::params![a, acc, label])?))
+                .unwrap();
+        }
+        let understood: Option<i64> = store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT understood_at FROM message WHERE id = ?1",
+                    [a],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        let changed = owner(&store) != before;
+        assert_eq!(
+            understood.is_none(),
+            changed,
+            "round {round}: {before:?} -> {:?}",
+            owner(&store)
+        );
+    }
+}
+
 #[test]
 fn the_same_content_with_an_empty_header_keeps_the_saved_header() {
     let dir = TempDir::new("keepheader");
