@@ -124,10 +124,13 @@ spelling. A flag write (section 7) sends the lowercase keyword too.
 `messages` with the label pages through each of them.
 
 A server does not have to send the special-use attributes (RFC 6154).
-If no folder of the LIST has one of `\Sent`, `\Drafts`, `\Junk` or
-`\Trash`, each folder with no attribute whose last name part (after the
-last hierarchy delimiter) is a common name of that role gets the role,
-with no case:
+The fallback works for each role on its own. For each of `\Sent`,
+`\Drafts`, `\Junk` and `\Trash` that no folder of the LIST has, each
+folder with no special-use attribute whose last name part (after the last
+hierarchy delimiter) is a common name of that role gets the role, with no
+case. Other LIST attributes (`\HasNoChildren`, `\HasChildren`, `\Marked`
+and so on) do not count. So on a server that marks `Sent` with `\Sent`
+and lists `Spam` with only `\HasNoChildren`, `Spam` gets `\Junk`:
 
 | Role | Common names |
 |---|---|
@@ -434,7 +437,7 @@ times after an unknown result (spec 2 section 7.2).
 | A flag that is not in the `PERMANENTFLAGS` of a target folder (no `\*` for a keyword) | `Api` 400 `notPermanent`, before any `STORE` | `modify_not_permanent` |
 | A `NO` to a `STORE` | `Transport` | `modify_refused` |
 | A `\Sent` folder message | `SENT_COPY`, no `SENT` | `labels_of_special_folders_and_flags` |
-| A server with no special-use attributes | the common names give the roles; an attribute wins | `special_folders_by_name`, `an_attribute_wins_over_a_name` |
+| A server with no special-use attributes, or with `\Sent` only and a `Spam` folder with `\HasNoChildren` | the common names give each missing role; an attribute wins | `special_folders_by_name`, `name_fallback_for_each_role`, `an_attribute_wins_over_a_name` |
 | `create_label("Todo")` | `Api` 400 `notSupported`, nothing written | `create_label_refused` (flag writes) |
 | A folder name over 255 bytes | `Api` 400 `longFolderName` | `long_folder_name` |
 | A thread header ID over 998 bytes | the own location ID as thread | `long_thread_header_is_ignored` |
