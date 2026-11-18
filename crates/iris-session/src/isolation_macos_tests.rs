@@ -420,6 +420,7 @@ fn the_profile_denies_by_default_and_allows_only_the_session() {
         .unwrap();
     assert!(reads.contains("(literal \"/\")"));
     assert!(!text.contains("(subpath \"/\")"));
+    assert!(reads.contains("(literal \"/etc\")"));
     assert!(!text.contains("(subpath \"/System\")") && !text.contains("(subpath \"/usr\")"));
     // The deny of the user volume comes after each allow but the folders
     // of the session.
@@ -814,6 +815,10 @@ fn the_real_profile_starts_programs_and_hides_launchd() {
     let out = run("echo ok > f && cat f");
     assert_eq!(out.stdout, b"ok\n", "{out:?}");
     assert!(!run("cat /private/etc/master.passwd").status.success());
+    // The public files open by their `/etc` path too.
+    let out = run("head -c 1 /etc/ssl/cert.pem && head -c 1 /etc/hosts");
+    assert!(out.status.success(), "{out:?}");
+    assert!(!run("cat /etc/master.passwd").status.success());
     assert!(!run("ls ~/.ssh /Users").status.success());
     let out = run("launchctl print gui/$(id -u)");
     assert!(!out.status.success(), "{out:?}");

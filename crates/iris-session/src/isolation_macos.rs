@@ -634,6 +634,9 @@ const SYSTEM_READS: &[&str] = &[
 /// files below it.
 const FILE_READS: &[&str] = &[
     "/",
+    // The link `/etc` to `/private/etc`: a program opens `/etc/...`, and
+    // Seatbelt refuses the path if it cannot read the link (Mac acceptance).
+    "/etc",
     "/private/var/select/sh",
     "/private/etc/ssl/openssl.cnf",
     "/dev/null",
