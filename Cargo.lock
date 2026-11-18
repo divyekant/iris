@@ -1063,6 +1063,7 @@ dependencies = [
  "iris-fakegraph",
  "iris-provider",
  "iris-synth",
+ "mail-parser",
  "serde",
  "serde_json",
  "unicase",

@@ -388,7 +388,7 @@ impl Store {
     }
 
     /// Save the sealed secret (`sealed`) of the account with `address`, and
-    /// set its state to `ok`, in one transaction. A new address gets a new
+    /// set its state to `state`, in one transaction. A new address gets a new
     /// account of `provider`. `imap` is the `(host, port, user)` of an
     /// `imap` account, and `None` for another provider. An address with an
     /// account of another provider, or of another IMAP mailbox, is refused
@@ -400,6 +400,7 @@ impl Store {
         address: &str,
         imap: Option<(&str, u16, &str)>,
         sealed: &[u8],
+        state: &str,
     ) -> Result<i64> {
         let (host, port, user) = match imap {
             Some((h, p, u)) => (Some(h), Some(p), Some(u)),
@@ -437,8 +438,8 @@ impl Store {
                 Some((id, ..)) => id,
             };
             tx.execute(
-                "UPDATE account SET token = ?2, state = 'ok' WHERE id = ?1",
-                params![id, sealed],
+                "UPDATE account SET token = ?2, state = ?3 WHERE id = ?1",
+                params![id, sealed, state],
             )?;
             Ok(id)
         })

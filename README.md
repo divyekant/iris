@@ -69,15 +69,28 @@ the client. `IRIS_REQUIRE_CLIENT=1` makes the build stop in that case.
 
 ## Connect a Gmail account
 
-Release 1 reads mail only. You need the JSON file of your own Google OAuth
-client of the type "Desktop app". The decision record
-`docs/decisions/2026-11-google-sign-in.md` tells how to make one.
+You need the JSON file of your own Google OAuth client of the type "Desktop
+app". The decision record `docs/decisions/2026-11-google-sign-in.md` tells how
+to make one.
+
+By default Iris reads mail only (scope `gmail.readonly`). To let Iris apply the
+changes and the sends that you approve, give it write access:
+
+1. In the Google Cloud console, open Google Auth Platform, then Data Access.
+2. Click "Add or remove scopes", add `gmail.modify`, and save.
+3. Add `--write` to the sign-in command below.
+
+A read-only account syncs as before. Its approved changes wait, and
+`iris status` shows `read_only`. Run the sign-in with `--write` again at any
+time: the account keeps its copy of the mail.
 
 1. Sign in:
 
    ```bash
    target/release/iris account add client.json
    ```
+
+   For write access: `target/release/iris account add client.json --write`.
 
 2. Open the address that the command prints, and sign in to Google.
 3. If the browser is on another machine than Iris, add `--paste`. Then copy

@@ -768,7 +768,7 @@ fn an_account_secret_keeps_its_provider_and_its_mailbox() {
     };
     let server = Some(("imap.example.org", 993, "me"));
     let id = store
-        .save_account_secret("imap", "me@example.org", server, b"one")
+        .save_account_secret("imap", "me@example.org", server, b"one", "ok")
         .unwrap();
     assert_eq!(
         token("me@example.org"),
@@ -780,7 +780,7 @@ fn an_account_secret_keeps_its_provider_and_its_mailbox() {
         ("imap", Some(("imap.example.org", 143, "me"))),
         ("imap", Some(("imap.example.org", 993, "you"))),
     ] {
-        let r = store.save_account_secret(provider, "me@example.org", imap, b"two");
+        let r = store.save_account_secret(provider, "me@example.org", imap, b"two", "ok");
         assert!(
             matches!(r, Err(Error::Account(_))),
             "{provider} {imap:?}: {r:?}"
@@ -789,15 +789,15 @@ fn an_account_secret_keeps_its_provider_and_its_mailbox() {
     }
     // The same mailbox: a new secret, the same account.
     let again = store
-        .save_account_secret("imap", "me@example.org", server, b"three")
+        .save_account_secret("imap", "me@example.org", server, b"three", "ok")
         .unwrap();
     assert_eq!(again, id);
     assert_eq!(token("me@example.org").1, Some(b"three".to_vec()));
     // A Gmail account refuses an IMAP secret too.
     store
-        .save_account_secret("gmail", "g@example.com", None, b"g")
+        .save_account_secret("gmail", "g@example.com", None, b"g", "ok")
         .unwrap();
-    let r = store.save_account_secret("imap", "g@example.com", server, b"x");
+    let r = store.save_account_secret("imap", "g@example.com", server, b"x", "ok");
     assert!(matches!(r, Err(Error::Account(_))));
     assert_eq!(token("g@example.com").1, Some(b"g".to_vec()));
 }

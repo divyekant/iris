@@ -280,3 +280,42 @@ fn a_kept_category_list_turns_off_category_writes() {
     assert_eq!(fake.requests().len(), after, "no request after the switch");
     outlook.modify(TOKEN, &[&b], &["STARRED"], &[]).unwrap();
 }
+
+/// The draft calls of the provider: a draft above the limit has no raw
+/// bytes, a message that is not a draft is gone, and a send with no
+/// `Message-ID` is refused before any request.
+#[test]
+fn the_draft_calls_keep_their_limits() {
+    let fake = FakeGraph::start(Mailbox::new(3, 60)).unwrap();
+    let (outlook, a, _) = warm(&fake);
+    let mut big =
+        b"From: <owner@example.com>\r\nMessage-ID: <big@example.com>\r\nSubject: x\r\n\r\n"
+            .to_vec();
+    big.resize(iris_provider::DRAFT_LIMIT + 10, b'a');
+    // A draft that the person made in Outlook: Graph refuses a create of
+    // this size.
+    let id = fake.add_message(&big, "F-drafts");
+    let d = outlook.drafts_with_id(TOKEN, "big@example.com").unwrap()[0].clone();
+    assert_eq!(d.id, id);
+    assert_eq!(outlook.draft_raw(TOKEN, &d.id).unwrap().raw, None);
+    assert_eq!(
+        outlook.drafts_with_id(TOKEN, "big@example.com").unwrap(),
+        vec![d.clone()]
+    );
+    assert_eq!(
+        outlook.drafts_with_id(TOKEN, "<big@example.com>").unwrap(),
+        vec![d]
+    );
+    assert!(matches!(outlook.draft_raw(TOKEN, &a), Err(Error::NotFound)));
+    let before = fake.requests().len();
+    let e = outlook
+        .send_draft(
+            TOKEN,
+            &a,
+            b"From: <owner@example.com>\r\nSubject: x\r\n\r\nHi.\r\n",
+            None,
+        )
+        .unwrap_err();
+    assert!(matches!(e, Error::Api { status: 400, .. }), "{e}");
+    assert_eq!(fake.requests().len(), before);
+}

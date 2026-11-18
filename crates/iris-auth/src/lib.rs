@@ -4,7 +4,8 @@
 //! - The user gives the JSON file of an own OAuth client of the type "Desktop
 //!   app" (decision record `docs/decisions/2026-11-google-sign-in.md`).
 //! - The sign-in uses the loopback redirect on `127.0.0.1` with PKCE (S256)
-//!   and asks only for [`SCOPE`].
+//!   and asks only for [`SCOPE`], or only for [`WRITE_SCOPE`] when the
+//!   person asks for write access ([`Client::sign_in_write`]).
 //! - The access token stays in memory. The caller seals the refresh token with
 //!   the secret box of the store (`iris_store::Store::seal`) and keeps the blob.
 //! - No secret goes into a `Debug` text, a `Display` text or an error.
@@ -23,8 +24,11 @@ use base64::Engine;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-/// The only scope of release 1.
+/// The read-only scope: the default sign-in.
 pub const SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
+/// The scope of a write sign-in (spec `docs/specs/2026-11-18-gmail-write-access.md`).
+/// It covers read, labels, trash, drafts and send, but not the permanent delete.
+pub const WRITE_SCOPE: &str = "https://www.googleapis.com/auth/gmail.modify";
 
 /// The Google endpoints. Iris uses only these, never the endpoints of the
 /// client file, so a changed file cannot send the tokens to another host.
@@ -96,6 +100,10 @@ pub struct Tokens {
     /// A value here means that the client is in the "Testing" status
     /// (7 days). The guided setup tells the user to publish the app.
     pub refresh_expires_in: Option<u64>,
+    /// True if the sign-in asked for write access and Google granted
+    /// [`WRITE_SCOPE`]. Always true for Microsoft,
+    /// whose sign-in requires `Mail.ReadWrite`.
+    pub write: bool,
 }
 
 #[derive(Debug)]
@@ -112,6 +120,9 @@ pub enum Error {
     Timeout,
     /// The user did not give the `gmail.readonly` permission on the consent screen.
     ScopeMissing,
+    /// A write sign-in ([`Client::sign_in_write`]) did not get the
+    /// `gmail.modify` permission. Nothing is saved.
+    WriteScopeMissing,
     /// The Microsoft token answer does not hold this Graph permission. The
     /// account does not start.
     PermissionMissing(&'static str),
@@ -146,6 +157,11 @@ impl fmt::Display for Error {
             Error::Timeout => f.write_str("the sign-in did not complete in time"),
             Error::ScopeMissing => f.write_str(
                 "Iris did not get read access to Gmail: select the Gmail box on the consent screen",
+            ),
+            Error::WriteScopeMissing => f.write_str(
+                "Iris did not get write access to Gmail: select the box that lets Iris \
+                 read, compose and send mail, or add the scope gmail.modify to the Data Access \
+                 page of your OAuth client",
             ),
             Error::PermissionMissing(p) => write!(
                 f,
@@ -203,6 +219,8 @@ pub struct Client {
     auth_uri: String,
     token_uri: String,
     agent: ureq::Agent,
+    /// Google only: ask for [`WRITE_SCOPE`] in place of [`SCOPE`].
+    write: bool,
 }
 
 #[derive(Deserialize)]
@@ -241,6 +259,7 @@ impl Client {
             auth_uri: GOOGLE_AUTH_URI.to_string(),
             token_uri: GOOGLE_TOKEN_URI.to_string(),
             agent: agent(),
+            write: false,
         })
     }
 
@@ -265,12 +284,14 @@ impl Client {
             auth_uri: format!("{MICROSOFT_LOGIN}/{tenant}/oauth2/v2.0/authorize"),
             token_uri: format!("{MICROSOFT_LOGIN}/{tenant}/oauth2/v2.0/token"),
             agent: agent(),
+            write: false,
         })
     }
 
     /// The scope text of the authorization request.
     fn scope(&self) -> &'static str {
         match self.kind {
+            Kind::Google(_) if self.write => WRITE_SCOPE,
             Kind::Google(_) => SCOPE,
             Kind::Microsoft => MICROSOFT_SCOPE,
         }
@@ -292,7 +313,11 @@ impl Client {
             return if refresh { Ok(()) } else { Err(self.missing()) };
         };
         match self.kind {
-            Kind::Google(_) if granted.split(' ').any(|x| x == SCOPE) => Ok(()),
+            // `gmail.modify` includes read.
+            Kind::Google(_) if self.write && !has_write(granted) => Err(Error::WriteScopeMissing),
+            Kind::Google(_) if has_write(granted) || granted.split(' ').any(|x| x == SCOPE) => {
+                Ok(())
+            }
             Kind::Google(_) => Err(Error::ScopeMissing),
             Kind::Microsoft => {
                 // Microsoft can name a Graph scope with or without its
@@ -314,6 +339,7 @@ impl Client {
 
     fn missing(&self) -> Error {
         match self.kind {
+            Kind::Google(_) if self.write => Error::WriteScopeMissing,
             Kind::Google(_) => Error::ScopeMissing,
             Kind::Microsoft => Error::PermissionMissing(MICROSOFT_NEEDED[0]),
         }
@@ -357,6 +383,15 @@ impl Client {
             state: random_text()?,
             verifier: Secret(random_text()?),
         })
+    }
+
+    /// Starts a sign-in that asks for [`WRITE_SCOPE`] only (Google). The
+    /// answer must grant it, else [`Error::WriteScopeMissing`]. A Microsoft
+    /// client asks for its usual scopes, which already allow writes.
+    pub fn sign_in_write(&self) -> Result<SignIn> {
+        let mut client = self.clone();
+        client.write = true;
+        client.sign_in()
     }
 
     /// Gets a new access token with the refresh token (Google). A Microsoft
@@ -695,8 +730,20 @@ impl SignIn {
                 .filter(|r| !r.expose().is_empty())
                 .ok_or(Error::NoRefreshToken)?,
             refresh_expires_in: answer.refresh_token_expires_in,
+            // A plain sign-in is read only in Iris, also when Google gives
+            // an earlier gmail.modify grant: the person asked for read only.
+            write: match c.kind {
+                Kind::Google(_) => c.write && answer.scope.as_deref().is_some_and(has_write),
+                Kind::Microsoft => true,
+            },
         })
     }
+}
+
+/// True if a granted scope text (scopes with one space between them) holds
+/// [`WRITE_SCOPE`].
+fn has_write(granted: &str) -> bool {
+    granted.split(' ').any(|x| x == WRITE_SCOPE)
 }
 
 #[cfg(test)]
@@ -836,6 +883,58 @@ mod tests {
                     (Err(Error::PermissionMissing(p)), Some(e)) if p == e => {}
                     (got, _) => panic!("{scope:?}: {got:?}, want {expect:?}"),
                 }
+            }
+        }
+    }
+
+    /// Property: a Google token answer gives write access only if one
+    /// space-separated token is exactly `gmail.modify`. A near match (a
+    /// prefix, a suffix, another case, another scope) never gives it. A
+    /// read sign-in passes with `gmail.readonly` or `gmail.modify`; a write
+    /// sign-in passes only with `gmail.modify`.
+    #[test]
+    fn generated_google_scope_strings() {
+        let words = [
+            SCOPE,
+            WRITE_SCOPE,
+            "https://www.googleapis.com/auth/gmail.modify.x",
+            "https://www.googleapis.com/auth/gmail.modif",
+            "HTTPS://WWW.GOOGLEAPIS.COM/AUTH/GMAIL.MODIFY",
+            "https://www.googleapis.com/auth/gmail.send",
+            "https://www.googleapis.com/auth/gmail.compose",
+            "https://mail.google.com/",
+            "gmail.modify",
+            "https://evil.example/auth/gmail.modify",
+            "https://www.googleapis.com/auth/gmail.readonly2",
+            "openid",
+            "",
+        ];
+        let json = br#"{"installed":{"client_id":"id","client_secret":"s"}}"#;
+        let read = Client::from_json(json).unwrap();
+        let mut write = read.clone();
+        write.write = true;
+        let mut rng = Rng(17);
+        for _ in 0..10_000 {
+            let n = rng.below(6);
+            let scope: Vec<&str> = (0..n).map(|_| words[rng.below(words.len())]).collect();
+            let scope = scope.join(" ");
+            let w = scope.split(' ').any(|t| t == WRITE_SCOPE);
+            let r = scope.split(' ').any(|t| t == SCOPE);
+            assert_eq!(has_write(&scope), w, "{scope:?}");
+            let answer = TokenAnswer {
+                access_token: Secret::new("a"),
+                expires_in: 1,
+                refresh_token: None,
+                refresh_token_expires_in: None,
+                scope: Some(scope.clone()),
+            };
+            match (read.check_scope(&answer, false), w || r) {
+                (Ok(()), true) | (Err(Error::ScopeMissing), false) => {}
+                (got, want) => panic!("read {scope:?}: {got:?}, want {want}"),
+            }
+            match (write.check_scope(&answer, false), w) {
+                (Ok(()), true) | (Err(Error::WriteScopeMissing), false) => {}
+                (got, want) => panic!("write {scope:?}: {got:?}, want {want}"),
             }
         }
     }

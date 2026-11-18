@@ -119,6 +119,19 @@ fn an_imap_account_syncs_with_zero_differences() {
         .read(|c| Ok(c.query_row("SELECT count(*) FROM message", [], |r| r.get(0))?))
         .unwrap();
     assert_eq!(n, 6);
+
+    // The apply step of an IMAP account runs. The read-only state is a
+    // Gmail scope, and the IMAP token is a password, not a Gmail grant.
+    std::env::set_var("IRIS_TEST_IMAP_PLAIN", "1");
+    let account: i64 = store
+        .read(|c| Ok(c.query_row("SELECT id FROM account", [], |r| r.get(0))?))
+        .unwrap();
+    let store = std::sync::Arc::new(store);
+    let mail = iris::engine::provider_for(&store, account, &iris_gmail::Config::default()).unwrap();
+    let mut worker = iris::engine::Worker::boxed(store.clone(), mail, account, None);
+    if let Err(e) = worker.apply_step() {
+        panic!("apply step: {e}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -235,6 +248,7 @@ fn a_gmail_sign_in_refuses_an_imap_address() {
         },
         refresh: iris_auth::Secret::new("fake-refresh"),
         refresh_expires_in: None,
+        write: true,
     };
     let json = br#"{"installed":{"client_id":"c","client_secret":"s"}}"#;
     let err = iris::engine::save_sign_in(&store, &client, json, &tokens).unwrap_err();

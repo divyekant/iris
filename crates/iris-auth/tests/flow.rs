@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use iris_auth::{Client, Error, Secret, CALLBACK, SCOPE};
+use iris_auth::{Client, Error, Secret, CALLBACK, SCOPE, WRITE_SCOPE};
 use sha2::{Digest, Sha256};
 
 const CLIENT_SECRET: &str = "fake-client-secret-77";
@@ -217,11 +217,86 @@ fn wait_ends_at_the_time_limit() {
 }
 
 fn finish_with(answer: (u16, String)) -> Result<iris_auth::Tokens, Error> {
+    finish_as(answer, false)
+}
+
+/// A sign-in that asks for write access when `write` is true.
+fn finish_as(answer: (u16, String), write: bool) -> Result<iris_auth::Tokens, Error> {
     let (_fake, uri) = token_server(vec![answer]);
     let client = test_client(Some(&uri));
-    let sign_in = client.sign_in().unwrap();
+    let sign_in = if write {
+        client.sign_in_write().unwrap()
+    } else {
+        client.sign_in().unwrap()
+    };
     let state = params(&sign_in.url())["state"].clone();
     sign_in.finish(&format!("{}?state={state}&code=c", sign_in.redirect_uri()))
+}
+
+fn granted(scope: &str) -> (u16, String) {
+    (
+        200,
+        format!(
+            r#"{{"access_token":"{ACCESS}","expires_in":3599,"refresh_token":"{REFRESH}","scope":"{scope}"}}"#
+        ),
+    )
+}
+
+#[test]
+fn a_write_sign_in_asks_for_gmail_modify_only() {
+    let client = test_client(None);
+    assert_eq!(
+        params(&client.sign_in_write().unwrap().url())["scope"],
+        WRITE_SCOPE
+    );
+    // The write sign-in does not change the client: its next sign-in reads only.
+    assert_eq!(params(&client.sign_in().unwrap().url())["scope"], SCOPE);
+}
+
+/// A sign-in can write only if it asked for write access and Google
+/// granted `gmail.modify`.
+#[test]
+fn write_access_comes_from_the_granted_scope() {
+    let both = format!("{SCOPE} {WRITE_SCOPE}");
+    let other = format!("openid {WRITE_SCOPE}");
+    // (asked for write, granted scope text, expected: Some(write) or None for an error)
+    let cases: [(bool, &str, Option<bool>); 8] = [
+        (false, SCOPE, Some(false)),
+        // A plain sign-in is read only, also with an earlier write grant.
+        (false, WRITE_SCOPE, Some(false)),
+        (false, &both, Some(false)),
+        (true, WRITE_SCOPE, Some(true)),
+        (true, &other, Some(true)),
+        (true, &both, Some(true)),
+        (true, SCOPE, None),
+        (true, "openid", None),
+    ];
+    for (write, scope, want) in cases {
+        let got = finish_as(granted(scope), write);
+        match want {
+            Some(w) => assert_eq!(got.unwrap().write, w, "{write} {scope}"),
+            None => assert!(
+                matches!(got, Err(Error::WriteScopeMissing)),
+                "{write} {scope}: {got:?}"
+            ),
+        }
+    }
+    // A scope that only starts like the write scope is not the write scope.
+    let near = format!("{SCOPE} {WRITE_SCOPE}.x");
+    assert!(matches!(
+        finish_as(granted(&near), true),
+        Err(Error::WriteScopeMissing)
+    ));
+}
+
+#[test]
+fn a_write_sign_in_with_no_scope_text_is_write_scope_missing() {
+    let answer =
+        format!(r#"{{"access_token":"{ACCESS}","expires_in":3599,"refresh_token":"{REFRESH}"}}"#);
+    assert!(matches!(
+        finish_as((200, answer), true),
+        Err(Error::WriteScopeMissing)
+    ));
 }
 
 #[test]

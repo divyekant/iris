@@ -26,13 +26,27 @@ pub struct Step {
     /// The earliest end of a hold, in milliseconds since 1970, while the
     /// switch is on and a held send waits for it. The engine wakes then.
     pub next: Option<i64>,
+    /// True if Gmail refused a write for a missing scope. The step ended
+    /// there, and the engine sets the account to read only
+    /// (docs/specs/2026-11-18-gmail-write-access.md).
+    pub scope_refused: bool,
 }
 
 impl Step {
-    /// True if the step stopped before its end: another apply holds the
-    /// lock, or Gmail refused the token. The next turn tries again.
-    fn stop(&self, token: &Token<'_>) -> bool {
-        token.refused || matches!(self.results.last(), Some((_, Err(Error::Busy))))
+    /// True if the step must stop before its end: another apply holds the
+    /// lock, Gmail refused the token, or Gmail refused a write for a
+    /// missing scope (then no other action of the step calls Gmail).
+    fn stop(&mut self, token: &Token<'_>) -> bool {
+        if self
+            .results
+            .last()
+            .is_some_and(|(_, r)| crate::scope_refused(r))
+        {
+            self.scope_refused = true;
+        }
+        self.scope_refused
+            || token.refused
+            || matches!(self.results.last(), Some((_, Err(Error::Busy))))
     }
 }
 
@@ -54,7 +68,8 @@ impl Step {
 ///    whose hold ended, oldest first.
 ///
 /// An error of one action goes in [`Step::results`], and the step goes on
-/// with the next action. [`Error::Busy`] and a refused token end the step.
+/// with the next action. [`Error::Busy`], a refused token and a scope
+/// refusal end the step.
 /// An error of the recovery or of the store ends the step with the error.
 pub fn step(
     store: &Store,
@@ -66,6 +81,24 @@ pub fn step(
     let begun = std::time::Instant::now();
     let clock = move || now_ms + i64::try_from(begun.elapsed().as_millis()).unwrap_or(i64::MAX / 2);
     step_clock(store, mail, token, account, &clock)
+}
+
+/// The step of an account with read access only
+/// (docs/specs/2026-11-18-gmail-write-access.md): only the recovery of
+/// step 1 with no write call ([`crate::recover_read_only`]), so a write
+/// whose result is not known still ends. A call that never started waits
+/// for a write sign-in. No action applies, and no send leaves.
+pub fn recover_step(
+    store: &Store,
+    mail: &dyn Provider,
+    token: &mut Token<'_>,
+    account: i64,
+) -> Result<Step> {
+    let mut out = Step::default();
+    if writing_rows(store, account)? {
+        out.scope_refused = crate::recover_read_only(store, mail, token, account)?;
+    }
+    Ok(out)
 }
 
 /// [`step`] with a clock. Steps 1, 2, 3 and 4 use the time at the start of
@@ -81,8 +114,9 @@ pub fn step_clock(
 ) -> Result<Step> {
     let now_ms = clock();
     let mut out = Step::default();
-    if writing_rows(store, account)? {
-        recover(store, mail, token, account)?;
+    if writing_rows(store, account)? && recover(store, mail, token, account)? {
+        out.scope_refused = true;
+        return Ok(out);
     }
     // While stopped, only the recovery runs. The claims check the stop
     // again, so a stop after this read still holds.

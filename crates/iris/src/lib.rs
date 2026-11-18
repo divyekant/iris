@@ -529,6 +529,11 @@ pub enum AccountCommand {
         /// machine than the engine.
         #[arg(long)]
         paste: bool,
+        /// Ask Google for write access (`gmail.modify`), so that Iris can
+        /// apply the changes and sends that you approve. Without it, Iris
+        /// reads only.
+        #[arg(long)]
+        write: bool,
     },
     /// Add an IMAP mailbox, or give a new password to one. The command reads
     /// the password (an app password of the provider) from the terminal
@@ -1320,8 +1325,13 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             serve(Arc::new(open()?), *addr).map_err(|e| e.to_string())
         }
         Command::Account {
-            command: AccountCommand::Add { client, paste },
-        } => account_add(&open()?, client, *paste),
+            command:
+                AccountCommand::Add {
+                    client,
+                    paste,
+                    write,
+                },
+        } => account_add(&open()?, client, *paste, *write),
         Command::Account {
             command:
                 AccountCommand::AddImap {
@@ -1703,13 +1713,23 @@ fn print(out: verbs::Output) -> Result<(), String> {
 }
 
 /// `iris account add`: sign in, then save the client and the sealed refresh token.
-fn account_add(store: &Store, client_path: &std::path::Path, paste: bool) -> Result<(), String> {
+fn account_add(
+    store: &Store,
+    client_path: &std::path::Path,
+    paste: bool,
+    write: bool,
+) -> Result<(), String> {
     let json = std::fs::read(client_path).map_err(|e| format!("{}: {e}", client_path.display()))?;
     let client = test_token_uri(iris_auth::Client::from_json(&json).map_err(|e| e.to_string())?)?;
     // Check the Gmail settings before the sign-in, so a bad setting fails
     // before a token exists.
     let gmail = gmail()?;
-    let sign_in = client.sign_in().map_err(|e| e.to_string())?;
+    let sign_in = if write {
+        client.sign_in_write()
+    } else {
+        client.sign_in()
+    }
+    .map_err(|e| e.to_string())?;
     say!(
         "iris: open this address in a browser and sign in:\n{}",
         sign_in.url()
@@ -1728,7 +1748,14 @@ fn account_add(store: &Store, client_path: &std::path::Path, paste: bool) -> Res
     .map_err(|e| e.to_string())?;
     let (_, address) =
         engine::save_sign_in(store, &gmail, &json, &tokens).map_err(|e| e.to_string())?;
-    println!("iris: added {address}");
+    println!(
+        "iris: added {address}, {}",
+        if tokens.write {
+            "with write access"
+        } else {
+            "read only: run the command again with --write to let Iris change mail"
+        }
+    );
     if tokens.refresh_expires_in.is_some() {
         say!(
             "iris: caution: the OAuth client is in the \"Testing\" status, so the sign-in \

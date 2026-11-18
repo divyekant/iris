@@ -104,6 +104,9 @@ struct Store {
     bodies: VecDeque<(u16, String)>,
     /// The MIME text of each `sendMail`.
     sent: Vec<Vec<u8>>,
+    /// True: a `sendMail` copy waits in `late` until `deliver_copies`.
+    hold_copies: bool,
+    late: Vec<Vec<u8>>,
     requests: Vec<String>,
     running: usize,
     most_running: usize,
@@ -150,6 +153,8 @@ impl Store {
             failures: VecDeque::new(),
             bodies: VecDeque::new(),
             sent: Vec::new(),
+            hold_copies: false,
+            late: Vec::new(),
             requests: Vec::new(),
             running: 0,
             most_running: 0,
@@ -159,6 +164,12 @@ impl Store {
     }
 
     /// Add a message, as a delivery, a draft or a sent copy does.
+    /// The sent copy of a `sendMail` in Sent Items, with a new ID.
+    fn copy(&mut self, raw: Vec<u8>) {
+        let i = self.add(raw, "F-sent", false);
+        self.msgs[i].read = true;
+    }
+
     fn add(&mut self, raw: Vec<u8>, folder: &str, draft: bool) -> usize {
         let i = self.msgs.len();
         let mid = header(&raw, "message-id")
@@ -365,6 +376,20 @@ impl FakeGraph {
         let mut s = self.store.lock().unwrap();
         let draft = folder == "F-drafts";
         message_id(s.add(raw.to_vec(), folder, draft))
+    }
+
+    /// While `hold` is true, a `sendMail` makes no sent copy until
+    /// [`FakeGraph::deliver_copies`], as Graph saves the copy later.
+    pub fn hold_copies(&self, hold: bool) {
+        self.store.lock().unwrap().hold_copies = hold;
+    }
+
+    /// Put each held sent copy in Sent Items.
+    pub fn deliver_copies(&self) {
+        let mut s = self.store.lock().unwrap();
+        for raw in std::mem::take(&mut s.late) {
+            s.copy(raw);
+        }
     }
 
     /// The MIME text of each `sendMail` so far.
@@ -938,8 +963,11 @@ async fn send_mail(State(s): State<Shared>, h: HeaderMap, body: Bytes) -> Respon
     };
     let mut s = s.lock().unwrap();
     s.sent.push(raw.clone());
-    let i = s.add(raw, "F-sent", false);
-    s.msgs[i].read = true;
+    if s.hold_copies {
+        s.late.push(raw);
+    } else {
+        s.copy(raw);
+    }
     StatusCode::ACCEPTED.into_response()
 }
 

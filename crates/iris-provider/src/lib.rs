@@ -44,7 +44,21 @@ pub enum Error {
     Sink(std::io::Error),
 }
 
+/// The text of a [`Error::is_scope_refusal`] error. The engine finds it in
+/// the error text of a failed action.
+pub const SCOPE_REFUSAL: &str = "Gmail refused the change: Iris has read access only. \
+     Run `iris account add <client.json> --write`.";
+
 impl Error {
+    /// True for the Gmail answer to a call that the granted scopes do not
+    /// allow: HTTP 403 `insufficientPermissions` (or the newer
+    /// `ACCESS_TOKEN_SCOPE_INSUFFICIENT`). Gmail made no change (spec
+    /// `docs/specs/2026-11-18-gmail-write-access.md`).
+    pub fn is_scope_refusal(&self) -> bool {
+        matches!(self, Error::Api { status: 403, reason, .. }
+            if reason == "insufficientPermissions" || reason == "ACCESS_TOKEN_SCOPE_INSUFFICIENT")
+    }
+
     /// For a write call: true if the provider can have done the call
     /// (spec 2 section 7.2). A timeout, a lost connection and HTTP 5xx give
     /// an unknown result. A rate limit of a call with one request also
@@ -70,6 +84,7 @@ impl std::fmt::Display for Error {
             Error::Unauthorized => write!(f, "the mail provider refused the access token"),
             Error::NotFound => write!(f, "the mail provider does not have the item"),
             Error::HistoryExpired => write!(f, "the sync cursor is too old"),
+            e @ Error::Api { .. } if e.is_scope_refusal() => f.write_str(SCOPE_REFUSAL),
             Error::Api {
                 status,
                 reason,
@@ -228,6 +243,12 @@ pub struct DraftRaw {
 /// `create_draft`, `send_draft`) is made one time: see
 /// [`Error::write_result_unknown`] and spec section 6.
 pub trait Provider: Send + Sync {
+    /// The name of the provider in a result that the person reads, for
+    /// example "the draft is gone at Gmail".
+    fn name(&self) -> &'static str {
+        "the mail server"
+    }
+
     /// True if a change of `INBOX` moves the message to another folder, so
     /// that its folder label changes too (Outlook). Then the apply reads
     /// the labels back after the write. A label provider (Gmail) and a
@@ -269,6 +290,22 @@ pub trait Provider: Send + Sync {
     fn draft_raw(&self, token: &str, id: &str) -> Result<DraftRaw>;
     /// A draft of `raw`, in the thread `thread` for a reply.
     fn create_draft(&self, token: &str, raw: &[u8], thread: Option<&str>) -> Result<Draft>;
+    /// A sent copy of the send of draft `draft`: a message with the
+    /// `Message-ID` `message_id` that the send made, never the draft. The
+    /// send recovery uses it (send spec, section 6). The default is the
+    /// first message with that ID and the label `SENT` (Gmail). A failed
+    /// read is an error, never "no copy".
+    fn sent_copy(&self, token: &str, message_id: &str, draft: &str) -> Result<Option<MessageRef>> {
+        let _ = draft;
+        for m in self.messages_with_id(token, message_id)? {
+            match self.minimal(token, &m.id) {
+                Ok(l) if l.label_ids.iter().any(|l| l == "SENT") => return Ok(Some(m)),
+                Ok(_) | Err(Error::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(None)
+    }
     /// Sends the draft `id` with the bytes `raw`.
     fn send_draft(&self, token: &str, id: &str, raw: &[u8], thread: Option<&str>) -> Result<Sent>;
 }
@@ -276,6 +313,36 @@ pub trait Provider: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scope_refusal_is_a_rejection_with_the_fix() {
+        let api = |status: u16, reason: &str| Error::Api {
+            status,
+            reason: reason.into(),
+            message: "Request had insufficient authentication scopes.".into(),
+        };
+        for e in [
+            api(403, "insufficientPermissions"),
+            api(403, "ACCESS_TOKEN_SCOPE_INSUFFICIENT"),
+        ] {
+            assert!(e.is_scope_refusal());
+            assert!(!e.write_result_unknown(), "Gmail made no change");
+            let text = e.to_string();
+            assert!(
+                text.contains("iris account add <client.json> --write"),
+                "{text}"
+            );
+            assert!(!text.contains("insufficient"), "no raw text: {text}");
+        }
+        for e in [
+            api(403, "forbidden"),
+            api(401, "insufficientPermissions"),
+            api(403, ""),
+        ] {
+            assert!(!e.is_scope_refusal(), "{e}");
+            assert!(e.to_string().starts_with("mail provider error"), "{e}");
+        }
+    }
 
     #[test]
     fn only_unknown_results_of_a_write_say_so() {

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
-use iris::engine::{self, Engine, Worker, STATE_NEEDS_SIGN_IN, STATE_OK};
+use iris::engine::{self, Engine, Worker, STATE_NEEDS_SIGN_IN, STATE_OK, STATE_READ_ONLY};
 use iris_fakegmail::FakeGmail;
 use iris_store::Store;
 use iris_synth::Mailbox;
@@ -758,6 +758,11 @@ fn a_tick_finds_the_mail_of_a_watch() {
 /// An approved archive of the first inbox message, in the mode `apply`.
 /// Gives the action ID and the Gmail ID of the message.
 fn approved_archive(s: &Setup) -> (i64, String) {
+    approved_archive_at(s, engine::now_ms())
+}
+
+/// [`approved_archive`] with the submit and the approval at `now`.
+fn approved_archive_at(s: &Setup, now: i64) -> (i64, String) {
     let (message, provider): (i64, String) = s
         .store
         .write(|tx| {
@@ -781,7 +786,6 @@ fn approved_archive(s: &Setup) -> (i64, String) {
         session: None,
         job: None,
     };
-    let now = engine::now_ms();
     let cs = iris_changeset::create(&s.store, &person, now).unwrap();
     iris_changeset::add_action(
         &s.store,
@@ -926,6 +930,316 @@ fn the_apply_step_reports_a_failed_action() {
         turn.reports[0].starts_with(&format!("action {action} failed: ")),
         "{turn:?}"
     );
+}
+
+/// A read-only sign-in (spec docs/specs/2026-11-18-gmail-write-access.md):
+/// the account syncs, its approved action waits with no Gmail write, and
+/// the error goes out once. A write sign-in then applies the action.
+#[test]
+fn a_read_only_account_syncs_and_its_actions_wait() {
+    let s = setup("apply-read-only", 5);
+    let g = gmail(s.fake.base_url());
+    assert_eq!(
+        sign_in_as(&s.store, &g, &client_json(), REFRESH, false),
+        s.account
+    );
+    assert_state(&s.store, s.account, STATE_READ_ONLY);
+    assert!(engine::sync_accounts(&s.store)
+        .unwrap()
+        .contains(&s.account));
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let (action, _) = approved_archive(&s);
+    let writes = |f: &FakeGmail| {
+        f.requests()
+            .iter()
+            .filter(|r| !r.starts_with("GET "))
+            .count()
+    };
+    let before = writes(&s.fake);
+    // The state was already read only at the sign-in: no error line.
+    assert_eq!(w.apply_step().unwrap().reports.len(), 0);
+    assert_eq!(writes(&s.fake), before, "no Gmail write");
+    assert_eq!(action_state(&s.store, action), "approved");
+    w.sync().unwrap();
+    // A write sign-in of the same address: the state is ok, and the action applies.
+    sign_in_as(&s.store, &g, &client_json(), REFRESH, true);
+    assert_state(&s.store, s.account, STATE_OK);
+    w.apply_step().unwrap();
+    assert_eq!(action_state(&s.store, action), "applied");
+}
+
+/// A grant of an older Iris has no `write` field: it is read only. The
+/// first apply step sets the state and gives the error one time.
+#[test]
+fn a_grant_with_no_write_field_is_read_only() {
+    let s = setup("apply-old-grant", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let client: serde_json::Value = serde_json::from_str(&client_json()).unwrap();
+    let old =
+        serde_json::to_vec(&serde_json::json!({"client": client, "refresh": REFRESH})).unwrap();
+    let sealed = s.store.seal(&old).unwrap();
+    s.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE account SET token = ?2, state = 'ok' WHERE id = ?1",
+                rusqlite::params![s.account, sealed],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let (action, _) = approved_archive(&s);
+    let r = w.apply_step();
+    assert!(matches!(r, Err(engine::Error::ReadOnly)), "{r:?}");
+    assert!(r
+        .unwrap_err()
+        .to_string()
+        .contains("iris account add <client.json> --write"));
+    assert_state(&s.store, s.account, STATE_READ_ONLY);
+    assert_eq!(
+        w.apply_step().unwrap().reports.len(),
+        0,
+        "the error goes out once"
+    );
+    assert_eq!(action_state(&s.store, action), "approved");
+}
+
+/// Gmail refuses a write for a missing scope, although the grant says
+/// write: the action fails with the clear text, and the account is read
+/// only, so the next action waits.
+#[test]
+fn a_scope_refusal_fails_the_action_and_sets_read_only() {
+    let s = setup("apply-scope-refused", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let (action, _) = approved_archive(&s);
+    let (second, _) = approved_archive(&s);
+    s.fake.set_read_only(true);
+    let writes = |f: &FakeGmail| {
+        f.requests()
+            .iter()
+            .filter(|r| !r.starts_with("GET "))
+            .count()
+    };
+    let before = writes(&s.fake);
+    let turn = w.apply_step().unwrap();
+    assert_eq!(writes(&s.fake), before + 1, "the step ends at the refusal");
+    assert_eq!(action_state(&s.store, second), "approved");
+    assert_eq!(action_state(&s.store, action), "failed");
+    assert_eq!(turn.reports.len(), 1, "{turn:?}");
+    assert!(
+        turn.reports[0].contains(iris_provider::SCOPE_REFUSAL),
+        "{turn:?}"
+    );
+    assert!(!turn.reports[0].contains("insufficient"), "{turn:?}");
+    assert_state(&s.store, s.account, STATE_READ_ONLY);
+    // The grant still says write, but the state holds the later steps.
+    assert!(w.apply_step().unwrap().reports.is_empty());
+    assert_eq!(writes(&s.fake), before + 1, "no write in a later step");
+    assert_eq!(action_state(&s.store, second), "approved");
+}
+
+/// A read-only account still gets the recovery of a write whose result is
+/// not known (held-outbox spec, issue #400): it reads, and writes nothing.
+#[test]
+fn a_read_only_account_still_recovers_a_writing_row() {
+    let s = setup("read-only-recover", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let (action, _) = approved_archive(&s);
+    s.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+                 VALUES (?1, ?2, '{\"call\":\"batchModify\",\"add\":[],\"remove\":[\"INBOX\"],\"calls\":1}',
+                         'writing', 'inverse', 1)",
+                rusqlite::params![action, s.account],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    sign_in_as(
+        &s.store,
+        &gmail(s.fake.base_url()),
+        &client_json(),
+        REFRESH,
+        false,
+    );
+    let writes = |f: &FakeGmail| {
+        f.requests()
+            .iter()
+            .filter(|r| !r.starts_with("GET "))
+            .count()
+    };
+    let before = writes(&s.fake);
+    w.apply_step().unwrap();
+    assert_eq!(writes(&s.fake), before, "the recovery only reads");
+    let writing = count(
+        &s.store,
+        &format!("SELECT count(*) FROM ledger WHERE action_id = {action} AND state = 'writing'"),
+    );
+    assert_eq!(writing, 0, "the recovery ended the row");
+}
+
+/// A crash state: a ledger row in `writing` for `action` whose call never
+/// started (`call` 0), with each message of the action for call 1.
+fn crash_before_call(s: &Setup, action: i64) {
+    s.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+                 VALUES (?1, ?2, '{\"call\":\"batchModify\",\"add\":[],\"remove\":[\"INBOX\"],\"calls\":1}',
+                         'writing', 'inverse', 1)",
+                rusqlite::params![action, s.account],
+            )?;
+            let ledger = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO ledger_message(ledger_id, message_id, call, pre, post)
+                 SELECT ?1, message_id, 1, '[\"INBOX\"]', '[]' FROM action_message
+                 WHERE action_id = ?2",
+                rusqlite::params![ledger, action],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// A crash left a row in `writing` whose call never started (`call` 0,
+/// a message for call 1). Read-only recovery must not start that call: the
+/// row waits in `writing`, and a write sign-in continues it.
+#[test]
+fn read_only_recovery_starts_no_call() {
+    let s = setup("read-only-no-call", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let (action, provider) = approved_archive(&s);
+    crash_before_call(&s, action);
+    sign_in_as(
+        &s.store,
+        &gmail(s.fake.base_url()),
+        &client_json(),
+        REFRESH,
+        false,
+    );
+    let writes = |f: &FakeGmail| {
+        f.requests()
+            .iter()
+            .filter(|r| !r.starts_with("GET "))
+            .count()
+    };
+    let before = writes(&s.fake);
+    w.apply_step().unwrap();
+    assert_eq!(writes(&s.fake), before, "no call starts while read only");
+    let seen = s.fake.requests().len();
+    w.apply_step().unwrap();
+    let new: Vec<String> = s.fake.requests()[seen..].to_vec();
+    assert!(
+        new.iter()
+            .all(|r| r.starts_with("GET ") && r.ends_with("/profile")),
+        "a later read-only turn makes only the profile read: {new:?}"
+    );
+    let writing =
+        format!("SELECT count(*) FROM ledger WHERE action_id = {action} AND state = 'writing'");
+    assert_eq!(count(&s.store, &writing), 1, "the row waits");
+    // A write sign-in continues the call.
+    sign_in_as(
+        &s.store,
+        &gmail(s.fake.base_url()),
+        &client_json(),
+        REFRESH,
+        true,
+    );
+    w.apply_step().unwrap();
+    assert_eq!(count(&s.store, &writing), 0);
+    let meta = gmail(s.fake.base_url()).minimal("t", &provider).unwrap();
+    assert!(!meta.label_ids.contains(&"INBOX".to_string()), "{meta:?}");
+}
+
+/// Google removed the write access: the recovery resumes a call that never
+/// started and gets a scope refusal. The step ends there, the account is
+/// read only, and no other action calls Gmail.
+#[test]
+fn a_scope_refusal_in_the_recovery_ends_the_step() {
+    let s = setup("recover-scope-refused", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let (action, _) = approved_archive(&s);
+    crash_before_call(&s, action);
+    let (other, _) = approved_archive(&s);
+    s.fake.set_read_only(true);
+    let writes = |f: &FakeGmail| {
+        f.requests()
+            .iter()
+            .filter(|r| !r.starts_with("GET "))
+            .count()
+    };
+    let before = writes(&s.fake);
+    let _ = w.apply_step();
+    assert_eq!(writes(&s.fake), before + 1, "only the resumed call");
+    assert_eq!(action_state(&s.store, other), "approved");
+    assert_state(&s.store, s.account, STATE_READ_ONLY);
+}
+
+/// The 14-day expiry does not wait for write access: the engine tick
+/// expires an action of a read-only account.
+#[test]
+fn an_action_of_a_read_only_account_expires() {
+    let s = setup("read-only-expiry", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    sign_in_as(
+        &s.store,
+        &gmail(s.fake.base_url()),
+        &client_json(),
+        REFRESH,
+        false,
+    );
+    let now = engine::now_ms();
+    let (action, _) = approved_archive_at(&s, now - 15 * 24 * 3600 * 1000);
+    w.apply_step().unwrap();
+    assert_eq!(action_state(&s.store, action), "approved");
+    iris_changeset::expire(&s.store, now).unwrap();
+    assert_eq!(action_state(&s.store, action), "expired");
+}
+
+/// The read-only mark keeps a new sign-in: it writes only while the token
+/// is the one that it read, and never over "needs sign-in".
+#[test]
+fn the_read_only_mark_keeps_a_new_sign_in() {
+    let s = setup("read-only-guard", 5);
+    let old: Vec<u8> = s
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT token FROM account WHERE id = ?1",
+                [s.account],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    sign_in_as(
+        &s.store,
+        &gmail(s.fake.base_url()),
+        &client_json(),
+        "new-refresh",
+        true,
+    );
+    assert!(!engine::mark_read_only(&s.store, s.account, &old).unwrap());
+    assert_state(&s.store, s.account, STATE_OK);
+    let now: Vec<u8> = s
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT token FROM account WHERE id = ?1",
+                [s.account],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    engine::mark_needs_sign_in(&s.store, s.account, &now).unwrap();
+    assert!(!engine::mark_read_only(&s.store, s.account, &now).unwrap());
+    assert_state(&s.store, s.account, STATE_NEEDS_SIGN_IN);
 }
 
 #[test]

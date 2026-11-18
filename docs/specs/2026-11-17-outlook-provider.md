@@ -216,10 +216,8 @@ rules:
   well-known folders after the first read.
 - `SENT` is never given (section 6). R6-16 decides how the copies that
   Iris sent get it.
-- The draft and send calls (`metadata`, `messages_with_id`,
-  `drafts_with_id`, `draft_raw`, `create_draft`, `send_draft`) give a
-  definite rejection (`Api` 400 `notSupported`) before any request,
-  until R6-17. Section 5.1 has the state writes (R6-15).
+- Section 5.1 has the state writes (R6-15) and section 5.2 the drafts,
+  the send and `metadata` (R6-17).
 
 ### 4. Raw message
 
@@ -264,22 +262,27 @@ draft (the same bytes that the approval hash covers, as for Gmail in spec
 `2026-11-16-send.md`).
 
 Graph builds the MIME text of a draft again at each read (A4), so a hash
-of the server bytes cannot show a change, and an etag alone is not proof
-(A14). The release checks both. The release of a send does these steps:
+of the server bytes cannot show a change. The release compares the
+content that the text reads back to, not the bytes. The release of a
+send does these steps:
 
-1. `create_draft` keeps the `@odata.etag` of the new draft with the draft
-   row.
-2. Before the send, `draft_etag` reads the server draft, and `raw` reads
-   its MIME text. The release runs the read back of the send spec
-   section 1 on that text (the fields of the content hash). It goes on
-   only if the draft exists, the etag is the kept etag, the `Message-ID`
-   of the read back is the `Message-ID` that Iris set (the content hash
-   does not cover it), and the content hash is the hash of the `draft`
-   row. Else the person or another client
+1. `create_draft` gives the ID of the new draft. The draft row keeps it.
+   Iris keeps no etag of the draft: the etag changes at each change of
+   the message, also a flag, a category or a read by another client, so
+   an etag check denies sends that changed nothing. The send carries the
+   stored bytes, not the server draft, so the content check of step 2
+   covers each field that the mail carries.
+2. Before the send, `draft_raw` reads the server draft and its MIME
+   text. The release runs the read back of the send spec section 1 on
+   that text (the fields of the content hash). It goes on only if the
+   draft exists and is a draft (`isDraft`), the `Message-ID` of the read
+   back is the `Message-ID` that Iris set (the content hash does not
+   cover it), and the content hash is the hash of the `draft` row. Else
+   the person or another client
    changed it: the release denies the send ("The draft changed after the
    approval."), as spec 2 section 7.5 and the send spec require, and
    refreshes the `draft` row as the send spec section 4.1 says: the row
-   gets the content, the hash, the new etag and the exact bytes of the
+   gets the content, the hash and the exact bytes of the
    read back, or `foreign_at` when the text does not read back (for
    example, Graph changed its form). A new `send` action then binds to
    the content that the person wrote, or submit denies it. If Graph
@@ -295,11 +298,15 @@ of the server bytes cannot show a change, and an etag alone is not proof
    `writing`.
 5. The completion finds the sent copy: `sent_by_message_id(id)` lists
    the messages of the whole mailbox (`/me/messages`, each folder) with
-   `$filter=internetMessageId eq '<id>'` (A15), and follows each page, so
-   a rule or a client that moved the copy does not hide it. A candidate
-   counts only if its ID is not the ID of the Iris draft, `isDraft` is
-   false and it has a `sentDateTime`: the original draft has the same
-   `Message-ID` and content, and stays in Drafts, so it never counts. It
+   `$filter=internetMessageId eq '<id>'` (A15), and follows each page. A
+   candidate counts only if it is in the well-known Sent Items folder,
+   its ID is not the ID of the Iris draft, `isDraft` is false and it has
+   a `sentDateTime`. The original draft has the same `Message-ID` and
+   content, and stays in Drafts, so it never counts. A mail that the
+   owner sends to the owner arrives with the same `Message-ID` and a
+   `sentDateTime` in another folder, so it never counts either. No
+   candidate, or two, keeps the result unknown. A copy that a rule moves
+   out of Sent Items is not found: known limit #687. It
    reads the `$value` of the copy. It runs the content check of the send
    spec section 6 (the fields of the content hash, the headers that
    change who gets the message), and sets the ledger row `applied` or
@@ -318,6 +325,57 @@ with no approval. The draft stays in Outlook Drafts. The outbox shows
 "Sent. The draft stays in Outlook: delete it there." A known limit with
 its own issue: the person can send the same draft a second time from
 Outlook. A later card can make the delete an approved part of the send.
+
+### 5.2 The drafts and the send of the provider (R6-17)
+
+`iris_graph::Outlook` makes the draft and send calls of the provider
+spec section 4 on these rules:
+
+- `create_draft(raw)` is `POST /me/messages` with the MIME bytes. Graph
+  puts a reply in its conversation from `In-Reply-To` and `References`,
+  so the `thread` argument is not sent. The draft ID is the ID of the
+  draft message.
+- `drafts_with_id` and `messages_with_id` list `/me/messages` with
+  `$filter=internetMessageId eq '<id>'` and follow each page (A15). The
+  apply gives the ID with no angle brackets, and the provider adds them.
+  `drafts_with_id` keeps only the messages with `isDraft` true.
+- `draft_raw(id)` reads the message first. A message that is not a draft
+  gives `NotFound`, as a sent Gmail draft. Then it streams `$value` and
+  keeps at most `DRAFT_LIMIT` bytes. Above the limit the read stops, and
+  `raw` is `None`.
+- `send_draft(id, raw)` reads the `Message-ID` of `raw` first. No
+  `Message-ID` is a definite rejection before any request. Then
+  `sendMail` with `raw`. After the 202, the provider looks for the sent
+  copy with `sent_copy`. No copy yet, or a failed search, gives
+  `Error::Transport` (unknown): the claim stays, and the recovery looks
+  again and never sends again.
+- `sent_copy(message_id, draft)` is a call of the provider trait. Its
+  default (Gmail) is the first message with the ID and the label `SENT`.
+  The Outlook provider gives the one message with the ID in Sent Items
+  that is not the draft, not a draft, and has a `sentDateTime`
+  (section 5, step 5). A delivery to the owner never counts.
+- `metadata(id, names)` reads the message, then the start of `$value`
+  up to the first empty line (at most 256 KiB), because Graph gives no
+  raw headers of a sent message or a draft. The draft of a reply reads
+  the headers of its parent this way. `mail-parser` reads the header
+  block; each value is the raw value with its line folds removed, as
+  Gmail gives it, and `Subject` is decoded (RFC 2047). Text that is not
+  a header gives no header. A property test covers random input.
+- The provider trait has `name()`: "Gmail", "Outlook", or "the mail
+  server" for another provider. Each result of the send that the person
+  reads names the provider, for example "the draft is gone at Outlook",
+  "unknown: Outlook shows no sent message" and "Outlook sent other
+  content than the approved content". Each error that ends with "sent
+  other content than the approved content" stops each later release, of
+  each provider.
+- Iris never deletes the draft after the send. Known limit with its own
+  issue (#634). The note in the outbox is part of R6-16.
+- The recovery of a `create_draft` with an unknown result is the
+  recovery of the apply for each provider: `drafts_with_id` finds the
+  draft, or the row fails. Graph makes the draft in the call, so a draft
+  that the search does not find does not come later. Evidence:
+  `pending`. If a draft comes later, Outlook has one more draft and the
+  person can delete it; nothing is sent.
 
 ### 5.1 The state writes of the provider (R6-15)
 
@@ -673,7 +731,7 @@ section 7.3). The caller reconciles with reads only.
 | `set_read`, `set_flag` | the answer has the new state | `Error::Api`, the mirror does not change | the caller reads the message: the target state means applied; any other state keeps the result unknown, because another client can have reversed the write. Iris tells the person (spec 2 section 7.3) | never after an unknown result |
 | `set_categories` | the answer has the new list | `Error::Api`; 412 means the message changed after the read: nothing changed | as `set_read` | after 412 only: one new read and one new PATCH |
 | `move_to` | 201 with the moved message | `Error::Api` | the caller reads the message: the target folder means applied; any other folder keeps the result unknown, and Iris tells the person | never after an unknown result |
-| `create_draft` | 201 with the draft ID | `Error::Api` | a draft can exist, now or later. The caller searches `drafts` for its `Message-ID` header: found means created. Not found keeps the result unknown: the action stays in `writing`, each recovery turn searches again, and the review shows "Outlook did not confirm the draft yet". Submit denies a new draft action for the same thread while one is unknown. After 24 hours with no draft, the row fails with "unknown" kept, as for a send | never after an unknown result |
+| `create_draft` | 201 with the draft ID | `Error::Api` | a draft can exist. The caller searches the drafts for its `Message-ID` header: found means created; not found means failed (section 5.2) | never after an unknown result |
 | `send_mime` | 202: the row stays in `writing` until the completion finds and checks the sent copy (section 5) | `Error::Api`; the row fails and the claim goes, as in the send spec | the ledger keeps the claim; recovery runs the search of section 5, step 5 (each folder, no draft) and the completion (spec 2 section 7.5) | never |
 
 ## Open questions
