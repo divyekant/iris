@@ -2,7 +2,7 @@
   A login code that is still good: large digits, one button to copy, and the
   time left. At the moment it expires, the code leaves the screen (spec 1 section 6.6).
   With `ondone`, a quiet Dismiss holds the verb for the Undo time, as on a brief
-  line (issue #527), then calls `ondone`. The brief sends each hold when the
+  line (issue 527), then calls `ondone`. The brief sends each hold when the
   person leaves it.
 -->
 <script lang="ts">
