@@ -414,7 +414,7 @@ fn start_job(name: &str, agent: &str) -> Started {
 fn the_job_runs_the_hold_with_the_handoff() {
     let mut j = start_job(
         "run",
-        "pwd > seen; echo \"$IRIS_T\" >> seen; [ -z \"$IRIS_TEST_JOB_DIR\" ] && echo clean >> seen; exec > fds; for n in $(seq 3 63); do [ -e /dev/fd/$n ] && echo $n; done; true",
+        "pwd > seen; echo \"$IRIS_T\" >> seen; [ -z \"$IRIS_TEST_JOB_DIR\" ] && echo clean >> seen; (launchctl print gui/$(id -u) >/dev/null 2>&1 && echo launchd >> seen) 2>/dev/null; exec > fds; for n in $(seq 3 63); do [ -e /dev/fd/$n ] && echo $n; done; true",
     );
     let d = j.dir.clone();
     // The record came before the connection.
@@ -438,6 +438,8 @@ fn the_job_runs_the_hold_with_the_handoff() {
         seen,
         format!("{}\nhanded\nclean\n", d.join("work").display())
     );
+    // The line "launchd" is absent: on macOS the job gave the agent no
+    // bootstrap port, so `launchctl print` failed (Linux has no launchctl).
     // Each open descriptor of the agent above 2 came from the test
     // process itself (open with no close-on-exec when the test started),
     // never from the handoff: the engine pipe, the log, the status pipe or

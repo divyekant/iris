@@ -41,13 +41,7 @@ extern "C" {
     /// `struct coalition_resource_usage` are `tasks_started` and
     /// `tasks_exited`.
     fn coalition_info_resource_usage(cid: u64, cru: *mut c_void, sz: usize) -> c_int;
-    /// `<mach/task.h>` and `<mach/mach_init.h>`.
-    fn task_set_special_port(task: u32, which: c_int, port: u32) -> c_int;
-    static mach_task_self_: u32;
 }
-
-/// `TASK_BOOTSTRAP_PORT` of `<mach/task_special_ports.h>`.
-const TASK_BOOTSTRAP_PORT: c_int = 4;
 
 /// Sets the bootstrap port of this process to none. Each child process
 /// inherits it, so the agent cannot send a message to launchd: with no
@@ -55,7 +49,12 @@ const TASK_BOOTSTRAP_PORT: c_int = 4;
 /// (Mac acceptance, 2026-11-18). Async-signal-safe: one Mach call.
 pub fn drop_bootstrap() -> io::Result<()> {
     // SAFETY: a Mach call on the task port of this process.
-    let kr = unsafe { task_set_special_port(mach_task_self_, TASK_BOOTSTRAP_PORT, 0) };
+    let kr = unsafe {
+        mach2::task_special_ports::task_set_bootstrap_port(
+            mach2::traps::mach_task_self(),
+            mach2::port::MACH_PORT_NULL,
+        )
+    };
     if kr == 0 {
         Ok(())
     } else {
