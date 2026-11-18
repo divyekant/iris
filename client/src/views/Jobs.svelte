@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { get, own, type Job, type JobPage, type JobState } from "../api";
-  import { due, now } from "../jobs";
+  import { due, now, pageSize } from "../jobs";
   import { href } from "../route";
 
   let { pages: first }: { pages: Record<JobState, JobPage> } = $props();
@@ -28,7 +28,7 @@
     busy = state;
     error = "";
     try {
-      const page = await get<JobPage>(`jobs?state=${state}&limit=50&after=${encodeURIComponent(pages[state].next ?? "")}`);
+      const page = await get<JobPage>(`jobs?state=${state}&limit=${pageSize(state)}&after=${encodeURIComponent(pages[state].next ?? "")}`);
       const seen = new Set(pages[state].jobs.map((j) => j.id));
       pages[state] = { jobs: [...pages[state].jobs, ...page.jobs.filter((j) => !seen.has(j.id))], next: page.next };
     } catch (e) {
