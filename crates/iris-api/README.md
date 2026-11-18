@@ -251,8 +251,10 @@ same request.
 
 A `reason` is 1 to 500 characters and not blank. The answer is the item
 after the change. The verb changes only a commitment with the status `open`
-or `deferred`. For another item, the answer is a 409 with the reason, and the
-ledger keeps a `failed` entry. A body that is not valid (for example, a date
+or `deferred`. For another commitment, the answer is a 409 with the reason,
+and the ledger keeps a `failed` entry. For an item of another form (for
+example `POST /api/items/r-1/close`), the answer is a 400, and nothing is
+written: no changeset and no ledger entry. A body that is not valid (for example, a date
 that is not valid) is a 400, and nothing is written. An ID that no item has,
 or another verb, is a 404.
 
