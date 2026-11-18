@@ -50,6 +50,11 @@ The code (`iris_auth::Client::microsoft`) does these checks:
   loses nothing.
 - `invalid_grant` on a refresh gives `Error::Revoked`: the account needs a
   new sign-in.
+- The token calls follow no redirect, for Google and Microsoft. A 3xx
+  answer is an error, so a code, a verifier or a refresh token never goes
+  to another host.
+- `Client::refresh` (access token only) refuses a Microsoft client with
+  `Error::RotatingRefresh`, so no caller can drop the new refresh token.
 
 ## Steps for the owner (release gate)
 
