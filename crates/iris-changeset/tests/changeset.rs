@@ -837,9 +837,10 @@ fn changeset_id_parser() {
         let digits = text
             .strip_prefix("cs-")
             .filter(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()));
+        // Only the canonical form: the text of format_changeset_id (#309).
         let expect = digits
             .and_then(|d| d.parse::<i64>().ok())
-            .filter(|n| *n > 0);
+            .filter(|n| *n > 0 && iris_changeset::format_changeset_id(*n) == text);
         assert_eq!(
             iris_changeset::parse_changeset_id(&text),
             expect,
@@ -861,6 +862,9 @@ fn changeset_id_parser() {
         iris_changeset::parse_changeset_id("cs-9223372036854775808"),
         None
     );
+    for bad in ["cs-01", "cs-007", "cs-0"] {
+        assert_eq!(iris_changeset::parse_changeset_id(bad), None, "{bad}");
+    }
 }
 
 /// The hash of section 5.1: SHA-256 of the verb, the targets text and the

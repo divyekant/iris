@@ -288,16 +288,16 @@ async fn gives_the_summary_of_each_message_id_in_order() {
 /// section 5.7, written apart from the code under test.
 fn oracle(segment: &str) -> Option<String> {
     let digits = segment.strip_prefix("m-")?;
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+    if digits.is_empty() || digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     let row: u128 = digits.parse().ok()?;
-    (row > 0 && row <= i64::MAX as u128).then(|| format!("m-{row}"))
+    (row <= i64::MAX as u128).then(|| format!("m-{row}"))
 }
 
 /// Property: for any ID text, the answer is a 400 unless each part is a
-/// message ID and there are 200 parts or fewer. Else it has one entry for
-/// each part, in order, with the normal form of the ID.
+/// message ID in its one canonical form (no zero in front) and there are
+/// 200 parts or fewer. Else it has one entry for each part, in order.
 #[test]
 fn the_ids_parser_accepts_only_message_ids_and_keeps_their_order() {
     let dir = temp("ids-property");
