@@ -14,9 +14,16 @@ export const clock = (value: string) => new Date(value).toLocaleTimeString("en-G
 
 const relative = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
 
-/** The due date of an open job, with a tone: `late` after the date, `soon` 2 days or less before it. */
+/** The jobs of one state that the Jobs view asks for at a time: 20 for an ended job, 50 for the others. */
+export const pageSize = (state: Job["state"]) => (state === "done" ? 20 : 50);
+
+/**
+ * The due date of a job, with a tone: `late` after the date, `soon` 2 days or less before it.
+ * An ended job keeps its date with no tone, so the person can see if it ended before the date.
+ */
 export function due(job: Job, now = new Date()): { text: string; tone: "late" | "soon" | "" } | null {
-  if (!job.due || job.state === "done") return null;
+  if (!job.due) return null;
+  if (job.state === "done") return { text: `Was due ${day(job.due)}`, tone: "" };
   const days = daysFrom(job.due, now);
   // The words say "late" each time the tone does, so color is not the only sign.
   if (Date.parse(job.due) <= now.getTime()) return { text: `Was due ${day(job.due)}, ${days < 0 ? relative.format(days, "day") : "earlier today"}`, tone: "late" };

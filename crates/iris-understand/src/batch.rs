@@ -41,7 +41,10 @@ const BASE: &str = concat!(
     iris_store::draft_or_copy!("m"),
     "
   AND NOT EXISTS (SELECT 1 FROM message o WHERE o.thread_id = m.thread_id
-                  AND o.gone_at IS NULL AND o.content_sha256 IS NULL)"
+                  AND o.gone_at IS NULL AND o.content_sha256 IS NULL
+                  AND NOT ",
+    iris_store::draft_or_copy!("o"),
+    ")"
 );
 
 /// The thread rule: no older message of the thread waits. Hostile mail

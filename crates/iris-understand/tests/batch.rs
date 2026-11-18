@@ -507,6 +507,17 @@ fn drafts_and_sent_copies_are_not_pending() {
     b.add("2", "a", 3, &["UNSENT"]);
     b.add("3", "a", 2, &["INBOX", "SENT_COPY"]);
     let last = b.add("4", "a", 1, &["INBOX"]);
+    // A draft and a copy with no raw content yet do not hold the thread
+    // (issue #686).
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET content_sha256 = NULL WHERE provider_id IN ('1', '2', '3')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(batch::estimate(&b.store, NOW).unwrap().messages, 1);
     let r = b.run(&Limits::default()).unwrap();
     assert_eq!(
@@ -938,6 +949,9 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                  DROP TABLE changeset_comment; DROP TABLE nudge_try;
                  DROP TRIGGER job_notes_end; DROP TABLE job_notes;
                  DROP TRIGGER ledger_stop; DROP TABLE stop_switch;
+                 ALTER TABLE account DROP COLUMN imap_host;
+                 ALTER TABLE account DROP COLUMN imap_port;
+                 ALTER TABLE account DROP COLUMN imap_user;
                  PRAGMA user_version = 19;",
             )?;
             Ok(())

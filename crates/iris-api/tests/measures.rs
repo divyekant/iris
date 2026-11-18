@@ -401,6 +401,9 @@ fn downgrade(s: &Store) {
              ALTER TABLE reply_draft DROP COLUMN ask;
              DROP TRIGGER job_notes_end; DROP TABLE job_notes;
              DROP TRIGGER job_session_stop; DROP TRIGGER ledger_stop; DROP TABLE stop_switch;
+             ALTER TABLE account DROP COLUMN imap_host;
+             ALTER TABLE account DROP COLUMN imap_port;
+             ALTER TABLE account DROP COLUMN imap_user;
              PRAGMA user_version = 26;",
         )?;
         Ok(())

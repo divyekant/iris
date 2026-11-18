@@ -128,7 +128,7 @@
       <div class="words">
         <p><strong>Iris is stopped</strong>{#if shared.since}{" "}<span class="since">since {since(shared.since)}</span>{/if}.</p>
         {#if shared.live === 0 && !shared.busy}
-          <p class="muted">No agent runs, no action applies and no mail leaves.</p>
+          <p class="muted">No agent runs, no mailbox change applies and no mail leaves.</p>
         {:else}
           <p class="muted">The stop is not complete yet.</p>
         {/if}
