@@ -36,6 +36,8 @@ pub struct Caps {
     pub qresync: bool,
     /// `AUTH=PLAIN`. Without it, the client must use `LOGIN`.
     pub plain: bool,
+    /// `UIDNEXT` in each `EXAMINE` answer.
+    pub uidnext: bool,
 }
 
 impl Caps {
@@ -44,6 +46,7 @@ impl Caps {
         condstore: true,
         qresync: true,
         plain: true,
+        uidnext: true,
     };
 }
 
@@ -96,6 +99,8 @@ impl FakeImap {
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let state = shared.clone();
+                // No Nagle delay: each command waits for its answer.
+                let _ = stream.set_nodelay(true);
                 thread::spawn(move || {
                     let _ = serve(stream, &state);
                 });
@@ -179,6 +184,11 @@ impl FakeImap {
         }
     }
 
+    /// Delete a folder and its messages.
+    pub fn drop_folder(&self, name: &str) {
+        self.lock().folders.remove(name);
+    }
+
     /// Give the folder a new `UIDVALIDITY`. Each message gets a new UID,
     /// from 1.
     pub fn renew(&self, folder: &str) {
@@ -216,6 +226,27 @@ impl State {
         self.modseq += 1;
         self.modseq
     }
+}
+
+/// The `Message-ID`, `In-Reply-To` and `References` lines of the header
+/// of `raw`, with their folded lines, and an empty line at the end.
+fn thread_fields(raw: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(raw);
+    let head = text.split("\r\n\r\n").next().unwrap_or("");
+    let mut out = String::new();
+    let mut keep = false;
+    for line in head.split("\r\n") {
+        if !line.starts_with([' ', '\t']) {
+            let name = line.split(':').next().unwrap_or("").to_ascii_lowercase();
+            keep = ["message-id", "in-reply-to", "references"].contains(&name.as_str());
+        }
+        if keep {
+            out.push_str(line);
+            out.push_str("\r\n");
+        }
+    }
+    out.push_str("\r\n");
+    out.into_bytes()
 }
 
 /// Split a command line into words. A quoted string is one word, without
@@ -441,12 +472,22 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                             .chain(f.gone.iter().map(|g| g.1))
                             .max()
                             .unwrap_or(1);
-                        reply.push_str(
-                            "* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)\r\n",
-                        );
+                        reply.push_str(&format!(
+                            "* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft{})\r\n",
+                            f.messages
+                                .values()
+                                .flat_map(|m| m.flags.iter())
+                                .filter(|x| !x.starts_with('\\'))
+                                .collect::<std::collections::BTreeSet<_>>()
+                                .into_iter()
+                                .map(|k| format!(" {k}"))
+                                .collect::<String>()
+                        ));
                         reply.push_str(&format!("* {} EXISTS\r\n", f.messages.len()));
                         reply.push_str(&format!("* OK [UIDVALIDITY {}] ok\r\n", f.uidvalidity));
-                        reply.push_str(&format!("* OK [UIDNEXT {}] ok\r\n", f.uidnext));
+                        if s.caps.uidnext {
+                            reply.push_str(&format!("* OK [UIDNEXT {}] ok\r\n", f.uidnext));
+                        }
                         if s.caps.condstore {
                             reply.push_str(&format!("* OK [HIGHESTMODSEQ {high}] ok\r\n"));
                         } else {
@@ -456,14 +497,73 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                     }
                 }
             }
-            "UID" if w.get(2).is_some_and(|x| x.eq_ignore_ascii_case("FETCH")) => {
+            "UID" if w.get(2).is_some_and(|x| x.eq_ignore_ascii_case("SEARCH")) => {
                 let s = lock();
                 match conn.folder.as_ref().and_then(|n| s.folders.get(n)) {
                     None => "BAD no folder".to_owned(),
                     Some(f) => {
-                        let items = w.get(4).map(|x| x.to_ascii_uppercase()).unwrap_or_default();
-                        let modifiers =
-                            w.get(5).map(|x| x.to_ascii_uppercase()).unwrap_or_default();
+                        // An optional set of sequence numbers before the key.
+                        let seqs = w
+                            .get(3)
+                            .filter(|x| x.starts_with(|c: char| c.is_ascii_digit()))
+                            .map(|x| uid_set(x, f.messages.len() as u32));
+                        let at = if seqs.is_some() { 4 } else { 3 };
+                        let key = w
+                            .get(at)
+                            .map(|x| x.to_ascii_uppercase())
+                            .unwrap_or_default();
+                        let arg = w.get(at + 1).cloned().unwrap_or_default();
+                        let in_seqs = |i: usize| {
+                            seqs.as_ref().is_none_or(|r| {
+                                r.iter().any(|(a, b)| (*a..=*b).contains(&(i as u32 + 1)))
+                            })
+                        };
+                        let has = |m: &Message, flag: &str| {
+                            m.flags.iter().any(|x| x.eq_ignore_ascii_case(flag))
+                        };
+                        let hits: Vec<String> = f
+                            .messages
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| in_seqs(*i))
+                            .map(|(_, x)| x)
+                            .filter(|(u, m)| match key.as_str() {
+                                "UNSEEN" => !has(m, "\\Seen"),
+                                "FLAGGED" => has(m, "\\Flagged"),
+                                "DRAFT" => has(m, "\\Draft"),
+                                "KEYWORD" => has(m, &arg),
+                                "UID" => uid_set(&arg, u32::MAX)
+                                    .iter()
+                                    .any(|(a, b)| (*a..=*b).contains(u)),
+                                _ => false,
+                            })
+                            .map(|(u, _)| u.to_string())
+                            .collect();
+                        reply.push_str(
+                            &format!("* SEARCH {}\r\n", hits.join(" ")).replace(" \r\n", "\r\n"),
+                        );
+                        "OK done".to_owned()
+                    }
+                }
+            }
+            // `UID FETCH`, and `FETCH` by sequence numbers.
+            "UID" | "FETCH"
+                if w[1] == "FETCH" || w.get(2).is_some_and(|x| x.eq_ignore_ascii_case("FETCH")) =>
+            {
+                let by_uid = w[1] == "UID";
+                let at = if by_uid { 3 } else { 2 };
+                let s = lock();
+                match conn.folder.as_ref().and_then(|n| s.folders.get(n)) {
+                    None => "BAD no folder".to_owned(),
+                    Some(f) => {
+                        let items = w
+                            .get(at + 1)
+                            .map(|x| x.to_ascii_uppercase())
+                            .unwrap_or_default();
+                        let modifiers = w
+                            .get(at + 2)
+                            .map(|x| x.to_ascii_uppercase())
+                            .unwrap_or_default();
                         let mods = words(modifiers.trim_matches(['(', ')']));
                         let since = mods
                             .iter()
@@ -471,13 +571,20 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                             .and_then(|i| mods.get(i + 1))
                             .and_then(|x| x.parse::<u64>().ok());
                         let vanished = mods.iter().any(|x| x == "VANISHED");
+                        let max = if by_uid {
+                            f.messages.keys().next_back().copied().unwrap_or(0)
+                        } else {
+                            f.messages.len() as u32
+                        };
+                        let ranges = uid_set(w.get(at).map(String::as_str).unwrap_or(""), max);
                         if (since.is_some() && !conn.condstore)
-                            || (vanished && (!conn.qresync || since.is_none()))
+                            || (vanished && (!conn.qresync || since.is_none() || !by_uid))
                         {
                             "BAD modifier not enabled".to_owned()
+                        } else if !by_uid && ranges.iter().any(|(a, b)| *a == 0 || *b > max) {
+                            // RFC 3501: a sequence number above EXISTS is an error.
+                            "BAD no such message".to_owned()
                         } else {
-                            let max = f.messages.keys().next_back().copied().unwrap_or(0);
-                            let ranges = uid_set(w.get(3).map(String::as_str).unwrap_or(""), max);
                             let inside =
                                 |u: u32| ranges.iter().any(|(a, b)| (*a..=*b).contains(&u));
                             let since = since.unwrap_or(0);
@@ -497,7 +604,8 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                             }
                             let mut bytes = reply.into_bytes();
                             for (seq, (uid, m)) in f.messages.iter().enumerate() {
-                                if !inside(*uid) || m.modseq <= since {
+                                let key = if by_uid { *uid } else { seq as u32 + 1 };
+                                if !inside(key) || m.modseq <= since {
                                     continue;
                                 }
                                 let mut parts = vec![format!("UID {uid}")];
@@ -513,12 +621,19 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                                 if conn.condstore {
                                     parts.push(format!("MODSEQ ({})", m.modseq));
                                 }
-                                if items.contains("BODY.PEEK[]") {
-                                    parts.push(format!("BODY[] {{{}}}\r\n", m.raw.len()));
-                                }
                                 let head = format!("* {} FETCH ({}", seq + 1, parts.join(" "));
                                 bytes.extend_from_slice(head.as_bytes());
+                                if items.contains("HEADER.FIELDS") {
+                                    let h = thread_fields(&m.raw);
+                                    bytes.extend_from_slice(
+                                        format!(" BODY[HEADER.FIELDS (MESSAGE-ID IN-REPLY-TO REFERENCES)] {{{}}}\r\n", h.len()).as_bytes(),
+                                    );
+                                    bytes.extend_from_slice(&h);
+                                }
                                 if items.contains("BODY.PEEK[]") {
+                                    bytes.extend_from_slice(
+                                        format!(" BODY[] {{{}}}\r\n", m.raw.len()).as_bytes(),
+                                    );
                                     bytes.extend_from_slice(&m.raw);
                                 }
                                 bytes.extend_from_slice(b")\r\n");

@@ -11,10 +11,15 @@ publish.workspace = true
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 # The response parser of async-imap. The framing and the commands are own code (spec "Options not chosen").
 imap-proto = "0.17"
+iris-provider = { version = "0.0.0", path = "../iris-provider" }
+# The header parser of the program (iris-clean): the thread fields and INTERNALDATE.
+mail-parser = { version = "=1.0.1", default-features = false, features = ["full_encoding"] }
 # The TLS parts that ureq brings already: rustls with ring, and the Mozilla roots.
 rustls = { version = "=0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
 webpki-roots = "1"
 
 [dev-dependencies]
+iris-store = { version = "0.0.0", path = "../iris-store" }
+iris-sync = { version = "0.0.0", path = "../iris-sync" }
 iris-fakeimap = { version = "0.0.0", path = "../iris-fakeimap" }
 iris-synth = { version = "0.0.0", path = "../iris-synth" }

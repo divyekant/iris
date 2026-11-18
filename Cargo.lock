@@ -1068,7 +1068,11 @@ dependencies = [
  "base64",
  "imap-proto",
  "iris-fakeimap",
+ "iris-provider",
+ "iris-store",
+ "iris-sync",
  "iris-synth",
+ "mail-parser",
  "rustls",
  "webpki-roots",
 ]

@@ -13,6 +13,10 @@
 //! The server is not trusted. Each response that does not parse is an
 //! error. After any error, drop the session and connect again.
 
+mod provider;
+
+pub use provider::{Imap, SENT_COPY, UNSENT};
+
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -118,6 +122,8 @@ pub fn connect(host: &str, port: u16, timeout: Duration) -> Result<Tls> {
     let tcp = tcp.ok_or(last)?;
     tcp.set_read_timeout(Some(timeout))?;
     tcp.set_write_timeout(Some(timeout))?;
+    // Each command waits for its answer: no Nagle delay.
+    tcp.set_nodelay(true)?;
     let roots = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
     };
@@ -172,6 +178,25 @@ pub struct Examined {
     /// `None` when the server has no `CONDSTORE`, or no mod-sequences for
     /// this folder.
     pub highest_modseq: Option<u64>,
+    /// The `FLAGS` and the `PERMANENTFLAGS` of the folder, without `\*`.
+    pub flags: Vec<String>,
+}
+
+/// The header fields that [`Entry::headers`] holds: the fields of the
+/// thread of a message.
+const HEADS: &str = "BODY.PEEK[HEADER.FIELDS (MESSAGE-ID IN-REPLY-TO REFERENCES)]";
+
+/// A key of [`Session::search`].
+#[derive(Clone, Copy, Debug)]
+pub enum Search<'a> {
+    Unseen,
+    Flagged,
+    /// The `\Draft` flag.
+    Draft,
+    /// A keyword: an IMAP atom, else [`Error::Name`].
+    Keyword(&'a str),
+    /// The UIDs from the first to the second.
+    Uids(u32, u32),
 }
 
 /// One message in a folder.
@@ -185,6 +210,8 @@ pub struct Entry {
     pub internal_date: Option<String>,
     /// `RFC822.SIZE`.
     pub size: Option<u32>,
+    /// The `Message-ID`, `In-Reply-To` and `References` header lines.
+    pub headers: Option<Vec<u8>>,
 }
 
 /// One event of [`Session::changes`].
@@ -485,7 +512,13 @@ impl<S: Read + Write> Session<S> {
         self.run(&cmd, None, |r, _| {
             match r {
                 Response::MailboxData(MailboxDatum::Exists(n)) => e.exists = n,
+                Response::MailboxData(MailboxDatum::Flags(f)) => {
+                    e.flags.extend(f.iter().map(|x| x.to_string()))
+                }
                 Response::Data { outcome, .. } => match outcome.code {
+                    Some(ResponseCode::PermanentFlags(f)) => e
+                        .flags
+                        .extend(f.iter().filter(|x| *x != "\\*").map(|x| x.to_string())),
                     Some(ResponseCode::UidValidity(v)) => validity = Some(v),
                     Some(ResponseCode::UidNext(n)) => e.uidnext = Some(n),
                     Some(ResponseCode::HighestModSeq(m)) => e.highest_modseq = Some(m),
@@ -496,6 +529,8 @@ impl<S: Read + Write> Session<S> {
             Ok(())
         })?;
         e.uidvalidity = validity.ok_or(Error::Protocol("no UIDVALIDITY"))?;
+        e.flags.sort();
+        e.flags.dedup();
         if !self.condstore() {
             e.highest_modseq = None;
         }
@@ -512,7 +547,7 @@ impl<S: Read + Write> Session<S> {
         // Not `1:*`: `*` is the largest UID now, so a removed UID above it
         // would get no VANISHED. 4294967295 is the largest UID (RFC 3501).
         let cmd = format!(
-            "UID FETCH 1:{} (UID FLAGS INTERNALDATE RFC822.SIZE) (CHANGEDSINCE {since}{vanished})",
+            "UID FETCH 1:{} (UID FLAGS INTERNALDATE RFC822.SIZE {HEADS}) (CHANGEDSINCE {since}{vanished})",
             u32::MAX
         );
         self.run(&cmd, None, |r, _| {
@@ -531,11 +566,82 @@ impl<S: Read + Write> Session<S> {
         })
     }
 
+    /// Each message of the open folder with a sequence number in
+    /// `low..=high` (at most `EXISTS`), and with `since` only the messages
+    /// with a mod-sequence above it.
+    pub fn window(
+        &mut self,
+        low: u32,
+        high: u32,
+        since: Option<u64>,
+        mut each: impl FnMut(Entry),
+    ) -> Result<()> {
+        let modifier = match since {
+            Some(_) if !self.condstore() => return Err(Error::Missing("CONDSTORE")),
+            Some(m) => format!(" (CHANGEDSINCE {m})"),
+            None => String::new(),
+        };
+        let cmd =
+            format!("FETCH {low}:{high} (UID FLAGS INTERNALDATE RFC822.SIZE {HEADS}){modifier}");
+        self.run(&cmd, None, |r, _| {
+            if let Response::Fetch(_, attrs) = r {
+                if let Some(e) = entry(&attrs) {
+                    each(e);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// The messages of the open folder with the UIDs `uids` (each one that
+    /// exists).
+    pub fn fetch_uids(&mut self, uids: &[u32], mut each: impl FnMut(Entry)) -> Result<()> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let set: Vec<String> = uids.iter().map(u32::to_string).collect();
+        let cmd = format!(
+            "UID FETCH {} (UID FLAGS INTERNALDATE RFC822.SIZE {HEADS})",
+            set.join(",")
+        );
+        self.run(&cmd, None, |r, _| {
+            if let Response::Fetch(_, attrs) = r {
+                if let Some(e) = entry(&attrs).filter(|e| uids.contains(&e.uid)) {
+                    each(e);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Each UID range of the open folder removed after `since`. Needs
+    /// `QRESYNC`. The changed messages are not read.
+    pub fn vanished(
+        &mut self,
+        since: u64,
+        mut each: impl FnMut(std::ops::RangeInclusive<u32>),
+    ) -> Result<()> {
+        if !self.qresync {
+            return Err(Error::Missing("QRESYNC"));
+        }
+        let cmd = format!(
+            "UID FETCH 1:{} (UID) (CHANGEDSINCE {since} VANISHED)",
+            u32::MAX
+        );
+        self.run(&cmd, None, |r, _| {
+            if let Response::Vanished { uids, .. } = r {
+                uids.into_iter().for_each(&mut each);
+            }
+            Ok(())
+        })
+    }
+
     /// Each message of the open folder with a UID in `from..=to` (`to`
     /// `None` is `*`).
     pub fn list(&mut self, from: u32, to: Option<u32>, mut each: impl FnMut(Entry)) -> Result<()> {
         let to_text = to.map_or("*".to_owned(), |t| t.to_string());
-        let cmd = format!("UID FETCH {from}:{to_text} (UID FLAGS INTERNALDATE RFC822.SIZE)");
+        let cmd =
+            format!("UID FETCH {from}:{to_text} (UID FLAGS INTERNALDATE RFC822.SIZE {HEADS})");
         let to = to.unwrap_or(u32::MAX);
         self.run(&cmd, None, |r, _| {
             if let Response::Fetch(_, attrs) = r {
@@ -549,30 +655,52 @@ impl<S: Read + Write> Session<S> {
     }
 
     /// Stream the RFC 5322 bytes of message `uid` of the open folder to
-    /// `sink`, and give the byte count. `Ok(None)`: no message has the UID.
-    /// After an error, the sink can hold part of the message: drop it.
-    pub fn fetch_raw(&mut self, uid: u32, sink: &mut dyn Write) -> Result<Option<u64>> {
+    /// `sink`. Gives the byte count and the entry (flags, `INTERNALDATE`,
+    /// header fields). `Ok(None)`: no message has the UID. After an error,
+    /// the sink can hold part of the message: drop it.
+    pub fn fetch_raw(&mut self, uid: u32, sink: &mut dyn Write) -> Result<Option<(u64, Entry)>> {
         let mut found = None;
         let mut counter = Counter { sink, n: 0 };
-        let cmd = format!("UID FETCH {uid} (UID BODY.PEEK[])");
+        let cmd = format!("UID FETCH {uid} (UID FLAGS INTERNALDATE {HEADS} BODY.PEEK[])");
         self.run(&cmd, Some(&mut counter), |r, _| {
             if let Response::Fetch(_, attrs) = r {
                 let has_body = attrs
                     .iter()
-                    .any(|a| matches!(a, AttributeValue::BodySection { .. }));
-                let this = attrs
-                    .iter()
-                    .any(|a| matches!(a, AttributeValue::Uid(u) if *u == uid));
-                if has_body && !this {
+                    .any(|a| matches!(a, AttributeValue::BodySection { section: None, .. }));
+                let e = entry(&attrs);
+                if has_body && e.as_ref().is_none_or(|e| e.uid != uid) {
                     return Err(Error::Protocol("BODY[] of another message"));
                 }
                 if has_body {
-                    found = Some(());
+                    found = e;
                 }
             }
             Ok(())
         })?;
-        Ok(found.map(|_| counter.n))
+        Ok(found.map(|e| (counter.n, e)))
+    }
+
+    /// The UIDs of the open folder that match `key`.
+    /// With `seqs`, only the messages with a sequence number in that range
+    /// (at most `EXISTS`), so the answer has at most that many UIDs.
+    pub fn search(&mut self, seqs: Option<(u32, u32)>, key: Search<'_>) -> Result<Vec<u32>> {
+        let key = match key {
+            Search::Unseen => "UNSEEN".to_owned(),
+            Search::Flagged => "FLAGGED".to_owned(),
+            Search::Draft => "DRAFT".to_owned(),
+            Search::Keyword(k) if is_atom(k) => format!("KEYWORD {k}"),
+            Search::Keyword(_) => return Err(Error::Name),
+            Search::Uids(a, b) => format!("UID {a}:{b}"),
+        };
+        let mut out = Vec::new();
+        let set = seqs.map_or(String::new(), |(a, b)| format!("{a}:{b} "));
+        self.run(&format!("UID SEARCH {set}{key}"), None, |r, _| {
+            if let Response::MailboxData(MailboxDatum::Search(u)) = r {
+                out.extend(u);
+            }
+            Ok(())
+        })?;
+        Ok(out)
     }
 
     /// End the session.
@@ -702,6 +830,7 @@ fn entry(attrs: &[AttributeValue<'_>]) -> Option<Entry> {
     let mut modseq = None;
     let mut internal_date = None;
     let mut size = None;
+    let mut headers = None;
     for a in attrs {
         match a {
             AttributeValue::Uid(u) => uid = Some(*u),
@@ -709,6 +838,11 @@ fn entry(attrs: &[AttributeValue<'_>]) -> Option<Entry> {
             AttributeValue::ModSeq(m) => modseq = Some(*m),
             AttributeValue::InternalDate(d) => internal_date = Some(d.to_string()),
             AttributeValue::Rfc822Size(n) => size = Some(*n),
+            AttributeValue::BodySection {
+                section: Some(_),
+                data: Some(d),
+                ..
+            } => headers = Some(d.to_vec()),
             _ => {}
         }
     }
@@ -719,7 +853,15 @@ fn entry(attrs: &[AttributeValue<'_>]) -> Option<Entry> {
         modseq,
         internal_date,
         size,
+        headers,
     })
+}
+
+/// An IMAP atom with no `\\`: a keyword that the client can send as it is.
+pub fn is_atom(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_graphic() && !b"(){%*\"\\]".contains(&b))
 }
 
 #[cfg(test)]

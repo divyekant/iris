@@ -226,13 +226,10 @@ the folder of section 4, from its attribute or its common name: `S`
 the newest message down. A window is a range of sequence numbers, not of
 UIDs: sequence numbers are dense (1 to `EXISTS`), so the page count follows
 the message count, and a folder with large or sparse UIDs needs no empty
-pages. A window is `FETCH <low>:<high> (UID FLAGS ...)`:
-
-- for a folder that is not in `from`: 2,000 sequence numbers, so at most
-  2,000 `Added` records;
-- for a known folder: 20,000 sequence numbers with `(CHANGEDSINCE
-  <modseq>)`, so at most 20,000 `Added` records, and only the changed
-  messages come back.
+pages. A window is 20,000 sequence numbers, `FETCH <low>:<high> (UID
+FLAGS ...) (CHANGEDSINCE <modseq>)`, so at most 20,000 `Added` records,
+and only the changed messages come back. Each folder of a window is in
+`from` (see the table below).
 
 A removal during the sequence moves the messages above it down by one
 sequence number. The windows go from the top down, so a message can come
@@ -261,7 +258,7 @@ For each folder of the list now:
 
 | Case | Result |
 |---|---|
-| The folder is not in `from` | `Added` for each message of the folder |
+| The folder is not in `from` | `HistoryExpired`. The first sync can list mail of a folder that is not in its start cursor, and that mail can go before the first `changes`. `from` has no UID set of the folder, so only a full resync removes that mail. A new folder at the server starts a full resync too: limit issue #660 |
 | A new `UIDVALIDITY` | `HistoryExpired` |
 | A new role (for example, a new `\Junk` folder takes the role from a folder named `Spam`) | `HistoryExpired`: the labels of each message of the folder change, and the folder has no other trace of the change |
 | No `HIGHESTMODSEQ` (`NOMODSEQ`) now or in `from` | `HistoryExpired`, also when nothing else changed: a flag change leaves no other trace. The resync then gets `Api` 400 `noCondstore` from `profile` (section 6) |
@@ -326,7 +323,8 @@ mirror does not have.
   - A page of `messages` then holds at most 2,000 IDs of about 1.3 KB
     each, so less than 3 MB.
   - A page of `changes` keeps at most 16 MiB of records (IDs, thread IDs
-    and labels). If a window has more, `changes` is `HistoryExpired`, and
+    and labels), `Added` and `Deleted` records together. If a page has
+    more, `changes` is `HistoryExpired`, and
     the full resync reads pages of `messages` and one message at a time.
 - `minimal` and `raw`: `EXAMINE` of the folder of the ID, then
   a `UID FETCH`. A new `UIDVALIDITY`, or no message with the UID, is
@@ -432,7 +430,8 @@ times after an unknown result (spec 2 section 7.2).
 | A `modify` with a label that moves mail | `Api` 400, nothing sent | `modify_refuses_moves` |
 | A lost connection after the first `STORE` | `Transport` | `modify_unknown` |
 | A wrong password | `Unauthorized` | `wrong_password` |
-| A new folder with more than 2,000 messages | pages of at most 2,000 records | `changes_pages` |
+| A folder that is not in `from` (also one that the first sync listed after its start cursor) | `HistoryExpired`, then a clean full resync in pages of 2,000 | `changes_pages` |
+| A page of changes and removals over the budget | `HistoryExpired` | `page_budget_counts_removals` |
 | A LIST order change between two message pages | each folder once | `message_pages_follow_folder_names` |
 | A flag that is not in the `PERMANENTFLAGS` of a target folder (no `\*` for a keyword) | `Api` 400 `notPermanent`, before any `STORE` | `modify_not_permanent` |
 | A `NO` to a `STORE` | `Transport` | `modify_refused` |
@@ -442,7 +441,6 @@ times after an unknown result (spec 2 section 7.2).
 | A folder name over 255 bytes | `Api` 400 `longFolderName` | `long_folder_name` |
 | A thread header ID over 998 bytes | the own location ID as thread | `long_thread_header_is_ignored` |
 | A keyword or folder named as a fixed label | a name with ` (keyword)` or ` (folder)` | `label_names_are_unique` |
-| A `changes` window over 16 MiB of records | `HistoryExpired` | none (it needs a 16 MiB page) |
 | A new role of a folder | `HistoryExpired`, then a clean full resync | `folder_role_change` |
 | Two folders with `\Junk` | `SPAM` on the mail of both, zero differences | `two_junk_folders_and_keyword_case` |
 | One keyword in two spellings (`$Todo`, `$todo`) | one label `kw:$todo`, zero differences | `two_junk_folders_and_keyword_case` |
