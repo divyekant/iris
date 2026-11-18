@@ -239,25 +239,33 @@ const FIXED: [&str; 9] = [
     "INBOX", "UNREAD", "STARRED", "SPAM", "TRASH", "SENT", "DRAFT", UNSENT, SENT_COPY,
 ];
 
-/// One name for each label, with no case: a folder label whose name is a
-/// fixed name gets " (folder)", and a keyword label whose name is a fixed
-/// or a folder name gets " (keyword)". A lookup by name finds one label.
+/// One name for each label, with no case (spec section 4). In ID order
+/// (fixed labels, then folder labels, then keyword labels), a name that a
+/// fixed name or an earlier label has gets " (folder)" or " (keyword)",
+/// then " (folder 2)", " (folder 3)" and so on. A lookup by name finds one
+/// label. The fixed names are taken first, so no label takes one.
 fn unique_names(mut labels: Vec<Label>) -> Vec<Label> {
-    let fixed = |n: &str| FIXED.iter().any(|x| x.eq_ignore_ascii_case(n));
-    for l in labels.iter_mut().filter(|l| l.id.starts_with("folder:")) {
-        if fixed(&l.name) {
-            l.name.push_str(" (folder)");
+    labels.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut taken: BTreeSet<String> = FIXED.iter().map(|x| x.to_ascii_lowercase()).collect();
+    for l in labels.iter_mut() {
+        let tag = if l.id.starts_with("folder:") {
+            "folder"
+        } else if l.id.starts_with("kw:") {
+            "keyword"
+        } else {
+            continue;
+        };
+        let base = l.name.clone();
+        let mut n = 1;
+        while taken.contains(&l.name.to_ascii_lowercase()) {
+            l.name = if n == 1 {
+                format!("{base} ({tag})")
+            } else {
+                format!("{base} ({tag} {n})")
+            };
+            n += 1;
         }
-    }
-    let taken: BTreeSet<String> = labels
-        .iter()
-        .filter(|l| !l.id.starts_with("kw:"))
-        .map(|l| l.name.to_ascii_lowercase())
-        .collect();
-    for l in labels.iter_mut().filter(|l| l.id.starts_with("kw:")) {
-        if fixed(&l.name) || taken.contains(&l.name.to_ascii_lowercase()) {
-            l.name.push_str(" (keyword)");
-        }
+        taken.insert(l.name.to_ascii_lowercase());
     }
     labels
 }
@@ -902,6 +910,8 @@ mod tests {
             l("kw:inbox", "Inbox"),
             l("kw:work", "work"),
             l("kw:late", "Late"),
+            l("folder:work", "work"),
+            l("folder:Work (folder)", "Work (folder)"),
         ]);
         let names: Vec<&str> = out.iter().map(|l| l.name.as_str()).collect();
         assert_eq!(
@@ -910,9 +920,11 @@ mod tests {
                 "INBOX",
                 "Spam (folder)",
                 "Work",
+                "Work (folder)",
+                "work (folder 2)",
                 "Inbox (keyword)",
+                "Late",
                 "work (keyword)",
-                "Late"
             ]
         );
     }
