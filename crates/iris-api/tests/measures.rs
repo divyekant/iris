@@ -404,6 +404,7 @@ fn downgrade(s: &Store) {
              ALTER TABLE account DROP COLUMN imap_host;
              ALTER TABLE account DROP COLUMN imap_port;
              ALTER TABLE account DROP COLUMN imap_user;
+             ALTER TABLE account DROP COLUMN categories_off_at;
              PRAGMA user_version = 26;",
         )?;
         Ok(())
