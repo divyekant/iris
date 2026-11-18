@@ -226,6 +226,23 @@ pub fn edit_text(text: &str, change: Change) -> std::result::Result<Option<Strin
         }
         Change::Accept(_) | Change::Grant { .. } => return Ok(None),
         Change::Remove(id) => {
+            // The parser accepts the rules as an array of inline tables too.
+            if let Some(rules) = doc.get_mut("rule").and_then(Item::as_array_mut) {
+                let Some(i) = rules.iter().position(|v| {
+                    v.as_inline_table()
+                        .and_then(|t| t.get("id"))
+                        .and_then(Value::as_integer)
+                        == Some(i64::from(id))
+                }) else {
+                    return Ok(None);
+                };
+                // The comments directly above the rule go with it, as for a table.
+                rules.remove(i);
+                if rules.is_empty() {
+                    doc.remove("rule");
+                }
+                return Ok(Some(doc.to_string()));
+            }
             let Some(rules) = doc.get_mut("rule").and_then(Item::as_array_of_tables_mut) else {
                 return Ok(None);
             };
@@ -318,6 +335,16 @@ fn add_rule(text: &str, rule: &crate::Rule, why: &str) -> std::result::Result<St
     t.decor_mut().set_prefix(format!("\n# {why}\n"));
     if doc.get("rule").is_none() {
         doc.insert("rule", Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    }
+    if let Some(rules) = doc.get_mut("rule").and_then(Item::as_array_mut) {
+        // An array of inline tables: the rule goes in as one more entry, on
+        // its own line, with the comment above it.
+        let mut v = Value::InlineTable(t.into_inline_table());
+        v.decor_mut().set_prefix(format!("\n  # {why}\n  "));
+        rules.push_formatted(v);
+        rules.set_trailing("\n");
+        rules.set_trailing_comma(true);
+        return Ok(doc.to_string());
     }
     match doc.get_mut("rule").and_then(Item::as_array_of_tables_mut) {
         Some(rules) => rules.push(t),

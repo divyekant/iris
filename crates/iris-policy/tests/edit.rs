@@ -116,6 +116,81 @@ fn a_removal_keeps_each_other_rule_and_each_comment_of_the_others() {
     }
 }
 
+/// The same rules as an array of inline tables, which the parser accepts
+/// too (issue 144), with a comment above some entries.
+fn random_inline(rng: &mut Rng, n: u32) -> String {
+    let mut s = "# head\nversion = 0\nmode = \"apply\"\nrule = [\n".to_string();
+    for id in 1..=n {
+        if rng.next(2) == 0 {
+            s += &format!("  # about {id}\n");
+        }
+        s += &format!(
+            "  {{ id = {id}, name = \"r{id}\", effect = \"hide\", when = {{ form = \"feed\" }}, by = \"person\", added = 2026-11-10 }},\n"
+        );
+    }
+    s + "]\n# tail\n"
+}
+
+#[test]
+fn a_removal_finds_a_rule_in_an_inline_array() {
+    // Invariant: a removal works on each layout of the rules that the
+    // parser accepts, and changes only the removed rule.
+    let mut rng = Rng(0x2545f4914f6cdd1d);
+    for case in 0..200 {
+        let n = 1 + rng.next(5) as u32;
+        let text = random_inline(&mut rng, n);
+        let before = parse(&text).unwrap_or_else(|e| panic!("case {case}: {e}\n{text}"));
+        let id = 1 + rng.next(n as usize) as u32;
+        let out = edit_text(&text, Change::Remove(id))
+            .unwrap()
+            .unwrap_or_else(|| panic!("case {case}: rule {id} not found\n{text}"));
+        let after = parse(&out).unwrap_or_else(|e| panic!("case {case}: {e}\n{out}"));
+        let mut want = rules(&before);
+        want.retain(|r| r.id != id);
+        assert_eq!(rules(&after), want, "case {case}\n{text}\n---\n{out}");
+        for line in text.lines().filter(|l| l.trim_start().starts_with('#')) {
+            let gone = line.trim() == format!("# about {id}");
+            assert_eq!(out.contains(line), !gone, "case {case}: {line}\n---\n{out}");
+        }
+        assert_eq!(edit_text(&text, Change::Remove(n + 1)), Ok(None));
+    }
+}
+
+#[test]
+fn a_grant_adds_a_rule_to_an_inline_array() {
+    let (_dir, s) = store("inline-add");
+    let text = random_inline(&mut Rng(3), 2);
+    std::fs::write(s.dir().join(FILE), &text).unwrap();
+    let FileState::Changed(l) = file_state(&s).unwrap() else {
+        panic!("the file is a change")
+    };
+    let Confirm::Done { version, .. } = confirm(&s, &l.sha256, 1).unwrap() else {
+        panic!("confirm")
+    };
+    let got = change(
+        &s,
+        Some(version),
+        Change::Grant {
+            job: "j-4".into(),
+            verbs: vec![Verb::Archive],
+        },
+        2,
+    )
+    .unwrap();
+    let Edited::Done { policy, .. } = got else {
+        panic!("grant: {got:?}")
+    };
+    let out = disk(&s);
+    assert_eq!(parse(&out).unwrap(), policy, "{out}");
+    assert_eq!(policy.rules.len(), 3, "{out}");
+    assert_eq!(policy.rules[2].job.as_deref(), Some("j-4"));
+    assert!(
+        out.contains("# You gave this grant inside job j-4"),
+        "{out}"
+    );
+    assert!(out.ends_with("]\n# tail\n"), "{out}");
+}
+
 #[test]
 fn a_removal_keeps_the_blank_line_after_a_shared_comment() {
     let text = format!("# shared\n\n# about 1\n{}{}", rule(1), rule(2));
