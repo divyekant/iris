@@ -665,8 +665,8 @@ async fn get_policy(State(s): State<Arc<Store>>) -> Result<Response> {
 /// The body of a route that takes none: zero bytes, or a JSON text that is
 /// the empty object `{}` (the web client sends `{}`). `serde_json` parses
 /// the JSON. Any other body, a body of only spaces too, gives 400 before the
-/// route changes anything. The read stops after `NO_BODY_MAX` bytes, so a
-/// large body does not stay in memory.
+/// route changes anything. The read stops at the first frame past
+/// `NO_BODY_MAX` bytes, so a large body does not stay in memory.
 struct NoBody;
 
 /// The longest body that a route with no body reads: `{}` with some space.

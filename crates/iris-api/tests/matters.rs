@@ -318,11 +318,11 @@ async fn a_route_with_no_body_refuses_a_body() {
 
 /// The rule of a body on a route that takes none, written apart from the
 /// code: zero bytes, or `{` and `}` with only JSON whitespace around and
-/// between them.
+/// between them, in 64 bytes or fewer.
 fn no_body(b: &[u8]) -> bool {
     let ws = |c: &u8| matches!(c, b' ' | b'\t' | b'\n' | b'\r');
     let inner: Vec<u8> = b.iter().copied().filter(|c| !ws(c)).collect();
-    b.is_empty() || inner == b"{}"
+    b.is_empty() || (inner == b"{}" && b.len() <= 64)
 }
 
 /// Generated bodies: each gets 400 unless it follows the rule, and a
@@ -342,11 +342,19 @@ async fn generated_bodies_follow_the_no_body_rule() {
         (seed >> 33) % n
     };
     let (mut passed, mut refused) = (0, 0);
-    for _ in 0..600 {
+    for i in 0..600 {
         let len = next(7);
-        let body: Vec<u8> = (0..len)
+        let mut body: Vec<u8> = (0..len)
             .flat_map(|_| pieces[next(pieces.len() as u64) as usize].to_vec())
             .collect();
+        // Each fourth body gets white space up to near the 64-byte limit.
+        if i % 4 == 0 {
+            let pad = 58 + next(10) as usize;
+            body.splice(
+                body.len() / 2..body.len() / 2,
+                std::iter::repeat_n(b' ', pad.saturating_sub(body.len())),
+            );
+        }
         let text = String::from_utf8(body.clone()).unwrap();
         let want = no_body(&body);
         // g-9 does not exist: a body that passes reaches the route and gets 404.
@@ -481,5 +489,22 @@ async fn a_route_with_no_body_stops_the_read_early() {
         let n = read.load(Ordering::SeqCst);
         assert!(n <= 4 * 1024, "{uri} read {n} bytes");
     }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The 64-byte limit of a route with no body: `{}` in 64 bytes passes and
+/// changes the matter. In 65 bytes it gets 400 and changes nothing.
+#[tokio::test]
+async fn the_no_body_limit_is_64_bytes() {
+    let (dir, s) = setup("nobody-64");
+    let body = |n: usize| format!("{{{}}}", " ".repeat(n - 2));
+    let (code, _) = call(&s, Method::POST, "/api/matters/g-1/decline", &body(65)).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let (_, list) = call(&s, Method::GET, "/api/matters", "").await;
+    assert_eq!(ids(&list["proposed"]), vec!["g-2", "g-1"]);
+    let (code, _) = call(&s, Method::POST, "/api/matters/g-1/decline", &body(64)).await;
+    assert_eq!(code, StatusCode::OK);
+    let (_, list) = call(&s, Method::GET, "/api/matters", "").await;
+    assert_eq!(ids(&list["proposed"]), vec!["g-2"]);
     let _ = std::fs::remove_dir_all(dir);
 }
