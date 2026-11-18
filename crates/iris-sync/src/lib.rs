@@ -181,7 +181,7 @@ pub fn sync(store: &Store, mail: &dyn Provider, account: i64, token: &str) -> Re
 /// [`sync`] for a caller that holds the sync lock.
 fn sync_locked(store: &Store, mail: &dyn Provider, account: i64, token: &str) -> Result<Synced> {
     let s = state(store, account)?;
-    let mut kind = match (s.kind.as_deref(), &s.history_id) {
+    let kind = match (s.kind.as_deref(), &s.history_id) {
         (Some(KIND_RESYNC), _) => KIND_RESYNC,
         (None, Some(_)) => "incremental",
         _ => KIND_FIRST,
@@ -189,8 +189,11 @@ fn sync_locked(store: &Store, mail: &dyn Provider, account: i64, token: &str) ->
     // The row of a running sync is the newest row, so a reader of the log
     // does not take the error row of an earlier call (for example a 401 of
     // a token that ran out) as the state of this call.
-    let row = log_start(store, account, kind, now_ms())?;
-    let result = run(store, mail, account, token, &mut kind);
+    let mut log = Running {
+        row: log_start(store, account, kind, now_ms())?,
+        kind,
+    };
+    let result = run(store, mail, account, token, &mut log);
     let text = match &result {
         Ok(s) => format!(
             "ok: history {}, fetched {}, gone {}, failed {}",
@@ -198,7 +201,7 @@ fn sync_locked(store: &Store, mail: &dyn Provider, account: i64, token: &str) ->
         ),
         Err(e) => format!("error: {e}"),
     };
-    let logged = log_end(store, row, kind, &text);
+    let logged = log_end(store, log.row, log.kind, &text);
     let synced = result?;
     logged?;
     Ok(synced)
@@ -209,7 +212,7 @@ fn run(
     mail: &dyn Provider,
     account: i64,
     token: &str,
-    kind: &mut &'static str,
+    log: &mut Running,
 ) -> Result<Synced> {
     // On each call: history of another mailbox would change the mirror of this one.
     let profile = mail.profile(token)?;
@@ -225,11 +228,11 @@ fn run(
         let from = match (s.kind.as_deref(), s.history_id.as_deref()) {
             (None, Some(h)) => h.to_string(),
             (None, None) | (Some(KIND_FIRST), _) => {
-                *kind = KIND_FIRST;
+                log.set(store, KIND_FIRST)?;
                 first_steps(store, mail, account, token, &s, &mut done)?
             }
             (Some(KIND_RESYNC), _) => {
-                *kind = KIND_RESYNC;
+                log.set(store, KIND_RESYNC)?;
                 resync = true;
                 fresh |= s.start.is_none();
                 resync_steps(store, mail, account, token, &s, &mut done)?
@@ -815,6 +818,31 @@ fn log(store: &Store, account: i64, kind: &str, started: i64, result: &str) -> R
         Ok(())
     })?;
     Ok(())
+}
+
+/// The open `sync_log` row of a running call and its kind.
+struct Running {
+    row: i64,
+    kind: &'static str,
+}
+
+impl Running {
+    /// Set the kind of the call. The open row gets it at once, so a reader
+    /// of the log sees the kind of the running call (for example a full
+    /// resync that starts after an expired history ID).
+    fn set(&mut self, store: &Store, kind: &'static str) -> Result<()> {
+        if self.kind != kind {
+            store.write(|tx| {
+                tx.execute(
+                    "UPDATE sync_log SET kind = ?2 WHERE id = ?1",
+                    params![self.row, kind],
+                )?;
+                Ok(())
+            })?;
+            self.kind = kind;
+        }
+        Ok(())
+    }
 }
 
 /// Add the row of a sync that starts, with no end and no result. Gives its ID.
