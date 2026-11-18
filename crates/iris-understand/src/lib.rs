@@ -94,6 +94,9 @@ pub struct Context<'a> {
     pub kind: Kind,
     /// Provider IDs of the labels of the message, for example `SPAM`.
     pub labels: &'a [String],
+    /// The authserv-id of the `Authentication-Results` header to trust
+    /// (`head::trusted_authserv` of the account provider).
+    pub authserv: Option<&'a str>,
     /// `internalDate` of the message, in milliseconds. Item dates use it.
     pub internal_date: Option<i64>,
     pub now_ms: i64,
@@ -225,7 +228,7 @@ pub fn link_mark(head: &Head, links: &[iris_clean::Link], links_cut: bool) -> bo
 /// [`Text::of_cut`]. A link past the cut can be missing, so the mark `link`
 /// reads the flags too.
 pub fn analyze_cut(raw: &[u8], raw_cut: bool, html_after: bool, cx: &Context) -> Analysis {
-    let head = Head::parse(raw);
+    let head = Head::parse(raw, cx.authserv);
     let mut text = Text::of_cut(raw, raw_cut, html_after);
     if !cx.same_sender.is_empty() {
         // The cut mark is not part of the text: it stays at the end.

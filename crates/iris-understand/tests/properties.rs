@@ -71,7 +71,7 @@ fn random_mail_never_stops_the_parsers() {
         if rng.below(4) == 0 {
             raw.push(0xff);
         }
-        let h = Head::parse(&raw);
+        let h = Head::parse(&raw, Some(iris_understand::head::GMAIL_AUTHSERV));
         // Each address is lowercase, as the store keeps it.
         for a in h.to.iter().chain(&h.cc).chain(h.from_addr.iter()) {
             assert_eq!(a, &a.to_ascii_lowercase(), "seed {seed}");
@@ -81,6 +81,7 @@ fn random_mail_never_stops_the_parsers() {
             me: "owner@example.com",
             kind: Kind::Stranger,
             labels: &[],
+            authserv: Some(iris_understand::head::GMAIL_AUTHSERV),
             internal_date: None,
             now_ms: 0,
             known_person: &lookup,

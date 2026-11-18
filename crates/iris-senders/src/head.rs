@@ -9,6 +9,17 @@ pub(crate) const HEAD_MAX: usize = 256 * 1024;
 /// joined. Names are lowercase.
 pub struct Head(Vec<(String, String)>);
 
+/// The authserv-id of the `Authentication-Results` header of Gmail.
+pub const GMAIL_AUTHSERV: &str = "mx.google.com";
+
+/// The authserv-id of the `Authentication-Results` header that the provider
+/// of an account adds on receipt: the only one to trust. Only Gmail has one.
+/// For another provider, any sender can write a header with the Gmail ID
+/// (docs/specs/2026-11-17-imap-provider.md, section 8).
+pub fn trusted_authserv(provider: &str) -> Option<&'static str> {
+    (provider == "gmail").then_some(GMAIL_AUTHSERV)
+}
+
 impl Head {
     pub fn parse(raw: &[u8]) -> Head {
         let raw = &raw[..raw.len().min(HEAD_MAX)];
@@ -90,12 +101,16 @@ impl Head {
                 .is_some_and(|v| first_word(v) != "no")
     }
 
-    /// True when the `Authentication-Results` header that Gmail added says
-    /// DKIM passes for `domain` (or a parent domain of it). Only the top
-    /// header with the authserv-id `mx.google.com` counts. Gmail puts its
-    /// header above each header that the sender wrote, and a sender can
-    /// write any result (spec 1 section 6.7).
-    pub(crate) fn dkim_pass(&self, domain: &str) -> bool {
+    /// True when the `Authentication-Results` header that the provider added
+    /// says DKIM passes for `domain` (or a parent domain of it). Only the top
+    /// header with the authserv-id `authserv` ([`trusted_authserv`]) counts.
+    /// Gmail puts its header above each header that the sender wrote, and a
+    /// sender can write any result (spec 1 section 6.7). With no `authserv`,
+    /// no header counts.
+    pub(crate) fn dkim_pass(&self, domain: &str, authserv: Option<&str>) -> bool {
+        let Some(authserv) = authserv else {
+            return false;
+        };
         let gmail = self.0.iter().find_map(|(n, v)| {
             if n != "authentication-results" {
                 return None;
@@ -103,7 +118,7 @@ impl Head {
             let v = strip_comments(v);
             let (id, rest) = v.split_once(';').unwrap_or((&v, ""));
             id.trim()
-                .eq_ignore_ascii_case("mx.google.com")
+                .eq_ignore_ascii_case(authserv)
                 .then(|| rest.to_string())
         });
         let Some(ar) = gmail else {
@@ -322,23 +337,28 @@ mod tests {
     fn only_the_top_gmail_authentication_results_header_counts() {
         let gmail = "Authentication-Results: mx.google.com;\r\n dkim=pass (fake: dkim=pass header.d=evil.example) header.i=@mail.shop.example.com;\r\n dmarc=pass\r\n\r\n";
         let h = Head::parse(gmail.as_bytes());
-        assert!(h.dkim_pass("mail.shop.example.com"));
-        assert!(h.dkim_pass("a.mail.shop.example.com"));
-        assert!(!h.dkim_pass("shop.example.com"));
+        // The account provider decides the trust: only Gmail adds the header.
+        assert!(!h.dkim_pass("mail.shop.example.com", trusted_authserv("imap")));
+        assert!(!h.dkim_pass("mail.shop.example.com", None));
+        const G: Option<&str> = Some(GMAIL_AUTHSERV);
+        assert_eq!(trusted_authserv("gmail"), G);
+        assert!(h.dkim_pass("mail.shop.example.com", G));
+        assert!(h.dkim_pass("a.mail.shop.example.com", G));
+        assert!(!h.dkim_pass("shop.example.com", G));
         // The text in a comment does not count.
-        assert!(!h.dkim_pass("evil.example"));
+        assert!(!h.dkim_pass("evil.example", G));
 
         // Another provider's header above Gmail's does not hide Gmail's result.
         let other = "Authentication-Results: mx.other.example; dkim=fail header.d=shop.example.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=shop.example.com\r\n\r\n";
-        assert!(Head::parse(other.as_bytes()).dkim_pass("shop.example.com"));
+        assert!(Head::parse(other.as_bytes()).dkim_pass("shop.example.com", G));
         let none =
             "Authentication-Results: mx.other.example; dkim=pass header.d=shop.example.com\r\n\r\n";
-        assert!(!Head::parse(none.as_bytes()).dkim_pass("shop.example.com"));
+        assert!(!Head::parse(none.as_bytes()).dkim_pass("shop.example.com", G));
         // Gmail puts its header on top. A header lower down is the sender's.
         let fail = "Authentication-Results: mx.google.com; dkim=fail header.d=shop.example.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=shop.example.com\r\n\r\n";
-        assert!(!Head::parse(fail.as_bytes()).dkim_pass("shop.example.com"));
+        assert!(!Head::parse(fail.as_bytes()).dkim_pass("shop.example.com", G));
         // "example.com" must not match the end of "badexample.com".
         let near = "Authentication-Results: mx.google.com; dkim=pass header.d=example.com\r\n\r\n";
-        assert!(!Head::parse(near.as_bytes()).dkim_pass("badexample.com"));
+        assert!(!Head::parse(near.as_bytes()).dkim_pass("badexample.com", G));
     }
 }

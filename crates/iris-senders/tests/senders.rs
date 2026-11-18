@@ -288,6 +288,25 @@ fn a_service_needs_automated_mail_gmail_dkim_and_two_earlier_messages() {
     }
 }
 
+/// For an account that is not Gmail, a header with the Gmail authserv-id is
+/// text that any sender can write: it is no DKIM pass (IMAP spec section 8).
+#[test]
+fn a_gmail_header_counts_only_for_a_gmail_account() {
+    let mut c = Case::new("service-imap");
+    c.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE account SET provider = 'imap' WHERE id = ?1",
+                [c.acc],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    for t in ["t1", "t2", "t3", "t4"] {
+        assert_eq!(c.put(t, &[], &service_mail()).kind, Kind::Stranger);
+    }
+}
+
 #[test]
 fn a_near_copy_of_a_known_domain_is_hostile() {
     let mut c = Case::new("hostile");

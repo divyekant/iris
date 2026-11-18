@@ -189,12 +189,13 @@ fn decide_message(
     ch: &mut Changes,
 ) -> rusqlite::Result<Decision> {
     let head = Head::parse(raw);
-    let (date, sha, account): (Option<i64>, Option<String>, String) = conn.query_row(
-        "SELECT m.internal_date, m.content_sha256, a.address FROM message m
+    let (date, sha, account, provider): (Option<i64>, Option<String>, String, String) = conn
+        .query_row(
+            "SELECT m.internal_date, m.content_sha256, a.address, a.provider FROM message m
            JOIN account a ON a.id = m.account_id WHERE m.id = ?1",
-        [message],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
+            [message],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
     let labels: Vec<String> = conn
         .prepare_cached(
             "SELECT l.provider_id FROM message_label ml JOIN label l ON l.id = ml.label_id
@@ -327,7 +328,8 @@ fn decide_message(
     // The `service` rule: this message is automated mail with a Gmail DKIM
     // pass. The rule counts its earlier messages when it reads the row, so
     // an older message that is understood later counts too.
-    if head.automated() && head.dkim_pass(domain_of(&addr)) {
+    let authserv = head::trusted_authserv(&provider);
+    if head.automated() && head.dkim_pass(domain_of(&addr), authserv) {
         conn.prepare_cached(
             "INSERT OR IGNORE INTO sender_evidence(message_id, address, rule, content_sha256)
              VALUES (?1, ?2, 'service', ?3)",
