@@ -27,4 +27,6 @@ unicase = "=2.8.1"
 iris-gmail = { version = "0.0.0", path = "../iris-gmail" }
 iris-spec = { version = "0.0.0", path = "../iris-spec" }
 iris-fakegmail = { version = "0.0.0", path = "../iris-fakegmail" }
+iris-fakegraph = { version = "0.0.0", path = "../iris-fakegraph" }
+iris-graph = { version = "0.0.0", path = "../iris-graph" }
 iris-synth = { version = "0.0.0", path = "../iris-synth" }
