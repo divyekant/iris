@@ -523,3 +523,52 @@ fn search_windows_use_sequence_numbers() {
     assert_eq!(page.messages.len(), 1, "{page:?}");
     assert!(page.messages[0].id.contains(&format!(":{}:", uids[25])));
 }
+
+/// Two `\Junk` folders both give SPAM, and the two spellings of one
+/// keyword give one label (spec section 4). The mirror stays clean.
+#[test]
+fn two_junk_folders_and_keyword_case() {
+    let fake = FakeImap::start(Caps::ALL);
+    fake.create("Junk", Some("\\Junk"));
+    fake.create("Spam", Some("\\Junk"));
+    fake.add("Junk", Mailbox::new(21, 1).raw(0), &["\\Seen", "$Todo"]);
+    fake.add(
+        "Spam",
+        Mailbox::new(22, 1).raw(0),
+        &["\\Seen", "$todo", "$TODO"],
+    );
+    let mail = provider(&fake);
+
+    let spam = mail.messages(PASSWORD, Some("SPAM"), None).unwrap();
+    let mut n = spam.messages.len();
+    let mut page = spam.next_page_token;
+    while let Some(p) = page {
+        let next = mail.messages(PASSWORD, Some("SPAM"), Some(&p)).unwrap();
+        n += next.messages.len();
+        page = next.next_page_token;
+    }
+    assert_eq!(n, 2);
+
+    let kws: Vec<_> = mail
+        .labels(PASSWORD)
+        .unwrap()
+        .into_iter()
+        .filter(|l| l.id.starts_with("kw:"))
+        .collect();
+    assert_eq!(kws.len(), 1, "{kws:?}");
+    assert_eq!(kws[0].id, "kw:$todo");
+    let tagged = mail.messages(PASSWORD, Some("kw:$todo"), None).unwrap();
+    let mut n = tagged.messages.len();
+    let mut page = tagged.next_page_token;
+    while let Some(p) = page {
+        let next = mail.messages(PASSWORD, Some("kw:$todo"), Some(&p)).unwrap();
+        n += next.messages.len();
+        page = next.next_page_token;
+    }
+    assert_eq!(n, 2);
+
+    let store = Store::open(&data_dir("junk-case")).unwrap();
+    let account = store.add_account("imap", OWNER).unwrap();
+    first_sync(&store, &mail, account, PASSWORD).unwrap();
+    assert_clean(&store, &mail, account);
+}

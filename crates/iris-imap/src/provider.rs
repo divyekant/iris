@@ -174,13 +174,19 @@ fn labels_of(f: &Folder, flags: &[String]) -> Vec<String> {
     if f.special == Some(Special::Sent) {
         out.push(SENT_COPY.into());
     }
-    out.extend(
-        flags
-            .iter()
-            .filter(|g| !g.starts_with('\\'))
-            .map(|g| format!("kw:{g}")),
-    );
+    let kws: std::collections::BTreeSet<String> = flags
+        .iter()
+        .filter(|g| !g.starts_with('\\'))
+        .map(|g| keyword_id(g))
+        .collect();
+    out.extend(kws);
     out
+}
+
+/// The label ID of a keyword. IMAP compares keywords with no case (RFC 3501
+/// section 9, note 1), so `$Todo` and `$todo` are one label.
+fn keyword_id(k: &str) -> String {
+    format!("kw:{}", k.to_ascii_lowercase())
 }
 
 fn message_id(validity: u32, uid: u32, folder: &str) -> String {
@@ -403,8 +409,10 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
                 out.insert(id.clone(), label(&id, &name, kind));
                 for k in s.examine(&f.name).map_err(read_error)?.flags {
                     if !k.starts_with('\\') {
-                        let id = format!("kw:{k}");
-                        out.insert(id.clone(), label(&id, &k, "user"));
+                        // The first spelling in folder order names the label.
+                        let id = keyword_id(&k);
+                        out.entry(id.clone())
+                            .or_insert_with(|| label(&id, &k, "user"));
                     }
                 }
             }
