@@ -95,6 +95,14 @@ pub fn state(store: &Store) -> Result<Option<Stopped>> {
     }))
 }
 
+/// The sessions that are not reaped, and whether a Gmail call runs (the
+/// apply lock is held), now, with no wait and with or without a stop. Each
+/// answer of the Stop API reads them (docs/specs/2026-11-17-stop.md,
+/// section 5).
+pub fn measure_now(store: &Store) -> Result<(usize, bool)> {
+    measure(store, std::time::Duration::ZERO)
+}
+
 /// Wait up to `wait` in total for the apply lock and for the reap of each
 /// session. Gives the sessions that are not reaped, and whether a Gmail
 /// call still runs (the apply lock is held).
