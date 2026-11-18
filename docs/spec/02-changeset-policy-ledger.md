@@ -665,7 +665,13 @@ changes:
 - The pass holds the facts of one action at a time, and one count for each
   key. It skips a bulk action, because a bulk action stays in review with
   each rule (section 6.5), so it holds the facts of 500 messages or fewer.
-  It runs on a read connection and holds no write lock.
+  The background pass runs on a read connection and holds no write lock.
+  Before it writes, it reads its mark again under the write lock, and it
+  drops a pass that a later decision or a new policy made stale.
+- Each policy that becomes active (an accept, an edit from the web client,
+  a confirmed file) runs the pass again in its own write transaction, so
+  the rule removes each open proposal that it covers at once. This pass
+  holds the write lock while it reads at most 2,000 actions.
 - The person accepts or dismisses a proposal in the web client. An accept
   is a change of section 6.3: the engine adds the rule at the end of the
   file, with the next rule ID, `by = "proposal"`, the date and a comment,

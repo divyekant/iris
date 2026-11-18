@@ -230,53 +230,98 @@ pub struct Mark([i64; 6]);
 
 /// Writes the open proposals again from the decided actions, if the
 /// decisions, the active policy or the hour changed since `last`. Gives the
-/// number of open proposals after a pass, or `None` when no pass ran.
+/// number of open proposals after a pass, or `None` when no pass ran or a
+/// change came between the read and the write.
 pub fn refresh(store: &Store, now: i64, last: &mut Option<Mark>) -> Result<Option<usize>> {
-    // The pass reads many facts: it runs on a read connection, so it holds
-    // no write lock. A decision after the read gives a new mark, and the
-    // next tick runs again; an accept checks its proposal again.
-    let (mark, found) = store.read(|c| {
+    match read_pass(store, now, last)? {
+        Some(pass) => write_pass(store, pass, now, last),
+        None => Ok(None),
+    }
+}
+
+/// The result of the read half of [`refresh`], for [`write_pass`].
+pub struct Pass {
+    mark: Mark,
+    found: Found,
+}
+
+/// The read half of [`refresh`]: a pass on a read connection, so it holds
+/// no write lock. Gives `None` when nothing changed since `last`.
+pub fn read_pass(store: &Store, now: i64, last: &Option<Mark>) -> Result<Option<Pass>> {
+    store.read(|c| {
         let mark = mark(c, now)?;
-        Ok((
+        if *last == Some(mark) {
+            return Ok(None);
+        }
+        Ok(Some(Pass {
             mark,
-            (*last != Some(mark)).then(|| pass(c, now)).transpose()?,
-        ))
-    })?;
-    let Some(found) = found else {
-        return Ok(None);
-    };
+            found: pass(c, now)?,
+        }))
+    })
+}
+
+/// The write half of [`refresh`]. The pass is the truth only of the state
+/// that it read: a decision or an accept (a new policy) after the read
+/// changes the mark, and the write then drops the pass. The next tick
+/// runs again, because `last` does not change.
+pub fn write_pass(
+    store: &Store,
+    pass: Pass,
+    now: i64,
+    last: &mut Option<Mark>,
+) -> Result<Option<usize>> {
     let n = store.write(|tx| {
-        let mut keep = BTreeSet::new();
-        for (key, approvals) in &found.proposals {
-            let (verb, cond, value, form) = key;
-            tx.execute(
-                "INSERT INTO rule_proposal (verb, cond, value, form, approvals, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
-                 ON CONFLICT (verb, cond, value, form) DO UPDATE
-                 SET approvals = excluded.approvals, updated_at = excluded.updated_at
-                 WHERE state = 'open' AND approvals <> excluded.approvals",
-                params![verb, cond, value, form, approvals, now],
-            )?;
-            keep.insert(key.clone());
+        if mark(tx, now)? != pass.mark {
+            return Ok(None);
         }
-        // A pattern that is gone (a refusal, an undo, a new rule) is no longer proposed.
-        let open: Vec<(i64, Key)> = tx
-            .prepare("SELECT id, verb, cond, value, form FROM rule_proposal WHERE state = 'open'")?
-            .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))))?
-            .collect::<rusqlite::Result<_>>()?;
-        let mut n = 0;
-        for (id, key) in open {
-            if keep.contains(&key) {
-                n += 1;
-            } else {
-                tx.execute("DELETE FROM rule_proposal WHERE id = ?1", [id])?;
-            }
-        }
-        Ok(n)
+        write(tx, &pass.found, now).map(Some)
     })?;
     // Only after the commit: a pass that did not commit runs again.
-    *last = Some(mark);
-    Ok(Some(n))
+    if n.is_some() {
+        *last = Some(pass.mark);
+    }
+    Ok(n)
+}
+
+/// Runs a pass in `tx` and writes its proposals. [`crate::active::record`]
+/// calls this for each policy that becomes active, so an accepted rule also
+/// removes each other open proposal that it covers, in the same transaction.
+pub(crate) fn reconcile(tx: &Connection, now: i64) -> Result<usize> {
+    write(tx, &pass(tx, now)?, now)
+}
+
+/// Writes the proposals of `found`, and removes each open proposal that is
+/// not in it. Gives the number of open proposals.
+fn write(tx: &Connection, found: &Found, now: i64) -> Result<usize> {
+    let mut keep = BTreeSet::new();
+    for (key, approvals) in &found.proposals {
+        let (verb, cond, value, form) = key;
+        tx.execute(
+            "INSERT INTO rule_proposal (verb, cond, value, form, approvals, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             ON CONFLICT (verb, cond, value, form) DO UPDATE
+             SET approvals = excluded.approvals, updated_at = excluded.updated_at
+             WHERE state = 'open' AND approvals <> excluded.approvals",
+            params![verb, cond, value, form, approvals, now],
+        )?;
+        keep.insert(key.clone());
+    }
+    // A pattern that is gone (a refusal, an undo, a new rule) is no longer proposed.
+    let open: Vec<(i64, Key)> = tx
+        .prepare("SELECT id, verb, cond, value, form FROM rule_proposal WHERE state = 'open'")?
+        .query_map([], |r| {
+            Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut n = 0;
+    for (id, key) in open {
+        if keep.contains(&key) {
+            n += 1;
+        } else {
+            tx.execute("DELETE FROM rule_proposal WHERE id = ?1", [id])?;
+        }
+    }
+    Ok(n)
 }
 
 fn mark(tx: &Connection, now: i64) -> Result<Mark> {
