@@ -425,8 +425,13 @@ categories are not moves, and work in each folder. R6-10 keeps the same rule for
 ## Failure list
 
 Supported input: JSON answers of Graph v1.0 in the shape of the Learn pages,
-and MIME text of `$value`. All other input fails closed: the call gives
-`Error::Decode` and the mirror changes nothing.
+and MIME text of `$value`. All other input fails closed. A read gives
+`Error::Decode` and the mirror changes nothing. A write that Graph
+accepted (its success status: 200 for a `PATCH`, 201 for a move or a
+draft, 202 for `sendMail`) can have changed the mailbox, so any bad
+answer to it gives an unknown result (`Error::Transport`), and the caller
+reconciles with reads: not JSON, another shape, another state, above
+16 MiB, or another 2xx status. The rows below are for reads.
 
 | Input or event | Result | Test |
 |---|---|---|

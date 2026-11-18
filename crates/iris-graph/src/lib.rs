@@ -222,10 +222,15 @@ struct Tag {
     etag: String,
 }
 
-/// The method of a write.
+/// The method of a write, and the one status of its success (spec
+/// section 5). Another 2xx is an unknown result.
 enum Verb {
+    /// `PATCH`, 200.
     Patch,
-    Post,
+    /// `POST` that makes an item, 201.
+    PostCreated,
+    /// `POST /me/sendMail`, 202.
+    PostAccepted,
 }
 
 impl Message {
@@ -462,7 +467,7 @@ impl Graph {
         let body = serde_json::json!({ "destinationId": folder }).to_string();
         let m: Message = accepted(&self.write(
             token,
-            Verb::Post,
+            Verb::PostCreated,
             &url,
             body.into(),
             "application/json",
@@ -475,8 +480,14 @@ impl Graph {
     /// request. Keep the `etag` of the answer for the send.
     pub fn create_draft(&self, token: &str, mime: &[u8]) -> Result<Message> {
         let url = self.url("/me/messages");
-        let m: Message =
-            accepted(&self.write(token, Verb::Post, &url, base64(mime), "text/plain", None)?)?;
+        let m: Message = accepted(&self.write(
+            token,
+            Verb::PostCreated,
+            &url,
+            base64(mime),
+            "text/plain",
+            None,
+        )?)?;
         // The release needs the ID and the etag of the draft (section 5, step 1).
         let tagged = m.etag.as_deref().is_some_and(|e| !e.is_empty());
         sure(m.is_draft && !m.id.is_empty() && tagged, m)
@@ -487,7 +498,14 @@ impl Graph {
     /// sent copy with [`Graph::sent_by_message_id`].
     pub fn send_mime(&self, token: &str, mime: &[u8]) -> Result<()> {
         let url = self.url("/me/sendMail");
-        self.write(token, Verb::Post, &url, base64(mime), "text/plain", None)?;
+        self.write(
+            token,
+            Verb::PostAccepted,
+            &url,
+            base64(mime),
+            "text/plain",
+            None,
+        )?;
         Ok(())
     }
 
@@ -550,9 +568,10 @@ impl Graph {
         if_match: Option<&str>,
     ) -> Result<Vec<u8>> {
         let _running = self.gate.enter();
-        let request = match verb {
-            Verb::Patch => self.agent.patch(url),
-            Verb::Post => self.agent.post(url),
+        let (request, success) = match verb {
+            Verb::Patch => (self.agent.patch(url), 200),
+            Verb::PostCreated => (self.agent.post(url), 201),
+            Verb::PostAccepted => (self.agent.post(url), 202),
         };
         let mut request = request
             .header("Authorization", &format!("Bearer {token}"))
@@ -567,6 +586,11 @@ impl Graph {
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
             return Err(status_error(status, response));
+        }
+        if status != success {
+            return Err(Error::Transport(format!(
+                "Graph answered {status} to a write, not {success}"
+            )));
         }
         // Graph accepted the write, so a lost answer leaves the result unknown.
         response

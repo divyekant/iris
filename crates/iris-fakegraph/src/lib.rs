@@ -100,8 +100,8 @@ struct Store {
     floor: u64,
     page_limit: usize,
     failures: VecDeque<(u16, Option<u64>)>,
-    /// Bodies of 200 answers in place of the real answers.
-    bodies: VecDeque<String>,
+    /// Status and body of answers in place of the real answers.
+    bodies: VecDeque<(u16, String)>,
     /// The MIME text of each `sendMail`.
     sent: Vec<Vec<u8>>,
     requests: Vec<String>,
@@ -432,7 +432,14 @@ impl FakeGraph {
     /// of the real answers. A test sends answers in a wrong shape this way.
     pub fn answer_next(&self, bodies: &[&str]) {
         let mut s = self.store.lock().unwrap();
-        s.bodies.extend(bodies.iter().map(|b| b.to_string()));
+        s.bodies.extend(bodies.iter().map(|b| (200, b.to_string())));
+    }
+
+    /// The next request gets an answer with this 2xx status and JSON body,
+    /// in place of the real answer, for example 201 for a write.
+    pub fn answer_next_status(&self, status: u16, body: &str) {
+        let mut s = self.store.lock().unwrap();
+        s.bodies.push_back((status, body.to_string()));
     }
 
     /// Each request waits this long before its answer, so that a test sees
@@ -514,7 +521,12 @@ async fn gate(State(s): State<Shared>, req: Request, next: Next) -> Response {
             r
         }
         (None, None) => match body {
-            Some(b) => ([("Content-Type", "application/json")], b).into_response(),
+            Some((status, b)) => (
+                StatusCode::from_u16(status).unwrap(),
+                [("Content-Type", "application/json")],
+                b,
+            )
+                .into_response(),
             None => next.run(req).await,
         },
     };

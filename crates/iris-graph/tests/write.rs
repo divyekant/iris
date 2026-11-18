@@ -255,10 +255,49 @@ fn each_write_answer_must_show_exactly_the_asked_state() {
         json!({"isDraft": true, "@odata.etag": ""}),
         json!({"isDraft": true, "id": ""}),
     ] {
-        fake.answer_next(&[&answer(&id, changes.clone())]);
+        fake.answer_next_status(201, &answer(&id, changes.clone()));
         let err = graph.create_draft(TOKEN, MIME).unwrap_err();
         assert!(err.write_result_unknown(), "{changes} {err}");
     }
-    fake.answer_next(&[&answer(&id, json!({"isDraft": true}))]);
+    fake.answer_next_status(201, &answer(&id, json!({"isDraft": true})));
     graph.create_draft(TOKEN, MIME).unwrap();
+}
+
+#[test]
+fn a_2xx_other_than_the_success_status_is_unknown() {
+    use serde_json::json;
+    let (fake, graph) = setup();
+    let id = inbox_message(&fake);
+    let archive = FakeGraph::folder_id("Archive");
+    let draft = answer(&id, json!({"isDraft": true}));
+    let moved = answer(&id, json!({"parentFolderId": archive}));
+    // sendMail succeeds with 202 only.
+    for status in [200, 201, 204] {
+        fake.answer_next_status(status, "{}");
+        let err = graph.send_mime(TOKEN, MIME).unwrap_err();
+        assert!(err.write_result_unknown(), "{status} {err}");
+    }
+    // A draft and a move succeed with 201 only.
+    fake.answer_next_status(200, &draft);
+    assert!(graph
+        .create_draft(TOKEN, MIME)
+        .unwrap_err()
+        .write_result_unknown());
+    fake.answer_next_status(200, &moved);
+    assert!(graph
+        .move_to(TOKEN, &id, archive)
+        .unwrap_err()
+        .write_result_unknown());
+    // A PATCH succeeds with 200 only.
+    fake.answer_next_status(201, &answer(&id, json!({})));
+    assert!(graph
+        .set_read(TOKEN, &id, true)
+        .unwrap_err()
+        .write_result_unknown());
+    assert!(fake.sent_mail().is_empty());
+    // The right statuses pass.
+    fake.answer_next_status(202, "");
+    graph.send_mime(TOKEN, MIME).unwrap();
+    fake.answer_next_status(201, &moved);
+    graph.move_to(TOKEN, &id, archive).unwrap();
 }
