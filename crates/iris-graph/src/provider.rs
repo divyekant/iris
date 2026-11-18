@@ -315,6 +315,13 @@ fn map(e: Error) -> iris_provider::Error {
         Error::Unauthorized => P::Unauthorized,
         Error::NotFound => P::NotFound,
         Error::DeltaReset => P::HistoryExpired,
+        // A status below 400 (an unfollowed redirect) is an unknown write
+        // result in Graph; the provider error has no such Api status.
+        Error::Api {
+            status,
+            code,
+            message,
+        } if status < 400 => P::Transport(format!("HTTP {status} {code}: {message}")),
         Error::Api {
             status,
             code,
@@ -763,6 +770,24 @@ mod tests {
     use super::*;
     use crate::tests::Rng;
     use crate::Flag;
+
+    /// Each Graph error that is an unknown write result stays one after
+    /// the map to the provider error, on each write path of the provider.
+    #[test]
+    fn the_map_keeps_each_unknown_write_result() {
+        let mut rng = Rng(7);
+        for _ in 0..2000 {
+            let status = 100 + rng.below(500) as u16;
+            let e = Error::Api {
+                status,
+                code: "c".into(),
+                message: "m".into(),
+            };
+            let unknown = e.write_result_unknown();
+            assert_eq!(map(e).write_result_unknown(), unknown, "HTTP {status}");
+        }
+        assert!(map(Error::Transport("t".into())).write_result_unknown());
+    }
 
     fn folder(
         id: &str,

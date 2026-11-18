@@ -113,6 +113,13 @@ fn a_failure_after_a_write_of_the_call_is_unknown() {
         .label_ids
         .contains(&"STARRED".to_string()));
 
+    // An unfollowed redirect of the first write is an unknown result too.
+    fake.fail_next(&[(0, None), (307, None)]);
+    let e = outlook.modify(TOKEN, &[&b], &["STARRED"], &[]).unwrap_err();
+    assert!(e.write_result_unknown(), "{e}");
+    fake.fail_next(&[(0, None), (307, None)]);
+    assert!(outlook.trash(TOKEN, &b).unwrap_err().write_result_unknown());
+
     fake.fail_next(&[(0, None), (400, None)]);
     let e = outlook.modify(TOKEN, &[&b], &["STARRED"], &[]).unwrap_err();
     assert!(matches!(e, Error::Api { status: 400, .. }), "{e}");
