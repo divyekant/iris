@@ -1,5 +1,5 @@
 import { access } from "./access.svelte.ts";
-import { addPage } from "./format";
+import { accountNames, addPage } from "./format";
 import { active, localDay } from "./measures";
 // The client reads the local API of the engine (crates/iris-api/README.md).
 // The form documents follow docs/spec/schema. The client only reads, except
@@ -51,6 +51,8 @@ export type Item = {
   expires?: string;
   /** The confirmed matter that keeps the item (`g-4`), or null. */
   matter?: string | null;
+  /** The account (the mailbox) of the item (`a-2`). Open model 1.1. */
+  account?: string;
 };
 
 // A matter: mail that belongs together, as Iris proposes it and the person decides it
@@ -551,6 +553,7 @@ export async function get<T>(path: string): Promise<T> {
     const accounts = (body as Status).accounts ?? [];
     access.locked = accounts.filter((a) => a.state === "needs_sign_in").map((a) => a.address);
     access.none = accounts.length === 0;
+    access.accounts = accountNames(accounts);
   }
   return body as T;
 }

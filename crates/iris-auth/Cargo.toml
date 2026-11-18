@@ -1,6 +1,6 @@
 [package]
 name = "iris-auth"
-description = "Google sign-in for Iris: the client file of the user, the loopback redirect with PKCE, the token exchange and the token refresh."
+description = "Google and Microsoft sign-in for Iris: the loopback redirect with PKCE, the token exchange and the token refresh."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

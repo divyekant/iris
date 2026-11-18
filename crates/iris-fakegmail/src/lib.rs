@@ -120,6 +120,8 @@ struct Event {
 
 struct Store {
     mailbox: Mailbox,
+    /// The `emailAddress` of the profile.
+    address: String,
     msgs: Vec<Msg>,
     labels: Vec<Label>,
     events: Vec<Event>,
@@ -199,6 +201,7 @@ impl Store {
         }));
         Store {
             mailbox,
+            address: OWNER.to_string(),
             msgs,
             labels,
             events,
@@ -394,6 +397,12 @@ impl FakeGmail {
 
     pub fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// Give the profile this address in place of the owner of the synthetic
+    /// mailbox: a second mailbox for a test with two accounts.
+    pub fn set_address(&self, address: &str) {
+        self.store.lock().unwrap().address = address.to_string();
     }
 
     /// The API root, for example `http://127.0.0.1:41234/gmail/v1`.
@@ -776,7 +785,7 @@ async fn profile(State(s): State<Shared>, Path(user): Path<String>, h: HeaderMap
     let s = s.lock().unwrap();
     let threads: BTreeSet<&str> = s.live().map(|m| m.thread.as_str()).collect();
     Json(json!({
-        "emailAddress": OWNER,
+        "emailAddress": s.address,
         "messagesTotal": s.live().count(),
         "threadsTotal": threads.len(),
         "historyId": s.latest_history().to_string(),

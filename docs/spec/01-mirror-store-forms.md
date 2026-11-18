@@ -2,7 +2,7 @@
 
 - Status: draft, for the approval of the maintainer
 - Applies to: release 1 ("See")
-- Open model version: 1.0
+- Open model version: 1.1
 - Related: [Specification 2](02-changeset-policy-ledger.md), the
   [schemas](schema/), the manifesto and the experience document "Iris: the
   ideal experience"
@@ -526,7 +526,7 @@ Each item of each form has these fields:
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `model` | string, `"iris/1.0"` | yes | The version of the open model: `iris/<major>.<minor>` ([specification 4](04-open-model-versions.md)). |
+| `model` | string, `"iris/1.1"` (`"iris/1.0"` in older documents) | yes | The version of the open model: `iris/<major>.<minor>` ([specification 4](04-open-model-versions.md)). |
 | `id` | string, for example `"c-311"` | yes | The ID of the item (section 5.7). |
 | `form` | `commitment`, `conversation`, `record`, `feed` or `signal` | yes | The form. |
 | `status` | string, values for each form | yes | The state of the item. |
@@ -537,6 +537,7 @@ Each item of each form has these fields:
 | `derived` | object | yes | Who made the item: `by` is `rule`, `model` or `person`. `rule` names the rule. `model` names the model, and `prompt` names the prompt version. |
 | `confidence` | number from 0 to 1 | no | How sure the understanding step is. Not set when `derived.by` is `person`. |
 | `matter` | string or null | no | The `g-` ID of the confirmed matter of the item, or null (`docs/specs/2026-11-16-matters.md`). The engine sets it when it reads the item. |
+| `account` | string, `a-` ID | no | Since `iris/1.1`. The account (the mailbox) of the item (card R6-02, `docs/specs/2026-11-17-accounts.md`). The engine sets it when it reads the item. |
 | `ready` | array of `"draft"`, at least 1, no repeats | no | What Iris prepared for the item (card R3-09). `"draft"`: the thread of the `origin` message has a reply draft that is not stale (`iris_voice::ready_item_sql`). A reply draft of the owner marks each item of its thread. A nudge (card R3-07, a draft with `ask`) marks only the commitment of its key, not the other items of its thread. The engine sets it only on the items of the brief lists and pages, when it reads them. A stored value is never shown, and a correction of it is refused. |
 | `attention` | object | no | Reserved for specification 2: `state` is `shown`, `bundled` or `hidden`, with the rule and the reason. |
 

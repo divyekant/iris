@@ -9,6 +9,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use super::macos::{Proc, Sys};
+use crate::macos_job::Launchd;
 
 /// `PROC_PIDT_BSDINFOWITHUNIQID` of `<sys/proc_info.h>`.
 const PIDT_BSDINFOWITHUNIQID: c_int = 18;
@@ -177,5 +178,72 @@ impl Sys for MacSys {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+}
+
+/// The real launchd calls of the shim.
+pub struct MacLaunchd;
+
+/// The time limit of one `launchctl` call of the shim.
+const LAUNCHCTL_WAIT: Duration = Duration::from_secs(2);
+
+impl Launchd for MacLaunchd {
+    fn bootstrap(&self, plist: &std::path::Path) -> io::Result<()> {
+        let argv: Vec<OsString> = vec![
+            "/bin/launchctl".into(),
+            "bootstrap".into(),
+            format!("gui/{}", self.uid()).into(),
+            plist.into(),
+        ];
+        match MacSys.run(&argv, LAUNCHCTL_WAIT)? {
+            0 => Ok(()),
+            c => Err(io::Error::other(format!(
+                "launchctl bootstrap: exit code {c}"
+            ))),
+        }
+    }
+
+    fn bootout(&self, label: &str) -> io::Result<()> {
+        let argv: Vec<OsString> = vec![
+            "/bin/launchctl".into(),
+            "bootout".into(),
+            format!("gui/{}/{label}", self.uid()).into(),
+        ];
+        match MacSys.run(&argv, LAUNCHCTL_WAIT)? {
+            0 | 3 | 113 => Ok(()),
+            c => Err(io::Error::other(format!(
+                "launchctl bootout: exit code {c}"
+            ))),
+        }
+    }
+
+    fn peer(&self, stream: &std::os::unix::net::UnixStream) -> io::Result<(u32, i32)> {
+        use std::os::fd::AsRawFd;
+        let fd = stream.as_raw_fd();
+        let (mut uid, mut gid) = (0, 0);
+        // SAFETY: getpeereid writes two integers.
+        if unsafe { libc::getpeereid(fd, &mut uid, &mut gid) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut pid: c_int = 0;
+        let mut len = size_of::<c_int>() as libc::socklen_t;
+        // SAFETY: LOCAL_PEERPID of SOL_LOCAL (0) writes one int.
+        let r = unsafe {
+            libc::getsockopt(
+                fd,
+                0,
+                libc::LOCAL_PEERPID,
+                (&mut pid as *mut c_int).cast(),
+                &mut len,
+            )
+        };
+        if r != 0 || pid <= 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((uid, pid))
+    }
+
+    fn uid(&self) -> u32 {
+        MacSys.uid()
     }
 }

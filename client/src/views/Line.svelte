@@ -16,6 +16,7 @@
   import { href } from "../route";
   import { get, post, type ThreadDraft } from "../api";
   import { hold, HOLD, quiet, said, type Verb } from "../act";
+  import AccountPill from "./AccountPill.svelte";
 
   // `note`: one more muted line, for example the reason of a rule that hides the item.
   // `ondone`: shows the tick box on an open commitment. `delay`: the time for Undo, shorter in tests.
@@ -170,6 +171,7 @@
   {#if away}
     <button class="away" type="button" aria-label={`${away.label}: ${item.title}`} onclick={() => tick(away.verb)}>{away.label}</button>
   {/if}
+  <AccountPill {item} />
   <a class="source" href={href.mail(origin(item))} aria-label="Open the source mail" title="Open the source mail">
     <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
       <rect x="2.5" y="4.5" width="15" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.5" />
