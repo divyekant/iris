@@ -416,22 +416,15 @@ pub(crate) fn recover(run: &mut Run<'_, '_>, ledger: i64) -> Result<Outcome> {
         }
         Ops::Send {
             draft,
-            provider_id: _,
+            provider_id,
             message_id,
             hash,
         } => {
             let found = run
-                .call(|g, t| g.messages_with_id(t, &message_id))
+                .call(|g, t| g.sent_copy(t, &message_id, &provider_id))
                 .map_err(Error::Provider)?;
-            for m in &found {
-                let labels = run.call(|g, t| g.minimal(t, &m.id));
-                match labels {
-                    Ok(l) if l.label_ids.iter().any(|l| l == "SENT") => {
-                        return complete(run, ledger, draft, &m.id, &hash);
-                    }
-                    Ok(_) | Err(GmailError::NotFound) => {}
-                    Err(e) => return Err(Error::Provider(e)),
-                }
+            if let Some(m) = found {
+                return complete(run, ledger, draft, &m.id, &hash);
             }
             if now() - at >= UNKNOWN_MS {
                 end(

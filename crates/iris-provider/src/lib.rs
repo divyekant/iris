@@ -269,6 +269,22 @@ pub trait Provider: Send + Sync {
     fn draft_raw(&self, token: &str, id: &str) -> Result<DraftRaw>;
     /// A draft of `raw`, in the thread `thread` for a reply.
     fn create_draft(&self, token: &str, raw: &[u8], thread: Option<&str>) -> Result<Draft>;
+    /// A sent copy of the send of draft `draft`: a message with the
+    /// `Message-ID` `message_id` that the send made, never the draft. The
+    /// send recovery uses it (send spec, section 6). The default is the
+    /// first message with that ID and the label `SENT` (Gmail). A failed
+    /// read is an error, never "no copy".
+    fn sent_copy(&self, token: &str, message_id: &str, draft: &str) -> Result<Option<MessageRef>> {
+        let _ = draft;
+        for m in self.messages_with_id(token, message_id)? {
+            match self.minimal(token, &m.id) {
+                Ok(l) if l.label_ids.iter().any(|l| l == "SENT") => return Ok(Some(m)),
+                Ok(_) | Err(Error::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(None)
+    }
     /// Sends the draft `id` with the bytes `raw`.
     fn send_draft(&self, token: &str, id: &str, raw: &[u8], thread: Option<&str>) -> Result<Sent>;
 }

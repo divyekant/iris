@@ -67,6 +67,16 @@ pub struct Outlook {
 }
 
 impl Outlook {
+    /// Each message with this `Message-ID`, each page. The apply gives
+    /// the ID with no angle brackets; Graph keeps them in
+    /// `internetMessageId`.
+    fn copies(&self, token: &str, message_id: &str) -> iris_provider::Result<Vec<crate::Copy>> {
+        let bare = message_id.trim_start_matches('<').trim_end_matches('>');
+        self.graph
+            .sent_by_message_id(token, &format!("<{bare}>"))
+            .map_err(map)
+    }
+
     pub fn new(graph: Graph) -> Outlook {
         Outlook {
             graph,
@@ -440,8 +450,56 @@ fn plan(
     Ok(ops)
 }
 
-/// The definite rejection of a call that card R6-17 adds. No request goes
-/// out.
+fn reference(id: String, thread_id: String) -> MessageRef {
+    MessageRef { id, thread_id }
+}
+
+fn draft(id: String, thread_id: String) -> Draft {
+    Draft {
+        id: id.clone(),
+        message: reference(id, thread_id),
+    }
+}
+
+/// The `Message-ID` of MIME bytes that Iris wrote, with no angle
+/// brackets. No `Message-ID` is a definite rejection before the send.
+fn message_id_of(raw: &[u8]) -> iris_provider::Result<String> {
+    mail_parser::MessageParser::new()
+        .parse_headers(raw)
+        .and_then(|m| m.message_id().map(str::to_string))
+        .ok_or_else(|| iris_provider::Error::Api {
+            status: 400,
+            reason: "refused".into(),
+            message: "the mail has no Message-ID".into(),
+        })
+}
+
+/// A sink that keeps at most [`iris_provider::DRAFT_LIMIT`] bytes and
+/// stops the read above it.
+#[derive(Default)]
+struct Capped {
+    bytes: Vec<u8>,
+    over: bool,
+}
+
+impl Write for Capped {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.bytes.len() + buf.len() > iris_provider::DRAFT_LIMIT {
+            self.over = true;
+            self.bytes = Vec::new();
+            return Err(std::io::Error::other("the draft is above the limit"));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The definite rejection of a call that the Outlook provider does not
+/// make. No request goes out.
 fn later<T>() -> iris_provider::Result<T> {
     Err(iris_provider::Error::Api {
         status: 400,
@@ -684,8 +742,17 @@ impl iris_provider::Provider for Outlook {
         })
     }
 
-    fn messages_with_id(&self, _: &str, _: &str) -> iris_provider::Result<Vec<MessageRef>> {
-        later()
+    /// Each message of the mailbox with this `Message-ID`, all folders.
+    fn messages_with_id(
+        &self,
+        token: &str,
+        message_id: &str,
+    ) -> iris_provider::Result<Vec<MessageRef>> {
+        Ok(self
+            .copies(token, message_id)?
+            .into_iter()
+            .map(|c| reference(c.id, c.conversation_id))
+            .collect())
     }
 
     /// Reads each message first and plans its writes; a refusal comes
@@ -765,26 +832,92 @@ impl iris_provider::Provider for Outlook {
         ))
     }
 
-    fn drafts_with_id(&self, _: &str, _: &str) -> iris_provider::Result<Vec<Draft>> {
-        later()
+    /// Each draft (`isDraft`) with this `Message-ID`. The ID of a draft
+    /// is the ID of its message.
+    fn drafts_with_id(&self, token: &str, message_id: &str) -> iris_provider::Result<Vec<Draft>> {
+        Ok(self
+            .copies(token, message_id)?
+            .into_iter()
+            .filter(|c| c.is_draft)
+            .map(|c| draft(c.id, c.conversation_id))
+            .collect())
     }
 
-    fn draft_raw(&self, _: &str, _: &str) -> iris_provider::Result<DraftRaw> {
-        later()
+    /// A message that is not a draft any more (sent, or a draft that
+    /// Graph turned into mail) gives `NotFound`, as a sent Gmail draft.
+    fn draft_raw(&self, token: &str, id: &str) -> iris_provider::Result<DraftRaw> {
+        let m = self.graph.message(token, id).map_err(map)?;
+        if !m.is_draft {
+            return Err(iris_provider::Error::NotFound);
+        }
+        let mut sink = Capped::default();
+        match self.graph.raw(token, id, &mut sink) {
+            Ok(_) => {}
+            Err(Error::Sink(_)) if sink.over => {}
+            Err(e) => return Err(map(e)),
+        }
+        Ok(DraftRaw {
+            id: m.id.clone(),
+            message: reference(m.id, m.conversation_id),
+            raw: (!sink.over).then_some(sink.bytes),
+        })
     }
 
-    fn create_draft(&self, _: &str, _: &[u8], _: Option<&str>) -> iris_provider::Result<Draft> {
-        later()
+    /// Graph puts a reply in its conversation from the MIME headers
+    /// (`In-Reply-To`, `References`), so `thread` is not sent.
+    fn create_draft(
+        &self,
+        token: &str,
+        raw: &[u8],
+        _: Option<&str>,
+    ) -> iris_provider::Result<Draft> {
+        let m = self.graph.create_draft(token, raw).map_err(map)?;
+        Ok(draft(m.id, m.conversation_id))
     }
 
+    /// `sendMail` with the bytes `raw`, never the server draft (provider
+    /// spec section 6). Graph gives no ID, so the provider looks for the
+    /// sent copy. After the 202, each failure is an unknown result: the
+    /// recovery looks again and never sends again. The draft stays in
+    /// Outlook (#634).
     fn send_draft(
         &self,
-        _: &str,
-        _: &str,
-        _: &[u8],
+        token: &str,
+        id: &str,
+        raw: &[u8],
         _: Option<&str>,
     ) -> iris_provider::Result<Sent> {
-        later()
+        let message_id = message_id_of(raw)?;
+        self.graph.send_mime(token, raw).map_err(map)?;
+        match self.sent_copy(token, &message_id, id) {
+            Ok(Some(m)) => Ok(Sent {
+                id: m.id,
+                thread_id: m.thread_id,
+                label_ids: Vec::new(),
+            }),
+            Ok(None) => Err(iris_provider::Error::Transport(
+                "Outlook accepted the send; its sent copy is not there yet".into(),
+            )),
+            Err(e) => Err(iris_provider::Error::Transport(format!(
+                "Outlook accepted the send, then: {e}"
+            ))),
+        }
+    }
+
+    /// A message with this `Message-ID` that is not the draft `draft`, not
+    /// a draft, and has a send time (section 5, step 5). The draft has the
+    /// same `Message-ID` and stays in Drafts, so it never counts.
+    fn sent_copy(
+        &self,
+        token: &str,
+        message_id: &str,
+        draft: &str,
+    ) -> iris_provider::Result<Option<MessageRef>> {
+        Ok(self
+            .copies(token, message_id)?
+            .into_iter()
+            .find(|c| c.id != draft && !c.is_draft && c.sent_date_time.is_some())
+            .map(|c| reference(c.id, c.conversation_id)))
     }
 }
 
