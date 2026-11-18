@@ -192,8 +192,10 @@ each folder. It gives no counts.
 ### 5. The cursor
 
 The cursor is text with one line for each folder:
-`<UIDVALIDITY> <UIDNEXT> <HIGHESTMODSEQ> <count> <folder>`. `profile` makes
-it from an `EXAMINE` of each folder.
+`<UIDVALIDITY> <UIDNEXT> <HIGHESTMODSEQ> <count> <role> <folder>`. `profile`
+makes it from an `EXAMINE` of each folder. The role is the special use of
+the folder of section 4, from its attribute or its common name: `S`
+(`\Sent`), `D` (`\Drafts`), `J` (`\Junk`), `T` (`\Trash`) or `-`.
 
 `changes(from, page)` gives one window of one folder for each page, from
 the newest message down. A window is a range of sequence numbers, not of
@@ -236,10 +238,11 @@ For each folder of the list now:
 |---|---|
 | The folder is not in `from` | `Added` for each message of the folder |
 | A new `UIDVALIDITY` | `HistoryExpired` |
+| A new role (for example, a new `\Junk` folder takes the role from a folder named `Spam`) | `HistoryExpired`: the labels of each message of the folder change, and the folder has no other trace of the change |
 | No `HIGHESTMODSEQ` (`NOMODSEQ`) now or in `from` | `HistoryExpired`, also when nothing else changed: a flag change leaves no other trace. The resync then gets `Api` 400 `noCondstore` from `profile` (section 6) |
 | `HIGHESTMODSEQ`, `UIDNEXT` and the count are the same | nothing |
 | `QRESYNC` | Windows with `CHANGEDSINCE`: `Added` (the full label set) for each changed message. Then `Deleted` for each `VANISHED` UID |
-| `CONDSTORE` only | Windows as above. Then the search of the new UIDs: removed = count in `from` - (count now - the new UIDs here now). If removed is not 0, `HistoryExpired`. A removal after the `EXAMINE` makes it `HistoryExpired` too, which is safe. A UID from the `UIDNEXT` of `from` up to the `UIDNEXT` of now that is not here now came and went after `from` (the first sync can list it): `Deleted` |
+| `CONDSTORE` only | Windows as above. Then the search of the new UIDs: removed = count in `from` - (count now - the new UIDs here now). If removed is not 0, `HistoryExpired`. A removal after the `EXAMINE` makes it `HistoryExpired` too, which is safe. A UID from the `UIDNEXT` of `from` up to the `UIDNEXT` of now that is not here now came and went after `from` (the first sync can list it): `Deleted`. UIDs can be sparse, so this range can be large: if the `UIDNEXT` of now minus the `UIDNEXT` of `from` is more than 20,000, `HistoryExpired`, before any search. So one call gives at most 20,000 such `Deleted` records |
 
 A folder in `from` that is not in the list now gives `HistoryExpired`. The
 last page carries the cursor of now, made from the `EXAMINE` results of
@@ -389,6 +392,7 @@ times after an unknown result (spec 2 section 7.2).
 | A `\Sent` folder message | `SENT_COPY`, no `SENT` | `labels_of_special_folders_and_flags` |
 | A server with no special-use attributes | the common names give the roles; an attribute wins | `special_folders_by_name`, `an_attribute_wins_over_a_name` |
 | `create_label("Todo")`, then a sync and an undo | the ID `kw:todo` everywhere | `create_label_case` (flag writes) |
+| A new role of a folder | `HistoryExpired`, then a clean full resync | `folder_role_change` |
 | Two folders with `\Junk` | `SPAM` on the mail of both, zero differences | `two_junk_folders_and_keyword_case` |
 | One keyword in two spellings (`$Todo`, `$todo`) | one label `kw:$todo`, zero differences | `two_junk_folders_and_keyword_case` |
 | An answer of `changes` above 1 MiB | `HistoryExpired` | `changes_too_large` |
