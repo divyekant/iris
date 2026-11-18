@@ -33,7 +33,7 @@ mod state;
 mod step;
 mod stop;
 
-pub use send::{release, sending, set_sending, HOLD_MS, SENT_OTHER};
+pub use send::{release, sending, set_sending, HOLD_MS, SENT_OTHER, SENT_OTHER_END};
 pub use state::{apply_state, apply_states};
 pub use step::{step, step_clock, Step};
 pub use stop::{resume, state as stop_state, stop, stop_wait, Stopped, STOPPED_CALL};
@@ -71,7 +71,7 @@ pub enum Error {
     /// The ledger entry has no undo now, with the reason ([`undo`]).
     Undo(String),
     /// A sent copy had other content than the approved content (ledger
-    /// error [`SENT_OTHER`]). Each release stops until the owner checks
+    /// error that ends with [`SENT_OTHER_END`]). Each release stops until the owner checks
     /// assumption 6 of the send spec. The action stays as it was.
     SendStopped,
 }
@@ -86,7 +86,10 @@ impl std::fmt::Display for Error {
             Error::OtherMailbox => write!(f, "the token is of another mailbox"),
             Error::Verb(v) => write!(f, "the verb {v} has no Gmail apply"),
             Error::Undo(why) => write!(f, "no undo: {why}"),
-            Error::SendStopped => write!(f, "{SENT_OTHER}: each send stops until the owner checks"),
+            Error::SendStopped => write!(
+                f,
+                "a mail provider {SENT_OTHER_END}: each send stops until the owner checks"
+            ),
         }
     }
 }

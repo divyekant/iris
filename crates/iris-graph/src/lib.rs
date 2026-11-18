@@ -217,6 +217,7 @@ pub struct Message {
 #[serde(rename_all = "camelCase")]
 pub struct Copy {
     pub id: String,
+    pub conversation_id: String,
     pub is_draft: bool,
     pub sent_date_time: Option<String>,
     pub parent_folder_id: String,
@@ -614,7 +615,7 @@ impl Graph {
     pub fn sent_by_message_id(&self, token: &str, message_id: &str) -> Result<Vec<Copy>> {
         let filter = format!("internetMessageId eq '{}'", message_id.replace('\'', "''"));
         let mut url = self.url(&format!(
-            "/me/messages?$filter={}&$select=id,isDraft,sentDateTime,parentFolderId",
+            "/me/messages?$filter={}&$select=id,conversationId,isDraft,sentDateTime,parentFolderId",
             segment(&filter)
         ));
         let mut all = Vec::new();

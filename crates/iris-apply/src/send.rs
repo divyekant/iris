@@ -26,7 +26,13 @@ const UNKNOWN_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// The error of a send whose sent copy does not have the approved content.
 /// A ledger row with it stops each later release (section 6).
+/// The error of a Gmail send whose sent copy differs.
 pub const SENT_OTHER: &str = "Gmail sent other content than the approved content";
+
+/// The end of each "sent other content" error, after the name of the
+/// provider (for example "Outlook sent other content ..."). Each such
+/// error stops the later releases.
+pub const SENT_OTHER_END: &str = "sent other content than the approved content";
 
 /// The content of a `draft` row and the `post` of a create: the content
 /// with its reply headers.
@@ -160,7 +166,10 @@ pub(crate) fn draft(run: &mut Run<'_, '_>, action: i64) -> Result<Outcome> {
         let Some(r) = header("Message-ID").and_then(|id| {
             iris_compose::references(&id, header("References").as_deref(), in_reply_to.as_deref())
         }) else {
-            return deny("the parent message has no Message-ID: Gmail cannot thread a reply");
+            return deny(&format!(
+                "the parent message has no Message-ID: {} cannot thread a reply",
+                run.mail.name()
+            ));
         };
         reply = Some(r);
         content.subject = iris_compose::reply_subject(&header("Subject").unwrap_or(p.subject));
@@ -409,36 +418,32 @@ pub(crate) fn recover(run: &mut Run<'_, '_>, ledger: i64) -> Result<Outcome> {
                     run,
                     ledger,
                     "failed",
-                    Some("Gmail has no draft of the create".into()),
+                    Some(format!("{} has no draft of the create", run.mail.name())),
                     false,
                 ),
             }
         }
         Ops::Send {
             draft,
-            provider_id: _,
+            provider_id,
             message_id,
             hash,
         } => {
             let found = run
-                .call(|g, t| g.messages_with_id(t, &message_id))
+                .call(|g, t| g.sent_copy(t, &message_id, &provider_id))
                 .map_err(Error::Provider)?;
-            for m in &found {
-                let labels = run.call(|g, t| g.minimal(t, &m.id));
-                match labels {
-                    Ok(l) if l.label_ids.iter().any(|l| l == "SENT") => {
-                        return complete(run, ledger, draft, &m.id, &hash);
-                    }
-                    Ok(_) | Err(GmailError::NotFound) => {}
-                    Err(e) => return Err(Error::Provider(e)),
-                }
+            if let Some(m) = found {
+                return complete(run, ledger, draft, &m.id, &hash);
             }
             if now() - at >= UNKNOWN_MS {
                 end(
                     run,
                     ledger,
                     "failed",
-                    Some("unknown: Gmail shows no sent message".into()),
+                    Some(format!(
+                        "unknown: {} shows no sent message",
+                        run.mail.name()
+                    )),
                     false,
                 )
             } else {
@@ -470,7 +475,7 @@ fn complete(
     };
     let same = iris_compose::read_sent(&raw, &run.address)
         .is_some_and(|r| iris_compose::hash(&r.content, r.reply.as_ref()) == approved);
-    let error = (!same).then(|| SENT_OTHER.to_string());
+    let error = (!same).then(|| format!("{} {SENT_OTHER_END}", run.mail.name()));
     run.store.write(|tx| {
         let t = now();
         tx.execute(
@@ -570,8 +575,8 @@ pub fn release(
     // owner checks assumption 6 (section 6).
     let stopped: bool = store.read(|c| {
         Ok(c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM ledger WHERE error = ?1)",
-            [SENT_OTHER],
+            "SELECT EXISTS (SELECT 1 FROM ledger WHERE error LIKE '% ' || ?1)",
+            [SENT_OTHER_END],
             |r| r.get(0),
         )?)
     })?;
@@ -599,9 +604,9 @@ pub fn release(
     let at_gmail = match run.call(|g, t| g.draft_raw(t, &d.provider_id)) {
         Ok(g) => g,
         Err(GmailError::NotFound) => {
-            let why = "the draft is gone at Gmail";
-            decide(store, action, "denied", why)?;
-            return Ok(Outcome::Denied(why.into()));
+            let why = format!("the draft is gone at {}", run.mail.name());
+            decide(store, action, "denied", &why)?;
+            return Ok(Outcome::Denied(why));
         }
         Err(e) => return Err(Error::Provider(e)),
     };
@@ -612,7 +617,7 @@ pub fn release(
         r.message_id == d.message_id && iris_compose::hash(&r.content, r.reply.as_ref()) == d.hash
     });
     if !same {
-        return changed_at_gmail(store, action, &d, read, &raw);
+        return changed_at_gmail(store, action, &d, read, &raw, run.mail.name());
     }
     // The flags of the mail that Gmail holds, the same bytes as the draft
     // row (docs/specs/2026-11-17-send-checks.md, section 4).
@@ -649,8 +654,9 @@ fn changed_at_gmail(
     d: &Draft,
     read: Option<iris_compose::Read>,
     raw: &[u8],
+    provider: &str,
 ) -> Result<Outcome> {
-    let why = "the draft changed at Gmail after the approval";
+    let why = format!("the draft changed at {provider} after the approval");
     let t = now();
     let refresh = read.filter(|r| r.message_id == d.message_id).map(|r| {
         let hash = iris_compose::hash(&r.content, r.reply.as_ref());
@@ -685,7 +691,7 @@ fn changed_at_gmail(
     if n == 0 {
         return Err(Error::NotApproved(action));
     }
-    Ok(Outcome::Denied(why.into()))
+    Ok(Outcome::Denied(why))
 }
 
 pub(crate) fn changeset_error(e: iris_changeset::Error) -> iris_store::Error {

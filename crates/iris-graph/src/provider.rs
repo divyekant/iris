@@ -67,6 +67,16 @@ pub struct Outlook {
 }
 
 impl Outlook {
+    /// Each message with this `Message-ID`, each page. The apply gives
+    /// the ID with no angle brackets; Graph keeps them in
+    /// `internetMessageId`.
+    fn copies(&self, token: &str, message_id: &str) -> iris_provider::Result<Vec<crate::Copy>> {
+        let bare = message_id.trim_start_matches('<').trim_end_matches('>');
+        self.graph
+            .sent_by_message_id(token, &format!("<{bare}>"))
+            .map_err(map)
+    }
+
     pub fn new(graph: Graph) -> Outlook {
         Outlook {
             graph,
@@ -440,14 +450,128 @@ fn plan(
     Ok(ops)
 }
 
-/// The definite rejection of a call that card R6-17 adds. No request goes
-/// out.
-fn later<T>() -> iris_provider::Result<T> {
-    Err(iris_provider::Error::Api {
-        status: 400,
-        reason: "notSupported".into(),
-        message: "the Outlook provider does not make this call yet".into(),
-    })
+fn reference(id: String, thread_id: String) -> MessageRef {
+    MessageRef { id, thread_id }
+}
+
+fn draft(id: String, thread_id: String) -> Draft {
+    Draft {
+        id: id.clone(),
+        message: reference(id, thread_id),
+    }
+}
+
+/// The `Message-ID` of MIME bytes that Iris wrote, with no angle
+/// brackets. No `Message-ID` is a definite rejection before the send.
+fn message_id_of(raw: &[u8]) -> iris_provider::Result<String> {
+    mail_parser::MessageParser::new()
+        .parse_headers(raw)
+        .and_then(|m| m.message_id().map(str::to_string))
+        .ok_or_else(|| iris_provider::Error::Api {
+            status: 400,
+            reason: "refused".into(),
+            message: "the mail has no Message-ID".into(),
+        })
+}
+
+/// A sink that keeps at most [`iris_provider::DRAFT_LIMIT`] bytes and
+/// stops the read above it.
+#[derive(Default)]
+struct Capped {
+    bytes: Vec<u8>,
+    over: bool,
+}
+
+impl Write for Capped {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.bytes.len() + buf.len() > iris_provider::DRAFT_LIMIT {
+            self.over = true;
+            self.bytes = Vec::new();
+            return Err(std::io::Error::other("the draft is above the limit"));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The most bytes of the header of a message that `metadata` reads.
+const HEAD_LIMIT: usize = 256 * 1024;
+
+/// A sink that keeps the header of a message: it stops the read at the
+/// first empty line, or at [`HEAD_LIMIT`].
+#[derive(Default)]
+struct Head {
+    bytes: Vec<u8>,
+    done: bool,
+}
+
+impl Write for Head {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // The limit comes first: no byte past it is kept or searched.
+        let room = HEAD_LIMIT - self.bytes.len();
+        let from = self.bytes.len().saturating_sub(3);
+        self.bytes.extend_from_slice(&buf[..buf.len().min(room)]);
+        let rest = &self.bytes[from..];
+        let end = rest
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|i| from + i + 4)
+            .or_else(|| {
+                rest.windows(2)
+                    .position(|w| w == b"\n\n")
+                    .map(|i| from + i + 2)
+            });
+        if let Some(end) = end {
+            self.bytes.truncate(end);
+            self.done = true;
+        } else if self.bytes.len() >= HEAD_LIMIT {
+            self.done = true;
+        }
+        if self.done {
+            return Err(std::io::Error::other("the header ends here"));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The headers of `head` whose names are in `names` (each header for an
+/// empty `names`), with the raw value unfolded, as Gmail gives them.
+/// `Subject` is decoded (RFC 2047). Text that is not a header gives no
+/// header.
+fn headers_of(head: &[u8], names: &[&str]) -> Vec<iris_provider::Header> {
+    let Some(message) = mail_parser::MessageParser::new().parse_headers(head) else {
+        return Vec::new();
+    };
+    let root = message.root_part();
+    root.headers()
+        .iter()
+        .filter(|h| names.is_empty() || names.iter().any(|n| n.eq_ignore_ascii_case(h.raw_name())))
+        .map(|h| {
+            let value = if h.raw_name().eq_ignore_ascii_case("subject") {
+                message.subject().unwrap_or_default().to_string()
+            } else {
+                let raw = head
+                    .get(h.offset_start() as usize..h.offset_end() as usize)
+                    .unwrap_or_default();
+                String::from_utf8_lossy(raw)
+                    .replace(['\r', '\n'], "")
+                    .trim()
+                    .to_string()
+            };
+            iris_provider::Header {
+                name: h.raw_name().to_string(),
+                value,
+            }
+        })
+        .collect()
 }
 
 fn history(m: &Message, known: &HashMap<String, &'static str>) -> HistoryMessage {
@@ -467,6 +591,10 @@ fn text_of<T: Serialize>(value: &T) -> String {
 }
 
 impl iris_provider::Provider for Outlook {
+    fn name(&self) -> &'static str {
+        "Outlook"
+    }
+
     /// `archive` and `inbox` move the message between folders.
     fn moves_folders(&self) -> bool {
         true
@@ -653,8 +781,23 @@ impl iris_provider::Provider for Outlook {
         })
     }
 
-    fn metadata(&self, _: &str, _: &str, _: &[&str]) -> iris_provider::Result<Metadata> {
-        later()
+    /// The headers come from the start of `$value`: Graph gives no raw
+    /// headers of a sent message or a draft. The send reads the parent of
+    /// a reply this way.
+    fn metadata(&self, token: &str, id: &str, headers: &[&str]) -> iris_provider::Result<Metadata> {
+        let known = self.known(token).map_err(map)?;
+        let m = self.graph.message(token, id).map_err(map)?;
+        let mut sink = Head::default();
+        match self.graph.raw(token, id, &mut sink) {
+            Ok(_) => {}
+            Err(Error::Sink(_)) if sink.done => {}
+            Err(e) => return Err(map(e)),
+        }
+        Ok(Metadata {
+            id: m.id.clone(),
+            label_ids: label_ids(&m, &known),
+            headers: headers_of(&sink.bytes, headers),
+        })
     }
 
     /// The fields first, then the MIME text into `sink`.
@@ -684,8 +827,17 @@ impl iris_provider::Provider for Outlook {
         })
     }
 
-    fn messages_with_id(&self, _: &str, _: &str) -> iris_provider::Result<Vec<MessageRef>> {
-        later()
+    /// Each message of the mailbox with this `Message-ID`, all folders.
+    fn messages_with_id(
+        &self,
+        token: &str,
+        message_id: &str,
+    ) -> iris_provider::Result<Vec<MessageRef>> {
+        Ok(self
+            .copies(token, message_id)?
+            .into_iter()
+            .map(|c| reference(c.id, c.conversation_id))
+            .collect())
     }
 
     /// Reads each message first and plans its writes; a refusal comes
@@ -765,26 +917,105 @@ impl iris_provider::Provider for Outlook {
         ))
     }
 
-    fn drafts_with_id(&self, _: &str, _: &str) -> iris_provider::Result<Vec<Draft>> {
-        later()
+    /// Each draft (`isDraft`) with this `Message-ID`. The ID of a draft
+    /// is the ID of its message.
+    fn drafts_with_id(&self, token: &str, message_id: &str) -> iris_provider::Result<Vec<Draft>> {
+        Ok(self
+            .copies(token, message_id)?
+            .into_iter()
+            .filter(|c| c.is_draft)
+            .map(|c| draft(c.id, c.conversation_id))
+            .collect())
     }
 
-    fn draft_raw(&self, _: &str, _: &str) -> iris_provider::Result<DraftRaw> {
-        later()
+    /// A message that is not a draft any more (sent, or a draft that
+    /// Graph turned into mail) gives `NotFound`, as a sent Gmail draft.
+    fn draft_raw(&self, token: &str, id: &str) -> iris_provider::Result<DraftRaw> {
+        let m = self.graph.message(token, id).map_err(map)?;
+        if !m.is_draft {
+            return Err(iris_provider::Error::NotFound);
+        }
+        let mut sink = Capped::default();
+        match self.graph.raw(token, id, &mut sink) {
+            Ok(_) => {}
+            Err(Error::Sink(_)) if sink.over => {}
+            Err(e) => return Err(map(e)),
+        }
+        Ok(DraftRaw {
+            id: m.id.clone(),
+            message: reference(m.id, m.conversation_id),
+            raw: (!sink.over).then_some(sink.bytes),
+        })
     }
 
-    fn create_draft(&self, _: &str, _: &[u8], _: Option<&str>) -> iris_provider::Result<Draft> {
-        later()
+    /// Graph puts a reply in its conversation from the MIME headers
+    /// (`In-Reply-To`, `References`), so `thread` is not sent.
+    fn create_draft(
+        &self,
+        token: &str,
+        raw: &[u8],
+        _: Option<&str>,
+    ) -> iris_provider::Result<Draft> {
+        let m = self.graph.create_draft(token, raw).map_err(map)?;
+        Ok(draft(m.id, m.conversation_id))
     }
 
+    /// `sendMail` with the bytes `raw`, never the server draft (provider
+    /// spec section 6). Graph gives no ID, so the provider looks for the
+    /// sent copy. After the 202, each failure is an unknown result: the
+    /// recovery looks again and never sends again. The draft stays in
+    /// Outlook (#634).
     fn send_draft(
         &self,
-        _: &str,
-        _: &str,
-        _: &[u8],
+        token: &str,
+        id: &str,
+        raw: &[u8],
         _: Option<&str>,
     ) -> iris_provider::Result<Sent> {
-        later()
+        let message_id = message_id_of(raw)?;
+        self.graph.send_mime(token, raw).map_err(map)?;
+        match self.sent_copy(token, &message_id, id) {
+            Ok(Some(m)) => Ok(Sent {
+                id: m.id,
+                thread_id: m.thread_id,
+                label_ids: Vec::new(),
+            }),
+            Ok(None) => Err(iris_provider::Error::Transport(
+                "Outlook accepted the send; its sent copy is not there yet".into(),
+            )),
+            Err(e) => Err(iris_provider::Error::Transport(format!(
+                "Outlook accepted the send, then: {e}"
+            ))),
+        }
+    }
+
+    /// The one message with this `Message-ID` in Sent Items that is not
+    /// the draft `draft`, not a draft, and has a send time (section 5,
+    /// step 5). A delivery of the mail to the owner has the same
+    /// `Message-ID` and a send time, but goes to another folder, so it
+    /// never counts. No such copy, or two of them, gives `None`: the
+    /// result stays unknown.
+    fn sent_copy(
+        &self,
+        token: &str,
+        message_id: &str,
+        draft: &str,
+    ) -> iris_provider::Result<Option<MessageRef>> {
+        let sent = self.id_of(token, "sentitems").map_err(map)?;
+        let mut found: Vec<_> = self
+            .copies(token, message_id)?
+            .into_iter()
+            .filter(|c| {
+                c.id != draft
+                    && !c.is_draft
+                    && c.sent_date_time.is_some()
+                    && Some(&c.parent_folder_id) == sent.as_ref()
+            })
+            .collect();
+        Ok(match found.len() {
+            1 => found.pop().map(|c| reference(c.id, c.conversation_id)),
+            _ => None,
+        })
     }
 }
 
@@ -793,6 +1024,66 @@ mod tests {
     use super::*;
     use crate::tests::Rng;
     use crate::Flag;
+
+    /// The header sink keeps at most `HEAD_LIMIT` bytes, also when the
+    /// empty line comes just past the limit in the same write, and ends
+    /// at the first empty line in each split of the writes.
+    #[test]
+    fn the_header_sink_keeps_its_limit() {
+        let mut big = b"X-Long: ".to_vec();
+        big.resize(HEAD_LIMIT + 5, b'a');
+        big.extend_from_slice(b"\r\n\r\nbody");
+        let mut h = Head::default();
+        assert!(h.write(&big).is_err());
+        assert!(h.done && h.bytes.len() <= HEAD_LIMIT);
+        let text = b"A: 1\r\nB: 2\r\n\r\nbody\r\n\r\nmore";
+        let mut rng = Rng(5);
+        for _ in 0..500 {
+            let mut h = Head::default();
+            let mut rest = &text[..];
+            while !rest.is_empty() && !h.done {
+                let n = 1 + rng.below(rest.len());
+                let _ = h.write(&rest[..n]);
+                rest = &rest[n..];
+            }
+            assert_eq!(h.bytes, b"A: 1\r\nB: 2\r\n\r\n");
+        }
+    }
+
+    /// `headers_of` reads any header block: random bytes never panic and
+    /// give only asked names, and a folded header reads back unfolded.
+    #[test]
+    fn the_headers_of_any_text_read_back() {
+        let mut rng = Rng(11);
+        let alphabet = b"abcXYZ:<>@ .\r\n\t=?-";
+        for _ in 0..3000 {
+            let n = rng.below(200);
+            let junk: Vec<u8> = (0..n)
+                .map(|_| alphabet[rng.below(alphabet.len())])
+                .collect();
+            for h in headers_of(&junk, &["Message-ID", "References"]) {
+                assert!(
+                    ["message-id", "references"].contains(&h.name.to_ascii_lowercase().as_str())
+                );
+            }
+            let id = format!("<m{}@example.com>", rng.below(1000));
+            let refs: Vec<String> = (0..rng.below(4)).map(|i| format!("<r{i}@x.org>")).collect();
+            let folded = refs.join("\r\n ");
+            let text = format!(
+                "From: <a@example.com>\r\nmessage-id: {id}\r\nReferences: {folded}\r\nSubject: =?utf-8?q?Caf=C3=A9?=\r\n\r\nbody\r\n"
+            );
+            let got = headers_of(text.as_bytes(), &["Message-ID", "References", "Subject"]);
+            let value = |n: &str| {
+                got.iter()
+                    .find(|h| h.name.eq_ignore_ascii_case(n))
+                    .map(|h| h.value.clone())
+            };
+            assert_eq!(value("Message-ID").as_deref(), Some(id.as_str()));
+            assert_eq!(value("References").unwrap_or_default(), refs.join(" "));
+            assert_eq!(value("Subject").as_deref(), Some("Café"));
+            assert!(value("From").is_none());
+        }
+    }
 
     /// Each Graph error that is an unknown write result stays one after
     /// the map to the provider error, on each write path of the provider.

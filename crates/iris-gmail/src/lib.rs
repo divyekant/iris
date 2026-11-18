@@ -839,6 +839,9 @@ fn parse_history(cursor: &str) -> Result<u64> {
 }
 
 impl Provider for Gmail {
+    fn name(&self) -> &'static str {
+        "Gmail"
+    }
     fn profile(&self, token: &str) -> Result<Profile> {
         Gmail::profile(self, token)
     }
