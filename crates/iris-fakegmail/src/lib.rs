@@ -1252,6 +1252,7 @@ async fn create_draft(
         Err(e) => return e,
     };
     let mut s = s.lock().unwrap();
+    let raw = gmail_draft_form(&raw, s.next_draft);
     let i = s.add(
         raw,
         body.message.thread_id,
@@ -1261,6 +1262,38 @@ async fn create_draft(
     s.next_draft += 1;
     s.drafts.push((id.clone(), i));
     Json(s.draft_json(&id, i)).into_response()
+}
+
+/// The message of a new draft as real Gmail keeps it (send check of issue
+/// #302): Gmail sets its own `Message-ID`, sets a new `Date` and adds a
+/// `Received` header in front. The rest of the bytes stay.
+fn gmail_draft_form(raw: &[u8], n: u64) -> Vec<u8> {
+    const DATE: &str = "Tue, 17 Nov 2026 21:40:12 -0800";
+    let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return raw.to_vec();
+    };
+    let mut out = format!(
+        "Received: from 216739018898 named unknown by gmailapi.google.com with HTTPREST; {DATE}\r\n"
+    )
+    .into_bytes();
+    let mut skip = false;
+    for line in raw[..end + 2].split_inclusive(|&b| b == b'\n') {
+        if skip && line.starts_with(b" ") || skip && line.starts_with(b"\t") {
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        skip = true;
+        if lower.starts_with(b"message-id:") {
+            out.extend(format!("Message-ID: <CACe_fake{n:010}@mail.gmail.com>\r\n").bytes());
+        } else if lower.starts_with(b"date:") {
+            out.extend(format!("Date: {DATE}\r\n").bytes());
+        } else {
+            skip = false;
+            out.extend(line);
+        }
+    }
+    out.extend(&raw[end + 2..]);
+    out
 }
 
 async fn get_draft(

@@ -905,6 +905,9 @@ impl Provider for Gmail {
     fn send_draft(&self, token: &str, id: &str, raw: &[u8], thread: Option<&str>) -> Result<Sent> {
         Gmail::send_draft(self, token, id, raw, thread)
     }
+    fn sets_draft_message_id(&self) -> bool {
+        true
+    }
 }
 
 fn segment(id: &str) -> String {

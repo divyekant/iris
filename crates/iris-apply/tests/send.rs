@@ -577,26 +577,77 @@ fn the_send_carries_the_approved_bytes() {
     assert_eq!(error, None);
 }
 
-/// A create with an unknown result: the recovery finds the draft by its
-/// Message-ID, and makes no second create.
+/// A create with an unknown result: Gmail sets its own Message-ID on the
+/// draft (spec, assumption 3), so the recovery search by the ID of Iris
+/// finds nothing. The row fails, with no second create. A draft that Gmail
+/// made stays at Gmail, and the person can delete it (known limit).
 #[test]
-fn an_unknown_create_is_found() {
+fn an_unknown_create_fails_with_no_second_create() {
     let b = setup("create");
+    for applied in [true, false] {
+        let a = b.approved(Verb::Draft, "a-1", mail(), 0);
+        let before = b.posts("/drafts");
+        b.fake.fail_next_write(&[503], applied);
+        assert!(
+            matches!(b.apply(a), Ok(Outcome::Failed { .. })),
+            "{applied}"
+        );
+        assert_eq!(b.posts("/drafts"), before + 1);
+    }
+    assert_eq!(b.fake.draft_ids().len(), 1);
+}
+
+/// A create gives the draft row the Message-ID that Gmail set, and the
+/// bytes of the row carry it, so the send recovery searches by that ID.
+#[test]
+fn a_draft_keeps_the_message_id_of_gmail() {
+    let b = setup("gmail-id");
     let a = b.approved(Verb::Draft, "a-1", mail(), 0);
-    b.fake.fail_next_write(&[503], true);
-    match b.apply(a) {
-        Ok(Outcome::Applied(_)) => {}
+    assert!(matches!(b.apply(a), Ok(Outcome::Applied(_))));
+    let (id, raw): (String, Vec<u8>) = b
+        .store
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT message_id_hdr, raw FROM draft", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?,
+            )
+        })
+        .unwrap();
+    assert!(id.ends_with("@mail.gmail.com"), "{id}");
+    assert!(String::from_utf8(raw).unwrap().contains(&format!("<{id}>")));
+}
+
+/// If the read back after the create fails, the row keeps the ID of Iris.
+/// The first release denies the send and refreshes the row with the ID of
+/// Gmail (not `foreign_at`), and a new approval sends the draft.
+#[test]
+fn a_failed_read_back_costs_one_new_approval() {
+    let b = setup("read-back");
+    let a = b.approved(Verb::Draft, "a-1", mail(), 0);
+    b.fake.fail_next_matching("/drafts/r", 404);
+    assert!(matches!(b.apply(a), Ok(Outcome::Applied(_))));
+    let (d, _) = b.draft(a);
+    let s = b.approved(Verb::Send, &d, json!({}), AGED);
+    match b.release(s) {
+        Ok(Outcome::Denied(why)) => assert!(why.contains("changed"), "{why}"),
         other => panic!("{other:?}"),
     }
-    assert_eq!(b.posts("/drafts"), 1);
-    let (_, provider) = b.draft(a);
-    assert!(b.gmail.draft_raw(TOKEN, &provider).is_ok());
-
-    // A lost create that Gmail did not make fails, with no second call.
-    let a = b.approved(Verb::Draft, "a-1", mail(), 0);
-    b.fake.fail_next_write(&[503], false);
-    assert!(matches!(b.apply(a), Ok(Outcome::Failed { .. })));
-    assert_eq!(b.posts("/drafts"), 2);
+    let (foreign, id): (bool, String) = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT foreign_at IS NOT NULL, message_id_hdr FROM draft",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert!(!foreign);
+    assert!(id.ends_with("@mail.gmail.com"), "{id}");
+    let again = b.approved(Verb::Send, &d, json!({}), AGED);
+    assert!(matches!(b.release(again), Ok(Outcome::Applied(_))));
+    assert_eq!(b.sends(), 1);
 }
 
 #[test]
