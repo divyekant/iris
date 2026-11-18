@@ -336,18 +336,9 @@ impl Worker {
         if !sync_accounts(&self.store)?.contains(&self.account) {
             return Err(Error::NeedsSignIn);
         }
-        // No Gmail call for a read-only account: its actions wait. The
-        // error goes out once, when the state changes.
-        if let Err(changed) = may_write(&self.store, self.account)? {
-            return if changed {
-                Err(Error::ReadOnly)
-            } else {
-                Ok(Turn {
-                    next: None,
-                    reports: Vec::new(),
-                })
-            };
-        }
+        // A read-only account gets only the recovery, which reads: its
+        // actions wait. The error goes out once, when the state changes.
+        let write = may_write(&self.store, self.account)?;
         let first = self.access()?;
         let (store, account, uri) = (&self.store, self.account, self.test_token_uri.as_deref());
         let (token, got, sealed) = (&mut self.token, &mut self.got, &mut self.sealed);
@@ -375,7 +366,11 @@ impl Worker {
                 renew: &mut renew,
                 refused: false,
             };
-            let step = iris_apply::step(store, self.mail.as_ref(), &mut t, account, now_ms());
+            let mail = self.mail.as_ref();
+            let step = match write {
+                Ok(()) => iris_apply::step(store, mail, &mut t, account, now_ms()),
+                Err(_) => iris_apply::recover_step(store, mail, &mut t, account),
+            };
             (step, t.refused)
         };
         // The token state comes before the result of the step: a refusal
@@ -391,8 +386,11 @@ impl Worker {
             return Err(Error::NeedsSignIn);
         }
         let step = step.map_err(Error::Apply)?;
+        if write == Err(true) {
+            return Err(Error::ReadOnly);
+        }
         // Gmail refused a write for a missing scope: the later actions wait.
-        if step.results.iter().any(|(_, r)| scope_refused(r)) {
+        if step.scope_refused {
             mark_read_only(&self.store, account, &self.sealed)?;
         }
         Ok(Turn {
@@ -497,17 +495,6 @@ pub fn reports(results: &[(i64, iris_apply::Result<iris_apply::Outcome>)]) -> Ve
             Ok(_) => None,
         })
         .collect()
-}
-
-/// True if the result of an action holds a Gmail scope refusal
-/// ([`iris_provider::Error::is_scope_refusal`]).
-fn scope_refused(r: &iris_apply::Result<iris_apply::Outcome>) -> bool {
-    let text = match r {
-        Ok(iris_apply::Outcome::Failed { error, .. }) => error.clone(),
-        Err(e) => e.to_string(),
-        Ok(_) => return false,
-    };
-    text.contains(iris_provider::SCOPE_REFUSAL)
 }
 
 /// A valid access token of `account`: `token` while the stored sign-in is

@@ -2,7 +2,7 @@
 
 - Date: 2026-11-18
 - Card: R2-17
-- Status: Draft
+- Status: Built
 
 ## Problem
 
@@ -88,8 +88,13 @@ The person sees a raw provider error and no next step.
   - It sets `account.state` to `read_only`, but only while `account.token`
     is the grant that it read (the same guard as `mark_needs_sign_in`). This
     covers an account of an older Iris, whose state is `ok`.
-  - It does not call `iris_apply::step`, so Iris makes no Gmail call for the
-    account. Approved actions stay `approved` and held sends stay `held`.
+  - It does not call `iris_apply::step`. It calls
+    `iris_apply::recover_step`: only the recovery of each ledger row in
+    `writing`, which reads and never writes (held-outbox spec, issue #400;
+    issue #684). So Iris makes no Gmail write for the account. Approved
+    actions stay `approved` and held sends stay `held`.
+  - Known limit (issue #683): a read-only sign-in that another process saves
+    while a step runs does not stop that step. The next step makes no write.
   - The 14-day expiry of spec 2 does not change: the engine tick calls
     `iris_changeset::expire` for all accounts, with no apply step. So an
     approved action or a held send of a read-only account expires 14 days
@@ -155,6 +160,7 @@ section 5 of spec 1.
 | Grant of an older Iris (no `write` field) | Read-only: state `read_only`, no apply step | engine test |
 | Gmail 403 `insufficientPermissions` on a write | Action `failed` with the clear text, the step ends, state `read_only`, later steps make no write | provider unit test, `iris-apply` step test, engine test |
 | 14 days pass while the account is read-only | The approved action expires, as for any account | engine test |
+| A ledger row in `writing` when the account becomes read-only | The recovery reads and ends the row; no write | engine test |
 | Gmail 403 with another reason | As now: the raw text | existing test |
 | A new sign-in between the read of the grant and the state write | The guard on `account.token` keeps the new state | engine test |
 

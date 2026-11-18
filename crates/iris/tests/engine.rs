@@ -758,6 +758,11 @@ fn a_tick_finds_the_mail_of_a_watch() {
 /// An approved archive of the first inbox message, in the mode `apply`.
 /// Gives the action ID and the Gmail ID of the message.
 fn approved_archive(s: &Setup) -> (i64, String) {
+    approved_archive_at(s, engine::now_ms())
+}
+
+/// [`approved_archive`] with the submit and the approval at `now`.
+fn approved_archive_at(s: &Setup, now: i64) -> (i64, String) {
     let (message, provider): (i64, String) = s
         .store
         .write(|tx| {
@@ -781,7 +786,6 @@ fn approved_archive(s: &Setup) -> (i64, String) {
         session: None,
         job: None,
     };
-    let now = engine::now_ms();
     let cs = iris_changeset::create(&s.store, &person, now).unwrap();
     iris_changeset::add_action(
         &s.store,
@@ -1010,8 +1014,13 @@ fn a_scope_refusal_fails_the_action_and_sets_read_only() {
     let mut w = s.worker(s.account);
     w.sync().unwrap();
     let (action, _) = approved_archive(&s);
+    let (second, _) = approved_archive(&s);
     s.fake.set_read_only(true);
+    let writes = |f: &FakeGmail| f.requests().iter().filter(|r| !r.starts_with("GET ")).count();
+    let before = writes(&s.fake);
     let turn = w.apply_step().unwrap();
+    assert_eq!(writes(&s.fake), before + 1, "the step ends at the refusal");
+    assert_eq!(action_state(&s.store, second), "approved");
     assert_eq!(action_state(&s.store, action), "failed");
     assert_eq!(turn.reports.len(), 1, "{turn:?}");
     assert!(
@@ -1020,9 +1029,57 @@ fn a_scope_refusal_fails_the_action_and_sets_read_only() {
     );
     assert!(!turn.reports[0].contains("insufficient"), "{turn:?}");
     assert_state(&s.store, s.account, STATE_READ_ONLY);
-    let (next, _) = approved_archive(&s);
+    // The grant still says write, but the state holds the later steps.
     assert!(w.apply_step().unwrap().reports.is_empty());
-    assert_eq!(action_state(&s.store, next), "approved");
+    assert_eq!(writes(&s.fake), before + 1, "no write in a later step");
+    assert_eq!(action_state(&s.store, second), "approved");
+}
+
+/// A read-only account still gets the recovery of a write whose result is
+/// not known (held-outbox spec, issue #400): it reads, and writes nothing.
+#[test]
+fn a_read_only_account_still_recovers_a_writing_row() {
+    let s = setup("read-only-recover", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let (action, _) = approved_archive(&s);
+    s.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+                 VALUES (?1, ?2, '{\"call\":\"batchModify\",\"add\":[],\"remove\":[\"INBOX\"],\"calls\":1}',
+                         'writing', 'inverse', 1)",
+                rusqlite::params![action, s.account],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    sign_in_as(&s.store, &gmail(s.fake.base_url()), &client_json(), REFRESH, false);
+    let writes = |f: &FakeGmail| f.requests().iter().filter(|r| !r.starts_with("GET ")).count();
+    let before = writes(&s.fake);
+    w.apply_step().unwrap();
+    assert_eq!(writes(&s.fake), before, "the recovery only reads");
+    let writing = count(
+        &s.store,
+        &format!("SELECT count(*) FROM ledger WHERE action_id = {action} AND state = 'writing'"),
+    );
+    assert_eq!(writing, 0, "the recovery ended the row");
+}
+
+/// The 14-day expiry does not wait for write access: the engine tick
+/// expires an action of a read-only account.
+#[test]
+fn an_action_of_a_read_only_account_expires() {
+    let s = setup("read-only-expiry", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    sign_in_as(&s.store, &gmail(s.fake.base_url()), &client_json(), REFRESH, false);
+    let now = engine::now_ms();
+    let (action, _) = approved_archive_at(&s, now - 15 * 24 * 3600 * 1000);
+    w.apply_step().unwrap();
+    assert_eq!(action_state(&s.store, action), "approved");
+    iris_changeset::expire(&s.store, now).unwrap();
+    assert_eq!(action_state(&s.store, action), "expired");
 }
 
 /// The read-only mark keeps a new sign-in: it writes only while the token

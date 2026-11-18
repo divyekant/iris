@@ -253,8 +253,8 @@ fn a_write_sign_in_asks_for_gmail_modify_only() {
     assert_eq!(params(&client.sign_in().unwrap().url())["scope"], SCOPE);
 }
 
-/// The access of a sign-in comes from the granted scopes, never from the
-/// scope that Iris asked for.
+/// A sign-in can write only if it asked for write access and Google
+/// granted `gmail.modify`.
 #[test]
 fn write_access_comes_from_the_granted_scope() {
     let both = format!("{SCOPE} {WRITE_SCOPE}");
@@ -262,8 +262,9 @@ fn write_access_comes_from_the_granted_scope() {
     // (asked for write, granted scope text, expected: Some(write) or None for an error)
     let cases: [(bool, &str, Option<bool>); 8] = [
         (false, SCOPE, Some(false)),
-        (false, WRITE_SCOPE, Some(true)),
-        (false, &both, Some(true)),
+        // A plain sign-in is read only, also with an earlier write grant.
+        (false, WRITE_SCOPE, Some(false)),
+        (false, &both, Some(false)),
         (true, WRITE_SCOPE, Some(true)),
         (true, &other, Some(true)),
         (true, &both, Some(true)),
@@ -282,7 +283,6 @@ fn write_access_comes_from_the_granted_scope() {
     }
     // A scope that only starts like the write scope is not the write scope.
     let near = format!("{SCOPE} {WRITE_SCOPE}.x");
-    assert!(!finish_as(granted(&near), false).unwrap().write);
     assert!(matches!(
         finish_as(granted(&near), true),
         Err(Error::WriteScopeMissing)

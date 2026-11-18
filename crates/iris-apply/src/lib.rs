@@ -35,7 +35,7 @@ mod stop;
 
 pub use send::{release, sending, set_sending, HOLD_MS, SENT_OTHER};
 pub use state::{apply_state, apply_states};
-pub use step::{step, step_clock, Step};
+pub use step::{recover_step, step, step_clock, Step};
 pub use stop::{resume, state as stop_state, stop, stop_wait, Stopped, STOPPED_CALL};
 
 use iris_policy::Mode;
@@ -152,6 +152,19 @@ pub enum Outcome {
     /// yet. The ledger row stays in `writing`, and the recovery decides
     /// later. No call is made again.
     Pending,
+}
+
+/// True if the result of one action is a Gmail scope refusal
+/// ([`iris_provider::Error::is_scope_refusal`]): the account has read
+/// access only. A failed action keeps the error as text, so this reads
+/// [`iris_provider::SCOPE_REFUSAL`], the only text of that error.
+pub fn scope_refused(r: &Result<Outcome>) -> bool {
+    match r {
+        Ok(Outcome::Failed { error, .. }) => error.contains(iris_provider::SCOPE_REFUSAL),
+        Err(Error::Provider(e)) => e.is_scope_refusal(),
+        Err(e) => e.to_string().contains(iris_provider::SCOPE_REFUSAL),
+        Ok(_) => false,
+    }
 }
 
 /// The name of the `batchModify` call in `ops`.

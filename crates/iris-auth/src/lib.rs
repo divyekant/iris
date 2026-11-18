@@ -100,7 +100,8 @@ pub struct Tokens {
     /// A value here means that the client is in the "Testing" status
     /// (7 days). The guided setup tells the user to publish the app.
     pub refresh_expires_in: Option<u64>,
-    /// True if Google granted [`WRITE_SCOPE`]. Always true for Microsoft,
+    /// True if the sign-in asked for write access and Google granted
+    /// [`WRITE_SCOPE`]. Always true for Microsoft,
     /// whose sign-in requires `Mail.ReadWrite`.
     pub write: bool,
 }
@@ -729,8 +730,10 @@ impl SignIn {
                 .filter(|r| !r.expose().is_empty())
                 .ok_or(Error::NoRefreshToken)?,
             refresh_expires_in: answer.refresh_token_expires_in,
+            // A plain sign-in is read only in Iris, also when Google gives
+            // an earlier gmail.modify grant: the person asked for read only.
             write: match c.kind {
-                Kind::Google(_) => answer.scope.as_deref().is_some_and(has_write),
+                Kind::Google(_) => c.write && answer.scope.as_deref().is_some_and(has_write),
                 Kind::Microsoft => true,
             },
         })
