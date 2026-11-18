@@ -172,9 +172,8 @@ macro_rules! in_thread {
          LEFT JOIN body b ON b.message_id = m.id
          WHERE m.thread_id = ",
             $thread,
-            " AND m.gone_at IS NULL
-           AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                           WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT')"
+            " AND m.gone_at IS NULL AND NOT ",
+            iris_store::draft_or_copy!("m")
         )
     };
 }

@@ -181,6 +181,8 @@ impl Hand {
                     ("SENT", "SENT", "system"),
                     ("DRAFT", "DRAFT", "system"),
                     ("SPAM", "SPAM", "system"),
+                    ("UNSENT", "UNSENT", "system"),
+                    ("SENT_COPY", "SENT_COPY", "system"),
                     ("INBOX", "INBOX", "system"),
                 ],
             )
@@ -230,6 +232,26 @@ fn addrs(p: &iris_people::Person) -> Vec<&str> {
     p.addresses.iter().map(|a| a.address.as_str()).collect()
 }
 
+/// An IMAP draft and a copy in a Sent folder are no history: in a thread
+/// where you replied after them, their senders are not people.
+#[test]
+fn drafts_and_sent_copies_are_no_history() {
+    let mut h = Hand::new("copies");
+    h.add("t1", "INBOX", "bo@example.org", "Bo Hart", "me@example.com");
+    h.add("t1", "UNSENT", "fay@example.org", "Fay", "me@example.com");
+    h.add(
+        "t1",
+        "SENT_COPY",
+        "gus@example.org",
+        "Gus",
+        "me@example.com",
+    );
+    h.add("t1", "SENT", "me@example.com", "Me", "bo@example.org");
+    let all = h.people();
+    let found: BTreeSet<&str> = all.iter().flat_map(addrs).collect();
+    assert_eq!(found, BTreeSet::from(["bo@example.org"]));
+}
+
 #[test]
 fn the_person_rule() {
     let mut h = Hand::new("rule");
@@ -255,7 +277,6 @@ fn the_person_rule() {
     // Mail from your alias is from you.
     h.add("t5", "SENT", "alias@example.com", "Me", "ana@example.org");
     h.add("t6", "INBOX", "alias@example.com", "Me", "me@example.com");
-
     let all = h.people();
     let found: BTreeSet<&str> = all.iter().flat_map(addrs).collect();
     assert_eq!(

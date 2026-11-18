@@ -165,16 +165,42 @@ and a sent copy is no evidence of a known person (limit issue, filed with
 the code PR). The understanding skips a message with `UNSENT` or
 `SENT_COPY` as it skips one with `DRAFT`. The same holds for each other
 check of received mail. The engine part of this card adds one store
-helper, the SQL condition "not `DRAFT`, `UNSENT` or `SENT_COPY`", and uses
-it in each query that excludes `DRAFT` from received mail today: the
-understanding (`crates/iris-understand`, `batch.rs`, the item query of
-`store.rs`, the guard of `store::understand`), the watches
-(`crates/iris-store/src/watch.rs`), the search, the conversations
-(`crates/iris-talk`) and the flags of the changeset. A test of that part
-lists each query in `crates/*/src` that names `'DRAFT'` and fails if one
-does not use the helper. A watch test covers a message that gets the
-`\Draft` flag after its body was saved: no arrival notice. No IMAP account can sync before that part, because
-only that part adds the account.
+helper, `iris_store::draft_or_copy!`, the SQL condition "the label
+`DRAFT`, `UNSENT` or `SENT_COPY`" (and `iris_store::DRAFT_OR_COPY` for a
+check in Rust). Each query that skipped `DRAFT` as mail that is not
+received mail uses it:
+
+- the understanding (`crates/iris-understand`: the pending query and the
+  thread rule of `batch.rs`, the thread context of `store.rs`, the guard
+  of `store::understand`),
+- the watches (`first_arrival` of `crates/iris-store/src/search.rs`), the
+  notices by rule (`crates/iris-policy/src/notice.rs`) and the messages
+  that Ask reads (`crates/iris-understand/src/ask.rs`),
+- the received-mail evidence of the sender axis (the `replied` and the
+  `service` rules, `received!` of `crates/iris-senders`),
+- the conversations (`crates/iris-talk`) and the people
+  (`crates/iris-people`),
+- the reply parent and the conversation of the write view
+  (`crates/iris-changeset`, `crates/iris-api/src/write.rs`), the thread
+  context of the drafts in your voice (`crates/iris-voice`), and the
+  replies that wake a waiting job (`crates/iris-workspace/src/wake.rs`).
+
+A message that the understanding never read has no hostile marks, so the
+model context, the write view and the agent must not read a sent copy
+either.
+
+The checks of authorship read `SENT` and `DRAFT` only, because a copy is
+no proof: the `you` kind of the sender axis, the mail-from-you rule of the attention, your
+addresses and voice samples, the link mark of your mail, and the mark of
+a job that read mail you did not send. The copied-text flag of the
+changeset counts a phrase of a sent copy as external text, the safe side
+(more flags). The test `each_draft_read_is_classified` lists each name of
+`DRAFT`, `UNSENT` or `SENT_COPY` in `crates/*/src`, with its reason, and
+fails on a new one. The test `each_gate_skips_drafts_and_sent_copies`
+fails on a file that reads `may_be_hostile!` (a gate of received mail)
+with no `draft_or_copy!`, unless it is listed with its reason. A watch test covers a message that gets the `\Draft`
+flag after its body was saved: no arrival notice. No IMAP account can
+sync before that part, because only the next part adds the account.
 
 A move at the server is a delete and an add (section 3), so a message
 moved into the Drafts or the Sent folder is a new message with the label
@@ -412,6 +438,10 @@ times after an unknown result (spec 2 section 7.2).
 - The `Authentication-Results` parsers trust the server ID
   `mx.google.com` only for a Gmail account. For an IMAP account a header
   with that ID counts as absent, because any sender can write it.
+  `iris_senders::head::trusted_authserv` gives the ID to trust from the
+  account provider. Both parsers take it as an argument
+  (`iris_understand::Head::parse` and the DKIM check of the sender axis),
+  so no caller can read a result with no provider.
 
 ## Options not chosen
 
@@ -549,5 +579,7 @@ keeps `provider = 'gmail'`.
 2. The read side: the provider, the client and fake additions, and the
    sync test.
 3. The flag writes.
-4. The engine: migration, command, provider choice, trust rules.
+4. The engine, in two PRs: first the received-mail helper and the trust
+   rule (no effect on a Gmail account), then the migration, the command
+   and the provider choice.
 5. A later card: drafts and send over SMTP.

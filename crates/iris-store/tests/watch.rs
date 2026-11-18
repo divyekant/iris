@@ -54,6 +54,8 @@ fn setup(dir: &TempDir) -> (Store, i64) {
                 ("INBOX", "INBOX", "system"),
                 ("SENT", "SENT", "system"),
                 ("DRAFT", "DRAFT", "system"),
+                ("UNSENT", "UNSENT", "system"),
+                ("SENT_COPY", "SENT_COPY", "system"),
             ],
         )
         .unwrap();
@@ -124,6 +126,13 @@ fn a_watch_skips_mail_that_is_not_a_safe_new_arrival() {
     );
     put(&store, acc, msg("c", NOW, &["SENT"], "x", true));
     put(&store, acc, msg("d", NOW, &["DRAFT"], "x", true));
+    // The IMAP labels of a draft and of a copy in a Sent folder.
+    put(&store, acc, msg("d2", NOW, &["UNSENT"], "x", true));
+    put(
+        &store,
+        acc,
+        msg("d3", NOW, &["INBOX", "SENT_COPY"], "x", true),
+    );
     let marked = put(&store, acc, msg("e", NOW, &["INBOX"], "x", true));
     let _hostile_sender = put(&store, acc, msg("f", NOW, &["INBOX"], "x", true));
     let gone = put(&store, acc, msg("g", NOW, &["INBOX"], "x", true));
@@ -156,6 +165,19 @@ fn a_watch_skips_mail_that_is_not_a_safe_new_arrival() {
         .unwrap();
     // Mail just before the watch that was not in the mirror can match.
     assert_eq!(store.check_watches(NOW).unwrap(), [(w, pending)]);
+}
+
+/// A message that gets the IMAP `\\Draft` flag (the label `UNSENT`) after
+/// its body was saved gives no arrival notice (IMAP spec section 4).
+#[test]
+fn a_draft_flag_after_the_body_gives_no_notice() {
+    let dir = TempDir::new("flag");
+    let (store, acc) = setup(&dir);
+    let w = store.add_watch("from:ana", NOW).unwrap();
+    put(&store, acc, msg("a", NOW, &["INBOX"], "x", true));
+    put(&store, acc, msg("a", NOW, &["INBOX", "UNSENT"], "x", true));
+    assert_eq!(store.check_watches(NOW).unwrap(), []);
+    assert_eq!(store.watch(w).unwrap().unwrap().message, None);
 }
 
 #[test]

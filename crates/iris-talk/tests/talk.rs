@@ -110,6 +110,8 @@ impl Box_ {
                     ("INBOX", "INBOX", "system"),
                     ("SENT", "SENT", "system"),
                     ("DRAFT", "DRAFT", "system"),
+                    ("UNSENT", "UNSENT", "system"),
+                    ("SENT_COPY", "SENT_COPY", "system"),
                 ],
             )
             .unwrap();
@@ -434,6 +436,17 @@ fn services_hostile_mail_and_drafts_do_not_make_a_talk() {
         ..M::default()
     });
     assert!(b.talk("d", NOW).is_none(), "a draft");
+    // An IMAP draft and a copy in a Sent folder from a person, understood
+    // before they got the label: no talk.
+    for (id, label) in [("u1", "UNSENT"), ("c1", "SENT_COPY")] {
+        b.put(M {
+            id,
+            thread: id,
+            labels: &[label],
+            ..M::default()
+        });
+        assert!(b.talk(id, NOW).is_none(), "{label}");
+    }
 
     // A service message and then a person: the person is the origin, and
     // the service message counts.

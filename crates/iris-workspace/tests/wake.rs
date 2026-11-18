@@ -39,7 +39,8 @@ fn fixture(name: &str) -> Fixture {
            VALUES (1, 1, 5, 'm1', 1, 1);
          INSERT INTO header (message_id, from_addr) VALUES (1, 'dana@example.com');
          INSERT INTO label (id, account_id, provider_id, name, kind)
-           VALUES (1, 1, 'SENT', 'SENT', 'system'), (2, 1, 'DRAFT', 'DRAFT', 'system');",
+           VALUES (1, 1, 'SENT', 'SENT', 'system'), (2, 1, 'DRAFT', 'DRAFT', 'system'),
+                  (3, 1, 'UNSENT', 'UNSENT', 'system'), (4, 1, 'SENT_COPY', 'SENT_COPY', 'system');",
     );
     let job = create(&store, "Get the contract.", None, NOW).unwrap();
     add_scope(&store, job, Ref::Thread(5), By::Person, NOW).unwrap();
@@ -81,6 +82,9 @@ fn no_wake_before_the_end_with_no_reply() {
     // yet, marked hostile, or queued for the link check.
     message(&f, 2, "INSERT INTO message_label VALUES (2, 1);");
     message(&f, 3, "INSERT INTO message_label VALUES (3, 2);");
+    // An IMAP draft and a copy in a Sent folder, understood before the label.
+    message(&f, 11, "INSERT INTO message_label VALUES (11, 3);");
+    message(&f, 12, "INSERT INTO message_label VALUES (12, 4);");
     message(&f, 5, "UPDATE message SET gone_at = 1 WHERE id = 5;");
     message(
         &f,

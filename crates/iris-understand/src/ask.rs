@@ -65,7 +65,9 @@ const ELIGIBLE: &str = concat!(
     " AND NOT EXISTS (SELECT 1 FROM sender s
                     WHERE s.address = h.from_addr COLLATE NOCASE AND s.kind = 'hostile')
     AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                    WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))"
+                    WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))
+    AND NOT ",
+    iris_store::draft_or_copy!("m")
 );
 
 /// Words that a search for them does not narrow (English only).

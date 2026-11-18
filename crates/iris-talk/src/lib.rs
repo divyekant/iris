@@ -434,16 +434,18 @@ pub fn message(conn: &Connection, id: i64) -> rusqlite::Result<Option<Mail>> {
 }
 
 /// The columns that [`mail_of`] reads.
-const MAIL_SELECT: &str =
+const MAIL_SELECT: &str = concat!(
     "SELECT m.id, COALESCE(m.internal_date, h.date, 0) AS at, h.from_addr, h.from_name,
             h.to_addrs, h.cc_addrs, COALESCE(b.subject, h.subject), b.text, m.hostile,
             EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                    WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
-            EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                   WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT'),
+            ",
+    iris_store::draft_or_copy!("m"),
+    ",
             m.gone_at IS NOT NULL
      FROM message m LEFT JOIN header h ON h.message_id = m.id
-     LEFT JOIN body b ON b.message_id = m.id";
+     LEFT JOIN body b ON b.message_id = m.id"
+);
 
 /// Each message of the thread that is understood or `current`, also when it
 /// is gone, oldest first. The content cleanup can delete the header of a gone

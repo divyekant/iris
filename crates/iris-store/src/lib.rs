@@ -19,6 +19,28 @@ macro_rules! may_be_hostile {
     };
 }
 
+/// The SQL condition "message `$m` is not received mail": it has the label
+/// `DRAFT`, `UNSENT` or `SENT_COPY` (docs/specs/2026-11-17-imap-provider.md,
+/// section 4). The understanding, the watches, the people, the conversations,
+/// the reply parent and the model context skip such a message. `UNSENT` and
+/// `SENT_COPY` are no proof that you wrote the mail: a check of authorship
+/// reads `SENT` and `DRAFT` only. The test `each_draft_read_is_classified`
+/// finds other forms.
+#[macro_export]
+macro_rules! draft_or_copy {
+    ($m:literal) => {
+        concat!(
+            "EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+               WHERE ml.message_id = ",
+            $m,
+            ".id AND l.provider_id IN ('DRAFT', 'UNSENT', 'SENT_COPY'))"
+        )
+    };
+}
+
+/// The labels of [`draft_or_copy!`], for a check in Rust.
+pub const DRAFT_OR_COPY: [&str; 3] = ["DRAFT", "UNSENT", "SENT_COPY"];
+
 mod backup;
 mod content;
 mod file_lock;

@@ -77,7 +77,7 @@ pub struct Outcome {
     pub items: Vec<i64>,
     /// Hostile mail: no item, no model call (or a `phishing` answer).
     pub hostile: bool,
-    /// A draft (label `DRAFT`): no item.
+    /// A draft or a sent copy (`iris_store::DRAFT_OR_COPY`): no item.
     pub draft: bool,
     /// The message is gone: nothing changed.
     pub gone: bool,
@@ -105,6 +105,8 @@ struct Row {
     internal_date: Option<i64>,
     gone: bool,
     me: String,
+    /// The authserv-id that the account provider adds (`trusted_authserv`).
+    authserv: Option<&'static str>,
     labels: Vec<String>,
     tries: i64,
     retry_at: Option<i64>,
@@ -202,7 +204,7 @@ fn link_mark_of(store: &Store, id: i64) -> Option<(bool, Option<String>)> {
     let path = row.sha.as_deref().and_then(|s| store.content_path(s))?;
     let (raw, raw_cut, html_after) = read_raw(&path).ok()?;
     let c = iris_clean::clean_cut(&raw, raw_cut);
-    let head = crate::Head::parse(&raw);
+    let head = crate::Head::parse(&raw, row.authserv);
     let mark = crate::link_mark(&head, &c.links, c.links_cut || html_after);
     Some((mark, row.sha))
 }
@@ -248,8 +250,12 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         .ok_or(Error::NoMessage(message))?;
     let (raw, raw_cut, html_after) = read_raw(&path)?;
 
-    let draft = row.labels.iter().any(|l| l == "DRAFT");
-    let head = crate::Head::parse(&raw);
+    // A draft or a copy in a Sent folder is not received mail (IMAP spec section 4).
+    let draft = row
+        .labels
+        .iter()
+        .any(|l| iris_store::DRAFT_OR_COPY.contains(&l.as_str()));
+    let head = crate::Head::parse(&raw, row.authserv);
     // The spoof check needs this lookup: a read error stops understanding
     // before any model call.
     let (from_name, from_addr) = (head.from_name.clone(), head.from_addr.clone());
@@ -273,6 +279,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         me: &row.me,
         kind: Kind::Stranger,
         labels: &row.labels,
+        authserv: row.authserv,
         internal_date: row.internal_date,
         now_ms,
         known_person: &known,
@@ -530,7 +537,8 @@ fn read_row(store: &Store, message: i64) -> Result<Row> {
             .query_row(
                 "SELECT m.account_id, m.thread_id, m.content_sha256, m.internal_date,
                         m.gone_at IS NOT NULL, a.address, m.tries, m.retry_at,
-                        EXISTS (SELECT 1 FROM json_each(coalesce(m.hostile, '[]')) WHERE value = 'phishing')
+                        EXISTS (SELECT 1 FROM json_each(coalesce(m.hostile, '[]')) WHERE value = 'phishing'),
+                        a.provider
                  FROM message m JOIN account a ON a.id = m.account_id WHERE m.id = ?1",
                 [message],
                 |r| {
@@ -541,6 +549,7 @@ fn read_row(store: &Store, message: i64) -> Result<Row> {
                         internal_date: r.get(3)?,
                         gone: r.get(4)?,
                         me: r.get::<_, String>(5)?.to_ascii_lowercase(),
+                        authserv: crate::head::trusted_authserv(&r.get::<_, String>(9)?),
                         labels: Vec::new(),
                         tries: r.get(6)?,
                         retry_at: r.get(7)?,
@@ -638,7 +647,10 @@ macro_rules! earlier_ok {
          AND m.internal_date < ?3 AND NOT ",
             iris_store::may_be_hostile!(),
             " AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                         WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'DRAFT'))
+                         WHERE ml.message_id = m.id AND l.provider_id = 'SPAM')
+         AND NOT ",
+            iris_store::draft_or_copy!("m"),
+            "
          AND NOT EXISTS (SELECT 1 FROM header hh JOIN sender s ON s.address = hh.from_addr
                          WHERE hh.message_id = m.id AND s.kind = 'hostile')"
         )

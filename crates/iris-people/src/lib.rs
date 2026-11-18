@@ -130,7 +130,8 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
              FROM message m JOIN header h ON h.message_id = m.id
              WHERE m.account_id = ?1 AND m.gone_at IS NULL",
             sent = flag("SENT"),
-            draft = flag("DRAFT"),
+            // A draft or a sent copy is no history (IMAP spec section 4).
+            draft = iris_store::draft_or_copy!("m"),
             spam = flag("SPAM"),
         ))?;
         // Pass 1: your addresses (with aliases) and the threads where you sent mail.

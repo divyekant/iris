@@ -116,7 +116,8 @@ fn mirror_sync_runs_understanding_so_search_finds_words_and_senders() {
         .filter(|&i| mailbox.truth(i).sender == iris_synth::Sender::KnownPerson)
         .find_map(|i| {
             let raw = mailbox.raw(i);
-            let head = iris_understand::Head::parse(&raw);
+            let head =
+                iris_understand::Head::parse(&raw, Some(iris_understand::head::GMAIL_AUTHSERV));
             let text = String::from_utf8_lossy(&raw).to_string();
             let subject = text.lines().find_map(|l| l.strip_prefix("Subject: "))?;
             if subject.contains("=?") {

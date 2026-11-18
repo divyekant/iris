@@ -1576,16 +1576,20 @@ fn draft_busy(c: &Connection, action: i64, draft: i64) -> Result<Option<String>>
 
 /// The message that a reply in the thread `thread` (a row ID) answers
 /// (send spec, section 3): the newest message of the thread, by internal
-/// date, that is not gone, has no `DRAFT` label and is not in `SPAM` or
-/// `TRASH`. Submit resolves a `draft` action of a thread with this rule,
+/// date, that is not gone, is not a draft or a sent copy
+/// (`iris_store::draft_or_copy!`) and is not in `SPAM` or `TRASH`. Submit resolves a `draft` action of a thread with this rule,
 /// and the write view shows the same message (write spec, section 5).
 pub fn reply_parent(c: &Connection, thread: i64) -> rusqlite::Result<Option<i64>> {
     c.query_row(
-        "SELECT m.id FROM message m WHERE m.thread_id = ?1 AND m.gone_at IS NULL
+        concat!(
+            "SELECT m.id FROM message m WHERE m.thread_id = ?1 AND m.gone_at IS NULL
            AND NOT EXISTS (SELECT 1 FROM message_label ml
              JOIN label l ON l.id = ml.label_id
-             WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH', 'DRAFT'))
-         ORDER BY m.internal_date DESC, m.id DESC LIMIT 1",
+             WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))
+           AND NOT ",
+            iris_store::draft_or_copy!("m"),
+            " ORDER BY m.internal_date DESC, m.id DESC LIMIT 1"
+        ),
         [thread],
         |r| r.get(0),
     )

@@ -102,6 +102,8 @@ fn setup(name: &str, budget: Option<i64>, mail: &[Mail]) -> Box_ {
                 ("INBOX", "INBOX", "system"),
                 ("SPAM", "SPAM", "system"),
                 ("TRASH", "TRASH", "system"),
+                ("UNSENT", "UNSENT", "system"),
+                ("SENT_COPY", "SENT_COPY", "system"),
             ],
         )
         .unwrap();
@@ -210,6 +212,38 @@ fn one(b: &Box_, sql: &str) -> Option<i64> {
     b.store
         .read(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
         .unwrap()
+}
+
+/// An IMAP draft and a copy in a Sent folder with a body (the label came
+/// after the understanding) are not data for Ask (IMAP spec section 4).
+#[test]
+fn drafts_and_sent_copies_are_not_data() {
+    let mail = &[
+        Mail(MAIL[0].0, MAIL[0].1, MAIL[0].2, MAIL[0].3),
+        Mail(
+            "Flight plan",
+            "a@example.com",
+            "Draft flight words",
+            &["UNSENT"],
+        ),
+        Mail(
+            "Flight copy",
+            "b@example.com",
+            "Copy flight words",
+            &["SENT_COPY"],
+        ),
+    ];
+    let b = setup("copies", Some(1_000_000), mail);
+    let reply = r#"{"claims": [], "quotes": []}"#;
+    let (_, calls) = run(&b, Ok(reply), "When does my flight leave?");
+    let calls = calls.borrow();
+    assert_eq!(calls.len(), 1);
+    let data = &calls[0].1;
+    assert!(data.contains("Departure"), "{data}");
+    assert!(
+        !data.contains("Draft flight") && !data.contains("Copy flight"),
+        "{data}"
+    );
 }
 
 #[test]

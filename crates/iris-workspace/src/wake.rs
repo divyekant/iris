@@ -10,7 +10,8 @@ use crate::{readable, Result};
 
 /// The replies on the wait thread of the waiting `job`: each message of an
 /// active thread ref of the job on that thread that is not in the list of
-/// the ref yet, not sent by you (no label `SENT` or `DRAFT`), and that the
+/// the ref yet, not sent by you (no label `SENT`, not
+/// `iris_store::draft_or_copy!`), and that the
 /// workspace can read ([`readable`]). Gives the scope row and the messages.
 /// No wait thread, a revoked ref or a job that does not wait gives none.
 pub fn replies_in(c: &Connection, job: i64) -> Result<Option<(i64, Vec<i64>)>> {
@@ -22,15 +23,17 @@ pub fn replies_in(c: &Connection, job: i64) -> Result<Option<(i64, Vec<i64>)>> {
     else {
         return Ok(None);
     };
-    let mut st = c.prepare_cached(
+    let mut st = c.prepare_cached(concat!(
         "SELECT s.id, m.id FROM job_scope s JOIN message m ON m.thread_id = s.thread_id
          WHERE s.job_id = ?1 AND s.thread_id = ?2 AND s.revoked_at IS NULL
            AND NOT EXISTS (SELECT 1 FROM job_scope_message sm
                            WHERE sm.scope_id = s.id AND sm.message_id = m.id)
            AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                           WHERE ml.message_id = m.id AND l.provider_id IN ('SENT', 'DRAFT'))
-         ORDER BY m.id",
-    )?;
+                           WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
+           AND NOT ",
+        iris_store::draft_or_copy!("m"),
+        " ORDER BY m.id"
+    ))?;
     let rows: Vec<(i64, i64)> = st
         .query_map(params![job, thread], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
