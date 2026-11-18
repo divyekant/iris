@@ -416,3 +416,39 @@ fn an_expired_h1_of_a_stopped_resync_starts_a_new_resync() {
     assert_eq!(sync_state(&store).0, None);
     assert_eq!(mirror_state(&store), fake_state(&fake));
 }
+
+/// A full resync that starts inside a call (an expired history ID) gives
+/// the open log row the kind `resync` at once, while it runs.
+#[test]
+fn a_resync_that_starts_in_a_call_is_its_log_kind_while_it_runs() {
+    let (fake, store, account) = synced("resync-kind", 21, 20);
+    // The folder of `synced`; `data_dir` would remove it.
+    let db = std::env::temp_dir()
+        .join(format!("iris-sync-resync-kind-{}", std::process::id()))
+        .join("iris.db");
+    fake.add_message(b"Subject: later\r\n\r\nx\r\n", &["INBOX"]);
+    fake.expire_history_before(latest(&fake));
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let seen2 = seen.clone();
+    fake.before_next_matching("/messages?", move || {
+        let row: (String, Option<String>) = rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT kind, result FROM sync_log ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        *seen2.lock().unwrap() = Some(row);
+    });
+    assert!(
+        sync(&store, &client(fake.base_url()), account, TOKEN)
+            .unwrap()
+            .resync
+    );
+    assert_eq!(*seen.lock().unwrap(), Some((KIND_RESYNC.to_string(), None)));
+    assert_eq!(
+        log_kinds(&store).last().map(String::as_str),
+        Some(KIND_RESYNC)
+    );
+}
