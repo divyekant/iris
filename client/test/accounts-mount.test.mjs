@@ -63,13 +63,14 @@ test("the accounts view lists each account with its state and how to add one", a
   }
 });
 
-test("a stopped IMAP account names the mail server and the IMAP sign-in command", async () => {
-  const stopped = { ...fx.status.accounts[1], provider: "imap", state: "needs_sign_in" };
+test("a stopped IMAP account names the mail server and its exact IMAP sign-in command", async () => {
+  const imap = { host: "imap.northwind.example", port: 1143, user: "you" };
+  const stopped = { ...fx.status.accounts[1], provider: "imap", imap, state: "needs_sign_in" };
   const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [stopped] }, poll: 0 });
   try {
     const row = text(view.target.querySelector(".accounts li"));
     assert.match(row, /The mail server refused the sign-in/);
-    assert.match(row, /iris account add-imap you@northwind\.example --host <server>/);
+    assert.match(row, /iris account add-imap you@northwind\.example --host imap\.northwind\.example --port 1143 --user you/);
     assert.doesNotMatch(row, /Google|client\.json/);
   } finally {
     view.destroy();
@@ -136,5 +137,17 @@ test("each item view of the brief names its account: a line and a live login cod
     }
   } finally {
     access.accounts = {};
+  }
+});
+
+test("the IMAP sign-in command leaves out the default port and the user that is the address", async () => {
+  const imap = { host: "imap.northwind.example", port: 993, user: "you@northwind.example" };
+  const stopped = { ...fx.status.accounts[1], provider: "imap", imap, state: "needs_sign_in" };
+  const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [stopped] }, poll: 0 });
+  try {
+    const row = text(view.target.querySelector(".accounts li"));
+    assert.match(row, /iris account add-imap you@northwind\.example --host imap\.northwind\.example and give/);
+  } finally {
+    view.destroy();
   }
 });

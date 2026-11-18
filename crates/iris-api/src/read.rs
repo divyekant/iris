@@ -76,6 +76,17 @@ pub struct Account {
     /// The unfinished first sync or full resync, if there is one.
     pub sync: Option<SyncState>,
     pub last_sync: Option<SyncRun>,
+    /// The saved server of an IMAP account, so that the sign-in help can
+    /// give the exact command. Absent for another provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub imap: Option<ImapServer>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct ImapServer {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -275,12 +286,17 @@ pub struct Filter<'a> {
 pub fn status(store: &Store) -> Result<Status> {
     Ok(store.read(|c| {
         let mut st = c.prepare(
-            "SELECT id, address, provider, state, mirror_ready_at, sync_kind, sync_step
+            "SELECT id, address, provider, state, mirror_ready_at, sync_kind, sync_step,
+                    imap_host, imap_port, imap_user
              FROM account ORDER BY id",
         )?;
         let rows = st.query_map([], |r| {
             let kind: Option<String> = r.get(5)?;
             let step: Option<i64> = r.get(6)?;
+            let imap = match (r.get(7)?, r.get(8)?, r.get(9)?) {
+                (Some(host), Some(port), Some(user)) => Some(ImapServer { host, port, user }),
+                _ => None,
+            };
             Ok(Account {
                 id: r.get(0)?,
                 address: r.get(1)?,
@@ -289,6 +305,7 @@ pub fn status(store: &Store) -> Result<Status> {
                 mirror_ready_at: r.get::<_, Option<i64>>(4)?.map(rfc3339),
                 sync: kind.map(|kind| SyncState { kind, step }),
                 last_sync: None,
+                imap,
             })
         })?;
         let mut accounts = rows.collect::<rusqlite::Result<Vec<_>>>()?;

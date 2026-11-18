@@ -5,7 +5,7 @@ export const access = $state({
   /** Why the API cannot answer now, or "". */
   problem: "",
   /** The accounts that need sign-in (spec 1 section 4.7), from the last status answer. */
-  locked: [] as { address: string; provider: string }[],
+  locked: [] as Pick<import("./api").Account, "address" | "provider" | "imap">[],
   /** True when the last status answer had no account: the views then link to setup. */
   none: false,
   /** The short name of each account by its `a-` ID, from the last status answer. Empty with one account. */

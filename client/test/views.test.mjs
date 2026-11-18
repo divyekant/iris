@@ -800,7 +800,7 @@ test("each status answer sets the accounts that need sign-in, and the app shows 
   try {
     globalThis.fetch = async () => new Response(JSON.stringify({ ...fx.status, accounts: [account] }));
     await get("status");
-    assert.deepEqual(access.locked, [{ address: account.address, provider: account.provider }]);
+    assert.deepEqual(access.locked, [{ address: account.address, provider: account.provider, imap: undefined }]);
     // The views start API calls while they render. Keep them pending.
     globalThis.fetch = () => new Promise(() => {});
     for (const hash of ["", "#/setup", "#/brief", "#/mail/m-55210"]) {
