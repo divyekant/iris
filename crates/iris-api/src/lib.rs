@@ -700,16 +700,35 @@ struct ConfirmBody {
     sha256: String,
 }
 
+/// Runs `f` on a blocking thread. Each policy writer waits for the backup
+/// lock (a backup can hold it for minutes), and the server has one runtime
+/// thread: a wait there stops each other request (issue 143).
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))?
+}
+
+/// [`policy::change`] on a blocking thread, see [`blocking`].
+async fn change_blocking(
+    s: Arc<Store>,
+    version: Option<i64>,
+    change: iris_policy::Change,
+) -> Result<serde_json::Value> {
+    blocking(move || policy::change(&s, version, change, now_s())).await
+}
+
 async fn post_confirm(
     State(s): State<Arc<Store>>,
     b: std::result::Result<Json<ConfirmBody>, JsonRejection>,
 ) -> Result<Response> {
     let b = body(b)?;
-    Ok(Json(policy::confirm(&s, &b.sha256, now_s())?).into_response())
+    let v = blocking(move || policy::confirm(&s, &b.sha256, now_s())).await?;
+    Ok(Json(v).into_response())
 }
 
 async fn post_discard(State(s): State<Arc<Store>>, _: NoBody) -> Result<Response> {
-    Ok(Json(policy::discard(&s)?).into_response())
+    Ok(Json(blocking(move || policy::discard(&s)).await?).into_response())
 }
 
 /// A field that must be in the body, also when its value is `null`: with
@@ -733,7 +752,7 @@ async fn post_mode(
 ) -> Result<Response> {
     let b = body(b)?;
     let change = iris_policy::Change::Mode(policy::mode(&b.mode)?);
-    Ok(Json(policy::change(&s, b.version, change, now_s())?).into_response())
+    Ok(Json(change_blocking(s, b.version, change).await?).into_response())
 }
 
 #[derive(Deserialize)]
@@ -749,7 +768,7 @@ async fn post_remove(
 ) -> Result<Response> {
     let b = body(b)?;
     let change = iris_policy::Change::Remove(b.id);
-    Ok(Json(policy::change(&s, b.version, change, now_s())?).into_response())
+    Ok(Json(change_blocking(s, b.version, change).await?).into_response())
 }
 
 #[derive(Deserialize)]
@@ -828,8 +847,11 @@ async fn post_grant(
     b: std::result::Result<Json<GrantBody>, JsonRejection>,
 ) -> Result<Response> {
     let b = body(b)?;
-    Ok(policy::grant(&s, &b.job, &b.verbs, b.version, now_s())?
-        .map_or_else(not_found, |v| Json(v).into_response()))
+    Ok(
+        blocking(move || policy::grant(&s, &b.job, &b.verbs, b.version, now_s()))
+            .await?
+            .map_or_else(not_found, |v| Json(v).into_response()),
+    )
 }
 
 async fn get_job(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
@@ -881,7 +903,7 @@ async fn post_accept(
 ) -> Result<Response> {
     let b = body(b)?;
     let change = iris_policy::Change::Accept(b.id);
-    Ok(Json(policy::change(&s, b.version, change, now_s())?).into_response())
+    Ok(Json(change_blocking(s, b.version, change).await?).into_response())
 }
 
 #[derive(Deserialize)]

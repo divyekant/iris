@@ -419,3 +419,54 @@ async fn a_hide_proposal_reads_as_choices() {
         json!({ "sender": "news@shop.example", "form": "feed" })
     );
 }
+
+/// Issue 143: each policy writer waits for the backup lock, which a backup
+/// can hold for minutes. A writer that waits must not stop the other
+/// requests: the server has one runtime thread.
+#[tokio::test]
+async fn a_policy_writer_that_waits_for_the_lock_stops_no_other_request() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let d = Arc::new(open("lockwait"));
+    d.write(FILE);
+    let sha = d.get().await["file"]["sha256"].clone();
+    let lock = d.1.backup_lock().unwrap();
+    let released = Arc::new(AtomicBool::new(false));
+    // The release in 3 s, so that a blocked thread cannot hang the test.
+    let r = released.clone();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        r.store(true, Ordering::SeqCst);
+        drop(lock);
+    });
+    let calls: Vec<(&str, Value)> = vec![
+        ("confirm", json!({ "sha256": sha })),
+        ("discard", Value::Null),
+        ("mode", json!({ "version": null, "mode": "observe" })),
+        ("remove", json!({ "version": null, "id": 1 })),
+        ("accept", json!({ "version": null, "id": 1 })),
+        (
+            "grant",
+            json!({ "version": null, "job": "j-1", "verbs": ["archive"] }),
+        ),
+    ];
+    let mut tasks = Vec::new();
+    for (what, body) in calls {
+        let d = d.clone();
+        tasks.push(tokio::spawn(async move {
+            let body = (!body.is_null()).then_some(body);
+            d.call("POST", &format!("/api/policy/{what}"), body, true)
+                .await
+        }));
+    }
+    tokio::task::yield_now().await;
+    let (code, _) = d.call("GET", "/api/policy", None, true).await;
+    assert_eq!(code, StatusCode::OK);
+    assert!(
+        !released.load(Ordering::SeqCst),
+        "the read waited for the lock of a policy writer"
+    );
+    for t in tasks {
+        t.await.unwrap();
+    }
+    release.join().unwrap();
+}
