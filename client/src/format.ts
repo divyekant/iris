@@ -218,6 +218,22 @@ export function across(status: Status | null): string {
   return status && status.accounts.length > 1 ? " from all accounts" : "";
 }
 
+/** One shell argument: as it is if it has only safe characters, else in single quotes. */
+export function shellArg(s: string): string {
+  return /^[A-Za-z0-9@._+-]+$/.test(s) ? s : `'${s.replaceAll("'", `'\\''`)}'`;
+}
+
+/**
+ * Who refused the sign-in of an account, and the command that signs it in
+ * again on the machine that runs Iris. The command differs for each provider.
+ */
+export function signIn(a: Pick<Account, "address" | "provider">): { who: string; command: string; detail: string } {
+  if (a.provider === "gmail") return { who: "Google", command: "iris account add client.json", detail: "with the client file of this account" };
+  // With no --host, the engine uses the saved server, port and user of the account.
+  if (a.provider === "imap") return { who: "The mail server", command: `iris account add-imap ${shellArg(a.address)}`, detail: "and give the new password" };
+  return { who: "The provider", command: "iris account --help", detail: "to see the sign-in command of this provider" };
+}
+
 /**
  * A short name for each account, by its `a-` ID, so a line can say which mailbox
  * an item came from (card R6-02). The first part that tells the accounts apart:

@@ -544,7 +544,7 @@
     font-size: var(--font-size--1);
     text-decoration: none;
   }
-  @media (max-width: 600px), (pointer: coarse) {
+  @media (max-width: 600px), (any-pointer: coarse) {
     /* The box is 44px to touch. A transparent border keeps the 24px mark, and a negative margin keeps the layout. */
     input[type="checkbox"] {
       width: var(--size-touch);

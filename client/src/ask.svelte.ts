@@ -49,9 +49,9 @@ export function parts(answer: string, sources: AskSource[]): Part[] {
   return out;
 }
 
-/** The cost of an answer in words, or "" for no cost (no call, or a local model). */
+/** The cost of an answer in words, or "" for no cost (no call, a local model, or a price of 0). */
 export function cost(micro: number | null): string {
-  if (micro === null) return "";
+  if (micro === null || micro <= 0) return "";
   // Cents, rounded to one decimal.
   const n = Math.round(micro / 1_000) / 10;
   if (n >= 100) return `$${(micro / 1_000_000).toFixed(2)}`;

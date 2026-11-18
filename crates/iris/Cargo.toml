@@ -21,6 +21,8 @@ iris-apply = { version = "0.0.0", path = "../iris-apply" }
 iris-service = { version = "0.0.0", path = "../iris-service" }
 iris-auth = { version = "0.0.0", path = "../iris-auth" }
 iris-gmail = { version = "0.0.0", path = "../iris-gmail" }
+iris-imap = { version = "0.0.0", path = "../iris-imap" }
+libc = "=0.2.191"
 iris-provider = { version = "0.0.0", path = "../iris-provider" }
 iris-mcp = { version = "0.0.0", path = "../iris-mcp" }
 iris-matters = { version = "0.0.0", path = "../iris-matters" }
@@ -46,6 +48,7 @@ tokio = { version = "1", default-features = false, features = ["rt", "net", "mac
 [dev-dependencies]
 iris-spec = { version = "0.0.0", path = "../iris-spec" }
 iris-fakegmail = { version = "0.0.0", path = "../iris-fakegmail" }
+iris-fakeimap = { version = "0.0.0", path = "../iris-fakeimap" }
 iris-synth = { version = "0.0.0", path = "../iris-synth" }
 
 # The engine session tests run their own main: the test program is also the

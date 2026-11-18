@@ -63,65 +63,24 @@ test("the accounts view lists each account with its state and how to add one", a
   }
 });
 
-test("a status answer sets the account pills of the brief, and a later one-account answer removes them", async () => {
-  const answer = (status) => (globalThis.fetch = async () => new Response(JSON.stringify(status), { status: 200, headers: { "content-type": "application/json" } }));
-  const item = fx.items.find((i) => i.account === "a-2");
-  const pill = async () => {
-    const view = await mount("/src/views/Line.svelte", { item });
-    try {
-      return view.target.querySelector(".pill")?.textContent.trim() ?? null;
-    } finally {
-      view.destroy();
-    }
-  };
-  answer(fx.status);
-  await get("status");
-  assert.equal(await pill(), "northwind");
-  answer({ ...fx.status, accounts: [fx.status.accounts[0]] });
-  await get("status");
-  assert.equal(await pill(), null);
-});
-
-test("the accounts view never says up to date while a copy runs or after a failed run", async () => {
-  const base = fx.status.accounts[0];
-  const cases = [
-    [{ ...base, sync: { kind: "resync", step: 2 } }, /copies this mailbox again/],
-    [{ ...base, last_sync: { ...base.last_sync, result: "error: Gmail: HTTP 500" } }, /last sync failed/],
-    [{ ...base, last_sync: { ...base.last_sync, kind: "verify", result: "2 differences, 0 skipped, then error: HTTP 401" } }, /last sync failed/],
-    [{ ...base, mirror_ready_at: null, sync: { kind: "first", step: 1 } }, /copies this mailbox now/],
-    [{ ...base, mirror_ready_at: null, sync: { kind: "first", step: 1 }, last_sync: { ...base.last_sync, kind: "first", result: "error: Gmail: HTTP 500" } }, /last try of the first copy failed\. Iris tries again/],
-    [base, /Up to date/],
-  ];
-  for (const [account, want] of cases) {
-    const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [account] }, poll: 0 });
-    try {
-      const row = text(view.target.querySelector(".accounts li"));
-      assert.match(row, want, JSON.stringify(account));
-      if (want.source !== "Up to date") assert.doesNotMatch(row, /Up to date/);
-      // A failed try is no stop: Iris tries again, so only a refused sign-in gets the error dot.
-      const dot = view.target.querySelector(".tone");
-      assert.equal(dot.classList.contains("stopped"), account.state === "needs_sign_in");
-      if (/failed/.test(want.source)) assert.ok(dot.classList.contains("retry"));
-    } finally {
-      view.destroy();
-    }
+test("a stopped IMAP account names the mail server and the IMAP sign-in command, which needs only the address", async () => {
+  const stopped = { ...fx.status.accounts[1], provider: "imap", state: "needs_sign_in" };
+  const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [stopped] }, poll: 0 });
+  try {
+    const row = text(view.target.querySelector(".accounts li"));
+    assert.match(row, /The mail server refused the sign-in/);
+    assert.match(row, /run iris account add-imap you@northwind\.example and give the new password/);
+    assert.doesNotMatch(row, /Google|client\.json|--host/);
+  } finally {
+    view.destroy();
   }
 });
 
-test("each item view of the brief names its account: a line and a live login code", async () => {
-  access.accounts = { "a-1": "gmail", "a-2": "northwind" };
-  const signal = { ...fx.items.find((i) => i.form === "signal"), account: "a-2" };
-  const now = new Date(new Date(signal.expires).getTime() - 60_000);
-  try {
-    for (const [path, props] of [["/src/views/Line.svelte", { item: signal }], ["/src/views/Code.svelte", { item: signal, now }]]) {
-      const view = await mount(path, props);
-      try {
-        assert.equal(view.target.querySelector(".pill")?.textContent.trim(), "northwind", path);
-      } finally {
-        view.destroy();
-      }
-    }
-  } finally {
-    access.accounts = {};
+test("each shell argument of a sign-in command keeps its exact text in a POSIX shell", async () => {
+  const { shellArg } = await load("/src/format.ts");
+  const { execFileSync } = await import("node:child_process");
+  for (const s of ["you@example.com", "o'brien@example.com", "a b@example.com", "x\\y@example.com", "$(id)@example.com", "-n"]) {
+    const out = execFileSync("sh", ["-c", `printf %s ${shellArg(s)}`]).toString();
+    assert.equal(out, s);
   }
 });

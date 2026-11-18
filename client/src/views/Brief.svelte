@@ -231,7 +231,7 @@
   <div class="copying" role="status">
     <p>
       {#if stopped}
-        Iris copied {progress.fetched.toLocaleString("en-US")} of {progress.total ? progress.total.toLocaleString("en-US") : "all"} messages{across(status)}, then Google stopped the sign-in.
+        Iris copied {progress.fetched.toLocaleString("en-US")} of {progress.total ? progress.total.toLocaleString("en-US") : "all"} messages{across(status)}, then the sign-in stopped.
       {:else}
         Iris still copies your mailbox: {progress.fetched.toLocaleString("en-US")} of {progress.total ? progress.total.toLocaleString("en-US") : "all"} messages{across(status)}.
       {/if}

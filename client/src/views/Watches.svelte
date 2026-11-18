@@ -131,7 +131,7 @@
   .stop:focus-visible {
     opacity: 1;
   }
-  @media (hover: none) {
+  @media (hover: none), (any-pointer: coarse) {
     .stop {
       opacity: 1;
     }

@@ -48,3 +48,25 @@ test("Dismiss sends the proposal ID, and a 409 shows the error and loads the pol
     view.destroy();
   }
 });
+
+test("a poll that blocks the screen closes the open mode choice and the open remove question (#148)", async () => {
+  const blocked = { ...fx.policy };
+  let block = false;
+  serve(() => [200, block ? blocked : same]);
+  const view = await mount("/src/views/Rules.svelte", { policy: same, every: 20 });
+  try {
+    const radio = [...view.target.querySelectorAll("input[name=mode]")].find((r) => r.value !== same.mode);
+    radio.click();
+    view.target.querySelector("button.remove").click();
+    view.flushSync();
+    const open = () => [...view.target.querySelectorAll("button")].filter((b) => /^Use .* mode$/.test(b.textContent.trim()) || (b.classList.contains("danger") && b.textContent.trim() === "Remove"));
+    assert.equal(open().length, 2, "the mode choice and the remove question are open");
+    block = true;
+    await until(() => /Confirm or discard the change of your file first|Confirm the change/.test(text(view.target)));
+    view.flushSync();
+    assert.equal(open().length, 0, "no open button can send a change while the screen is blocked");
+    assert.ok([...view.target.querySelectorAll("input[name=mode]")].find((r) => r.value === same.mode).checked);
+  } finally {
+    view.destroy();
+  }
+});

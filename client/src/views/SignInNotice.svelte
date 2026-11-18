@@ -1,16 +1,18 @@
 <!--
-  Spec 1 section 4.7: Google refused the refresh token of an account, so its
+  Spec 1 section 4.7: the provider refused the sign-in of an account, so its
   sync stopped. App.svelte shows this above every view, from the access state.
 -->
 <script lang="ts">
   import { access } from "../access.svelte.ts";
+  import { signIn } from "../format";
 </script>
 
-{#each access.locked as address (address)}
+{#each access.locked as a (a.address)}
+  {@const s = signIn(a)}
   <div class="locked" role="alert">
     <p>
-      Google stopped the sign-in of {address}. Iris copies no new mail from this account until you sign in again.
-      On the machine that runs Iris, run <code>iris account add client.json</code> with the same client file.
+      {s.who} stopped the sign-in of {a.address}. Iris copies no new mail from this account until you sign in again.
+      On the machine that runs Iris, run <code>{s.command}</code> {s.detail}.
     </p>
   </div>
 {/each}

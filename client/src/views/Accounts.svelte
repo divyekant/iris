@@ -6,7 +6,7 @@
 <script lang="ts">
   import { get, type Account, type Status } from "../api";
   import { poll as every } from "../clock";
-  import { accountNames, when } from "../format";
+  import { accountNames, signIn, when } from "../format";
 
   let { status: initial, poll = 60000 }: { status: Status; poll?: number } = $props();
   // svelte-ignore state_referenced_locally
@@ -17,7 +17,7 @@
 
   // The state of one account, in one sentence, and its tone.
   function stateOf(a: Account): { text: string; tone: "ok" | "busy" | "retry" | "stopped" } {
-    if (a.state === "needs_sign_in") return { text: "The copy stopped: Google refused the sign-in. Sign in again to continue.", tone: "stopped" };
+    if (a.state === "needs_sign_in") return { text: `The copy stopped: ${signIn(a).who} refused the sign-in. Sign in again to continue.`, tone: "stopped" };
     // A failed run comes before the busy states. The status cannot tell if a new try runs now, so the
     // sentence says only what it knows: the last try failed, and Iris tries again. Only a refused sign-in stops.
     // A sync writes "error: ...", a verify writes "N differences, M skipped, then error: ..." (iris-sync).
@@ -45,7 +45,8 @@
         </p>
         <p class="state">{s.text}</p>
         {#if a.state === "needs_sign_in"}
-          <p class="state">On the machine that runs Iris, run <code>iris account add client.json</code> with the client file of this account.</p>
+          {@const s = signIn(a)}
+          <p class="state">On the machine that runs Iris, run <code>{s.command}</code> {s.detail}.</p>
         {/if}
       </div>
     </li>

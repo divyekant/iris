@@ -548,10 +548,10 @@ export async function get<T>(path: string): Promise<T> {
   const body = await response.json().catch(() => null);
   // The status goes with the error, so that a caller can tell a 404 from other failures.
   if (!response.ok) throw Object.assign(new Error(body?.error ?? `The engine answered ${response.status}.`), { status: response.status });
-  // Spec 1 section 4.7: Google refused the refresh token of these accounts, so their sync stopped.
+  // Spec 1 section 4.7: the provider refused the sign-in of these accounts, so their sync stopped.
   if (path === "status") {
     const accounts = (body as Status).accounts ?? [];
-    access.locked = accounts.filter((a) => a.state === "needs_sign_in").map((a) => a.address);
+    access.locked = accounts.filter((a) => a.state === "needs_sign_in").map(({ address, provider }) => ({ address, provider }));
     access.none = accounts.length === 0;
     access.accounts = accountNames(accounts);
   }
