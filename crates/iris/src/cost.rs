@@ -74,15 +74,20 @@ struct LocalUrl {
 /// on loopback adds nothing, and the run connects to an IP literal (see
 /// `pin_local_url`), which a certificate for `localhost` does not match.
 fn parse_local(url: &str) -> Result<LocalUrl, String> {
+    // No error holds the URL text: a user part, a query or a fragment can
+    // hold a secret, and the command prints the error.
     let refuse = || {
-        format!("`{url}` is not on this machine: use http:// with localhost, 127.0.0.1 or [::1]")
+        "the model URL is not on this machine: use http:// with localhost, 127.0.0.1 or [::1]"
+            .to_string()
     };
     // The model client adds `/chat/completions` to the URL text, so a query
     // or a fragment would change the request path (#135).
     if url.contains(['?', '#']) {
-        return Err(format!(
-            "`{url}` has a query or a fragment: give the base URL only, for example http://localhost:8080/v1"
-        ));
+        return Err(
+            "the model URL has a query or a fragment: give the base URL only, \
+             for example http://localhost:8080/v1"
+                .to_string(),
+        );
     }
     let uri: http::Uri = url.parse().map_err(|_| refuse())?;
     if uri.scheme_str() != Some("http") {
@@ -788,6 +793,12 @@ mod tests {
             let expect = loopback && scheme_ok && user.is_empty() && port_ok && plain;
             let got = parse_local(&url);
             assert_eq!(got.is_ok(), expect, "{url}");
+            if let Err(e) = &got {
+                // No secret of the URL goes to the error text.
+                for part in ["x=1", "#f", "a:b", "127.0.0.1@", "user@", "evil"] {
+                    assert!(!e.contains(part), "{url}: {e}");
+                }
+            }
             if let Ok(u) = got {
                 let bare = u.host.trim_start_matches('[').trim_end_matches(']');
                 assert!(u.host == "localhost" || bare.parse::<IpAddr>().unwrap().is_loopback());
