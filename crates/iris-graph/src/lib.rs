@@ -398,7 +398,8 @@ impl Graph {
     }
 
     /// The name of each category of the master list of the mailbox:
-    /// `GET /me/outlook/masterCategories`.
+    /// `GET /me/outlook/masterCategories`, page by page. The token needs
+    /// `MailboxSettings.Read`.
     pub fn categories(&self, token: &str) -> Result<Vec<String>> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]

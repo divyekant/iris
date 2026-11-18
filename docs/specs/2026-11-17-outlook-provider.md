@@ -37,9 +37,9 @@ on a real Outlook mailbox on dk's Mac, after R1-07 ends.
 - Calendar, contacts and tasks.
 - The Exchange archive mailbox. A move to the archive mailbox changes the
   immutable ID (assumption A3), so the mirror sees a delete.
-- Category colors and the category list of the mailbox
-  (`outlook/masterCategories`). That call needs one more scope
-  (`MailboxSettings.Read`). The mirror reads the categories of each message.
+- Category colors. R6-14 reads the names of the category list
+  (`outlook/masterCategories`) for the label list, with the scope
+  `MailboxSettings.Read` (section 7).
 - One shared Iris app registration. See "Options not chosen".
 
 ## Design
@@ -437,9 +437,13 @@ categories are not moves, and work in each folder. R6-10 keeps the same rule for
     only for the accounts of that tenant. Microsoft refuses it at
     `common`. A personal account cannot use it.
 - Scopes: `offline_access https://graph.microsoft.com/Mail.ReadWrite
-  https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read`.
+  https://graph.microsoft.com/Mail.Send
+  https://graph.microsoft.com/MailboxSettings.Read
+  https://graph.microsoft.com/User.Read`. `MailboxSettings.Read` reads
+  the category list for the label list (section 3.1).
   The code exchange and each refresh that names a `scope` check that it has
-  both `Mail.ReadWrite` and `Mail.Send` (A10). If one is missing, the
+  `Mail.ReadWrite`, `Mail.Send` and `MailboxSettings.Read` (A10). If one
+  is missing, the
   sign-in fails with an error that names the missing permission, and the
   account does not start.
 - PKCE with S256 and a random `state`.
@@ -640,8 +644,8 @@ section 7.3). The caller reconciles with reads only.
 7. `set_categories` with an old etag gets 412 from the fake and changes
    nothing. A changed list makes it red.
 8. A Microsoft sign-in against a fake token endpoint gives a new refresh
-   token on refresh. A missing `Mail.ReadWrite` or `Mail.Send` scope gives
-   an error.
+   token on refresh. A missing `Mail.ReadWrite`, `Mail.Send` or
+   `MailboxSettings.Read` scope gives an error.
 9. After R6-10: an Outlook account syncs with zero differences against the
    fake, also after a move, a delete and an expired link.
 

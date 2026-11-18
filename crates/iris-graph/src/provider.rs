@@ -234,50 +234,11 @@ fn escape(name: &str) -> String {
         .replace('#', "%23")
 }
 
-/// Milliseconds since 1970 of `YYYY-MM-DDTHH:MM:SS[.fff]Z`.
+/// Milliseconds since 1970 of an RFC 3339 time, as Graph gives it.
 fn epoch_ms(text: &str) -> Option<i64> {
-    let b = text.as_bytes();
-    let num = |r: std::ops::Range<usize>| -> Option<i64> {
-        let s = text.get(r)?;
-        s.bytes()
-            .all(|c| c.is_ascii_digit())
-            .then(|| s.parse().ok())?
-    };
-    if b.len() < 20
-        || b[4] != b'-'
-        || b[7] != b'-'
-        || b[10] != b'T'
-        || b[13] != b':'
-        || b[16] != b':'
-    {
-        return None;
-    }
-    let tail = text.get(19..)?;
-    let frac = match tail.strip_suffix('Z')? {
-        "" => 0,
-        f => {
-            let digits = f.strip_prefix('.')?;
-            if digits.is_empty() || !digits.bytes().all(|c| c.is_ascii_digit()) {
-                return None;
-            }
-            // Only the milliseconds count.
-            format!("{digits:0<3}")[..3].parse::<i64>().ok()?
-        }
-    };
-    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
-    let (h, min, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || h > 23 || min > 59 || sec > 60 {
-        return None;
-    }
-    // Days from civil (H. Hinnant).
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = if m > 2 { m - 3 } else { m + 9 };
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    Some(((days * 86_400 + h * 3600 + min * 60 + sec) * 1000) + frac)
+    chrono::DateTime::parse_from_rfc3339(text)
+        .ok()
+        .map(|t| t.timestamp_millis())
 }
 
 /// The provider error of a Graph error (provider spec section 5).
