@@ -184,7 +184,7 @@
   .away:focus-visible {
     outline: 2px solid var(--color-primary);
   }
-  @media (max-width: 600px), (pointer: coarse) {
+  @media (max-width: 600px), (any-pointer: coarse) {
     .away,
     .undo {
       min-height: var(--size-touch);

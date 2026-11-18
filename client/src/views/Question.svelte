@@ -43,7 +43,7 @@
         error = "This job does not ask this question now.";
         onchanged();
       } else if (status === undefined) {
-        // No answer: the engine can have stored it, so say that the result is not known, never the access text (#610).
+        // No answer: the engine can have stored it, so say that the result is not known, never the access text (issue 610).
         error = "Iris does not know if your answer arrived. Open the job to see.";
       } else {
         error = own(e) || "Iris could not send your answer. Try again.";
