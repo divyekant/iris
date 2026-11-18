@@ -669,3 +669,27 @@ fn long_folder_name() {
         Err(Error::Api { status: 400, .. })
     ));
 }
+
+/// The name fallback works for each role on its own: `\Sent` on one folder
+/// does not stop `Spam` (with `\HasNoChildren` from the fake) from SPAM.
+#[test]
+fn name_fallback_for_each_role() {
+    let fake = FakeImap::start(Caps::ALL);
+    fake.create("Sent", Some("\\Sent"));
+    fake.create("Spam", None);
+    let uid = fake.add("Spam", Mailbox::new(60, 1).raw(0), &["\\Seen"]);
+    let mail = provider(&fake);
+    let validity = cursor(&mail)
+        .lines()
+        .find(|l| l.ends_with(" Spam"))
+        .unwrap()
+        .split(' ')
+        .next()
+        .unwrap()
+        .to_owned();
+    let labels = mail
+        .minimal(PASSWORD, &format!("{validity}:{uid}:Spam"))
+        .unwrap()
+        .label_ids;
+    assert_eq!(labels, vec!["SPAM"]);
+}
