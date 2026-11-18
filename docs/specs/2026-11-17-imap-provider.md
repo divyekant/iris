@@ -342,7 +342,7 @@ mirror does not have.
 |---|---|
 | `modify` with only `UNREAD`, `STARRED` and `kw:` labels | First a check of each target folder: `SELECT`, its `UIDVALIDITY`, and its `PERMANENTFLAGS`. Then, for each folder, `SELECT`, the `UIDVALIDITY` again, and `UID STORE <uids> +FLAGS` or `-FLAGS` (not `.SILENT`) |
 | `modify` with any other label | `Api` 400 `notSupported`, before any write |
-| `create_label(name)` | `Api` 400 `notSupported` until the flag writes. With the flag writes: the label ID `kw:` and the name in lowercase ASCII (section 4), with the name as given, if the name is a valid atom, else `Api` 400 `badName`. So `create_label("Todo")` gives `kw:todo`, the same ID that `labels`, `minimal` and `changes` give after the write, and the ledger and the undo use that ID |
+| `create_label(name)` | `Api` 400 `notSupported`, also with the flag writes (limit issue #652). IMAP has no call that makes a keyword with no message: if the targets of the action are gone before the apply, a created label would have no `STORE` behind it, and the next `labels` would not list it. A label action can use a keyword that a folder lists in `FLAGS` or `PERMANENTFLAGS` (section 4). Its ID is the lowercase `kw:` ID, so the ledger and the undo use the same ID as `labels`, `minimal` and `changes` |
 | `trash`, `untrash` | `Api` 400 `notSupported` |
 | drafts and send | `Api` 400 `notSupported` |
 
@@ -435,7 +435,7 @@ times after an unknown result (spec 2 section 7.2).
 | A `NO` to a `STORE` | `Transport` | `modify_refused` |
 | A `\Sent` folder message | `SENT_COPY`, no `SENT` | `labels_of_special_folders_and_flags` |
 | A server with no special-use attributes | the common names give the roles; an attribute wins | `special_folders_by_name`, `an_attribute_wins_over_a_name` |
-| `create_label("Todo")`, then a sync and an undo | the ID `kw:todo` everywhere | `create_label_case` (flag writes) |
+| `create_label("Todo")` | `Api` 400 `notSupported`, nothing written | `create_label_refused` (flag writes) |
 | A folder name over 255 bytes | `Api` 400 `longFolderName` | `long_folder_name` |
 | A thread header ID over 998 bytes | the own location ID as thread | `long_thread_header_is_ignored` |
 | A keyword or folder named as a fixed label | a name with ` (keyword)` or ` (folder)` | `label_names_are_unique` |
