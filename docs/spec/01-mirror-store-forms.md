@@ -295,9 +295,10 @@ The exit criterion of release 1 is 0 differences each day for 7 days.
 - `iris account add` asks only for the scope
   `https://www.googleapis.com/auth/gmail.readonly`.
 - `iris account add --write` asks only for
-  `https://www.googleapis.com/auth/gmail.modify`, which also allows read. The
-  engine records the access that Google granted, not the access that it asked
-  for. A read-only account syncs as before, makes no Gmail write, and has the
+  `https://www.googleapis.com/auth/gmail.modify`, which also allows read. An
+  account can write only if its sign-in asked for write access and Google
+  granted `gmail.modify`. A plain sign-in is read only, also when Google gives
+  an earlier `gmail.modify` grant. A read-only account syncs as before, makes no Gmail write, and has the
   state `read_only`. Its approved actions wait for a write sign-in. See
   `docs/specs/2026-11-18-gmail-write-access.md` (tracker item R2-17).
 - The engine stores the refresh token encrypted in the store (section 5.4),

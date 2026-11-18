@@ -163,7 +163,7 @@ section 5 of spec 1.
 | Gmail 403 `insufficientPermissions` on a write | Action `failed` with the clear text, the step ends, state `read_only`, later steps make no write | provider unit test, `iris-apply` step test, engine test |
 | 14 days pass while the account is read-only | The approved action expires, as for any account | engine test |
 | A ledger row in `writing` when the account becomes read-only | The recovery reads and ends the row; no write | engine test |
-| A crash left a call that never started (`call` 0, a message for call 1) | Read-only recovery starts no call and reads none of its messages, so later turns cost no quota; the row waits; a write sign-in continues it | engine test `read_only_recovery_starts_no_call` |
+| A crash left a call that never started (`call` 0, a message for call 1) | Read-only recovery starts no call and reads none of its messages; a later turn makes only the profile read of the mailbox check (1 quota unit); the row waits; a write sign-in continues it | engine test `read_only_recovery_starts_no_call` |
 | The recovery resumes a call, and Gmail answers with a scope refusal | The recovery stops, the step ends, state `read_only` | engine test `a_scope_refusal_in_the_recovery_ends_the_step` |
 | A Gmail error answer with the reason only in `error.details[].reason` | The reason is read from there, so `ACCESS_TOKEN_SCOPE_INSUFFICIENT` is a scope refusal | `iris-gmail` unit test |
 | Gmail 403 with another reason | As now: the raw text | existing test |

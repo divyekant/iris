@@ -61,6 +61,29 @@ fn status_json_is_the_api_status() {
     assert!(out.contains("Mode: observe"), "{out}");
 }
 
+/// A read-only account (R2-17): `iris status` names the state and the
+/// command that gives write access. A write account has no such line.
+#[test]
+fn status_names_a_read_only_account_and_the_fix() {
+    let (store, fake) = synced("status-read-only");
+    let (_, out, _) = iris(&store, &["status"]);
+    assert!(!out.contains("read only"), "{out}");
+    sign_in_as(
+        &store,
+        &gmail(fake.base_url()),
+        &client_json(),
+        REFRESH,
+        false,
+    );
+    let (ok, out, err) = iris(&store, &["status"]);
+    assert!(ok, "{err}");
+    assert!(out.contains(": read_only, "), "{out}");
+    assert!(
+        out.contains("iris account add <client.json> --write"),
+        "{out}"
+    );
+}
+
 #[test]
 fn search_json_is_the_api_search() {
     let (store, _fake) = synced("search");

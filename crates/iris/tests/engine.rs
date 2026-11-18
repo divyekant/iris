@@ -1129,20 +1129,15 @@ fn read_only_recovery_starts_no_call() {
             .count()
     };
     let before = writes(&s.fake);
-    let reads = |f: &FakeGmail| {
-        f.requests()
-            .iter()
-            .filter(|r| r.contains("/messages/"))
-            .count()
-    };
     w.apply_step().unwrap();
     assert_eq!(writes(&s.fake), before, "no call starts while read only");
-    let read = reads(&s.fake);
+    let seen = s.fake.requests().len();
     w.apply_step().unwrap();
-    assert_eq!(
-        reads(&s.fake),
-        read,
-        "a later read-only turn reads no message again"
+    let new: Vec<String> = s.fake.requests()[seen..].to_vec();
+    assert!(
+        new.iter()
+            .all(|r| r.starts_with("GET ") && r.ends_with("/profile")),
+        "a later read-only turn makes only the profile read: {new:?}"
     );
     let writing =
         format!("SELECT count(*) FROM ledger WHERE action_id = {action} AND state = 'writing'");
