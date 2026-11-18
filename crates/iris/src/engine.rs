@@ -40,8 +40,11 @@ pub enum Error {
     Sync(iris_sync::Error),
     /// The apply step (docs/specs/2026-11-17-held-outbox.md, section 4).
     Apply(iris_apply::Error),
-    /// The account has no stored sign-in, or Google refused it.
+    /// The account has no stored sign-in, or the provider refused it.
     NeedsSignIn,
+    /// The account row cannot give a provider: an unknown provider, an IMAP
+    /// account with no server, or a test setting that is not valid.
+    Setup(String),
 }
 
 impl fmt::Display for Error {
@@ -52,9 +55,11 @@ impl fmt::Display for Error {
             Error::Store(e) => write!(f, "store: {e}"),
             Error::Sync(e) => write!(f, "sync: {e}"),
             Error::Apply(e) => write!(f, "apply: {e}"),
-            Error::NeedsSignIn => {
-                f.write_str("the account needs a new sign-in: run `iris account add <client.json>`")
-            }
+            Error::NeedsSignIn => f.write_str(
+                "the account needs a new sign-in: run `iris account add <client.json>` (Gmail) \
+                 or `iris account add-imap` (IMAP)",
+            ),
+            Error::Setup(why) => write!(f, "account: {why}"),
         }
     }
 }
@@ -115,15 +120,91 @@ pub fn save_sign_in(
     let sealed = store.seal(&plain)?;
     let profile = gmail.profile(tokens.access.token.expose())?;
     let address = profile.email_address;
-    let id = store.add_account("gmail", &address)?;
-    store.write(|tx| {
-        tx.execute(
-            "UPDATE account SET token = ?2, state = ?3 WHERE id = ?1",
-            (id, &sealed, STATE_OK),
-        )?;
-        Ok(())
-    })?;
+    // Refused if the address has an account of another provider.
+    let id = store.save_account_secret("gmail", &address, None, &sealed)?;
     Ok((id, address))
+}
+
+/// The server and the user name of an IMAP account.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImapServer {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+}
+
+/// The time-out of each connect and each read of an IMAP connection.
+const IMAP_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Save an IMAP account: the password sealed in `account.token`, in one
+/// write with the server. Refused if the address has an account of another
+/// provider or of another server or user (IMAP spec section 8). The caller
+/// checks the password with one sign-in first. Gives the account ID.
+pub fn save_imap(
+    store: &Store,
+    address: &str,
+    server: &ImapServer,
+    password: &Secret,
+) -> Result<i64> {
+    let sealed = store.seal(password.expose().as_bytes())?;
+    let imap = (server.host.as_str(), server.port, server.user.as_str());
+    Ok(store.save_account_secret("imap", address, Some(imap), &sealed)?)
+}
+
+/// The IMAP provider of the mailbox `address` on `server`: TLS to the
+/// server. For tests, `IRIS_TEST_IMAP_PLAIN` set and the host `127.0.0.1`
+/// give a plain TCP connection to a fake server. With the setting, any
+/// other host is refused, so the password cannot go out with no TLS.
+pub fn imap_provider(address: &str, server: &ImapServer) -> Result<Box<dyn Provider>> {
+    let (host, port) = (server.host.clone(), server.port);
+    if std::env::var_os("IRIS_TEST_IMAP_PLAIN").is_some() {
+        if host != "127.0.0.1" {
+            return Err(Error::Setup(
+                "IRIS_TEST_IMAP_PLAIN needs the host 127.0.0.1".into(),
+            ));
+        }
+        return Ok(Box::new(iris_imap::Imap::new(
+            address,
+            &server.user,
+            move || {
+                let s = std::net::TcpStream::connect((host.as_str(), port))?;
+                s.set_nodelay(true)?;
+                s.set_read_timeout(Some(IMAP_TIMEOUT))?;
+                Ok(s)
+            },
+        )));
+    }
+    Ok(Box::new(iris_imap::Imap::new(
+        address,
+        &server.user,
+        move || iris_imap::connect(&host, port, IMAP_TIMEOUT),
+    )))
+}
+
+/// The provider of `account`, from its row: one value for each account,
+/// which the worker keeps. `gmail` is the Gmail setting.
+pub fn provider_for(
+    store: &Store,
+    account: i64,
+    gmail: &iris_gmail::Config,
+) -> Result<Box<dyn Provider>> {
+    type Row = (String, String, Option<String>, Option<u16>, Option<String>);
+    let (provider, address, host, port, user): Row = store.read(|c| {
+        Ok(c.query_row(
+            "SELECT provider, address, imap_host, imap_port, imap_user FROM account
+             WHERE id = ?1",
+            [account],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )?)
+    })?;
+    match (provider.as_str(), host, port, user) {
+        ("gmail", ..) => Ok(Box::new(Gmail::new(gmail.clone()))),
+        ("imap", Some(host), Some(port), Some(user)) => {
+            imap_provider(&address, &ImapServer { host, port, user })
+        }
+        ("imap", ..) => Err(Error::Setup("the IMAP account has no server".into())),
+        (p, ..) => Err(Error::Setup(format!("no provider {p:?} in this version"))),
+    }
 }
 
 /// Read the sealed sign-in of `account`: the client, the refresh token, and
@@ -204,9 +285,19 @@ impl Worker {
         account: i64,
         test_token_uri: Option<String>,
     ) -> Worker {
+        Worker::boxed(store, Box::new(mail), account, test_token_uri)
+    }
+
+    /// [`Worker::new`] with the provider of [`provider_for`].
+    pub fn boxed(
+        store: Arc<Store>,
+        mail: Box<dyn Provider>,
+        account: i64,
+        test_token_uri: Option<String>,
+    ) -> Worker {
         Worker {
             store,
-            mail: Box::new(mail),
+            mail,
             account,
             test_token_uri,
             token: None,
@@ -437,6 +528,23 @@ fn access(
     got: &mut Instant,
     sealed_now: &mut Vec<u8>,
 ) -> Result<Secret> {
+    // An IMAP account: the token of each call is the sealed password. It
+    // has no refresh, so a refusal is a refusal (`Worker::call`).
+    let (provider, sealed): (String, Option<Vec<u8>>) = store.read(|c| {
+        Ok(c.query_row(
+            "SELECT provider, token FROM account WHERE id = ?1",
+            [account],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    })?;
+    if provider == "imap" {
+        let sealed = sealed.ok_or(Error::NeedsSignIn)?;
+        let password = String::from_utf8(store.unseal(&sealed)?)
+            .map_err(|_| iris_store::Error::Key("the stored password is not valid"))?;
+        *token = None;
+        *sealed_now = sealed;
+        return Ok(Secret::new(password));
+    }
     let (mut client, refresh, sealed) = load_grant(store, account)?;
     // A new sign-in (`iris account add`) replaces the token in memory too.
     if let Some(t) = token {
@@ -597,9 +705,16 @@ impl Engine {
             if self.workers.contains_key(&account) {
                 continue;
             }
-            let worker = Worker::new(
+            let mail = match provider_for(&self.store, account, &self.gmail) {
+                Ok(m) => m,
+                Err(e) => {
+                    say!("iris: account {account}: {e}");
+                    continue;
+                }
+            };
+            let worker = Worker::boxed(
                 self.store.clone(),
-                Gmail::new(self.gmail.clone()),
+                mail,
                 account,
                 self.test_token_uri.clone(),
             );

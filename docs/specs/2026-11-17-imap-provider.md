@@ -434,7 +434,15 @@ times after an unknown result (spec 2 section 7.2).
   account first.
 - The engine worker of an IMAP account uses `Imap`, with the password as
   the token. `Unauthorized` marks the account `needs_sign_in`, as for
-  Gmail.
+  Gmail. `provider_for` in `crates/iris/src/engine.rs` picks the provider
+  from the `provider` column. If it cannot make one (for example, an IMAP
+  row with no host), the engine logs the account and continues with the
+  next account.
+- `Store::save_account_secret` does the provider and mailbox check and the
+  token write in one transaction, for both sign-in commands.
+- Test mode: if `IRIS_TEST_IMAP_PLAIN` is set, the connection is plain TCP
+  with no TLS. It is allowed only for the host `127.0.0.1`, so the
+  binary tests can use the fake server. Any other host is refused.
 - The `Authentication-Results` parsers trust the server ID
   `mx.google.com` only for a Gmail account. For an IMAP account a header
   with that ID counts as absent, because any sender can write it.
