@@ -461,12 +461,8 @@ fn the_wait_after_a_model_error_is_for_that_model_and_under_the_lock() {
     assert_eq!(run(now + 2_000), AfterSync::Idle);
     assert_eq!(run(now + 3_000), AfterSync::Idle);
     assert_eq!(col(&store, rows), n, "idle turns in the wait keep no row");
-    // An idle manual run does not end the wait: the next turn makes no call.
-    let (ok, _, err) = iris(&store, &["understand"]);
-    assert!(ok, "{err}");
-    let before = calls.load(Ordering::SeqCst);
-    assert_eq!(run(now + 4_000), AfterSync::Idle);
-    assert_eq!(calls.load(Ordering::SeqCst), before, "still in the wait");
+    // `iris understand` reads the marked mail at once (#155): the batch
+    // test a_manual_run_reads_mail_that_waits_for_the_model_wait.
     // The wait has ended, but another run holds the lock: this run clears
     // no mark, so a mark set by the other run stays.
     let after = now + iris_understand::batch::RETRY_FIRST_MS + 1_000;
