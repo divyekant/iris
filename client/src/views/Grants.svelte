@@ -97,7 +97,7 @@
           <li><span class="title">{said(r)}</span> <span class="what">{[...conditions(r), `rule ${r.id}`].join(". ")}</span></li>
         {/each}
       </ul>
-      <p class="note"><a href="#/rules">Change these rules</a></p>
+      <p class="note"><a class="touch" href="#/rules">Change these rules</a></p>
     {/if}
     {#if problem}<p class="error" role="alert">{problem}</p>{/if}
   {/if}
