@@ -997,16 +997,19 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
 pub struct SectionPage {
     #[serde(flatten)]
     pub section: Section,
-    /// The `after` value of the next page (the ID of the last item), or
-    /// `None` on the last page.
+    /// The `after` value of the next page: an encoded cursor (see
+    /// `encode_cursor`) with the section name and the sort keys of the
+    /// last item, not an item ID. `None` on the last page.
     pub next: Option<String>,
 }
 
 /// One page of the list section `name` (one of [`SECTIONS`], or
 /// `bundle-<rule>` for the bundle of a rule) of the brief at the time `now`,
-/// with the same filter and order as [`brief`]. `after` is
-/// the ID of the last item of the page before. The page starts after the
-/// place of that item in the order, also when the item left the section.
+/// with the same filter and order as [`brief`]. `after` is the `next`
+/// value of the page before: an encoded cursor with the section name and
+/// the sort keys of its last item, not an item ID. The page starts after
+/// these keys in the order, also when that item left the section. An
+/// `after` that is not a cursor of section `name` gives [`Error::Query`].
 pub fn brief_section(
     store: &Store,
     now: i64,
