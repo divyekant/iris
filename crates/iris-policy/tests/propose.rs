@@ -149,6 +149,14 @@ fn a_pattern_gives_a_proposal_and_only_an_accept_writes_the_file() {
     );
     assert_eq!(rule.when.sender.as_deref(), Some("deals@shop.example"));
     assert_eq!(rule.name, "Archive mail from deals@shop.example");
+    // The new rule approves each action of the sender kind proposal too: the
+    // accept removes that overlapping proposal in its own transaction, with
+    // no wait for the next pass (issue 314).
+    let open = store.read(propose::open).unwrap();
+    assert!(
+        open.iter().all(|q| q.when.sender_kind.is_none()),
+        "the overlapping proposal stays open: {open:?}"
+    );
 
     // The rule now approves these actions, so the proposal does not come
     // back, and a second accept finds nothing.

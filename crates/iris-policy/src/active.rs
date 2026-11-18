@@ -156,7 +156,7 @@ pub fn confirm(store: &Store, sha256: &str, now: i64) -> Result<Confirm> {
 /// Stores `text` as the newest version of the active policy, and records
 /// its rule IDs. A rule ID of the version before that `policy` does not have
 /// is removed, and never used again. Then writes the attention of each item
-/// again, in the same transaction.
+/// and the open rule proposals again, in the same transaction.
 pub(crate) fn record(
     tx: &Connection,
     text: &str,
@@ -189,6 +189,7 @@ pub(crate) fn record(
     }
     crate::attention::evaluate(tx, policy, now)?;
     crate::propose::accepted(tx, policy, now)?;
+    crate::propose::reconcile(tx, now)?;
     Ok(version)
 }
 
