@@ -86,6 +86,8 @@ test("while a Resume waits for its answer, the band makes no claim and Stop stay
   const v = await start(engine({ stopped: true, since }));
   try {
     assert.match(text(v.band.target), /no mail leaves/);
+    // The state verbs of an item still work while Iris is stopped, so the band names only approved actions (#596).
+    assert.match(text(v.band.target), /No agent runs, no approved action applies and no mail leaves\./);
     v.e.hold = true;
     press(v.band, "Resume");
     await until(() => v.e.waiting.length === 1); // The Resume committed; its answer waits.
