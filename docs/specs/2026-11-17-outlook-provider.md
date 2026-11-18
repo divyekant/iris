@@ -216,9 +216,10 @@ rules:
   well-known folders after the first read.
 - `SENT` is never given (section 6). R6-16 decides how the copies that
   Iris sent get it.
-- The write calls and the reads of the send (`metadata`,
-  `messages_with_id`, `drafts_with_id`, `draft_raw`) give a definite
-  rejection (`Api` 400 `notSupported`) before any request, until R6-15.
+- The draft and send calls (`metadata`, `messages_with_id`,
+  `drafts_with_id`, `draft_raw`, `create_draft`, `send_draft`) give a
+  definite rejection (`Api` 400 `notSupported`) before any request,
+  until R6-17. Section 5.1 has the state writes (R6-15).
 
 ### 4. Raw message
 
@@ -237,10 +238,10 @@ account. R6-10 decides where this compare lives.
 
 | Call | Graph | Answer |
 |---|---|---|
-| `set_read(id, bool)` | `PATCH /me/messages/{id}` `{"isRead"}` | 200 |
-| `set_flag(id, bool)` | `PATCH` `{"flag":{"flagStatus":"flagged" or "notFlagged"}}` | 200 |
+| `set_read(id, bool, etag)` | `PATCH /me/messages/{id}` `{"isRead"}`, with `If-Match: <etag>` when the etag is given | 200, or 412 |
+| `set_flag(id, bool, etag)` | `PATCH` `{"flag":{"flagStatus":"flagged" or "notFlagged"}}`, with `If-Match: <etag>` when the etag is given | 200, or 412 |
 | `set_categories(id, list, etag)` | `PATCH` `{"categories":[...]}`, the full list, with `If-Match: <etag>` | 200, or 412 |
-| `move_to(id, folder)` | `POST /me/messages/{id}/move` `{"destinationId"}` | 201, the message |
+| `move_to(id, folder, etag)` | `POST /me/messages/{id}/move` `{"destinationId"}` | 201, the message |
 | `create_draft(mime)` | `POST /me/messages`, `text/plain`, base64 MIME | 201, the draft |
 | `send_mime(mime)` | `POST /me/sendMail`, `text/plain`, base64 MIME | 202, no body |
 | `sent_by_message_id(id)` | `GET /me/messages?$filter=internetMessageId eq '<id>'&$select=id,isDraft,sentDateTime,parentFolderId`, each page (a read) | 200, the matching messages |
@@ -317,6 +318,51 @@ with no approval. The draft stays in Outlook Drafts. The outbox shows
 "Sent. The draft stays in Outlook: delete it there." A known limit with
 its own issue: the person can send the same draft a second time from
 Outlook. A later card can make the delete an approved part of the send.
+
+### 5.1 The state writes of the provider (R6-15)
+
+`iris_graph::Outlook` makes the state writes of the provider spec
+section 4 on these rules:
+
+- `modify(ids, add, remove)` reads each message first (one read by ID
+  each) and plans its writes. Each refusal comes before any write of the
+  call: a label that is not `INBOX`, `UNREAD`, `STARRED` or a
+  `category:` label (a folder label, `TRASH`, `SPAM`, `DRAFT`, `SENT`),
+  one label in `add` and `remove`, more than `BATCH_LIMIT` messages, and
+  a change of `INBOX` on a message that is not in the inbox or the
+  archive. The read state, the flag and the categories change in each
+  folder (section 6). Then, for each message, in this order: the
+  categories (the full new list from the read of this call), `isRead`,
+  the flag, and the move last. Each write has `If-Match` on the newest
+  etag of the message. A write that changes nothing is not sent.
+- HTTP 412 on a write of a message means that another client changed the
+  message after the read. The provider reads the message one more time,
+  plans again from the new state, and writes once more, so that the
+  change of the other client stays (A14, A17). A second error is the
+  error of the call, as below.
+- An error after a write of the call is `Error::Transport` (unknown), so
+  the apply reads the labels and never calls again (provider spec
+  section 6). An error of the first write is the error of that write.
+- `trash` moves the message to `deleteditems`, only from the inbox or the
+  archive. `untrash` moves it to the inbox, only from `deleteditems`.
+  Each move has `If-Match` on the etag of the check read (A17).
+- `create_label` gives a definite refusal: Iris makes no category,
+  because the master list needs `MailboxSettings.ReadWrite` and a
+  category that is not on the list is not mirrored. The person makes the
+  category in Outlook first. Known limit with its own issue.
+- `moves_folders()` of the provider trait is true for Outlook. After a
+  successful `modify` that changes `INBOX` (a move) on such a provider, the apply
+  reads the labels of each message (`minimal`) and writes them to the
+  mirror, so that the mirror has one folder label before the next sync.
+  If a read fails, the reads stop, and each message with no read keeps
+  its complete labels from before the move until the next sync. The
+  mirror never has a message with no folder label or with two. Gmail
+  keeps the add and remove change of the call, with no read.
+- Each write of `modify` has `If-Match` on the newest etag of the
+  message, also `isRead` and the flag. Thus a message that another
+  client moves after the read of the plan does not move: the 412 read
+  plans again from the new folder, and refuses a move out of a user
+  folder.
 
 ### 6. Map to the mirror
 
@@ -559,7 +605,10 @@ Each assumption has the evidence of a Microsoft Learn page, read on
   second call). The mirror takes the list of the answer, the ledger keeps
   the row with the note "Outlook kept other categories", Iris tells the
   person, and Iris turns off category writes for the account (label and unlabel give a definite refusal)
-  until a new release. The release gate tests an `unlabel`.
+  until a new release. The release gate tests an `unlabel`. R6-15: the
+  Graph client gives `Error::Differs` for such an answer, and the provider
+  turns off its category writes in memory, before any request. Card R6-16
+  stores the switch with the account and shows the notice (limit #675).
 - A7. Well-known folder names work in each language of the mailbox.
   Evidence: <https://learn.microsoft.com/en-us/graph/api/resources/mailfolder>.
 - A8. Error body `{"error":{"code","message"}}`. Evidence:
@@ -600,6 +649,14 @@ Each assumption has the evidence of a Microsoft Learn page, read on
   <https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app>.
   Whether the tenant stays after the free trial: `pending`. The decision
   record tells dk to check it.
+- A17. A `move` with `If-Match` and an old `@odata.etag` gives HTTP 412
+  and moves nothing, so a message that another client moved or changed
+  after the check read of Iris does not move (provider spec section 4).
+  Evidence: `pending` (OData v4 rule; the move page does not state it).
+  The release gate tests it. If Graph ignores `If-Match` on `move`, Iris
+  turns off moves for Outlook accounts (`archive`, `inbox`, `trash` and
+  `untrash` give a definite refusal before any write), and the rest
+  works.
 
 ## External writes
 
@@ -685,7 +742,9 @@ Each step is one card and one PR. The board has each card with its
    with the app registration steps for dk. Depends on R6-04.
 5. R6-14: the sync side of the provider (section 3.1). Depends on
    R6-12, R6-13 and R6-10.
-6. R6-15: the write and send side of the provider. Depends on R6-14.
-7. R6-16: the engine wiring (account kind, sign-in, token storage,
+6. R6-15: the state writes of the provider (section 5.1). Depends on
+   R6-14.
+7. R6-17: the drafts and the send of the provider. Depends on R6-15.
+8. R6-16: the engine wiring (account kind, sign-in, token storage,
    `Authentication-Results`, `SENT` of the copies that Iris sent).
-   Depends on R6-15.
+   Depends on R6-17.

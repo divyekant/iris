@@ -424,7 +424,8 @@ impl FakeGraph {
     }
 
     /// The next requests get these HTTP status codes, each with an optional
-    /// `Retry-After` in seconds, in place of an answer.
+    /// `Retry-After` in seconds, in place of an answer. Status 0 lets that
+    /// request through.
     pub fn fail_next(&self, failures: &[(u16, Option<u64>)]) {
         self.store.lock().unwrap().failures.extend(failures);
     }
@@ -491,7 +492,8 @@ async fn gate(State(s): State<Shared>, req: Request, next: Next) -> Response {
         s.requests.push(format!("{} {}", req.method(), req.uri()));
         s.running += 1;
         s.most_running = s.most_running.max(s.running);
-        let failure = s.failures.pop_front();
+        // Status 0 lets one request through.
+        let failure = s.failures.pop_front().filter(|f| f.0 != 0);
         let body = if failure.is_none() {
             s.bodies.pop_front()
         } else {
@@ -891,12 +893,22 @@ async fn patch_message(
 async fn move_to(
     State(s): State<Shared>,
     Path(id): Path<String>,
+    h: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
     let mut s = s.lock().unwrap();
     let Some(i) = s.index(&id) else {
         return not_found();
     };
+    if let Some(m) = h.get("if-match").and_then(|v| v.to_str().ok()) {
+        if m != etag(&s.msgs[i]) {
+            return error(
+                StatusCode::PRECONDITION_FAILED,
+                "ErrorIrresolvableConflict",
+                "The change key does not match the current change key for the item.",
+            );
+        }
+    }
     let to = body["destinationId"].as_str().unwrap_or("");
     let Some(f) = FOLDERS.iter().find(|f| f.0 == to || f.3 == Some(to)) else {
         return not_found();

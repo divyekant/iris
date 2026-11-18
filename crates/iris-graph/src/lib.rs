@@ -100,6 +100,9 @@ pub enum Error {
     Decode(String),
     /// The sink of a raw message failed.
     Sink(std::io::Error),
+    /// Graph accepted a write and answered with another state than the
+    /// request: an unknown result (spec section 5 and A6).
+    Differs(String),
 }
 
 impl std::fmt::Display for Error {
@@ -116,6 +119,7 @@ impl std::fmt::Display for Error {
             Error::Transport(e) => write!(f, "network error: {e}"),
             Error::Decode(e) => write!(f, "bad answer from Graph: {e}"),
             Error::Sink(e) => write!(f, "cannot write the raw message: {e}"),
+            Error::Differs(e) => write!(f, "Graph answered with another state: {e}"),
         }
     }
 }
@@ -128,7 +132,7 @@ impl Error {
     /// 5xx and an unfollowed 3xx give an unknown result.
     pub fn write_result_unknown(&self) -> bool {
         match self {
-            Error::Transport(_) => true,
+            Error::Transport(_) | Error::Differs(_) => true,
             Error::Api { status, .. } => *status >= 500 || *status == 429 || *status < 400,
             _ => false,
         }
@@ -505,17 +509,32 @@ impl Graph {
         self.json(token, &url, false)
     }
 
-    /// `PATCH isRead`. A write: one request (spec section 5).
-    pub fn set_read(&self, token: &str, id: &str, read: bool) -> Result<Message> {
-        let m = self.patch(token, id, serde_json::json!({ "isRead": read }), None)?;
+    /// `PATCH isRead`, with `If-Match: etag` when `etag` is given (HTTP 412,
+    /// `Error::Api`, if the message changed). A write: one request (spec
+    /// section 5).
+    pub fn set_read(
+        &self,
+        token: &str,
+        id: &str,
+        read: bool,
+        etag: Option<&str>,
+    ) -> Result<Message> {
+        let m = self.patch(token, id, serde_json::json!({ "isRead": read }), etag)?;
         sure(m.is_read == read, m)
     }
 
-    /// `PATCH flag`. A write: one request.
-    pub fn set_flag(&self, token: &str, id: &str, flagged: bool) -> Result<Message> {
+    /// `PATCH flag`, with `If-Match: etag` as `set_read`. A write: one
+    /// request.
+    pub fn set_flag(
+        &self,
+        token: &str,
+        id: &str,
+        flagged: bool,
+        etag: Option<&str>,
+    ) -> Result<Message> {
         let status = if flagged { "flagged" } else { "notFlagged" };
         let body = serde_json::json!({ "flag": { "flagStatus": status } });
-        let m = self.patch(token, id, body, None)?;
+        let m = self.patch(token, id, body, etag)?;
         sure(m.flag.flag_status == status, m)
     }
 
@@ -536,9 +555,12 @@ impl Graph {
         sure(set(&m.categories) == set(categories), m)
     }
 
-    /// `POST /me/messages/{id}/move` to the folder with the ID `folder`. A
-    /// write: one request. The ID of the message stays (immutable IDs).
-    pub fn move_to(&self, token: &str, id: &str, folder: &str) -> Result<Message> {
+    /// `POST /me/messages/{id}/move` to the folder with the ID `folder`,
+    /// with `If-Match: etag`, so that a message that changed after the read
+    /// of `etag` (for example, another client moved it) does not move: HTTP
+    /// 412 (`Error::Api`), and nothing changed (assumption A17). A write:
+    /// one request. The ID of the message stays (immutable IDs).
+    pub fn move_to(&self, token: &str, id: &str, folder: &str, etag: &str) -> Result<Message> {
         let url = self.url(&format!("/me/messages/{}/move", segment(id)));
         let body = serde_json::json!({ "destinationId": folder }).to_string();
         let m: Message = accepted(&self.write(
@@ -547,7 +569,7 @@ impl Graph {
             &url,
             body.into(),
             "application/json",
-            None,
+            Some(etag),
         )?)?;
         sure(m.id == id && m.parent_folder_id == folder, m)
     }
@@ -826,7 +848,7 @@ fn sure(ok: bool, m: Message) -> Result<Message> {
     if ok {
         Ok(m)
     } else {
-        Err(Error::Transport(format!(
+        Err(Error::Differs(format!(
             "Graph accepted the write of {} but answered with another state",
             m.id
         )))

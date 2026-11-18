@@ -36,7 +36,7 @@ type Write<'a> = Box<dyn Fn() -> Result<(), Error> + 'a>;
 
 /// Each write, by name. The category write comes first, because the
 /// other writes change the etag.
-fn writes<'a>(fake: &FakeGraph, graph: &'a Graph) -> Vec<(&'static str, Write<'a>)> {
+fn writes<'a>(fake: &'a FakeGraph, graph: &'a Graph) -> Vec<(&'static str, Write<'a>)> {
     let id = inbox_message(fake);
     let etag = fake.etag_of(&id).unwrap();
     let archive = FakeGraph::folder_id("Archive");
@@ -52,15 +52,19 @@ fn writes<'a>(fake: &FakeGraph, graph: &'a Graph) -> Vec<(&'static str, Write<'a
         ),
         (
             "set_read",
-            Box::new(move || graph.set_read(TOKEN, &i1, true).map(drop)),
+            Box::new(move || graph.set_read(TOKEN, &i1, true, None).map(drop)),
         ),
         (
             "set_flag",
-            Box::new(move || graph.set_flag(TOKEN, &i2, true).map(drop)),
+            Box::new(move || graph.set_flag(TOKEN, &i2, true, None).map(drop)),
         ),
         (
             "move_to",
-            Box::new(move || graph.move_to(TOKEN, &i4, archive).map(drop)),
+            Box::new(move || {
+                // The etag of now: the writes before change it.
+                let now = fake.etag_of(&i4).unwrap_or_default();
+                graph.move_to(TOKEN, &i4, archive, &now).map(drop)
+            }),
         ),
         (
             "create_draft",
@@ -104,12 +108,21 @@ fn a_401_of_a_write_is_definite_and_each_write_works_after() {
 fn the_state_writes_change_the_fake_and_answer_the_new_state() {
     let (fake, graph) = setup();
     let id = inbox_message(&fake);
-    assert!(!graph.set_read(TOKEN, &id, false).unwrap().is_read);
-    assert!(graph.set_read(TOKEN, &id, true).unwrap().is_read);
-    assert!(graph.set_flag(TOKEN, &id, true).unwrap().flagged());
-    assert!(!graph.set_flag(TOKEN, &id, false).unwrap().flagged());
+    assert!(!graph.set_read(TOKEN, &id, false, None).unwrap().is_read);
+    assert!(graph.set_read(TOKEN, &id, true, None).unwrap().is_read);
+    assert!(graph.set_flag(TOKEN, &id, true, None).unwrap().flagged());
+    assert!(!graph.set_flag(TOKEN, &id, false, None).unwrap().flagged());
     let archive = FakeGraph::folder_id("Archive");
-    let moved = graph.move_to(TOKEN, &id, archive).unwrap();
+    let old = fake.etag_of(&id).unwrap();
+    assert!(graph.set_read(TOKEN, &id, true, None).is_ok());
+    // The move has a condition: an old etag moves nothing.
+    match graph.move_to(TOKEN, &id, archive, &old) {
+        Err(Error::Api { status: 412, .. }) => {}
+        other => panic!("a move with an old etag: {other:?}"),
+    }
+    assert_ne!(fake.messages()[&id], archive);
+    let now = fake.etag_of(&id).unwrap();
+    let moved = graph.move_to(TOKEN, &id, archive, &now).unwrap();
     assert_eq!(
         (moved.id.as_str(), moved.parent_folder_id.as_str()),
         (id.as_str(), archive)
@@ -180,7 +193,7 @@ fn a_bad_answer_to_an_accepted_write_is_unknown() {
     let (fake, graph) = setup();
     let id = inbox_message(&fake);
     fake.answer_next(&["{}"]);
-    let err = graph.set_read(TOKEN, &id, true).unwrap_err();
+    let err = graph.set_read(TOKEN, &id, true, None).unwrap_err();
     assert!(err.write_result_unknown(), "{err}");
     // An answer with another state is unknown too.
     let other = format!(
@@ -188,7 +201,7 @@ fn a_bad_answer_to_an_accepted_write_is_unknown() {
         "isRead":false,"flag":{{"flagStatus":"notFlagged"}},"isDraft":false}}"#
     );
     fake.answer_next(&[&other]);
-    let err = graph.set_read(TOKEN, &id, true).unwrap_err();
+    let err = graph.set_read(TOKEN, &id, true, None).unwrap_err();
     assert!(err.write_result_unknown(), "{err}");
 }
 
@@ -245,10 +258,10 @@ fn each_write_answer_must_show_exactly_the_asked_state() {
     assert!(err.write_result_unknown(), "{err}");
     // An unflag answered with `complete`: unknown.
     fake.answer_next(&[&answer(&id, json!({"flag": {"flagStatus": "complete"}}))]);
-    let err = graph.set_flag(TOKEN, &id, false).unwrap_err();
+    let err = graph.set_flag(TOKEN, &id, false, None).unwrap_err();
     assert!(err.write_result_unknown(), "{err}");
     fake.answer_next(&[&answer(&id, json!({}))]);
-    graph.set_flag(TOKEN, &id, false).unwrap();
+    graph.set_flag(TOKEN, &id, false, None).unwrap();
     // A draft with no etag, or with an empty ID: unknown.
     for changes in [
         json!({"isDraft": true, "@odata.etag": null}),
@@ -285,13 +298,13 @@ fn a_2xx_other_than_the_success_status_is_unknown() {
         .write_result_unknown());
     fake.answer_next_status(200, &moved);
     assert!(graph
-        .move_to(TOKEN, &id, archive)
+        .move_to(TOKEN, &id, archive, "W/\"1\"")
         .unwrap_err()
         .write_result_unknown());
     // A PATCH succeeds with 200 only.
     fake.answer_next_status(201, &answer(&id, json!({})));
     assert!(graph
-        .set_read(TOKEN, &id, true)
+        .set_read(TOKEN, &id, true, None)
         .unwrap_err()
         .write_result_unknown());
     assert!(fake.sent_mail().is_empty());
@@ -299,5 +312,5 @@ fn a_2xx_other_than_the_success_status_is_unknown() {
     fake.answer_next_status(202, "");
     graph.send_mime(TOKEN, MIME).unwrap();
     fake.answer_next_status(201, &moved);
-    graph.move_to(TOKEN, &id, archive).unwrap();
+    graph.move_to(TOKEN, &id, archive, "W/\"1\"").unwrap();
 }
