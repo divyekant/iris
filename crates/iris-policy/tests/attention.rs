@@ -844,3 +844,47 @@ fn a_sender_change_marks_the_header_in_each_case_form() {
         }
     }
 }
+
+/// Migration 39 changes a mixed-case `from_addr` of an older store to the
+/// one form, so a later change of the sender row marks the message.
+#[test]
+fn migration_39_lowercases_the_headers_of_an_older_store() {
+    let dir = std::env::temp_dir().join(format!("iris-attn-m39-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _d = Dir(dir.clone());
+    {
+        let s = Store::open(&dir).unwrap();
+        // A store of migration 38, with a header in another case.
+        s.write(|tx| {
+            tx.execute_batch(
+                "DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower;
+                 PRAGMA user_version = 38;
+                 INSERT INTO account(id, provider, address) VALUES (1, 'gmail', 'me@x.example');
+                 INSERT INTO thread(account_id, provider_id) VALUES (1, 't');
+                 INSERT INTO message(id, account_id, thread_id, provider_id) VALUES (1, 1, 1, 'm');
+                 INSERT INTO header(message_id, from_addr) VALUES (1, 'News@Shop.example');
+                 INSERT INTO item(id, form, account_id, status, doc, created_at, updated_at)
+                   VALUES (1, 'feed', 1, 'new', '{}', 0, 0);
+                 INSERT INTO item_source(item_id, message_id, role) VALUES (1, 1, 'origin');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let stored: String = s
+            .read(|c| Ok(c.query_row("SELECT from_addr FROM header", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(stored, "News@Shop.example");
+    }
+    let s = Store::open(&dir).unwrap();
+    let stored: String = s
+        .read(|c| Ok(c.query_row("SELECT from_addr FROM header", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(stored, "news@shop.example");
+    sql(&s, "DELETE FROM attention_due", []);
+    sql(
+        &s,
+        "INSERT INTO sender(address, kind) VALUES ('news@shop.example', 'service')",
+        [],
+    );
+    assert_eq!(due(&s), vec![1]);
+}
