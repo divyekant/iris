@@ -10,6 +10,8 @@ publish.workspace = true
 [dependencies]
 # The MIME body of a draft or a send (iris-auth and iris-imap use it too).
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
+# The RFC 3339 times of Graph (already in the program through rmcp).
+chrono = { version = "0.4.45", default-features = false, features = ["alloc"] }
 iris-provider = { version = "0.0.0", path = "../iris-provider" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
