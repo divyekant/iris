@@ -276,12 +276,25 @@ struct Mark {
     next: u32,
     modseq: u64,
     count: u32,
+    /// The special use of the folder, from its attribute or its name
+    /// (section 4): a change of it changes the labels of each message.
+    role: char,
+}
+
+fn role_of(f: &Folder) -> char {
+    match f.special {
+        Some(Special::Sent) => 'S',
+        Some(Special::Drafts) => 'D',
+        Some(Special::Junk) => 'J',
+        Some(Special::Trash) => 'T',
+        _ => '-',
+    }
 }
 
 fn mark_line(name: &str, m: Mark) -> String {
     format!(
-        "{} {} {} {} {name}\n",
-        m.validity, m.next, m.modseq, m.count
+        "{} {} {} {} {} {name}\n",
+        m.validity, m.next, m.modseq, m.count, m.role
     )
 }
 
@@ -289,15 +302,21 @@ fn mark_line(name: &str, m: Mark) -> String {
 fn parse_cursor(text: &str) -> Option<BTreeMap<String, Mark>> {
     let mut out = BTreeMap::new();
     for line in text.lines() {
-        let mut p = line.splitn(5, ' ');
+        let mut p = line.splitn(6, ' ');
         let mut num = || p.next()?.parse::<u64>().ok();
         let (validity, next, modseq, count) = (num()?, num()?, num()?, num()?);
+        let role = p.next()?;
+        let role = match role {
+            "S" | "D" | "J" | "T" | "-" => role.chars().next()?,
+            _ => return None,
+        };
         let name = p.next()?;
         let m = Mark {
             validity: u32::try_from(validity).ok()?,
             next: u32::try_from(next).ok()?,
             modseq,
             count: u32::try_from(count).ok()?,
+            role,
         };
         out.insert(name.to_owned(), m);
     }
@@ -305,8 +324,9 @@ fn parse_cursor(text: &str) -> Option<BTreeMap<String, Mark>> {
     (!out.is_empty()).then_some(out)
 }
 
-fn mark_of(e: &crate::Examined) -> Mark {
+fn mark_of(f: &Folder, e: &crate::Examined) -> Mark {
     Mark {
+        role: role_of(f),
         validity: e.uidvalidity,
         next: e.uidnext.unwrap_or(0),
         modseq: e.highest_modseq.unwrap_or(0),
@@ -417,7 +437,7 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
                 if e.uidnext.is_none() && !s.qresync() {
                     return Err(api("noUidnext", "an IMAP folder has no UIDNEXT"));
                 }
-                cursor.push_str(&mark_line(&f.name, mark_of(&e)));
+                cursor.push_str(&mark_line(&f.name, mark_of(&f, &e)));
             }
             Ok(Profile {
                 email_address: self.address.clone(),
@@ -584,13 +604,16 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
                 .ok_or(Error::HistoryExpired)?;
             let now = s.examine(&f.name).map_err(change_error)?;
             let (mark, high) = match at {
-                At::Folder(_) => (mark_of(&now), now.exists),
+                At::Folder(_) => (mark_of(f, &now), now.exists),
                 // Removals since the token lower `EXISTS`.
                 At::Window { mark, high, .. } => (mark, high.min(now.exists)),
             };
             let before = old.get(&f.name).copied();
+            // A new role of the folder (an attribute or a name) changes the
+            // labels of each message with no other trace (spec section 5).
             if now.uidvalidity != mark.validity
-                || before.is_some_and(|b| b.validity != mark.validity)
+                || role_of(f) != mark.role
+                || before.is_some_and(|b| b.validity != mark.validity || b.role != mark.role)
             {
                 return Err(Error::HistoryExpired);
             }
@@ -818,10 +841,13 @@ mod tests {
             next: 2,
             modseq: 3,
             count: 4,
+            role: 'J',
         };
         let c = parse_cursor(&(mark_line("A b", m) + &mark_line("INBOX", m))).unwrap();
         assert_eq!(c.len(), 2);
         assert_eq!(c["A b"].modseq, 3);
-        assert!(parse_cursor("1 2 x 4 INBOX").is_none());
+        assert_eq!(c["A b"].role, 'J');
+        assert!(parse_cursor("1 2 x 4 - INBOX").is_none());
+        assert!(parse_cursor("1 2 3 4 X INBOX").is_none());
     }
 }

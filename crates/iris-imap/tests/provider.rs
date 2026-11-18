@@ -632,3 +632,27 @@ fn an_attribute_wins_over_a_name() {
         .label_ids;
     assert_eq!(labels, vec!["folder:Spam"]);
 }
+
+/// A new `\Junk` folder takes the role from a folder named "Spam": its
+/// messages lose SPAM with no change of their own (spec section 5).
+#[test]
+fn folder_role_change() {
+    let fake = FakeImap::start(Caps::ALL);
+    fake.create("Spam", None);
+    fake.add("Spam", Mailbox::new(50, 1).raw(0), &["\\Seen"]);
+    fake.add("INBOX", Mailbox::new(51, 1).raw(0), &[]);
+    let mail = provider(&fake);
+    let store = Store::open(&data_dir("role")).unwrap();
+    let account = store.add_account("imap", OWNER).unwrap();
+    first_sync(&store, &mail, account, PASSWORD).unwrap();
+    assert_clean(&store, &mail, account);
+    let before = cursor(&mail);
+
+    fake.create("Junk", Some("\\Junk"));
+    assert!(matches!(
+        all_changes(&mail, &before),
+        Err(Error::HistoryExpired)
+    ));
+    sync(&store, &mail, account, PASSWORD).unwrap();
+    assert_clean(&store, &mail, account);
+}
