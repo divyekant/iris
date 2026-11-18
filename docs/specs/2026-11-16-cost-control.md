@@ -85,7 +85,11 @@ A message is pending when all of these are true:
   call of the message was refused before it went out (no model, or no
   budget). Triggers of the store set it to 0 on each change of an input of
   that refusal: a label, the content, `gone_at`, `hostile` or `tries` of
-  the message, or a new or changed model row (`version`). A budget change
+  the message, or a new or changed model row (`version`). A write of the
+  same value is no change (schema 38, #154). The runner sets the mark only
+  if the message is still in the state that the refused call read
+  (`store::mark_waiting`, #153), so a change between the refusal and the
+  mark leaves no mark. A budget change
   clears nothing, because the runner spends and refunds the budget itself.
   The approval (`iris understand --approve`) clears the marks in its own
   write. So no write path can leave the mark after a change of an input,

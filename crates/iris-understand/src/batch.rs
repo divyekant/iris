@@ -447,20 +447,14 @@ impl Runner<'_> {
                 // the cause.
                 // A refusal after a failed store write of this run is no
                 // refusal of the model or the budget: no mark (#156).
-                Err(store::Error::Model(iris_model::Error::Budget(_), rows))
+                Err(store::Error::Model(iris_model::Error::Budget(_), rows, seen))
                     if !self.model.state().store_failed =>
                 {
-                    self.store.write(|tx| {
-                        tx.execute(
-                            "UPDATE message SET waits_model = ?2
-                             WHERE id = ?1 AND understood_at IS NULL",
-                            params![message, self.mark],
-                        )?;
-                        Ok(())
-                    })?;
+                    self.store
+                        .write(|tx| Ok(store::mark_waiting(tx, message, &seen, self.mark)?))?;
                     rows
                 }
-                Err(store::Error::Model(_, rows)) => rows,
+                Err(store::Error::Model(_, rows, _)) => rows,
                 Err(e) => return Err(Error::Understand(e)),
             };
             self.done += 1;

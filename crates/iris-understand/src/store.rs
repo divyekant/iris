@@ -29,7 +29,9 @@ pub enum Error {
     /// The model call failed. The message stays not understood, with no
     /// added try. If `is_retryable()`, try again later. The `Vec` holds the
     /// sender rows of [`Outcome::rerun`]: write 1 committed their change.
-    Model(iris_model::Error, Vec<i64>),
+    /// [`Seen`] is what the call read: the state of the message, the
+    /// sender kind and the other inputs.
+    Model(iris_model::Error, Vec<i64>, Box<Seen>),
     /// The message is not in the store, or it has no content file.
     NoMessage(i64),
     /// A finished item is not valid: a defect of the engine. Nothing of
@@ -41,7 +43,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Store(e) => write!(f, "store: {e}"),
-            Error::Model(e, _) => write!(f, "model: {e}"),
+            Error::Model(e, _, _) => write!(f, "model: {e}"),
             Error::NoMessage(id) => write!(f, "message {id} is not in the store or has no content"),
             Error::Invalid(e) => write!(f, "item not valid: {e}"),
         }
@@ -368,6 +370,18 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
             ..Outcome::default()
         });
     };
+    // What the call reads.
+    let read = || Seen {
+        message,
+        state: seen.clone(),
+        kind: kind_read,
+        from: from.clone().filter(|_| !sent),
+        inputs: after.clone(),
+        thread: row.thread,
+        date: row.internal_date,
+        from_name: from_name.clone(),
+        from_addr: from_addr.clone(),
+    };
     // The engine does not understand a draft. It stays not understood, so
     // it runs when it is sent and loses the label DRAFT.
     if draft {
@@ -381,8 +395,8 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     // fixed rules always run. Only the model call waits for `retry_at` and
     // stops after MAX_TRIES failed tries.
     let held = row.tries >= MAX_TRIES || row.retry_at.is_some_and(|t| t > now_ms);
-    let d =
-        decide(&a, &cx, (!held).then_some(model)).map_err(|e| Error::Model(e, rerun.clone()))?;
+    let d = decide(&a, &cx, (!held).then_some(model))
+        .map_err(|e| Error::Model(e, rerun.clone(), Box::new(read())))?;
     if d.waiting {
         // No rule supports the old items now, and the model cannot run.
         let same = store.write(|tx| {
@@ -417,14 +431,11 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     // Write 3: step 8.
     let mut invalid = None;
     let mut changed = false;
+    let read = read();
     let written = store.write(|tx| {
-        let kind_now = match &from {
-            Some(f) if !sent => sender_kind_in(tx, f)?,
-            _ => kind_read,
-        };
         // The model saw `after`: each input must still be the same now, for
         // example with no later SPAM label on an earlier message.
-        if state(tx, message, true)? != seen || kind_now != kind_read || inputs_now(tx)? != after {
+        if !read.same(tx)? {
             changed = true;
             return Ok(Vec::new());
         }
@@ -488,6 +499,63 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
 /// gone state, the thread, the date and the labels. With `full`, also the hostile marks and
 /// `understood_at`, which a second run of the same message changes. The
 /// sender kind is checked apart.
+/// What one model call read (after write 1): the state of the message,
+/// the sender kind and the other store inputs. Each checked write after the
+/// call compares all of it with [`Seen::same`].
+#[derive(Debug)]
+pub struct Seen {
+    message: i64,
+    state: Option<String>,
+    kind: Kind,
+    /// The sender address whose kind the call read; `None` for your own mail.
+    from: Option<String>,
+    inputs: Inputs,
+    thread: i64,
+    date: Option<i64>,
+    from_name: Option<String>,
+    from_addr: Option<String>,
+}
+
+impl Seen {
+    /// True if each thing that the call read is the same now.
+    fn same(&self, c: &rusqlite::Connection) -> rusqlite::Result<bool> {
+        let kind_now = match &self.from {
+            Some(f) => sender_kind_in(c, f)?,
+            None => self.kind,
+        };
+        Ok(state(c, self.message, true)? == self.state
+            && kind_now == self.kind
+            && inputs(
+                c,
+                self.message,
+                self.thread,
+                self.date,
+                self.from_name.as_deref(),
+                self.from_addr.as_deref(),
+            )? == self.inputs)
+    }
+}
+
+/// Mark `message` as waiting for the model with `mark`, only if it is still
+/// in the state that the refused call read (issue #153). A write of another
+/// writer between the refusal and the mark changed an input: the message
+/// then gets no mark, and the next run reads it again.
+pub fn mark_waiting(
+    tx: &rusqlite::Transaction,
+    message: i64,
+    seen: &Seen,
+    mark: i64,
+) -> rusqlite::Result<bool> {
+    if seen.message != message || !seen.same(tx)? {
+        return Ok(false);
+    }
+    tx.execute(
+        "UPDATE message SET waits_model = ?2 WHERE id = ?1 AND understood_at IS NULL",
+        params![message, mark],
+    )?;
+    Ok(true)
+}
+
 fn state(c: &rusqlite::Connection, message: i64, full: bool) -> rusqlite::Result<Option<String>> {
     c.query_row(
         "SELECT coalesce(m.content_sha256, '') || '|' || (m.gone_at IS NOT NULL) || '|' ||
@@ -600,7 +668,7 @@ fn sender_kind_in(c: &rusqlite::Connection, from: &str) -> rusqlite::Result<Kind
 
 /// The store inputs of one run besides the state of the message. A run
 /// reads them with `inputs` only, and each checked write compares them.
-#[derive(Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Inputs {
     /// The known persons with the display name of the sender (spoof check).
     known: Vec<String>,
@@ -843,7 +911,7 @@ pub fn rerun_senders(tx: &Transaction, rows: &[i64], now_ms: i64) -> iris_store:
             [row],
         )?;
         reset += tx.execute(
-            "UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL
+            "UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL, waits_model = 0
              WHERE gone_at IS NULL AND id IN (
                SELECT h.message_id FROM sender s JOIN header h ON h.from_addr = s.address
                WHERE s.id = ?1)",
