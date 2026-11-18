@@ -1192,3 +1192,66 @@ fn a_label_change_during_a_check_queues_the_message_again() {
         .unwrap();
     assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(1));
 }
+
+/// A failed store write of the counts of a call is no evidence against the
+/// model (#156): the message gets no `waits_model` mark and no model wait
+/// starts. The next run after a sync reads the message.
+#[test]
+fn a_failed_count_write_marks_no_mail_and_starts_no_wait() {
+    let b = store("count-write");
+    b.model(false, None);
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    let fail = "CREATE TRIGGER fail_counts BEFORE UPDATE OF calls ON understand_run
+                WHEN NEW.calls <> OLD.calls BEGIN SELECT RAISE(ABORT, 'disk full'); END";
+    b.store.write(|tx| Ok(tx.execute_batch(fail)?)).unwrap();
+    let after_sync = Limits {
+        wait_after_error: true,
+        ..Limits::default()
+    };
+    assert!(matches!(b.run(&after_sync), Err(Error::Store(_))));
+    assert_eq!(
+        b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
+        Some(0)
+    );
+    assert_eq!(b.col("SELECT retry_at FROM model_setting"), None);
+
+    b.store
+        .write(|tx| Ok(tx.execute_batch("DROP TRIGGER fail_counts")?))
+        .unwrap();
+    b.run(&after_sync).unwrap();
+    assert!(b.understood(m));
+    assert_eq!(b.script.calls(), 2);
+}
+
+/// `iris understand` does not wait (#155): it clears the marks of an
+/// automatic wait and calls the repaired model before `retry_at`.
+#[test]
+fn a_manual_run_reads_mail_that_waits_for_the_model_wait() {
+    let b = store("manual-wait");
+    b.model(false, None);
+    let waited = b.add("1", "a", 1, &["INBOX"]);
+    let refused = b.add("2", "b", 1, &["INBOX"]);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE model_setting SET retry_failures = 1, retry_at = ?1",
+                [NOW + 3_600_000],
+            )?;
+            tx.execute("UPDATE message SET waits_model = 2 WHERE id = ?1", [waited])?;
+            tx.execute(
+                "UPDATE message SET waits_model = 1 WHERE id = ?1",
+                [refused],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!((r.stop.as_deref(), r.calls), (Some("done"), 1));
+    assert!(b.understood(waited));
+    assert!(!b.understood(refused), "a refusal mark stays");
+    assert_eq!(
+        b.col("SELECT retry_at FROM model_setting"),
+        None,
+        "the call ended the wait"
+    );
+}

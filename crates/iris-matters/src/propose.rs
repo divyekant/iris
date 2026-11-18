@@ -190,12 +190,13 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
             .filter(|v| v.get("matters").is_some_and(Value::is_array))
             .map(Some),
     };
+    // Only evidence of the model starts the wait: a failed store write of
+    // the counts is no such evidence (#156).
     let failed = !refused
-        && (answer.is_none()
+        && ((answer.is_none() && !state.store_failed)
             || state.key_refused
             || state.server_failed
-            || state.unknown
-            || state.store_failed);
+            || state.unknown);
     let name = model.name().to_string();
     let (proposed, dropped) = write(store, |tx| {
         if refused {
@@ -207,7 +208,7 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
             "UPDATE understand_run SET ended_at = ?2, stop = ?3 WHERE id = ?1",
             params![run, ended, if failed { "model" } else { "done" }],
         )?;
-        batch::update_wait(tx, failed, !failed, ended)?;
+        batch::update_wait(tx, failed, !failed && answer.is_some(), ended)?;
         let Some(answer) = &answer else {
             return Ok((0, 0));
         };
