@@ -77,7 +77,8 @@ export function status(e: LedgerEntry): string {
     const part = e.messages > 0 ? ` ${e.changed.toLocaleString("en-US")} of ${count(e.messages, "message", "messages")} changed.` : "";
     return `Failed.${part}${e.error ? ` ${e.error}` : ""}`;
   }
-  return "";
+  // A done change can carry a note, for example an Outlook send whose draft stays in Outlook.
+  return e.error ?? "";
 }
 
 /** The day heading of a time: "Today", "Yesterday", or the date, in the local day of `now`. */

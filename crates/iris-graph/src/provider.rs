@@ -645,6 +645,10 @@ impl iris_provider::Provider for Outlook {
         true
     }
 
+    fn keeps_sent_draft(&self) -> bool {
+        true
+    }
+
     /// The cursor of now is the empty cursor: Graph has no cheap cursor of
     /// now, so the next `changes` starts a new round of each folder.
     fn profile(&self, token: &str) -> iris_provider::Result<Profile> {

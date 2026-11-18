@@ -188,6 +188,24 @@ fn a_draft_and_its_send_reach_outlook() {
         "F-drafts",
         "Iris deletes no draft"
     );
+    // The good send tells the person that the draft stays (limit #634).
+    let note: Option<String> = b
+        .store
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT error FROM ledger WHERE action_id = ?1", [s], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        note.as_deref(),
+        Some("Sent. The draft stays in Outlook: delete it there.")
+    );
+    // The note is no content error, so the next send can leave.
+    let (s2, _) = b.new_mail(AGED);
+    assert!(matches!(b.release(s2), Outcome::Applied(_)));
 }
 
 /// Graph saves the sent copy after the 202: the send is pending, the

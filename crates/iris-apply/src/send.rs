@@ -32,6 +32,9 @@ pub const SENT_OTHER: &str = "Gmail sent other content than the approved content
 /// The end of each "sent other content" error, after the name of the
 /// provider (for example "Outlook sent other content ..."). Each such
 /// error stops the later releases.
+/// The start of the note of a good send whose draft stays on the server.
+pub const KEPT_DRAFT_START: &str = "Sent. The draft stays in";
+
 pub const SENT_OTHER_END: &str = "sent other content than the approved content";
 
 /// The content of a `draft` row and the `post` of a create: the content
@@ -475,7 +478,18 @@ fn complete(
     };
     let same = iris_compose::read_sent(&raw, &run.address)
         .is_some_and(|r| iris_compose::hash(&r.content, r.reply.as_ref()) == approved);
-    let error = (!same).then(|| format!("{} {SENT_OTHER_END}", run.mail.name()));
+    let error = if !same {
+        Some(format!("{} {SENT_OTHER_END}", run.mail.name()))
+    } else if run.mail.keeps_sent_draft() {
+        // The send is good. The note stays with the ledger row, where the
+        // history shows it (limit #634).
+        Some(format!(
+            "{KEPT_DRAFT_START} {}: delete it there.",
+            run.mail.name()
+        ))
+    } else {
+        None
+    };
     run.store.write(|tx| {
         let t = now();
         tx.execute(

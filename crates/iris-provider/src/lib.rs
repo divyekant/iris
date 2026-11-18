@@ -257,6 +257,14 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// True if the draft stays on the server after `send_draft` (Outlook
+    /// sends the bytes with `sendMail`, and Iris never deletes a draft).
+    /// Then the completed send tells the person to delete the draft there
+    /// (limit #634). Gmail sends the draft itself, so the draft is gone.
+    fn keeps_sent_draft(&self) -> bool {
+        false
+    }
+
     /// The mailbox of `token` and the cursor of now.
     fn profile(&self, token: &str) -> Result<Profile>;
     /// Each label of the mailbox.

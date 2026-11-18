@@ -50,6 +50,7 @@ test("who decided: the author, and the rule or the person that approved", () => 
 
 test("a failed or a running entry says so; a done entry needs no words", () => {
   assert.equal(l.status(e({ state: "applied" })), "");
+  assert.equal(l.status(e({ state: "applied", error: "Sent. The draft stays in Outlook: delete it there." })), "Sent. The draft stays in Outlook: delete it there.");
   assert.equal(l.status(e({ state: "writing" })), "Iris makes this change now.");
   assert.equal(l.status(e({ state: "failed", messages: 40, changed: 12, error: "Gmail refused one call." })), "Failed. 12 of 40 messages changed. Gmail refused one call.");
   assert.equal(l.status(e({ state: "failed", messages: 0, items: 1, error: null })), "Failed.");

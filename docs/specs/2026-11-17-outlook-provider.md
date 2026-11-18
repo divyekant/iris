@@ -321,8 +321,10 @@ send does these steps:
 
 Iris does not delete the server draft after the send, because spec 2
 says that Iris never deletes a draft, and a delete is a mailbox write
-with no approval. The draft stays in Outlook Drafts. The outbox shows
-"Sent. The draft stays in Outlook: delete it there." A known limit with
+with no approval. The draft stays in Outlook Drafts. The ledger row of
+the good send keeps the note "Sent. The draft stays in Outlook: delete
+it there." (R6-16), and the history shows it with the send. The outbox
+lists only sends that wait. A known limit with
 its own issue: the person can send the same draft a second time from
 Outlook. A later card can make the delete an approved part of the send.
 
@@ -369,7 +371,8 @@ spec section 4 on these rules:
   other content than the approved content" stops each later release, of
   each provider.
 - Iris never deletes the draft after the send. Known limit with its own
-  issue (#634). The note in the outbox is part of R6-16.
+  issue (#634). R6-16 keeps the note with the ledger row of the send
+  (`Provider::keeps_sent_draft`), and the history shows it.
 - The recovery of a `create_draft` with an unknown result is the
   recovery of the apply for each provider: `drafts_with_id` finds the
   draft, or the row fails. Graph makes the draft in the call, so a draft
