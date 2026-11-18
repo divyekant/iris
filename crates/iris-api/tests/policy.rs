@@ -419,3 +419,57 @@ async fn a_hide_proposal_reads_as_choices() {
         json!({ "sender": "news@shop.example", "form": "feed" })
     );
 }
+
+/// Issue 143: each policy writer waits for the backup lock, which a backup
+/// can hold for minutes. A writer that waits must not stop the other
+/// requests: the server has one runtime thread. Each route runs alone, so
+/// one route on the runtime thread fails the test.
+#[tokio::test]
+async fn a_policy_writer_that_waits_for_the_lock_stops_no_other_request() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let d = Arc::new(open("lockwait"));
+    d.write(FILE);
+    let sha = d.get().await["file"]["sha256"].clone();
+    // An open job, so that the grant reaches the lock.
+    let job = iris_job::create(&d.1, "Book the dentist.", None, 1_800_000_000).unwrap();
+    let job = iris_job::format_job_id(job);
+    let calls: Vec<(&str, Option<Value>)> = vec![
+        ("confirm", Some(json!({ "sha256": sha }))),
+        ("discard", None),
+        ("mode", Some(json!({ "version": null, "mode": "observe" }))),
+        ("remove", Some(json!({ "version": null, "id": 1 }))),
+        ("accept", Some(json!({ "version": null, "id": 1 }))),
+        (
+            "grant",
+            Some(json!({ "version": null, "job": job, "verbs": ["archive"] })),
+        ),
+    ];
+    for (what, body) in calls {
+        let lock = d.1.backup_lock().unwrap();
+        let released = Arc::new(AtomicBool::new(false));
+        // The release in 2 s, so that a blocked thread cannot hang the test.
+        let r = released.clone();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            r.store(true, Ordering::SeqCst);
+            drop(lock);
+        });
+        let writer = {
+            let d = d.clone();
+            tokio::spawn(async move {
+                d.call("POST", &format!("/api/policy/{what}"), body, true)
+                    .await
+            })
+        };
+        // The writer runs first and comes to the lock.
+        tokio::task::yield_now().await;
+        let (code, _) = d.call("GET", "/api/policy", None, true).await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(
+            !released.load(Ordering::SeqCst),
+            "{what}: the read waited for the lock of the writer"
+        );
+        writer.await.unwrap();
+        release.join().unwrap();
+    }
+}
