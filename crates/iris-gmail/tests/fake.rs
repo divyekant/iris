@@ -272,10 +272,13 @@ fn a_draft_is_created_read_and_sent_in_its_thread() {
     let d = gmail.create_draft(TOKEN, DRAFT, Some(&thread)).unwrap();
     assert_eq!(d.message.thread_id, thread);
     let got = gmail.draft_raw(TOKEN, &d.id).unwrap();
-    assert_eq!(
-        (got.raw.as_deref().unwrap(), got.message.thread_id.as_str()),
-        (DRAFT, thread.as_str())
-    );
+    assert_eq!(got.message.thread_id, thread);
+    // Like Gmail, the fake sets its own Message-ID and adds `Received`.
+    let got = String::from_utf8(got.raw.unwrap()).unwrap();
+    assert!(got.starts_with("Received: "), "{got}");
+    assert!(got.contains("Message-ID: <CACe_fake0000000001@mail.gmail.com>\r\n"));
+    assert!(!got.contains("iris.1@example.com"));
+    assert!(got.contains("\r\nSubject: Hi\r\n") && got.ends_with("\r\n\r\nHello\r\n"));
 
     // The person edits the draft at Gmail; the send carries the bytes of Iris.
     assert!(fake.edit_draft(
@@ -411,9 +414,14 @@ fn a_draft_search_reads_every_page() {
     let other = b"Subject: Hi\r\nMessage-ID: <other@example.com>\r\n\r\nHello\r\n";
     let raw = b"Subject: Hi\r\nMessage-ID: <iris.5@example.com>\r\n\r\nHello\r\n";
     gmail.create_draft(TOKEN, other, None).unwrap();
+    // Gmail gives each new draft its own Message-ID: an edit at Gmail
+    // gives the three drafts the same ID.
     let ids: Vec<String> = (0..3)
         .map(|_| gmail.create_draft(TOKEN, raw, None).unwrap().id)
         .collect();
+    for id in &ids {
+        assert!(fake.edit_draft(id, raw));
+    }
     fake.set_page_limit(1);
 
     // The matching drafts are on three pages. Without the page tokens,
