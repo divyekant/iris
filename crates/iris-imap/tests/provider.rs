@@ -808,6 +808,7 @@ fn modify_refused_and_unconfirmed() {
         FakeStore::RefuseAfterOne,
         FakeStore::NoFetch,
         FakeStore::Close,
+        FakeStore::UidOnly,
     ] {
         let fake = FakeImap::start(Caps::ALL);
         let a = fake.add("INBOX", small(1), &[]);
@@ -821,6 +822,14 @@ fn modify_refused_and_unconfirmed() {
             "{mode:?}: {r:?}"
         );
     }
+    // A removal answered with a FETCH of the UID and no FLAGS.
+    let fake = FakeImap::start(Caps::ALL);
+    let a = fake.add("INBOX", small(1), &["\\Flagged"]);
+    let mail = provider(&fake);
+    let id = id_of(&mail, "INBOX", a);
+    fake.set_store(FakeStore::UidOnly);
+    let r = mail.modify(PASSWORD, &[&id], &[], &["STARRED"]);
+    assert!(matches!(&r, Err(e) if e.write_result_unknown()), "{r:?}");
     // A UID that another client removed: no FETCH for it.
     let fake = FakeImap::start(Caps::ALL);
     let a = fake.add("INBOX", small(1), &[]);

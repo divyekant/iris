@@ -730,6 +730,7 @@ impl<S: Read + Write> Session<S> {
         );
         self.run(&cmd, None, |r, _| {
             if let Response::Fetch(_, attrs) = r {
+                // A FETCH with no FLAGS gives no entry: it confirms nothing.
                 if let Some(e) = entry(&attrs) {
                     each(e.uid, e.flags);
                 }
@@ -884,7 +885,7 @@ impl Write for Counter<'_> {
 
 fn entry(attrs: &[AttributeValue<'_>]) -> Option<Entry> {
     let mut uid = None;
-    let mut flags = Vec::new();
+    let mut flags = None;
     let mut modseq = None;
     let mut internal_date = None;
     let mut size = None;
@@ -892,7 +893,7 @@ fn entry(attrs: &[AttributeValue<'_>]) -> Option<Entry> {
     for a in attrs {
         match a {
             AttributeValue::Uid(u) => uid = Some(*u),
-            AttributeValue::Flags(f) => flags = f.iter().map(|x| x.to_string()).collect(),
+            AttributeValue::Flags(f) => flags = Some(f.iter().map(|x| x.to_string()).collect()),
             AttributeValue::ModSeq(m) => modseq = Some(*m),
             AttributeValue::InternalDate(d) => internal_date = Some(d.to_string()),
             AttributeValue::Rfc822Size(n) => size = Some(*n),
@@ -904,10 +905,12 @@ fn entry(attrs: &[AttributeValue<'_>]) -> Option<Entry> {
             _ => {}
         }
     }
-    // A FETCH with no UID (an unsolicited flag change) is skipped. The next sync finds the change.
+    // A FETCH with no UID or no FLAGS (an unsolicited update, for example
+    // MODSEQ only) is skipped: each command asks for both, and empty flags
+    // would read as unread mail. The next sync finds the change.
     Some(Entry {
         uid: uid?,
-        flags,
+        flags: flags?,
         modseq,
         internal_date,
         size,

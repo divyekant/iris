@@ -77,6 +77,8 @@ pub enum Store {
     NoFetch,
     /// Change the flags, then close the connection with no answer.
     Close,
+    /// Change the flags, and send a `FETCH` with the UID and no `FLAGS`.
+    UidOnly,
 }
 
 struct State {
@@ -578,6 +580,11 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                             }
                             m.modseq = modseq;
                             done += 1;
+                            if mode == Store::UidOnly {
+                                reply.push_str(&format!(
+                                    "* 1 FETCH (UID {uid} MODSEQ ({modseq}))\r\n"
+                                ));
+                            }
                             if mode == Store::Normal {
                                 reply.push_str(&format!(
                                     "* 1 FETCH (UID {uid} FLAGS ({}))\r\n",

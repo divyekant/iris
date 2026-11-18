@@ -532,3 +532,21 @@ fn mirror_agrees_in_each_mode() {
         );
     }
 }
+
+/// An unsolicited FETCH with no FLAGS (a MODSEQ update of another session)
+/// gives no entry: empty flags would read as unread mail.
+#[test]
+fn fetch_with_no_flags_gives_no_entry() {
+    let mut s = Session::start(
+        script(
+            b"* 1 EXISTS\r\n* OK [UIDVALIDITY 7] x\r\na4 OK [READ-ONLY] done\r\n\
+* 1 FETCH (UID 3 MODSEQ (91))\r\n* 1 FETCH (UID 3 FLAGS (\\Seen))\r\na5 OK done\r\n",
+        ),
+        PASS,
+    )
+    .unwrap();
+    s.examine("INBOX").unwrap();
+    let mut got = Vec::new();
+    s.list(1, None, |e| got.push((e.uid, e.flags))).unwrap();
+    assert_eq!(got, [(3, vec!["\\Seen".to_owned()])]);
+}
