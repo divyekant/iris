@@ -34,8 +34,8 @@ const ALLOWED: [(&str, usize, &str); 16] = [
     ),
     (
         "iris-senders/src/lib.rs",
-        4,
-        "the sender axis: SENT and DRAFT are proof of authorship, UNSENT and SENT_COPY are not",
+        3,
+        "the sender axis: SENT and DRAFT are proof of authorship, UNSENT and SENT_COPY are not; received!() uses draft_or_copy",
     ),
     (
         "iris-policy/src/attention.rs",
@@ -138,6 +138,54 @@ fn each_draft_read_is_classified() {
     assert!(
         bad.is_empty(),
         "use iris_store::draft_or_copy!():\n{}",
+        bad.join("\n")
+    );
+}
+
+/// The files with a gate of received mail (a read of `may_be_hostile!`) that
+/// do not read `draft_or_copy!` themselves, and why.
+const GATES_WITHOUT: [(&str, &str); 3] = [
+    (
+        "iris-store/src/lib.rs",
+        "the definitions of may_be_hostile and draft_or_copy",
+    ),
+    (
+        "iris-policy/src/attention.rs",
+        "the facts of one message for its items; items come only from understood mail",
+    ),
+    (
+        "iris-workspace/src/lib.rs",
+        "readable() reads iris_talk::message, which counts a draft or a copy as not clean",
+    ),
+];
+
+/// Each gate of received mail also skips drafts and sent copies: a file
+/// that reads `may_be_hostile!` reads `draft_or_copy!` too, or is in
+/// [`GATES_WITHOUT`] with its reason.
+#[test]
+fn each_gate_skips_drafts_and_sent_copies() {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut files = Vec::new();
+    sources(&crates, &mut files);
+    let mut bad = Vec::new();
+    for (path, text) in &files {
+        let gate = text.contains("may_be_hostile!(") && !path.contains("/tests");
+        let skip = text.contains("draft_or_copy!(");
+        let listed = GATES_WITHOUT
+            .iter()
+            .any(|(f, _)| path.ends_with(&format!("/{f}")));
+        if gate && !skip && !listed {
+            bad.push(path.clone());
+        }
+        if listed && (!gate || skip) && !path.ends_with("/iris-store/src/lib.rs") {
+            bad.push(format!(
+                "{path}: listed, but it is no gate without the helper"
+            ));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "use iris_store::draft_or_copy!() in each gate:\n{}",
         bad.join("\n")
     );
 }

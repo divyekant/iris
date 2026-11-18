@@ -16,6 +16,21 @@ use rusqlite::{params, Connection, OptionalExtension};
 pub mod gate;
 /// The header parser of the sender rules. `iris-understand` reads the
 /// same headers with it, so both crates agree on each value.
+/// SQL that is true when the message with the alias `$m` is received mail:
+/// no label `SENT`, and not a draft or a sent copy
+/// (`iris_store::draft_or_copy!`). A copy is no evidence of a sender.
+macro_rules! received {
+    ($m:literal) => {
+        concat!(
+            "NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                      WHERE ml.message_id = ",
+            $m,
+            ".id AND l.provider_id = 'SENT') AND NOT ",
+            iris_store::draft_or_copy!($m)
+        )
+    };
+}
+
 pub mod head;
 use head::Head;
 
@@ -296,7 +311,7 @@ fn decide_message(
                   WHERE m.thread_id = (SELECT thread_id FROM message WHERE id = ?1)
                     AND m.id != ?1 AND m.internal_date < ?2 AND m.gone_at IS NULL AND {}
                     AND h.from_addr IS NOT NULL AND h.from_addr != '' AND h.from_addr != lower(?3)",
-                received("m")
+                received!("m")
             ))?
             .query_map(params![message, date.unwrap_or(i64::MIN), account], |r| {
                 r.get(0)
@@ -397,15 +412,6 @@ const SENT_NOT_DRAFT: &str =
       AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                   WHERE ml.message_id = s.id AND l.provider_id = 'DRAFT'))";
 
-/// SQL that is true when the message with the alias `m` is received mail:
-/// no label `SENT` or `DRAFT`.
-fn received(m: &str) -> String {
-    format!(
-        "NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                      WHERE ml.message_id = {m}.id AND l.provider_id IN ('SENT', 'DRAFT'))"
-    )
-}
-
 /// SQL that is true when the header `h` names the address of parameter
 /// `?n` in `To` or `Cc`.
 fn to_addr(n: u8) -> String {
@@ -468,7 +474,7 @@ fn rules(conn: &Connection, addr: &str) -> rusqlite::Result<(Kind, String)> {
                  JOIN header h ON h.message_id = s.id
                 WHERE hm.from_addr = ?1 AND m.gone_at IS NULL AND {} AND {SENT_NOT_DRAFT}
                   AND (s.internal_date > m.internal_date OR {}))",
-            received("m"),
+            received!("m"),
             to_addr(1)
         ),
         [addr],
@@ -489,8 +495,8 @@ fn rules(conn: &Connection, addr: &str) -> rusqlite::Result<(Kind, String)> {
                 AND (SELECT count(*) FROM (SELECT 1 FROM header h JOIN message e ON e.id = h.message_id
                       WHERE h.from_addr = ?1 AND e.internal_date < q.internal_date
                         AND e.gone_at IS NULL AND {} LIMIT 2)) >= 2)",
-            received("q"),
-            received("e")
+            received!("q"),
+            received!("e")
         ),
         [addr],
         |r| r.get(0),

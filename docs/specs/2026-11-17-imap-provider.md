@@ -173,7 +173,11 @@ received mail uses it:
 - the understanding (`crates/iris-understand`: the pending query and the
   thread rule of `batch.rs`, the thread context of `store.rs`, the guard
   of `store::understand`),
-- the watches (`first_arrival` of `crates/iris-store/src/search.rs`),
+- the watches (`first_arrival` of `crates/iris-store/src/search.rs`), the
+  notices by rule (`crates/iris-policy/src/notice.rs`) and the messages
+  that Ask reads (`crates/iris-understand/src/ask.rs`),
+- the received-mail evidence of the sender axis (the `replied` and the
+  `service` rules, `received!` of `crates/iris-senders`),
 - the conversations (`crates/iris-talk`) and the people
   (`crates/iris-people`),
 - the reply parent and the conversation of the write view
@@ -186,13 +190,15 @@ model context, the write view and the agent must not read a sent copy
 either.
 
 The checks of authorship read `SENT` and `DRAFT` only, because a copy is
-no proof: the sender axis, the mail-from-you rule of the attention, your
+no proof: the `you` kind of the sender axis, the mail-from-you rule of the attention, your
 addresses and voice samples, the link mark of your mail, and the mark of
 a job that read mail you did not send. The copied-text flag of the
 changeset counts a phrase of a sent copy as external text, the safe side
 (more flags). The test `each_draft_read_is_classified` lists each name of
 `DRAFT`, `UNSENT` or `SENT_COPY` in `crates/*/src`, with its reason, and
-fails on a new one. A watch test covers a message that gets the `\Draft`
+fails on a new one. The test `each_gate_skips_drafts_and_sent_copies`
+fails on a file that reads `may_be_hostile!` (a gate of received mail)
+with no `draft_or_copy!`, unless it is listed with its reason. A watch test covers a message that gets the `\Draft`
 flag after its body was saved: no arrival notice. No IMAP account can
 sync before that part, because only the next part adds the account.
 

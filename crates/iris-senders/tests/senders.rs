@@ -38,6 +38,8 @@ fn open(dir: &TempDir) -> (Store, i64) {
                 ("INBOX", "INBOX", "system"),
                 ("SENT", "SENT", "system"),
                 ("DRAFT", "DRAFT", "system"),
+                ("UNSENT", "UNSENT", "system"),
+                ("SENT_COPY", "SENT_COPY", "system"),
             ],
         )
         .unwrap();
@@ -197,6 +199,26 @@ fn a_reply_in_the_thread_makes_a_person_and_a_draft_does_not() {
     c.put("t1", &["SENT"], &format!("From: {OWNER}"));
     let d = c.put("t9", &["INBOX"], head);
     assert_eq!((d.kind, d.basis.as_str()), (Kind::Person, "replied"));
+}
+
+/// An IMAP draft and a copy in a Sent folder are no evidence of a sender:
+/// they are not earlier mail of a service, and a reply after a copy does
+/// not make its sender a person (IMAP spec section 4).
+#[test]
+fn drafts_and_sent_copies_are_no_sender_evidence() {
+    let mut c = Case::new("copies-replied");
+    let head = "From: Cy <cy@example.net>\r\nTo: owner@example.com";
+    c.put("t1", &["SENT_COPY"], head);
+    c.put("t1", &["UNSENT"], head);
+    c.put("t1", &["SENT"], &format!("From: {OWNER}"));
+    assert_eq!(c.put("t9", &["INBOX"], head).kind, Kind::Stranger);
+
+    let mut c = Case::new("copies-service");
+    c.put("t1", &["UNSENT"], &service_mail());
+    c.put("t2", &["SENT_COPY"], &service_mail());
+    assert_eq!(c.put("t3", &[], &service_mail()).kind, Kind::Stranger);
+    assert_eq!(c.put("t4", &[], &service_mail()).kind, Kind::Stranger);
+    assert_eq!(c.put("t5", &[], &service_mail()).kind, Kind::Service);
 }
 
 #[test]

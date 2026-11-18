@@ -69,6 +69,7 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
                    AND NOT EXISTS (SELECT 1 FROM notice n WHERE n.message_id = m.id)
                    AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                        WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))
+                   AND NOT ", iris_store::draft_or_copy!("m"), "
                  ORDER BY m.id",
             ))?
             .query_map(params![now_ms - WINDOW_MS, WINDOW_MS, now_ms - LATE_MS], |r| r.get(0))?
