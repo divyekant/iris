@@ -357,7 +357,7 @@
   .away:focus-visible {
     outline: 2px solid var(--color-primary);
   }
-  @media (hover: none) {
+  @media (hover: none), (any-pointer: coarse) {
     .away {
       opacity: 1;
     }
