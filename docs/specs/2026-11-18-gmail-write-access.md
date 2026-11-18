@@ -37,7 +37,7 @@ The person sees a raw provider error and no next step.
 
 - A sign-in from the web client. The sign-in stays a command
   (`iris account add`).
-- A change to the Accounts page of the web client. The account state
+- A change to the Accounts page of the web client (issue #681). The account state
   `read_only` is in `GET /api/status` at once. The words on the page come in
   a follow-up card with a before/after page, because the owner picks each
   screen change.
