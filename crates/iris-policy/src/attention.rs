@@ -173,7 +173,7 @@ pub fn facts(tx: &Connection, id: i64, now: i64) -> Result<Option<Facts>> {
             Ok((
                 r.get::<_, Option<String>>(0)?
                     .unwrap_or_default()
-                    .to_lowercase(),
+                    .to_ascii_lowercase(), // One form with migration 39.
                 // No date: age 0, so that no `older_than_days` rule hides it.
                 r.get::<_, Option<i64>>(1)?
                     .map_or(now, |ms| ms.div_euclid(1000)),
