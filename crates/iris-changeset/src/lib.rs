@@ -221,7 +221,7 @@ pub fn format_changeset_id(row: i64) -> String {
 /// Parse `cs-42`. Gives `None` for any other text.
 pub fn parse_changeset_id(text: &str) -> Option<i64> {
     let n = text.strip_prefix("cs-")?;
-    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+    if n.is_empty() || n.starts_with('0') || !n.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     n.parse().ok().filter(|row| *row > 0)
