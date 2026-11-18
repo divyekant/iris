@@ -937,15 +937,57 @@ fn error_of(response: ureq::http::Response<ureq::Body>) -> (String, String) {
         .read_to_vec()
         .unwrap_or_default();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    (
+        reason_of(&v),
+        v["error"]["message"].as_str().unwrap_or("").to_string(),
+    )
+}
+
+/// The reason of a Gmail error answer: `error.errors[0].reason`, else the
+/// reason of the first `error.details` entry (the newer `ErrorInfo` form,
+/// for example `ACCESS_TOKEN_SCOPE_INSUFFICIENT`).
+fn reason_of(v: &serde_json::Value) -> String {
     let e = &v["error"];
-    let reason = e["errors"][0]["reason"].as_str().unwrap_or("").to_string();
-    let message = e["message"].as_str().unwrap_or("").to_string();
-    (reason, message)
+    let first = |r: &serde_json::Value| r.as_str().filter(|s| !s.is_empty()).map(str::to_string);
+    first(&e["errors"][0]["reason"])
+        .or_else(|| {
+            e["details"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find_map(|d| first(&d["reason"]))
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_reason_comes_from_both_error_forms() {
+        let old = serde_json::json!({"error": {"code": 403, "errors": [
+            {"reason": "insufficientPermissions"}]}});
+        assert_eq!(reason_of(&old), "insufficientPermissions");
+        let new = serde_json::json!({"error": {"code": 403, "status": "PERMISSION_DENIED",
+            "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                         "reason": "ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]}});
+        assert_eq!(reason_of(&new), "ACCESS_TOKEN_SCOPE_INSUFFICIENT");
+        let both = serde_json::json!({"error": {"errors": [{"reason": "rateLimitExceeded"}],
+            "details": [{"reason": "RATE_LIMIT_EXCEEDED"}]}});
+        assert_eq!(
+            reason_of(&both),
+            "rateLimitExceeded",
+            "the old form comes first"
+        );
+        for none in [
+            serde_json::json!({}),
+            serde_json::json!({"error": {"details": "x"}}),
+            serde_json::json!({"error": {"errors": [{"reason": 3}]}}),
+        ] {
+            assert_eq!(reason_of(&none), "");
+        }
+    }
 
     /// A small random number generator with a fixed seed.
     struct Rng(u64);

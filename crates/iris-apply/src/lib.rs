@@ -623,13 +623,14 @@ pub fn apply(
 
 /// The recovery of section 7.3 for each ledger row in `writing` of the
 /// account. The engine runs it at start. It holds the same locks as
-/// [`apply`].
+/// [`apply`]. Gives true if Gmail refused a call for a missing scope
+/// ([`scope_refused`]): the recovery stopped there.
 pub fn recover(
     store: &Store,
     mail: &dyn Provider,
     token: &mut Token<'_>,
     account: i64,
-) -> Result<()> {
+) -> Result<bool> {
     let _lock = lock(store)?;
     let _sync = sync_lock(store, account)?;
     let mut run = Run::new(store, mail, token, account)?;
@@ -645,7 +646,7 @@ pub fn recover_read_only(
     mail: &dyn Provider,
     token: &mut Token<'_>,
     account: i64,
-) -> Result<()> {
+) -> Result<bool> {
     let _lock = lock(store)?;
     let _sync = sync_lock(store, account)?;
     let mut run = Run::new(store, mail, token, account)?;
@@ -1079,6 +1080,12 @@ impl<'a, 'b> Run<'a, 'b> {
             let mut failure = None;
             for (id, provider_id, message_call) in page {
                 let started = message_call <= call;
+                // A read-only run starts no call, so it does not read the
+                // messages of a call that never started: the recovery after
+                // a write sign-in reads them (Run::calls).
+                if self.read_only && !started {
+                    continue;
+                }
                 let Some(provider_id) = provider_id else {
                     found.push((id, Found::Listed("gone")));
                     continue;
@@ -1135,8 +1142,9 @@ impl<'a, 'b> Run<'a, 'b> {
         self.calls(ledger, &change)
     }
 
-    /// The recovery of each row of the account in `writing`.
-    fn recover_account(&mut self) -> Result<()> {
+    /// The recovery of each row of the account in `writing`. Gives true at
+    /// the first scope refusal, and recovers no other row then.
+    fn recover_account(&mut self) -> Result<bool> {
         let account = self.account;
         let rows: Vec<i64> = self.store.read(|c| {
             let mut st = c.prepare(
@@ -1146,9 +1154,13 @@ impl<'a, 'b> Run<'a, 'b> {
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })?;
         for ledger in rows {
-            self.recover(ledger)?;
+            let r = self.recover(ledger);
+            if scope_refused(&r) {
+                return Ok(true);
+            }
+            r?;
         }
-        Ok(())
+        Ok(false)
     }
 }
 

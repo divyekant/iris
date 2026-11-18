@@ -1082,15 +1082,9 @@ fn a_read_only_account_still_recovers_a_writing_row() {
     assert_eq!(writing, 0, "the recovery ended the row");
 }
 
-/// A crash left a row in `writing` whose call never started (`call` 0,
-/// a message for call 1). Read-only recovery must not start that call: the
-/// row waits in `writing`, and a write sign-in continues it.
-#[test]
-fn read_only_recovery_starts_no_call() {
-    let s = setup("read-only-no-call", 5);
-    let mut w = s.worker(s.account);
-    w.sync().unwrap();
-    let (action, provider) = approved_archive(&s);
+/// A crash state: a ledger row in `writing` for `action` whose call never
+/// started (`call` 0), with each message of the action for call 1.
+fn crash_before_call(s: &Setup, action: i64) {
     s.store
         .write(|tx| {
             tx.execute(
@@ -1109,6 +1103,18 @@ fn read_only_recovery_starts_no_call() {
             Ok(())
         })
         .unwrap();
+}
+
+/// A crash left a row in `writing` whose call never started (`call` 0,
+/// a message for call 1). Read-only recovery must not start that call: the
+/// row waits in `writing`, and a write sign-in continues it.
+#[test]
+fn read_only_recovery_starts_no_call() {
+    let s = setup("read-only-no-call", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let (action, provider) = approved_archive(&s);
+    crash_before_call(&s, action);
     sign_in_as(
         &s.store,
         &gmail(s.fake.base_url()),
@@ -1123,8 +1129,21 @@ fn read_only_recovery_starts_no_call() {
             .count()
     };
     let before = writes(&s.fake);
+    let reads = |f: &FakeGmail| {
+        f.requests()
+            .iter()
+            .filter(|r| r.contains("/messages/"))
+            .count()
+    };
     w.apply_step().unwrap();
     assert_eq!(writes(&s.fake), before, "no call starts while read only");
+    let read = reads(&s.fake);
+    w.apply_step().unwrap();
+    assert_eq!(
+        reads(&s.fake),
+        read,
+        "a later read-only turn reads no message again"
+    );
     let writing =
         format!("SELECT count(*) FROM ledger WHERE action_id = {action} AND state = 'writing'");
     assert_eq!(count(&s.store, &writing), 1, "the row waits");
@@ -1140,6 +1159,31 @@ fn read_only_recovery_starts_no_call() {
     assert_eq!(count(&s.store, &writing), 0);
     let meta = gmail(s.fake.base_url()).minimal("t", &provider).unwrap();
     assert!(!meta.label_ids.contains(&"INBOX".to_string()), "{meta:?}");
+}
+
+/// Google removed the write access: the recovery resumes a call that never
+/// started and gets a scope refusal. The step ends there, the account is
+/// read only, and no other action calls Gmail.
+#[test]
+fn a_scope_refusal_in_the_recovery_ends_the_step() {
+    let s = setup("recover-scope-refused", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let (action, _) = approved_archive(&s);
+    crash_before_call(&s, action);
+    let (other, _) = approved_archive(&s);
+    s.fake.set_read_only(true);
+    let writes = |f: &FakeGmail| {
+        f.requests()
+            .iter()
+            .filter(|r| !r.starts_with("GET "))
+            .count()
+    };
+    let before = writes(&s.fake);
+    let _ = w.apply_step();
+    assert_eq!(writes(&s.fake), before + 1, "only the resumed call");
+    assert_eq!(action_state(&s.store, other), "approved");
+    assert_state(&s.store, s.account, STATE_READ_ONLY);
 }
 
 /// The 14-day expiry does not wait for write access: the engine tick

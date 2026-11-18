@@ -94,10 +94,11 @@ pub fn recover_step(
     token: &mut Token<'_>,
     account: i64,
 ) -> Result<Step> {
+    let mut out = Step::default();
     if writing_rows(store, account)? {
-        crate::recover_read_only(store, mail, token, account)?;
+        out.scope_refused = crate::recover_read_only(store, mail, token, account)?;
     }
-    Ok(Step::default())
+    Ok(out)
 }
 
 /// [`step`] with a clock. Steps 1, 2, 3 and 4 use the time at the start of
@@ -113,8 +114,9 @@ pub fn step_clock(
 ) -> Result<Step> {
     let now_ms = clock();
     let mut out = Step::default();
-    if writing_rows(store, account)? {
-        recover(store, mail, token, account)?;
+    if writing_rows(store, account)? && recover(store, mail, token, account)? {
+        out.scope_refused = true;
+        return Ok(out);
     }
     // While stopped, only the recovery runs. The claims check the stop
     // again, so a stop after this read still holds.
