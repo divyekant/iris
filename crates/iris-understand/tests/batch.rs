@@ -507,6 +507,17 @@ fn drafts_and_sent_copies_are_not_pending() {
     b.add("2", "a", 3, &["UNSENT"]);
     b.add("3", "a", 2, &["INBOX", "SENT_COPY"]);
     let last = b.add("4", "a", 1, &["INBOX"]);
+    // A draft and a copy with no raw content yet do not hold the thread
+    // (issue #686).
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET content_sha256 = NULL WHERE provider_id IN ('1', '2', '3')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(batch::estimate(&b.store, NOW).unwrap().messages, 1);
     let r = b.run(&Limits::default()).unwrap();
     assert_eq!(
