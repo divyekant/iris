@@ -129,6 +129,53 @@ fn not_supported() -> Error {
     api("notSupported", "IMAP accounts cannot do this yet")
 }
 
+/// The flags to set (`plus`) and to clear (`minus`) for a `modify` of
+/// labels (spec section 7). Only `UNREAD`, `STARRED` and keyword labels;
+/// any other label is `notSupported`, before any command.
+fn flag_change(add: &[&str], remove: &[&str]) -> Result<(Vec<String>, Vec<String>)> {
+    let (mut plus, mut minus) = (Vec::new(), Vec::new());
+    for (labels, adding) in [(add, true), (remove, false)] {
+        for l in labels {
+            let (flag, set) = match *l {
+                // UNREAD is the absence of `\Seen`.
+                "UNREAD" => ("\\Seen".to_owned(), !adding),
+                "STARRED" => ("\\Flagged".to_owned(), adding),
+                l => match l.strip_prefix("kw:") {
+                    // The lowercase ID (section 4) is the keyword to send.
+                    Some(k) if crate::is_atom(k) && !k.is_empty() => {
+                        (k.to_ascii_lowercase(), adding)
+                    }
+                    Some(_) => return Err(api("badName", "not an IMAP keyword")),
+                    None => return Err(not_supported()),
+                },
+            };
+            let (to, other) = if set {
+                (&mut plus, &minus)
+            } else {
+                (&mut minus, &plus)
+            };
+            if other.contains(&flag) {
+                return Err(api("badRequest", "a label is added and removed"));
+            }
+            if !to.contains(&flag) {
+                to.push(flag);
+            }
+        }
+    }
+    Ok((plus, minus))
+}
+
+/// Each flag of `flags` is permanent in the folder of `e` (RFC 3501
+/// section 7.1): in `PERMANENTFLAGS`, or a keyword with `\*` there.
+fn permanent(e: &crate::Examined, flags: &[&str]) -> bool {
+    let Some(p) = &e.permanent else {
+        return false;
+    };
+    flags.iter().all(|f| {
+        p.iter().any(|x| x.eq_ignore_ascii_case(f)) || (!f.starts_with('\\') && e.any_keyword)
+    })
+}
+
 /// The folders that hold mail: selectable, and not a view of other
 /// folders. In the page order of spec section 2.
 fn mail_folders<S: Read + Write>(s: &mut Session<S>) -> Result<Vec<Folder>> {
@@ -375,7 +422,10 @@ fn parse_cursor(text: &str) -> Option<BTreeMap<String, Mark>> {
             count: u32::try_from(count).ok()?,
             role,
         };
-        out.insert(name.to_owned(), m);
+        // Two lines for one folder: not a cursor of ours.
+        if out.insert(name.to_owned(), m).is_some() {
+            return None;
+        }
     }
     // A profile always has INBOX, so an empty cursor is not one of ours.
     (!out.is_empty()).then_some(out)
@@ -533,7 +583,9 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
             for f in mail_folders(s)? {
                 let (id, name, kind) = folder_label(&f);
                 out.insert(id.clone(), label(&id, &name, kind));
-                for k in s.examine(&f.name).map_err(read_error)?.flags {
+                // SELECT, not EXAMINE: a server sends the keywords of
+                // PERMANENTFLAGS only to a read-write open (RFC 3501 6.3.2).
+                for k in s.select(&f.name).map_err(read_error)?.flags {
                     if !k.starts_with('\\') {
                         // The first spelling in folder order names the label.
                         let id = keyword_id(&k);
@@ -596,7 +648,20 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
             };
             if let Some((f, bound)) = found {
                 let e = s.examine(&f.name).map_err(read_error)?;
-                let mut got: Vec<Entry> = Vec::new();
+                // (UID, reference): each entry becomes compact in the callback,
+                // so no header block stays for the page (spec section 6).
+                let mut got: Vec<(u32, MessageRef)> = Vec::new();
+                let validity = e.uidvalidity;
+                let mut keep = |en: Entry| {
+                    let m = history_message(f, validity, &en);
+                    got.push((
+                        en.uid,
+                        MessageRef {
+                            id: m.id,
+                            thread_id: m.thread_id,
+                        },
+                    ));
+                };
                 // A window of sequence numbers: for a search too, so that
                 // each answer holds at most WINDOW UIDs.
                 let high = u64::from(e.exists).min(bound.saturating_sub(1)) as u32;
@@ -604,27 +669,19 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
                 if high > 0 {
                     match search {
                         // Each message of a Drafts folder is UNSENT.
-                        Some(Search::Draft) if f.special == Some(Special::Drafts) => s
-                            .window(low, high, None, |en| got.push(en))
-                            .map_err(read_error)?,
+                        Some(Search::Draft) if f.special == Some(Special::Drafts) => {
+                            s.window(low, high, None, &mut keep).map_err(read_error)?
+                        }
                         Some(key) => {
                             let uids = s.search(Some((low, high)), key).map_err(read_error)?;
-                            s.fetch_uids(&uids, |en| got.push(en)).map_err(read_error)?;
+                            s.fetch_uids(&uids, &mut keep).map_err(read_error)?;
                         }
-                        None => s
-                            .window(low, high, None, |en| got.push(en))
-                            .map_err(read_error)?,
+                        None => s.window(low, high, None, &mut keep).map_err(read_error)?,
                     }
                 }
                 let more = (low > 1).then_some(low);
-                got.sort_by_key(|e| std::cmp::Reverse(e.uid));
-                messages.extend(got.iter().map(|en| {
-                    let m = history_message(f, e.uidvalidity, en);
-                    MessageRef {
-                        id: m.id,
-                        thread_id: m.thread_id,
-                    }
-                }));
+                got.sort_by_key(|(uid, _)| std::cmp::Reverse(*uid));
+                messages.extend(got.into_iter().map(|(_, m)| m));
                 let next = if let Some(lo) = more {
                     Some(format!("{lo}:{}", f.name))
                 } else {
@@ -813,9 +870,85 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
         Err(not_supported())
     }
 
-    fn modify(&self, _: &str, _: &[&str], _: &[&str], _: &[&str]) -> Result<()> {
-        // shortcut: no writes yet, part B code 2 adds the flag writes.
-        Err(not_supported())
+    fn modify(&self, token: &str, ids: &[&str], add: &[&str], remove: &[&str]) -> Result<()> {
+        let (plus, minus) = flag_change(add, remove)?;
+        // The targets of each folder: (UIDVALIDITY, UIDs). All checks come
+        // before the first write (spec section 7).
+        let mut targets: BTreeMap<&str, (u32, Vec<u32>)> = BTreeMap::new();
+        for id in ids {
+            let (validity, uid, folder) = parse_id(id).ok_or(Error::NotFound)?;
+            let t = targets.entry(folder).or_insert((validity, Vec::new()));
+            // Two UIDVALIDITY values for one folder: one ID is stale.
+            if t.0 != validity {
+                return Err(Error::NotFound);
+            }
+            t.1.push(uid);
+        }
+        if targets.is_empty() || (plus.is_empty() && minus.is_empty()) {
+            return Ok(());
+        }
+        let all: Vec<&str> = plus.iter().chain(&minus).map(String::as_str).collect();
+        self.with(token, |s| {
+            let folders = mail_folders(s)?;
+            // The check pass: no STORE.
+            for (folder, (validity, _)) in &targets {
+                if !folders.iter().any(|f| f.name == *folder) {
+                    return Err(Error::NotFound);
+                }
+                let e = s.select(folder).map_err(read_error)?;
+                if e.uidvalidity != *validity {
+                    return Err(Error::NotFound);
+                }
+                if !permanent(&e, &all) {
+                    return Err(api("notPermanent", "the server does not keep this flag"));
+                }
+            }
+            // The write pass. After the first STORE, each error is unknown.
+            let mut sent = false;
+            let unknown = |e: Error| Error::Transport(format!("unknown result: {e}"));
+            for (folder, (validity, uids)) in &targets {
+                let e = s.select(folder).map_err(|e| {
+                    let e = read_error(e);
+                    if sent {
+                        unknown(e)
+                    } else {
+                        e
+                    }
+                })?;
+                if e.uidvalidity != *validity {
+                    return Err(if sent {
+                        unknown(Error::NotFound)
+                    } else {
+                        Error::NotFound
+                    });
+                }
+                for (flags, add) in [(&plus, true), (&minus, false)] {
+                    if flags.is_empty() {
+                        continue;
+                    }
+                    let names: Vec<&str> = flags.iter().map(String::as_str).collect();
+                    let mut seen: BTreeMap<u32, Vec<String>> = BTreeMap::new();
+                    sent = true;
+                    s.store(uids, add, &names, |uid, f| {
+                        seen.insert(uid, f);
+                    })
+                    .map_err(|e| unknown(read_error(e)))?;
+                    // Each target must come back with the asked flags.
+                    for uid in uids {
+                        let got = seen.get(uid).ok_or_else(|| {
+                            Error::Transport("unknown result: a UID had no answer".into())
+                        })?;
+                        let has = |x: &str| got.iter().any(|g| g.eq_ignore_ascii_case(x));
+                        if names.iter().any(|n| has(n) != add) {
+                            return Err(Error::Transport(
+                                "unknown result: other flags in the answer".into(),
+                            ));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })
     }
 
     fn trash(&self, _: &str, _: &str) -> Result<Minimal> {
@@ -827,8 +960,8 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
     }
 
     fn create_label(&self, _: &str, _: &str) -> Result<Label> {
-        // shortcut: a keyword exists only after a STORE, which part B code 2
-        // adds. Until then a label that labels() does not give is a lie.
+        // shortcut: a keyword exists only on a message, so a label made
+        // before its first STORE can be a lie, issue #652.
         Err(not_supported())
     }
 
@@ -954,6 +1087,80 @@ mod tests {
         assert_eq!(thread_of(Some(long.as_bytes()), "1:2:INBOX"), "1:2:INBOX");
         let short = b"Message-ID: <a@x>\r\n\r\n";
         assert_eq!(thread_of(Some(short), "1:2:INBOX"), "a@x");
+    }
+
+    /// A small xorshift generator: the tests stay deterministic.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    fn render(c: &BTreeMap<String, Mark>) -> String {
+        c.iter().map(|(n, m)| mark_line(n, *m)).collect()
+    }
+
+    /// Property: a cursor parses back to the same folders; any change to
+    /// its text never panics and gives a cursor that renders the same way
+    /// again or `None`; a second line for one folder is `None`. The token
+    /// parser never panics either.
+    #[test]
+    fn cursor_parsers_property() {
+        let mut rng = Rng(0x2545f4914f6cdd1d);
+        let names = ["INBOX", "A b", "x:y", "Spam", "a/b c"];
+        for _ in 0..5_000 {
+            let mut c = BTreeMap::new();
+            for n in names.iter().take(1 + rng.below(5) as usize) {
+                c.insert(
+                    n.to_string(),
+                    Mark {
+                        validity: rng.next() as u32,
+                        next: rng.next() as u32,
+                        modseq: rng.next(),
+                        count: rng.next() as u32,
+                        role: ['S', 'D', 'J', 'T', '-'][rng.below(5) as usize],
+                    },
+                );
+            }
+            let text = render(&c);
+            let back = parse_cursor(&text).unwrap();
+            assert_eq!(render(&back), text);
+            // A duplicate folder line.
+            let first = text.lines().next().unwrap();
+            assert!(parse_cursor(&format!("{text}{first}\n")).is_none());
+            // Random edits.
+            let mut b = text.into_bytes();
+            for _ in 0..1 + rng.below(4) {
+                if b.is_empty() {
+                    break;
+                }
+                let at = rng.below(b.len() as u64) as usize;
+                match rng.below(3) {
+                    0 => b[at] = b" \n0123456789-SJx:"[rng.below(16) as usize],
+                    1 => {
+                        b.remove(at);
+                    }
+                    _ => b.truncate(at),
+                }
+            }
+            let t = String::from_utf8_lossy(&b);
+            if let Some(p) = parse_cursor(&t) {
+                assert_eq!(
+                    parse_cursor(&render(&p)).map(|q| render(&q)),
+                    Some(render(&p))
+                );
+            }
+            let _ = parse_changes_token(&t);
+            let _ = parse_changes_token(&format!("W 5\n{t}"));
+            let _ = parse_changes_token(&format!("F\n{t}"));
+        }
     }
 
     #[test]

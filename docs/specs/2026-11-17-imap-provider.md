@@ -80,7 +80,8 @@ index, so a change of the LIST order between two calls does not skip a
 folder. The next page is the first folder after that name in the order of
 now. A folder that a page sequence skips because it was made during the
 sequence is not in the cursor of `profile` or of the last `changes`, so
-the next `changes` gives `Added` for each of its messages.
+the next `changes` gives `HistoryExpired` (section 5), and the full resync
+reads its messages. Issue #664 (fixed here).
 
 ### 3. Message ID and thread ID
 
@@ -195,7 +196,10 @@ its flags: the mirror shows it as archived, as a Gmail message with no
 `labels` gives the fixed labels `INBOX`, `UNREAD`, `STARRED`, `UNSENT`,
 `SENT_COPY`, `SPAM` and `TRASH` that apply, each folder label, and a
 keyword label for each keyword in the `PERMANENTFLAGS` and the `FLAGS` of
-each folder. It gives no counts.
+each folder. It opens each folder with `SELECT`, not `EXAMINE`: a server
+sends the keywords of `PERMANENTFLAGS` only to a read-write open (RFC 3501
+section 6.3.2). So a permanent keyword that is on no message is a label,
+and a label action can use it with no `create_label`. It gives no counts.
 
 Each label has one name, with no case, so a lookup by name finds one
 label. A keyword can be named `INBOX`, a folder can be named `Spam` with
@@ -215,6 +219,10 @@ So `folder:Work` is `Work` and `folder:work` is `work (folder)`. The rule
 gives the same names for the same LIST and flags. The IDs do not change. The test `label_names_are_unique` covers both.
 
 ### 5. The cursor
+
+A cursor with two lines for one folder is not a cursor of the provider:
+`changes` gives `HistoryExpired` (issue #663). The test
+`cursor_parsers_property` covers random cursor text.
 
 The cursor is text with one line for each folder:
 `<UIDVALIDITY> <UIDNEXT> <HIGHESTMODSEQ> <count> <role> <folder>`. `profile`
@@ -321,7 +329,9 @@ mirror does not have.
     5322). A longer one is ignored, and the message gets its own location
     ID as thread.
   - A page of `messages` then holds at most 2,000 IDs of about 1.3 KB
-    each, so less than 3 MB.
+    each, so less than 3 MB. Each fetched entry becomes its compact
+    reference in the fetch callback, so no header block stays for the
+    whole page (issue #662).
   - A page of `changes` keeps at most 16 MiB of records (IDs, thread IDs
     and labels), `Added` and `Deleted` records together. If a page has
     more, `changes` is `HistoryExpired`, and
@@ -427,17 +437,19 @@ times after an unknown result (spec 2 section 7.2).
 | A server without `CONDSTORE` | `Api` 400 `noCondstore` | `no_condstore` |
 | No `UIDNEXT` with `CONDSTORE` only | `Api` 400 `noUidnext` | `no_uidnext` |
 | Header fields that do not parse | thread = the message ID | `thread_rules` |
-| A `modify` with a label that moves mail | `Api` 400, nothing sent | `modify_refuses_moves` |
-| A lost connection after the first `STORE` | `Transport` | `modify_unknown` |
+| A `modify` with a label that moves mail | `Api` 400, nothing sent | `writes_refuse_before_any_command` |
+| A lost connection after the first `STORE` | `Transport` | `modify_refused_and_unconfirmed` |
 | A wrong password | `Unauthorized` | `wrong_password` |
 | A folder that is not in `from` (also one that the first sync listed after its start cursor) | `HistoryExpired`, then a clean full resync in pages of 2,000 | `changes_pages` |
 | A page of changes and removals over the budget | `HistoryExpired` | `page_budget_counts_removals` |
 | A LIST order change between two message pages | each folder once | `message_pages_follow_folder_names` |
 | A flag that is not in the `PERMANENTFLAGS` of a target folder (no `\*` for a keyword) | `Api` 400 `notPermanent`, before any `STORE` | `modify_not_permanent` |
-| A `NO` to a `STORE` | `Transport` | `modify_refused` |
+| A flag write of `UNREAD`, `STARRED` and a keyword, then a sync | the flags at the server change, zero differences | `modify_flags` |
+| A label that is not a flag, or one label added and removed | `Api` 400, nothing sent | `modify_bad_labels` |
+| A `NO` to a `STORE` | `Transport` | `modify_refused_and_unconfirmed` |
 | A `\Sent` folder message | `SENT_COPY`, no `SENT` | `labels_of_special_folders_and_flags` |
 | A server with no special-use attributes, or with `\Sent` only and a `Spam` folder with `\HasNoChildren` | the common names give each missing role; an attribute wins | `special_folders_by_name`, `name_fallback_for_each_role`, `an_attribute_wins_over_a_name` |
-| `create_label("Todo")` | `Api` 400 `notSupported`, nothing written | `create_label_refused` (flag writes) |
+| `create_label("Todo")` | `Api` 400 `notSupported`, nothing written | `writes_refuse_before_any_command` |
 | A folder name over 255 bytes | `Api` 400 `longFolderName` | `long_folder_name` |
 | A thread header ID over 998 bytes | the own location ID as thread | `long_thread_header_is_ignored` |
 | A keyword or folder named as a fixed label | a name with ` (keyword)` or ` (folder)` | `label_names_are_unique` |
@@ -446,7 +458,7 @@ times after an unknown result (spec 2 section 7.2).
 | One keyword in two spellings (`$Todo`, `$todo`) | one label `kw:$todo`, zero differences | `two_junk_folders_and_keyword_case` |
 | An answer of `changes` above 1 MiB | `HistoryExpired` | `changes_too_large` |
 | A read of a message in a deleted folder | `NotFound` | `folder_gone` |
-| A `STORE` `OK` with no `FETCH` for a target UID | `Transport` | `modify_unconfirmed` |
+| A `STORE` `OK` with no `FETCH` for a target UID | `Transport` | `modify_refused_and_unconfirmed` |
 | `add-imap` of an address that another mailbox has | refused, nothing written | `add_imap_other_mailbox` |
 | A Gmail sign-in of an address of an IMAP account | refused, nothing written | `gmail_sign_in_imap_address` |
 

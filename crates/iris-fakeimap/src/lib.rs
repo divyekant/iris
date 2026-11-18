@@ -66,8 +66,26 @@ struct Folder {
     gone: Vec<(u32, u64)>,
 }
 
+/// How the fake answers a `UID STORE` (for the failure tests).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Store {
+    /// Change the flags and send a `FETCH` for each changed UID.
+    Normal,
+    /// Change the flags of the first UID only, then answer `NO`.
+    RefuseAfterOne,
+    /// Change the flags, then answer `OK` with no `FETCH`.
+    NoFetch,
+    /// Change the flags, then close the connection with no answer.
+    Close,
+    /// Change the flags, and send a `FETCH` with the UID and no `FLAGS`.
+    UidOnly,
+}
+
 struct State {
     caps: Caps,
+    /// The `PERMANENTFLAGS` of a `SELECT`; `None` sends none.
+    permanent: Option<String>,
+    store: Store,
     folders: BTreeMap<String, Folder>,
     modseq: u64,
     validity: u32,
@@ -88,6 +106,8 @@ impl FakeImap {
         let addr = listener.local_addr().expect("addr");
         let state = Arc::new(Mutex::new(State {
             caps,
+            permanent: Some("\\Seen \\Flagged \\Draft \\*".to_owned()),
+            store: Store::Normal,
             folders: BTreeMap::new(),
             modseq: 1,
             validity: 1000,
@@ -172,6 +192,22 @@ impl FakeImap {
             .expect("uid");
         m.flags = flags.iter().map(|x| x.to_string()).collect();
         m.modseq = modseq;
+    }
+
+    /// The `PERMANENTFLAGS` of each `SELECT`, for example `\Seen \*`.
+    /// `None` sends no `PERMANENTFLAGS`.
+    pub fn set_permanent(&self, flags: Option<&str>) {
+        self.lock().permanent = flags.map(str::to_owned);
+    }
+
+    /// How the next `UID STORE` commands answer.
+    pub fn set_store(&self, store: Store) {
+        self.lock().store = store;
+    }
+
+    /// The flags of a message.
+    pub fn flags(&self, folder: &str, uid: u32) -> Vec<String> {
+        self.lock().folders[folder].messages[&uid].flags.clone()
     }
 
     /// Remove a message (`EXPUNGE`).
@@ -453,7 +489,8 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                 }
                 "OK done".to_owned()
             }
-            "EXAMINE" => {
+            "EXAMINE" | "SELECT" => {
+                let select = w[1].eq_ignore_ascii_case("SELECT");
                 let s = lock();
                 match w.get(2).and_then(|n| s.folders.get(n).map(|f| (n, f))) {
                     None => "NO no such folder".to_owned(),
@@ -493,8 +530,78 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                         } else {
                             reply.push_str("* OK [NOMODSEQ] no mod-sequences\r\n");
                         }
-                        "OK [READ-ONLY] done".to_owned()
+                        if !select {
+                            "OK [READ-ONLY] done".to_owned()
+                        } else {
+                            if let Some(p) = &s.permanent {
+                                reply.push_str(&format!("* OK [PERMANENTFLAGS ({p})] ok\r\n"));
+                            }
+                            "OK [READ-WRITE] done".to_owned()
+                        }
                     }
+                }
+            }
+            // `UID STORE <set> +FLAGS (...)` or `-FLAGS (...)`, in a selected folder.
+            "UID" if w.get(2).is_some_and(|x| x.eq_ignore_ascii_case("STORE")) => {
+                let mut s = lock();
+                let mode = s.store;
+                let modseq = s.next_modseq();
+                let (set, op, list) = (
+                    w.get(3).cloned().unwrap_or_default(),
+                    w.get(4).cloned().unwrap_or_default(),
+                    w.get(5).cloned().unwrap_or_default(),
+                );
+                let flags: Vec<String> = list
+                    .trim_matches(|c| c == '(' || c == ')')
+                    .split_whitespace()
+                    .map(str::to_owned)
+                    .collect();
+                let add = match op.to_ascii_uppercase().as_str() {
+                    "+FLAGS" => Some(true),
+                    "-FLAGS" => Some(false),
+                    _ => None,
+                };
+                match (conn.folder.clone(), add) {
+                    (Some(n), Some(add)) if s.folders.contains_key(&n) => {
+                        let f = s.folders.get_mut(&n).expect("folder");
+                        let ranges = uid_set(&set, u32::MAX);
+                        let mut done = 0;
+                        for (uid, m) in f.messages.iter_mut() {
+                            if !ranges.iter().any(|(a, b)| (*a..=*b).contains(uid)) {
+                                continue;
+                            }
+                            if mode == Store::RefuseAfterOne && done == 1 {
+                                break;
+                            }
+                            m.flags
+                                .retain(|x| !flags.iter().any(|g| g.eq_ignore_ascii_case(x)));
+                            if add {
+                                m.flags.extend(flags.iter().cloned());
+                            }
+                            m.modseq = modseq;
+                            done += 1;
+                            if mode == Store::UidOnly {
+                                reply.push_str(&format!(
+                                    "* 1 FETCH (UID {uid} MODSEQ ({modseq}))\r\n"
+                                ));
+                            }
+                            if mode == Store::Normal {
+                                reply.push_str(&format!(
+                                    "* 1 FETCH (UID {uid} FLAGS ({}))\r\n",
+                                    m.flags.join(" ")
+                                ));
+                            }
+                        }
+                        if mode == Store::Close {
+                            return Ok(());
+                        }
+                        if mode == Store::RefuseAfterOne {
+                            "NO store failed".to_owned()
+                        } else {
+                            "OK done".to_owned()
+                        }
+                    }
+                    _ => "BAD no folder or bad store".to_owned(),
                 }
             }
             "UID" if w.get(2).is_some_and(|x| x.eq_ignore_ascii_case("SEARCH")) => {
