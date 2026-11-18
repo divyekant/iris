@@ -189,20 +189,29 @@ rules:
   `Change::Added` with its labels now (a move), 404 gives
   `Change::Deleted`. The last page gives the new cursor, so the sync
   stores all links in one transaction with the last changes.
-- `messages` lists with delta rounds with no link, one folder page for
-  each call: all folders, or the one folder of a folder label. For
-  another label (`UNREAD`, `STARRED`, a category) it reads all folders
-  and keeps the messages that have the label. The order is the folder
-  order, not newest first; the sync does not need an order. Known limit
-  with its own issue: each such label list of a full resync or a verify
-  reads the whole mailbox.
+- `messages` with no label lists all mail of all folders, newest first:
+  `GET /me/messages` with `$orderby=receivedDateTime desc`, so that the
+  first sync fetches the newest threads first (spec 1 section 4.2). The
+  page token is the `nextLink`. Assumption, evidence `pending` (release
+  gate): this list has the messages of each folder. If it misses one,
+  the first `changes` after the first sync lists it in the new round of
+  its folder and the sync fetches it then.
+- `messages` with a folder label lists that one folder with a delta
+  round with no link. For another label (`UNREAD`, `STARRED`, a
+  category) it reads all folders that way and keeps the messages that
+  have the label. These lists are in folder order; the label lists of
+  the sync need no order. Known limit with its own issue: each such
+  label list of a full resync or a verify reads the whole mailbox.
 - `labels` gives the system labels, the folder labels of section 6 and
   one label for each category of the master list
-  (`/me/outlook/masterCategories`). Known limit with its own issue: a
+  (`/me/outlook/masterCategories`, page by page). Known limit with its own issue: a
   category that a message has, but the master list does not, is not
   mirrored.
 - `minimal` and `raw` read the message by ID for its labels, its thread
-  and `receivedDateTime`. `raw` then streams `$value`.
+  and its time. `raw` then streams `$value`. The time is
+  `receivedDateTime`, else `createdDateTime` (a draft can have no
+  received time). A message with neither gives `Error::Decode`: the sync
+  records a failure of that message, never a false date.
 - One `Outlook` value serves one mailbox: it keeps the IDs of the
   well-known folders after the first read.
 - `SENT` is never given (section 6). R6-16 decides how the copies that

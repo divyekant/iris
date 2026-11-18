@@ -38,7 +38,7 @@ pub const RAW_LIMIT: u64 = 150 * 1024 * 1024;
 const ANSWER_LIMIT: u64 = 16 * 1024 * 1024;
 /// The fields of a message that a delta query gives.
 const SELECT: &str =
-    "id,conversationId,parentFolderId,categories,isRead,flag,isDraft,receivedDateTime,internetMessageId";
+    "id,conversationId,parentFolderId,categories,isRead,flag,isDraft,receivedDateTime,createdDateTime,internetMessageId";
 /// The well-known folders that the mirror maps (spec section 6).
 pub const WELL_KNOWN: [&str; 7] = [
     "inbox",
@@ -137,6 +137,9 @@ impl Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// A page of [`Graph::all_mail`]: (ID, conversation ID) pairs and the next link.
+pub type AllMail = (Vec<(String, String)>, Option<String>);
+
 /// The account of the token: `GET /me`.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -195,6 +198,9 @@ pub struct Message {
     pub is_draft: bool,
     /// ISO 8601 in UTC, for example `2026-11-17T10:00:00Z`.
     pub received_date_time: Option<String>,
+    /// ISO 8601 in UTC: when the item was made, for a draft too.
+    #[serde(default)]
+    pub created_date_time: Option<String>,
     pub internet_message_id: Option<String>,
     /// The version of the message. A category write sends it in `If-Match`.
     #[serde(rename = "@odata.etag")]
@@ -402,9 +408,52 @@ impl Graph {
         #[derive(Deserialize)]
         struct Page {
             value: Vec<Category>,
+            #[serde(rename = "@odata.nextLink")]
+            next_link: Option<String>,
         }
-        let page: Page = self.json(token, &self.url("/me/outlook/masterCategories"), false)?;
-        Ok(page.value.into_iter().map(|c| c.display_name).collect())
+        let mut url = self.url("/me/outlook/masterCategories");
+        let mut names = Vec::new();
+        loop {
+            let page: Page = self.json(token, &url, false)?;
+            names.extend(page.value.into_iter().map(|c| c.display_name));
+            match page.next_link {
+                Some(next) => url = self.checked(&next)?,
+                None => return Ok(names),
+            }
+        }
+    }
+
+    /// One page of all mail of all folders, newest first:
+    /// `GET /me/messages` with `$orderby=receivedDateTime desc`. With
+    /// `link`, call that `nextLink`. Gives (ID, conversation ID) pairs and
+    /// the next link.
+    pub fn all_mail(&self, token: &str, link: Option<&str>) -> Result<AllMail> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Item {
+            id: String,
+            conversation_id: String,
+        }
+        #[derive(Deserialize)]
+        struct Page {
+            value: Vec<Item>,
+            #[serde(rename = "@odata.nextLink")]
+            next_link: Option<String>,
+        }
+        let url = match link {
+            Some(l) => self.checked(l)?,
+            None => self.url(&format!(
+                "/me/messages?$select=id,conversationId&$orderby=receivedDateTime%20desc&$top={PAGE_SIZE}"
+            )),
+        };
+        let page: Page = self.json(token, &url, true)?;
+        let next = page.next_link.map(|n| self.checked(&n)).transpose()?;
+        let items = page
+            .value
+            .into_iter()
+            .map(|i| (i.id, i.conversation_id))
+            .collect();
+        Ok((items, next))
     }
 
     /// One page of the message delta of `folder`. With no `link`, start a new

@@ -350,14 +350,27 @@ impl iris_provider::Provider for Outlook {
         Ok(label_list(&folders, &categories))
     }
 
-    /// One delta page of one folder, with no stored link: the folder as it
-    /// is now. With `label`, only the messages that have it.
+    /// With no `label`: one page of all mail, newest first. With `label`:
+    /// one delta page of one folder with no stored link (the folder as it
+    /// is now), with only the messages that have the label.
     fn messages(
         &self,
         token: &str,
         label: Option<&str>,
         page: Option<&str>,
     ) -> iris_provider::Result<MessagePage> {
+        if label.is_none() {
+            // All mail: newest first across folders (spec 1 section 4.2).
+            // The page token is the `nextLink`.
+            let (items, next) = self.graph.all_mail(token, page).map_err(map)?;
+            return Ok(MessagePage {
+                messages: items
+                    .into_iter()
+                    .map(|(id, thread_id)| MessageRef { id, thread_id })
+                    .collect(),
+                next_page_token: next,
+            });
+        }
         let mut at: Page = match page {
             Some(p) => token_of(p, "page token")?,
             None => Page {
@@ -510,11 +523,14 @@ impl iris_provider::Provider for Outlook {
     ) -> iris_provider::Result<RawMessage> {
         let m = self.graph.message(token, id).map_err(map)?;
         let known = self.known(token).map_err(map)?;
-        let internal_date = match m.received_date_time.as_deref() {
-            None => 0,
-            Some(t) => epoch_ms(t)
-                .ok_or_else(|| iris_provider::Error::Decode(format!("bad receivedDateTime {t}")))?,
-        };
+        // A draft can have no received time: then the time it was made.
+        let time = m
+            .received_date_time
+            .as_deref()
+            .or(m.created_date_time.as_deref())
+            .ok_or_else(|| iris_provider::Error::Decode(format!("message {id} has no time")))?;
+        let internal_date = epoch_ms(time)
+            .ok_or_else(|| iris_provider::Error::Decode(format!("bad message time {time}")))?;
         let size = self.graph.raw(token, id, &mut &mut *sink).map_err(map)?;
         Ok(RawMessage {
             id: m.id.clone(),
@@ -715,6 +731,7 @@ mod tests {
                 },
                 is_draft: rng.below(2) == 0,
                 received_date_time: None,
+                created_date_time: None,
                 internet_message_id: None,
                 etag: None,
             };
