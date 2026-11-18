@@ -80,7 +80,7 @@ const ALLOWED: [(&str, usize, &str); 16] = [
     (
         "iris-graph/src/provider.rs",
         7,
-        "the Outlook provider maps the Graph drafts folder to DRAFT, and saves a new draft there",
+        "the Outlook provider maps the Graph drafts folder to DRAFT, saves a new draft there, and gives SENT only to the copies that Iris sent",
     ),
 ];
 

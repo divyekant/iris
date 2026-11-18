@@ -184,3 +184,66 @@ fn a_refused_outlook_refresh_asks_for_a_new_sign_in() {
     // The refused token stays: a new sign-in replaces it.
     assert!(plain.contains("refresh-1"));
 }
+
+/// A message answer of the fake with this ID, etag and category list.
+fn message_json(id: &str, etag: &str, categories: &str) -> String {
+    format!(
+        r#"{{"id":"{id}","@odata.etag":{etag:?},"conversationId":"c",
+        "parentFolderId":"F-inbox","categories":[{categories}],"isRead":true,
+        "flag":{{"flagStatus":"notFlagged"}},"isDraft":false,
+        "receivedDateTime":"2026-11-17T10:00:00Z","internetMessageId":null}}"#
+    )
+}
+
+/// When Graph keeps another category list than a write asks for (A6),
+/// the engine stores the switch with the account (limit #675): a new
+/// provider value, as after a restart, refuses each category write before
+/// any request.
+#[test]
+fn the_category_switch_lasts_after_a_restart() {
+    use std::sync::Arc;
+    let fake = FakeGraph::start(Mailbox::new(3, 60)).unwrap();
+    // The only test of this file that reads the setting in this process.
+    std::env::set_var("IRIS_TEST_GRAPH_URL", fake.base_url());
+    let dir = data_dir("outlook-switch");
+    let store = Arc::new(Store::open(&dir).unwrap());
+    let refresh = iris_auth::Secret::new("refresh-1");
+    let account =
+        iris::engine::save_outlook(&store, "owner@example.com", CLIENT_ID, "common", &refresh)
+            .unwrap();
+    let gmail = iris_gmail::Config::default();
+    let off_at = || -> Option<i64> {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT categories_off_at FROM account WHERE id = ?1",
+                    [account],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    let (a, b) = (FakeGraph::id_of(0), FakeGraph::id_of(1));
+    let mail = iris::engine::provider_for(&store, account, &gmail).unwrap();
+    mail.labels("t").unwrap();
+    let etag = fake.etag_of(&a).unwrap();
+    fake.answer_next(&[
+        &message_json(&a, &etag, ""),
+        &message_json(&a, &etag, r#""Other""#),
+    ]);
+    let e = mail
+        .modify("t", &[&a], &["category:Blue"], &[])
+        .unwrap_err();
+    assert!(e.write_result_unknown(), "{e}");
+    assert!(off_at().is_some(), "the switch is stored");
+    drop(mail);
+
+    let mail = iris::engine::provider_for(&store, account, &gmail).unwrap();
+    let n = fake.requests().len();
+    let e = mail
+        .modify("t", &[&b], &["category:Blue"], &[])
+        .unwrap_err();
+    assert!(!e.write_result_unknown(), "{e}");
+    assert_eq!(fake.requests().len(), n, "no request after a restart");
+    mail.modify("t", &[&b], &["STARRED"], &[]).unwrap();
+}

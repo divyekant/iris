@@ -671,8 +671,14 @@ Each assumption has the evidence of a Microsoft Learn page, read on
   person, and Iris turns off category writes for the account (label and unlabel give a definite refusal)
   until a new release. The release gate tests an `unlabel`. R6-15: the
   Graph client gives `Error::Differs` for such an answer, and the provider
-  turns off its category writes in memory, before any request. Card R6-16
-  stores the switch with the account and shows the notice (limit #675).
+  turns off its category writes in memory, before any request. R6-16:
+  the provider also stores the switch in `account.categories_off_at`
+  (migration 37), and the engine reads it each time it makes the
+  provider, so the switch lasts after a restart. Each later `label` and
+  `unlabel` of the account gets the refusal "Outlook kept other
+  categories than Iris asked for", which the person reads as the reason
+  of the action. To turn category writes on again, a new release clears
+  the column.
 - A7. Well-known folder names work in each language of the mailbox.
   Evidence: <https://learn.microsoft.com/en-us/graph/api/resources/mailfolder>.
 - A8. Error body `{"error":{"code","message"}}`. Evidence:

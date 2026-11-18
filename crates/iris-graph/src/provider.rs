@@ -64,6 +64,9 @@ pub struct Outlook {
     /// True after Graph kept another category list than the request (A6):
     /// each later category write gets a definite refusal.
     categories_off: AtomicBool,
+    /// Called one time when the switch turns on, so the engine stores it
+    /// with the account (limit #675).
+    on_categories_off: Option<Box<dyn Fn() + Send + Sync>>,
     /// The IDs of the sent copies of the messages that Iris sent (spec
     /// section 6): only these get `SENT`.
     own_sent: Mutex<HashSet<String>>,
@@ -85,6 +88,7 @@ impl Outlook {
             graph,
             known: Mutex::new(HashMap::new()),
             categories_off: AtomicBool::new(false),
+            on_categories_off: None,
             own_sent: Mutex::new(HashSet::new()),
         }
     }
@@ -94,6 +98,19 @@ impl Outlook {
     /// its own sent copy.
     pub fn with_sent(self, ids: impl IntoIterator<Item = String>) -> Outlook {
         self.own_sent.lock().unwrap().extend(ids);
+        self
+    }
+
+    /// The provider with the stored category switch: `off` true turns off
+    /// category writes from the start. `stored` is called one time when
+    /// the switch turns on later.
+    pub fn with_category_switch(
+        mut self,
+        off: bool,
+        stored: impl Fn() + Send + Sync + 'static,
+    ) -> Outlook {
+        self.categories_off = AtomicBool::new(off);
+        self.on_categories_off = Some(Box::new(stored));
         self
     }
 
@@ -173,8 +190,12 @@ impl Outlook {
                 Op::Categories(list) => tag()
                     .and_then(|e| self.graph.set_categories(token, id, list, &e))
                     .inspect_err(|e| {
-                        if matches!(e, Error::Differs(_)) {
-                            self.categories_off.store(true, Ordering::Relaxed);
+                        if matches!(e, Error::Differs(_))
+                            && !self.categories_off.swap(true, Ordering::Relaxed)
+                        {
+                            if let Some(stored) = &self.on_categories_off {
+                                stored();
+                            }
                         }
                     }),
                 Op::Read(read) => {
