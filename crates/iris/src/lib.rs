@@ -535,6 +535,25 @@ pub enum AccountCommand {
         #[arg(long)]
         write: bool,
     },
+    /// Add an IMAP mailbox, or give a new password to one. The command reads
+    /// the password (an app password of the provider) from the terminal
+    /// with no echo, or one line of standard input, and signs in once to
+    /// check it.
+    AddImap {
+        /// The mail address of the mailbox.
+        address: String,
+        /// The IMAP server, for example imap.fastmail.com. TLS only. Leave
+        /// it out to give a new password to an IMAP account that exists:
+        /// the command then uses its saved server, port and user.
+        #[arg(long)]
+        host: Option<String>,
+        /// The IMAP port. The default is 993.
+        #[arg(long, requires = "host")]
+        port: Option<u16>,
+        /// The IMAP user name. The default is the address.
+        #[arg(long, requires = "host")]
+        user: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, Subcommand)]
@@ -1316,6 +1335,31 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
                     write,
                 },
         } => account_add(&open()?, client, *paste, *write),
+        Command::Account {
+            command:
+                AccountCommand::AddImap {
+                    address,
+                    host,
+                    port,
+                    user,
+                },
+        } => {
+            let store = open()?;
+            let server = match host {
+                Some(host) => engine::ImapServer {
+                    host: host.clone(),
+                    port: port.unwrap_or(993),
+                    user: user.clone().unwrap_or_else(|| address.clone()),
+                },
+                // A new password for an account that exists: the saved server.
+                None => engine::saved_imap(&store, address)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| {
+                        format!("no IMAP account has the address {address}: give --host")
+                    })?,
+            };
+            account_add_imap(&store, address, &server)
+        }
         Command::Mirror { command } => mirror(Arc::new(open()?), command),
         Command::Mcp => mcp(engine::data_dir(cli.data.clone()).map_err(|e| e.to_string())?),
         Command::Status { json } => print(verbs::status(&open()?, *json)),
@@ -1586,9 +1630,17 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
             say!("iris: account {account}: {}", engine::Error::NeedsSignIn);
             continue;
         }
-        let mut worker = engine::Worker::new(
+        let mail = match engine::provider_for(&store, account, &config) {
+            Ok(m) => m,
+            Err(e) => {
+                failed = true;
+                say!("iris: account {account}: {e}");
+                continue;
+            }
+        };
+        let mut worker = engine::Worker::boxed(
             store.clone(),
-            iris_gmail::Gmail::new(config.clone()),
+            mail,
             account,
             std::env::var("IRIS_TEST_TOKEN_URI").ok(),
         );
@@ -1723,6 +1775,130 @@ fn account_add(
         );
     }
     Ok(())
+}
+
+/// `iris account add-imap`: read the password, sign in once to check it,
+/// then save the account with the password sealed. The password is never
+/// in a log or an error.
+fn account_add_imap(
+    store: &Store,
+    address: &str,
+    server: &engine::ImapServer,
+) -> Result<(), String> {
+    if !address.contains('@') || address.trim() != address {
+        return Err(format!("{address:?} is not a mail address"));
+    }
+    let password = read_password(&format!("iris: the password of {}: ", server.user))?;
+    let mail = engine::imap_provider(address, server).map_err(|e| e.to_string())?;
+    match mail.profile(password.expose()) {
+        Ok(_) => {}
+        Err(iris_provider::Error::Unauthorized) => {
+            return Err("the IMAP server refused the user or the password".into())
+        }
+        Err(e) => return Err(format!("the sign-in check failed: {e}")),
+    }
+    let id = engine::save_imap(store, address, server, &password).map_err(|e| e.to_string())?;
+    println!("iris: added {address} (account {id})");
+    Ok(())
+}
+
+/// One line of the password: from the terminal with no echo, else from
+/// standard input (a script or a test). The line end does not count.
+fn read_password(prompt: &str) -> Result<iris_auth::Secret, String> {
+    use std::io::{BufRead, IsTerminal};
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    if stdin.is_terminal() {
+        say!("{prompt}");
+        let _echo = no_echo::Guard::new().map_err(|e| format!("terminal: {e}"))?;
+        stdin
+            .lock()
+            .read_line(&mut line)
+            .map_err(|e| e.to_string())?;
+    } else {
+        stdin
+            .lock()
+            .read_line(&mut line)
+            .map_err(|e| e.to_string())?;
+    }
+    let password = line.trim_end_matches(['\r', '\n']).to_string();
+    if password.is_empty() {
+        return Err("no password".into());
+    }
+    Ok(iris_auth::Secret::new(password))
+}
+
+/// Terminal echo off while a guard lives (POSIX termios, macOS and Linux).
+/// A signal that ends the process (Ctrl-C and others) does not run `Drop`,
+/// so a handler puts the saved terminal state back first, then ends the
+/// process with the same signal.
+mod no_echo {
+    use std::sync::OnceLock;
+
+    /// The terminal state before the first guard. The handler reads it.
+    static SAVED: OnceLock<libc::termios> = OnceLock::new();
+    const SIGNALS: [libc::c_int; 4] = [libc::SIGINT, libc::SIGTERM, libc::SIGQUIT, libc::SIGHUP];
+
+    pub struct Guard {
+        old: libc::termios,
+        handlers: [libc::sighandler_t; 4],
+    }
+
+    extern "C" fn restore(sig: libc::c_int) {
+        // SAFETY: tcsetattr, signal and raise are async-signal-safe, and
+        // SAVED is set before the handler is installed.
+        unsafe {
+            if let Some(t) = SAVED.get() {
+                libc::tcsetattr(0, libc::TCSANOW, t);
+            }
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
+
+    impl Guard {
+        pub fn new() -> std::io::Result<Guard> {
+            // SAFETY: tcgetattr and tcsetattr write and read one termios
+            // value of this frame, for standard input (fd 0). signal
+            // installs `restore`, an extern "C" fn of one c_int.
+            unsafe {
+                let mut t: libc::termios = std::mem::zeroed();
+                if libc::tcgetattr(0, &mut t) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let old = t;
+                SAVED.get_or_init(|| old);
+                let handler = restore as extern "C" fn(libc::c_int) as libc::sighandler_t;
+                let handlers = SIGNALS.map(|sig| {
+                    let before = libc::signal(sig, handler);
+                    // A signal that the parent ignores stays ignored.
+                    if before == libc::SIG_IGN {
+                        libc::signal(sig, libc::SIG_IGN);
+                    }
+                    before
+                });
+                let guard = Guard { old, handlers };
+                t.c_lflag &= !libc::ECHO;
+                if libc::tcsetattr(0, libc::TCSANOW, &t) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(guard)
+            }
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            // SAFETY: as in `new`, with the values that `new` read.
+            unsafe {
+                libc::tcsetattr(0, libc::TCSANOW, &self.old);
+                for (sig, before) in SIGNALS.iter().zip(self.handlers) {
+                    libc::signal(*sig, before);
+                }
+            }
+            eprintln!();
+        }
+    }
 }
 
 /// The Gmail client. `IRIS_GMAIL_QUOTA` changes the quota units for each

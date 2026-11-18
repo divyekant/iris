@@ -432,9 +432,22 @@ times after an unknown result (spec 2 section 7.2).
   check of the provider and the write of the token run in one store
   transaction. To move an address to another mailbox, the person removes the
   account first.
+- `iris account add-imap <address>` with no `--host` gives a new password
+  to the IMAP account of the address, with its saved server, port and
+  user. With no IMAP account for the address, it refuses. The sign-in help
+  of the web client shows only this form, with the address quoted for the
+  shell, so the help never copies a saved value into a command.
 - The engine worker of an IMAP account uses `Imap`, with the password as
   the token. `Unauthorized` marks the account `needs_sign_in`, as for
-  Gmail.
+  Gmail. `provider_for` in `crates/iris/src/engine.rs` picks the provider
+  from the `provider` column. If it cannot make one (for example, an IMAP
+  row with no host), the engine logs the account and continues with the
+  next account.
+- `Store::save_account_secret` does the provider and mailbox check and the
+  token write in one transaction, for both sign-in commands.
+- Test mode: if `IRIS_TEST_IMAP_PLAIN` is set, the connection is plain TCP
+  with no TLS. It is allowed only for the host `127.0.0.1`, so the
+  binary tests can use the fake server. Any other host is refused.
 - The `Authentication-Results` parsers trust the server ID
   `mx.google.com` only for a Gmail account. For an IMAP account a header
   with that ID counts as absent, because any sender can write it.
