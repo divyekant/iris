@@ -107,7 +107,15 @@ test("a refusal keeps the answer, and no answer says that Iris does not know", a
       throw new TypeError("Failed to fetch");
     };
     button(view).click();
-    await until(() => /does not know|cannot reach/.test(text(view.target)));
+    await until(() => /does not know/.test(text(view.target)));
+    assert.match(text(view.target), /Iris does not know if your answer arrived\. Open the job to see\./);
+    // A broken answer after the send (the request may have arrived): no status, and a message that is not the access text.
+    globalThis.fetch = async () => undefined;
+    button(view).click();
+    await until(() => !view.target.querySelector("button[disabled]"));
+    await new Promise((r) => setTimeout(r, 20));
+    assert.match(text(view.target), /Iris does not know if your answer arrived\. Open the job to see\./);
+    assert.doesNotMatch(text(view.target), /undefined|properties/);
   } finally {
     view.destroy();
   }
