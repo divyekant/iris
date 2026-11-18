@@ -28,11 +28,12 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use axum::body::Bytes;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use iris_synth::{Form, Mailbox, Sender, OWNER};
 use serde_json::{json, Value};
@@ -73,6 +74,8 @@ struct Msg {
     /// `isDraft`. It does not follow the folder: a received message moved
     /// to Drafts stays `false` (spec section 5).
     draft: bool,
+    /// The sequence number of the last change: the etag.
+    version: u64,
     /// The `Message-ID` header, with no angle brackets.
     mid: String,
     /// `None`: the raw message comes from the synthetic mailbox.
@@ -97,8 +100,10 @@ struct Store {
     floor: u64,
     page_limit: usize,
     failures: VecDeque<(u16, Option<u64>)>,
-    /// Bodies of 200 answers in place of the real answers.
-    bodies: VecDeque<String>,
+    /// Status and body of answers in place of the real answers.
+    bodies: VecDeque<(u16, String)>,
+    /// The MIME text of each `sendMail`.
+    sent: Vec<Vec<u8>>,
     requests: Vec<String>,
     running: usize,
     most_running: usize,
@@ -121,6 +126,7 @@ impl Store {
                     read: !i.is_multiple_of(3),
                     flagged: i % 30 == 2,
                     draft: first_folder(i, t.form, t.sender) == "F-drafts",
+                    version: 0,
                     mid: t.message_id,
                     raw: None,
                     deleted: false,
@@ -143,6 +149,7 @@ impl Store {
             page_limit: PAGE_MAX,
             failures: VecDeque::new(),
             bodies: VecDeque::new(),
+            sent: Vec::new(),
             requests: Vec::new(),
             running: 0,
             most_running: 0,
@@ -151,9 +158,41 @@ impl Store {
         }
     }
 
+    /// Add a message, as a delivery, a draft or a sent copy does.
+    fn add(&mut self, raw: Vec<u8>, folder: &str, draft: bool) -> usize {
+        let i = self.msgs.len();
+        let mid = header(&raw, "message-id")
+            .map(|v| {
+                v.trim_matches(|c| c == '<' || c == '>' || c == ' ')
+                    .to_string()
+            })
+            .unwrap_or_else(|| format!("added-{i}@fake.example"));
+        self.seq += 1;
+        self.msgs.push(Msg {
+            folder: folder.to_string(),
+            thread: u32::MAX - i as u32,
+            date: 1_767_225_600,
+            categories: Vec::new(),
+            read: false,
+            flagged: false,
+            draft,
+            version: self.seq,
+            mid,
+            raw: Some(raw),
+            deleted: false,
+        });
+        self.events.push(Event {
+            seq: self.seq,
+            msg: i,
+            from: None,
+        });
+        i
+    }
+
     /// Record a change of message `i`, before the change.
     fn touch(&mut self, i: usize) {
         self.seq += 1;
+        self.msgs[i].version = self.seq;
         let from = Some(self.msgs[i].folder.clone());
         self.events.push(Event {
             seq: self.seq,
@@ -186,6 +225,8 @@ impl Store {
             "isRead": m.read,
             "flag": { "flagStatus": if m.flagged { "flagged" } else { "notFlagged" } },
             "isDraft": m.draft,
+            "@odata.etag": etag(m),
+            "sentDateTime": if m.draft { Value::Null } else { date.clone().into() },
             "receivedDateTime": date,
             "internetMessageId": format!("<{}>", m.mid),
         })
@@ -321,27 +362,19 @@ impl FakeGraph {
     /// Add a message to a folder, as a delivery does. Returns the ID.
     pub fn add_message(&self, raw: &[u8], folder: &str) -> String {
         let mut s = self.store.lock().unwrap();
-        let i = s.msgs.len();
-        s.msgs.push(Msg {
-            folder: folder.to_string(),
-            thread: u32::MAX - i as u32,
-            date: 1_767_225_600,
-            categories: Vec::new(),
-            read: false,
-            flagged: false,
-            draft: folder == "F-drafts",
-            mid: format!("added-{i}@fake.example"),
-            raw: Some(raw.to_vec()),
-            deleted: false,
-        });
-        s.seq += 1;
-        let seq = s.seq;
-        s.events.push(Event {
-            seq,
-            msg: i,
-            from: None,
-        });
-        message_id(i)
+        let draft = folder == "F-drafts";
+        message_id(s.add(raw.to_vec(), folder, draft))
+    }
+
+    /// The MIME text of each `sendMail` so far.
+    pub fn sent_mail(&self) -> Vec<Vec<u8>> {
+        self.store.lock().unwrap().sent.clone()
+    }
+
+    /// The etag of a message, as Graph gives it in `@odata.etag`.
+    pub fn etag_of(&self, id: &str) -> Option<String> {
+        let s = self.store.lock().unwrap();
+        s.index(id).map(|i| etag(&s.msgs[i]))
     }
 
     /// Move a message to a folder. The ID stays (spec, A3).
@@ -399,7 +432,14 @@ impl FakeGraph {
     /// of the real answers. A test sends answers in a wrong shape this way.
     pub fn answer_next(&self, bodies: &[&str]) {
         let mut s = self.store.lock().unwrap();
-        s.bodies.extend(bodies.iter().map(|b| b.to_string()));
+        s.bodies.extend(bodies.iter().map(|b| (200, b.to_string())));
+    }
+
+    /// The next request gets an answer with this 2xx status and JSON body,
+    /// in place of the real answer, for example 201 for a write.
+    pub fn answer_next_status(&self, status: u16, body: &str) {
+        let mut s = self.store.lock().unwrap();
+        s.bodies.push_back((status, body.to_string()));
     }
 
     /// Each request waits this long before its answer, so that a test sees
@@ -432,7 +472,10 @@ fn router(store: Shared) -> Router {
         .route("/v1.0/me/mailFolders/{id}", get(folder))
         .route("/v1.0/me/mailFolders/{id}/childFolders", get(child_folders))
         .route("/v1.0/me/mailFolders/{id}/messages/delta", get(delta))
-        .route("/v1.0/me/messages/{id}", get(message))
+        .route("/v1.0/me/messages", get(by_message_id).post(create_draft))
+        .route("/v1.0/me/sendMail", post(send_mail))
+        .route("/v1.0/me/messages/{id}", get(message).patch(patch_message))
+        .route("/v1.0/me/messages/{id}/move", post(move_to))
         .route("/v1.0/me/messages/{id}/$value", get(value))
         .layer(middleware::from_fn_with_state(store.clone(), gate))
         .with_state(store)
@@ -478,7 +521,12 @@ async fn gate(State(s): State<Shared>, req: Request, next: Next) -> Response {
             r
         }
         (None, None) => match body {
-            Some(b) => ([("Content-Type", "application/json")], b).into_response(),
+            Some((status, b)) => (
+                StatusCode::from_u16(status).unwrap(),
+                [("Content-Type", "application/json")],
+                b,
+            )
+                .into_response(),
             None => next.run(req).await,
         },
     };
@@ -728,6 +776,192 @@ async fn value(State(s): State<Shared>, Path(id): Path<String>) -> Response {
         Some(i) => ([("content-type", "text/plain")], s.raw(i)).into_response(),
         None => not_found(),
     }
+}
+
+fn etag(m: &Msg) -> String {
+    format!("W/\"{}\"", m.version)
+}
+
+/// The value of the first header `name` (lower case) of a MIME text.
+fn header(raw: &[u8], name: &str) -> Option<String> {
+    let text = String::from_utf8_lossy(raw);
+    let head = text.split("\r\n\r\n").next()?;
+    head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| v.trim().to_string())
+    })
+}
+
+/// The MIME text of a `text/plain` base64 body, as Graph wants it for
+/// MIME writes.
+fn mime_body(h: &HeaderMap, body: &[u8]) -> Result<Vec<u8>, Response> {
+    let plain = h
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/plain"));
+    let text = std::str::from_utf8(body).ok();
+    match text
+        .filter(|_| plain)
+        .and_then(|t| iris_synth::base64::decode(t.trim()))
+    {
+        Some(raw) => Ok(raw),
+        None => Err(error(
+            StatusCode::BAD_REQUEST,
+            "ErrorMimeContentInvalidBase64String",
+            "The MIME content is not valid base64 text/plain.",
+        )),
+    }
+}
+
+/// `PATCH /me/messages/{id}`: `isRead`, `flag` and `categories` (the full
+/// list). An `If-Match` with another etag gets HTTP 412 and changes nothing.
+async fn patch_message(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    h: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let mut s = s.lock().unwrap();
+    let Some(i) = s.index(&id) else {
+        return not_found();
+    };
+    if let Some(m) = h.get("if-match").and_then(|v| v.to_str().ok()) {
+        if m != etag(&s.msgs[i]) {
+            return error(
+                StatusCode::PRECONDITION_FAILED,
+                "ErrorIrresolvableConflict",
+                "The send or update operation could not be performed because the change key passed in the request does not match the current change key for the item.",
+            );
+        }
+    }
+    let read = body.get("isRead").map(|v| v.as_bool());
+    let flag = body.get("flag").map(|v| v["flagStatus"].as_str());
+    let categories = body.get("categories").map(|v| {
+        v.as_array().and_then(|a| {
+            a.iter()
+                .map(|c| c.as_str().map(String::from))
+                .collect::<Option<Vec<_>>>()
+        })
+    });
+    let bad = matches!(read, Some(None))
+        || matches!(flag, Some(None) | Some(Some("complete")))
+        || matches!(categories, Some(None));
+    if bad || (read.is_none() && flag.is_none() && categories.is_none()) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "ErrorInvalidRequest",
+            "a bad PATCH body",
+        );
+    }
+    s.touch(i);
+    let m = &mut s.msgs[i];
+    if let Some(Some(r)) = read {
+        m.read = r;
+    }
+    if let Some(Some(f)) = flag {
+        m.flagged = f == "flagged";
+    }
+    if let Some(Some(c)) = categories {
+        m.categories = c;
+    }
+    Json(s.message_json(i)).into_response()
+}
+
+/// `POST /me/messages/{id}/move`: 201 with the moved message. The ID stays.
+async fn move_to(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    let mut s = s.lock().unwrap();
+    let Some(i) = s.index(&id) else {
+        return not_found();
+    };
+    let to = body["destinationId"].as_str().unwrap_or("");
+    let Some(f) = FOLDERS.iter().find(|f| f.0 == to || f.3 == Some(to)) else {
+        return not_found();
+    };
+    s.touch(i);
+    s.msgs[i].folder = f.0.to_string();
+    (StatusCode::CREATED, Json(s.message_json(i))).into_response()
+}
+
+/// `POST /me/messages` with MIME: 201 with the new draft.
+async fn create_draft(State(s): State<Shared>, h: HeaderMap, body: Bytes) -> Response {
+    let raw = match mime_body(&h, &body) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let mut s = s.lock().unwrap();
+    let i = s.add(raw, "F-drafts", true);
+    (StatusCode::CREATED, Json(s.message_json(i))).into_response()
+}
+
+/// `POST /me/sendMail` with MIME: 202 with no body. The sent copy goes to
+/// Sent Items, with a new ID.
+async fn send_mail(State(s): State<Shared>, h: HeaderMap, body: Bytes) -> Response {
+    let raw = match mime_body(&h, &body) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let mut s = s.lock().unwrap();
+    s.sent.push(raw.clone());
+    let i = s.add(raw, "F-sent", false);
+    s.msgs[i].read = true;
+    StatusCode::ACCEPTED.into_response()
+}
+
+/// `GET /me/messages?$filter=internetMessageId eq '<id>'`: each message of
+/// the mailbox with that `Message-ID`, one in a page, so that a test reads
+/// more than one page.
+async fn by_message_id(
+    State(s): State<Shared>,
+    Query(q): Query<BTreeMap<String, String>>,
+    h: HeaderMap,
+) -> Response {
+    let s = s.lock().unwrap();
+    let filter = q.get("$filter").map(String::as_str).unwrap_or("");
+    let Some(lit) = filter
+        .strip_prefix("internetMessageId eq '")
+        .and_then(|f| f.strip_suffix('\''))
+    else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "BadRequest",
+            "the fake knows one filter",
+        );
+    };
+    let want = lit.replace("''", "'");
+    let skip: usize = q.get("$skip").and_then(|t| t.parse().ok()).unwrap_or(0);
+    let all: Vec<usize> = (0..s.msgs.len())
+        .filter(|&i| !s.msgs[i].deleted && format!("<{}>", s.msgs[i].mid) == want)
+        .collect();
+    let value: Vec<Value> = all
+        .iter()
+        .skip(skip)
+        .take(1)
+        .map(|&i| s.message_json(i))
+        .collect();
+    let mut body = json!({ "value": value });
+    if skip + 1 < all.len() {
+        let rest = format!("/me/messages?$filter={}&$skip={}", escape(filter), skip + 1);
+        body["@odata.nextLink"] = s.link(&base(&h), &rest).into();
+    }
+    Json(body).into_response()
+}
+
+/// Percent-encode a query value.
+fn escape(v: &str) -> String {
+    v.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 #[cfg(test)]

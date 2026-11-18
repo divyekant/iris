@@ -331,3 +331,11 @@ fn a_retry_after_above_the_backoff_cap_is_kept() {
         start.elapsed()
     );
 }
+
+#[test]
+fn a_huge_retry_after_ends_the_call_with_no_panic() {
+    let (fake, graph, _) = setup(5);
+    fake.fail_next(&[(429, Some(u64::MAX))]);
+    let got = graph.me(TOKEN);
+    assert!(matches!(got, Err(Error::Transport(_))), "{got:?}");
+}

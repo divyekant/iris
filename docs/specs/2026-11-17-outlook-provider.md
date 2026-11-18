@@ -74,9 +74,12 @@ Waits after a refusal:
   has it, else 1 second, then double up to 5 minutes, plus up to 50 percent
   at random (A5), and try again.
 - A write makes one request only. The client never tries a write again,
-  also not after 429 or 503. A time-out, a lost answer, 429 and 5xx of a
-  write give an unknown result (`Error::write_result_unknown`), and the
-  caller reconciles it with a read (see "External writes").
+  also not after 429 or 503. A time-out, a lost answer, 429, 5xx and an
+  unfollowed 3xx of a write give an unknown result
+  (`Error::write_result_unknown`). An accepted write whose answer is not
+  in the Graph shape, or does not show the new state, also gives an
+  unknown result. The caller reconciles it with a read (see "External
+  writes").
 - HTTP 401: `Error::Unauthorized`. Graph refused the token before it
   ran the call, so a 401 is a definite rejection, not an unknown result,
   also for a write. The caller gets a new access token one time and makes
@@ -422,8 +425,13 @@ categories are not moves, and work in each folder. R6-10 keeps the same rule for
 ## Failure list
 
 Supported input: JSON answers of Graph v1.0 in the shape of the Learn pages,
-and MIME text of `$value`. All other input fails closed: the call gives
-`Error::Decode` and the mirror changes nothing.
+and MIME text of `$value`. All other input fails closed. A read gives
+`Error::Decode` and the mirror changes nothing. A write that Graph
+accepted (its success status: 200 for a `PATCH`, 201 for a move or a
+draft, 202 for `sendMail`) can have changed the mailbox, so any bad
+answer to it gives an unknown result (`Error::Transport`), and the caller
+reconciles with reads: not JSON, another shape, another state, above
+16 MiB, or another 2xx status. The rows below are for reads.
 
 | Input or event | Result | Test |
 |---|---|---|
