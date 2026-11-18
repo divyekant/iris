@@ -189,6 +189,18 @@ its flags: the mirror shows it as archived, as a Gmail message with no
 keyword label for each keyword in the `PERMANENTFLAGS` and the `FLAGS` of
 each folder. It gives no counts.
 
+Each label has one name, with no case, so a lookup by name finds one
+label. A keyword can be named `INBOX`, and a folder can be named `Spam`
+with no `\Junk`. The fixed names are `INBOX`, `UNREAD`, `STARRED`, `SPAM`,
+`TRASH`, `SENT`, `DRAFT`, `UNSENT` and `SENT_COPY`:
+
+- A folder label whose name is a fixed name gets the name `<name>
+  (folder)`.
+- A keyword label whose name is a fixed name or the name of a folder label
+  gets the name `<keyword> (keyword)`.
+
+The IDs do not change. The test `label_names_are_unique` covers both.
+
 ### 5. The cursor
 
 The cursor is text with one line for each folder:
@@ -290,6 +302,19 @@ mirror does not have.
   of the found UIDs. So one answer holds at most 2,000 UIDs, under the
   1 MiB response limit of the client. For `UNSENT`, each message of a
   `\Drafts` folder counts with no search.
+- The size of a page. The 1 MiB limit bounds each answer, not the records
+  that a page keeps, and each ID holds the folder name. So:
+  - A folder name is at most 255 bytes. A longer name of a selectable
+    folder makes each call `Api` 400 `longFolderName` (limit issue #650);
+    a skipped folder would lose its mail with no notice.
+  - A thread ID from a header is at most 998 bytes (the line limit of RFC
+    5322). A longer one is ignored, and the message gets its own location
+    ID as thread.
+  - A page of `messages` then holds at most 2,000 IDs of about 1.3 KB
+    each, so less than 3 MB.
+  - A page of `changes` keeps at most 16 MiB of records (IDs, thread IDs
+    and labels). If a window has more, `changes` is `HistoryExpired`, and
+    the full resync reads pages of `messages` and one message at a time.
 - `minimal` and `raw`: `EXAMINE` of the folder of the ID, then
   a `UID FETCH`. A new `UIDVALIDITY`, or no message with the UID, is
   `NotFound`. A refused `EXAMINE` of a folder that is not in the LIST now
@@ -401,6 +426,10 @@ times after an unknown result (spec 2 section 7.2).
 | A `\Sent` folder message | `SENT_COPY`, no `SENT` | `labels_of_special_folders_and_flags` |
 | A server with no special-use attributes | the common names give the roles; an attribute wins | `special_folders_by_name`, `an_attribute_wins_over_a_name` |
 | `create_label("Todo")`, then a sync and an undo | the ID `kw:todo` everywhere | `create_label_case` (flag writes) |
+| A folder name over 255 bytes | `Api` 400 `longFolderName` | `long_folder_name` |
+| A thread header ID over 998 bytes | the own location ID as thread | `long_thread_header_is_ignored` |
+| A keyword or folder named as a fixed label | a name with ` (keyword)` or ` (folder)` | `label_names_are_unique` |
+| A `changes` window over 16 MiB of records | `HistoryExpired` | none (it needs a 16 MiB page) |
 | A new role of a folder | `HistoryExpired`, then a clean full resync | `folder_role_change` |
 | Two folders with `\Junk` | `SPAM` on the mail of both, zero differences | `two_junk_folders_and_keyword_case` |
 | One keyword in two spellings (`$Todo`, `$todo`) | one label `kw:$todo`, zero differences | `two_junk_folders_and_keyword_case` |
