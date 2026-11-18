@@ -330,10 +330,16 @@ section 4 on these rules:
   `category:` label (a folder label, `TRASH`, `SPAM`, `DRAFT`, `SENT`),
   one label in `add` and `remove`, more than `BATCH_LIMIT` messages, and
   a change of `INBOX` on a message that is not in the inbox or the
-  archive. Then, for each message, in this order: the categories (the
-  full new list from the read of this call, with `If-Match`), `isRead`,
-  the flag, and the move last (`If-Match` on the newest etag of the
-  message). A write that changes nothing is not sent.
+  archive. The read state, the flag and the categories change in each
+  folder (section 6). Then, for each message, in this order: the
+  categories (the full new list from the read of this call, with
+  `If-Match`), `isRead`, the flag, and the move last (`If-Match` on the
+  newest etag of the message). A write that changes nothing is not sent.
+- HTTP 412 on a write of a message means that another client changed the
+  message after the read. The provider reads the message one more time,
+  plans again from the new state, and writes once more, so that the
+  change of the other client stays (A14, A17). A second error is the
+  error of the call, as below.
 - An error after a write of the call is `Error::Transport` (unknown), so
   the apply reads the labels and never calls again (provider spec
   section 6). An error of the first write is the error of that write.
@@ -344,10 +350,11 @@ section 4 on these rules:
   because the master list needs `MailboxSettings.ReadWrite` and a
   category that is not on the list is not mirrored. The person makes the
   category in Outlook first. Known limit with its own issue.
-- After a move, the apply changes the mirror labels by `add` and
-  `remove` only, so the mirror does not have the new folder label (for
-  example `folder:<archive>` after an `archive`) until the next sync.
-  Known limit with its own issue.
+- After a successful `modify` that changes `INBOX` (a move), the apply
+  reads the labels of each message (`minimal`) and writes them to the
+  mirror, so that the mirror has one folder label before the next sync.
+  If a read fails, the mirror has the `add` and `remove` change until the
+  next sync.
 
 ### 6. Map to the mirror
 

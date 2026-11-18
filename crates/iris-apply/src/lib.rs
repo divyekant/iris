@@ -195,6 +195,13 @@ impl Change {
         [BATCH, "trash", "untrash"].into_iter().find(|c| *c == call)
     }
 
+    /// A change of `INBOX`. On a folder provider (Outlook) it moves the
+    /// message, so its folder label changes too, and `add` and `remove` do
+    /// not name that label.
+    fn moves(&self) -> bool {
+        self.add.iter().chain(&self.remove).any(|l| l == "INBOX")
+    }
+
     /// One provider call for each message.
     fn single(&self) -> bool {
         self.call != BATCH
@@ -853,6 +860,9 @@ impl<'a, 'b> Run<'a, 'b> {
                     } else {
                         let ids: Vec<i64> = live.iter().map(|(id, _)| *id).collect();
                         mirror_change(self.store, self.account, &ids, change);
+                        if change.moves() {
+                            self.mirror_read(&live);
+                        }
                     }
                 }
                 // Gmail can have applied the call: read, never call again.
@@ -862,6 +872,20 @@ impl<'a, 'b> Run<'a, 'b> {
             }
         }
         self.end(ledger, None)
+    }
+
+    /// The mirror gets the labels that the provider gives now for each of
+    /// `messages`, after a successful move. The write is done, so a failed
+    /// read stops only these reads: the next sync writes the labels.
+    fn mirror_read(&mut self, messages: &[(i64, String)]) {
+        let mut seen = Vec::with_capacity(messages.len());
+        for (id, provider_id) in messages {
+            match self.call(|g, t| g.minimal(t, provider_id)) {
+                Ok(m) => seen.push((*id, m.label_ids)),
+                Err(_) => break,
+            }
+        }
+        mirror(self.store, self.account, &seen);
     }
 
     /// Step 5: `applied` when no message is `unknown`, else `failed`. The

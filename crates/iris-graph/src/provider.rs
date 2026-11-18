@@ -116,6 +116,36 @@ impl Outlook {
 }
 
 impl Outlook {
+    /// The writes `ops` of message `id`, in order. `etag` is the etag of
+    /// the read of the plan. `wrote` becomes true at the first write that
+    /// Graph confirms.
+    fn write_ops(
+        &self,
+        token: &str,
+        id: &str,
+        mut etag: Option<String>,
+        ops: Vec<Op>,
+        wrote: &mut bool,
+    ) -> Result<(), Error> {
+        for op in ops {
+            let tag = || {
+                etag.clone()
+                    .ok_or_else(|| Error::Decode(format!("message {id} has no etag")))
+            };
+            let m = match &op {
+                Op::Categories(list) => {
+                    tag().and_then(|e| self.graph.set_categories(token, id, list, &e))
+                }
+                Op::Read(read) => self.graph.set_read(token, id, *read),
+                Op::Flag(flagged) => self.graph.set_flag(token, id, *flagged),
+                Op::Move(folder) => tag().and_then(|e| self.graph.move_to(token, id, folder, &e)),
+            }?;
+            *wrote = true;
+            etag = m.etag;
+        }
+        Ok(())
+    }
+
     /// Move `id` to the well-known folder `to`, only from one of `from`,
     /// with `If-Match` on the etag of the check read. One write.
     fn move_between(
@@ -655,34 +685,27 @@ impl iris_provider::Provider for Outlook {
         }
         let mut wrote = false;
         for (id, (etag, ops)) in ids.iter().zip(plans) {
-            let mut etag = etag;
-            for op in ops {
-                let tag = || {
-                    etag.clone()
-                        .ok_or_else(|| Error::Decode(format!("message {id} has no etag")))
-                };
-                let result = match &op {
-                    Op::Categories(list) => {
-                        tag().and_then(|e| self.graph.set_categories(token, id, list, &e))
-                    }
-                    Op::Read(read) => self.graph.set_read(token, id, *read),
-                    Op::Flag(flagged) => self.graph.set_flag(token, id, *flagged),
-                    Op::Move(folder) => {
-                        tag().and_then(|e| self.graph.move_to(token, id, folder, &e))
-                    }
-                };
-                match result {
-                    Ok(m) => {
-                        wrote = true;
-                        etag = m.etag;
-                    }
-                    Err(e) if wrote => {
-                        return Err(iris_provider::Error::Transport(format!(
-                            "a part of the call ran, then: {e}"
-                        )))
-                    }
-                    Err(e) => return Err(map(e)),
-                }
+            let result = match self.write_ops(token, id, etag, ops, &mut wrote) {
+                // HTTP 412: another client changed the message after the
+                // read. One new read and plan, so that its change stays
+                // (spec section 5, A14 and A17).
+                Err(Error::Api { status: 412, .. }) => self
+                    .graph
+                    .message(token, id)
+                    .map_err(map)
+                    .and_then(|m| Ok((m.etag.clone(), plan(&m, &known, add, remove)?)))
+                    .and_then(|(etag, ops)| {
+                        self.write_ops(token, id, etag, ops, &mut wrote)
+                            .map_err(map)
+                    }),
+                other => other.map_err(map),
+            };
+            if let Err(e) = result {
+                return Err(if wrote {
+                    iris_provider::Error::Transport(format!("a part of the call ran, then: {e}"))
+                } else {
+                    e
+                });
             }
         }
         Ok(())

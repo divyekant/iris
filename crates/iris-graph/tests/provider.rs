@@ -124,7 +124,8 @@ fn a_failure_after_a_write_of_the_call_is_unknown() {
         .contains(&"STARRED".to_string()));
 }
 
-/// A refusal of one message comes before the write of any message.
+/// A refusal of one message comes before the write of any message. A
+/// change that is not a move works in a user folder.
 #[test]
 fn a_refusal_of_one_message_stops_the_writes_of_all() {
     let fake = FakeGraph::start(Mailbox::new(3, 60)).unwrap();
@@ -145,9 +146,64 @@ fn a_refusal_of_one_message_stops_the_writes_of_all() {
         .filter(|r| !r.starts_with("GET"))
         .count();
     assert_eq!(writes, 0);
+    // The read state, the flag and the categories are not moves: they
+    // change in a user folder too (spec section 6).
+    outlook
+        .modify(TOKEN, &[&user], &["STARRED", "UNREAD"], &[])
+        .unwrap();
+    let l = outlook.minimal(TOKEN, &user).unwrap().label_ids;
+    assert!(
+        l.contains(&"STARRED".to_string()) && l.contains(&"UNREAD".to_string()),
+        "{l:?}"
+    );
+    assert!(fake.messages()[&user].starts_with("F-") && fake.messages()[&user] != "F-inbox");
     let ids: Vec<&str> = std::iter::repeat_n(a.as_str(), iris_provider::BATCH_LIMIT + 1).collect();
     assert!(matches!(
         outlook.modify(TOKEN, &ids, &["UNREAD"], &[]),
         Err(Error::Api { status: 400, .. })
     ));
+}
+
+/// Another client changes the categories between the read of the plan
+/// and the PATCH: Graph gives 412, the provider reads again, and the new
+/// list keeps the change of the other client.
+#[test]
+fn a_category_conflict_reads_again_and_keeps_the_other_change() {
+    let fake = FakeGraph::start(Mailbox::new(3, 60)).unwrap();
+    let (outlook, a, _) = warm(&fake);
+    // The read of the plan sees no category and an old etag.
+    fake.answer_next(&[&format!(
+        r#"{{"id":"{a}","@odata.etag":"W/\"old\"","conversationId":"c",
+        "parentFolderId":"F-inbox","categories":[],"isRead":true,
+        "flag":{{"flagStatus":"notFlagged"}},"isDraft":false,
+        "receivedDateTime":"2026-11-17T10:00:00Z","internetMessageId":null}}"#
+    )]);
+    assert!(fake.set_categories(&a, &["Other client"]));
+    outlook
+        .modify(TOKEN, &[&a], &["category:Blue category"], &[])
+        .unwrap();
+    let l = outlook.minimal(TOKEN, &a).unwrap().label_ids;
+    for c in ["category:Other client", "category:Blue category"] {
+        assert!(l.contains(&c.to_string()), "{l:?}");
+    }
+    // A second conflict on the new read is the error of the call.
+    let before = fake.requests().len();
+    fake.answer_next(&[&format!(
+        r#"{{"id":"{a}","@odata.etag":"W/\"old\"","conversationId":"c",
+        "parentFolderId":"F-inbox","categories":[],"isRead":true,
+        "flag":{{"flagStatus":"notFlagged"}},"isDraft":false,
+        "receivedDateTime":"2026-11-17T10:00:00Z","internetMessageId":null}}"#
+    )]);
+    fake.fail_next(&[(0, None), (0, None), (0, None), (412, None)]);
+    let e = outlook
+        .modify(TOKEN, &[&a], &["category:Green"], &[])
+        .unwrap_err();
+    assert!(matches!(e, Error::Api { status: 412, .. }), "{e}");
+    assert!(!e.write_result_unknown());
+    assert_eq!(
+        fake.requests().len() - before,
+        4,
+        "{:?}",
+        &fake.requests()[before..]
+    );
 }

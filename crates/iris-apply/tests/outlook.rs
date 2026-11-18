@@ -233,8 +233,8 @@ fn failed(o: Outcome) -> String {
     }
 }
 
-/// Each verb changes Outlook, the undo returns it, and after a sync the
-/// mirror has the labels of Outlook.
+/// Each verb changes Outlook, the undo returns it, and the mirror has the
+/// labels of Outlook after each write, before and after a sync.
 #[test]
 fn each_verb_and_its_undo_change_outlook() {
     let b = setup("verbs");
@@ -262,6 +262,8 @@ fn each_verb_and_its_undo_change_outlook() {
                 "{verb}: {:?}",
                 b.outlook_labels(m)
             );
+            // The mirror has one folder label before any sync.
+            assert_eq!(b.mirror_labels(m), b.outlook_labels(m), "{verb}, no sync");
         }
         b.sync();
         for &m in &ms {
@@ -274,6 +276,8 @@ fn each_verb_and_its_undo_change_outlook() {
         );
         for (i, &m) in ms.iter().enumerate() {
             assert_eq!(b.outlook_labels(m), before[i], "{verb} undo");
+            // An inbox move from a synced archive, before any sync.
+            assert_eq!(b.mirror_labels(m), before[i], "{verb} undo, no sync");
         }
     }
     assert!(has(ms[0], "INBOX"));
