@@ -333,6 +333,83 @@ mod tests {
         assert!(!auto("Subject: hi\r\n\r\n"));
     }
 
+    /// Random `Authentication-Results` headers: order, case, folding,
+    /// comments that hold a forged result, other headers, and the trust of
+    /// the provider. A DKIM pass comes only from the top header with the
+    /// trusted ID, and never with no trusted ID.
+    #[test]
+    fn property_only_a_trusted_header_gives_a_dkim_pass() {
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = |n: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % n
+        };
+        let ids = [
+            "mx.google.com",
+            "MX.Google.COM",
+            "mx.other.example",
+            "mx.google.com.evil.example",
+        ];
+        let domains = [
+            "shop.example.com",
+            "example.com",
+            "evil.example",
+            "mail.shop.example.com",
+        ];
+        let results = ["pass", "fail", "none"];
+        let target = "mail.shop.example.com";
+        let covers = |d: &str| target == d || target.ends_with(&format!(".{d}"));
+        for case in 0..5000 {
+            let mut raw = String::new();
+            let mut want = None;
+            for _ in 0..1 + next(4) {
+                if next(3) == 0 {
+                    raw.push_str("X-Other: dkim=pass header.d=shop.example.com\r\n");
+                }
+                let id = ids[next(ids.len() as u64) as usize];
+                let fold = if next(2) == 0 { "\r\n " } else { " " };
+                raw.push_str(&format!("Authentication-Results: {id};"));
+                let mut pass = false;
+                for _ in 0..1 + next(3) {
+                    let r = results[next(3) as usize];
+                    let d = domains[next(domains.len() as u64) as usize];
+                    let key = if next(2) == 0 {
+                        "header.d="
+                    } else {
+                        "header.i=@"
+                    };
+                    let comment = if next(3) == 0 {
+                        format!("(dkim=pass header.d={target}) ")
+                    } else {
+                        String::new()
+                    };
+                    raw.push_str(&format!("{fold}dkim={r} {comment}{key}{d};"));
+                    pass |= r == "pass" && covers(d);
+                }
+                raw.push_str("\r\n");
+                if want.is_none() && id.eq_ignore_ascii_case(GMAIL_AUTHSERV) {
+                    want = Some(pass);
+                }
+            }
+            raw.push_str("\r\n");
+            let h = Head::parse(raw.as_bytes());
+            let want = want.unwrap_or(false);
+            assert_eq!(
+                h.dkim_pass(target, trusted_authserv("gmail")),
+                want,
+                "case {case}: {raw}"
+            );
+            for p in ["imap", "outlook", ""] {
+                assert!(
+                    !h.dkim_pass(target, trusted_authserv(p)),
+                    "case {case} {p}: {raw}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn only_the_top_gmail_authentication_results_header_counts() {
         let gmail = "Authentication-Results: mx.google.com;\r\n dkim=pass (fake: dkim=pass header.d=evil.example) header.i=@mail.shop.example.com;\r\n dmarc=pass\r\n\r\n";

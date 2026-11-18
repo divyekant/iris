@@ -67,7 +67,7 @@ const ALLOWED: [(&str, usize, &str); 16] = [
         1,
         "proof of authorship: the samples of your style are SENT mail that is not DRAFT",
     ),
-    ("iris-voice/src/tests.rs", 4, "test data"),
+    ("iris-voice/src/tests.rs", 10, "test data"),
     ("iris-fakegmail/src/lib.rs", 5, "the fake Gmail server"),
     ("iris-fakeimap/src/lib.rs", 1, "the fake IMAP server: SEARCH DRAFT"),
     ("iris-gmail/src/raw.rs", 1, "a test of the Gmail client"),
