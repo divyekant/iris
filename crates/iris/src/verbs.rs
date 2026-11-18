@@ -37,6 +37,11 @@ pub fn status(store: &Store, as_json: bool) -> Output {
             field(&a.address),
             a.provider
         );
+        if a.state.as_deref() == Some(crate::engine::STATE_READ_ONLY) {
+            out.push_str(
+                "  read only: approved changes wait. Run `iris account add <client.json> --write`.\n",
+            );
+        }
         if let Some(run) = &a.last_sync {
             let _ = writeln!(
                 out,

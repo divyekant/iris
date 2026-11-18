@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
-use iris::engine::{self, Engine, Worker, STATE_NEEDS_SIGN_IN, STATE_OK};
+use iris::engine::{self, Engine, Worker, STATE_NEEDS_SIGN_IN, STATE_OK, STATE_READ_ONLY};
 use iris_fakegmail::FakeGmail;
 use iris_store::Store;
 use iris_synth::Mailbox;
@@ -926,6 +926,142 @@ fn the_apply_step_reports_a_failed_action() {
         turn.reports[0].starts_with(&format!("action {action} failed: ")),
         "{turn:?}"
     );
+}
+
+/// A read-only sign-in (spec docs/specs/2026-11-18-gmail-write-access.md):
+/// the account syncs, its approved action waits with no Gmail write, and
+/// the error goes out once. A write sign-in then applies the action.
+#[test]
+fn a_read_only_account_syncs_and_its_actions_wait() {
+    let s = setup("apply-read-only", 5);
+    let g = gmail(s.fake.base_url());
+    assert_eq!(
+        sign_in_as(&s.store, &g, &client_json(), REFRESH, false),
+        s.account
+    );
+    assert_state(&s.store, s.account, STATE_READ_ONLY);
+    assert!(engine::sync_accounts(&s.store)
+        .unwrap()
+        .contains(&s.account));
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let (action, _) = approved_archive(&s);
+    let writes = |f: &FakeGmail| {
+        f.requests()
+            .iter()
+            .filter(|r| !r.starts_with("GET "))
+            .count()
+    };
+    let before = writes(&s.fake);
+    // The state was already read only at the sign-in: no error line.
+    assert_eq!(w.apply_step().unwrap().reports.len(), 0);
+    assert_eq!(writes(&s.fake), before, "no Gmail write");
+    assert_eq!(action_state(&s.store, action), "approved");
+    w.sync().unwrap();
+    // A write sign-in of the same address: the state is ok, and the action applies.
+    sign_in_as(&s.store, &g, &client_json(), REFRESH, true);
+    assert_state(&s.store, s.account, STATE_OK);
+    w.apply_step().unwrap();
+    assert_eq!(action_state(&s.store, action), "applied");
+}
+
+/// A grant of an older Iris has no `write` field: it is read only. The
+/// first apply step sets the state and gives the error one time.
+#[test]
+fn a_grant_with_no_write_field_is_read_only() {
+    let s = setup("apply-old-grant", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let client: serde_json::Value = serde_json::from_str(&client_json()).unwrap();
+    let old =
+        serde_json::to_vec(&serde_json::json!({"client": client, "refresh": REFRESH})).unwrap();
+    let sealed = s.store.seal(&old).unwrap();
+    s.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE account SET token = ?2, state = 'ok' WHERE id = ?1",
+                rusqlite::params![s.account, sealed],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let (action, _) = approved_archive(&s);
+    let r = w.apply_step();
+    assert!(matches!(r, Err(engine::Error::ReadOnly)), "{r:?}");
+    assert!(r
+        .unwrap_err()
+        .to_string()
+        .contains("iris account add <client.json> --write"));
+    assert_state(&s.store, s.account, STATE_READ_ONLY);
+    assert_eq!(
+        w.apply_step().unwrap().reports.len(),
+        0,
+        "the error goes out once"
+    );
+    assert_eq!(action_state(&s.store, action), "approved");
+}
+
+/// Gmail refuses a write for a missing scope, although the grant says
+/// write: the action fails with the clear text, and the account is read
+/// only, so the next action waits.
+#[test]
+fn a_scope_refusal_fails_the_action_and_sets_read_only() {
+    let s = setup("apply-scope-refused", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let (action, _) = approved_archive(&s);
+    s.fake.set_read_only(true);
+    let turn = w.apply_step().unwrap();
+    assert_eq!(action_state(&s.store, action), "failed");
+    assert_eq!(turn.reports.len(), 1, "{turn:?}");
+    assert!(
+        turn.reports[0].contains(iris_provider::SCOPE_REFUSAL),
+        "{turn:?}"
+    );
+    assert!(!turn.reports[0].contains("insufficient"), "{turn:?}");
+    assert_state(&s.store, s.account, STATE_READ_ONLY);
+    let (next, _) = approved_archive(&s);
+    assert!(w.apply_step().unwrap().reports.is_empty());
+    assert_eq!(action_state(&s.store, next), "approved");
+}
+
+/// The read-only mark keeps a new sign-in: it writes only while the token
+/// is the one that it read, and never over "needs sign-in".
+#[test]
+fn the_read_only_mark_keeps_a_new_sign_in() {
+    let s = setup("read-only-guard", 5);
+    let old: Vec<u8> = s
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT token FROM account WHERE id = ?1",
+                [s.account],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    sign_in_as(
+        &s.store,
+        &gmail(s.fake.base_url()),
+        &client_json(),
+        "new-refresh",
+        true,
+    );
+    assert!(!engine::mark_read_only(&s.store, s.account, &old).unwrap());
+    assert_state(&s.store, s.account, STATE_OK);
+    let now: Vec<u8> = s
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT token FROM account WHERE id = ?1",
+                [s.account],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    engine::mark_needs_sign_in(&s.store, s.account, &now).unwrap();
+    assert!(!engine::mark_read_only(&s.store, s.account, &now).unwrap());
+    assert_state(&s.store, s.account, STATE_NEEDS_SIGN_IN);
 }
 
 #[test]
