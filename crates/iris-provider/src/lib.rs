@@ -44,7 +44,21 @@ pub enum Error {
     Sink(std::io::Error),
 }
 
+/// The text of a [`Error::is_scope_refusal`] error. The engine finds it in
+/// the error text of a failed action.
+pub const SCOPE_REFUSAL: &str = "Gmail refused the change: Iris has read access only. \
+     Run `iris account add <client.json> --write`.";
+
 impl Error {
+    /// True for the Gmail answer to a call that the granted scopes do not
+    /// allow: HTTP 403 `insufficientPermissions` (or the newer
+    /// `ACCESS_TOKEN_SCOPE_INSUFFICIENT`). Gmail made no change (spec
+    /// `docs/specs/2026-11-18-gmail-write-access.md`).
+    pub fn is_scope_refusal(&self) -> bool {
+        matches!(self, Error::Api { status: 403, reason, .. }
+            if reason == "insufficientPermissions" || reason == "ACCESS_TOKEN_SCOPE_INSUFFICIENT")
+    }
+
     /// For a write call: true if the provider can have done the call
     /// (spec 2 section 7.2). A timeout, a lost connection and HTTP 5xx give
     /// an unknown result. A rate limit of a call with one request also
@@ -70,6 +84,7 @@ impl std::fmt::Display for Error {
             Error::Unauthorized => write!(f, "the mail provider refused the access token"),
             Error::NotFound => write!(f, "the mail provider does not have the item"),
             Error::HistoryExpired => write!(f, "the sync cursor is too old"),
+            e @ Error::Api { .. } if e.is_scope_refusal() => f.write_str(SCOPE_REFUSAL),
             Error::Api {
                 status,
                 reason,
@@ -276,6 +291,36 @@ pub trait Provider: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scope_refusal_is_a_rejection_with_the_fix() {
+        let api = |status: u16, reason: &str| Error::Api {
+            status,
+            reason: reason.into(),
+            message: "Request had insufficient authentication scopes.".into(),
+        };
+        for e in [
+            api(403, "insufficientPermissions"),
+            api(403, "ACCESS_TOKEN_SCOPE_INSUFFICIENT"),
+        ] {
+            assert!(e.is_scope_refusal());
+            assert!(!e.write_result_unknown(), "Gmail made no change");
+            let text = e.to_string();
+            assert!(
+                text.contains("iris account add <client.json> --write"),
+                "{text}"
+            );
+            assert!(!text.contains("insufficient"), "no raw text: {text}");
+        }
+        for e in [
+            api(403, "forbidden"),
+            api(401, "insufficientPermissions"),
+            api(403, ""),
+        ] {
+            assert!(!e.is_scope_refusal(), "{e}");
+            assert!(e.to_string().starts_with("mail provider error"), "{e}");
+        }
+    }
 
     #[test]
     fn only_unknown_results_of_a_write_say_so() {
