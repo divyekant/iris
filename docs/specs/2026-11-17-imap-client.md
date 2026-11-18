@@ -23,7 +23,10 @@ does not depend on it, so it is built first.
    changes the plan for a server without them: see section 3.
 3. A test IMAP server (`crates/iris-fakeimap`) runs in local CI with no
    network. A property test shows that a mirror kept with the client agrees
-   with the server after random changes, in each of the three modes.
+   with the server after random changes, in each of the two modes that part
+   B supports (`QRESYNC`, and `CONDSTORE` only). A server without
+   `CONDSTORE` gets a clear refusal (part B spec, section 6; limit issue
+   #629). The first plan had a third mode for it.
 4. The client uses little memory: no list of all messages and no full
    message is in memory.
 
@@ -237,8 +240,9 @@ A session after an error is not used again. The caller connects again.
   Evidence: `src/rfc4551.rs` and `src/rfc7162.rs` of the crate.
 - Fastmail and Dovecot have `QRESYNC`; Gmail IMAP has `CONDSTORE` but no
   `QRESYNC`; some servers have neither. `pending`: the real-mailbox check
-  on dk's Mac shows the capabilities. The design has a mode for each case,
-  so a wrong guess changes only the speed.
+  on dk's Mac shows the capabilities. Part B syncs with `QRESYNC` or with
+  `CONDSTORE` only, and refuses a server with neither (limit issue #629),
+  so a wrong guess changes the speed or gives that refusal.
 - App-password providers accept `AUTHENTICATE PLAIN` over TLS. `pending`.
   If a server has no `AUTH=PLAIN`, the client uses `LOGIN`.
 
@@ -258,8 +262,10 @@ None. The client opens folders with `EXAMINE` and fetches with
 
 1. A mirror that part B could keep with the client agrees with the test
    server after random adds, flag changes, removals and `UIDVALIDITY`
-   changes, in each of the three modes. It goes red if `changes`, `list`
-   or `VANISHED` lose an event.
+   changes, in each of the two supported modes (`QRESYNC`, and `CONDSTORE`
+   only). It goes red if `changes`, `list` or `VANISHED` lose an event.
+   A server without `CONDSTORE` gets `Api` 400 `noCondstore` from the
+   part B `profile` (part B spec, section 6).
 2. `fetch_raw` of a 20 MiB message works, although each buffered response
    is at most 1 MiB. It goes red if the client buffers the message.
 3. Random and cut server responses never make the client panic or hang.

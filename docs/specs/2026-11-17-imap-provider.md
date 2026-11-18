@@ -305,14 +305,22 @@ mirror does not have.
 
 | Call | Result |
 |---|---|
-| `modify` with only `UNREAD`, `STARRED` and `kw:` labels | `SELECT` of the folder of each ID, a check of its `UIDVALIDITY`, then `UID STORE <uids> +FLAGS` or `-FLAGS` (not `.SILENT`) |
+| `modify` with only `UNREAD`, `STARRED` and `kw:` labels | First a check of each target folder: `SELECT`, its `UIDVALIDITY`, and its `PERMANENTFLAGS`. Then, for each folder, `SELECT`, the `UIDVALIDITY` again, and `UID STORE <uids> +FLAGS` or `-FLAGS` (not `.SILENT`) |
 | `modify` with any other label | `Api` 400 `notSupported`, before any write |
 | `create_label(name)` | `Api` 400 `notSupported` until the flag writes. With the flag writes: the label ID `kw:` and the name in lowercase ASCII (section 4), with the name as given, if the name is a valid atom, else `Api` 400 `badName`. So `create_label("Todo")` gives `kw:todo`, the same ID that `labels`, `minimal` and `changes` give after the write, and the ledger and the undo use that ID |
 | `trash`, `untrash` | `Api` 400 `notSupported` |
 | drafts and send | `Api` 400 `notSupported` |
 
-A `modify` checks all IDs and labels before the first write. It writes
-each folder in turn. After the `SELECT` of a folder, it compares the
+A `modify` checks all IDs and labels before the first write. It then
+does a check pass with no `STORE`: a `SELECT` of each target folder, a
+compare of its `UIDVALIDITY` with each ID of the folder, and a check that
+each flag to change is permanent in the folder. A flag is permanent if the
+`PERMANENTFLAGS` of the `SELECT` holds it, or holds `\*` for a keyword
+(RFC 3501 section 7.1). A server can show a flag that is not permanent in
+the answer to a `STORE` and lose it at the end of the session, so Iris
+could record an action that does not last. A flag that is not permanent,
+or a `SELECT` with no `PERMANENTFLAGS`, is `Api` 400 `notPermanent`, and
+nothing is written. Then it writes each folder in turn. After the `SELECT` of a folder, it compares the
 `UIDVALIDITY` of the folder with the one in each ID of that folder. A
 different value before any `STORE` was sent is `NotFound`, and nothing is
 written. A different value after a `STORE` of an earlier folder is
@@ -388,6 +396,7 @@ times after an unknown result (spec 2 section 7.2).
 | A wrong password | `Unauthorized` | `wrong_password` |
 | A new folder with more than 2,000 messages | pages of at most 2,000 records | `changes_pages` |
 | A LIST order change between two message pages | each folder once | `message_pages_follow_folder_names` |
+| A flag that is not in the `PERMANENTFLAGS` of a target folder (no `\*` for a keyword) | `Api` 400 `notPermanent`, before any `STORE` | `modify_not_permanent` |
 | A `NO` to a `STORE` | `Transport` | `modify_refused` |
 | A `\Sent` folder message | `SENT_COPY`, no `SENT` | `labels_of_special_folders_and_flags` |
 | A server with no special-use attributes | the common names give the roles; an attribute wins | `special_folders_by_name`, `an_attribute_wins_over_a_name` |
