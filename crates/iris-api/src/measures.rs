@@ -119,7 +119,7 @@ pub fn measures(store: &Store, rss_kib: Option<i64>) -> Result<Measures> {
             .map(|(a, b)| FirstBrief {
                 connect: a.map(rfc3339),
                 brief: b.map(rfc3339),
-                seconds: a.zip(b).map(|(a, b)| (b - a).max(0) / 1000),
+                seconds: a.zip(b).map(|(a, b)| brief_seconds(b - a)),
             });
         let mut q = c.prepare(
             "SELECT a.address, coalesce(l.ended_at, l.started_at), l.result
@@ -232,15 +232,26 @@ pub fn mark_brief(store: &Store, brief: &crate::Brief, now_ms: i64) -> Result<()
     Ok(())
 }
 
+/// Whole seconds of a time in milliseconds, rounded up: a time just over
+/// the target must not show as met.
+fn brief_seconds(ms: i64) -> i64 {
+    (ms.max(0) + 999) / 1000
+}
+
 /// The count and the end of the text that `iris_sync::verify` writes to
 /// `sync_log.result`: "N differences, M skipped", then ", then error: ..."
-/// when an error stopped the check.
+/// when an error stopped the check. The check is complete only with no
+/// error and 0 skipped messages: a skipped message was not compared.
 fn verify_result(text: &str) -> (Option<i64>, bool) {
     let first = text.lines().next().unwrap_or("");
     let count = first
         .split_once(" differences")
         .and_then(|(n, _)| n.parse().ok());
-    (count, !first.contains(", then error"))
+    let skipped = first
+        .split_once(" skipped")
+        .and_then(|(n, _)| n.rsplit(' ').next()?.parse::<i64>().ok());
+    let none_skipped = skipped == Some(0) || !first.contains(" skipped");
+    (count, none_skipped && !first.contains(", then error"))
 }
 
 /// Count one use of the web client on `day` (the local date of the person,
@@ -362,16 +373,33 @@ mod tests {
     #[test]
     fn verify_result_reads_the_text_of_the_verify() {
         assert_eq!(verify_result("0 differences, 0 skipped"), (Some(0), true));
+        // A skipped message was not compared: the check is not complete.
+        assert_eq!(verify_result("0 differences, 2 skipped"), (Some(0), false));
         assert_eq!(
             verify_result("3 differences, 1 skipped\nmessage a: other labels"),
-            (Some(3), true)
+            (Some(3), false)
         );
+        assert_eq!(verify_result("0 differences, x skipped"), (Some(0), false));
         assert_eq!(
             verify_result("2 differences, 0 skipped, then error: HTTP 401"),
             (Some(2), false)
         );
         assert_eq!(verify_result(""), (None, true));
         assert_eq!(verify_result("x differences"), (None, true));
+    }
+
+    /// Property: the shown seconds are never under the real time, so a
+    /// time over the target never shows as met.
+    #[test]
+    fn brief_seconds_round_up() {
+        for ms in [
+            0, 1, 999, 1000, 1001, 599_999, 600_000, 600_001, 600_999, 601_000,
+        ] {
+            let s = brief_seconds(ms);
+            assert!(s * 1000 >= ms && s * 1000 < ms + 1000, "{ms} {s}");
+        }
+        assert_eq!(brief_seconds(600_001), 601);
+        assert_eq!(brief_seconds(-5), 0);
     }
 
     #[test]
