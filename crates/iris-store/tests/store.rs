@@ -800,4 +800,86 @@ fn an_account_secret_keeps_its_provider_and_its_mailbox() {
     let r = store.save_account_secret("imap", "g@example.com", server, b"x", "ok");
     assert!(matches!(r, Err(Error::Account(_))));
     assert_eq!(token("g@example.com").1, Some(b"g".to_vec()));
+
+/// True when two other threads can each hold a read connection now: this
+/// thread holds no store connection. It waits at most 2 seconds.
+pub fn readers_free(s: &Store) -> bool {
+    use std::sync::{mpsc, Barrier};
+    use std::time::Duration;
+    let held = Barrier::new(2);
+    let (release, wait) = mpsc::channel::<()>();
+    let (got, second) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let held = &held;
+        scope.spawn(move || {
+            s.read(|_| {
+                held.wait();
+                let _ = wait.recv();
+                Ok(())
+            })
+            .unwrap()
+        });
+        held.wait();
+        scope.spawn(|| {
+            let _ = s.read(|_| Ok(()));
+            let _ = got.send(());
+        });
+        let free = second.recv_timeout(Duration::from_secs(2)).is_ok();
+        drop(release);
+        free
+    })
+}
+
+/// A writer that records, at each write, if the store was free.
+struct Probe<'a> {
+    store: &'a Store,
+    bytes: Vec<u8>,
+    held: bool,
+}
+
+impl std::io::Write for Probe<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.held |= !readers_free(self.store);
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+// Invariant (engine hang of 2026-11-18): no thread holds a store connection
+// while it writes an answer to a peer. A peer that stops reading must not
+// stop the other threads of the engine.
+#[test]
+fn read_to_writes_the_answer_after_the_read_ends() {
+    let dir = TempDir::new("read-to");
+    let s = Store::open(&dir.0).unwrap();
+    let mut out = Probe {
+        store: &s,
+        bytes: Vec::new(),
+        held: false,
+    };
+    let n = s
+        .read_to(&mut out, |c, w| -> Result<i64, Error> {
+            let n: i64 = c.query_row("SELECT 7", [], |r| r.get(0))?;
+            std::io::Write::write_all(w, &vec![b'x'; 300_000])?;
+            Ok(n)
+        })
+        .unwrap();
+    assert_eq!(n, 7);
+    assert_eq!(out.bytes.len(), 300_000);
+    assert!(!out.held, "a store connection was held during a write to the peer");
+    // An error leaves `out` with no byte.
+    let mut empty = Vec::new();
+    let r = s.read_to(&mut empty, |_, w| -> Result<(), Error> {
+        std::io::Write::write_all(w, b"part")?;
+        Err(Error::Query("stop".into()))
+    });
+    assert!(r.is_err());
+    assert!(empty.is_empty());
+    // The spool file has no name: the data folder keeps no file of it.
+    assert!(!fs::read_dir(&dir.0)
+        .unwrap()
+        .any(|e| e.unwrap().file_name().to_string_lossy().starts_with(".spool")));
 }

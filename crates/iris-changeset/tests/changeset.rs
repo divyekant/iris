@@ -1944,3 +1944,59 @@ fn random_ledger_targets() {
     }
     assert!(proposed > 0 && denied > 0, "{proposed} {denied}");
 }
+
+/// True when two other threads can each hold a read connection now: this
+/// thread holds no store connection. It waits at most 2 seconds.
+fn readers_free(s: &Store) -> bool {
+    use std::sync::{mpsc, Barrier};
+    use std::time::Duration;
+    let held = Barrier::new(2);
+    let (release, wait) = mpsc::channel::<()>();
+    let (got, second) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let held = &held;
+        scope.spawn(move || {
+            s.read(|_| {
+                held.wait();
+                let _ = wait.recv();
+                Ok(())
+            })
+            .unwrap()
+        });
+        held.wait();
+        scope.spawn(|| {
+            let _ = s.read(|_| Ok(()));
+            let _ = got.send(());
+        });
+        let free = second.recv_timeout(Duration::from_secs(2)).is_ok();
+        drop(release);
+        free
+    })
+}
+
+// Invariant (engine hang of 2026-11-18): the document goes to its peer (a
+// socket or the channel of the web server) only after the store read ends.
+// A peer that stops reading then never holds a store connection.
+#[test]
+fn the_document_goes_out_after_the_read() {
+    struct Probe<'a>(&'a Store, Vec<u8>, bool);
+    impl std::io::Write for Probe<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.2 |= !readers_free(self.0);
+            self.1.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let dir = TempDir::new("after-read");
+    let s = store(&dir);
+    let cs = create(&s, &agent(), NOW).unwrap();
+    add_action(&s, cs, &agent(), Verb::Archive, &["m-1"], &Map::new(), None).unwrap();
+    submit(&s, cs, &agent(), "Archive.", NOW).unwrap();
+    let mut out = Probe(&s, Vec::new(), false);
+    write_document(&s, cs, &mut out).unwrap();
+    assert!(!out.1.is_empty());
+    assert!(!out.2, "a store connection was held during a write to the peer");
+}
