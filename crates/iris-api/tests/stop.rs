@@ -57,7 +57,7 @@ async fn stop_and_resume() {
         (code, v),
         (
             StatusCode::OK,
-            json!({"stopped": false, "since": null, "live": 0, "busy": false})
+            json!({"stopped": false, "since": null, "sessions": 0, "live": 0, "busy": false})
         )
     );
 
@@ -79,6 +79,68 @@ async fn stop_and_resume() {
     assert!(stopped(&s).is_none());
     let (_, v) = call(&s, "POST", "/api/resume", "").await;
     assert_eq!(v["resumed"], json!(false));
+}
+
+/// Issue 569: each answer of the Stop API has each field of spec section 5
+/// (`stopped`, `since`, `sessions`, `live`, `busy`), and `live` and `busy`
+/// are measured now, also while Iris runs and at a resume.
+#[tokio::test]
+async fn each_answer_has_each_field_measured_now() {
+    let dir = temp("fields");
+    let s = Arc::new(Store::open(&dir.0).unwrap());
+    let job = iris_job::create(&s, "Tidy the inbox.", None, 1).unwrap();
+    let session = iris_job::register(&s, job, "claude-code", 1).unwrap();
+    let keys = ["stopped", "since", "sessions", "live", "busy"];
+    let has = |v: &Value| keys.iter().all(|k| v.get(*k).is_some());
+    // While Iris runs: a live session and a Gmail call that runs.
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(s.dir().join(iris_apply::LOCK_FILE))
+        .unwrap();
+    file.try_lock().unwrap();
+    let (_, v) = call(&s, "GET", "/api/stop", "").await;
+    assert!(has(&v), "{v}");
+    assert_eq!(
+        (&v["stopped"], &v["sessions"], &v["live"], &v["busy"]),
+        (&json!(false), &json!(0), &json!(1), &json!(true)),
+        "{v}"
+    );
+    drop(file);
+    // A stop that does not wait: the session stays live through the resume.
+    iris_apply::stop_wait(&s, std::time::Duration::ZERO).unwrap();
+    let (_, v) = call(&s, "GET", "/api/stop", "").await;
+    assert!(has(&v), "{v}");
+    assert_eq!(
+        (&v["stopped"], &v["sessions"]),
+        (&json!(true), &json!(0)),
+        "{v}"
+    );
+    let (_, v) = call(&s, "POST", "/api/resume", "").await;
+    assert!(has(&v), "{v}");
+    assert_eq!(
+        (
+            &v["stopped"],
+            &v["sessions"],
+            &v["live"],
+            &v["busy"],
+            &v["resumed"]
+        ),
+        (
+            &json!(false),
+            &json!(0),
+            &json!(1),
+            &json!(false),
+            &json!(true)
+        ),
+        "{v}"
+    );
+    // After the reap, Stop gives its own answer, with each field.
+    iris_job::reap(&s, session, 3).unwrap();
+    let (_, v) = call(&s, "POST", "/api/stop", "").await;
+    assert!(has(&v), "{v}");
+    assert_eq!(v["live"], json!(0), "{v}");
 }
 
 /// A body or a wrong method changes nothing.

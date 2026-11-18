@@ -36,7 +36,10 @@ mod stop;
 pub use send::{release, sending, sent_by_iris, set_sending, HOLD_MS, SENT_OTHER, SENT_OTHER_END};
 pub use state::{apply_state, apply_states};
 pub use step::{recover_step, step, step_clock, Step};
-pub use stop::{resume, state as stop_state, stop, stop_wait, Stopped, STOPPED_CALL};
+pub use stop::{
+    measure_now as stop_measure, resume, state as stop_state, stop, stop_wait, Stopped,
+    STOPPED_CALL,
+};
 
 use iris_policy::Mode;
 use iris_provider::{Provider, BATCH_LIMIT};

@@ -947,19 +947,26 @@ async fn get_outbox(
     .into_response())
 }
 
-/// `GET /api/stop`: `{"stopped": bool, "since": time|null, "live": n,
-/// "busy": bool}` (docs/specs/2026-11-17-stop.md, section 5). `live` and
-/// `busy` are measured now, so a client says that no mail leaves only for a
-/// complete stop.
+/// `GET /api/stop`: `{"stopped": bool, "since": time|null, "sessions": 0,
+/// "live": n, "busy": bool}` (docs/specs/2026-11-17-stop.md, section 5).
+/// `live` and `busy` are measured now, also while Iris runs, so a client
+/// says that no mail leaves only for a complete stop.
 async fn get_stop(State(s): State<Arc<Store>>) -> Result<Response> {
-    let now = iris_apply::stop_state(&s).map_err(apply_error)?;
-    Ok(Json(match now {
-        None => serde_json::json!({ "stopped": false, "since": null, "live": 0, "busy": false }),
-        Some(n) => serde_json::json!({
-            "stopped": true, "since": rfc3339(n.since), "live": n.live, "busy": n.busy,
-        }),
-    })
-    .into_response())
+    let since = s.read(iris_store::stopped)?;
+    Ok(Json(stop_answer(&s, since)?).into_response())
+}
+
+/// The answer of each Stop route with no stop in it: `sessions` is 0, and
+/// `live` and `busy` are measured now (issue 569).
+fn stop_answer(s: &Store, since: Option<i64>) -> Result<serde_json::Value> {
+    let (live, busy) = iris_apply::stop_measure(s).map_err(apply_error)?;
+    Ok(serde_json::json!({
+        "stopped": since.is_some(),
+        "since": since.map(rfc3339),
+        "sessions": 0,
+        "live": live,
+        "busy": busy,
+    }))
 }
 
 /// `POST /api/stop`: Stop all agent work. The answer adds `sessions` (the
@@ -982,14 +989,13 @@ async fn post_stop(State(s): State<Arc<Store>>, _: NoBody) -> Result<Response> {
     .into_response())
 }
 
-/// `POST /api/resume`: end the stop. `resumed` is false if Iris was not
-/// stopped; then nothing changed.
+/// `POST /api/resume`: end the stop, with the fields of [`stop_answer`].
+/// `resumed` is false if Iris was not stopped; then nothing changed.
 async fn post_resume(State(s): State<Arc<Store>>, _: NoBody) -> Result<Response> {
     let resumed = iris_apply::resume(&s).map_err(apply_error)?;
-    Ok(
-        Json(serde_json::json!({ "stopped": false, "since": null, "resumed": resumed }))
-            .into_response(),
-    )
+    let mut v = stop_answer(&s, None)?;
+    v["resumed"] = resumed.into();
+    Ok(Json(v).into_response())
 }
 
 fn apply_error(e: iris_apply::Error) -> Error {
