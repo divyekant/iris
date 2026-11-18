@@ -275,7 +275,10 @@ pub fn run(store: &Store, connect: Connect, limits: &Limits, now_ms: i64) -> Res
         )?;
         Ok((row, calls, tx.last_insert_rowid()))
     })?;
-    let result = run_messages(store, connect, row.as_ref(), calls, run, limits, now_ms);
+    let result = run_messages(store, connect, row.as_ref(), calls, run, limits, now_ms)
+        // Each stop, also a limit: a kind change of the last messages marks
+        // talks after the last sender refresh (issue 106).
+        .and_then(|stop| Ok(store::update_due_talks(store, now_ms).map(|_| stop)?));
     let stop = result.as_ref().map_or(Stop::Error, |s| *s);
     let keep_idle = limits.keep_idle || result.is_err();
     let report = store.write(|tx| {
@@ -388,10 +391,12 @@ fn run_messages(
 /// Step 2: the sender refresh and its reruns, in one write. Gives the
 /// count of reset messages.
 fn refresh_senders(store: &Store, now_ms: i64) -> Result<u64, Error> {
-    Ok(store.write(|tx| {
+    let reset = store.write(|tx| {
         let rows = iris_senders::refresh(tx, now_ms)?;
         rerun_senders(tx, &rows, now_ms)
-    })?)
+    })?;
+    store::update_due_talks(store, now_ms)?;
+    Ok(reset)
 }
 
 struct Runner<'a> {

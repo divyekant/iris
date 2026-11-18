@@ -1197,3 +1197,72 @@ fn a_reply_to_an_alias_is_your_turn() {
     assert_eq!(doc["your_turn"], true);
     assert_eq!(doc["role"], "direct");
 }
+
+/// Issue 106: each change of a sender kind marks the threads with mail
+/// from that address (store migration 40), and `update_due` computes their
+/// conversations again. So a thread of a service gets its conversation when
+/// the address becomes a person, also when no message of the thread is
+/// understood again, and loses it when the address becomes a service.
+#[test]
+fn a_kind_change_updates_the_talk_of_each_thread_of_the_sender() {
+    let b = Box_::new("kind-change");
+    let svc = ("Ann", "ann@shop.example");
+    b.kind(svc.1, "service");
+    for (id, thread) in [("k1", "k"), ("l1", "l")] {
+        b.put(M {
+            id,
+            thread,
+            from: svc,
+            ..M::default()
+        });
+    }
+    let due = |b: &Box_| -> usize {
+        b.store
+            .write(|tx| Ok(iris_talk::update_due(tx, NOW, 100)?))
+            .unwrap()
+    };
+    let talks = |b: &Box_| -> i64 {
+        b.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM item WHERE form = 'conversation' AND status <> 'gone'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    due(&b);
+    assert_eq!(talks(&b), 0, "service mail makes no talk");
+    // An update of the kind, an insert and a delete of the row: each one
+    // marks both threads.
+    for (step, sql, want) in [
+        (
+            "person",
+            "UPDATE sender SET kind = 'person' WHERE address = 'ann@shop.example'",
+            2,
+        ),
+        (
+            "service",
+            "UPDATE sender SET kind = 'service' WHERE address = 'ann@shop.example'",
+            0,
+        ),
+        (
+            "delete",
+            "DELETE FROM sender WHERE address = 'ann@shop.example'",
+            2,
+        ),
+        (
+            // The talk made a party row with no kind: its delete marks nothing.
+            "insert",
+            "DELETE FROM sender WHERE address = 'ann@shop.example';
+             INSERT INTO sender(address, kind) VALUES ('ann@shop.example', 'service')",
+            0,
+        ),
+    ] {
+        b.sql(sql);
+        assert_eq!(due(&b), 2, "{step}: two threads were due");
+        assert_eq!(talks(&b), want, "{step}");
+        assert_eq!(due(&b), 0, "{step}: the queue is empty");
+    }
+}

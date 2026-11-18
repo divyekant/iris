@@ -407,7 +407,7 @@ fn downgrade(s: &Store) {
              ALTER TABLE account DROP COLUMN imap_user;
              ALTER TABLE account DROP COLUMN categories_off_at;
              DROP TRIGGER understand_owner_label_add; DROP TRIGGER understand_owner_label_remove;
-             DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower;
+             DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower; DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender; DROP TRIGGER talk_due_sender_remove; DROP TABLE talk_due;
              PRAGMA user_version = 26;",
         )?;
         Ok(())

@@ -117,6 +117,22 @@ struct Existing {
     origin: i64,
 }
 
+/// Computes again the conversation of up to `limit` threads that a change
+/// of a sender kind marked (`talk_due`, store migration 40), and takes them
+/// from the queue. Gives the count of threads. Call it until it gives 0.
+pub fn update_due(conn: &Connection, now: i64, limit: i64) -> rusqlite::Result<usize> {
+    let threads: Vec<i64> = conn
+        .prepare_cached("SELECT thread_id FROM talk_due ORDER BY thread_id LIMIT ?1")?
+        .query_map([limit], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for &t in &threads {
+        update(conn, t, None, now)?;
+        conn.prepare_cached("DELETE FROM talk_due WHERE thread_id = ?1")?
+            .execute([t])?;
+    }
+    Ok(threads.len())
+}
+
 /// Compute the conversation of the thread with row ID `thread` again, and
 /// save it in the item table. Give the item row ID, or `None` if the thread
 /// has no conversation.
