@@ -30,6 +30,13 @@ const CHANGED_WINDOW: u32 = 20_000;
 /// The most deletes of one folder in one [`Provider::changes`] sequence.
 /// More give a full resync.
 const DELETES_MAX: u32 = 20_000;
+/// The longest folder name, in bytes. Each ID and label of a page holds the
+/// name, so this bound keeps a page small (spec section 6).
+const NAME_MAX: usize = 255;
+/// The most bytes of records in one page of `changes` (spec section 5).
+const PAGE_BYTES: usize = 16 << 20;
+/// The longest thread ID from a header: RFC 5322 allows no longer line.
+const THREAD_MAX: usize = 998;
 
 /// An IMAP account as a mail provider. The `token` of each call is the
 /// password. The calls run one at a time on one session.
@@ -123,6 +130,10 @@ fn mail_folders<S: Read + Write>(s: &mut Session<S>) -> Result<Vec<Folder>> {
         // shortcut: mail only in `\All` (Gmail over IMAP) does not sync, issue #633.
         .filter(|f| f.selectable && !matches!(f.special, Some(Special::All | Special::Flagged)))
         .collect();
+    // shortcut: a longer folder name refuses the account, issue #650.
+    if v.iter().any(|f| f.name.len() > NAME_MAX) {
+        return Err(api("longFolderName", "an IMAP folder name is too long"));
+    }
     v.sort_by(|a, b| order(&a.name).cmp(&order(&b.name)));
     by_name(&mut v);
     Ok(v)
@@ -222,6 +233,35 @@ fn labels_of(f: &Folder, flags: &[String]) -> Vec<String> {
     out
 }
 
+/// The names of fixed labels of any provider: no folder or keyword label
+/// takes one of them (spec section 4).
+const FIXED: [&str; 9] = [
+    "INBOX", "UNREAD", "STARRED", "SPAM", "TRASH", "SENT", "DRAFT", UNSENT, SENT_COPY,
+];
+
+/// One name for each label, with no case: a folder label whose name is a
+/// fixed name gets " (folder)", and a keyword label whose name is a fixed
+/// or a folder name gets " (keyword)". A lookup by name finds one label.
+fn unique_names(mut labels: Vec<Label>) -> Vec<Label> {
+    let fixed = |n: &str| FIXED.iter().any(|x| x.eq_ignore_ascii_case(n));
+    for l in labels.iter_mut().filter(|l| l.id.starts_with("folder:")) {
+        if fixed(&l.name) {
+            l.name.push_str(" (folder)");
+        }
+    }
+    let taken: BTreeSet<String> = labels
+        .iter()
+        .filter(|l| !l.id.starts_with("kw:"))
+        .map(|l| l.name.to_ascii_lowercase())
+        .collect();
+    for l in labels.iter_mut().filter(|l| l.id.starts_with("kw:")) {
+        if fixed(&l.name) || taken.contains(&l.name.to_ascii_lowercase()) {
+            l.name.push_str(" (keyword)");
+        }
+    }
+    labels
+}
+
 /// The label ID of a keyword. IMAP compares keywords with no case (RFC 3501
 /// section 9, note 1), so `$Todo` and `$todo` are one label.
 fn keyword_id(k: &str) -> String {
@@ -249,7 +289,7 @@ pub(crate) fn thread_of(headers: Option<&[u8]>, id: &str) -> String {
                 .or_else(|| m.in_reply_to().and_then(|r| r.first().map(str::to_owned)))
                 .or_else(|| m.message_id().map(str::to_owned))
         })
-        .filter(|t| !t.is_empty())
+        .filter(|t| !t.is_empty() && t.len() <= THREAD_MAX)
         .unwrap_or_else(|| id.to_owned())
 }
 
@@ -475,7 +515,7 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
                     }
                 }
             }
-            Ok(out.into_values().collect())
+            Ok(unique_names(out.into_values().collect()))
         })
     }
 
@@ -635,10 +675,22 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
                 };
                 let low = high.saturating_sub(width - 1).max(1);
                 if high > 0 {
+                    let mut bytes = 0usize;
                     s.window(low, high, before.map(|b| b.modseq), |e| {
-                        changes.push(Change::Added(history_message(f, mark.validity, &e)))
+                        let m = history_message(f, mark.validity, &e);
+                        bytes += m.id.len()
+                            + m.thread_id.len()
+                            + m.label_ids.iter().map(String::len).sum::<usize>();
+                        if bytes <= PAGE_BYTES {
+                            changes.push(Change::Added(m));
+                        }
                     })
                     .map_err(change_error)?;
+                    // Too large for one page: the full resync reads pages of
+                    // `messages` and one message at a time (spec section 5).
+                    if bytes > PAGE_BYTES {
+                        return Err(Error::HistoryExpired);
+                    }
                 }
                 if low > 1 {
                     let at = At::Window {
@@ -830,6 +882,47 @@ mod tests {
             Some(1_794_040_200_000)
         );
         assert_eq!(internal_ms("bad"), None);
+    }
+
+    #[test]
+    fn label_names_are_unique() {
+        let l = |id: &str, name: &str| Label {
+            id: id.into(),
+            name: name.into(),
+            kind: "user".into(),
+            messages_total: None,
+            messages_unread: None,
+            threads_total: None,
+            threads_unread: None,
+        };
+        let out = unique_names(vec![
+            l("INBOX", "INBOX"),
+            l("folder:Spam", "Spam"),
+            l("folder:Work", "Work"),
+            l("kw:inbox", "Inbox"),
+            l("kw:work", "work"),
+            l("kw:late", "Late"),
+        ]);
+        let names: Vec<&str> = out.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "INBOX",
+                "Spam (folder)",
+                "Work",
+                "Inbox (keyword)",
+                "work (keyword)",
+                "Late"
+            ]
+        );
+    }
+
+    #[test]
+    fn long_thread_header_is_ignored() {
+        let long = format!("Message-ID: <{}@x>\r\n\r\n", "a".repeat(THREAD_MAX));
+        assert_eq!(thread_of(Some(long.as_bytes()), "1:2:INBOX"), "1:2:INBOX");
+        let short = b"Message-ID: <a@x>\r\n\r\n";
+        assert_eq!(thread_of(Some(short), "1:2:INBOX"), "a@x");
     }
 
     #[test]

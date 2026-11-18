@@ -656,3 +656,16 @@ fn folder_role_change() {
     sync(&store, &mail, account, PASSWORD).unwrap();
     assert_clean(&store, &mail, account);
 }
+
+/// A folder name over 255 bytes refuses the account with a clear error,
+/// so no page holds IDs of an unbounded size (spec section 6).
+#[test]
+fn long_folder_name() {
+    let fake = FakeImap::start(Caps::ALL);
+    fake.create(&"a".repeat(256), None);
+    let mail = provider(&fake);
+    assert!(matches!(
+        mail.profile(PASSWORD),
+        Err(Error::Api { status: 400, .. })
+    ));
+}
