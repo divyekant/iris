@@ -259,15 +259,15 @@ fn by_socket(e: &Engine, verb: Verb, target: &str, args: &Map<String, Value>) ->
 }
 
 /// An agent of the library path: the steps of the socket for `who`, with
-/// the rules of the policy after the submit. Gives `cs-N`, or `None` if the
-/// engine denies the submit.
+/// the rules of the policy after the submit. Gives `cs-N`, or the reason
+/// if the engine denies the submit.
 fn by_agent(
     e: &Engine,
     who: &Author,
     verb: Verb,
     target: &str,
     args: &Map<String, Value>,
-) -> Option<String> {
+) -> Result<String, String> {
     let t = now();
     let cs = iris_changeset::create(&e.store, who, t).unwrap();
     iris_changeset::add_action(&e.store, cs, who, verb, &[target], args, None).unwrap();
@@ -282,11 +282,8 @@ fn by_agent(
         iris_triage::decide_submitted(c, cs, revision, iris_policy::Author::Agent, t)
     });
     match submitted {
-        Ok(()) => Some(format!("cs-{cs}")),
-        Err(iris_changeset::Error::Denied(why)) => {
-            assert!(why.contains("cannot"), "{why}");
-            None
-        }
+        Ok(()) => Ok(format!("cs-{cs}")),
+        Err(iris_changeset::Error::Denied(why)) => Err(why),
         Err(x) => panic!("{x}"),
     }
 }
@@ -406,15 +403,23 @@ fn no_injection_sends_mail_without_a_person() {
     for s in SAMPLES {
         let thread = e.thread_of(&s.message_id());
         let (verb, target, args) = obey(&e, s.ask, &s.message_id(), &draft);
+        // Today a job cannot write mail: the engine denies the submit
+        // (docs/specs/2026-11-17-job-verbs.md). A later card that grants a
+        // job an account or a draft (#551) changes this check, so that the
+        // job path reaches the checks below.
+        let denied = by_agent(&e, &agent(Some(job(&e, &thread))), verb, &target, &args)
+            .expect_err("a job submit of a draft or a send is denied");
+        assert!(
+            denied.contains("a job has no grant of an account or a draft"),
+            "{}: {denied}",
+            s.name
+        );
         let paths = [
-            Some(by_socket(&e, verb, &target, &args)),
-            by_agent(&e, &agent(None), verb, &target, &args),
-            // Today a job cannot write mail: the engine denies the submit. A
-            // later card that grants it makes this path reach the checks.
-            by_agent(&e, &agent(Some(job(&e, &thread))), verb, &target, &args),
+            by_socket(&e, verb, &target, &args),
+            by_agent(&e, &agent(None), verb, &target, &args)
+                .unwrap_or_else(|why| panic!("{}: {why}", s.name)),
         ];
-        assert!(paths[0].is_some() && paths[1].is_some(), "{}", s.name);
-        for (i, cs) in paths.into_iter().flatten().enumerate() {
+        for (i, cs) in paths.into_iter().enumerate() {
             let actions = e.actions(&cs);
             assert_eq!(actions.len(), 1, "{}: {cs}", s.name);
             let (a, state, flags) = actions.into_iter().next().unwrap();
