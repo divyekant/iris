@@ -89,7 +89,9 @@ provider reads the three header fields with
 `BODY.PEEK[HEADER.FIELDS (MESSAGE-ID IN-REPLY-TO REFERENCES)]` in each list
 and in each raw read, so that the list and the raw read give the same
 thread. Two copies of one message in two folders are two messages in one
-thread.
+thread if the message has one of the three header fields. A message with
+none of them gets its own location ID as thread, so its copies are in two
+threads. This is part of limit issue #631 (threads from headers only).
 
 ### 4. Labels
 
