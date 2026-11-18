@@ -317,14 +317,18 @@ fn created(
     // Read the draft back and keep that ID, so that the release check and
     // the send recovery use it. If the read fails, or the draft has other
     // content, the row keeps the ID of Iris, and the first release denies
-    // the send and refreshes the row from Gmail (section 4.1).
-    let gmail_id = run
-        .call(|g, t| g.draft_raw(t, provider_id))
-        .ok()
-        .and_then(|d| d.raw)
-        .and_then(|raw| iris_compose::read(&raw, &run.address))
-        .filter(|r| iris_compose::hash(&r.content, r.reply.as_ref()) == *hash)
-        .map(|r| r.message_id);
+    // the send and refreshes the row from Gmail (section 4.1). Outlook
+    // keeps the ID of Iris, so it gets no read.
+    let gmail_id = if run.mail.sets_draft_message_id() {
+        run.call(|g, t| g.draft_raw(t, provider_id))
+            .ok()
+            .and_then(|d| d.raw)
+            .and_then(|raw| iris_compose::read(&raw, &run.address))
+            .filter(|r| iris_compose::hash(&r.content, r.reply.as_ref()) == *hash)
+            .map(|r| r.message_id)
+    } else {
+        None
+    };
     let message_id = gmail_id.as_ref().unwrap_or(message_id);
     let raw = iris_compose::compose(
         &run.address,
@@ -638,7 +642,8 @@ pub fn release(
         r.message_id == d.message_id && iris_compose::hash(&r.content, r.reply.as_ref()) == d.hash
     });
     if !same {
-        return changed_at_gmail(store, action, &d, read, &raw, run.mail.name());
+        let new_ids = run.mail.sets_draft_message_id();
+        return changed_at_gmail(store, action, &d, read, &raw, run.mail.name(), new_ids);
     }
     // The flags of the mail that Gmail holds, the same bytes as the draft
     // row (docs/specs/2026-11-17-send-checks.md, section 4).
@@ -676,24 +681,29 @@ fn changed_at_gmail(
     read: Option<iris_compose::Read>,
     raw: &[u8],
     provider: &str,
+    new_ids: bool,
 ) -> Result<Outcome> {
     let why = format!("the draft changed at {provider} after the approval");
     let t = now();
-    // A draft that reads back refreshes the row, also with another
-    // Message-ID: Gmail can set its own (spec, assumption 3). The ID is not
-    // in the content hash, so a new send still needs a new approval.
-    let refresh = read.map(|r| {
-        let hash = iris_compose::hash(&r.content, r.reply.as_ref());
-        let stored = Stored {
-            content: r.content,
-            reply: r.reply,
-        };
-        (
-            serde_json::to_string(&stored).expect("plain data"),
-            hash,
-            r.message_id,
-        )
-    });
+    // A draft that reads back refreshes the row. With another Message-ID
+    // only if the provider sets its own ID on a draft (Gmail, spec
+    // assumption 3); else another ID means another client: `foreign_at`.
+    // The ID is not in the content hash, so a new send still needs a new
+    // approval.
+    let refresh = read
+        .filter(|r| new_ids || r.message_id == d.message_id)
+        .map(|r| {
+            let hash = iris_compose::hash(&r.content, r.reply.as_ref());
+            let stored = Stored {
+                content: r.content,
+                reply: r.reply,
+            };
+            (
+                serde_json::to_string(&stored).expect("plain data"),
+                hash,
+                r.message_id,
+            )
+        });
     let n = store.write(|tx| {
         let n = tx.execute(
             "UPDATE changeset_action SET state = 'denied', decided_by = 'engine', rule = NULL,
