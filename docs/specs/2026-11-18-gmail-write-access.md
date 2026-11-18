@@ -23,8 +23,8 @@ The person sees a raw provider error and no next step.
   `iris account add <client.json> --write`.
 - A plain `iris account add` keeps the read-only sign-in. A read-only account
   syncs and verifies as before.
-- Iris knows the access of each account from the scopes that Google granted,
-  not from the scopes that Iris asked for.
+- An account can write only if the person asked for write access and Google
+  granted `gmail.modify`. Iris never trusts the asked scope alone.
 - A read-only account makes no Gmail write call. Its approved and held
   actions wait, and the account state says why.
 - A Gmail 403 for a missing scope gives a clear error with the command that
@@ -41,8 +41,9 @@ The person sees a raw provider error and no next step.
   `read_only` is in `GET /api/status` at once. The words on the page come in
   a follow-up card with a before/after page, because the owner picks each
   screen change.
-- A way to drop write access in Iris. The person runs `iris account add`
-  without `--write`, or removes the access at
+- A command that only drops write access. The person runs `iris account add`
+  without `--write` (the account is then read-only in Iris, also when Google
+  keeps the earlier grant), or removes the access at
   `myaccount.google.com/permissions`.
 - Outlook. Its sign-in asks for `Mail.ReadWrite` and `Mail.Send` already.
 
@@ -64,8 +65,11 @@ The person sees a raw provider error and no next step.
 - A write sign-in whose answer does not hold `WRITE_SCOPE` gives the new
   `Error::WriteScopeMissing`. Iris saves nothing. The person asked for write
   access, so a silent read-only account would hide the refusal.
-- `Tokens` gets `write: bool`: true only if the granted scope text of the
-  code exchange holds `WRITE_SCOPE`.
+- `Tokens` gets `write: bool`: true only if the sign-in asked for write
+  access and the granted scope text of the code exchange holds
+  `WRITE_SCOPE`. Google can return an earlier `gmail.modify` grant to a plain
+  sign-in. Then `write` is false: the plain sign-in is the way to make an
+  account read-only in Iris.
 
 ### Storage
 
@@ -85,9 +89,11 @@ The person sees a raw provider error and no next step.
     is the grant that it read (the same guard as `mark_needs_sign_in`). This
     covers an account of an older Iris, whose state is `ok`.
   - It does not call `iris_apply::step`, so Iris makes no Gmail call for the
-    account. Approved actions stay `approved` and held sends stay `held`. The
-    14-day expiry of spec 2 runs at the first apply step after a write
-    sign-in.
+    account. Approved actions stay `approved` and held sends stay `held`.
+  - The 14-day expiry of spec 2 does not change: the engine tick calls
+    `iris_changeset::expire` for all accounts, with no apply step. So an
+    approved action or a held send of a read-only account expires 14 days
+    after its submit, as for any other account.
   - It gives `Error::ReadOnly`. Its text: "the account has read access only:
     run `iris account add <client.json> --write` to let Iris change mail".
     The engine prints the text once for each account, when the state changes,
@@ -100,9 +106,16 @@ The person sees a raw provider error and no next step.
   - The `Display` text of the error is "Gmail refused the change: Iris has
     read access only. Run `iris account add <client.json> --write`." in
     place of the raw provider text. The failed action keeps this text.
-  - `apply_step` sets `account.state` to `read_only` (same guard), so the
-    actions of the next apply steps wait in place of a fail. The other
-    actions of the same step can fail with the same text.
+  - `iris_apply::Outcome::is_scope_refusal()` reads the outcome of one
+    action. It is the only place that knows the form of the refusal.
+  - The apply step (`iris_apply::step`) ends at the first scope refusal,
+    as it ends at a refused token. So no other action of the same step
+    (approved actions, sends of the write view, releases of held sends)
+    makes a Gmail call. `Step.scope_refused` tells the engine.
+  - `apply_step` then sets `account.state` to `read_only` (same guard).
+  - Each later apply step checks the grant and the state: `write` must be
+    true and the state must not be `read_only`. Only `save_sign_in` sets
+    the state again, so the actions wait until a new write sign-in.
 
 ### Status
 
@@ -136,11 +149,12 @@ section 5 of spec 1.
 |---|---|---|
 | Write sign-in, answer holds `gmail.modify` | Account saved, `write` true, state `ok` | `iris-auth` flow test, engine test |
 | Write sign-in, answer holds only `gmail.readonly` | `WriteScopeMissing`, nothing saved | `iris-auth` flow test |
-| Read sign-in, answer holds `gmail.modify` (an earlier write grant) | Saved, `write` true | `iris-auth` flow test |
+| Read sign-in, answer holds `gmail.modify` (an earlier write grant) | Saved, `write` false: the person asked for read only | `iris-auth` flow test |
 | Any sign-in, answer holds neither scope | `ScopeMissing`, nothing saved | existing test |
 | Refresh answer with no `scope` | Accepted, `write` of the grant unchanged | existing test |
 | Grant of an older Iris (no `write` field) | Read-only: state `read_only`, no apply step | engine test |
-| Gmail 403 `insufficientPermissions` on a write | Action `failed` with the clear text, state `read_only` | provider unit test, engine test |
+| Gmail 403 `insufficientPermissions` on a write | Action `failed` with the clear text, the step ends, state `read_only`, later steps make no write | provider unit test, `iris-apply` step test, engine test |
+| 14 days pass while the account is read-only | The approved action expires, as for any account | engine test |
 | Gmail 403 with another reason | As now: the raw text | existing test |
 | A new sign-in between the read of the grant and the state write | The guard on `account.token` keeps the new state | engine test |
 
@@ -207,9 +221,11 @@ rejection.
 4. A grant of an older Iris reads as read-only. Red if its apply step calls
    Gmail.
 5. A 403 `insufficientPermissions` on a write fails the action with the clear
-   text and sets `read_only`. Red if the raw text stays or the state stays
-   `ok`.
-6. After `--write` on the Mac, the draft and send check of #302 passes.
+   text, ends the step and sets `read_only`. Red if the raw text stays, the
+   state stays `ok`, or a second approved action gets a Gmail call.
+6. A plain sign-in makes the account read-only, also when Google gives
+   `gmail.modify`. Red if `write` is true.
+7. After `--write` on the Mac, the draft and send check of #302 passes.
 
 ## Verify
 
@@ -231,7 +247,8 @@ Criterion 6 runs on the Mac of the owner (runbook `mac-gates.md`).
 
 - A write grant gives Iris more access. The policy, the review and the send
   switch still gate each write. Rollback: `iris account add` without
-  `--write`, or remove the access at Google.
+  `--write` (read-only in Iris at once), and remove the access at Google to
+  take back the grant.
 - An account of an older Iris shows `read_only` after the upgrade. That is
   the truth, and the state tells the person the command.
 
