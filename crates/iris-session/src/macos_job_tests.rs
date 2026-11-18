@@ -344,6 +344,8 @@ struct Started {
     engine: io::PipeWriter,
     status: io::PipeReader,
     dir: PathBuf,
+    /// The descriptors of the test process that a child inherits.
+    inherited: Vec<i32>,
     _dir: Dir,
 }
 
@@ -358,6 +360,13 @@ fn start_job(name: &str, agent: &str) -> Started {
     let f = files(&d, 3);
     fs::create_dir_all(f.socket.parent().unwrap()).unwrap();
     let listener = UnixListener::bind(&f.socket).unwrap();
+    // SAFETY: fcntl on numbers that may or may not be open.
+    let inherited: Vec<i32> = (3..64)
+        .filter(|&n| {
+            let f = unsafe { libc::fcntl(n, libc::F_GETFD) };
+            f >= 0 && f & libc::FD_CLOEXEC == 0
+        })
+        .collect();
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "macos_job::tests::job_child", "--test-threads=1"])
         .env("IRIS_TEST_JOB_DIR", &d)
@@ -392,6 +401,7 @@ fn start_job(name: &str, agent: &str) -> Started {
         engine: engine_w,
         status: status_r,
         dir: d,
+        inherited,
         _dir: guard,
     }
 }
@@ -404,7 +414,7 @@ fn start_job(name: &str, agent: &str) -> Started {
 fn the_job_runs_the_hold_with_the_handoff() {
     let mut j = start_job(
         "run",
-        "pwd > seen; echo \"$IRIS_T\" >> seen; [ -z \"$IRIS_TEST_JOB_DIR\" ] && echo clean >> seen; ls /dev/fd/ > fds",
+        "pwd > seen; echo \"$IRIS_T\" >> seen; [ -z \"$IRIS_TEST_JOB_DIR\" ] && echo clean >> seen; (launchctl print gui/$(id -u) >/dev/null 2>&1 && echo launchd >> seen) 2>/dev/null; exec > fds; for n in $(seq 3 63); do [ -e /dev/fd/$n ] && echo $n; done; true",
     );
     let d = j.dir.clone();
     // The record came before the connection.
@@ -428,16 +438,17 @@ fn the_job_runs_the_hold_with_the_handoff() {
         seen,
         format!("{}\nhanded\nclean\n", d.join("work").display())
     );
-    // 0, 1 and 2, and the folder that `ls` opens: no descriptor of the
-    // handoff (engine pipe, log, status, folder) reaches the agent.
+    // The line "launchd" is absent: on macOS the job gave the agent no
+    // bootstrap port, so `launchctl print` failed (Linux has no launchctl).
+    // Each open descriptor of the agent above 2 came from the test
+    // process itself (open with no close-on-exec when the test started),
+    // never from the handoff: the engine pipe, the log, the status pipe or
+    // the folder. A stat of /dev/fd/N opens no descriptor, and `exec >`
+    // keeps no copy of the old fd 1 (a redirect of the loop would).
     let fds = fs::read_to_string(d.join("work/fds")).unwrap();
-    assert!(
-        fds.split_whitespace().count() <= 4
-            && fds
-                .split_whitespace()
-                .all(|n| ["0", "1", "2", "3"].contains(&n)),
-        "{fds}"
-    );
+    for n in fds.split_whitespace() {
+        assert!(j.inherited.contains(&n.parse::<i32>().unwrap()), "{fds}");
+    }
     assert!(sb.home(3).is_dir() && sb.tmp(3).is_dir());
 }
 

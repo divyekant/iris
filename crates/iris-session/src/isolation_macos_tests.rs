@@ -413,6 +413,14 @@ fn the_profile_denies_by_default_and_allows_only_the_session() {
     assert!(!text.contains("remote ip"), "UDP must stay refused");
     assert!(!text.contains("kern.proc"));
     assert!(!text.contains("mach-lookup") && !text.contains("iokit-open"));
+    // dyld reads `/` to start each program; only the literal, not below it.
+    let reads = text
+        .lines()
+        .find(|l| l.starts_with("(allow file-read* "))
+        .unwrap();
+    assert!(reads.contains("(literal \"/\")"));
+    assert!(!text.contains("(subpath \"/\")"));
+    assert!(reads.contains("(literal \"/etc\")"));
     assert!(!text.contains("(subpath \"/System\")") && !text.contains("(subpath \"/usr\")"));
     // The deny of the user volume comes after each allow but the folders
     // of the session.
@@ -767,4 +775,54 @@ fn stop_with_no_record_boots_out_a_job_that_a_crash_left() {
     let w = f.w();
     assert!(w.signals.is_empty());
     assert_eq!(w.bootouts, [format!("gui/501/{}", s.name(1))]);
+}
+
+/// The real profile on the Mac: a program starts, the workspace works, a
+/// file outside is refused, and `launchctl` gets no answer from launchd.
+/// The unit tests above use a fake system, so only this test runs the real
+/// profile. Run it on a Mac: `cargo test -p iris-session --lib --
+/// --include-ignored`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "runs the real sandbox-exec; run on a Mac with --include-ignored"]
+fn the_real_profile_starts_programs_and_hides_launchd() {
+    use std::os::unix::process::CommandExt;
+    let d = std::env::temp_dir().join(format!("iris-sbx-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&d);
+    for sub in ["work", "home", "tmp"] {
+        fs::create_dir_all(d.join(sub)).unwrap();
+    }
+    let d = fs::canonicalize(&d).unwrap();
+    let paths = Paths {
+        workspace: d.join("work"),
+        home: d.join("home"),
+        tmp: d.join("tmp"),
+        programs: vec![],
+    };
+    let run = |script: &str| {
+        let mut c = std::process::Command::new("/usr/bin/sandbox-exec");
+        c.args(sandbox_args(&paths, None))
+            .args(["/bin/sh", "-c", script])
+            .current_dir(&paths.workspace);
+        // SAFETY: the hook makes one Mach call and allocates nothing.
+        unsafe {
+            c.pre_exec(crate::isolation::macos_sys::drop_bootstrap);
+        }
+        c.output().unwrap()
+    };
+    let out = run("/usr/bin/true");
+    assert!(out.status.success(), "{out:?}");
+    let out = run("echo ok > f && cat f");
+    assert_eq!(out.stdout, b"ok\n", "{out:?}");
+    assert!(!run("cat /private/etc/master.passwd").status.success());
+    // The public files open by their `/etc` path too.
+    let out = run("head -c 1 /etc/ssl/cert.pem && head -c 1 /etc/hosts");
+    assert!(out.status.success(), "{out:?}");
+    assert!(!run("cat /etc/master.passwd").status.success());
+    assert!(!run("ls ~/.ssh /Users").status.success());
+    let out = run("launchctl print gui/$(id -u)");
+    assert!(!out.status.success(), "{out:?}");
+    let out = run("launchctl list");
+    assert!(!out.status.success() || out.stdout.is_empty(), "{out:?}");
+    let _ = fs::remove_dir_all(&d);
 }

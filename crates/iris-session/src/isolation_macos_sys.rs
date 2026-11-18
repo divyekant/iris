@@ -43,6 +43,25 @@ extern "C" {
     fn coalition_info_resource_usage(cid: u64, cru: *mut c_void, sz: usize) -> c_int;
 }
 
+/// Sets the bootstrap port of this process to none. Each child process
+/// inherits it, so the agent cannot send a message to launchd: with no
+/// `mach-lookup`, the bootstrap port still answers `launchctl print`
+/// (Mac acceptance, 2026-11-18). Async-signal-safe: one Mach call.
+pub fn drop_bootstrap() -> io::Result<()> {
+    // SAFETY: a Mach call on the task port of this process.
+    let kr = unsafe {
+        mach2::task_special_ports::task_set_bootstrap_port(
+            mach2::traps::mach_task_self(),
+            mach2::port::MACH_PORT_NULL,
+        )
+    };
+    if kr == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("task_set_special_port: {kr}")))
+    }
+}
+
 /// The real process facts of macOS.
 pub struct MacSys;
 

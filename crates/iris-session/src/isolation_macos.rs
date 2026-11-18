@@ -628,8 +628,17 @@ const SYSTEM_READS: &[&str] = &[
     "/private/etc/ssl/certs",
 ];
 
-/// The single files that the agent can read.
+/// The single files that the agent can read. `/` itself: dyld reads it
+/// to find the shared cache, and each program aborts without it (Mac
+/// acceptance, 2026-11-18). The literal gives the names in `/`, not the
+/// files below it.
 const FILE_READS: &[&str] = &[
+    "/",
+    // The link `/etc` to `/private/etc`: a program opens `/etc/...`, and
+    // Seatbelt refuses the path if it cannot read the link (Mac acceptance).
+    "/etc",
+    "/private/var/select/sh",
+    "/private/etc/ssl/openssl.cnf",
     "/dev/null",
     "/dev/zero",
     "/dev/random",
