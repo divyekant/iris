@@ -169,6 +169,36 @@ fn a_pattern_gives_a_proposal_and_only_an_accept_writes_the_file() {
     );
 }
 
+/// A refresh reads its pass before it takes the write lock. An accept
+/// between the read and the write changes the policy: the write drops the
+/// old pass, so the covered proposal does not come back (issue 314).
+#[test]
+fn a_pass_read_before_an_accept_writes_nothing() {
+    let (_dir, store) = store("race");
+    for _ in 0..MIN_APPROVALS {
+        let m = message(&store, "deals@shop.example", false);
+        decided(&store, "archive", &[m], "approved");
+    }
+    let ps = refresh(&store);
+    let p = find(&ps, "deals@shop.example").unwrap().id;
+    let mut last = None;
+    let old = propose::read_pass(&store, NOW, &last).unwrap().unwrap();
+    assert!(matches!(
+        change(&store, None, Change::Accept(p), NOW).unwrap(),
+        Edited::Done { .. }
+    ));
+    assert_eq!(
+        propose::write_pass(&store, old, NOW, &mut last).unwrap(),
+        None
+    );
+    assert_eq!(last, None, "the next tick runs again");
+    let open = store.read(propose::open).unwrap();
+    assert!(open.is_empty(), "a proposal came back: {open:?}");
+    // The next tick reads the new policy and writes the same state.
+    let mut last = None;
+    assert_eq!(propose::refresh(&store, NOW, &mut last).unwrap(), Some(0));
+}
+
 #[test]
 fn one_refusal_stops_the_proposal() {
     let (_dir, store) = store("refusal");

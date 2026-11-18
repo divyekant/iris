@@ -230,25 +230,57 @@ pub struct Mark([i64; 6]);
 
 /// Writes the open proposals again from the decided actions, if the
 /// decisions, the active policy or the hour changed since `last`. Gives the
-/// number of open proposals after a pass, or `None` when no pass ran.
+/// number of open proposals after a pass, or `None` when no pass ran or a
+/// change came between the read and the write.
 pub fn refresh(store: &Store, now: i64, last: &mut Option<Mark>) -> Result<Option<usize>> {
-    // The pass reads many facts: it runs on a read connection, so it holds
-    // no write lock. A decision after the read gives a new mark, and the
-    // next tick runs again; an accept checks its proposal again.
-    let (mark, found) = store.read(|c| {
+    match read_pass(store, now, last)? {
+        Some(pass) => write_pass(store, pass, now, last),
+        None => Ok(None),
+    }
+}
+
+/// The result of the read half of [`refresh`], for [`write_pass`].
+pub struct Pass {
+    mark: Mark,
+    found: Found,
+}
+
+/// The read half of [`refresh`]: a pass on a read connection, so it holds
+/// no write lock. Gives `None` when nothing changed since `last`.
+pub fn read_pass(store: &Store, now: i64, last: &Option<Mark>) -> Result<Option<Pass>> {
+    store.read(|c| {
         let mark = mark(c, now)?;
-        Ok((
+        if *last == Some(mark) {
+            return Ok(None);
+        }
+        Ok(Some(Pass {
             mark,
-            (*last != Some(mark)).then(|| pass(c, now)).transpose()?,
-        ))
+            found: pass(c, now)?,
+        }))
+    })
+}
+
+/// The write half of [`refresh`]. The pass is the truth only of the state
+/// that it read: a decision or an accept (a new policy) after the read
+/// changes the mark, and the write then drops the pass. The next tick
+/// runs again, because `last` does not change.
+pub fn write_pass(
+    store: &Store,
+    pass: Pass,
+    now: i64,
+    last: &mut Option<Mark>,
+) -> Result<Option<usize>> {
+    let n = store.write(|tx| {
+        if mark(tx, now)? != pass.mark {
+            return Ok(None);
+        }
+        write(tx, &pass.found, now).map(Some)
     })?;
-    let Some(found) = found else {
-        return Ok(None);
-    };
-    let n = store.write(|tx| write(tx, &found, now))?;
     // Only after the commit: a pass that did not commit runs again.
-    *last = Some(mark);
-    Ok(Some(n))
+    if n.is_some() {
+        *last = Some(pass.mark);
+    }
+    Ok(n)
 }
 
 /// Runs a pass in `tx` and writes its proposals. [`crate::active::record`]
