@@ -375,7 +375,10 @@ fn parse_cursor(text: &str) -> Option<BTreeMap<String, Mark>> {
             count: u32::try_from(count).ok()?,
             role,
         };
-        out.insert(name.to_owned(), m);
+        // Two lines for one folder: not a cursor of ours.
+        if out.insert(name.to_owned(), m).is_some() {
+            return None;
+        }
     }
     // A profile always has INBOX, so an empty cursor is not one of ours.
     (!out.is_empty()).then_some(out)
@@ -596,7 +599,20 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
             };
             if let Some((f, bound)) = found {
                 let e = s.examine(&f.name).map_err(read_error)?;
-                let mut got: Vec<Entry> = Vec::new();
+                // (UID, reference): each entry becomes compact in the callback,
+                // so no header block stays for the page (spec section 6).
+                let mut got: Vec<(u32, MessageRef)> = Vec::new();
+                let validity = e.uidvalidity;
+                let mut keep = |en: Entry| {
+                    let m = history_message(f, validity, &en);
+                    got.push((
+                        en.uid,
+                        MessageRef {
+                            id: m.id,
+                            thread_id: m.thread_id,
+                        },
+                    ));
+                };
                 // A window of sequence numbers: for a search too, so that
                 // each answer holds at most WINDOW UIDs.
                 let high = u64::from(e.exists).min(bound.saturating_sub(1)) as u32;
@@ -604,27 +620,19 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
                 if high > 0 {
                     match search {
                         // Each message of a Drafts folder is UNSENT.
-                        Some(Search::Draft) if f.special == Some(Special::Drafts) => s
-                            .window(low, high, None, |en| got.push(en))
-                            .map_err(read_error)?,
+                        Some(Search::Draft) if f.special == Some(Special::Drafts) => {
+                            s.window(low, high, None, &mut keep).map_err(read_error)?
+                        }
                         Some(key) => {
                             let uids = s.search(Some((low, high)), key).map_err(read_error)?;
-                            s.fetch_uids(&uids, |en| got.push(en)).map_err(read_error)?;
+                            s.fetch_uids(&uids, &mut keep).map_err(read_error)?;
                         }
-                        None => s
-                            .window(low, high, None, |en| got.push(en))
-                            .map_err(read_error)?,
+                        None => s.window(low, high, None, &mut keep).map_err(read_error)?,
                     }
                 }
                 let more = (low > 1).then_some(low);
-                got.sort_by_key(|e| std::cmp::Reverse(e.uid));
-                messages.extend(got.iter().map(|en| {
-                    let m = history_message(f, e.uidvalidity, en);
-                    MessageRef {
-                        id: m.id,
-                        thread_id: m.thread_id,
-                    }
-                }));
+                got.sort_by_key(|(uid, _)| std::cmp::Reverse(*uid));
+                messages.extend(got.into_iter().map(|(_, m)| m));
                 let next = if let Some(lo) = more {
                     Some(format!("{lo}:{}", f.name))
                 } else {
@@ -954,6 +962,80 @@ mod tests {
         assert_eq!(thread_of(Some(long.as_bytes()), "1:2:INBOX"), "1:2:INBOX");
         let short = b"Message-ID: <a@x>\r\n\r\n";
         assert_eq!(thread_of(Some(short), "1:2:INBOX"), "a@x");
+    }
+
+    /// A small xorshift generator: the tests stay deterministic.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    fn render(c: &BTreeMap<String, Mark>) -> String {
+        c.iter().map(|(n, m)| mark_line(n, *m)).collect()
+    }
+
+    /// Property: a cursor parses back to the same folders; any change to
+    /// its text never panics and gives a cursor that renders the same way
+    /// again or `None`; a second line for one folder is `None`. The token
+    /// parser never panics either.
+    #[test]
+    fn cursor_parsers_property() {
+        let mut rng = Rng(0x2545f4914f6cdd1d);
+        let names = ["INBOX", "A b", "x:y", "Spam", "a/b c"];
+        for _ in 0..5_000 {
+            let mut c = BTreeMap::new();
+            for n in names.iter().take(1 + rng.below(5) as usize) {
+                c.insert(
+                    n.to_string(),
+                    Mark {
+                        validity: rng.next() as u32,
+                        next: rng.next() as u32,
+                        modseq: rng.next(),
+                        count: rng.next() as u32,
+                        role: ['S', 'D', 'J', 'T', '-'][rng.below(5) as usize],
+                    },
+                );
+            }
+            let text = render(&c);
+            let back = parse_cursor(&text).unwrap();
+            assert_eq!(render(&back), text);
+            // A duplicate folder line.
+            let first = text.lines().next().unwrap();
+            assert!(parse_cursor(&format!("{text}{first}\n")).is_none());
+            // Random edits.
+            let mut b = text.into_bytes();
+            for _ in 0..1 + rng.below(4) {
+                if b.is_empty() {
+                    break;
+                }
+                let at = rng.below(b.len() as u64) as usize;
+                match rng.below(3) {
+                    0 => b[at] = b" \n0123456789-SJx:"[rng.below(16) as usize],
+                    1 => {
+                        b.remove(at);
+                    }
+                    _ => b.truncate(at),
+                }
+            }
+            let t = String::from_utf8_lossy(&b);
+            if let Some(p) = parse_cursor(&t) {
+                assert_eq!(
+                    parse_cursor(&render(&p)).map(|q| render(&q)),
+                    Some(render(&p))
+                );
+            }
+            let _ = parse_changes_token(&t);
+            let _ = parse_changes_token(&format!("W 5\n{t}"));
+            let _ = parse_changes_token(&format!("F\n{t}"));
+        }
     }
 
     #[test]

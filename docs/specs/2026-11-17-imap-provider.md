@@ -80,7 +80,8 @@ index, so a change of the LIST order between two calls does not skip a
 folder. The next page is the first folder after that name in the order of
 now. A folder that a page sequence skips because it was made during the
 sequence is not in the cursor of `profile` or of the last `changes`, so
-the next `changes` gives `Added` for each of its messages.
+the next `changes` gives `HistoryExpired` (section 5), and the full resync
+reads its messages. Issue #664 (fixed here).
 
 ### 3. Message ID and thread ID
 
@@ -216,6 +217,10 @@ gives the same names for the same LIST and flags. The IDs do not change. The tes
 
 ### 5. The cursor
 
+A cursor with two lines for one folder is not a cursor of the provider:
+`changes` gives `HistoryExpired` (issue #663). The test
+`cursor_parsers_property` covers random cursor text.
+
 The cursor is text with one line for each folder:
 `<UIDVALIDITY> <UIDNEXT> <HIGHESTMODSEQ> <count> <role> <folder>`. `profile`
 makes it from an `EXAMINE` of each folder. The role is the special use of
@@ -321,7 +326,9 @@ mirror does not have.
     5322). A longer one is ignored, and the message gets its own location
     ID as thread.
   - A page of `messages` then holds at most 2,000 IDs of about 1.3 KB
-    each, so less than 3 MB.
+    each, so less than 3 MB. Each fetched entry becomes its compact
+    reference in the fetch callback, so no header block stays for the
+    whole page (issue #662).
   - A page of `changes` keeps at most 16 MiB of records (IDs, thread IDs
     and labels), `Added` and `Deleted` records together. If a page has
     more, `changes` is `HistoryExpired`, and
