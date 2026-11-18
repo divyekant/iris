@@ -33,25 +33,31 @@ const PAGE: i64 = 500;
 const NO_DATE: i64 = -9_223_372_036_854_775_807;
 
 /// The pending conditions other than the thread rule, on message `m`.
-const BASE: &str = "m.gone_at IS NULL AND m.understood_at IS NULL
+const BASE: &str = concat!(
+    "m.gone_at IS NULL AND m.understood_at IS NULL
   AND m.content_sha256 IS NOT NULL AND m.waits_model = 0
   AND m.tries < :max_tries AND (m.retry_at IS NULL OR m.retry_at <= :now)
-  AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                  WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT')
+  AND NOT ",
+    iris_store::draft_or_copy!("m"),
+    "
   AND NOT EXISTS (SELECT 1 FROM message o WHERE o.thread_id = m.thread_id
-                  AND o.gone_at IS NULL AND o.content_sha256 IS NULL)";
+                  AND o.gone_at IS NULL AND o.content_sha256 IS NULL)"
+);
 
 /// The thread rule: no older message of the thread waits. Hostile mail
 /// (label `SPAM`, or a `hostile` sender) does not wait.
-const THREAD_RULE: &str = "(EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+const THREAD_RULE: &str = concat!(
+    "(EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
           WHERE ml.message_id = m.id AND l.provider_id = 'SPAM')
    OR EXISTS (SELECT 1 FROM header h JOIN sender s ON s.address = h.from_addr
           WHERE h.message_id = m.id AND s.kind = 'hostile')
    OR NOT EXISTS (SELECT 1 FROM message o WHERE o.thread_id = m.thread_id AND o.id <> m.id
           AND o.gone_at IS NULL AND o.understood_at IS NULL AND o.tries < :max_tries
           AND (coalesce(o.internal_date, :no_date), o.id) < (coalesce(m.internal_date, :no_date), m.id)
-          AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                          WHERE ml.message_id = o.id AND l.provider_id = 'DRAFT')))";
+          AND NOT ",
+    iris_store::draft_or_copy!("o"),
+    "))"
+);
 
 #[derive(Debug)]
 pub enum Error {
@@ -585,7 +591,7 @@ fn from_of(path: &std::path::Path) -> Option<String> {
         .take(crate::head::HEAD_LIMIT as u64)
         .read_to_end(&mut raw)
         .ok()?;
-    crate::Head::parse(&raw).from_addr
+    crate::Head::parse(&raw, None).from_addr
 }
 
 /// `waits_model`: the call was refused for an input of the store (no

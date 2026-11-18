@@ -237,9 +237,13 @@ fn cut(t: &str, n: usize) -> String {
 
 /// The mails of the thread that a reply can answer (the filter of
 /// `iris_changeset::reply_parent`), newest first.
-const ANSWERABLE: &str = "FROM message m WHERE m.thread_id = ?1 AND m.gone_at IS NULL
+const ANSWERABLE: &str = concat!(
+    "FROM message m WHERE m.thread_id = ?1 AND m.gone_at IS NULL
    AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-     WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH', 'DRAFT'))";
+     WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))
+   AND NOT ",
+    iris_store::draft_or_copy!("m")
+);
 
 /// The conversation above the reply form: the newest [`CONVERSATION`]
 /// answerable mails of the thread, oldest first, and the count of the older

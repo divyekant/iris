@@ -107,6 +107,8 @@ fn store(name: &str) -> Box_ {
                 ("SENT", "SENT", "system"),
                 ("SPAM", "SPAM", "system"),
                 ("DRAFT", "DRAFT", "system"),
+                ("UNSENT", "UNSENT", "system"),
+                ("SENT_COPY", "SENT_COPY", "system"),
             ],
         )
         .unwrap();
@@ -493,6 +495,25 @@ fn a_later_message_waits_for_an_older_one_that_failed() {
     assert_eq!(r.stop.as_deref(), Some("done"));
     assert_eq!(b.script.calls(), 2, "two tries of the first message only");
     assert!(!b.understood(first) && !b.understood(second));
+}
+
+/// A draft and a copy in a Sent folder (IMAP `UNSENT`, `SENT_COPY`) are not
+/// pending, and a later message of the thread does not wait for them.
+#[test]
+fn drafts_and_sent_copies_are_not_pending() {
+    let b = store("copies");
+    b.model(false, None);
+    b.add("1", "a", 4, &["DRAFT"]);
+    b.add("2", "a", 3, &["UNSENT"]);
+    b.add("3", "a", 2, &["INBOX", "SENT_COPY"]);
+    let last = b.add("4", "a", 1, &["INBOX"]);
+    assert_eq!(batch::estimate(&b.store, NOW).unwrap().messages, 1);
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(
+        (r.stop.as_deref(), r.messages, r.calls),
+        (Some("done"), 1, 1)
+    );
+    assert!(b.understood(last));
 }
 
 #[test]
