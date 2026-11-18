@@ -129,6 +129,53 @@ fn not_supported() -> Error {
     api("notSupported", "IMAP accounts cannot do this yet")
 }
 
+/// The flags to set (`plus`) and to clear (`minus`) for a `modify` of
+/// labels (spec section 7). Only `UNREAD`, `STARRED` and keyword labels;
+/// any other label is `notSupported`, before any command.
+fn flag_change(add: &[&str], remove: &[&str]) -> Result<(Vec<String>, Vec<String>)> {
+    let (mut plus, mut minus) = (Vec::new(), Vec::new());
+    for (labels, adding) in [(add, true), (remove, false)] {
+        for l in labels {
+            let (flag, set) = match *l {
+                // UNREAD is the absence of `\Seen`.
+                "UNREAD" => ("\\Seen".to_owned(), !adding),
+                "STARRED" => ("\\Flagged".to_owned(), adding),
+                l => match l.strip_prefix("kw:") {
+                    // The lowercase ID (section 4) is the keyword to send.
+                    Some(k) if crate::is_atom(k) && !k.is_empty() => {
+                        (k.to_ascii_lowercase(), adding)
+                    }
+                    Some(_) => return Err(api("badName", "not an IMAP keyword")),
+                    None => return Err(not_supported()),
+                },
+            };
+            let (to, other) = if set {
+                (&mut plus, &minus)
+            } else {
+                (&mut minus, &plus)
+            };
+            if other.contains(&flag) {
+                return Err(api("badRequest", "a label is added and removed"));
+            }
+            if !to.contains(&flag) {
+                to.push(flag);
+            }
+        }
+    }
+    Ok((plus, minus))
+}
+
+/// Each flag of `flags` is permanent in the folder of `e` (RFC 3501
+/// section 7.1): in `PERMANENTFLAGS`, or a keyword with `\*` there.
+fn permanent(e: &crate::Examined, flags: &[&str]) -> bool {
+    let Some(p) = &e.permanent else {
+        return false;
+    };
+    flags.iter().all(|f| {
+        p.iter().any(|x| x.eq_ignore_ascii_case(f)) || (!f.starts_with('\\') && e.any_keyword)
+    })
+}
+
 /// The folders that hold mail: selectable, and not a view of other
 /// folders. In the page order of spec section 2.
 fn mail_folders<S: Read + Write>(s: &mut Session<S>) -> Result<Vec<Folder>> {
@@ -821,9 +868,85 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
         Err(not_supported())
     }
 
-    fn modify(&self, _: &str, _: &[&str], _: &[&str], _: &[&str]) -> Result<()> {
-        // shortcut: no writes yet, part B code 2 adds the flag writes.
-        Err(not_supported())
+    fn modify(&self, token: &str, ids: &[&str], add: &[&str], remove: &[&str]) -> Result<()> {
+        let (plus, minus) = flag_change(add, remove)?;
+        // The targets of each folder: (UIDVALIDITY, UIDs). All checks come
+        // before the first write (spec section 7).
+        let mut targets: BTreeMap<&str, (u32, Vec<u32>)> = BTreeMap::new();
+        for id in ids {
+            let (validity, uid, folder) = parse_id(id).ok_or(Error::NotFound)?;
+            let t = targets.entry(folder).or_insert((validity, Vec::new()));
+            // Two UIDVALIDITY values for one folder: one ID is stale.
+            if t.0 != validity {
+                return Err(Error::NotFound);
+            }
+            t.1.push(uid);
+        }
+        if targets.is_empty() || (plus.is_empty() && minus.is_empty()) {
+            return Ok(());
+        }
+        let all: Vec<&str> = plus.iter().chain(&minus).map(String::as_str).collect();
+        self.with(token, |s| {
+            let folders = mail_folders(s)?;
+            // The check pass: no STORE.
+            for (folder, (validity, _)) in &targets {
+                if !folders.iter().any(|f| f.name == *folder) {
+                    return Err(Error::NotFound);
+                }
+                let e = s.select(folder).map_err(read_error)?;
+                if e.uidvalidity != *validity {
+                    return Err(Error::NotFound);
+                }
+                if !permanent(&e, &all) {
+                    return Err(api("notPermanent", "the server does not keep this flag"));
+                }
+            }
+            // The write pass. After the first STORE, each error is unknown.
+            let mut sent = false;
+            let unknown = |e: Error| Error::Transport(format!("unknown result: {e}"));
+            for (folder, (validity, uids)) in &targets {
+                let e = s.select(folder).map_err(|e| {
+                    let e = read_error(e);
+                    if sent {
+                        unknown(e)
+                    } else {
+                        e
+                    }
+                })?;
+                if e.uidvalidity != *validity {
+                    return Err(if sent {
+                        unknown(Error::NotFound)
+                    } else {
+                        Error::NotFound
+                    });
+                }
+                for (flags, add) in [(&plus, true), (&minus, false)] {
+                    if flags.is_empty() {
+                        continue;
+                    }
+                    let names: Vec<&str> = flags.iter().map(String::as_str).collect();
+                    let mut seen: BTreeMap<u32, Vec<String>> = BTreeMap::new();
+                    sent = true;
+                    s.store(uids, add, &names, |uid, f| {
+                        seen.insert(uid, f);
+                    })
+                    .map_err(|e| unknown(read_error(e)))?;
+                    // Each target must come back with the asked flags.
+                    for uid in uids {
+                        let got = seen.get(uid).ok_or_else(|| {
+                            Error::Transport("unknown result: a UID had no answer".into())
+                        })?;
+                        let has = |x: &str| got.iter().any(|g| g.eq_ignore_ascii_case(x));
+                        if names.iter().any(|n| has(n) != add) {
+                            return Err(Error::Transport(
+                                "unknown result: other flags in the answer".into(),
+                            ));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })
     }
 
     fn trash(&self, _: &str, _: &str) -> Result<Minimal> {
@@ -835,8 +958,8 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
     }
 
     fn create_label(&self, _: &str, _: &str) -> Result<Label> {
-        // shortcut: a keyword exists only after a STORE, which part B code 2
-        // adds. Until then a label that labels() does not give is a lie.
+        // shortcut: a keyword exists only on a message, so a label made
+        // before its first STORE can be a lie, issue #652.
         Err(not_supported())
     }
 

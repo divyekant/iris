@@ -180,6 +180,11 @@ pub struct Examined {
     pub highest_modseq: Option<u64>,
     /// The `FLAGS` and the `PERMANENTFLAGS` of the folder, without `\*`.
     pub flags: Vec<String>,
+    /// The `PERMANENTFLAGS` alone, without `\*`. `None`: the answer had
+    /// none (always so for `EXAMINE` on most servers).
+    pub permanent: Option<Vec<String>>,
+    /// `PERMANENTFLAGS` holds `\*`: a new keyword is permanent too.
+    pub any_keyword: bool,
 }
 
 /// The header fields that [`Entry::headers`] holds: the fields of the
@@ -503,7 +508,16 @@ impl<S: Read + Write> Session<S> {
 
     /// Open a folder read-only.
     pub fn examine(&mut self, folder: &str) -> Result<Examined> {
-        let mut cmd = format!("EXAMINE {}", quote(folder)?);
+        self.open("EXAMINE", folder)
+    }
+
+    /// Open a folder read-write, for [`Session::store`].
+    pub fn select(&mut self, folder: &str) -> Result<Examined> {
+        self.open("SELECT", folder)
+    }
+
+    fn open(&mut self, verb: &str, folder: &str) -> Result<Examined> {
+        let mut cmd = format!("{verb} {}", quote(folder)?);
         if self.condstore() {
             cmd.push_str(" (CONDSTORE)");
         }
@@ -516,9 +530,16 @@ impl<S: Read + Write> Session<S> {
                     e.flags.extend(f.iter().map(|x| x.to_string()))
                 }
                 Response::Data { outcome, .. } => match outcome.code {
-                    Some(ResponseCode::PermanentFlags(f)) => e
-                        .flags
-                        .extend(f.iter().filter(|x| *x != "\\*").map(|x| x.to_string())),
+                    Some(ResponseCode::PermanentFlags(f)) => {
+                        let p: Vec<String> = f
+                            .iter()
+                            .filter(|x| *x != "\\*")
+                            .map(|x| x.to_string())
+                            .collect();
+                        e.any_keyword |= f.iter().any(|x| x == "\\*");
+                        e.flags.extend(p.iter().cloned());
+                        e.permanent.get_or_insert_with(Vec::new).extend(p);
+                    }
                     Some(ResponseCode::UidValidity(v)) => validity = Some(v),
                     Some(ResponseCode::UidNext(n)) => e.uidnext = Some(n),
                     Some(ResponseCode::HighestModSeq(m)) => e.highest_modseq = Some(m),
@@ -678,6 +699,43 @@ impl<S: Read + Write> Session<S> {
             Ok(())
         })?;
         Ok(found.map(|e| (counter.n, e)))
+    }
+
+    /// `UID STORE` in the folder that [`Session::select`] opened: `+FLAGS`
+    /// with `add`, else `-FLAGS`, of `flags` on `uids`. Not `.SILENT`: gives
+    /// each UID of the answer with its flags after the store. A flag is
+    /// `\Seen`, `\Flagged` or a keyword atom, else [`Error::Name`].
+    pub fn store(
+        &mut self,
+        uids: &[u32],
+        add: bool,
+        flags: &[&str],
+        mut each: impl FnMut(u32, Vec<String>),
+    ) -> Result<()> {
+        let ok = |f: &&str| {
+            f.eq_ignore_ascii_case("\\Seen") || f.eq_ignore_ascii_case("\\Flagged") || is_atom(f)
+        };
+        if uids.is_empty() || flags.is_empty() {
+            return Ok(());
+        }
+        if !flags.iter().all(ok) {
+            return Err(Error::Name);
+        }
+        let set: Vec<String> = uids.iter().map(u32::to_string).collect();
+        let cmd = format!(
+            "UID STORE {} {}FLAGS ({})",
+            set.join(","),
+            if add { "+" } else { "-" },
+            flags.join(" ")
+        );
+        self.run(&cmd, None, |r, _| {
+            if let Response::Fetch(_, attrs) = r {
+                if let Some(e) = entry(&attrs) {
+                    each(e.uid, e.flags);
+                }
+            }
+            Ok(())
+        })
     }
 
     /// The UIDs of the open folder that match `key`.

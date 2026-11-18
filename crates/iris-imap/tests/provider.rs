@@ -6,7 +6,7 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use iris_fakeimap::{Caps, FakeImap, PASSWORD, USER};
+use iris_fakeimap::{Caps, FakeImap, Store as FakeStore, PASSWORD, USER};
 use iris_imap::{Imap, SENT_COPY, UNSENT};
 use iris_provider::{Error, Provider};
 use iris_store::Store;
@@ -256,8 +256,17 @@ fn writes_refuse_before_any_command() {
     let (fake, _) = filled(Caps::ALL, 1);
     let mail = provider(&fake);
     let before = fake.commands().len();
-    let r = mail.modify(PASSWORD, &["1001:1:INBOX"], &["UNREAD"], &[]);
-    assert!(matches!(r, Err(Error::Api { status: 400, .. })), "{r:?}");
+    // A move (INBOX, TRASH, a folder label) is never a flag write.
+    for label in ["INBOX", "TRASH", "SPAM", "folder:Archive"] {
+        let r = mail.modify(PASSWORD, &["1001:1:INBOX"], &[label], &[]);
+        assert!(matches!(r, Err(Error::Api { status: 400, .. })), "{r:?}");
+        let r = mail.modify(PASSWORD, &["1001:1:INBOX"], &["UNREAD"], &[label]);
+        assert!(matches!(r, Err(Error::Api { status: 400, .. })), "{r:?}");
+    }
+    assert!(matches!(
+        mail.create_label(PASSWORD, "Todo"),
+        Err(Error::Api { status: 400, .. })
+    ));
     assert!(matches!(
         mail.trash(PASSWORD, "1001:1:INBOX"),
         Err(Error::Api { status: 400, .. })
@@ -699,4 +708,150 @@ fn page_budget_counts_removals() {
     assert!(matches!(all_changes(&mail, &c), Err(Error::HistoryExpired)));
     // With the normal budget the same changes fit.
     all_changes(&provider(&fake), &c).unwrap();
+}
+
+/// The ID of message `uid` of `folder` now.
+fn id_of(mail: &dyn Provider, folder: &str, uid: u32) -> String {
+    let validity = cursor(mail)
+        .lines()
+        .find(|l| l.ends_with(&format!(" {folder}")))
+        .unwrap()
+        .split(' ')
+        .next()
+        .unwrap()
+        .to_owned();
+    format!("{validity}:{uid}:{folder}")
+}
+
+/// UNREAD, STARRED and a keyword change the flags at the server, and the
+/// mirror follows with zero differences (spec section 7).
+#[test]
+fn modify_flags() {
+    let fake = FakeImap::start(Caps::ALL);
+    fake.create("Archive", None);
+    let a = fake.add("INBOX", small(1), &["\\Seen", "$Todo"]);
+    let b = fake.add("Archive", small(2), &[]);
+    let mail = provider(&fake);
+    let store = Store::open(&data_dir("modify")).unwrap();
+    let account = store.add_account("imap", OWNER).unwrap();
+    first_sync(&store, &mail, account, PASSWORD).unwrap();
+    let (ia, ib) = (id_of(&mail, "INBOX", a), id_of(&mail, "Archive", b));
+
+    mail.modify(
+        PASSWORD,
+        &[&ia, &ib],
+        &["UNREAD", "STARRED", "kw:$late"],
+        &["kw:$todo"],
+    )
+    .unwrap();
+    for (f, u) in [("INBOX", a), ("Archive", b)] {
+        let flags = fake.flags(f, u);
+        let has = |x: &str| flags.iter().any(|g| g.eq_ignore_ascii_case(x));
+        assert!(
+            !has("\\Seen") && has("\\Flagged") && has("$late") && !has("$todo"),
+            "{flags:?}"
+        );
+    }
+    sync(&store, &mail, account, PASSWORD).unwrap();
+    assert_clean(&store, &mail, account);
+
+    mail.modify(PASSWORD, &[&ia], &[], &["UNREAD", "STARRED"])
+        .unwrap();
+    let flags = fake.flags("INBOX", a);
+    assert!(flags.iter().any(|g| g == "\\Seen") && !flags.iter().any(|g| g == "\\Flagged"));
+    sync(&store, &mail, account, PASSWORD).unwrap();
+    assert_clean(&store, &mail, account);
+}
+
+/// A flag that the folder does not keep is refused before any STORE.
+#[test]
+fn modify_not_permanent() {
+    let fake = FakeImap::start(Caps::ALL);
+    let a = fake.add("INBOX", small(1), &[]);
+    let mail = provider(&fake);
+    let id = id_of(&mail, "INBOX", a);
+    for p in [Some("\\Seen \\Flagged"), None] {
+        fake.set_permanent(p);
+        let r = mail.modify(PASSWORD, &[&id], &["kw:$late"], &[]);
+        assert!(
+            matches!(&r, Err(Error::Api { status: 400, reason, .. }) if reason == "notPermanent"),
+            "{r:?}"
+        );
+    }
+    fake.set_permanent(Some("\\Flagged"));
+    assert!(mail.modify(PASSWORD, &[&id], &[], &["UNREAD"]).is_err());
+    assert!(!fake.commands().iter().any(|c| c.contains("UID STORE")));
+    assert!(fake.flags("INBOX", a).is_empty());
+}
+
+/// A new UIDVALIDITY before any STORE is NotFound, and nothing changes.
+#[test]
+fn modify_uidvalidity() {
+    let fake = FakeImap::start(Caps::ALL);
+    let a = fake.add("INBOX", small(1), &[]);
+    let mail = provider(&fake);
+    let id = id_of(&mail, "INBOX", a);
+    fake.renew("INBOX");
+    let r = mail.modify(PASSWORD, &[&id], &["STARRED"], &[]);
+    assert!(matches!(r, Err(Error::NotFound)), "{r:?}");
+    assert!(!fake.commands().iter().any(|c| c.contains("UID STORE")));
+    let bad = mail.modify(PASSWORD, &["x:1:INBOX"], &["STARRED"], &[]);
+    assert!(matches!(bad, Err(Error::NotFound)));
+}
+
+/// A NO to a STORE, an OK with no FETCH and a lost connection after a
+/// STORE are unknown results: the
+/// server can have changed some flags (spec section 7).
+#[test]
+fn modify_refused_and_unconfirmed() {
+    for mode in [
+        FakeStore::RefuseAfterOne,
+        FakeStore::NoFetch,
+        FakeStore::Close,
+    ] {
+        let fake = FakeImap::start(Caps::ALL);
+        let a = fake.add("INBOX", small(1), &[]);
+        let b = fake.add("INBOX", small(2), &[]);
+        let mail = provider(&fake);
+        let ids = [id_of(&mail, "INBOX", a), id_of(&mail, "INBOX", b)];
+        fake.set_store(mode);
+        let r = mail.modify(PASSWORD, &[&ids[0], &ids[1]], &["STARRED"], &[]);
+        assert!(
+            matches!(&r, Err(e) if e.write_result_unknown()),
+            "{mode:?}: {r:?}"
+        );
+    }
+    // A UID that another client removed: no FETCH for it.
+    let fake = FakeImap::start(Caps::ALL);
+    let a = fake.add("INBOX", small(1), &[]);
+    let b = fake.add("INBOX", small(2), &[]);
+    let mail = provider(&fake);
+    let ids = [id_of(&mail, "INBOX", a), id_of(&mail, "INBOX", b)];
+    fake.remove("INBOX", b);
+    let r = mail.modify(PASSWORD, &[&ids[0], &ids[1]], &["STARRED"], &[]);
+    assert!(matches!(&r, Err(e) if e.write_result_unknown()), "{r:?}");
+}
+
+/// Labels that cannot be flags, or a label both added and removed, are
+/// refused before any command.
+#[test]
+fn modify_bad_labels() {
+    let fake = FakeImap::start(Caps::ALL);
+    let a = fake.add("INBOX", small(1), &[]);
+    let mail = provider(&fake);
+    let id = id_of(&mail, "INBOX", a);
+    let before = fake.commands().len();
+    for (add, remove) in [
+        (&["kw:a b"][..], &[][..]),
+        (&["kw:"][..], &[][..]),
+        (&["STARRED"][..], &["STARRED"][..]),
+        (&["UNREAD"][..], &["UNREAD"][..]),
+    ] {
+        let r = mail.modify(PASSWORD, &[&id], add, remove);
+        assert!(
+            matches!(r, Err(Error::Api { status: 400, .. })),
+            "{add:?} {remove:?}: {r:?}"
+        );
+    }
+    assert_eq!(fake.commands().len(), before);
 }
