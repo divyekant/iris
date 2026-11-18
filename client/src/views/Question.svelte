@@ -174,7 +174,7 @@
     overflow: hidden;
     clip-path: inset(50%);
   }
-  @media (max-width: 600px), (pointer: coarse) {
+  @media (max-width: 600px), (any-pointer: coarse) {
     button {
       min-height: var(--size-touch);
     }

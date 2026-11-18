@@ -48,7 +48,7 @@ background.
 - Base unit 4px. Use multiples only: 0, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128.
 - Radii: none 0, sm 4, md 8, lg 12, full 9999.
 - Transitions: fast 120ms ease, normal 200ms ease.
-- Touch target: `--size-touch`, 44px. On a phone (600px wide or less) or a touch screen, each button, summary, select and text input is at least 44px high and wide. A link that stands alone (not in a sentence) has the class `touch`, which gives it the same size. A link in a sentence keeps its text size (WCAG 2.5.8). A checkbox keeps its mark size: a 44px label around it, or a transparent border with a negative margin, makes the target.
+- Touch target: `--size-touch`, 44px. On a phone (600px wide or less) or a device with a touch screen (`(any-pointer: coarse)`, also a laptop with a touch screen and a mouse), each button, summary, select and text input is at least 44px high and wide. A link that stands alone (not in a sentence) has the class `touch`, which gives it the same size. A link in a sentence keeps its text size (WCAG 2.5.8). A checkbox keeps its mark size: a 44px label around it, or a transparent border with a negative margin, makes the target.
 - Safe areas: `index.html` sets `viewport-fit=cover`, so the header, the page, the footer and the tabs add the `safe-area-inset-*` of each edge to their padding.
 - Phone width: from 360px, no view scrolls sideways. `client/test/phone.test.mjs` checks the brief, the review, an item and a mail at 360, 390 and 768px.
 
