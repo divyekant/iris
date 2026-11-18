@@ -467,6 +467,10 @@ fn apply(seatbelt: &Seatbelt, session: i64, fds: &[OwnedFd], h: &Handoff) -> io:
     for (k, v) in &h.env {
         std::env::set_var(k, v);
     }
+    // The job needs no launchd after the handoff; no process of the
+    // session gets the bootstrap port.
+    #[cfg(target_os = "macos")]
+    crate::isolation::macos_sys::drop_bootstrap()?;
     for dir in [seatbelt.home(session), seatbelt.tmp(session)] {
         fs::DirBuilder::new()
             .mode(0o700)

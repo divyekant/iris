@@ -255,7 +255,7 @@ The profile starts with `(deny default)` and allows only these:
 | `process-exec`, `process-fork` | Each program that the profile lets the session read |
 | `signal`, `process-info*` | `(target same-sandbox)` only |
 | `sysctl-read` | Only a list of names that tell the system and the hardware: the prefixes `hw.` and `machdep.cpu.`, and the names `kern.ostype`, `kern.osrelease`, `kern.osversion`, `kern.osproductversion`, `kern.version`, `kern.hostname`, `kern.boottime`, `kern.argmax`, `kern.maxfiles`, `kern.maxfilesperproc`, `kern.usrstack64`, `kern.secure_kernel`, `vm.loadavg`, `vm.pagesize` and `sysctl.proc_translated`. Never `kern.proc`, `kern.procargs` or `kern.procargs2`, which give the arguments and the environment of other processes |
-| `file-read*` | The system folders: `/usr` without `/usr/local`, `/bin`, `/sbin`, `/System/Library`, `/System/Cryptexes`, `/System/Volumes/Preboot/Cryptexes`, `/Library/Apple`, `/private/var/db/dyld` (never all of `/System`: `/System/Volumes/Data` holds the home folders and the data folder); the device files `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`; in `/private/etc` only `hosts`, `passwd`, `group`, `localtime` and the public certificate files (`ssl/cert.pem`, `ssl/certs`); the adapter program file and the `iris` program file (each one a literal real path); the workspace; the private home and `/tmp` of the session |
+| `file-read*` | The root folder `/` as a literal (its names only, not the files below it: dyld reads it to find the shared cache, and each program aborts without it); `/private/var/select/sh` (the link of `/bin/sh`); `/private/etc/ssl/openssl.cnf` (LibreSSL reads it at start); the system folders: `/usr` without `/usr/local`, `/bin`, `/sbin`, `/System/Library`, `/System/Cryptexes`, `/System/Volumes/Preboot/Cryptexes`, `/Library/Apple`, `/private/var/db/dyld` (never all of `/System`: `/System/Volumes/Data` holds the home folders and the data folder); the device files `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`; in `/private/etc` only `hosts`, `passwd`, `group`, `localtime` and the public certificate files (`ssl/cert.pem`, `ssl/certs`); the adapter program file and the `iris` program file (each one a literal real path); the workspace; the private home and `/tmp` of the session |
 | `file-read-metadata` | The paths above, and each folder above them (literal paths), so that a program can resolve its paths |
 | `file-write*` | The workspace, the private home and `/tmp` of the session, `/dev/null` |
 | `network-outbound` | `(remote tcp "localhost:<egress port>")`, if the session has an egress port: TCP only, so a UDP datagram to the same port number (for example to another local service on that UDP port) is refused; and `(remote unix-socket (path-literal "<workspace>/.iris/socket"))`, the session socket (launcher spec, goal 6), which each `iris` verb of the session uses. No other Unix socket |
@@ -276,7 +276,15 @@ process makes them before the agent starts. The reap removes them after
 `ended` is true. `HOME` and `TMPDIR` point to them.
 
 The profile has no `mach-lookup` and no `iokit-open`. So the agent cannot
-reach launchd, the pasteboard, the keychain or another system service.
+reach the pasteboard, the keychain or another system service by name.
+
+The bootstrap port answers with no `mach-lookup`: in the Mac acceptance of
+2026-11-18, `launchctl print gui/<uid>` worked in the sandbox and showed
+the arguments and the environment of other services of the user. So the
+job process sets its bootstrap port to none (`task_set_special_port`,
+`TASK_BOOTSTRAP_PORT`) after the handoff and before the hold starts. The
+agent inherits no bootstrap port and cannot send a message to launchd.
+The job process needs launchd no more after the handoff.
 
 ### Egress on macOS
 
@@ -367,7 +375,7 @@ before the agent runs, or `ended` is false.
 | The agent connects to another port, a public address, UDP or a Unix socket other than its session socket | Refused | Mac acceptance 1 |
 | The agent runs `iris status` (the session socket `.iris/socket`) | Works | Mac acceptance 1 |
 | The agent sends UDP to `127.0.0.1:<egress port>` | Refused: the rule allows TCP only | Mac acceptance 1 |
-| The agent calls `launchctl`, `open`, `pbpaste` or another system service | Refused (no `mach-lookup`) | Mac acceptance 1 |
+| The agent calls `launchctl`, `open`, `pbpaste` or another system service | Refused (no `mach-lookup`, no bootstrap port) | Mac acceptance 1; Mac test `the_real_profile_starts_programs_and_hides_launchd` |
 | The agent signals a process outside the sandbox | Refused | Mac acceptance 1 |
 | No GUI domain (no person signed in, for example an SSH session only) | `check` fails with the reason; `run` is refused | Unit test of the reason text |
 | The job process does not connect in 1 second | The shim boots out the job and exits with 1 | Mac acceptance 4 |
