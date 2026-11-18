@@ -339,7 +339,7 @@
     color: var(--color-text-muted);
   }
   /* A touch screen: each control is at least the size of a finger tip. */
-  @media (max-width: 600px), (pointer: coarse) {
+  @media (max-width: 600px), (any-pointer: coarse) {
     main :global(:is(button, summary, select, input:not([type="checkbox"], [type="radio"]))) {
       min-width: var(--size-touch);
       min-height: var(--size-touch);

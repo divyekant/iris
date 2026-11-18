@@ -318,7 +318,7 @@
     box-shadow: 0 0 0 2px var(--color-primary);
   }
   /* A touch screen: the icon controls grow to the size of a finger tip. */
-  @media (max-width: 600px), (pointer: coarse) {
+  @media (max-width: 600px), (any-pointer: coarse) {
     .source,
     .box {
       width: var(--size-touch);
@@ -357,7 +357,7 @@
   .away:focus-visible {
     outline: 2px solid var(--color-primary);
   }
-  @media (hover: none) {
+  @media (hover: none), (any-pointer: coarse) {
     .away {
       opacity: 1;
     }

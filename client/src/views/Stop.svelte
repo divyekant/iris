@@ -240,7 +240,7 @@
     margin: 0 0 var(--space-8);
     color: var(--color-text-muted);
   }
-  @media (max-width: 600px), (pointer: coarse) {
+  @media (max-width: 600px), (any-pointer: coarse) {
     .stop-all,
     .actions button {
       min-height: var(--size-touch);

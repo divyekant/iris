@@ -222,6 +222,26 @@ test("the tabs cover nothing that sticks to the bottom of the screen", async () 
   await page.locator("main form button[type=submit]").tap();
 });
 
+// A laptop with a touch screen and a mouse (issue #528): the mouse is the primary
+// pointer, so `(pointer: coarse)` and `(hover: none)` do not match, but
+// `(any-pointer: coarse)` does. Each control of the brief is a touch target, and the
+// quiet verbs that show on hover show at once.
+const HYBRID = "--blink-settings=primaryPointerType=4,availablePointerTypes=6,primaryHoverType=2,availableHoverTypes=3";
+
+test("on a touch laptop with a mouse, the brief shows its quiet verbs and each control is a touch target", async () => {
+  const { base, browser } = await serve(() => chromium.launch({ args: [HYBRID] }));
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, reducedMotion: "reduce" });
+  assert.deepEqual(await page.evaluate(() => [matchMedia("(pointer: coarse)").matches, matchMedia("(any-pointer: coarse)").matches]), [false, true], "the browser is a hybrid device");
+  await page.goto(base + "#/brief");
+  await page.waitForSelector("main h1, main h2");
+  await page.mouse.move(0, 0);
+  const hidden = await page.evaluate(() => [...document.querySelectorAll(".away, .stop")].filter((e) => getComputedStyle(e).opacity !== "1").map((e) => e.textContent.trim()));
+  assert.ok((await page.locator(".away").count()) > 0, "the brief has a quiet verb");
+  assert.deepEqual(hidden, [], "each quiet verb shows with no hover");
+  assert.deepEqual((await page.evaluate(measure, TOUCH)).small, [], "the brief has small controls");
+  await page.close();
+});
+
 test("each other view has no small standalone link and no sideways scroll on a phone (#465)", async () => {
   const { base, browser } = await serve();
   for (const width of [390, 768]) {
