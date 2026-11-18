@@ -31,7 +31,7 @@ pub enum Error {
     /// sender rows of [`Outcome::rerun`]: write 1 committed their change.
     /// [`Seen`] is what the call read: the state of the message, the
     /// sender kind and the other inputs.
-    Model(iris_model::Error, Vec<i64>, Seen),
+    Model(iris_model::Error, Vec<i64>, Box<Seen>),
     /// The message is not in the store, or it has no content file.
     NoMessage(i64),
     /// A finished item is not valid: a defect of the engine. Nothing of
@@ -396,7 +396,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     // stops after MAX_TRIES failed tries.
     let held = row.tries >= MAX_TRIES || row.retry_at.is_some_and(|t| t > now_ms);
     let d = decide(&a, &cx, (!held).then_some(model))
-        .map_err(|e| Error::Model(e, rerun.clone(), read()))?;
+        .map_err(|e| Error::Model(e, rerun.clone(), Box::new(read())))?;
     if d.waiting {
         // No rule supports the old items now, and the model cannot run.
         let same = store.write(|tx| {
