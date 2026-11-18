@@ -272,6 +272,9 @@ pub struct Body {
     pub text: String,
 }
 
+/// The output of [`Store::read_to`]: a buffered spool file.
+pub type Spool = io::BufWriter<fs::File>;
+
 /// An open data folder. One write connection and 2 read connections
 /// (specification 1, section 5.2). All writes go through the write connection.
 pub struct Store {
@@ -348,11 +351,59 @@ impl Store {
     /// Run `f` on a read connection. The connection sees one snapshot for
     /// the duration of each statement.
     pub fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        // The first free reader; wait only when both are busy.
         let conn = self.readers[1]
             .try_lock()
-            .ok()
-            .unwrap_or_else(|| lock(&self.readers[0]));
+            .or_else(|_| self.readers[0].try_lock())
+            .unwrap_or_else(|_| lock(&self.readers[0]));
         f(&conn)
+    }
+
+    /// Run `f` in one read transaction with a spool file as its output, then
+    /// copy the spool to `out` after the read connection is free. Use it
+    /// for each answer that goes to a socket or a channel: a slow or stopped
+    /// reader of `out` then never holds a store connection, so the other
+    /// threads of the engine never wait for a peer. The spool is a file in
+    /// the data folder with no name, so memory stays flat. If `f` gives an
+    /// error, `out` gets no byte.
+    pub fn read_to<T, E: From<Error>>(
+        &self,
+        out: &mut impl io::Write,
+        f: impl FnOnce(&Connection, &mut Spool) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, E> {
+        let mut spool = io::BufWriter::new(self.spool_file()?);
+        let mut res = None;
+        self.read(|c| {
+            let tx = c.unchecked_transaction()?;
+            res = Some(f(&tx, &mut spool));
+            Ok(())
+            // The drop of `tx` ends the read.
+        })?;
+        let value = res.expect("the read ran f")?;
+        let mut file = spool.into_inner().map_err(|e| Error::Io(e.into_error()))?;
+        io::Seek::rewind(&mut file).map_err(Error::Io)?;
+        io::copy(&mut file, out).map_err(Error::Io)?;
+        Ok(value)
+    }
+
+    /// A new file in the data folder (mode 0700) with no name: the open file
+    /// is the only reference, so the OS deletes it at the close, also after
+    /// a crash.
+    fn spool_file(&self) -> Result<fs::File> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = self.dir.join(format!(
+            ".spool-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        fs::remove_file(&path)?;
+        Ok(file)
     }
 
     /// Open each deferred commitment again on its `deferred_until` date, in

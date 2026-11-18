@@ -114,14 +114,8 @@ fn io(e: std::io::Error) -> Error {
 /// The answer streams. All parts come from one read of the store. If the
 /// job document fails, `out` gets no byte (issue #303).
 pub fn write_job(store: &Store, row: i64, out: &mut impl Write) -> Result<()> {
-    let mut res = Ok(());
-    store.read(|c| {
-        let tx = c.unchecked_transaction()?;
-        res = write_job_in(&tx, row, out);
-        Ok(())
-        // The drop of `tx` ends the read.
-    })?;
-    res
+    // The spool keeps a slow reader of `out` from holding the store.
+    store.read_to(out, |c, w| write_job_in(c, row, w))
 }
 
 fn write_job_in(c: &Connection, row: i64, out: &mut impl Write) -> Result<()> {
