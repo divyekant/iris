@@ -498,14 +498,79 @@ impl Write for Capped {
     }
 }
 
-/// The definite rejection of a call that the Outlook provider does not
-/// make. No request goes out.
-fn later<T>() -> iris_provider::Result<T> {
-    Err(iris_provider::Error::Api {
-        status: 400,
-        reason: "notSupported".into(),
-        message: "the Outlook provider does not make this call yet".into(),
-    })
+/// The most bytes of the header of a message that `metadata` reads.
+const HEAD_LIMIT: usize = 256 * 1024;
+
+/// A sink that keeps the header of a message: it stops the read at the
+/// first empty line, or at [`HEAD_LIMIT`].
+#[derive(Default)]
+struct Head {
+    bytes: Vec<u8>,
+    done: bool,
+}
+
+impl Write for Head {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let from = self.bytes.len().saturating_sub(3);
+        self.bytes.extend_from_slice(buf);
+        let rest = &self.bytes[from..];
+        let end = rest
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|i| from + i + 4)
+            .or_else(|| {
+                rest.windows(2)
+                    .position(|w| w == b"\n\n")
+                    .map(|i| from + i + 2)
+            });
+        if let Some(end) = end {
+            self.bytes.truncate(end);
+            self.done = true;
+        } else if self.bytes.len() >= HEAD_LIMIT {
+            self.bytes.truncate(HEAD_LIMIT);
+            self.done = true;
+        }
+        if self.done {
+            return Err(std::io::Error::other("the header ends here"));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The headers of `head` whose names are in `names` (each header for an
+/// empty `names`), with the raw value unfolded, as Gmail gives them.
+/// `Subject` is decoded (RFC 2047). Text that is not a header gives no
+/// header.
+fn headers_of(head: &[u8], names: &[&str]) -> Vec<iris_provider::Header> {
+    let Some(message) = mail_parser::MessageParser::new().parse_headers(head) else {
+        return Vec::new();
+    };
+    let root = message.root_part();
+    root.headers()
+        .iter()
+        .filter(|h| names.is_empty() || names.iter().any(|n| n.eq_ignore_ascii_case(h.raw_name())))
+        .map(|h| {
+            let value = if h.raw_name().eq_ignore_ascii_case("subject") {
+                message.subject().unwrap_or_default().to_string()
+            } else {
+                let raw = head
+                    .get(h.offset_start() as usize..h.offset_end() as usize)
+                    .unwrap_or_default();
+                String::from_utf8_lossy(raw)
+                    .replace(['\r', '\n'], "")
+                    .trim()
+                    .to_string()
+            };
+            iris_provider::Header {
+                name: h.raw_name().to_string(),
+                value,
+            }
+        })
+        .collect()
 }
 
 fn history(m: &Message, known: &HashMap<String, &'static str>) -> HistoryMessage {
@@ -525,6 +590,10 @@ fn text_of<T: Serialize>(value: &T) -> String {
 }
 
 impl iris_provider::Provider for Outlook {
+    fn name(&self) -> &'static str {
+        "Outlook"
+    }
+
     /// `archive` and `inbox` move the message between folders.
     fn moves_folders(&self) -> bool {
         true
@@ -711,8 +780,23 @@ impl iris_provider::Provider for Outlook {
         })
     }
 
-    fn metadata(&self, _: &str, _: &str, _: &[&str]) -> iris_provider::Result<Metadata> {
-        later()
+    /// The headers come from the start of `$value`: Graph gives no raw
+    /// headers of a sent message or a draft. The send reads the parent of
+    /// a reply this way.
+    fn metadata(&self, token: &str, id: &str, headers: &[&str]) -> iris_provider::Result<Metadata> {
+        let known = self.known(token).map_err(map)?;
+        let m = self.graph.message(token, id).map_err(map)?;
+        let mut sink = Head::default();
+        match self.graph.raw(token, id, &mut sink) {
+            Ok(_) => {}
+            Err(Error::Sink(_)) if sink.done => {}
+            Err(e) => return Err(map(e)),
+        }
+        Ok(Metadata {
+            id: m.id.clone(),
+            label_ids: label_ids(&m, &known),
+            headers: headers_of(&sink.bytes, headers),
+        })
     }
 
     /// The fields first, then the MIME text into `sink`.
@@ -926,6 +1010,41 @@ mod tests {
     use super::*;
     use crate::tests::Rng;
     use crate::Flag;
+
+    /// `headers_of` reads any header block: random bytes never panic and
+    /// give only asked names, and a folded header reads back unfolded.
+    #[test]
+    fn the_headers_of_any_text_read_back() {
+        let mut rng = Rng(11);
+        let alphabet = b"abcXYZ:<>@ .\r\n\t=?-";
+        for _ in 0..3000 {
+            let n = rng.below(200);
+            let junk: Vec<u8> = (0..n)
+                .map(|_| alphabet[rng.below(alphabet.len())])
+                .collect();
+            for h in headers_of(&junk, &["Message-ID", "References"]) {
+                assert!(
+                    ["message-id", "references"].contains(&h.name.to_ascii_lowercase().as_str())
+                );
+            }
+            let id = format!("<m{}@example.com>", rng.below(1000));
+            let refs: Vec<String> = (0..rng.below(4)).map(|i| format!("<r{i}@x.org>")).collect();
+            let folded = refs.join("\r\n ");
+            let text = format!(
+                "From: <a@example.com>\r\nmessage-id: {id}\r\nReferences: {folded}\r\nSubject: =?utf-8?q?Caf=C3=A9?=\r\n\r\nbody\r\n"
+            );
+            let got = headers_of(text.as_bytes(), &["Message-ID", "References", "Subject"]);
+            let value = |n: &str| {
+                got.iter()
+                    .find(|h| h.name.eq_ignore_ascii_case(n))
+                    .map(|h| h.value.clone())
+            };
+            assert_eq!(value("Message-ID").as_deref(), Some(id.as_str()));
+            assert_eq!(value("References").unwrap_or_default(), refs.join(" "));
+            assert_eq!(value("Subject").as_deref(), Some("Café"));
+            assert!(value("From").is_none());
+        }
+    }
 
     /// Each Graph error that is an unknown write result stays one after
     /// the map to the provider error, on each write path of the provider.

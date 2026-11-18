@@ -9,6 +9,7 @@ use iris_apply::{apply, release, Outcome, Token, HOLD_MS};
 use iris_changeset::{add_action, create, submit, Author, AuthorKind, Verb};
 use iris_fakegraph::FakeGraph;
 use iris_graph::{Config, Graph, Outlook};
+use iris_provider::Provider;
 use iris_store::Store;
 use iris_synth::Mailbox;
 use rusqlite::params;
@@ -222,8 +223,153 @@ fn a_deleted_draft_is_not_sent() {
     let (s, draft) = b.new_mail(AGED);
     assert!(b.fake.delete_message(&draft));
     match b.release(s) {
-        Outcome::Denied(why) => assert!(why.contains("gone"), "{why}"),
+        Outcome::Denied(why) => assert_eq!(why, "the draft is gone at Outlook"),
         other => panic!("{other:?}"),
     }
     assert!(b.fake.sent_mail().is_empty());
+}
+
+impl Box {
+    /// Move the claim of the send `action` back by `ms`, as a clock.
+    fn age_claim(&self, action: i64, ms: i64) {
+        self.store
+            .write(|tx| {
+                // ledger_change forbids a change of `at`: drop and remake the
+                // trigger in this test store only.
+                let sql: String = tx.query_row(
+                    "SELECT sql FROM sqlite_schema WHERE name = 'ledger_change'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                tx.execute_batch("DROP TRIGGER ledger_change")?;
+                tx.execute(
+                    "UPDATE ledger SET at = at - ?2 WHERE action_id = ?1",
+                    params![action, ms],
+                )?;
+                tx.execute_batch(&sql)?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn error(&self, action: i64) -> Option<String> {
+        self.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT error FROM ledger WHERE action_id = ?1",
+                    [action],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    }
+}
+
+/// A reply reads the headers of its parent in Outlook (`metadata`), and
+/// the draft has the `In-Reply-To` of the parent.
+#[test]
+fn a_reply_draft_reads_its_parent_in_outlook() {
+    let b = setup("reply");
+    let (thread, parent, provider): (i64, i64, String) = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT m.thread_id, m.id, m.provider_id FROM message m
+                 WHERE m.gone_at IS NULL AND m.internal_date = (SELECT max(internal_date)
+                   FROM message WHERE thread_id = m.thread_id AND gone_at IS NULL)
+                 ORDER BY m.id LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .unwrap();
+    let head = b
+        .outlook
+        .metadata(TOKEN, &provider, &["Message-ID", "Subject"])
+        .unwrap();
+    let parent_id = head
+        .headers
+        .iter()
+        .find(|h| h.name.eq_ignore_ascii_case("Message-ID"))
+        .expect("the Message-ID of the parent")
+        .value
+        .clone();
+    let subject = head
+        .headers
+        .iter()
+        .find(|h| h.name.eq_ignore_ascii_case("Subject"))
+        .expect("the Subject of the parent")
+        .value
+        .clone();
+    assert_eq!(head.headers.len(), 2);
+    // The parent is understood: the mirror has its subject, so submit
+    // flags the same subject as the apply.
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE header SET subject = ?1 WHERE message_id = ?2",
+                params![subject, parent],
+            )?)
+        })
+        .unwrap();
+    let a = b.approved(
+        Verb::Draft,
+        &format!("t-{thread}"),
+        json!({"to": ["priya@example.com"], "body": "Thanks."}),
+        0,
+    );
+    match apply(&b.store, &b.outlook, &mut tok(), b.account, a) {
+        Ok(Outcome::Applied(c)) => assert_eq!(c.changed, 1),
+        other => panic!("{other:?}"),
+    }
+    let raw = String::from_utf8(b.row().0).unwrap();
+    assert!(
+        raw.lines()
+            .any(|l| l.starts_with("In-Reply-To: ") && l.contains(parent_id.trim())),
+        "{raw}"
+    );
+}
+
+/// The results of an Outlook send name Outlook: no sent copy after 24
+/// hours, and a sent copy with other content, which stops each later
+/// release.
+#[test]
+fn the_results_of_an_outlook_send_name_outlook() {
+    let b = setup("results");
+    let (s, _) = b.new_mail(AGED);
+    b.fake.hold_copies(true);
+    assert_eq!(b.release(s), Outcome::Pending);
+    b.age_claim(s, 24 * 60 * 60 * 1000 + 1);
+    iris_apply::recover(&b.store, &b.outlook, &mut tok(), b.account).unwrap();
+    assert_eq!(
+        b.error(s).as_deref(),
+        Some("unknown: Outlook shows no sent message")
+    );
+
+    let b = setup("other");
+    let (s, _) = b.new_mail(AGED);
+    b.fake.hold_copies(true);
+    assert_eq!(b.release(s), Outcome::Pending);
+    // Outlook saves a copy with the same Message-ID and other text.
+    let raw = String::from_utf8(b.row().0).unwrap();
+    let id = raw
+        .lines()
+        .find(|l| l.starts_with("Message-ID: "))
+        .unwrap()
+        .to_string();
+    let other = format!(
+        "From: <{OWNER}>\r\nTo: <spy@example.org>\r\n{id}\r\nSubject: Q4 numbers\r\n\r\nOther.\r\n"
+    );
+    b.fake.add_message(other.as_bytes(), "F-sent");
+    iris_apply::recover(&b.store, &b.outlook, &mut tok(), b.account).unwrap();
+    assert_eq!(
+        b.error(s).as_deref(),
+        Some("Outlook sent other content than the approved content")
+    );
+    let (s2, _) = b.new_mail(AGED);
+    iris_changeset::hold(&b.store, b.account, now()).unwrap();
+    assert!(matches!(
+        release(&b.store, &b.outlook, &mut tok(), b.account, s2),
+        Err(iris_apply::Error::SendStopped)
+    ));
 }

@@ -216,10 +216,8 @@ rules:
   well-known folders after the first read.
 - `SENT` is never given (section 6). R6-16 decides how the copies that
   Iris sent get it.
-- `metadata` gives a definite rejection (`Api` 400 `notSupported`)
-  before any request: no caller of the apply or the sync needs it for
-  Outlook. Section 5.1 has the state writes (R6-15) and section 5.2 the
-  drafts and the send (R6-17).
+- Section 5.1 has the state writes (R6-15) and section 5.2 the drafts,
+  the send and `metadata` (R6-17).
 
 ### 4. Raw message
 
@@ -351,6 +349,20 @@ spec section 4 on these rules:
   default (Gmail) is the first message with the ID and the label `SENT`.
   The Outlook provider gives a message with the ID that is not the
   draft, not a draft, and has a `sentDateTime` (section 5, step 5).
+- `metadata(id, names)` reads the message, then the start of `$value`
+  up to the first empty line (at most 256 KiB), because Graph gives no
+  raw headers of a sent message or a draft. The draft of a reply reads
+  the headers of its parent this way. `mail-parser` reads the header
+  block; each value is the raw value with its line folds removed, as
+  Gmail gives it, and `Subject` is decoded (RFC 2047). Text that is not
+  a header gives no header. A property test covers random input.
+- The provider trait has `name()`: "Gmail", "Outlook", or "the mail
+  server" for another provider. Each result of the send that the person
+  reads names the provider, for example "the draft is gone at Outlook",
+  "unknown: Outlook shows no sent message" and "Outlook sent other
+  content than the approved content". Each error that ends with "sent
+  other content than the approved content" stops each later release, of
+  each provider.
 - Iris never deletes the draft after the send. Known limit with its own
   issue (#634). The note in the outbox is part of R6-16.
 - The recovery of a `create_draft` with an unknown result is the

@@ -228,6 +228,12 @@ pub struct DraftRaw {
 /// `create_draft`, `send_draft`) is made one time: see
 /// [`Error::write_result_unknown`] and spec section 6.
 pub trait Provider: Send + Sync {
+    /// The name of the provider in a result that the person reads, for
+    /// example "the draft is gone at Gmail".
+    fn name(&self) -> &'static str {
+        "the mail server"
+    }
+
     /// True if a change of `INBOX` moves the message to another folder, so
     /// that its folder label changes too (Outlook). Then the apply reads
     /// the labels back after the write. A label provider (Gmail) and a
