@@ -1082,6 +1082,66 @@ fn a_read_only_account_still_recovers_a_writing_row() {
     assert_eq!(writing, 0, "the recovery ended the row");
 }
 
+/// A crash left a row in `writing` whose call never started (`call` 0,
+/// a message for call 1). Read-only recovery must not start that call: the
+/// row waits in `writing`, and a write sign-in continues it.
+#[test]
+fn read_only_recovery_starts_no_call() {
+    let s = setup("read-only-no-call", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let (action, provider) = approved_archive(&s);
+    s.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+                 VALUES (?1, ?2, '{\"call\":\"batchModify\",\"add\":[],\"remove\":[\"INBOX\"],\"calls\":1}',
+                         'writing', 'inverse', 1)",
+                rusqlite::params![action, s.account],
+            )?;
+            let ledger = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO ledger_message(ledger_id, message_id, call, pre, post)
+                 SELECT ?1, message_id, 1, '[\"INBOX\"]', '[]' FROM action_message
+                 WHERE action_id = ?2",
+                rusqlite::params![ledger, action],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    sign_in_as(
+        &s.store,
+        &gmail(s.fake.base_url()),
+        &client_json(),
+        REFRESH,
+        false,
+    );
+    let writes = |f: &FakeGmail| {
+        f.requests()
+            .iter()
+            .filter(|r| !r.starts_with("GET "))
+            .count()
+    };
+    let before = writes(&s.fake);
+    w.apply_step().unwrap();
+    assert_eq!(writes(&s.fake), before, "no call starts while read only");
+    let writing =
+        format!("SELECT count(*) FROM ledger WHERE action_id = {action} AND state = 'writing'");
+    assert_eq!(count(&s.store, &writing), 1, "the row waits");
+    // A write sign-in continues the call.
+    sign_in_as(
+        &s.store,
+        &gmail(s.fake.base_url()),
+        &client_json(),
+        REFRESH,
+        true,
+    );
+    w.apply_step().unwrap();
+    assert_eq!(count(&s.store, &writing), 0);
+    let meta = gmail(s.fake.base_url()).minimal("t", &provider).unwrap();
+    assert!(!meta.label_ids.contains(&"INBOX".to_string()), "{meta:?}");
+}
+
 /// The 14-day expiry does not wait for write access: the engine tick
 /// expires an action of a read-only account.
 #[test]

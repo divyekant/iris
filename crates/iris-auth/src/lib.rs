@@ -886,4 +886,56 @@ mod tests {
             }
         }
     }
+
+    /// Property: a Google token answer gives write access only if one
+    /// space-separated token is exactly `gmail.modify`. A near match (a
+    /// prefix, a suffix, another case, another scope) never gives it. A
+    /// read sign-in passes with `gmail.readonly` or `gmail.modify`; a write
+    /// sign-in passes only with `gmail.modify`.
+    #[test]
+    fn generated_google_scope_strings() {
+        let words = [
+            SCOPE,
+            WRITE_SCOPE,
+            "https://www.googleapis.com/auth/gmail.modify.x",
+            "https://www.googleapis.com/auth/gmail.modif",
+            "HTTPS://WWW.GOOGLEAPIS.COM/AUTH/GMAIL.MODIFY",
+            "https://www.googleapis.com/auth/gmail.send",
+            "https://www.googleapis.com/auth/gmail.compose",
+            "https://mail.google.com/",
+            "gmail.modify",
+            "https://evil.example/auth/gmail.modify",
+            "https://www.googleapis.com/auth/gmail.readonly2",
+            "openid",
+            "",
+        ];
+        let json = br#"{"installed":{"client_id":"id","client_secret":"s"}}"#;
+        let read = Client::from_json(json).unwrap();
+        let mut write = read.clone();
+        write.write = true;
+        let mut rng = Rng(17);
+        for _ in 0..10_000 {
+            let n = rng.below(6);
+            let scope: Vec<&str> = (0..n).map(|_| words[rng.below(words.len())]).collect();
+            let scope = scope.join(" ");
+            let w = scope.split(' ').any(|t| t == WRITE_SCOPE);
+            let r = scope.split(' ').any(|t| t == SCOPE);
+            assert_eq!(has_write(&scope), w, "{scope:?}");
+            let answer = TokenAnswer {
+                access_token: Secret::new("a"),
+                expires_in: 1,
+                refresh_token: None,
+                refresh_token_expires_in: None,
+                scope: Some(scope.clone()),
+            };
+            match (read.check_scope(&answer, false), w || r) {
+                (Ok(()), true) | (Err(Error::ScopeMissing), false) => {}
+                (got, want) => panic!("read {scope:?}: {got:?}, want {want}"),
+            }
+            match (write.check_scope(&answer, false), w) {
+                (Ok(()), true) | (Err(Error::WriteScopeMissing), false) => {}
+                (got, want) => panic!("write {scope:?}: {got:?}, want {want}"),
+            }
+        }
+    }
 }

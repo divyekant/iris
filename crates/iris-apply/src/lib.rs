@@ -637,6 +637,23 @@ pub fn recover(
     run.recover_account()
 }
 
+/// [`recover`] for an account with read access only: it reads each row in
+/// `writing` and ends what the reads decide, but starts no call that never
+/// started. Such a row stays in `writing` until a write sign-in.
+pub fn recover_read_only(
+    store: &Store,
+    mail: &dyn Provider,
+    token: &mut Token<'_>,
+    account: i64,
+) -> Result<()> {
+    let _lock = lock(store)?;
+    let _sync = sync_lock(store, account)?;
+    let mut run = Run::new(store, mail, token, account)?;
+    run.read_only = true;
+    run.mailbox()?;
+    run.recover_account()
+}
+
 fn sync_lock(store: &Store, account: i64) -> Result<iris_sync::SyncLock> {
     match iris_sync::lock(store, account) {
         Ok(l) => Ok(l),
@@ -657,6 +674,9 @@ struct Run<'a, 'b> {
     account: i64,
     /// The messages of step 2 that have no ledger message row.
     counts: Counts,
+    /// The account has read access only (docs/specs/2026-11-18-gmail-write-access.md):
+    /// the run reads, and [`Run::calls`] makes no write call.
+    read_only: bool,
 }
 
 /// What the recovery learned of one message (section 7.3).
@@ -688,6 +708,7 @@ impl<'a, 'b> Run<'a, 'b> {
             address,
             account,
             counts: Counts::default(),
+            read_only: false,
         })
     }
 
@@ -792,6 +813,12 @@ impl<'a, 'b> Run<'a, 'b> {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?)
         })?;
+        // A read-only run starts no call: the row stays in `writing`, and
+        // the calls continue after a write sign-in. A row with no call left
+        // ends as usual.
+        if self.read_only && from < last {
+            return Ok(Outcome::Pending);
+        }
         for k in from + 1..=last {
             let messages: Vec<(i64, Option<String>)> = self.store.read(|c| {
                 let mut st = c.prepare_cached(

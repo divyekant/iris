@@ -85,8 +85,9 @@ pub fn step(
 
 /// The step of an account with read access only
 /// (docs/specs/2026-11-18-gmail-write-access.md): only the recovery of
-/// step 1, which reads and never writes, so a write whose result is not
-/// known still ends. No action applies, and no send leaves.
+/// step 1 with no write call ([`crate::recover_read_only`]), so a write
+/// whose result is not known still ends. A call that never started waits
+/// for a write sign-in. No action applies, and no send leaves.
 pub fn recover_step(
     store: &Store,
     mail: &dyn Provider,
@@ -94,7 +95,7 @@ pub fn recover_step(
     account: i64,
 ) -> Result<Step> {
     if writing_rows(store, account)? {
-        recover(store, mail, token, account)?;
+        crate::recover_read_only(store, mail, token, account)?;
     }
     Ok(Step::default())
 }
