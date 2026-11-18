@@ -324,11 +324,18 @@ fn a_search_gives_only_its_message_id_or_is_refused() {
             true,
         );
         assert_eq!(status, 200);
+        // Like Gmail, the draft got its own Message-ID: a plain message
+        // keeps the ID of Iris.
+        let plain =
+            format!("From: owner@example.com\r\nMessage-ID: <{id}>\r\nSubject: s\r\n\r\nb\r\n");
+        gmail.add_message(plain.as_bytes(), &["SENT"]);
     }
     const POOL: &[&str] = &[
         "rfc822msgid:",
         "rfc822msgid",
         "from:",
+        "CACe_fake0000000001@mail.gmail.com",
+        "<cace_fake0000000002@MAIL.gmail.com>",
         "iris.1@x.org",
         "<iris.1@x.org>",
         "iris.2@x.org",
@@ -381,7 +388,14 @@ fn a_search_gives_only_its_message_id_or_is_refused() {
                 "messages"
             };
             let found = body[key].as_array().map_or(0, Vec::len);
-            let expected = usize::from(bare == "iris.1@x.org" || bare == "iris.2@x.org");
+            let gmail_id = bare == "cace_fake0000000001@mail.gmail.com"
+                || bare == "cace_fake0000000002@mail.gmail.com";
+            let iris_id = bare == "iris.1@x.org" || bare == "iris.2@x.org";
+            // A draft has only the ID of Gmail; each draft is a message too.
+            let expected = match path {
+                "drafts" => usize::from(gmail_id),
+                _ => usize::from(gmail_id || iris_id),
+            };
             assert_eq!(found, expected, "{q:?} {body}");
         }
     }

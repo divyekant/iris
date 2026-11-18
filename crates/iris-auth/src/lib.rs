@@ -1,12 +1,18 @@
-//! Google sign-in for Iris (specification 1, section 4.9).
+//! Google and Microsoft sign-in for Iris (specification 1, section 4.9;
+//! Outlook spec `docs/specs/2026-11-17-outlook-provider.md`, section 7).
 //!
 //! - The user gives the JSON file of an own OAuth client of the type "Desktop
 //!   app" (decision record `docs/decisions/2026-11-google-sign-in.md`).
 //! - The sign-in uses the loopback redirect on `127.0.0.1` with PKCE (S256)
-//!   and asks only for [`SCOPE`].
+//!   and asks only for [`SCOPE`], or only for [`WRITE_SCOPE`] when the
+//!   person asks for write access ([`Client::sign_in_write`]).
 //! - The access token stays in memory. The caller seals the refresh token with
 //!   the secret box of the store (`iris_store::Store::seal`) and keeps the blob.
 //! - No secret goes into a `Debug` text, a `Display` text or an error.
+//! - Microsoft: the user gives the application ID of an own app registration
+//!   and a tenant (`common` or a tenant GUID). The client is public (no
+//!   secret). Each refresh gives a new refresh token
+//!   ([`Client::refresh_tokens`]); the caller keeps it in place of the old one.
 
 use std::fmt;
 use std::io::{Read, Write};
@@ -18,13 +24,26 @@ use base64::Engine;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-/// The only scope of release 1.
+/// The read-only scope: the default sign-in.
 pub const SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
+/// The scope of a write sign-in (spec `docs/specs/2026-11-18-gmail-write-access.md`).
+/// It covers read, labels, trash, drafts and send, but not the permanent delete.
+pub const WRITE_SCOPE: &str = "https://www.googleapis.com/auth/gmail.modify";
 
 /// The Google endpoints. Iris uses only these, never the endpoints of the
 /// client file, so a changed file cannot send the tokens to another host.
 pub const GOOGLE_AUTH_URI: &str = "https://accounts.google.com/o/oauth2/auth";
 pub const GOOGLE_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
+
+/// The Microsoft identity platform. The host is fixed; only the tenant
+/// segment changes, and Iris accepts only `common` or a GUID there.
+pub const MICROSOFT_LOGIN: &str = "https://login.microsoftonline.com";
+/// The scopes of an Outlook account (Outlook spec section 7).
+pub const MICROSOFT_SCOPE: &str = "offline_access https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/MailboxSettings.Read https://graph.microsoft.com/User.Read";
+/// The Graph permissions that each token answer must hold.
+/// `MailboxSettings.Read` reads the category list of the mailbox, which the
+/// label list of each sync needs.
+const MICROSOFT_NEEDED: [&str; 3] = ["Mail.ReadWrite", "Mail.Send", "MailboxSettings.Read"];
 
 /// The path of the loopback redirect.
 pub const CALLBACK: &str = "/oauth/callback";
@@ -81,6 +100,10 @@ pub struct Tokens {
     /// A value here means that the client is in the "Testing" status
     /// (7 days). The guided setup tells the user to publish the app.
     pub refresh_expires_in: Option<u64>,
+    /// True if the sign-in asked for write access and Google granted
+    /// [`WRITE_SCOPE`]. Always true for Microsoft,
+    /// whose sign-in requires `Mail.ReadWrite`.
+    pub write: bool,
 }
 
 #[derive(Debug)]
@@ -97,8 +120,17 @@ pub enum Error {
     Timeout,
     /// The user did not give the `gmail.readonly` permission on the consent screen.
     ScopeMissing,
+    /// A write sign-in ([`Client::sign_in_write`]) did not get the
+    /// `gmail.modify` permission. Nothing is saved.
+    WriteScopeMissing,
+    /// The Microsoft token answer does not hold this Graph permission. The
+    /// account does not start.
+    PermissionMissing(&'static str),
     /// The answer of the code exchange has no refresh token.
     NoRefreshToken,
+    /// [`Client::refresh`] of a Microsoft client: it would drop the new
+    /// refresh token. A program error, not a provider answer.
+    RotatingRefresh,
     /// Google refused the refresh token (`invalid_grant`). The account state
     /// becomes "needs sign-in".
     Revoked,
@@ -126,8 +158,20 @@ impl fmt::Display for Error {
             Error::ScopeMissing => f.write_str(
                 "Iris did not get read access to Gmail: select the Gmail box on the consent screen",
             ),
-            Error::NoRefreshToken => f.write_str("Google gave no refresh token"),
-            Error::Revoked => f.write_str("Google refused the stored sign-in: sign in again"),
+            Error::WriteScopeMissing => f.write_str(
+                "Iris did not get write access to Gmail: select the box that lets Iris \
+                 read, compose and send mail, or add the scope gmail.modify to the Data Access \
+                 page of your OAuth client",
+            ),
+            Error::PermissionMissing(p) => write!(
+                f,
+                "Iris did not get the Microsoft permission {p}: sign in again and accept it"
+            ),
+            Error::NoRefreshToken => f.write_str("the sign-in gave no refresh token"),
+            Error::RotatingRefresh => {
+                f.write_str("a Microsoft refresh must keep the new refresh token")
+            }
+            Error::Revoked => f.write_str("the provider refused the stored sign-in: sign in again"),
             Error::Token { status, code } => {
                 write!(f, "the token endpoint refused the request: {status} {code}")
             }
@@ -158,14 +202,25 @@ fn error_code(raw: &str) -> String {
     }
 }
 
-/// The OAuth client of the user, from its JSON file.
+/// The provider of a client.
+#[derive(Clone)]
+enum Kind {
+    /// A "Desktop app" client, with its client secret.
+    Google(Secret),
+    /// A public client: no secret.
+    Microsoft,
+}
+
+/// The OAuth client of the user.
 #[derive(Clone)]
 pub struct Client {
     id: String,
-    secret: Secret,
+    kind: Kind,
     auth_uri: String,
     token_uri: String,
     agent: ureq::Agent,
+    /// Google only: ask for [`WRITE_SCOPE`] in place of [`SCOPE`].
+    write: bool,
 }
 
 #[derive(Deserialize)]
@@ -198,18 +253,96 @@ impl Client {
                 "the client ID or the client secret is empty",
             ));
         }
-        let agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(30)))
-            .build()
-            .into();
         Ok(Client {
             id: c.client_id,
-            secret: c.client_secret,
+            kind: Kind::Google(c.client_secret),
             auth_uri: GOOGLE_AUTH_URI.to_string(),
             token_uri: GOOGLE_TOKEN_URI.to_string(),
-            agent,
+            agent: agent(),
+            write: false,
         })
+    }
+
+    /// A Microsoft client: the application (client) ID of the app
+    /// registration of the user, and the tenant: `common` or the tenant ID
+    /// (decision record `docs/decisions/2026-11-microsoft-sign-in.md`).
+    pub fn microsoft(client_id: &str, tenant: &str) -> Result<Client> {
+        if !is_guid(client_id) {
+            return Err(Error::ClientFile(
+                "the application (client) ID must be a GUID, as the Entra admin center shows it",
+            ));
+        }
+        if tenant != "common" && !is_guid(tenant) {
+            return Err(Error::ClientFile(
+                "the tenant must be \"common\" or the directory (tenant) ID, a GUID",
+            ));
+        }
+        let tenant = tenant.to_ascii_lowercase();
+        Ok(Client {
+            id: client_id.to_ascii_lowercase(),
+            kind: Kind::Microsoft,
+            auth_uri: format!("{MICROSOFT_LOGIN}/{tenant}/oauth2/v2.0/authorize"),
+            token_uri: format!("{MICROSOFT_LOGIN}/{tenant}/oauth2/v2.0/token"),
+            agent: agent(),
+            write: false,
+        })
+    }
+
+    /// The scope text of the authorization request.
+    fn scope(&self) -> &'static str {
+        match self.kind {
+            Kind::Google(_) if self.write => WRITE_SCOPE,
+            Kind::Google(_) => SCOPE,
+            Kind::Microsoft => MICROSOFT_SCOPE,
+        }
+    }
+
+    /// The form fields that name the client: the secret only for Google.
+    fn identity(&self) -> Vec<(&str, &str)> {
+        let mut form = vec![("client_id", self.id.as_str())];
+        if let Kind::Google(secret) = &self.kind {
+            form.push(("client_secret", secret.expose()));
+        }
+        form
+    }
+
+    /// Checks the granted scope of a token answer. A code exchange must
+    /// name it. A refresh can leave it out when the grant did not change.
+    fn check_scope(&self, answer: &TokenAnswer, refresh: bool) -> Result<()> {
+        let Some(granted) = &answer.scope else {
+            return if refresh { Ok(()) } else { Err(self.missing()) };
+        };
+        match self.kind {
+            // `gmail.modify` includes read.
+            Kind::Google(_) if self.write && !has_write(granted) => Err(Error::WriteScopeMissing),
+            Kind::Google(_) if has_write(granted) || granted.split(' ').any(|x| x == SCOPE) => {
+                Ok(())
+            }
+            Kind::Google(_) => Err(Error::ScopeMissing),
+            Kind::Microsoft => {
+                // Microsoft can name a Graph scope with or without its
+                // resource prefix, in any case.
+                let has = |p: &str| {
+                    granted.split(' ').any(|x| {
+                        let x = x.to_ascii_lowercase();
+                        let x = x.strip_prefix("https://graph.microsoft.com/").unwrap_or(&x);
+                        x == p.to_ascii_lowercase()
+                    })
+                };
+                match MICROSOFT_NEEDED.iter().find(|p| !has(p)) {
+                    Some(p) => Err(Error::PermissionMissing(p)),
+                    None => Ok(()),
+                }
+            }
+        }
+    }
+
+    fn missing(&self) -> Error {
+        match self.kind {
+            Kind::Google(_) if self.write => Error::WriteScopeMissing,
+            Kind::Google(_) => Error::ScopeMissing,
+            Kind::Microsoft => Error::PermissionMissing(MICROSOFT_NEEDED[0]),
+        }
     }
 
     /// The token endpoint that this client posts to.
@@ -237,28 +370,60 @@ impl Client {
     pub fn sign_in(&self) -> Result<SignIn> {
         let listener = TcpListener::bind("127.0.0.1:0").map_err(Error::Io)?;
         let port = listener.local_addr().map_err(Error::Io)?.port();
+        // Microsoft matches `http://localhost` with any port (A9); the
+        // listener still binds 127.0.0.1 only.
+        let host = match self.kind {
+            Kind::Google(_) => "127.0.0.1",
+            Kind::Microsoft => "localhost",
+        };
         Ok(SignIn {
             client: self.clone(),
             listener,
-            redirect_uri: format!("http://127.0.0.1:{port}{CALLBACK}"),
+            redirect_uri: format!("http://{host}:{port}{CALLBACK}"),
             state: random_text()?,
             verifier: Secret(random_text()?),
         })
     }
 
-    /// Gets a new access token with the refresh token.
+    /// Starts a sign-in that asks for [`WRITE_SCOPE`] only (Google). The
+    /// answer must grant it, else [`Error::WriteScopeMissing`]. A Microsoft
+    /// client asks for its usual scopes, which already allow writes.
+    pub fn sign_in_write(&self) -> Result<SignIn> {
+        let mut client = self.clone();
+        client.write = true;
+        client.sign_in()
+    }
+
+    /// Gets a new access token with the refresh token (Google). A Microsoft
+    /// client gets [`Error::RotatingRefresh`] and sends no request: use
+    /// [`Client::refresh_tokens`], so that the new refresh token is never
+    /// dropped.
     pub fn refresh(&self, refresh: &Secret) -> Result<AccessToken> {
-        let answer = self.token_call(
-            true,
-            &[
-                ("grant_type", "refresh_token"),
-                ("refresh_token", refresh.expose()),
-                ("client_id", &self.id),
-                ("client_secret", self.secret.expose()),
-            ],
-        )?;
-        check_scope(&answer, true)?;
-        answer.access()
+        if matches!(self.kind, Kind::Microsoft) {
+            return Err(Error::RotatingRefresh);
+        }
+        self.refresh_tokens(refresh).map(|r| r.access)
+    }
+
+    /// Gets a new access token, and the new refresh token if the answer has
+    /// one. Microsoft gives one at each refresh (A11): seal it in place of
+    /// the old one. The old token stays valid, so a crash before the write
+    /// loses nothing.
+    pub fn refresh_tokens(&self, refresh: &Secret) -> Result<Refreshed> {
+        let mut form = vec![
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh.expose()),
+        ];
+        form.extend(self.identity());
+        if matches!(self.kind, Kind::Microsoft) {
+            form.push(("scope", MICROSOFT_SCOPE));
+        }
+        let answer = self.token_call(true, &form)?;
+        self.check_scope(&answer, true)?;
+        Ok(Refreshed {
+            access: answer.access()?,
+            refresh: answer.refresh_token.filter(|r| !r.expose().is_empty()),
+        })
     }
 
     /// `refresh` says if the request uses a stored refresh token. Only then
@@ -319,15 +484,34 @@ impl TokenAnswer {
     }
 }
 
-/// With granular consent the user can clear the Gmail box, so check the grant.
-/// A code exchange must name the scope. A refresh can leave it out when the
-/// grant did not change.
-fn check_scope(answer: &TokenAnswer, refresh: bool) -> Result<()> {
-    match &answer.scope {
-        Some(s) if s.split(' ').any(|x| x == SCOPE) => Ok(()),
-        None if refresh => Ok(()),
-        _ => Err(Error::ScopeMissing),
-    }
+/// The answer of a refresh.
+#[derive(Debug, Clone)]
+pub struct Refreshed {
+    pub access: AccessToken,
+    /// The new refresh token, if the answer has one. Seal it in place of
+    /// the old one.
+    pub refresh: Option<Secret>,
+}
+
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        // A redirect could carry a code, a verifier or a refresh token to
+        // another host: a 3xx is an error answer of the token endpoint.
+        .max_redirects(0)
+        .timeout_global(Some(Duration::from_secs(30)))
+        .build()
+        .into()
+}
+
+/// `8-4-4-4-12` hex digits, as Entra shows an application or tenant ID.
+fn is_guid(v: &str) -> bool {
+    let parts: Vec<&str> = v.split('-').collect();
+    parts.len() == 5
+        && parts
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(p, n)| p.len() == n && p.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// 32 random bytes in base64url: 43 characters, valid as a PKCE verifier.
@@ -373,18 +557,24 @@ impl SignIn {
     /// The address to open in the browser.
     pub fn url(&self) -> String {
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(self.verifier.expose()));
-        let query = form_urlencoded::Serializer::new(String::new())
+        let mut query = form_urlencoded::Serializer::new(String::new());
+        query
             .append_pair("client_id", &self.client.id)
             .append_pair("redirect_uri", &self.redirect_uri)
             .append_pair("response_type", "code")
-            .append_pair("scope", SCOPE)
+            .append_pair("scope", self.client.scope())
             .append_pair("state", &self.state)
             .append_pair("code_challenge", &challenge)
-            .append_pair("code_challenge_method", "S256")
+            .append_pair("code_challenge_method", "S256");
+        match self.client.kind {
             // A refresh token comes only with offline access and a new consent.
-            .append_pair("access_type", "offline")
-            .append_pair("prompt", "consent")
-            .finish();
+            Kind::Google(_) => query
+                .append_pair("access_type", "offline")
+                .append_pair("prompt", "consent"),
+            // `offline_access` in the scope gives the refresh token.
+            Kind::Microsoft => query.append_pair("prompt", "select_account"),
+        };
+        let query = query.finish();
         format!("{}?{query}", self.client.auth_uri)
     }
 
@@ -471,7 +661,7 @@ impl SignIn {
             match self.read_query(query) {
                 Ok(Some(answer)) => {
                     let page = match answer {
-                        Answer::Code(_) => "Iris got the answer from Google. Go back to Iris.",
+                        Answer::Code(_) => "Iris got the sign-in answer. Go back to Iris.",
                         Answer::Denied(_) => "The sign-in was refused. Go back to Iris.",
                     };
                     ("200 OK", page, Some(answer))
@@ -523,18 +713,15 @@ impl SignIn {
             Answer::Denied(e) => return Err(Error::Denied(e)),
         };
         let c = &self.client;
-        let answer = c.token_call(
-            false,
-            &[
-                ("grant_type", "authorization_code"),
-                ("code", &code),
-                ("client_id", &c.id),
-                ("client_secret", c.secret.expose()),
-                ("redirect_uri", &self.redirect_uri),
-                ("code_verifier", self.verifier.expose()),
-            ],
-        )?;
-        check_scope(&answer, false)?;
+        let mut form = vec![
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("redirect_uri", self.redirect_uri.as_str()),
+            ("code_verifier", self.verifier.expose()),
+        ];
+        form.extend(c.identity());
+        let answer = c.token_call(false, &form)?;
+        c.check_scope(&answer, false)?;
         Ok(Tokens {
             access: answer.access()?,
             refresh: answer
@@ -543,6 +730,212 @@ impl SignIn {
                 .filter(|r| !r.expose().is_empty())
                 .ok_or(Error::NoRefreshToken)?,
             refresh_expires_in: answer.refresh_token_expires_in,
+            // A plain sign-in is read only in Iris, also when Google gives
+            // an earlier gmail.modify grant: the person asked for read only.
+            write: match c.kind {
+                Kind::Google(_) => c.write && answer.scope.as_deref().is_some_and(has_write),
+                Kind::Microsoft => true,
+            },
         })
+    }
+}
+
+/// True if a granted scope text (scopes with one space between them) holds
+/// [`WRITE_SCOPE`].
+fn has_write(granted: &str) -> bool {
+    granted.split(' ').any(|x| x == WRITE_SCOPE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A small random number source for the property tests.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 33) % n as u64) as usize
+        }
+    }
+
+    /// The GUID rule by position: 36 characters, `-` at 8, 13, 18 and 23,
+    /// hex digits at all other places.
+    fn guid_by_position(v: &str) -> bool {
+        v.len() == 36
+            && v.bytes().enumerate().all(|(i, b)| match i {
+                8 | 13 | 18 | 23 => b == b'-',
+                _ => b.is_ascii_hexdigit(),
+            })
+    }
+
+    /// Property: only a GUID (or `common` as the tenant) makes a client,
+    /// and the endpoints of each client stay on the fixed host.
+    #[test]
+    fn generated_ids_and_tenants() {
+        let chars = b"0123456789abcdefABCDEF-g/@.:?#%xX ";
+        let mut rng = Rng(5);
+        let mut made = 0;
+        for _ in 0..20_000 {
+            let gen = |rng: &mut Rng| -> String {
+                match rng.below(4) {
+                    // A GUID with one character changed, or none.
+                    0 | 1 => {
+                        let mut g: Vec<u8> = b"0a1b2c3d-4e5f-6A7B-8C9D-0e1f2a3b4c5d".to_vec();
+                        if rng.below(2) == 0 {
+                            let i = rng.below(g.len());
+                            g[i] = chars[rng.below(chars.len())];
+                        }
+                        if rng.below(8) == 0 {
+                            g.push(chars[rng.below(chars.len())]);
+                        }
+                        String::from_utf8(g).unwrap()
+                    }
+                    2 => [
+                        "common",
+                        "Common",
+                        "organizations",
+                        "consumers",
+                        "common/x",
+                        "",
+                    ][rng.below(6)]
+                    .to_string(),
+                    _ => (0..rng.below(40))
+                        .map(|_| chars[rng.below(chars.len())] as char)
+                        .collect(),
+                }
+            };
+            let (id, tenant) = (gen(&mut rng), gen(&mut rng));
+            let ok = guid_by_position(&id) && (tenant == "common" || guid_by_position(&tenant));
+            let got = Client::microsoft(&id, &tenant);
+            assert_eq!(got.is_ok(), ok, "{id:?} {tenant:?}");
+            if let Ok(c) = got {
+                made += 1;
+                let rest = c
+                    .token_uri
+                    .strip_prefix("https://login.microsoftonline.com/")
+                    .unwrap();
+                let (seg, path) = rest.split_once('/').unwrap();
+                assert_eq!(path, "oauth2/v2.0/token");
+                assert!(seg == "common" || guid_by_position(seg), "{seg}");
+                assert!(c.auth_uri.starts_with("https://login.microsoftonline.com/"));
+            }
+        }
+        assert!(made > 100, "too few clients: {made}");
+    }
+
+    /// Property: a Microsoft token answer passes only if it names
+    /// Mail.ReadWrite, Mail.Send and MailboxSettings.Read, bare or with the Graph prefix, in any
+    /// case; else the first missing one is named.
+    #[test]
+    fn generated_scope_strings() {
+        let words = [
+            "Mail.ReadWrite",
+            "mail.readwrite",
+            "https://graph.microsoft.com/Mail.ReadWrite",
+            "Mail.Send",
+            "MAIL.SEND",
+            "https://graph.microsoft.com/mail.send",
+            "Mail.Read",
+            "Mail.ReadWrite.Shared",
+            "Mail.SendX",
+            "https://evil.example/Mail.Send",
+            "graph.microsoft.com/Mail.Send",
+            "MailboxSettings.Read",
+            "mailboxsettings.read",
+            "https://graph.microsoft.com/MailboxSettings.Read",
+            "MailboxSettings.ReadWrite",
+            "User.Read",
+            "offline_access",
+            "openid",
+            "",
+        ];
+        let c = Client::microsoft("0a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d", "common").unwrap();
+        let mut rng = Rng(9);
+        for _ in 0..10_000 {
+            let n = rng.below(8);
+            let scope: Vec<&str> = (0..n).map(|_| words[rng.below(words.len())]).collect();
+            let scope = scope.join(" ");
+            let has = |p: &str| {
+                scope.split(' ').any(|t| {
+                    let t = t.to_lowercase();
+                    let p = p.to_lowercase();
+                    t == p || t == format!("https://graph.microsoft.com/{p}")
+                })
+            };
+            let expect = ["Mail.ReadWrite", "Mail.Send", "MailboxSettings.Read"]
+                .into_iter()
+                .find(|p| !has(p));
+            let answer = TokenAnswer {
+                access_token: Secret::new("a"),
+                expires_in: 1,
+                refresh_token: None,
+                refresh_token_expires_in: None,
+                scope: Some(scope.clone()),
+            };
+            for refresh in [false, true] {
+                match (c.check_scope(&answer, refresh), expect) {
+                    (Ok(()), None) => {}
+                    (Err(Error::PermissionMissing(p)), Some(e)) if p == e => {}
+                    (got, _) => panic!("{scope:?}: {got:?}, want {expect:?}"),
+                }
+            }
+        }
+    }
+
+    /// Property: a Google token answer gives write access only if one
+    /// space-separated token is exactly `gmail.modify`. A near match (a
+    /// prefix, a suffix, another case, another scope) never gives it. A
+    /// read sign-in passes with `gmail.readonly` or `gmail.modify`; a write
+    /// sign-in passes only with `gmail.modify`.
+    #[test]
+    fn generated_google_scope_strings() {
+        let words = [
+            SCOPE,
+            WRITE_SCOPE,
+            "https://www.googleapis.com/auth/gmail.modify.x",
+            "https://www.googleapis.com/auth/gmail.modif",
+            "HTTPS://WWW.GOOGLEAPIS.COM/AUTH/GMAIL.MODIFY",
+            "https://www.googleapis.com/auth/gmail.send",
+            "https://www.googleapis.com/auth/gmail.compose",
+            "https://mail.google.com/",
+            "gmail.modify",
+            "https://evil.example/auth/gmail.modify",
+            "https://www.googleapis.com/auth/gmail.readonly2",
+            "openid",
+            "",
+        ];
+        let json = br#"{"installed":{"client_id":"id","client_secret":"s"}}"#;
+        let read = Client::from_json(json).unwrap();
+        let mut write = read.clone();
+        write.write = true;
+        let mut rng = Rng(17);
+        for _ in 0..10_000 {
+            let n = rng.below(6);
+            let scope: Vec<&str> = (0..n).map(|_| words[rng.below(words.len())]).collect();
+            let scope = scope.join(" ");
+            let w = scope.split(' ').any(|t| t == WRITE_SCOPE);
+            let r = scope.split(' ').any(|t| t == SCOPE);
+            assert_eq!(has_write(&scope), w, "{scope:?}");
+            let answer = TokenAnswer {
+                access_token: Secret::new("a"),
+                expires_in: 1,
+                refresh_token: None,
+                refresh_token_expires_in: None,
+                scope: Some(scope.clone()),
+            };
+            match (read.check_scope(&answer, false), w || r) {
+                (Ok(()), true) | (Err(Error::ScopeMissing), false) => {}
+                (got, want) => panic!("read {scope:?}: {got:?}, want {want}"),
+            }
+            match (write.check_scope(&answer, false), w) {
+                (Ok(()), true) | (Err(Error::WriteScopeMissing), false) => {}
+                (got, want) => panic!("write {scope:?}: {got:?}, want {want}"),
+            }
+        }
     }
 }

@@ -3,7 +3,7 @@
 The local API of Iris (tracker item R1-17). The API gives the web client
 and the read verbs of the `iris` program their data from the store. The API
 reads only, except the policy changes of the web client (see
-[Policy](#policy)), the review of the person: decisions and withdraws
+[Policy](#policy)), the review of the person: decisions, withdraws and comments
 (see [Review](#review)), the state verbs of the person (see
 [State verbs](#state-verbs)), the cancel of a send in the outbox (see
 [Outbox](#outbox)), the days of use of the measures page (see
@@ -108,7 +108,7 @@ a stranger.
 ## Policy
 
 The policy view of the web client (specification 2, section 6.3). Each
-endpoint gives the policy object below. `POST` endpoints take a JSON body. A route with no body (the sender answers, the withdraw of a changeset, the policy discard, the notice done, the watch remove and the matter decline) takes zero bytes or the JSON object `{}`, and gives 400 for any other body (a body of only spaces too) before it changes anything.
+endpoint gives the policy object below. `POST` endpoints take a JSON body. The `mode`, `remove`, `grant` and `accept` endpoints need the field `version`: the active version that the person saw, or `null` for the policy of the first start. A body with no `version` field gets 400, and nothing changes. A route with no body (the sender answers, the withdraw of a changeset, the policy discard, the notice done, the watch remove and the matter decline) takes zero bytes or the JSON object `{}`, and gives 400 for any other body (a body of only spaces too) before it changes anything. The route keeps at most 64 bytes of the body for the check: a longer body gets 400. The read stops at the first transport frame past the limit, so one received frame can be larger.
 
 | Endpoint | Does |
 |---|---|
@@ -154,6 +154,8 @@ The person decides the actions of one changeset in one request
 |---|---|
 | `POST /api/changesets/{id}/decide` | Body `{"actions": [{"revision", "n", "approve", "hash"}]}`: 1 to 500 decisions, each action once. `approve` `true` approves the action and needs the `hash` that the review showed. `false` denies it, with the reason "The person denied it in the review.". The answer is the changeset document after the decision. |
 | `POST /api/changesets/{id}/withdraw` | No body. The person withdraws the changeset, in any state but `withdrawn` (section 5.5: "each changeset"): each open action and each draft action becomes `cancelled`, and applied and decided actions stay. A second withdraw is a 409. The withdraw of a write also withdraws the changeset of its send, so the mail does not leave; if the send left or is leaving now, the withdraw is a 409 and changes nothing. The answer is the changeset document after the withdraw. |
+| `POST /api/changesets/{id}/comments` | Body `{"revision", "text", "key"}`. The person comments on the newest revision of an open changeset of a job (`docs/specs/2026-11-17-review-comments.md`). `text` has 1 to 4,000 characters, not only white space, and no NUL. `key` has 16 to 64 characters of `A-Z`, `a-z`, `0-9`, `_` and `-`; the client makes a new key for each new comment. A retry with the same key and the same body gives the first comment and writes nothing. A comment on a `waiting` job wakes the job. The next session of the job reads the comment in `comments/cs-<id>.md`. The answer is the comment: `{"id", "changeset", "revision", "text", "at"}`. A bad body is a 400. A changeset with no job, not open, of a done job, or with a newer revision is a 409, and nothing is written. |
+| `GET /api/changesets/{id}/comments` | `{"comments": [...]}`: each comment of the changeset, oldest first, in the form of the `POST` answer. |
 
 The changeset must be open for each decision. Each action of a decision must wait for a person (`proposed` or `in_review`). The
 decisions write in one transaction. If one is refused (a hash that changed,
@@ -197,7 +199,8 @@ engine computes them from the store. Nothing leaves the machine.
   person opened on that day. A day with no entry is a day with no use.
 - `first_brief`: `{"connect", "brief", "seconds"}`, or `null` before the
   first brief with content. `connect` is the time of the first account (the
-  connect step). `brief` is the time of the first brief with content: an
+  connect step). `seconds` is the time between the two, rounded up to whole
+  seconds. `brief` is the time of the first brief with content: an
   item of a section, a record or a bundle. The engine checks the brief every
   10 seconds in `iris serve`, after `iris mirror` and `iris understand`, and
   at each `/api/brief`. The store
@@ -208,7 +211,8 @@ engine computes them from the store. Nothing leaves the machine.
   each `{"account", "checked", "differences", "complete"}`. An account with
   no check has `checked` and `differences` `null`, and `complete` `false`.
   `differences` is `null` if the log has no count. `complete` is `false`
-  when an error stopped the check.
+  when an error stopped the check, or when the check skipped a message (a
+  message that changed during the check is not compared).
 - `memory`: `{"rss_kib", "messages"}`. `rss_kib` is the resident memory of
   the engine from `ps`, or `null`.
 - `approvals`: `{"decided", "approved"}`, the decisions of the person on the
@@ -247,8 +251,10 @@ same request.
 
 A `reason` is 1 to 500 characters and not blank. The answer is the item
 after the change. The verb changes only a commitment with the status `open`
-or `deferred`. For another item, the answer is a 409 with the reason, and the
-ledger keeps a `failed` entry. A body that is not valid (for example, a date
+or `deferred`. For another commitment, the answer is a 409 with the reason,
+and the ledger keeps a `failed` entry. For an item of another form (for
+example `POST /api/items/r-1/close`), the answer is a 400, and nothing is
+written: no changeset and no ledger entry. A body that is not valid (for example, a date
 that is not valid) is a 400, and nothing is written. An ID that no item has,
 or another verb, is a 404.
 
@@ -274,7 +280,9 @@ then the send. The send leaves after the hold, and only while sending is on.
 |---|---|
 | `POST /api/write` | The body is `account` (`a-N`, a new mail) or `thread` (`t-N`) with `parent` (`m-N`, a reply), and `to`, `cc`, `subject` (a new mail only), `body`, `key` (16 to 64 letters, digits or hyphens) and `flags` (the warnings that the person saw). In one transaction: the changeset of the author `person`, the `draft` action, its submit, the approval and the send mark. A new write is a 201 `{"write": "cs-N"}`. A second try with the same key and the same mail is a 200 with the same `cs-N`, and writes nothing. A 409 `{"error", "flags"}` writes nothing: the warnings are not the warnings that the person saw (`flags` holds the new warnings), a new mail came into the thread, or the key belongs to another mail. A body that is not valid (a target that is not an ID of its kind too), or a mail that the submit denies, is a 400. |
 | `GET /api/write/{cs-N}` | The state of the write: `saving`, `waiting` (`draft`, `sending`, `leaves_at`), `review` (`reason`), `sent` or `stopped` (`reason`, `draft`). A write that got no send in 24 hours after the press is `stopped`: the engine makes no send for it. One answer is one snapshot of the store. A changeset that is not a write is a 404. |
+| `GET /api/threads/{t-N}/draft` | The draft of the thread that the person can use now: `thread`, `based_on` (the newest mail when Iris wrote it), `nudge` (true for a reminder that Iris prepared because a person is late on an ask, card R3-07), `to` (for a nudge, the address of the person that owes, else null), `item` (for a nudge, its commitment `c-N`, else null) and `body`. On the brief, a nudge marks only its commitment as `ready`, not the other items of its thread. A draft is stale after a newer mail or a hostile mark. A nudge is also stale when its commitment is done, hidden, changed or not late. A stale draft is a 404. A thread with no draft is a 404. Nothing is sent. |
 | `GET /api/threads/{t-N}/reply` | The start values of a reply: `account`, `parent` (`id`, `from`, `date`, and `text` cut to 600 characters), `to`, `cc`, `subject`, `topic` (the subject of the parent), `conversation` and `earlier`. `conversation` is the newest 20 mails of the thread that a reply can answer, oldest first, with the parent last: `id`, `from`, `date`, `to`, `you` (the mail has the label `SENT`), `hostile` (a hostile mark, a link check that waits, or a hostile sender), `text` (cut to 4,000 characters) and `cut`. `earlier` is the count of the older mails. The parent is the newest mail of the thread that is not spam, trash or a draft. If the person wrote it (it has the label `SENT`), the reply goes to its recipients. Otherwise it goes to its sender, also when its `From` is the address of the person. A thread with no mail to reply to is a 409. A thread that does not exist is a 404. |
+| `POST /api/threads/{t-N}/draft` | A draft of the reply in the voice of the person (R3-04 intent path, `iris_voice::draft`). Body `{"intent": "...", "parent": "m-N"}`; the intent can be empty, and `parent` is the mail that the form shows (409 before the call if the reply parent is another mail now). One model call through the budget of understanding. The draft is saved in `reply_draft` and comes back as `body`, with `based_on`, `samples`, `unknown_cost` and `overrun`. It writes nothing to Gmail. 404 for a thread that does not exist; 400 for an intent over 2,000 characters; 409 for a thread with hostile mail, with mail that understanding did not read, or that changed during the call; 503 with no model, no budget, or while an understanding run holds the lock; 502 if the model fails. |
 
 ## Stranger gate
 
@@ -326,7 +334,7 @@ An error is `{"error": "<reason>"}`:
 |---|---|
 | 400 | The search text, an ID, a filter or a request body is not valid. |
 | 401 | The request has no `Authorization: Bearer` token of the sign-in, or a wrong one. |
-| 403 | The `Host` is not the bound address, the `Origin` is another origin, or the sign-in code is not valid or was used. |
+| 403 | The `Host` is not the bound address, the `Origin` is another origin, or the sign-in code is not valid, was used or ended. |
 | 405 | The code exchange was not a `POST`. |
 | 404 | No object has the ID, or the path is not an endpoint. |
 | 409 | A gate answer is for a sender that is not at the gate now: its kind is not `stranger`, or a rule took its items out. A policy change cannot apply: the policy or the file changed after the person saw it, the file is not valid, or the rule does not exist. Read the policy again. A review decision cannot apply: read the changeset again. |
@@ -336,12 +344,15 @@ An error is `{"error": "<reason>"}`:
 
 The API follows specification 2, section 8.6. At each start, `Auth::new(addr)`
 makes a random web secret of 32 bytes and a one-time code. `iris serve`
-prints (and opens) the sign-in address `http://<addr>/#code=<code>`.
+prints the sign-in address `http://<addr>/#code=<code>`. `Auth::sign_in()`
+makes one more code, for 2 minutes (`CODE_LIFE`). At most 8 codes wait
+(`CODES_MAX`): a new code ends the oldest code of `sign_in`. `iris open`
+gets such a code through the engine socket.
 
 1. The client page reads the code from the fragment of the address. The
    browser does not send a fragment to a server.
 2. The client sends `POST /api/session` with `{"code": "<code>"}`. The answer
-   is `{"token": "<secret>"}`, one time only. A wrong or used code gives 403.
+   is `{"token": "<secret>"}`, one time only. A wrong, used or ended code gives 403.
 3. The client keeps the token in the storage of its origin (for example
    `sessionStorage`), and sends `Authorization: Bearer <token>` with each
    request. A request without it gives 401.
@@ -349,7 +360,7 @@ prints (and opens) the sign-in address `http://<addr>/#code=<code>`.
 The API does not use a cookie. A browser sends a cookie to each port of a host,
 so a server of another OS user on another loopback port could get it. Storage
 belongs to one origin, with its port. A download of `/raw` needs the header
-too: fetch it, then save the blob. For a new code, start `iris serve` again.
+too: fetch it, then save the blob. For a new code, run `iris open`.
 
 ## Bound address only
 

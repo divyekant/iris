@@ -288,16 +288,16 @@ async fn gives_the_summary_of_each_message_id_in_order() {
 /// section 5.7, written apart from the code under test.
 fn oracle(segment: &str) -> Option<String> {
     let digits = segment.strip_prefix("m-")?;
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+    if digits.is_empty() || digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     let row: u128 = digits.parse().ok()?;
-    (row > 0 && row <= i64::MAX as u128).then(|| format!("m-{row}"))
+    (row <= i64::MAX as u128).then(|| format!("m-{row}"))
 }
 
 /// Property: for any ID text, the answer is a 400 unless each part is a
-/// message ID and there are 200 parts or fewer. Else it has one entry for
-/// each part, in order, with the normal form of the ID.
+/// message ID in its one canonical form (no zero in front) and there are
+/// 200 parts or fewer. Else it has one entry for each part, in order.
 #[test]
 fn the_ids_parser_accepts_only_message_ids_and_keeps_their_order() {
     let dir = temp("ids-property");
@@ -660,4 +660,56 @@ async fn withdraws_each_changeset_once() {
         StatusCode::NOT_FOUND
     );
     assert_eq!(get(&s, &uri).await.0, StatusCode::METHOD_NOT_ALLOWED);
+}
+
+/// Review comments (docs/specs/2026-11-17-review-comments.md, section 3).
+#[tokio::test]
+async fn the_person_comments_on_a_changeset_of_a_job() {
+    let dir = temp("comment");
+    let s = store(&dir);
+    s.write(|tx| Ok(tx.execute("UPDATE message SET understood_at = 1", [])?))
+        .unwrap();
+    let j = iris_job::create(&s, "Tidy", None, NOW).unwrap();
+    iris_job::add_scope(&s, j, iris_job::Ref::Thread(1), iris_job::By::Person, NOW).unwrap();
+    let who = Author {
+        job: Some(iris_job::format_job_id(j)),
+        ..agent()
+    };
+    let cs = create(&s, &who, NOW).unwrap();
+    add_action(&s, cs, &who, Verb::Archive, &["m-1"], &Map::new(), None).unwrap();
+    submit(&s, cs, &who, "Archive.", NOW).unwrap();
+    let uri = format!("/api/changesets/cs-{cs}/comments");
+    let body = json!({"revision": 1, "text": "Keep it.", "key": "k-0123456789abcdef"}).to_string();
+
+    let (code, first) = post(&s, &uri, &body).await;
+    assert_eq!(code, StatusCode::OK, "{first}");
+    assert_eq!(
+        (&first["changeset"], &first["revision"], &first["text"]),
+        (&json!(format!("cs-{cs}")), &json!(1), &json!("Keep it."))
+    );
+    // A retry after a lost answer gives the same comment.
+    assert_eq!(post(&s, &uri, &body).await, (StatusCode::OK, first.clone()));
+
+    // A bad body is a 400, a refused state a 409, an unknown changeset a 404.
+    let bad = json!({"revision": 1, "text": " ", "key": "k-1123456789abcdef"}).to_string();
+    assert_eq!(post(&s, &uri, &bad).await.0, StatusCode::BAD_REQUEST);
+    let old = json!({"revision": 2, "text": "x", "key": "k-2123456789abcdef"}).to_string();
+    assert_eq!(post(&s, &uri, &old).await.0, StatusCode::CONFLICT);
+    let host = changeset(&s, "Archive.", &[&["m-3"]], NOW);
+    let other = format!("/api/changesets/cs-{host}/comments");
+    let ok = json!({"revision": 1, "text": "x", "key": "k-3123456789abcdef"}).to_string();
+    assert_eq!(post(&s, &other, &ok).await.0, StatusCode::CONFLICT);
+    assert_eq!(
+        post(&s, "/api/changesets/cs-99/comments", &ok).await.0,
+        StatusCode::NOT_FOUND
+    );
+
+    assert_eq!(
+        get(&s, &uri).await,
+        (StatusCode::OK, json!({"comments": [first]}))
+    );
+    assert_eq!(
+        get(&s, &other).await,
+        (StatusCode::OK, json!({"comments": []}))
+    );
 }

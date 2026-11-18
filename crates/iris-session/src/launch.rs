@@ -23,6 +23,7 @@ use iris_job::{format_session_id, EndReason};
 use iris_store::Store;
 
 use crate::config::{self, Adapter};
+use crate::egress::Endpoint;
 use crate::isolation::Isolation;
 use crate::reap::reap_check;
 
@@ -48,9 +49,9 @@ pub enum Step {
     HelperStarted,
 }
 
-/// Gives the egress port of a session from its adapter (see
+/// Gives the egress endpoint of a session from its adapter (see
 /// [`Launcher::egress`]).
-pub type Egress<'a> = dyn Fn(i64, &Adapter) -> Result<Option<u16>, String> + 'a;
+pub type Egress<'a> = dyn Fn(i64, &Adapter) -> Result<Option<Endpoint>, String> + 'a;
 
 /// What the launch needs from the engine.
 pub struct Launcher<'a> {
@@ -231,7 +232,7 @@ impl Launcher<'_> {
         let dir = iris_workspace::default_dir(self.data_dir, job);
         // 3. Build. A revoke during the build changes the revoke count.
         let mut tries = 0;
-        loop {
+        let comment = loop {
             tries += 1;
             let built = match iris_workspace::build(self.store, job, &dir) {
                 Ok(b) => b,
@@ -242,7 +243,7 @@ impl Launcher<'_> {
                 return a;
             }
             match iris_job::revoked_count(self.store, job) {
-                Ok(n) if n == built.revoked => break,
+                Ok(n) if n == built.revoked => break built.comment,
                 Ok(_) if tries < BUILD_TRIES => {}
                 Ok(_) => {
                     let why = format!("the scope changed during each of {BUILD_TRIES} builds");
@@ -252,7 +253,7 @@ impl Launcher<'_> {
                     return self.fail(session, format!("cannot read the scope: {e}"), None, None)
                 }
             }
-        }
+        };
         // 4. Bind the session socket.
         let socket_path = dir.join(".iris").join("socket");
         let socket = match bind(&socket_path) {
@@ -264,14 +265,14 @@ impl Launcher<'_> {
             return a;
         }
         // 5. Start the held helper and write its process ID.
-        let port = match (self.egress)(session, adapter) {
+        let egress = match (self.egress)(session, adapter) {
             Ok(p) => p,
             Err(why) => {
                 let why = format!("no egress port: {why}");
                 return self.fail(session, why, None, Some(&socket_path));
             }
         };
-        let helper = match self.start_helper(session, &dir, adapter, port) {
+        let helper = match self.start_helper(session, &dir, adapter, egress.as_ref()) {
             Ok(h) => h,
             Err(why) => return self.fail(session, why, None, Some(&socket_path)),
         };
@@ -281,7 +282,7 @@ impl Launcher<'_> {
         }
         (self.after)(Step::HelperStarted, session);
         // 6. The gate.
-        self.gate(job, session, helper, socket, socket_path)
+        self.gate(job, session, comment, helper, socket, socket_path)
     }
 
     /// Step 6: the check of the end, the start and the spawn, in one write
@@ -291,6 +292,7 @@ impl Launcher<'_> {
         &self,
         job: i64,
         session: i64,
+        comment: Option<i64>,
         mut helper: Helper,
         socket: UnixListener,
         socket_path: PathBuf,
@@ -337,6 +339,17 @@ impl Launcher<'_> {
                 }
                 Err(e) => {
                     result = Some(Err(Gate::Failed(format!("the start move failed: {e}"))));
+                    return Err(rollback());
+                }
+            }
+            // The build of this session read each comment up to `comment`
+            // (docs/specs/2026-11-17-review-comments.md, section 5).
+            if let Some(id) = comment {
+                if let Err(e) = tx.execute(
+                    "INSERT INTO comment_delivery (session_id, comment_id) VALUES (?1, ?2)",
+                    [session, id],
+                ) {
+                    result = Some(Err(Gate::Failed(format!("cannot write the delivery: {e}"))));
                     return Err(rollback());
                 }
             }
@@ -417,8 +430,9 @@ impl Launcher<'_> {
         session: i64,
         dir: &Path,
         adapter: &Adapter,
-        egress_port: Option<u16>,
+        egress: Option<&Endpoint>,
     ) -> Result<Helper, String> {
+        let egress_port = egress.map(|e| e.port);
         let logs = self.data_dir.join("sessions");
         fs::DirBuilder::new()
             .recursive(true)
@@ -436,7 +450,7 @@ impl Launcher<'_> {
                 .command(session, dir, egress_port, &adapter.program, &adapter.args);
         let mut args: Vec<OsString> = vec![session.to_string().into(), command.program.into()];
         args.extend(command.args);
-        let env = config::agent_env(adapter, egress_port, |n| (self.env)(n));
+        let env = config::agent_env(adapter, egress, |n| (self.env)(n));
         let mut child = (self.helper)(&args)
             .current_dir(dir)
             .env_clear()
@@ -559,7 +573,10 @@ impl Launcher<'_> {
             .map_err(|e| format!("cannot read the session: {e}"))
             .and_then(|s| reap_check(self.store, self.isolation, &s, helper_reaped, (self.now)()));
         match checked {
-            Ok(()) => String::new(),
+            Ok(notes) => notes
+                .problem()
+                .map(|p| format!("; {p}"))
+                .unwrap_or_default(),
             Err(why) => format!("; the session stays live: {why}"),
         }
     }

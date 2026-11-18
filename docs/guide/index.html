@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Iris builder guide</title>
+<link rel="stylesheet" href="../site.css">
+</head>
+<body>
+<nav><a href="../index.html">Iris</a> <a href="index.html" aria-current="page">Guide</a> <a href="documents.html">Documents</a> <a href="write.html">Write</a> <a href="read.html">Read</a> <a href="agents.html">Agents</a></nav>
+<main>
+<h1>Iris builder guide</h1>
+<p>This guide is for a builder: a person who writes a program that makes or
+reads the data of Iris. Use this guide to adopt the Iris open model in your
+program. You do not need the Iris code.</p>
+
+<h2 id="model">The open model</h2>
+<p>The open model is the data format of Iris. It is a set of JSON documents:
+the mail items of the five forms, the sender, the matter, the changeset, the
+job, the job item and the person. The policy file is TOML (Tom's Obvious
+Minimal Language). The JSON Schema files (draft 2020-12) are the normative
+copy of the model.</p>
+<p>The current version is 1.1. Each JSON document that Iris writes has the
+field <code>"model": "iris/1.1"</code>. Version 1.1 adds the optional field
+<code>account</code> to each item. Each document of version 1.0 stays valid. The licenses are open: the text of the
+specifications is CC BY 4.0, and the schemas and the samples are
+Apache-2.0.</p>
+
+<h2 id="roles">Three types of program</h2>
+<table>
+<tr><th>Type</th><th>What it does</th><th>Page</th></tr>
+<tr><td>Producer</td><td>Writes documents of the open model, for example from
+another mail program.</td><td><a href="write.html">Write documents</a></td></tr>
+<tr><td>Reader</td><td>Reads documents of the open model, for example the
+output of <code>iris export</code>.</td><td><a href="read.html">Read
+documents</a></td></tr>
+<tr><td>Agent</td><td>Works on the mail of a person through the
+<code>iris</code> command, the MCP server or a job workspace.</td><td><a
+href="agents.html">Connect an agent</a></td></tr>
+</table>
+
+<h2 id="start">Start</h2>
+<ol>
+<li>Read <a href="documents.html">the documents</a>. Each document has its
+required fields and one sample.</li>
+<li>Get the schemas and the conformance kit. They are in the folder
+<a href="https://github.com/divyekant/iris/tree/develop/docs/spec">docs/spec</a>
+of the Iris repository.</li>
+<li>If your program writes documents, do the steps of
+<a href="write.html">Write documents</a>. Then run the conformance kit on
+your output.</li>
+<li>If your program reads documents, follow the rules of
+<a href="read.html">Read documents</a>.</li>
+</ol>
+
+<h2 id="terms">Terms</h2>
+<table>
+<tr><th>Term</th><th>Meaning</th></tr>
+<tr><td>Item</td><td>One document of one of the five forms.</td></tr>
+<tr><td>Form</td><td>The type of an item: <code>commitment</code>,
+<code>conversation</code>, <code>record</code>, <code>feed</code> or
+<code>signal</code>.</td></tr>
+<tr><td>Source</td><td>One message that an item comes from.</td></tr>
+<tr><td>Party</td><td>A person or a service in an item: the owner of the
+mailbox (<code>self</code>) or a sender.</td></tr>
+<tr><td>Engine</td><td>The Iris program that keeps the store and writes the
+documents.</td></tr>
+<tr><td>Changeset</td><td>A list of proposed actions on the mailbox. A person
+or a policy rule approves each action.</td></tr>
+<tr><td>Conformance kit</td><td>A runner and test files that check the
+documents of a producer, with no Iris code.</td></tr>
+</table>
+
+<h2 id="specs">The specifications</h2>
+<p>This guide gives the rules that a builder needs. The specifications give
+the full rules. If the guide and a schema do not agree, the schema is
+correct.</p>
+<ul>
+<li><a href="https://github.com/divyekant/iris/blob/develop/docs/spec/01-mirror-store-forms.md">Specification 1</a>:
+the mirror, the store, the five forms and the sender axis.</li>
+<li><a href="https://github.com/divyekant/iris/blob/develop/docs/spec/02-changeset-policy-ledger.md">Specification 2</a>:
+the changeset, the policy file, the ledger and the <code>iris</code>
+command.</li>
+<li><a href="https://github.com/divyekant/iris/blob/develop/docs/spec/03-job-workspace.md">Specification 3</a>:
+the job workspace.</li>
+<li><a href="https://github.com/divyekant/iris/blob/develop/docs/spec/04-open-model-versions.md">Specification 4</a>:
+the versions of the open model, the rules for a producer and a reader, and
+the conformance kit.</li>
+</ul>
+</main>
+</body>
+</html>

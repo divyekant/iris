@@ -916,15 +916,18 @@ fn session_mode_uses_only_the_session_socket() {
             .output()
             .unwrap()
     };
-    // Host mode (no `.iris/` above the folder): `list` is a usage error.
-    let out = Command::new(env!("CARGO_BIN_EXE_iris"))
-        .current_dir(&root)
-        .arg("--data")
-        .arg(&data)
-        .arg("list")
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    // Host mode (no `.iris/` above the folder): `list` and `wait` are usage
+    // errors.
+    for args in [&["list"][..], &["wait", "--until", "2030-01-02"]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_iris"))
+            .current_dir(&root)
+            .arg("--data")
+            .arg(&data)
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+    }
     // No socket: code 4, for a socket verb and for a store verb.
     let draft = ["draft", "t-1", "missing.json"];
     for args in [
@@ -940,7 +943,7 @@ fn session_mode_uses_only_the_session_socket() {
     let listener = std::os::unix::net::UnixListener::bind(work.join(".iris/socket")).unwrap();
     let server = std::thread::spawn(move || {
         let mut verbs = Vec::new();
-        for _ in 0..5 {
+        for _ in 0..6 {
             let (s, _) = listener.accept().unwrap();
             let mut line = String::new();
             std::io::BufReader::new(&s).read_line(&mut line).unwrap();
@@ -954,6 +957,8 @@ fn session_mode_uses_only_the_session_socket() {
                     "from_name": "Dana", "subject": "Contract"}]}),
                 "list" => json!({"items": [item]}),
                 "show" => json!({"item": item}),
+                "wait" => json!({"job": "j-4", "state": "waiting",
+                    "until": "2030-01-02T00:00:00Z", "reply": "t-5"}),
                 _ => json!({"job": "j-4", "session": "se-9", "goal": "Get it.",
                     "state": "working", "threads": 1, "messages": 2, "items": 0}),
             };
@@ -995,6 +1000,21 @@ fn session_mode_uses_only_the_session_socket() {
         String::from_utf8_lossy(&out.stdout).contains("c-1"),
         "{out:?}"
     );
+    // `wait` sends each option to the socket (R5-04).
+    let out = iris(&[
+        "wait",
+        "--until",
+        "2030-01-02",
+        "--reply",
+        "t-5",
+        "--why",
+        "Dana reads it.",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("j-4 waits until 2030-01-02T00:00:00Z"),
+        "{out:?}"
+    );
     assert_eq!(
         server.join().unwrap(),
         [
@@ -1003,7 +1023,233 @@ fn session_mode_uses_only_the_session_socket() {
             r#"search {"limit":5,"text":"contract"}"#,
             r#"show {"id":"c-1"}"#,
             r#"list {"form":"commitment"}"#,
+            r#"wait {"reply":"t-5","until":"2030-01-02","why":"Dana reads it."}"#,
         ]
     );
     assert!(!data.exists(), "the command made the data folder");
+}
+
+/// Send one request with `socket::answer_as` and parse the answer line.
+fn answer_as(store: &Store, me: &Author, request: Value) -> Value {
+    let mut out = Vec::new();
+    socket::answer_as(store, me, request.to_string().as_bytes(), &mut out).unwrap();
+    serde_json::from_slice(&out).unwrap()
+}
+
+#[test]
+fn sign_in_gives_a_new_address_each_time() {
+    let (_, d) = engine("sign-in");
+    let auth = socket::AUTH
+        .get_or_init(|| Arc::new(iris_api::Auth::new("127.0.0.1:4800".parse().unwrap()).unwrap()));
+    let url = |_| {
+        socket::request(&d, "sign-in", json!({})).unwrap()["url"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let (a, b) = (url(0), url(1));
+    assert!(a.starts_with("http://127.0.0.1:4800/#code="), "{a}");
+    assert_ne!(a, b);
+    // The start code stays as it was.
+    assert!(auth.sign_in_url().is_some());
+    let e = socket::request(&d, "sign-in", json!({ "x": 1 })).unwrap_err();
+    assert_eq!(e.code, code::USAGE);
+    // `iris open --print` prints a new address. With no engine: code 4.
+    let open = |data: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_iris"))
+            .arg("--data")
+            .arg(data)
+            .args(["open", "--print"])
+            .output()
+            .unwrap()
+    };
+    let out = open(&d);
+    assert_eq!(out.status.code(), Some(0));
+    let printed = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        printed.starts_with("http://127.0.0.1:4800/#code="),
+        "{printed}"
+    );
+    assert!(![a, b].contains(&printed.trim().to_string()));
+    let none = dir("open-none");
+    std::fs::create_dir_all(&none).unwrap();
+    assert_eq!(
+        open(&none).status.code(),
+        Some(i32::from(code::UNREACHABLE))
+    );
+}
+
+#[test]
+fn a_session_cannot_sign_in_or_read_the_notices_of_the_app() {
+    let d = dir("app-session");
+    let store = Store::open(&d).unwrap();
+    let mut me = agent();
+    me.job = Some("j-1".into());
+    for verb in ["sign-in", "app.notices"] {
+        let r = answer_as(&store, &me, json!({ "v": 1, "verb": verb, "args": {} }));
+        assert_eq!(r["code"], json!(code::DENIED), "{verb}: {r}");
+        assert!(r.get("result").is_none(), "{verb}: {r}");
+    }
+}
+
+#[test]
+fn app_notices_give_only_the_new_notices_oldest_first() {
+    let d = dir("app-notices");
+    let store = Store::open(&d).unwrap();
+    let ask = |args: Value| {
+        answer_as(
+            &store,
+            &socket::local(),
+            json!({ "v": 1, "verb": "app.notices", "args": args }),
+        )
+    };
+    // No notice: nothing, and the last ID is 0.
+    let r = ask(json!({}));
+    assert_eq!(
+        (
+            &r["result"]["notices"],
+            &r["result"]["last"],
+            &r["result"]["open"]
+        ),
+        (&json!([]), &json!(0), &json!(0))
+    );
+    store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO notice(message_id, rule, rule_name, policy_version, title, text, created_at)
+                 VALUES (1, 7, 'Clinic', 1, 'Dr Lee', 'Results', 0),
+                        (2, 7, 'Clinic', 1, 'Dr Lee', 'Moved', 0),
+                        (3, 7, 'Clinic', 1, 'Dr Lee', 'Done', 0);
+                 UPDATE notice SET done_at = 1 WHERE id = 3;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    // The start of the engine stays the same in one process.
+    let engine = r["result"]["engine"].clone();
+    assert!(engine.as_u64().is_some_and(|e| e > 0), "{r}");
+    // A new app gets no old notice, only the last ID (a done notice too).
+    let r = ask(json!({}));
+    assert_eq!(r["result"]["start"], json!(true), "{r}");
+    assert_eq!(
+        (
+            &r["result"]["notices"],
+            &r["result"]["last"],
+            &r["result"]["open"]
+        ),
+        (&json!([]), &json!(3), &json!(2))
+    );
+    // The first call started the app after notice 3: the engine still shows
+    // notices 1 to 3 itself (a notice of the first call is not lost), and
+    // leaves a later notice to the app.
+    let now = iris::engine::now_ms();
+    assert!((1..=3).all(|id| !iris::notify::app_shows_now(id, now)));
+    assert!(iris::notify::app_shows_now(4, now));
+    let r = ask(json!({ "after": 0 }));
+    let ids: Vec<&str> = r["result"]["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["n-1", "n-2"]);
+    assert_eq!(r["result"]["notices"][0]["text"], json!("Results"));
+    assert_eq!(r["result"]["last"], json!(2));
+    let r = ask(json!({ "after": 2 }));
+    assert_eq!(r["result"]["start"], json!(false), "{r}");
+    assert_eq!(
+        (
+            &r["result"]["notices"],
+            &r["result"]["last"],
+            &r["result"]["open"]
+        ),
+        (&json!([]), &json!(2), &json!(2))
+    );
+    // A long list comes in pages of APP_NOTICES_MAX, oldest first.
+    store
+        .write(|tx| {
+            for m in 10..35 {
+                tx.execute(
+                    "INSERT INTO notice(message_id, rule, rule_name, policy_version, title, text, created_at)
+                     VALUES (?1, 7, 'Clinic', 1, 'Dr Lee', 'More', 0)",
+                    [m],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let r = ask(json!({ "after": 3 }));
+    let page = r["result"]["notices"].as_array().unwrap();
+    assert_eq!(page.len(), socket::APP_NOTICES_MAX as usize);
+    assert_eq!(page[0]["id"], json!("n-4"));
+    assert_eq!(r["result"]["last"], json!(23));
+    assert_eq!(r["result"]["open"], json!(27));
+    assert_eq!(r["result"]["engine"], engine);
+    let r = ask(json!({ "after": 23 }));
+    assert_eq!(r["result"]["notices"].as_array().unwrap().len(), 5);
+    assert_eq!(r["result"]["last"], json!(28));
+    for bad in [
+        json!({ "after": -1 }),
+        json!({ "after": null }),
+        json!({ "after": "2" }),
+        json!({ "after": 1.5 }),
+        json!({ "since": 1 }),
+    ] {
+        let r = ask(bad.clone());
+        assert_eq!(r["code"], json!(code::USAGE), "{bad}: {r}");
+    }
+}
+
+#[test]
+fn iris_open_keeps_the_code_out_of_process_arguments() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = dir("open-page");
+    std::fs::create_dir_all(&d).unwrap();
+    let url = "http://127.0.0.1:4800/#code=0123abcd";
+    // An old page is removed. A link with the name of a page is never
+    // written through.
+    let old = d.join("open-1-1.html");
+    std::fs::write(&old, b"old").unwrap();
+    let ago = std::time::SystemTime::now() - iris_api::CODE_LIFE * 2;
+    std::fs::File::options()
+        .write(true)
+        .open(&old)
+        .unwrap()
+        .set_modified(ago)
+        .unwrap();
+    let target = d.join("target");
+    std::fs::write(&target, b"mine").unwrap();
+    std::os::unix::fs::symlink(&target, d.join("open-2-2.html")).unwrap();
+    let page = iris::open_page(&d, url).unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), b"mine");
+    assert!(
+        std::fs::symlink_metadata(&old).is_err(),
+        "the old page is gone"
+    );
+    let m = std::fs::symlink_metadata(&page).unwrap();
+    assert!(m.file_type().is_file());
+    assert_eq!(m.permissions().mode() & 0o777, 0o600);
+    // Two opens before the browser reads either page: two pages, each with
+    // its own code. A new page stays.
+    let other = "http://127.0.0.1:4800/#code=4567ef01";
+    let second = iris::open_page(&d, other).unwrap();
+    assert_ne!(page, second);
+    assert!(std::fs::read_to_string(&second).unwrap().contains(other));
+    assert!(page.exists());
+    let html = std::fs::read_to_string(&page).unwrap();
+    assert!(html.contains(&format!("content=\"0;url={url}\"")), "{html}");
+    for os in ["macos", "linux"] {
+        let c = iris::opener(os, &page).unwrap();
+        let args: Vec<_> = c.get_args().collect();
+        assert_eq!(args, [page.as_os_str()], "{os}");
+        assert!(!c.get_program().to_string_lossy().contains("code"));
+    }
+    assert!(iris::opener("windows", &page).is_none());
+    for bad in [
+        "http://127.0.0.1:4800/#code=\"><script>",
+        "file:///etc/passwd",
+        "javascript:x",
+    ] {
+        assert!(iris::open_page(&d, bad).is_err(), "{bad}");
+    }
 }

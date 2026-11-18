@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Iris documents</title>
+<link rel="stylesheet" href="../site.css">
+</head>
+<body>
+<nav><a href="../index.html">Iris</a> <a href="index.html">Guide</a> <a href="documents.html" aria-current="page">Documents</a> <a href="write.html">Write</a> <a href="read.html">Read</a> <a href="agents.html">Agents</a></nav>
+<main>
+<h1>The documents of the open model</h1>
+<p>This page gives each document of version 1.1: its purpose, its required
+fields and one valid sample. The schema of each document is the normative
+copy. Each schema refuses a field that it does not name.</p>
+<p>Contents: <a href="#common">common fields</a>, <a href="#ids">IDs</a>,
+<a href="#commitment">commitment</a>, <a href="#conversation">conversation</a>,
+<a href="#record">record</a>, <a href="#feed">feed</a>,
+<a href="#signal">signal</a>, <a href="#sender">sender</a>,
+<a href="#matter">matter</a>, <a href="#changeset">changeset</a>,
+<a href="#policy">policy file</a>, <a href="#job">job</a>,
+<a href="#jobitem">job item</a>, <a href="#person">person</a>.</p>
+
+<h2 id="common">Common fields of an item</h2>
+<p>An item is a document of one of the five forms. Each item has these
+fields. The schema is
+<a href="https://github.com/divyekant/iris/blob/develop/docs/spec/schema/common.schema.json">common.schema.json</a>
+(<code>$defs/item</code>).</p>
+<table>
+<tr><th>Field</th><th>Required</th><th>Value</th></tr>
+<tr><td><code>model</code></td><td>yes</td><td><code>"iris/1.1"</code>, or <code>"iris/1.0"</code> for a document of version 1.0.</td></tr>
+<tr><td><code>id</code></td><td>yes</td><td>The ID of the item, with the prefix of its form.</td></tr>
+<tr><td><code>form</code></td><td>yes</td><td><code>commitment</code>, <code>conversation</code>, <code>record</code>, <code>feed</code> or <code>signal</code>.</td></tr>
+<tr><td><code>status</code></td><td>yes</td><td>The state of the item. Each form has its own values.</td></tr>
+<tr><td><code>title</code></td><td>yes</td><td>One line, 1 to 200 characters.</td></tr>
+<tr><td><code>sources</code></td><td>yes</td><td>The messages of the item. One or more sources, and exactly one source with the role <code>origin</code>.</td></tr>
+<tr><td><code>created</code>, <code>updated</code></td><td>yes</td><td>Date-time (RFC 3339).</td></tr>
+<tr><td><code>derived</code></td><td>yes</td><td>Who made the item. <code>by</code> is <code>rule</code> (with <code>rule</code>), <code>model</code> (with <code>model</code> and <code>prompt</code>) or <code>person</code>.</td></tr>
+<tr><td><code>confidence</code></td><td>no</td><td>A number from 0 to 1. Not permitted when <code>derived.by</code> is <code>person</code>.</td></tr>
+<tr><td><code>matter</code></td><td>no</td><td>The <code>g-</code> ID of the matter of the item, or <code>null</code>.</td></tr>
+<tr><td><code>account</code></td><td>no</td><td>Since version 1.1. The <code>a-</code> ID of the account (the mailbox) of the item. Not permitted in a document of version 1.0.</td></tr>
+<tr><td><code>ready</code></td><td>no</td><td><code>["draft"]</code> when Iris prepared a reply draft. The engine sets it when it reads the item.</td></tr>
+<tr><td><code>attention</code></td><td>no</td><td><code>state</code> is <code>shown</code>, <code>bundled</code> or <code>hidden</code>, with the policy rule and the reason.</td></tr>
+</table>
+<p>A source has the fields <code>message</code> (an <code>m-</code> ID),
+<code>thread</code> (a <code>t-</code> ID) and <code>role</code>
+(<code>origin</code>, <code>update</code> or <code>evidence</code>). A source
+with the role <code>origin</code> also has <code>quote</code>: the words of
+the message that support the item, 1 to 500 characters.</p>
+<p>A party has the field <code>kind</code>: <code>self</code> (the owner of
+the mailbox) or <code>sender</code>. A party of the kind <code>sender</code>
+also has <code>sender</code> (a <code>p-</code> ID). The fields
+<code>name</code> and <code>address</code> are optional.</p>
+<p>A money value is an object with <code>value</code> (a decimal number as a
+string, for example <code>"312.77"</code>) and <code>currency</code> (three
+capital letters, for example <code>"USD"</code>).</p>
+
+<h2 id="ids">IDs</h2>
+<p>An ID is a prefix and a positive number with no leading zero, for example
+<code>c-311</code>. An ID is unique in one Iris install. A document holds no
+ID of the mail provider, so the model does not depend on Gmail.</p>
+<table>
+<tr><th>Prefix</th><th>Object</th><th>Prefix</th><th>Object</th></tr>
+<tr><td><code>m-</code></td><td>Message</td><td><code>s-</code></td><td>Signal</td></tr>
+<tr><td><code>t-</code></td><td>Thread</td><td><code>g-</code></td><td>Matter</td></tr>
+<tr><td><code>p-</code></td><td>Sender or person</td><td><code>cs-</code></td><td>Changeset</td></tr>
+<tr><td><code>c-</code></td><td>Commitment</td><td><code>j-</code></td><td>Job</td></tr>
+<tr><td><code>v-</code></td><td>Conversation</td><td><code>l-</code></td><td>Ledger entry</td></tr>
+<tr><td><code>r-</code></td><td>Record</td><td><code>f-</code></td><td>Feed item</td></tr>
+</table>
+
+<h2 id="commitment">Commitment</h2>
+<p>An ask or a promise with an owner and a date. <code>direction</code> is
+<code>you_owe</code> or <code>owed_to_you</code>. <code>kind</code> is
+<code>task</code>, <code>reply</code>, <code>payment</code>,
+<code>invitation</code> or <code>decision</code>. <code>status</code> is
+<code>open</code>, <code>done</code>, <code>declined</code>,
+<code>deferred</code>, <code>cancelled</code> or <code>gone</code>. The
+optional <code>due</code> has a <code>date</code> or a date-time
+<code>at</code>, and <code>strict</code>.</p>
+<p>Required fields:</p>
+<ul class="fields" data-required="commitment"><li>model</li> <li>id</li> <li>form</li> <li>status</li> <li>title</li> <li>sources</li> <li>created</li> <li>updated</li> <li>derived</li> <li>direction</li> <li>owner</li> <li>counterparty</li> <li>kind</li></ul>
+<pre data-sample="commitment-you-owe.json">{
+  "model": "iris/1.0",
+  "id": "c-311",
+  "form": "commitment",
+  "status": "open",
+  "title": "Review contract section 4",
+  "direction": "you_owe",
+  "kind": "task",
+  "owner": { "kind": "self" },
+  "counterparty": { "kind": "sender", "sender": "p-42", "name": "Dana Whitfield", "address": "dana@contoso.example" },
+  "due": { "date": "2026-11-17", "strict": false },
+  "sources": [
+    { "message": "m-55210", "thread": "t-8841", "role": "origin", "quote": "Could you review section 4 by Tuesday?" }
+  ],
+  "created": "2026-11-16T09:02:11Z",
+  "updated": "2026-11-16T09:02:11Z",
+  "derived": { "by": "model", "model": "example-model-1", "prompt": "understand/0.1" },
+  "confidence": 0.92,
+  "matter": null
+}</pre>
+<p>Schema: <a href="https://github.com/divyekant/iris/blob/develop/docs/spec/schema/commitment.schema.json">commitment.schema.json</a>.
+Text: specification 1, section 6.2.</p>
+
+<h2 id="conversation">Conversation</h2>
+<p>The talk with one person or one group, in one thread. <code>role</code>
+is <code>direct</code>, <code>group</code> or <code>cc</code>.
+<code>your_turn</code> is <code>true</code> when the last message needs a
+reply from you. <code>status</code> is <code>active</code>,
+<code>quiet</code>, <code>muted</code> or <code>gone</code>.</p>
+<p>Required fields:</p>
+<ul class="fields" data-required="conversation"><li>model</li> <li>id</li> <li>form</li> <li>status</li> <li>title</li> <li>sources</li> <li>created</li> <li>updated</li> <li>derived</li> <li>thread</li> <li>participants</li> <li>role</li> <li>latest</li> <li>messages</li> <li>new</li> <li>your_turn</li></ul>
+<pre data-sample="conversation.json">{
+  "model": "iris/1.0",
+  "id": "v-88",
+  "form": "conversation",
+  "status": "active",
+  "title": "Dinner on Thursday?",
+  "thread": "t-9001",
+  "participants": [
+    {
+      "kind": "self"
+    },
+    {
+      "kind": "sender",
+      "sender": "p-23",
+      "name": "Sam Ortiz",
+      "address": "sam@fabrikam.example"
+    }
+  ],
+  "role": "direct",
+  "latest": {
+    "at": "2026-11-16T08:41:00Z",
+    "from": {
+      "kind": "sender",
+      "sender": "p-23",
+      "name": "Sam Ortiz"
+    },
+    "snippet": "Are you free for dinner on Thursday?"
+  },
+  "messages": 3,
+  "new": 1,
+  "your_turn": true,
+  "sources": [
+    {
+      "message": "m-55380",
+      "thread": "t-9001",
+      "role": "origin",
+      "quote": "Dinner on Thursday?"
+    },
+    {
+      "message": "m-55390",
+      "thread": "t-9001",
+      "role": "update"
+    },
+    {
+      "message": "m-55400",
+      "thread": "t-9001",
+      "role": "update"
+    }
+  ],
+  "created": "2026-11-12T19:00:00Z",
+  "updated": "2026-11-16T08:41:00Z",
+  "derived": {
+    "by": "rule",
+    "rule": "thread"
+  }
+}</pre>
+<p>Schema: <a href="https://github.com/divyekant/iris/blob/develop/docs/spec/schema/conversation.schema.json">conversation.schema.json</a>.
+Text: specification 1, section 6.3.</p>
+
+<h2 id="record">Record</h2>
+<p>A fact that you keep and can query: a receipt, a booking, a statement, a
+ticket, a contract or an event. <code>type</code> names the type, and
+<code>fields</code> holds the values of that type. <code>status</code> is
+<code>kept</code>, <code>corrected</code> or <code>gone</code>.</p>
+<p>Required fields:</p>
+<ul class="fields" data-required="record"><li>model</li> <li>id</li> <li>form</li> <li>status</li> <li>title</li> <li>sources</li> <li>created</li> <li>updated</li> <li>derived</li> <li>type</li> <li>issuer</li> <li>fields</li></ul>
+<pre data-sample="record-booking.json">{
+  "model": "iris/1.0",
+  "id": "r-1202",
+  "form": "record",
+  "status": "corrected",
+  "title": "Flight to Tokyo",
+  "type": "booking",
+  "issuer": {
+    "kind": "sender",
+    "sender": "p-33",
+    "address": "trips@air.example"
+  },
+  "fields": {
+    "kind": "flight",
+    "reference": "QX7K2P",
+    "start": "2026-12-10T11:05:00+01:00",
+    "end": "2026-12-11T07:40:00+09:00",
+    "location": "Tokyo"
+  },
+  "sources": [
+    {
+      "message": "m-53500",
+      "thread": "t-8600",
+      "role": "origin",
+      "quote": "Booking reference QX7K2P"
+    }
+  ],
+  "created": "2026-11-05T12:00:00Z",
+  "updated": "2026-11-06T08:00:00Z",
+  "derived": {
+    "by": "model",
+    "model": "example-model-1",
+    "prompt": "understand/0.1"
+  }
+}</pre>
+<p>Schema: <a href="https://github.com/divyekant/iris/blob/develop/docs/spec/schema/record.schema.json">record.schema.json</a>.
+Text: specification 1, section 6.4.</p>
+
+<h2 id="feed">Feed item</h2>
+<p>An item to read when you choose, for example a newsletter.
+<code>status</code> is <code>new</code>, <code>read</code>,
+<code>skipped</code> or <code>gone</code>.</p>
+<p>Required fields:</p>
+<ul class="fields" data-required="feed"><li>model</li> <li>id</li> <li>form</li> <li>status</li> <li>title</li> <li>sources</li> <li>created</li> <li>updated</li> <li>derived</li> <li>publisher</li> <li>published</li></ul>
+<pre data-sample="feed.json">{
+  "model": "iris/1.0",
+  "id": "f-5001",
+  "form": "feed",
+  "status": "new",
+  "title": "This week in mail standards",
+  "publisher": {
+    "kind": "sender",
+    "sender": "p-50",
+    "name": "Mail Weekly",
+    "address": "news@weekly.example"
+  },
+  "list": "&lt;weekly.news.example&gt;",
+  "published": "2026-11-15T06:00:00Z",
+  "sources": [
+    {
+      "message": "m-55100",
+      "thread": "t-8800",
+      "role": "origin",
+      "quote": "This week in mail standards"
+    }
+  ],
+  "created": "2026-11-15T06:01:00Z",
+  "updated": "2026-11-15T06:01:00Z",
+  "derived": {
+    "by": "rule",
+    "rule": "list-id"
+  },
+  "attention": {
+    "state": "bundled",
+    "rule": 3,
+    "reason": "Feed items are bundled by rule 3."
+  }
+}</pre>
+<p>Schema: <a href="https://github.com/divyekant/iris/blob/develop/docs/spec/schema/feed.schema.json">feed.schema.json</a>.
+Text: specification 1, section 6.5.</p>
+
+<h2 id="signal">Signal</h2>
+<p>A short-lived item that matters at one moment, for example a login code.
+<code>kind</code> is <code>code</code>, <code>security</code>,
+<code>delivery</code>, <code>build</code> or <code>other</code>.
+<code>status</code> is <code>active</code>, <code>used</code>,
+<code>dismissed</code>, <code>expired</code> or <code>gone</code>.</p>
+<p>Required fields:</p>
+<ul class="fields" data-required="signal"><li>model</li> <li>id</li> <li>form</li> <li>status</li> <li>title</li> <li>sources</li> <li>created</li> <li>updated</li> <li>derived</li> <li>kind</li> <li>issuer</li> <li>expires</li></ul>
+<pre data-sample="signal-code.json">{
+  "model": "iris/1.0",
+  "id": "s-901",
+  "form": "signal",
+  "status": "active",
+  "title": "Login code for Example Bank",
+  "kind": "code",
+  "issuer": {
+    "kind": "sender",
+    "sender": "p-60",
+    "address": "no-reply@bank.example"
+  },
+  "code": "482913",
+  "expires": "2026-11-16T09:15:00Z",
+  "sources": [
+    {
+      "message": "m-55500",
+      "thread": "t-9100",
+      "role": "origin",
+      "quote": "Your login code is 482913."
+    }
+  ],
+  "created": "2026-11-16T09:00:00Z",
+  "updated": "2026-11-16T09:00:00Z",
+  "derived": {
+    "by": "rule",
+    "rule": "code-pattern"
+  }
+}</pre>
+<p>Schema: <a href="https://github.com/divyekant/iris/blob/develop/docs/spec/schema/signal.schema.json">signal.schema.json</a>.
+Text: specification 1, section 6.6.</p>
+
+<h2 id="sender">Sender</h2>
+<p>One address on the sender axis. <code>kind</code> is <code>person</code>
+(a known person), <code>service</code> (a known service),
+<code>stranger</code> or <code>hostile</code>. <code>basis</code> names the
+rule that matched. <code>decided_by</code> is <code>engine</code> or
+<code>person</code>. A decision of a person always wins.</p>
+<p>Required fields:</p>
+<ul class="fields" data-required="sender"><li>model</li> <li>id</li> <li>address</li> <li>kind</li> <li>basis</li> <li>decided_by</li></ul>
+<pre data-sample="sender.json">{
+  "model": "iris/1.0",
+  "id": "p-42",
+  "address": "dana@contoso.example",
+  "name": "Dana Whitfield",
+  "kind": "person",
+  "basis": "sent-to",
+  "decided_by": "engine",
+  "decided_at": "2026-11-15T10:00:00Z"
+}</pre>
+<p>Schema: <a href="https://github.com/divyekant/iris/blob/develop/docs/spec/schema/sender.schema.json">sender.schema.json</a>.
+Text: specification 1, section 6.7.</p>
+
+<h2 id="matter">Matter</h2>
+<p>A title and the items that belong together: a trip, a contract, a hire.
+Iris proposes a matter, and the person confirms it. <code>status</code> is
+<code>proposed</code>, <code>confirmed</code> or <code>declined</code>.</p>
+<p>Required fields:</p>
+<ul class="fields" data-required="matter"><li>model</li> <li>id</li> <li>title</li> <li>status</li> <li>items</li> <li>counts</li> <li>created</li> <li>updated</li> <li>derived</li></ul>
+<pre data-sample="matter-proposed.json">{
+  "model": "iris/1.0",
+  "id": "g-5",
+  "title": "Office lease",
+  "status": "proposed",
+  "items": ["r-1300", "v-901"],
+  "counts": { "commitment": 0, "conversation": 1, "record": 1 },
+  "created": "2026-11-07T09:00:00Z",
+  "updated": "2026-11-07T09:00:00Z",
+  "derived": { "by": "model", "model": "example-model-1", "prompt": "matters/0.1" }
+}</pre>
+<p>Schema: <a href="https://github.com/divyekant/iris/blob/develop/docs/spec/schema/matter.schema.json">matter.schema.json</a>.</p>
+
+<h2 id="changeset">Changeset</h2>
+<p>The proposed actions of one author on the mailbox and on the items, with
+the decision of each action. <code>author.kind</code> is <code>person</code>,
+<code>agent</code>, <code>triage</code> or <code>local</code>.
+<code>state</code> is <code>draft</code>, <code>open</code>,
+<code>closed</code> or <code>withdrawn</code>. Each action has a verb, its
+targets, its arguments and a decision. The <a href="agents.html#changeset">Agents</a>
+page tells how an agent makes a changeset.</p>
+<p>Required fields:</p>
+<ul class="fields" data-required="changeset"><li>model</li> <li>id</li> <li>revision</li> <li>author</li> <li>why</li> <li>created</li> <li>submitted</li> <li>state</li> <li>actions</li></ul>
+<pre data-sample="changeset-draft.json">{
+  "model": "iris/1.0",
+  "id": "cs-80",
+  "revision": 1,
+  "author": {
+    "kind": "person"
+  },
+  "why": null,
+  "created": "2026-11-16T10:02:11.120Z",
+  "submitted": null,
+  "state": "draft",
+  "actions": [
+    {
+      "n": 1,
+      "revision": 1,
+      "verb": "read",
+      "targets": {
+        "messages": [
+          "m-61002"
+        ]
+      },
+      "resolved": {
+        "messages": []
+      },
+      "args": {},
+      "why": null,
+      "flags": [],
+      "hash": null,
+      "decision": null
+    }
+  ]
+}</pre>
+<p>Schema: <a href="https://github.com/divyekant/iris/blob/develop/docs/spec/schema/changeset.schema.json">changeset.schema.json</a>.
+Text: specification 2, section 5.</p>
+
+<h2 id="policy">Policy file</h2>
+<p>The file <code>policy.toml</code> tells which actions Iris applies with no
+review. A person writes it in TOML, so it has no <code>model</code> field.
+<code>version</code> is <code>1</code> (<code>0</code> has the same meaning).
+<code>mode</code> is <code>observe</code> (Iris applies nothing) or
+<code>apply</code> (the rules decide, and each other action goes to review).
+The schema checks the JSON form of the TOML data.</p>
+<p>Required fields:</p>
+<ul class="fields" data-required="policy"><li>version</li> <li>mode</li></ul>
+<pre data-sample="policy-first-start.toml"># The policy of Iris (spec 2, section 6). Iris keeps the comments in this file.
+version = 1
+
+# observe: Iris applies nothing. apply: rules decide, and the rest goes to review.
+mode = "observe"</pre>
+<p>Schema: <a href="https://github.com/divyekant/iris/blob/develop/docs/spec/schema/policy.schema.json">policy.schema.json</a>.
+Text: specification 2, section 6.</p>
+
+<h2 id="job">Job</h2>
+<p>A goal with limits for an agent, its state and the events of each change
+of state. <code>state</code> is <code>working</code>, <code>waiting</code>,
+<code>needs_you</code> or <code>done</code>.</p>
+<p>Required fields:</p>
+<ul class="fields" data-required="job"><li>model</li> <li>id</li> <li>goal</li> <li>created</li> <li>updated</li> <li>state</li> <li>events</li></ul>
+<pre data-sample="job-needs-you.json">{
+  "model": "iris/1.0",
+  "id": "j-142",
+  "goal": "Get the signed contract from Dana before Nov 20.",
+  "created": "2026-11-16T09:00:00Z",
+  "updated": "2026-11-16T09:10:00Z",
+  "state": "needs_you",
+  "question": "Can I accept section 4 as Dana wrote it?",
+  "events": [
+    {
+      "at": "2026-11-16T09:00:00Z",
+      "state": "working",
+      "by": "person"
+    },
+    {
+      "at": "2026-11-16T09:10:00Z",
+      "state": "needs_you",
+      "by": "agent",
+      "question": "Can I accept section 4 as Dana wrote it?"
+    }
+  ]
+}</pre>
+<p>Schema: <a href="https://github.com/divyekant/iris/blob/develop/docs/spec/schema/job.schema.json">job.schema.json</a>.</p>
+
+<h2 id="jobitem">Job item</h2>
+<p>The identity of one commitment or one record in the workspace of a job.
+It holds no text of the model and no status. <code>sources</code> is a list
+of <code>m-</code> IDs.</p>
+<p>Required fields:</p>
+<ul class="fields" data-required="jobitem"><li>model</li> <li>id</li> <li>form</li> <li>sources</li></ul>
+<pre data-sample="jobitem.json">{
+  "model": "iris/1.0",
+  "id": "c-412",
+  "form": "commitment",
+  "sources": ["m-50101"]
+}</pre>
+<p>Schema: <a href="https://github.com/divyekant/iris/blob/develop/docs/spec/schema/jobitem.schema.json">jobitem.schema.json</a>.
+Text: specification 3, section 5.</p>
+
+<h2 id="person">Person</h2>
+<p>One known person in the workspace of a job. Each value comes only from
+the messages in the thread files of the workspace. Each date is in UTC, with
+three digits of milliseconds and <code>Z</code>.</p>
+<p>Required fields:</p>
+<ul class="fields" data-required="person"><li>model</li> <li>id</li> <li>address</li> <li>names</li> <li>first</li> <li>last</li> <li>from_them</li> <li>from_you</li> <li>threads</li></ul>
+<pre data-sample="person.json">{
+  "model": "iris/1.0",
+  "id": "p-1",
+  "address": "dana@example.com",
+  "names": [
+    "Dana"
+  ],
+  "first": "1970-01-01T00:00:01.000Z",
+  "last": "1970-01-01T00:00:09.000Z",
+  "from_them": 2,
+  "from_you": 1,
+  "threads": [
+    "t-1",
+    "t-3"
+  ]
+}</pre>
+<p>Schema: <a href="https://github.com/divyekant/iris/blob/develop/docs/spec/schema/person.schema.json">person.schema.json</a>.
+Text: specification 3, section 7.</p>
+</main>
+</body>
+</html>

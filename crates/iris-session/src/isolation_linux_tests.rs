@@ -640,6 +640,7 @@ fn a_relay_reaches_no_proxy_of_another_session() {
         file,
         Box::new(SystemResolver),
         session_peer(8).unwrap(),
+        None,
     )
     .unwrap();
     let inner = TcpListener::bind("127.0.0.1:0").unwrap();

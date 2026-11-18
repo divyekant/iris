@@ -172,10 +172,24 @@ fn stop(f: &Fixture, mut r: Running, why: EndReason) -> String {
         .and_then(|c| c.parse().ok());
     let code = if why == EndReason::Exit { code } else { None };
     iris_job::end(&f.store, r.session, why, code, now()).unwrap();
-    let s = session(&f.store, r.session).unwrap();
-    reap_check(&f.store, &Plain, &s, true, now()).unwrap();
+    reap(f, r.session);
     let _ = fs::remove_file(&r.socket_path);
     status.trim().to_string()
+}
+
+/// Runs the reap check until it passes, as the supervisor of the engine
+/// does. One check is not enough: a killed child of the agent can stay a
+/// zombie in the group until its new parent (init) reaps it (issue #659).
+fn reap(f: &Fixture, id: i64) {
+    let end = Instant::now() + Duration::from_secs(20);
+    loop {
+        let s = session(&f.store, id).unwrap();
+        match reap_check(&f.store, &Plain, &s, true, now()) {
+            Ok(_) => return,
+            Err(why) if Instant::now() >= end => panic!("no reap after 20 s: {why}"),
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
 }
 
 fn sessions(f: &Fixture) -> Vec<iris_job::Session> {
@@ -327,6 +341,24 @@ fn a_stop_during_the_launch_cancels_it_with_no_retry() {
     assert!(iris_job::register(&f.store, f.job, "script", NOW + 3).is_ok());
 }
 
+/// A launch that ends with a bad `notes.md` reaps in its cleanup: the
+/// reason of the end says that the store kept its last copy (R5-06).
+fn a_launch_that_ends_reports_bad_notes() {
+    let f = fixture("badnotes", "data", "sleep 30");
+    fs::create_dir_all(workspace(&f).join("notes.md")).unwrap();
+    let (_, end, why) = ended(launch(&f, &real_helper, &|step, s| {
+        if step == Step::Bound {
+            iris_job::end(&f.store, s, EndReason::Stop, None, NOW + 1).unwrap();
+        }
+    }));
+    assert_eq!(end, EndReason::Stop, "{why}");
+    assert!(
+        why.contains("the store keeps its last copy of the notes: notes.md is not a regular file"),
+        "{why}"
+    );
+    assert!(sessions(&f)[0].reaped_ms.is_some());
+}
+
 /// A stop mark that comes while the gate waits for the helper either
 /// comes before the gate reads it (no start) or after the commit of the
 /// start. It never comes between the read and the commit.
@@ -473,6 +505,34 @@ fn the_reap_check_waits_for_the_helper_and_the_group() {
     assert!(get().reaped_ms.is_some());
 }
 
+/// A zombie that stays in the group of the agent after the helper ends
+/// holds the reap until its parent reaps it (issue #659). Here the test is
+/// the parent, and it reaps the zombie 300 ms after the end.
+fn the_reap_waits_for_a_late_zombie_in_the_group() {
+    use std::os::unix::process::CommandExt;
+    let f = fixture("late-zombie", "data", "sleep 30");
+    let mut r = running(launch(&f, &real_helper, &|_, _| {}));
+    let mut zombie = Process::new("/bin/true")
+        .process_group(r.pgid)
+        .spawn()
+        .unwrap();
+    drop(r.pipe);
+    r.status.read_to_string(&mut String::new()).unwrap();
+    r.helper.wait().unwrap();
+    iris_job::end(&f.store, r.session, EndReason::Stop, None, now()).unwrap();
+    let s = session(&f.store, r.session).unwrap();
+    let why = reap_check(&f.store, &Plain, &s, true, now()).unwrap_err();
+    assert!(why.contains("process group"), "{why}");
+    let late = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        zombie.wait().unwrap();
+    });
+    reap(&f, r.session);
+    late.join().unwrap();
+    assert!(session(&f.store, r.session).unwrap().reaped_ms.is_some());
+    let _ = fs::remove_file(&r.socket_path);
+}
+
 /// The launch reports an end only if the store has it. A failed end write
 /// gives `Open`, and the row stays open for the engine to end.
 fn a_failed_end_write_is_not_reported_as_an_end() {
@@ -500,6 +560,57 @@ fn a_failed_end_write_is_not_reported_as_an_end() {
     assert_eq!(row.reaped_ms, None);
 }
 
+/// One changeset of the job with one review comment. Gives the comment ID.
+fn comment(f: &Fixture) -> i64 {
+    f.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO changeset (author_kind, author_name, author_session, author_job, created_at)
+                 VALUES ('agent', 't', 'se-1', ?1, 0)",
+                [iris_job::format_job_id(f.job)],
+            )?;
+            tx.execute(
+                "INSERT INTO changeset_comment (changeset_id, revision, text, key, at_ms)
+                 VALUES (?1, 1, 'Keep it.', 'k-0123456789abcdef', 1)",
+                [tx.last_insert_rowid()],
+            )?;
+            Ok(tx.last_insert_rowid())
+        })
+        .unwrap()
+}
+
+fn deliveries(f: &Fixture) -> Vec<(i64, i64)> {
+    f.store
+        .read(|c| {
+            let mut q = c.prepare("SELECT session_id, comment_id FROM comment_delivery")?;
+            let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .unwrap()
+}
+
+/// docs/specs/2026-11-17-review-comments.md, section 5: the gate writes the
+/// delivery of the comments that the build read. A launch that fails before
+/// the gate commit writes none.
+fn the_gate_writes_the_delivery_of_the_comments() {
+    let f = fixture("delivery-fail", "data", "sleep 30");
+    comment(&f);
+    let late = |_: &[OsString]| {
+        let mut c = Process::new("/bin/sh");
+        c.args(["-c", "read line; sleep 3"]);
+        c
+    };
+    ended(launch(&f, &late, &|_, _| {}));
+    assert!(workspace(&f).join("comments").exists());
+    assert_eq!(deliveries(&f), []);
+
+    let f = fixture("delivery", "data", "sleep 30");
+    let id = comment(&f);
+    let r = running(launch(&f, &real_helper, &|_, _| {}));
+    assert_eq!(deliveries(&f), [(r.session, id)]);
+    stop(&f, r, EndReason::Stop);
+}
+
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "session-hold") {
@@ -514,6 +625,10 @@ fn main() {
         (
             "a_script_runs_in_the_workspace_through_the_generic_adapter",
             a_script_runs_in_the_workspace_through_the_generic_adapter,
+        ),
+        (
+            "a_launch_that_ends_reports_bad_notes",
+            a_launch_that_ends_reports_bad_notes,
         ),
         (
             "a_revoke_during_the_build_starts_the_launch_again_once",
@@ -544,6 +659,10 @@ fn main() {
             a_long_socket_path_fails_the_launch,
         ),
         (
+            "the_reap_waits_for_a_late_zombie_in_the_group",
+            the_reap_waits_for_a_late_zombie_in_the_group,
+        ),
+        (
             "the_reap_check_waits_for_the_helper_and_the_group",
             the_reap_check_waits_for_the_helper_and_the_group,
         ),
@@ -554,6 +673,10 @@ fn main() {
         (
             "a_missing_program_fails_before_a_session_row",
             a_missing_program_fails_before_a_session_row,
+        ),
+        (
+            "the_gate_writes_the_delivery_of_the_comments",
+            the_gate_writes_the_delivery_of_the_comments,
         ),
     ];
     let mut failed = 0;

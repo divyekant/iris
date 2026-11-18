@@ -120,6 +120,8 @@ struct Event {
 
 struct Store {
     mailbox: Mailbox,
+    /// The `emailAddress` of the profile.
+    address: String,
     msgs: Vec<Msg>,
     labels: Vec<Label>,
     events: Vec<Event>,
@@ -134,6 +136,12 @@ struct Store {
     write_failures: VecDeque<(u16, bool)>,
     /// A failure for the next request whose log line contains the text.
     path_failure: Option<(String, u16)>,
+    /// Each write request gets HTTP 403 `insufficientPermissions`, as when
+    /// the token has `gmail.readonly` only.
+    read_only: bool,
+    /// A step that runs before the answer of the next request whose log
+    /// line contains the text: a change by another process during a call.
+    before_matching: Option<(String, Box<dyn FnOnce() + Send>)>,
     /// The most items on one list page, below `maxResults`.
     page_limit: usize,
     /// A draft edit that the next `drafts.get` of the draft starts, after
@@ -196,6 +204,7 @@ impl Store {
         }));
         Store {
             mailbox,
+            address: OWNER.to_string(),
             msgs,
             labels,
             events,
@@ -205,6 +214,8 @@ impl Store {
             failures: VecDeque::new(),
             write_failures: VecDeque::new(),
             path_failure: None,
+            read_only: false,
+            before_matching: None,
             page_limit: usize::MAX,
             edit_after_get: None,
             log: Vec::new(),
@@ -392,6 +403,12 @@ impl FakeGmail {
         self.addr
     }
 
+    /// Give the profile this address in place of the owner of the synthetic
+    /// mailbox: a second mailbox for a test with two accounts.
+    pub fn set_address(&self, address: &str) {
+        self.store.lock().unwrap().address = address.to_string();
+    }
+
     /// The API root, for example `http://127.0.0.1:41234/gmail/v1`.
     pub fn base_url(&self) -> String {
         format!("http://{}/gmail/v1", self.addr)
@@ -496,11 +513,24 @@ impl FakeGmail {
         self.store.lock().unwrap().failures.extend(statuses);
     }
 
+    /// With `true`, each write request (not GET) gets HTTP 403 with the
+    /// reason `insufficientPermissions` and makes no change, as Gmail
+    /// answers a token with `gmail.readonly` only.
+    pub fn set_read_only(&self, read_only: bool) {
+        self.store.lock().unwrap().read_only = read_only;
+    }
+
     /// The next request whose log line (for example
     /// `GET /gmail/v1/users/me/drafts?q=...`) contains `text` gets this
     /// HTTP status code in place of an answer.
     pub fn fail_next_matching(&self, text: &str, status: u16) {
         self.store.lock().unwrap().path_failure = Some((text.to_string(), status));
+    }
+
+    /// Run `step` before the answer of the next request whose log line
+    /// contains `text`. The fake holds no lock while the step runs.
+    pub fn before_next_matching(&self, text: &str, step: impl FnOnce() + Send + 'static) {
+        self.store.lock().unwrap().before_matching = Some((text.to_string(), Box::new(step)));
     }
 
     /// The next write requests (POST) get these HTTP status codes, one
@@ -591,6 +621,17 @@ fn router(store: Shared) -> Router {
 
 /// Log each request, and answer with an injected failure if one is queued.
 async fn log_and_fail(State(s): State<Shared>, req: Request, next: Next) -> Response {
+    let step = {
+        let mut s = s.lock().unwrap();
+        let line = format!("{} {}", req.method(), req.uri());
+        match &s.before_matching {
+            Some((t, _)) if line.contains(t.as_str()) => s.before_matching.take().map(|(_, f)| f),
+            _ => None,
+        }
+    };
+    if let Some(step) = step {
+        step();
+    }
     let failure = {
         let mut s = s.lock().unwrap();
         let line = match req.uri().query() {
@@ -602,6 +643,17 @@ async fn log_and_fail(State(s): State<Shared>, req: Request, next: Next) -> Resp
             .as_ref()
             .is_some_and(|(t, _)| line.contains(t.as_str()));
         s.log.push(line);
+        if s.read_only && req.method() != axum::http::Method::GET {
+            let message = "Request had insufficient authentication scopes.";
+            let body = json!({ "error": {
+                "code": 403,
+                "message": message,
+                "errors": [{ "message": "Insufficient Permission", "domain": "global",
+                             "reason": "insufficientPermissions" }],
+                "status": "PERMISSION_DENIED",
+            }});
+            return (StatusCode::FORBIDDEN, Json(body)).into_response();
+        }
         if matched {
             let (_, c) = s.path_failure.take().expect("checked");
             return error(
@@ -755,7 +807,7 @@ async fn profile(State(s): State<Shared>, Path(user): Path<String>, h: HeaderMap
     let s = s.lock().unwrap();
     let threads: BTreeSet<&str> = s.live().map(|m| m.thread.as_str()).collect();
     Json(json!({
-        "emailAddress": OWNER,
+        "emailAddress": s.address,
         "messagesTotal": s.live().count(),
         "threadsTotal": threads.len(),
         "historyId": s.latest_history().to_string(),
@@ -1200,6 +1252,7 @@ async fn create_draft(
         Err(e) => return e,
     };
     let mut s = s.lock().unwrap();
+    let raw = gmail_draft_form(&raw, s.next_draft);
     let i = s.add(
         raw,
         body.message.thread_id,
@@ -1209,6 +1262,38 @@ async fn create_draft(
     s.next_draft += 1;
     s.drafts.push((id.clone(), i));
     Json(s.draft_json(&id, i)).into_response()
+}
+
+/// The message of a new draft as real Gmail keeps it (send check of issue
+/// #302): Gmail sets its own `Message-ID`, sets a new `Date` and adds a
+/// `Received` header in front. The rest of the bytes stay.
+fn gmail_draft_form(raw: &[u8], n: u64) -> Vec<u8> {
+    const DATE: &str = "Tue, 17 Nov 2026 21:40:12 -0800";
+    let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return raw.to_vec();
+    };
+    let mut out = format!(
+        "Received: from 216739018898 named unknown by gmailapi.google.com with HTTPREST; {DATE}\r\n"
+    )
+    .into_bytes();
+    let mut skip = false;
+    for line in raw[..end + 2].split_inclusive(|&b| b == b'\n') {
+        if skip && line.starts_with(b" ") || skip && line.starts_with(b"\t") {
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        skip = true;
+        if lower.starts_with(b"message-id:") {
+            out.extend(format!("Message-ID: <CACe_fake{n:010}@mail.gmail.com>\r\n").bytes());
+        } else if lower.starts_with(b"date:") {
+            out.extend(format!("Date: {DATE}\r\n").bytes());
+        } else {
+            skip = false;
+            out.extend(line);
+        }
+    }
+    out.extend(&raw[end + 2..]);
+    out
 }
 
 async fn get_draft(

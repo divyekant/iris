@@ -41,7 +41,7 @@ mod verbs;
 mod watch;
 mod write;
 pub use ask::{answer, AskAnswer, AskSource, Connect};
-pub use auth::{Auth, SIGN_IN};
+pub use auth::{Auth, CODE_LIFE, SIGN_IN};
 pub use drafts::write_drafts;
 pub use export::{export, Exported};
 pub use jobs::*;
@@ -133,6 +133,7 @@ pub fn router_with_model(store: Arc<Store>, auth: Arc<Auth>, connect: Connect) -
 fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Router {
     let ask = Router::new()
         .route("/api/ask", post(post_ask))
+        .route("/api/threads/{id}/draft", post(post_draft))
         .with_state((store.clone(), connect));
     Router::new()
         .route("/api/status", get(get_status))
@@ -155,6 +156,10 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/changesets/{id}/drafts", get(get_drafts))
         .route("/api/changesets/{id}/decide", post(post_decide))
         .route("/api/changesets/{id}/withdraw", post(post_withdraw))
+        .route(
+            "/api/changesets/{id}/comments",
+            get(get_comments).post(post_comment),
+        )
         .route("/api/messages", get(get_messages))
         .route("/api/messages/{id}", get(get_message))
         .route("/api/messages/{id}/raw", get(get_raw))
@@ -167,17 +172,21 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/policy/grant", post(post_grant))
         .route("/api/jobs", get(get_jobs).post(post_job))
         .route("/api/jobs/{id}", get(get_job))
+        .route("/api/jobs/{id}/answer", post(post_job_answer))
         .route("/api/policy/accept", post(post_accept))
         .route("/api/policy/dismiss", post(post_dismiss))
         .route("/api/notices", get(get_notices))
         .route("/api/notices/{id}/done", post(post_notice_done))
         .route("/api/watches", get(get_watches).post(post_watch))
         .route("/api/watches/{id}/remove", post(post_watch_remove))
+        .route("/api/stop", get(get_stop).post(post_stop))
+        .route("/api/resume", post(post_resume))
         .route("/api/outbox", get(get_outbox))
         .route("/api/outbox/{draft}/cancel", post(post_outbox_cancel))
         .route("/api/write", post(post_write))
         .route("/api/write/{id}", get(get_write))
         .route("/api/threads/{id}/reply", get(get_reply))
+        .route("/api/threads/{id}/draft", get(get_draft))
         .route("/api/matters", get(get_matters))
         .route("/api/matters/{id}", get(get_matter))
         .route("/api/matters/{id}/confirm", post(post_matter_confirm))
@@ -315,6 +324,38 @@ async fn post_withdraw(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CommentBody {
+    revision: i64,
+    text: String,
+    key: String,
+}
+
+/// A review comment of the person on the newest revision of a changeset of
+/// a job (docs/specs/2026-11-17-review-comments.md). The answer is the
+/// comment. A retry with the same key gives the same comment.
+async fn post_comment(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<CommentBody>, JsonRejection>,
+) -> Result<Response> {
+    let Some(row) = changeset_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    let b = body(b)?;
+    let c = review::comment(&s, row, b.revision, &b.text, &b.key, now_ms())?;
+    Ok(Json(c).into_response())
+}
+
+/// Each review comment of a changeset, oldest first.
+async fn get_comments(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    let Some(row) = changeset_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    Ok(Json(review::comments(&s, row)?).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AskBody {
     question: String,
 }
@@ -332,6 +373,37 @@ async fn post_ask(
         .await
         .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;
     Ok(Json(a).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DraftBody {
+    /// What the reply must say, in the words of the person. Empty: Iris
+    /// writes the reply from the thread alone.
+    #[serde(default)]
+    intent: String,
+    /// The mail that the form answers (`m-N`, the `parent` of the reply
+    /// start values). A newer parent makes a 409 before the call.
+    parent: String,
+}
+
+/// A draft of the reply in the voice of the person (R3-04 intent path,
+/// R3-05). The model call runs on a blocking thread, so the other requests
+/// go on. The draft is saved in the store; nothing goes to Gmail.
+async fn post_draft(
+    State((s, connect)): State<(Arc<Store>, Option<Connect>)>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<DraftBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let connect =
+        connect.ok_or_else(|| Error::Unavailable("This engine has no model client.".into()))?;
+    let d = tokio::task::spawn_blocking(move || {
+        write::draft(&s, &connect, &id, &b.parent, &b.intent, now_ms)
+    })
+    .await
+    .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;
+    Ok(d.map_or_else(not_found, |v| Json(v).into_response()))
 }
 
 #[derive(Deserialize)]
@@ -593,16 +665,20 @@ async fn get_policy(State(s): State<Arc<Store>>) -> Result<Response> {
 /// The body of a route that takes none: zero bytes, or a JSON text that is
 /// the empty object `{}` (the web client sends `{}`). `serde_json` parses
 /// the JSON. Any other body, a body of only spaces too, gives 400 before the
-/// route changes anything.
+/// route changes anything. The read stops at the first frame past
+/// `NO_BODY_MAX` bytes, so a large body does not stay in memory.
 struct NoBody;
+
+/// The longest body that a route with no body reads: `{}` with some space.
+const NO_BODY_MAX: usize = 64;
 
 impl<S: Send + Sync> axum::extract::FromRequest<S> for NoBody {
     type Rejection = Error;
 
-    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self> {
-        let b = Bytes::from_request(req, state)
+    async fn from_request(req: axum::extract::Request, _: &S) -> Result<Self> {
+        let b = axum::body::to_bytes(req.into_body(), NO_BODY_MAX)
             .await
-            .map_err(|e| Error::Query(e.body_text()))?;
+            .map_err(|_| Error::Query("this route takes no body".into()))?;
         let none = b.is_empty()
             || serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&b)
                 .is_ok_and(|m| m.is_empty());
@@ -624,22 +700,48 @@ struct ConfirmBody {
     sha256: String,
 }
 
+/// Runs `f` on a blocking thread. Each policy writer waits for the backup
+/// lock (a backup can hold it for minutes), and the server has one runtime
+/// thread: a wait there stops each other request (issue 143).
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))?
+}
+
+/// [`policy::change`] on a blocking thread, see [`blocking`].
+async fn change_blocking(
+    s: Arc<Store>,
+    version: Option<i64>,
+    change: iris_policy::Change,
+) -> Result<serde_json::Value> {
+    blocking(move || policy::change(&s, version, change, now_s())).await
+}
+
 async fn post_confirm(
     State(s): State<Arc<Store>>,
     b: std::result::Result<Json<ConfirmBody>, JsonRejection>,
 ) -> Result<Response> {
     let b = body(b)?;
-    Ok(Json(policy::confirm(&s, &b.sha256, now_s())?).into_response())
+    let v = blocking(move || policy::confirm(&s, &b.sha256, now_s())).await?;
+    Ok(Json(v).into_response())
 }
 
 async fn post_discard(State(s): State<Arc<Store>>, _: NoBody) -> Result<Response> {
-    Ok(Json(policy::discard(&s)?).into_response())
+    Ok(Json(blocking(move || policy::discard(&s)).await?).into_response())
+}
+
+/// A field that must be in the body, also when its value is `null`: with
+/// `deserialize_with`, serde gives no default for an omitted `Option` (#145).
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<i64>, D::Error> {
+    Option::deserialize(d)
 }
 
 /// `version` is the active version that the person saw, `null` for the
-/// policy of the first start.
+/// policy of the first start. A body with no `version` field is refused.
 #[derive(Deserialize)]
 struct ModeBody {
+    #[serde(deserialize_with = "present")]
     version: Option<i64>,
     mode: String,
 }
@@ -650,11 +752,12 @@ async fn post_mode(
 ) -> Result<Response> {
     let b = body(b)?;
     let change = iris_policy::Change::Mode(policy::mode(&b.mode)?);
-    Ok(Json(policy::change(&s, b.version, change, now_s())?).into_response())
+    Ok(Json(change_blocking(s, b.version, change).await?).into_response())
 }
 
 #[derive(Deserialize)]
 struct RemoveBody {
+    #[serde(deserialize_with = "present")]
     version: Option<i64>,
     id: u32,
 }
@@ -665,7 +768,7 @@ async fn post_remove(
 ) -> Result<Response> {
     let b = body(b)?;
     let change = iris_policy::Change::Remove(b.id);
-    Ok(Json(policy::change(&s, b.version, change, now_s())?).into_response())
+    Ok(Json(change_blocking(s, b.version, change).await?).into_response())
 }
 
 #[derive(Deserialize)]
@@ -732,6 +835,7 @@ async fn post_job(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GrantBody {
+    #[serde(deserialize_with = "present")]
     version: Option<i64>,
     job: String,
     verbs: Vec<String>,
@@ -743,8 +847,11 @@ async fn post_grant(
     b: std::result::Result<Json<GrantBody>, JsonRejection>,
 ) -> Result<Response> {
     let b = body(b)?;
-    Ok(policy::grant(&s, &b.job, &b.verbs, b.version, now_s())?
-        .map_or_else(not_found, |v| Json(v).into_response()))
+    Ok(
+        blocking(move || policy::grant(&s, &b.job, &b.verbs, b.version, now_s()))
+            .await?
+            .map_or_else(not_found, |v| Json(v).into_response()),
+    )
 }
 
 async fn get_job(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
@@ -754,9 +861,38 @@ async fn get_job(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<
     Ok(stream(move |w| write_job(&s, row, w)).await)
 }
 
+#[derive(Deserialize)]
+struct JobAnswerBody {
+    answer: String,
+    /// The question that the person answers, and the `updated` of the job
+    /// when the person saw it. An answer to an older question gets 409.
+    question: String,
+    updated: String,
+}
+
+/// The answer of the person to the question of a job (card R5-05). The
+/// answer is the job document.
+async fn post_job_answer(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<JobAnswerBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let Some(row) = job_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    let asked = iris_job::Asked {
+        question: &b.question,
+        updated: &b.updated,
+    };
+    answer_job(&s, row, &b.answer, Some(asked), now_ms())?;
+    Ok(stream(move |w| write_job(&s, row, w)).await)
+}
+
 /// `id` is the ID of an open proposal (spec 2, section 6.6).
 #[derive(Deserialize)]
 struct ProposalBody {
+    #[serde(deserialize_with = "present")]
     version: Option<i64>,
     id: i64,
 }
@@ -767,7 +903,7 @@ async fn post_accept(
 ) -> Result<Response> {
     let b = body(b)?;
     let change = iris_policy::Change::Accept(b.id);
-    Ok(Json(policy::change(&s, b.version, change, now_s())?).into_response())
+    Ok(Json(change_blocking(s, b.version, change).await?).into_response())
 }
 
 #[derive(Deserialize)]
@@ -809,6 +945,64 @@ async fn get_outbox(
         q.after.as_deref(),
     )?)
     .into_response())
+}
+
+/// `GET /api/stop`: `{"stopped": bool, "since": time|null, "sessions": 0,
+/// "live": n, "busy": bool}` (docs/specs/2026-11-17-stop.md, section 5).
+/// `live` and `busy` are measured now, also while Iris runs, so a client
+/// says that no mail leaves only for a complete stop.
+async fn get_stop(State(s): State<Arc<Store>>) -> Result<Response> {
+    let since = s.read(iris_store::stopped)?;
+    Ok(Json(stop_answer(&s, since)?).into_response())
+}
+
+/// The answer of each Stop route with no stop in it: `sessions` is 0, and
+/// `live` and `busy` are measured now (issue 569).
+fn stop_answer(s: &Store, since: Option<i64>) -> Result<serde_json::Value> {
+    let (live, busy) = iris_apply::stop_measure(s).map_err(apply_error)?;
+    Ok(serde_json::json!({
+        "stopped": since.is_some(),
+        "since": since.map(rfc3339),
+        "sessions": 0,
+        "live": live,
+        "busy": busy,
+    }))
+}
+
+/// `POST /api/stop`: Stop all agent work. The answer adds `sessions` (the
+/// sessions that this stop ended), `live` (the sessions that are not reaped
+/// yet) and `busy` (a Gmail call still ran). The stop is complete only when
+/// `live` is 0 and `busy` is false. The wait of up to 20 seconds runs on a
+/// blocking thread, so the other routes still answer.
+async fn post_stop(State(s): State<Arc<Store>>, _: NoBody) -> Result<Response> {
+    let done = tokio::task::spawn_blocking(move || iris_apply::stop(&s))
+        .await
+        .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))?
+        .map_err(apply_error)?;
+    Ok(Json(serde_json::json!({
+        "stopped": true,
+        "since": rfc3339(done.since),
+        "sessions": done.sessions,
+        "live": done.live,
+        "busy": done.busy,
+    }))
+    .into_response())
+}
+
+/// `POST /api/resume`: end the stop, with the fields of [`stop_answer`].
+/// `resumed` is false if Iris was not stopped; then nothing changed.
+async fn post_resume(State(s): State<Arc<Store>>, _: NoBody) -> Result<Response> {
+    let resumed = iris_apply::resume(&s).map_err(apply_error)?;
+    let mut v = stop_answer(&s, None)?;
+    v["resumed"] = resumed.into();
+    Ok(Json(v).into_response())
+}
+
+fn apply_error(e: iris_apply::Error) -> Error {
+    match e {
+        iris_apply::Error::Store(e) => Error::Store(e),
+        other => Error::Unavailable(other.to_string()),
+    }
 }
 
 /// Cancel the send of a draft (`d-N`) in the outbox. 409 if the release
@@ -862,6 +1056,32 @@ async fn get_write(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
     };
     Ok(match write::state(&s, row, now_ms())? {
         Some(v) => Json(v).into_response(),
+        None => not_found(),
+    })
+}
+
+/// The draft of a thread (`t-N`) that the person can use now: a reply in
+/// the voice of the owner (R3-05) or a nudge (R3-07), with the address of
+/// the person that owes (`to`) and its commitment (`item`). 404 when there is none, or when it is
+/// stale ([`iris_voice::ready_sql`]): a newer mail, or for a nudge, a
+/// change of its commitment or its person. Nothing is sent.
+async fn get_draft(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    let Some((iris_store::Kind::Thread, thread)) = iris_store::parse_id(&id) else {
+        return Ok(not_found());
+    };
+    let draft = s
+        .read(|c| Ok(iris_voice::ready(c, thread)?))
+        .map_err(Error::from)?;
+    Ok(match draft {
+        Some(d) => Json(serde_json::json!({
+            "thread": id,
+            "based_on": iris_store::format_id(iris_store::Kind::Message, d.based_on),
+            "nudge": d.to.is_some(),
+            "to": d.to,
+            "item": d.item.map(|i| iris_store::format_id(iris_store::Kind::Commitment, i)),
+            "body": d.body,
+        }))
+        .into_response(),
         None => not_found(),
     })
 }

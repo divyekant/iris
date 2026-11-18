@@ -1,0 +1,10 @@
+[package]
+name = "iris-fakeimap"
+description = "A fake IMAP server for Iris tests: folders, UIDs, CONDSTORE and QRESYNC. In process, no network."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

@@ -54,7 +54,7 @@ pub fn parse_id(text: &str) -> Option<(Kind, i64)> {
     let (p, n) = text.split_once('-')?;
     let (kind, _) = PREFIXES.iter().find(|(_, q)| *q == p)?;
     // Only digits: `i64::from_str` also takes a sign, and "+5" is not an ID.
-    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+    if n.is_empty() || n.starts_with('0') || !n.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     let row: i64 = n.parse().ok()?;
@@ -73,6 +73,31 @@ mod tests {
         assert_eq!(format_id(Kind::Sender, 7), "p-7");
     }
 
+    /// Property: a text parses only if it is the canonical form that
+    /// `format_id` gives for its row (#309).
+    #[test]
+    fn only_the_canonical_form_parses() {
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let alphabet = b"mtp-0123456789+ x";
+        for _ in 0..20_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let len = (x % 8) as usize;
+            let text: String = (0..len)
+                .map(|i| alphabet[((x >> (i * 5)) % alphabet.len() as u64) as usize] as char)
+                .collect();
+            match parse_id(&text) {
+                Some((kind, row)) => assert_eq!(format_id(kind, row), text),
+                None => assert!(PREFIXES.iter().all(|(k, _)| {
+                    text.split_once('-')
+                        .and_then(|(_, n)| n.parse::<i64>().ok())
+                        .is_none_or(|n| n <= 0 || format_id(*k, n) != text)
+                })),
+            }
+        }
+    }
+
     #[test]
     fn rejects_bad_ids() {
         for bad in [
@@ -86,6 +111,9 @@ mod tests {
             "m-1a",
             "M-1",
             "m-99999999999999999999",
+            "m-01",
+            "cs-007",
+            "t-00",
         ] {
             assert_eq!(parse_id(bad), None, "{bad}");
         }

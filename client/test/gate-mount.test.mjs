@@ -14,6 +14,8 @@ function serve(answer) {
   const asked = [];
   globalThis.fetch = async (url, init) => {
     const path = String(url).replace(/^\/api\//, "");
+    // A brief line owed to you reads its ready draft (card R3-07): not a request of the gate.
+    if (path.endsWith("/draft")) return new Response(JSON.stringify({ error: "Not found." }), { status: 404 });
     asked.push([init?.method ?? "GET", path]);
     const [status, out] = await answer(path);
     return new Response(JSON.stringify(out), { status, headers: { "content-type": "application/json" } });
@@ -101,7 +103,7 @@ test("in the brief, an answered sender keeps its row and its Undo after the brie
   // After the accept, the engine gives a brief with Maria out of the gate and her ask under You owe.
   const after = { ...fx.brief, gate: { count: 2, senders: fx.gate.senders.slice(1), next: null } };
   const asked = serve((path) => (path === "brief" ? [200, after] : [200, row("p-71")]));
-  const view = await mount("/src/views/Brief.svelte", { watches: [], proposed: null, brief: fx.brief, now: new Date("2026-11-16T09:05:00Z"), poll: 0 });
+  const view = await mount("/src/views/Brief.svelte", { watches: [], proposed: null, questions: [], brief: fx.brief, now: new Date("2026-11-16T09:05:00Z"), poll: 0 });
   try {
     const gate = () => view.target.querySelector("#strangers").closest("section");
     [...gate().querySelectorAll("button")].find((b) => b.textContent.trim() === "Accept").click();
@@ -125,7 +127,7 @@ test("Undo stays after you answer the last sender of the gate", async () => {
   const only = { ...fx.brief, gate: { count: 1, senders: fx.gate.senders.slice(0, 1), next: null }, declined: 0 };
   const after = { ...fx.brief, gate: { count: 0, senders: [], next: null }, declined: 0 };
   const asked = serve((path) => (path === "brief" ? [200, after] : [200, row("p-71")]));
-  const view = await mount("/src/views/Brief.svelte", { watches: [], proposed: null, brief: only, now: new Date("2026-11-16T09:05:00Z"), poll: 0 });
+  const view = await mount("/src/views/Brief.svelte", { watches: [], proposed: null, questions: [], brief: only, now: new Date("2026-11-16T09:05:00Z"), poll: 0 });
   try {
     button(view, "Accept").click();
     await until(() => asked.some(([, p]) => p === "brief"));
@@ -212,7 +214,7 @@ test("the brief links all senders while a waiting sender is not on the page, als
   // After the accept of p-100: two new senders, 21 wait, and the brief gives the first 20.
   const after = { ...fx.brief, gate: { count: 21, senders: many(101, 20), next: "k" } };
   serve((path) => (path === "brief" ? [200, after] : [200, row("p-100")]));
-  const view = await mount("/src/views/Brief.svelte", { watches: [], proposed: null, brief: first, now: new Date("2026-11-16T09:05:00Z"), poll: 0 });
+  const view = await mount("/src/views/Brief.svelte", { watches: [], proposed: null, questions: [], brief: first, now: new Date("2026-11-16T09:05:00Z"), poll: 0 });
   try {
     assert.doesNotMatch(text(view.target), /All 20/);
     buttons(view, "Accept")[0].click();
@@ -235,7 +237,7 @@ test("the brief shows the newest load when two loads answer out of order", async
     const body = gets.length === 1 ? afterA : afterAB;
     return new Promise((done) => held.push(() => done(new Response(JSON.stringify(body), { status: 200 }))));
   };
-  const view = await mount("/src/views/Brief.svelte", { watches: [], proposed: null, brief: fx.brief, now: new Date("2026-11-16T09:05:00Z"), poll: 0 });
+  const view = await mount("/src/views/Brief.svelte", { watches: [], proposed: null, questions: [], brief: fx.brief, now: new Date("2026-11-16T09:05:00Z"), poll: 0 });
   const heading = () => text(view.target.querySelector("#strangers"));
   try {
     buttons(view, "Accept")[0].click();
@@ -258,7 +260,7 @@ test("in the brief, a refused answer keeps its row and its words after the brief
   // A rule took Leo's items out after the brief loaded: the next brief has no Leo.
   const after = { ...fx.brief, gate: { count: 2, senders: [fx.gate.senders[0], fx.gate.senders[2]], next: null } };
   const asked = serve((path) => (path === "brief" ? [200, after] : [409, { error: words }]));
-  const view = await mount("/src/views/Brief.svelte", { watches: [], proposed: null, brief: fx.brief, now: new Date("2026-11-16T09:05:00Z"), poll: 0 });
+  const view = await mount("/src/views/Brief.svelte", { watches: [], proposed: null, questions: [], brief: fx.brief, now: new Date("2026-11-16T09:05:00Z"), poll: 0 });
   try {
     buttons(view, "Accept")[1].click();
     await until(() => asked.some(([, p]) => p === "brief"));
@@ -281,9 +283,11 @@ test("in the brief, a row stays when a new brief comes before the answer", async
     if (path === "status") return Promise.resolve(new Response(JSON.stringify(fx.answer("status")), { status: 200 }));
     if (path.startsWith("watches")) return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
     if (path === "matters") return Promise.resolve(new Response(JSON.stringify({ proposed: [], confirmed: [] }), { status: 200 }));
+    if (path.startsWith("jobs")) return Promise.resolve(new Response(JSON.stringify({ jobs: [], next: null }), { status: 200 }));
+    if (path.endsWith("/draft")) return Promise.resolve(new Response(JSON.stringify({ error: "Not found." }), { status: 404 }));
     return new Promise((done) => (post = () => done(new Response(JSON.stringify(rowFor(path)), { status: 200 }))));
   };
-  const view = await mount("/src/views/Brief.svelte", { watches: [], proposed: null, brief: fx.brief, now: new Date("2026-11-16T09:05:00Z"), poll: 30 });
+  const view = await mount("/src/views/Brief.svelte", { watches: [], proposed: null, questions: [], brief: fx.brief, now: new Date("2026-11-16T09:05:00Z"), poll: 30 });
   try {
     buttons(view, "Accept")[0].click();
     await until(() => post);

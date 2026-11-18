@@ -38,6 +38,8 @@ fn open(dir: &TempDir) -> (Store, i64) {
                 ("INBOX", "INBOX", "system"),
                 ("SENT", "SENT", "system"),
                 ("DRAFT", "DRAFT", "system"),
+                ("UNSENT", "UNSENT", "system"),
+                ("SENT_COPY", "SENT_COPY", "system"),
             ],
         )
         .unwrap();
@@ -199,6 +201,26 @@ fn a_reply_in_the_thread_makes_a_person_and_a_draft_does_not() {
     assert_eq!((d.kind, d.basis.as_str()), (Kind::Person, "replied"));
 }
 
+/// An IMAP draft and a copy in a Sent folder are no evidence of a sender:
+/// they are not earlier mail of a service, and a reply after a copy does
+/// not make its sender a person (IMAP spec section 4).
+#[test]
+fn drafts_and_sent_copies_are_no_sender_evidence() {
+    let mut c = Case::new("copies-replied");
+    let head = "From: Cy <cy@example.net>\r\nTo: owner@example.com";
+    c.put("t1", &["SENT_COPY"], head);
+    c.put("t1", &["UNSENT"], head);
+    c.put("t1", &["SENT"], &format!("From: {OWNER}"));
+    assert_eq!(c.put("t9", &["INBOX"], head).kind, Kind::Stranger);
+
+    let mut c = Case::new("copies-service");
+    c.put("t1", &["UNSENT"], &service_mail());
+    c.put("t2", &["SENT_COPY"], &service_mail());
+    assert_eq!(c.put("t3", &[], &service_mail()).kind, Kind::Stranger);
+    assert_eq!(c.put("t4", &[], &service_mail()).kind, Kind::Stranger);
+    assert_eq!(c.put("t5", &[], &service_mail()).kind, Kind::Service);
+}
+
 #[test]
 fn a_sent_message_before_a_new_participant_does_not_make_it_a_person() {
     let mut c = Case::new("later");
@@ -285,6 +307,25 @@ fn a_service_needs_automated_mail_gmail_dkim_and_two_earlier_messages() {
     let mut c = Case::new("service-forged");
     for t in ["t1", "t2", "t3"] {
         assert_eq!(c.put(t, &[], &forged).kind, Kind::Stranger);
+    }
+}
+
+/// For an account that is not Gmail, a header with the Gmail authserv-id is
+/// text that any sender can write: it is no DKIM pass (IMAP spec section 8).
+#[test]
+fn a_gmail_header_counts_only_for_a_gmail_account() {
+    let mut c = Case::new("service-imap");
+    c.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE account SET provider = 'imap' WHERE id = ?1",
+                [c.acc],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    for t in ["t1", "t2", "t3", "t4"] {
+        assert_eq!(c.put(t, &[], &service_mail()).kind, Kind::Stranger);
     }
 }
 

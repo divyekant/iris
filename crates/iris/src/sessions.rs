@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::Read;
+use std::net::Ipv4Addr;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
@@ -22,7 +23,7 @@ use std::time::{Duration, Instant};
 use iris_changeset::{Author, AuthorKind};
 use iris_job::{format_session_id, EndReason, Session};
 use iris_session::config::Adapter;
-use iris_session::egress::{session_peer, Proxy, SystemResolver};
+use iris_session::egress::{new_token, session_peer, Endpoint, Proxy, SystemResolver};
 use iris_session::isolation::Isolation;
 use iris_session::launch::{Egress, Launcher, Outcome, Step};
 use iris_session::reap::reap_check;
@@ -62,6 +63,14 @@ pub struct Sessions {
     /// lock is held. A stop waits here for at most one gate.
     stop_marks: Mutex<HashSet<i64>>,
     after: Mutex<Option<Arc<AfterStep>>>,
+    /// The wakes (job, last session before the wake) whose session this
+    /// engine tried to start: one try for each wake and engine. After a failed start, the
+    /// person runs `iris job run`.
+    tried: Mutex<HashSet<(i64, i64)>>,
+    /// Each (job, highest pending comment ID) that a review comment tried to
+    /// start (R4-08): one try for each new comment and engine, also when the
+    /// start fails before a session registers.
+    comment_tried: Mutex<HashSet<(i64, i64)>>,
     /// The done jobs whose workspace the build thread builds again. A
     /// build can wait for the workspace lock without a limit, so no
     /// supervisor turn and no stop waits for it.
@@ -153,6 +162,8 @@ impl Sessions {
             state: Mutex::new(State::default()),
             stop_marks: Mutex::default(),
             after: Mutex::new(None),
+            tried: Mutex::default(),
+            comment_tried: Mutex::default(),
             builds,
             releases,
         });
@@ -345,14 +356,14 @@ impl Sessions {
         // of a revoke retry. Each has the log and the peer address of its
         // session.
         let proxies: RefCell<HashMap<i64, Proxy>> = RefCell::default();
-        let egress = |session: i64, adapter: &Adapter| -> Result<Option<u16>, String> {
+        let egress = |session: i64, adapter: &Adapter| -> Result<Option<Endpoint>, String> {
             if adapter.allow_hosts.is_empty() {
                 return Ok(None);
             }
             let p = self.egress(session, adapter.allow_hosts.clone())?;
-            let port = p.port();
+            let end = p.endpoint();
             proxies.borrow_mut().insert(session, p);
-            Ok(Some(port))
+            Ok(Some(end))
         };
         let outcome = self.launcher(isolation, &egress, &after).finish(begun);
         let mut proxies = proxies.into_inner();
@@ -416,8 +427,8 @@ impl Sessions {
             .mode(0o600)
             .open(self.egress_log(session))
             .map_err(|e| e.to_string())?;
-        let peer = session_peer(session).ok_or("the session ID has no peer address")?;
-        Proxy::start(allowed, log, Box::new(SystemResolver), peer).map_err(|e| e.to_string())
+        let (peer, token) = egress_identity(session, cfg!(target_os = "macos"))?;
+        Proxy::start(allowed, log, Box::new(SystemResolver), peer, token).map_err(|e| e.to_string())
     }
 
     fn egress_log(&self, session: i64) -> PathBuf {
@@ -665,7 +676,12 @@ impl Sessions {
             .map_err(|e| format!("no isolation: {e}"))?;
         let s = iris_job::session(&self.store, session).map_err(|e| e.to_string())?;
         match reap_check(&self.store, &**iso, &s, helper_reaped, now) {
-            Ok(()) => Ok(()),
+            Ok(notes) => {
+                if let Some(p) = notes.problem() {
+                    say!("iris: {}: {p}", iris_job::format_job_id(s.job_id));
+                }
+                Ok(())
+            }
             Err(why) => {
                 // One line in the engine log for a session still live 10
                 // minutes after its end.
@@ -679,10 +695,110 @@ impl Sessions {
         }
     }
 
-    /// The supervisor thread: one turn each [`TURN`].
+    /// The wake of R5-04 (docs/specs/2026-11-17-wait.md): wakes each
+    /// waiting job whose reply came or whose wait ended at `now`, then starts
+    /// one session for each job that a wake of the engine moved to `working`,
+    /// with the agent of its last session. A job with a live session (the
+    /// session of the wait before its reap) gets its session at a later call.
+    pub fn wake(self: &Arc<Self>, now: i64) {
+        if let Err(e) = iris_workspace::wake_due(&self.store, now) {
+            say!("iris: the wake of the waiting jobs failed: {e}");
+        }
+        self.comment_wake(now);
+        let Ok(woken) = iris_job::woken(&self.store) else {
+            return;
+        };
+        for (job, last, agent) in woken {
+            if self.live_of(job).is_some() || self.state().launching.contains(&job) {
+                continue;
+            }
+            let first = self
+                .tried
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert((job, last));
+            if !first {
+                continue;
+            }
+            if let Err(e) = self.run(job, &agent) {
+                say!(
+                    "iris: {}: the session after the wake did not start: {e}",
+                    iris_job::format_job_id(job)
+                );
+            }
+        }
+    }
+
+    /// The review comments of R4-08 (docs/specs/2026-11-17-review-comments.md,
+    /// section 5, stage 2): a `waiting` job with a pending comment gets a
+    /// wake of the engine, and a `working` job with a pending comment and no
+    /// live session gets a new session. The comment stays pending until the
+    /// gate of a session writes its delivery, so a session that is live now
+    /// or a launch that runs now gets nothing more here. Each new comment
+    /// gets one try: a start that fails, also before its register, waits for
+    /// the next comment or for `iris job run`.
+    fn comment_wake(self: &Arc<Self>, now: i64) {
+        let mut jobs = None;
+        if let Err(e) = self.store.read(|c| {
+            jobs = Some(iris_changeset::commented_jobs_in(c));
+            Ok(())
+        }) {
+            say!("iris: the read of the review comments failed: {e}");
+            return;
+        }
+        let jobs = match jobs.expect("the read ran") {
+            Ok(j) => j,
+            Err(e) => {
+                say!("iris: the read of the review comments failed: {e}");
+                return;
+            }
+        };
+        for (job, state, comment) in jobs {
+            if self.live_of(job).is_some() || self.state().launching.contains(&job) {
+                continue;
+            }
+            let first = self
+                .comment_tried
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert((job, comment));
+            if !first {
+                continue;
+            }
+            let id = iris_job::format_job_id(job);
+            if state == "waiting" {
+                if let Err(e) =
+                    iris_job::wake(&self.store, job, iris_job::By::Engine, Some("comment"), now)
+                {
+                    say!("iris: {id}: the wake for a review comment failed: {e}");
+                }
+                continue;
+            }
+            if let Err(e) = self.resume(job) {
+                say!("iris: {id}: the session for a review comment did not start: {e}");
+            }
+        }
+    }
+
+    /// Starts a new session of `job` with the agent of its last session.
+    /// For a caller that gives a working job new input (for example a
+    /// review comment, R4-08).
+    pub fn resume(self: &Arc<Self>, job: i64) -> Result<i64, String> {
+        let last = last_session(&self.store, job)?.ok_or("the job has no session")?;
+        self.run(job, &last.agent)
+    }
+
+    /// The supervisor thread: one turn and one wake each [`TURN`].
     pub fn supervise_forever(self: Arc<Self>) {
+        self.supervise_with(&now_ms)
+    }
+
+    /// [`Sessions::supervise_forever`] with the clock `now`. For tests.
+    pub fn supervise_with(self: Arc<Self>, now: &dyn Fn() -> i64) {
         loop {
-            self.turn(now_ms());
+            let t = now();
+            self.turn(t);
+            self.wake(t);
             std::thread::sleep(TURN);
         }
     }
@@ -739,5 +855,39 @@ pub fn state(s: &Session) -> String {
         (Some(_), None, _) => "running".into(),
         (_, Some(e), None) => format!("ending ({})", e.as_str()),
         (_, Some(e), Some(_)) => format!("ended ({})", e.as_str()),
+    }
+}
+
+/// The client address and the token of the proxy of `session`. macOS has
+/// no session address: the peer is 127.0.0.1, and a new token of the
+/// session tells its processes from all others. Linux has the session
+/// address and no token.
+fn egress_identity(session: i64, macos: bool) -> Result<(Ipv4Addr, Option<String>), String> {
+    if macos {
+        let token = new_token().map_err(|e| format!("no token: {e}"))?;
+        return Ok((Ipv4Addr::LOCALHOST, Some(token)));
+    }
+    let peer = session_peer(session).ok_or("the session ID has no peer address")?;
+    Ok((peer, None))
+}
+
+#[cfg(test)]
+mod egress_tests {
+    use super::*;
+
+    #[test]
+    fn macos_gets_a_new_token_and_linux_the_session_address() {
+        let (peer, a) = egress_identity(5, true).unwrap();
+        assert_eq!(peer, Ipv4Addr::LOCALHOST);
+        let a = a.unwrap();
+        assert_eq!(a.len(), 64);
+        assert!(a.bytes().all(|b| b.is_ascii_hexdigit()));
+        let (_, b) = egress_identity(5, true).unwrap();
+        assert_ne!(Some(a), b, "each session gets its own token");
+        assert_eq!(
+            egress_identity(5, false).unwrap(),
+            (session_peer(5).unwrap(), None)
+        );
+        assert!(egress_identity(0, false).is_err());
     }
 }

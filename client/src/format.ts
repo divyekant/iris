@@ -218,6 +218,41 @@ export function across(status: Status | null): string {
   return status && status.accounts.length > 1 ? " from all accounts" : "";
 }
 
+/** One shell argument: as it is if it has only safe characters, else in single quotes. */
+export function shellArg(s: string): string {
+  return /^[A-Za-z0-9@._+-]+$/.test(s) ? s : `'${s.replaceAll("'", `'\\''`)}'`;
+}
+
+/**
+ * Who refused the sign-in of an account, and the command that signs it in
+ * again on the machine that runs Iris. The command differs for each provider.
+ */
+export function signIn(a: Pick<Account, "address" | "provider">): { who: string; command: string; detail: string } {
+  if (a.provider === "gmail") return { who: "Google", command: "iris account add client.json", detail: "with the client file of this account" };
+  // With no --host, the engine uses the saved server, port and user of the account.
+  if (a.provider === "imap") return { who: "The mail server", command: `iris account add-imap ${shellArg(a.address)}`, detail: "and give the new password" };
+  if (a.provider === "outlook") return { who: "Microsoft", command: "iris account add-outlook <client ID>", detail: "with the application (client) ID of your app registration. For a single-tenant registration, also add --tenant with its directory (tenant) ID" };
+  return { who: "The provider", command: "iris account --help", detail: "to see the sign-in command of this provider" };
+}
+
+/**
+ * A short name for each account, by its `a-` ID, so a line can say which mailbox
+ * an item came from (card R6-02). The first part that tells the accounts apart:
+ * the name of the domain ("gmail"), the part before "@", or the whole address.
+ * With one account, no line needs a name: the map is empty.
+ */
+export function accountNames(accounts: Pick<Account, "id" | "address">[]): Record<string, string> {
+  if (accounts.length < 2) return {};
+  const parts = [
+    (a: string) => a.split("@")[1]?.split(".")[0] ?? a,
+    (a: string) => a.split("@")[0],
+    (a: string) => a,
+  ];
+  const lower = accounts.map((a) => a.address.toLowerCase());
+  const pick = parts.find((p) => new Set(lower.map(p)).size === lower.length) ?? parts[2];
+  return Object.fromEntries(accounts.map((a, i) => [`a-${a.id}`, pick(lower[i])]));
+}
+
 /** The home view: the setup flow until there is something to show, then the brief. */
 export function home(status: Status, view: "home" | "brief" = "home"): "setup" | "brief" {
   if (status.accounts.length === 0) return "setup";

@@ -260,6 +260,30 @@ async fn a_file_that_is_not_valid_shows_its_line_and_can_be_discarded() {
     );
 }
 
+/// Each change names the version that the person saw: `null` is the policy
+/// of the first start, and a body with no `version` field is refused (#145).
+#[tokio::test]
+async fn a_change_with_no_version_field_is_refused() {
+    let d = open("no-version");
+    for (what, body) in [
+        ("mode", json!({ "mode": "apply" })),
+        ("remove", json!({ "id": 1 })),
+        ("accept", json!({ "id": 1 })),
+        ("grant", json!({ "job": "j-1", "verbs": ["archive"] })),
+    ] {
+        let (code, v) = d.post(what, body).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{what}: {v}");
+    }
+    assert_eq!(d.get().await["version"], json!(null));
+    assert!(!d.0.join(iris_policy::FILE).exists());
+
+    let (code, v) = d
+        .post("mode", json!({ "version": null, "mode": "apply" }))
+        .await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["version"], 1);
+}
+
 #[tokio::test]
 async fn each_policy_endpoint_needs_the_sign_in() {
     let d = open("auth");
@@ -394,4 +418,58 @@ async fn a_hide_proposal_reads_as_choices() {
         p["rule"]["when"],
         json!({ "sender": "news@shop.example", "form": "feed" })
     );
+}
+
+/// Issue 143: each policy writer waits for the backup lock, which a backup
+/// can hold for minutes. A writer that waits must not stop the other
+/// requests: the server has one runtime thread. Each route runs alone, so
+/// one route on the runtime thread fails the test.
+#[tokio::test]
+async fn a_policy_writer_that_waits_for_the_lock_stops_no_other_request() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let d = Arc::new(open("lockwait"));
+    d.write(FILE);
+    let sha = d.get().await["file"]["sha256"].clone();
+    // An open job, so that the grant reaches the lock.
+    let job = iris_job::create(&d.1, "Book the dentist.", None, 1_800_000_000).unwrap();
+    let job = iris_job::format_job_id(job);
+    let calls: Vec<(&str, Option<Value>)> = vec![
+        ("confirm", Some(json!({ "sha256": sha }))),
+        ("discard", None),
+        ("mode", Some(json!({ "version": null, "mode": "observe" }))),
+        ("remove", Some(json!({ "version": null, "id": 1 }))),
+        ("accept", Some(json!({ "version": null, "id": 1 }))),
+        (
+            "grant",
+            Some(json!({ "version": null, "job": job, "verbs": ["archive"] })),
+        ),
+    ];
+    for (what, body) in calls {
+        let lock = d.1.backup_lock().unwrap();
+        let released = Arc::new(AtomicBool::new(false));
+        // The release in 2 s, so that a blocked thread cannot hang the test.
+        let r = released.clone();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            r.store(true, Ordering::SeqCst);
+            drop(lock);
+        });
+        let writer = {
+            let d = d.clone();
+            tokio::spawn(async move {
+                d.call("POST", &format!("/api/policy/{what}"), body, true)
+                    .await
+            })
+        };
+        // The writer runs first and comes to the lock.
+        tokio::task::yield_now().await;
+        let (code, _) = d.call("GET", "/api/policy", None, true).await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(
+            !released.load(Ordering::SeqCst),
+            "{what}: the read waited for the lock of the writer"
+        );
+        writer.await.unwrap();
+        release.join().unwrap();
+    }
 }

@@ -4,8 +4,7 @@
 /// The most bytes of the header block that the parser reads (the same limit
 /// as `iris-clean`).
 pub const HEAD_LIMIT: usize = 256 * 1024;
-/// The authserv-id of the `Authentication-Results` header that Gmail adds.
-pub const GMAIL_AUTHSERV: &str = "mx.google.com";
+pub use iris_senders::head::{trusted_authserv, GMAIL_AUTHSERV};
 
 /// The parsed headers of one message.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -29,7 +28,8 @@ pub struct Head {
     /// `List-Id`, `List-Unsubscribe`, `Precedence: bulk`, or
     /// `Auto-Submitted` other than `no` (the rule of `iris-senders`).
     pub automated: bool,
-    /// The results of the top `Authentication-Results` header of Gmail.
+    /// The results of the top `Authentication-Results` header of the
+    /// provider (the `authserv` of [`Head::parse`]).
     pub auth: Option<Auth>,
 }
 
@@ -78,7 +78,10 @@ pub fn domain(addr: &str) -> &str {
 }
 
 impl Head {
-    pub fn parse(raw: &[u8]) -> Head {
+    /// Parse the headers of `raw`. `authserv` is the authserv-id that the
+    /// provider of the account adds ([`trusted_authserv`]). With `None`, no
+    /// `Authentication-Results` header counts.
+    pub fn parse(raw: &[u8], authserv: Option<&str>) -> Head {
         let fields = fields(raw);
         let get = |name: &str| {
             fields
@@ -99,10 +102,12 @@ impl Head {
                 .unwrap_or_default()
         };
         // Gmail adds its header at the top. A sender can add more below it.
-        let auth = fields
-            .iter()
-            .filter(|(n, _)| n.eq_ignore_ascii_case("authentication-results"))
-            .find_map(|(_, v)| auth(v));
+        let auth = authserv.and_then(|id| {
+            fields
+                .iter()
+                .filter(|(n, _)| n.eq_ignore_ascii_case("authentication-results"))
+                .find_map(|(_, v)| auth(v, id))
+        });
         let nonempty = |v: Option<&str>| v.filter(|v| !v.is_empty()).map(str::to_string);
         Head {
             from_addr,
@@ -168,12 +173,12 @@ pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
 }
 
 /// The results of one `Authentication-Results` value, if its authserv-id is
-/// the id of Gmail.
-fn auth(v: &str) -> Option<Auth> {
+/// `authserv`.
+fn auth(v: &str, authserv: &str) -> Option<Auth> {
     let v = strip_comments(v);
     let mut parts = v.split(';');
     let id = parts.next()?.split_whitespace().next()?;
-    if !id.eq_ignore_ascii_case(GMAIL_AUTHSERV) {
+    if !id.eq_ignore_ascii_case(authserv) {
         return None;
     }
     let mut a = Auth::default();

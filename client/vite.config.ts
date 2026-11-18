@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
-import { act, answer, answerSender, askAnswer, decide, noticePost, undoEntry, outboxPost, policyPost, raw, startJob, watchPost, withdraw } from "./dev/fixtures.ts";
+import { act, answer, answerJob, answerSender, askAnswer, replyDraft, decide, noticePost, undoEntry, outboxPost, policyPost, raw, startJob, stopPost, watchPost, withdraw } from "./dev/fixtures.ts";
 import { engineProxy } from "./dev/proxy.ts";
 
 // `pnpm dev` sends /api to an engine on 127.0.0.1:4800 (`iris serve`).
@@ -45,6 +45,12 @@ export default defineConfig(({ mode }) => {
             });
             return;
           }
+          // A draft in your voice (R3-04 intent path), after a pause, as the engine.
+          if (url === "/threads/t-8841/draft" && req.method === "POST") {
+            res.setHeader("content-type", "application/json");
+            setTimeout(() => res.end(JSON.stringify(replyDraft)), 900);
+            return;
+          }
           const undo = url.match(/^\/ledger\/([^/?]+)\/undo$/);
           if (undo && req.method === "POST") {
             const done = undoEntry(decodeURIComponent(undo[1]));
@@ -86,6 +92,13 @@ export default defineConfig(({ mode }) => {
             });
             return;
           }
+          const stop = req.method === "POST" ? stopPost(url) : undefined;
+          if (stop) {
+            res.statusCode = stop[0];
+            res.setHeader("content-type", "application/json");
+            res.end(JSON.stringify(stop[1]));
+            return;
+          }
           const cancel = req.method === "POST" ? outboxPost(url) : undefined;
           if (cancel) {
             res.statusCode = cancel[0];
@@ -118,6 +131,24 @@ export default defineConfig(({ mode }) => {
             res.end(JSON.stringify(out));
             return;
           }
+          const job = url.match(/^\/jobs\/([^/?]+)\/answer$/);
+          if (job && req.method === "POST") {
+            let text = "";
+            req.on("data", (part: Buffer) => (text += part));
+            req.on("end", () => {
+              let said = {};
+              try {
+                said = JSON.parse(text) ?? {};
+              } catch {
+                said = {};
+              }
+              const [code, out] = answerJob(decodeURIComponent(job[1]), said);
+              res.statusCode = code;
+              res.setHeader("content-type", "application/json");
+              res.end(JSON.stringify(out));
+            });
+            return;
+          }
           if (url.startsWith("/watches") && req.method === "POST") {
             let text = "";
             req.on("data", (part: Buffer) => (text += part));
@@ -127,6 +158,13 @@ export default defineConfig(({ mode }) => {
               res.setHeader("content-type", "application/json");
               res.end(JSON.stringify(out));
             });
+            return;
+          }
+          // A write that no route above handles saves nothing: never answer it with a read.
+          if (req.method !== "GET" && req.method !== "HEAD") {
+            res.statusCode = 405;
+            res.setHeader("content-type", "application/json");
+            res.end(JSON.stringify({ error: "The fixtures do not save this change." }));
             return;
           }
           const body = answer(url);

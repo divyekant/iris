@@ -1,0 +1,978 @@
+//! A synchronous IMAP client for the Iris mirror (spec
+//! `docs/specs/2026-11-17-imap-client.md`).
+//!
+//! [`connect`] opens a TLS connection (port 993). [`Session::start`] signs
+//! in on any stream, so that tests use a plain local stream. The client only
+//! reads: it opens folders with `EXAMINE` and fetches with `BODY.PEEK[]`, so
+//! no call changes the mailbox.
+//!
+//! Memory: [`Session::fetch_raw`] streams the message to a sink. Each other
+//! response is at most [`RESPONSE_LIMIT`] bytes. [`Session::changes`] and
+//! [`Session::list`] give each message to a callback and keep no list.
+//!
+//! The server is not trusted. Each response that does not parse is an
+//! error. After any error, drop the session and connect again.
+
+mod provider;
+
+pub use provider::{Imap, SENT_COPY, UNSENT};
+
+use std::fmt;
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::ops::RangeInclusive;
+use std::sync::Arc;
+use std::time::Duration;
+
+use base64::Engine;
+use imap_proto::{
+    AttributeValue, Capability, MailboxDatum, NameAttribute, Response, ResponseCode, Status,
+};
+
+/// The largest response that the client reads into memory. The `BODY[]`
+/// literal of [`Session::fetch_raw`] does not count: the client streams it.
+pub const RESPONSE_LIMIT: usize = 1024 * 1024;
+
+#[derive(Debug)]
+pub enum Error {
+    /// The connection failed, or a read or write timed out.
+    Io(io::Error),
+    /// The TLS setup failed (for example, a bad host name).
+    Tls(String),
+    /// A response did not parse, or did not agree with the command. No error
+    /// holds server text: a server can echo the password or the token.
+    Protocol(&'static str),
+    /// A response or a line is above [`RESPONSE_LIMIT`].
+    TooLarge,
+    /// The server refused the sign-in. The person must sign in again. It
+    /// holds no server text, because a server can echo the secret.
+    SignIn,
+    /// The server answered `NO` or `BAD` to a command. It holds the first
+    /// word of the command only.
+    Refused(String),
+    /// The server closed the connection (`BYE`).
+    Closed,
+    /// The server does not have a capability that the call needs.
+    Missing(&'static str),
+    /// A folder name or a user name has a byte that a quoted string cannot
+    /// hold. Nothing was sent.
+    Name,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Io(e) => write!(f, "imap: {e}"),
+            Error::Tls(e) => write!(f, "imap: tls: {e}"),
+            Error::Protocol(e) => write!(f, "imap: bad response: {e}"),
+            Error::TooLarge => write!(f, "imap: response above {RESPONSE_LIMIT} bytes"),
+            Error::SignIn => write!(f, "imap: sign-in refused"),
+            Error::Refused(e) => write!(f, "imap: refused: {e}"),
+            Error::Closed => write!(f, "imap: the server closed the connection"),
+            Error::Missing(c) => write!(f, "imap: the server has no {c}"),
+            Error::Name => write!(f, "imap: a name has a byte that IMAP cannot quote"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl From<io::Error> for Error {
+    fn from(e: io::Error) -> Error {
+        Error::Io(e)
+    }
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// The sign-in data. The client stores none of it. `Debug` hides the secret.
+pub enum Auth<'a> {
+    /// An app password of the provider.
+    Password { user: &'a str, password: &'a str },
+    /// An OAuth access token (`XOAUTH2`).
+    OAuth { user: &'a str, token: &'a str },
+}
+
+impl fmt::Debug for Auth<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Auth::Password { user, .. } => write!(f, "Password {{ user: {user:?}, .. }}"),
+            Auth::OAuth { user, .. } => write!(f, "OAuth {{ user: {user:?}, .. }}"),
+        }
+    }
+}
+
+/// The TLS stream that [`connect`] makes.
+pub type Tls = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
+
+/// Open a TLS connection to `host:port`. `timeout` limits the connect and
+/// each read and write.
+pub fn connect(host: &str, port: u16, timeout: Duration) -> Result<Tls> {
+    let mut last = io::Error::new(io::ErrorKind::NotFound, "no address");
+    let mut tcp = None;
+    for addr in (host, port).to_socket_addrs()? {
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(s) => {
+                tcp = Some(s);
+                break;
+            }
+            Err(e) => last = e,
+        }
+    }
+    let tcp = tcp.ok_or(last)?;
+    tcp.set_read_timeout(Some(timeout))?;
+    tcp.set_write_timeout(Some(timeout))?;
+    // Each command waits for its answer: no Nagle delay.
+    tcp.set_nodelay(true)?;
+    let roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| Error::Tls(e.to_string()))?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let name = rustls::pki_types::ServerName::try_from(host.to_owned())
+        .map_err(|e| Error::Tls(e.to_string()))?;
+    let conn = rustls::ClientConnection::new(Arc::new(config), name)
+        .map_err(|e| Error::Tls(e.to_string()))?;
+    let mut tls = rustls::StreamOwned::new(conn, tcp);
+    // Finish the handshake now, so that a server with no TLS fails here.
+    while tls.conn.is_handshaking() {
+        tls.conn.complete_io(&mut tls.sock)?;
+    }
+    Ok(tls)
+}
+
+/// The special use of a folder (RFC 6154).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Special {
+    All,
+    Archive,
+    Drafts,
+    Flagged,
+    Junk,
+    Sent,
+    Trash,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Folder {
+    /// The name as the server sends it (modified UTF-7). Give it back to
+    /// [`Session::examine`] as it is.
+    pub name: String,
+    pub delimiter: Option<String>,
+    pub special: Option<Special>,
+    /// `false` for `\Noselect` and `\NonExistent`.
+    pub selectable: bool,
+}
+
+/// The state of a folder after [`Session::examine`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Examined {
+    pub uidvalidity: u32,
+    pub uidnext: Option<u32>,
+    pub exists: u32,
+    /// `None` when the server has no `CONDSTORE`, or no mod-sequences for
+    /// this folder.
+    pub highest_modseq: Option<u64>,
+    /// The `FLAGS` and the `PERMANENTFLAGS` of the folder, without `\*`.
+    pub flags: Vec<String>,
+    /// The `PERMANENTFLAGS` alone, without `\*`. `None`: the answer had
+    /// none (always so for `EXAMINE` on most servers).
+    pub permanent: Option<Vec<String>>,
+    /// `PERMANENTFLAGS` holds `\*`: a new keyword is permanent too.
+    pub any_keyword: bool,
+}
+
+/// The header fields that [`Entry::headers`] holds: the fields of the
+/// thread of a message.
+const HEADS: &str = "BODY.PEEK[HEADER.FIELDS (MESSAGE-ID IN-REPLY-TO REFERENCES)]";
+
+/// A key of [`Session::search`].
+#[derive(Clone, Copy, Debug)]
+pub enum Search<'a> {
+    Unseen,
+    Flagged,
+    /// The `\Draft` flag.
+    Draft,
+    /// A keyword: an IMAP atom, else [`Error::Name`].
+    Keyword(&'a str),
+    /// The UIDs from the first to the second.
+    Uids(u32, u32),
+}
+
+/// One message in a folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    pub uid: u32,
+    pub flags: Vec<String>,
+    pub modseq: Option<u64>,
+    /// `INTERNALDATE` as the server sends it, for example
+    /// `17-Nov-2026 09:30:00 +0000`.
+    pub internal_date: Option<String>,
+    /// `RFC822.SIZE`.
+    pub size: Option<u32>,
+    /// The `Message-ID`, `In-Reply-To` and `References` header lines.
+    pub headers: Option<Vec<u8>>,
+}
+
+/// One event of [`Session::changes`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Change {
+    /// A new message, or a message with changed flags.
+    Entry(Entry),
+    /// Removed UIDs (`VANISHED`, only with `QRESYNC`).
+    Vanished(RangeInclusive<u32>),
+}
+
+/// A signed-in session.
+pub struct Session<S: Read + Write> {
+    io: BufReader<S>,
+    tag: u32,
+    caps: Vec<String>,
+    qresync: bool,
+}
+
+/// Put `s` in a quoted string, or give [`Error::Name`].
+fn quote(s: &str) -> Result<String> {
+    if s.bytes()
+        .any(|b| b == b'\r' || b == b'\n' || b == 0 || b > 127)
+    {
+        return Err(Error::Name);
+    }
+    Ok(format!(
+        "\"{}\"",
+        s.replace('\\', "\\\\").replace('"', "\\\"")
+    ))
+}
+
+/// Remove the escapes of a quoted string.
+fn unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        out.push(if c == '\\' {
+            chars.next().unwrap_or(c)
+        } else {
+            c
+        });
+    }
+    out
+}
+
+/// The first literal marker (`{n}` and CRLF) in a response.
+fn literal_in(buf: &[u8]) -> Option<usize> {
+    buf.windows(3).position(|w| w == b"}\r\n")
+}
+
+/// A status response (`OK`, `NO`, `BAD`, `BYE`, `PREAUTH`, or a `+`
+/// continuation) with a byte above 127 just after the `]` of its code.
+/// `imap-proto` 0.17 panics on it (it cuts the text at byte 1).
+fn bad_outcome(buf: &[u8]) -> bool {
+    let line = &buf[..buf.iter().position(|b| *b == b'\n').unwrap_or(buf.len())];
+    let mut words = line.splitn(3, |b| *b == b' ');
+    let first = words.next().unwrap_or_default();
+    let rest = if first == b"+" {
+        line.get(2..).unwrap_or_default()
+    } else {
+        let status = words.next().unwrap_or_default();
+        if !["OK", "NO", "BAD", "BYE", "PREAUTH"]
+            .iter()
+            .any(|s| status.eq_ignore_ascii_case(s.as_bytes()))
+        {
+            return false;
+        }
+        words.next().unwrap_or_default()
+    };
+    if !rest.starts_with(b"[") {
+        return false;
+    }
+    rest.iter()
+        .position(|b| *b == b']')
+        .and_then(|i| rest.get(i + 1))
+        .is_some_and(|b| *b > 127)
+}
+
+/// The size of the literal at the end of a line, as `{n}\r\n`.
+fn literal(line: &[u8]) -> Option<usize> {
+    let body = line.strip_suffix(b"}\r\n")?;
+    let open = body.iter().rposition(|b| *b == b'{')?;
+    let n = &body[open + 1..];
+    if n.is_empty() || !n.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(n).ok()?.parse().ok()
+}
+
+impl<S: Read + Write> Session<S> {
+    /// Read the greeting, sign in, and turn on `QRESYNC` when the server has
+    /// it.
+    pub fn start(stream: S, auth: Auth<'_>) -> Result<Session<S>> {
+        let mut s = Session {
+            io: BufReader::new(stream),
+            tag: 0,
+            caps: Vec::new(),
+            qresync: false,
+        };
+        let greeting = s.read_response(None)?;
+        if bad_outcome(&greeting) {
+            return Err(Error::Protocol("greeting"));
+        }
+        match Response::parse(&greeting) {
+            Ok((
+                _,
+                Response::Data {
+                    status: Status::Ok, ..
+                },
+            )) => {}
+            Ok((
+                _,
+                Response::Data {
+                    status: Status::Bye,
+                    ..
+                },
+            )) => return Err(Error::Closed),
+            _ => return Err(Error::Protocol("greeting")),
+        }
+        s.capability()?;
+        // A server can echo the secret in any answer to the sign-in, so
+        // each error of this step drops the server text.
+        s.sign_in(auth).map_err(|e| match e {
+            Error::Refused(_) | Error::SignIn => Error::SignIn,
+            e => e,
+        })?;
+        // The capabilities can change after the sign-in.
+        s.capability()?;
+        if s.has("QRESYNC") {
+            let mut on = false;
+            s.run("ENABLE QRESYNC", None, |r, _| {
+                if let Response::Capabilities(c) = r {
+                    on |= c.iter().any(
+                        |c| matches!(c, Capability::Atom(a) if a.eq_ignore_ascii_case("QRESYNC")),
+                    );
+                }
+                Ok(())
+            })?;
+            s.qresync = on;
+        }
+        Ok(s)
+    }
+
+    fn sign_in(&mut self, auth: Auth<'_>) -> Result<()> {
+        match auth {
+            Auth::Password { user, password } => {
+                if self.has("AUTH=PLAIN") {
+                    self.authenticate("PLAIN", format!("\0{user}\0{password}").as_bytes())
+                } else if self.has("LOGINDISABLED") {
+                    Err(Error::Missing("AUTH=PLAIN or LOGIN"))
+                } else {
+                    let cmd = format!("LOGIN {} {}", quote(user)?, quote(password)?);
+                    self.run(&cmd, None, |_, _| Ok(()))
+                }
+            }
+            Auth::OAuth { user, token } => {
+                if !self.has("AUTH=XOAUTH2") {
+                    return Err(Error::Missing("AUTH=XOAUTH2"));
+                }
+                let payload = format!("user={user}\x01auth=Bearer {token}\x01\x01");
+                self.authenticate("XOAUTH2", payload.as_bytes())
+            }
+        }
+    }
+
+    /// The server has the capability `name` (no case).
+    pub fn has(&self, name: &str) -> bool {
+        self.caps.iter().any(|c| c.eq_ignore_ascii_case(name))
+    }
+
+    /// `CONDSTORE` is usable: [`Session::changes`] works.
+    pub fn condstore(&self) -> bool {
+        self.qresync || self.has("CONDSTORE")
+    }
+
+    /// `QRESYNC` is on: [`Session::changes`] also gives removed UIDs.
+    pub fn qresync(&self) -> bool {
+        self.qresync
+    }
+
+    fn capability(&mut self) -> Result<()> {
+        let mut caps = Vec::new();
+        self.run("CAPABILITY", None, |r, _| {
+            if let Response::Capabilities(c) = r {
+                caps = c
+                    .iter()
+                    .map(|c| match c {
+                        Capability::Imap4rev1 => "IMAP4rev1".to_owned(),
+                        Capability::Auth(a) => format!("AUTH={a}"),
+                        Capability::Atom(a) => a.to_string(),
+                    })
+                    .collect();
+            }
+            Ok(())
+        })?;
+        self.caps = caps;
+        Ok(())
+    }
+
+    fn authenticate(&mut self, mech: &str, payload: &[u8]) -> Result<()> {
+        self.tag += 1;
+        let tag = format!("a{}", self.tag);
+        self.send(format!("{tag} AUTHENTICATE {mech}\r\n").as_bytes())?;
+        let mut sent = false;
+        let mut ended = false;
+        loop {
+            let buf = self.read_response(None)?;
+            if bad_outcome(&buf) {
+                return Err(Error::Protocol("byte above 127 after ]"));
+            }
+            let (_, r) = Response::parse(&buf).map_err(|_| Error::Protocol("sign-in"))?;
+            match r {
+                Response::Continue(_) if !sent => {
+                    let mut line = base64::engine::general_purpose::STANDARD
+                        .encode(payload)
+                        .into_bytes();
+                    line.extend_from_slice(b"\r\n");
+                    self.send(&line)?;
+                    sent = true;
+                }
+                // An error challenge (XOAUTH2): an empty line ends it, then the server says NO.
+                Response::Continue(_) if !ended => {
+                    self.send(b"\r\n")?;
+                    ended = true;
+                }
+                Response::Continue(_) => {
+                    return Err(Error::Protocol("sign-in challenge after the end"))
+                }
+                Response::Done {
+                    tag: t,
+                    status,
+                    outcome: _,
+                } if t.0 == tag => {
+                    return match status {
+                        Status::Ok => Ok(()),
+                        _ => Err(Error::SignIn),
+                    };
+                }
+                Response::Data {
+                    status: Status::Bye,
+                    ..
+                } => return Err(Error::Closed),
+                _ => {}
+            }
+        }
+    }
+
+    /// The folders of the account.
+    pub fn folders(&mut self) -> Result<Vec<Folder>> {
+        let mut out = Vec::new();
+        self.run("LIST \"\" \"*\"", None, |r, raw| {
+            if let Response::MailboxData(MailboxDatum::List(l)) = r {
+                let mut special = None;
+                let mut selectable = true;
+                for a in &l.name_attributes {
+                    match a {
+                        NameAttribute::All => special = Some(Special::All),
+                        NameAttribute::Archive => special = Some(Special::Archive),
+                        NameAttribute::Drafts => special = Some(Special::Drafts),
+                        NameAttribute::Flagged => special = Some(Special::Flagged),
+                        NameAttribute::Junk => special = Some(Special::Junk),
+                        NameAttribute::Sent => special = Some(Special::Sent),
+                        NameAttribute::Trash => special = Some(Special::Trash),
+                        NameAttribute::NoSelect => selectable = false,
+                        NameAttribute::Extension(e) if e.eq_ignore_ascii_case("\\NonExistent") => {
+                            selectable = false
+                        }
+                        _ => {}
+                    }
+                }
+                // The parser keeps the escapes of a quoted string. A name in a literal has none.
+                let quoted = literal_in(raw).is_none();
+                out.push(Folder {
+                    name: if quoted {
+                        unescape(&l.name)
+                    } else {
+                        l.name.to_string()
+                    },
+                    delimiter: l.delimiter.as_deref().map(str::to_owned),
+                    special,
+                    selectable,
+                });
+            }
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// Open a folder read-only.
+    pub fn examine(&mut self, folder: &str) -> Result<Examined> {
+        self.open("EXAMINE", folder)
+    }
+
+    /// Open a folder read-write, for [`Session::store`].
+    pub fn select(&mut self, folder: &str) -> Result<Examined> {
+        self.open("SELECT", folder)
+    }
+
+    fn open(&mut self, verb: &str, folder: &str) -> Result<Examined> {
+        let mut cmd = format!("{verb} {}", quote(folder)?);
+        if self.condstore() {
+            cmd.push_str(" (CONDSTORE)");
+        }
+        let mut e = Examined::default();
+        let mut validity = None;
+        self.run(&cmd, None, |r, _| {
+            match r {
+                Response::MailboxData(MailboxDatum::Exists(n)) => e.exists = n,
+                Response::MailboxData(MailboxDatum::Flags(f)) => {
+                    e.flags.extend(f.iter().map(|x| x.to_string()))
+                }
+                Response::Data { outcome, .. } => match outcome.code {
+                    Some(ResponseCode::PermanentFlags(f)) => {
+                        let p: Vec<String> = f
+                            .iter()
+                            .filter(|x| *x != "\\*")
+                            .map(|x| x.to_string())
+                            .collect();
+                        e.any_keyword |= f.iter().any(|x| x == "\\*");
+                        e.flags.extend(p.iter().cloned());
+                        e.permanent.get_or_insert_with(Vec::new).extend(p);
+                    }
+                    Some(ResponseCode::UidValidity(v)) => validity = Some(v),
+                    Some(ResponseCode::UidNext(n)) => e.uidnext = Some(n),
+                    Some(ResponseCode::HighestModSeq(m)) => e.highest_modseq = Some(m),
+                    _ => {}
+                },
+                _ => {}
+            }
+            Ok(())
+        })?;
+        e.uidvalidity = validity.ok_or(Error::Protocol("no UIDVALIDITY"))?;
+        e.flags.sort();
+        e.flags.dedup();
+        if !self.condstore() {
+            e.highest_modseq = None;
+        }
+        Ok(e)
+    }
+
+    /// Each message of the open folder with a mod-sequence above `since`,
+    /// and with `QRESYNC` each UID removed after `since`.
+    pub fn changes(&mut self, since: u64, mut each: impl FnMut(Change)) -> Result<()> {
+        if !self.condstore() {
+            return Err(Error::Missing("CONDSTORE"));
+        }
+        let vanished = if self.qresync { " VANISHED" } else { "" };
+        // Not `1:*`: `*` is the largest UID now, so a removed UID above it
+        // would get no VANISHED. 4294967295 is the largest UID (RFC 3501).
+        let cmd = format!(
+            "UID FETCH 1:{} (UID FLAGS INTERNALDATE RFC822.SIZE {HEADS}) (CHANGEDSINCE {since}{vanished})",
+            u32::MAX
+        );
+        self.run(&cmd, None, |r, _| {
+            match r {
+                Response::Vanished { uids, .. } => {
+                    uids.into_iter().for_each(|u| each(Change::Vanished(u)))
+                }
+                Response::Fetch(_, attrs) => {
+                    if let Some(e) = entry(&attrs) {
+                        each(Change::Entry(e));
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        })
+    }
+
+    /// Each message of the open folder with a sequence number in
+    /// `low..=high` (at most `EXISTS`), and with `since` only the messages
+    /// with a mod-sequence above it.
+    pub fn window(
+        &mut self,
+        low: u32,
+        high: u32,
+        since: Option<u64>,
+        mut each: impl FnMut(Entry),
+    ) -> Result<()> {
+        let modifier = match since {
+            Some(_) if !self.condstore() => return Err(Error::Missing("CONDSTORE")),
+            Some(m) => format!(" (CHANGEDSINCE {m})"),
+            None => String::new(),
+        };
+        let cmd =
+            format!("FETCH {low}:{high} (UID FLAGS INTERNALDATE RFC822.SIZE {HEADS}){modifier}");
+        self.run(&cmd, None, |r, _| {
+            if let Response::Fetch(_, attrs) = r {
+                if let Some(e) = entry(&attrs) {
+                    each(e);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// The messages of the open folder with the UIDs `uids` (each one that
+    /// exists).
+    pub fn fetch_uids(&mut self, uids: &[u32], mut each: impl FnMut(Entry)) -> Result<()> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let set: Vec<String> = uids.iter().map(u32::to_string).collect();
+        let cmd = format!(
+            "UID FETCH {} (UID FLAGS INTERNALDATE RFC822.SIZE {HEADS})",
+            set.join(",")
+        );
+        self.run(&cmd, None, |r, _| {
+            if let Response::Fetch(_, attrs) = r {
+                if let Some(e) = entry(&attrs).filter(|e| uids.contains(&e.uid)) {
+                    each(e);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Each UID range of the open folder removed after `since`. Needs
+    /// `QRESYNC`. The changed messages are not read.
+    pub fn vanished(
+        &mut self,
+        since: u64,
+        mut each: impl FnMut(std::ops::RangeInclusive<u32>),
+    ) -> Result<()> {
+        if !self.qresync {
+            return Err(Error::Missing("QRESYNC"));
+        }
+        let cmd = format!(
+            "UID FETCH 1:{} (UID) (CHANGEDSINCE {since} VANISHED)",
+            u32::MAX
+        );
+        self.run(&cmd, None, |r, _| {
+            if let Response::Vanished { uids, .. } = r {
+                uids.into_iter().for_each(&mut each);
+            }
+            Ok(())
+        })
+    }
+
+    /// Each message of the open folder with a UID in `from..=to` (`to`
+    /// `None` is `*`).
+    pub fn list(&mut self, from: u32, to: Option<u32>, mut each: impl FnMut(Entry)) -> Result<()> {
+        let to_text = to.map_or("*".to_owned(), |t| t.to_string());
+        let cmd =
+            format!("UID FETCH {from}:{to_text} (UID FLAGS INTERNALDATE RFC822.SIZE {HEADS})");
+        let to = to.unwrap_or(u32::MAX);
+        self.run(&cmd, None, |r, _| {
+            if let Response::Fetch(_, attrs) = r {
+                // `n:*` gives the last message also when its UID is below n.
+                if let Some(e) = entry(&attrs).filter(|e| (from..=to).contains(&e.uid)) {
+                    each(e);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Stream the RFC 5322 bytes of message `uid` of the open folder to
+    /// `sink`. Gives the byte count and the entry (flags, `INTERNALDATE`,
+    /// header fields). `Ok(None)`: no message has the UID. After an error,
+    /// the sink can hold part of the message: drop it.
+    pub fn fetch_raw(&mut self, uid: u32, sink: &mut dyn Write) -> Result<Option<(u64, Entry)>> {
+        let mut found = None;
+        let mut counter = Counter { sink, n: 0 };
+        let cmd = format!("UID FETCH {uid} (UID FLAGS INTERNALDATE {HEADS} BODY.PEEK[])");
+        self.run(&cmd, Some(&mut counter), |r, _| {
+            if let Response::Fetch(_, attrs) = r {
+                let has_body = attrs
+                    .iter()
+                    .any(|a| matches!(a, AttributeValue::BodySection { section: None, .. }));
+                let e = entry(&attrs);
+                if has_body && e.as_ref().is_none_or(|e| e.uid != uid) {
+                    return Err(Error::Protocol("BODY[] of another message"));
+                }
+                if has_body {
+                    found = e;
+                }
+            }
+            Ok(())
+        })?;
+        Ok(found.map(|e| (counter.n, e)))
+    }
+
+    /// `UID STORE` in the folder that [`Session::select`] opened: `+FLAGS`
+    /// with `add`, else `-FLAGS`, of `flags` on `uids`. Not `.SILENT`: gives
+    /// each UID of the answer with its flags after the store. A flag is
+    /// `\Seen`, `\Flagged` or a keyword atom, else [`Error::Name`].
+    pub fn store(
+        &mut self,
+        uids: &[u32],
+        add: bool,
+        flags: &[&str],
+        mut each: impl FnMut(u32, Vec<String>),
+    ) -> Result<()> {
+        let ok = |f: &&str| {
+            f.eq_ignore_ascii_case("\\Seen") || f.eq_ignore_ascii_case("\\Flagged") || is_atom(f)
+        };
+        if uids.is_empty() || flags.is_empty() {
+            return Ok(());
+        }
+        if !flags.iter().all(ok) {
+            return Err(Error::Name);
+        }
+        let set: Vec<String> = uids.iter().map(u32::to_string).collect();
+        let cmd = format!(
+            "UID STORE {} {}FLAGS ({})",
+            set.join(","),
+            if add { "+" } else { "-" },
+            flags.join(" ")
+        );
+        self.run(&cmd, None, |r, _| {
+            if let Response::Fetch(_, attrs) = r {
+                // A FETCH with no FLAGS gives no entry: it confirms nothing.
+                if let Some(e) = entry(&attrs) {
+                    each(e.uid, e.flags);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// The UIDs of the open folder that match `key`.
+    /// With `seqs`, only the messages with a sequence number in that range
+    /// (at most `EXISTS`), so the answer has at most that many UIDs.
+    pub fn search(&mut self, seqs: Option<(u32, u32)>, key: Search<'_>) -> Result<Vec<u32>> {
+        let key = match key {
+            Search::Unseen => "UNSEEN".to_owned(),
+            Search::Flagged => "FLAGGED".to_owned(),
+            Search::Draft => "DRAFT".to_owned(),
+            Search::Keyword(k) if is_atom(k) => format!("KEYWORD {k}"),
+            Search::Keyword(_) => return Err(Error::Name),
+            Search::Uids(a, b) => format!("UID {a}:{b}"),
+        };
+        let mut out = Vec::new();
+        let set = seqs.map_or(String::new(), |(a, b)| format!("{a}:{b} "));
+        self.run(&format!("UID SEARCH {set}{key}"), None, |r, _| {
+            if let Response::MailboxData(MailboxDatum::Search(u)) = r {
+                out.extend(u);
+            }
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// End the session.
+    pub fn logout(mut self) -> Result<()> {
+        match self.run("LOGOUT", None, |_, _| Ok(())) {
+            Ok(()) | Err(Error::Closed) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn send(&mut self, bytes: &[u8]) -> Result<()> {
+        let s = self.io.get_mut();
+        s.write_all(bytes)?;
+        s.flush()?;
+        Ok(())
+    }
+
+    /// Send a command and give each untagged response to `on`, until the
+    /// tagged answer.
+    fn run(
+        &mut self,
+        cmd: &str,
+        mut body: Option<&mut Counter<'_>>,
+        mut on: impl FnMut(Response<'_>, &[u8]) -> Result<()>,
+    ) -> Result<()> {
+        self.tag += 1;
+        let tag = format!("a{}", self.tag);
+        self.send(format!("{tag} {cmd}\r\n").as_bytes())?;
+        loop {
+            let buf = self.read_response(body.as_deref_mut())?;
+            if bad_outcome(&buf) {
+                return Err(Error::Protocol("byte above 127 after ]"));
+            }
+            let r = match Response::parse(&buf) {
+                Ok((b"", r)) => r,
+                _ => return Err(Error::Protocol("a response does not parse")),
+            };
+            match r {
+                Response::Done {
+                    tag: t,
+                    status,
+                    outcome: _,
+                } if t.0 == tag => {
+                    return match status {
+                        Status::Ok => Ok(()),
+                        // Only the command word: a LOGIN command holds the password.
+                        _ => Err(Error::Refused(
+                            cmd.split(' ').next().unwrap_or("").to_owned(),
+                        )),
+                    };
+                }
+                Response::Done { .. } | Response::Continue(_) => {
+                    return Err(Error::Protocol("unexpected answer"))
+                }
+                Response::Data {
+                    status: Status::Bye,
+                    ..
+                } => return Err(Error::Closed),
+                r => on(r, &buf)?,
+            }
+        }
+    }
+
+    /// Read one response with its literals. With `body`, the literal after
+    /// `BODY[]` goes to the sink, and the buffer gets `{0}` in its place.
+    fn read_response(&mut self, mut body: Option<&mut Counter<'_>>) -> Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        loop {
+            let start = buf.len();
+            let room = RESPONSE_LIMIT.saturating_sub(start) as u64;
+            let n = (&mut self.io).take(room + 1).read_until(b'\n', &mut buf)?;
+            if buf.len() > RESPONSE_LIMIT {
+                return Err(Error::TooLarge);
+            }
+            if n == 0 || !buf.ends_with(b"\r\n") {
+                return Err(Error::Closed);
+            }
+            let Some(size) = literal(&buf[start..]) else {
+                return Ok(buf);
+            };
+            let open = buf.iter().rposition(|b| *b == b'{').unwrap_or(start);
+            let is_body =
+                buf[..open].len() >= 7 && buf[open - 7..open].eq_ignore_ascii_case(b"BODY[] ");
+            match body.as_deref_mut() {
+                Some(sink) if is_body => {
+                    buf.truncate(open);
+                    buf.extend_from_slice(b"{0}\r\n");
+                    let copied = io::copy(&mut (&mut self.io).take(size as u64), sink)?;
+                    if copied != size as u64 {
+                        return Err(Error::Closed);
+                    }
+                }
+                _ => {
+                    // buf.len() is at most RESPONSE_LIMIT here; a server size can be usize::MAX.
+                    if size > RESPONSE_LIMIT - buf.len() {
+                        return Err(Error::TooLarge);
+                    }
+                    let at = buf.len();
+                    buf.resize(at + size, 0);
+                    self.io.read_exact(&mut buf[at..])?;
+                }
+            }
+        }
+    }
+}
+
+/// A sink that counts the bytes.
+struct Counter<'a> {
+    sink: &'a mut dyn Write,
+    n: u64,
+}
+
+impl Write for Counter<'_> {
+    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        let n = self.sink.write(b)?;
+        self.n += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.sink.flush()
+    }
+}
+
+fn entry(attrs: &[AttributeValue<'_>]) -> Option<Entry> {
+    let mut uid = None;
+    let mut flags = None;
+    let mut modseq = None;
+    let mut internal_date = None;
+    let mut size = None;
+    let mut headers = None;
+    for a in attrs {
+        match a {
+            AttributeValue::Uid(u) => uid = Some(*u),
+            AttributeValue::Flags(f) => flags = Some(f.iter().map(|x| x.to_string()).collect()),
+            AttributeValue::ModSeq(m) => modseq = Some(*m),
+            AttributeValue::InternalDate(d) => internal_date = Some(d.to_string()),
+            AttributeValue::Rfc822Size(n) => size = Some(*n),
+            AttributeValue::BodySection {
+                section: Some(_),
+                data: Some(d),
+                ..
+            } => headers = Some(d.to_vec()),
+            _ => {}
+        }
+    }
+    // A FETCH with no UID or no FLAGS (an unsolicited update, for example
+    // MODSEQ only) is skipped: each command asks for both, and empty flags
+    // would read as unread mail. The next sync finds the change.
+    Some(Entry {
+        uid: uid?,
+        flags: flags?,
+        modseq,
+        internal_date,
+        size,
+        headers,
+    })
+}
+
+/// An IMAP atom with no `\\`: a keyword that the client can send as it is.
+pub fn is_atom(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_graphic() && !b"(){%*\"\\]".contains(&b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quote_escapes_and_refuses() {
+        assert_eq!(quote(r#"a"b\c"#).unwrap(), r#""a\"b\\c""#);
+        for bad in ["a\r", "a\nb", "a\0", "café"] {
+            assert!(matches!(quote(bad), Err(Error::Name)), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn unescape_quoted() {
+        assert_eq!(unescape(r#"Odd \"n\" \\x"#), r#"Odd "n" \x"#);
+    }
+
+    #[test]
+    fn bad_outcome_finds_the_panic_input() {
+        assert!(bad_outcome("* OK [UIDNEXT 4]é\r\n".as_bytes()));
+        assert!(bad_outcome("a1 NO [ALERT]\u{80}x\r\n".as_bytes()));
+        assert!(bad_outcome("+ [ALERT]é\r\n".as_bytes()));
+        assert!(!bad_outcome("* OK [UIDNEXT 4] é\r\n".as_bytes()));
+        assert!(!bad_outcome("* LIST () \"/\" \"a]é\"\r\n".as_bytes()));
+    }
+
+    #[test]
+    fn literal_size() {
+        assert_eq!(literal(b"* 1 FETCH (BODY[] {12}\r\n"), Some(12));
+        assert_eq!(literal(b"* OK {x}\r\n"), None);
+        assert_eq!(literal(b"* OK {}\r\n"), None);
+        assert_eq!(literal(b"* OK done\r\n"), None);
+    }
+
+    #[test]
+    fn auth_debug_hides_secret() {
+        let a = Auth::Password {
+            user: "u",
+            password: "hunter2",
+        };
+        let b = Auth::OAuth {
+            user: "u",
+            token: "ya29.secret",
+        };
+        let shown = format!("{a:?} {b:?}");
+        assert!(
+            !shown.contains("hunter2") && !shown.contains("ya29"),
+            "{shown}"
+        );
+    }
+}

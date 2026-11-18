@@ -1,5 +1,5 @@
 import { access } from "./access.svelte.ts";
-import { addPage } from "./format";
+import { accountNames, addPage } from "./format";
 import { active, localDay } from "./measures";
 // The client reads the local API of the engine (crates/iris-api/README.md).
 // The form documents follow docs/spec/schema. The client only reads, except
@@ -32,6 +32,8 @@ export type Item = {
   deferred_until?: string;
   amount?: Money;
   participants?: Party[];
+  /** The mail thread of a conversation (`t-N`). */
+  thread?: string;
   latest?: { at: string; from: Party; snippet: string };
   messages?: number;
   new?: number;
@@ -49,6 +51,8 @@ export type Item = {
   expires?: string;
   /** The confirmed matter that keeps the item (`g-4`), or null. */
   matter?: string | null;
+  /** The account (the mailbox) of the item (`a-2`). Open model 1.1. */
+  account?: string;
 };
 
 // A matter: mail that belongs together, as Iris proposes it and the person decides it
@@ -319,6 +323,9 @@ export async function loadOutbox(): Promise<Outbox> {
   return { ...first, sends, next: null };
 }
 
+/** GET /api/threads/{t}/draft: the ready draft of a thread (R3-09). `nudge` is true for a reminder to a late person (R3-07), with `to` and its commitment `item`. */
+export type ThreadDraft = { thread: string; based_on: string; nudge: boolean; to: string | null; item: string | null; body: string };
+
 /** GET /api/threads/{t}/reply: the start values of a reply (write spec, section 5). */
 export type ReplyStart = {
   account: string;
@@ -384,11 +391,11 @@ export type JobChangeset = { id: string; at: string; state: string; why: string 
 /** One job (GET /api/jobs/{id}): the job with its events, its changesets, and the newest mail of each wait thread. */
 export type JobDetail = { job: Job & { events: JobEvent[] }; changesets: JobChangeset[]; threads: Record<string, Target> };
 
-export const SIGN_IN = "Open the sign-in address that iris serve printed.";
-export const SIGN_IN_FAILED = "This sign-in address was used or is not valid. Start iris serve again, then open the new address.";
+export const SIGN_IN = "Sign in: run iris open in Terminal.";
+export const SIGN_IN_FAILED = "This sign-in address was used, ended or is not valid. Run iris open in Terminal for a new address.";
 export const NOT_COPIED = "Iris has not copied the original of this mail yet. Try again after the copy of the mailbox.";
 export const SIGN_IN_RETRY = "The engine of Iris could not sign you in. Load this page again to try again.";
-export const UNREACHABLE = "Iris cannot reach its engine. Start it with iris serve, then open the sign-in address that it prints.";
+export const UNREACHABLE = "Iris cannot reach its engine. Start it with iris service install, then run iris open.";
 
 /** The text that a view shows for an error: "" when App.svelte shows it already as the access state. */
 export function own(error: unknown): string {
@@ -541,11 +548,12 @@ export async function get<T>(path: string): Promise<T> {
   const body = await response.json().catch(() => null);
   // The status goes with the error, so that a caller can tell a 404 from other failures.
   if (!response.ok) throw Object.assign(new Error(body?.error ?? `The engine answered ${response.status}.`), { status: response.status });
-  // Spec 1 section 4.7: Google refused the refresh token of these accounts, so their sync stopped.
+  // Spec 1 section 4.7: the provider refused the sign-in of these accounts, so their sync stopped.
   if (path === "status") {
     const accounts = (body as Status).accounts ?? [];
-    access.locked = accounts.filter((a) => a.state === "needs_sign_in").map((a) => a.address);
+    access.locked = accounts.filter((a) => a.state === "needs_sign_in").map(({ address, provider }) => ({ address, provider }));
     access.none = accounts.length === 0;
+    access.accounts = accountNames(accounts);
   }
   return body as T;
 }

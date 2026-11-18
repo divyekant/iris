@@ -2,7 +2,7 @@
 
 - Status: draft, for the approval of the maintainer
 - Applies to: release 2 ("Apply"). Parts for releases 3 to 5 are marked.
-- Open model version: 1.0
+- Open model version: 1.1
 - Related: [Specification 1](01-mirror-store-forms.md), the manifesto and the
   experience document "Iris: the ideal experience"
 
@@ -173,7 +173,7 @@ documents in `schema/examples/` (files `changeset*.json`).
 
 ```json
 {
-  "model": "iris/1.0",
+  "model": "iris/1.1",
   "id": "cs-77",
   "revision": 1,
   "author": { "kind": "agent", "name": "Claude Code", "session": "se-12", "job": "j-142" },
@@ -665,7 +665,13 @@ changes:
 - The pass holds the facts of one action at a time, and one count for each
   key. It skips a bulk action, because a bulk action stays in review with
   each rule (section 6.5), so it holds the facts of 500 messages or fewer.
-  It runs on a read connection and holds no write lock.
+  The background pass runs on a read connection and holds no write lock.
+  Before it writes, it reads its mark again under the write lock, and it
+  drops a pass that a later decision or a new policy made stale.
+- Each policy that becomes active (an accept, an edit from the web client,
+  a confirmed file) runs the pass again in its own write transaction, so
+  the rule removes each open proposal that it covers at once. This pass
+  holds the write lock while it reads at most 2,000 actions.
 - The person accepts or dismisses a proposal in the web client. An accept
   is a change of section 6.3: the engine adds the rule at the end of the
   file, with the next rule ID, `by = "proposal"`, the date and a comment,
@@ -948,6 +954,15 @@ An undo of an undo is a new action, not a delete of the record.
 
 ### 7.5 Release 3: draft, send and the held outbox
 
+The text of a nudge comes first (R3-07). When a person is late on a
+commitment `owed_to_you`, the engine writes the text of a reminder in the
+voice of the owner, through the budget of understanding, and saves it as
+the reply draft of the thread (`iris_voice::late` gives the rule,
+`crates/iris/src/nudge.rs` runs the step). It makes no changeset action and
+sends nothing. The person sends it as a reply (`draft` and `send`, through
+the held outbox). The verb `nudge` and `iris nudge <c-id>` are not built
+yet.
+
 A later specification defines the verbs `draft`, `send` and `nudge`, and the
 held outbox. `docs/specs/2026-11-16-send.md` (R3-01) defines `draft`, `send`
 and the release step. That specification must meet these constraints:
@@ -1225,8 +1240,10 @@ policy. The one exception is the model budget of release 1 (section 8.1). The en
   one-time code. `iris serve` prints a one-time sign-in address:
   `http://<address>/#code=<code>`. Release 1 does not open the browser,
   because the engine often runs as a background service with no screen
-  (`iris service install`). The person opens the address. A later release
-  can open the browser when the engine runs in a terminal. The browser does
+  (`iris service install`). The person opens the address. `iris open` asks
+  the engine socket (verb `sign-in`) for a new one-time code with a life of 2
+  minutes, and opens its address in the browser
+  (`docs/specs/2026-11-17-mac-app.md`). The browser does
   not send the fragment to a server. The client exchanges the code one time
   (`POST /api/session`) for the web secret, keeps the secret in the storage
   of its origin, and sends it as `Authorization: Bearer <secret>`. The engine

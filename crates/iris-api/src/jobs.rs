@@ -61,6 +61,29 @@ pub fn jobs(store: &Store, state: &str, limit: u32, after: Option<&str>) -> Resu
     })
 }
 
+/// The answer of the person to the question of the job `row` (card
+/// R5-05). The job moves to `working`, and the engine starts a new session
+/// with the answer in `JOB.md`. A job that does not ask the question now
+/// gives `Conflict`: for example a second answer, a job that the person
+/// ended, or a newer question when `asked` names an older one. With no
+/// `asked` (the command `iris job answer`), the answer applies to the
+/// question that the job asks now.
+pub fn answer_job(
+    store: &Store,
+    row: i64,
+    text: &str,
+    asked: Option<iris_job::Asked>,
+    now_ms: i64,
+) -> Result<()> {
+    iris_job::check_text(text, 10_000).map_err(Error::Query)?;
+    iris_job::answer(store, row, text, asked, now_ms).map_err(|e| match e {
+        iris_job::Error::Refused(_) => {
+            Error::Conflict("The job does not ask this question now.".into())
+        }
+        e => job_error(e),
+    })
+}
+
 /// The row of the job `id` (`j-42`), or `None` if no job has it.
 pub fn job_row(store: &Store, id: &str) -> Result<Option<i64>> {
     let Some(row) = iris_job::parse_job_id(id) else {
@@ -91,14 +114,8 @@ fn io(e: std::io::Error) -> Error {
 /// The answer streams. All parts come from one read of the store. If the
 /// job document fails, `out` gets no byte (issue #303).
 pub fn write_job(store: &Store, row: i64, out: &mut impl Write) -> Result<()> {
-    let mut res = Ok(());
-    store.read(|c| {
-        let tx = c.unchecked_transaction()?;
-        res = write_job_in(&tx, row, out);
-        Ok(())
-        // The drop of `tx` ends the read.
-    })?;
-    res
+    // The spool keeps a slow reader of `out` from holding the store.
+    store.read_to(out, |c, w| write_job_in(c, row, w))
 }
 
 fn write_job_in(c: &Connection, row: i64, out: &mut impl Write) -> Result<()> {

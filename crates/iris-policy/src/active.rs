@@ -136,6 +136,9 @@ pub fn file_state(store: &Store) -> Result<FileState> {
 /// and the write are in one transaction, so a crash leaves the old policy or
 /// the new one.
 pub fn confirm(store: &Store, sha256: &str, now: i64) -> Result<Confirm> {
+    // The lock of each policy writer (a change and a discard take it too),
+    // so that the writers of two processes cannot interleave (issue 143).
+    let _lock = store.backup_lock()?;
     store.write(|tx| {
         let loaded = match check(tx, store.dir())? {
             Checked::Missing => return Ok(Confirm::Missing),
@@ -156,7 +159,7 @@ pub fn confirm(store: &Store, sha256: &str, now: i64) -> Result<Confirm> {
 /// Stores `text` as the newest version of the active policy, and records
 /// its rule IDs. A rule ID of the version before that `policy` does not have
 /// is removed, and never used again. Then writes the attention of each item
-/// again, in the same transaction.
+/// and the open rule proposals again, in the same transaction.
 pub(crate) fn record(
     tx: &Connection,
     text: &str,
@@ -189,6 +192,7 @@ pub(crate) fn record(
     }
     crate::attention::evaluate(tx, policy, now)?;
     crate::propose::accepted(tx, policy, now)?;
+    crate::propose::reconcile(tx, now)?;
     Ok(version)
 }
 

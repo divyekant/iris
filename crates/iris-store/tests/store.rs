@@ -82,7 +82,7 @@ fn open_makes_the_data_folder() {
     }
     store
         .read(|c| {
-            assert_eq!(iris_store::schema_version(c)?, 31);
+            assert_eq!(iris_store::schema_version(c)?, 40);
             let journal: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
             assert_eq!(journal, "wal");
             let cache: i64 = c.query_row("PRAGMA cache_size", [], |r| r.get(0))?;
@@ -595,6 +595,94 @@ fn a_new_sent_or_draft_label_clears_the_understanding() {
     assert_eq!(understood(&store, a), None);
 }
 
+/// The invariant of migration 37: for each writer of `message_label` (here
+/// `put_messages` and a plain SQL write, as the sync and the apply mirror
+/// do), a message loses its understanding exactly when its set of SENT and
+/// DRAFT changes. Random label sets from a fixed seed.
+#[test]
+fn each_label_writer_clears_the_understanding_only_for_a_sent_or_draft_change() {
+    let dir = TempDir::new("ownerprop");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(
+            acc,
+            &[("SENT", "SENT", "system"), ("DRAFT", "DRAFT", "system")],
+        )
+        .unwrap();
+    let names = ["INBOX", "SENT", "DRAFT", "Label_1"];
+    let mut m = msg("a", "t1", 1, &["INBOX"], "s", "apple");
+    m.content_sha256 = Some(store.put_content(b"raw a").unwrap());
+    let a = store.put_messages(acc, &[m.clone()]).unwrap()[0];
+    let owner = |store: &Store| -> Vec<String> {
+        store
+            .read(|c| {
+                let mut st = c.prepare(
+                    "SELECT l.provider_id FROM message_label ml JOIN label l ON l.id = ml.label_id
+                     WHERE ml.message_id = ?1 AND l.provider_id IN ('SENT', 'DRAFT')
+                     ORDER BY l.provider_id",
+                )?;
+                let v = st
+                    .query_map([a], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                Ok(v)
+            })
+            .unwrap()
+    };
+    let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for round in 0..300 {
+        store
+            .write(|tx| Ok(tx.execute("UPDATE message SET understood_at = 4 WHERE id = ?1", [a])?))
+            .unwrap();
+        let before = owner(&store);
+        let pick = next();
+        let set: Vec<String> = names
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| pick >> i & 1 == 1)
+            .map(|(_, n)| n.to_string())
+            .collect();
+        if round % 2 == 0 {
+            m.labels = set;
+            store.put_messages(acc, &[m.clone()]).unwrap();
+        } else {
+            // One plain add or remove, as a mirror write does.
+            let label = names[(pick >> 8) as usize % names.len()];
+            let sql = if pick >> 12 & 1 == 1 {
+                "INSERT OR IGNORE INTO message_label(message_id, label_id)
+                 SELECT ?1, id FROM label WHERE account_id = ?2 AND provider_id = ?3"
+            } else {
+                "DELETE FROM message_label WHERE message_id = ?1 AND label_id =
+                   (SELECT id FROM label WHERE account_id = ?2 AND provider_id = ?3)"
+            };
+            store
+                .write(|tx| Ok(tx.execute(sql, rusqlite::params![a, acc, label])?))
+                .unwrap();
+        }
+        let understood: Option<i64> = store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT understood_at FROM message WHERE id = ?1",
+                    [a],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        let changed = owner(&store) != before;
+        assert_eq!(
+            understood.is_none(),
+            changed,
+            "round {round}: {before:?} -> {:?}",
+            owner(&store)
+        );
+    }
+}
+
 #[test]
 fn the_same_content_with_an_empty_header_keeps_the_saved_header() {
     let dir = TempDir::new("keepheader");
@@ -746,4 +834,146 @@ fn a_sender_lookup_without_case_uses_an_index() {
             .any(|p| p.contains("USING INDEX sender_address_nocase")),
         "{plan:?}"
     );
+}
+
+/// An address never gets the mirror and the apply state of another mailbox:
+/// a secret of another provider, or of another IMAP server or user, is
+/// refused before any change (IMAP spec section 8).
+#[test]
+fn an_account_secret_keeps_its_provider_and_its_mailbox() {
+    let dir = TempDir::new("account-secret");
+    let store = Store::open(&dir.0).unwrap();
+    let token = |a: &str| -> (String, Option<Vec<u8>>, Option<String>) {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT provider, token, state FROM account WHERE address = ?1",
+                    [a],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    let server = Some(("imap.example.org", 993, "me"));
+    let id = store
+        .save_account_secret("imap", "me@example.org", server, b"one", "ok")
+        .unwrap();
+    assert_eq!(
+        token("me@example.org"),
+        ("imap".into(), Some(b"one".to_vec()), Some("ok".into()))
+    );
+    for (provider, imap) in [
+        ("gmail", None),
+        ("imap", Some(("imap.other.example", 993, "me"))),
+        ("imap", Some(("imap.example.org", 143, "me"))),
+        ("imap", Some(("imap.example.org", 993, "you"))),
+    ] {
+        let r = store.save_account_secret(provider, "me@example.org", imap, b"two", "ok");
+        assert!(
+            matches!(r, Err(Error::Account(_))),
+            "{provider} {imap:?}: {r:?}"
+        );
+        assert_eq!(token("me@example.org").1, Some(b"one".to_vec()));
+    }
+    // The same mailbox: a new secret, the same account.
+    let again = store
+        .save_account_secret("imap", "me@example.org", server, b"three", "ok")
+        .unwrap();
+    assert_eq!(again, id);
+    assert_eq!(token("me@example.org").1, Some(b"three".to_vec()));
+    // A Gmail account refuses an IMAP secret too.
+    store
+        .save_account_secret("gmail", "g@example.com", None, b"g", "ok")
+        .unwrap();
+    let r = store.save_account_secret("imap", "g@example.com", server, b"x", "ok");
+    assert!(matches!(r, Err(Error::Account(_))));
+    assert_eq!(token("g@example.com").1, Some(b"g".to_vec()));
+}
+
+/// True when two other threads can each hold a read connection now: this
+/// thread holds no store connection. It waits at most 2 seconds.
+pub fn readers_free(s: &Store) -> bool {
+    use std::sync::{mpsc, Barrier};
+    use std::time::Duration;
+    let held = Barrier::new(2);
+    let (release, wait) = mpsc::channel::<()>();
+    let (got, second) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let held = &held;
+        scope.spawn(move || {
+            s.read(|_| {
+                held.wait();
+                let _ = wait.recv();
+                Ok(())
+            })
+            .unwrap()
+        });
+        held.wait();
+        scope.spawn(|| {
+            let _ = s.read(|_| Ok(()));
+            let _ = got.send(());
+        });
+        let free = second.recv_timeout(Duration::from_secs(2)).is_ok();
+        drop(release);
+        free
+    })
+}
+
+/// A writer that records, at each write, if the store was free.
+struct Probe<'a> {
+    store: &'a Store,
+    bytes: Vec<u8>,
+    held: bool,
+}
+
+impl std::io::Write for Probe<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.held |= !readers_free(self.store);
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+// Invariant (engine hang of 2026-11-18): no thread holds a store connection
+// while it writes an answer to a peer. A peer that stops reading must not
+// stop the other threads of the engine.
+#[test]
+fn read_to_writes_the_answer_after_the_read_ends() {
+    let dir = TempDir::new("read-to");
+    let s = Store::open(&dir.0).unwrap();
+    let mut out = Probe {
+        store: &s,
+        bytes: Vec::new(),
+        held: false,
+    };
+    let n = s
+        .read_to(&mut out, |c, w| -> Result<i64, Error> {
+            let n: i64 = c.query_row("SELECT 7", [], |r| r.get(0))?;
+            std::io::Write::write_all(w, &vec![b'x'; 300_000])?;
+            Ok(n)
+        })
+        .unwrap();
+    assert_eq!(n, 7);
+    assert_eq!(out.bytes.len(), 300_000);
+    assert!(
+        !out.held,
+        "a store connection was held during a write to the peer"
+    );
+    // An error leaves `out` with no byte.
+    let mut empty = Vec::new();
+    let r = s.read_to(&mut empty, |_, w| -> Result<(), Error> {
+        std::io::Write::write_all(w, b"part")?;
+        Err(Error::Query("stop".into()))
+    });
+    assert!(r.is_err());
+    assert!(empty.is_empty());
+    // The spool file has no name: the data folder keeps no file of it.
+    assert!(!fs::read_dir(&dir.0).unwrap().any(|e| e
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".spool")));
 }

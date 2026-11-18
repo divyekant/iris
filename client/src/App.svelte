@@ -2,6 +2,7 @@
   import { access } from "./access.svelte.ts";
   import { followSignIn, get, loadBrief, loadOutbox, own, type Changeset, type GatePage, type HandledPage, type LedgerPage, type JobDetail, type JobPage, type MatterList, type MatterView, type Item as ItemData, type Message as MessageData, type Page, type Policy, type ReplyStart, type Status } from "./api";
   import { home } from "./format";
+  import { pageSize } from "./jobs";
   import type { Measures as MeasuresData } from "./measures";
   import { NAV, parse, SECTIONS, type Route } from "./route";
   import Setup from "./views/Setup.svelte";
@@ -27,6 +28,8 @@
   import PolicyNotice from "./views/PolicyNotice.svelte";
   import SignInNotice from "./views/SignInNotice.svelte";
   import Notices from "./views/Notices.svelte";
+  import Stop, { refresh as refreshStop } from "./views/Stop.svelte";
+  import Accounts from "./views/Accounts.svelte";
 
   let hash = $state(typeof location === "undefined" ? "" : location.hash);
   let route: Route = $derived(parse(hash));
@@ -37,11 +40,18 @@
       // A sign-in address opened in this tab: the access state shows a failure.
       if (/^#code=/.test(location.hash)) return void followSignIn().then(() => (hash = location.hash));
       hash = location.hash;
+      refreshStop();
       if (moreOpen) document.getElementById("more")?.hidePopover();
       scrollTo(0, 0);
     };
     addEventListener("hashchange", update);
-    return () => removeEventListener("hashchange", update);
+    // A stop from the terminal shows when the tab comes back.
+    addEventListener("focus", refreshStop);
+    refreshStop();
+    return () => {
+      removeEventListener("hashchange", update);
+      removeEventListener("focus", refreshStop);
+    };
   });
 
   // Read the status one time at start, so a view opened from a link also shows an account that needs sign-in.
@@ -65,7 +75,9 @@
   const back = () => (history.length > 1 ? history.back() : (location.hash = "#/brief"));
 </script>
 
-<header>
+<!-- The Mac app drags its window by the empty part of this bar and of its
+     view row (apps/mac). A link still opens its view. -->
+<header data-tauri-drag-region>
   <a class="name touch" href="#/brief">
     <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
       <circle cx="12" cy="12" r="9" fill="none" stroke="var(--color-primary)" stroke-width="2" />
@@ -73,11 +85,12 @@
     </svg>
     Iris
   </a>
-  <nav aria-label="Views">
+  <nav aria-label="Views" data-tauri-drag-region>
     {#each NAV as [link, label] (link)}
       <a href={link} aria-current={active === link ? "page" : undefined}>{label}</a>
     {/each}
   </nav>
+  <Stop place="button" />
 </header>
 
 <nav class="tabs" aria-label="Main views">
@@ -106,6 +119,7 @@
 {/snippet}
 
 <main>
+  <Stop place="band" />
   {#if access.problem}<p class="problem" role="alert">{access.problem}</p>{/if}
   <SignInNotice />
   <Notices />
@@ -181,7 +195,7 @@
         <Review changesets={open.changesets} mode={status.mode === "observe" ? "observe" : "apply"} />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "jobs"}
-      {#await Promise.all(JOB_STATES.map((state) => get<JobPage>(`jobs?state=${state}&limit=${state === "done" ? 20 : 50}`))) then [needs_you, working, waiting, done]}
+      {#await Promise.all(JOB_STATES.map((state) => get<JobPage>(`jobs?state=${state}&limit=${pageSize(state)}`))) then [needs_you, working, waiting, done]}
         <Jobs pages={{ needs_you, working, waiting, done }} />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "job"}
@@ -192,6 +206,8 @@
       {#await get<MatterList>("matters") then list}<Matters {list} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "matter"}
       {#await get<MatterView>(`matters/${encodeURIComponent(route.id)}`) then view}<Matter {view} />{:catch error}{@render failed(error)}{/await}
+    {:else if route.view === "accounts"}
+      {#await get<Status>("status") then status}<Accounts {status} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "rules"}
       {#await get<Policy>("policy") then policy}<Rules {policy} />{:catch error}{@render failed(error)}{/await}
     {/if}
@@ -201,6 +217,7 @@
 <footer class="site">
   <a class="touch" href="#/rules">Rules</a>
   <a class="touch" href="#/measures">Measures</a>
+  <a class="touch" href="#/accounts">Accounts</a>
   <span>Iris runs on your machine.</span>
 </footer>
 
@@ -248,6 +265,14 @@
     padding: max(var(--space-3), env(safe-area-inset-top)) max(var(--space-6), env(safe-area-inset-right)) var(--space-3) max(var(--space-6), env(safe-area-inset-left));
     border-bottom: 1px solid var(--color-border-subtle);
     background: var(--color-background);
+  }
+  /* The Mac app (apps/mac) sets data-shell="mac": the window buttons sit at
+     the left of this bar, and the menu bar of the Mac names the app. */
+  :global(:root[data-shell="mac"]) header {
+    padding-left: calc(var(--space-16) + var(--space-8));
+  }
+  :global(:root[data-shell="mac"]) .name {
+    display: none;
   }
   .name {
     display: flex;
@@ -314,7 +339,7 @@
     color: var(--color-text-muted);
   }
   /* A touch screen: each control is at least the size of a finger tip. */
-  @media (max-width: 600px), (pointer: coarse) {
+  @media (max-width: 600px), (any-pointer: coarse) {
     main :global(:is(button, summary, select, input:not([type="checkbox"], [type="radio"]))) {
       min-width: var(--size-touch);
       min-height: var(--size-touch);

@@ -291,3 +291,29 @@ test("a full section of the brief has the quiet verb, and the line leaves after 
     form.destroy();
   }
 });
+
+// The nudge of a late person (card R3-07, option A): the pill only, no text of the reminder.
+test("a ready draft owed to you shows as a nudge, and only such a line asks", async () => {
+  const owed = { ...fx.items.find((i) => i.form === "commitment" && i.direction === "owed_to_you"), ready: ["draft"] };
+  const owe = { ...fx.items.find((i) => i.form === "commitment" && i.direction === "you_owe"), ready: ["draft"] };
+  const cases = [
+    [owed, [200, fx.nudgeDraft], "Nudge ready", null, ["threads/t-8700/draft"]],
+    [owed, [200, { ...fx.nudgeDraft, nudge: false, to: null }], "Draft ready", null, ["threads/t-8700/draft"]],
+    [owed, [404, { error: "Not found." }], "Draft ready", null, ["threads/t-8700/draft"]],
+    // A nudge for another commitment of the same thread.
+    [owed, [200, { ...fx.nudgeDraft, item: "c-999" }], "Draft ready", null, ["threads/t-8700/draft"]],
+    [owe, [200, fx.nudgeDraft], "Draft ready", null, []],
+  ];
+  for (const [item, answer, pill, body, want] of cases) {
+    const asked = serve(() => answer);
+    const view = await mount("/src/views/Line.svelte", { item });
+    try {
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(text(view.target.querySelector(".ready")).trim(), pill, `${item.id} ${answer[0]}`);
+      assert.ok(!text(view.target).includes("quick check"), "no text of the reminder");
+      assert.deepEqual(asked.map((a) => a[0]), want);
+    } finally {
+      view.destroy();
+    }
+  }
+});

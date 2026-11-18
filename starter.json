@@ -63,6 +63,27 @@
         "npm --version"
       ]
     },
+    "mac": {
+      "paths": [
+        "apps/mac/**"
+      ],
+      "setup": "cd apps/mac && cargo fetch --locked",
+      "setup_inputs": [
+        "apps/mac/Cargo.toml",
+        "apps/mac/Cargo.lock",
+        "rust-toolchain.toml"
+      ],
+      "check": "cd apps/mac && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings",
+      "test": "cd apps/mac && cargo test --locked",
+      "tools": [
+        "rustc --version",
+        "cargo --version"
+      ],
+      "env": {
+        "RUSTUP_HOME": "~/.rustup",
+        "CARGO_HOME": "./.local-ci/cargo"
+      }
+    },
     "spec-kit": {
       "paths": [
         "docs/spec/schema/**",
@@ -75,6 +96,31 @@
       ],
       "check": ".local-ci/spec-venv/bin/python -m py_compile docs/spec/conformance/run.py docs/spec/conformance/producer/produce.py",
       "test": ".local-ci/spec-venv/bin/python -m unittest discover -s docs/spec/conformance -p 'test_*.py' -v",
+      "tools": [
+        "python3 --version"
+      ]
+    },
+    "site": {
+      "paths": [
+        "docs/*.html",
+        "docs/guide/**",
+        "docs/site.css",
+        "docs/spec/schema/**",
+        "docs/spec/VERSION",
+        "scripts/site/**"
+      ],
+      "check": "python3 -m py_compile scripts/site/test_site.py",
+      "test": "python3 -m unittest discover -s scripts/site -v",
+      "tools": [
+        "python3 --version"
+      ]
+    },
+    "probes": {
+      "paths": [
+        "scripts/probes/**"
+      ],
+      "check": "python3 -m py_compile scripts/probes/macos-sandbox-probe.py",
+      "test": "python3 scripts/probes/macos-sandbox-probe.py --self-check",
       "tools": [
         "python3 --version"
       ]

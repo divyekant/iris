@@ -174,6 +174,47 @@ fn a_remote_local_model_is_refused() {
     assert_eq!(col(&store, "SELECT count(*) FROM model_setting"), Some(0));
 }
 
+/// A query or a fragment changes the request path, so it is refused
+/// (#135). The error does not show the URL: a query can hold a secret.
+#[test]
+fn a_local_model_url_with_a_query_is_refused_and_not_shown() {
+    let (store, _fake) = synced("query");
+    for url in [
+        "http://localhost:8080/v1?token=secret-1",
+        "http://127.0.0.1:8080/v1#secret-1",
+        "http://a:secret-1@127.0.0.1/v1",
+    ] {
+        let (ok, out, err) = iris(&store, &["model", "set", "local", url, "m"]);
+        assert!(!ok, "{url}");
+        assert!(
+            !err.contains("secret-1") && !out.contains("secret-1"),
+            "{err}"
+        );
+    }
+    assert_eq!(col(&store, "SELECT count(*) FROM model_setting"), Some(0));
+    // A stored row from before the check fails at the run, with no secret.
+    let (ok, _, err) = iris(
+        &store,
+        &["model", "set", "local", "http://127.0.0.1:9/v1", "m"],
+    );
+    assert!(ok, "{err}");
+    store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE model_setting SET base_url = 'http://127.0.0.1:9/v1?token=secret-1'",
+                [],
+            )?)
+        })
+        .unwrap();
+    let (ok, out, err) = iris(&store, &["understand"]);
+    assert!(!ok, "{out}");
+    assert!(err.contains("query or a fragment"), "{err}");
+    assert!(
+        !err.contains("secret-1") && !out.contains("secret-1"),
+        "{err}"
+    );
+}
+
 #[test]
 fn the_key_comes_from_stdin_and_is_never_shown() {
     let (store, _fake) = synced("key");
@@ -461,12 +502,8 @@ fn the_wait_after_a_model_error_is_for_that_model_and_under_the_lock() {
     assert_eq!(run(now + 2_000), AfterSync::Idle);
     assert_eq!(run(now + 3_000), AfterSync::Idle);
     assert_eq!(col(&store, rows), n, "idle turns in the wait keep no row");
-    // An idle manual run does not end the wait: the next turn makes no call.
-    let (ok, _, err) = iris(&store, &["understand"]);
-    assert!(ok, "{err}");
-    let before = calls.load(Ordering::SeqCst);
-    assert_eq!(run(now + 4_000), AfterSync::Idle);
-    assert_eq!(calls.load(Ordering::SeqCst), before, "still in the wait");
+    // `iris understand` reads the marked mail at once (#155): the batch
+    // test a_manual_run_reads_mail_that_waits_for_the_model_wait.
     // The wait has ended, but another run holds the lock: this run clears
     // no mark, so a mark set by the other run stays.
     let after = now + iris_understand::batch::RETRY_FIRST_MS + 1_000;
@@ -650,4 +687,114 @@ fn iris_understand_records_the_first_brief() {
         .unwrap();
     let _ = iris(&store, &["understand"]);
     assert_eq!(brief(&store), Some(1));
+}
+
+/// Each turn of the understanding thread runs the nudge step (R3-07): a
+/// late ask gets one call of the draft prompt.
+#[test]
+fn a_turn_runs_the_nudge_step() {
+    let (store, _fake) = synced("nudge-turn");
+    let (url, calls) = model_server();
+    let (ok, _, err) = iris(&store, &["model", "set", "local", &url, "local-1"]);
+    assert!(ok, "{err}");
+    let (ok, _, err) = iris(&store, &["understand"]);
+    assert!(ok, "{err}");
+    // An ask that the owner sent 3 days ago to a known person, and its
+    // commitment. The sender rows stay as the mail makes them.
+    let (person, ana): (i64, String) = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT id, address FROM sender WHERE kind = 'person' ORDER BY id LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    let now = iris::engine::now_ms();
+    let account = col(&store, "SELECT min(id) FROM account").unwrap();
+    store
+        .put_labels(account, &[("SENT", "SENT", "system")])
+        .unwrap();
+    let me: String = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT address FROM account WHERE id = ?1",
+                [account],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    let ids = store
+        .put_messages(
+            account,
+            &[iris_store::NewMessage {
+                provider_id: "nudge-ask".into(),
+                thread_provider_id: "nudge-thread".into(),
+                internal_date: Some(now - 3 * 86_400_000),
+                labels: vec!["SENT".into()],
+                header: iris_store::Header {
+                    from_addr: Some(me.clone()),
+                    to_addrs: Some(ana),
+                    ..Default::default()
+                },
+                body: Some(iris_store::Body {
+                    subject: "Slides".into(),
+                    sender: me,
+                    text: "Ana, can you send the slides?".into(),
+                }),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+    store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET understood_at = 1 WHERE id = ?1",
+                [ids[0]],
+            )?;
+            tx.execute("DELETE FROM link_check WHERE message_id = ?1", [ids[0]])?;
+            // The `sent` evidence that iris-senders writes from the raw
+            // headers (this test message has no raw file).
+            tx.execute(
+                "INSERT INTO sender_evidence(message_id, address, rule, content_sha256)
+                 SELECT ?1, address, 'sent', (SELECT content_sha256 FROM message WHERE id = ?1)
+                   FROM sender WHERE id = ?2",
+                [ids[0], person],
+            )?;
+            tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 VALUES ('commitment', ?1, 'open', json_object('direction', 'owed_to_you',
+                         'owner', json_object('kind', 'sender', 'sender', 's-' || ?2)),
+                         1, 1)",
+                [account, person],
+            )?;
+            tx.execute(
+                "INSERT INTO item_source(item_id, message_id, role)
+                 VALUES (last_insert_rowid(), ?1, 'origin')",
+                [ids[0]],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    // The fake server gives no valid matters answer: the hourly gate of
+    // matters holds, so its failure does not start the model wait.
+    store
+        .write(|tx| {
+            tx.execute("INSERT INTO matter_run(id, tried_at) VALUES (1, ?1)", [now])?;
+            Ok(())
+        })
+        .unwrap();
+    let drafts = |s: &Store| {
+        col(
+            s,
+            "SELECT count(*) FROM understand_run WHERE prompt = 'nudge/0.1'",
+        )
+    };
+    assert_eq!(drafts(&store), Some(0));
+    let before = calls.load(Ordering::SeqCst);
+    iris::engine::understand_turn(&store, now);
+    // The fake server gives no "body": one call, no draft.
+    assert_eq!(drafts(&store), Some(1));
+    assert!(calls.load(Ordering::SeqCst) > before);
+    assert_eq!(col(&store, "SELECT count(*) FROM reply_draft"), Some(0));
 }

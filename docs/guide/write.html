@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Write Iris documents</title>
+<link rel="stylesheet" href="../site.css">
+</head>
+<body>
+<nav><a href="../index.html">Iris</a> <a href="index.html">Guide</a> <a href="documents.html">Documents</a> <a href="write.html" aria-current="page">Write</a> <a href="read.html">Read</a> <a href="agents.html">Agents</a></nav>
+<main>
+<h1>Write documents</h1>
+<p>A producer is a program that writes documents of the open model. This
+page gives the rules for a producer, and the steps to check the output with
+the conformance kit.</p>
+
+<h2 id="rules">Rules for a producer</h2>
+<ol>
+<li>Write only the fields of the minor version that your program claims.
+For version 1.0, do not write <code>account</code>, the field of 1.1.</li>
+<li>Write the <code>model</code> value of that version: <code>"iris/1.1"</code>
+or <code>"iris/1.0"</code>.</li>
+<li>Make sure that each document passes the schema of its kind, with the
+format checks of <code>date</code> and <code>date-time</code>.</li>
+<li>Do not write a key two times in one JSON object.</li>
+<li>Do not write <code>NaN</code>, <code>Infinity</code> or
+<code>-Infinity</code>.</li>
+<li>Write the text in UTF-8.</li>
+</ol>
+
+<h2 id="mistakes">Frequent errors</h2>
+<table>
+<tr><th>Error</th><th>Correct value</th></tr>
+<tr><td>An item has no source with the role <code>origin</code>, or has two.</td><td>Exactly one source has the role <code>origin</code>, and it has a <code>quote</code>.</td></tr>
+<tr><td>A field that the schema does not name.</td><td>Remove the field. The schemas refuse each unknown field.</td></tr>
+<tr><td>An amount as a number, for example <code>312.77</code>.</td><td>A money object: <code>{"value": "312.77", "currency": "USD"}</code>.</td></tr>
+<tr><td>A date-time with no time zone, for example <code>2026-11-16T09:00:00</code>.</td><td>RFC 3339 with a zone: <code>2026-11-16T09:00:00Z</code>.</td></tr>
+<tr><td><code>confidence</code> on an item of a person.</td><td>No <code>confidence</code> when <code>derived.by</code> is <code>person</code>.</td></tr>
+<tr><td>An ID with a leading zero, for example <code>m-007</code>.</td><td><code>m-7</code>.</td></tr>
+</table>
+
+<h2 id="install">Install the conformance kit</h2>
+<p>The kit checks your documents with no Iris code. You need Git and
+Python 3.11 or newer.</p>
+<ol>
+<li>Get the Iris repository:
+<pre>git clone https://github.com/divyekant/iris.git
+cd iris/docs/spec/conformance</pre></li>
+<li>Make a virtual environment:
+<pre>python3 -m venv .venv</pre></li>
+<li>Install the libraries with their hashes:
+<pre>.venv/bin/pip install --require-hashes -r requirements.txt</pre></li>
+</ol>
+
+<h2 id="check">Check your documents</h2>
+<ol>
+<li>Write the documents of your program into one folder.</li>
+<li>Give each file a name that starts with the name of its schema, for
+example <code>commitment-1.json</code> or <code>signal-7.json</code>. The
+text before the first <code>-</code> or <code>.</code> selects the
+schema.</li>
+<li>Run the check:
+<pre>.venv/bin/python run.py check &lt;folder&gt;</pre></li>
+</ol>
+<p>These file names have a special meaning:</p>
+<table>
+<tr><th>File</th><th>Content</th></tr>
+<tr><td><code>&lt;schema&gt;-&lt;n&gt;.json</code></td><td>One document.</td></tr>
+<tr><td><code>&lt;schema&gt;-&lt;n&gt;.jsonl</code></td><td>One document on each line (JSON Lines).</td></tr>
+<tr><td><code>items.jsonl</code></td><td>Items of each form. The <code>form</code> of each line selects the schema.</td></tr>
+<tr><td><code>&lt;name&gt;.toml</code></td><td>A policy file. Each <code>.toml</code> file is a policy file.</td></tr>
+</table>
+<p>The runner reads only the files at the top level of the folder. It prints
+one line for each document that fails.</p>
+<table>
+<tr><th>Exit code</th><th>Meaning</th></tr>
+<tr><td>0</td><td>Each document passed, and the folder had one or more documents.</td></tr>
+<tr><td>1</td><td>One or more documents failed, or the folder had no document.</td></tr>
+<tr><td>2</td><td>The command is not correct, or the kit is not complete.</td></tr>
+</table>
+<p>Your producer conforms when <code>run.py check</code> on its output exits
+with 0. If the runner says "newer than the kit", get the newest kit.</p>
+
+<h2 id="sample">Try the sample producer</h2>
+<p>The kit has a sample producer in Python, with the standard library only.
+It reads three synthetic messages and writes a feed item and a signal. Use it
+as a start for your own producer.</p>
+<ol>
+<li>Write the documents:
+<pre>python3 producer/produce.py /tmp/iris-out</pre></li>
+<li>Check the documents:
+<pre>.venv/bin/python run.py check /tmp/iris-out</pre></li>
+</ol>
+<p>The producer refuses a folder that exists. It writes into
+<code>&lt;folder&gt;.partial</code>, and renames the folder after the last
+file. A reader thus never sees a part of the output.</p>
+<p>Code: <a href="https://github.com/divyekant/iris/blob/develop/docs/spec/conformance/producer/produce.py">produce.py</a>.</p>
+
+<h2 id="validator">Use your own validator</h2>
+<p>You can check the documents with your own JSON Schema validator
+(draft 2020-12). Do these steps:</p>
+<ol>
+<li>Load each file <code>docs/spec/schema/*.schema.json</code>. A schema
+refers to <code>common.schema.json</code> by its <code>$id</code>
+(<code>urn:iris:model:1:common</code>).</li>
+<li>Turn on the formats <code>date</code> and <code>date-time</code>. You
+do not need to check <code>email</code>, because validators do not agree on
+it.</li>
+<li>Read each fixture file as one or more documents:
+<ul>
+<li>A <code>.json</code> file is one document.</li>
+<li>A <code>.jsonl</code> file has one document on each line.</li>
+<li>A <code>.toml</code> file is a policy file. Parse the TOML, and change
+each TOML date or time into RFC 3339 text, for example
+<code>2026-12-01</code>. Validate the result with
+<code>policy.schema.json</code>.</li>
+</ul></li>
+<li>Select the schema of each document. The text of the file name before the
+first <code>-</code> or <code>.</code> names the schema, for example
+<code>commitment</code> for <code>commitment-payment.json</code>. In
+<code>items.jsonl</code>, the <code>form</code> of each line names the
+schema.</li>
+<li>Run the validator on each document in
+<a href="https://github.com/divyekant/iris/tree/develop/docs/spec/schema/examples">schema/examples/</a>.
+Each document must pass.</li>
+<li>Run the validator on each file in
+<a href="https://github.com/divyekant/iris/tree/develop/docs/spec/schema/examples/invalid">schema/examples/invalid/</a>.
+Each file must fail.</li>
+</ol>
+<p>The runner does the same check of its own validator:</p>
+<pre>.venv/bin/python run.py self-test</pre>
+</main>
+</body>
+</html>

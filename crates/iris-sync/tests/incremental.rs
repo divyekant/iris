@@ -19,7 +19,12 @@ fn synced(name: &str, seed: u64, n: usize) -> (FakeGmail, Store, i64) {
 }
 
 fn latest(fake: &FakeGmail) -> u64 {
-    client(fake.base_url()).profile(TOKEN).unwrap().history_id
+    client(fake.base_url())
+        .profile(TOKEN)
+        .unwrap()
+        .cursor
+        .parse()
+        .unwrap()
 }
 
 fn gone_at(store: &Store, id: &str) -> Option<i64> {
@@ -122,7 +127,7 @@ fn new_mail_label_changes_and_deletes_reach_the_mirror() {
 
     let s = sync(&store, &gmail, account, TOKEN).unwrap();
     assert_eq!((s.fetched, s.gone, s.failed, s.resync), (1, 1, 0, false));
-    assert_eq!(s.history_id, latest(&fake));
+    assert_eq!(s.history_id, latest(&fake).to_string());
     assert_eq!(sync_state(&store).3, Some(s.history_id.to_string()));
     assert!(gone_at(&store, &FakeGmail::id_of(9)).is_some());
     assert!(gone_at(&store, &new).is_none());
@@ -142,7 +147,7 @@ fn a_message_added_and_deleted_before_a_sync() {
     assert!(fake.delete_message(&id));
 
     let s = sync(&store, &client(fake.base_url()), account, TOKEN).unwrap();
-    assert_eq!(s.history_id, latest(&fake));
+    assert_eq!(s.history_id, latest(&fake).to_string());
     assert_eq!(sync_state(&store).3, Some(s.history_id.to_string()));
     let rows = count(
         &store,
@@ -248,7 +253,7 @@ fn an_expired_history_starts_a_full_resync() {
 
     let s = sync(&store, &client(fake.base_url()), account, TOKEN).unwrap();
     assert!(s.resync);
-    assert_eq!(s.history_id, latest(&fake));
+    assert_eq!(s.history_id, latest(&fake).to_string());
     assert_eq!(sync_state(&store).0, None);
     assert_eq!(mirror_state(&store), fake_state(&fake));
     for id in [&back, &refetch] {
@@ -314,7 +319,7 @@ fn a_stop_during_the_gone_check_of_a_resync_continues_from_h1() {
         at_fake.fail_next(&[401]);
     }));
     match sync(&store, &cut, account, TOKEN) {
-        Err(Error::Gmail(iris_gmail::Error::Unauthorized)) => {}
+        Err(Error::Provider(iris_gmail::Error::Unauthorized)) => {}
         other => panic!("the hook did not stop the resync: {other:?}"),
     }
     let (kind, h1, step, _) = sync_state(&store);
@@ -410,4 +415,40 @@ fn an_expired_h1_of_a_stopped_resync_starts_a_new_resync() {
     assert!(s.resync);
     assert_eq!(sync_state(&store).0, None);
     assert_eq!(mirror_state(&store), fake_state(&fake));
+}
+
+/// A full resync that starts inside a call (an expired history ID) gives
+/// the open log row the kind `resync` at once, while it runs.
+#[test]
+fn a_resync_that_starts_in_a_call_is_its_log_kind_while_it_runs() {
+    let (fake, store, account) = synced("resync-kind", 21, 20);
+    // The folder of `synced`; `data_dir` would remove it.
+    let db = std::env::temp_dir()
+        .join(format!("iris-sync-resync-kind-{}", std::process::id()))
+        .join("iris.db");
+    fake.add_message(b"Subject: later\r\n\r\nx\r\n", &["INBOX"]);
+    fake.expire_history_before(latest(&fake));
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let seen2 = seen.clone();
+    fake.before_next_matching("/messages?", move || {
+        let row: (String, Option<String>) = rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT kind, result FROM sync_log ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        *seen2.lock().unwrap() = Some(row);
+    });
+    assert!(
+        sync(&store, &client(fake.base_url()), account, TOKEN)
+            .unwrap()
+            .resync
+    );
+    assert_eq!(*seen.lock().unwrap(), Some((KIND_RESYNC.to_string(), None)));
+    assert_eq!(
+        log_kinds(&store).last().map(String::as_str),
+        Some(KIND_RESYNC)
+    );
 }

@@ -29,12 +29,15 @@ use std::time::{Duration, Instant};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 
+pub use iris_provider::{
+    Change, Draft, DraftRaw, Error, Header, History, HistoryMessage, HistoryPage, Label,
+    MessagePage, MessageRef, Metadata, Minimal, Profile, Provider, RawMessage, Result, Sent,
+    BATCH_LIMIT, DRAFT_LIMIT, MAX_GETS,
+};
 pub use raw::encode_url;
 
 /// The API root of Gmail.
 pub const API: &str = "https://gmail.googleapis.com/gmail/v1";
-/// The most `messages.get` calls at the same time (spec 1 section 4.7).
-pub const MAX_GETS: usize = 8;
 /// The quota units for each minute for each user (spec 1, assumptions).
 pub const DEFAULT_QUOTA: u32 = 6_000;
 /// The page size of `messages.list` and `history.list` (spec 1 section 4.2).
@@ -62,9 +65,6 @@ mod cost {
     pub const DRAFTS_LIST: u32 = 5;
     pub const DRAFTS_SEND: u32 = 100;
 }
-
-/// The most message IDs in one `messages.batchModify` call (Gmail limit).
-pub const BATCH_LIMIT: usize = 1000;
 
 /// The settings of a client.
 #[derive(Clone, Debug)]
@@ -94,71 +94,6 @@ impl Default for Config {
     }
 }
 
-#[derive(Debug)]
-pub enum Error {
-    /// HTTP 401. Get a new access token one time, then call again.
-    Unauthorized,
-    /// HTTP 404 for a message or a label: Gmail does not have it.
-    NotFound,
-    /// HTTP 404 of `history.list`: the history ID is too old. Do a full resync.
-    HistoryExpired,
-    /// Another HTTP error. `reason` is the first reason of the Gmail error.
-    Api {
-        status: u16,
-        reason: String,
-        message: String,
-    },
-    /// The network failed, or the answer stopped before its end.
-    Transport(String),
-    /// The answer is not in the shape of the Gmail API.
-    Decode(String),
-    /// The sink of a raw message failed.
-    Sink(std::io::Error),
-}
-
-impl Error {
-    /// For a write call (`messages.send`, `batchModify`, `trash`,
-    /// `labels.create`, `drafts.create`, `drafts.send`): true if
-    /// Gmail can have done the call (spec 2 section 7.2). A timeout, a lost
-    /// connection and HTTP 5xx give an unknown result. A rate limit of a
-    /// call with one request also does: the engine never reads it as a
-    /// rejection (spec `docs/specs/2026-11-16-send.md`, section 5.2).
-    pub fn write_result_unknown(&self) -> bool {
-        match self {
-            Error::Transport(_) => true,
-            Error::Api { status, reason, .. } => {
-                *status >= 500
-                    || *status == 429
-                    || (*status == 403
-                        && (reason == "rateLimitExceeded" || reason == "userRateLimitExceeded"))
-            }
-            _ => false,
-        }
-    }
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::Unauthorized => write!(f, "Gmail refused the access token (HTTP 401)"),
-            Error::NotFound => write!(f, "Gmail does not have the item (HTTP 404)"),
-            Error::HistoryExpired => write!(f, "the history ID is too old (HTTP 404)"),
-            Error::Api {
-                status,
-                reason,
-                message,
-            } => write!(f, "Gmail error {status} {reason}: {message}"),
-            Error::Transport(e) => write!(f, "network error: {e}"),
-            Error::Decode(e) => write!(f, "bad answer from Gmail: {e}"),
-            Error::Sink(e) => write!(f, "cannot write the raw message: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for Error {}
-
-pub type Result<T> = std::result::Result<T, Error>;
-
 /// Gmail sends 64-bit numbers as strings.
 fn number<'de, D: Deserializer<'de>, T: std::str::FromStr>(
     d: D,
@@ -177,82 +112,16 @@ fn number<'de, D: Deserializer<'de>, T: std::str::FromStr>(
         .map_err(|_| serde::de::Error::custom("not a number"))
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Profile {
-    pub email_address: String,
+struct ProfileJson {
+    email_address: String,
     #[serde(default)]
-    pub messages_total: u64,
+    messages_total: u64,
     #[serde(default)]
-    pub threads_total: u64,
+    threads_total: u64,
     #[serde(deserialize_with = "number")]
-    pub history_id: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct Label {
-    pub id: String,
-    pub name: String,
-    /// `system` or `user`.
-    #[serde(rename = "type", default)]
-    pub kind: String,
-    /// The counts come only from `labels.get`.
-    pub messages_total: Option<u64>,
-    pub messages_unread: Option<u64>,
-    pub threads_total: Option<u64>,
-    pub threads_unread: Option<u64>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct MessageRef {
-    pub id: String,
-    pub thread_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct MessagePage {
-    #[serde(default)]
-    pub messages: Vec<MessageRef>,
-    pub next_page_token: Option<String>,
-}
-
-/// The answer of `format=minimal`: only the ID and the labels.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct Minimal {
-    pub id: String,
-    #[serde(default)]
-    pub label_ids: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-pub struct Header {
-    pub name: String,
-    pub value: String,
-}
-
-/// The answer of `format=metadata`: the ID, the labels and the headers.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Metadata {
-    pub id: String,
-    pub label_ids: Vec<String>,
-    pub headers: Vec<Header>,
-}
-
-/// The fields of `format=raw`. The data went to the sink.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RawMessage {
-    pub id: String,
-    pub thread_id: String,
-    pub label_ids: Vec<String>,
-    pub history_id: u64,
-    /// Milliseconds since 1970-01-01T00:00:00Z.
-    pub internal_date: i64,
-    /// The count of decoded bytes that went to the sink.
-    pub size: u64,
+    history_id: u64,
 }
 
 #[derive(Deserialize)]
@@ -263,19 +132,7 @@ struct RawFields {
     #[serde(default)]
     label_ids: Vec<String>,
     #[serde(deserialize_with = "number")]
-    history_id: u64,
-    #[serde(deserialize_with = "number")]
     internal_date: i64,
-}
-
-/// A message in a history record.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct HistoryMessage {
-    pub id: String,
-    pub thread_id: String,
-    #[serde(default)]
-    pub label_ids: Vec<String>,
 }
 
 /// The history types of `history.list`.
@@ -306,30 +163,6 @@ impl HistoryType {
     }
 }
 
-/// One change in a history record.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Change {
-    Added(HistoryMessage),
-    Deleted(HistoryMessage),
-    LabelsAdded(HistoryMessage, Vec<String>),
-    LabelsRemoved(HistoryMessage, Vec<String>),
-}
-
-/// One history record. Apply the records in the order of the page.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct History {
-    pub id: u64,
-    pub changes: Vec<Change>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HistoryPage {
-    pub history: Vec<History>,
-    /// The current history ID of the mailbox.
-    pub history_id: u64,
-    pub next_page_token: Option<String>,
-}
-
 #[derive(Deserialize)]
 struct Wrapped {
     message: HistoryMessage,
@@ -346,8 +179,6 @@ struct WrappedLabels {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct HistoryJson {
-    #[serde(deserialize_with = "number")]
-    id: u64,
     #[serde(default)]
     messages_added: Vec<Wrapped>,
     #[serde(default)]
@@ -368,24 +199,6 @@ struct HistoryPageJson {
     next_page_token: Option<String>,
 }
 
-/// The answer of `messages.send`.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct Sent {
-    pub id: String,
-    pub thread_id: String,
-    #[serde(default)]
-    pub label_ids: Vec<String>,
-}
-
-/// The answer of `drafts.create`, `drafts.update` and `drafts.list`: the
-/// draft ID and its message.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-pub struct Draft {
-    pub id: String,
-    pub message: MessageRef,
-}
-
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct DraftPage {
@@ -393,20 +206,6 @@ struct DraftPage {
     drafts: Vec<Draft>,
     next_page_token: Option<String>,
 }
-
-/// A draft with `format=raw`: the decoded RFC 5322 text of its message.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DraftRaw {
-    pub id: String,
-    pub message: MessageRef,
-    /// The message, or `None` if it is larger than [`DRAFT_LIMIT`].
-    pub raw: Option<Vec<u8>>,
-}
-
-/// The most bytes of a draft message that [`Gmail::draft_raw`] keeps. A
-/// draft of Iris has a body of at most 256 KiB, so a larger message is
-/// not in the form that Iris writes.
-pub const DRAFT_LIMIT: usize = 4 * 1024 * 1024;
 
 /// A sink that keeps at most [`DRAFT_LIMIT`] bytes, and then only counts.
 #[derive(Default)]
@@ -501,7 +300,13 @@ impl Gmail {
 
     /// `users.getProfile`.
     pub fn profile(&self, token: &str) -> Result<Profile> {
-        self.json(token, "profile", &[], cost::PROFILE)
+        let p: ProfileJson = self.json(token, "profile", &[], cost::PROFILE)?;
+        Ok(Profile {
+            email_address: p.email_address,
+            messages_total: p.messages_total,
+            threads_total: p.threads_total,
+            cursor: p.history_id.to_string(),
+        })
     }
 
     /// `users.labels.list`.
@@ -730,23 +535,24 @@ impl Gmail {
             id: f.id,
             thread_id: f.thread_id,
             label_ids: f.label_ids,
-            history_id: f.history_id,
             internal_date: f.internal_date,
             size,
         })
     }
 
-    /// One page of `users.history.list` after `start`. An empty `types`
-    /// gives each type. [`Error::HistoryExpired`] means: do a full resync.
+    /// One page of `users.history.list` after the history ID `start`. An
+    /// empty `types` gives each type. [`Error::HistoryExpired`] means: do a
+    /// full resync. A `start` that is not a history ID gives
+    /// [`Error::Decode`], and the client sends no call.
     pub fn history(
         &self,
         token: &str,
-        start: u64,
+        start: &str,
         types: &[HistoryType],
         page_token: Option<&str>,
     ) -> Result<HistoryPage> {
         let mut q = vec![
-            ("startHistoryId", start.to_string()),
+            ("startHistoryId", parse_history(start)?.to_string()),
             ("maxResults", PAGE_SIZE.to_string()),
         ];
         q.extend(types.iter().map(|t| ("historyTypes", t.name().to_string())));
@@ -782,12 +588,12 @@ impl Gmail {
                         .into_iter()
                         .map(|w| Change::LabelsRemoved(w.message, w.label_ids)),
                 );
-                History { id: h.id, changes }
+                History { changes }
             })
             .collect();
         Ok(HistoryPage {
             history,
-            history_id: page.history_id,
+            cursor: page.history_id.to_string(),
             next_page_token: page.next_page_token,
         })
     }
@@ -1021,6 +827,89 @@ fn draft_body(id: Option<&str>, raw: &[u8], thread_id: Option<&str>) -> String {
 }
 
 /// Escape an ID for one segment of the URL path.
+/// A history ID of Gmail, from the cursor text of the mirror.
+fn parse_history(cursor: &str) -> Result<u64> {
+    // `u64::from_str` also takes a leading `+`, which is not a history ID.
+    cursor
+        .bytes()
+        .all(|b| b.is_ascii_digit())
+        .then(|| cursor.parse().ok())
+        .flatten()
+        .ok_or_else(|| Error::Decode(format!("not a Gmail history ID: {cursor:?}")))
+}
+
+impl Provider for Gmail {
+    fn name(&self) -> &'static str {
+        "Gmail"
+    }
+    fn profile(&self, token: &str) -> Result<Profile> {
+        Gmail::profile(self, token)
+    }
+    fn labels(&self, token: &str) -> Result<Vec<Label>> {
+        Gmail::labels(self, token)
+    }
+    fn messages(
+        &self,
+        token: &str,
+        label: Option<&str>,
+        page: Option<&str>,
+    ) -> Result<MessagePage> {
+        Gmail::messages(self, token, label.as_slice(), true, page)
+    }
+    fn changes(&self, token: &str, from: &str, page: Option<&str>) -> Result<HistoryPage> {
+        Gmail::history(self, token, from, &HistoryType::ALL, page)
+    }
+    fn minimal(&self, token: &str, id: &str) -> Result<Minimal> {
+        Gmail::minimal(self, token, id)
+    }
+    fn metadata(&self, token: &str, id: &str, headers: &[&str]) -> Result<Metadata> {
+        Gmail::metadata(self, token, id, headers)
+    }
+    fn raw(&self, token: &str, id: &str, sink: &mut dyn Write) -> Result<RawMessage> {
+        Gmail::raw(self, token, id, &mut { sink })
+    }
+    fn messages_with_id(&self, token: &str, message_id: &str) -> Result<Vec<MessageRef>> {
+        let q = format!("rfc822msgid:{message_id}");
+        let mut all = Vec::new();
+        let mut next: Option<String> = None;
+        loop {
+            let page = Gmail::search(self, token, &q, next.as_deref())?;
+            all.extend(page.messages);
+            match page.next_page_token {
+                Some(t) if !t.is_empty() => next = Some(t),
+                _ => return Ok(all),
+            }
+        }
+    }
+    fn modify(&self, token: &str, ids: &[&str], add: &[&str], remove: &[&str]) -> Result<()> {
+        Gmail::batch_modify(self, token, ids, add, remove)
+    }
+    fn trash(&self, token: &str, id: &str) -> Result<Minimal> {
+        Gmail::trash(self, token, id)
+    }
+    fn untrash(&self, token: &str, id: &str) -> Result<Minimal> {
+        Gmail::untrash(self, token, id)
+    }
+    fn create_label(&self, token: &str, name: &str) -> Result<Label> {
+        Gmail::create_label(self, token, name)
+    }
+    fn drafts_with_id(&self, token: &str, message_id: &str) -> Result<Vec<Draft>> {
+        Gmail::drafts(self, token, &format!("rfc822msgid:{message_id}"))
+    }
+    fn draft_raw(&self, token: &str, id: &str) -> Result<DraftRaw> {
+        Gmail::draft_raw(self, token, id)
+    }
+    fn create_draft(&self, token: &str, raw: &[u8], thread: Option<&str>) -> Result<Draft> {
+        Gmail::create_draft(self, token, raw, thread)
+    }
+    fn send_draft(&self, token: &str, id: &str, raw: &[u8], thread: Option<&str>) -> Result<Sent> {
+        Gmail::send_draft(self, token, id, raw, thread)
+    }
+    fn sets_draft_message_id(&self) -> bool {
+        true
+    }
+}
+
 fn segment(id: &str) -> String {
     id.bytes()
         .map(|b| match b {
@@ -1054,15 +943,207 @@ fn error_of(response: ureq::http::Response<ureq::Body>) -> (String, String) {
         .read_to_vec()
         .unwrap_or_default();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    (
+        reason_of(&v),
+        v["error"]["message"].as_str().unwrap_or("").to_string(),
+    )
+}
+
+/// The reason of a Gmail error answer: `error.errors[0].reason`, else the
+/// reason of the first `error.details` entry (the newer `ErrorInfo` form,
+/// for example `ACCESS_TOKEN_SCOPE_INSUFFICIENT`).
+fn reason_of(v: &serde_json::Value) -> String {
     let e = &v["error"];
-    let reason = e["errors"][0]["reason"].as_str().unwrap_or("").to_string();
-    let message = e["message"].as_str().unwrap_or("").to_string();
-    (reason, message)
+    let first = |r: &serde_json::Value| r.as_str().filter(|s| !s.is_empty()).map(str::to_string);
+    first(&e["errors"][0]["reason"])
+        .or_else(|| {
+            e["details"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find_map(|d| first(&d["reason"]))
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_reason_comes_from_both_error_forms() {
+        let old = serde_json::json!({"error": {"code": 403, "errors": [
+            {"reason": "insufficientPermissions"}]}});
+        assert_eq!(reason_of(&old), "insufficientPermissions");
+        let new = serde_json::json!({"error": {"code": 403, "status": "PERMISSION_DENIED",
+            "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                         "reason": "ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]}});
+        assert_eq!(reason_of(&new), "ACCESS_TOKEN_SCOPE_INSUFFICIENT");
+        let both = serde_json::json!({"error": {"errors": [{"reason": "rateLimitExceeded"}],
+            "details": [{"reason": "RATE_LIMIT_EXCEEDED"}]}});
+        assert_eq!(
+            reason_of(&both),
+            "rateLimitExceeded",
+            "the old form comes first"
+        );
+        for none in [
+            serde_json::json!({}),
+            serde_json::json!({"error": {"details": "x"}}),
+            serde_json::json!({"error": {"errors": [{"reason": 3}]}}),
+        ] {
+            assert_eq!(reason_of(&none), "");
+        }
+    }
+
+    /// Property: for generated error answers, `reason_of` gives the first
+    /// non-empty string reason of `error.errors[0]`, else of the first
+    /// `error.details` entry that has one, else "". It never panics.
+    #[test]
+    fn generated_error_answers() {
+        use serde_json::{json, Value};
+        let reasons: [Value; 6] = [
+            json!("insufficientPermissions"),
+            json!("ACCESS_TOKEN_SCOPE_INSUFFICIENT"),
+            json!(""),
+            json!(7),
+            json!(null),
+            json!({"x": 1}),
+        ];
+        let mut rng = Rng(0x5eed);
+        for _ in 0..10_000 {
+            let mut pick = |n: usize| rng.next() % n;
+            let entry = |r: &Value, with: bool| {
+                if with {
+                    json!({"reason": r})
+                } else {
+                    json!({})
+                }
+            };
+            let errors: Vec<Value> = (0..pick(3))
+                .map(|_| entry(&reasons[pick(6)], pick(4) > 0))
+                .collect();
+            let details: Vec<Value> = (0..pick(4))
+                .map(|_| entry(&reasons[pick(6)], pick(4) > 0))
+                .collect();
+            let mut e = serde_json::Map::new();
+            match pick(3) {
+                0 => {}
+                1 => drop(e.insert("errors".into(), json!(errors.clone()))),
+                _ => drop(e.insert("errors".into(), json!("not a list"))),
+            }
+            match pick(3) {
+                0 => {}
+                1 => drop(e.insert("details".into(), json!(details.clone()))),
+                _ => drop(e.insert("details".into(), json!({"reason": "x"}))),
+            }
+            let v = match pick(4) {
+                0 => json!([1, 2]),
+                1 => json!({"other": e}),
+                _ => json!({ "error": e }),
+            };
+            let s = |r: &Value| r.as_str().filter(|s| !s.is_empty()).map(str::to_string);
+            let err = &v["error"];
+            let want = err["errors"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|x| s(&x["reason"]))
+                .or_else(|| {
+                    err["details"]
+                        .as_array()
+                        .and_then(|d| d.iter().find_map(|x| s(&x["reason"])))
+                })
+                .unwrap_or_default();
+            assert_eq!(reason_of(&v), want, "{v}");
+        }
+    }
+
+    /// A small random number generator with a fixed seed.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 16) as usize
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            self.next() % n.max(1)
+        }
+
+        /// A short text of digits, signs, letters, spaces and other bytes.
+        fn text(&mut self) -> String {
+            const PARTS: [&str; 10] = [
+                "0",
+                "7",
+                "9",
+                "18446744073709551615",
+                "-",
+                "+",
+                "a",
+                " ",
+                ".",
+                "é",
+            ];
+            (0..self.below(6))
+                .map(|_| PARTS[self.below(PARTS.len())])
+                .collect()
+        }
+    }
+
+    // Property: a cursor is a history ID if and only if it is the decimal
+    // text of a u64, and the call then carries that number.
+    #[test]
+    fn a_cursor_is_accepted_only_as_a_u64() {
+        let mut rng = Rng(0x5eed_1d0c);
+        for _ in 0..20_000 {
+            let text = rng.text();
+            let number = !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+            if let Err(e) = parse_history(&text) {
+                assert!(matches!(e, Error::Decode(_)), "{text:?}: {e}");
+            }
+            assert_eq!(
+                parse_history(&text).ok(),
+                text.parse::<u64>().ok().filter(|_| number)
+            );
+        }
+    }
+
+    // Property: a profile answer gives a profile whose cursor is the decimal
+    // text of its history ID, or Error::Decode. It never gives another
+    // cursor, and never panics.
+    #[test]
+    fn a_profile_answer_gives_a_decimal_cursor_or_a_decode_error() {
+        let mut rng = Rng(0x0dd_ba11);
+        for _ in 0..20_000 {
+            let id = rng.text();
+            let value = match rng.below(4) {
+                0 => serde_json::Value::String(id.clone()),
+                1 => id
+                    .parse::<u64>()
+                    .map(serde_json::Value::from)
+                    .unwrap_or(serde_json::Value::Null),
+                2 => serde_json::Value::Bool(true),
+                _ => serde_json::Value::from(-1),
+            };
+            let mut answer =
+                serde_json::json!({ "emailAddress": "a@example.com", "historyId": value });
+            if rng.below(8) == 0 {
+                answer.as_object_mut().unwrap().remove("emailAddress");
+            }
+            let bytes = answer.to_string();
+            match parse::<ProfileJson>(bytes.as_bytes()) {
+                Ok(p) => {
+                    let cursor = p.history_id.to_string();
+                    assert_eq!(parse_history(&cursor).unwrap(), p.history_id);
+                    assert!(answer["emailAddress"].is_string(), "{bytes}");
+                }
+                Err(Error::Decode(_)) => {}
+                Err(e) => panic!("{bytes}: {e}"),
+            }
+        }
+    }
 
     #[test]
     fn the_gate_lets_at_most_max_gets_run() {
@@ -1112,18 +1193,5 @@ mod tests {
             let j = jitter(Duration::from_secs(2));
             assert!(j >= Duration::from_secs(2) && j < Duration::from_secs(3));
         }
-    }
-
-    #[test]
-    fn only_unknown_results_of_a_write_say_so() {
-        assert!(Error::Transport("reset".into()).write_result_unknown());
-        let api = |status| Error::Api {
-            status,
-            reason: String::new(),
-            message: String::new(),
-        };
-        assert!(api(503).write_result_unknown());
-        assert!(!api(400).write_result_unknown());
-        assert!(!Error::Unauthorized.write_result_unknown());
     }
 }

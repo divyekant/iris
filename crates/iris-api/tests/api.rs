@@ -308,6 +308,16 @@ async fn status_with_no_account_and_with_a_sync() {
     assert_eq!(a["sync"], json!({"kind": "first", "step": 2}));
     assert_eq!(a["last_sync"]["started"], "1970-01-01T00:00:00Z");
     assert_eq!(a["last_sync"]["ended"], Value::Null);
+
+    // The failure of one message is not a sync: the status keeps the sync row.
+    exec(
+        &store,
+        "INSERT INTO sync_log(account_id, kind, started_at, ended_at, result)
+         VALUES (?1, 'fetch', 5, 5, 'failed 18a: HTTP 500')",
+        [acc],
+    );
+    let (_, v) = get(&store, "/api/status").await;
+    assert_eq!(v["accounts"][0]["last_sync"]["kind"], "first");
 }
 
 #[tokio::test]
@@ -1549,6 +1559,82 @@ async fn an_ask_that_you_send_is_owed_to_you_with_the_person_and_the_date() {
     assert_eq!(got, want);
 }
 
+#[tokio::test]
+async fn the_draft_route_gives_a_ready_nudge_with_its_person() {
+    let dir = temp("ready-nudge");
+    let (store, _) = filled_n(&dir, 30);
+    exec(&store, "UPDATE message SET understood_at = 1 WHERE ?1", [1]);
+    exec(&store, "DELETE FROM link_check WHERE ?1", [1]);
+    // The newest message of the thread of message 1 is a mail of Dana, not
+    // sent by the owner. Dana promised a thing with a due date: a late promise.
+    let (thread, newest): (i64, i64) = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT thread_id, (SELECT n.id FROM message n WHERE n.thread_id = m.thread_id
+                                     ORDER BY coalesce(n.internal_date, 0) DESC, n.id DESC LIMIT 1)
+                   FROM message m WHERE m.id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    exec(
+        &store,
+        "DELETE FROM message_label WHERE message_id = ?1
+            AND label_id IN (SELECT id FROM label WHERE provider_id = 'SENT')",
+        [newest],
+    );
+    exec(
+        &store,
+        "UPDATE header SET from_addr = 'dana@contoso.example' WHERE message_id = ?1",
+        [newest],
+    );
+    let dana = sender(&store, "dana@contoso.example", Some("person"));
+    let owed = |p: &str| {
+        json!({"direction": "owed_to_you", "kind": "task", "owner": party(p),
+               "counterparty": {"kind": "self"}, "due": {"date": "2026-11-01"}})
+    };
+    let first = add_item(&store, "commitment", "open", 1, 10, owed(&dana));
+    // A second commitment of the same thread, owed by Eli: the nudge is
+    // for the first one only, so only its line is ready.
+    let eli = sender(&store, "eli@contoso.example", Some("person"));
+    let second = add_item(&store, "commitment", "open", 1, 20, owed(&eli));
+    // The nudge that the engine saved: its `ask` is the key of now.
+    let key = iris_voice::nudge_key_sql("?1", None);
+    exec(
+        &store,
+        &format!(
+            "INSERT INTO reply_draft(thread_id, based_on, body, model, prompt, samples, created_at, ask)
+             VALUES (?1, ?2, 'Any news, Dana?', 'fake', 'nudge/0.1', 0, 1, {key})"
+        ),
+        [thread, newest],
+    );
+    let (status, draft) = get(&store, &format!("/api/threads/t-{thread}/draft")).await;
+    assert_eq!(status, StatusCode::OK, "{draft}");
+    assert_eq!(
+        draft,
+        json!({"thread": format!("t-{thread}"), "based_on": format!("m-{newest}"),
+               "nudge": true, "to": "dana@contoso.example", "item": format!("c-{first}"),
+               "body": "Any news, Dana?"})
+    );
+    let want = vec![
+        (format!("c-{first}"), json!(["draft"])),
+        (format!("c-{second}"), Value::Null),
+    ];
+    let (_, brief) = get(&store, "/api/brief").await;
+    assert_eq!(ready_marks(&brief["owed_to_you"]), want);
+    let (_, page) = get(&store, "/api/brief/owed_to_you").await;
+    assert_eq!(ready_marks(&page), want);
+    // The promise is kept: the nudge is stale.
+    exec(
+        &store,
+        "UPDATE item SET status = 'done' WHERE id = ?1",
+        [first],
+    );
+    let (status, _) = get(&store, &format!("/api/threads/t-{thread}/draft")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
 /// The draft marks of the items of `section` of a brief: the item ID and
 /// its `ready` field.
 fn ready_marks(section: &Value) -> Vec<(String, Value)> {
@@ -1592,6 +1678,34 @@ async fn an_item_shows_a_ready_draft_of_its_thread_until_the_draft_is_stale() {
          ORDER BY coalesce(m.internal_date, 0) DESC, m.id DESC LIMIT 1",
         [first],
     );
+    // The text of the draft: GET /api/threads/{t}/draft.
+    let thread = format!(
+        "t-{}",
+        store
+            .read(|c| Ok(c.query_row(
+                "SELECT thread_id FROM message WHERE id = ?1",
+                [first],
+                |r| r.get::<_, i64>(0)
+            )?))
+            .unwrap()
+    );
+    let (status, draft) = get(&store, &format!("/api/threads/{thread}/draft")).await;
+    assert_eq!(status, StatusCode::OK, "{draft}");
+    assert_eq!(draft["body"], "Yes.");
+    assert_eq!(draft["nudge"], false);
+    // A nudge whose thread has no late commitment is stale, on both paths.
+    exec(
+        &store,
+        "UPDATE reply_draft SET ask = '{\"to\": \"x@x.example\"}' WHERE ?1",
+        [1],
+    );
+    let (status, _) = get(&store, &format!("/api/threads/{thread}/draft")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, brief) = get(&store, "/api/brief").await;
+    assert_eq!(brief["you_owe"]["items"][0]["ready"], Value::Null);
+    exec(&store, "UPDATE reply_draft SET ask = NULL WHERE ?1", [1]);
+    let (status, _) = get(&store, "/api/threads/m-1/draft").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
     let ready = json!(["draft"]);
     let want = vec![
         (format!("c-{with}"), ready.clone()),
@@ -1637,4 +1751,67 @@ async fn an_item_shows_a_ready_draft_of_its_thread_until_the_draft_is_stale() {
             (format!("c-{without}"), Value::Null),
         ]
     );
+    let (status, _) = get(&store, &format!("/api/threads/{thread}/draft")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "a stale draft");
+}
+
+/// R6-02: the brief shows the items of each account, each with the `a-` ID
+/// of its account, and the item passes the schema of model 1.1.
+#[tokio::test]
+async fn the_brief_shows_the_items_of_each_account() {
+    let dir = temp("two-accounts");
+    let (store, _) = filled_n(&dir, 30);
+    let second = store.add_account("gmail", "second@example.com").unwrap();
+    let person = sender(&store, "dana@contoso.example", Some("person"));
+    let owe = json!({"direction": "you_owe", "kind": "task", "owner": {"kind": "self"},
+                     "counterparty": party(&person)});
+    exec(&store, "UPDATE message SET understood_at = 1 WHERE ?1", [1]);
+    exec(&store, "DELETE FROM link_check WHERE ?1", [1]);
+    let first = add_item(&store, "commitment", "open", 1, 10, owe.clone());
+    let other = add_item(&store, "commitment", "open", 2, 20, owe);
+    exec(
+        &store,
+        "UPDATE item SET account_id = ?1 WHERE id = ?2",
+        [second, other],
+    );
+    let (_, brief) = get(&store, "/api/brief").await;
+    let items = brief["you_owe"]["items"].as_array().unwrap();
+    let mut shown: Vec<(String, String)> = items
+        .iter()
+        .map(|i| {
+            (
+                i["id"].as_str().unwrap().into(),
+                i["account"].as_str().unwrap().into(),
+            )
+        })
+        .collect();
+    shown.sort();
+    assert_eq!(
+        shown,
+        vec![
+            (format!("c-{first}"), "a-1".to_string()),
+            (format!("c-{other}"), format!("a-{second}")),
+        ]
+    );
+    let schema = iris_spec::validator("commitment");
+    for item in items {
+        assert_eq!(item["model"], iris_store::MODEL);
+        assert!(schema.is_valid(item), "{item}");
+    }
+    let mut wrong = items[0].clone();
+    wrong["account"] = json!("a-0");
+    assert!(!schema.is_valid(&wrong), "{wrong}");
+    // A field of 1.1 in a document that claims 1.0 is not valid (spec 4, rule 2.8).
+    let mut old = items[0].clone();
+    old["model"] = json!("iris/1.0");
+    assert!(!schema.is_valid(&old), "{old}");
+    // The status lists both accounts, so the client can name each one.
+    let (_, status) = get(&store, "/api/status").await;
+    let addresses: Vec<&str> = status["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["address"].as_str().unwrap())
+        .collect();
+    assert_eq!(addresses, ["owner@example.com", "second@example.com"]);
 }

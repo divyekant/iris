@@ -136,6 +136,16 @@ fn gone(path: &Path) {
     }
 }
 
+/// Waits until `path` exists, at most 20 s: the build removes the old
+/// files first and writes the new files after, on its own thread.
+fn appears(path: &Path) {
+    let end = Instant::now() + Duration::from_secs(20);
+    while !path.exists() {
+        assert!(Instant::now() < end, "{} does not come", path.display());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn now() -> i64 {
     iris::engine::now_ms()
 }
@@ -348,7 +358,7 @@ fn a_done_job_gets_its_workspace_again_after_the_reap() {
     let row = until(&s, &f, id, |r| r.reaped_ms.is_some());
     assert_eq!(row.end, Some(EndReason::JobState));
     gone(&marker);
-    assert!(workspace(&f).join("JOB.md").exists());
+    appears(&workspace(&f).join("JOB.md"));
 }
 
 fn the_engine_start_builds_each_done_job_again() {
@@ -382,7 +392,7 @@ fn the_engine_start_builds_each_done_job_again() {
     .unwrap();
     let _s = sessions(&f);
     gone(&marker);
-    assert!(workspace(&f).join("JOB.md").exists());
+    appears(&workspace(&f).join("JOB.md"));
     assert!(!old.exists(), "a log older than 30 days goes");
     assert!(
         !old_egress.exists(),
@@ -833,6 +843,534 @@ fn the_end_of_a_session_closes_its_proxy_before_the_reap() {
     until(&s, &f, id, |r| r.reaped_ms.is_some());
 }
 
+/// The day `days` after today, UTC, as `YYYY-MM-DD`, and its start in
+/// milliseconds.
+fn day(days: i64) -> (String, i64) {
+    let ms = (now() / 86_400_000 + days) * 86_400_000;
+    (iris_api::rfc3339(ms)[..10].to_string(), ms)
+}
+
+/// The agent of a running session sends `wait`: the session ends with
+/// `job_state` and the supervisor reaps it.
+fn wait(s: &Arc<Sessions>, f: &Fixture, args: serde_json::Value) -> Session {
+    let id = s.run(f.job, "script").unwrap();
+    until(s, f, id, |r| r.started_ms.is_some());
+    let v = ask(f, "wait", args).unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["result"]["state"], "waiting", "{v}");
+    let row = until(s, f, id, |r| r.reaped_ms.is_some());
+    assert_eq!(row.end, Some(EndReason::JobState));
+    row
+}
+
+/// The newest session of the job after `after`, once the wake started it.
+fn next_session(s: &Arc<Sessions>, f: &Fixture, after: i64) -> Session {
+    let next = last_session(&f.store, f.job).unwrap().unwrap();
+    assert!(next.id > after, "no new session after the wake");
+    assert_eq!(next.agent, "script");
+    until(s, f, next.id, |r| r.started_ms.is_some())
+}
+
+fn a_job_waits_three_days_and_continues() {
+    let f = fixture("wait3", "sleep 30");
+    let s = sessions(&f);
+    let (until_day, until_ms) = day(3);
+    let first = s.run(f.job, "script").unwrap();
+    until(&s, &f, first, |r| r.started_ms.is_some());
+    fs::write(
+        workspace(&f).join("notes.md"),
+        "# Notes\nDana has the contract.\n",
+    )
+    .unwrap();
+    let _ = s.stop(f.job).unwrap();
+    let first = wait(
+        &s,
+        &f,
+        serde_json::json!({ "until": until_day, "why": "Dana reads it." }),
+    );
+    // One day later (a fake clock): the job still waits, and no session starts.
+    s.wake(until_ms - 2 * 86_400_000);
+    assert_eq!(
+        iris_job::get(&f.store, f.job).unwrap().state,
+        iris_job::State::Waiting
+    );
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first.id);
+    // At the end of the wait: the engine wakes the job and starts a session
+    // of the same agent, with the notes of the agent.
+    s.wake(until_ms);
+    let events = iris_job::events(&f.store, f.job).unwrap();
+    let woke = events.last().unwrap();
+    assert_eq!(
+        (woke.state, woke.by),
+        (iris_job::State::Working, By::Engine)
+    );
+    assert_eq!(woke.why.as_deref(), Some("time"));
+    let next = next_session(&s, &f, first.id);
+    let notes = fs::read_to_string(workspace(&f).join("notes.md")).unwrap();
+    assert_eq!(notes, "# Notes\nDana has the contract.\n");
+    // A second wake call starts no second session.
+    s.wake(until_ms + 1000);
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, next.id);
+    let _ = s.stop(f.job).unwrap();
+}
+
+/// The supervisor loop of the engine wakes a job at the end of its wait,
+/// with its own clock.
+fn the_supervisor_loop_wakes_the_job() {
+    use std::sync::atomic::AtomicI64;
+    let f = fixture("waitloop", "sleep 30");
+    let s = sessions(&f);
+    let (until_day, until_ms) = day(3);
+    let clock = Arc::new(AtomicI64::new(now()));
+    {
+        let (s, clock) = (s.clone(), clock.clone());
+        std::thread::spawn(move || s.supervise_with(&move || clock.load(Ordering::SeqCst)));
+    }
+    let first = wait(&s, &f, serde_json::json!({ "until": until_day }));
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first.id);
+    clock.store(until_ms, Ordering::SeqCst);
+    let end = Instant::now() + Duration::from_secs(20);
+    while last_session(&f.store, f.job).unwrap().unwrap().id == first.id {
+        assert!(Instant::now() < end, "the loop did not wake the job");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    next_session(&s, &f, first.id);
+    let _ = s.stop(f.job).unwrap();
+}
+
+fn a_reply_on_the_wait_thread_wakes_the_job() {
+    let f = fixture("waitreply", "sleep 30");
+    let s = sessions(&f);
+    let (until_day, _) = day(3);
+    // A thread outside the scope is refused, and the session stays open.
+    let id = s.run(f.job, "script").unwrap();
+    until(&s, &f, id, |r| r.started_ms.is_some());
+    f.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO thread (id, account_id, provider_id) VALUES (6, 1, 'b')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let v = ask(
+        &f,
+        "wait",
+        serde_json::json!({ "until": until_day, "reply": "t-6" }),
+    )
+    .unwrap();
+    assert_eq!(v["code"], 3, "{v}");
+    let v = ask(&f, "wait", serde_json::json!({ "until": "2020-01-01" })).unwrap();
+    assert_eq!(v["code"], 2, "{v}");
+    let _ = s.stop(f.job).unwrap();
+    let first = wait(
+        &s,
+        &f,
+        serde_json::json!({ "until": until_day, "reply": "t-5" }),
+    );
+    // Mail that you sent on the thread is not a reply.
+    let message = |id: i64, sent: bool| {
+        f.store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO message
+                       (id, account_id, thread_id, provider_id, fetched_at, understood_at)
+                     VALUES (?1, 1, 5, ?2, 1, 1)",
+                    rusqlite::params![id, format!("m{id}")],
+                )?;
+                tx.execute(
+                    "INSERT INTO header (message_id, from_addr) VALUES (?1, 'dana@example.com')",
+                    [id],
+                )?;
+                if sent {
+                    tx.execute_batch(
+                        "INSERT OR IGNORE INTO label (id, account_id, provider_id, name, kind)
+                         VALUES (1, 1, 'SENT', 'SENT', 'system');",
+                    )?;
+                    tx.execute("INSERT INTO message_label VALUES (?1, 1)", [id])?;
+                }
+                Ok(())
+            })
+            .unwrap()
+    };
+    message(40, true);
+    s.wake(now());
+    assert_eq!(
+        iris_job::get(&f.store, f.job).unwrap().state,
+        iris_job::State::Waiting
+    );
+    message(41, false);
+    s.wake(now());
+    let woke = iris_job::events(&f.store, f.job).unwrap().pop().unwrap();
+    assert_eq!(
+        (woke.state, woke.by),
+        (iris_job::State::Working, By::Engine)
+    );
+    assert_eq!(woke.why.as_deref(), Some("reply"));
+    // The reply is in the grant of the next session; the mail that you sent
+    // is not.
+    let granted: Vec<i64> = f
+        .store
+        .read(|c| {
+            let mut st =
+                c.prepare("SELECT message_id FROM job_scope_message WHERE message_id IN (40, 41)")?;
+            let ids = st
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(ids)
+        })
+        .unwrap();
+    assert_eq!(granted, vec![41]);
+    next_session(&s, &f, first.id);
+    let _ = s.stop(f.job).unwrap();
+}
+
+/// R5-06 (docs/specs/2026-11-17-job-memory.md): the reap saves the notes in
+/// the store, and a job whose workspace folder is lost during the wait
+/// gets the same bytes at the wake.
+fn a_lost_workspace_gets_the_notes_at_the_wake() {
+    let f = fixture("memory", "sleep 30");
+    let s = sessions(&f);
+    let (until_day, until_ms) = day(3);
+    let first = s.run(f.job, "script").unwrap();
+    until(&s, &f, first, |r| r.started_ms.is_some());
+    // The session changes the notes after its build: only the reap can
+    // save these bytes. Not UTF-8, a NUL, a CR and no line end at the end.
+    let text: &[u8] = b"# Notes\r\nDana \xff\x00 has it";
+    fs::write(workspace(&f).join("notes.md"), text).unwrap();
+    let v = ask(&f, "wait", serde_json::json!({ "until": until_day })).unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    until(&s, &f, first, |r| r.reaped_ms.is_some());
+    // The reap transaction saved the notes.
+    assert_eq!(
+        iris_job::notes(&f.store, f.job).unwrap().as_deref(),
+        Some(text)
+    );
+    fs::remove_dir_all(workspace(&f)).unwrap();
+    s.wake(until_ms);
+    next_session(&s, &f, first);
+    assert_eq!(fs::read(workspace(&f).join("notes.md")).unwrap(), text);
+    let _ = s.stop(f.job).unwrap();
+}
+
+/// Card R5-05: the agent asks one question, the session ends, and the
+/// answer of the person starts a new session with the answer in `JOB.md`.
+fn an_answer_starts_a_session_with_the_answer() {
+    let f = fixture("ask", "sleep 30");
+    let s = sessions(&f);
+    let first = s.run(f.job, "script").unwrap();
+    until(&s, &f, first, |r| r.started_ms.is_some());
+    for bad in [
+        serde_json::json!({}),
+        serde_json::json!({ "question": "  " }),
+        serde_json::json!({ "question": "x".repeat(2001) }),
+        // Over the limit before any trim (the review of PR #575).
+        serde_json::json!({ "question": format!(" {} ", "x".repeat(1999)) }),
+    ] {
+        let v = ask(&f, "ask", bad).unwrap();
+        assert_eq!(v["code"], 2, "{v}");
+    }
+    let v = ask(
+        &f,
+        "ask",
+        serde_json::json!({ "question": "  Which card do I use?" }),
+    )
+    .unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["result"]["state"], "needs_you", "{v}");
+    let row = until(&s, &f, first, |r| r.reaped_ms.is_some());
+    assert_eq!(row.end, Some(EndReason::JobState));
+    // No session starts before the answer.
+    s.wake(now());
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first);
+    let job = fs::read_to_string(workspace(&f).join("JOB.md")).unwrap();
+    assert!(!job.contains("## Your answer"), "{job}");
+
+    iris_job::answer(
+        &f.store,
+        f.job,
+        "The blue card. Not ```this```.",
+        None,
+        now(),
+    )
+    .unwrap();
+    s.wake(now());
+    let next = next_session(&s, &f, first);
+    let job = fs::read_to_string(workspace(&f).join("JOB.md")).unwrap();
+    assert!(job.contains("## Your answer\n\nYou asked on "), "{job}");
+    assert!(
+        job.contains("\n```question\n  Which card do I use?\n```\n"),
+        "{job}"
+    );
+    // The fence is longer than each run of backticks in the answer.
+    assert!(
+        job.contains("\n````answer\nThe blue card. Not ```this```.\n````\n"),
+        "{job}"
+    );
+    // A second wake call starts no second session.
+    s.wake(now());
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, next.id);
+    let _ = s.stop(f.job).unwrap();
+}
+
+/// A wake by the person has no answer and starts no session.
+fn a_wake_by_the_person_starts_no_session() {
+    let f = fixture("personwake", "sleep 30");
+    let s = sessions(&f);
+    let (until_day, _) = day(3);
+    let first = wait(&s, &f, serde_json::json!({ "until": until_day }));
+    iris_job::wake(&f.store, f.job, By::Person, None, now()).unwrap();
+    s.wake(now());
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first.id);
+}
+
+/// R4-08 (docs/specs/2026-11-17-review-comments.md, section 5): a review
+/// comment on a job with no live session starts a session with no command.
+/// That session reads the comment and submits a new revision.
+fn a_comment_starts_a_session_that_submits_a_new_revision() {
+    let f = fixture("comment", "sleep 30");
+    f.store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO message (id, account_id, thread_id, provider_id, internal_date, understood_at)
+                   VALUES (1, 1, 5, 'm1', 1000, 1);
+                 INSERT INTO header (message_id, date, from_addr, to_addrs, subject)
+                   VALUES (1, 1000, 'dana@example.com', 'me@example.com', 'Contract');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    // A new add of the thread grants the message.
+    add_scope(&f.store, f.job, Ref::Thread(5), By::Person, NOW).unwrap();
+    let s = sessions(&f);
+    let first = s.run(f.job, "script").unwrap();
+    until(&s, &f, first, |r| r.started_ms.is_some());
+    // The agent proposes an archive, then the session ends.
+    let v = ask(
+        &f,
+        "add",
+        serde_json::json!({"verb": "archive", "targets": ["m-1"]}),
+    )
+    .unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    let cs = v["result"]["changeset"].as_str().unwrap().to_string();
+    let v = ask(
+        &f,
+        "submit",
+        serde_json::json!({"changeset": cs, "why": "Old."}),
+    )
+    .unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    let _ = s.stop(f.job).unwrap();
+    until(&s, &f, first, |r| r.reaped_ms.is_some());
+    // No comment: a wake starts nothing.
+    s.wake(now());
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first);
+
+    let row = iris_changeset::parse_changeset_id(&cs).unwrap();
+    iris_changeset::transaction(&f.store, |c| {
+        iris_changeset::comment_in(
+            c,
+            row,
+            1,
+            "Keep it in the inbox.",
+            "k-0123456789abcdef",
+            now(),
+        )
+    })
+    .unwrap();
+    s.wake(now());
+    let next = next_session(&s, &f, first);
+    let file = fs::read_to_string(workspace(&f).join(format!("comments/{cs}.md"))).unwrap();
+    assert!(file.contains("Keep it in the inbox."), "{file}");
+    // The gate wrote the delivery: one more wake starts no other session.
+    s.wake(now());
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, next.id);
+    // The new session submits revision 2.
+    let v = ask(&f, "revise", serde_json::json!({"changeset": cs})).unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    let v = ask(
+        &f,
+        "add",
+        serde_json::json!({"verb": "read", "targets": ["m-1"], "changeset": cs}),
+    )
+    .unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    let v = ask(
+        &f,
+        "submit",
+        serde_json::json!({"changeset": cs, "why": "Read only."}),
+    )
+    .unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    let mut doc = Vec::new();
+    iris_changeset::write_document(&f.store, row, &mut doc).unwrap();
+    let doc: serde_json::Value = serde_json::from_slice(&doc).unwrap();
+    assert_eq!(
+        (doc["revision"].as_i64(), doc["why"].as_str()),
+        (Some(2), Some("Read only."))
+    );
+    let _ = s.stop(f.job).unwrap();
+}
+
+/// A start for a comment that fails before its register (the agent left
+/// `agents.toml`) is not tried again at the next wake. A new comment gets
+/// one new try.
+fn a_failed_start_for_a_comment_is_tried_once() {
+    let f = fixture("comment-once", "sleep 30");
+    f.store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO message (id, account_id, thread_id, provider_id, internal_date, understood_at)
+                   VALUES (1, 1, 5, 'm1', 1000, 1);
+                 INSERT INTO header (message_id, date, from_addr, to_addrs, subject)
+                   VALUES (1, 1000, 'dana@example.com', 'me@example.com', 'Contract');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    add_scope(&f.store, f.job, Ref::Thread(5), By::Person, NOW).unwrap();
+    let s = sessions(&f);
+    let first = s.run(f.job, "script").unwrap();
+    until(&s, &f, first, |r| r.started_ms.is_some());
+    let v = ask(
+        &f,
+        "add",
+        serde_json::json!({"verb": "archive", "targets": ["m-1"]}),
+    )
+    .unwrap();
+    let cs = v["result"]["changeset"].as_str().unwrap().to_string();
+    ask(
+        &f,
+        "submit",
+        serde_json::json!({"changeset": cs, "why": "Old."}),
+    )
+    .unwrap();
+    let _ = s.stop(f.job).unwrap();
+    until(&s, &f, first, |r| r.reaped_ms.is_some());
+    let row = iris_changeset::parse_changeset_id(&cs).unwrap();
+    let comment = |key: &str| {
+        iris_changeset::transaction(&f.store, |c| {
+            iris_changeset::comment_in(c, row, 1, "Keep it.", key, now())
+        })
+        .unwrap();
+    };
+    comment("k-0123456789abcdef");
+    let toml = f.store.dir().join("agents.toml");
+    let saved = fs::read_to_string(&toml).unwrap();
+    fs::write(&toml, "").unwrap();
+    s.wake(now());
+    fs::write(&toml, &saved).unwrap();
+    // The agent is back, but the same comment gets no second try.
+    s.wake(now());
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first);
+    // A new comment gets one new try.
+    comment("k-1123456789abcdef");
+    s.wake(now());
+    let next = next_session(&s, &f, first);
+    assert!(next.id > first);
+    let _ = s.stop(f.job).unwrap();
+}
+
+/// A fixture whose first session submitted a changeset, still live. Gives
+/// the sessions, the first session and the changeset ID.
+fn commented(name: &str) -> (Fixture, Arc<Sessions>, i64, String) {
+    let f = fixture(name, "sleep 30");
+    f.store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO message (id, account_id, thread_id, provider_id, internal_date, understood_at)
+                   VALUES (1, 1, 5, 'm1', 1000, 1);
+                 INSERT INTO header (message_id, date, from_addr, to_addrs, subject)
+                   VALUES (1, 1000, 'dana@example.com', 'me@example.com', 'Contract');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    add_scope(&f.store, f.job, Ref::Thread(5), By::Person, NOW).unwrap();
+    let s = sessions(&f);
+    let first = s.run(f.job, "script").unwrap();
+    until(&s, &f, first, |r| r.started_ms.is_some());
+    let v = ask(
+        &f,
+        "add",
+        serde_json::json!({"verb": "archive", "targets": ["m-1"]}),
+    )
+    .unwrap();
+    let cs = v["result"]["changeset"].as_str().unwrap().to_string();
+    let v = ask(
+        &f,
+        "submit",
+        serde_json::json!({"changeset": cs, "why": "Old."}),
+    )
+    .unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    let row = iris_changeset::parse_changeset_id(&cs).unwrap();
+    iris_changeset::transaction(&f.store, |c| {
+        iris_changeset::comment_in(c, row, 1, "Keep it.", "k-0123456789abcdef", now())
+    })
+    .unwrap();
+    (f, s, first, cs)
+}
+
+/// A comment while a session is live: no second session starts while it
+/// runs, and exactly one session starts after it ends (spec, section 5).
+fn a_comment_during_a_session_starts_one_session_after_it() {
+    let (f, s, first, cs) = commented("comment-live");
+    s.wake(now());
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first);
+    let _ = s.stop(f.job).unwrap();
+    until(&s, &f, first, |r| r.reaped_ms.is_some());
+    s.wake(now());
+    let next = next_session(&s, &f, first);
+    assert!(workspace(&f).join(format!("comments/{cs}.md")).exists());
+    assert!(
+        !pending(&f),
+        "the gate of the new session delivered the comment"
+    );
+    // After the session ends, a new engine (no memory of its tries) starts no third session.
+    let _ = s.stop(f.job).unwrap();
+    until(&s, &f, next.id, |r| r.reaped_ms.is_some());
+    let again = sessions(&f);
+    again.wake(now());
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, next.id);
+}
+
+/// True if a comment on a changeset of the job has no delivery yet.
+fn pending(f: &Fixture) -> bool {
+    iris_changeset::transaction(&f.store, |c| iris_changeset::comment_pending_in(c, f.job)).unwrap()
+}
+
+/// The live session moves the job to `waiting` after a comment: the wake
+/// of the engine moves it back, and one session starts with the comment.
+fn a_comment_wakes_a_job_that_waits_after_it() {
+    let (f, s, first, cs) = commented("comment-wait");
+    let (until_day, _) = day(3);
+    let v = ask(
+        &f,
+        "wait",
+        serde_json::json!({ "until": until_day, "why": "Later." }),
+    )
+    .unwrap();
+    assert_eq!(v["result"]["state"], "waiting", "{v}");
+    until(&s, &f, first, |r| r.reaped_ms.is_some());
+    s.wake(now());
+    let woke = iris_job::events(&f.store, f.job).unwrap().pop().unwrap();
+    assert_eq!(
+        (woke.by, woke.why.as_deref()),
+        (By::Engine, Some("comment"))
+    );
+    next_session(&s, &f, first);
+    assert!(workspace(&f).join(format!("comments/{cs}.md")).exists());
+    assert!(
+        !pending(&f),
+        "the gate of the new session delivered the comment"
+    );
+    let _ = s.stop(f.job).unwrap();
+}
+
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "session-hold") {
@@ -844,6 +1382,46 @@ fn main() {
         .filter_map(|a| a.to_str())
         .find(|a| !a.starts_with('-'));
     let tests: &[(&str, fn())] = &[
+        (
+            "a_comment_during_a_session_starts_one_session_after_it",
+            a_comment_during_a_session_starts_one_session_after_it,
+        ),
+        (
+            "a_comment_wakes_a_job_that_waits_after_it",
+            a_comment_wakes_a_job_that_waits_after_it,
+        ),
+        (
+            "an_answer_starts_a_session_with_the_answer",
+            an_answer_starts_a_session_with_the_answer,
+        ),
+        (
+            "a_wake_by_the_person_starts_no_session",
+            a_wake_by_the_person_starts_no_session,
+        ),
+        (
+            "a_failed_start_for_a_comment_is_tried_once",
+            a_failed_start_for_a_comment_is_tried_once,
+        ),
+        (
+            "a_comment_starts_a_session_that_submits_a_new_revision",
+            a_comment_starts_a_session_that_submits_a_new_revision,
+        ),
+        (
+            "a_job_waits_three_days_and_continues",
+            a_job_waits_three_days_and_continues,
+        ),
+        (
+            "a_lost_workspace_gets_the_notes_at_the_wake",
+            a_lost_workspace_gets_the_notes_at_the_wake,
+        ),
+        (
+            "a_reply_on_the_wait_thread_wakes_the_job",
+            a_reply_on_the_wait_thread_wakes_the_job,
+        ),
+        (
+            "the_supervisor_loop_wakes_the_job",
+            the_supervisor_loop_wakes_the_job,
+        ),
         (
             "an_exit_of_the_agent_ends_and_reaps_the_session",
             an_exit_of_the_agent_ends_and_reaps_the_session,

@@ -131,6 +131,17 @@ pub fn add_account(store: &Store, gmail: &iris_gmail::Gmail) -> i64 {
 
 /// Save a sign-in with this client file and this refresh token.
 pub fn sign_in(store: &Store, gmail: &iris_gmail::Gmail, client: &str, refresh: &str) -> i64 {
+    sign_in_as(store, gmail, client, refresh, true)
+}
+
+/// Save a sign-in whose granted scopes allow writes only if `write`.
+pub fn sign_in_as(
+    store: &Store,
+    gmail: &iris_gmail::Gmail,
+    client: &str,
+    refresh: &str,
+    write: bool,
+) -> i64 {
     let tokens = iris_auth::Tokens {
         access: iris_auth::AccessToken {
             token: iris_auth::Secret::new("fake-access"),
@@ -138,6 +149,7 @@ pub fn sign_in(store: &Store, gmail: &iris_gmail::Gmail, client: &str, refresh: 
         },
         refresh: iris_auth::Secret::new(refresh),
         refresh_expires_in: None,
+        write,
     };
     iris::engine::save_sign_in(store, gmail, client.as_bytes(), &tokens)
         .unwrap()

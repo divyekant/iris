@@ -69,15 +69,28 @@ the client. `IRIS_REQUIRE_CLIENT=1` makes the build stop in that case.
 
 ## Connect a Gmail account
 
-Release 1 reads mail only. You need the JSON file of your own Google OAuth
-client of the type "Desktop app". The decision record
-`docs/decisions/2026-11-google-sign-in.md` tells how to make one.
+You need the JSON file of your own Google OAuth client of the type "Desktop
+app". The decision record `docs/decisions/2026-11-google-sign-in.md` tells how
+to make one.
+
+By default Iris reads mail only (scope `gmail.readonly`). To let Iris apply the
+changes and the sends that you approve, give it write access:
+
+1. In the Google Cloud console, open Google Auth Platform, then Data Access.
+2. Click "Add or remove scopes", add `gmail.modify`, and save.
+3. Add `--write` to the sign-in command below.
+
+A read-only account syncs as before. Its approved changes wait, and
+`iris status` shows `read_only`. Run the sign-in with `--write` again at any
+time: the account keeps its copy of the mail.
 
 1. Sign in:
 
    ```bash
    target/release/iris account add client.json
    ```
+
+   For write access: `target/release/iris account add client.json --write`.
 
 2. Open the address that the command prints, and sign in to Google.
 3. If the browser is on another machine than Iris, add `--paste`. Then copy
@@ -92,13 +105,35 @@ client of the type "Desktop app". The decision record
 The engine syncs the mailbox at once, then each 60 seconds. If Google refuses
 the stored sign-in, run `iris account add` again.
 
+## Connect an Outlook account
+
+You need an app registration of your own in Microsoft Entra. The decision
+record `docs/decisions/2026-11-microsoft-sign-in.md` tells how to make one.
+
+1. Sign in with the application (client) ID of the registration:
+
+   ```bash
+   target/release/iris account add-outlook <client ID>
+   ```
+
+2. Open the address that the command prints, and sign in to Microsoft. For
+   a single-tenant registration, add `--tenant <tenant ID>`. For a browser
+   on another machine, add `--paste`.
+3. Start the engine with `iris serve`.
+
+Microsoft gives a new refresh token at each refresh. Iris encrypts each new
+token in place of the old one. If Microsoft refuses the stored sign-in, run
+`iris account add-outlook` again.
+
 Iris keeps all state in the data folder: `~/Library/Application Support/iris`
 on macOS, `~/.local/share/iris` on Linux. `--data <path>` or the variable
 `IRIS_DATA` changes the folder. The refresh token and the client file are
 encrypted with the `key` file of the data folder.
 
-`iris serve` prints the sign-in address of the local API, with a one-time
-code. The web client uses this address when its sign-in (PR #27, tracker item R1-18) merges. A
+To open the web client, run `iris open`. It asks the running engine for a
+new sign-in address with a one-time code, and opens it in the browser. The
+address works one time, for 2 minutes. `iris open --print` prints the address
+and opens nothing. `iris serve` also prints one sign-in address at start. A
 program can exchange the code for a token with `POST /api/session`
 (`crates/iris-api/README.md`).
 

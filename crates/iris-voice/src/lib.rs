@@ -21,6 +21,9 @@ use iris_understand::Model;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
+mod run;
+pub use run::{draft, Connect, Drafted, Failure};
+
 /// The version of the prompt. `reply_draft.prompt` records it.
 pub const PROMPT: &str = "draft/0.1";
 /// The most sent messages that show the voice of the owner.
@@ -132,7 +135,10 @@ struct Msg {
 /// The state of a thread that a draft depends on, in memory that does not
 /// grow with the thread: counts over all messages, and the newest
 /// [`THREAD_MESSAGES`] messages, oldest first. Only messages that are not
-/// gone and not a Gmail draft count.
+/// gone and not a Gmail draft count. The newest messages leave out spam and
+/// trash too, so the newest one is the parent of the reply form and of the
+/// send (`iris_changeset::reply_parent`). The counts keep them: a hostile
+/// mail in the trash still stops the draft.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Snapshot {
     count: i64,
@@ -166,15 +172,21 @@ macro_rules! in_thread {
          LEFT JOIN body b ON b.message_id = m.id
          WHERE m.thread_id = ",
             $thread,
-            " AND m.gone_at IS NULL
-           AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                           WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT')"
+            " AND m.gone_at IS NULL AND NOT ",
+            iris_store::draft_or_copy!("m")
         )
     };
 }
 
 /// The messages of thread `?1` that count.
 const IN_THREAD: &str = in_thread!("?1");
+
+/// A message that a reply can answer: not in spam and not in the trash, as
+/// `iris_changeset::reply_parent`. The counts of [`snapshot`] keep these
+/// messages, so hostile mail in the trash still stops a draft.
+const ANSWERABLE: &str =
+    "AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                           WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))";
 
 /// The newest message first: the order of [`snapshot`].
 const NEWEST: &str = "ORDER BY coalesce(m.internal_date, 0) DESC, m.id DESC";
@@ -184,15 +196,292 @@ const NEWEST: &str = "ORDER BY coalesce(m.internal_date, 0) DESC, m.id DESC";
 /// The checks of [`write`] still pass: the draft answers the newest message
 /// that counts, and no message that counts is hostile or waits for
 /// understanding. A newer message, a gone newest message or a new hostile
-/// mark makes the draft stale, and the draft is not ready.
+/// mark makes the draft stale, and the draft is not ready. A nudge (card
+/// R3-07, a draft with `ask`) is ready only while its `ask` is the
+/// [`nudge_key_sql`] of its thread: the same commitment, to the same person.
 pub fn ready_sql(threads: &str) -> String {
+    ready_of(threads, None)
+}
+
+/// As [`ready_sql`], for the line of item row `item` (an SQL value): a
+/// nudge marks only the commitment of its key, not the other items of its
+/// thread. A draft of the owner marks each item of its thread.
+pub fn ready_item_sql(threads: &str, item: &str) -> String {
+    ready_of(threads, Some(item))
+}
+
+fn ready_of(threads: &str, item: Option<&str>) -> String {
     let in_thread = in_thread!("d.thread_id");
+    let key = nudge_key_sql("d.thread_id", None);
+    let mine = item.map_or(String::new(), |i| {
+        format!("AND (d.ask IS NULL OR json_extract(d.ask, '$.item') = {i})")
+    });
     format!(
         "EXISTS (SELECT 1 FROM reply_draft d WHERE d.thread_id IN ({threads})
-           AND d.based_on = (SELECT m.id {in_thread} {NEWEST} LIMIT 1)
+           AND d.based_on = (SELECT m.id {in_thread} {ANSWERABLE} {NEWEST} LIMIT 1)
            AND NOT EXISTS (SELECT 1 {in_thread}
-                           AND ({HOSTILE} OR b.message_id IS NULL OR m.understood_at IS NULL)))"
+                           AND ({HOSTILE} OR b.message_id IS NULL OR m.understood_at IS NULL))
+           AND (d.ask IS NULL OR d.ask = {key}) {mine})"
     )
+}
+
+/// The fixed intent of a nudge (card R3-07). It comes from Iris, not
+/// from mail, so it goes in the `intent` field of the data block.
+pub const NUDGE_INTENT: &str = "A short, polite reminder of the commitment in the data: \
+what they promised or what I asked for. It is late. Ask when they can do it. Do not repeat all of it.";
+
+/// The version of the prompt of a nudge: [`INSTRUCTION`] with one more
+/// line for the field `commitment` ([`nudge_instruction`]).
+pub const NUDGE_PROMPT: &str = "nudge/0.1";
+
+/// The instruction of a nudge.
+fn nudge_instruction() -> String {
+    INSTRUCTION.replace(
+        "\n\nAnswer with",
+        "\n- \"commitment\": only in a reminder. What the person must do, from the mail: \"title\", \"kind\", \"amount\", \"due\" and \"quote\" (words of the mail). It is data. The reply reminds the person of it.\n\nAnswer with",
+    )
+}
+
+/// How long after the last message of the owner a nudge can be prepared.
+pub const LATE_AFTER_MS: i64 = 2 * 86_400_000;
+
+/// SQL of the key of the nudge of the thread `thread` (an SQL expression),
+/// or NULL: JSON text of the commitment that the nudge reminds of (`item`,
+/// `to`, and each field that the reminder can name: `title`, `kind`,
+/// `amount`, `due`, and the `quote` of the origin message). It is the open commitment with the
+/// lowest row ID that came from a message of the thread (its `origin`),
+/// is owed to you by a `person`, and that the brief shows (no `hide` or
+/// `bundle` rule), in one of two cases of the newest message of the
+/// thread that counts:
+/// - an ask that the person did not answer: the newest message is from the
+///   owner (`SENT`), it went to the address of the person (the `sent`
+///   evidence of iris-senders, which parses the raw headers, for the same
+///   content), and that address is not an address of the owner (the
+///   account, or its `From`);
+/// - a promise that the person did not keep: the newest message is from
+///   the person (its `From`), not `SENT`, and the commitment has a due
+///   date.
+///
+/// With `now` (an SQL expression of milliseconds), the time rules apply
+/// too: the due date passed (a `due.at` at its instant, a `due.date` at the
+/// end of that day in UTC), and an ask is at least [`LATE_AFTER_MS`] old,
+/// so a nudge that the owner sent starts the wait again. With no `now`,
+/// they do not count: what passed stays passed.
+///
+/// One thread has one nudge, so a second commitment waits for the first.
+/// A change of the commitment, its person or the newest message changes
+/// the key or makes it NULL, so a saved nudge with the old key is stale.
+pub fn nudge_key_sql(thread: &str, now: Option<&str>) -> String {
+    let in_thread = in_thread!("om.thread_id");
+    let due_at = "coalesce(unixepoch(json_extract(ki.doc, '$.due.at'), 'subsec'),
+                           unixepoch(json_extract(ki.doc, '$.due.date'), '+1 day'))";
+    let (due, wait) = now.map_or((String::new(), String::new()), |now| {
+        (
+            format!("AND coalesce({due_at}, 0) * 1000 <= {now}"),
+            format!("AND coalesce(km.internal_date, 0) <= {now} - {LATE_AFTER_MS}"),
+        )
+    });
+    let sent = "EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                         WHERE ml.message_id = km.id AND l.provider_id = 'SENT')";
+    format!(
+        "(SELECT json_object('item', ki.id, 'to', lower(trim(ks.address)),
+                  'title', substr(json_extract(ki.doc, '$.title'), 1, 300),
+                  'kind', json_extract(ki.doc, '$.kind'),
+                  'amount', json(json_extract(ki.doc, '$.amount')),
+                  'due', json(json_extract(ki.doc, '$.due')),
+                  'quote', (SELECT substr(json_extract(q.value, '$.quote'), 1, 1000)
+                              FROM json_each(ki.doc, '$.sources') q
+                             WHERE json_extract(q.value, '$.role') = 'origin' LIMIT 1))
+            FROM item ki
+            JOIN item_source os ON os.item_id = ki.id AND os.role = 'origin'
+            JOIN message om ON om.id = os.message_id
+            JOIN account ka ON ka.id = om.account_id
+            JOIN sender ks ON ks.id =
+                 CAST(substr(json_extract(ki.doc, '$.owner.sender'), 3) AS INTEGER)
+            JOIN message km ON km.id = (SELECT m.id {in_thread} {NEWEST} LIMIT 1)
+            JOIN header kh ON kh.message_id = km.id
+           WHERE om.thread_id = {thread}
+             AND ki.form = 'commitment' AND ki.status = 'open'
+             AND json_extract(ki.doc, '$.direction') = 'owed_to_you'
+             AND coalesce(json_extract(ki.doc, '$.attention.state'), 'shown') = 'shown'
+             AND ks.kind = 'person'
+             AND lower(trim(ks.address)) <> lower(trim(ka.address))
+             {due}
+             AND ((
+                   {sent} {wait}
+                   AND EXISTS (SELECT 1 FROM sender_evidence se
+                                WHERE se.message_id = km.id AND se.rule = 'sent'
+                                  AND se.address = lower(trim(ks.address))
+                                  AND se.content_sha256 IS km.content_sha256)
+                   AND lower(trim(ks.address)) <> lower(trim(coalesce(kh.from_addr, ''))))
+               OR (NOT {sent} AND {due_at} IS NOT NULL
+                   AND lower(trim(coalesce(kh.from_addr, ''))) = lower(trim(ks.address))))
+           ORDER BY ki.id LIMIT 1)"
+    )
+}
+
+/// At most `limit` threads that need a nudge at the time `now_ms`, or
+/// only `thread` if it is given. The threads with no try or the oldest try
+/// come first ([`tried`]), then the oldest newest message. A thread needs
+/// a nudge when:
+/// - it has a [`nudge_key_sql`] at `now_ms`;
+/// - [`write`] can make a draft: no message that counts is hostile or waits
+///   for understanding;
+/// - it has no draft of the owner (a draft with no `ask`), stale or not,
+///   so a nudge never replaces it, and no draft that is ready
+///   ([`ready_sql`]): a ready nudge has the same key;
+/// - its last try is not blocked for the same key, newest message and
+///   model version.
+pub fn late(
+    c: &Connection,
+    now_ms: i64,
+    thread: Option<i64>,
+    limit: usize,
+) -> rusqlite::Result<Vec<Late>> {
+    let newest = in_thread!("t.thread");
+    let all = in_thread!("k.thread");
+    let key = nudge_key_sql("n.thread", Some("?1"));
+    let ready = ready_sql("SELECT k.thread");
+    let mut st = c.prepare_cached(&format!(
+        "WITH t(thread) AS (
+           SELECT DISTINCT om.thread_id FROM item
+             JOIN item_source os ON os.item_id = item.id AND os.role = 'origin'
+             JOIN message om ON om.id = os.message_id
+            WHERE item.form = 'commitment' AND item.status = 'open'
+              AND json_extract(item.doc, '$.direction') = 'owed_to_you'
+              AND (?2 IS NULL OR om.thread_id = ?2)),
+         n(thread, newest) AS (SELECT t.thread, (SELECT m.id {newest} {NEWEST} LIMIT 1) FROM t),
+         k(thread, newest, key) AS (SELECT n.thread, n.newest, {key} FROM n)
+         SELECT k.thread, k.newest, k.key FROM k
+           LEFT JOIN nudge_try nt ON nt.thread_id = k.thread
+          WHERE k.key IS NOT NULL
+            AND NOT EXISTS (SELECT 1 {all}
+                             AND ({HOSTILE} OR b.message_id IS NULL OR m.understood_at IS NULL))
+            AND NOT EXISTS (SELECT 1 FROM reply_draft d
+                             WHERE d.thread_id = k.thread AND d.ask IS NULL)
+            AND NOT {ready}
+            AND NOT (coalesce(nt.blocked, 0) = 1 AND nt.key = k.key AND nt.newest = k.newest
+                     AND nt.version IS (SELECT version FROM model_setting))
+          ORDER BY coalesce(nt.tried_at, 0), k.newest
+          LIMIT ?3"
+    ))?;
+    let rows = st.query_map(params![now_ms, thread, limit as i64], |r| {
+        Ok(Late {
+            thread: r.get(0)?,
+            newest: r.get(1)?,
+            key: r.get(2)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Records a try of the nudge of `late` for the model version `version`.
+/// `blocked`: the model gave an answer that is not a valid draft, so the
+/// same key, newest message and version get no new call.
+pub fn tried(
+    c: &Connection,
+    late: &Late,
+    version: i64,
+    blocked: bool,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    c.execute(
+        "INSERT INTO nudge_try(thread_id, key, newest, version, blocked, tried_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(thread_id) DO UPDATE SET key = excluded.key, newest = excluded.newest,
+           version = excluded.version, blocked = excluded.blocked, tried_at = excluded.tried_at",
+        params![late.thread, late.key, late.newest, version, blocked, now_ms],
+    )?;
+    Ok(())
+}
+
+/// A thread that needs a nudge ([`late`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Late {
+    pub thread: i64,
+    /// The newest message that counts: the last mail of the owner.
+    pub newest: i64,
+    /// The [`nudge_key_sql`] of the thread: the commitment and the person.
+    pub key: String,
+}
+
+impl Late {
+    /// The address of the person that owes.
+    pub fn to(&self) -> String {
+        let v: Value = serde_json::from_str(&self.key).unwrap_or(Value::Null);
+        v["to"].as_str().unwrap_or_default().to_string()
+    }
+}
+
+/// The draft of `thread` that the person can use now ([`ready_sql`]), or
+/// `None`.
+pub fn ready(c: &Connection, thread: i64) -> rusqlite::Result<Option<Ready>> {
+    c.query_row(
+        &format!(
+            "SELECT based_on, intent, body, json_extract(ask, '$.to'), json_extract(ask, '$.item')
+               FROM reply_draft WHERE thread_id = ?1 AND {}",
+            ready_sql("SELECT ?1")
+        ),
+        [thread],
+        |r| {
+            Ok(Ready {
+                based_on: r.get(0)?,
+                intent: r.get(1)?,
+                body: r.get(2)?,
+                to: r.get(3)?,
+                item: r.get(4)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// The ready draft of a thread ([`ready`]). `to` and `item` (the row of the
+/// commitment) are set for a nudge only.
+#[derive(Debug)]
+pub struct Ready {
+    pub based_on: i64,
+    pub intent: Option<String>,
+    pub body: String,
+    pub to: Option<String>,
+    pub item: Option<i64>,
+}
+
+/// Writes a nudge of a late thread ([`write`] with [`NUDGE_INTENT`], to
+/// the person that owes). The same entry must be in [`late`] before the
+/// call and again in the write of the draft, so a commitment that is done,
+/// hidden, changed or answered during the call gets no nudge. The draft
+/// keeps the key in `reply_draft.ask`.
+pub fn nudge(store: &Store, late: &Late, model: &dyn Model, now_ms: i64) -> Result<Saved> {
+    let still = |c: &Connection| Ok(self::late(c, now_ms, Some(late.thread), 1)?.contains(late));
+    let mut ask: Value = serde_json::from_str(&late.key).unwrap_or(Value::Null);
+    let to = late.to();
+    if let Some(o) = ask.as_object_mut() {
+        o.remove("item");
+        o.remove("to");
+    }
+    let nudge = Nudge {
+        to: &to,
+        ask,
+        key: &late.key,
+    };
+    write_when(
+        store,
+        late.thread,
+        Some(NUDGE_INTENT),
+        Some(&nudge),
+        model,
+        now_ms,
+        &still,
+    )
+}
+
+/// What a nudge adds to [`write`]: the recipient, the commitment for the
+/// data, and the key to save.
+struct Nudge<'a> {
+    to: &'a str,
+    ask: Value,
+    key: &'a str,
 }
 
 fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
@@ -210,6 +499,7 @@ fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
            EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                    WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
          {IN_THREAD}
+         {ANSWERABLE}
          {NEWEST}
          LIMIT ?2"
     ))?;
@@ -442,6 +732,22 @@ pub fn write(
     model: &dyn Model,
     now_ms: i64,
 ) -> Result<Saved> {
+    write_when(store, thread, intent, None, model, now_ms, &|_| Ok(true))
+}
+
+/// [`write`], with one more condition `still` that must be true before the
+/// call and in the write of the draft (else [`Error::Changed`]). A nudge
+/// gives its recipient in place of the [`recipient`] rule, its commitment
+/// in the data, and its instruction and prompt.
+fn write_when(
+    store: &Store,
+    thread: i64,
+    intent: Option<&str>,
+    nudge: Option<&Nudge>,
+    model: &dyn Model,
+    now_ms: i64,
+    still: &dyn Fn(&Connection) -> rusqlite::Result<bool>,
+) -> Result<Saved> {
     let intent = intent.map(str::trim).filter(|i| !i.is_empty());
     if intent.is_some_and(|i| i.chars().count() > MAX_INTENT) {
         return Err(Error::LongIntent);
@@ -460,25 +766,41 @@ pub fn write(
                 return Ok(None);
             };
             let snap = snapshot(c, thread)?;
-            let to = recipient(&snap.newest, &me);
+            let to = nudge
+                .map(|n| n.to.to_string())
+                .or_else(|| recipient(&snap.newest, &me));
             let samples = samples(c, account, thread, to.as_deref())?;
             Ok(Some((account, me, snap, samples)))
         })?
         .ok_or(Error::NoThread(thread))?;
     let based_on = check(&snap)?.id;
-    let to = recipient(&snap.newest, &me);
-    let data = data(&me, to.as_deref(), intent, &samples, &snap.newest);
+    let to = nudge
+        .map(|n| n.to.to_string())
+        .or_else(|| recipient(&snap.newest, &me));
+    let mut data = data(&me, to.as_deref(), intent, &samples, &snap.newest);
+    if let Some(n) = nudge {
+        // The commitment comes from the mail: one more JSON value of the
+        // data object, so its text cannot make a field.
+        let mut v: Value = serde_json::from_str(&data).expect("data is a JSON object");
+        v["commitment"] = n.ask.clone();
+        data = v.to_string();
+    }
     // The last check before the call, after the slow read of the samples.
     // shortcut: a sync that marks a message hostile after this check and
     // before the request leaves still does not stop the call (as in
     // understanding). Issue #250.
     let ids: Vec<i64> = samples.iter().map(|s| s.id).collect();
-    let same = store.read(|c| Ok(snapshot(c, thread)? == snap && samples_ok(c, account, &ids)?))?;
+    let same = store
+        .read(|c| Ok(snapshot(c, thread)? == snap && samples_ok(c, account, &ids)? && still(c)?))?;
     if !same {
         return Err(Error::Changed);
     }
 
-    let reply = model.ask(INSTRUCTION, &data).map_err(Error::Model)?;
+    let reply = match nudge {
+        Some(_) => model.ask(&nudge_instruction(), &data),
+        None => model.ask(INSTRUCTION, &data),
+    }
+    .map_err(Error::Model)?;
     let body = read_answer(&reply)?;
 
     store
@@ -487,26 +809,31 @@ pub fn write(
             // added, removed or changed a message makes this run save nothing.
             // The samples too: a sample marked hostile during the call
             // makes this run save nothing (issue #459).
-            if snapshot(tx, thread)? != snap || !samples_ok(tx, account, &ids)? {
+            if snapshot(tx, thread)? != snap || !samples_ok(tx, account, &ids)? || !still(tx)? {
                 return Ok(false);
             }
             tx.execute(
                 "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
-               created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+               created_at, ask)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(thread_id) DO UPDATE SET
                based_on = excluded.based_on, intent = excluded.intent, body = excluded.body,
                model = excluded.model, prompt = excluded.prompt, samples = excluded.samples,
-               created_at = excluded.created_at",
+               created_at = excluded.created_at, ask = excluded.ask",
                 params![
                     thread,
                     based_on,
                     intent,
                     body,
                     model.name(),
-                    PROMPT,
+                    if nudge.is_some() {
+                        NUDGE_PROMPT
+                    } else {
+                        PROMPT
+                    },
                     samples.len() as i64,
-                    now_ms
+                    now_ms,
+                    nudge.map(|n| n.key)
                 ],
             )?;
             Ok(true)

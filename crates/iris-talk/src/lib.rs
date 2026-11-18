@@ -117,6 +117,22 @@ struct Existing {
     origin: i64,
 }
 
+/// Computes again the conversation of up to `limit` threads that a change
+/// of a sender kind marked (`talk_due`, store migration 40), and takes them
+/// from the queue. Gives the count of threads. Call it until it gives 0.
+pub fn update_due(conn: &Connection, now: i64, limit: i64) -> rusqlite::Result<usize> {
+    let threads: Vec<i64> = conn
+        .prepare_cached("SELECT thread_id FROM talk_due ORDER BY thread_id LIMIT ?1")?
+        .query_map([limit], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for &t in &threads {
+        update(conn, t, None, now)?;
+        conn.prepare_cached("DELETE FROM talk_due WHERE thread_id = ?1")?
+            .execute([t])?;
+    }
+    Ok(threads.len())
+}
+
 /// Compute the conversation of the thread with row ID `thread` again, and
 /// save it in the item table. Give the item row ID, or `None` if the thread
 /// has no conversation.
@@ -434,16 +450,18 @@ pub fn message(conn: &Connection, id: i64) -> rusqlite::Result<Option<Mail>> {
 }
 
 /// The columns that [`mail_of`] reads.
-const MAIL_SELECT: &str =
+const MAIL_SELECT: &str = concat!(
     "SELECT m.id, COALESCE(m.internal_date, h.date, 0) AS at, h.from_addr, h.from_name,
             h.to_addrs, h.cc_addrs, COALESCE(b.subject, h.subject), b.text, m.hostile,
             EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                    WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
-            EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                   WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT'),
+            ",
+    iris_store::draft_or_copy!("m"),
+    ",
             m.gone_at IS NOT NULL
      FROM message m LEFT JOIN header h ON h.message_id = m.id
-     LEFT JOIN body b ON b.message_id = m.id";
+     LEFT JOIN body b ON b.message_id = m.id"
+);
 
 /// Each message of the thread that is understood or `current`, also when it
 /// is gone, oldest first. The content cleanup can delete the header of a gone

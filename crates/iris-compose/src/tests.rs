@@ -500,3 +500,45 @@ fn a_display_name_on_from_reads_back_on_both_paths() {
     let other = named.replacen("<owner@example.com>", "<other@example.com>", 1);
     assert!(read(other.as_bytes(), ME).is_none());
 }
+
+/// The shape of a real Gmail draft after `drafts.create` (send check of
+/// issue #302): Gmail sets its own `Message-ID`, sets a new `Date` and adds
+/// a `Received` header. The draft reads back with the ID of Gmail.
+#[test]
+fn a_gmail_draft_reads_back_with_the_gmail_message_id() {
+    let c = content(&[ME], "Iris send test 2", "Body").check().unwrap();
+    let raw =
+        String::from_utf8(compose(ME, "iris.5@example.com", &c, None, 1_800_000_000)).unwrap();
+    let id_line = raw
+        .lines()
+        .find(|l| l.starts_with("Message-ID:"))
+        .unwrap()
+        .to_string();
+    let date_line = raw
+        .lines()
+        .find(|l| l.starts_with("Date:"))
+        .unwrap()
+        .to_string();
+    let gmail = format!(
+        "Received: from 216739018898 named unknown by gmailapi.google.com with HTTPREST; \
+         Tue, 17 Nov 2026 21:40:12 -0800\r\n{}",
+        raw.replacen(&id_line, "Message-ID: <CACe_x7Q1fake@mail.gmail.com>", 1)
+            .replacen(&date_line, "Date: Tue, 17 Nov 2026 21:40:12 -0800", 1)
+    );
+    let back = read(gmail.as_bytes(), ME).unwrap();
+    assert_eq!(back.message_id, "CACe_x7Q1fake@mail.gmail.com");
+    assert_eq!(hash(&back.content, None), hash(&c, None));
+    // Two Received headers are transport too.
+    let twice = format!("Received: by 10.0.0.1; Tue, 17 Nov 2026\r\n{gmail}");
+    assert!(read(twice.as_bytes(), ME).is_some());
+    // An addressing header or another unknown header still gives no content.
+    for extra in [
+        "Bcc: spy@x.org",
+        "Reply-To: spy@x.org",
+        "Disposition-Notification-To: spy@x.org",
+        "X-Gm-Spam: 0",
+    ] {
+        let changed = format!("{extra}\r\n{gmail}");
+        assert!(read(changed.as_bytes(), ME).is_none(), "{changed}");
+    }
+}

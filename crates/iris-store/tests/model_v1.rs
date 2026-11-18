@@ -103,14 +103,14 @@ fn each_stored_item_gets_model_1_0_and_the_attention_queue_stays() {
     }
     let s = Store::open(&dir.0).unwrap();
     s.write(|tx| {
-        assert_eq!(iris_store::schema_version(tx)?, 31);
+        assert_eq!(iris_store::schema_version(tx)?, 40);
         let got: Vec<Value> = tx
             .prepare("SELECT doc FROM item ORDER BY id")?
             .query_map([], |r| r.get::<_, String>(0))?
             .map(|d| serde_json::from_str(&d.unwrap()).unwrap())
             .collect();
         let v1 = |mut d: Value| {
-            d["model"] = json!(iris_store::MODEL);
+            d["model"] = json!("iris/1.0"); // migration 31 writes 1.0
             d
         };
         assert_eq!(

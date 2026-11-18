@@ -28,11 +28,26 @@ fn only_the_top_gmail_auth_header_counts() {
 Authentication-Results: mx.google.com;\r\n dkim=pass header.i=@Bank.example (comment; x);\r\n spf=pass smtp.mailfrom=a@bank.example;\r\n dmarc=fail (p=REJECT) header.from=bank.example\r\n\
 Authentication-Results: mx.google.com; dmarc=pass header.from=bank.example\r\n\
 From: a@bank.example\r\n\r\nbody";
-    let a = Head::parse(raw).auth.unwrap();
+    let a = Head::parse(raw, Some(iris_understand::head::GMAIL_AUTHSERV))
+        .auth
+        .unwrap();
     assert_eq!(a.dmarc.as_deref(), Some("fail"));
     assert_eq!(a.dmarc_from.as_deref(), Some("bank.example"));
     assert!(a.dkim_pass("bank.example"));
     assert_eq!(a.spf.as_deref(), Some("pass"));
+}
+
+/// Only the account provider decides the trust: for an IMAP account the
+/// Gmail header is text that any sender can write (IMAP spec section 8).
+#[test]
+fn the_gmail_auth_header_counts_only_for_gmail() {
+    use iris_understand::head::trusted_authserv;
+    let raw = b"Authentication-Results: mx.google.com; dmarc=pass header.from=bank.example\r\n\
+From: a@bank.example\r\n\r\nbody";
+    assert!(Head::parse(raw, trusted_authserv("gmail")).auth.is_some());
+    for p in ["imap", "outlook", ""] {
+        assert_eq!(Head::parse(raw, trusted_authserv(p)).auth, None, "{p}");
+    }
 }
 
 #[test]
@@ -53,10 +68,13 @@ fn dates() {
 
 #[test]
 fn groups_comments_and_parent_dkim_domains() {
-    let h = Head::parse(b"From: a@mail.example.org\r\nTo: Friends: alice@example.org, Bob <BOB@example.org>;\r\nPrecedence: bulk (list mail)\r\n\r\nx");
+    let h = Head::parse(b"From: a@mail.example.org\r\nTo: Friends: alice@example.org, Bob <BOB@example.org>;\r\nPrecedence: bulk (list mail)\r\n\r\nx", Some(iris_understand::head::GMAIL_AUTHSERV));
     assert_eq!(h.to, vec!["alice@example.org", "bob@example.org"]);
     assert!(h.automated);
-    let human = Head::parse(b"From: a@b.c\r\nAuto-Submitted: no (human-generated)\r\n\r\nx");
+    let human = Head::parse(
+        b"From: a@b.c\r\nAuto-Submitted: no (human-generated)\r\n\r\nx",
+        Some(iris_understand::head::GMAIL_AUTHSERV),
+    );
     assert!(!human.automated);
     let a = Auth {
         dkim: vec![("example.org".into(), "pass".into())],

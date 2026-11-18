@@ -101,6 +101,8 @@ fn store(name: &str) -> Box_ {
                 ("SPAM", "SPAM", "system"),
                 ("DRAFT", "DRAFT", "system"),
                 ("UNREAD", "UNREAD", "system"),
+                ("UNSENT", "UNSENT", "system"),
+                ("SENT_COPY", "SENT_COPY", "system"),
             ],
         )
         .unwrap();
@@ -250,19 +252,50 @@ fn spam_and_a_hostile_sender_make_no_item() {
     assert_eq!(marks, r#"["spam"]"#);
 }
 
+/// A pass in a header with the Gmail authserv-id clears the spoof check only
+/// for a Gmail account. For an IMAP account any sender can write that header
+/// (IMAP spec section 8), so it counts as absent.
+#[test]
+fn a_gmail_auth_header_counts_only_for_a_gmail_account() {
+    let raw = "Authentication-Results: mx.google.com; dkim=pass header.d=other.example; dmarc=pass header.from=other.example
+From: \"Ana Lee\" <ana@other.example>
+To: owner@example.com
+Subject: Hi
+
+The notes of today.
+";
+    for (provider, marks) in [("gmail", "[]"), ("imap", r#"["spoof"]"#)] {
+        let b = store(&format!("auth-{provider}"));
+        b.store
+            .write(|tx| {
+                tx.execute("UPDATE account SET provider = ?1", [provider])?;
+                Ok(())
+            })
+            .unwrap();
+        b.kind("ana@example.org", "Ana Lee", "person");
+        let m = b.add("1", raw, &["INBOX"]);
+        understand(&b.store, m, &Fake::default(), NOW).unwrap();
+        let got: Option<String> = b.col("SELECT hostile FROM message WHERE id = ?1", m);
+        assert_eq!(got.as_deref().unwrap_or("[]"), marks, "{provider}");
+    }
+}
+
 #[test]
 fn a_draft_makes_no_item() {
-    let b = store("draft");
-    let m = b.add("1", FEED, &["DRAFT"]);
-    let fake = Fake::default();
-    let out = understand(&b.store, m, &fake, NOW).unwrap();
-    assert!(out.draft);
-    assert_eq!(fake.calls.borrow().len(), 0);
-    assert!(b.items().is_empty());
-    // The engine does not understand a draft: when it is sent, it runs.
-    assert!(b
-        .col::<Option<i64>>("SELECT understood_at FROM message WHERE id = ?1", m)
-        .is_none());
+    // UNSENT and SENT_COPY: an IMAP draft and a copy in a Sent folder.
+    for labels in [&["DRAFT"][..], &["UNSENT"], &["INBOX", "SENT_COPY"]] {
+        let b = store("draft");
+        let m = b.add("1", FEED, labels);
+        let fake = Fake::default();
+        let out = understand(&b.store, m, &fake, NOW).unwrap();
+        assert!(out.draft, "{labels:?}");
+        assert_eq!(fake.calls.borrow().len(), 0);
+        assert!(b.items().is_empty());
+        // The engine does not understand a draft: when it is sent, it runs.
+        assert!(b
+            .col::<Option<i64>>("SELECT understood_at FROM message WHERE id = ?1", m)
+            .is_none());
+    }
 }
 
 const ASK: &str = "From: Bo Ren <bo@example.org>
@@ -376,7 +409,7 @@ fn a_model_error_changes_nothing_of_step_8() {
         .borrow_mut()
         .push_back(Err(ModelError::Server(529)));
     match understand(&b.store, m, &fake, NOW) {
-        Err(Error::Model(e, _)) => assert!(e.is_retryable()),
+        Err(Error::Model(e, _, _)) => assert!(e.is_retryable()),
         other => panic!("{other:?}"),
     }
     assert_eq!(
@@ -905,6 +938,8 @@ fn hostile_mail_and_drafts_are_not_thread_context() {
     let spam = "From: x@example.net\nTo: owner@example.com\nSubject: S\n\nSpam words.\n";
     let bad = "From: bad@evil.example\nTo: owner@example.com\nSubject: B\n\nHostile words.\n";
     let draft = "From: owner@example.com\nTo: bo@example.org\nSubject: D\n\nDraft words.\n";
+    let unsent = "From: owner@example.com\nTo: bo@example.org\nSubject: U\n\nUnsent words.\n";
+    let copy = "From: x@example.net\nTo: owner@example.com\nSubject: C\n\nCopy words.\n";
     let ok = "From: bo@example.org\nTo: owner@example.com\nSubject: K\n\nGood words.\n";
     let now = "From: bo@example.org\nTo: owner@example.com\nSubject: N\n\nCan you call?\n";
     let fake = Fake::default();
@@ -912,6 +947,8 @@ fn hostile_mail_and_drafts_are_not_thread_context() {
         (spam, "SPAM"),
         (bad, "INBOX"),
         (draft, "DRAFT"),
+        (unsent, "UNSENT"),
+        (copy, "SENT_COPY"),
         (ok, "INBOX"),
     ]
     .into_iter()
@@ -933,7 +970,13 @@ fn hostile_mail_and_drafts_are_not_thread_context() {
     assert_eq!(calls.len(), calls_before + 1);
     let data = &calls[calls_before].1;
     assert!(data.contains("Good words"), "{data}");
-    for w in ["Spam words", "Hostile words", "Draft words"] {
+    for w in [
+        "Spam words",
+        "Hostile words",
+        "Draft words",
+        "Unsent words",
+        "Copy words",
+    ] {
         assert!(!data.contains(w), "{w}: {data}");
     }
 }

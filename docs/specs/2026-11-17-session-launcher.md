@@ -25,7 +25,9 @@ command. Each tool has its own command line.
    scope, when the job leaves the state `working`, at the time limit of the
    session, and when the engine stops.
 3. When a session ends, no process of the session runs after the stop
-   time (see [Stop](#stop)).
+   time (see [Stop](#stop)). On macOS a process can run until a later
+   `stop` catches it, and the session is not reaped before (the macOS
+   exception in [Isolation](#isolation)).
 4. The launcher steps of the workspace spec hold: one open session for each
    job, a build before each session, a held process, and a start only if the
    session did not end.
@@ -261,9 +263,12 @@ So the pipe ties the session to the engine: when the engine process ends for
 any reason, the kernel closes the pipe, and the helper stops the agent. A
 process that the agent moves out of its group
 (`setsid`) is stopped by `Isolation::stop`, which the helper calls on the
-end of the pipe with no engine. If the helper is killed too, the lifetime
-rule of the isolation ends each process of the session. So no process of a
-session outlives both the engine and the helper.
+end of the pipe with no engine. If the helper is killed too, on Linux the
+lifetime rule of the isolation ends each process of the session, so no
+process of a session outlives both the engine and the helper. On macOS
+such a process can live until the next engine calls `stop` and catches it,
+and the session is not reaped before (the macOS exception in
+[Isolation](#isolation)).
 
 The helper is the same program as the engine, so no new file is installed.
 
@@ -343,7 +348,7 @@ Each failure after step 2 ends the session with `launch_failed`, closes the
 pipe, waits for the helper if one started, runs the reap check and removes
 the socket. The wait for the helper is at most 15 seconds (the helper needs
 5 seconds and the isolation stop). After it, the launch kills the helper,
-and the lifetime rule of the isolation ends each process of the session. So no live session stays without a process. In step 6, a session
+and the lifetime rule of the isolation ends each process of the session (on macOS: the reap check waits until `stop` ended each process, see the macOS exception in [Isolation](#isolation)). So no live session stays without a process. In step 6, a session
 that ended is reaped the same way before step 2 runs again.
 
 ### Supervisor
@@ -491,7 +496,9 @@ The one exception is the egress port of the session (see
 It shows the agent only the workspace (read and write), a private empty
 home and `/tmp` (read and write), and the programs and system files of the
 sandbox spec (read only). It shows no settings or credential file of the
-person. It ends each process in it when the session ends.
+person. It ends each process in it when the session ends: on Linux by the
+lifetime rule, on macOS by `stop` before the reap (the macOS exception
+below).
 
 `iris_session::Isolation` is the interface. It gives:
 
@@ -511,16 +518,30 @@ person. It ends each process in it when the session ends.
   call from the engine. For example on Linux, the agent runs in a new PID
   namespace whose first process is a child of the helper with
   `PR_SET_PDEATHSIG`; when the first process of a PID namespace ends, the
-  kernel kills each process in it. R4-05 (Linux) and R4-05m (macOS) give the mechanism of each
-  system, and an isolation that cannot keep this rule does not pass the
-  check of the system.
+  kernel kills each process in it. R4-05 gives the mechanism on Linux,
+  and a Linux isolation that cannot keep this rule does not pass its
+  check. On macOS this rule does not apply: the macOS exception below
+  replaces it.
+- The macOS exception (`docs/specs/2026-11-17-session-sandbox-macos.md`,
+  "The change of the lifetime rule"): macOS has no mechanism for the
+  lifetime rule, so on macOS a process of a session can live after the
+  helper ends, until a later `stop` catches it. In its place, `ended` is
+  exact (the kernel counters of the coalition of the session), and the
+  reap check (rule 3) passes only when `ended` is true. Until then the
+  session keeps its workspace and its egress port, the job starts no new
+  session, and the engine calls `stop` again at each turn. The Seatbelt
+  profile keeps such a process away from the data folder, other
+  sessions, other ports and other processes. Linux keeps the lifetime
+  rule.
 
 The engine calls `stop` on each end of a session, in step 5 of the
 shutdown order (see [Supervisor](#supervisor)): on a stop, a revoke, a job
 move, a time limit, an exit of the agent, a failed helper, a failed launch,
 and at the engine start for each live session. The
 supervisor calls `stop` again on each turn while the reap check fails. So
-no process of a session runs past its end, also when the helper is gone.
+on Linux no process of a session runs past its end, also when the helper
+is gone. On macOS a process can run past the end until a `stop` catches
+it, and the session is not reaped before that (the macOS exception).
 
 This card gives no isolation for a real system: R4-05 gives one for Linux, and R4-05m one for macOS. With no
 isolation, `iris job run` fails with the reason, so no agent runs as the
@@ -539,11 +560,19 @@ no network stops them. The engine gives each session one narrow path out:
 - The engine listens on one TCP port of `127.0.0.1` for each running
   session, the egress port. The isolation permits a connection to this
   port only. It blocks each other address, also DNS.
-- The proxy takes a client only from the session address of its session
-  (`127.128.0.0` plus the session ID). The relay of the sandbox connects
-  from that address (sandbox spec, "Egress on Linux"). A client from each
-  other address gets `403` and the log word `not_session`.
-- The agent gets `HTTPS_PROXY=http://127.0.0.1:<port>` (and `https_proxy`).
+- On Linux, the proxy takes a client only from the session address of
+  its session (`127.128.0.0` plus the session ID). The relay of the
+  sandbox connects from that address (sandbox spec, "Egress on Linux"). A
+  client from each other address gets `403` and the log word
+  `not_session`. The agent gets `HTTPS_PROXY=http://127.0.0.1:<port>` and
+  the same value in `https_proxy`.
+- On macOS, the proxy takes a client only from `127.0.0.1`, and only with
+  the token of its session in `Proxy-Authorization: Basic` (user `iris`).
+  A client from another address gets `403`, and a `CONNECT` with no
+  token or another token gets `407`, both with the log word
+  `not_session` (macOS sandbox spec, "Egress on macOS"). The agent gets
+  `HTTPS_PROXY=http://iris:<token>@127.0.0.1:<port>` and the same value
+  in `https_proxy`.
 - The proxy takes only `CONNECT <host>:443`. The host must be in the
   allowed hosts of the adapter: `api.anthropic.com` for `claude-code`,
   `api.openai.com` for `codex`, and `allow_hosts` for an adapter of
@@ -824,7 +853,7 @@ is refused before a row is written.
 | `iris job stop` during a launch, and no end write works until the launch is over | No agent starts. The session stays open; the supervisor ends it with `launch_failed` when the store takes the end | Engine test: the trigger stays until the helper stopped |
 | A stop mark while the gate waits for `started` | The mark waits for the commit of the gate; then the stop ends a running session | Launch test: a mark 300 ms into a 1 s late helper |
 | An agent that opens connections without end | The egress log stops at 1 MiB, then counts; the engine memory stays bounded (8 open connections) | Proxy test with 200 refused connections and a small limit |
-| The engine is killed and an agent process left the group (`setsid`) | The helper sees the end of the pipe, stops the group and calls `Isolation::stop`; if the helper is killed too, the lifetime rule ends the process | Helper test with the test isolation that records `stop`; R4-05 test of the lifetime rule on each system |
+| The engine is killed and an agent process left the group (`setsid`) | The helper sees the end of the pipe, stops the group and calls `Isolation::stop`; if the helper is killed too, the lifetime rule ends the process on Linux; on macOS the new engine calls `stop` at its start and on each turn, and reaps the session only when `ended` is true | Helper test with the test isolation that records `stop`; R4-05 test of the lifetime rule on each system |
 | An agent that prints a passed key or a file of the agent tool | Nothing of it is stored; the log has only status lines | Helper test: a script prints a marker value to both pipes, and no file of the data folder holds it |
 | A connection to the egress port of another session | The other session is not reached: each port belongs to one session, and the isolation permits only its own port | R4-05 test |
 | An `allow_hosts` entry with a port, a wildcard or an IP address | Refused with the line | Parser test |

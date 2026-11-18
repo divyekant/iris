@@ -19,6 +19,28 @@ macro_rules! may_be_hostile {
     };
 }
 
+/// The SQL condition "message `$m` is not received mail": it has the label
+/// `DRAFT`, `UNSENT` or `SENT_COPY` (docs/specs/2026-11-17-imap-provider.md,
+/// section 4). The understanding, the watches, the people, the conversations,
+/// the reply parent and the model context skip such a message. `UNSENT` and
+/// `SENT_COPY` are no proof that you wrote the mail: a check of authorship
+/// reads `SENT` and `DRAFT` only. The test `each_draft_read_is_classified`
+/// finds other forms.
+#[macro_export]
+macro_rules! draft_or_copy {
+    ($m:literal) => {
+        concat!(
+            "EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+               WHERE ml.message_id = ",
+            $m,
+            ".id AND l.provider_id IN ('DRAFT', 'UNSENT', 'SENT_COPY'))"
+        )
+    };
+}
+
+/// The labels of [`draft_or_copy!`], for a check in Rust.
+pub const DRAFT_OR_COPY: [&str; 3] = ["DRAFT", "UNSENT", "SENT_COPY"];
+
 mod backup;
 mod content;
 mod file_lock;
@@ -34,13 +56,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
-use rusqlite::{params, Connection, OpenFlags, Transaction};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 
 pub use backup::{BackupLock, Cleaned, PolicyExpect, PolicyWrite, GONE_KEEP_MS};
 pub use content::ContentWriter;
 pub use file_lock::FileLock;
 pub use id::{format_id, parse_id, Kind};
-pub use search::Query;
+pub use search::{day_ms, Query};
 pub use watch::{Watch, SINCE_MARGIN_MS, TEXT_MAX, WAIT_MAX};
 
 /// The schema migrations, in order. Item `n` makes `PRAGMA user_version` `n + 1`.
@@ -77,6 +99,15 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_29.sql"),
     include_str!("schema_30.sql"),
     include_str!("schema_31.sql"),
+    include_str!("schema_32.sql"),
+    include_str!("schema_33.sql"),
+    include_str!("schema_34.sql"),
+    include_str!("schema_35.sql"),
+    include_str!("schema_36.sql"),
+    include_str!("schema_37.sql"),
+    include_str!("schema_38.sql"),
+    include_str!("schema_39.sql"),
+    include_str!("schema_40.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
@@ -107,6 +138,9 @@ pub enum Error {
     MissingContent(String),
     /// The text of a watch is not valid, or too many watches wait.
     Watch(&'static str),
+    /// The address has an account of another provider or of another
+    /// mailbox ([`Store::save_account_secret`]).
+    Account(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -123,6 +157,7 @@ impl fmt::Display for Error {
             Error::Query(why) => write!(f, "search: {why}"),
             Error::MissingContent(sha) => write!(f, "content file {sha} is missing"),
             Error::Watch(why) => write!(f, "watch: {why}"),
+            Error::Account(why) => write!(f, "account: {why}"),
         }
     }
 }
@@ -149,7 +184,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// document. Same value as `iris_clean::TEXT_LIMIT`.
 /// The `model` value of each open model document that Iris writes
 /// (spec 4, rule 2.1).
-pub const MODEL: &str = "iris/1.0";
+pub const MODEL: &str = "iris/1.1";
 
 /// The `$id` of the common definitions of the open model.
 pub const COMMON_SCHEMA_ID: &str = "urn:iris:model:1:common";
@@ -241,6 +276,9 @@ pub struct Body {
     pub text: String,
 }
 
+/// The output of [`Store::read_to`]: a buffered spool file.
+pub type Spool = io::BufWriter<fs::File>;
+
 /// An open data folder. One write connection and 2 read connections
 /// (specification 1, section 5.2). All writes go through the write connection.
 pub struct Store {
@@ -317,11 +355,59 @@ impl Store {
     /// Run `f` on a read connection. The connection sees one snapshot for
     /// the duration of each statement.
     pub fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        // The first free reader; wait only when both are busy.
         let conn = self.readers[1]
             .try_lock()
-            .ok()
-            .unwrap_or_else(|| lock(&self.readers[0]));
+            .or_else(|_| self.readers[0].try_lock())
+            .unwrap_or_else(|_| lock(&self.readers[0]));
         f(&conn)
+    }
+
+    /// Run `f` in one read transaction with a spool file as its output, then
+    /// copy the spool to `out` after the read connection is free. Use it
+    /// for each answer that goes to a socket or a channel: a slow or stopped
+    /// reader of `out` then never holds a store connection, so the other
+    /// threads of the engine never wait for a peer. The spool is a file in
+    /// the data folder with no name, so memory stays flat. If `f` gives an
+    /// error, `out` gets no byte.
+    pub fn read_to<T, E: From<Error>>(
+        &self,
+        out: &mut impl io::Write,
+        f: impl FnOnce(&Connection, &mut Spool) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, E> {
+        let mut spool = io::BufWriter::new(self.spool_file()?);
+        let mut res = None;
+        self.read(|c| {
+            let tx = c.unchecked_transaction()?;
+            res = Some(f(&tx, &mut spool));
+            Ok(())
+            // The drop of `tx` ends the read.
+        })?;
+        let value = res.expect("the read ran f")?;
+        let mut file = spool.into_inner().map_err(|e| Error::Io(e.into_error()))?;
+        io::Seek::rewind(&mut file).map_err(Error::Io)?;
+        io::copy(&mut file, out).map_err(Error::Io)?;
+        Ok(value)
+    }
+
+    /// A new file in the data folder (mode 0700) with no name: the open file
+    /// is the only reference, so the OS deletes it at the close, also after
+    /// a crash.
+    fn spool_file(&self) -> Result<fs::File> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = self.dir.join(format!(
+            ".spool-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        fs::remove_file(&path)?;
+        Ok(file)
     }
 
     /// Open each deferred commitment again on its `deferred_until` date, in
@@ -353,6 +439,64 @@ impl Store {
                 params![provider, address],
                 |r| r.get(0),
             )?)
+        })
+    }
+
+    /// Save the sealed secret (`sealed`) of the account with `address`, and
+    /// set its state to `state`, in one transaction. A new address gets a new
+    /// account of `provider`. `imap` is the `(host, port, user)` of an
+    /// `imap` account, and `None` for another provider. An address with an
+    /// account of another provider, or of another IMAP mailbox, is refused
+    /// before any change: an address never gets the mirror and the apply
+    /// state of another mailbox (IMAP spec section 8). Gives the account ID.
+    pub fn save_account_secret(
+        &self,
+        provider: &str,
+        address: &str,
+        imap: Option<(&str, u16, &str)>,
+        sealed: &[u8],
+        state: &str,
+    ) -> Result<i64> {
+        let (host, port, user) = match imap {
+            Some((h, p, u)) => (Some(h), Some(p), Some(u)),
+            None => (None, None, None),
+        };
+        self.write(|tx| {
+            type Row = (i64, String, Option<String>, Option<u16>, Option<String>);
+            let old: Option<Row> = tx
+                .query_row(
+                    "SELECT id, provider, imap_host, imap_port, imap_user FROM account
+                     WHERE address = ?1",
+                    [address],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .optional()?;
+            let id = match old {
+                None => tx.query_row(
+                    "INSERT INTO account(provider, address, imap_host, imap_port, imap_user)
+                     VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
+                    params![provider, address, host, port, user],
+                    |r| r.get(0),
+                )?,
+                Some((_, p, ..)) if p != provider => {
+                    return Err(Error::Account(
+                        "the address has an account of another provider; remove that account first",
+                    ))
+                }
+                Some((_, _, h, p, u))
+                    if h.as_deref() != host || p != port || u.as_deref() != user =>
+                {
+                    return Err(Error::Account(
+                        "the address has an account of another IMAP server or user; remove that account first",
+                    ))
+                }
+                Some((id, ..)) => id,
+            };
+            tx.execute(
+                "UPDATE account SET token = ?2, state = ?3 WHERE id = ?1",
+                params![id, sealed, state],
+            )?;
+            Ok(id)
         })
     }
 
@@ -409,14 +553,15 @@ impl Store {
                    gone_at = NULL
                  RETURNING id",
             )?;
-            let mut clear_labels = tx.prepare_cached("DELETE FROM message_label WHERE message_id = ?1")?;
-            // A bit mask: 1 for SENT, 2 for DRAFT.
-            let mut owner_labels = tx.prepare_cached(
-                "SELECT coalesce(sum(CASE l.provider_id WHEN 'SENT' THEN 1 WHEN 'DRAFT' THEN 2 END), 0)
-                   FROM message_label ml JOIN label l ON l.id = ml.label_id WHERE ml.message_id = ?1",
+            // Only the rows that differ change, so the triggers on
+            // message_label (SENT and DRAFT clear `understood_at`) see only
+            // real changes.
+            let mut have_labels = tx.prepare_cached(
+                "SELECT l.id, l.provider_id FROM message_label ml JOIN label l ON l.id = ml.label_id
+                 WHERE ml.message_id = ?1",
             )?;
-            let mut ununderstood =
-                tx.prepare_cached("UPDATE message SET understood_at = NULL WHERE id = ?1")?;
+            let mut stale_label = tx
+                .prepare_cached("DELETE FROM message_label WHERE message_id = ?1 AND label_id = ?2")?;
             let mut label = tx.prepare_cached(
                 "INSERT OR IGNORE INTO message_label(message_id, label_id)
                  SELECT ?1, id FROM label WHERE account_id = ?2 AND provider_id = ?3",
@@ -465,17 +610,18 @@ impl Store {
                         return Err(Error::MissingContent(sha.clone()));
                     }
                 }
-                let owner_before: i64 = owner_labels.query_row([id], |r| r.get(0))?;
-                clear_labels.execute([id])?;
+                let have: Vec<(i64, String)> = have_labels
+                    .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<_>>()?;
+                for (label, provider_id) in have {
+                    if !m.labels.contains(&provider_id) {
+                        stale_label.execute(params![id, label])?;
+                    }
+                }
                 // A label that the store does not have adds no row
                 // (specification 1, section 4.3).
                 for l in &m.labels {
                     label.execute(params![id, account, l])?;
-                }
-                // SENT and DRAFT decide if the message is from you, so a
-                // change of them needs the understanding again.
-                if owner_labels.query_row([id], |r| r.get::<_, i64>(0))? != owner_before {
-                    ununderstood.execute([id])?;
                 }
                 let h = &m.header;
                 if !keep_header { header.execute(params![
@@ -683,4 +829,15 @@ fn migrate(conn: &mut Connection, db: &Path) -> Result<()> {
 /// The schema version of an open database.
 pub fn schema_version(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
+}
+
+/// The time of the stop (docs/specs/2026-11-17-stop.md), in milliseconds
+/// since 1970, or `None` while Iris runs. Read it in the transaction that
+/// the stop guards.
+pub fn stopped(conn: &Connection) -> Result<Option<i64>> {
+    Ok(
+        conn.query_row("SELECT stopped_at FROM stop_switch WHERE id = 1", [], |r| {
+            r.get(0)
+        })?,
+    )
 }

@@ -28,7 +28,8 @@ fn store(name: &str) -> (Dir, Store) {
                  INSERT INTO label(id, account_id, provider_id, name, kind) VALUES
                    (1, 1, 'INBOX', 'INBOX', 'system'), (2, 1, 'Label_1', 'Work', 'user'),
                    (3, 1, 'SENT', 'Sent', 'system'), (4, 1, 'SPAM', 'Spam', 'system'),
-                   (5, 1, 'TRASH', 'Trash', 'system');
+                   (5, 1, 'TRASH', 'Trash', 'system'), (6, 1, 'UNSENT', 'UNSENT', 'system'),
+                   (7, 1, 'SENT_COPY', 'SENT_COPY', 'system');
                  INSERT INTO sender(address, kind) VALUES ('ann@friends.example', 'person'),
                    ('news@shop.example', 'service'), ('x@far.example', 'hostile');",
             )?;
@@ -405,6 +406,26 @@ fn a_spam_label_after_the_body_stops_the_notice() {
     })
     .unwrap();
     assert!(notice::refresh(&s, NOW).unwrap().is_empty());
+}
+
+/// An IMAP `\\Draft` flag (the label `UNSENT`) or a move to a Sent folder
+/// copy (`SENT_COPY`) after the body stops the notice (IMAP spec section 4).
+#[test]
+fn a_draft_or_copy_label_after_the_body_stops_the_notice() {
+    for label in [6, 7] {
+        let (_d, s) = store(&format!("copy-{label}"));
+        activate(&s, ANN);
+        let id = put(&s, &mail(), 0);
+        s.write(|tx| {
+            tx.execute(
+                "INSERT INTO message_label(message_id, label_id) VALUES (?1, ?2)",
+                [id, label],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(notice::refresh(&s, NOW).unwrap().is_empty(), "{label}");
+    }
 }
 
 #[test]

@@ -22,10 +22,10 @@
         <tr>
           {#each columns as column, i (column)}
             <td>
-              {#if i === 0}<a href={href.item(item.id)}>{field(item.fields?.[column]) || item.title}</a>{:else}{field(item.fields?.[column])}{/if}
+              {#if i === 0}<a class="touch" href={href.item(item.id)}>{field(item.fields?.[column]) || item.title}</a>{:else}{field(item.fields?.[column])}{/if}
             </td>
           {/each}
-          <td><a href={href.mail(origin(item))}>Mail</a></td>
+          <td><a class="touch" href={href.mail(origin(item))}>Mail</a></td>
         </tr>
       {/each}
     </tbody>

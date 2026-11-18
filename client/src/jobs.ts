@@ -1,7 +1,7 @@
 // Words for the jobs of the agents (card R4-09): the state of a job and each
 // step of its timeline, as plain sentences. Pure functions, so the tests need
 // no DOM. Text from an agent or from mail is data: the view shows it as text.
-import type { Job, JobChangeset, JobDetail, JobEvent, Target } from "./api";
+import { get, post, type Job, type JobChangeset, type JobDetail, type JobEvent, type JobPage, type Target } from "./api";
 import { daysFrom } from "./format";
 import { href } from "./route";
 
@@ -14,9 +14,16 @@ export const clock = (value: string) => new Date(value).toLocaleTimeString("en-G
 
 const relative = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
 
-/** The due date of an open job, with a tone: `late` after the date, `soon` 2 days or less before it. */
+/** The jobs of one state that the Jobs view asks for at a time: 20 for an ended job, 50 for the others. */
+export const pageSize = (state: Job["state"]) => (state === "done" ? 20 : 50);
+
+/**
+ * The due date of a job, with a tone: `late` after the date, `soon` 2 days or less before it.
+ * An ended job keeps its date with no tone, so the person can see if it ended before the date.
+ */
 export function due(job: Job, now = new Date()): { text: string; tone: "late" | "soon" | "" } | null {
-  if (!job.due || job.state === "done") return null;
+  if (!job.due) return null;
+  if (job.state === "done") return { text: `Was due ${day(job.due)}`, tone: "" };
   const days = daysFrom(job.due, now);
   // The words say "late" each time the tone does, so color is not the only sign.
   if (Date.parse(job.due) <= now.getTime()) return { text: `Was due ${day(job.due)}, ${days < 0 ? relative.format(days, "day") : "earlier today"}`, tone: "late" };
@@ -135,4 +142,23 @@ export function steps(d: JobDetail): Step[] {
     out.push(e);
   }
   return [...out, ...changes.slice(c)];
+}
+
+/** The jobs whose agent asks you a question now (card R5-05), the newest question first (`updated` of the job, not its ID). */
+export async function loadQuestions(): Promise<Job[]> {
+  // The API pages by job ID, so the newest question can be on any page: read each page.
+  let jobs: Job[] = [];
+  let next: string | null = null;
+  do {
+    const page: JobPage = await get<JobPage>(`jobs?state=needs_you&limit=200${next ? `&after=${encodeURIComponent(next)}` : ""}`);
+    jobs = jobs.concat(page.jobs);
+    next = page.next;
+  } while (next);
+  return jobs.filter((j) => j.state === "needs_you" && j.question).sort((a, b) => Date.parse(b.updated) - Date.parse(a.updated));
+}
+
+/** Your answer to the question of a job (card R5-05). The engine starts a new session of the job with it. */
+export function answerJob(job: Pick<Job, "id" | "question" | "updated">, answer: string): Promise<JobDetail> {
+  // The question and the time that the person saw: the engine refuses (409) an answer to an older question.
+  return post<JobDetail>(`jobs/${encodeURIComponent(job.id)}/answer`, { answer, question: job.question, updated: job.updated });
 }
