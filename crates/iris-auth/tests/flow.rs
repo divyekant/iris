@@ -659,7 +659,7 @@ fn a_missing_mail_permission_is_named() {
     assert!(client.refresh_tokens(&Secret::new(REFRESH)).is_ok());
 }
 
-/// Property: the client ID and the tenant are GUIDs (the tenant may also be
+/// Examples: the client ID and the tenant are GUIDs (the tenant may also be
 /// `common`), so the endpoints always stay on the fixed host.
 #[test]
 fn only_a_guid_or_common_reaches_the_endpoints() {
@@ -717,5 +717,50 @@ fn microsoft_secrets_stay_out_of_debug_text() {
     assert!(
         !text.contains("rotated-refresh-33") && !text.contains(ACCESS),
         "{text}"
+    );
+}
+
+#[test]
+fn a_microsoft_client_cannot_drop_the_new_refresh_token() {
+    let (fake, uri) = token_server(vec![]);
+    let got = ms_client(&uri).refresh(&Secret::new(REFRESH));
+    assert!(matches!(got, Err(Error::RotatingRefresh)), "{got:?}");
+    assert!(fake.forms.lock().unwrap().is_empty(), "no request");
+}
+
+/// A token endpoint that answers 307 to another listener. The other
+/// listener must get no connection: the code, the verifier and the refresh
+/// token stay on the token host.
+#[test]
+fn a_token_endpoint_redirect_is_not_followed() {
+    let other = TcpListener::bind("127.0.0.1:0").unwrap();
+    let target = format!("http://{}/steal", other.local_addr().unwrap());
+    other.set_nonblocking(true).unwrap();
+    let endpoint = TcpListener::bind("127.0.0.1:0").unwrap();
+    let uri = format!("http://{}/token", endpoint.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in endpoint.incoming() {
+            let mut stream = stream.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: {target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+        }
+    });
+    let google = test_client(Some(&uri));
+    let ms = ms_client(&uri);
+    assert!(google.refresh(&Secret::new(REFRESH)).is_err());
+    assert!(ms.refresh_tokens(&Secret::new(REFRESH)).is_err());
+    let sign_in = ms.sign_in().unwrap();
+    let state = params(&sign_in.url())["state"].clone();
+    assert!(sign_in
+        .finish(&format!("http://localhost/?state={state}&code=c"))
+        .is_err());
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        other.accept().is_err(),
+        "the redirect target got a connection"
     );
 }

@@ -115,6 +115,9 @@ pub enum Error {
     PermissionMissing(&'static str),
     /// The answer of the code exchange has no refresh token.
     NoRefreshToken,
+    /// [`Client::refresh`] of a Microsoft client: it would drop the new
+    /// refresh token. A program error, not a provider answer.
+    RotatingRefresh,
     /// Google refused the refresh token (`invalid_grant`). The account state
     /// becomes "needs sign-in".
     Revoked,
@@ -147,6 +150,9 @@ impl fmt::Display for Error {
                 "Iris did not get the Microsoft permission {p}: sign in again and accept it"
             ),
             Error::NoRefreshToken => f.write_str("the sign-in gave no refresh token"),
+            Error::RotatingRefresh => {
+                f.write_str("a Microsoft refresh must keep the new refresh token")
+            }
             Error::Revoked => f.write_str("the provider refused the stored sign-in: sign in again"),
             Error::Token { status, code } => {
                 write!(f, "the token endpoint refused the request: {status} {code}")
@@ -351,10 +357,14 @@ impl Client {
         })
     }
 
-    /// Gets a new access token with the refresh token. For a Microsoft
-    /// client use [`Client::refresh_tokens`], which keeps the new refresh
-    /// token.
+    /// Gets a new access token with the refresh token (Google). A Microsoft
+    /// client gets [`Error::RotatingRefresh`] and sends no request: use
+    /// [`Client::refresh_tokens`], so that the new refresh token is never
+    /// dropped.
     pub fn refresh(&self, refresh: &Secret) -> Result<AccessToken> {
+        if matches!(self.kind, Kind::Microsoft) {
+            return Err(Error::RotatingRefresh);
+        }
         self.refresh_tokens(refresh).map(|r| r.access)
     }
 
@@ -449,6 +459,9 @@ pub struct Refreshed {
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
+        // A redirect could carry a code, a verifier or a refresh token to
+        // another host: a 3xx is an error answer of the token endpoint.
+        .max_redirects(0)
         .timeout_global(Some(Duration::from_secs(30)))
         .build()
         .into()
@@ -681,5 +694,143 @@ impl SignIn {
                 .ok_or(Error::NoRefreshToken)?,
             refresh_expires_in: answer.refresh_token_expires_in,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A small random number source for the property tests.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 33) % n as u64) as usize
+        }
+    }
+
+    /// The GUID rule by position: 36 characters, `-` at 8, 13, 18 and 23,
+    /// hex digits at all other places.
+    fn guid_by_position(v: &str) -> bool {
+        v.len() == 36
+            && v.bytes().enumerate().all(|(i, b)| match i {
+                8 | 13 | 18 | 23 => b == b'-',
+                _ => b.is_ascii_hexdigit(),
+            })
+    }
+
+    /// Property: only a GUID (or `common` as the tenant) makes a client,
+    /// and the endpoints of each client stay on the fixed host.
+    #[test]
+    fn generated_ids_and_tenants() {
+        let chars = b"0123456789abcdefABCDEF-g/@.:?#%xX ";
+        let mut rng = Rng(5);
+        let mut made = 0;
+        for _ in 0..20_000 {
+            let gen = |rng: &mut Rng| -> String {
+                match rng.below(4) {
+                    // A GUID with one character changed, or none.
+                    0 | 1 => {
+                        let mut g: Vec<u8> = b"0a1b2c3d-4e5f-6A7B-8C9D-0e1f2a3b4c5d".to_vec();
+                        if rng.below(2) == 0 {
+                            let i = rng.below(g.len());
+                            g[i] = chars[rng.below(chars.len())];
+                        }
+                        if rng.below(8) == 0 {
+                            g.push(chars[rng.below(chars.len())]);
+                        }
+                        String::from_utf8(g).unwrap()
+                    }
+                    2 => [
+                        "common",
+                        "Common",
+                        "organizations",
+                        "consumers",
+                        "common/x",
+                        "",
+                    ][rng.below(6)]
+                    .to_string(),
+                    _ => (0..rng.below(40))
+                        .map(|_| chars[rng.below(chars.len())] as char)
+                        .collect(),
+                }
+            };
+            let (id, tenant) = (gen(&mut rng), gen(&mut rng));
+            let ok = guid_by_position(&id) && (tenant == "common" || guid_by_position(&tenant));
+            let got = Client::microsoft(&id, &tenant);
+            assert_eq!(got.is_ok(), ok, "{id:?} {tenant:?}");
+            if let Ok(c) = got {
+                made += 1;
+                let rest = c
+                    .token_uri
+                    .strip_prefix("https://login.microsoftonline.com/")
+                    .unwrap();
+                let (seg, path) = rest.split_once('/').unwrap();
+                assert_eq!(path, "oauth2/v2.0/token");
+                assert!(seg == "common" || guid_by_position(seg), "{seg}");
+                assert!(c.auth_uri.starts_with("https://login.microsoftonline.com/"));
+            }
+        }
+        assert!(made > 100, "too few clients: {made}");
+    }
+
+    /// Property: a Microsoft token answer passes only if it names
+    /// Mail.ReadWrite and Mail.Send, bare or with the Graph prefix, in any
+    /// case; else the first missing one is named.
+    #[test]
+    fn generated_scope_strings() {
+        let words = [
+            "Mail.ReadWrite",
+            "mail.readwrite",
+            "https://graph.microsoft.com/Mail.ReadWrite",
+            "Mail.Send",
+            "MAIL.SEND",
+            "https://graph.microsoft.com/mail.send",
+            "Mail.Read",
+            "Mail.ReadWrite.Shared",
+            "Mail.SendX",
+            "https://evil.example/Mail.Send",
+            "graph.microsoft.com/Mail.Send",
+            "User.Read",
+            "offline_access",
+            "openid",
+            "",
+        ];
+        let c = Client::microsoft("0a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d", "common").unwrap();
+        let mut rng = Rng(9);
+        for _ in 0..10_000 {
+            let n = rng.below(6);
+            let scope: Vec<&str> = (0..n).map(|_| words[rng.below(words.len())]).collect();
+            let scope = scope.join(" ");
+            let has = |p: &str| {
+                scope.split(' ').any(|t| {
+                    let t = t.to_lowercase();
+                    let p = p.to_lowercase();
+                    t == p || t == format!("https://graph.microsoft.com/{p}")
+                })
+            };
+            let expect = ["Mail.ReadWrite", "Mail.Send"]
+                .into_iter()
+                .find(|p| !has(p));
+            let answer = TokenAnswer {
+                access_token: Secret::new("a"),
+                expires_in: 1,
+                refresh_token: None,
+                refresh_token_expires_in: None,
+                scope: Some(scope.clone()),
+            };
+            for refresh in [false, true] {
+                match (c.check_scope(&answer, refresh), expect) {
+                    (Ok(()), None) => {}
+                    (Err(Error::PermissionMissing(p)), Some(e)) if p == e => {}
+                    (got, _) => panic!("{scope:?}: {got:?}, want {expect:?}"),
+                }
+            }
+        }
     }
 }
