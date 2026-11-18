@@ -442,3 +442,44 @@ fn reads_during_decisions_are_consistent() {
     writer.join().unwrap();
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A route that takes no body stops the read of a large body after a few
+/// bytes (issue 361): an endless body gives 400, and the route reads only
+/// the first chunks of it.
+#[tokio::test]
+async fn a_route_with_no_body_stops_the_read_early() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (dir, s) = setup("nobody-early");
+    let auth = Arc::new(Auth::new("127.0.0.1:4800".parse().unwrap()).unwrap());
+    for uri in [
+        "/api/matters/g-1/decline",
+        "/api/senders/p-999/accept",
+        "/api/changesets/x-999/withdraw",
+        "/api/policy/discard",
+        "/api/notices/n-999/done",
+        "/api/watches/w-999/remove",
+    ] {
+        let read = Arc::new(AtomicUsize::new(0));
+        let r = read.clone();
+        let chunks = futures_util::stream::repeat_with(move || {
+            r.fetch_add(1024, Ordering::SeqCst);
+            Ok::<_, std::io::Error>(axum::body::Bytes::from(vec![b' '; 1024]))
+        });
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header("host", "127.0.0.1:4800")
+            .header("authorization", auth.bearer())
+            .header("content-type", "application/json")
+            .body(Body::from_stream(chunks))
+            .unwrap();
+        let res = iris_api::router(s.clone(), auth.clone())
+            .oneshot(req)
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let n = read.load(Ordering::SeqCst);
+        assert!(n <= 4 * 1024, "{uri} read {n} bytes");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
