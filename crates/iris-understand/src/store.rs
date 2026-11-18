@@ -942,6 +942,22 @@ pub fn rerun_senders(tx: &Transaction, rows: &[i64], now_ms: i64) -> iris_store:
 /// Threads in one page of [`rerun_senders`].
 pub const RERUN_PAGE: i64 = 500;
 
+/// Computes again the conversation of each thread that a change of a sender
+/// kind marked (`talk_due`, store migration 40, issue 106), in writes of
+/// [`RERUN_PAGE`] threads. Gives the count of threads. The understanding
+/// runner calls it after its sender refresh, and the engine at each turn of
+/// its attention thread, so a kind change of the stranger gate counts too.
+pub fn update_due_talks(store: &Store, now_ms: i64) -> iris_store::Result<usize> {
+    let mut done = 0;
+    loop {
+        let n = store.write(|tx| Ok(iris_talk::update_due(tx, now_ms, RERUN_PAGE)?))?;
+        if n == 0 {
+            return Ok(done);
+        }
+        done += n;
+    }
+}
+
 /// The items of an origin message `src` that a new run replaces: not the
 /// conversation, made by a rule or the model, and not pinned (`item_pin`: a
 /// correction, or an open changeset action that names the item).

@@ -269,6 +269,33 @@ fn no_model_runs_the_free_steps() {
     assert!(b.understood(spam) && !b.understood(m));
 }
 
+/// Issue 106: a run computes again the conversations of the threads that a
+/// sender kind change marked, and empties the queue.
+#[test]
+fn a_run_updates_the_talks_of_a_kind_change() {
+    let b = store("talkdue");
+    b.add("1", "a", 1, &["INBOX"]);
+    b.run(&Limits::default()).unwrap();
+    let due = |b: &Box_| -> i64 {
+        b.store
+            .read(|c| Ok(c.query_row("SELECT count(*) FROM talk_due", [], |r| r.get(0))?))
+            .unwrap()
+    };
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sender(address, kind) VALUES ('ana@example.org', 'service')
+                 ON CONFLICT(address) DO UPDATE SET kind = 'service', decided_by = 'person'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(due(&b), 1);
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(due(&b), 0);
+}
+
 #[test]
 fn two_runs_share_one_budget() {
     let b = store("share");
@@ -974,7 +1001,7 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                  ALTER TABLE account DROP COLUMN imap_user;
                  ALTER TABLE account DROP COLUMN categories_off_at;
                  DROP TRIGGER understand_owner_label_add; DROP TRIGGER understand_owner_label_remove;
-                 DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower;
+                 DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower; DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender; DROP TRIGGER talk_due_sender_remove; DROP TABLE talk_due;
                  PRAGMA user_version = 19;",
             )?;
             Ok(())

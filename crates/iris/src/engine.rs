@@ -877,13 +877,20 @@ pub const ATTENTION_EVERY: Duration = Duration::from_secs(10);
 /// attention of the items whose origin message changed, and each hour of
 /// each item ([`iris_policy::refresh_attention`]). It is apart from the
 /// understanding thread, because one understanding run can take hours.
-/// The same thread writes the rules that Iris proposes from the approvals
+/// The same thread computes again the conversations of the threads that a
+/// change of a sender kind marked (`iris_understand::store::update_due_talks`),
+/// and writes the rules that Iris proposes from the approvals
 /// of the person (spec 2 section 6.6, [`iris_policy::propose::refresh`]),
 /// and the notices by rule ([`iris_policy::notice::refresh`]).
 fn attention_loop(store: Arc<Store>) {
     let mut mark = None;
     let system = crate::notify::spawn(crate::notify::show);
     loop {
+        // The conversations first: a kind change marks their threads, and
+        // the attention reads the items.
+        if let Err(e) = iris_understand::store::update_due_talks(&store, now_ms()) {
+            say!("iris: conversations: {e}");
+        }
         if let Err(e) = iris_policy::refresh_attention(&store, now_ms().div_euclid(1000)) {
             say!("iris: attention: {e}");
         }

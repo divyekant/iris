@@ -388,10 +388,12 @@ fn run_messages(
 /// Step 2: the sender refresh and its reruns, in one write. Gives the
 /// count of reset messages.
 fn refresh_senders(store: &Store, now_ms: i64) -> Result<u64, Error> {
-    Ok(store.write(|tx| {
+    let reset = store.write(|tx| {
         let rows = iris_senders::refresh(tx, now_ms)?;
         rerun_senders(tx, &rows, now_ms)
-    })?)
+    })?;
+    store::update_due_talks(store, now_ms)?;
+    Ok(reset)
 }
 
 struct Runner<'a> {
