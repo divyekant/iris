@@ -196,7 +196,10 @@ its flags: the mirror shows it as archived, as a Gmail message with no
 `labels` gives the fixed labels `INBOX`, `UNREAD`, `STARRED`, `UNSENT`,
 `SENT_COPY`, `SPAM` and `TRASH` that apply, each folder label, and a
 keyword label for each keyword in the `PERMANENTFLAGS` and the `FLAGS` of
-each folder. It gives no counts.
+each folder. It opens each folder with `SELECT`, not `EXAMINE`: a server
+sends the keywords of `PERMANENTFLAGS` only to a read-write open (RFC 3501
+section 6.3.2). So a permanent keyword that is on no message is a label,
+and a label action can use it with no `create_label`. It gives no counts.
 
 Each label has one name, with no case, so a lookup by name finds one
 label. A keyword can be named `INBOX`, a folder can be named `Spam` with

@@ -784,6 +784,28 @@ fn modify_not_permanent() {
     assert!(fake.flags("INBOX", a).is_empty());
 }
 
+/// A keyword that only PERMANENTFLAGS lists (on no message) is a label, and a
+/// label action can use it with no create_label (spec sections 4 and 7).
+#[test]
+fn permanent_keyword_with_no_message_is_a_label() {
+    let fake = FakeImap::start(Caps::ALL);
+    fake.set_permanent(Some("\\Seen \\Flagged $Later"));
+    let a = fake.add("INBOX", small(1), &[]);
+    let mail = provider(&fake);
+    let labels = mail.labels(PASSWORD).unwrap();
+    let later = labels
+        .iter()
+        .find(|l| l.id == "kw:$later")
+        .expect("kw:$later");
+    assert_eq!(
+        (later.name.as_str(), later.kind.as_str()),
+        ("$Later", "user")
+    );
+    let id = id_of(&mail, "INBOX", a);
+    mail.modify(PASSWORD, &[&id], &["kw:$later"], &[]).unwrap();
+    assert_eq!(fake.flags("INBOX", a), vec!["$later".to_owned()]);
+}
+
 /// A new UIDVALIDITY before any STORE is NotFound, and nothing changes.
 #[test]
 fn modify_uidvalidity() {

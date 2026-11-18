@@ -583,7 +583,9 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
             for f in mail_folders(s)? {
                 let (id, name, kind) = folder_label(&f);
                 out.insert(id.clone(), label(&id, &name, kind));
-                for k in s.examine(&f.name).map_err(read_error)?.flags {
+                // SELECT, not EXAMINE: a server sends the keywords of
+                // PERMANENTFLAGS only to a read-write open (RFC 3501 6.3.2).
+                for k in s.select(&f.name).map_err(read_error)?.flags {
                     if !k.starts_with('\\') {
                         // The first spelling in folder order names the label.
                         let id = keyword_id(&k);
