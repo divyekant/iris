@@ -665,16 +665,20 @@ async fn get_policy(State(s): State<Arc<Store>>) -> Result<Response> {
 /// The body of a route that takes none: zero bytes, or a JSON text that is
 /// the empty object `{}` (the web client sends `{}`). `serde_json` parses
 /// the JSON. Any other body, a body of only spaces too, gives 400 before the
-/// route changes anything.
+/// route changes anything. The read stops at the first frame past
+/// `NO_BODY_MAX` bytes, so a large body does not stay in memory.
 struct NoBody;
+
+/// The longest body that a route with no body reads: `{}` with some space.
+const NO_BODY_MAX: usize = 64;
 
 impl<S: Send + Sync> axum::extract::FromRequest<S> for NoBody {
     type Rejection = Error;
 
-    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self> {
-        let b = Bytes::from_request(req, state)
+    async fn from_request(req: axum::extract::Request, _: &S) -> Result<Self> {
+        let b = axum::body::to_bytes(req.into_body(), NO_BODY_MAX)
             .await
-            .map_err(|e| Error::Query(e.body_text()))?;
+            .map_err(|_| Error::Query("this route takes no body".into()))?;
         let none = b.is_empty()
             || serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&b)
                 .is_ok_and(|m| m.is_empty());
