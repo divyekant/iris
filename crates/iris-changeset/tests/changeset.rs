@@ -1998,5 +1998,8 @@ fn the_document_goes_out_after_the_read() {
     let mut out = Probe(&s, Vec::new(), false);
     write_document(&s, cs, &mut out).unwrap();
     assert!(!out.1.is_empty());
-    assert!(!out.2, "a store connection was held during a write to the peer");
+    assert!(
+        !out.2,
+        "a store connection was held during a write to the peer"
+    );
 }

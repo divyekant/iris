@@ -869,7 +869,10 @@ fn read_to_writes_the_answer_after_the_read_ends() {
         .unwrap();
     assert_eq!(n, 7);
     assert_eq!(out.bytes.len(), 300_000);
-    assert!(!out.held, "a store connection was held during a write to the peer");
+    assert!(
+        !out.held,
+        "a store connection was held during a write to the peer"
+    );
     // An error leaves `out` with no byte.
     let mut empty = Vec::new();
     let r = s.read_to(&mut empty, |_, w| -> Result<(), Error> {
@@ -879,7 +882,9 @@ fn read_to_writes_the_answer_after_the_read_ends() {
     assert!(r.is_err());
     assert!(empty.is_empty());
     // The spool file has no name: the data folder keeps no file of it.
-    assert!(!fs::read_dir(&dir.0)
+    assert!(!fs::read_dir(&dir.0).unwrap().any(|e| e
         .unwrap()
-        .any(|e| e.unwrap().file_name().to_string_lossy().starts_with(".spool")));
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".spool")));
 }
