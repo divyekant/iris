@@ -174,6 +174,47 @@ fn a_remote_local_model_is_refused() {
     assert_eq!(col(&store, "SELECT count(*) FROM model_setting"), Some(0));
 }
 
+/// A query or a fragment changes the request path, so it is refused
+/// (#135). The error does not show the URL: a query can hold a secret.
+#[test]
+fn a_local_model_url_with_a_query_is_refused_and_not_shown() {
+    let (store, _fake) = synced("query");
+    for url in [
+        "http://localhost:8080/v1?token=secret-1",
+        "http://127.0.0.1:8080/v1#secret-1",
+        "http://a:secret-1@127.0.0.1/v1",
+    ] {
+        let (ok, out, err) = iris(&store, &["model", "set", "local", url, "m"]);
+        assert!(!ok, "{url}");
+        assert!(
+            !err.contains("secret-1") && !out.contains("secret-1"),
+            "{err}"
+        );
+    }
+    assert_eq!(col(&store, "SELECT count(*) FROM model_setting"), Some(0));
+    // A stored row from before the check fails at the run, with no secret.
+    let (ok, _, err) = iris(
+        &store,
+        &["model", "set", "local", "http://127.0.0.1:9/v1", "m"],
+    );
+    assert!(ok, "{err}");
+    store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE model_setting SET base_url = 'http://127.0.0.1:9/v1?token=secret-1'",
+                [],
+            )?)
+        })
+        .unwrap();
+    let (ok, out, err) = iris(&store, &["understand"]);
+    assert!(!ok, "{out}");
+    assert!(err.contains("query or a fragment"), "{err}");
+    assert!(
+        !err.contains("secret-1") && !out.contains("secret-1"),
+        "{err}"
+    );
+}
+
 #[test]
 fn the_key_comes_from_stdin_and_is_never_shown() {
     let (store, _fake) = synced("key");
