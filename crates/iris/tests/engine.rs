@@ -1016,7 +1016,12 @@ fn a_scope_refusal_fails_the_action_and_sets_read_only() {
     let (action, _) = approved_archive(&s);
     let (second, _) = approved_archive(&s);
     s.fake.set_read_only(true);
-    let writes = |f: &FakeGmail| f.requests().iter().filter(|r| !r.starts_with("GET ")).count();
+    let writes = |f: &FakeGmail| {
+        f.requests()
+            .iter()
+            .filter(|r| !r.starts_with("GET "))
+            .count()
+    };
     let before = writes(&s.fake);
     let turn = w.apply_step().unwrap();
     assert_eq!(writes(&s.fake), before + 1, "the step ends at the refusal");
@@ -1054,8 +1059,19 @@ fn a_read_only_account_still_recovers_a_writing_row() {
             Ok(())
         })
         .unwrap();
-    sign_in_as(&s.store, &gmail(s.fake.base_url()), &client_json(), REFRESH, false);
-    let writes = |f: &FakeGmail| f.requests().iter().filter(|r| !r.starts_with("GET ")).count();
+    sign_in_as(
+        &s.store,
+        &gmail(s.fake.base_url()),
+        &client_json(),
+        REFRESH,
+        false,
+    );
+    let writes = |f: &FakeGmail| {
+        f.requests()
+            .iter()
+            .filter(|r| !r.starts_with("GET "))
+            .count()
+    };
     let before = writes(&s.fake);
     w.apply_step().unwrap();
     assert_eq!(writes(&s.fake), before, "the recovery only reads");
@@ -1073,7 +1089,13 @@ fn an_action_of_a_read_only_account_expires() {
     let s = setup("read-only-expiry", 5);
     let mut w = s.worker(s.account);
     w.sync().unwrap();
-    sign_in_as(&s.store, &gmail(s.fake.base_url()), &client_json(), REFRESH, false);
+    sign_in_as(
+        &s.store,
+        &gmail(s.fake.base_url()),
+        &client_json(),
+        REFRESH,
+        false,
+    );
     let now = engine::now_ms();
     let (action, _) = approved_archive_at(&s, now - 15 * 24 * 3600 * 1000);
     w.apply_step().unwrap();

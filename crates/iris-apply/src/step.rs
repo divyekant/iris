@@ -37,7 +37,11 @@ impl Step {
     /// lock, Gmail refused the token, or Gmail refused a write for a
     /// missing scope (then no other action of the step calls Gmail).
     fn stop(&mut self, token: &Token<'_>) -> bool {
-        if self.results.last().is_some_and(|(_, r)| crate::scope_refused(r)) {
+        if self
+            .results
+            .last()
+            .is_some_and(|(_, r)| crate::scope_refused(r))
+        {
             self.scope_refused = true;
         }
         self.scope_refused
