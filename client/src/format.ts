@@ -231,7 +231,7 @@ export function signIn(a: Pick<Account, "address" | "provider">): { who: string;
   if (a.provider === "gmail") return { who: "Google", command: "iris account add client.json", detail: "with the client file of this account" };
   // With no --host, the engine uses the saved server, port and user of the account.
   if (a.provider === "imap") return { who: "The mail server", command: `iris account add-imap ${shellArg(a.address)}`, detail: "and give the new password" };
-  if (a.provider === "outlook") return { who: "Microsoft", command: "iris account add-outlook <client ID>", detail: "with the application (client) ID of your app registration" };
+  if (a.provider === "outlook") return { who: "Microsoft", command: "iris account add-outlook <client ID>", detail: "with the application (client) ID of your app registration. For a single-tenant registration, also add --tenant with its directory (tenant) ID" };
   return { who: "The provider", command: "iris account --help", detail: "to see the sign-in command of this provider" };
 }
 

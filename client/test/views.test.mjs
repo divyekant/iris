@@ -831,6 +831,7 @@ test("each status answer sets the accounts that need sign-in, and the app shows 
     const o = text(await render("/src/App.svelte"));
     assert.match(o, /Microsoft stopped the sign-in/);
     assert.match(o, /iris account add-outlook (&lt;|<)client ID> with the application \(client\) ID/);
+    assert.match(o, /add --tenant with its directory \(tenant\) ID/);
     assert.doesNotMatch(o, /client\.json/);
   } finally {
     globalThis.fetch = saved;
