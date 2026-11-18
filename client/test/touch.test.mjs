@@ -19,3 +19,10 @@ test("each (hover: none) media query also matches a touch screen with a mouse", 
   }
   assert.ok(found >= 2, "the brief line and the watch list each have one");
 });
+
+test("each touch size rule matches any touch screen, also next to a mouse", () => {
+  for (const f of files) {
+    const text = readFileSync(new URL(f, dir), "utf8");
+    assert.doesNotMatch(text, /[^-]pointer:\s*coarse/, `${f}: use (any-pointer: coarse), not (pointer: coarse)`);
+  }
+});
