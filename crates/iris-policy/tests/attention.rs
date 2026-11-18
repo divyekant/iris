@@ -767,3 +767,80 @@ fn each_fact_change_gets_the_attention_of_the_policy_after_a_refresh() {
         }
     }
 }
+
+/// Property: the header and the sender rows use one address form, so each
+/// change of a sender row marks each message of that sender, whatever the
+/// case of the address in the header or in the row (issue 166).
+#[test]
+fn a_sender_change_marks_the_header_in_each_case_form() {
+    let (_d, s) = store("sender-case");
+    sql(
+        &s,
+        "INSERT INTO account(id, provider, address) VALUES (1, 'gmail', 'me@x.example')",
+        [],
+    );
+    sql(
+        &s,
+        "INSERT INTO thread(account_id, provider_id) VALUES (1, 't')",
+        [],
+    );
+    let forms = [
+        "news@shop.example",
+        "News@Shop.example",
+        "NEWS@SHOP.EXAMPLE",
+        "nEwS@sHoP.ExAmPlE",
+    ];
+    for (m, header) in forms.iter().enumerate() {
+        let id = m as i64 + 1;
+        sql(
+            &s,
+            "INSERT INTO message(id, account_id, thread_id, provider_id) VALUES (?1, 1, 1, ?2)",
+            rusqlite::params![id, format!("m{m}")],
+        );
+        // Each write path of a header: an insert, and an update.
+        if m % 2 == 0 {
+            sql(
+                &s,
+                "INSERT INTO header(message_id, from_addr) VALUES (?1, ?2)",
+                rusqlite::params![id, header],
+            );
+        } else {
+            sql(
+                &s,
+                "INSERT INTO header(message_id, from_addr) VALUES (?1, 'x@y.example')",
+                [id],
+            );
+            sql(
+                &s,
+                "UPDATE header SET from_addr = ?2 WHERE message_id = ?1",
+                rusqlite::params![id, header],
+            );
+        }
+        sql(
+            &s,
+            "INSERT INTO item(id, form, account_id, status, doc, created_at, updated_at)
+             VALUES (?1, 'feed', 1, 'new', '{}', 0, 0)",
+            [id],
+        );
+        sql(
+            &s,
+            "INSERT INTO item_source(item_id, message_id, role) VALUES (?1, ?1, 'origin')",
+            [id],
+        );
+    }
+    let all: Vec<i64> = (1..=forms.len() as i64).collect();
+    for row in forms {
+        for (step, q) in [
+            "INSERT INTO sender(address, kind) VALUES (?1, 'service')",
+            "UPDATE sender SET kind = 'hostile' WHERE address = ?1",
+            "DELETE FROM sender WHERE address = ?1",
+        ]
+        .iter()
+        .enumerate()
+        {
+            sql(&s, "DELETE FROM attention_due", []);
+            sql(&s, q, [row]);
+            assert_eq!(due(&s), all, "row {row}, step {step}");
+        }
+    }
+}
