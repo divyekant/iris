@@ -136,6 +136,9 @@ struct Store {
     write_failures: VecDeque<(u16, bool)>,
     /// A failure for the next request whose log line contains the text.
     path_failure: Option<(String, u16)>,
+    /// Each write request gets HTTP 403 `insufficientPermissions`, as when
+    /// the token has `gmail.readonly` only.
+    read_only: bool,
     /// A step that runs before the answer of the next request whose log
     /// line contains the text: a change by another process during a call.
     before_matching: Option<(String, Box<dyn FnOnce() + Send>)>,
@@ -211,6 +214,7 @@ impl Store {
             failures: VecDeque::new(),
             write_failures: VecDeque::new(),
             path_failure: None,
+            read_only: false,
             before_matching: None,
             page_limit: usize::MAX,
             edit_after_get: None,
@@ -509,6 +513,13 @@ impl FakeGmail {
         self.store.lock().unwrap().failures.extend(statuses);
     }
 
+    /// With `true`, each write request (not GET) gets HTTP 403 with the
+    /// reason `insufficientPermissions` and makes no change, as Gmail
+    /// answers a token with `gmail.readonly` only.
+    pub fn set_read_only(&self, read_only: bool) {
+        self.store.lock().unwrap().read_only = read_only;
+    }
+
     /// The next request whose log line (for example
     /// `GET /gmail/v1/users/me/drafts?q=...`) contains `text` gets this
     /// HTTP status code in place of an answer.
@@ -632,6 +643,17 @@ async fn log_and_fail(State(s): State<Shared>, req: Request, next: Next) -> Resp
             .as_ref()
             .is_some_and(|(t, _)| line.contains(t.as_str()));
         s.log.push(line);
+        if s.read_only && req.method() != axum::http::Method::GET {
+            let message = "Request had insufficient authentication scopes.";
+            let body = json!({ "error": {
+                "code": 403,
+                "message": message,
+                "errors": [{ "message": "Insufficient Permission", "domain": "global",
+                             "reason": "insufficientPermissions" }],
+                "status": "PERMISSION_DENIED",
+            }});
+            return (StatusCode::FORBIDDEN, Json(body)).into_response();
+        }
         if matched {
             let (_, c) = s.path_failure.take().expect("checked");
             return error(

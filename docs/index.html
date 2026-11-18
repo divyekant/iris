@@ -12,8 +12,10 @@
 <p>Iris is a local email tool for people and their agents. It is open source
 (Apache-2.0). Each person runs an own copy of Iris on an own computer or
 server.</p>
-<p>Iris reads Gmail with the Gmail API. Release 1 asks Google only for read
-access (<code>gmail.readonly</code>). Iris keeps its copy of the mail on the
+<p>Iris reads Gmail with the Gmail API. By default it asks Google only for read
+access (<code>gmail.readonly</code>). If the person asks for write access, it
+asks for <code>gmail.modify</code>, to apply the changes and the sends that the
+person approves. Iris keeps its copy of the mail on the
 machine of the person. If the person selects a hosted model, Iris sends mail
 data to that model provider, and the provider can keep it. See the
 <a href="privacy.html">privacy policy</a>.</p>

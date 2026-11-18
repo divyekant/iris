@@ -19,6 +19,11 @@ pub const STATE_OK: &str = "ok";
 /// `account.state` when Google refused the stored sign-in. The person must
 /// run `iris account add` again (specification 1, section 4.7).
 pub const STATE_NEEDS_SIGN_IN: &str = "needs_sign_in";
+/// `account.state` of an account that syncs, but whose sign-in does not
+/// allow Gmail writes. Its approved actions wait for
+/// `iris account add <client.json> --write`
+/// (docs/specs/2026-11-18-gmail-write-access.md).
+pub const STATE_READ_ONLY: &str = "read_only";
 
 /// The time between two incremental syncs (specification 1, section 4.6).
 pub const SYNC_EVERY: Duration = Duration::from_secs(60);
@@ -42,6 +47,8 @@ pub enum Error {
     Apply(iris_apply::Error),
     /// The account has no stored sign-in, or Google refused it.
     NeedsSignIn,
+    /// The sign-in of the account does not allow Gmail writes.
+    ReadOnly,
 }
 
 impl fmt::Display for Error {
@@ -55,6 +62,10 @@ impl fmt::Display for Error {
             Error::NeedsSignIn => {
                 f.write_str("the account needs a new sign-in: run `iris account add <client.json>`")
             }
+            Error::ReadOnly => f.write_str(
+                "the account has read access only, so its approved changes wait: run \
+                 `iris account add <client.json> --write` to let Iris change mail",
+            ),
         }
     }
 }
@@ -92,6 +103,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 struct Grant {
     client: Box<serde_json::value::RawValue>,
     refresh: String,
+    /// True if Google granted `gmail.modify`. A grant of an older Iris has
+    /// no field: it had `gmail.readonly` only.
+    #[serde(default)]
+    write: bool,
 }
 
 /// Save a completed sign-in: find the address of the mailbox, add the
@@ -110,6 +125,7 @@ pub fn save_sign_in(
     let grant = Grant {
         client,
         refresh: tokens.refresh.expose().to_string(),
+        write: tokens.write,
     };
     let plain = serde_json::to_vec(&grant).expect("a grant serializes");
     let sealed = store.seal(&plain)?;
@@ -119,7 +135,15 @@ pub fn save_sign_in(
     store.write(|tx| {
         tx.execute(
             "UPDATE account SET token = ?2, state = ?3 WHERE id = ?1",
-            (id, &sealed, STATE_OK),
+            (
+                id,
+                &sealed,
+                if tokens.write {
+                    STATE_OK
+                } else {
+                    STATE_READ_ONLY
+                },
+            ),
         )?;
         Ok(())
     })?;
@@ -128,7 +152,7 @@ pub fn save_sign_in(
 
 /// Read the sealed sign-in of `account`: the client, the refresh token, and
 /// the sealed value itself.
-fn load_grant(store: &Store, account: i64) -> Result<(Client, Secret, Vec<u8>)> {
+fn load_grant(store: &Store, account: i64) -> Result<(Client, Secret, Vec<u8>, bool)> {
     let sealed: Option<Vec<u8>> = store.read(|c| {
         Ok(
             c.query_row("SELECT token FROM account WHERE id = ?1", [account], |r| {
@@ -140,7 +164,7 @@ fn load_grant(store: &Store, account: i64) -> Result<(Client, Secret, Vec<u8>)> 
     let grant: Grant = serde_json::from_slice(&store.unseal(&sealed)?)
         .map_err(|_| iris_store::Error::Key("the stored sign-in is not valid"))?;
     let client = Client::from_json(grant.client.get().as_bytes())?;
-    Ok((client, Secret::new(grant.refresh), sealed))
+    Ok((client, Secret::new(grant.refresh), sealed, grant.write))
 }
 
 /// Set `account` to "needs sign-in", but only while `account.token` is still
@@ -153,6 +177,38 @@ pub fn mark_needs_sign_in(store: &Store, account: i64, sealed: &[u8]) -> Result<
             (account, STATE_NEEDS_SIGN_IN, sealed),
         )? > 0)
     })?)
+}
+
+/// Set `account` to "read only", but only while `account.token` is still
+/// `sealed` and the state is not "needs sign-in". Gives true if the state
+/// changed.
+pub fn mark_read_only(store: &Store, account: i64, sealed: &[u8]) -> Result<bool> {
+    Ok(store.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE account SET state = ?2 WHERE id = ?1 AND token = ?3
+             AND (state IS NULL OR state NOT IN (?2, ?4))",
+            (account, STATE_READ_ONLY, sealed, STATE_NEEDS_SIGN_IN),
+        )? > 0)
+    })?)
+}
+
+/// True if the apply of `account` may write to Gmail: its stored grant has
+/// `gmail.modify` and no Gmail scope refusal set it to "read only" since.
+/// Else it sets the state to "read only" (guarded as [`mark_read_only`])
+/// and gives `Err(changed)`.
+fn may_write(store: &Store, account: i64) -> Result<std::result::Result<(), bool>> {
+    let (_, _, sealed, write) = load_grant(store, account)?;
+    let state: Option<String> = store.read(|c| {
+        Ok(
+            c.query_row("SELECT state FROM account WHERE id = ?1", [account], |r| {
+                r.get(0)
+            })?,
+        )
+    })?;
+    if write && state.as_deref() != Some(STATE_READ_ONLY) {
+        return Ok(Ok(()));
+    }
+    Ok(Err(mark_read_only(store, account, &sealed)?))
 }
 
 /// Each account with a stored sign-in, with its state.
@@ -280,6 +336,9 @@ impl Worker {
         if !sync_accounts(&self.store)?.contains(&self.account) {
             return Err(Error::NeedsSignIn);
         }
+        // A read-only account gets only the recovery, which reads: its
+        // actions wait. The error goes out once, when the state changes.
+        let write = may_write(&self.store, self.account)?;
         let first = self.access()?;
         let (store, account, uri) = (&self.store, self.account, self.test_token_uri.as_deref());
         let (token, got, sealed) = (&mut self.token, &mut self.got, &mut self.sealed);
@@ -307,7 +366,11 @@ impl Worker {
                 renew: &mut renew,
                 refused: false,
             };
-            let step = iris_apply::step(store, self.mail.as_ref(), &mut t, account, now_ms());
+            let mail = self.mail.as_ref();
+            let step = match write {
+                Ok(()) => iris_apply::step(store, mail, &mut t, account, now_ms()),
+                Err(_) => iris_apply::recover_step(store, mail, &mut t, account),
+            };
             (step, t.refused)
         };
         // The token state comes before the result of the step: a refusal
@@ -323,6 +386,13 @@ impl Worker {
             return Err(Error::NeedsSignIn);
         }
         let step = step.map_err(Error::Apply)?;
+        if write == Err(true) {
+            return Err(Error::ReadOnly);
+        }
+        // Gmail refused a write for a missing scope: the later actions wait.
+        if step.scope_refused {
+            mark_read_only(&self.store, account, &self.sealed)?;
+        }
         Ok(Turn {
             next: step.next,
             reports: reports(&step.results),
@@ -437,7 +507,7 @@ fn access(
     got: &mut Instant,
     sealed_now: &mut Vec<u8>,
 ) -> Result<Secret> {
-    let (mut client, refresh, sealed) = load_grant(store, account)?;
+    let (mut client, refresh, sealed, _) = load_grant(store, account)?;
     // A new sign-in (`iris account add`) replaces the token in memory too.
     if let Some(t) = token {
         if sealed == *sealed_now && t.expires_at > Instant::now() + TOKEN_MARGIN {

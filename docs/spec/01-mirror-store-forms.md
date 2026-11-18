@@ -292,8 +292,15 @@ The exit criterion of release 1 is 0 differences each day for 7 days.
 
 - The person signs in with OAuth 2.0 in the browser. The engine uses the
   loopback redirect (`http://127.0.0.1:<port>/oauth/callback`) and PKCE.
-- Release 1 asks only for the scope `https://www.googleapis.com/auth/gmail.readonly`.
-  Release 2 asks for `gmail.modify` when the person turns on writes.
+- `iris account add` asks only for the scope
+  `https://www.googleapis.com/auth/gmail.readonly`.
+- `iris account add --write` asks only for
+  `https://www.googleapis.com/auth/gmail.modify`, which also allows read. An
+  account can write only if its sign-in asked for write access and Google
+  granted `gmail.modify`. A plain sign-in is read only, also when Google gives
+  an earlier `gmail.modify` grant. A read-only account syncs as before, makes no Gmail write, and has the
+  state `read_only`. Its approved actions wait for a write sign-in. See
+  `docs/specs/2026-11-18-gmail-write-access.md` (tracker item R2-17).
 - The engine stores the refresh token encrypted in the store (section 5.4),
   together with the OAuth client file that got it, in `account.token`. So each
   account has its own client, and a backup has a matching client and token.

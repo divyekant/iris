@@ -35,7 +35,7 @@ mod stop;
 
 pub use send::{release, sending, set_sending, HOLD_MS, SENT_OTHER, SENT_OTHER_END};
 pub use state::{apply_state, apply_states};
-pub use step::{step, step_clock, Step};
+pub use step::{recover_step, step, step_clock, Step};
 pub use stop::{resume, state as stop_state, stop, stop_wait, Stopped, STOPPED_CALL};
 
 use iris_policy::Mode;
@@ -155,6 +155,19 @@ pub enum Outcome {
     /// yet. The ledger row stays in `writing`, and the recovery decides
     /// later. No call is made again.
     Pending,
+}
+
+/// True if the result of one action is a Gmail scope refusal
+/// ([`iris_provider::Error::is_scope_refusal`]): the account has read
+/// access only. A failed action keeps the error as text, so this reads
+/// [`iris_provider::SCOPE_REFUSAL`], the only text of that error.
+pub fn scope_refused(r: &Result<Outcome>) -> bool {
+    match r {
+        Ok(Outcome::Failed { error, .. }) => error.contains(iris_provider::SCOPE_REFUSAL),
+        Err(Error::Provider(e)) => e.is_scope_refusal(),
+        Err(e) => e.to_string().contains(iris_provider::SCOPE_REFUSAL),
+        Ok(_) => false,
+    }
 }
 
 /// The name of the `batchModify` call in `ops`.
@@ -613,16 +626,34 @@ pub fn apply(
 
 /// The recovery of section 7.3 for each ledger row in `writing` of the
 /// account. The engine runs it at start. It holds the same locks as
-/// [`apply`].
+/// [`apply`]. Gives true if Gmail refused a call for a missing scope
+/// ([`scope_refused`]): the recovery stopped there.
 pub fn recover(
     store: &Store,
     mail: &dyn Provider,
     token: &mut Token<'_>,
     account: i64,
-) -> Result<()> {
+) -> Result<bool> {
     let _lock = lock(store)?;
     let _sync = sync_lock(store, account)?;
     let mut run = Run::new(store, mail, token, account)?;
+    run.mailbox()?;
+    run.recover_account()
+}
+
+/// [`recover`] for an account with read access only: it reads each row in
+/// `writing` and ends what the reads decide, but starts no call that never
+/// started. Such a row stays in `writing` until a write sign-in.
+pub fn recover_read_only(
+    store: &Store,
+    mail: &dyn Provider,
+    token: &mut Token<'_>,
+    account: i64,
+) -> Result<bool> {
+    let _lock = lock(store)?;
+    let _sync = sync_lock(store, account)?;
+    let mut run = Run::new(store, mail, token, account)?;
+    run.read_only = true;
     run.mailbox()?;
     run.recover_account()
 }
@@ -647,6 +678,9 @@ struct Run<'a, 'b> {
     account: i64,
     /// The messages of step 2 that have no ledger message row.
     counts: Counts,
+    /// The account has read access only (docs/specs/2026-11-18-gmail-write-access.md):
+    /// the run reads, and [`Run::calls`] makes no write call.
+    read_only: bool,
 }
 
 /// What the recovery learned of one message (section 7.3).
@@ -678,6 +712,7 @@ impl<'a, 'b> Run<'a, 'b> {
             address,
             account,
             counts: Counts::default(),
+            read_only: false,
         })
     }
 
@@ -782,6 +817,12 @@ impl<'a, 'b> Run<'a, 'b> {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?)
         })?;
+        // A read-only run starts no call: the row stays in `writing`, and
+        // the calls continue after a write sign-in. A row with no call left
+        // ends as usual.
+        if self.read_only && from < last {
+            return Ok(Outcome::Pending);
+        }
         for k in from + 1..=last {
             let messages: Vec<(i64, Option<String>)> = self.store.read(|c| {
                 let mut st = c.prepare_cached(
@@ -1042,6 +1083,12 @@ impl<'a, 'b> Run<'a, 'b> {
             let mut failure = None;
             for (id, provider_id, message_call) in page {
                 let started = message_call <= call;
+                // A read-only run starts no call, so it does not read the
+                // messages of a call that never started: the recovery after
+                // a write sign-in reads them (Run::calls).
+                if self.read_only && !started {
+                    continue;
+                }
                 let Some(provider_id) = provider_id else {
                     found.push((id, Found::Listed("gone")));
                     continue;
@@ -1098,8 +1145,9 @@ impl<'a, 'b> Run<'a, 'b> {
         self.calls(ledger, &change)
     }
 
-    /// The recovery of each row of the account in `writing`.
-    fn recover_account(&mut self) -> Result<()> {
+    /// The recovery of each row of the account in `writing`. Gives true at
+    /// the first scope refusal, and recovers no other row then.
+    fn recover_account(&mut self) -> Result<bool> {
         let account = self.account;
         let rows: Vec<i64> = self.store.read(|c| {
             let mut st = c.prepare(
@@ -1109,9 +1157,13 @@ impl<'a, 'b> Run<'a, 'b> {
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })?;
         for ledger in rows {
-            self.recover(ledger)?;
+            let r = self.recover(ledger);
+            if scope_refused(&r) {
+                return Ok(true);
+            }
+            r?;
         }
-        Ok(())
+        Ok(false)
     }
 }
 
