@@ -43,8 +43,13 @@ choose it for the account.
 
 ### 1. Connection
 
-`Imap::new(server)` takes the host, the port, the user, and a time-out. The
-`token` of each trait call is the app password. The provider keeps one
+`Imap::new(address, user, connect)` takes the account address (from the
+account row), the IMAP user, and a function that opens the TLS stream to
+the host and the port with the time-out. The values do not change for the
+life of the provider. `profile` returns the given address (section 6), so
+an account with the address `name@example.com` and the IMAP user `name`
+passes the address check of the sync. The `token` of each trait call is
+the app password. The provider keeps one
 session behind a `Mutex<Option<Session<Tls>>>`. Each call takes the lock,
 connects and signs in if there is no session, and drops the session after
 any error. The calls of one provider run one at a time.
@@ -190,16 +195,21 @@ keyword label for each keyword in the `PERMANENTFLAGS` and the `FLAGS` of
 each folder. It gives no counts.
 
 Each label has one name, with no case, so a lookup by name finds one
-label. A keyword can be named `INBOX`, and a folder can be named `Spam`
-with no `\Junk`. The fixed names are `INBOX`, `UNREAD`, `STARRED`, `SPAM`,
-`TRASH`, `SENT`, `DRAFT`, `UNSENT` and `SENT_COPY`:
+label. A keyword can be named `INBOX`, a folder can be named `Spam` with
+no `\Junk`, and two folders can be named `Work` and `work`. The fixed
+names are `INBOX`, `UNREAD`, `STARRED`, `SPAM`, `TRASH`, `SENT`, `DRAFT`,
+`UNSENT` and `SENT_COPY`. The rule:
 
-- A folder label whose name is a fixed name gets the name `<name>
-  (folder)`.
-- A keyword label whose name is a fixed name or the name of a folder label
-  gets the name `<keyword> (keyword)`.
+1. The fixed names are taken first.
+2. Then each folder label and each keyword label, in ID order (`folder:`
+   before `kw:`, then by bytes), takes its own name if that name is free,
+   with no case.
+3. Else it takes `<name> (folder)` or `<name> (keyword)`, then
+   `<name> (folder 2)`, `<name> (folder 3)` and so on, the first that is
+   free. A name that a suffix makes counts as taken too.
 
-The IDs do not change. The test `label_names_are_unique` covers both.
+So `folder:Work` is `Work` and `folder:work` is `work (folder)`. The rule
+gives the same names for the same LIST and flags. The IDs do not change. The test `label_names_are_unique` covers both.
 
 ### 5. The cursor
 
