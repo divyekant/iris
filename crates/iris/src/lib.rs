@@ -535,6 +535,20 @@ pub enum AccountCommand {
         #[arg(long)]
         write: bool,
     },
+    /// Sign in to an Outlook mailbox (Microsoft Graph) with your own app
+    /// registration in Microsoft Entra (docs/decisions/2026-11-microsoft-sign-in.md).
+    AddOutlook {
+        /// The application (client) ID of the app registration.
+        client_id: String,
+        /// `common`, or the directory (tenant) ID of a single-tenant
+        /// registration.
+        #[arg(long, default_value = "common")]
+        tenant: String,
+        /// Paste the address of the browser after the sign-in, in place of
+        /// the wait for the redirect.
+        #[arg(long)]
+        paste: bool,
+    },
     /// Add an IMAP mailbox, or give a new password to one. The command reads
     /// the password (an app password of the provider) from the terminal
     /// with no echo, or one line of standard input, and signs in once to
@@ -1360,6 +1374,14 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             };
             account_add_imap(&store, address, &server)
         }
+        Command::Account {
+            command:
+                AccountCommand::AddOutlook {
+                    client_id,
+                    tenant,
+                    paste,
+                },
+        } => account_add_outlook(&open()?, client_id, tenant, *paste),
         Command::Mirror { command } => mirror(Arc::new(open()?), command),
         Command::Mcp => mcp(engine::data_dir(cli.data.clone()).map_err(|e| e.to_string())?),
         Command::Status { json } => print(verbs::status(&open()?, *json)),
@@ -1742,22 +1764,7 @@ fn account_add(
         client.sign_in()
     }
     .map_err(|e| e.to_string())?;
-    say!(
-        "iris: open this address in a browser and sign in:\n{}",
-        sign_in.url()
-    );
-    let tokens = if paste {
-        say!("iris: then paste the address of the browser here:");
-        let mut line = String::new();
-        std::io::stdin()
-            .lock()
-            .read_line(&mut line)
-            .map_err(|e| e.to_string())?;
-        sign_in.finish(line.trim())
-    } else {
-        sign_in.wait(SIGN_IN_WAIT)
-    }
-    .map_err(|e| e.to_string())?;
+    let tokens = browser_sign_in(sign_in, paste)?;
     let (_, address) =
         engine::save_sign_in(store, &gmail, &json, &tokens).map_err(|e| e.to_string())?;
     println!(
@@ -1774,6 +1781,52 @@ fn account_add(
              ends after 7 days. Publish the app to \"In production\"."
         );
     }
+    Ok(())
+}
+
+/// The sign-in in a browser: the redirect to this machine, or with
+/// `paste` the address that the person pastes.
+fn browser_sign_in(sign_in: iris_auth::SignIn, paste: bool) -> Result<iris_auth::Tokens, String> {
+    say!(
+        "iris: open this address in a browser and sign in:\n{}",
+        sign_in.url()
+    );
+    if paste {
+        say!("iris: then paste the address of the browser here:");
+        let mut line = String::new();
+        std::io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .map_err(|e| e.to_string())?;
+        sign_in.finish(line.trim())
+    } else {
+        sign_in.wait(SIGN_IN_WAIT)
+    }
+    .map_err(|e| e.to_string())
+}
+
+/// `iris account add-outlook`: sign in to Microsoft, read the address of
+/// the mailbox, then save the account with the refresh token sealed.
+fn account_add_outlook(
+    store: &Store,
+    client_id: &str,
+    tenant: &str,
+    paste: bool,
+) -> Result<(), String> {
+    let client = test_token_uri(
+        iris_auth::Client::microsoft(client_id, tenant).map_err(|e| e.to_string())?,
+    )?;
+    // Check the Graph setting before the sign-in, so a bad setting fails
+    // before a token exists.
+    let mail = engine::outlook_provider(Vec::new()).map_err(|e| e.to_string())?;
+    let tokens = browser_sign_in(client.sign_in().map_err(|e| e.to_string())?, paste)?;
+    let address = mail
+        .profile(tokens.access.token.expose())
+        .map_err(|e| format!("Outlook: {e}"))?
+        .email_address;
+    let id = engine::save_outlook(store, &address, client_id, tenant, &tokens.refresh)
+        .map_err(|e| e.to_string())?;
+    println!("iris: added {address} (account {id})");
     Ok(())
 }
 

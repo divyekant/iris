@@ -105,6 +105,26 @@ time: the account keeps its copy of the mail.
 The engine syncs the mailbox at once, then each 60 seconds. If Google refuses
 the stored sign-in, run `iris account add` again.
 
+## Connect an Outlook account
+
+You need an app registration of your own in Microsoft Entra. The decision
+record `docs/decisions/2026-11-microsoft-sign-in.md` tells how to make one.
+
+1. Sign in with the application (client) ID of the registration:
+
+   ```bash
+   target/release/iris account add-outlook <client ID>
+   ```
+
+2. Open the address that the command prints, and sign in to Microsoft. For
+   a single-tenant registration, add `--tenant <tenant ID>`. For a browser
+   on another machine, add `--paste`.
+3. Start the engine with `iris serve`.
+
+Microsoft gives a new refresh token at each refresh. Iris encrypts each new
+token in place of the old one. If Microsoft refuses the stored sign-in, run
+`iris account add-outlook` again.
+
 Iris keeps all state in the data folder: `~/Library/Application Support/iris`
 on macOS, `~/.local/share/iris` on Linux. `--data <path>` or the variable
 `IRIS_DATA` changes the folder. The refresh token and the client file are

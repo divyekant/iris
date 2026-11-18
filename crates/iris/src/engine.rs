@@ -64,7 +64,7 @@ impl fmt::Display for Error {
             Error::Apply(e) => write!(f, "apply: {e}"),
             Error::NeedsSignIn => f.write_str(
                 "the account needs a new sign-in: run `iris account add <client.json>` (Gmail) \
-                 or `iris account add-imap` (IMAP)",
+                 or `iris account add-imap` (IMAP) or `iris account add-outlook` (Outlook)",
             ),
             Error::Setup(why) => write!(f, "account: {why}"),
             Error::ReadOnly => f.write_str(
@@ -193,6 +193,105 @@ pub fn saved_imap(store: &Store, address: &str) -> Result<Option<ImapServer>> {
     })?)
 }
 
+/// The sealed sign-in of an Outlook account: the app registration of the
+/// user and the newest refresh token (Outlook spec section 7).
+#[derive(Serialize, Deserialize)]
+struct OutlookGrant {
+    client_id: String,
+    tenant: String,
+    refresh: String,
+}
+
+/// Save a completed Microsoft sign-in of `address`: the client ID, the
+/// tenant and the refresh token sealed in `account.token`, in one write.
+/// Refused if the address has an account of another provider. Gives the
+/// account ID.
+pub fn save_outlook(
+    store: &Store,
+    address: &str,
+    client_id: &str,
+    tenant: &str,
+    refresh: &Secret,
+) -> Result<i64> {
+    let grant = OutlookGrant {
+        client_id: client_id.to_string(),
+        tenant: tenant.to_string(),
+        refresh: refresh.expose().to_string(),
+    };
+    let sealed = store.seal(&serde_json::to_vec(&grant).expect("a grant serializes"))?;
+    Ok(store.save_account_secret("outlook", address, None, &sealed, STATE_OK)?)
+}
+
+/// The Graph setting: the real API, or the fake server of a test
+/// (`IRIS_TEST_GRAPH_URL`, only `http://127.0.0.1:<port>`).
+pub fn graph_config() -> Result<iris_graph::Config> {
+    let mut config = iris_graph::Config::default();
+    if let Some(url) = std::env::var_os("IRIS_TEST_GRAPH_URL") {
+        let url = url.into_string().unwrap_or_default();
+        if !crate::is_local_url(&url) {
+            return Err(Error::Setup(
+                "IRIS_TEST_GRAPH_URL must be http://127.0.0.1:<port>".into(),
+            ));
+        }
+        config.base_url = url;
+    }
+    Ok(config)
+}
+
+/// The Outlook provider: one value for each account, which keeps the
+/// folder IDs and the category switch of its mailbox. `sent` gives the
+/// sent copies of the messages that Iris sent: only these get `SENT`
+/// (Outlook spec section 6).
+pub fn outlook_provider(sent: Vec<String>) -> Result<Box<dyn Provider>> {
+    Ok(Box::new(
+        iris_graph::Outlook::new(iris_graph::Graph::new(graph_config()?)).with_sent(sent),
+    ))
+}
+
+/// The Outlook provider of `account`: the sent copies of Iris and the
+/// stored category switch (limit #675). When Graph keeps other categories
+/// than a write asks for, the provider stores the switch with the account,
+/// so it lasts after a restart.
+fn outlook_of(store: &Arc<Store>, account: i64) -> Result<Box<dyn Provider>> {
+    let off: Option<i64> = store.read(|c| {
+        Ok(c.query_row(
+            "SELECT categories_off_at FROM account WHERE id = ?1",
+            [account],
+            |r| r.get(0),
+        )?)
+    })?;
+    let keep = store.clone();
+    let stored = move || {
+        // A failed write keeps the switch in memory; the next Differs
+        // answer after a restart stores it again.
+        let _ = keep.write(|tx| {
+            Ok(tx.execute(
+                "UPDATE account SET categories_off_at = ?2
+                 WHERE id = ?1 AND categories_off_at IS NULL",
+                (account, now_ms()),
+            )?)
+        });
+    };
+    Ok(Box::new(
+        iris_graph::Outlook::new(iris_graph::Graph::new(graph_config()?))
+            .with_sent(sent_by_iris(store, account)?)
+            .with_category_switch(off.is_some(), stored),
+    ))
+}
+
+/// The provider ID of each message that Iris sent from `account`.
+fn sent_by_iris(store: &Store, account: i64) -> Result<Vec<String>> {
+    Ok(store.read(|c| {
+        let mut st = c.prepare(
+            "SELECT sent_message FROM draft WHERE account_id = ?1 AND sent_message IS NOT NULL",
+        )?;
+        let ids = st
+            .query_map([account], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
+    })?)
+}
+
 /// The IMAP provider of the mailbox `address` on `server`: TLS to the
 /// server. For tests, `IRIS_TEST_IMAP_PLAIN` set and the host `127.0.0.1`
 /// give a plain TCP connection to a fake server. With the setting, any
@@ -226,7 +325,7 @@ pub fn imap_provider(address: &str, server: &ImapServer) -> Result<Box<dyn Provi
 /// The provider of `account`, from its row: one value for each account,
 /// which the worker keeps. `gmail` is the Gmail setting.
 pub fn provider_for(
-    store: &Store,
+    store: &Arc<Store>,
     account: i64,
     gmail: &iris_gmail::Config,
 ) -> Result<Box<dyn Provider>> {
@@ -245,8 +344,40 @@ pub fn provider_for(
             imap_provider(&address, &ImapServer { host, port, user })
         }
         ("imap", ..) => Err(Error::Setup("the IMAP account has no server".into())),
+        ("outlook", ..) => outlook_of(store, account),
         (p, ..) => Err(Error::Setup(format!("no provider {p:?} in this version"))),
     }
+}
+
+/// The sign-in in the sealed value of an account of `provider`: the
+/// client, the refresh token, and for Outlook the grant to seal again with
+/// a new refresh token.
+fn grant_of(
+    store: &Store,
+    provider: &str,
+    sealed: &[u8],
+) -> Result<(Client, Secret, Option<OutlookGrant>)> {
+    let plain = store.unseal(sealed)?;
+    let bad = || iris_store::Error::Key("the stored sign-in is not valid");
+    if provider == "outlook" {
+        let grant: OutlookGrant = serde_json::from_slice(&plain).map_err(|_| bad())?;
+        let client = Client::microsoft(&grant.client_id, &grant.tenant)?;
+        return Ok((client, Secret::new(grant.refresh.clone()), Some(grant)));
+    }
+    let grant: Grant = serde_json::from_slice(&plain).map_err(|_| bad())?;
+    let client = Client::from_json(grant.client.get().as_bytes())?;
+    Ok((client, Secret::new(grant.refresh), None))
+}
+
+/// Put `next` in `account.token`, but only while it is still `sealed`: a
+/// new sign-in in the meantime keeps its token. Gives true if it changed.
+fn replace_token(store: &Store, account: i64, sealed: &[u8], next: &[u8]) -> Result<bool> {
+    Ok(store.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE account SET token = ?3 WHERE id = ?1 AND token = ?2",
+            (account, sealed, next),
+        )? > 0)
+    })?)
 }
 
 /// Read the sealed sign-in of `account`: the client, the refresh token, and
@@ -645,26 +776,57 @@ fn access(
         *sealed_now = sealed;
         return Ok(Secret::new(password));
     }
-    let (mut client, refresh, sealed, _) = load_grant(store, account)?;
+    let sealed = sealed.ok_or(Error::NeedsSignIn)?;
     // A new sign-in (`iris account add`) replaces the token in memory too.
     if let Some(t) = token {
         if sealed == *sealed_now && t.expires_at > Instant::now() + TOKEN_MARGIN {
             return Ok(t.token.clone());
         }
     }
+    let (mut client, refresh, outlook) = grant_of(store, &provider, &sealed)?;
     if let Some(uri) = test_token_uri {
         client = client.with_test_token_uri(uri)?;
     }
-    match client.refresh(&refresh) {
-        Ok(t) => {
-            let new = t.token.clone();
-            *token = Some(t);
+    let refreshed = if outlook.is_some() {
+        client.refresh_tokens(&refresh)
+    } else {
+        client.refresh(&refresh).map(|access| iris_auth::Refreshed {
+            access,
+            refresh: None,
+        })
+    };
+    match refreshed {
+        Ok(r) => {
+            let mut kept = sealed;
+            // Microsoft gives a new refresh token at each refresh (Outlook
+            // spec section 7): seal it in place of the old one. The old one
+            // stays valid, so a crash before this write loses nothing.
+            if let (Some(grant), Some(new)) = (outlook, r.refresh) {
+                if new.expose() != grant.refresh {
+                    let grant = OutlookGrant {
+                        refresh: new.expose().to_string(),
+                        ..grant
+                    };
+                    let next =
+                        store.seal(&serde_json::to_vec(&grant).expect("a grant serializes"))?;
+                    if !replace_token(store, account, &kept, &next)? {
+                        // A new sign-in replaced the token: use this access
+                        // token once, and read the new sign-in next time.
+                        *token = None;
+                        *sealed_now = kept;
+                        return Ok(r.access.token);
+                    }
+                    kept = next;
+                }
+            }
+            let new = r.access.token.clone();
+            *token = Some(r.access);
             *got = Instant::now();
-            *sealed_now = sealed;
+            *sealed_now = kept;
             Ok(new)
         }
-        // Google refused the refresh token: only a new sign-in helps. A
-        // network or server error keeps the account, and the next turn
+        // The provider refused the refresh token: only a new sign-in helps.
+        // A network or server error keeps the account, and the next turn
         // tries again (specification 1, section 4.7).
         Err(iris_auth::Error::Revoked) => {
             mark_needs_sign_in(store, account, &sealed)?;
