@@ -166,7 +166,14 @@
   };
 
   let signal = $derived(signals(brief.signals, now));
-  let codes = $derived(signal.codes);
+  // The code cards with an open Dismiss (held, sending or failed) stay after their expiry, so the Undo or the result does not go.
+  let kept: Item[] = $state([]);
+  const keep = (item: Item, on: boolean) => {
+    const has = kept.some((k) => k.id === item.id);
+    if (on && !has) kept = [...kept, item];
+    else if (!on && has) kept = kept.filter((k) => k.id !== item.id);
+  };
+  let codes = $derived([...signal.codes, ...kept.filter((k) => !signal.codes.some((c) => c.id === k.id))]);
   // A signal leaves at its expiry. The date and the due words change at midnight.
   // Keep `now` fresh until the first of the two.
   let until = $derived([signal.next, nextDay(now)].filter((t): t is string => !!t).sort((a, b) => Date.parse(a) - Date.parse(b))[0]);
@@ -243,7 +250,7 @@
 
 {#if codes.length}
   <div class="codes">
-    {#each codes as item (item.id)}<Code {item} {now} ondone={done} delay={hold} />{/each}
+    {#each codes as item (item.id)}<Code {item} {now} ondone={done} onkeep={keep} delay={hold} />{/each}
   </div>
 {/if}
 

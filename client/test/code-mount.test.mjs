@@ -70,3 +70,23 @@ test("a refused Dismiss shows the reason; with no ondone, a code has no Dismiss"
     plain.destroy();
   }
 });
+
+test("in the brief, a code that expires during the Undo time keeps its held card, its Undo and its request", async () => {
+  const { load } = await import("./mount.mjs");
+  const fx = await load("/dev/fixtures.ts");
+  const asked = serve();
+  const code = { ...signal, expires: new Date(Date.now() + 300).toISOString() };
+  const brief = { ...fx.brief, signals: { count: 1, items: [code] } };
+  const view = await mount("/src/views/Brief.svelte", { watches: [], proposed: null, questions: [], brief, now: new Date(), poll: 0, hold: 1200 });
+  try {
+    button(view, "Dismiss").click();
+    view.flushSync();
+    await new Promise((r) => setTimeout(r, 600)); // The code expired.
+    view.flushSync();
+    assert.ok(button(view, "Undo"), "the held card and its Undo stay after the expiry");
+    await until(() => asked.some(([url]) => url === "/api/items/s-901/dismiss"));
+    await until(() => !/Dismissed\. It leaves your brief\./.test(text(view.target)));
+  } finally {
+    view.destroy();
+  }
+});

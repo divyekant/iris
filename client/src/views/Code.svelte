@@ -17,16 +17,20 @@
     item,
     now: start = new Date(),
     ondone,
+    onkeep,
     delay = HOLD,
-  }: { item: Item; now?: Date; ondone?: (id: string) => void; delay?: number } = $props();
+  }: { item: Item; now?: Date; ondone?: (id: string) => void; onkeep?: (item: Item, keep: boolean) => void; delay?: number } = $props();
   // svelte-ignore state_referenced_locally
   let now = $state(start);
   let copied = $state<"" | "done" | "failed">("");
 
   $effect(() => (item.expires ? watch(item.expires, (d) => (now = d)) : undefined));
 
-  type Phase = { at: "idle" } | { at: "held" } | { at: "sending" } | { at: "failed"; why: string; known: boolean };
-  let phase: Phase = $state({ at: "idle" });
+  type Phase = { at: "idle" } | { at: "held" } | { at: "sending" } | { at: "done" } | { at: "failed"; why: string; known: boolean };
+  let phase = $state<Phase>({ at: "idle" });
+  // A held, sending or failed Dismiss asks the brief to keep this card after the expiry, so its Undo or result stays.
+  let open = $derived(phase.at === "held" || phase.at === "sending" || phase.at === "failed");
+  $effect(() => onkeep?.(item, open));
   let pending: ReturnType<typeof hold> | undefined;
 
   function dismiss() {
@@ -45,6 +49,7 @@
     phase = { at: "sending" };
     try {
       await post(`items/${encodeURIComponent(item.id)}/dismiss`, {});
+      phase = { at: "done" };
       ondone?.(item.id);
     } catch (error) {
       const status = (error as { status?: number }).status ?? 0;
@@ -63,7 +68,9 @@
 </script>
 
 <!-- The held or failed Dismiss shows also after the expiry, so its Undo or its result does not go. -->
-{#if phase.at !== "idle"}
+{#if phase.at === "done"}
+  <!-- Dismissed: the card leaves; the brief loads again. -->
+{:else if open}
   <div class="code said" class:error={phase.at === "failed"} role="status">
     {#if phase.at === "failed"}
       <span class="why">{phase.known ? `Iris did not record it: ${phase.why}` : "Iris does not know if it recorded the change. Reload the page to see."}</span>
