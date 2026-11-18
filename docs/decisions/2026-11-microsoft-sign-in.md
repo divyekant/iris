@@ -28,8 +28,11 @@ Each user makes an own app registration, as for Google:
 2. The account type is "Accounts in any organizational directory and
    personal Microsoft accounts". With it, Iris uses the tenant `common`,
    for an Outlook.com account and for a work or school account [3].
-3. Iris asks for `offline_access`, `Mail.ReadWrite`, `Mail.Send` and
-   `User.Read`, with PKCE (S256) [4][5].
+3. Iris asks for `offline_access`, `Mail.ReadWrite`, `Mail.Send`,
+   `MailboxSettings.Read` and `User.Read`, with PKCE (S256) [4][5].
+   `MailboxSettings.Read` reads the category list of the mailbox
+   (`/me/outlook/masterCategories`), which the label list of each sync
+   needs.
 4. The user gives Iris the application (client) ID and the tenant. Iris
    accepts only `common` or a tenant ID (a GUID). The host of the endpoints
    is fixed in the code: `login.microsoftonline.com`.
@@ -42,7 +45,8 @@ The code (`iris_auth::Client::microsoft`) does these checks:
   ignores the port of a `localhost` redirect [2]. The listener binds
   `127.0.0.1` only.
 - Each code exchange and each refresh that names a `scope` must hold
-  `Mail.ReadWrite` and `Mail.Send`. Else the sign-in fails with
+  `Mail.ReadWrite`, `Mail.Send` and `MailboxSettings.Read`. Else the
+  sign-in fails with
   `Error::PermissionMissing`, which names the missing permission.
 - Each refresh gives a new refresh token [6].
   `Client::refresh_tokens` returns it, and the caller seals it in place of
@@ -96,7 +100,8 @@ Do not make a client secret. Iris does not use one.
 
 1. Open API permissions, Add a permission, Microsoft Graph, Delegated
    permissions.
-2. Select `Mail.ReadWrite`, `Mail.Send`, `User.Read` and `offline_access`.
+2. Select `Mail.ReadWrite`, `Mail.Send`, `MailboxSettings.Read`,
+   `User.Read` and `offline_access`.
 3. Click Add permissions.
 
 A personal account gives consent at the first sign-in. A work or school

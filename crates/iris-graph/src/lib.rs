@@ -20,6 +20,9 @@ use std::io::{Read, Write};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+mod provider;
+pub use provider::{label_ids, label_list, Outlook};
+
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
@@ -35,7 +38,7 @@ pub const RAW_LIMIT: u64 = 150 * 1024 * 1024;
 const ANSWER_LIMIT: u64 = 16 * 1024 * 1024;
 /// The fields of a message that a delta query gives.
 const SELECT: &str =
-    "id,conversationId,parentFolderId,categories,isRead,flag,isDraft,receivedDateTime,internetMessageId";
+    "id,conversationId,parentFolderId,categories,isRead,flag,isDraft,receivedDateTime,createdDateTime,internetMessageId";
 /// The well-known folders that the mirror maps (spec section 6).
 pub const WELL_KNOWN: [&str; 7] = [
     "inbox",
@@ -83,7 +86,7 @@ pub enum Error {
     /// HTTP 404: Graph does not have the item.
     NotFound,
     /// Graph does not accept the stored delta link any more (HTTP 410, or
-    /// another 4xx of a stored link). Start the folder again with no link.
+    /// another 4xx of a stored link). The provider gives `HistoryExpired`: a full resync.
     DeltaReset,
     /// Another HTTP error. `code` is the code of the Graph error body.
     Api {
@@ -133,6 +136,9 @@ impl Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// A page of [`Graph::all_mail`]: (ID, conversation ID) pairs and the next link.
+pub type AllMail = (Vec<(String, String)>, Option<String>);
 
 /// The account of the token: `GET /me`.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -192,6 +198,9 @@ pub struct Message {
     pub is_draft: bool,
     /// ISO 8601 in UTC, for example `2026-11-17T10:00:00Z`.
     pub received_date_time: Option<String>,
+    /// ISO 8601 in UTC: when the item was made, for a draft too.
+    #[serde(default)]
+    pub created_date_time: Option<String>,
     pub internet_message_id: Option<String>,
     /// The version of the message. A category write sends it in `If-Match`.
     #[serde(rename = "@odata.etag")]
@@ -340,15 +349,7 @@ impl Graph {
     /// Each mail folder of the mailbox, the child folders at each depth
     /// included, parents before children (spec section 2).
     pub fn folders(&self, token: &str) -> Result<Vec<Folder>> {
-        let mut known = Vec::new();
-        for name in WELL_KNOWN {
-            match self.json::<Folder>(token, &self.url(&format!("/me/mailFolders/{name}")), false) {
-                Ok(f) => known.push((f.id, name)),
-                // A mailbox can lack a well-known folder, for example `archive`.
-                Err(Error::NotFound) => {}
-                Err(e) => return Err(e),
-            }
-        }
+        let known = self.well_known(token)?;
         let mut all: Vec<Folder> = Vec::new();
         let mut parents = vec![None::<String>];
         while let Some(parent) = parents.pop() {
@@ -381,9 +382,84 @@ impl Graph {
         Ok(all)
     }
 
+    /// The ID of each well-known folder of [`WELL_KNOWN`] that the mailbox
+    /// has: one call `GET /me/mailFolders/{name}` each.
+    pub fn well_known(&self, token: &str) -> Result<Vec<(String, &'static str)>> {
+        let mut known = Vec::new();
+        for name in WELL_KNOWN {
+            match self.json::<Folder>(token, &self.url(&format!("/me/mailFolders/{name}")), false) {
+                Ok(f) => known.push((f.id, name)),
+                // A mailbox can lack a well-known folder, for example `archive`.
+                Err(Error::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(known)
+    }
+
+    /// The name of each category of the master list of the mailbox:
+    /// `GET /me/outlook/masterCategories`, page by page. The token needs
+    /// `MailboxSettings.Read`.
+    pub fn categories(&self, token: &str) -> Result<Vec<String>> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Category {
+            display_name: String,
+        }
+        #[derive(Deserialize)]
+        struct Page {
+            value: Vec<Category>,
+            #[serde(rename = "@odata.nextLink")]
+            next_link: Option<String>,
+        }
+        let mut url = self.url("/me/outlook/masterCategories");
+        let mut names = Vec::new();
+        loop {
+            let page: Page = self.json(token, &url, false)?;
+            names.extend(page.value.into_iter().map(|c| c.display_name));
+            match page.next_link {
+                Some(next) => url = self.checked(&next)?,
+                None => return Ok(names),
+            }
+        }
+    }
+
+    /// One page of all mail of all folders, newest first:
+    /// `GET /me/messages` with `$orderby=receivedDateTime desc`. With
+    /// `link`, call that `nextLink`. Gives (ID, conversation ID) pairs and
+    /// the next link.
+    pub fn all_mail(&self, token: &str, link: Option<&str>) -> Result<AllMail> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Item {
+            id: String,
+            conversation_id: String,
+        }
+        #[derive(Deserialize)]
+        struct Page {
+            value: Vec<Item>,
+            #[serde(rename = "@odata.nextLink")]
+            next_link: Option<String>,
+        }
+        let url = match link {
+            Some(l) => self.checked(l)?,
+            None => self.url(&format!(
+                "/me/messages?$select=id,conversationId&$orderby=receivedDateTime%20desc&$top={PAGE_SIZE}"
+            )),
+        };
+        let page: Page = self.json(token, &url, true)?;
+        let next = page.next_link.map(|n| self.checked(&n)).transpose()?;
+        let items = page
+            .value
+            .into_iter()
+            .map(|i| (i.id, i.conversation_id))
+            .collect();
+        Ok((items, next))
+    }
+
     /// One page of the message delta of `folder`. With no `link`, start a new
     /// round. With a link, call the stored `nextLink` or `deltaLink`.
-    /// [`Error::DeltaReset`] means: start the folder again with no link.
+    /// [`Error::DeltaReset`] means: the provider gives `HistoryExpired`, and the sync does a full resync.
     pub fn delta(&self, token: &str, folder: &str, link: Option<&str>) -> Result<DeltaPage> {
         let (url, stored) = match link {
             Some(l) => (self.checked(l)?, true),
@@ -857,10 +933,10 @@ mod tests {
     }
 
     /// A small random number source for the property test.
-    struct Rng(u64);
+    pub(crate) struct Rng(pub(crate) u64);
 
     impl Rng {
-        fn below(&mut self, n: usize) -> usize {
+        pub(crate) fn below(&mut self, n: usize) -> usize {
             self.0 = self
                 .0
                 .wrapping_mul(6364136223846793005)
@@ -868,7 +944,7 @@ mod tests {
             ((self.0 >> 33) % n as u64) as usize
         }
 
-        fn pick<'a>(&mut self, from: &[&'a str]) -> &'a str {
+        pub(crate) fn pick<'a>(&mut self, from: &[&'a str]) -> &'a str {
             from[self.below(from.len())]
         }
     }

@@ -35,9 +35,11 @@ pub const GOOGLE_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 /// segment changes, and Iris accepts only `common` or a GUID there.
 pub const MICROSOFT_LOGIN: &str = "https://login.microsoftonline.com";
 /// The scopes of an Outlook account (Outlook spec section 7).
-pub const MICROSOFT_SCOPE: &str = "offline_access https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read";
+pub const MICROSOFT_SCOPE: &str = "offline_access https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/MailboxSettings.Read https://graph.microsoft.com/User.Read";
 /// The Graph permissions that each token answer must hold.
-const MICROSOFT_NEEDED: [&str; 2] = ["Mail.ReadWrite", "Mail.Send"];
+/// `MailboxSettings.Read` reads the category list of the mailbox, which the
+/// label list of each sync needs.
+const MICROSOFT_NEEDED: [&str; 3] = ["Mail.ReadWrite", "Mail.Send", "MailboxSettings.Read"];
 
 /// The path of the loopback redirect.
 pub const CALLBACK: &str = "/oauth/callback";
@@ -780,7 +782,7 @@ mod tests {
     }
 
     /// Property: a Microsoft token answer passes only if it names
-    /// Mail.ReadWrite and Mail.Send, bare or with the Graph prefix, in any
+    /// Mail.ReadWrite, Mail.Send and MailboxSettings.Read, bare or with the Graph prefix, in any
     /// case; else the first missing one is named.
     #[test]
     fn generated_scope_strings() {
@@ -796,6 +798,10 @@ mod tests {
             "Mail.SendX",
             "https://evil.example/Mail.Send",
             "graph.microsoft.com/Mail.Send",
+            "MailboxSettings.Read",
+            "mailboxsettings.read",
+            "https://graph.microsoft.com/MailboxSettings.Read",
+            "MailboxSettings.ReadWrite",
             "User.Read",
             "offline_access",
             "openid",
@@ -804,7 +810,7 @@ mod tests {
         let c = Client::microsoft("0a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d", "common").unwrap();
         let mut rng = Rng(9);
         for _ in 0..10_000 {
-            let n = rng.below(6);
+            let n = rng.below(8);
             let scope: Vec<&str> = (0..n).map(|_| words[rng.below(words.len())]).collect();
             let scope = scope.join(" ");
             let has = |p: &str| {
@@ -814,7 +820,7 @@ mod tests {
                     t == p || t == format!("https://graph.microsoft.com/{p}")
                 })
             };
-            let expect = ["Mail.ReadWrite", "Mail.Send"]
+            let expect = ["Mail.ReadWrite", "Mail.Send", "MailboxSettings.Read"]
                 .into_iter()
                 .find(|p| !has(p));
             let answer = TokenAnswer {

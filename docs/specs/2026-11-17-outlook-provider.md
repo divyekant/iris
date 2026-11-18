@@ -37,9 +37,9 @@ on a real Outlook mailbox on dk's Mac, after R1-07 ends.
 - Calendar, contacts and tasks.
 - The Exchange archive mailbox. A move to the archive mailbox changes the
   immutable ID (assumption A3), so the mirror sees a delete.
-- Category colors and the category list of the mailbox
-  (`outlook/masterCategories`). That call needs one more scope
-  (`MailboxSettings.Read`). The mirror reads the categories of each message.
+- Category colors. R6-14 reads the names of the category list
+  (`outlook/masterCategories`) for the label list, with the scope
+  `MailboxSettings.Read` (section 7).
 - One shared Iris app registration. See "Options not chosen".
 
 ## Design
@@ -159,13 +159,66 @@ flat.
 A token that Graph does not accept any more gives HTTP 410, or another 4xx
 with a code such as `syncStateNotFound` (A1). The client gives
 `Error::DeltaReset` for 410 and for each 4xx of a call with a stored link,
-except 401, 403 and 429. The caller then starts that folder again with no
-link: a full resync of one folder. A round with no link lists only the
-messages that are in the folder now, so a message that went away while
-the link was expired is not in it. After such a full round, each mirror
-message of that folder that the round did not list counts as `Removed`,
-and gets the same read by ID as above: 404 means gone, a message means a
-move to its new folder.
+except 401, 403 and 429. The provider gives `HistoryExpired` for it, and
+also when a folder of the cursor is not in the folder list any more. The
+sync then does the full resync of spec 1 section 4.4 for the whole
+account: the list, the read by ID of each mirror message that the list
+does not have (404 means gone, a message gives its folder now), and the
+label lists. A round with no link lists only the messages that are in the
+folder now, so a full resync is the only path that finds a message that
+went away while a link was expired. Known limit with its own issue: one
+expired link costs a resync of all folders.
+
+### 3.1 The provider calls (R6-14)
+
+`iris_graph::Outlook` implements `iris_provider::Provider` on these
+rules:
+
+- The cursor is JSON: `{"v":1,"links":{"<folder id>":"<deltaLink>"}}`.
+  `profile` gives the cursor with no links, because Graph has no cheap
+  cursor of now. The next `changes` then runs a new round of each
+  folder: each message gives `Change::Added` with its labels now. Known
+  limit with its own issue: a message that is deleted after the list of
+  a first sync or a full resync, and before its first `changes`, stays in
+  the mirror until the next verify finds it (an extra message starts a
+  full resync).
+- `changes` gives one delta page of one folder for each call. The page
+  token holds the folder IDs of the call, the folder of the next page,
+  its `nextLink` and the delta links of the folders whose round ended.
+  Each `Removed` gets the read by ID in the same call: a message gives
+  `Change::Added` with its labels now (a move), 404 gives
+  `Change::Deleted`. The last page gives the new cursor, so the sync
+  stores all links in one transaction with the last changes.
+- `messages` with no label lists all mail of all folders, newest first:
+  `GET /me/messages` with `$orderby=receivedDateTime desc`, so that the
+  first sync fetches the newest threads first (spec 1 section 4.2). The
+  page token is the `nextLink`. Assumption, evidence `pending` (release
+  gate): this list has the messages of each folder. If it misses one,
+  the first `changes` after the first sync lists it in the new round of
+  its folder and the sync fetches it then.
+- `messages` with a folder label lists that one folder with a delta
+  round with no link. For another label (`UNREAD`, `STARRED`, a
+  category) it reads all folders that way and keeps the messages that
+  have the label. These lists are in folder order; the label lists of
+  the sync need no order. Known limit with its own issue: each such
+  label list of a full resync or a verify reads the whole mailbox.
+- `labels` gives the system labels, the folder labels of section 6 and
+  one label for each category of the master list
+  (`/me/outlook/masterCategories`, page by page). Known limit with its own issue: a
+  category that a message has, but the master list does not, is not
+  mirrored.
+- `minimal` and `raw` read the message by ID for its labels, its thread
+  and its time. `raw` then streams `$value`. The time is
+  `receivedDateTime`, else `createdDateTime` (a draft can have no
+  received time). A message with neither gives `Error::Decode`: the sync
+  records a failure of that message, never a false date.
+- One `Outlook` value serves one mailbox: it keeps the IDs of the
+  well-known folders after the first read.
+- `SENT` is never given (section 6). R6-16 decides how the copies that
+  Iris sent get it.
+- The write calls and the reads of the send (`metadata`,
+  `messages_with_id`, `drafts_with_id`, `draft_raw`) give a definite
+  rejection (`Api` 400 `notSupported`) before any request, until R6-15.
 
 ### 4. Raw message
 
@@ -384,9 +437,13 @@ categories are not moves, and work in each folder. R6-10 keeps the same rule for
     only for the accounts of that tenant. Microsoft refuses it at
     `common`. A personal account cannot use it.
 - Scopes: `offline_access https://graph.microsoft.com/Mail.ReadWrite
-  https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read`.
+  https://graph.microsoft.com/Mail.Send
+  https://graph.microsoft.com/MailboxSettings.Read
+  https://graph.microsoft.com/User.Read`. `MailboxSettings.Read` reads
+  the category list for the label list (section 3.1).
   The code exchange and each refresh that names a `scope` check that it has
-  both `Mail.ReadWrite` and `Mail.Send` (A10). If one is missing, the
+  `Mail.ReadWrite`, `Mail.Send` and `MailboxSettings.Read` (A10). If one
+  is missing, the
   sign-in fails with an error that names the missing permission, and the
   account does not start.
 - PKCE with S256 and a random `state`.
@@ -450,7 +507,7 @@ reconciles with reads: not JSON, another shape, another state, above
 | A hidden child folder | listed, its messages synced | fake hidden child |
 | A received message moved into Drafts (`isDraft` false) | label `Folders/Drafts`, no `DRAFT` | fake move to `drafts` |
 | A received message moved into Sent Items | label `Folders/Sent Items`, no `SENT`; the sender axis treats it as received mail | fake move to `sentitems` |
-| An expired delta link | `Error::DeltaReset`, a full round of that folder | fake expiry |
+| An expired delta link | `Error::DeltaReset`, then `HistoryExpired`: a full resync of the account | fake expiry, `iris-sync` test `an_expired_link_starts_a_full_resync` |
 | 429 or 503 with `Retry-After` on a read | wait for it, then call again; a write never calls again | fake with `Retry-After` |
 | A crash in a round | the last stored link is the start; Graph replays changes, the mirror applies each one again with the same result | R6-10 part |
 
@@ -587,8 +644,8 @@ section 7.3). The caller reconciles with reads only.
 7. `set_categories` with an old etag gets 412 from the fake and changes
    nothing. A changed list makes it red.
 8. A Microsoft sign-in against a fake token endpoint gives a new refresh
-   token on refresh. A missing `Mail.ReadWrite` or `Mail.Send` scope gives
-   an error.
+   token on refresh. A missing `Mail.ReadWrite`, `Mail.Send` or
+   `MailboxSettings.Read` scope gives an error.
 9. After R6-10: an Outlook account syncs with zero differences against the
    fake, also after a move, a delete and an expired link.
 
@@ -626,5 +683,9 @@ Each step is one card and one PR. The board has each card with its
    R6-11.
 4. R6-13: the Microsoft sign-in in `iris-auth`, and the decision record
    with the app registration steps for dk. Depends on R6-04.
-5. R6-14: the provider implementation and the engine wiring. Depends on
+5. R6-14: the sync side of the provider (section 3.1). Depends on
    R6-12, R6-13 and R6-10.
+6. R6-15: the write and send side of the provider. Depends on R6-14.
+7. R6-16: the engine wiring (account kind, sign-in, token storage,
+   `Authentication-Results`, `SENT` of the copies that Iris sent).
+   Depends on R6-15.

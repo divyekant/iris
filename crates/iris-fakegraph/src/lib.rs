@@ -228,6 +228,7 @@ impl Store {
             "@odata.etag": etag(m),
             "sentDateTime": if m.draft { Value::Null } else { date.clone().into() },
             "receivedDateTime": date,
+            "createdDateTime": date,
             "internetMessageId": format!("<{}>", m.mid),
         })
     }
@@ -468,6 +469,7 @@ impl FakeGraph {
 fn router(store: Shared) -> Router {
     Router::new()
         .route("/v1.0/me", get(me))
+        .route("/v1.0/me/outlook/masterCategories", get(categories))
         .route("/v1.0/me/mailFolders", get(top_folders))
         .route("/v1.0/me/mailFolders/{id}", get(folder))
         .route("/v1.0/me/mailFolders/{id}/childFolders", get(child_folders))
@@ -590,6 +592,22 @@ fn page_size(h: &HeaderMap, limit: usize) -> usize {
 
 async fn me() -> Response {
     Json(json!({ "id": "fake-user", "mail": OWNER, "userPrincipalName": OWNER })).into_response()
+}
+
+/// The master list: each category of a message that is not deleted.
+async fn categories(State(s): State<Shared>) -> Response {
+    let s = s.lock().unwrap();
+    let names: std::collections::BTreeSet<&str> = s
+        .msgs
+        .iter()
+        .filter(|m| !m.deleted)
+        .flat_map(|m| m.categories.iter().map(String::as_str))
+        .collect();
+    let value: Vec<Value> = names
+        .iter()
+        .map(|n| json!({ "id": format!("cat-{n}"), "displayName": n, "color": "preset0" }))
+        .collect();
+    Json(json!({ "value": value })).into_response()
 }
 
 fn folder_json(s: &Store, f: &(&str, &str, Option<&str>, Option<&str>)) -> Value {
@@ -922,6 +940,32 @@ async fn by_message_id(
     h: HeaderMap,
 ) -> Response {
     let s = s.lock().unwrap();
+    let skip: usize = q.get("$skip").and_then(|t| t.parse().ok()).unwrap_or(0);
+    if !q.contains_key("$filter")
+        && q.get("$orderby").map(String::as_str) == Some("receivedDateTime desc")
+    {
+        // All mail of all folders, newest first.
+        let mut all: Vec<usize> = (0..s.msgs.len()).filter(|&i| !s.msgs[i].deleted).collect();
+        all.sort_by_key(|&i| (std::cmp::Reverse(s.msgs[i].date), i));
+        let size = page_size(&h, s.page_limit);
+        let value: Vec<Value> = all
+            .iter()
+            .skip(skip)
+            .take(size)
+            .map(|&i| s.message_json(i))
+            .collect();
+        let mut body = json!({ "value": value });
+        if skip + size < all.len() {
+            let select = q.get("$select").map(String::as_str).unwrap_or("");
+            let rest = format!(
+                "/me/messages?$select={}&$orderby=receivedDateTime%20desc&$skip={}",
+                escape(select),
+                skip + size
+            );
+            body["@odata.nextLink"] = s.link(&base(&h), &rest).into();
+        }
+        return Json(body).into_response();
+    }
     let filter = q.get("$filter").map(String::as_str).unwrap_or("");
     let Some(lit) = filter
         .strip_prefix("internetMessageId eq '")
@@ -934,7 +978,6 @@ async fn by_message_id(
         );
     };
     let want = lit.replace("''", "'");
-    let skip: usize = q.get("$skip").and_then(|t| t.parse().ok()).unwrap_or(0);
     let all: Vec<usize> = (0..s.msgs.len())
         .filter(|&i| !s.msgs[i].deleted && format!("<{}>", s.msgs[i].mid) == want)
         .collect();

@@ -512,7 +512,7 @@ fn empty_tokens_are_refused() {
 
 const APP_ID: &str = "00000000-1111-2222-3333-444444444444";
 const MS_SCOPE: &str =
-    "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read";
+    "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/MailboxSettings.Read https://graph.microsoft.com/User.Read";
 
 fn ms_client(token_uri: &str) -> Client {
     Client::microsoft(APP_ID, "common")
@@ -616,8 +616,16 @@ fn a_missing_mail_permission_is_named() {
         ),
         ("Mail.Read Mail.Send", Some("Mail.ReadWrite")),
         ("", Some("Mail.ReadWrite")),
+        // The permissions of the old scope: the category list cannot be read.
+        (
+            "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read",
+            Some("MailboxSettings.Read"),
+        ),
         // Without the resource prefix, and in another case: accepted.
-        ("mail.readwrite MAIL.SEND User.Read openid profile", None),
+        (
+            "mail.readwrite MAIL.SEND mailboxsettings.read User.Read openid profile",
+            None,
+        ),
         (MS_SCOPE, None),
     ];
     for (scope, missing) in cases {
