@@ -218,7 +218,7 @@
     margin: var(--space-2) 0 0;
     color: var(--color-text-muted);
   }
-  @media (max-width: 600px), (pointer: coarse) {
+  @media (max-width: 600px), (any-pointer: coarse) {
     .outline {
       min-height: var(--size-touch);
     }

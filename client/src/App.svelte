@@ -2,6 +2,7 @@
   import { access } from "./access.svelte.ts";
   import { followSignIn, get, loadBrief, loadOutbox, own, type Changeset, type GatePage, type HandledPage, type LedgerPage, type JobDetail, type JobPage, type MatterList, type MatterView, type Item as ItemData, type Message as MessageData, type Page, type Policy, type ReplyStart, type Status } from "./api";
   import { home } from "./format";
+  import { pageSize } from "./jobs";
   import type { Measures as MeasuresData } from "./measures";
   import { NAV, parse, SECTIONS, type Route } from "./route";
   import Setup from "./views/Setup.svelte";
@@ -194,7 +195,7 @@
         <Review changesets={open.changesets} mode={status.mode === "observe" ? "observe" : "apply"} />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "jobs"}
-      {#await Promise.all(JOB_STATES.map((state) => get<JobPage>(`jobs?state=${state}&limit=${state === "done" ? 20 : 50}`))) then [needs_you, working, waiting, done]}
+      {#await Promise.all(JOB_STATES.map((state) => get<JobPage>(`jobs?state=${state}&limit=${pageSize(state)}`))) then [needs_you, working, waiting, done]}
         <Jobs pages={{ needs_you, working, waiting, done }} />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "job"}
@@ -338,7 +339,7 @@
     color: var(--color-text-muted);
   }
   /* A touch screen: each control is at least the size of a finger tip. */
-  @media (max-width: 600px), (pointer: coarse) {
+  @media (max-width: 600px), (any-pointer: coarse) {
     main :global(:is(button, summary, select, input:not([type="checkbox"], [type="radio"]))) {
       min-width: var(--size-touch);
       min-height: var(--size-touch);

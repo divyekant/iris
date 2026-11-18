@@ -40,6 +40,13 @@
   let gone = $derived(file.state === "missing" && policy.version !== null);
   // Spec 2 section 6.3: a change from here waits until the file on disk is the active policy.
   let blocked = $derived(file.state === "changed" || file.state === "invalid" || gone || policy.error !== null);
+  // An open mode choice or remove question exists only while a change can be sent:
+  // each path that makes the screen blocked (a poll, a refused send) closes it.
+  $effect(() => {
+    if (!blocked) return;
+    asking = null;
+    choice = policy.mode;
+  });
   let empty = $derived(file.state === "changed" && file.mode === policy.mode && !file.added.length && !file.removed.length && !file.changed.length);
 
   async function send(path: string, body: unknown) {

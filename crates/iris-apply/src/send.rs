@@ -307,15 +307,40 @@ fn created(
 ) -> Result<Outcome> {
     let (ops, post) = row(run.store, ledger)?;
     let post: Stored = serde_json::from_str(&post.expect("a create has a post")).expect("ours");
-    let raw = compose(&run.address, &ops, &post);
     let Ops::Create {
-        message_id, hash, ..
+        message_id,
+        hash,
+        date,
+        ..
     } = &ops
     else {
         unreachable!("a create row")
     };
-    let (account, address) = (run.account, run.address.clone());
-    let _ = address;
+    // Gmail sets its own Message-ID on each draft (spec, assumption 3).
+    // Read the draft back and keep that ID, so that the release check and
+    // the send recovery use it. If the read fails, or the draft has other
+    // content, the row keeps the ID of Iris, and the first release denies
+    // the send and refreshes the row from Gmail (section 4.1). Outlook
+    // keeps the ID of Iris, so it gets no read.
+    let gmail_id = if run.mail.sets_draft_message_id() {
+        run.call(|g, t| g.draft_raw(t, provider_id))
+            .ok()
+            .and_then(|d| d.raw)
+            .and_then(|raw| iris_compose::read(&raw, &run.address))
+            .filter(|r| iris_compose::hash(&r.content, r.reply.as_ref()) == *hash)
+            .map(|r| r.message_id)
+    } else {
+        None
+    };
+    let message_id = gmail_id.as_ref().unwrap_or(message_id);
+    let raw = iris_compose::compose(
+        &run.address,
+        message_id,
+        &post.content,
+        post.reply.as_ref(),
+        *date,
+    );
+    let account = run.account;
     let content = serde_json::to_string(&post).expect("plain data");
     run.store.write(|tx| {
         let thread: Option<i64> = tx
@@ -667,7 +692,8 @@ pub fn release(
         r.message_id == d.message_id && iris_compose::hash(&r.content, r.reply.as_ref()) == d.hash
     });
     if !same {
-        return changed_at_gmail(store, action, &d, read, &raw, run.mail.name());
+        let new_ids = run.mail.sets_draft_message_id();
+        return changed_at_gmail(store, action, &d, read, &raw, run.mail.name(), new_ids);
     }
     // The flags of the mail that Gmail holds, the same bytes as the draft
     // row (docs/specs/2026-11-17-send-checks.md, section 4).
@@ -705,17 +731,29 @@ fn changed_at_gmail(
     read: Option<iris_compose::Read>,
     raw: &[u8],
     provider: &str,
+    new_ids: bool,
 ) -> Result<Outcome> {
     let why = format!("the draft changed at {provider} after the approval");
     let t = now();
-    let refresh = read.filter(|r| r.message_id == d.message_id).map(|r| {
-        let hash = iris_compose::hash(&r.content, r.reply.as_ref());
-        let stored = Stored {
-            content: r.content,
-            reply: r.reply,
-        };
-        (serde_json::to_string(&stored).expect("plain data"), hash)
-    });
+    // A draft that reads back refreshes the row. With another Message-ID
+    // only if the provider sets its own ID on a draft (Gmail, spec
+    // assumption 3); else another ID means another client: `foreign_at`.
+    // The ID is not in the content hash, so a new send still needs a new
+    // approval.
+    let refresh = read
+        .filter(|r| new_ids || r.message_id == d.message_id)
+        .map(|r| {
+            let hash = iris_compose::hash(&r.content, r.reply.as_ref());
+            let stored = Stored {
+                content: r.content,
+                reply: r.reply,
+            };
+            (
+                serde_json::to_string(&stored).expect("plain data"),
+                hash,
+                r.message_id,
+            )
+        });
     let n = store.write(|tx| {
         let n = tx.execute(
             "UPDATE changeset_action SET state = 'denied', decided_by = 'engine', rule = NULL,
@@ -725,10 +763,11 @@ fn changed_at_gmail(
         )?;
         if n == 1 {
             match &refresh {
-                Some((content, hash)) => tx.execute(
-                    "UPDATE draft SET content = ?2, hash = ?3, raw = ?4, updated_at = ?5
+                Some((content, hash, message_id)) => tx.execute(
+                    "UPDATE draft SET content = ?2, hash = ?3, raw = ?4, updated_at = ?5,
+                       message_id_hdr = ?6
                      WHERE id = ?1",
-                    params![d.id, content, hash, raw, t],
+                    params![d.id, content, hash, raw, t, message_id],
                 )?,
                 None => tx.execute(
                     "UPDATE draft SET foreign_at = ?2, updated_at = ?2 WHERE id = ?1",

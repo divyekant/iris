@@ -532,3 +532,30 @@ fn only_the_copies_that_iris_sent_get_sent() {
     let blind = Outlook::new(Graph::new(config));
     assert!(b.differences(&blind) > 0);
 }
+
+/// Outlook keeps the Message-ID that Iris set, so another ID at the server
+/// means another client changed the draft: the release denies the send and
+/// marks the row foreign. It does not take the other ID (only Gmail sets
+/// its own ID on a draft, send spec assumption 3).
+#[test]
+fn an_outlook_draft_with_another_message_id_is_foreign() {
+    let b = setup("other-id");
+    let (s, _) = b.new_mail(AGED);
+    b.store
+        .write(|tx| Ok(tx.execute("UPDATE draft SET message_id_hdr = 'other@example.com'", [])?))
+        .unwrap();
+    assert!(matches!(b.release(s), Outcome::Denied(_)));
+    let (foreign, id): (bool, String) = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT foreign_at IS NOT NULL, message_id_hdr FROM draft",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert!(foreign);
+    assert_eq!(id, "other@example.com");
+    assert!(b.fake.sent_mail().is_empty());
+}

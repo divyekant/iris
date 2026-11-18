@@ -108,7 +108,7 @@ a stranger.
 ## Policy
 
 The policy view of the web client (specification 2, section 6.3). Each
-endpoint gives the policy object below. `POST` endpoints take a JSON body. A route with no body (the sender answers, the withdraw of a changeset, the policy discard, the notice done, the watch remove and the matter decline) takes zero bytes or the JSON object `{}`, and gives 400 for any other body (a body of only spaces too) before it changes anything.
+endpoint gives the policy object below. `POST` endpoints take a JSON body. The `mode`, `remove`, `grant` and `accept` endpoints need the field `version`: the active version that the person saw, or `null` for the policy of the first start. A body with no `version` field gets 400, and nothing changes. A route with no body (the sender answers, the withdraw of a changeset, the policy discard, the notice done, the watch remove and the matter decline) takes zero bytes or the JSON object `{}`, and gives 400 for any other body (a body of only spaces too) before it changes anything.
 
 | Endpoint | Does |
 |---|---|

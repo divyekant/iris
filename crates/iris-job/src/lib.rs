@@ -648,7 +648,8 @@ fn event_json(e: &Event) -> Value {
 /// The events stream from the store, so no list of events is in memory.
 /// On an error of the store, nothing is written to `out`.
 pub fn write_document(store: &Store, job: i64, out: &mut impl Write) -> Result<()> {
-    read(store, |c| write_document_in(c, job, out))
+    // The spool keeps a slow reader of `out` from holding the store.
+    store.read_to(out, |c, w| write_document_in(c, job, w))
 }
 
 /// The fields of the job document without `events`: the summary of a job.

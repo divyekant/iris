@@ -1881,12 +1881,8 @@ pub fn approve_in(c: &Connection, action: ActionId, hash: &str, now_ms: i64) -> 
 /// store, so the document is never in memory. Each action names its
 /// revision, because an old revision can keep decided and open actions.
 pub fn write_document(store: &Store, changeset: i64, out: &mut impl Write) -> Result<()> {
-    store
-        .read(|c| {
-            let tx = c.unchecked_transaction()?;
-            Ok(document(&tx, changeset, out))
-        })
-        .map_err(Error::Store)?
+    // The spool keeps a slow reader of `out` from holding the store.
+    store.read_to(out, |c, w| document(c, changeset, w))
 }
 
 fn document(c: &Connection, changeset: i64, out: &mut impl Write) -> Result<()> {

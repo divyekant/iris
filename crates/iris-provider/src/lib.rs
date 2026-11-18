@@ -249,6 +249,14 @@ pub trait Provider: Send + Sync {
         "the mail server"
     }
 
+    /// True if the server replaces the `Message-ID` of each new draft with
+    /// its own (Gmail, send spec assumption 3). Then the `draft` row takes
+    /// the ID of the server. Else another ID at the server means that
+    /// another client changed the draft.
+    fn sets_draft_message_id(&self) -> bool {
+        false
+    }
+
     /// True if a change of `INBOX` moves the message to another folder, so
     /// that its folder label changes too (Outlook). Then the apply reads
     /// the labels back after the write. A label provider (Gmail) and a
