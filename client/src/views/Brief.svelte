@@ -243,7 +243,7 @@
 
 {#if codes.length}
   <div class="codes">
-    {#each codes as item (item.id)}<Code {item} {now} />{/each}
+    {#each codes as item (item.id)}<Code {item} {now} ondone={done} delay={hold} />{/each}
   </div>
 {/if}
 
