@@ -341,24 +341,37 @@ pub(crate) fn pass(conn: &Connection, now: i64) -> Result<Found> {
     let mut policy = active.policy;
     policy.mode = crate::Mode::Apply;
     let mut st = conn.prepare(
-        "SELECT a.id, a.verb, a.state, c.author_kind, c.author_job
+        // The window holds the bulk actions too (section 6.6): the loop
+        // skips them after the LIMIT, so that they use up the window.
+        "SELECT a.id, a.verb, a.state, c.author_kind, c.author_job,
+           EXISTS (SELECT 1 FROM json_each(a.flags) WHERE value = 'bulk')
          FROM changeset_action a JOIN changeset c ON c.id = a.changeset_id
          WHERE a.verb IN ('archive', 'read', 'unread', 'inbox', 'trash')
            AND c.author_kind <> 'person'
            AND ((a.decided_by = 'person'
                  AND a.state IN ('approved', 'held', 'applied', 'failed', 'denied'))
                 OR a.state = 'undone')
-           AND NOT EXISTS (SELECT 1 FROM json_each(a.flags) WHERE value = 'bulk')
          ORDER BY a.id DESC LIMIT ?1",
     )?;
-    let rows: Vec<(i64, String, String, String, Option<String>)> = st
+    type Row = (i64, String, String, String, Option<String>, bool);
+    let rows: Vec<Row> = st
         .query_map([MAX_ACTIONS as i64], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
         })?
         .collect::<rusqlite::Result<_>>()?;
     let mut counts: BTreeMap<(Verb, &'static str, String), Count> = BTreeMap::new();
     let mut blocked = BTreeSet::new();
-    for (id, verb, state, author, job) in rows {
+    for (id, verb, state, author, job, bulk) in rows {
+        if bulk {
+            continue;
+        }
         let (Some(verb), Some(author)) = (Verb::from_name(&verb), Author::from_name(&author))
         else {
             continue;
@@ -767,6 +780,66 @@ mod tests {
             Some(&30),
             "the bulk action does not count"
         );
+    }
+
+    /// Spec 2 section 6.6: the window is the newest MAX_ACTIONS eligible
+    /// actions, bulk ones too, and the pass then skips the bulk ones. An
+    /// older action outside the window gives no proposal (issue 315).
+    #[test]
+    fn bulk_actions_use_up_the_window() {
+        let dir = std::env::temp_dir().join(format!("iris-propose-window-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        store
+            .write(|tx| {
+                tx.execute_batch(
+                    "INSERT INTO account(id, provider, address) VALUES (1, 'gmail', 'me@x.example');
+                     INSERT INTO thread(id, account_id, provider_id) VALUES (1, 1, 't');",
+                )?;
+                // MIN_APPROVALS old actions, then MAX_ACTIONS newer bulk actions.
+                let old = std::iter::repeat_n(("old@y.example", "[]"), MIN_APPROVALS as usize);
+                let bulk = std::iter::repeat_n(("new@y.example", "[\"bulk\"]"), MAX_ACTIONS);
+                for (a, (from, flags)) in old.chain(bulk).enumerate() {
+                    tx.execute("INSERT INTO changeset(author_kind, created_at) VALUES ('agent', 0)", [])?;
+                    let cs = tx.last_insert_rowid();
+                    tx.execute(
+                        "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args, hash)
+                         VALUES (?1, 1, 1, 'archive', '{}', '{}', 'h')",
+                        [cs],
+                    )?;
+                    let id = tx.last_insert_rowid();
+                    tx.execute(
+                        "INSERT INTO message(account_id, thread_id, provider_id, internal_date)
+                         VALUES (1, 1, ?1, 0)",
+                        [format!("m{a}")],
+                    )?;
+                    let msg = tx.last_insert_rowid();
+                    tx.execute(
+                        "INSERT INTO header(message_id, from_addr) VALUES (?1, ?2)",
+                        params![msg, from],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO action_message(action_id, message_id) VALUES (?1, ?2)",
+                        [id, msg],
+                    )?;
+                    tx.execute("UPDATE changeset SET why = 'w', submitted_at = 1 WHERE id = ?1", [cs])?;
+                    tx.execute(
+                        "UPDATE changeset_action SET flags = ?2, state = 'approved',
+                         decided_by = 'person', decided_at = 2 WHERE id = ?1",
+                        params![id, flags],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let found = store.read(|c| pass(c, 1_800_000_000)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            found.proposals.keys().all(|k| k.2 != "old@y.example"),
+            "{:?}",
+            found.proposals
+        );
+        assert!(found.proposals.is_empty(), "{:?}", found.proposals);
     }
 
     #[test]
