@@ -20,8 +20,9 @@ use url::{Host, Url};
 ///
 /// Only one sender can link `S` to another owner: a sender that owns `S`,
 /// as DMARC proves (`authenticated` and the `From` domain has the owner of
-/// `S`). It can link through any redirect, for example a click counter of
-/// its mail service. DMARC for another domain proves nothing about `S`.
+/// `S`). It can link through a redirect on an ordinary host, for example a
+/// click counter of its mail service. The first rule above applies also to
+/// this sender. DMARC for another domain proves nothing about `S`.
 ///
 /// `cut` is true when `iris-clean` could not list each link (a very large
 /// body). Iris cannot check the links that went out, so the message counts
@@ -38,12 +39,12 @@ pub fn deceptive(links: &[Link], cut: bool, from_domain: &str, authenticated: bo
             continue;
         };
         let theirs = registrable(&shown);
-        if authenticated && theirs == owner {
-            continue;
-        }
+        // The target form first: the proven owner can redirect only
+        // through an ordinary host, never through a suspect form.
         match target_host(href) {
             Target::NotWeb => {}
             Target::Host(t) if registrable(&t) == theirs => {}
+            Target::Host(_) if authenticated && theirs == owner => {}
             Target::Suspect | Target::Host(_) => return true,
         }
     }
@@ -218,6 +219,44 @@ mod tests {
             ("www.m\u{fc}nchen.de", "xn--mnchen-3ya.de"),
         ] {
             assert!(!one(s, t, from, true), "{s} {from}");
+        }
+    }
+
+    /// Property: the proven owner of the shown domain can redirect only
+    /// through an ordinary target. A suspect target form (a user part, a
+    /// backslash, a percent sign in the host, an IP address or text that
+    /// Iris cannot read) is deceptive from each sender.
+    #[test]
+    fn the_proven_owner_cannot_use_a_suspect_target() {
+        let suspect = [
+            "https://bank.com@evil.example.net/",
+            "https://evil.example.net\\@bank.com/",
+            "https:\\\\evil.example.net/",
+            "https://evil%2eexample%2enet/",
+            "https://bank%2ecom/",
+            "https://192.0.2.7/login",
+            "https://0xc0.0.2.7/login",
+            "https://[2001:db8::1]/login",
+            "https://bank.com:99999/",
+        ];
+        for shown in ["bank.com", "https://www.bank.com/login", "www.bank.com"] {
+            for from in ["bank.com", "news.bank.com", "NEWS.BANK.COM"] {
+                for href in suspect {
+                    for authenticated in [true, false] {
+                        assert!(
+                            one(shown, href, from, authenticated),
+                            "{shown} {from} {href:?} {authenticated}"
+                        );
+                    }
+                }
+                // An ordinary target of another owner stays allowed.
+                assert!(!one(
+                    shown,
+                    "https://click.mailer.example.net/x",
+                    from,
+                    true
+                ));
+            }
         }
     }
 
