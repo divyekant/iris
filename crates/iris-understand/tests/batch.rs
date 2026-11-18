@@ -949,6 +949,9 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                  DROP TABLE changeset_comment; DROP TABLE nudge_try;
                  DROP TRIGGER job_notes_end; DROP TABLE job_notes;
                  DROP TRIGGER ledger_stop; DROP TABLE stop_switch;
+                 ALTER TABLE account DROP COLUMN imap_host;
+                 ALTER TABLE account DROP COLUMN imap_port;
+                 ALTER TABLE account DROP COLUMN imap_user;
                  PRAGMA user_version = 19;",
             )?;
             Ok(())
