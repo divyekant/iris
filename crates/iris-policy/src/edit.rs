@@ -236,9 +236,32 @@ pub fn edit_text(text: &str, change: Change) -> std::result::Result<Option<Strin
                 }) else {
                     return Ok(None);
                 };
-                // The comments directly above the rule go with it, as for a table.
+                // The comments directly above the rule go with it, as for a
+                // table. A comment that a blank line separates stays.
+                let prefix = rules
+                    .get(i)
+                    .and_then(|v| v.decor().prefix())
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 rules.remove(i);
-                if rules.is_empty() {
+                let keep = shared_comments(&prefix);
+                if !keep.is_empty() {
+                    if let Some(next) = rules.get_mut(i) {
+                        let old = next
+                            .decor()
+                            .prefix()
+                            .and_then(|p| p.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        next.decor_mut().set_prefix(join(keep, &old));
+                    } else {
+                        let old = rules.trailing().as_str().unwrap_or("").to_string();
+                        rules.set_trailing(join(keep, &old));
+                    }
+                }
+                // An empty array with a comment in it stays, so the comment stays.
+                if rules.is_empty() && !rules.trailing().as_str().unwrap_or("").contains('#') {
                     doc.remove("rule");
                 }
                 return Ok(Some(doc.to_string()));
@@ -342,8 +365,13 @@ fn add_rule(text: &str, rule: &crate::Rule, why: &str) -> std::result::Result<St
         let mut v = Value::InlineTable(t.into_inline_table());
         v.decor_mut().set_prefix(format!("\n  # {why}\n  "));
         rules.push_formatted(v);
-        rules.set_trailing("\n");
         rules.set_trailing_comma(true);
+        // The text before `]` (a comment there) stays; the `]` goes on a
+        // line of its own.
+        let trailing = rules.trailing().as_str().unwrap_or("").to_string();
+        if !trailing.contains('\n') {
+            rules.set_trailing(format!("\n{trailing}"));
+        }
         return Ok(doc.to_string());
     }
     match doc.get_mut("rule").and_then(Item::as_array_of_tables_mut) {
@@ -418,6 +446,50 @@ mod tests {
             shared_comments("\n# all rules\n \n# about rule 1\n"),
             "\n# all rules\n \n"
         );
+    }
+
+    /// Issue 144: an add to an inline array keeps each comment of the file,
+    /// also one before the closing bracket, and adds exactly one rule. An
+    /// accept and a grant both add through `add_rule`.
+    #[test]
+    fn an_add_to_an_inline_array_keeps_each_comment() {
+        let mut seed = 0x9e37_79b9_u64;
+        for case in 0..100 {
+            let mut bit = || {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed.is_multiple_of(2)
+            };
+            let mut text = "version = 0\nmode = \"apply\"\nrule = [\n".to_string();
+            for id in 1..=3 {
+                if bit() {
+                    text += &format!("  # all before {id}\n\n");
+                }
+                if bit() {
+                    text += &format!("  # about {id}\n");
+                }
+                text += &format!("  {{ id = {id}, name = \"r{id}\", effect = \"hide\", when = {{ form = \"feed\" }}, by = \"person\", added = 2026-11-10 }}");
+                text += if id < 3 || bit() { ",\n" } else { "\n" };
+            }
+            if bit() {
+                text += "  # footer\n";
+            }
+            text += "]\n# tail\n";
+            let mut rule = crate::parse(&text).unwrap().rules[0].clone();
+            rule.id = 4;
+            let out = add_rule(&text, &rule, "why 4").unwrap();
+            let after = crate::parse(&out).unwrap_or_else(|e| panic!("case {case}: {e}\n{out}"));
+            assert_eq!(after.rules.len(), 4, "case {case}\n{out}");
+            assert_eq!(after.rules[3].id, 4);
+            for line in text.lines().filter(|l| l.trim_start().starts_with('#')) {
+                assert!(
+                    out.contains(line),
+                    "case {case}: {line}\n{text}\n---\n{out}"
+                );
+            }
+            assert!(out.contains("# why 4"), "{out}");
+        }
     }
 
     /// The file reads back each condition that `add_rule` gets.

@@ -122,11 +122,17 @@ fn random_inline(rng: &mut Rng, n: u32) -> String {
     let mut s = "# head\nversion = 0\nmode = \"apply\"\nrule = [\n".to_string();
     for id in 1..=n {
         if rng.next(2) == 0 {
+            s += &format!("  # all before {id}\n\n");
+        }
+        if rng.next(2) == 0 {
             s += &format!("  # about {id}\n");
         }
         s += &format!(
             "  {{ id = {id}, name = \"r{id}\", effect = \"hide\", when = {{ form = \"feed\" }}, by = \"person\", added = 2026-11-10 }},\n"
         );
+    }
+    if rng.next(2) == 0 {
+        s += "  # footer\n";
     }
     s + "]\n# tail\n"
 }
