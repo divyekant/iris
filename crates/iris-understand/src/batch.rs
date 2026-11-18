@@ -255,6 +255,10 @@ pub fn run(store: &Store, connect: Connect, limits: &Limits, now_ms: i64) -> Res
             // error doubles the wait.
             tx.execute("UPDATE model_setting SET retry_at = NULL", [])?;
             clear_retry_marks(tx)?;
+        } else if row.is_some() && !limits.wait_after_error {
+            // A run that does not wait (`iris understand`) reads the mail
+            // that waits for the wait too (#155). The marks of a refusal stay.
+            clear_retry_marks(tx)?;
         }
         tx.execute(
             "INSERT INTO understand_run(started_at, model, prompt, cost_micro_usd,
@@ -282,7 +286,10 @@ pub fn run(store: &Store, connect: Connect, limits: &Limits, now_ms: i64) -> Res
         )?;
         let r = report(tx, run)?;
         if calls && row.is_some() {
-            end_wait(tx, &stop, &r, ended)?;
+            // Only evidence of the model starts the wait: a model that
+            // cannot be made, not a store error (#156).
+            let connect = matches!(result, Err(Error::Connect(_)));
+            end_wait(tx, &stop, connect, &r, ended)?;
         }
         if !keep_idle && r.is_idle() {
             tx.execute("DELETE FROM understand_run WHERE id = ?1", [run])?;
@@ -438,7 +445,11 @@ impl Runner<'_> {
                 // after a model error): the message waits until that cause
                 // ends, so later runs do not read it again. The mark names
                 // the cause.
-                Err(store::Error::Model(iris_model::Error::Budget(_), rows)) => {
+                // A refusal after a failed store write of this run is no
+                // refusal of the model or the budget: no mark (#156).
+                Err(store::Error::Model(iris_model::Error::Budget(_), rows))
+                    if !self.model.state().store_failed =>
+                {
                     self.store.write(|tx| {
                         tx.execute(
                             "UPDATE message SET waits_model = ?2
@@ -622,8 +633,8 @@ fn clear_retry_marks(tx: &Transaction) -> rusqlite::Result<usize> {
     )
 }
 
-/// The first wait after a run that stopped on `model`, `unknown` or
-/// `error`, in milliseconds. Each such stop in a row doubles it.
+/// The first wait after a run that stopped on `model` or `unknown`, or
+/// could not make the model, in milliseconds. Each such stop in a row doubles it.
 pub const RETRY_FIRST_MS: i64 = 60_000;
 /// The longest wait, in milliseconds.
 pub const RETRY_MAX_MS: i64 = 3_600_000;
@@ -641,14 +652,21 @@ pub fn retry_after(c: &Connection) -> rusqlite::Result<Option<i64>> {
 
 /// The wait state after a run that could call the model, in the end write
 /// of the run (under its lock). Only evidence of the model changes it: a
-/// stop on `model`, `unknown` or `error` starts or doubles the wait; a run
-/// that made a call and did not stop on an error ends it and clears the
-/// marks of that wait (`WAITS_RETRY` only: a budget refusal of the same
-/// run keeps its mark). A run that made no call changes nothing.
-fn end_wait(tx: &Transaction, stop: &Stop, r: &Report, ended: i64) -> rusqlite::Result<()> {
+/// stop on `model` or `unknown`, or a model that cannot be made
+/// (`connect`), starts or doubles the wait. A store error is no such
+/// evidence. A run that made a call and did not fail so ends the wait and
+/// clears the marks of that wait (`WAITS_RETRY` only: a budget refusal of
+/// the same run keeps its mark). A run that made no call changes nothing.
+fn end_wait(
+    tx: &Transaction,
+    stop: &Stop,
+    connect: bool,
+    r: &Report,
+    ended: i64,
+) -> rusqlite::Result<()> {
     update_wait(
         tx,
-        matches!(stop, Stop::Model | Stop::Unknown | Stop::Error),
+        connect || matches!(stop, Stop::Model | Stop::Unknown),
         r.calls > 0,
         ended,
     )
