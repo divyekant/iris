@@ -409,7 +409,7 @@ fn a_model_error_changes_nothing_of_step_8() {
         .borrow_mut()
         .push_back(Err(ModelError::Server(529)));
     match understand(&b.store, m, &fake, NOW) {
-        Err(Error::Model(e, _)) => assert!(e.is_retryable()),
+        Err(Error::Model(e, _, _)) => assert!(e.is_retryable()),
         other => panic!("{other:?}"),
     }
     assert_eq!(

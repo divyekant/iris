@@ -29,7 +29,8 @@ pub enum Error {
     /// The model call failed. The message stays not understood, with no
     /// added try. If `is_retryable()`, try again later. The `Vec` holds the
     /// sender rows of [`Outcome::rerun`]: write 1 committed their change.
-    Model(iris_model::Error, Vec<i64>),
+    /// [`Seen`] is the state of the message that the call read.
+    Model(iris_model::Error, Vec<i64>, Seen),
     /// The message is not in the store, or it has no content file.
     NoMessage(i64),
     /// A finished item is not valid: a defect of the engine. Nothing of
@@ -41,7 +42,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Store(e) => write!(f, "store: {e}"),
-            Error::Model(e, _) => write!(f, "model: {e}"),
+            Error::Model(e, _, _) => write!(f, "model: {e}"),
             Error::NoMessage(id) => write!(f, "message {id} is not in the store or has no content"),
             Error::Invalid(e) => write!(f, "item not valid: {e}"),
         }
@@ -381,8 +382,8 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     // fixed rules always run. Only the model call waits for `retry_at` and
     // stops after MAX_TRIES failed tries.
     let held = row.tries >= MAX_TRIES || row.retry_at.is_some_and(|t| t > now_ms);
-    let d =
-        decide(&a, &cx, (!held).then_some(model)).map_err(|e| Error::Model(e, rerun.clone()))?;
+    let d = decide(&a, &cx, (!held).then_some(model))
+        .map_err(|e| Error::Model(e, rerun.clone(), Seen(seen.clone())))?;
     if d.waiting {
         // No rule supports the old items now, and the model cannot run.
         let same = store.write(|tx| {
@@ -488,6 +489,30 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
 /// gone state, the thread, the date and the labels. With `full`, also the hostile marks and
 /// `understood_at`, which a second run of the same message changes. The
 /// sender kind is checked apart.
+/// The state of a message that a refused model call read (write 1).
+#[derive(Debug, Clone)]
+pub struct Seen(Option<String>);
+
+/// Mark `message` as waiting for the model with `mark`, only if it is still
+/// in the state that the refused call read (issue #153). A write of another
+/// writer between the refusal and the mark changed an input: the message
+/// then gets no mark, and the next run reads it again.
+pub fn mark_waiting(
+    tx: &rusqlite::Transaction,
+    message: i64,
+    seen: &Seen,
+    mark: i64,
+) -> rusqlite::Result<bool> {
+    if state(tx, message, true)? != seen.0 {
+        return Ok(false);
+    }
+    tx.execute(
+        "UPDATE message SET waits_model = ?2 WHERE id = ?1 AND understood_at IS NULL",
+        params![message, mark],
+    )?;
+    Ok(true)
+}
+
 fn state(c: &rusqlite::Connection, message: i64, full: bool) -> rusqlite::Result<Option<String>> {
     c.query_row(
         "SELECT coalesce(m.content_sha256, '') || '|' || (m.gone_at IS NOT NULL) || '|' ||

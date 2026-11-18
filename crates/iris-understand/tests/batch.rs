@@ -49,6 +49,9 @@ fn usage(input: u64, output: u64) -> Usage {
 struct Script {
     answers: RefCell<VecDeque<Answer>>,
     calls: RefCell<u32>,
+    /// Runs in the next call, before the answer: a write of another
+    /// writer during the call.
+    during: RefCell<Option<std::boxed::Box<dyn FnOnce()>>>,
 }
 
 impl Script {
@@ -74,6 +77,9 @@ impl Model for Fake {
 
     fn ask(&self, _: &str, _: &str) -> Result<Reply, ModelError> {
         *self.0.calls.borrow_mut() += 1;
+        if let Some(during) = self.0.during.borrow_mut().take() {
+            during();
+        }
         let (text, usage) = self
             .0
             .answers
@@ -760,8 +766,8 @@ fn an_idle_run_keeps_its_row_only_with_keep_idle() {
 }
 
 /// Property: the mark `waits_model` goes away on each change of an input
-/// of a refused call (labels, content, gone state, hostile marks, the model
-/// row), by any write path, and stays when only the budget changes (the
+/// of a refused call (labels, content, gone state, hostile marks, tries,
+/// the model row), by any write path, and not on a write of the same values, and stays when only the budget changes (the
 /// runner spends and refunds it; an approval clears in its own write).
 #[test]
 fn the_waits_model_mark_clears_on_each_input_change() {
@@ -813,9 +819,22 @@ fn the_waits_model_mark_clears_on_each_input_change() {
             "INSERT INTO message_label(message_id, label_id) SELECT :m, id FROM label LIMIT 1",
             true,
         ),
+        // A write of the same values is no change (#154): a full resync
+        // writes each listed message again.
+        (
+            "same content",
+            "UPDATE message SET content_sha256 = content_sha256, gone_at = gone_at,
+               hostile = hostile, tries = tries WHERE id = :m",
+            false,
+        ),
         (
             "content",
-            "UPDATE message SET content_sha256 = content_sha256 WHERE id = :m",
+            "UPDATE message SET content_sha256 = 'new' || content_sha256 WHERE id = :m",
+            true,
+        ),
+        (
+            "tries",
+            "UPDATE message SET tries = tries + 1 WHERE id = :m",
             true,
         ),
         ("gone", "UPDATE message SET gone_at = 1 WHERE id = :m", true),
@@ -826,7 +845,8 @@ fn the_waits_model_mark_clears_on_each_input_change() {
         ),
         (
             "hostile",
-            "UPDATE message SET hostile = '[]' WHERE id = :m",
+            "UPDATE message SET hostile = CASE WHEN hostile IS '[]' THEN '[\"spoof\"]' ELSE '[]' END
+               WHERE id = :m",
             true,
         ),
         (
@@ -1256,4 +1276,30 @@ fn a_manual_run_reads_mail_that_waits_for_the_model_wait() {
         None,
         "the call ended the wait"
     );
+}
+
+/// A sync write between a refusal and its mark (#153): the mark is only
+/// set if the message is still in the state that the refusal read, so the
+/// changed message is read again by the next run.
+#[test]
+fn a_change_during_a_refused_call_leaves_no_mark() {
+    let b = store("refusal-race");
+    b.model(false, None);
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    let db = b._dir.0.join("iris.db");
+    b.script.push(Err(ModelError::Budget("refused".into())));
+    *b.script.during.borrow_mut() = Some(std::boxed::Box::new(move || {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO message_label(message_id, label_id)
+                 SELECT ?1, id FROM label WHERE provider_id = 'UNSENT'",
+                [m],
+            )
+            .unwrap();
+    }));
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.script.calls(), 1);
+    let marks = b.col("SELECT count(*) FROM message WHERE waits_model <> 0");
+    assert_eq!(marks, Some(0), "the changed message has no mark");
 }
