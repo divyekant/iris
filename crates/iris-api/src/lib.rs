@@ -708,10 +708,17 @@ async fn post_discard(State(s): State<Arc<Store>>, _: NoBody) -> Result<Response
     Ok(Json(policy::discard(&s)?).into_response())
 }
 
+/// A field that must be in the body, also when its value is `null`: with
+/// `deserialize_with`, serde gives no default for an omitted `Option` (#145).
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<i64>, D::Error> {
+    Option::deserialize(d)
+}
+
 /// `version` is the active version that the person saw, `null` for the
-/// policy of the first start.
+/// policy of the first start. A body with no `version` field is refused.
 #[derive(Deserialize)]
 struct ModeBody {
+    #[serde(deserialize_with = "present")]
     version: Option<i64>,
     mode: String,
 }
@@ -727,6 +734,7 @@ async fn post_mode(
 
 #[derive(Deserialize)]
 struct RemoveBody {
+    #[serde(deserialize_with = "present")]
     version: Option<i64>,
     id: u32,
 }
@@ -804,6 +812,7 @@ async fn post_job(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GrantBody {
+    #[serde(deserialize_with = "present")]
     version: Option<i64>,
     job: String,
     verbs: Vec<String>,
@@ -857,6 +866,7 @@ async fn post_job_answer(
 /// `id` is the ID of an open proposal (spec 2, section 6.6).
 #[derive(Deserialize)]
 struct ProposalBody {
+    #[serde(deserialize_with = "present")]
     version: Option<i64>,
     id: i64,
 }

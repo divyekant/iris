@@ -260,6 +260,30 @@ async fn a_file_that_is_not_valid_shows_its_line_and_can_be_discarded() {
     );
 }
 
+/// Each change names the version that the person saw: `null` is the policy
+/// of the first start, and a body with no `version` field is refused (#145).
+#[tokio::test]
+async fn a_change_with_no_version_field_is_refused() {
+    let d = open("no-version");
+    for (what, body) in [
+        ("mode", json!({ "mode": "apply" })),
+        ("remove", json!({ "id": 1 })),
+        ("accept", json!({ "id": 1 })),
+        ("grant", json!({ "job": "j-1", "verbs": ["archive"] })),
+    ] {
+        let (code, v) = d.post(what, body).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{what}: {v}");
+    }
+    assert_eq!(d.get().await["version"], json!(null));
+    assert!(!d.0.join(iris_policy::FILE).exists());
+
+    let (code, v) = d
+        .post("mode", json!({ "version": null, "mode": "apply" }))
+        .await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["version"], 1);
+}
+
 #[tokio::test]
 async fn each_policy_endpoint_needs_the_sign_in() {
     let d = open("auth");
