@@ -171,7 +171,8 @@ pub fn lock(store: &Store, account: i64) -> Result<SyncLock> {
 ///
 /// If Gmail does not have the history of the saved history ID any more,
 /// the call starts a full resync (section 4.4) and runs it to the end.
-/// Each call adds one row to `sync_log`.
+/// Each call adds one row to `sync_log` when it starts, with no result
+/// while it runs, and writes the result at its end.
 pub fn sync(store: &Store, mail: &dyn Provider, account: i64, token: &str) -> Result<Synced> {
     let _lock = lock(store, account)?;
     sync_locked(store, mail, account, token)
@@ -179,8 +180,16 @@ pub fn sync(store: &Store, mail: &dyn Provider, account: i64, token: &str) -> Re
 
 /// [`sync`] for a caller that holds the sync lock.
 fn sync_locked(store: &Store, mail: &dyn Provider, account: i64, token: &str) -> Result<Synced> {
-    let started = now_ms();
-    let mut kind = "incremental";
+    let s = state(store, account)?;
+    let mut kind = match (s.kind.as_deref(), &s.history_id) {
+        (Some(KIND_RESYNC), _) => KIND_RESYNC,
+        (None, Some(_)) => "incremental",
+        _ => KIND_FIRST,
+    };
+    // The row of a running sync is the newest row, so a reader of the log
+    // does not take the error row of an earlier call (for example a 401 of
+    // a token that ran out) as the state of this call.
+    let row = log_start(store, account, kind, now_ms())?;
     let result = run(store, mail, account, token, &mut kind);
     let text = match &result {
         Ok(s) => format!(
@@ -189,7 +198,7 @@ fn sync_locked(store: &Store, mail: &dyn Provider, account: i64, token: &str) ->
         ),
         Err(e) => format!("error: {e}"),
     };
-    let logged = log(store, account, kind, started, &text);
+    let logged = log_end(store, row, kind, &text);
     let synced = result?;
     logged?;
     Ok(synced)
@@ -802,6 +811,29 @@ fn log(store: &Store, account: i64, kind: &str, started: i64, result: &str) -> R
             "INSERT INTO sync_log(account_id, kind, started_at, ended_at, result)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![account, kind, started, now_ms(), result],
+        )?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// Add the row of a sync that starts, with no end and no result. Gives its ID.
+fn log_start(store: &Store, account: i64, kind: &str, started: i64) -> Result<i64> {
+    Ok(store.write(|tx| {
+        tx.execute(
+            "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, ?2, ?3)",
+            params![account, kind, started],
+        )?;
+        Ok(tx.last_insert_rowid())
+    })?)
+}
+
+/// Write the kind, the end and the result of the sync row `row`.
+fn log_end(store: &Store, row: i64, kind: &str, result: &str) -> Result<()> {
+    store.write(|tx| {
+        tx.execute(
+            "UPDATE sync_log SET kind = ?2, ended_at = ?3, result = ?4 WHERE id = ?1",
+            params![row, kind, now_ms(), result],
         )?;
         Ok(())
     })?;

@@ -295,8 +295,9 @@ pub fn status(store: &Store) -> Result<Status> {
         for a in &mut accounts {
             a.last_sync = c
                 .query_row(
+                    // A `fetch` row is the failure of one message, not a sync.
                     "SELECT kind, started_at, ended_at, result FROM sync_log
-                     WHERE account_id = ?1 ORDER BY id DESC LIMIT 1",
+                     WHERE account_id = ?1 AND kind <> 'fetch' ORDER BY id DESC LIMIT 1",
                     [a.id],
                     |r| {
                         Ok(SyncRun {

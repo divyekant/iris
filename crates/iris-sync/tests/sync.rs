@@ -4,12 +4,12 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use iris_fakegmail::FakeGmail;
 
 use iris_store::Store;
-use iris_sync::{first_sync, Error, STEP_FETCH, STEP_INCREMENTAL};
+use iris_sync::{first_sync, sync, Error, STEP_FETCH, STEP_INCREMENTAL};
 use iris_synth::Mailbox;
 
 mod common;
@@ -168,6 +168,48 @@ fn a_401_stops_the_sync_and_a_new_call_continues() {
         first_sync(&store, &gmail, account, TOKEN).unwrap().fetched,
         30
     );
+}
+
+/// The kind and the result of the newest `sync_log` row, read through a
+/// second connection.
+fn newest_log(db: &Path) -> (String, Option<String>) {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row(
+            "SELECT kind, result FROM sync_log ORDER BY id DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+}
+
+/// A call after a refused token (a token that ran out during a long first
+/// sync) is the newest row of the log while it runs, not the 401 row.
+#[test]
+fn the_running_sync_is_the_newest_log_row() {
+    let fake = FakeGmail::start(Mailbox::new(5, 30)).unwrap();
+    let gmail = client(fake.base_url());
+    let dir = data_dir("running");
+    let store = Store::open(&dir).unwrap();
+    let account = store.add_account("gmail", OWNER).unwrap();
+    let db = dir.join("iris.db");
+
+    fake.fail_next(&[401]);
+    assert!(sync(&store, &gmail, account, TOKEN).is_err());
+    let (kind, result) = newest_log(&db);
+    assert_eq!(kind, "first");
+    assert!(result.unwrap().starts_with("error: "));
+
+    let seen = Arc::new(Mutex::new(None));
+    let (seen2, db2) = (seen.clone(), db.clone());
+    fake.before_next_matching("format=raw", move || {
+        *seen2.lock().unwrap() = Some(newest_log(&db2));
+    });
+    sync(&store, &gmail, account, TOKEN).unwrap();
+    assert_eq!(*seen.lock().unwrap(), Some(("first".to_string(), None)));
+    let (kind, result) = newest_log(&db);
+    assert_eq!(kind, "first");
+    assert!(result.unwrap().starts_with("ok: "));
 }
 
 /// A TCP proxy in front of the fake that drops each connection after

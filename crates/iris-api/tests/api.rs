@@ -308,6 +308,16 @@ async fn status_with_no_account_and_with_a_sync() {
     assert_eq!(a["sync"], json!({"kind": "first", "step": 2}));
     assert_eq!(a["last_sync"]["started"], "1970-01-01T00:00:00Z");
     assert_eq!(a["last_sync"]["ended"], Value::Null);
+
+    // The failure of one message is not a sync: the status keeps the sync row.
+    exec(
+        &store,
+        "INSERT INTO sync_log(account_id, kind, started_at, ended_at, result)
+         VALUES (?1, 'fetch', 5, 5, 'failed 18a: HTTP 500')",
+        [acc],
+    );
+    let (_, v) = get(&store, "/api/status").await;
+    assert_eq!(v["accounts"][0]["last_sync"]["kind"], "first");
 }
 
 #[tokio::test]
