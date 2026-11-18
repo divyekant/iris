@@ -16,4 +16,6 @@ sha2 = { version = "=0.11.1", default-features = false }
 [dev-dependencies]
 iris-gmail = { version = "0.0.0", path = "../iris-gmail" }
 iris-fakegmail = { version = "0.0.0", path = "../iris-fakegmail" }
+iris-fakegraph = { version = "0.0.0", path = "../iris-fakegraph" }
+iris-graph = { version = "0.0.0", path = "../iris-graph" }
 iris-synth = { version = "0.0.0", path = "../iris-synth" }

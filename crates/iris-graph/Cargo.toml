@@ -10,9 +10,12 @@ publish.workspace = true
 [dependencies]
 # The MIME body of a draft or a send (iris-auth and iris-imap use it too).
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
+iris-provider = { version = "0.0.0", path = "../iris-provider" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The one HTTP stack of the program (iris-gmail and iris-model use it too).
+# Unicode case folding of label names, as the changeset store and the apply.
+unicase = "=2.8.1"
 ureq = { version = "3.5", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]

@@ -1055,9 +1055,11 @@ version = "0.0.0"
 dependencies = [
  "base64",
  "iris-fakegraph",
+ "iris-provider",
  "iris-synth",
  "serde",
  "serde_json",
+ "unicase",
  "ureq",
 ]
 
@@ -1226,7 +1228,9 @@ name = "iris-sync"
 version = "0.0.0"
 dependencies = [
  "iris-fakegmail",
+ "iris-fakegraph",
  "iris-gmail",
+ "iris-graph",
  "iris-provider",
  "iris-store",
  "iris-synth",
