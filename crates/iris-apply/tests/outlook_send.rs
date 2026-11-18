@@ -373,3 +373,25 @@ fn the_results_of_an_outlook_send_name_outlook() {
         Err(iris_apply::Error::SendStopped)
     ));
 }
+
+/// A mail to the owner arrives in the inbox before Outlook saves the sent
+/// copy: the delivery has the same Message-ID and a send time, but does
+/// not confirm the send. The copy in Sent Items does.
+#[test]
+fn a_delivery_to_the_owner_does_not_confirm_the_send() {
+    let b = setup("self");
+    let (s, _) = b.new_mail(AGED);
+    b.fake.hold_copies(true);
+    assert_eq!(b.release(s), Outcome::Pending);
+    let raw = b.row().0;
+    let delivered = b.fake.add_message(&raw, "F-inbox");
+    iris_apply::recover(&b.store, &b.outlook, &mut tok(), b.account).unwrap();
+    assert_eq!(b.state(s), "held");
+    b.fake.deliver_copies();
+    iris_apply::recover(&b.store, &b.outlook, &mut tok(), b.account).unwrap();
+    assert_eq!(b.state(s), "applied");
+    let sent = b.row().1.unwrap();
+    assert_ne!(sent, delivered);
+    assert_eq!(b.fake.messages()[&sent], "F-sent");
+    assert_eq!(b.fake.sent_mail().len(), 1);
+}

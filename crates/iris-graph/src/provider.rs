@@ -989,20 +989,33 @@ impl iris_provider::Provider for Outlook {
         }
     }
 
-    /// A message with this `Message-ID` that is not the draft `draft`, not
-    /// a draft, and has a send time (section 5, step 5). The draft has the
-    /// same `Message-ID` and stays in Drafts, so it never counts.
+    /// The one message with this `Message-ID` in Sent Items that is not
+    /// the draft `draft`, not a draft, and has a send time (section 5,
+    /// step 5). A delivery of the mail to the owner has the same
+    /// `Message-ID` and a send time, but goes to another folder, so it
+    /// never counts. No such copy, or two of them, gives `None`: the
+    /// result stays unknown.
     fn sent_copy(
         &self,
         token: &str,
         message_id: &str,
         draft: &str,
     ) -> iris_provider::Result<Option<MessageRef>> {
-        Ok(self
+        let sent = self.id_of(token, "sentitems").map_err(map)?;
+        let mut found: Vec<_> = self
             .copies(token, message_id)?
             .into_iter()
-            .find(|c| c.id != draft && !c.is_draft && c.sent_date_time.is_some())
-            .map(|c| reference(c.id, c.conversation_id)))
+            .filter(|c| {
+                c.id != draft
+                    && !c.is_draft
+                    && c.sent_date_time.is_some()
+                    && Some(&c.parent_folder_id) == sent.as_ref()
+            })
+            .collect();
+        Ok(match found.len() {
+            1 => found.pop().map(|c| reference(c.id, c.conversation_id)),
+            _ => None,
+        })
     }
 }
 

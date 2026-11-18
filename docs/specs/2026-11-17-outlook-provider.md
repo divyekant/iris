@@ -298,11 +298,15 @@ send does these steps:
    `writing`.
 5. The completion finds the sent copy: `sent_by_message_id(id)` lists
    the messages of the whole mailbox (`/me/messages`, each folder) with
-   `$filter=internetMessageId eq '<id>'` (A15), and follows each page, so
-   a rule or a client that moved the copy does not hide it. A candidate
-   counts only if its ID is not the ID of the Iris draft, `isDraft` is
-   false and it has a `sentDateTime`: the original draft has the same
-   `Message-ID` and content, and stays in Drafts, so it never counts. It
+   `$filter=internetMessageId eq '<id>'` (A15), and follows each page. A
+   candidate counts only if it is in the well-known Sent Items folder,
+   its ID is not the ID of the Iris draft, `isDraft` is false and it has
+   a `sentDateTime`. The original draft has the same `Message-ID` and
+   content, and stays in Drafts, so it never counts. A mail that the
+   owner sends to the owner arrives with the same `Message-ID` and a
+   `sentDateTime` in another folder, so it never counts either. No
+   candidate, or two, keeps the result unknown. A copy that a rule moves
+   out of Sent Items is not found: known limit #687. It
    reads the `$value` of the copy. It runs the content check of the send
    spec section 6 (the fields of the content hash, the headers that
    change who gets the message), and sets the ledger row `applied` or
@@ -347,8 +351,9 @@ spec section 4 on these rules:
   again and never sends again.
 - `sent_copy(message_id, draft)` is a call of the provider trait. Its
   default (Gmail) is the first message with the ID and the label `SENT`.
-  The Outlook provider gives a message with the ID that is not the
-  draft, not a draft, and has a `sentDateTime` (section 5, step 5).
+  The Outlook provider gives the one message with the ID in Sent Items
+  that is not the draft, not a draft, and has a `sentDateTime`
+  (section 5, step 5). A delivery to the owner never counts.
 - `metadata(id, names)` reads the message, then the start of `$value`
   up to the first empty line (at most 256 KiB), because Graph gives no
   raw headers of a sent message or a draft. The draft of a reply reads
