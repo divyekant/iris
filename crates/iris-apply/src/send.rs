@@ -502,9 +502,12 @@ fn complete(
         )?;
         Ok(())
     })?;
+    if same {
+        run.mail.sent_confirmed(sent_id);
+    }
     // A sync can copy the sent message into the mirror before the provider
     // knows that Iris sent it. Outlook gives `SENT` only to a copy that
-    // Iris sent, so read the labels of a mirrored copy again.
+    // Iris confirmed, so read the labels of a mirrored copy again.
     let mirrored: Option<i64> = run.store.read(|c| {
         Ok(c.query_row(
             "SELECT id FROM message WHERE account_id = ?1 AND provider_id = ?2",
@@ -520,6 +523,25 @@ fn complete(
         changed: 1,
         ..Default::default()
     }))
+}
+
+/// The provider IDs of the sent copies of `account` whose content Iris
+/// confirmed. A draft with a send whose copy differed ([`SENT_OTHER_END`])
+/// is left out. A provider that gives `SENT` only to the copies that Iris
+/// sent (Outlook) gets this list at its start.
+pub fn sent_by_iris(store: &Store, account: i64) -> Result<Vec<String>> {
+    Ok(store.read(|c| {
+        let mut st = c.prepare(
+            "SELECT d.sent_message FROM draft d
+             WHERE d.account_id = ?1 AND d.sent_message IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM action_draft ad JOIN ledger l ON l.action_id = ad.action_id
+                               WHERE ad.draft_id = d.id AND l.error LIKE '% ' || ?2)",
+        )?;
+        let ids = st
+            .query_map(params![account, SENT_OTHER_END], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
+    })?)
 }
 
 /// The draft of a send action.

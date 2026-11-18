@@ -645,6 +645,12 @@ impl iris_provider::Provider for Outlook {
         true
     }
 
+    /// Only a copy whose content Iris confirmed gets `SENT`: `SENT` is
+    /// evidence that the owner wrote the message.
+    fn sent_confirmed(&self, id: &str) {
+        self.own_sent.lock().unwrap().insert(id.to_string());
+    }
+
     fn keeps_sent_draft(&self) -> bool {
         true
     }
@@ -1062,11 +1068,7 @@ impl iris_provider::Provider for Outlook {
             })
             .collect();
         Ok(match found.len() {
-            1 => found.pop().map(|c| {
-                // Iris sent this copy: from now on it has `SENT`.
-                self.own_sent.lock().unwrap().insert(c.id.clone());
-                reference(c.id, c.conversation_id)
-            }),
+            1 => found.pop().map(|c| reference(c.id, c.conversation_id)),
             _ => None,
         })
     }

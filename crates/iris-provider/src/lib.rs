@@ -265,6 +265,14 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// Iris confirmed that the sent copy `id` holds the approved content
+    /// (send spec, section 6). A provider that gives `SENT` only to the
+    /// copies that Iris sent (Outlook) records it here. The default does
+    /// nothing: Gmail gives `SENT` itself.
+    fn sent_confirmed(&self, id: &str) {
+        let _ = id;
+    }
+
     /// The mailbox of `token` and the cursor of now.
     fn profile(&self, token: &str) -> Result<Profile>;
     /// Each label of the mailbox.

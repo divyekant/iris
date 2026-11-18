@@ -274,22 +274,9 @@ fn outlook_of(store: &Arc<Store>, account: i64) -> Result<Box<dyn Provider>> {
     };
     Ok(Box::new(
         iris_graph::Outlook::new(iris_graph::Graph::new(graph_config()?))
-            .with_sent(sent_by_iris(store, account)?)
+            .with_sent(iris_apply::sent_by_iris(store, account).map_err(Error::Apply)?)
             .with_category_switch(off.is_some(), stored),
     ))
-}
-
-/// The provider ID of each message that Iris sent from `account`.
-fn sent_by_iris(store: &Store, account: i64) -> Result<Vec<String>> {
-    Ok(store.read(|c| {
-        let mut st = c.prepare(
-            "SELECT sent_message FROM draft WHERE account_id = ?1 AND sent_message IS NOT NULL",
-        )?;
-        let ids = st
-            .query_map([account], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(ids)
-    })?)
 }
 
 /// The IMAP provider of the mailbox `address` on `server`: TLS to the
