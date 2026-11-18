@@ -45,6 +45,7 @@ pub struct Imap<S: Read + Write> {
     user: String,
     connect: Box<dyn Fn() -> crate::Result<S> + Send + Sync>,
     session: Mutex<Option<Session<S>>>,
+    page_bytes: usize,
 }
 
 impl<S: Read + Write + Send> Imap<S> {
@@ -60,7 +61,15 @@ impl<S: Read + Write + Send> Imap<S> {
             user: user.to_owned(),
             connect: Box::new(connect),
             session: Mutex::new(None),
+            page_bytes: PAGE_BYTES,
         }
+    }
+
+    /// A smaller page budget, for the tests of the budget.
+    #[doc(hidden)]
+    pub fn with_page_bytes(mut self, bytes: usize) -> Imap<S> {
+        self.page_bytes = bytes;
+        self
     }
 
     /// Run `f` on the session. A new session signs in with `password`. Any
@@ -412,6 +421,16 @@ fn parse_changes_token(p: &str) -> Option<(At, String)> {
     Some((At::Window { name, mark, high }, done.to_owned()))
 }
 
+/// The bytes of one change record that a page keeps (spec section 6).
+fn record_bytes(c: &Change) -> usize {
+    let (m, extra) = match c {
+        Change::Added(m) | Change::Deleted(m) => (m, &[][..]),
+        Change::LabelsAdded(m, l) | Change::LabelsRemoved(m, l) => (m, &l[..]),
+    };
+    let labels = |l: &[String]| l.iter().map(String::len).sum::<usize>();
+    m.id.len() + m.thread_id.len() + labels(&m.label_ids) + labels(extra)
+}
+
 fn deleted(validity: u32, uid: u32, folder: &str) -> Change {
     let id = message_id(validity, uid, folder);
     Change::Deleted(HistoryMessage {
@@ -626,6 +645,7 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
 
     fn changes(&self, token: &str, from: &str, page: Option<&str>) -> Result<HistoryPage> {
         let old = parse_cursor(from).ok_or(Error::HistoryExpired)?;
+        let budget = self.page_bytes;
         let start = match page {
             Some(p) => Some(parse_changes_token(p).ok_or(Error::Decode("page token".into()))?),
             None => None,
@@ -656,47 +676,44 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
                 // Removals since the token lower `EXISTS`.
                 At::Window { mark, high, .. } => (mark, high.min(now.exists)),
             };
-            let before = old.get(&f.name).copied();
+            // A folder that is not in `from`: the first sync can have listed
+            // mail of it that is gone now, and `from` cannot show which. Only
+            // a full resync removes it (spec section 5).
+            let before = old.get(&f.name).copied().ok_or(Error::HistoryExpired)?;
             // A new role of the folder (an attribute or a name) changes the
             // labels of each message with no other trace (spec section 5).
             if now.uidvalidity != mark.validity
                 || role_of(f) != mark.role
-                || before.is_some_and(|b| b.validity != mark.validity || b.role != mark.role)
+                || before.validity != mark.validity
+                || before.role != mark.role
             {
                 return Err(Error::HistoryExpired);
             }
-            let unchanged = before.is_some_and(|b| {
-                b.modseq == mark.modseq && b.count == mark.count && b.next == mark.next
-            });
+            let unchanged = before.modseq == mark.modseq
+                && before.count == mark.count
+                && before.next == mark.next;
             // `NOMODSEQ`: a flag change leaves no trace (spec section 5).
-            if mark.modseq == 0 || before.is_some_and(|b| b.modseq == 0) {
+            if mark.modseq == 0 || before.modseq == 0 {
                 return Err(Error::HistoryExpired);
             }
             let mut changes = Vec::new();
             if !unchanged {
                 // Newest first, in windows of sequence numbers: dense, so the
                 // page count follows the message count (spec section 5).
-                let width = if before.is_some() {
-                    CHANGED_WINDOW
-                } else {
-                    WINDOW
-                };
-                let low = high.saturating_sub(width - 1).max(1);
+                let low = high.saturating_sub(CHANGED_WINDOW - 1).max(1);
                 if high > 0 {
                     let mut bytes = 0usize;
-                    s.window(low, high, before.map(|b| b.modseq), |e| {
-                        let m = history_message(f, mark.validity, &e);
-                        bytes += m.id.len()
-                            + m.thread_id.len()
-                            + m.label_ids.iter().map(String::len).sum::<usize>();
-                        if bytes <= PAGE_BYTES {
-                            changes.push(Change::Added(m));
+                    s.window(low, high, Some(before.modseq), |e| {
+                        let c = Change::Added(history_message(f, mark.validity, &e));
+                        bytes += record_bytes(&c);
+                        if bytes <= budget {
+                            changes.push(c);
                         }
                     })
                     .map_err(change_error)?;
                     // Too large for one page: the full resync reads pages of
                     // `messages` and one message at a time (spec section 5).
-                    if bytes > PAGE_BYTES {
+                    if bytes > budget {
                         return Err(Error::HistoryExpired);
                     }
                 }
@@ -712,8 +729,10 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
                         next_page_token: Some(changes_token(&at, &done)),
                     });
                 }
-                if let Some(b) = before {
-                    changes.extend(removals(s, f, b, mark)?.ok_or(Error::HistoryExpired)?);
+                changes.extend(removals(s, f, before, mark)?.ok_or(Error::HistoryExpired)?);
+                // The budget holds for all records of the page, removals too.
+                if changes.iter().map(record_bytes).sum::<usize>() > budget {
+                    return Err(Error::HistoryExpired);
                 }
             }
             done.push_str(&mark_line(&f.name, mark));

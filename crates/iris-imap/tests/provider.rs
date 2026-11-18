@@ -2,7 +2,6 @@
 //! has zero differences after each change, and the failure list of the spec
 //! (docs/specs/2026-11-17-imap-provider.md) holds. No network.
 
-use std::collections::BTreeSet;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -437,8 +436,9 @@ fn small(i: usize) -> Vec<u8> {
     format!("Message-ID: <m{i}@x>\r\nSubject: {i}\r\n\r\nbody {i}\r\n").into_bytes()
 }
 
-/// A page of changes for a new folder holds at most 2,000 records, and the
-/// sync of a folder of more than one page is still exact.
+/// A folder that is not in the cursor gives `HistoryExpired`: the first
+/// sync can have listed mail of it that is gone now (spec section 5). The
+/// full resync then reads pages of 2,000 and stays exact.
 #[test]
 fn changes_pages() {
     for caps in [
@@ -452,27 +452,14 @@ fn changes_pages() {
         let mail = provider(&fake);
         let store = Store::open(&data_dir(&format!("pages-{}", caps.qresync))).unwrap();
         let account = store.add_account("imap", OWNER).unwrap();
-        first_sync(&store, &mail, account, PASSWORD).unwrap();
+        // The cursor of the profile is read before the folder exists, and
+        // the list of the first sync sees the folder: the race of the review.
         let c = cursor(&mail);
         fake.create("Big", None);
         let uids: Vec<u32> = (0..2100).map(|i| fake.add("Big", small(i), &[])).collect();
-        let mut page = None;
-        let mut added = BTreeSet::new();
-        loop {
-            let p = mail.changes(PASSWORD, &c, page.as_deref()).unwrap();
-            let n: usize = p.history.iter().map(|h| h.changes.len()).sum();
-            assert!(n <= 2000, "{n} records in one page");
-            for ch in p.history.into_iter().flat_map(|h| h.changes) {
-                if let iris_provider::Change::Added(m) = ch {
-                    added.insert(m.id);
-                }
-            }
-            match p.next_page_token {
-                Some(t) => page = Some(t),
-                None => break,
-            }
-        }
-        assert_eq!(added.len(), 2100);
+        first_sync(&store, &mail, account, PASSWORD).unwrap();
+        fake.remove("Big", uids[0]);
+        assert!(matches!(all_changes(&mail, &c), Err(Error::HistoryExpired)));
         sync(&store, &mail, account, PASSWORD).unwrap();
         assert_clean(&store, &mail, account);
         // A flag change and a removal in a known folder.
@@ -692,4 +679,24 @@ fn name_fallback_for_each_role() {
         .unwrap()
         .label_ids;
     assert_eq!(labels, vec!["SPAM"]);
+}
+
+/// The page budget counts each record of a page, the removals too: a
+/// page of changes and removals over the budget is `HistoryExpired`.
+#[test]
+fn page_budget_counts_removals() {
+    let fake = FakeImap::start(Caps::ALL);
+    let uids: Vec<u32> = (0..40).map(|i| fake.add("INBOX", small(i), &[])).collect();
+    // One flag change: one record of about 40 bytes. 30 removals: about
+    // 30 records of the same size. The budget lets the change through.
+    let mail = provider(&fake).with_page_bytes(200);
+    let c = cursor(&mail);
+    fake.set_flags("INBOX", uids[39], &["\\Seen"]);
+    all_changes(&mail, &c).unwrap();
+    for u in &uids[..30] {
+        fake.remove("INBOX", *u);
+    }
+    assert!(matches!(all_changes(&mail, &c), Err(Error::HistoryExpired)));
+    // With the normal budget the same changes fit.
+    all_changes(&provider(&fake), &c).unwrap();
 }
