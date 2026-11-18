@@ -124,7 +124,46 @@ fn mail_folders<S: Read + Write>(s: &mut Session<S>) -> Result<Vec<Folder>> {
         .filter(|f| f.selectable && !matches!(f.special, Some(Special::All | Special::Flagged)))
         .collect();
     v.sort_by(|a, b| order(&a.name).cmp(&order(&b.name)));
+    by_name(&mut v);
     Ok(v)
+}
+
+/// The common names of the four special folders (spec section 4), ASCII
+/// and compared with no case. shortcut: English names only, issue #648.
+const NAMES: [(Special, &[&str]); 4] = [
+    (
+        Special::Sent,
+        &["sent", "sent items", "sent messages", "sent mail"],
+    ),
+    (Special::Drafts, &["drafts", "draft"]),
+    (
+        Special::Junk,
+        &["junk", "spam", "junk e-mail", "junk email", "bulk mail"],
+    ),
+    (
+        Special::Trash,
+        &["trash", "deleted items", "deleted messages", "bin"],
+    ),
+];
+
+/// A server with no folder of a special-use attribute: each folder with no
+/// attribute whose last name part is a common name of it gets it. So sent
+/// mail and drafts stay out of the understanding, and spam keeps SPAM.
+fn by_name(folders: &mut [Folder]) {
+    for (special, names) in NAMES {
+        if folders.iter().any(|f| f.special == Some(special)) {
+            continue;
+        }
+        for f in folders.iter_mut().filter(|f| f.special.is_none()) {
+            let last = match f.delimiter.as_deref() {
+                Some(d) if !d.is_empty() => f.name.rsplit(d).next().unwrap_or(&f.name),
+                _ => f.name.as_str(),
+            };
+            if names.iter().any(|n| last.eq_ignore_ascii_case(n)) {
+                f.special = Some(special);
+            }
+        }
+    }
 }
 
 /// The page order of a folder (spec section 2): `INBOX` first, then by name.

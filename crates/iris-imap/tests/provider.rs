@@ -572,3 +572,63 @@ fn two_junk_folders_and_keyword_case() {
     first_sync(&store, &mail, account, PASSWORD).unwrap();
     assert_clean(&store, &mail, account);
 }
+
+/// A server with no special-use attributes: the common folder names give
+/// the special labels (spec section 4), and the mirror stays clean.
+#[test]
+fn special_folders_by_name() {
+    let fake = FakeImap::start(Caps::ALL);
+    for f in ["Sent Items", "Drafts", "Spam", "Trash", "Projects"] {
+        fake.create(f, None);
+    }
+    let mail = provider(&fake);
+    let mut seen = Vec::new();
+    for (i, f) in ["Sent Items", "Drafts", "Spam", "Trash", "Projects"]
+        .iter()
+        .enumerate()
+    {
+        let uid = fake.add(f, Mailbox::new(30 + i as u64, 1).raw(0), &["\\Seen"]);
+        let validity = cursor(&mail)
+            .lines()
+            .find(|l| l.ends_with(&format!(" {f}")))
+            .unwrap()
+            .split(' ')
+            .next()
+            .unwrap()
+            .to_owned();
+        let id = format!("{validity}:{uid}:{f}");
+        seen.push(mail.minimal(PASSWORD, &id).unwrap().label_ids);
+    }
+    assert_eq!(seen[0], vec!["folder:Sent Items", SENT_COPY]);
+    assert_eq!(seen[1], vec!["folder:Drafts", UNSENT]);
+    assert_eq!(seen[2], vec!["SPAM"]);
+    assert_eq!(seen[3], vec!["TRASH"]);
+    assert_eq!(seen[4], vec!["folder:Projects"]);
+
+    let store = Store::open(&data_dir("by-name")).unwrap();
+    let account = store.add_account("imap", OWNER).unwrap();
+    first_sync(&store, &mail, account, PASSWORD).unwrap();
+    assert_clean(&store, &mail, account);
+}
+
+#[test]
+fn an_attribute_wins_over_a_name() {
+    let fake = FakeImap::start(Caps::ALL);
+    fake.create("Junk", Some("\\Junk"));
+    fake.create("Spam", None);
+    let uid = fake.add("Spam", Mailbox::new(40, 1).raw(0), &["\\Seen"]);
+    let mail = provider(&fake);
+    let validity = cursor(&mail)
+        .lines()
+        .find(|l| l.ends_with(" Spam"))
+        .unwrap()
+        .split(' ')
+        .next()
+        .unwrap()
+        .to_owned();
+    let labels = mail
+        .minimal(PASSWORD, &format!("{validity}:{uid}:Spam"))
+        .unwrap()
+        .label_ids;
+    assert_eq!(labels, vec!["folder:Spam"]);
+}
