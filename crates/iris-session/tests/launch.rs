@@ -172,10 +172,24 @@ fn stop(f: &Fixture, mut r: Running, why: EndReason) -> String {
         .and_then(|c| c.parse().ok());
     let code = if why == EndReason::Exit { code } else { None };
     iris_job::end(&f.store, r.session, why, code, now()).unwrap();
-    let s = session(&f.store, r.session).unwrap();
-    reap_check(&f.store, &Plain, &s, true, now()).unwrap();
+    reap(f, r.session);
     let _ = fs::remove_file(&r.socket_path);
     status.trim().to_string()
+}
+
+/// Runs the reap check until it passes, as the supervisor of the engine
+/// does. One check is not enough: a killed child of the agent can stay a
+/// zombie in the group until its new parent (init) reaps it (issue #659).
+fn reap(f: &Fixture, id: i64) {
+    let end = Instant::now() + Duration::from_secs(20);
+    loop {
+        let s = session(&f.store, id).unwrap();
+        match reap_check(&f.store, &Plain, &s, true, now()) {
+            Ok(_) => return,
+            Err(why) if Instant::now() >= end => panic!("no reap after 20 s: {why}"),
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
 }
 
 fn sessions(f: &Fixture) -> Vec<iris_job::Session> {
@@ -491,6 +505,34 @@ fn the_reap_check_waits_for_the_helper_and_the_group() {
     assert!(get().reaped_ms.is_some());
 }
 
+/// A zombie that stays in the group of the agent after the helper ends
+/// holds the reap until its parent reaps it (issue #659). Here the test is
+/// the parent, and it reaps the zombie 300 ms after the end.
+fn the_reap_waits_for_a_late_zombie_in_the_group() {
+    use std::os::unix::process::CommandExt;
+    let f = fixture("late-zombie", "data", "sleep 30");
+    let mut r = running(launch(&f, &real_helper, &|_, _| {}));
+    let mut zombie = Process::new("/bin/true")
+        .process_group(r.pgid)
+        .spawn()
+        .unwrap();
+    drop(r.pipe);
+    r.status.read_to_string(&mut String::new()).unwrap();
+    r.helper.wait().unwrap();
+    iris_job::end(&f.store, r.session, EndReason::Stop, None, now()).unwrap();
+    let s = session(&f.store, r.session).unwrap();
+    let why = reap_check(&f.store, &Plain, &s, true, now()).unwrap_err();
+    assert!(why.contains("process group"), "{why}");
+    let late = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        zombie.wait().unwrap();
+    });
+    reap(&f, r.session);
+    late.join().unwrap();
+    assert!(session(&f.store, r.session).unwrap().reaped_ms.is_some());
+    let _ = fs::remove_file(&r.socket_path);
+}
+
 /// The launch reports an end only if the store has it. A failed end write
 /// gives `Open`, and the row stays open for the engine to end.
 fn a_failed_end_write_is_not_reported_as_an_end() {
@@ -615,6 +657,10 @@ fn main() {
         (
             "a_long_socket_path_fails_the_launch",
             a_long_socket_path_fails_the_launch,
+        ),
+        (
+            "the_reap_waits_for_a_late_zombie_in_the_group",
+            the_reap_waits_for_a_late_zombie_in_the_group,
         ),
         (
             "the_reap_check_waits_for_the_helper_and_the_group",
