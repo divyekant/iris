@@ -468,6 +468,7 @@ impl FakeGraph {
 fn router(store: Shared) -> Router {
     Router::new()
         .route("/v1.0/me", get(me))
+        .route("/v1.0/me/outlook/masterCategories", get(categories))
         .route("/v1.0/me/mailFolders", get(top_folders))
         .route("/v1.0/me/mailFolders/{id}", get(folder))
         .route("/v1.0/me/mailFolders/{id}/childFolders", get(child_folders))
@@ -590,6 +591,22 @@ fn page_size(h: &HeaderMap, limit: usize) -> usize {
 
 async fn me() -> Response {
     Json(json!({ "id": "fake-user", "mail": OWNER, "userPrincipalName": OWNER })).into_response()
+}
+
+/// The master list: each category of a message that is not deleted.
+async fn categories(State(s): State<Shared>) -> Response {
+    let s = s.lock().unwrap();
+    let names: std::collections::BTreeSet<&str> = s
+        .msgs
+        .iter()
+        .filter(|m| !m.deleted)
+        .flat_map(|m| m.categories.iter().map(String::as_str))
+        .collect();
+    let value: Vec<Value> = names
+        .iter()
+        .map(|n| json!({ "id": format!("cat-{n}"), "displayName": n, "color": "preset0" }))
+        .collect();
+    Json(json!({ "value": value })).into_response()
 }
 
 fn folder_json(s: &Store, f: &(&str, &str, Option<&str>, Option<&str>)) -> Value {

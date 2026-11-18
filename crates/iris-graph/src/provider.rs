@@ -1,0 +1,793 @@
+//! The mail provider of an Outlook account: [`Outlook`] maps Microsoft Graph
+//! to the label model of the mirror (spec
+//! `docs/specs/2026-11-17-outlook-provider.md`, sections 3 and 6, and spec
+//! `docs/specs/2026-11-17-provider.md`).
+//!
+//! This part gives the calls of the sync and the verify. Each write call,
+//! and the reads of the send, give a definite rejection before any request
+//! until card R6-15 adds them.
+
+use std::collections::{BTreeMap, HashMap};
+use std::io::Write;
+use std::sync::Mutex;
+
+use iris_provider::{
+    Change as Record, Draft, DraftRaw, History, HistoryMessage, HistoryPage, Label, MessagePage,
+    MessageRef, Metadata, Minimal, Profile, RawMessage, Sent,
+};
+use serde::{Deserialize, Serialize};
+use unicase::UniCase;
+
+use crate::{Change, Error, Folder, Graph, Message, Next};
+
+/// The system label names of the mirror (spec 1 section 4.10). A category
+/// with such a name gets the prefix `Categories/`.
+const SYSTEM_NAMES: [&str; 9] = [
+    "INBOX",
+    "SPAM",
+    "TRASH",
+    "UNREAD",
+    "STARRED",
+    "IMPORTANT",
+    "SENT",
+    "DRAFT",
+    "CHAT",
+];
+
+/// The cursor of the sync: the delta link of each folder whose round ended.
+/// A folder with no link gets a new round, which lists it as it is now.
+#[derive(Default, Serialize, Deserialize)]
+struct Cursor {
+    v: u8,
+    links: BTreeMap<String, String>,
+}
+
+/// The page token of [`iris_provider::Provider::changes`] and of
+/// [`iris_provider::Provider::messages`]: the folders of the call, the folder
+/// of the next page, its `nextLink`, and the delta links of the folders whose
+/// round ended.
+#[derive(Default, Serialize, Deserialize)]
+struct Page {
+    ids: Vec<String>,
+    i: usize,
+    next: Option<String>,
+    #[serde(default)]
+    done: BTreeMap<String, String>,
+}
+
+/// The Outlook provider. One value serves one mailbox: it keeps the IDs of
+/// the well-known folders after the first read.
+pub struct Outlook {
+    graph: Graph,
+    known: Mutex<HashMap<String, &'static str>>,
+}
+
+impl Outlook {
+    pub fn new(graph: Graph) -> Outlook {
+        Outlook {
+            graph,
+            known: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The well-known name of each folder ID, from the cache or from Graph.
+    fn known(&self, token: &str) -> Result<HashMap<String, &'static str>, Error> {
+        let mut k = self.known.lock().unwrap();
+        if k.is_empty() {
+            *k = self.graph.well_known(token)?.into_iter().collect();
+        }
+        Ok(k.clone())
+    }
+
+    /// The folders of the mailbox. Also refreshes the cache of well-known IDs.
+    fn folders(&self, token: &str) -> Result<Vec<Folder>, Error> {
+        let folders = self.graph.folders(token)?;
+        *self.known.lock().unwrap() = folders
+            .iter()
+            .filter_map(|f| Some((f.id.clone(), f.well_known?)))
+            .collect();
+        Ok(folders)
+    }
+
+    fn id_of(&self, token: &str, name: &str) -> Result<Option<String>, Error> {
+        Ok(self
+            .known(token)?
+            .into_iter()
+            .find(|(_, n)| *n == name)
+            .map(|(id, _)| id))
+    }
+
+    /// The folders that a list of `label` reads: one folder for a folder
+    /// label, else all folders.
+    fn list_folders(&self, token: &str, label: Option<&str>) -> Result<Vec<String>, Error> {
+        let one = match label {
+            Some("INBOX") => self.id_of(token, "inbox")?,
+            Some("TRASH") => self.id_of(token, "deleteditems")?,
+            Some("SPAM") => self.id_of(token, "junkemail")?,
+            Some("DRAFT") => self.id_of(token, "drafts")?,
+            Some(l) => match l.strip_prefix("folder:") {
+                Some(id) => Some(id.to_string()),
+                None => return Ok(self.folders(token)?.into_iter().map(|f| f.id).collect()),
+            },
+            None => return Ok(self.folders(token)?.into_iter().map(|f| f.id).collect()),
+        };
+        Ok(one.into_iter().collect())
+    }
+}
+
+/// The mirror labels of a message (spec section 6): one folder label, then
+/// `UNREAD`, `STARRED` and one label for each category.
+pub fn label_ids(m: &Message, known: &HashMap<String, &'static str>) -> Vec<String> {
+    let folder = match known.get(&m.parent_folder_id).copied() {
+        Some("inbox") => "INBOX".to_string(),
+        Some("deleteditems") => "TRASH".to_string(),
+        Some("junkemail") => "SPAM".to_string(),
+        // A received message that the person moved into Drafts is not a draft.
+        Some("drafts") if m.is_draft => "DRAFT".to_string(),
+        _ => format!("folder:{}", m.parent_folder_id),
+    };
+    let mut ids = vec![folder];
+    if !m.is_read {
+        ids.push("UNREAD".into());
+    }
+    if m.flagged() {
+        ids.push("STARRED".into());
+    }
+    for c in &m.categories {
+        let id = format!("category:{c}");
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+/// Each label of the mailbox, with the names of spec section 6.
+pub fn label_list(folders: &[Folder], categories: &[String]) -> Vec<Label> {
+    let label = |id: String, name: String, system: bool| Label {
+        id,
+        name,
+        kind: if system { "system" } else { "user" }.into(),
+        messages_total: None,
+        messages_unread: None,
+        threads_total: None,
+        threads_unread: None,
+    };
+    let mut out: Vec<Label> = ["INBOX", "UNREAD", "STARRED", "DRAFT", "SPAM", "TRASH"]
+        .iter()
+        .map(|n| label(n.to_string(), n.to_string(), true))
+        .collect();
+
+    let by_id: HashMap<&str, &Folder> = folders.iter().map(|f| (f.id.as_str(), f)).collect();
+    let mut named: Vec<Label> = Vec::new();
+    for f in folders {
+        let fixed = match f.well_known {
+            Some("inbox" | "deleteditems" | "junkemail") => continue,
+            Some("drafts") => Some("Folders/Drafts"),
+            Some("archive") => Some("Folders/Archive"),
+            Some("outbox") => Some("Folders/Outbox"),
+            Some("sentitems") => Some("Folders/Sent Items"),
+            _ => None,
+        };
+        let name = match fixed {
+            Some(n) => n.to_string(),
+            None => {
+                // The path from the top folder. The depth limit stops a loop
+                // of parents in a bad answer.
+                let mut parts = vec![escape(&f.display_name)];
+                let mut at = f.parent_folder_id.as_deref();
+                while let Some(p) = at.and_then(|id| by_id.get(id)) {
+                    if parts.len() > folders.len() {
+                        break;
+                    }
+                    parts.push(escape(&p.display_name));
+                    at = p.parent_folder_id.as_deref();
+                }
+                parts.reverse();
+                format!("Folders/{}", parts.join("/"))
+            }
+        };
+        named.push(label(format!("folder:{}", f.id), name, fixed.is_some()));
+    }
+    // Folder labels equal under case folding get the folder ID at the end.
+    let names: Vec<UniCase<String>> = named.iter().map(|l| UniCase::new(l.name.clone())).collect();
+    for (l, folded) in named.iter_mut().zip(&names) {
+        if names.iter().filter(|n| *n == folded).count() > 1 {
+            l.name = format!("{} #{}", l.name, &l.id["folder:".len()..]);
+        }
+    }
+    out.extend(named);
+
+    let mut cats: Vec<&String> = categories.iter().collect();
+    cats.sort();
+    cats.dedup();
+    for c in &cats {
+        let folded = UniCase::new(c.as_str());
+        let twin = cats
+            .iter()
+            .filter(|o| UniCase::new(o.as_str()) == folded)
+            .count()
+            > 1;
+        let prefix = |p: &str| {
+            c.get(..p.len())
+                .is_some_and(|h| UniCase::new(h) == UniCase::new(p))
+        };
+        let system = SYSTEM_NAMES.iter().any(|s| UniCase::new(*s) == folded) || prefix("CATEGORY_");
+        let name = if twin {
+            let hex: String = c.bytes().map(|b| format!("{b:02x}")).collect();
+            format!("Categories/{c} #{hex}")
+        } else if system || prefix("Folders/") || prefix("Categories/") {
+            format!("Categories/{c}")
+        } else {
+            c.to_string()
+        };
+        out.push(label(format!("category:{c}"), name, false));
+    }
+    out
+}
+
+/// A display name in a label path: `%`, `/` and `#` are escaped, so each
+/// `/` of a label is a level and no name has a `#`.
+fn escape(name: &str) -> String {
+    name.replace('%', "%25")
+        .replace('/', "%2F")
+        .replace('#', "%23")
+}
+
+/// Milliseconds since 1970 of `YYYY-MM-DDTHH:MM:SS[.fff]Z`.
+fn epoch_ms(text: &str) -> Option<i64> {
+    let b = text.as_bytes();
+    let num = |r: std::ops::Range<usize>| -> Option<i64> {
+        let s = text.get(r)?;
+        s.bytes()
+            .all(|c| c.is_ascii_digit())
+            .then(|| s.parse().ok())?
+    };
+    if b.len() < 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+    {
+        return None;
+    }
+    let tail = text.get(19..)?;
+    let frac = match tail.strip_suffix('Z')? {
+        "" => 0,
+        f => {
+            let digits = f.strip_prefix('.')?;
+            if digits.is_empty() || !digits.bytes().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            // Only the milliseconds count.
+            format!("{digits:0<3}")[..3].parse::<i64>().ok()?
+        }
+    };
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (h, min, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || h > 23 || min > 59 || sec > 60 {
+        return None;
+    }
+    // Days from civil (H. Hinnant).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(((days * 86_400 + h * 3600 + min * 60 + sec) * 1000) + frac)
+}
+
+/// The provider error of a Graph error (provider spec section 5).
+fn map(e: Error) -> iris_provider::Error {
+    use iris_provider::Error as P;
+    match e {
+        Error::Unauthorized => P::Unauthorized,
+        Error::NotFound => P::NotFound,
+        Error::DeltaReset => P::HistoryExpired,
+        Error::Api {
+            status,
+            code,
+            message,
+        } => P::Api {
+            status,
+            reason: code,
+            message,
+        },
+        Error::Transport(t) => P::Transport(t),
+        Error::Decode(d) => P::Decode(d),
+        Error::Sink(s) => P::Sink(s),
+    }
+}
+
+/// The definite rejection of a call that card R6-15 adds. No request goes
+/// out.
+fn later<T>() -> iris_provider::Result<T> {
+    Err(iris_provider::Error::Api {
+        status: 400,
+        reason: "notSupported".into(),
+        message: "the Outlook provider does not make this call yet".into(),
+    })
+}
+
+fn history(m: &Message, known: &HashMap<String, &'static str>) -> HistoryMessage {
+    HistoryMessage {
+        id: m.id.clone(),
+        thread_id: m.conversation_id.clone(),
+        label_ids: label_ids(m, known),
+    }
+}
+
+fn token_of<T: serde::de::DeserializeOwned>(text: &str, what: &str) -> iris_provider::Result<T> {
+    serde_json::from_str(text).map_err(|e| iris_provider::Error::Decode(format!("{what}: {e}")))
+}
+
+fn text_of<T: Serialize>(value: &T) -> String {
+    serde_json::to_string(value).expect("the JSON of a cursor")
+}
+
+impl iris_provider::Provider for Outlook {
+    /// The cursor of now is the empty cursor: Graph has no cheap cursor of
+    /// now, so the next `changes` starts a new round of each folder.
+    fn profile(&self, token: &str) -> iris_provider::Result<Profile> {
+        let me = self.graph.me(token).map_err(map)?;
+        Ok(Profile {
+            email_address: me.address().to_string(),
+            messages_total: 0,
+            threads_total: 0,
+            cursor: text_of(&Cursor {
+                v: 1,
+                links: BTreeMap::new(),
+            }),
+        })
+    }
+
+    fn labels(&self, token: &str) -> iris_provider::Result<Vec<Label>> {
+        let folders = self.folders(token).map_err(map)?;
+        let categories = self.graph.categories(token).map_err(map)?;
+        Ok(label_list(&folders, &categories))
+    }
+
+    /// One delta page of one folder, with no stored link: the folder as it
+    /// is now. With `label`, only the messages that have it.
+    fn messages(
+        &self,
+        token: &str,
+        label: Option<&str>,
+        page: Option<&str>,
+    ) -> iris_provider::Result<MessagePage> {
+        let mut at: Page = match page {
+            Some(p) => token_of(p, "page token")?,
+            None => Page {
+                ids: self.list_folders(token, label).map_err(map)?,
+                ..Page::default()
+            },
+        };
+        let Some(folder) = at.ids.get(at.i).cloned() else {
+            return Ok(MessagePage {
+                messages: Vec::new(),
+                next_page_token: None,
+            });
+        };
+        let known = self.known(token).map_err(map)?;
+        let delta = self
+            .graph
+            .delta(token, &folder, at.next.as_deref())
+            .map_err(map)?;
+        let messages = delta
+            .changes
+            .iter()
+            .filter_map(|c| match c {
+                Change::Message(m) => Some(m),
+                Change::Removed(_) => None,
+            })
+            .filter(|m| label.is_none_or(|l| label_ids(m, &known).iter().any(|x| x == l)))
+            .map(|m| MessageRef {
+                id: m.id.clone(),
+                thread_id: m.conversation_id.clone(),
+            })
+            .collect();
+        match delta.next {
+            Next::More(l) => at.next = Some(l),
+            Next::Done(_) => {
+                at.next = None;
+                at.i += 1;
+            }
+        }
+        Ok(MessagePage {
+            messages,
+            next_page_token: (at.i < at.ids.len()).then(|| text_of(&at)),
+        })
+    }
+
+    /// One delta page of one folder (spec section 3). A removed message is
+    /// read by ID: a message gives its labels now (a move), HTTP 404 gives
+    /// `Deleted`. A folder of the cursor that the mailbox lost, and a link
+    /// that Graph does not accept, give `HistoryExpired`: the sync then does
+    /// a full resync.
+    fn changes(
+        &self,
+        token: &str,
+        from: &str,
+        page: Option<&str>,
+    ) -> iris_provider::Result<HistoryPage> {
+        let cursor: Cursor = token_of(from, "cursor")?;
+        if cursor.v != 1 {
+            return Err(iris_provider::Error::Decode(
+                "an unknown cursor version".into(),
+            ));
+        }
+        let mut at: Page = match page {
+            Some(p) => token_of(p, "page token")?,
+            None => {
+                let ids: Vec<String> = self
+                    .folders(token)
+                    .map_err(map)?
+                    .into_iter()
+                    .map(|f| f.id)
+                    .collect();
+                if cursor.links.keys().any(|k| !ids.contains(k)) {
+                    return Err(iris_provider::Error::HistoryExpired);
+                }
+                Page {
+                    ids,
+                    ..Page::default()
+                }
+            }
+        };
+        let known = self.known(token).map_err(map)?;
+        let mut changes = Vec::new();
+        if let Some(folder) = at.ids.get(at.i).cloned() {
+            let link = at
+                .next
+                .clone()
+                .or_else(|| cursor.links.get(&folder).cloned());
+            let delta = match self.graph.delta(token, &folder, link.as_deref()) {
+                Ok(d) => d,
+                // The folder went away during the sync.
+                Err(Error::NotFound) => return Err(iris_provider::Error::HistoryExpired),
+                Err(e) => return Err(map(e)),
+            };
+            for c in delta.changes {
+                changes.push(match c {
+                    Change::Message(m) => Record::Added(history(&m, &known)),
+                    Change::Removed(id) => match self.graph.message(token, &id) {
+                        Ok(m) => Record::Added(history(&m, &known)),
+                        Err(Error::NotFound) => Record::Deleted(HistoryMessage {
+                            id,
+                            thread_id: String::new(),
+                            label_ids: Vec::new(),
+                        }),
+                        Err(e) => return Err(map(e)),
+                    },
+                });
+            }
+            match delta.next {
+                Next::More(l) => at.next = Some(l),
+                Next::Done(l) => {
+                    at.done.insert(folder, l);
+                    at.next = None;
+                    at.i += 1;
+                }
+            }
+        }
+        let last = at.i >= at.ids.len();
+        Ok(HistoryPage {
+            history: vec![History { changes }],
+            cursor: if last {
+                text_of(&Cursor {
+                    v: 1,
+                    links: std::mem::take(&mut at.done),
+                })
+            } else {
+                from.to_string()
+            },
+            next_page_token: (!last).then(|| text_of(&at)),
+        })
+    }
+
+    fn minimal(&self, token: &str, id: &str) -> iris_provider::Result<Minimal> {
+        let m = self.graph.message(token, id).map_err(map)?;
+        let known = self.known(token).map_err(map)?;
+        Ok(Minimal {
+            id: m.id.clone(),
+            label_ids: label_ids(&m, &known),
+        })
+    }
+
+    fn metadata(&self, _: &str, _: &str, _: &[&str]) -> iris_provider::Result<Metadata> {
+        later()
+    }
+
+    /// The fields first, then the MIME text into `sink`.
+    fn raw(
+        &self,
+        token: &str,
+        id: &str,
+        sink: &mut dyn Write,
+    ) -> iris_provider::Result<RawMessage> {
+        let m = self.graph.message(token, id).map_err(map)?;
+        let known = self.known(token).map_err(map)?;
+        let internal_date = match m.received_date_time.as_deref() {
+            None => 0,
+            Some(t) => epoch_ms(t)
+                .ok_or_else(|| iris_provider::Error::Decode(format!("bad receivedDateTime {t}")))?,
+        };
+        let size = self.graph.raw(token, id, &mut &mut *sink).map_err(map)?;
+        Ok(RawMessage {
+            id: m.id.clone(),
+            thread_id: m.conversation_id.clone(),
+            label_ids: label_ids(&m, &known),
+            internal_date,
+            size,
+        })
+    }
+
+    fn messages_with_id(&self, _: &str, _: &str) -> iris_provider::Result<Vec<MessageRef>> {
+        later()
+    }
+
+    fn modify(&self, _: &str, _: &[&str], _: &[&str], _: &[&str]) -> iris_provider::Result<()> {
+        later()
+    }
+
+    fn trash(&self, _: &str, _: &str) -> iris_provider::Result<Minimal> {
+        later()
+    }
+
+    fn untrash(&self, _: &str, _: &str) -> iris_provider::Result<Minimal> {
+        later()
+    }
+
+    fn create_label(&self, _: &str, _: &str) -> iris_provider::Result<Label> {
+        later()
+    }
+
+    fn drafts_with_id(&self, _: &str, _: &str) -> iris_provider::Result<Vec<Draft>> {
+        later()
+    }
+
+    fn draft_raw(&self, _: &str, _: &str) -> iris_provider::Result<DraftRaw> {
+        later()
+    }
+
+    fn create_draft(&self, _: &str, _: &[u8], _: Option<&str>) -> iris_provider::Result<Draft> {
+        later()
+    }
+
+    fn send_draft(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: Option<&str>,
+    ) -> iris_provider::Result<Sent> {
+        later()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::Rng;
+    use crate::Flag;
+
+    fn folder(
+        id: &str,
+        name: &str,
+        parent: Option<&str>,
+        well_known: Option<&'static str>,
+    ) -> Folder {
+        Folder {
+            odata_type: None,
+            id: id.into(),
+            display_name: name.into(),
+            parent_folder_id: parent.map(str::to_string),
+            child_folder_count: 0,
+            total_item_count: 0,
+            unread_item_count: 0,
+            well_known,
+        }
+    }
+
+    fn unescape(part: &str) -> String {
+        part.replace("%2F", "/")
+            .replace("%23", "#")
+            .replace("%25", "%")
+    }
+
+    /// Property: for random folder trees and category lists (names from
+    /// Graph, which the person sets), the label names are distinct under
+    /// case folding, no category gets a system name or a `Folders/` name,
+    /// and each folder name gives back the display names of its path.
+    #[test]
+    fn label_names_stay_distinct_for_any_folder_and_category_names() {
+        let words = [
+            "Inbox",
+            "inbox",
+            "INBOX",
+            "a/b",
+            "a%2Fb",
+            "#1",
+            "%",
+            "Folders",
+            "Categories/x",
+            "folders/y",
+            "Travel",
+            "travel",
+            "Σσ",
+            "ς",
+            "Drafts",
+            "Sent Items",
+            "Archive",
+            "",
+            " x ",
+            "CATEGORY_A",
+            "Spam",
+            "Unread",
+        ];
+        let known = [
+            "inbox",
+            "drafts",
+            "deleteditems",
+            "junkemail",
+            "archive",
+            "outbox",
+            "sentitems",
+        ];
+        let mut rng = Rng(7);
+        for _ in 0..3_000 {
+            let mut folders = Vec::new();
+            for (i, wk) in known.iter().enumerate() {
+                if rng.below(4) > 0 {
+                    folders.push(folder(&format!("W{i}"), rng.pick(&words), None, Some(wk)));
+                }
+            }
+            for i in 0..rng.below(8) {
+                let parent = (i > 0 && rng.below(2) == 0).then(|| format!("U{}", rng.below(i)));
+                let f = folder(&format!("U{i}"), rng.pick(&words), parent.as_deref(), None);
+                folders.push(f);
+            }
+            let cats: Vec<String> = (0..rng.below(6))
+                .map(|_| rng.pick(&words).to_string())
+                .collect();
+            let labels = label_list(&folders, &cats);
+
+            let mut ids: Vec<&str> = labels.iter().map(|l| l.id.as_str()).collect();
+            ids.sort();
+            let n = ids.len();
+            ids.dedup();
+            assert_eq!(ids.len(), n, "distinct IDs");
+            for (i, a) in labels.iter().enumerate() {
+                for b in &labels[i + 1..] {
+                    assert_ne!(UniCase::new(&a.name), UniCase::new(&b.name), "{a:?} {b:?}");
+                }
+                if a.id.starts_with("category:") {
+                    let folded = UniCase::new(a.name.as_str());
+                    assert!(!SYSTEM_NAMES.iter().any(|s| UniCase::new(*s) == folded));
+                    assert!(!a.name.to_lowercase().starts_with("folders/"), "{a:?}");
+                    assert_eq!(a.kind, "user");
+                }
+                if let Some(id) = a.id.strip_prefix("folder:") {
+                    let f = folders.iter().find(|f| f.id == id).unwrap();
+                    let name = a.name.split(" #").next().unwrap();
+                    if f.well_known.is_none() {
+                        let last = name.rsplit('/').next().unwrap();
+                        assert_eq!(unescape(last), f.display_name, "{a:?}");
+                        assert_eq!(a.kind, "user");
+                    } else {
+                        assert_eq!(a.kind, "system");
+                    }
+                    assert!(name.starts_with("Folders/"));
+                }
+            }
+        }
+    }
+
+    /// Property: each message has exactly one folder label, and `DRAFT`
+    /// only when it is in Drafts and Graph says that it is a draft.
+    #[test]
+    fn each_message_has_one_folder_label() {
+        let known: HashMap<String, &'static str> = [
+            ("I", "inbox"),
+            ("D", "drafts"),
+            ("T", "deleteditems"),
+            ("J", "junkemail"),
+            ("S", "sentitems"),
+        ]
+        .into_iter()
+        .map(|(id, n)| (id.to_string(), n))
+        .collect();
+        let mut rng = Rng(11);
+        for _ in 0..5_000 {
+            let m = Message {
+                id: "m".into(),
+                conversation_id: "c".into(),
+                parent_folder_id: rng.pick(&["I", "D", "T", "J", "S", "X", ""]).into(),
+                categories: (0..rng.below(4))
+                    .map(|_| rng.pick(&["a", "A", "INBOX", "a"]).to_string())
+                    .collect(),
+                is_read: rng.below(2) == 0,
+                flag: Flag {
+                    flag_status: rng.pick(&["flagged", "notFlagged", "complete"]).into(),
+                },
+                is_draft: rng.below(2) == 0,
+                received_date_time: None,
+                internet_message_id: None,
+                etag: None,
+            };
+            let ids = label_ids(&m, &known);
+            let folders: Vec<&String> = ids
+                .iter()
+                .filter(|l| {
+                    l.starts_with("folder:")
+                        || ["INBOX", "TRASH", "SPAM", "DRAFT"].contains(&l.as_str())
+                })
+                .collect();
+            assert_eq!(folders.len(), 1, "{ids:?}");
+            assert_eq!(
+                ids.contains(&"DRAFT".to_string()),
+                m.is_draft && m.parent_folder_id == "D"
+            );
+            assert!(!ids.contains(&"SENT".to_string()));
+            assert_eq!(ids.contains(&"UNREAD".to_string()), !m.is_read);
+            assert_eq!(ids.contains(&"STARRED".to_string()), m.flagged());
+            let mut sorted = ids.clone();
+            sorted.sort();
+            sorted.dedup();
+            assert_eq!(sorted.len(), ids.len(), "no label twice");
+        }
+    }
+
+    /// Property: `epoch_ms` reads each time that `format` writes, and gives
+    /// `None` for a changed text, never a wrong time or a panic.
+    #[test]
+    fn received_times_read_back_and_bad_text_is_refused() {
+        fn format(ms: i64) -> String {
+            let secs = ms.div_euclid(1000);
+            let days = secs.div_euclid(86_400);
+            let rest = secs.rem_euclid(86_400);
+            let z = days + 719_468;
+            let era = z.div_euclid(146_097);
+            let doe = z - era * 146_097;
+            let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+            let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+            let mp = (5 * doy + 2) / 153;
+            let d = doy - (153 * mp + 2) / 5 + 1;
+            let m = if mp < 10 { mp + 3 } else { mp - 9 };
+            let y = yoe + era * 400 + i64::from(m <= 2);
+            format!(
+                "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{:03}Z",
+                rest / 3600,
+                rest % 3600 / 60,
+                rest % 60,
+                ms.rem_euclid(1000)
+            )
+        }
+        let mut rng = Rng(3);
+        let chars = ["0", "9", "-", ":", "T", "Z", ".", "x", "é", " "];
+        for _ in 0..20_000 {
+            let ms = (rng.below(1 << 30) as i64) * 4096 + rng.below(4096) as i64;
+            let text = format(ms);
+            assert_eq!(epoch_ms(&text), Some(ms), "{text}");
+            let whole = format!("{}Z", &text[..19]);
+            assert_eq!(epoch_ms(&whole), Some(ms - ms % 1000), "{whole}");
+            let mut bad = text.clone();
+            let at = rng.below(bad.len());
+            if bad.is_char_boundary(at) && bad.is_char_boundary(at + 1) {
+                bad.replace_range(at..at + 1, rng.pick(&chars));
+            }
+            if let Some(t) = epoch_ms(&bad) {
+                // A changed digit can give another valid time, never a panic.
+                assert!(bad != text || t == ms);
+            }
+        }
+        assert_eq!(epoch_ms("2026-11-17T10:00:00Z"), Some(1_794_909_600_000));
+        assert_eq!(epoch_ms("2026-13-17T10:00:00Z"), None);
+        assert_eq!(epoch_ms("2026-11-17T10:00:00"), None);
+        assert_eq!(epoch_ms("2026-11-17T10:00:00.Z"), None);
+        assert_eq!(epoch_ms(""), None);
+    }
+}

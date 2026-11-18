@@ -159,13 +159,57 @@ flat.
 A token that Graph does not accept any more gives HTTP 410, or another 4xx
 with a code such as `syncStateNotFound` (A1). The client gives
 `Error::DeltaReset` for 410 and for each 4xx of a call with a stored link,
-except 401, 403 and 429. The caller then starts that folder again with no
-link: a full resync of one folder. A round with no link lists only the
-messages that are in the folder now, so a message that went away while
-the link was expired is not in it. After such a full round, each mirror
-message of that folder that the round did not list counts as `Removed`,
-and gets the same read by ID as above: 404 means gone, a message means a
-move to its new folder.
+except 401, 403 and 429. The provider gives `HistoryExpired` for it, and
+also when a folder of the cursor is not in the folder list any more. The
+sync then does the full resync of spec 1 section 4.4 for the whole
+account: the list, the read by ID of each mirror message that the list
+does not have (404 means gone, a message gives its folder now), and the
+label lists. A round with no link lists only the messages that are in the
+folder now, so a full resync is the only path that finds a message that
+went away while a link was expired. Known limit with its own issue: one
+expired link costs a resync of all folders.
+
+### 3.1 The provider calls (R6-14)
+
+`iris_graph::Outlook` implements `iris_provider::Provider` on these
+rules:
+
+- The cursor is JSON: `{"v":1,"links":{"<folder id>":"<deltaLink>"}}`.
+  `profile` gives the cursor with no links, because Graph has no cheap
+  cursor of now. The next `changes` then runs a new round of each
+  folder: each message gives `Change::Added` with its labels now. Known
+  limit with its own issue: a message that is deleted after the list of
+  a first sync or a full resync, and before its first `changes`, stays in
+  the mirror until the next verify finds it (an extra message starts a
+  full resync).
+- `changes` gives one delta page of one folder for each call. The page
+  token holds the folder IDs of the call, the folder of the next page,
+  its `nextLink` and the delta links of the folders whose round ended.
+  Each `Removed` gets the read by ID in the same call: a message gives
+  `Change::Added` with its labels now (a move), 404 gives
+  `Change::Deleted`. The last page gives the new cursor, so the sync
+  stores all links in one transaction with the last changes.
+- `messages` lists with delta rounds with no link, one folder page for
+  each call: all folders, or the one folder of a folder label. For
+  another label (`UNREAD`, `STARRED`, a category) it reads all folders
+  and keeps the messages that have the label. The order is the folder
+  order, not newest first; the sync does not need an order. Known limit
+  with its own issue: each such label list of a full resync or a verify
+  reads the whole mailbox.
+- `labels` gives the system labels, the folder labels of section 6 and
+  one label for each category of the master list
+  (`/me/outlook/masterCategories`). Known limit with its own issue: a
+  category that a message has, but the master list does not, is not
+  mirrored.
+- `minimal` and `raw` read the message by ID for its labels, its thread
+  and `receivedDateTime`. `raw` then streams `$value`.
+- One `Outlook` value serves one mailbox: it keeps the IDs of the
+  well-known folders after the first read.
+- `SENT` is never given (section 6). R6-16 decides how the copies that
+  Iris sent get it.
+- The write calls and the reads of the send (`metadata`,
+  `messages_with_id`, `drafts_with_id`, `draft_raw`) give a definite
+  rejection (`Api` 400 `notSupported`) before any request, until R6-15.
 
 ### 4. Raw message
 
@@ -450,7 +494,7 @@ reconciles with reads: not JSON, another shape, another state, above
 | A hidden child folder | listed, its messages synced | fake hidden child |
 | A received message moved into Drafts (`isDraft` false) | label `Folders/Drafts`, no `DRAFT` | fake move to `drafts` |
 | A received message moved into Sent Items | label `Folders/Sent Items`, no `SENT`; the sender axis treats it as received mail | fake move to `sentitems` |
-| An expired delta link | `Error::DeltaReset`, a full round of that folder | fake expiry |
+| An expired delta link | `Error::DeltaReset`, then `HistoryExpired`: a full resync of the account | fake expiry, `iris-sync` test `an_expired_link_starts_a_full_resync` |
 | 429 or 503 with `Retry-After` on a read | wait for it, then call again; a write never calls again | fake with `Retry-After` |
 | A crash in a round | the last stored link is the start; Graph replays changes, the mirror applies each one again with the same result | R6-10 part |
 
@@ -626,5 +670,9 @@ Each step is one card and one PR. The board has each card with its
    R6-11.
 4. R6-13: the Microsoft sign-in in `iris-auth`, and the decision record
    with the app registration steps for dk. Depends on R6-04.
-5. R6-14: the provider implementation and the engine wiring. Depends on
+5. R6-14: the sync side of the provider (section 3.1). Depends on
    R6-12, R6-13 and R6-10.
+6. R6-15: the write and send side of the provider. Depends on R6-14.
+7. R6-16: the engine wiring (account kind, sign-in, token storage,
+   `Authentication-Results`, `SENT` of the copies that Iris sent).
+   Depends on R6-15.
