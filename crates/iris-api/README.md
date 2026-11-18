@@ -199,7 +199,8 @@ engine computes them from the store. Nothing leaves the machine.
   person opened on that day. A day with no entry is a day with no use.
 - `first_brief`: `{"connect", "brief", "seconds"}`, or `null` before the
   first brief with content. `connect` is the time of the first account (the
-  connect step). `brief` is the time of the first brief with content: an
+  connect step). `seconds` is the time between the two, rounded up to whole
+  seconds. `brief` is the time of the first brief with content: an
   item of a section, a record or a bundle. The engine checks the brief every
   10 seconds in `iris serve`, after `iris mirror` and `iris understand`, and
   at each `/api/brief`. The store
@@ -210,7 +211,8 @@ engine computes them from the store. Nothing leaves the machine.
   each `{"account", "checked", "differences", "complete"}`. An account with
   no check has `checked` and `differences` `null`, and `complete` `false`.
   `differences` is `null` if the log has no count. `complete` is `false`
-  when an error stopped the check.
+  when an error stopped the check, or when the check skipped a message (a
+  message that changed during the check is not compared).
 - `memory`: `{"rss_kib", "messages"}`. `rss_kib` is the resident memory of
   the engine from `ps`, or `null`.
 - `approvals`: `{"decided", "approved"}`, the decisions of the person on the

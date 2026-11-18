@@ -384,7 +384,8 @@ async fn first_brief_runs_to_the_first_brief_with_content() {
     assert!(brief > connect, "{first:?}");
     assert_eq!(m["first_brief"]["connect"], iris_api::rfc3339(connect));
     assert_eq!(m["first_brief"]["brief"], iris_api::rfc3339(brief));
-    assert_eq!(m["first_brief"]["seconds"], (brief - connect) / 1000);
+    // Rounded up: a time just over the target does not show as met.
+    assert_eq!(m["first_brief"]["seconds"], (brief - connect + 999) / 1000);
 }
 
 /// Make the store a store of migration 26 again. The later migrations (28
@@ -531,7 +532,8 @@ async fn mirror_gives_the_newest_verify_of_each_account() {
     assert_eq!(
         m["mirror"],
         json!([
-            {"account": "a@example.com", "checked": "2026-11-16T12:00:01Z", "differences": 0, "complete": true},
+            // Two skipped messages were not compared: not complete.
+            {"account": "a@example.com", "checked": "2026-11-16T12:00:01Z", "differences": 0, "complete": false},
             {"account": "b@example.com", "checked": "2026-11-16T12:00:00Z", "differences": 1, "complete": false},
             {"account": "c@example.com", "checked": null, "differences": null, "complete": false},
         ])
