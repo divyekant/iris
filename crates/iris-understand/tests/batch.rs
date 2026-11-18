@@ -276,11 +276,6 @@ fn a_run_updates_the_talks_of_a_kind_change() {
     let b = store("talkdue");
     b.add("1", "a", 1, &["INBOX"]);
     b.run(&Limits::default()).unwrap();
-    let due = |b: &Box_| -> i64 {
-        b.store
-            .read(|c| Ok(c.query_row("SELECT count(*) FROM talk_due", [], |r| r.get(0))?))
-            .unwrap()
-    };
     b.store
         .write(|tx| {
             tx.execute(
@@ -291,9 +286,68 @@ fn a_run_updates_the_talks_of_a_kind_change() {
             Ok(())
         })
         .unwrap();
-    assert_eq!(due(&b), 1);
+    assert_eq!(due(&b), Some(1));
     b.run(&Limits::default()).unwrap();
-    assert_eq!(due(&b), 0);
+    assert_eq!(due(&b), Some(0));
+}
+
+fn due(b: &Box_) -> Option<i64> {
+    b.col("SELECT count(*) FROM talk_due")
+}
+
+/// Issue 106: a kind change that the understanding of the last messages of
+/// a run makes (a sent message makes its recipient a person) marks talks
+/// after the last sender refresh. The run empties the queue before it ends.
+#[test]
+fn a_run_ends_with_no_marked_talk() {
+    let b = store("talkend");
+    b.add("1", "a", 2, &["INBOX"]);
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(due(&b), Some(0));
+    b.add_raw(
+        "2",
+        "b",
+        1,
+        "From: owner@example.com\nTo: Ana Lee <ana@example.org>\nSubject: Hi\n\
+         Message-ID: <s2@example.com>\nDate: Wed, 31 Dec 2025 08:00:00 +0000\n\
+         Content-Type: text/plain\n\nHello Ana.\n",
+        &["SENT"],
+    );
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(
+        b.col("SELECT count(*) FROM sender WHERE address = 'ana@example.org' AND kind = 'person'"),
+        Some(1),
+        "the sent message makes Ana a person"
+    );
+    assert_eq!(due(&b), Some(0));
+}
+
+/// Issue 106: migration 40 marks each thread with understood mail, so a
+/// conversation that a kind change of an older store left stale is
+/// computed again once.
+#[test]
+fn migration_40_marks_each_understood_thread() {
+    let b = store("talkup");
+    b.model(false, None);
+    b.add("1", "a", 2, &["INBOX"]);
+    b.add("2", "b", 1, &["INBOX"]);
+    b.run(&Limits::default()).unwrap();
+    b.add("3", "c", 1, &["INBOX"]);
+    b.store
+        .write(|tx| {
+            tx.execute_batch(
+                "DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender;
+                 DROP TRIGGER talk_due_sender_remove; DROP TABLE talk_due;
+                 PRAGMA user_version = 39;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let store = Store::open(&b._dir.0).unwrap();
+    let due: i64 = store
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM talk_due", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(due, 2, "the two understood threads, not the new one");
 }
 
 #[test]

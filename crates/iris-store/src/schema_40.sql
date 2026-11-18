@@ -10,6 +10,12 @@
 
 CREATE TABLE talk_due (thread_id INTEGER PRIMARY KEY);
 
+-- An older store can hold a conversation that a past kind change left
+-- stale, with no queue to mark it. Each thread with understood mail is
+-- computed again once.
+INSERT INTO talk_due(thread_id)
+  SELECT DISTINCT thread_id FROM message WHERE understood_at IS NOT NULL;
+
 CREATE TRIGGER talk_due_sender_add AFTER INSERT ON sender
   WHEN NEW.kind IS NOT NULL
 BEGIN
