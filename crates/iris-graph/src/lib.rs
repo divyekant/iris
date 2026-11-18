@@ -505,17 +505,32 @@ impl Graph {
         self.json(token, &url, false)
     }
 
-    /// `PATCH isRead`. A write: one request (spec section 5).
-    pub fn set_read(&self, token: &str, id: &str, read: bool) -> Result<Message> {
-        let m = self.patch(token, id, serde_json::json!({ "isRead": read }), None)?;
+    /// `PATCH isRead`, with `If-Match: etag` when `etag` is given (HTTP 412,
+    /// `Error::Api`, if the message changed). A write: one request (spec
+    /// section 5).
+    pub fn set_read(
+        &self,
+        token: &str,
+        id: &str,
+        read: bool,
+        etag: Option<&str>,
+    ) -> Result<Message> {
+        let m = self.patch(token, id, serde_json::json!({ "isRead": read }), etag)?;
         sure(m.is_read == read, m)
     }
 
-    /// `PATCH flag`. A write: one request.
-    pub fn set_flag(&self, token: &str, id: &str, flagged: bool) -> Result<Message> {
+    /// `PATCH flag`, with `If-Match: etag` as `set_read`. A write: one
+    /// request.
+    pub fn set_flag(
+        &self,
+        token: &str,
+        id: &str,
+        flagged: bool,
+        etag: Option<&str>,
+    ) -> Result<Message> {
         let status = if flagged { "flagged" } else { "notFlagged" };
         let body = serde_json::json!({ "flag": { "flagStatus": status } });
-        let m = self.patch(token, id, body, None)?;
+        let m = self.patch(token, id, body, etag)?;
         sure(m.flag.flag_status == status, m)
     }
 

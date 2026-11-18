@@ -207,3 +207,27 @@ fn a_category_conflict_reads_again_and_keeps_the_other_change() {
         &fake.requests()[before..]
     );
 }
+
+/// Another client moves the message to a user folder after the read of
+/// the plan: the conditional `isRead` gets 412, the new read plans from
+/// the user folder, and the call refuses the move before any write.
+#[test]
+fn a_move_by_another_client_stops_the_planned_move() {
+    let fake = FakeGraph::start(Mailbox::new(3, 60)).unwrap();
+    let (outlook, a, _) = warm(&fake);
+    assert!(fake.set_read(&a, true));
+    fake.answer_next(&[&format!(
+        r#"{{"id":"{a}","@odata.etag":"W/\"old\"","conversationId":"c",
+        "parentFolderId":"F-inbox","categories":[],"isRead":true,
+        "flag":{{"flagStatus":"notFlagged"}},"isDraft":false,
+        "receivedDateTime":"2026-11-17T10:00:00Z","internetMessageId":null}}"#
+    )]);
+    assert!(fake.move_message(&a, "F-old"));
+    let e = outlook
+        .modify(TOKEN, &[&a], &["UNREAD"], &["INBOX"])
+        .unwrap_err();
+    assert!(matches!(e, Error::Api { status: 400, .. }), "{e}");
+    assert_eq!(fake.messages()[&a], "F-old");
+    let l = outlook.minimal(TOKEN, &a).unwrap().label_ids;
+    assert!(!l.contains(&"UNREAD".to_string()), "{l:?}");
+}

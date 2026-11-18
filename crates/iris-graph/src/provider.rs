@@ -136,8 +136,12 @@ impl Outlook {
                 Op::Categories(list) => {
                     tag().and_then(|e| self.graph.set_categories(token, id, list, &e))
                 }
-                Op::Read(read) => self.graph.set_read(token, id, *read),
-                Op::Flag(flagged) => self.graph.set_flag(token, id, *flagged),
+                Op::Read(read) => {
+                    tag().and_then(|e| self.graph.set_read(token, id, *read, Some(&e)))
+                }
+                Op::Flag(flagged) => {
+                    tag().and_then(|e| self.graph.set_flag(token, id, *flagged, Some(&e)))
+                }
                 Op::Move(folder) => tag().and_then(|e| self.graph.move_to(token, id, folder, &e)),
             }?;
             *wrote = true;

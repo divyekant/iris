@@ -323,3 +323,25 @@ fn a_label_keeps_the_other_categories() {
         assert!(l.contains(&format!("category:{c}")), "{l:?}");
     }
 }
+
+/// A failed read after a successful move leaves the complete labels of
+/// before the move in the mirror, never a message with no folder label.
+#[test]
+fn a_failed_read_after_a_move_keeps_the_labels_of_before() {
+    let b = setup("move-read");
+    let m = b.in_folder("F-inbox", 1)[0];
+    let before = b.mirror_labels(m);
+    assert!(before.contains(&"INBOX".to_string()));
+    let a = b.approved("archive", "{}", &[m]);
+    // The profile, the read of step 2, the read of the plan and the move
+    // pass; the read after the move fails.
+    b.fake
+        .fail_next(&[(0, None), (0, None), (0, None), (0, None), (400, None)]);
+    assert_eq!(changed(b.apply(a)), 1);
+    assert!(b
+        .outlook_labels(m)
+        .contains(&"folder:F-archive".to_string()));
+    assert_eq!(b.mirror_labels(m), before);
+    b.sync();
+    assert_eq!(b.mirror_labels(m), b.outlook_labels(m));
+}

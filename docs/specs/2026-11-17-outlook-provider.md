@@ -238,10 +238,10 @@ account. R6-10 decides where this compare lives.
 
 | Call | Graph | Answer |
 |---|---|---|
-| `set_read(id, bool)` | `PATCH /me/messages/{id}` `{"isRead"}` | 200 |
-| `set_flag(id, bool)` | `PATCH` `{"flag":{"flagStatus":"flagged" or "notFlagged"}}` | 200 |
+| `set_read(id, bool, etag)` | `PATCH /me/messages/{id}` `{"isRead"}`, with `If-Match: <etag>` when the etag is given | 200, or 412 |
+| `set_flag(id, bool, etag)` | `PATCH` `{"flag":{"flagStatus":"flagged" or "notFlagged"}}`, with `If-Match: <etag>` when the etag is given | 200, or 412 |
 | `set_categories(id, list, etag)` | `PATCH` `{"categories":[...]}`, the full list, with `If-Match: <etag>` | 200, or 412 |
-| `move_to(id, folder)` | `POST /me/messages/{id}/move` `{"destinationId"}` | 201, the message |
+| `move_to(id, folder, etag)` | `POST /me/messages/{id}/move` `{"destinationId"}` | 201, the message |
 | `create_draft(mime)` | `POST /me/messages`, `text/plain`, base64 MIME | 201, the draft |
 | `send_mime(mime)` | `POST /me/sendMail`, `text/plain`, base64 MIME | 202, no body |
 | `sent_by_message_id(id)` | `GET /me/messages?$filter=internetMessageId eq '<id>'&$select=id,isDraft,sentDateTime,parentFolderId`, each page (a read) | 200, the matching messages |
@@ -332,9 +332,9 @@ section 4 on these rules:
   a change of `INBOX` on a message that is not in the inbox or the
   archive. The read state, the flag and the categories change in each
   folder (section 6). Then, for each message, in this order: the
-  categories (the full new list from the read of this call, with
-  `If-Match`), `isRead`, the flag, and the move last (`If-Match` on the
-  newest etag of the message). A write that changes nothing is not sent.
+  categories (the full new list from the read of this call), `isRead`,
+  the flag, and the move last. Each write has `If-Match` on the newest
+  etag of the message. A write that changes nothing is not sent.
 - HTTP 412 on a write of a message means that another client changed the
   message after the read. The provider reads the message one more time,
   plans again from the new state, and writes once more, so that the
@@ -353,8 +353,14 @@ section 4 on these rules:
 - After a successful `modify` that changes `INBOX` (a move), the apply
   reads the labels of each message (`minimal`) and writes them to the
   mirror, so that the mirror has one folder label before the next sync.
-  If a read fails, the mirror has the `add` and `remove` change until the
-  next sync.
+  If a read fails, the reads stop, and each message with no read keeps
+  its complete labels from before the move until the next sync. The
+  mirror never has a message with no folder label or with two.
+- Each write of `modify` has `If-Match` on the newest etag of the
+  message, also `isRead` and the flag. Thus a message that another
+  client moves after the read of the plan does not move: the 412 read
+  plans again from the new folder, and refuses a move out of a user
+  folder.
 
 ### 6. Map to the mirror
 

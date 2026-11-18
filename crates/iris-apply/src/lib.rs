@@ -858,10 +858,11 @@ impl<'a, 'b> Run<'a, 'b> {
                     if change.single() {
                         mirror(self.store, self.account, &labels);
                     } else {
-                        let ids: Vec<i64> = live.iter().map(|(id, _)| *id).collect();
-                        mirror_change(self.store, self.account, &ids, change);
                         if change.moves() {
                             self.mirror_read(&live);
+                        } else {
+                            let ids: Vec<i64> = live.iter().map(|(id, _)| *id).collect();
+                            mirror_change(self.store, self.account, &ids, change);
                         }
                     }
                 }
@@ -876,7 +877,9 @@ impl<'a, 'b> Run<'a, 'b> {
 
     /// The mirror gets the labels that the provider gives now for each of
     /// `messages`, after a successful move. The write is done, so a failed
-    /// read stops only these reads: the next sync writes the labels.
+    /// read stops only these reads. A message with no read keeps its
+    /// complete labels from before the move (one folder label), and the
+    /// next sync writes the new labels.
     fn mirror_read(&mut self, messages: &[(i64, String)]) {
         let mut seen = Vec::with_capacity(messages.len());
         for (id, provider_id) in messages {
