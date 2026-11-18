@@ -59,7 +59,8 @@ Setup steps (Google Cloud console, "Google Auth Platform" since April 2025 [9]):
 3. On the Branding page, give an app name, a support email, a home page URL,
    a privacy policy URL and an authorized domain.
 4. On the Audience page, select "External".
-5. On the Data Access page, add the scope `gmail.readonly`.
+5. On the Data Access page, add the scope `gmail.readonly`. To let Iris
+   change and send mail (`iris account add --write`), add `gmail.modify` too.
 6. On the Clients page, create a client of the type "Desktop app".
 7. Download the JSON file at once. Since June 2025 the console does not show
    the client secret again after the creation screen closes [9].

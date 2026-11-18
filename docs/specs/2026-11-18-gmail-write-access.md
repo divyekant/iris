@@ -101,7 +101,8 @@ The person sees a raw provider error and no next step.
     read access only. Run `iris account add <client.json> --write`." in
     place of the raw provider text. The failed action keeps this text.
   - `apply_step` sets `account.state` to `read_only` (same guard), so the
-    next actions wait in place of a fail.
+    actions of the next apply steps wait in place of a fail. The other
+    actions of the same step can fail with the same text.
 
 ### Status
 
