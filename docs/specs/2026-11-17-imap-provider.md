@@ -432,6 +432,11 @@ times after an unknown result (spec 2 section 7.2).
   check of the provider and the write of the token run in one store
   transaction. To move an address to another mailbox, the person removes the
   account first.
+- `iris account add-imap <address>` with no `--host` gives a new password
+  to the IMAP account of the address, with its saved server, port and
+  user. With no IMAP account for the address, it refuses. The sign-in help
+  of the web client shows only this form, with the address quoted for the
+  shell, so the help never copies a saved value into a command.
 - The engine worker of an IMAP account uses `Imap`, with the password as
   the token. `Unauthorized` marks the account `needs_sign_in`, as for
   Gmail. `provider_for` in `crates/iris/src/engine.rs` picks the provider

@@ -172,6 +172,27 @@ pub fn save_imap(
     Ok(store.save_account_secret("imap", address, Some(imap), &sealed, STATE_OK)?)
 }
 
+/// The saved server of the IMAP account with `address`, or `None` if no
+/// IMAP account has the address.
+pub fn saved_imap(store: &Store, address: &str) -> Result<Option<ImapServer>> {
+    use rusqlite::OptionalExtension;
+    Ok(store.read(|c| {
+        Ok(c.query_row(
+            "SELECT imap_host, imap_port, imap_user FROM account
+             WHERE address = ?1 AND provider = 'imap' AND imap_host IS NOT NULL",
+            [address],
+            |r| {
+                Ok(ImapServer {
+                    host: r.get(0)?,
+                    port: r.get(1)?,
+                    user: r.get(2)?,
+                })
+            },
+        )
+        .optional()?)
+    })?)
+}
+
 /// The IMAP provider of the mailbox `address` on `server`: TLS to the
 /// server. For tests, `IRIS_TEST_IMAP_PLAIN` set and the host `127.0.0.1`
 /// give a plain TCP connection to a fake server. With the setting, any

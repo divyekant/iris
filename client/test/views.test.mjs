@@ -800,7 +800,7 @@ test("each status answer sets the accounts that need sign-in, and the app shows 
   try {
     globalThis.fetch = async () => new Response(JSON.stringify({ ...fx.status, accounts: [account] }));
     await get("status");
-    assert.deepEqual(access.locked, [{ address: account.address, provider: account.provider, imap: undefined }]);
+    assert.deepEqual(access.locked, [{ address: account.address, provider: account.provider }]);
     // The views start API calls while they render. Keep them pending.
     globalThis.fetch = () => new Promise(() => {});
     for (const hash of ["", "#/setup", "#/brief", "#/mail/m-55210"]) {
@@ -821,7 +821,7 @@ test("each status answer sets the accounts that need sign-in, and the app shows 
     globalThis.fetch = () => new Promise(() => {});
     const t = text(await render("/src/App.svelte"));
     assert.match(t, /The mail server stopped the sign-in/);
-    assert.match(t, new RegExp(`iris account add-imap ${imap.address.replace(".", "\\.")} --host (<|&lt;)server>`));
+    assert.match(t, new RegExp(`iris account add-imap ${imap.address.replace(".", "\\.")} and give the new password`));
     assert.doesNotMatch(t, /client\.json/);
   } finally {
     globalThis.fetch = saved;

@@ -542,13 +542,16 @@ pub enum AccountCommand {
     AddImap {
         /// The mail address of the mailbox.
         address: String,
-        /// The IMAP server, for example imap.fastmail.com. TLS only.
+        /// The IMAP server, for example imap.fastmail.com. TLS only. Leave
+        /// it out to give a new password to an IMAP account that exists:
+        /// the command then uses its saved server, port and user.
         #[arg(long)]
-        host: String,
-        #[arg(long, default_value_t = 993)]
-        port: u16,
+        host: Option<String>,
+        /// The IMAP port. The default is 993.
+        #[arg(long, requires = "host")]
+        port: Option<u16>,
         /// The IMAP user name. The default is the address.
-        #[arg(long)]
+        #[arg(long, requires = "host")]
         user: Option<String>,
     },
 }
@@ -1341,12 +1344,21 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
                     user,
                 },
         } => {
-            let server = engine::ImapServer {
-                host: host.clone(),
-                port: *port,
-                user: user.clone().unwrap_or_else(|| address.clone()),
+            let store = open()?;
+            let server = match host {
+                Some(host) => engine::ImapServer {
+                    host: host.clone(),
+                    port: port.unwrap_or(993),
+                    user: user.clone().unwrap_or_else(|| address.clone()),
+                },
+                // A new password for an account that exists: the saved server.
+                None => engine::saved_imap(&store, address)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| {
+                        format!("no IMAP account has the address {address}: give --host")
+                    })?,
             };
-            account_add_imap(&open()?, address, &server)
+            account_add_imap(&store, address, &server)
         }
         Command::Mirror { command } => mirror(Arc::new(open()?), command),
         Command::Mcp => mcp(engine::data_dir(cli.data.clone()).map_err(|e| e.to_string())?),

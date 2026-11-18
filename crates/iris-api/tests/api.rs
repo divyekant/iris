@@ -308,23 +308,6 @@ async fn status_with_no_account_and_with_a_sync() {
     assert_eq!(a["sync"], json!({"kind": "first", "step": 2}));
     assert_eq!(a["last_sync"]["started"], "1970-01-01T00:00:00Z");
     assert_eq!(a["last_sync"]["ended"], Value::Null);
-    // A Gmail account has no IMAP server; an IMAP account gives its saved
-    // server, so that the sign-in help shows the exact command.
-    assert!(a.get("imap").is_none());
-    store
-        .save_account_secret(
-            "imap",
-            "me@example.org",
-            Some(("imap.example.org", 1143, "me")),
-            b"s",
-            "ok",
-        )
-        .unwrap();
-    let (_, v) = get(&store, "/api/status").await;
-    assert_eq!(
-        v["accounts"][1]["imap"],
-        json!({"host": "imap.example.org", "port": 1143, "user": "me"})
-    );
 }
 
 #[tokio::test]

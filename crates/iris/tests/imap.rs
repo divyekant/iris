@@ -323,3 +323,33 @@ fn an_interrupted_password_read_turns_the_echo_back_on() {
     unsafe { libc::close(master) };
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// With no `--host`, the command gives a new password to the IMAP account
+/// of the address, with its saved server, port and user. The sign-in help
+/// of the web client shows only this form, so it needs no saved value.
+#[test]
+fn a_new_password_needs_only_the_address() {
+    let fake = FakeImap::start(Caps::ALL);
+    let dir = data_dir("renew");
+    let (ok, _, err) = run(
+        &dir,
+        &["account", "add-imap", OWNER],
+        &format!("{PASSWORD}\n"),
+    );
+    assert!(!ok && err.contains("give --host"), "{err}");
+    assert!(row(&dir, OWNER).is_none());
+
+    assert!(add(&dir, &fake, OWNER, PASSWORD).0);
+    let first = row(&dir, OWNER).unwrap();
+    let (ok, out, err) = run(
+        &dir,
+        &["account", "add-imap", OWNER],
+        &format!("{PASSWORD}\n"),
+    );
+    assert!(ok, "{out}{err}");
+    assert!(!out.contains(PASSWORD) && !err.contains(PASSWORD));
+    let again = row(&dir, OWNER).unwrap();
+    assert_ne!(again.1, first.1, "a new seal of the password");
+    assert_eq!((again.0, again.2, again.3), (first.0, first.2, first.3));
+    let _ = std::fs::remove_dir_all(&dir);
+}
