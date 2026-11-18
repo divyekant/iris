@@ -1303,3 +1303,63 @@ fn a_change_during_a_refused_call_leaves_no_mark() {
     let marks = b.col("SELECT count(*) FROM message WHERE waits_model <> 0");
     assert_eq!(marks, Some(0), "the changed message has no mark");
 }
+
+/// A change of the thread context during a refused call (a SPAM label on
+/// an earlier message) leaves no mark either (#153).
+#[test]
+fn a_context_change_during_a_refused_call_leaves_no_mark() {
+    let b = store("refusal-context");
+    b.model(false, None);
+    let earlier = b.add("0", "a", 2, &["INBOX"]);
+    b.run(&Limits::default()).unwrap();
+    assert!(b.understood(earlier));
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    let db = b._dir.0.join("iris.db");
+    b.script.push(Err(ModelError::Budget("refused".into())));
+    *b.script.during.borrow_mut() = Some(std::boxed::Box::new(move || {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO message_label(message_id, label_id)
+                 SELECT ?1, id FROM label WHERE provider_id = 'SPAM'",
+                [earlier],
+            )
+            .unwrap();
+    }));
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(
+        b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
+        Some(0)
+    );
+}
+
+/// A sender rerun resets the mail of the sender for a new understanding,
+/// also when its retry fields have the reset values already: the mark goes.
+#[test]
+fn a_sender_rerun_clears_the_mark() {
+    let b = store("rerun-mark");
+    b.model(true, None);
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(
+        b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
+        Some(1),
+        "no budget: a refusal"
+    );
+    b.store
+        .write(|tx| {
+            let sender: i64 = tx.query_row(
+                "SELECT s.id FROM sender s JOIN header h ON h.from_addr = s.address
+                 WHERE h.message_id = ?1",
+                [m],
+                |r| r.get(0),
+            )?;
+            iris_understand::store::rerun_senders(tx, &[sender], NOW)?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
+        Some(0)
+    );
+}
