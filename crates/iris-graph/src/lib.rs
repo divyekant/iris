@@ -536,9 +536,12 @@ impl Graph {
         sure(set(&m.categories) == set(categories), m)
     }
 
-    /// `POST /me/messages/{id}/move` to the folder with the ID `folder`. A
-    /// write: one request. The ID of the message stays (immutable IDs).
-    pub fn move_to(&self, token: &str, id: &str, folder: &str) -> Result<Message> {
+    /// `POST /me/messages/{id}/move` to the folder with the ID `folder`,
+    /// with `If-Match: etag`, so that a message that changed after the read
+    /// of `etag` (for example, another client moved it) does not move: HTTP
+    /// 412 (`Error::Api`), and nothing changed (assumption A17). A write:
+    /// one request. The ID of the message stays (immutable IDs).
+    pub fn move_to(&self, token: &str, id: &str, folder: &str, etag: &str) -> Result<Message> {
         let url = self.url(&format!("/me/messages/{}/move", segment(id)));
         let body = serde_json::json!({ "destinationId": folder }).to_string();
         let m: Message = accepted(&self.write(
@@ -547,7 +550,7 @@ impl Graph {
             &url,
             body.into(),
             "application/json",
-            None,
+            Some(etag),
         )?)?;
         sure(m.id == id && m.parent_folder_id == folder, m)
     }

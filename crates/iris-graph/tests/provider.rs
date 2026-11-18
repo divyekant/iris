@@ -79,3 +79,75 @@ fn a_draft_with_no_received_time_gets_its_created_time() {
         other => panic!("a message with no time: {other:?}"),
     }
 }
+
+fn warm(fake: &FakeGraph) -> (Outlook, String, String) {
+    let outlook = Outlook::new(graph(fake));
+    let inbox: Vec<String> = fake
+        .messages()
+        .into_iter()
+        .filter(|(_, f)| f == "F-inbox")
+        .map(|(id, _)| id)
+        .take(2)
+        .collect();
+    // The well-known folder IDs are read here, before the counted calls.
+    outlook.minimal(TOKEN, &inbox[0]).unwrap();
+    (outlook, inbox[0].clone(), inbox[1].clone())
+}
+
+/// A write that fails after another write of the call ran is an unknown
+/// result; a refusal of the first write is definite and changes nothing.
+#[test]
+fn a_failure_after_a_write_of_the_call_is_unknown() {
+    let fake = FakeGraph::start(Mailbox::new(3, 60)).unwrap();
+    let (outlook, a, b) = warm(&fake);
+    // Two reads, the first PATCH, then the second PATCH gets 400.
+    fake.fail_next(&[(0, None), (0, None), (0, None), (400, None)]);
+    let e = outlook
+        .modify(TOKEN, &[&a, &b], &["STARRED"], &[])
+        .unwrap_err();
+    assert!(matches!(e, Error::Transport(_)), "{e}");
+    assert!(e.write_result_unknown());
+    assert!(outlook
+        .minimal(TOKEN, &a)
+        .unwrap()
+        .label_ids
+        .contains(&"STARRED".to_string()));
+
+    fake.fail_next(&[(0, None), (400, None)]);
+    let e = outlook.modify(TOKEN, &[&b], &["STARRED"], &[]).unwrap_err();
+    assert!(matches!(e, Error::Api { status: 400, .. }), "{e}");
+    assert!(!e.write_result_unknown());
+    assert!(!outlook
+        .minimal(TOKEN, &b)
+        .unwrap()
+        .label_ids
+        .contains(&"STARRED".to_string()));
+}
+
+/// A refusal of one message comes before the write of any message.
+#[test]
+fn a_refusal_of_one_message_stops_the_writes_of_all() {
+    let fake = FakeGraph::start(Mailbox::new(3, 60)).unwrap();
+    let (outlook, a, _) = warm(&fake);
+    let user = fake
+        .messages()
+        .into_iter()
+        .find(|(_, f)| f == "F-old" || f == "F-receipts" || f == "F-projects")
+        .map(|(id, _)| id)
+        .expect("a message in a user folder");
+    let before = fake.requests().len();
+    let e = outlook
+        .modify(TOKEN, &[&a, &user], &["UNREAD"], &["INBOX"])
+        .unwrap_err();
+    assert!(matches!(e, Error::Api { status: 400, .. }), "{e}");
+    let writes = fake.requests()[before..]
+        .iter()
+        .filter(|r| !r.starts_with("GET"))
+        .count();
+    assert_eq!(writes, 0);
+    let ids: Vec<&str> = std::iter::repeat_n(a.as_str(), iris_provider::BATCH_LIMIT + 1).collect();
+    assert!(matches!(
+        outlook.modify(TOKEN, &ids, &["UNREAD"], &[]),
+        Err(Error::Api { status: 400, .. })
+    ));
+}

@@ -3,9 +3,9 @@
 //! `docs/specs/2026-11-17-outlook-provider.md`, sections 3 and 6, and spec
 //! `docs/specs/2026-11-17-provider.md`).
 //!
-//! This part gives the calls of the sync and the verify. Each write call,
-//! and the reads of the send, give a definite rejection before any request
-//! until card R6-15 adds them.
+//! This part gives the calls of the sync, the verify and the state writes
+//! (spec section 5.1). The draft calls and the send give a definite
+//! rejection before any request until card R6-17 adds them.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
@@ -112,6 +112,39 @@ impl Outlook {
             None => return Ok(self.folders(token)?.into_iter().map(|f| f.id).collect()),
         };
         Ok(one.into_iter().collect())
+    }
+}
+
+impl Outlook {
+    /// Move `id` to the well-known folder `to`, only from one of `from`,
+    /// with `If-Match` on the etag of the check read. One write.
+    fn move_between(
+        &self,
+        token: &str,
+        id: &str,
+        from: &[&str],
+        to: &str,
+    ) -> iris_provider::Result<Minimal> {
+        let known = self.known(token).map_err(map)?;
+        let m = self.graph.message(token, id).map_err(map)?;
+        let here = known.get(&m.parent_folder_id).copied();
+        if !here.is_some_and(|h| from.contains(&h)) {
+            return refuse(format!(
+                "Outlook moves this message to {to} only from {}",
+                from.join(" or ")
+            ));
+        }
+        let Some(to_id) = folder_of(&known, to) else {
+            return refuse(format!("the mailbox has no {to} folder"));
+        };
+        let etag = m
+            .etag
+            .ok_or_else(|| iris_provider::Error::Decode(format!("message {id} has no etag")))?;
+        let moved = self.graph.move_to(token, id, &to_id, &etag).map_err(map)?;
+        Ok(Minimal {
+            id: moved.id.clone(),
+            label_ids: label_ids(&moved, &known),
+        })
     }
 }
 
@@ -263,7 +296,100 @@ fn map(e: Error) -> iris_provider::Error {
     }
 }
 
-/// The definite rejection of a call that card R6-15 adds. No request goes
+/// One write of [`iris_provider::Provider::modify`] for one message.
+#[derive(Debug, PartialEq, Eq)]
+enum Op {
+    /// The full new list of categories.
+    Categories(Vec<String>),
+    Read(bool),
+    Flag(bool),
+    /// The ID of the folder to move to.
+    Move(String),
+}
+
+/// A definite rejection before any write (`Api` 400).
+fn refuse<T>(why: String) -> iris_provider::Result<T> {
+    Err(iris_provider::Error::Api {
+        status: 400,
+        reason: "refused".into(),
+        message: why,
+    })
+}
+
+/// The ID of the well-known folder `name`.
+fn folder_of(known: &HashMap<String, &'static str>, name: &str) -> Option<String> {
+    known
+        .iter()
+        .find(|(_, n)| **n == name)
+        .map(|(id, _)| id.clone())
+}
+
+/// The writes that change the labels of `m` by `add` and `remove`, in the
+/// order of the call. A label that Outlook cannot change this way, and a
+/// move out of a folder other than the inbox or the archive, give a
+/// definite rejection (spec section 6).
+fn plan(
+    m: &Message,
+    known: &HashMap<String, &'static str>,
+    add: &[&str],
+    remove: &[&str],
+) -> iris_provider::Result<Vec<Op>> {
+    if let Some(l) = add.iter().find(|l| remove.contains(l)) {
+        return refuse(format!("{l} is added and removed in one call"));
+    }
+    let mut categories = m.categories.clone();
+    let (mut read, mut flag, mut target) = (None, None, None);
+    for (label, adding) in add
+        .iter()
+        .map(|l| (*l, true))
+        .chain(remove.iter().map(|l| (*l, false)))
+    {
+        match label {
+            "UNREAD" => read = Some(!adding),
+            "STARRED" => flag = Some(adding),
+            "INBOX" => target = Some(if adding { "inbox" } else { "archive" }),
+            l => match l.strip_prefix("category:") {
+                Some(name) if !name.is_empty() => {
+                    categories.retain(|c| c != name);
+                    if adding {
+                        categories.push(name.to_string());
+                    }
+                }
+                _ => {
+                    return refuse(format!(
+                        "Outlook cannot change {l} as a label: a folder moves only with archive, inbox and trash"
+                    ))
+                }
+            },
+        }
+    }
+    let mut ops = Vec::new();
+    let same = |a: &[String], b: &[String]| a.len() == b.len() && a.iter().all(|x| b.contains(x));
+    if !same(&categories, &m.categories) {
+        ops.push(Op::Categories(categories));
+    }
+    if let Some(r) = read.filter(|r| *r != m.is_read) {
+        ops.push(Op::Read(r));
+    }
+    if let Some(f) = flag.filter(|f| *f != m.flagged()) {
+        ops.push(Op::Flag(f));
+    }
+    if let Some(to) = target {
+        let from = known.get(&m.parent_folder_id).copied();
+        if !matches!(from, Some("inbox" | "archive")) {
+            return refuse("Outlook moves a message only between the inbox and the archive".into());
+        }
+        let Some(to_id) = folder_of(known, to) else {
+            return refuse(format!("the mailbox has no {to} folder"));
+        };
+        if to_id != m.parent_folder_id {
+            ops.push(Op::Move(to_id));
+        }
+    }
+    Ok(ops)
+}
+
+/// The definite rejection of a call that card R6-17 adds. No request goes
 /// out.
 fn later<T>() -> iris_provider::Result<T> {
     Err(iris_provider::Error::Api {
@@ -506,20 +632,80 @@ impl iris_provider::Provider for Outlook {
         later()
     }
 
-    fn modify(&self, _: &str, _: &[&str], _: &[&str], _: &[&str]) -> iris_provider::Result<()> {
-        later()
+    /// Reads each message first and plans its writes; a refusal comes
+    /// before any write (provider spec section 4). Then, for each message:
+    /// the categories (`If-Match`), the read state, the flag, and the move
+    /// last (`If-Match` on the newest etag). An error after a write of the
+    /// call is an unknown result (provider spec section 6).
+    fn modify(
+        &self,
+        token: &str,
+        ids: &[&str],
+        add: &[&str],
+        remove: &[&str],
+    ) -> iris_provider::Result<()> {
+        if ids.len() > iris_provider::BATCH_LIMIT {
+            return refuse(format!("more than {} messages", iris_provider::BATCH_LIMIT));
+        }
+        let known = self.known(token).map_err(map)?;
+        let mut plans = Vec::with_capacity(ids.len());
+        for id in ids {
+            let m = self.graph.message(token, id).map_err(map)?;
+            plans.push((m.etag.clone(), plan(&m, &known, add, remove)?));
+        }
+        let mut wrote = false;
+        for (id, (etag, ops)) in ids.iter().zip(plans) {
+            let mut etag = etag;
+            for op in ops {
+                let tag = || {
+                    etag.clone()
+                        .ok_or_else(|| Error::Decode(format!("message {id} has no etag")))
+                };
+                let result = match &op {
+                    Op::Categories(list) => {
+                        tag().and_then(|e| self.graph.set_categories(token, id, list, &e))
+                    }
+                    Op::Read(read) => self.graph.set_read(token, id, *read),
+                    Op::Flag(flagged) => self.graph.set_flag(token, id, *flagged),
+                    Op::Move(folder) => {
+                        tag().and_then(|e| self.graph.move_to(token, id, folder, &e))
+                    }
+                };
+                match result {
+                    Ok(m) => {
+                        wrote = true;
+                        etag = m.etag;
+                    }
+                    Err(e) if wrote => {
+                        return Err(iris_provider::Error::Transport(format!(
+                            "a part of the call ran, then: {e}"
+                        )))
+                    }
+                    Err(e) => return Err(map(e)),
+                }
+            }
+        }
+        Ok(())
     }
 
-    fn trash(&self, _: &str, _: &str) -> iris_provider::Result<Minimal> {
-        later()
+    /// A move to Deleted Items, only from the inbox or the archive.
+    fn trash(&self, token: &str, id: &str) -> iris_provider::Result<Minimal> {
+        self.move_between(token, id, &["inbox", "archive"], "deleteditems")
     }
 
-    fn untrash(&self, _: &str, _: &str) -> iris_provider::Result<Minimal> {
-        later()
+    /// A move from Deleted Items to the inbox. The apply then archives a
+    /// message that had no `INBOX` before the trash.
+    fn untrash(&self, token: &str, id: &str) -> iris_provider::Result<Minimal> {
+        self.move_between(token, id, &["deleteditems"], "inbox")
     }
 
-    fn create_label(&self, _: &str, _: &str) -> iris_provider::Result<Label> {
-        later()
+    /// Iris makes no category: the master list needs one more permission
+    /// (`MailboxSettings.ReadWrite`), and a category that is not on the
+    /// list is not mirrored (#656). Make the category in Outlook first.
+    fn create_label(&self, _: &str, name: &str) -> iris_provider::Result<Label> {
+        refuse(format!(
+            "Outlook has no category {name}: make it in Outlook first, then sync"
+        ))
     }
 
     fn drafts_with_id(&self, _: &str, _: &str) -> iris_provider::Result<Vec<Draft>> {
@@ -767,5 +953,127 @@ mod tests {
         assert_eq!(epoch_ms("2026-11-17T10:00:00"), None);
         assert_eq!(epoch_ms("2026-11-17T10:00:00.Z"), None);
         assert_eq!(epoch_ms(""), None);
+    }
+
+    /// Property: for random messages and random label changes, `plan`
+    /// refuses each change that Outlook cannot make, before any write, and
+    /// else its writes give exactly the labels of the change.
+    #[test]
+    fn a_plan_gives_the_labels_of_the_change_or_a_refusal() {
+        let known: HashMap<String, &'static str> = [
+            ("I", "inbox"),
+            ("A", "archive"),
+            ("D", "drafts"),
+            ("T", "deleteditems"),
+            ("J", "junkemail"),
+        ]
+        .into_iter()
+        .map(|(id, n)| (id.to_string(), n))
+        .collect();
+        let labels = [
+            "INBOX",
+            "UNREAD",
+            "STARRED",
+            "category:a",
+            "category:B",
+            "category:",
+            "TRASH",
+            "SPAM",
+            "DRAFT",
+            "SENT",
+            "folder:X",
+            "folder:A",
+            "IMPORTANT",
+        ];
+        let mut rng = Rng(5);
+        for _ in 0..20_000 {
+            let m = Message {
+                id: "m".into(),
+                conversation_id: "c".into(),
+                parent_folder_id: rng.pick(&["I", "A", "D", "T", "J", "X"]).into(),
+                categories: (0..rng.below(3))
+                    .map(|_| rng.pick(&["a", "B", "c"]).to_string())
+                    .fold(Vec::new(), |mut v, c| {
+                        if !v.contains(&c) {
+                            v.push(c);
+                        }
+                        v
+                    }),
+                is_read: rng.below(2) == 0,
+                flag: Flag {
+                    flag_status: rng.pick(&["flagged", "notFlagged"]).into(),
+                },
+                is_draft: false,
+                received_date_time: None,
+                created_date_time: None,
+                internet_message_id: None,
+                etag: Some("e".into()),
+            };
+            let add: Vec<&str> = (0..rng.below(3)).map(|_| rng.pick(&labels)).collect();
+            let remove: Vec<&str> = (0..rng.below(3)).map(|_| rng.pick(&labels)).collect();
+            let ok_label = |l: &&str| {
+                ["INBOX", "UNREAD", "STARRED"].contains(l)
+                    || l.strip_prefix("category:").is_some_and(|n| !n.is_empty())
+            };
+            let moves = add.contains(&"INBOX") || remove.contains(&"INBOX");
+            let from_ok = matches!(m.parent_folder_id.as_str(), "I" | "A");
+            let clash = add.iter().any(|l| remove.contains(l));
+            let allowed = !clash && add.iter().chain(&remove).all(ok_label) && (!moves || from_ok);
+            let plan = plan(&m, &known, &add, &remove);
+            assert_eq!(
+                plan.is_ok(),
+                allowed,
+                "{add:?} {remove:?} {:?}",
+                m.parent_folder_id
+            );
+            let Ok(ops) = plan else { continue };
+            // Apply the writes to a copy, as Graph does.
+            let mut after = m.clone();
+            for op in &ops {
+                match op {
+                    Op::Categories(c) => after.categories = c.clone(),
+                    Op::Read(r) => after.is_read = *r,
+                    Op::Flag(f) => {
+                        after.flag.flag_status = if *f { "flagged" } else { "notFlagged" }.into()
+                    }
+                    Op::Move(to) => after.parent_folder_id = to.clone(),
+                }
+            }
+            let mut want: Vec<String> = label_ids(&m, &known)
+                .into_iter()
+                .filter(|l| !remove.contains(&l.as_str()))
+                .collect();
+            for l in &add {
+                if !want.iter().any(|w| w == l) {
+                    want.push(l.to_string());
+                }
+            }
+            // A move changes the folder label: INBOX or the archive folder.
+            if moves {
+                want.retain(|l| l != "INBOX" && l != "folder:A");
+                want.push(
+                    if add.contains(&"INBOX") {
+                        "INBOX"
+                    } else {
+                        "folder:A"
+                    }
+                    .into(),
+                );
+            }
+            let mut got = label_ids(&after, &known);
+            got.sort();
+            want.sort();
+            assert_eq!(got, want, "{add:?} {remove:?} {ops:?}");
+            // No write that changes nothing.
+            let mut seen = Vec::new();
+            for op in &ops {
+                let kind = std::mem::discriminant(op);
+                assert!(!seen.contains(&kind), "one write of each kind: {ops:?}");
+                seen.push(kind);
+            }
+            if ops.is_empty() {
+                assert_eq!(label_ids(&m, &known).len(), label_ids(&after, &known).len());
+            }
+        }
     }
 }

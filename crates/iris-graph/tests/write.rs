@@ -36,7 +36,7 @@ type Write<'a> = Box<dyn Fn() -> Result<(), Error> + 'a>;
 
 /// Each write, by name. The category write comes first, because the
 /// other writes change the etag.
-fn writes<'a>(fake: &FakeGraph, graph: &'a Graph) -> Vec<(&'static str, Write<'a>)> {
+fn writes<'a>(fake: &'a FakeGraph, graph: &'a Graph) -> Vec<(&'static str, Write<'a>)> {
     let id = inbox_message(fake);
     let etag = fake.etag_of(&id).unwrap();
     let archive = FakeGraph::folder_id("Archive");
@@ -60,7 +60,11 @@ fn writes<'a>(fake: &FakeGraph, graph: &'a Graph) -> Vec<(&'static str, Write<'a
         ),
         (
             "move_to",
-            Box::new(move || graph.move_to(TOKEN, &i4, archive).map(drop)),
+            Box::new(move || {
+                // The etag of now: the writes before change it.
+                let now = fake.etag_of(&i4).unwrap_or_default();
+                graph.move_to(TOKEN, &i4, archive, &now).map(drop)
+            }),
         ),
         (
             "create_draft",
@@ -109,7 +113,16 @@ fn the_state_writes_change_the_fake_and_answer_the_new_state() {
     assert!(graph.set_flag(TOKEN, &id, true).unwrap().flagged());
     assert!(!graph.set_flag(TOKEN, &id, false).unwrap().flagged());
     let archive = FakeGraph::folder_id("Archive");
-    let moved = graph.move_to(TOKEN, &id, archive).unwrap();
+    let old = fake.etag_of(&id).unwrap();
+    assert!(graph.set_read(TOKEN, &id, true).is_ok());
+    // The move has a condition: an old etag moves nothing.
+    match graph.move_to(TOKEN, &id, archive, &old) {
+        Err(Error::Api { status: 412, .. }) => {}
+        other => panic!("a move with an old etag: {other:?}"),
+    }
+    assert_ne!(fake.messages()[&id], archive);
+    let now = fake.etag_of(&id).unwrap();
+    let moved = graph.move_to(TOKEN, &id, archive, &now).unwrap();
     assert_eq!(
         (moved.id.as_str(), moved.parent_folder_id.as_str()),
         (id.as_str(), archive)
@@ -285,7 +298,7 @@ fn a_2xx_other_than_the_success_status_is_unknown() {
         .write_result_unknown());
     fake.answer_next_status(200, &moved);
     assert!(graph
-        .move_to(TOKEN, &id, archive)
+        .move_to(TOKEN, &id, archive, "W/\"1\"")
         .unwrap_err()
         .write_result_unknown());
     // A PATCH succeeds with 200 only.
@@ -299,5 +312,5 @@ fn a_2xx_other_than_the_success_status_is_unknown() {
     fake.answer_next_status(202, "");
     graph.send_mime(TOKEN, MIME).unwrap();
     fake.answer_next_status(201, &moved);
-    graph.move_to(TOKEN, &id, archive).unwrap();
+    graph.move_to(TOKEN, &id, archive, "W/\"1\"").unwrap();
 }
