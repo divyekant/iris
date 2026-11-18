@@ -488,6 +488,20 @@ fn complete(
         )?;
         Ok(())
     })?;
+    // A sync can copy the sent message into the mirror before the provider
+    // knows that Iris sent it. Outlook gives `SENT` only to a copy that
+    // Iris sent, so read the labels of a mirrored copy again.
+    let mirrored: Option<i64> = run.store.read(|c| {
+        Ok(c.query_row(
+            "SELECT id FROM message WHERE account_id = ?1 AND provider_id = ?2",
+            params![run.account, sent_id],
+            |r| r.get(0),
+        )
+        .optional()?)
+    })?;
+    if let Some(id) = mirrored {
+        run.mirror_read(&[(id, sent_id.to_string())]);
+    }
     Ok(Outcome::Applied(super::Counts {
         changed: 1,
         ..Default::default()

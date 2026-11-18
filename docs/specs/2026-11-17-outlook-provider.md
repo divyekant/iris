@@ -214,8 +214,8 @@ rules:
   records a failure of that message, never a false date.
 - One `Outlook` value serves one mailbox: it keeps the IDs of the
   well-known folders after the first read.
-- `SENT` is never given (section 6). R6-16 decides how the copies that
-  Iris sent get it.
+- `SENT` goes only to a sent copy of a message that Iris sent (section
+  6). Graph gives no such label.
 - Section 5.1 has the state writes (R6-15) and section 5.2 the drafts,
   the send and `metadata` (R6-17).
 
@@ -441,7 +441,13 @@ person or a sender can set. Two existing rules read such data as proof:
   hostile checks, the evidence of known people). The person can move a
   received message into Sent Items, so the folder is not proof. For an
   Outlook account, only a message that Iris sent itself (the sent copy of
-  a ledger send row, section 5) gets `SENT`. Each other message in
+  a ledger send row, section 5) gets `SENT`. R6-16: the engine gives the
+  provider the `sent_message` of each sent draft of the account when it
+  makes the provider. `sent_copy` adds each copy that it finds. Each
+  label read of the provider (sync, verify, the apply) adds `SENT` for
+  these IDs, so the mirror and the verify agree. A sync can copy the
+  sent message before the send completes. The completion then reads the
+  labels of that mirror message again. Each other message in
   `sentitems` gets the label `Folders/Sent Items`, and the sender axis
   decides it from its headers as any received mail. Known limit with its
   own issue: mail that the owner sends from another Outlook client is not
