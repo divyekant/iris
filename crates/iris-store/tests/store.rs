@@ -800,6 +800,7 @@ fn an_account_secret_keeps_its_provider_and_its_mailbox() {
     let r = store.save_account_secret("imap", "g@example.com", server, b"x", "ok");
     assert!(matches!(r, Err(Error::Account(_))));
     assert_eq!(token("g@example.com").1, Some(b"g".to_vec()));
+}
 
 /// True when two other threads can each hold a read connection now: this
 /// thread holds no store connection. It waits at most 2 seconds.
