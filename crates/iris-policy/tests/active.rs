@@ -204,3 +204,30 @@ fn each_confirmed_version_keeps_its_rule_text() {
     assert_eq!(s.read(|c| version_text(c, 3)).unwrap(), None);
     assert_eq!(s.read(active).unwrap().version, Some(2));
 }
+
+/// Issue 143: a confirm waits for the backup lock, as a discard and a
+/// change do, so a confirm of another process cannot come between the
+/// read and the file write of a discard.
+#[test]
+fn a_confirm_waits_while_another_writer_holds_the_policy_lock() {
+    let (_d, s) = store("confirm-lock");
+    write(&s, &file(&[1]));
+    let seen = changed(&s);
+    // A discard or a change of another process holds the lock.
+    let lock = s.backup_lock().unwrap();
+    let dir = s.dir().to_path_buf();
+    let sha = seen.sha256.clone();
+    let other = std::thread::spawn(move || {
+        let s = Store::open(&dir).unwrap();
+        confirm(&s, &sha, 10).unwrap()
+    });
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(
+        s.read(active).unwrap().version,
+        None,
+        "the confirm did not wait for the lock"
+    );
+    drop(lock);
+    assert!(matches!(other.join().unwrap(), Confirm::Done { .. }));
+    assert!(s.read(active).unwrap().version.is_some());
+}

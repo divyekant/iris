@@ -136,6 +136,9 @@ pub fn file_state(store: &Store) -> Result<FileState> {
 /// and the write are in one transaction, so a crash leaves the old policy or
 /// the new one.
 pub fn confirm(store: &Store, sha256: &str, now: i64) -> Result<Confirm> {
+    // The lock of each policy writer (a change and a discard take it too),
+    // so that the writers of two processes cannot interleave (issue 143).
+    let _lock = store.backup_lock()?;
     store.write(|tx| {
         let loaded = match check(tx, store.dir())? {
             Checked::Missing => return Ok(Confirm::Missing),
