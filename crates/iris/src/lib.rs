@@ -1790,33 +1790,72 @@ fn read_password(prompt: &str) -> Result<iris_auth::Secret, String> {
 }
 
 /// Terminal echo off while a guard lives (POSIX termios, macOS and Linux).
+/// A signal that ends the process (Ctrl-C and others) does not run `Drop`,
+/// so a handler puts the saved terminal state back first, then ends the
+/// process with the same signal.
 mod no_echo {
-    pub struct Guard(libc::termios);
+    use std::sync::OnceLock;
+
+    /// The terminal state before the first guard. The handler reads it.
+    static SAVED: OnceLock<libc::termios> = OnceLock::new();
+    const SIGNALS: [libc::c_int; 4] = [libc::SIGINT, libc::SIGTERM, libc::SIGQUIT, libc::SIGHUP];
+
+    pub struct Guard {
+        old: libc::termios,
+        handlers: [libc::sighandler_t; 4],
+    }
+
+    extern "C" fn restore(sig: libc::c_int) {
+        // SAFETY: tcsetattr, signal and raise are async-signal-safe, and
+        // SAVED is set before the handler is installed.
+        unsafe {
+            if let Some(t) = SAVED.get() {
+                libc::tcsetattr(0, libc::TCSANOW, t);
+            }
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
 
     impl Guard {
         pub fn new() -> std::io::Result<Guard> {
             // SAFETY: tcgetattr and tcsetattr write and read one termios
-            // value of this frame, for standard input (fd 0).
+            // value of this frame, for standard input (fd 0). signal
+            // installs `restore`, an extern "C" fn of one c_int.
             unsafe {
                 let mut t: libc::termios = std::mem::zeroed();
                 if libc::tcgetattr(0, &mut t) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
                 let old = t;
+                SAVED.get_or_init(|| old);
+                let handler = restore as extern "C" fn(libc::c_int) as libc::sighandler_t;
+                let handlers = SIGNALS.map(|sig| {
+                    let before = libc::signal(sig, handler);
+                    // A signal that the parent ignores stays ignored.
+                    if before == libc::SIG_IGN {
+                        libc::signal(sig, libc::SIG_IGN);
+                    }
+                    before
+                });
+                let guard = Guard { old, handlers };
                 t.c_lflag &= !libc::ECHO;
                 if libc::tcsetattr(0, libc::TCSANOW, &t) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                Ok(Guard(old))
+                Ok(guard)
             }
         }
     }
 
     impl Drop for Guard {
         fn drop(&mut self) {
-            // SAFETY: as in `new`, with the value that `new` read.
+            // SAFETY: as in `new`, with the values that `new` read.
             unsafe {
-                libc::tcsetattr(0, libc::TCSANOW, &self.0);
+                libc::tcsetattr(0, libc::TCSANOW, &self.old);
+                for (sig, before) in SIGNALS.iter().zip(self.handlers) {
+                    libc::signal(*sig, before);
+                }
             }
             eprintln!();
         }

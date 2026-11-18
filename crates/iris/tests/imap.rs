@@ -201,3 +201,111 @@ fn the_plain_test_mode_refuses_a_host_that_is_not_local() {
     assert_eq!(row(&dir, OWNER), None);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_gmail_sign_in_refuses_an_imap_address() {
+    let fake = FakeImap::start(Caps::ALL);
+    let dir = data_dir("gmail-over-imap");
+    assert!(add(&dir, &fake, OWNER, PASSWORD).0);
+    let before = row(&dir, OWNER).unwrap();
+    let server = |store: &Store| {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT imap_host, imap_user FROM account WHERE address = ?1",
+                    [OWNER],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    let store = Store::open(&dir).unwrap();
+    let host_user = server(&store);
+
+    let gmail = iris_fakegmail::FakeGmail::start(Mailbox::new(3, 4)).unwrap();
+    gmail.set_address(OWNER);
+    let client = iris_gmail::Gmail::new(iris_gmail::Config {
+        base_url: gmail.base_url(),
+        ..iris_gmail::Config::default()
+    });
+    let tokens = iris_auth::Tokens {
+        access: iris_auth::AccessToken {
+            token: iris_auth::Secret::new("fake-access"),
+            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(3600),
+        },
+        refresh: iris_auth::Secret::new("fake-refresh"),
+        refresh_expires_in: None,
+    };
+    let json = br#"{"installed":{"client_id":"c","client_secret":"s"}}"#;
+    let err = iris::engine::save_sign_in(&store, &client, json, &tokens).unwrap_err();
+    assert!(err.to_string().contains("another provider"), "{err}");
+    assert_eq!(server(&store), host_user);
+    drop(store);
+    assert_eq!(row(&dir, OWNER).unwrap(), before);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Ctrl-C at the password prompt ends the program, and the terminal gets
+/// its echo back. The terminal is a pseudo-terminal of the test.
+#[test]
+fn an_interrupted_password_read_turns_the_echo_back_on() {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+    let dir = data_dir("interrupt");
+    // SAFETY: posix_openpt, grantpt, unlockpt and ptsname on one new fd;
+    // ptsname gives a C string that is copied at once.
+    let (master, name) = unsafe {
+        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+        assert!(master >= 0);
+        assert_eq!(libc::grantpt(master), 0);
+        assert_eq!(libc::unlockpt(master), 0);
+        let name = std::ffi::CStr::from_ptr(libc::ptsname(master));
+        (master, name.to_str().unwrap().to_string())
+    };
+    let tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOCTTY)
+        .open(&name)
+        .unwrap();
+    let echo = |f: &std::fs::File| {
+        // SAFETY: tcgetattr writes one termios value of this frame.
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(f.as_raw_fd(), &mut t), 0);
+            t.c_lflag & libc::ECHO != 0
+        }
+    };
+    assert!(echo(&tty));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_iris"))
+        .args([
+            "account",
+            "add-imap",
+            OWNER,
+            "--host",
+            "127.0.0.1",
+            "--data",
+        ])
+        .arg(&dir)
+        .env("IRIS_TEST_IMAP_PLAIN", "1")
+        .stdin(tty.try_clone().unwrap())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let begin = std::time::Instant::now();
+    while echo(&tty) {
+        assert!(
+            begin.elapsed() < std::time::Duration::from_secs(20),
+            "the prompt did not turn the echo off"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // SAFETY: a signal to the child process of this test.
+    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) };
+    assert!(!child.wait().unwrap().success());
+    assert!(echo(&tty), "the echo stays off after Ctrl-C");
+    // SAFETY: the fd from posix_openpt, closed once.
+    unsafe { libc::close(master) };
+    let _ = std::fs::remove_dir_all(&dir);
+}
