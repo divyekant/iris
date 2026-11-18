@@ -974,6 +974,7 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                  ALTER TABLE account DROP COLUMN imap_user;
                  ALTER TABLE account DROP COLUMN categories_off_at;
                  DROP TRIGGER understand_owner_label_add; DROP TRIGGER understand_owner_label_remove;
+                 DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower;
                  PRAGMA user_version = 19;",
             )?;
             Ok(())
