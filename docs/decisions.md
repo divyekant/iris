@@ -15,6 +15,18 @@ edit an old entry. If a decision changes, add a new entry that names the old one
 - Links: <card, spec, PR, before/after page>
 ```
 
+## D10 (2026-11-18): Each user signs in to Outlook with an own Entra app registration
+
+- Decided by: Claude, as the technical owner (Outlook spec, PR #637)
+- Why: As for Gmail (D2), a shared Iris app makes the project responsible
+  for each install. A public client with PKCE needs no secret, and the
+  account type "any tenant and personal accounts" works with the tenant
+  `common` for Outlook.com and for work or school accounts.
+- Options not chosen: A shared, verified Iris app (publisher verification
+  needs a Microsoft Partner Network account). A client secret (not secret
+  in a self-hosted program). The device code flow (more steps).
+- Links: card R6-13, `docs/decisions/2026-11-microsoft-sign-in.md`
+
 ## D9 (2026-11-17): Open model 1.1 adds the account of each item
 
 - Decided by: dk

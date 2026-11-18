@@ -1,4 +1,5 @@
-//! Google sign-in for Iris (specification 1, section 4.9).
+//! Google and Microsoft sign-in for Iris (specification 1, section 4.9;
+//! Outlook spec `docs/specs/2026-11-17-outlook-provider.md`, section 7).
 //!
 //! - The user gives the JSON file of an own OAuth client of the type "Desktop
 //!   app" (decision record `docs/decisions/2026-11-google-sign-in.md`).
@@ -7,6 +8,10 @@
 //! - The access token stays in memory. The caller seals the refresh token with
 //!   the secret box of the store (`iris_store::Store::seal`) and keeps the blob.
 //! - No secret goes into a `Debug` text, a `Display` text or an error.
+//! - Microsoft: the user gives the application ID of an own app registration
+//!   and a tenant (`common` or a tenant GUID). The client is public (no
+//!   secret). Each refresh gives a new refresh token
+//!   ([`Client::refresh_tokens`]); the caller keeps it in place of the old one.
 
 use std::fmt;
 use std::io::{Read, Write};
@@ -25,6 +30,14 @@ pub const SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
 /// client file, so a changed file cannot send the tokens to another host.
 pub const GOOGLE_AUTH_URI: &str = "https://accounts.google.com/o/oauth2/auth";
 pub const GOOGLE_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
+
+/// The Microsoft identity platform. The host is fixed; only the tenant
+/// segment changes, and Iris accepts only `common` or a GUID there.
+pub const MICROSOFT_LOGIN: &str = "https://login.microsoftonline.com";
+/// The scopes of an Outlook account (Outlook spec section 7).
+pub const MICROSOFT_SCOPE: &str = "offline_access https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read";
+/// The Graph permissions that each token answer must hold.
+const MICROSOFT_NEEDED: [&str; 2] = ["Mail.ReadWrite", "Mail.Send"];
 
 /// The path of the loopback redirect.
 pub const CALLBACK: &str = "/oauth/callback";
@@ -97,6 +110,9 @@ pub enum Error {
     Timeout,
     /// The user did not give the `gmail.readonly` permission on the consent screen.
     ScopeMissing,
+    /// The Microsoft token answer does not hold this Graph permission. The
+    /// account does not start.
+    PermissionMissing(&'static str),
     /// The answer of the code exchange has no refresh token.
     NoRefreshToken,
     /// Google refused the refresh token (`invalid_grant`). The account state
@@ -126,8 +142,12 @@ impl fmt::Display for Error {
             Error::ScopeMissing => f.write_str(
                 "Iris did not get read access to Gmail: select the Gmail box on the consent screen",
             ),
-            Error::NoRefreshToken => f.write_str("Google gave no refresh token"),
-            Error::Revoked => f.write_str("Google refused the stored sign-in: sign in again"),
+            Error::PermissionMissing(p) => write!(
+                f,
+                "Iris did not get the Microsoft permission {p}: sign in again and accept it"
+            ),
+            Error::NoRefreshToken => f.write_str("the sign-in gave no refresh token"),
+            Error::Revoked => f.write_str("the provider refused the stored sign-in: sign in again"),
             Error::Token { status, code } => {
                 write!(f, "the token endpoint refused the request: {status} {code}")
             }
@@ -158,11 +178,20 @@ fn error_code(raw: &str) -> String {
     }
 }
 
-/// The OAuth client of the user, from its JSON file.
+/// The provider of a client.
+#[derive(Clone)]
+enum Kind {
+    /// A "Desktop app" client, with its client secret.
+    Google(Secret),
+    /// A public client: no secret.
+    Microsoft,
+}
+
+/// The OAuth client of the user.
 #[derive(Clone)]
 pub struct Client {
     id: String,
-    secret: Secret,
+    kind: Kind,
     auth_uri: String,
     token_uri: String,
     agent: ureq::Agent,
@@ -198,18 +227,88 @@ impl Client {
                 "the client ID or the client secret is empty",
             ));
         }
-        let agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(30)))
-            .build()
-            .into();
         Ok(Client {
             id: c.client_id,
-            secret: c.client_secret,
+            kind: Kind::Google(c.client_secret),
             auth_uri: GOOGLE_AUTH_URI.to_string(),
             token_uri: GOOGLE_TOKEN_URI.to_string(),
-            agent,
+            agent: agent(),
         })
+    }
+
+    /// A Microsoft client: the application (client) ID of the app
+    /// registration of the user, and the tenant: `common` or the tenant ID
+    /// (decision record `docs/decisions/2026-11-microsoft-sign-in.md`).
+    pub fn microsoft(client_id: &str, tenant: &str) -> Result<Client> {
+        if !is_guid(client_id) {
+            return Err(Error::ClientFile(
+                "the application (client) ID must be a GUID, as the Entra admin center shows it",
+            ));
+        }
+        if tenant != "common" && !is_guid(tenant) {
+            return Err(Error::ClientFile(
+                "the tenant must be \"common\" or the directory (tenant) ID, a GUID",
+            ));
+        }
+        let tenant = tenant.to_ascii_lowercase();
+        Ok(Client {
+            id: client_id.to_ascii_lowercase(),
+            kind: Kind::Microsoft,
+            auth_uri: format!("{MICROSOFT_LOGIN}/{tenant}/oauth2/v2.0/authorize"),
+            token_uri: format!("{MICROSOFT_LOGIN}/{tenant}/oauth2/v2.0/token"),
+            agent: agent(),
+        })
+    }
+
+    /// The scope text of the authorization request.
+    fn scope(&self) -> &'static str {
+        match self.kind {
+            Kind::Google(_) => SCOPE,
+            Kind::Microsoft => MICROSOFT_SCOPE,
+        }
+    }
+
+    /// The form fields that name the client: the secret only for Google.
+    fn identity(&self) -> Vec<(&str, &str)> {
+        let mut form = vec![("client_id", self.id.as_str())];
+        if let Kind::Google(secret) = &self.kind {
+            form.push(("client_secret", secret.expose()));
+        }
+        form
+    }
+
+    /// Checks the granted scope of a token answer. A code exchange must
+    /// name it. A refresh can leave it out when the grant did not change.
+    fn check_scope(&self, answer: &TokenAnswer, refresh: bool) -> Result<()> {
+        let Some(granted) = &answer.scope else {
+            return if refresh { Ok(()) } else { Err(self.missing()) };
+        };
+        match self.kind {
+            Kind::Google(_) if granted.split(' ').any(|x| x == SCOPE) => Ok(()),
+            Kind::Google(_) => Err(Error::ScopeMissing),
+            Kind::Microsoft => {
+                // Microsoft can name a Graph scope with or without its
+                // resource prefix, in any case.
+                let has = |p: &str| {
+                    granted.split(' ').any(|x| {
+                        let x = x.to_ascii_lowercase();
+                        let x = x.strip_prefix("https://graph.microsoft.com/").unwrap_or(&x);
+                        x == p.to_ascii_lowercase()
+                    })
+                };
+                match MICROSOFT_NEEDED.iter().find(|p| !has(p)) {
+                    Some(p) => Err(Error::PermissionMissing(p)),
+                    None => Ok(()),
+                }
+            }
+        }
+    }
+
+    fn missing(&self) -> Error {
+        match self.kind {
+            Kind::Google(_) => Error::ScopeMissing,
+            Kind::Microsoft => Error::PermissionMissing(MICROSOFT_NEEDED[0]),
+        }
     }
 
     /// The token endpoint that this client posts to.
@@ -237,28 +336,47 @@ impl Client {
     pub fn sign_in(&self) -> Result<SignIn> {
         let listener = TcpListener::bind("127.0.0.1:0").map_err(Error::Io)?;
         let port = listener.local_addr().map_err(Error::Io)?.port();
+        // Microsoft matches `http://localhost` with any port (A9); the
+        // listener still binds 127.0.0.1 only.
+        let host = match self.kind {
+            Kind::Google(_) => "127.0.0.1",
+            Kind::Microsoft => "localhost",
+        };
         Ok(SignIn {
             client: self.clone(),
             listener,
-            redirect_uri: format!("http://127.0.0.1:{port}{CALLBACK}"),
+            redirect_uri: format!("http://{host}:{port}{CALLBACK}"),
             state: random_text()?,
             verifier: Secret(random_text()?),
         })
     }
 
-    /// Gets a new access token with the refresh token.
+    /// Gets a new access token with the refresh token. For a Microsoft
+    /// client use [`Client::refresh_tokens`], which keeps the new refresh
+    /// token.
     pub fn refresh(&self, refresh: &Secret) -> Result<AccessToken> {
-        let answer = self.token_call(
-            true,
-            &[
-                ("grant_type", "refresh_token"),
-                ("refresh_token", refresh.expose()),
-                ("client_id", &self.id),
-                ("client_secret", self.secret.expose()),
-            ],
-        )?;
-        check_scope(&answer, true)?;
-        answer.access()
+        self.refresh_tokens(refresh).map(|r| r.access)
+    }
+
+    /// Gets a new access token, and the new refresh token if the answer has
+    /// one. Microsoft gives one at each refresh (A11): seal it in place of
+    /// the old one. The old token stays valid, so a crash before the write
+    /// loses nothing.
+    pub fn refresh_tokens(&self, refresh: &Secret) -> Result<Refreshed> {
+        let mut form = vec![
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh.expose()),
+        ];
+        form.extend(self.identity());
+        if matches!(self.kind, Kind::Microsoft) {
+            form.push(("scope", MICROSOFT_SCOPE));
+        }
+        let answer = self.token_call(true, &form)?;
+        self.check_scope(&answer, true)?;
+        Ok(Refreshed {
+            access: answer.access()?,
+            refresh: answer.refresh_token.filter(|r| !r.expose().is_empty()),
+        })
     }
 
     /// `refresh` says if the request uses a stored refresh token. Only then
@@ -319,15 +437,31 @@ impl TokenAnswer {
     }
 }
 
-/// With granular consent the user can clear the Gmail box, so check the grant.
-/// A code exchange must name the scope. A refresh can leave it out when the
-/// grant did not change.
-fn check_scope(answer: &TokenAnswer, refresh: bool) -> Result<()> {
-    match &answer.scope {
-        Some(s) if s.split(' ').any(|x| x == SCOPE) => Ok(()),
-        None if refresh => Ok(()),
-        _ => Err(Error::ScopeMissing),
-    }
+/// The answer of a refresh.
+#[derive(Debug, Clone)]
+pub struct Refreshed {
+    pub access: AccessToken,
+    /// The new refresh token, if the answer has one. Seal it in place of
+    /// the old one.
+    pub refresh: Option<Secret>,
+}
+
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(30)))
+        .build()
+        .into()
+}
+
+/// `8-4-4-4-12` hex digits, as Entra shows an application or tenant ID.
+fn is_guid(v: &str) -> bool {
+    let parts: Vec<&str> = v.split('-').collect();
+    parts.len() == 5
+        && parts
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(p, n)| p.len() == n && p.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// 32 random bytes in base64url: 43 characters, valid as a PKCE verifier.
@@ -373,18 +507,24 @@ impl SignIn {
     /// The address to open in the browser.
     pub fn url(&self) -> String {
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(self.verifier.expose()));
-        let query = form_urlencoded::Serializer::new(String::new())
+        let mut query = form_urlencoded::Serializer::new(String::new());
+        query
             .append_pair("client_id", &self.client.id)
             .append_pair("redirect_uri", &self.redirect_uri)
             .append_pair("response_type", "code")
-            .append_pair("scope", SCOPE)
+            .append_pair("scope", self.client.scope())
             .append_pair("state", &self.state)
             .append_pair("code_challenge", &challenge)
-            .append_pair("code_challenge_method", "S256")
+            .append_pair("code_challenge_method", "S256");
+        match self.client.kind {
             // A refresh token comes only with offline access and a new consent.
-            .append_pair("access_type", "offline")
-            .append_pair("prompt", "consent")
-            .finish();
+            Kind::Google(_) => query
+                .append_pair("access_type", "offline")
+                .append_pair("prompt", "consent"),
+            // `offline_access` in the scope gives the refresh token.
+            Kind::Microsoft => query.append_pair("prompt", "select_account"),
+        };
+        let query = query.finish();
         format!("{}?{query}", self.client.auth_uri)
     }
 
@@ -471,7 +611,7 @@ impl SignIn {
             match self.read_query(query) {
                 Ok(Some(answer)) => {
                     let page = match answer {
-                        Answer::Code(_) => "Iris got the answer from Google. Go back to Iris.",
+                        Answer::Code(_) => "Iris got the sign-in answer. Go back to Iris.",
                         Answer::Denied(_) => "The sign-in was refused. Go back to Iris.",
                     };
                     ("200 OK", page, Some(answer))
@@ -523,18 +663,15 @@ impl SignIn {
             Answer::Denied(e) => return Err(Error::Denied(e)),
         };
         let c = &self.client;
-        let answer = c.token_call(
-            false,
-            &[
-                ("grant_type", "authorization_code"),
-                ("code", &code),
-                ("client_id", &c.id),
-                ("client_secret", c.secret.expose()),
-                ("redirect_uri", &self.redirect_uri),
-                ("code_verifier", self.verifier.expose()),
-            ],
-        )?;
-        check_scope(&answer, false)?;
+        let mut form = vec![
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("redirect_uri", self.redirect_uri.as_str()),
+            ("code_verifier", self.verifier.expose()),
+        ];
+        form.extend(c.identity());
+        let answer = c.token_call(false, &form)?;
+        c.check_scope(&answer, false)?;
         Ok(Tokens {
             access: answer.access()?,
             refresh: answer
