@@ -19,10 +19,14 @@ does not depend on it, so it is built first.
    folder, the changes since the last sync, a full list for a compare, and
    a streamed raw fetch.
 2. The client uses `CONDSTORE` and `QRESYNC` (RFC 7162) when the server has
-   them, and a full compare when it does not.
+   them. The part B spec (`docs/specs/2026-11-17-imap-provider.md`)
+   changes the plan for a server without them: see section 3.
 3. A test IMAP server (`crates/iris-fakeimap`) runs in local CI with no
    network. A property test shows that a mirror kept with the client agrees
-   with the server after random changes, in each of the three modes.
+   with the server after random changes, in each of the two modes that part
+   B supports (`QRESYNC`, and `CONDSTORE` only). A server without
+   `CONDSTORE` gets a clear refusal (part B spec, section 6; limit issue
+   #629). The first plan had a third mode for it.
 4. The client uses little memory: no list of all messages and no full
    message is in memory.
 
@@ -72,7 +76,9 @@ does not depend on it, so it is built first.
 
 ### 2. Reads
 
-All reads use UIDs, never message sequence numbers.
+All reads use UIDs, never message sequence numbers, except `window`:
+part B pages by windows of sequence numbers, because UIDs can be sparse
+(`docs/specs/2026-11-17-imap-provider.md`, section 5).
 
 | Call | IMAP command | Result |
 |---|---|---|
@@ -108,6 +114,14 @@ All reads use UIDs, never message sequence numbers.
   (RFC 3501 section 6.4.8). The client drops such a message.
 
 ### 3. Sync of a folder (for part B)
+
+The part B spec (`docs/specs/2026-11-17-imap-provider.md`, section 5)
+replaces this section. The changes: a server without `CONDSTORE` cannot
+sync (limit issue #629), and a full compare is a full resync of the
+mirror (`HistoryExpired`), because the provider cursor cannot hold the
+UID set of a folder. Part B also reads its pages in windows of sequence
+numbers (`Session::window`), not of UIDs, because UIDs can be sparse. The
+text below is the first plan.
 
 The client gives the reads. Part B does the sync with them. The mode is
 chosen for each folder at each sync, from the `EXAMINE` result, not from
@@ -226,8 +240,9 @@ A session after an error is not used again. The caller connects again.
   Evidence: `src/rfc4551.rs` and `src/rfc7162.rs` of the crate.
 - Fastmail and Dovecot have `QRESYNC`; Gmail IMAP has `CONDSTORE` but no
   `QRESYNC`; some servers have neither. `pending`: the real-mailbox check
-  on dk's Mac shows the capabilities. The design has a mode for each case,
-  so a wrong guess changes only the speed.
+  on dk's Mac shows the capabilities. Part B syncs with `QRESYNC` or with
+  `CONDSTORE` only, and refuses a server with neither (limit issue #629),
+  so a wrong guess changes the speed or gives that refusal.
 - App-password providers accept `AUTHENTICATE PLAIN` over TLS. `pending`.
   If a server has no `AUTH=PLAIN`, the client uses `LOGIN`.
 
@@ -247,8 +262,10 @@ None. The client opens folders with `EXAMINE` and fetches with
 
 1. A mirror that part B could keep with the client agrees with the test
    server after random adds, flag changes, removals and `UIDVALIDITY`
-   changes, in each of the three modes. It goes red if `changes`, `list`
-   or `VANISHED` lose an event.
+   changes, in each of the two supported modes (`QRESYNC`, and `CONDSTORE`
+   only). It goes red if `changes`, `list` or `VANISHED` lose an event.
+   A server without `CONDSTORE` gets `Api` 400 `noCondstore` from the
+   part B `profile` (part B spec, section 6).
 2. `fetch_raw` of a 20 MiB message works, although each buffered response
    is at most 1 MiB. It goes red if the client buffers the message.
 3. Random and cut server responses never make the client panic or hang.
