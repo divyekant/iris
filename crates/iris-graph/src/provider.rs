@@ -511,8 +511,10 @@ struct Head {
 
 impl Write for Head {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // The limit comes first: no byte past it is kept or searched.
+        let room = HEAD_LIMIT - self.bytes.len();
         let from = self.bytes.len().saturating_sub(3);
-        self.bytes.extend_from_slice(buf);
+        self.bytes.extend_from_slice(&buf[..buf.len().min(room)]);
         let rest = &self.bytes[from..];
         let end = rest
             .windows(4)
@@ -527,7 +529,6 @@ impl Write for Head {
             self.bytes.truncate(end);
             self.done = true;
         } else if self.bytes.len() >= HEAD_LIMIT {
-            self.bytes.truncate(HEAD_LIMIT);
             self.done = true;
         }
         if self.done {
@@ -1010,6 +1011,31 @@ mod tests {
     use super::*;
     use crate::tests::Rng;
     use crate::Flag;
+
+    /// The header sink keeps at most `HEAD_LIMIT` bytes, also when the
+    /// empty line comes just past the limit in the same write, and ends
+    /// at the first empty line in each split of the writes.
+    #[test]
+    fn the_header_sink_keeps_its_limit() {
+        let mut big = b"X-Long: ".to_vec();
+        big.resize(HEAD_LIMIT + 5, b'a');
+        big.extend_from_slice(b"\r\n\r\nbody");
+        let mut h = Head::default();
+        assert!(h.write(&big).is_err());
+        assert!(h.done && h.bytes.len() <= HEAD_LIMIT);
+        let text = b"A: 1\r\nB: 2\r\n\r\nbody\r\n\r\nmore";
+        let mut rng = Rng(5);
+        for _ in 0..500 {
+            let mut h = Head::default();
+            let mut rest = &text[..];
+            while !rest.is_empty() && !h.done {
+                let n = 1 + rng.below(rest.len());
+                let _ = h.write(&rest[..n]);
+                rest = &rest[n..];
+            }
+            assert_eq!(h.bytes, b"A: 1\r\nB: 2\r\n\r\n");
+        }
+    }
 
     /// `headers_of` reads any header block: random bytes never panic and
     /// give only asked names, and a folded header reads back unfolded.
