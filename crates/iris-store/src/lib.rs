@@ -56,7 +56,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
-use rusqlite::{params, Connection, OpenFlags, Transaction};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 
 pub use backup::{BackupLock, Cleaned, PolicyExpect, PolicyWrite, GONE_KEEP_MS};
 pub use content::ContentWriter;
@@ -103,6 +103,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_33.sql"),
     include_str!("schema_34.sql"),
     include_str!("schema_35.sql"),
+    include_str!("schema_36.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
@@ -133,6 +134,9 @@ pub enum Error {
     MissingContent(String),
     /// The text of a watch is not valid, or too many watches wait.
     Watch(&'static str),
+    /// The address has an account of another provider or of another
+    /// mailbox ([`Store::save_account_secret`]).
+    Account(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -149,6 +153,7 @@ impl fmt::Display for Error {
             Error::Query(why) => write!(f, "search: {why}"),
             Error::MissingContent(sha) => write!(f, "content file {sha} is missing"),
             Error::Watch(why) => write!(f, "watch: {why}"),
+            Error::Account(why) => write!(f, "account: {why}"),
         }
     }
 }
@@ -379,6 +384,63 @@ impl Store {
                 params![provider, address],
                 |r| r.get(0),
             )?)
+        })
+    }
+
+    /// Save the sealed secret (`sealed`) of the account with `address`, and
+    /// set its state to `ok`, in one transaction. A new address gets a new
+    /// account of `provider`. `imap` is the `(host, port, user)` of an
+    /// `imap` account, and `None` for another provider. An address with an
+    /// account of another provider, or of another IMAP mailbox, is refused
+    /// before any change: an address never gets the mirror and the apply
+    /// state of another mailbox (IMAP spec section 8). Gives the account ID.
+    pub fn save_account_secret(
+        &self,
+        provider: &str,
+        address: &str,
+        imap: Option<(&str, u16, &str)>,
+        sealed: &[u8],
+    ) -> Result<i64> {
+        let (host, port, user) = match imap {
+            Some((h, p, u)) => (Some(h), Some(p), Some(u)),
+            None => (None, None, None),
+        };
+        self.write(|tx| {
+            type Row = (i64, String, Option<String>, Option<u16>, Option<String>);
+            let old: Option<Row> = tx
+                .query_row(
+                    "SELECT id, provider, imap_host, imap_port, imap_user FROM account
+                     WHERE address = ?1",
+                    [address],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .optional()?;
+            let id = match old {
+                None => tx.query_row(
+                    "INSERT INTO account(provider, address, imap_host, imap_port, imap_user)
+                     VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
+                    params![provider, address, host, port, user],
+                    |r| r.get(0),
+                )?,
+                Some((_, p, ..)) if p != provider => {
+                    return Err(Error::Account(
+                        "the address has an account of another provider; remove that account first",
+                    ))
+                }
+                Some((_, _, h, p, u))
+                    if h.as_deref() != host || p != port || u.as_deref() != user =>
+                {
+                    return Err(Error::Account(
+                        "the address has an account of another IMAP server or user; remove that account first",
+                    ))
+                }
+                Some((id, ..)) => id,
+            };
+            tx.execute(
+                "UPDATE account SET token = ?2, state = 'ok' WHERE id = ?1",
+                params![id, sealed],
+            )?;
+            Ok(id)
         })
     }
 

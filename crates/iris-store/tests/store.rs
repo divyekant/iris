@@ -82,7 +82,7 @@ fn open_makes_the_data_folder() {
     }
     store
         .read(|c| {
-            assert_eq!(iris_store::schema_version(c)?, 35);
+            assert_eq!(iris_store::schema_version(c)?, 36);
             let journal: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
             assert_eq!(journal, "wal");
             let cache: i64 = c.query_row("PRAGMA cache_size", [], |r| r.get(0))?;
@@ -746,4 +746,58 @@ fn a_sender_lookup_without_case_uses_an_index() {
             .any(|p| p.contains("USING INDEX sender_address_nocase")),
         "{plan:?}"
     );
+}
+
+/// An address never gets the mirror and the apply state of another mailbox:
+/// a secret of another provider, or of another IMAP server or user, is
+/// refused before any change (IMAP spec section 8).
+#[test]
+fn an_account_secret_keeps_its_provider_and_its_mailbox() {
+    let dir = TempDir::new("account-secret");
+    let store = Store::open(&dir.0).unwrap();
+    let token = |a: &str| -> (String, Option<Vec<u8>>, Option<String>) {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT provider, token, state FROM account WHERE address = ?1",
+                    [a],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    let server = Some(("imap.example.org", 993, "me"));
+    let id = store
+        .save_account_secret("imap", "me@example.org", server, b"one")
+        .unwrap();
+    assert_eq!(
+        token("me@example.org"),
+        ("imap".into(), Some(b"one".to_vec()), Some("ok".into()))
+    );
+    for (provider, imap) in [
+        ("gmail", None),
+        ("imap", Some(("imap.other.example", 993, "me"))),
+        ("imap", Some(("imap.example.org", 143, "me"))),
+        ("imap", Some(("imap.example.org", 993, "you"))),
+    ] {
+        let r = store.save_account_secret(provider, "me@example.org", imap, b"two");
+        assert!(
+            matches!(r, Err(Error::Account(_))),
+            "{provider} {imap:?}: {r:?}"
+        );
+        assert_eq!(token("me@example.org").1, Some(b"one".to_vec()));
+    }
+    // The same mailbox: a new secret, the same account.
+    let again = store
+        .save_account_secret("imap", "me@example.org", server, b"three")
+        .unwrap();
+    assert_eq!(again, id);
+    assert_eq!(token("me@example.org").1, Some(b"three".to_vec()));
+    // A Gmail account refuses an IMAP secret too.
+    store
+        .save_account_secret("gmail", "g@example.com", None, b"g")
+        .unwrap();
+    let r = store.save_account_secret("imap", "g@example.com", server, b"x");
+    assert!(matches!(r, Err(Error::Account(_))));
+    assert_eq!(token("g@example.com").1, Some(b"g".to_vec()));
 }
