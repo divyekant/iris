@@ -7,7 +7,7 @@
 //! (spec section 5.1). The draft calls and the send give a definite
 //! rejection before any request until card R6-17 adds them.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -64,6 +64,12 @@ pub struct Outlook {
     /// True after Graph kept another category list than the request (A6):
     /// each later category write gets a definite refusal.
     categories_off: AtomicBool,
+    /// Called one time when the switch turns on, so the engine stores it
+    /// with the account (limit #675).
+    on_categories_off: Option<Box<dyn Fn() + Send + Sync>>,
+    /// The IDs of the sent copies of the messages that Iris sent (spec
+    /// section 6): only these get `SENT`.
+    own_sent: Mutex<HashSet<String>>,
 }
 
 impl Outlook {
@@ -82,7 +88,40 @@ impl Outlook {
             graph,
             known: Mutex::new(HashMap::new()),
             categories_off: AtomicBool::new(false),
+            on_categories_off: None,
+            own_sent: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// The provider with the sent copies of the messages that Iris sent
+    /// before (`draft.sent_message`). Each later send of this value adds
+    /// its own sent copy.
+    pub fn with_sent(self, ids: impl IntoIterator<Item = String>) -> Outlook {
+        self.own_sent.lock().unwrap().extend(ids);
+        self
+    }
+
+    /// The provider with the stored category switch: `off` true turns off
+    /// category writes from the start. `stored` is called one time when
+    /// the switch turns on later.
+    pub fn with_category_switch(
+        mut self,
+        off: bool,
+        stored: impl Fn() + Send + Sync + 'static,
+    ) -> Outlook {
+        self.categories_off = AtomicBool::new(off);
+        self.on_categories_off = Some(Box::new(stored));
+        self
+    }
+
+    /// The mirror labels of `m` ([`label_ids`]), with `SENT` for a sent
+    /// copy of a message that Iris sent.
+    fn labels(&self, m: &Message, known: &HashMap<String, &'static str>) -> Vec<String> {
+        let mut ids = label_ids(m, known);
+        if self.own_sent.lock().unwrap().contains(&m.id) {
+            ids.push("SENT".into());
+        }
+        ids
     }
 
     /// The well-known name of each folder ID, from the cache or from Graph.
@@ -151,8 +190,12 @@ impl Outlook {
                 Op::Categories(list) => tag()
                     .and_then(|e| self.graph.set_categories(token, id, list, &e))
                     .inspect_err(|e| {
-                        if matches!(e, Error::Differs(_)) {
-                            self.categories_off.store(true, Ordering::Relaxed);
+                        if matches!(e, Error::Differs(_))
+                            && !self.categories_off.swap(true, Ordering::Relaxed)
+                        {
+                            if let Some(stored) = &self.on_categories_off {
+                                stored();
+                            }
                         }
                     }),
                 Op::Read(read) => {
@@ -196,7 +239,7 @@ impl Outlook {
         let moved = self.graph.move_to(token, id, &to_id, &etag).map_err(map)?;
         Ok(Minimal {
             id: moved.id.clone(),
-            label_ids: label_ids(&moved, &known),
+            label_ids: self.labels(&moved, &known),
         })
     }
 }
@@ -239,10 +282,12 @@ pub fn label_list(folders: &[Folder], categories: &[String]) -> Vec<Label> {
         threads_total: None,
         threads_unread: None,
     };
-    let mut out: Vec<Label> = ["INBOX", "UNREAD", "STARRED", "DRAFT", "SPAM", "TRASH"]
-        .iter()
-        .map(|n| label(n.to_string(), n.to_string(), true))
-        .collect();
+    let mut out: Vec<Label> = [
+        "INBOX", "UNREAD", "STARRED", "DRAFT", "SPAM", "TRASH", "SENT",
+    ]
+    .iter()
+    .map(|n| label(n.to_string(), n.to_string(), true))
+    .collect();
 
     let by_id: HashMap<&str, &Folder> = folders.iter().map(|f| (f.id.as_str(), f)).collect();
     let mut named: Vec<Label> = Vec::new();
@@ -574,11 +619,11 @@ fn headers_of(head: &[u8], names: &[&str]) -> Vec<iris_provider::Header> {
         .collect()
 }
 
-fn history(m: &Message, known: &HashMap<String, &'static str>) -> HistoryMessage {
+fn history(m: &Message, label_ids: Vec<String>) -> HistoryMessage {
     HistoryMessage {
         id: m.id.clone(),
         thread_id: m.conversation_id.clone(),
-        label_ids: label_ids(m, known),
+        label_ids,
     }
 }
 
@@ -597,6 +642,16 @@ impl iris_provider::Provider for Outlook {
 
     /// `archive` and `inbox` move the message between folders.
     fn moves_folders(&self) -> bool {
+        true
+    }
+
+    /// Only a copy whose content Iris confirmed gets `SENT`: `SENT` is
+    /// evidence that the owner wrote the message.
+    fn sent_confirmed(&self, id: &str) {
+        self.own_sent.lock().unwrap().insert(id.to_string());
+    }
+
+    fn keeps_sent_draft(&self) -> bool {
         true
     }
 
@@ -667,7 +722,7 @@ impl iris_provider::Provider for Outlook {
                 Change::Message(m) => Some(m),
                 Change::Removed(_) => None,
             })
-            .filter(|m| label.is_none_or(|l| label_ids(m, &known).iter().any(|x| x == l)))
+            .filter(|m| label.is_none_or(|l| self.labels(m, &known).iter().any(|x| x == l)))
             .map(|m| MessageRef {
                 id: m.id.clone(),
                 thread_id: m.conversation_id.clone(),
@@ -736,9 +791,9 @@ impl iris_provider::Provider for Outlook {
             };
             for c in delta.changes {
                 changes.push(match c {
-                    Change::Message(m) => Record::Added(history(&m, &known)),
+                    Change::Message(m) => Record::Added(history(&m, self.labels(&m, &known))),
                     Change::Removed(id) => match self.graph.message(token, &id) {
-                        Ok(m) => Record::Added(history(&m, &known)),
+                        Ok(m) => Record::Added(history(&m, self.labels(&m, &known))),
                         Err(Error::NotFound) => Record::Deleted(HistoryMessage {
                             id,
                             thread_id: String::new(),
@@ -777,7 +832,7 @@ impl iris_provider::Provider for Outlook {
         let known = self.known(token).map_err(map)?;
         Ok(Minimal {
             id: m.id.clone(),
-            label_ids: label_ids(&m, &known),
+            label_ids: self.labels(&m, &known),
         })
     }
 
@@ -795,7 +850,7 @@ impl iris_provider::Provider for Outlook {
         }
         Ok(Metadata {
             id: m.id.clone(),
-            label_ids: label_ids(&m, &known),
+            label_ids: self.labels(&m, &known),
             headers: headers_of(&sink.bytes, headers),
         })
     }
@@ -821,7 +876,7 @@ impl iris_provider::Provider for Outlook {
         Ok(RawMessage {
             id: m.id.clone(),
             thread_id: m.conversation_id.clone(),
-            label_ids: label_ids(&m, &known),
+            label_ids: self.labels(&m, &known),
             internal_date,
             size,
         })

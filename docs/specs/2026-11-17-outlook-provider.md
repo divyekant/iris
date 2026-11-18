@@ -214,8 +214,8 @@ rules:
   records a failure of that message, never a false date.
 - One `Outlook` value serves one mailbox: it keeps the IDs of the
   well-known folders after the first read.
-- `SENT` is never given (section 6). R6-16 decides how the copies that
-  Iris sent get it.
+- `SENT` goes only to a sent copy of a message that Iris sent (section
+  6). Graph gives no such label.
 - Section 5.1 has the state writes (R6-15) and section 5.2 the drafts,
   the send and `metadata` (R6-17).
 
@@ -321,8 +321,10 @@ send does these steps:
 
 Iris does not delete the server draft after the send, because spec 2
 says that Iris never deletes a draft, and a delete is a mailbox write
-with no approval. The draft stays in Outlook Drafts. The outbox shows
-"Sent. The draft stays in Outlook: delete it there." A known limit with
+with no approval. The draft stays in Outlook Drafts. The ledger row of
+the good send keeps the note "Sent. The draft stays in Outlook: delete
+it there." (R6-16), and the history shows it with the send. The outbox
+lists only sends that wait. A known limit with
 its own issue: the person can send the same draft a second time from
 Outlook. A later card can make the delete an approved part of the send.
 
@@ -369,7 +371,8 @@ spec section 4 on these rules:
   other content than the approved content" stops each later release, of
   each provider.
 - Iris never deletes the draft after the send. Known limit with its own
-  issue (#634). The note in the outbox is part of R6-16.
+  issue (#634). R6-16 keeps the note with the ledger row of the send
+  (`Provider::keeps_sent_draft`), and the history shows it.
 - The recovery of a `create_draft` with an unknown result is the
   recovery of the apply for each provider: `drafts_with_id` finds the
   draft, or the row fails. Graph makes the draft in the call, so a draft
@@ -441,7 +444,18 @@ person or a sender can set. Two existing rules read such data as proof:
   hostile checks, the evidence of known people). The person can move a
   received message into Sent Items, so the folder is not proof. For an
   Outlook account, only a message that Iris sent itself (the sent copy of
-  a ledger send row, section 5) gets `SENT`. Each other message in
+  a ledger send row, section 5) gets `SENT`, and only when the completion
+  confirmed that its content is the approved content. R6-16: the engine
+  gives the provider the `sent_message` of each sent draft of the account
+  when it makes the provider (`iris_apply::sent_by_iris`). A draft with a
+  send whose copy had other content is left out. The completion calls
+  `sent_confirmed` only after the content check. Each label read of the
+  provider (sync, verify, the apply) adds `SENT` for these IDs, so the
+  mirror and the verify agree. A sync can copy the sent message before
+  the send completes. The completion then reads the labels of that mirror
+  message again. Each change of `SENT` or `DRAFT` clears `understood_at`
+  through the triggers of migration 37, so the message gets a new
+  understanding with the new sender decision. Each other message in
   `sentitems` gets the label `Folders/Sent Items`, and the sender axis
   decides it from its headers as any received mail. Known limit with its
   own issue: mail that the owner sends from another Outlook client is not
@@ -665,8 +679,14 @@ Each assumption has the evidence of a Microsoft Learn page, read on
   person, and Iris turns off category writes for the account (label and unlabel give a definite refusal)
   until a new release. The release gate tests an `unlabel`. R6-15: the
   Graph client gives `Error::Differs` for such an answer, and the provider
-  turns off its category writes in memory, before any request. Card R6-16
-  stores the switch with the account and shows the notice (limit #675).
+  turns off its category writes in memory, before any request. R6-16:
+  the provider also stores the switch in `account.categories_off_at`
+  (migration 37), and the engine reads it each time it makes the
+  provider, so the switch lasts after a restart. Each later `label` and
+  `unlabel` of the account gets the refusal "Outlook kept other
+  categories than Iris asked for", which the person reads as the reason
+  of the action. To turn category writes on again, a new release clears
+  the column.
 - A7. Well-known folder names work in each language of the mailbox.
   Evidence: <https://learn.microsoft.com/en-us/graph/api/resources/mailfolder>.
 - A8. Error body `{"error":{"code","message"}}`. Evidence:

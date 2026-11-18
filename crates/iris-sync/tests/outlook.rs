@@ -144,9 +144,11 @@ fn an_outlook_mailbox_syncs_with_no_difference() {
     assert_eq!(
         count(
             &store,
-            "SELECT count(*) FROM label WHERE provider_id = 'SENT'"
+            "SELECT count(*) FROM message_label ml JOIN label l ON l.id = ml.label_id
+             WHERE l.provider_id = 'SENT'"
         ),
-        0
+        0,
+        "SENT goes only to the copies that Iris sent"
     );
 }
 

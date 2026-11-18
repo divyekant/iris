@@ -188,6 +188,24 @@ fn a_draft_and_its_send_reach_outlook() {
         "F-drafts",
         "Iris deletes no draft"
     );
+    // The good send tells the person that the draft stays (limit #634).
+    let note: Option<String> = b
+        .store
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT error FROM ledger WHERE action_id = ?1", [s], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        note.as_deref(),
+        Some("Sent. The draft stays in Outlook: delete it there.")
+    );
+    // The note is no content error, so the next send can leave.
+    let (s2, _) = b.new_mail(AGED);
+    assert!(matches!(b.release(s2), Outcome::Applied(_)));
 }
 
 /// Graph saves the sent copy after the 202: the send is pending, the
@@ -360,12 +378,27 @@ fn the_results_of_an_outlook_send_name_outlook() {
     let other = format!(
         "From: <{OWNER}>\r\nTo: <spy@example.org>\r\n{id}\r\nSubject: Q4 numbers\r\n\r\nOther.\r\n"
     );
-    b.fake.add_message(other.as_bytes(), "F-sent");
+    let copy = b.fake.add_message(other.as_bytes(), "F-sent");
+    iris_sync::sync(&b.store, &b.outlook, b.account, TOKEN).unwrap();
     iris_apply::recover(&b.store, &b.outlook, &mut tok(), b.account).unwrap();
     assert_eq!(
         b.error(s).as_deref(),
         Some("Outlook sent other content than the approved content")
     );
+    // SENT says that the owner wrote the message: a copy with other content
+    // does not get it, now or after a restart.
+    assert!(!b.labels(&copy).contains(&"SENT".to_string()));
+    assert_eq!(b.differences(&b.outlook), 0);
+    assert!(iris_apply::sent_by_iris(&b.store, b.account)
+        .unwrap()
+        .is_empty());
+    let fresh = Outlook::new(Graph::new(Config {
+        base_url: b.fake.base_url(),
+        ..Config::default()
+    }))
+    .with_sent(iris_apply::sent_by_iris(&b.store, b.account).unwrap());
+    iris_sync::sync(&b.store, &fresh, b.account, TOKEN).unwrap();
+    assert!(!b.labels(&copy).contains(&"SENT".to_string()));
     let (s2, _) = b.new_mail(AGED);
     iris_changeset::hold(&b.store, b.account, now()).unwrap();
     assert!(matches!(
@@ -394,6 +427,110 @@ fn a_delivery_to_the_owner_does_not_confirm_the_send() {
     assert_ne!(sent, delivered);
     assert_eq!(b.fake.messages()[&sent], "F-sent");
     assert_eq!(b.fake.sent_mail().len(), 1);
+}
+
+impl Box {
+    /// The labels of the mirror message with this Graph ID.
+    fn labels(&self, provider_id: &str) -> Vec<String> {
+        self.store
+            .read(|c| {
+                let mut st = c.prepare(
+                    "SELECT l.provider_id FROM message m
+                     JOIN message_label ml ON ml.message_id = m.id
+                     JOIN label l ON l.id = ml.label_id
+                     WHERE m.account_id = ?1 AND m.provider_id = ?2",
+                )?;
+                let v = st
+                    .query_map(params![self.account, provider_id], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                Ok(v)
+            })
+            .unwrap()
+    }
+
+    fn set_understood(&self, provider_id: &str) {
+        let n = self
+            .store
+            .write(|tx| {
+                Ok(tx.execute(
+                    "UPDATE message SET understood_at = 1 WHERE account_id = ?1 AND provider_id = ?2",
+                    params![self.account, provider_id],
+                )?)
+            })
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    fn understood(&self, provider_id: &str) -> Option<i64> {
+        self.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT understood_at FROM message WHERE account_id = ?1 AND provider_id = ?2",
+                    params![self.account, provider_id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    }
+
+    fn differences(&self, mail: &dyn Provider) -> u64 {
+        iris_sync::verify(&self.store, mail, self.account, TOKEN)
+            .unwrap()
+            .total
+    }
+}
+
+/// Only the sent copy of a message that Iris sent gets SENT (spec section
+/// 6). A message that the person moved into Sent Items does not. A sync
+/// that copies the sent message before the send completes gets SENT at
+/// the completion, and a new provider value of the engine agrees.
+#[test]
+fn only_the_copies_that_iris_sent_get_sent() {
+    let b = setup("own-sent");
+    let (s, _) = b.new_mail(AGED);
+    let other = b.fake.add_message(
+        b"From: <x@example.org>\r\nMessage-ID: <x@example.org>\r\nSubject: moved\r\n\r\nhi\r\n",
+        "F-sent",
+    );
+    b.fake.hold_copies(true);
+    assert_eq!(b.release(s), Outcome::Pending);
+    let before = b.fake.messages();
+    b.fake.deliver_copies();
+    iris_sync::sync(&b.store, &b.outlook, b.account, TOKEN).unwrap();
+    let raw = b.row().0;
+    let copy = b
+        .fake
+        .messages()
+        .into_keys()
+        .find(|id| !before.contains_key(id))
+        .unwrap();
+    assert!(
+        !b.labels(&copy).contains(&"SENT".to_string()),
+        "not known yet"
+    );
+    // The copy was understood as received mail before the completion.
+    b.set_understood(&copy);
+    iris_apply::recover(&b.store, &b.outlook, &mut tok(), b.account).unwrap();
+    assert_eq!(b.state(s), "applied");
+    assert_eq!(b.row().1.as_deref(), Some(copy.as_str()));
+    assert_eq!(b.fake.sent_mail(), vec![raw]);
+    assert!(b.labels(&copy).contains(&"SENT".to_string()));
+    assert!(!b.labels(&other).contains(&"SENT".to_string()));
+    assert_eq!(b.understood(&copy), None, "SENT needs a new understanding");
+    assert_eq!(b.differences(&b.outlook), 0);
+    // A new value of the provider, as the engine makes it after a restart.
+    let config = Config {
+        base_url: b.fake.base_url(),
+        ..Config::default()
+    };
+    let sent = iris_apply::sent_by_iris(&b.store, b.account).unwrap();
+    assert_eq!(sent, vec![copy.clone()]);
+    let fresh = Outlook::new(Graph::new(config.clone())).with_sent(sent);
+    assert_eq!(b.differences(&fresh), 0);
+    assert!(b.labels(&copy).contains(&"SENT".to_string()));
+    // With no list, the copy loses SENT: the list is what proves it.
+    let blind = Outlook::new(Graph::new(config));
+    assert!(b.differences(&blind) > 0);
 }
 
 /// Outlook keeps the Message-ID that Iris set, so another ID at the server

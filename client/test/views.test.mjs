@@ -823,6 +823,16 @@ test("each status answer sets the accounts that need sign-in, and the app shows 
     assert.match(t, /The mail server stopped the sign-in/);
     assert.match(t, new RegExp(`iris account add-imap ${imap.address.replace(".", "\\.")} and give the new password`));
     assert.doesNotMatch(t, /client\.json/);
+    // An Outlook account: Microsoft refused, and the notice gives the Outlook command.
+    const outlook = { ...account, provider: "outlook" };
+    globalThis.fetch = async () => new Response(JSON.stringify({ ...fx.status, accounts: [outlook] }));
+    await get("status");
+    globalThis.fetch = () => new Promise(() => {});
+    const o = text(await render("/src/App.svelte"));
+    assert.match(o, /Microsoft stopped the sign-in/);
+    assert.match(o, /iris account add-outlook (&lt;|<)client ID> with the application \(client\) ID/);
+    assert.match(o, /add --tenant with its directory \(tenant\) ID/);
+    assert.doesNotMatch(o, /client\.json/);
   } finally {
     globalThis.fetch = saved;
     delete globalThis.location;

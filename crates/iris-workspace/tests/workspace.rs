@@ -68,6 +68,8 @@ INSERT INTO message (id, account_id, thread_id, provider_id, internal_date, unde
   (10, 1, 2, 'm10', 10000, 1, NULL, NULL),
   (12, 1, 1, 'm12', 12000, 1, NULL, NULL);
 INSERT INTO message_label (message_id, label_id) VALUES (3, 2), (9, 1), (10, 1);
+-- SENT and DRAFT clear the understanding (migration 37): mark it again.
+UPDATE message SET understood_at = 1 WHERE id IN (3, 9, 10);
 INSERT INTO header (message_id, date, from_addr, from_name, to_addrs, subject) VALUES
   (1, 1000, 'dana@example.com', 'Dana', 'me@example.com', 'Contract'),
   (2, 500, 'dana@example.com', 'Dana', 'me@example.com', 'HOSTILE-SUBJECT'),
@@ -724,6 +726,7 @@ fn an_alias_of_yours_is_not_a_person() {
                  INSERT INTO message (id, account_id, thread_id, provider_id, internal_date, understood_at)
                    VALUES (41, 1, 1, 'm41', 41000, 1), (42, 1, 2, 'm42', 42000, 1);
                  INSERT INTO message_label (message_id, label_id) VALUES (41, 1), (42, 1);
+                 UPDATE message SET understood_at = 1 WHERE id IN (41, 42);
                  INSERT INTO header (message_id, date, from_addr, to_addrs, cc_addrs, subject) VALUES
                    (41, 41000, 'me.work@example.com', 'dana@example.com', 'me.work@example.com', 'Contract'),
                    (42, 42000, 'me.work@example.com', 'sam@example.com', NULL, 'Dinner');

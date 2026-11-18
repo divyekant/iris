@@ -401,8 +401,18 @@ fn resync_steps(
             let listed = "SELECT m.id FROM message m JOIN sync_seen s
                 ON s.account_id = m.account_id AND s.message_id = m.provider_id
                 WHERE m.account_id = ?1 AND m.gone_at IS NULL";
+            // Only the rows that differ change, so the triggers on
+            // message_label (SENT and DRAFT clear `understood_at`) see only
+            // real changes.
             tx.execute(
-                &format!("DELETE FROM message_label WHERE message_id IN ({listed})"),
+                &format!(
+                    "DELETE FROM message_label WHERE message_id IN ({listed})
+                       AND NOT EXISTS (SELECT 1 FROM message m
+                         JOIN sync_seen s ON s.account_id = m.account_id AND s.message_id = m.provider_id
+                         JOIN json_each(s.labels) j
+                         JOIN label l ON l.account_id = s.account_id AND l.provider_id = j.value
+                         WHERE m.id = message_label.message_id AND l.id = message_label.label_id)"
+                ),
                 [account],
             )?;
             tx.execute(
@@ -722,8 +732,25 @@ fn set_labels(
     labels: &[String],
     op: Op,
 ) -> iris_store::Result<()> {
+    // Only the rows that differ change, so the triggers on message_label
+    // (SENT and DRAFT clear `understood_at`) see only real changes.
     if let Op::Set = op {
-        tx.execute("DELETE FROM message_label WHERE message_id = ?1", [message])?;
+        let have: Vec<(i64, String)> = {
+            let mut st = tx.prepare_cached(
+                "SELECT l.id, l.provider_id FROM message_label ml JOIN label l ON l.id = ml.label_id
+                 WHERE ml.message_id = ?1",
+            )?;
+            let rows = st.query_map([message], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for (label, provider_id) in have {
+            if !labels.contains(&provider_id) {
+                tx.execute(
+                    "DELETE FROM message_label WHERE message_id = ?1 AND label_id = ?2",
+                    params![message, label],
+                )?;
+            }
+        }
     }
     let sql = match op {
         Op::Set | Op::Add => {

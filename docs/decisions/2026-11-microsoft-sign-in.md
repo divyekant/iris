@@ -112,9 +112,16 @@ the app in that tenant as single-tenant, and give Iris its directory
 
 ### 4. Sign in from Iris
 
-1. In Iris, add an Outlook account. Give the application (client) ID, and
-   `common` as the tenant (or the tenant ID for a single-tenant app).
-2. Sign in in the browser. Accept the permissions.
+1. Add the Outlook account. Give the application (client) ID. For a
+   single-tenant app, also give `--tenant <tenant ID>`:
+
+   ```bash
+   iris account add-outlook <client ID>
+   ```
+
+2. Open the address that the command prints, and sign in in the browser.
+   Accept the permissions. If the browser is on another machine, add
+   `--paste`, then paste the address of the browser after the sign-in.
 3. The screen can say that the publisher is not verified. You are the
    publisher of your own app: continue.
 

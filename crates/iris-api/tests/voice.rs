@@ -290,6 +290,9 @@ async fn property_a_draft_answers_the_parent_of_the_form() {
                            SELECT ?1, id FROM label WHERE provider_id = ?2",
                         rusqlite::params![id, label],
                     )?;
+                    // SENT and DRAFT clear the understanding (migration 37):
+                    // the message is understood after its labels.
+                    tx.execute("UPDATE message SET understood_at = 1 WHERE id = ?1", [id])?;
                 }
             }
             Ok(())

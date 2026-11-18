@@ -24,8 +24,8 @@ const READS: [&str; 6] = [
 const ALLOWED: [(&str, usize, &str); 16] = [
     (
         "iris-store/src/lib.rs",
-        7,
-        "the definition of draft_or_copy and DRAFT_OR_COPY; a change of SENT or DRAFT (proof of authorship) clears understood_at",
+        6,
+        "the definition of draft_or_copy and DRAFT_OR_COPY (the triggers of migration 37 clear understood_at at a change of SENT or DRAFT)",
     ),
     (
         "iris-understand/src/store.rs",
@@ -80,7 +80,7 @@ const ALLOWED: [(&str, usize, &str); 16] = [
     (
         "iris-graph/src/provider.rs",
         7,
-        "the Outlook provider maps the Graph drafts folder to DRAFT, and saves a new draft there",
+        "the Outlook provider maps the Graph drafts folder to DRAFT, saves a new draft there, and gives SENT only to the copies that Iris sent",
     ),
 ];
 

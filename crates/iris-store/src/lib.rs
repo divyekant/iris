@@ -104,6 +104,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_34.sql"),
     include_str!("schema_35.sql"),
     include_str!("schema_36.sql"),
+    include_str!("schema_37.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
@@ -549,14 +550,15 @@ impl Store {
                    gone_at = NULL
                  RETURNING id",
             )?;
-            let mut clear_labels = tx.prepare_cached("DELETE FROM message_label WHERE message_id = ?1")?;
-            // A bit mask: 1 for SENT, 2 for DRAFT.
-            let mut owner_labels = tx.prepare_cached(
-                "SELECT coalesce(sum(CASE l.provider_id WHEN 'SENT' THEN 1 WHEN 'DRAFT' THEN 2 END), 0)
-                   FROM message_label ml JOIN label l ON l.id = ml.label_id WHERE ml.message_id = ?1",
+            // Only the rows that differ change, so the triggers on
+            // message_label (SENT and DRAFT clear `understood_at`) see only
+            // real changes.
+            let mut have_labels = tx.prepare_cached(
+                "SELECT l.id, l.provider_id FROM message_label ml JOIN label l ON l.id = ml.label_id
+                 WHERE ml.message_id = ?1",
             )?;
-            let mut ununderstood =
-                tx.prepare_cached("UPDATE message SET understood_at = NULL WHERE id = ?1")?;
+            let mut stale_label = tx
+                .prepare_cached("DELETE FROM message_label WHERE message_id = ?1 AND label_id = ?2")?;
             let mut label = tx.prepare_cached(
                 "INSERT OR IGNORE INTO message_label(message_id, label_id)
                  SELECT ?1, id FROM label WHERE account_id = ?2 AND provider_id = ?3",
@@ -605,17 +607,18 @@ impl Store {
                         return Err(Error::MissingContent(sha.clone()));
                     }
                 }
-                let owner_before: i64 = owner_labels.query_row([id], |r| r.get(0))?;
-                clear_labels.execute([id])?;
+                let have: Vec<(i64, String)> = have_labels
+                    .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<_>>()?;
+                for (label, provider_id) in have {
+                    if !m.labels.contains(&provider_id) {
+                        stale_label.execute(params![id, label])?;
+                    }
+                }
                 // A label that the store does not have adds no row
                 // (specification 1, section 4.3).
                 for l in &m.labels {
                     label.execute(params![id, account, l])?;
-                }
-                // SENT and DRAFT decide if the message is from you, so a
-                // change of them needs the understanding again.
-                if owner_labels.query_row([id], |r| r.get::<_, i64>(0))? != owner_before {
-                    ununderstood.execute([id])?;
                 }
                 let h = &m.header;
                 if !keep_header { header.execute(params![

@@ -32,6 +32,9 @@ pub const SENT_OTHER: &str = "Gmail sent other content than the approved content
 /// The end of each "sent other content" error, after the name of the
 /// provider (for example "Outlook sent other content ..."). Each such
 /// error stops the later releases.
+/// The start of the note of a good send whose draft stays on the server.
+pub const KEPT_DRAFT_START: &str = "Sent. The draft stays in";
+
 pub const SENT_OTHER_END: &str = "sent other content than the approved content";
 
 /// The content of a `draft` row and the `post` of a create: the content
@@ -500,7 +503,18 @@ fn complete(
     };
     let same = iris_compose::read_sent(&raw, &run.address)
         .is_some_and(|r| iris_compose::hash(&r.content, r.reply.as_ref()) == approved);
-    let error = (!same).then(|| format!("{} {SENT_OTHER_END}", run.mail.name()));
+    let error = if !same {
+        Some(format!("{} {SENT_OTHER_END}", run.mail.name()))
+    } else if run.mail.keeps_sent_draft() {
+        // The send is good. The note stays with the ledger row, where the
+        // history shows it (limit #634).
+        Some(format!(
+            "{KEPT_DRAFT_START} {}: delete it there.",
+            run.mail.name()
+        ))
+    } else {
+        None
+    };
     run.store.write(|tx| {
         let t = now();
         tx.execute(
@@ -513,10 +527,46 @@ fn complete(
         )?;
         Ok(())
     })?;
+    if same {
+        run.mail.sent_confirmed(sent_id);
+    }
+    // A sync can copy the sent message into the mirror before the provider
+    // knows that Iris sent it. Outlook gives `SENT` only to a copy that
+    // Iris confirmed, so read the labels of a mirrored copy again.
+    let mirrored: Option<i64> = run.store.read(|c| {
+        Ok(c.query_row(
+            "SELECT id FROM message WHERE account_id = ?1 AND provider_id = ?2",
+            params![run.account, sent_id],
+            |r| r.get(0),
+        )
+        .optional()?)
+    })?;
+    if let Some(id) = mirrored {
+        run.mirror_read(&[(id, sent_id.to_string())]);
+    }
     Ok(Outcome::Applied(super::Counts {
         changed: 1,
         ..Default::default()
     }))
+}
+
+/// The provider IDs of the sent copies of `account` whose content Iris
+/// confirmed. A draft with a send whose copy differed ([`SENT_OTHER_END`])
+/// is left out. A provider that gives `SENT` only to the copies that Iris
+/// sent (Outlook) gets this list at its start.
+pub fn sent_by_iris(store: &Store, account: i64) -> Result<Vec<String>> {
+    Ok(store.read(|c| {
+        let mut st = c.prepare(
+            "SELECT d.sent_message FROM draft d
+             WHERE d.account_id = ?1 AND d.sent_message IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM action_draft ad JOIN ledger l ON l.action_id = ad.action_id
+                               WHERE ad.draft_id = d.id AND l.error LIKE '% ' || ?2)",
+        )?;
+        let ids = st
+            .query_map(params![account, SENT_OTHER_END], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
+    })?)
 }
 
 /// The draft of a send action.
