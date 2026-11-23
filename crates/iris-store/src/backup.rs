@@ -71,8 +71,58 @@ impl Store {
     /// `dest` must not exist, or must be an empty folder. Gives the number
     /// of content files in the copy. A content file that the database
     /// refers to and that is not there is an error: the copy is not complete.
+    ///
+    /// The copy is made in a folder next to `dest` and gets the name `dest`
+    /// only when it is complete. After an error, the function removes that
+    /// folder, so a new backup to the same path can start (#63). After a
+    /// crash, the folder `.<name>.partial-<pid>` can stay; it never blocks
+    /// a new backup.
     pub fn backup(&self, dest: &Path) -> Result<u64> {
         let _lock = self.backup_lock()?;
+        if dest.exists() && fs::read_dir(dest)?.next().is_some() {
+            return Err(Error::Io(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "the folder is not empty",
+            )));
+        }
+        let name = dest
+            .file_name()
+            .ok_or_else(|| Error::Io(io::Error::other("the backup path has no folder name")))?;
+        let partial = dest.with_file_name(format!(
+            ".{}.partial-{}",
+            name.to_string_lossy(),
+            std::process::id()
+        ));
+        // A folder of this name is a copy that an earlier run of this
+        // process ID did not end.
+        match fs::remove_dir_all(&partial) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+        let files = match self.backup_into(&partial) {
+            Ok(files) => files,
+            Err(e) => {
+                // The partial copy holds the key and the mail: remove it.
+                let _ = fs::remove_dir_all(&partial);
+                return Err(e);
+            }
+        };
+        // A rename replaces an empty folder, and never a folder with files.
+        if let Err(e) = fs::rename(&partial, dest) {
+            let _ = fs::remove_dir_all(&partial);
+            return Err(e.into());
+        }
+        let parent = dest
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        sync_dir(parent)?;
+        Ok(files)
+    }
+
+    /// The copy of [`Store::backup`] into the new folder `dest`. The caller
+    /// holds the backup lock.
+    fn backup_into(&self, dest: &Path) -> Result<u64> {
         // The copy holds the key and the mail.
         new_private_dir(dest)?;
         let dest_content = dest.join("content");

@@ -545,3 +545,36 @@ fn a_write_after_a_crash_never_truncates_the_policy_file() {
         assert!(files.iter().any(|(_, t)| t == b"edit"), "{files:?}");
     }
 }
+
+// Invariant (#63): a backup that stops with an error leaves no file at the
+// destination and no partial copy next to it, so a new backup to the same
+// path can start.
+#[test]
+fn a_failed_backup_leaves_no_partial_copy() {
+    let dir = TempDir::new("partial");
+    let dest = TempDir::new("partial-copy");
+    let store = Store::open(&dir.0).unwrap();
+    let acc = store.add_account("gmail", "owner@example.com").unwrap();
+    store
+        .put_messages(acc, &[msg(&store, "a", b"raw a", "apple")])
+        .unwrap();
+    // A content file that is not there stops the copy after iris.db.
+    let content = dir.0.join("content");
+    let moved = dir.0.join("content-aside");
+    fs::rename(&content, &moved).unwrap();
+    fs::create_dir(&content).unwrap();
+    assert!(store.backup(&dest.0).is_err());
+    assert!(!dest.0.exists(), "the destination has a partial copy");
+    let parent = dest.0.parent().unwrap();
+    let name = dest.0.file_name().unwrap().to_string_lossy().to_string();
+    assert!(!fs::read_dir(parent).unwrap().any(|e| e
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with(&format!(".{name}.partial"))));
+    // The retry to the same path works.
+    fs::remove_dir(&content).unwrap();
+    fs::rename(&moved, &content).unwrap();
+    assert_eq!(store.backup(&dest.0).unwrap(), 1);
+    assert!(missing_files(&dest.0).is_empty());
+}

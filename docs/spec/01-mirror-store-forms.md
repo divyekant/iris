@@ -368,6 +368,12 @@ makes a copy while the engine runs:
    backup cannot decrypt the secrets.
 5. Release the lock.
 
+The engine makes the copy in the folder `.<name>.partial-<pid>` next to the
+destination, and renames it to the destination only when it is complete.
+After an error, the engine removes that folder, so a new backup to the same
+path can start. After a crash, the folder can stay; it does not block a new
+backup, and the person can delete it.
+
 The engine makes the backup folder with mode `0700`, because it holds the key
 and the mail. The engine writes `policy.toml` to a temporary file, and it
 does not write the file during a backup. So the copy has one complete version
