@@ -1233,6 +1233,34 @@ fn each_draft_or_copy_label_added_in_place_drops_the_items() {
     }
 }
 
+/// An understood message with no droppable item that gets a draft or copy
+/// label in place, or loses it, puts its thread in `talk_due`: the
+/// conversation leaves out drafts and copies.
+#[test]
+fn each_draft_or_copy_label_change_marks_the_conversation() {
+    for label in iris_store::DRAFT_OR_COPY {
+        let b = store("talk-due");
+        let m = b.add("1", ASK, &["INBOX"]);
+        understand(&b.store, m, &Fake::default(), NOW).unwrap();
+        iris_understand::store::update_due_talks(&b.store, NOW).unwrap();
+        assert!(b.items().is_empty(), "{label}: no droppable item");
+        let due = |b: &Box_| -> i64 {
+            b.col(
+                "SELECT count(*) FROM talk_due t JOIN message m ON m.thread_id = t.thread_id
+                 WHERE m.id = ?1",
+                m,
+            )
+        };
+        assert_eq!(due(&b), 0);
+        b.add("1", ASK, &["INBOX", label]);
+        assert_eq!(due(&b), 1, "{label}: added");
+        iris_understand::store::update_due_talks(&b.store, NOW).unwrap();
+        assert_eq!(due(&b), 0);
+        b.add("1", ASK, &["INBOX"]);
+        assert_eq!(due(&b), 1, "{label}: removed");
+    }
+}
+
 /// A store from before migration 41 can hold items of a message that got
 /// `UNSENT` in place. The migration drops them.
 #[test]
@@ -1243,7 +1271,7 @@ fn the_upgrade_drops_the_items_of_a_draft_or_copy() {
     // The store of version 40: no view and no item trigger.
     b.store
         .write(|tx| {
-            tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP VIEW item_droppable;")?;
+            tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP VIEW item_droppable;")?;
             Ok(())
         })
         .unwrap();

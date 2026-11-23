@@ -39,24 +39,41 @@ BEGIN
 END;
 
 -- A new DRAFT, UNSENT or SENT_COPY label deletes the droppable items of the
--- message. The thread goes into `talk_due` (migration 40), so its
--- conversation is computed again.
+-- message.
 CREATE TRIGGER draft_or_copy_drops_items AFTER INSERT ON message_label
   WHEN (SELECT provider_id FROM label WHERE id = NEW.label_id)
     IN ('DRAFT', 'UNSENT', 'SENT_COPY')
-  AND EXISTS (SELECT 1 FROM item_droppable d WHERE d.message_id = NEW.message_id)
 BEGIN
-  INSERT INTO talk_due(thread_id) SELECT m.thread_id FROM message m
-    WHERE m.id = NEW.message_id
-      AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = m.thread_id);
   DELETE FROM item WHERE id IN
     (SELECT item_id FROM item_droppable WHERE message_id = NEW.message_id);
 END;
 
--- A store before this migration can hold such items already.
+-- The conversation of a thread leaves out drafts and copies, so each new or
+-- removed DRAFT, UNSENT or SENT_COPY label puts the thread in `talk_due`
+-- (migration 40), also when the message had no droppable item.
+CREATE TRIGGER draft_or_copy_talk_add AFTER INSERT ON message_label
+  WHEN (SELECT provider_id FROM label WHERE id = NEW.label_id)
+    IN ('DRAFT', 'UNSENT', 'SENT_COPY')
+BEGIN
+  INSERT INTO talk_due(thread_id) SELECT m.thread_id FROM message m
+    WHERE m.id = NEW.message_id
+      AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = m.thread_id);
+END;
+
+CREATE TRIGGER draft_or_copy_talk_remove AFTER DELETE ON message_label
+  WHEN (SELECT provider_id FROM label WHERE id = OLD.label_id)
+    IN ('DRAFT', 'UNSENT', 'SENT_COPY')
+BEGIN
+  INSERT INTO talk_due(thread_id) SELECT m.thread_id FROM message m
+    WHERE m.id = OLD.message_id
+      AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = m.thread_id);
+END;
+
+-- A store before this migration can hold such items, and conversations
+-- that show such a message. Each thread with a draft or a copy is computed
+-- again once.
 INSERT INTO talk_due(thread_id) SELECT DISTINCT m.thread_id FROM message m
-  WHERE EXISTS (SELECT 1 FROM item_droppable d WHERE d.message_id = m.id)
-    AND EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+  WHERE EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
       WHERE ml.message_id = m.id AND l.provider_id IN ('DRAFT', 'UNSENT', 'SENT_COPY'))
     AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = m.thread_id);
 DELETE FROM item WHERE id IN (
