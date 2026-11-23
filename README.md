@@ -32,8 +32,9 @@ curl -fsSLO https://raw.githubusercontent.com/divyekant/iris/main/scripts/instal
 ```
 
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md), "Install Iris", gives each step of the
-script and the data that it sends. Then connect an account (see below) and run
-`iris open`.
+script and the data that it sends. If the script says that
+`~/.local/bin` is not on your `PATH`, add it as the script shows. Then connect
+an account (see below) and run `iris open`.
 
 To build from source, see "Build".
 
@@ -77,6 +78,9 @@ You need these tools. Iris builds on macOS and Linux.
    target/release/iris serve
    ```
 
+The other sections of this README run `iris`. In a source build, use
+`target/release/iris`, or copy it to a folder on your `PATH`.
+
 A plain `cargo build --release` also works. If `client/dist` does not exist, the
 program has no web client and serves a fallback page that tells you to build
 the client. `IRIS_REQUIRE_CLIENT=1` makes the build stop in that case.
@@ -105,10 +109,10 @@ time: the account keeps its copy of the mail.
 1. Sign in:
 
    ```bash
-   target/release/iris account add client.json
+   iris account add client.json
    ```
 
-   For write access: `target/release/iris account add client.json --write`.
+   For write access: `iris account add client.json --write`.
 
 2. Open the address that the command prints, and sign in to Google.
 3. If the browser is on another machine than Iris, add `--paste`. Then copy
@@ -117,7 +121,7 @@ time: the account keeps its copy of the mail.
 4. Start the engine:
 
    ```bash
-   target/release/iris serve
+   iris serve
    ```
 
 The engine syncs the mailbox at once, then each 60 seconds. If Google refuses
@@ -131,7 +135,7 @@ record `docs/decisions/2026-11-microsoft-sign-in.md` tells how to make one.
 1. Sign in with the application (client) ID of the registration:
 
    ```bash
-   target/release/iris account add-outlook <client ID>
+   iris account add-outlook <client ID>
    ```
 
 2. Open the address that the command prints, and sign in to Microsoft. For
@@ -142,6 +146,26 @@ record `docs/decisions/2026-11-microsoft-sign-in.md` tells how to make one.
 Microsoft gives a new refresh token at each refresh. Iris encrypts each new
 token in place of the old one. If Microsoft refuses the stored sign-in, run
 `iris account add-outlook` again.
+
+## Connect an IMAP account
+
+Iris reads an IMAP mailbox over TLS. The server must support `CONDSTORE`.
+
+```bash
+iris account add-imap <address> --host <server>
+```
+
+The command asks for the password with no echo, signs in one time to check
+it, and saves it encrypted. Use an app password if your provider has them.
+`--port` (default 993) and `--user` (default the address) change the sign-in.
+To give a new password, run `iris account add-imap <address>` with no
+`--host`. Then start the engine with `iris serve`.
+
+An IMAP account has these limits: Iris can change the read and star state
+and the keywords of a message. It cannot archive, move, trash or send, and it
+makes no new label.
+
+## Data folder and the web client
 
 Iris keeps all state in the data folder: `~/Library/Application Support/iris`
 on macOS, `~/.local/share/iris` on Linux. `--data <path>` or the variable
@@ -238,14 +262,16 @@ a message cannot send commands to your terminal.
 
 ## Agents that do a job
 
-A job gives one goal and its threads to an agent (release 4). Start a session
-with this command:
+A job gives one goal and its threads to an agent (release 4). To make a job,
+open an item in the web client, press "Handle this", and type the goal. The
+address of the job page ends with the job ID, for example `#/jobs/j-1`. Then start a session of an
+agent with this command:
 
 ```bash
-iris job run --agent claude-code j-1
+iris job run --agent claude-code <job ID>
 ```
 
-`iris job session j-1` shows the state of the last session. Its log is
+`iris job session <job ID>` shows the state of the last session. Its log is
 `sessions/<session>.log` in the data folder. The session runs in a sandbox
 with only the workspace of the job and no login file of yours. It gets only
 the variables and the hosts of its adapter:
@@ -274,6 +300,9 @@ max_minutes = 60
 ```
 
 Iris adds the fixed prompt as the last argument of `command`.
+
+On Linux, the sandbox needs `bwrap`. [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+gives the prerequisites of the sandbox on Linux and on macOS.
 
 ## Open Iris on a phone
 
@@ -334,7 +363,7 @@ necessary.
 To get a draft of a reply in your voice, run:
 
 ```bash
-target/release/iris write t-42 --intent "yes, Friday at 10"
+iris write t-42 --intent "yes, Friday at 10"
 ```
 
 The model reads the thread and up to 8 of your sent messages (mail to the
@@ -351,7 +380,7 @@ also holds the key. Keep them private.
 To copy the data folder while the engine runs, run:
 
 ```bash
-target/release/iris backup <empty-folder>
+iris backup <empty-folder>
 ```
 
 The backup is a complete data folder. Iris opens it as it is, at any path.
@@ -359,7 +388,7 @@ The backup is a complete data folder. Iris opens it as it is, at any path.
 To get your data in open formats, run:
 
 ```bash
-target/release/iris export <empty-folder>
+iris export <empty-folder>
 ```
 
 | File | Content |
