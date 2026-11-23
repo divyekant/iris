@@ -145,7 +145,8 @@
 
   const ADDRESS = /^[^\s@,<>]+@[^\s@,<>]+\.[^\s@,<>]+$/;
   const valid = (a: string) => ADDRESS.test(a);
-  let ready = $derived(to.some(valid) && (thread !== null || subject.trim() !== "") && !busy);
+  // No mail with no text (issue 741): the engine refuses it too.
+  let ready = $derived(to.some(valid) && (thread !== null || subject.trim() !== "") && body.trim() !== "" && !busy);
 
   function typed(field: "to" | "cc", end = false) {
     const [list, rest] = chips(field === "to" ? to : cc, field === "to" ? toText : ccText, end);
