@@ -173,6 +173,11 @@ the store. It stops with an unknown schema version. The error stays after you
 remove an account or the data of a new feature. Only a backup from before the
 update lets you roll back.
 
+If you run Iris with another data folder (`--data <path>` or `IRIS_DATA`),
+give the same folder to each `iris` command below, for example
+`iris --data <path> backup <empty-folder>`. The background service uses
+only the default data folder (issue #243).
+
 Before each update, run `iris backup <empty-folder>`. Keep the backup until
 you no longer need to roll back. The backup holds your mail and the key, so
 keep it private.
@@ -189,13 +194,21 @@ To roll back, do these steps:
 
    Replace `v2026.11.16.1` with the tag of the earlier release (see the
    GitHub Releases page).
+
+   CAUTION: The restore in step 3 removes each local change since the
+   backup: decisions, ledger entries, items, drafts and job state. The mail
+   syncs again from the mail provider, but these local changes do not come
+   back. Keep the moved data folder until you no longer need it.
+
 3. If the bad release migrated the store, move the data folder away and copy
    the backup in its place. Use the data folder of your installation: the
    path of `--data` or `IRIS_DATA` if you set one. Else it is
    `~/Library/Application Support/iris` on macOS, and `$XDG_DATA_HOME/iris`
    or `~/.local/share/iris` on Linux.
-4. Run `iris status`. Make sure that it shows your accounts.
-5. Run `iris service install`.
+4. Run `iris status` (with the same `--data` if you set one). Make sure that
+   it shows your accounts.
+5. If you use the default data folder, run `iris service install`. Else
+   start `iris serve` with your data folder.
 
 The service file points to `~/.local/bin/iris`, so the service runs the old
 program after a restart of the service. To restart it:
