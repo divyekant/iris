@@ -409,6 +409,12 @@ def run_areas(root: Path, config: Dict[str, Any], names: Sequence[str], steps: S
         return
     workers = workers_for(len(names))
     per_area = max(1, (os.cpu_count() or 1) // workers)
+    if "setup" in steps:
+        # The first tool probe can install a toolchain (rustup reads rust-toolchain.toml).
+        # Two installs of one toolchain at the same time break it, so probe one area at a time.
+        for name in names:
+            area = config["areas"][name]
+            tool_versions(root, area, isolated_env(root, name, per_area, area.get("env")))
     errors: List[str] = []
     lock = threading.Lock()
 
