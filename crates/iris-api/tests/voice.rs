@@ -209,10 +209,31 @@ async fn a_refused_draft_saves_nothing() {
         &s,
         fake(),
         "/api/threads/t-1/draft",
-        json!({"intent": "yes", "parent": "m-1", "to": "x"}),
+        json!({"intent": "yes", "parent": "m-1", "cc": "x"}),
     )
     .await;
     assert_eq!(code, StatusCode::BAD_REQUEST);
+    // A recipient of the form that fails the address check (issue 535).
+    let (code, v) = post(
+        &s,
+        fake(),
+        "/api/threads/t-1/draft",
+        json!({"intent": "yes", "parent": "m-1", "to": ["not an address"]}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{v}");
+    assert!(drafts(&s).is_empty());
+    // A valid recipient of the form is the person of the reply.
+    let (code, v) = post(
+        &s,
+        fake(),
+        "/api/threads/t-1/draft",
+        json!({"intent": "yes", "parent": "m-1", "to": ["bo@example.org"]}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    s.write(|tx| Ok(tx.execute("DELETE FROM reply_draft", [])?))
+        .unwrap();
     // A mail that understanding did not read, then a hostile mail.
     s.write(|tx| Ok(tx.execute("UPDATE message SET understood_at = NULL", [])?))
         .unwrap();

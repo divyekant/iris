@@ -152,7 +152,7 @@
     draftNote = "";
     try {
       const parent = reply?.parent.id;
-      const v = await post<{ body: string; based_on: string }>(`threads/${encodeURIComponent(thread)}/draft`, { intent, parent });
+      const v = await post<{ body: string; based_on: string }>(`threads/${encodeURIComponent(thread)}/draft`, { intent, parent, to: [...to] });
       // The text goes in the form only if it answers the mail that the form shows.
       if (v.based_on !== parent) draftNote = "A new mail came into this thread. Read it, then ask again.";
       else if (alive) body = v.body;

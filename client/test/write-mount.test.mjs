@@ -348,7 +348,7 @@ test("Write it for me sends the intent to the engine and puts its draft in the t
     await until(() => app.target.querySelector("textarea").value.startsWith("Hi Priya"));
     const [post] = net.posts();
     assert.equal(post.path, "threads/t-2/draft");
-    assert.deepEqual(post.body, { intent: "yes, Wednesday", parent: "m-9" }, "the draft answers the mail that the form shows");
+    assert.deepEqual(post.body, { intent: "yes, Wednesday", parent: "m-9", to: ["priya@example.com"] }, "the draft answers the mail that the form shows, to the recipients of the form");
     assert.equal(app.target.querySelector("fieldset").disabled, false);
     assert.equal(app.target.querySelector("button[type=submit]").disabled, false, "the person can send the draft");
   } finally {

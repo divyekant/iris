@@ -468,7 +468,10 @@ pub fn nudge(store: &Store, late: &Late, model: &dyn Model, now_ms: i64) -> Resu
     write_when(
         store,
         late.thread,
-        Some(NUDGE_INTENT),
+        Form {
+            intent: Some(NUDGE_INTENT),
+            ..Form::default()
+        },
         Some(&nudge),
         model,
         now_ms,
@@ -723,6 +726,20 @@ fn read_answer(reply: &iris_model::Reply) -> Result<String> {
     Ok(body.to_string())
 }
 
+/// What the person asks of a reply draft (R3-04 intent path).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Form<'a> {
+    /// What the reply must say, in the words of the person.
+    pub intent: Option<&'a str>,
+    /// The message that the reply form answers (row ID). If the newest
+    /// message of the thread is another one, the draft fails with
+    /// [`Error::Changed`] before the model call and saves nothing.
+    pub parent: Option<i64>,
+    /// The address that the form sends the reply to, in place of the
+    /// [`recipient`] rule: the person of the reply and of the samples.
+    pub to: Option<&'a str>,
+}
+
 /// Writes a draft of the reply to `thread` with one model call, and saves
 /// it in place of the last draft of the thread.
 pub fn write(
@@ -732,7 +749,28 @@ pub fn write(
     model: &dyn Model,
     now_ms: i64,
 ) -> Result<Saved> {
-    write_when(store, thread, intent, None, model, now_ms, &|_| Ok(true))
+    write_reply(
+        store,
+        thread,
+        Form {
+            intent,
+            ..Form::default()
+        },
+        model,
+        now_ms,
+    )
+}
+
+/// [`write`] for the reply that the form names: its parent and its
+/// recipient.
+pub fn write_reply(
+    store: &Store,
+    thread: i64,
+    form: Form<'_>,
+    model: &dyn Model,
+    now_ms: i64,
+) -> Result<Saved> {
+    write_when(store, thread, form, None, model, now_ms, &|_| Ok(true))
 }
 
 /// [`write`], with one more condition `still` that must be true before the
@@ -742,13 +780,18 @@ pub fn write(
 fn write_when(
     store: &Store,
     thread: i64,
-    intent: Option<&str>,
+    form: Form<'_>,
     nudge: Option<&Nudge>,
     model: &dyn Model,
     now_ms: i64,
     still: &dyn Fn(&Connection) -> rusqlite::Result<bool>,
 ) -> Result<Saved> {
-    let intent = intent.map(str::trim).filter(|i| !i.is_empty());
+    let intent = form.intent.map(str::trim).filter(|i| !i.is_empty());
+    // The recipient of the form, in the form of the [`recipient`] rule.
+    let form_to = form
+        .to
+        .map(|a| a.trim().to_lowercase())
+        .filter(|a| !a.is_empty());
     if intent.is_some_and(|i| i.chars().count() > MAX_INTENT) {
         return Err(Error::LongIntent);
     }
@@ -768,14 +811,21 @@ fn write_when(
             let snap = snapshot(c, thread)?;
             let to = nudge
                 .map(|n| n.to.to_string())
+                .or_else(|| form_to.clone())
                 .or_else(|| recipient(&snap.newest, &me));
             let samples = samples(c, account, thread, to.as_deref())?;
             Ok(Some((account, me, snap, samples)))
         })?
         .ok_or(Error::NoThread(thread))?;
     let based_on = check(&snap)?.id;
+    // A newer mail than the one that the form answers: no call, no save
+    // (issue 576). The save checks the same snapshot again.
+    if form.parent.is_some_and(|p| p != based_on) {
+        return Err(Error::Changed);
+    }
     let to = nudge
         .map(|n| n.to.to_string())
+        .or_else(|| form_to.clone())
         .or_else(|| recipient(&snap.newest, &me));
     let mut data = data(&me, to.as_deref(), intent, &samples, &snap.newest);
     if let Some(n) = nudge {
