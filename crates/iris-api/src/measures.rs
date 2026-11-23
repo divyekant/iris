@@ -308,7 +308,15 @@ pub fn count_use(store: &Store, day: &str, open: Option<&str>, now_ms: i64) -> R
 #[derive(Clone)]
 pub struct Counter {
     store: Arc<Store>,
-    day: Arc<Mutex<String>>,
+    day: Arc<Mutex<Days>>,
+}
+
+/// The days of [`Counter`]: the last day that a use was counted, and each
+/// day that a request counts now.
+#[derive(Default)]
+struct Days {
+    last: String,
+    counting: std::collections::HashSet<String>,
 }
 
 impl Counter {
@@ -338,12 +346,20 @@ pub async fn count(State(c): State<Counter>, req: Request, next: Next) -> Respon
         .filter(|id| !id.contains('/'))
         .map(str::to_owned);
     if let Some(day) = &day {
-        // Only the request that holds the lock waits for the store. A
-        // request that finds the lock held counts nothing: the holder
-        // counts the day, so no other request waits for the writer (#700).
-        if let Ok(mut last) = c.day.try_lock() {
-            if *last != *day && count_use(&c.store, day, None, crate::now_ms()).is_ok() {
-                *last = day.clone();
+        // The lock is held only to read and change the state, never during
+        // a store call (#700). One request counts each day that is not
+        // counted yet. Another request of that day skips the count while
+        // the first one counts it; a request of another day counts its own.
+        let mine = {
+            let mut d = c.day.lock().unwrap_or_else(|e| e.into_inner());
+            d.last != *day && d.counting.insert(day.clone())
+        };
+        if mine {
+            let ok = count_use(&c.store, day, None, crate::now_ms()).is_ok();
+            let mut d = c.day.lock().unwrap_or_else(|e| e.into_inner());
+            d.counting.remove(day);
+            if ok {
+                d.last = day.clone();
             }
         }
     }
