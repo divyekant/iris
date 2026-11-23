@@ -34,8 +34,9 @@ export default defineConfig(({ mode }) => {
               } catch {
                 question = undefined;
               }
-              // As the engine: a body with no question text is a 400.
-              if (typeof question !== "string" || !question.trim()) {
+              // As the engine: a question of 0 or more than 500 characters (code points, after trim) is a 400.
+              const size = typeof question === "string" ? [...question.trim()].length : 0;
+              if (typeof question !== "string" || size < 1 || size > 500) {
                 res.statusCode = 400;
                 res.end(JSON.stringify({ error: "A question has 1 to 500 characters." }));
                 return;
