@@ -11,7 +11,9 @@
 //!
 //! The report goes to stderr.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Duration;
 
 use iris_eval::{pair_scores, Count};
@@ -310,13 +312,57 @@ impl Model for Oracle {
     }
 }
 
-/// Runs the step with `model`, and gives the pair score of the proposals
-/// against the true matters.
-fn measure(name: &str, model: impl Fn() -> Box<dyn Model>) -> (Outcome, Count) {
+/// What one call sent and gave back.
+#[derive(Default)]
+struct Call {
+    /// The data block of the call.
+    data: String,
+    /// The reply ended (`Stop::End`) and is JSON with a `matters` array.
+    usable: bool,
+}
+
+/// Forwards to `inner`, and keeps the data block and the kind of reply.
+struct Watch {
+    inner: Box<dyn Model>,
+    call: Rc<RefCell<Call>>,
+}
+
+impl Model for Watch {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn ask(&self, instruction: &str, data: &str) -> Result<Reply, ModelError> {
+        let reply = self.inner.ask(instruction, data);
+        *self.call.borrow_mut() = Call {
+            data: data.to_string(),
+            usable: reply.as_ref().is_ok_and(usable),
+        };
+        reply
+    }
+    fn request_bytes(&self, instruction: &str, data: &str) -> u64 {
+        self.inner.request_bytes(instruction, data)
+    }
+}
+
+/// A reply that gives a score: a complete answer with a `matters` array.
+fn usable(r: &Reply) -> bool {
+    r.stop == Stop::End
+        && serde_json::from_str::<Value>(&r.text).is_ok_and(|v| v["matters"].is_array())
+}
+
+/// Runs the step with `model`, and gives the outcome, the call, and the
+/// pair score of the proposals against the true matters.
+fn measure(name: &str, model: impl Fn() -> Box<dyn Model>) -> (Outcome, Call, Count) {
     let dir = std::env::temp_dir().join(format!("iris-quality-{name}-{}", std::process::id()));
     let cases = set();
     let store = setup(&dir, &cases);
-    let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> { Ok(model()) };
+    let call = Rc::new(RefCell::new(Call::default()));
+    let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+        Ok(Box::new(Watch {
+            inner: model(),
+            call: call.clone(),
+        }))
+    };
     let out = propose(&store, &connect, Gate::Now, NOW).unwrap();
     // Item row i + 1 is case i.
     let truth = groups(
@@ -341,7 +387,23 @@ fn measure(name: &str, model: impl Fn() -> Box<dyn Model>) -> (Outcome, Count) {
         score.recall()
     );
     let _ = std::fs::remove_dir_all(&dir);
-    (out, score)
+    let call = std::mem::take(&mut *call.borrow_mut());
+    (out, call, score)
+}
+
+/// Each item of the set went to the model, the items of no matter too, so
+/// a score counts the decoys.
+fn assert_all_sent(call: &Call) {
+    let titles: Vec<String> = call
+        .data
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|v| v["title"].as_str().map(String::from))
+        .collect();
+    for (_, _, _, doc) in set() {
+        let t = doc["title"].as_str().unwrap();
+        assert!(titles.iter().any(|x| x == t), "not sent: {t}");
+    }
 }
 
 /// The members of each group key, in order of the first member.
@@ -361,7 +423,9 @@ fn groups(pairs: impl Iterator<Item = (String, i64)>) -> Vec<Vec<i64>> {
 /// valid matter.
 #[test]
 fn the_oracle_scores_one() {
-    let (_, s) = measure("oracle", || Box::new(Oracle(set())));
+    let (_, call, s) = measure("oracle", || Box::new(Oracle(set())));
+    assert_all_sent(&call);
+    assert!(call.usable);
     assert_eq!(s.expected, 6 + 3 + 3 + 3);
     assert_eq!((s.precision(), s.recall()), (Some(1.0), Some(1.0)), "{s:?}");
 }
@@ -375,7 +439,7 @@ fn a_local_model_gives_a_score() {
     };
     let (url, model) = v.split_once('|').expect("<base URL>|<model>");
     let (url, model) = (url.to_string(), model.to_string());
-    let (out, _) = measure("local", || {
+    let (_, call, _) = measure("local", || {
         Box::new(iris_understand::Named {
             client: iris_model::Client::new(iris_model::Config {
                 provider: iris_model::Provider::OpenAiCompatible,
@@ -389,9 +453,27 @@ fn a_local_model_gives_a_score() {
             name: model.clone(),
         })
     });
-    // A failed call gives no score of the model: say so.
+    // A call with no complete answer gives no score of the model.
+    assert_all_sent(&call);
     assert!(
-        !out.failed,
-        "the model call failed or gave no answer of the format"
+        call.usable,
+        "the model gave no complete answer of the format"
     );
+}
+
+/// A cut, refused or empty answer is not usable: the local test fails on
+/// it and does not print a score as if the model grouped nothing.
+#[test]
+fn a_cut_or_refused_reply_is_not_usable() {
+    let reply = |stop, text: &str| Reply {
+        text: text.into(),
+        usage: Usage::default(),
+        stop,
+    };
+    let good = r#"{"matters": []}"#;
+    assert!(usable(&reply(Stop::End, good)));
+    assert!(!usable(&reply(Stop::Truncated, good)));
+    assert!(!usable(&reply(Stop::Refused, good)));
+    assert!(!usable(&reply(Stop::End, r#"{"body": "Hello"}"#)));
+    assert!(!usable(&reply(Stop::End, "{\"matters\": [")));
 }
