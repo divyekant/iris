@@ -11,10 +11,18 @@ use iris_api::Auth;
 use iris_store::Store;
 use tower::ServiceExt;
 
+/// A request of the web client: with the day header, so the measure
+/// count runs for it.
 fn request(auth: &Auth, method: Method, uri: &str) -> Request<Body> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let day = iris_api::rfc3339(now)[..10].to_string();
     Request::builder()
         .method(method)
         .uri(uri)
+        .header(iris_api::measures::DAY, day)
         .header("host", "127.0.0.1:4800")
         .header("authorization", auth.bearer())
         .header("content-type", "application/json")

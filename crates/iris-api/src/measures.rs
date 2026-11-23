@@ -338,9 +338,13 @@ pub async fn count(State(c): State<Counter>, req: Request, next: Next) -> Respon
         .filter(|id| !id.contains('/'))
         .map(str::to_owned);
     if let Some(day) = &day {
-        let mut last = c.day.lock().unwrap_or_else(|e| e.into_inner());
-        if *last != *day && count_use(&c.store, day, None, crate::now_ms()).is_ok() {
-            *last = day.clone();
+        // Only the request that holds the lock waits for the store. A
+        // request that finds the lock held counts nothing: the holder
+        // counts the day, so no other request waits for the writer (#700).
+        if let Ok(mut last) = c.day.try_lock() {
+            if *last != *day && count_use(&c.store, day, None, crate::now_ms()).is_ok() {
+                *last = day.clone();
+            }
         }
     }
     let res = next.run(req).await;
