@@ -525,6 +525,18 @@ fn complete(
             "UPDATE ledger SET state = 'applied', error = ?2 WHERE id = ?1 AND state = 'writing'",
             params![ledger, error],
         )?;
+        // A confirmed copy that is in the mirror gets SENT in the same
+        // transaction (migration 41): a later read of the labels can fail,
+        // and a sync with no change of the copy writes no labels.
+        tx.execute(
+            "INSERT OR IGNORE INTO message_label(message_id, label_id)
+             SELECT m.id, l.id FROM iris_sent_copy s
+             JOIN account a ON a.id = s.account_id AND a.provider = 'outlook'
+             JOIN message m ON m.account_id = s.account_id AND m.provider_id = s.provider_id
+             JOIN label l ON l.account_id = s.account_id AND l.provider_id = 'SENT'
+             WHERE s.provider_id = ?1 AND s.account_id = (SELECT account_id FROM draft WHERE id = ?2)",
+            params![sent_id, draft],
+        )?;
         Ok(())
     })?;
     if same {

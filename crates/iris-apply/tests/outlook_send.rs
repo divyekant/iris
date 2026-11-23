@@ -647,3 +647,64 @@ fn a_stale_sync_of_a_confirmed_copy_adds_sent() {
     assert!(b.labels(&copy).contains(&"SENT".to_string()));
     assert_eq!(b.differences(&b.outlook), 0);
 }
+
+/// Review round 2 of #768: the completion adds SENT to a mirrored copy in
+/// its own transaction. Here its later read of the labels gives no SENT
+/// (a provider value whose source has no copy yet), and the next sync has
+/// no change of the copy.
+#[test]
+fn the_completion_adds_sent_to_a_mirrored_copy() {
+    let b = setup("complete-adds");
+    let (s, _) = b.new_mail(AGED);
+    b.fake.hold_copies(true);
+    assert_eq!(b.release(s), Outcome::Pending);
+    b.fake.deliver_copies();
+    iris_sync::sync(&b.store, &b.outlook, b.account, TOKEN).unwrap();
+    let blind = stale(&b).with_sent_source(|| Ok(Vec::new()));
+    iris_apply::recover(&b.store, &blind, &mut tok(), b.account).unwrap();
+    let copy = b.row().1.expect("the send is complete");
+    assert!(b.labels(&copy).contains(&"SENT".to_string()));
+    // The engine value reads the copies from the store.
+    let (account, second) = (b.account, Store::open(&b.dir).unwrap());
+    let engine = stale(&b).with_sent_source(move || {
+        iris_apply::sent_by_iris(&second, account).map_err(|e| e.to_string())
+    });
+    iris_sync::sync(&b.store, &engine, b.account, TOKEN).unwrap();
+    assert!(b.labels(&copy).contains(&"SENT".to_string()));
+    assert_eq!(b.differences(&engine), 0);
+}
+
+/// Migration 41 adds SENT to each confirmed copy that a store of version 40
+/// has in its mirror with no SENT.
+#[test]
+fn migration_41_adds_sent_to_the_confirmed_copies() {
+    let b = setup("backfill");
+    let (s, _) = b.new_mail(AGED);
+    assert!(matches!(b.release(s), Outcome::Applied(_)));
+    iris_sync::sync(&b.store, &b.outlook, b.account, TOKEN).unwrap();
+    let copy = b.row().1.expect("the send is complete");
+    assert!(b.labels(&copy).contains(&"SENT".to_string()));
+    b.store
+        .write(|tx| {
+            tx.execute_batch(
+                "DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy;
+                 DELETE FROM message_label WHERE label_id IN (SELECT id FROM label WHERE provider_id = 'SENT');
+                 PRAGMA user_version = 40;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(!b.labels(&copy).contains(&"SENT".to_string()));
+    let again = Store::open(&b.dir).unwrap();
+    let has_sent: bool = again
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM message m JOIN message_label ml ON ml.message_id = m.id
+                   JOIN label l ON l.id = ml.label_id WHERE m.provider_id = ?1 AND l.provider_id = 'SENT')",
+                [&copy],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(has_sent);
+}

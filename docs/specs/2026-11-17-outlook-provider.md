@@ -454,7 +454,9 @@ person or a sender can set. Two existing rules read such data as proof:
   each order of a sync and a completion: the view `iris_sent_copy` holds
   the confirmed copies (`sent_by_iris` reads it), a write that removes
   `SENT` from a confirmed copy of an Outlook account does nothing, and a
-  label write of a confirmed copy with no `SENT` adds `SENT`. The triggers
+  label write of a confirmed copy with no `SENT` adds `SENT`. The
+  completion adds `SENT` to a mirrored copy in its own transaction, and the
+  migration adds `SENT` to each confirmed copy in the mirror. The triggers
   run in the transaction of the write, so a sync that read the labels
   before the completion committed cannot remove `SENT`. A draft with a
   send whose copy had other content is left out. The completion calls

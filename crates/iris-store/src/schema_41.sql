@@ -29,7 +29,10 @@ BEGIN
   SELECT RAISE(IGNORE);
 END;
 
--- A label write of a confirmed copy with no SENT adds SENT.
+-- A label write of a confirmed copy with no SENT adds SENT. The completion
+-- of a send adds SENT to a mirrored copy in its own transaction
+-- (`iris_apply::send`), and the backfill at the end adds it to each copy
+-- that a store confirmed before this migration.
 CREATE TRIGGER sent_copy_add AFTER INSERT ON message_label
   WHEN (SELECT provider_id FROM label WHERE id = NEW.label_id) <> 'SENT'
    AND EXISTS (SELECT 1 FROM message m JOIN account a ON a.id = m.account_id
@@ -40,3 +43,10 @@ BEGIN
     SELECT NEW.message_id, l.id FROM label l JOIN message m ON m.account_id = l.account_id
     WHERE m.id = NEW.message_id AND l.provider_id = 'SENT';
 END;
+
+-- The backfill: each confirmed copy of an Outlook account in the mirror.
+INSERT OR IGNORE INTO message_label(message_id, label_id)
+  SELECT m.id, l.id FROM iris_sent_copy s
+  JOIN account a ON a.id = s.account_id AND a.provider = 'outlook'
+  JOIN message m ON m.account_id = s.account_id AND m.provider_id = s.provider_id
+  JOIN label l ON l.account_id = s.account_id AND l.provider_id = 'SENT';
