@@ -61,7 +61,7 @@ struct Page {
 
 /// The most removed IDs that the page token of `changes` keeps for the read
 /// after the last round. A `Removed` past this number gets its read at once.
-// shortcut: past 1,000 removals in one sync, a message that moves again during the sync can keep an older folder until the next sync (#665); raise it if the release gate shows such syncs.
+// shortcut: past 1,000 removals in one sync, a message that moves again during the sync can keep an older folder until the next sync (#761); keep the IDs in the store if the release gate shows such syncs.
 const PENDING_REMOVED: usize = 1_000;
 
 /// The most reads by ID of one `changes` call after the last round.

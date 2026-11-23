@@ -146,8 +146,13 @@ A change is one of:
   (`GET /me/messages/{id}?$select=...`), also when a round gave it as
   `Message`: HTTP 404 means gone, and a message gives its folder now. The
   read comes after the last round, so a message that moves again after a
-  later round listed it gets the folder of its last move (#665). The
-  message stays in the mirror until this read gives 404.
+  later round listed it gets the folder of its last move (#665). Known
+  limit with its own issue (#761): the provider keeps at most 1,000
+  removed IDs for this read (section 3.1). Past that number, a removed
+  message gets its read after the page of its round, and a message that
+  moves again into a folder whose round ended keeps its older folder
+  until the next sync. The message stays in the mirror until a read by ID
+  gives 404.
 
 Commit: the new delta links of a sync become durable only in the same
 transaction as all the changes of the sync and the results of the reads
@@ -193,9 +198,9 @@ rules:
   `Change::Deleted`. The sync applies the changes in order, so this
   `Added` is the last state of the message. The page token keeps at most
   1,000 IDs. A `Removed` past that number gets its read in the same call,
-  as before #665. Known limit: in such a large sync, a message that moves
-  again after a later round listed it keeps the older folder until the
-  next sync. The last page gives the new cursor, so the sync stores all
+  as before #665. Known limit with its own issue (#761): in such a large
+  sync, a message that moves again after a later round listed it keeps
+  the older folder until the next sync. The last page gives the new cursor, so the sync stores all
   links in one transaction with the last changes.
 - `messages` with no label lists all mail of all folders, newest first:
   `GET /me/messages` with `$orderby=receivedDateTime desc`, so that the
@@ -627,6 +632,8 @@ reconciles with reads: not JSON, another shape, another state, above
 | The same message two times in one round | the last one wins | fake replays |
 | A message moves during the round of a folder | `Removed` in one folder, `Message` in the other | fake move |
 | A message moves after the round of its new folder | `Removed` only; the read by ID finds the new folder, and the message stays | fake move between rounds |
+| A message moves again after a later round listed it | the read by ID after the last round gives the folder of the last move | fake move between pages |
+| More than 1,000 removals in one sync | the first 1,000 get the read after the last round; each other one gets its read after its page and can keep an older folder until the next sync (#761) | fake mass move |
 | A folder of the mirror is not in the folder list | its link goes; each of its messages is read by ID: 404 is gone, else its new folder | fake folder delete |
 | An Outlook message with a forged `Authentication-Results: mx.google.com; dmarc=pass` | the header counts as absent; DMARC is unknown | unit test of the parser with the provider `outlook` |
 | A search folder in the folder list | left out with its children; its messages come from their real folders | fake search folder |
