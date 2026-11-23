@@ -377,6 +377,9 @@ impl Sessions {
         self.marks().remove(&job);
         match outcome {
             Outcome::Running(r) => {
+                if let Some(p) = &r.notes {
+                    say!("iris: {}: {p}", iris_job::format_job_id(job));
+                }
                 let proxy = proxies.remove(&r.session);
                 let server = self.serve(r.session, r.socket, job, agent);
                 st.running.insert(
@@ -814,11 +817,16 @@ fn build_done(store: &Store, job: i64) {
     if !done || std::fs::symlink_metadata(&dir).is_err() {
         return;
     }
-    if let Err(e) = iris_workspace::build(store, job, &dir) {
-        say!(
+    match iris_workspace::build(store, job, &dir) {
+        Ok(b) => {
+            if let Some(p) = b.notes {
+                say!("iris: {}: {p}", iris_job::format_job_id(job));
+            }
+        }
+        Err(e) => say!(
             "iris: {}: the workspace of the done job was not built again: {e}",
             iris_job::format_job_id(job)
-        );
+        ),
     }
 }
 

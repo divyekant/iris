@@ -949,3 +949,31 @@ fn samples(spec: &str) -> Vec<(String, String)> {
     assert_eq!(out.len(), 4, "the published text has 4 samples");
     out
 }
+
+#[test]
+fn a_person_with_only_pre_1970_mail_gets_the_real_last_date() {
+    let tmp = TempDir::new("pre1970");
+    let store = store(&tmp.0.join("data"));
+    // Each date moves to 1969-12-20, about 11.6 days before 1970.
+    store
+        .write(|tx| {
+            tx.execute_batch(
+                "UPDATE message SET internal_date = internal_date - 1000000000;
+                 UPDATE header SET date = date - 1000000000;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let job = job(&store);
+    let ws = tmp.0.join("ws");
+    build(&store, job, &ws).unwrap();
+    let person: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(ws.join("people/p-1.json")).unwrap()).unwrap();
+    let (first, last) = (
+        person["first"].as_str().unwrap(),
+        person["last"].as_str().unwrap(),
+    );
+    assert!(last.starts_with("1969-12-20"), "last {last}");
+    assert!(first.starts_with("1969-12-20"), "first {first}");
+    assert!(first < last, "first {first}, last {last}");
+}
