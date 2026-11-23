@@ -836,6 +836,31 @@ fn a_sender_lookup_without_case_uses_an_index() {
     );
 }
 
+#[test]
+fn the_changesets_of_one_job_use_an_index() {
+    // Issue 311: the job page finds the changesets of a job by
+    // `author_job` with an index search, not a scan of each changeset.
+    let dir = std::env::temp_dir().join(format!("iris-store-author-job-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    let plan: Vec<String> = store
+        .read(|c| {
+            Ok(
+                c.prepare("EXPLAIN QUERY PLAN SELECT id FROM changeset c WHERE c.author_job = ?1")?
+                    .query_map(["j-1"], |r| r.get(3))?
+                    .collect::<rusqlite::Result<_>>()?,
+            )
+        })
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        plan.iter()
+            .any(|p| p.contains("USING INDEX changeset_author_job")
+                || p.contains("USING COVERING INDEX changeset_author_job")),
+        "{plan:?}"
+    );
+}
+
 /// An address never gets the mirror and the apply state of another mailbox:
 /// a secret of another provider, or of another IMAP server or user, is
 /// refused before any change (IMAP spec section 8).
