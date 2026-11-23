@@ -559,3 +559,47 @@ fn an_outlook_draft_with_another_message_id_is_foreign() {
     assert_eq!(id, "other@example.com");
     assert!(b.fake.sent_mail().is_empty());
 }
+
+/// Two engine processes on one data folder (issue #719): a provider value
+/// that reads the sent copies from the store before each read of labels
+/// agrees with a send that the other process completes. A value with the
+/// list of its start does not, so the source is what keeps `SENT`.
+#[test]
+fn a_provider_with_a_store_source_sees_a_send_of_another_process() {
+    let b = setup("two-engines");
+    let config = Config {
+        base_url: b.fake.base_url(),
+        ..Config::default()
+    };
+    let (account, second) = (b.account, Store::open(&b.dir).unwrap());
+    let other = Outlook::new(Graph::new(config.clone())).with_sent_source(move || {
+        iris_apply::sent_by_iris(&second, account).map_err(|e| e.to_string())
+    });
+    let start = Outlook::new(Graph::new(config))
+        .with_sent(iris_apply::sent_by_iris(&b.store, account).unwrap());
+    assert_eq!(b.differences(&other), 0);
+    let (s, _) = b.new_mail(AGED);
+    assert!(matches!(b.release(s), Outcome::Applied(_)));
+    let copy = b.row().1.expect("the send is complete");
+    iris_sync::sync(&b.store, &b.outlook, account, TOKEN).unwrap();
+    assert!(b.labels(&copy).contains(&"SENT".to_string()));
+    assert_eq!(b.differences(&other), 0, "the other value keeps SENT");
+    assert!(b.labels(&copy).contains(&"SENT".to_string()));
+    assert!(
+        b.differences(&start) > 0,
+        "the list of the start lacks the copy"
+    );
+}
+
+/// A store source that fails gives an error, not labels without `SENT`.
+#[test]
+fn a_failed_store_source_gives_an_error() {
+    let b = setup("source-error");
+    let failing = Outlook::new(Graph::new(Config {
+        base_url: b.fake.base_url(),
+        ..Config::default()
+    }))
+    .with_sent_source(|| Err("disk I/O error".into()));
+    let id = b.fake.messages().into_keys().next().unwrap();
+    assert!(failing.minimal(TOKEN, &id).is_err());
+}

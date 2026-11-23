@@ -446,8 +446,11 @@ person or a sender can set. Two existing rules read such data as proof:
   Outlook account, only a message that Iris sent itself (the sent copy of
   a ledger send row, section 5) gets `SENT`, and only when the completion
   confirmed that its content is the approved content. R6-16: the engine
-  gives the provider the `sent_message` of each sent draft of the account
-  when it makes the provider (`iris_apply::sent_by_iris`). A draft with a
+  gives the provider a source of the `sent_message` of each sent draft of
+  the account (`iris_apply::sent_by_iris`). The provider reads the source
+  before each label read, so a send that another engine process completed
+  counts too (issue #719). A failed read of the source is an error, not
+  labels with no `SENT`. A draft with a
   send whose copy had other content is left out. The completion calls
   `sent_confirmed` only after the content check. Each label read of the
   provider (sync, verify, the apply) adds `SENT` for these IDs, so the
@@ -682,7 +685,12 @@ Each assumption has the evidence of a Microsoft Learn page, read on
   turns off its category writes in memory, before any request. R6-16:
   the provider also stores the switch in `account.categories_off_at`
   (migration 37), and the engine reads it each time it makes the
-  provider, so the switch lasts after a restart. Each later `label` and
+  provider, so the switch lasts after a restart. If the store write fails,
+  the switch stays on in memory, and each later refused category write
+  tries the store write again (issue #717). A stop of the engine before
+  one store write succeeds loses the switch: the next category write after
+  the start can reach Graph one time, and its `Differs` answer turns the
+  switch on again. Each later `label` and
   `unlabel` of the account gets the refusal "Outlook kept other
   categories than Iris asked for", which the person reads as the reason
   of the action. To turn category writes on again, a new release clears
