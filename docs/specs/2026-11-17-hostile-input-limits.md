@@ -177,8 +177,11 @@ the thread messages in the store, the scope rows of the job.
 - An agent with no job is marked, so its new mail gets `outside_thread`.
   Tests of the other draft flags use a person author or expect the flag.
 - `docs/spec/02-changeset-policy-ledger.md`: sections 5.3 and 6.5.
-- No API, schema or screen change. The flag name exists in
+- No schema change. The flag name exists in
   `docs/spec/schema/changeset.schema.json`.
+- The drafts API and the review screen (issue 462, after this spec): the
+  API marks each outside address with `outside_thread`, and the review
+  screen shows the tag "not in the thread" beside it (section 3).
 - Memory: the check holds only the recipients of the draft (at most the
   limit of `Content::check`). It streams your addresses and the thread
   headers, one row at a time, and removes each recipient that a row names
