@@ -183,8 +183,14 @@
   };
   const holds = (key: string) => held.some((h) => h.key === key);
   function lines(key: string, items: Item[]): Item[] {
+    const mine = held.filter((h) => h.key === key).map((h) => h.item);
     const top = items.filter((i) => !held.some((h) => h.item.id === i.id && h.key !== key)).slice(0, SHOWN);
-    return [...top, ...held.filter((h) => h.key === key && !top.some((t) => t.id === h.item.id)).map((h) => h.item)];
+    const missing = mine.filter((m) => !top.some((t) => t.id === m.id));
+    // At most SHOWN lines (docs/DESIGN.md): a held line takes the place of the last line that holds nothing.
+    for (let i = top.length - 1; i >= 0 && top.length + missing.length > SHOWN; i--) {
+      if (!mine.some((m) => m.id === top[i].id)) top.splice(i, 1);
+    }
+    return [...top, ...missing];
   }
   // A signal leaves at its expiry. The date and the due words change at midnight.
   // Keep `now` fresh until the first of the two.
