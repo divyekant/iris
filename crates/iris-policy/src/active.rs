@@ -114,6 +114,23 @@ pub(crate) fn check(conn: &Connection, data_dir: &std::path::Path) -> Result<Che
 /// Reads `policy.toml` in the data folder and compares it to the active
 /// policy. Changes nothing.
 pub fn file_state(store: &Store) -> Result<FileState> {
+    // A policy writer (`Store::write_policy`, with the backup lock) moves
+    // the old file aside, then links the new one: a read between the two
+    // sees no file (issue #141). While another holder has the lock, look
+    // again for a short time. With no holder, a missing file is missing.
+    // A backup also holds the lock, so the wait has a bound: at most
+    // 5 x 10 ms, and only for a missing file.
+    for _ in 0..5 {
+        let state = file_state_now(store)?;
+        if state != FileState::Missing || store.try_backup_lock()?.is_some() {
+            return Ok(state);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    file_state_now(store)
+}
+
+fn file_state_now(store: &Store) -> Result<FileState> {
     store.read(|conn| {
         let loaded = match check(conn, store.dir())? {
             Checked::Missing => return Ok(FileState::Missing),
