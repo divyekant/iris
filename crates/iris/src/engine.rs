@@ -950,8 +950,8 @@ impl Engine {
 
     /// Start a sync thread for each account that has none, open the
     /// deferred commitments whose date came, expire the changeset actions
-    /// 14 days after their submit, check the watches, and run the content cleanup if
-    /// [`CLEAN_EVERY`] passed. So an account that
+    /// 14 days after their submit, check the watches, and run the content cleanup
+    /// and the removal of the grants of ended jobs if [`CLEAN_EVERY`] passed. So an account that
     /// `iris account add` adds or signs in again starts to sync without a
     /// restart. Gives the accounts that got a new thread.
     pub fn tick(&mut self) -> Result<Vec<i64>> {
@@ -1023,6 +1023,12 @@ impl Engine {
             self.last_clean = Some(Instant::now());
             if let Err(e) = self.store.clean_gone(now_ms()) {
                 say!("iris: content cleanup: {e}");
+            }
+            // The grants of an ended job match nothing: remove them from
+            // the policy (issue #385). A held lock or a file with a change
+            // to confirm waits for the next pass.
+            if let Err(e) = iris_policy::end_grants(&self.store, now_ms().div_euclid(1000)) {
+                say!("iris: grants of ended jobs: {e}");
             }
         }
         Ok(started)
