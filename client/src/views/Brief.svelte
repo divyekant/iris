@@ -246,6 +246,8 @@
   <h1>{opening}</h1>
 </div>
 
+{#if needsModel(status)}<NoModel />{/if}
+
 {#if arrived.length}
   <div class="arrivals">
     {#each arrived as w (w.id)}<Arrived watch={w} ondone={removed} />{/each}
@@ -266,8 +268,6 @@
     <progress max={progress.total || 1} value={progress.fetched} aria-label="Messages copied"></progress>
   </div>
 {/if}
-
-{#if needsModel(status)}<NoModel />{/if}
 
 {#if codes.length}
   <div class="codes">
