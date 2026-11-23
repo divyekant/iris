@@ -262,19 +262,25 @@ fn outlook_of(store: &Arc<Store>, account: i64) -> Result<Box<dyn Provider>> {
     })?;
     let keep = store.clone();
     let stored = move || {
-        // A failed write keeps the switch in memory; the next Differs
-        // answer after a restart stores it again.
-        let _ = keep.write(|tx| {
+        // A failed write keeps the switch in memory, and the provider tries
+        // the write again at each refused category write (issue #717).
+        keep.write(|tx| {
             Ok(tx.execute(
                 "UPDATE account SET categories_off_at = ?2
                  WHERE id = ?1 AND categories_off_at IS NULL",
                 (account, now_ms()),
             )?)
-        });
+        })
+        .inspect_err(|e| say!("iris: the Outlook category switch: {e}"))
+        .is_ok()
     };
+    // The store gives the sent copies at each read of labels: another
+    // engine process can complete a send (issue #719).
+    let read = store.clone();
+    let sent = move || iris_apply::sent_by_iris(&read, account).map_err(|e| e.to_string());
     Ok(Box::new(
         iris_graph::Outlook::new(iris_graph::Graph::new(graph_config()?))
-            .with_sent(iris_apply::sent_by_iris(store, account).map_err(Error::Apply)?)
+            .with_sent_source(sent)
             .with_category_switch(off.is_some(), stored),
     ))
 }
