@@ -31,8 +31,10 @@ fn request(auth: &Auth, method: Method, uri: &str) -> Request<Body> {
 }
 
 /// A write route waits for the writer connection, which another thread
-/// holds. On the one runtime thread of the test, a read request still gets
-/// its answer before the writer is free.
+/// holds. The write request comes first, so it also counts the day of the
+/// web client and holds the day lock (#700). On the one runtime thread of
+/// the test, a later read request with the same day still gets its answer
+/// before the writer is free.
 #[tokio::test(flavor = "current_thread")]
 async fn a_store_wait_does_not_stop_other_requests() {
     let dir = std::env::temp_dir().join(format!("iris-api-runtime-{}", std::process::id()));
@@ -41,14 +43,14 @@ async fn a_store_wait_does_not_stop_other_requests() {
     let auth = Arc::new(Auth::new("127.0.0.1:4800".parse().unwrap()).unwrap());
     let router = iris_api::router(s.clone(), auth.clone());
 
-    // Another thread holds the writer for 3 seconds.
+    // Another thread holds the writer for 6 seconds.
     let (held, wait) = mpsc::channel();
     let holder = {
         let s = s.clone();
         std::thread::spawn(move || {
             s.write(|_| {
                 held.send(()).unwrap();
-                std::thread::sleep(Duration::from_secs(3));
+                std::thread::sleep(Duration::from_secs(6));
                 Ok(())
             })
             .unwrap();
@@ -56,27 +58,33 @@ async fn a_store_wait_does_not_stop_other_requests() {
     };
     wait.recv().unwrap();
 
-    let start = Instant::now();
-    let write = router
-        .clone()
-        .oneshot(request(&auth, Method::POST, "/api/notices/n-1/done"));
-    let read = async {
-        // The write request starts first.
-        tokio::task::yield_now().await;
-        let res = router
-            .clone()
-            .oneshot(request(&auth, Method::GET, "/api/status"))
-            .await
-            .unwrap();
-        (res.status(), start.elapsed())
-    };
-    let (w, (code, took)) = tokio::join!(write, read);
-    assert_eq!(code, StatusCode::OK);
+    let write = tokio::spawn(router.clone().oneshot(request(
+        &auth,
+        Method::POST,
+        "/api/notices/n-1/done",
+    )));
+    // The write request has its blocking thread, the day lock and the wait
+    // for the writer before the read starts.
+    tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_secs(1)))
+        .await
+        .unwrap();
     assert!(
-        took < Duration::from_secs(2),
+        !write.is_finished(),
+        "the write did not wait for the writer"
+    );
+    let start = Instant::now();
+    let res = router
+        .clone()
+        .oneshot(request(&auth, Method::GET, "/api/status"))
+        .await
+        .unwrap();
+    let took = start.elapsed();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(
+        took < Duration::from_secs(3),
         "the read waited for the writer: {took:?}"
     );
-    assert!(w.is_ok());
+    assert!(write.await.unwrap().is_ok());
     holder.join().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
