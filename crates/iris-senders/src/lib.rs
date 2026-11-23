@@ -283,13 +283,23 @@ fn decide_message(
                     conn,
                     to,
                     None,
+                    false,
                     Kind::Hostile,
                     &format!("near copy of {k}"),
                     now_ms,
                 )
                 .map(drop)?,
                 None => {
-                    upsert(ch, conn, to, name_of(to), Kind::Person, "sent", now_ms)?;
+                    upsert(
+                        ch,
+                        conn,
+                        to,
+                        name_of(to),
+                        true,
+                        Kind::Person,
+                        "sent",
+                        now_ms,
+                    )?;
                     // A row that a person set keeps its kind: only a known
                     // sender adds its domain.
                     let kind: Option<String> =
@@ -379,7 +389,16 @@ fn decide_message(
     }
 
     let (kind, basis) = rules(conn, &addr)?;
-    let id = upsert(ch, conn, &addr, name.as_deref(), kind, &basis, now_ms)?;
+    let id = upsert(
+        ch,
+        conn,
+        &addr,
+        name.as_deref(),
+        false,
+        kind,
+        &basis,
+        now_ms,
+    )?;
     Ok(Decision {
         rerun: Vec::new(),
         kind,
@@ -435,7 +454,7 @@ fn own(basis: &str) -> Decision {
 /// evidence in the store.
 fn recheck(conn: &Connection, addr: &str, now_ms: i64, ch: &mut Changes) -> rusqlite::Result<()> {
     let (kind, basis) = rules(conn, addr)?;
-    upsert(ch, conn, addr, None, kind, &basis, now_ms)?;
+    upsert(ch, conn, addr, None, false, kind, &basis, now_ms)?;
     Ok(())
 }
 
@@ -519,6 +538,7 @@ fn upsert(
     conn: &Connection,
     addr: &str,
     name: Option<&str>,
+    yours: bool,
     kind: Kind,
     basis: &str,
     now_ms: i64,
@@ -528,15 +548,20 @@ fn upsert(
             r.get(0)
         })
         .optional()?;
+    // A name that you wrote in sent mail replaces a name from received
+    // mail: the spoof check compares later `From` names with it (#109).
+    // Received mail never replaces a name. A row that a person set keeps all.
     conn.prepare_cached(
         "INSERT INTO sender(address, name, kind, basis, decided_by, decided_at)
               VALUES (?1, ?2, ?3, ?4, 'engine', ?5)
          ON CONFLICT(address) DO UPDATE SET
-              name = coalesce(sender.name, excluded.name), kind = excluded.kind,
+              name = CASE WHEN ?6 THEN coalesce(excluded.name, sender.name)
+                          ELSE coalesce(sender.name, excluded.name) END,
+              kind = excluded.kind,
               basis = excluded.basis, decided_by = 'engine', decided_at = excluded.decided_at
          WHERE sender.decided_by IS NOT 'person'",
     )?
-    .execute(params![addr, name, kind.name(), basis, now_ms])?;
+    .execute(params![addr, name, kind.name(), basis, now_ms, yours])?;
     let (id, after): (i64, Option<String>) = conn.query_row(
         "SELECT id, kind FROM sender WHERE address = ?1",
         [addr],
