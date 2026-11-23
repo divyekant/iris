@@ -63,6 +63,19 @@ test("the accounts view lists each account with its state and how to add one", a
   }
 });
 
+test("a read-only account says that its approved changes wait, and names the command that gives write access", async () => {
+  const reader = { ...fx.status.accounts[0], state: "read_only" };
+  const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [reader] }, poll: 0 });
+  try {
+    const row = text(view.target.querySelector(".accounts li"));
+    assert.match(row, /Iris can read this mailbox, but it cannot change it\. Your approved changes wait\./);
+    assert.match(row, /To give write access, run iris account add client\.json --write on the machine that runs Iris and sign in again\./);
+    assert.doesNotMatch(row, /Up to date/);
+  } finally {
+    view.destroy();
+  }
+});
+
 test("a stopped IMAP account names the mail server and the IMAP sign-in command, which needs only the address", async () => {
   const stopped = { ...fx.status.accounts[1], provider: "imap", state: "needs_sign_in" };
   const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [stopped] }, poll: 0 });
