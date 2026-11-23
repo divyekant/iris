@@ -72,44 +72,25 @@ impl Store {
     /// of content files in the copy. A content file that the database
     /// refers to and that is not there is an error: the copy is not complete.
     ///
-    /// The copy is made in a new folder next to `dest` (next to its target,
-    /// if `dest` is a symbolic link to an empty folder) and gets the name
-    /// `dest` only when it is complete. After an error, the function removes
-    /// that folder, so a new backup to the same path can start (#63). After
-    /// a crash, the folder `.<name>.partial-<pid>-<n>` can stay (#790); it
-    /// never blocks a new backup, and a backup never removes or writes into
-    /// a folder that it did not make.
+    /// After an error, the function removes each file that it wrote, and
+    /// `dest` if it made it, so `dest` is as before and a new backup to the
+    /// same path can start (#63). It never removes another file.
     pub fn backup(&self, dest: &Path) -> Result<u64> {
         let _lock = self.backup_lock()?;
-        if dest.exists() && fs::read_dir(dest)?.next().is_some() {
+        let existed = dest.exists();
+        // A folder with files is refused before any write, so the removal
+        // after an error never meets a file of another owner.
+        if existed && fs::read_dir(dest)?.next().is_some() {
             return Err(Error::Io(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "the folder is not empty",
             )));
         }
-        // The rename replaces a symbolic link itself: put the copy at the
-        // folder that the link names.
-        let dest = if dest.exists() {
-            fs::canonicalize(dest)?
-        } else {
-            dest.to_path_buf()
-        };
-        let dest = dest.as_path();
-        let partial = new_partial(dest)?;
-        let files = match self.backup_into(&partial) {
-            Ok(files) => files,
-            Err(e) => {
-                // The partial copy holds the key and the mail: remove it.
-                let _ = fs::remove_dir_all(&partial);
-                return Err(e);
-            }
-        };
-        place(&partial, dest, sync_dir)?;
-        Ok(files)
+        self.backup_into(dest)
+            .inspect_err(|_| remove_copy(dest, existed))
     }
 
-    /// The copy of [`Store::backup`] into the new folder `dest`. The caller
-    /// holds the backup lock.
+    /// The copy of [`Store::backup`]. The caller holds the backup lock.
     fn backup_into(&self, dest: &Path) -> Result<u64> {
         // The copy holds the key and the mail.
         new_private_dir(dest)?;
@@ -373,75 +354,31 @@ fn sync_file(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
 }
 
-/// Make a new private folder `.<name>.partial-<pid>-<n>` next to `dest`,
-/// with the first `n` that no file or folder has.
-fn new_partial(dest: &Path) -> Result<std::path::PathBuf> {
-    let name = dest
-        .file_name()
-        .ok_or_else(|| Error::Io(io::Error::other("the backup path has no folder name")))?
-        .to_string_lossy()
-        .into_owned();
-    for n in 0.. {
-        let partial = dest.with_file_name(format!(".{name}.partial-{}-{n}", std::process::id()));
-        let mut b = fs::DirBuilder::new();
-        #[cfg(unix)]
-        std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
-        match b.create(&partial) {
-            Ok(()) => return Ok(partial),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e.into()),
-        }
-    }
-    unreachable!("the loop returns")
-}
+/// The names that [`Store::backup`] writes in its destination, with the
+/// journal that SQLite can make next to the copy of `iris.db`.
+const COPY_NAMES: [&str; 5] = [
+    "iris.db",
+    "iris.db-journal",
+    "content",
+    "key",
+    "policy.toml",
+];
 
-/// Give the complete copy `partial` the name `dest`, and write the folder
-/// entry to disk with `sync`. After each error, neither name holds a copy:
-/// the destination is free for a new backup (#63).
-fn place(partial: &Path, dest: &Path, sync: impl FnOnce(&Path) -> io::Result<()>) -> Result<()> {
-    // A rename replaces an empty folder, and never a folder with files.
-    if let Err(e) = fs::rename(partial, dest) {
-        let _ = fs::remove_dir_all(partial);
-        return Err(e.into());
+/// Remove what a failed backup wrote in `dest`: each name of [`COPY_NAMES`],
+/// and `dest` itself if it did not exist before and is empty now. The
+/// backup checks that `dest` is empty first, and holds the backup lock, so
+/// these names are its own.
+fn remove_copy(dest: &Path, existed: bool) {
+    for name in COPY_NAMES {
+        let p = dest.join(name);
+        let _ = match fs::symlink_metadata(&p) {
+            Ok(m) if m.is_dir() => fs::remove_dir_all(&p),
+            Ok(_) => fs::remove_file(&p),
+            Err(_) => continue,
+        };
     }
-    let parent = dest
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    if let Err(e) = sync(parent) {
-        // The rename is maybe not on disk: remove the copy, so that the
-        // error never leaves a copy at the destination.
-        if fs::rename(dest, partial).is_ok() {
-            let _ = fs::remove_dir_all(partial);
-        } else {
-            let _ = fs::remove_dir_all(dest);
-        }
-        return Err(e.into());
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A failed sync after the rename leaves no copy at either name.
-    #[test]
-    fn a_failed_sync_after_the_rename_leaves_no_copy() {
-        let root = std::env::temp_dir().join(format!("iris-store-place-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let partial = root.join(".copy.partial-1");
-        let dest = root.join("copy");
-        fs::create_dir_all(&partial).unwrap();
-        fs::write(partial.join("iris.db"), b"db").unwrap();
-        let r = place(&partial, &dest, |_| Err(io::Error::other("sync")));
-        assert!(r.is_err());
-        assert!(!dest.exists() && !partial.exists());
-        // With a good sync the copy has the name of the destination.
-        fs::create_dir_all(&partial).unwrap();
-        fs::write(partial.join("iris.db"), b"db").unwrap();
-        place(&partial, &dest, |_| Ok(())).unwrap();
-        assert_eq!(fs::read(dest.join("iris.db")).unwrap(), b"db");
-        let _ = fs::remove_dir_all(&root);
+    if !existed {
+        // remove_dir removes only an empty folder.
+        let _ = fs::remove_dir(dest);
     }
 }

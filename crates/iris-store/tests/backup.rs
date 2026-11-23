@@ -546,11 +546,11 @@ fn a_write_after_a_crash_never_truncates_the_policy_file() {
     }
 }
 
-// Invariant (#63): a backup that stops with an error leaves no file at the
-// destination and no partial copy next to it, so a new backup to the same
-// path can start.
+// Invariant (#63): a backup that stops with an error leaves the
+// destination as it was (absent, or an empty folder), so a new backup to
+// the same path can start. A destination with files is never touched.
 #[test]
-fn a_failed_backup_leaves_no_partial_copy() {
+fn a_failed_backup_leaves_the_destination_as_it_was() {
     let dir = TempDir::new("partial");
     let dest = TempDir::new("partial-copy");
     let store = Store::open(&dir.0).unwrap();
@@ -563,53 +563,47 @@ fn a_failed_backup_leaves_no_partial_copy() {
     let moved = dir.0.join("content-aside");
     fs::rename(&content, &moved).unwrap();
     fs::create_dir(&content).unwrap();
-    assert!(store.backup(&dest.0).is_err());
-    assert!(!dest.0.exists(), "the destination has a partial copy");
-    let parent = dest.0.parent().unwrap();
-    let name = dest.0.file_name().unwrap().to_string_lossy().to_string();
-    assert!(!fs::read_dir(parent).unwrap().any(|e| e
-        .unwrap()
-        .file_name()
-        .to_string_lossy()
-        .starts_with(&format!(".{name}.partial"))));
-    // The retry to the same path works.
+    // A destination that does not exist, under a parent that does not exist.
+    let deep = dest.0.join("new-parent").join("copy");
+    assert!(store.backup(&deep).is_err());
+    assert!(!deep.exists(), "the destination has a partial copy");
+    // An empty folder stays an empty folder.
+    fs::create_dir_all(&dest.0).unwrap();
+    let empty = dest.0.join("empty");
+    fs::create_dir(&empty).unwrap();
+    assert!(store.backup(&empty).is_err());
+    assert_eq!(fs::read_dir(&empty).unwrap().count(), 0);
+    // A folder with files is refused, and keeps its files.
+    let full = dest.0.join("full");
+    fs::create_dir(&full).unwrap();
+    fs::write(full.join("key"), b"mine").unwrap();
+    assert!(store.backup(&full).is_err());
+    assert_eq!(fs::read(full.join("key")).unwrap(), b"mine");
+    // The retry to the same paths works.
     fs::remove_dir(&content).unwrap();
     fs::rename(&moved, &content).unwrap();
-    assert_eq!(store.backup(&dest.0).unwrap(), 1);
-    assert!(missing_files(&dest.0).is_empty());
+    for d in [&deep, &empty] {
+        assert_eq!(store.backup(d).unwrap(), 1);
+        assert!(missing_files(d).is_empty());
+    }
 }
 
-// Invariant (review of #785): a backup never removes or writes into a
-// folder that it did not make, and a symbolic link to an empty folder
-// gets the copy at its target.
+// A symbolic link to an empty folder gets the copy at its target, and the
+// link stays.
 #[cfg(unix)]
 #[test]
-fn a_backup_keeps_other_folders_and_follows_a_link() {
-    let dir = TempDir::new("keep");
-    let dest = TempDir::new("keep-copy");
-    let target = TempDir::new("keep-target");
+fn a_backup_follows_a_link_to_an_empty_folder() {
+    let dir = TempDir::new("link");
+    let dest = TempDir::new("link-copy");
     let store = Store::open(&dir.0).unwrap();
-    let name = dest.0.file_name().unwrap().to_string_lossy().to_string();
-    let other = dest
-        .0
-        .with_file_name(format!(".{name}.partial-{}-0", std::process::id()));
-    let _ = fs::remove_dir_all(&other);
-    fs::create_dir_all(&other).unwrap();
-    fs::write(other.join("mine"), b"keep").unwrap();
-    store.backup(&dest.0).unwrap();
-    assert_eq!(fs::read(other.join("mine")).unwrap(), b"keep");
-    assert!(dest.0.join("iris.db").exists());
-    fs::remove_dir_all(&other).unwrap();
-
-    fs::create_dir_all(&target.0).unwrap();
-    let link = dest.0.with_file_name(format!("{name}-link"));
-    let _ = fs::remove_file(&link);
-    std::os::unix::fs::symlink(&target.0, &link).unwrap();
+    let target = dest.0.join("target");
+    fs::create_dir_all(&target).unwrap();
+    let link = dest.0.join("link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
     store.backup(&link).unwrap();
     assert!(fs::symlink_metadata(&link)
         .unwrap()
         .file_type()
         .is_symlink());
-    assert!(target.0.join("iris.db").exists());
-    fs::remove_file(&link).unwrap();
+    assert!(target.join("iris.db").exists());
 }

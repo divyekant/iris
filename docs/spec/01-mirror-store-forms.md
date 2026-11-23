@@ -368,23 +368,15 @@ makes a copy while the engine runs:
    backup cannot decrypt the secrets.
 5. Release the lock.
 
-The engine makes the copy in the folder `.<name>.partial-<pid>-<n>` next to the
-destination, with the first free number `<n>`, and renames it to the
-destination only when it is complete. If the destination is a symbolic link
-to an empty folder, the copy goes next to the target of the link, and the
-link stays. The backup never removes or writes into a folder that it did
-not make. The failure list of the backup:
+The failure list of the backup:
 
 | Input or event | Result |
 |---|---|
-| The destination does not exist, or is an empty folder | Supported. The copy gets the name of the destination at the end. |
-| The destination has files, or the path has no folder name | Error before the copy. Nothing changes. |
-| An error during the copy (for example a missing content file or a full disk) | The engine removes the partial folder. The destination does not change, so a new backup to the same path can start. |
-| The rename fails | The engine removes the partial folder. The destination does not change. |
-| The write of the folder entry to disk fails after the rename | The engine removes the copy. The destination does not exist, so a new backup can start. |
-| A crash or a power loss before the rename | The partial folder stays (issue #790). It does not block a new backup. The person can delete it. |
-| A crash or a power loss after the rename | The destination holds the complete copy, or does not exist if the rename was not on disk. |
-| Any other error | The backup gives an error, and the destination holds no partial copy. |
+| The destination does not exist (its parent folders can be missing), or is an empty folder, or a symbolic link to an empty folder | Supported. The copy goes into that folder. |
+| The destination has files | Error before the copy. Nothing changes. |
+| An error during the copy (for example a missing content file or a full disk) | The engine removes each file that it wrote (`iris.db`, its journal, `content/`, `key`, `policy.toml`), and the destination folder if it made it. The destination is as before, so a new backup to the same path can start. Parent folders that the engine made stay. |
+| A crash or a power loss during the copy | The partial copy stays in the destination (issue #790). The person deletes it before a new backup to the same path. |
+| Any other error | The same as an error during the copy. |
 
 The engine makes the backup folder with mode `0700`, because it holds the key
 and the mail. The engine writes `policy.toml` to a temporary file, and it
@@ -1175,12 +1167,9 @@ The triage proposal of release 1 (crate `iris-observe`) has these rules:
   status `expired`, feed items, and records. A message goes only to the first
   rule that matches it.
 - The engine reads the counts and the message IDs in one read transaction.
-- Because release 1 does not store the proposal, its ID is an exception to
-  the rule "unique in one install" of specification 2, section 5.1. The ID is
-  `cs-` and the first 63 bits of the SHA-256 of the account and the message
-  IDs of each rule. So the ID names the content: the same content gives the
-  same ID, also at a later time, and a different content gives a different
-  ID. A client must not use this ID as the ID of a stored changeset.
+- Release 1 did not store the proposal, and its ID was a hash of the
+  content. From release 2 no part of Iris writes that form: `iris-triage`
+  stores the proposal, and the store gives its ID (issues #72 and #212).
 
 From release 2, the crate `iris-triage` stores the same proposal as a
 changeset (specification 2, section 5.4):
