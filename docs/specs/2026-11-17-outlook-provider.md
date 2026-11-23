@@ -141,10 +141,12 @@ A change is one of:
   same immutable ID. The rounds of two folders are not one snapshot: if
   the round of the new folder ran before the move, only the `Removed` of
   the old folder shows the move, and a message can move again after a
-  round gave it as `Message`. Thus, after the round of each folder, the
+  round gave it as `Message`. Thus, after the rounds of all folders, the
   caller reads each removed message by ID with `message(id)`
   (`GET /me/messages/{id}?$select=...`), also when a round gave it as
   `Message`: HTTP 404 means gone, and a message gives its folder now. The
+  read comes after the last round, so a message that moves again after a
+  later round listed it gets the folder of its last move (#665). The
   message stays in the mirror until this read gives 404.
 
 Commit: the new delta links of a sync become durable only in the same
@@ -184,11 +186,17 @@ rules:
   full resync).
 - `changes` gives one delta page of one folder for each call. The page
   token holds the folder IDs of the call, the folder of the next page,
-  its `nextLink` and the delta links of the folders whose round ended.
-  Each `Removed` gets the read by ID in the same call: a message gives
+  its `nextLink`, the delta links of the folders whose round ended, and
+  the IDs of the `Removed` items. After the round of the last folder,
+  each next call reads at most 50 of these IDs by ID: a message gives
   `Change::Added` with its labels now (a move), 404 gives
-  `Change::Deleted`. The last page gives the new cursor, so the sync
-  stores all links in one transaction with the last changes.
+  `Change::Deleted`. The sync applies the changes in order, so this
+  `Added` is the last state of the message. The page token keeps at most
+  1,000 IDs. A `Removed` past that number gets its read in the same call,
+  as before #665. Known limit: in such a large sync, a message that moves
+  again after a later round listed it keeps the older folder until the
+  next sync. The last page gives the new cursor, so the sync stores all
+  links in one transaction with the last changes.
 - `messages` with no label lists all mail of all folders, newest first:
   `GET /me/messages` with `$orderby=receivedDateTime desc`, so that the
   first sync fetches the newest threads first (spec 1 section 4.2). The
