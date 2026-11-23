@@ -821,6 +821,55 @@ fn modify_uidvalidity() {
     assert!(matches!(bad, Err(Error::NotFound)));
 }
 
+/// A new UIDVALIDITY of a folder between the check pass and the write pass
+/// of `modify` (#673). The target folders go in name order, so the four
+/// SELECT commands are: check Archive, check INBOX, write Archive, write
+/// INBOX.
+/// - Archive changes at the third SELECT: no STORE was sent, so the result
+///   is NotFound and nothing changes.
+/// - INBOX changes at the fourth SELECT: the STORE of Archive was sent, so
+///   the result is unknown (Transport), and INBOX keeps its flags.
+#[test]
+fn modify_uidvalidity_between_the_passes() {
+    for (folder, n) in [("Archive", 3), ("INBOX", 4)] {
+        let fake = FakeImap::start(Caps::ALL);
+        fake.create("Archive", None);
+        let a = fake.add("Archive", small(1), &[]);
+        let b = fake.add("INBOX", small(2), &[]);
+        let mail = provider(&fake);
+        let (ia, ib) = (id_of(&mail, "Archive", a), id_of(&mail, "INBOX", b));
+        fake.renew_at_select(folder, n);
+        let r = mail.modify(PASSWORD, &[&ia, &ib], &["STARRED"], &[]);
+        let selects: Vec<String> = fake
+            .commands()
+            .into_iter()
+            .filter(|c| c.contains("SELECT"))
+            .collect();
+        assert_eq!(selects.len(), n, "{folder}: {selects:?}");
+        let stores = fake
+            .commands()
+            .iter()
+            .filter(|c| c.contains("UID STORE"))
+            .count();
+        let (_, inbox) = fake.snapshot("INBOX");
+        assert!(
+            inbox.values().all(|f| f.is_empty()),
+            "{folder}: INBOX keeps its flags: {inbox:?}"
+        );
+        if folder == "Archive" {
+            assert!(matches!(r, Err(Error::NotFound)), "{r:?}");
+            assert_eq!(stores, 0);
+            let (_, archive) = fake.snapshot("Archive");
+            assert!(archive.values().all(|f| f.is_empty()), "{archive:?}");
+        } else {
+            assert!(matches!(&r, Err(Error::Transport(_))), "{r:?}");
+            assert!(r.as_ref().unwrap_err().write_result_unknown());
+            assert_eq!(stores, 1);
+            assert_eq!(fake.flags("Archive", a), vec!["\\Flagged".to_owned()]);
+        }
+    }
+}
+
 /// A NO to a STORE, an OK with no FETCH and a lost connection after a
 /// STORE are unknown results: the
 /// server can have changed some flags (spec section 7).

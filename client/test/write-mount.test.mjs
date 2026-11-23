@@ -348,7 +348,7 @@ test("Write it for me sends the intent to the engine and puts its draft in the t
     await until(() => app.target.querySelector("textarea").value.startsWith("Hi Priya"));
     const [post] = net.posts();
     assert.equal(post.path, "threads/t-2/draft");
-    assert.deepEqual(post.body, { intent: "yes, Wednesday", parent: "m-9" }, "the draft answers the mail that the form shows");
+    assert.deepEqual(post.body, { intent: "yes, Wednesday", parent: "m-9", to: ["priya@example.com"] }, "the draft answers the mail that the form shows, to the recipients of the form");
     assert.equal(app.target.querySelector("fieldset").disabled, false);
     assert.equal(app.target.querySelector("button[type=submit]").disabled, false, "the person can send the draft");
   } finally {
@@ -615,5 +615,101 @@ test("the form does not change while the press runs, and the state names the mai
   } finally {
     app.destroy();
     net.restore();
+  }
+});
+
+test("a reload while the write is saving keeps its state and Stop this mail", async () => {
+  let stopped = false;
+  const net = serve((path, method) => {
+    if (method === "POST" && path === "write") return [201, { write: "cs-3" }];
+    if (method === "POST" && path === "changesets/cs-3/withdraw") return (stopped = true), [200, {}];
+    if (path === "write/cs-3") return [200, stopped ? { state: "stopped", reason: "You stopped this mail.", draft: null } : { state: "saving" }];
+    return [404, { error: "Not found." }];
+  });
+  let app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+  try {
+    await fill(app);
+    press(app);
+    await until(() => app.target.querySelector(".state h2")?.textContent.includes("Saving your mail"));
+    // The reload: a new view reads the accepted write from the storage, not a fresh form.
+    app.destroy();
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+    await until(() => app.target.querySelector(".state h2")?.textContent.includes("Saving your mail"));
+    app.flushSync();
+    assert.equal(app.target.querySelector("form"), null, "no fresh form");
+    assert.match(text(app.target), /To sam@okafor\.example/);
+    assert.match(text(app.target), /Are you free\?/);
+    const stop = [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Stop this mail");
+    stop.click();
+    await until(() => app.target.querySelector(".state h2")?.textContent.includes("did not leave"));
+    assert.ok(net.posts().some((p) => p.path === "changesets/cs-3/withdraw"));
+    // A terminal state ends the record: the next view opens a fresh form.
+    app.destroy();
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+    assert.ok(app.target.querySelector("form"), "a fresh form after the end of the write");
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("Write another ends the record of the last write", async () => {
+  const net = serve((path, method) => {
+    if (method === "POST" && path === "write") return [201, { write: "cs-3" }];
+    if (path === "write/cs-3") return [200, { state: "waiting", draft: "d-7", sending: false, leaves_at: null }];
+    return [404, { error: "Not found." }];
+  });
+  let app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+  try {
+    await fill(app);
+    press(app);
+    await until(() => [...app.target.querySelectorAll("button")].some((b) => b.textContent === "Write another"));
+    [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Write another").click();
+    app.destroy();
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+    assert.ok(app.target.querySelector("form"), "a fresh form");
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("a late answer of a left view does not replace the record of a newer write", async () => {
+  let first;
+  const late = new Promise((r) => (first = r));
+  const saved = globalThis.fetch;
+  let posts = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url).replace(/^\/api\//, "");
+    if (init.method === "POST" && path === "write") {
+      posts += 1;
+      if (posts === 1) await late;
+      return new Response(JSON.stringify({ write: posts === 1 ? "cs-3" : "cs-4" }), { status: 201 });
+    }
+    return new Response(JSON.stringify({ state: "saving" }), { status: 200 });
+  };
+  let app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+  try {
+    await fill(app);
+    press(app);
+    await until(() => posts === 1);
+    // The person leaves while the first press waits, comes back and sends another mail.
+    app.destroy();
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+    await fill(app, "ana@example.com ");
+    press(app);
+    await until(() => app.target.querySelector(".state h2")?.textContent.includes("Saving your mail"));
+    // The first answer arrives last.
+    first();
+    await new Promise((r) => setTimeout(r, 30));
+    app.destroy();
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+    await until(() => app.target.querySelector(".state"));
+    app.flushSync();
+    assert.equal(JSON.parse(window.sessionStorage.getItem("iris.write.new.taken")).write, "cs-4", "the record names the newer write");
+    assert.match(text(app.target), /To sam@okafor\.example, ana@example\.com/, "the reload shows the newer mail");
+  } finally {
+    app.destroy();
+    globalThis.fetch = saved;
   }
 });

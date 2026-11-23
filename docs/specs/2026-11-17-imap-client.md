@@ -84,6 +84,7 @@ part B pages by windows of sequence numbers, because UIDs can be sparse
 |---|---|---|
 | `folders` | `LIST "" "*"` | name (as the server sends it), delimiter, special use (`\Sent`, `\Trash`, `\Drafts`, `\Junk`, `\Archive`, `\All`, `\Flagged`), and if it can be selected |
 | `examine(folder)` | `EXAMINE "<folder>"`, with `(CONDSTORE)` when the server has it | `UIDVALIDITY`, `UIDNEXT`, the count, and `HIGHESTMODSEQ` or none |
+| `select(folder)` | `SELECT "<folder>"`, with `(CONDSTORE)` when the server has it | the same as `examine`, plus `PERMANENTFLAGS` |
 | `changes(since, each)` | `UID FETCH 1:4294967295 (UID FLAGS INTERNALDATE RFC822.SIZE) (CHANGEDSINCE <since>)`, plus `VANISHED` when `QRESYNC` is on | each changed message (an entry) and each removed UID range |
 | `list(from, to, each)` | `UID FETCH <from>:<to> (UID FLAGS INTERNALDATE RFC822.SIZE)` | each message in the range (an entry) |
 | `fetch_raw(uid, sink)` | `UID FETCH <uid> (UID BODY.PEEK[])` | the RFC 5322 bytes, streamed to the sink |
@@ -100,9 +101,22 @@ part B pages by windows of sequence numbers, because UIDs can be sparse
 - No error holds server text. A server can echo the password or the token
   in any answer, also after the sign-in. `Error::Refused` holds only the
   first word of the command.
-- `EXAMINE` opens a folder read-only. The client never uses `SELECT`, so
-  no read sets `\Seen` and no read changes the mailbox. `BODY.PEEK[]`
-  does not set `\Seen` either.
+- `EXAMINE` opens a folder read-only. The message reads (`examine`,
+  `changes`, `list`, `fetch_raw`) use `EXAMINE`, so no message read
+  changes the mailbox. `BODY.PEEK[]` does not set `\Seen`.
+- Only two provider calls use `SELECT`, because only `SELECT` gives
+  `PERMANENTFLAGS` (the keywords that the folder can keep):
+  - `labels` opens each mail folder with `SELECT` to read its keywords.
+    Each sync calls `labels` (the first sync, each later sync and each
+    verify).
+  - `modify` uses `SELECT` for its check pass and for its write pass.
+
+  A `SELECT` with no fetch of a body does not set `\Seen`. A `SELECT`
+  can clear `\Recent`, also the `SELECT` of `labels` in a sync. Iris does
+  not read `\Recent`, but another client that reads it can see fewer
+  recent messages.
+  `docs/specs/2026-11-17-imap-provider.md` gives the rules of `labels`
+  and `modify`.
 - A folder name goes to the server as a quoted string. A name with a byte
   that a quoted string cannot hold (CR, LF, NUL, or a byte above 127) is
   `Error::Name`. In IMAP4rev1 mode, names from `LIST` use modified UTF-7,
@@ -248,8 +262,12 @@ A session after an error is not used again. The caller connects again.
 
 ## External writes
 
-None. The client opens folders with `EXAMINE` and fetches with
-`BODY.PEEK[]`, so no call changes the mailbox.
+- The message reads open folders with `EXAMINE` and fetch with
+  `BODY.PEEK[]`, so they change no message.
+- The `SELECT` of `labels` and of `modify` can clear `\Recent`, a flag
+  of the session that the server keeps. No Iris data depends on it.
+- The flag writes of `modify` are in
+  `docs/specs/2026-11-17-imap-provider.md`.
 
 ## Open questions
 

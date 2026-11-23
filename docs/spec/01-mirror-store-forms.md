@@ -1157,12 +1157,9 @@ The triage proposal of release 1 (crate `iris-observe`) has these rules:
   status `expired`, feed items, and records. A message goes only to the first
   rule that matches it.
 - The engine reads the counts and the message IDs in one read transaction.
-- Because release 1 does not store the proposal, its ID is an exception to
-  the rule "unique in one install" of specification 2, section 5.1. The ID is
-  `cs-` and the first 63 bits of the SHA-256 of the account and the message
-  IDs of each rule. So the ID names the content: the same content gives the
-  same ID, also at a later time, and a different content gives a different
-  ID. A client must not use this ID as the ID of a stored changeset.
+- Release 1 did not store the proposal, and its ID was a hash of the
+  content. From release 2 no part of Iris writes that form: `iris-triage`
+  stores the proposal, and the store gives its ID (issues #72 and #212).
 
 From release 2, the crate `iris-triage` stores the same proposal as a
 changeset (specification 2, section 5.4):

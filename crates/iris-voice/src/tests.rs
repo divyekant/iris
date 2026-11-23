@@ -1589,3 +1589,82 @@ fn the_tries_order_the_pages_and_only_an_invalid_answer_blocks() {
         .unwrap();
     assert_eq!(page(10), [t2]);
 }
+
+#[test]
+fn a_parent_that_is_not_the_newest_mail_gets_no_call_and_saves_nothing() {
+    // Issue 576: a mail that arrives after the check of the API makes the
+    // newest mail another one than the parent of the form.
+    let (b, t) = mailbox("voice-parent");
+    let newest = b
+        .store
+        .read(|c| Ok(check(&snapshot(c, t)?).unwrap().id))
+        .unwrap();
+    let fake = Fake::new(r#"{"body": "Hi Ana, yes. D"}"#);
+    let older = Form {
+        parent: Some(newest - 1),
+        ..Form::default()
+    };
+    assert!(matches!(
+        write_reply(&b.store, t, older, &fake, 1),
+        Err(Error::Changed)
+    ));
+    assert!(fake.calls.borrow().is_empty(), "no model call");
+    assert_eq!(saved(&b.store, t), None, "nothing saved");
+    let same = Form {
+        parent: Some(newest),
+        ..Form::default()
+    };
+    assert_eq!(
+        write_reply(&b.store, t, same, &fake, 2).unwrap().based_on,
+        newest
+    );
+}
+
+#[test]
+fn the_recipient_of_the_form_is_the_person_of_the_reply() {
+    // Issue 535: the person changed the recipient of the form from Ana to Bo.
+    let (b, t) = mailbox("voice-to");
+    let fake = Fake::new(r#"{"body": "Hi Bo, yes. D"}"#);
+    let to_bo = Form {
+        to: Some(" Bo@Example.org "),
+        ..Form::default()
+    };
+    write_reply(&b.store, t, to_bo, &fake, 1).unwrap();
+    let calls = fake.calls.borrow();
+    let data = &calls[0].1;
+    let v: Value = serde_json::from_str(data).unwrap();
+    assert_eq!(v["reply_to"], "bo@example.org");
+    // The sent mail to Bo is the first sample now, before the mail to Ana.
+    let bo = data.find("Yo Bo").unwrap();
+    let ana = data.find("sure thing").unwrap();
+    assert!(bo < ana, "{data}");
+}
+
+#[test]
+fn a_new_mail_that_understanding_did_not_read_gives_changed_not_not_ready() {
+    let (b, t) = mailbox("voice-parent-unread");
+    let newest = b
+        .store
+        .read(|c| Ok(check(&snapshot(c, t)?).unwrap().id))
+        .unwrap();
+    // The new mail of the sync: the newest mail is not read yet.
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE message SET understood_at = NULL WHERE id = ?1",
+                [newest],
+            )?)
+        })
+        .unwrap();
+    let fake = Fake::new(r#"{"body": "Hi Ana, yes. D"}"#);
+    let older = Form {
+        parent: Some(newest - 1),
+        ..Form::default()
+    };
+    assert!(matches!(
+        write_reply(&b.store, t, older, &fake, 1),
+        Err(Error::Changed)
+    ));
+    assert!(fake.calls.borrow().is_empty());
+    assert_eq!(saved(&b.store, t), None);
+}

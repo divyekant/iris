@@ -165,7 +165,7 @@ pub enum Command {
     /// Close a commitment (`c-7`) in a draft changeset. Needs the engine.
     Close {
         id: String,
-        /// The reason. The default is "Done.".
+        /// The reason, at most 500 characters. The default is "Done.".
         #[arg(long)]
         reason: Option<String>,
         #[command(flatten)]
@@ -174,7 +174,7 @@ pub enum Command {
     /// Decline a commitment in a draft changeset. Needs the engine.
     Decline {
         id: String,
-        /// The reason. The default is "Declined.".
+        /// The reason, at most 500 characters. The default is "Declined.".
         #[arg(long)]
         reason: Option<String>,
         #[command(flatten)]

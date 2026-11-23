@@ -1464,6 +1464,76 @@ fn a_comment_wakes_a_job_that_waits_after_it() {
     let _ = s.stop(f.job).unwrap();
 }
 
+/// Set in a child run of this program: the child runs one scenario of
+/// [`the_engine_log_names_bad_notes_at_the_launch_and_the_done_rebuild`].
+const LOG_CHILD: &str = "IRIS_TEST_LOG_CHILD";
+/// The line that a child writes to stderr after the step under test.
+const MARK: &str = "LOG-CHILD-MARK";
+
+/// A child scenario: a launch with a folder at `notes.md`. The mark comes
+/// when the session runs, before the end and the reap of the session.
+fn log_child_launch() {
+    if std::env::var_os(LOG_CHILD).is_none() {
+        return;
+    }
+    let f = fixture("lognotes", "sleep 30");
+    fs::create_dir_all(workspace(&f).join("notes.md")).unwrap();
+    let s = sessions(&f);
+    let id = s.run(f.job, "script").unwrap();
+    until(&s, &f, id, |r| r.started_ms.is_some());
+    eprintln!("{MARK}");
+    let _ = s.stop(f.job);
+}
+
+/// A child scenario: the engine start builds a done job with a folder at
+/// `notes.md` again. No session ends, so no reap writes a line.
+fn log_child_done() {
+    if std::env::var_os(LOG_CHILD).is_none() {
+        return;
+    }
+    let f = fixture("lognotesdone", "true");
+    fs::create_dir_all(workspace(&f).join("notes.md")).unwrap();
+    iris_job::finish(
+        &f.store,
+        f.job,
+        By::Person,
+        iris_job::End::Cancel,
+        None,
+        NOW,
+    )
+    .unwrap();
+    let _s = sessions(&f);
+    appears(&workspace(&f).join("JOB.md"));
+    // The build writes JOB.md before it returns the line to the engine.
+    std::thread::sleep(Duration::from_secs(2));
+    eprintln!("{MARK}");
+}
+
+/// The engine log names a `notes.md` that the build did not save: at the
+/// launch, before the session ends, and at the rebuild of a done job
+/// (#594). Each scenario runs in a child, because the engine writes its log
+/// to stderr.
+fn the_engine_log_names_bad_notes_at_the_launch_and_the_done_rebuild() {
+    let line = "j-1: the notes were not saved: notes.md is not a regular file";
+    for child in ["log_child_launch", "log_child_done"] {
+        let out = Process::new(std::env::current_exe().unwrap())
+            .arg(child)
+            .env(LOG_CHILD, "1")
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "{child}: {stdout}{err}"
+        );
+        let mark = err
+            .find(MARK)
+            .unwrap_or_else(|| panic!("{child}: no mark: {err}"));
+        assert!(err[..mark].contains(line), "{child}: {err}");
+    }
+}
+
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "session-hold") {
@@ -1475,6 +1545,12 @@ fn main() {
         .filter_map(|a| a.to_str())
         .find(|a| !a.starts_with('-'));
     let tests: &[(&str, fn())] = &[
+        ("log_child_launch", log_child_launch),
+        ("log_child_done", log_child_done),
+        (
+            "the_engine_log_names_bad_notes_at_the_launch_and_the_done_rebuild",
+            the_engine_log_names_bad_notes_at_the_launch_and_the_done_rebuild,
+        ),
         (
             "done_of_the_agent_ends_the_session_and_the_mail_files",
             done_of_the_agent_ends_the_session_and_the_mail_files,

@@ -7,7 +7,7 @@
 //! (spec section 5.1). The draft calls and the send give a definite
 //! rejection before any request until card R6-17 adds them.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -45,8 +45,9 @@ struct Cursor {
 
 /// The page token of [`iris_provider::Provider::changes`] and of
 /// [`iris_provider::Provider::messages`]: the folders of the call, the folder
-/// of the next page, its `nextLink`, and the delta links of the folders whose
-/// round ended.
+/// of the next page, its `nextLink`, the delta links of the folders whose
+/// round ended, and the removed messages that `changes` reads by ID after
+/// the rounds of all folders.
 #[derive(Default, Serialize, Deserialize)]
 struct Page {
     ids: Vec<String>,
@@ -54,7 +55,17 @@ struct Page {
     next: Option<String>,
     #[serde(default)]
     done: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    removed: BTreeSet<String>,
 }
+
+/// The most removed IDs that the page token of `changes` keeps for the read
+/// after the last round. A `Removed` past this number gets its read at once.
+// shortcut: past 1,000 removals in one sync, a message that moves again during the sync can keep an older folder until the next sync (#761); keep the IDs in the store if the release gate shows such syncs.
+const PENDING_REMOVED: usize = 1_000;
+
+/// The most reads by ID of one `changes` call after the last round.
+const READS_PER_PAGE: usize = 50;
 
 /// The Outlook provider. One value serves one mailbox: it keeps the IDs of
 /// the well-known folders after the first read.
@@ -64,13 +75,23 @@ pub struct Outlook {
     /// True after Graph kept another category list than the request (A6):
     /// each later category write gets a definite refusal.
     categories_off: AtomicBool,
-    /// Called one time when the switch turns on, so the engine stores it
-    /// with the account (limit #675).
-    on_categories_off: Option<Box<dyn Fn() + Send + Sync>>,
+    /// Stores the switch with the account (limit #675). True when the
+    /// store has it.
+    on_categories_off: Option<Box<dyn Fn() -> bool + Send + Sync>>,
+    /// True when the store has the switch. A failed store write leaves it
+    /// false, and each later refused category write stores it again
+    /// (issue #717).
+    switch_stored: AtomicBool,
     /// The IDs of the sent copies of the messages that Iris sent (spec
     /// section 6): only these get `SENT`.
     own_sent: Mutex<HashSet<String>>,
+    /// Reads the current list of [`Outlook::own_sent`] from the store
+    /// before each read of labels, so a send that another process
+    /// completed counts too (issue #719).
+    sent_source: Option<SentSource>,
 }
+
+type SentSource = Box<dyn Fn() -> Result<Vec<String>, String> + Send + Sync>;
 
 impl Outlook {
     /// Each message with this `Message-ID`, each page. The apply gives
@@ -89,7 +110,9 @@ impl Outlook {
             known: Mutex::new(HashMap::new()),
             categories_off: AtomicBool::new(false),
             on_categories_off: None,
+            switch_stored: AtomicBool::new(false),
             own_sent: Mutex::new(HashSet::new()),
+            sent_source: None,
         }
     }
 
@@ -101,17 +124,50 @@ impl Outlook {
         self
     }
 
+    /// The provider that reads the sent copies of Iris from `source`
+    /// before each read of labels. `source` gives the full current list.
+    pub fn with_sent_source(
+        mut self,
+        source: impl Fn() -> Result<Vec<String>, String> + Send + Sync + 'static,
+    ) -> Outlook {
+        self.sent_source = Some(Box::new(source));
+        self
+    }
+
     /// The provider with the stored category switch: `off` true turns off
-    /// category writes from the start. `stored` is called one time when
-    /// the switch turns on later.
+    /// category writes from the start. `stored` stores the switch when it
+    /// turns on later, and gives true when the store has it.
     pub fn with_category_switch(
         mut self,
         off: bool,
-        stored: impl Fn() + Send + Sync + 'static,
+        stored: impl Fn() -> bool + Send + Sync + 'static,
     ) -> Outlook {
         self.categories_off = AtomicBool::new(off);
+        self.switch_stored = AtomicBool::new(off);
         self.on_categories_off = Some(Box::new(stored));
         self
+    }
+
+    /// Store the category switch if the store does not have it yet.
+    fn store_switch(&self) {
+        if self.switch_stored.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Some(stored) = &self.on_categories_off {
+            if stored() {
+                self.switch_stored.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The well-known folders ([`Outlook::known`]), after a read of the
+    /// current sent copies from the source. Call it before [`Outlook::labels`].
+    fn label_view(&self, token: &str) -> iris_provider::Result<HashMap<String, &'static str>> {
+        if let Some(source) = &self.sent_source {
+            let ids = source().map_err(iris_provider::Error::Transport)?;
+            *self.own_sent.lock().unwrap() = ids.into_iter().collect();
+        }
+        self.known(token).map_err(map)
     }
 
     /// The mirror labels of `m` ([`label_ids`]), with `SENT` for a sent
@@ -134,6 +190,25 @@ impl Outlook {
     }
 
     /// The folders of the mailbox. Also refreshes the cache of well-known IDs.
+    /// The read by ID of a message that left a folder: a message gives its
+    /// labels now (a move), HTTP 404 gives `Deleted`.
+    fn read_removed(
+        &self,
+        token: &str,
+        id: String,
+        known: &HashMap<String, &'static str>,
+    ) -> iris_provider::Result<Record> {
+        Ok(match self.graph.message(token, &id) {
+            Ok(m) => Record::Added(history(&m, self.labels(&m, known))),
+            Err(Error::NotFound) => Record::Deleted(HistoryMessage {
+                id,
+                thread_id: String::new(),
+                label_ids: Vec::new(),
+            }),
+            Err(e) => return Err(map(e)),
+        })
+    }
+
     fn folders(&self, token: &str) -> Result<Vec<Folder>, Error> {
         let folders = self.graph.folders(token)?;
         *self.known.lock().unwrap() = folders
@@ -190,12 +265,9 @@ impl Outlook {
                 Op::Categories(list) => tag()
                     .and_then(|e| self.graph.set_categories(token, id, list, &e))
                     .inspect_err(|e| {
-                        if matches!(e, Error::Differs(_))
-                            && !self.categories_off.swap(true, Ordering::Relaxed)
-                        {
-                            if let Some(stored) = &self.on_categories_off {
-                                stored();
-                            }
+                        if matches!(e, Error::Differs(_)) {
+                            self.categories_off.store(true, Ordering::Relaxed);
+                            self.store_switch();
                         }
                     }),
                 Op::Read(read) => {
@@ -221,7 +293,7 @@ impl Outlook {
         from: &[&str],
         to: &str,
     ) -> iris_provider::Result<Minimal> {
-        let known = self.known(token).map_err(map)?;
+        let known = self.label_view(token)?;
         let m = self.graph.message(token, id).map_err(map)?;
         let here = known.get(&m.parent_folder_id).copied();
         if !here.is_some_and(|h| from.contains(&h)) {
@@ -710,7 +782,7 @@ impl iris_provider::Provider for Outlook {
                 next_page_token: None,
             });
         };
-        let known = self.known(token).map_err(map)?;
+        let known = self.label_view(token)?;
         let delta = self
             .graph
             .delta(token, &folder, at.next.as_deref())
@@ -741,9 +813,9 @@ impl iris_provider::Provider for Outlook {
         })
     }
 
-    /// One delta page of one folder (spec section 3). A removed message is
-    /// read by ID: a message gives its labels now (a move), HTTP 404 gives
-    /// `Deleted`. A folder of the cursor that the mailbox lost, and a link
+    /// One delta page of one folder (spec section 3), or, after the last
+    /// round, the reads by ID of the removed messages: a message gives its
+    /// labels now (a move), HTTP 404 gives `Deleted`. A folder of the cursor that the mailbox lost, and a link
     /// that Graph does not accept, give `HistoryExpired`: the sync then does
     /// a full resync.
     fn changes(
@@ -776,7 +848,7 @@ impl iris_provider::Provider for Outlook {
                 }
             }
         };
-        let known = self.known(token).map_err(map)?;
+        let known = self.label_view(token)?;
         let mut changes = Vec::new();
         if let Some(folder) = at.ids.get(at.i).cloned() {
             let link = at
@@ -790,18 +862,20 @@ impl iris_provider::Provider for Outlook {
                 Err(e) => return Err(map(e)),
             };
             for c in delta.changes {
-                changes.push(match c {
-                    Change::Message(m) => Record::Added(history(&m, self.labels(&m, &known))),
-                    Change::Removed(id) => match self.graph.message(token, &id) {
-                        Ok(m) => Record::Added(history(&m, self.labels(&m, &known))),
-                        Err(Error::NotFound) => Record::Deleted(HistoryMessage {
-                            id,
-                            thread_id: String::new(),
-                            label_ids: Vec::new(),
-                        }),
-                        Err(e) => return Err(map(e)),
-                    },
-                });
+                match c {
+                    Change::Message(m) => {
+                        changes.push(Record::Added(history(&m, self.labels(&m, &known))))
+                    }
+                    // The read by ID waits for the end of all rounds, so it
+                    // gives the folder after the last move of the sync.
+                    Change::Removed(id) if at.removed.len() < PENDING_REMOVED => {
+                        at.removed.insert(id);
+                    }
+                    Change::Removed(id) if !at.removed.contains(&id) => {
+                        changes.push(self.read_removed(token, id, &known)?)
+                    }
+                    Change::Removed(_) => {}
+                }
             }
             match delta.next {
                 Next::More(l) => at.next = Some(l),
@@ -811,8 +885,15 @@ impl iris_provider::Provider for Outlook {
                     at.i += 1;
                 }
             }
+        } else {
+            for _ in 0..READS_PER_PAGE {
+                let Some(id) = at.removed.pop_first() else {
+                    break;
+                };
+                changes.push(self.read_removed(token, id, &known)?);
+            }
         }
-        let last = at.i >= at.ids.len();
+        let last = at.i >= at.ids.len() && at.removed.is_empty();
         Ok(HistoryPage {
             history: vec![History { changes }],
             cursor: if last {
@@ -829,7 +910,7 @@ impl iris_provider::Provider for Outlook {
 
     fn minimal(&self, token: &str, id: &str) -> iris_provider::Result<Minimal> {
         let m = self.graph.message(token, id).map_err(map)?;
-        let known = self.known(token).map_err(map)?;
+        let known = self.label_view(token)?;
         Ok(Minimal {
             id: m.id.clone(),
             label_ids: self.labels(&m, &known),
@@ -840,7 +921,7 @@ impl iris_provider::Provider for Outlook {
     /// headers of a sent message or a draft. The send reads the parent of
     /// a reply this way.
     fn metadata(&self, token: &str, id: &str, headers: &[&str]) -> iris_provider::Result<Metadata> {
-        let known = self.known(token).map_err(map)?;
+        let known = self.label_view(token)?;
         let m = self.graph.message(token, id).map_err(map)?;
         let mut sink = Head::default();
         match self.graph.raw(token, id, &mut sink) {
@@ -863,7 +944,7 @@ impl iris_provider::Provider for Outlook {
         sink: &mut dyn Write,
     ) -> iris_provider::Result<RawMessage> {
         let m = self.graph.message(token, id).map_err(map)?;
-        let known = self.known(token).map_err(map)?;
+        let known = self.label_view(token)?;
         // A draft can have no received time: then the time it was made.
         let time = m
             .received_date_time
@@ -913,6 +994,7 @@ impl iris_provider::Provider for Outlook {
         if self.categories_off.load(Ordering::Relaxed)
             && add.iter().chain(remove).any(|l| l.starts_with("category:"))
         {
+            self.store_switch();
             return refuse(
                 "Outlook kept other categories than Iris asked for: category writes are off until a new release (A6)"
                     .into(),

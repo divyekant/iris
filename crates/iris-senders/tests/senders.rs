@@ -181,6 +181,39 @@ fn sent_mail_makes_each_recipient_a_person() {
     assert_eq!((d.kind, d.previous), (Kind::Person, Some(Kind::Person)));
 }
 
+/// #109: a name that you wrote in sent mail replaces a name from received
+/// mail, and later received mail does not replace it. The spoof check reads
+/// this name, so a forged `From: Ana Lee` finds the known person.
+#[test]
+fn a_name_you_wrote_replaces_a_received_name() {
+    let mut c = Case::new("sent-name");
+    let support = "From: Support <ana@example.org>\r\nTo: owner@example.com";
+    c.put("t1", &["INBOX"], support);
+    assert_eq!(c.row("ana@example.org").0.as_deref(), Some("Support"));
+    c.put(
+        "t2",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: Ana Lee <ana@example.org>"),
+    );
+    assert_eq!(c.row("ana@example.org").0.as_deref(), Some("Ana Lee"));
+    // Received mail, and sent mail with no name, keep your name.
+    c.put("t3", &["INBOX"], support);
+    c.put(
+        "t4",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: ana@example.org"),
+    );
+    assert_eq!(
+        c.row("ana@example.org"),
+        (
+            Some("Ana Lee".into()),
+            Some("person".into()),
+            Some("sent".into()),
+            Some("engine".into())
+        )
+    );
+}
+
 #[test]
 fn a_reply_in_the_thread_makes_a_person_and_a_draft_does_not() {
     let mut c = Case::new("reply");

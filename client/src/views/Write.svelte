@@ -9,7 +9,9 @@
 
   The form content and its key stay together in sessionStorage until the
   engine takes the mail or the person discards it, so a reload or another
-  view keeps both. One key belongs to one content: a press after a lost
+  view keeps both. Then the write ID and the mail that the engine took stay
+  there until the write is sent or stopped, or the person writes another, so
+  a reload shows the state of the write and keeps Stop this mail. One key belongs to one content: a press after a lost
   answer sends the same key, and the engine makes the mail only once.
 
   Mail text is data: Svelte escapes the text of each mail.
@@ -71,6 +73,27 @@
       // The browser blocks the storage: nothing to remove.
     }
   };
+
+  // The write that the engine took, while it can still change.
+  type Taken = { write: string; to: string[]; subject: string; body: string };
+  const placeWrite = `${place}.taken`;
+  function taken(): Taken | null {
+    try {
+      const v = JSON.parse(storage()?.getItem(placeWrite) ?? "null");
+      return v && typeof v.write === "string" && Array.isArray(v.to) ? (v as Taken) : null;
+    } catch {
+      return null;
+    }
+  }
+  // Keep `t`, or with null, end the record of the write `id` (only if it is still the kept one).
+  function keep(t: Taken | null, id?: string) {
+    try {
+      if (t) storage()?.setItem(placeWrite, JSON.stringify(t));
+      else if (id === undefined || taken()?.write === id) storage()?.removeItem(placeWrite);
+    } catch {
+      // With no storage, a reload opens a fresh form, and the Outbox still shows the mail.
+    }
+  }
 
   const saved = restore();
   let account = $state(saved?.account ?? reply?.account ?? (accounts[0] ? `a-${accounts[0].id}` : ""));
@@ -152,7 +175,7 @@
     draftNote = "";
     try {
       const parent = reply?.parent.id;
-      const v = await post<{ body: string; based_on: string }>(`threads/${encodeURIComponent(thread)}/draft`, { intent, parent });
+      const v = await post<{ body: string; based_on: string }>(`threads/${encodeURIComponent(thread)}/draft`, { intent, parent, to: [...to] });
       // The text goes in the form only if it answers the mail that the form shows.
       if (v.based_on !== parent) draftNote = "A new mail came into this thread. Read it, then ask again.";
       else if (alive) body = v.body;
@@ -180,6 +203,9 @@
     const mail = { ...target, to: [...to], cc: [...cc], body, key, flags: [...flags] };
     try {
       const v = await post<{ write: string }>("write", mail);
+      // A view that the person left keeps the record only while the saved form is still the form of this
+      // press: else a newer form or a newer write owns the place, and this late answer must not replace it.
+      if (alive || restore()?.key === sent) keep({ write: v.write, to: mail.to, subject: thread ? "" : subject, body: mail.body });
       forget(sent);
       if (!alive) return;
       sentTo = mail.to;
@@ -221,6 +247,7 @@
       if (mine <= applied || id !== write) return;
       applied = mine;
       ws = v;
+      if (v.state === "sent" || v.state === "stopped") keep(null, id);
     } catch {
       // The engine can restart. The next read tries again.
     }
@@ -266,6 +293,7 @@
   }
 
   function again() {
+    keep(null, write);
     if (thread) return void (location.hash = "#/write");
     clearTimeout(timer);
     [write, to, cc, subject, body, note, toText, ccText] = ["", [], [], "", "", "", "", ""];
@@ -288,6 +316,15 @@
   };
   const named = $derived(to.map(name).join(", "));
   const last = $derived(reply ? reply.conversation.length - 1 : -1);
+
+  // After a reload: show the write that the engine took, and follow its state.
+  const kept = taken();
+  if (kept) {
+    write = kept.write;
+    sentTo = kept.to;
+    sent_ = { subject: kept.subject, body: kept.body };
+    follow();
+  }
 </script>
 
 {#if reply}

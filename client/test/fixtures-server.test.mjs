@@ -23,3 +23,15 @@ test("a comment POST is refused, and the GET gives the comments", async () => {
   assert.equal(sent.status, 405);
   assert.match((await sent.json()).error, /do not save/);
 });
+
+test("the Ask route refuses a question over 500 characters, as the engine", async () => {
+  const ask = (question) => fetch(`${base}api/ask`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question }) });
+  // The engine counts the characters (code points) of the trimmed question.
+  const over = await ask("a".repeat(501));
+  assert.equal(over.status, 400);
+  assert.match((await over.json()).error, /1 to 500 characters/);
+  // 500 emoji are 1,000 UTF-16 units but 500 characters, and spaces around them do not count.
+  const most = await ask(`  ${"😀".repeat(500)}  `);
+  assert.equal(most.status, 200);
+  assert.equal((await ask("😀".repeat(501))).status, 400);
+});
