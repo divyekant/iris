@@ -18,6 +18,10 @@ CREATE VIEW iris_sent_copy AS
                     WHERE ad.draft_id = d.id
                       AND l.error LIKE '% sent other content than the approved content');
 
+-- The triggers look up a copy by account and provider ID at each label
+-- write, so the lookup uses an index, not a scan of each draft.
+CREATE INDEX draft_sent_copy ON draft(account_id, sent_message) WHERE sent_message IS NOT NULL;
+
 -- A write that removes SENT from a confirmed copy does nothing. The delete of
 -- the message itself still removes its rows (the message is gone first).
 CREATE TRIGGER sent_copy_keep BEFORE DELETE ON message_label
