@@ -271,6 +271,12 @@ async fn a_body_that_is_not_valid_writes_nothing() {
     let mut v = base.clone();
     v["extra"] = json!(1);
     cases.push(v);
+    // No mail with no text (issue 741).
+    for body in ["", " \n\t\r\n"] {
+        let mut v = base.clone();
+        v["body"] = json!(body);
+        cases.push(v);
+    }
     let mut v = base.clone();
     v["account"] = json!("a-9");
     cases.push(v);
@@ -580,7 +586,7 @@ async fn property_each_start_address_is_valid() {
                 to: vec![a.clone()],
                 cc: vec![],
                 subject: "s".into(),
-                body: String::new(),
+                body: "b".into(),
             };
             assert!(c.check().is_ok(), "{text:?} gave {a:?}");
         }
