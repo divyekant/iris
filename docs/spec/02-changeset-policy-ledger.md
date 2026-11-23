@@ -750,7 +750,11 @@ The `ledger_message` table has one row for each message of the entry:
 ### 7.2 Apply
 
 1. If the action adds a user label that Gmail does not have (`labels.list`),
-   call `labels.create`. If Gmail answers with an error (for example, the
+   call `labels.create`. Just before the call, one transaction checks the
+   stop, the expiry, the mode, the grant and the state `approved` again, as
+   the claim of step 3 does. If the action does not apply now, no call is
+   made. A change during the create call itself can still leave an empty
+   label at Gmail. If Gmail answers with an error (for example, the
    label exists) or the result is not known, call `labels.list` again and use
    the user label with that name. If
    no label of kind `user` has that name, the action is `failed`. The label
