@@ -145,9 +145,12 @@ The granted messages of a job:
   until that start. If the build fails, the engine tries it again at that
   start. The callers are `iris done` of a
   session (the agent completes the job), and `iris job finish` and
-  `POST /api/jobs/{id}/finish` of the person (complete or cancel). A job
-  that the person ends with no live session gets its build at the next wake
-  of the supervisor (#356).
+  `POST /api/jobs/{id}/finish` of the person (complete or cancel). The
+  person callers only move the job and reply: they do not wait for the
+  build. The supervisor of a running engine builds each done job at the
+  first wake (about one second) with no live session and no launch of the
+  job, also after a launch that ended with no session. With no running
+  engine, the build waits for the next engine start (#356).
 
 - A thread of the scope grants each clean message that was in the thread
   at the add of the ref. The add writes these messages into the table

@@ -75,9 +75,9 @@ pub struct Sessions {
     /// build can wait for the workspace lock without a limit, so no
     /// supervisor turn and no stop waits for it.
     builds: mpsc::Sender<i64>,
-    /// The done jobs that this engine saw. A job that moves to `done` with
-    /// no live session (the person ends it) gets one build at the next
-    /// wake; a job with a live session gets its build after the reap.
+    /// The done jobs that this engine sent to the build thread. A done job
+    /// gets one build at the first wake with no live session and no launch
+    /// of the job; a reap also builds it.
     done_seen: Mutex<HashSet<i64>>,
     /// The egress proxies that the stop thread stops. A stop joins the
     /// threads of the proxy, so no supervisor turn and no stop or run
@@ -272,6 +272,11 @@ impl Sessions {
             Ok(b) => b,
             Err(e) => {
                 self.launch_over(job);
+                // No session: no reap builds a job that moved to done
+                // during the launch (#356).
+                if self.live_of(job).is_none() {
+                    let _ = self.builds.send(job);
+                }
                 return Err(e);
             }
         };
@@ -738,10 +743,10 @@ impl Sessions {
         }
     }
 
-    /// One build for each job that moved to `done` since the last wake and
-    /// has no live session or launch: the mail files of its workspace go
-    /// (docs/specs/2026-11-16-job-workspace.md). A job with a live session
-    /// or a launch gets its build after the reap.
+    /// One build for each done job that this engine did not build yet and
+    /// that has no live session or launch now: the mail files of its
+    /// workspace go (docs/specs/2026-11-16-job-workspace.md). A job with a
+    /// live session or a launch waits for a later wake.
     fn done_builds(&self) {
         // Only the IDs: the index `job_state` covers the read.
         let Ok(done) = self.store.read(|c| {
@@ -753,10 +758,13 @@ impl Sessions {
         };
         let mut seen = self.done_seen.lock().unwrap_or_else(|e| e.into_inner());
         for job in done {
-            if !seen.insert(job) {
+            if seen.contains(&job) {
                 continue;
             }
+            // A job with a live session or a launch stays for a later wake:
+            // a launch can end with no session, so no reap builds it.
             if self.live_of(job).is_none() && !self.state().launching.contains(&job) {
+                seen.insert(job);
                 let _ = self.builds.send(job);
             }
         }

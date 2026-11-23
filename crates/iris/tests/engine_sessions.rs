@@ -387,6 +387,28 @@ fn done_of_the_agent_ends_the_session_and_the_mail_files() {
     appears(&workspace(&f).join("JOB.md"));
 }
 
+/// A launch that the finish of the person refuses before the register
+/// leaves no session to reap: the mail files go all the same (#356).
+fn a_launch_refused_for_a_done_job_removes_the_mail_files() {
+    let f = fixture("launchdone", "true");
+    let s = sessions(&f);
+    let marker = workspace(&f).join(".iris/marker");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "x").unwrap();
+    s.wake(now());
+    iris_job::finish(
+        &f.store,
+        f.job,
+        By::Person,
+        iris_job::End::Cancel,
+        None,
+        now(),
+    )
+    .unwrap();
+    assert!(s.run(f.job, "script").is_err());
+    gone(&marker);
+}
+
 fn a_job_the_person_ends_with_no_session_gets_its_workspace_again() {
     let f = fixture("persondone", "true");
     let s = sessions(&f);
@@ -1433,6 +1455,10 @@ fn main() {
         (
             "done_of_the_agent_ends_the_session_and_the_mail_files",
             done_of_the_agent_ends_the_session_and_the_mail_files,
+        ),
+        (
+            "a_launch_refused_for_a_done_job_removes_the_mail_files",
+            a_launch_refused_for_a_done_job_removes_the_mail_files,
         ),
         (
             "a_job_the_person_ends_with_no_session_gets_its_workspace_again",

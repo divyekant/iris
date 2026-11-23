@@ -1470,7 +1470,10 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
                 iris_job::End::Complete
             };
             iris_api::finish_job(&store, job, end, engine::now_ms()).map_err(|e| e.to_string())?;
-            println!("{id}: done. Iris removes the mail files of its workspace.");
+            println!(
+                "{id}: done. The engine removes the mail files of its workspace when no \
+                 session of the job runs, or at its next start."
+            );
             Ok(())
         }
         Command::Job { .. } => Err("the engine socket runs this verb".into()),
