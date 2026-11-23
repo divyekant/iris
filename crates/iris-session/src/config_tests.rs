@@ -425,70 +425,65 @@ fn a_relative_path_entry_is_skipped() {
 
 /// Runs [`the_lookup_skips_a_file_that_the_engine_cannot_run`] again in a
 /// child process as the user `nobody` (65534). The checkout and `TMPDIR`
-/// of root can be closed to other users, so the child gets a copy of this
-/// test program and its own `TMPDIR` in a folder that `nobody` owns, under
-/// the first base folder whose path each user can pass, on a mount that
-/// runs programs.
+/// of root can be closed to other users or on a `noexec` mount. So for
+/// each base folder in turn, the child gets a copy of this test program
+/// and its own `TMPDIR` (owned by `nobody`) in one new folder of the base.
+/// The first base where the child program starts gives the result: the
+/// test files are on the same mount as the program, so they can run too.
 fn as_nobody() {
-    use std::os::unix::fs::{chown, MetadataExt};
+    use std::os::unix::fs::chown;
     use std::os::unix::process::CommandExt;
-    // Each folder from `/` to `p` lets other users pass (o+x).
-    let open = |p: &Path| {
-        p.ancestors()
-            .all(|a| std::fs::metadata(a).is_ok_and(|m| m.is_dir() && m.mode() & 0o001 != 0))
-    };
     let bases = [
         std::env::temp_dir(),
         "/tmp".into(),
         "/var/tmp".into(),
         "/dev/shm".into(),
     ];
-    // The child and its program files run from the base: no `noexec` mount.
-    let exec = |p: &Path| {
-        let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else {
-            return false;
-        };
-        // SAFETY: zeroed statvfs is a valid out value; c is a valid C string.
-        let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
-        let ok = unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0;
-        ok && st.f_flag & libc::ST_NOEXEC == 0
-    };
-    let base = bases
-        .iter()
-        .find(|b| open(b) && exec(b))
-        .unwrap_or_else(|| {
-            panic!("no base folder that nobody can pass and run programs in: {bases:?}")
+    let mut why = Vec::new();
+    for base in &bases {
+        let home = base.join(format!("iris-cfg-nobody-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let tmp = home.join("tmp");
+        let exe = home.join("test");
+        let made = std::fs::create_dir(&home)
+            .and_then(|()| std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)))
+            .and_then(|()| std::fs::copy(std::env::current_exe()?, &exe))
+            .and_then(|_| std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)))
+            .and_then(|()| std::fs::create_dir(&tmp))
+            .and_then(|()| chown(&tmp, Some(65534), Some(65534)));
+        let child = made.and_then(|()| {
+            std::process::Command::new(&exe)
+                .args([
+                    "--exact",
+                    "config::tests::the_lookup_skips_a_file_that_the_engine_cannot_run",
+                    "--test-threads=1",
+                ])
+                .env("TMPDIR", &tmp)
+                .current_dir(&tmp)
+                .uid(65534)
+                .gid(65534)
+                .output()
         });
-    let home = base.join(format!("iris-cfg-nobody-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir(&home).unwrap();
-    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let exe = home.join("test");
-    std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
-    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let tmp = home.join("tmp");
-    std::fs::create_dir(&tmp).unwrap();
-    chown(&tmp, Some(65534), Some(65534)).unwrap();
-    let child = std::process::Command::new(&exe)
-        .args([
-            "--exact",
-            "config::tests::the_lookup_skips_a_file_that_the_engine_cannot_run",
-            "--test-threads=1",
-        ])
-        .env("TMPDIR", &tmp)
-        .current_dir(&tmp)
-        .uid(65534)
-        .gid(65534)
-        .output();
-    let _ = std::fs::remove_dir_all(&home);
-    let child = child.unwrap();
-    let out = String::from_utf8_lossy(&child.stdout);
-    // The child ran the test: a filter that matched nothing also succeeds.
-    assert!(
-        child.status.success() && out.contains("1 passed"),
-        "the child as nobody: {out}{}",
-        String::from_utf8_lossy(&child.stderr)
-    );
+        let _ = std::fs::remove_dir_all(&home);
+        // The program did not start from this base (no path for nobody,
+        // a `noexec` mount): try the next base.
+        let child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                why.push(format!("{}: {e}", base.display()));
+                continue;
+            }
+        };
+        let out = String::from_utf8_lossy(&child.stdout);
+        // The child ran the test: a filter that matched nothing also succeeds.
+        assert!(
+            child.status.success() && out.contains("1 passed"),
+            "the child as nobody: {out}{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        return;
+    }
+    panic!("the child as nobody started from no base: {why:?}");
 }
 
 /// A file with an execute bit that does not let the engine user run it is
