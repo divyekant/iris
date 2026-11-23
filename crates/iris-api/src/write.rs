@@ -375,7 +375,7 @@ fn valid_address(a: &str) -> bool {
             to: vec![a.to_string()],
             cc: vec![],
             subject: "s".into(),
-            body: String::new(),
+            body: "b".into(),
         }
         .check()
         .is_ok()
