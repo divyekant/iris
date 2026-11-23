@@ -200,6 +200,12 @@ To roll back, do these steps:
    syncs again from the mail provider, but these local changes do not come
    back. Keep the moved data folder until you no longer need it.
 
+   CAUTION: `iris backup` does not copy the `workspaces` folder (issue
+   #350). An agent draft that a job did not submit is only in the
+   `workspaces` folder of the moved data folder, also when the draft is older
+   than the backup. Before you start Iris in step 4, copy the `workspaces`
+   folder from the moved data folder into the restored data folder.
+
 3. If the bad release migrated the store, move the data folder away and copy
    the backup in its place. Use the data folder of your installation: the
    path of `--data` or `IRIS_DATA` if you set one. Else it is
