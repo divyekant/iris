@@ -7,7 +7,7 @@
 //! (spec section 5.1). The draft calls and the send give a definite
 //! rejection before any request until card R6-17 adds them.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -45,8 +45,9 @@ struct Cursor {
 
 /// The page token of [`iris_provider::Provider::changes`] and of
 /// [`iris_provider::Provider::messages`]: the folders of the call, the folder
-/// of the next page, its `nextLink`, and the delta links of the folders whose
-/// round ended.
+/// of the next page, its `nextLink`, the delta links of the folders whose
+/// round ended, and the removed messages that `changes` reads by ID after
+/// the rounds of all folders.
 #[derive(Default, Serialize, Deserialize)]
 struct Page {
     ids: Vec<String>,
@@ -54,7 +55,17 @@ struct Page {
     next: Option<String>,
     #[serde(default)]
     done: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    removed: BTreeSet<String>,
 }
+
+/// The most removed IDs that the page token of `changes` keeps for the read
+/// after the last round. A `Removed` past this number gets its read at once.
+// shortcut: past 1,000 removals in one sync, a message that moves again during the sync can keep an older folder until the next sync (#761); keep the IDs in the store if the release gate shows such syncs.
+const PENDING_REMOVED: usize = 1_000;
+
+/// The most reads by ID of one `changes` call after the last round.
+const READS_PER_PAGE: usize = 50;
 
 /// The Outlook provider. One value serves one mailbox: it keeps the IDs of
 /// the well-known folders after the first read.
@@ -134,6 +145,25 @@ impl Outlook {
     }
 
     /// The folders of the mailbox. Also refreshes the cache of well-known IDs.
+    /// The read by ID of a message that left a folder: a message gives its
+    /// labels now (a move), HTTP 404 gives `Deleted`.
+    fn read_removed(
+        &self,
+        token: &str,
+        id: String,
+        known: &HashMap<String, &'static str>,
+    ) -> iris_provider::Result<Record> {
+        Ok(match self.graph.message(token, &id) {
+            Ok(m) => Record::Added(history(&m, self.labels(&m, known))),
+            Err(Error::NotFound) => Record::Deleted(HistoryMessage {
+                id,
+                thread_id: String::new(),
+                label_ids: Vec::new(),
+            }),
+            Err(e) => return Err(map(e)),
+        })
+    }
+
     fn folders(&self, token: &str) -> Result<Vec<Folder>, Error> {
         let folders = self.graph.folders(token)?;
         *self.known.lock().unwrap() = folders
@@ -741,9 +771,9 @@ impl iris_provider::Provider for Outlook {
         })
     }
 
-    /// One delta page of one folder (spec section 3). A removed message is
-    /// read by ID: a message gives its labels now (a move), HTTP 404 gives
-    /// `Deleted`. A folder of the cursor that the mailbox lost, and a link
+    /// One delta page of one folder (spec section 3), or, after the last
+    /// round, the reads by ID of the removed messages: a message gives its
+    /// labels now (a move), HTTP 404 gives `Deleted`. A folder of the cursor that the mailbox lost, and a link
     /// that Graph does not accept, give `HistoryExpired`: the sync then does
     /// a full resync.
     fn changes(
@@ -790,18 +820,20 @@ impl iris_provider::Provider for Outlook {
                 Err(e) => return Err(map(e)),
             };
             for c in delta.changes {
-                changes.push(match c {
-                    Change::Message(m) => Record::Added(history(&m, self.labels(&m, &known))),
-                    Change::Removed(id) => match self.graph.message(token, &id) {
-                        Ok(m) => Record::Added(history(&m, self.labels(&m, &known))),
-                        Err(Error::NotFound) => Record::Deleted(HistoryMessage {
-                            id,
-                            thread_id: String::new(),
-                            label_ids: Vec::new(),
-                        }),
-                        Err(e) => return Err(map(e)),
-                    },
-                });
+                match c {
+                    Change::Message(m) => {
+                        changes.push(Record::Added(history(&m, self.labels(&m, &known))))
+                    }
+                    // The read by ID waits for the end of all rounds, so it
+                    // gives the folder after the last move of the sync.
+                    Change::Removed(id) if at.removed.len() < PENDING_REMOVED => {
+                        at.removed.insert(id);
+                    }
+                    Change::Removed(id) if !at.removed.contains(&id) => {
+                        changes.push(self.read_removed(token, id, &known)?)
+                    }
+                    Change::Removed(_) => {}
+                }
             }
             match delta.next {
                 Next::More(l) => at.next = Some(l),
@@ -811,8 +843,15 @@ impl iris_provider::Provider for Outlook {
                     at.i += 1;
                 }
             }
+        } else {
+            for _ in 0..READS_PER_PAGE {
+                let Some(id) = at.removed.pop_first() else {
+                    break;
+                };
+                changes.push(self.read_removed(token, id, &known)?);
+            }
         }
-        let last = at.i >= at.ids.len();
+        let last = at.i >= at.ids.len() && at.removed.is_empty();
         Ok(HistoryPage {
             history: vec![History { changes }],
             cursor: if last {
