@@ -29,7 +29,7 @@ pub enum Notes {
 }
 
 impl Notes {
-    /// The line for the engine log when a save kept the last copy, or
+    /// The line for the engine log when a save did not save the file, or
     /// `None` when there is nothing to report. Each reap and build path
     /// uses this one text.
     pub fn problem(&self) -> Option<String> {
@@ -39,7 +39,8 @@ impl Notes {
             Notes::TooLarge => format!("notes.md is larger than {NOTES_MAX} bytes"),
             Notes::Unreadable(e) => format!("notes.md cannot be read: {e}"),
         };
-        Some(format!("the store keeps its last copy of the notes: {why}"))
+        // A done job has no copy, so the line claims none (#762 review).
+        Some(format!("the notes were not saved: {why}"))
     }
 }
 

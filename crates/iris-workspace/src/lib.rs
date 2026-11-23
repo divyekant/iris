@@ -67,7 +67,7 @@ pub struct Built {
     /// from `iris_job::revoked_count`, a revoke came during the build: build
     /// again before a session starts.
     pub revoked: i64,
-    /// The engine log line when the build kept the last copy of the notes
+    /// The engine log line when the build did not save the notes
     /// ([`Notes::problem`]), else `None`.
     pub notes: Option<String>,
 }

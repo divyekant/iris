@@ -130,7 +130,7 @@ pub struct Running {
     pub status: ChildStderr,
     pub socket: UnixListener,
     pub socket_path: PathBuf,
-    /// The engine log line when the build kept the last copy of the notes.
+    /// The engine log line when the build did not save the notes.
     pub notes: Option<String>,
 }
 
