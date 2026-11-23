@@ -391,23 +391,46 @@ fn in_mail(quote: &str, a: &Analysis) -> bool {
 /// is the same on both sides and changes no letter or digit, so a made-up
 /// quote still fails.
 pub(crate) fn squash(s: &str) -> String {
+    fold(s).0
+}
+
+/// [`squash`], and the byte offset in the result of each plain mark that
+/// replaced a typographic mark, with that original mark. A caller that
+/// finds word ends reads the original mark, so the fold moves no word end
+/// (`ask::has`). Invisible characters (a soft hyphen, zero-width
+/// characters) are not text: they go out.
+pub(crate) fn fold(s: &str) -> (String, Vec<(usize, char)>) {
     let mut out = String::with_capacity(s.len());
+    let mut from = Vec::new();
+    let mut space = false;
     for c in s.chars() {
-        match c {
-            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' | '\u{2032}' => out.push('\''),
+        let plain = match c {
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' | '\u{2032}' => "'",
             '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' | '\u{2033}' | '\u{00AB}'
-            | '\u{00BB}' => out.push('"'),
-            '\u{2010}'..='\u{2015}' | '\u{2212}' => out.push('-'),
-            '\u{2026}' => out.push_str("..."),
-            // Invisible: a soft hyphen and the zero-width characters.
-            '\u{00AD}' | '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}' => {}
-            c => out.push(c),
+            | '\u{00BB}' => "\"",
+            '\u{2010}'..='\u{2015}' | '\u{2212}' => "-",
+            '\u{2026}' => "...",
+            '\u{00AD}' | '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}' => continue,
+            c if c.is_whitespace() => {
+                space = true;
+                continue;
+            }
+            _ => "",
+        };
+        if space && !out.is_empty() {
+            out.push(' ');
+        }
+        space = false;
+        if plain.is_empty() {
+            out.extend(c.to_lowercase());
+        } else {
+            for p in plain.chars() {
+                from.push((out.len(), c));
+                out.push(p);
+            }
         }
     }
-    out.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
+    (out, from)
 }
 
 /// Make each model party a party of the open model: an owner address (`me`)

@@ -553,25 +553,32 @@ fn read_answer(json: &Value, docs: &[Doc]) -> Option<(Vec<Claim>, Vec<Source>)> 
 /// Neither end of a match may fall inside a word of the text, whatever the
 /// quote starts or ends with.
 fn has(text: &str, quote: &str) -> bool {
-    // The same fold as the quote check of an item (#102).
-    let (text, quote) = (crate::prompt::squash(text), crate::prompt::squash(quote));
+    // The same fold as the quote check of an item (#102). The word ends
+    // come from the marks of the mail, not from their plain forms.
+    let ((text, from), quote) = (crate::prompt::fold(text), crate::prompt::squash(quote));
     if quote.is_empty() {
         return false;
     }
-    let words = words(&text);
+    let words = words(&text, &from);
     let inside = |at: usize| words.iter().any(|&(s, e)| s < at && at < e);
     text.char_indices()
         .any(|(i, _)| text[i..].starts_with(&quote) && !inside(i) && !inside(i + quote.len()))
 }
 
 /// The byte spans of the words of `s`: runs of letters and digits, with one
-/// mark of [`JOIN`] between two of them inside the word.
-fn words(s: &str) -> Vec<(usize, usize)> {
+/// mark of [`JOIN`] between two of them inside the word. `from` gives the
+/// original mark of each plain mark of `prompt::fold`.
+fn words(s: &str, from: &[(usize, char)]) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut start: Option<usize> = None;
     let mut it = s.char_indices().peekable();
     while let Some((i, c)) = it.next() {
-        let joins = JOIN.contains(&c)
+        // A plain mark of the fold joins only if its original mark joins.
+        // `from` is in the order of the offsets.
+        let mark = from
+            .binary_search_by_key(&i, |&(at, _)| at)
+            .map_or(c, |k| from[k].1);
+        let joins = JOIN.contains(&mark)
             && start.is_some()
             && it.peek().is_some_and(|&(_, n)| n.is_alphanumeric());
         if c.is_alphanumeric() || joins {
@@ -752,6 +759,20 @@ mod tests {
             text,
             "don't miss it \u{2013} the \u{201C}porto\u{201D}"
         ));
+        // The fold moves no word end: an em dash and an ellipsis do not
+        // join words, as before the fold; a curly apostrophe still joins.
+        let text = "Send by Friday\u{2014}please. Wait\u{2026}now. Don\u{2019}t go.";
+        for (q, want) in [
+            ("Friday", true),
+            ("please.", true),
+            ("by friday-please", true),
+            ("Wait", true),
+            ("now", true),
+            ("Don", false),
+            ("don't go", true),
+        ] {
+            assert_eq!(has(text, q), want, "{q:?}");
+        }
     }
 
     /// A span of whole words of a text is a quote, also with the
