@@ -687,7 +687,7 @@ fn migration_41_adds_sent_to_the_confirmed_copies() {
     b.store
         .write(|tx| {
             tx.execute_batch(
-                "DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy;
+                "DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP VIEW item_droppable;
                  DELETE FROM message_label WHERE label_id IN (SELECT id FROM label WHERE provider_id = 'SENT');
                  PRAGMA user_version = 40;",
             )?;
