@@ -174,6 +174,18 @@
     else if (!on && has) kept = kept.filter((k) => k.id !== item.id);
   };
   let codes = $derived([...signal.codes, ...kept.filter((k) => !signal.codes.some((c) => c.id === k.id))]);
+  // A line with a held quick verb, or a result to read, stays in its section across a refresh, so its Undo
+  // and its result do not go (issue 316). It shows in that section only, and the section stays while it shows.
+  let held: { key: string; item: Item }[] = $state([]);
+  const holdIn = (key: string) => (item: Item, on: boolean) => {
+    held = held.filter((h) => h.item.id !== item.id);
+    if (on) held = [...held, { key, item }];
+  };
+  const holds = (key: string) => held.some((h) => h.key === key);
+  function lines(key: string, items: Item[]): Item[] {
+    const top = items.filter((i) => !held.some((h) => h.item.id === i.id && h.key !== key)).slice(0, SHOWN);
+    return [...top, ...held.filter((h) => h.key === key && !top.some((t) => t.id === h.item.id)).map((h) => h.item)];
+  }
   // A signal leaves at its expiry. The date and the due words change at midnight.
   // Keep `now` fresh until the first of the two.
   let until = $derived([signal.next, nextDay(now)].filter((t): t is string => !!t).sort((a, b) => Date.parse(a) - Date.parse(b))[0]);
@@ -278,11 +290,11 @@
   <div class="alone">{@render sentLine(sent)}</div>
 {/if}
 
-{#if soon.length}
+{#if soon.length || holds("soon")}
   <section class="soon" aria-labelledby="soon">
     <h2 id="soon"><span>Due soon</span> <span class="count">{soon.length}</span></h2>
     <ul>
-      {#each soon.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={brief.you_owe.duplicates?.[item.id]} ondone={done} delay={hold} />{/each}
+      {#each lines("soon", soon) as item (item.id)}<Line {item} {now} twins={brief.you_owe.duplicates?.[item.id]} ondone={done} onheld={holdIn("soon")} delay={hold} />{/each}
     </ul>
     {#if soon.length > SHOWN}<a class="all touch" href="#/brief/you_owe">All {brief.you_owe.count} that you owe</a>{/if}
   </section>
@@ -315,13 +327,13 @@
         <Gate page={brief.gate} declined={brief.declined} onanswer={reload} />
       </section>
     {/if}
-  {:else if part.count > 0}
+  {:else if part.count > 0 || holds(part.key)}
     <section aria-labelledby={part.key}>
       <h2 id={part.key}><span>{part.title}</span> <span class="count">{part.count}</span></h2>
       <!-- Live login codes show above the sections, so the Signals list can be empty. -->
-      {#if part.items.length}
+      {#if part.items.length || holds(part.key)}
         <ul>
-          {#each part.items.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={part.duplicates?.[item.id]} ondone={done} delay={hold} />{/each}
+          {#each lines(part.key, part.items) as item (item.id)}<Line {item} {now} twins={part.duplicates?.[item.id]} ondone={done} onheld={holdIn(part.key)} delay={hold} />{/each}
         </ul>
       {/if}
       <a class="all touch" href={`#/brief/${part.key}`}>All {part.total ?? part.count}</a>

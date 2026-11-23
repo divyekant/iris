@@ -317,3 +317,35 @@ test("a ready draft owed to you shows as a nudge, and only such a line asks", as
     }
   }
 });
+
+test("a brief refresh that drops a held line keeps its Undo, and Undo sends nothing", async () => {
+  let briefs = 0;
+  const asked = [];
+  globalThis.fetch = async (url) => {
+    const path = String(url).replace(/^\/api\//, "");
+    asked.push(path);
+    let out = {};
+    // Each refresh no longer lists the item: newer items pushed it out of the section, or the list changed.
+    if (path === "brief") (briefs += 1), (out = closed());
+    else if (path === "status") out = fx.status;
+    else if (path === "watches") out = [];
+    else out = commitment("done");
+    return new Response(JSON.stringify(out), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const view = await mount("/src/views/Brief.svelte", { brief: copy(fx.brief), status: { ...fx.status }, watches: [], poll: 20, hold: 60_000 });
+  try {
+    box(view).click();
+    await until(() => button(view, "Undo"));
+    const seen = briefs;
+    await until(() => briefs >= seen + 2);
+    view.flushSync();
+    assert.ok(button(view, "Undo"), "the held line and its Undo stay after the refresh");
+    button(view, "Undo").click();
+    view.flushSync();
+    assert.ok(!button(view, "Undo"));
+    assert.ok(!owes(view), "after Undo, the line goes: the refreshed list does not have the item");
+    assert.ok(!asked.some((p) => p.startsWith("items/")), "Undo sends nothing");
+  } finally {
+    view.destroy();
+  }
+});

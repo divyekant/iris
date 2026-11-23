@@ -8,7 +8,9 @@
   it done after the same Undo time as the item view, then calls `ondone`. The
   view that passes `ondone` calls `flushHolds` when the person leaves it. A feed
   item, a conversation or a signal gets its one quiet verb (Skip, Mute or
-  Dismiss) as a text button, with the same Undo time.
+  Dismiss) as a text button, with the same Undo time. `onheld` tells the view
+  when the line holds a click or shows a result, so the view can keep the
+  line across a refresh of its list.
 -->
 <script lang="ts">
   import type { Item } from "../api";
@@ -26,8 +28,9 @@
     twins = [],
     note = "",
     ondone,
+    onheld,
     delay = HOLD,
-  }: { item: Item; now?: Date; twins?: string[]; note?: string; ondone?: (id: string) => void; delay?: number } = $props();
+  }: { item: Item; now?: Date; twins?: string[]; note?: string; ondone?: (id: string) => void; onheld?: (item: Item, on: boolean) => void; delay?: number } = $props();
 
   let box = $derived(
     !!ondone && item.form === "commitment" && (item.status === "open" || item.status === "deferred"),
@@ -63,6 +66,7 @@
   function tick(v: Verb = "close") {
     verb = v;
     phase = { at: "held" };
+    onheld?.(item, true);
     pending = hold(send, delay);
   }
 
@@ -70,6 +74,7 @@
     pending?.cancel();
     pending = undefined;
     phase = { at: "idle" };
+    onheld?.(item, false);
   }
 
   async function send() {
@@ -78,6 +83,7 @@
     try {
       await post(`items/${encodeURIComponent(item.id)}/${verb}`, {});
       phase = { at: "done" };
+      onheld?.(item, false);
       ondone?.(item.id);
     } catch (error) {
       const status = (error as { status?: number }).status ?? 0;
@@ -119,7 +125,7 @@
       <span class="why">
         {phase.known ? `Iris did not record it: ${phase.why}` : "Iris does not know if it recorded the change. Reload the page to see."}
       </span>
-      {#if phase.known}<button class="undo" type="button" onclick={() => (phase = { at: "idle" })}>Close</button>{/if}
+      {#if phase.known}<button class="undo" type="button" onclick={() => ((phase = { at: "idle" }), onheld?.(item, false))}>Close</button>{/if}
     {:else}
       <svg class="tick" viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
         <circle cx="10" cy="10" r="9" />
