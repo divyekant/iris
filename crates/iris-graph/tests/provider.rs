@@ -319,3 +319,122 @@ fn the_draft_calls_keep_their_limits() {
     assert!(matches!(e, Error::Api { status: 400, .. }), "{e}");
     assert_eq!(fake.requests().len(), before);
 }
+
+/// One full `changes` run from `cursor`. `after` runs after each call with
+/// the number of calls so far. Gives the records and the new cursor.
+fn changes_run(
+    outlook: &Outlook,
+    cursor: &str,
+    mut after: impl FnMut(usize),
+) -> (Vec<iris_provider::Change>, String) {
+    let mut records = Vec::new();
+    let mut page: Option<String> = None;
+    let mut n = 0;
+    loop {
+        let p = outlook.changes(TOKEN, cursor, page.as_deref()).unwrap();
+        records.extend(p.history.into_iter().flat_map(|h| h.changes));
+        n += 1;
+        after(n);
+        match p.next_page_token {
+            Some(t) => page = Some(t),
+            None => return (records, p.cursor),
+        }
+    }
+}
+
+/// The labels of `id` after all records: the sync applies them in order,
+/// and the last `Added` sets the labels (#665).
+fn last_labels(records: &[iris_provider::Change], id: &str) -> Option<Vec<String>> {
+    records.iter().rev().find_map(|r| match r {
+        iris_provider::Change::Added(m) if m.id == id => Some(m.label_ids.clone()),
+        _ => None,
+    })
+}
+
+/// A message leaves folder A, a later round lists it in folder B, then it
+/// moves to folder C whose round ended. The read by ID of the `Removed` of A
+/// runs after the last round, so the sync ends with the labels of C (#665).
+#[test]
+fn a_move_during_the_sync_ends_with_the_folder_after_the_move() {
+    let fake = FakeGraph::start(Mailbox::new(3, 60)).unwrap();
+    let outlook = Outlook::new(graph(&fake));
+    let order: Vec<String> = graph(&fake)
+        .folders(TOKEN)
+        .unwrap()
+        .into_iter()
+        .map(|f| f.id)
+        .collect();
+    let (a, b, c) = (order[1].clone(), order[2].clone(), order[0].clone());
+    let start = outlook.profile(TOKEN).unwrap().cursor;
+    let (_, cursor) = changes_run(&outlook, &start, |_| {});
+    let id = fake
+        .messages()
+        .into_iter()
+        .find(|(_, f)| *f == a)
+        .map(|(id, _)| id)
+        .expect("a message in folder A");
+    assert!(fake.move_message(&id, &b));
+    // Each folder gives one page: call 3 is the round of B.
+    let (records, _) = changes_run(&outlook, &cursor, |n| {
+        if n == 3 {
+            assert!(fake.move_message(&id, &c));
+        }
+    });
+    let want = outlook.minimal(TOKEN, &id).unwrap().label_ids;
+    assert_eq!(last_labels(&records, &id), Some(want));
+}
+
+/// A message that leaves a folder and is deleted gives `Deleted` from the
+/// read after the last round, and a message that only moved gives its new
+/// folder.
+#[test]
+fn the_reads_after_the_last_round_give_moves_and_deletes() {
+    let fake = FakeGraph::start(Mailbox::new(3, 60)).unwrap();
+    fake.set_page_limit(5);
+    let outlook = Outlook::new(graph(&fake));
+    let start = outlook.profile(TOKEN).unwrap().cursor;
+    let (_, cursor) = changes_run(&outlook, &start, |_| {});
+    let inbox: Vec<String> = fake
+        .messages()
+        .into_iter()
+        .filter(|(_, f)| f == "F-inbox")
+        .map(|(id, _)| id)
+        .collect();
+    let (moved, gone) = (&inbox[0], &inbox[1]);
+    assert!(fake.move_message(moved, FakeGraph::folder_id("Old")));
+    assert!(fake.delete_message(gone));
+    let (records, _) = changes_run(&outlook, &cursor, |_| {});
+    let want = outlook.minimal(TOKEN, moved).unwrap().label_ids;
+    assert_eq!(last_labels(&records, moved), Some(want));
+    assert!(records
+        .iter()
+        .any(|r| matches!(r, iris_provider::Change::Deleted(m) if &m.id == gone)));
+    assert_eq!(last_labels(&records, gone), None);
+}
+
+/// Past 1,000 removed IDs in one sync, a `Removed` gets its read at once.
+/// Each moved message still ends with its folder now.
+#[test]
+fn more_removals_than_the_page_token_keeps_still_give_each_move() {
+    let fake = FakeGraph::start(Mailbox::new(3, 1_300)).unwrap();
+    let outlook = Outlook::new(graph(&fake));
+    let start = outlook.profile(TOKEN).unwrap().cursor;
+    let (_, cursor) = changes_run(&outlook, &start, |_| {});
+    let old = FakeGraph::folder_id("Old");
+    let moved: Vec<String> = fake
+        .messages()
+        .into_iter()
+        .filter(|(_, f)| f != old)
+        .map(|(id, _)| id)
+        .collect();
+    assert!(moved.len() > 1_000, "{}", moved.len());
+    for id in &moved {
+        assert!(fake.move_message(id, old));
+    }
+    let (records, _) = changes_run(&outlook, &cursor, |_| {});
+    for id in &moved {
+        let want = outlook.minimal(TOKEN, id).unwrap().label_ids;
+        assert!(want.contains(&format!("folder:{old}")), "{want:?}");
+        assert_eq!(last_labels(&records, id), Some(want), "{id}");
+    }
+}

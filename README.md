@@ -161,8 +161,8 @@ the data folder. They do not read the store. Start the engine with
 | `iris changeset <cs-id>` | Shows a changeset and the state of each action. Add `--json` for the document. |
 | `iris changeset --drafts` | Lists your draft changesets, newest first. |
 | `iris withdraw <cs-id>` | Withdraws a changeset that the command made. Applied actions stay. |
-| `iris close <c-id>` | Adds `close` of a commitment to a draft changeset. `--reason` is optional. |
-| `iris decline <c-id>` | Adds `decline` of a commitment to a draft changeset. `--reason` is optional. |
+| `iris close <c-id>` | Adds `close` of a commitment to a draft changeset. `--reason` is optional. The reason has at most 500 characters: submit denies a longer reason. |
+| `iris decline <c-id>` | Adds `decline` of a commitment to a draft changeset. `--reason` is optional. The reason has at most 500 characters: submit denies a longer reason. |
 | `iris defer <c-id> --date <YYYY-MM-DD>` | Adds `defer` of a commitment to a draft changeset. |
 | `iris correct <id> --field <path> --value <json>` | Adds a correction of one field of an item to a draft changeset. |
 | `iris archive`, `inbox`, `read`, `unread`, `trash <ids>` | Adds the mail action on threads (`t-3`) or messages (`m-42`) to a draft changeset. |
