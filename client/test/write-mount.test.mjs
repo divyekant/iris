@@ -673,3 +673,43 @@ test("Write another ends the record of the last write", async () => {
     net.restore();
   }
 });
+
+test("a late answer of a left view does not replace the record of a newer write", async () => {
+  let first;
+  const late = new Promise((r) => (first = r));
+  const saved = globalThis.fetch;
+  let posts = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url).replace(/^\/api\//, "");
+    if (init.method === "POST" && path === "write") {
+      posts += 1;
+      if (posts === 1) await late;
+      return new Response(JSON.stringify({ write: posts === 1 ? "cs-3" : "cs-4" }), { status: 201 });
+    }
+    return new Response(JSON.stringify({ state: "saving" }), { status: 200 });
+  };
+  let app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+  try {
+    await fill(app);
+    press(app);
+    await until(() => posts === 1);
+    // The person leaves while the first press waits, comes back and sends another mail.
+    app.destroy();
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+    await fill(app, "ana@example.com ");
+    press(app);
+    await until(() => app.target.querySelector(".state h2")?.textContent.includes("Saving your mail"));
+    // The first answer arrives last.
+    first();
+    await new Promise((r) => setTimeout(r, 30));
+    app.destroy();
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+    await until(() => app.target.querySelector(".state"));
+    app.flushSync();
+    assert.equal(JSON.parse(window.sessionStorage.getItem("iris.write.new.taken")).write, "cs-4", "the record names the newer write");
+    assert.match(text(app.target), /To sam@okafor\.example, ana@example\.com/, "the reload shows the newer mail");
+  } finally {
+    app.destroy();
+    globalThis.fetch = saved;
+  }
+});

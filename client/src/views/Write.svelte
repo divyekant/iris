@@ -203,7 +203,9 @@
     const mail = { ...target, to: [...to], cc: [...cc], body, key, flags: [...flags] };
     try {
       const v = await post<{ write: string }>("write", mail);
-      keep({ write: v.write, to: mail.to, subject: thread ? "" : subject, body: mail.body });
+      // A view that the person left keeps the record only while the saved form is still the form of this
+      // press: else a newer form or a newer write owns the place, and this late answer must not replace it.
+      if (alive || restore()?.key === sent) keep({ write: v.write, to: mail.to, subject: thread ? "" : subject, body: mail.body });
       forget(sent);
       if (!alive) return;
       sentTo = mail.to;
