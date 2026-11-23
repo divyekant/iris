@@ -1261,16 +1261,16 @@ fn each_draft_or_copy_label_change_marks_the_conversation() {
     }
 }
 
-/// A store from before migration 41 can hold items of a message that got
+/// A store from before migration 42 can hold items of a message that got
 /// `UNSENT` in place. The migration drops them.
 #[test]
 fn the_upgrade_drops_the_items_of_a_draft_or_copy() {
-    let b = store("upgrade-41");
+    let b = store("upgrade-42");
     let m = b.add("1", ASK, &["INBOX"]);
     understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW).unwrap();
     let g = b.add_in("2", "t2", NOW - DAY, ASK, &["INBOX"]);
     understand(&b.store, g, &Fake::with(&[COMMITMENT]), NOW).unwrap();
-    // The store of version 40: no view and no item trigger.
+    // The store of version 41: no view and no item trigger.
     b.store
         .write(|tx| {
             tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP VIEW item_droppable;")?;
@@ -1290,7 +1290,7 @@ fn the_upgrade_drops_the_items_of_a_draft_or_copy() {
     assert_eq!(b.items().len(), 2);
     b.store
         .write(|tx| {
-            tx.execute_batch("PRAGMA user_version = 40;")?;
+            tx.execute_batch("PRAGMA user_version = 41;")?;
             Ok(())
         })
         .unwrap();

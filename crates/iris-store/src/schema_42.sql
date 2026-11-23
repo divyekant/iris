@@ -1,4 +1,4 @@
--- Migration 41: a message with a label of `iris_store::DRAFT_OR_COPY` keeps
+-- Migration 42: a message with a label of `iris_store::DRAFT_OR_COPY` keeps
 -- no item of its own understanding (issue 677).
 -- An IMAP client can set the `\Draft` flag in place, and the sync then adds
 -- UNSENT to a message that has items. The batch runner skips each message

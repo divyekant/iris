@@ -141,11 +141,18 @@ A change is one of:
   same immutable ID. The rounds of two folders are not one snapshot: if
   the round of the new folder ran before the move, only the `Removed` of
   the old folder shows the move, and a message can move again after a
-  round gave it as `Message`. Thus, after the round of each folder, the
+  round gave it as `Message`. Thus, after the rounds of all folders, the
   caller reads each removed message by ID with `message(id)`
   (`GET /me/messages/{id}?$select=...`), also when a round gave it as
   `Message`: HTTP 404 means gone, and a message gives its folder now. The
-  message stays in the mirror until this read gives 404.
+  read comes after the last round, so a message that moves again after a
+  later round listed it gets the folder of its last move (#665). Known
+  limit with its own issue (#761): the provider keeps at most 1,000
+  removed IDs for this read (section 3.1). Past that number, a removed
+  message gets its read after the page of its round, and a message that
+  moves again into a folder whose round ended keeps its older folder
+  until the next sync. The message stays in the mirror until a read by ID
+  gives 404.
 
 Commit: the new delta links of a sync become durable only in the same
 transaction as all the changes of the sync and the results of the reads
@@ -184,11 +191,17 @@ rules:
   full resync).
 - `changes` gives one delta page of one folder for each call. The page
   token holds the folder IDs of the call, the folder of the next page,
-  its `nextLink` and the delta links of the folders whose round ended.
-  Each `Removed` gets the read by ID in the same call: a message gives
+  its `nextLink`, the delta links of the folders whose round ended, and
+  the IDs of the `Removed` items. After the round of the last folder,
+  each next call reads at most 50 of these IDs by ID: a message gives
   `Change::Added` with its labels now (a move), 404 gives
-  `Change::Deleted`. The last page gives the new cursor, so the sync
-  stores all links in one transaction with the last changes.
+  `Change::Deleted`. The sync applies the changes in order, so this
+  `Added` is the last state of the message. The page token keeps at most
+  1,000 IDs. A `Removed` past that number gets its read in the same call,
+  as before #665. Known limit with its own issue (#761): in such a large
+  sync, a message that moves again after a later round listed it keeps
+  the older folder until the next sync. The last page gives the new cursor, so the sync stores all
+  links in one transaction with the last changes.
 - `messages` with no label lists all mail of all folders, newest first:
   `GET /me/messages` with `$orderby=receivedDateTime desc`, so that the
   first sync fetches the newest threads first (spec 1 section 4.2). The
@@ -446,15 +459,26 @@ person or a sender can set. Two existing rules read such data as proof:
   Outlook account, only a message that Iris sent itself (the sent copy of
   a ledger send row, section 5) gets `SENT`, and only when the completion
   confirmed that its content is the approved content. R6-16: the engine
-  gives the provider the `sent_message` of each sent draft of the account
-  when it makes the provider (`iris_apply::sent_by_iris`). A draft with a
+  gives the provider a source of the `sent_message` of each sent draft of
+  the account (`iris_apply::sent_by_iris`). The provider reads the source
+  before each label read, so a send that another engine process completed
+  counts too (issue #719). A failed read of the source is an error, not
+  labels with no `SENT`. Migration 41 keeps the rule in the store, for
+  each order of a sync and a completion: the view `iris_sent_copy` holds
+  the confirmed copies (`sent_by_iris` reads it), a write that removes
+  `SENT` from a confirmed copy of an Outlook account does nothing, and a
+  label write of a confirmed copy with no `SENT` adds `SENT`. The
+  completion adds `SENT` to a mirrored copy in its own transaction, and the
+  migration adds `SENT` to each confirmed copy in the mirror. The triggers
+  run in the transaction of the write, so a sync that read the labels
+  before the completion committed cannot remove `SENT`. A draft with a
   send whose copy had other content is left out. The completion calls
   `sent_confirmed` only after the content check. Each label read of the
   provider (sync, verify, the apply) adds `SENT` for these IDs, so the
   mirror and the verify agree. A sync can copy the sent message before
   the send completes. The completion then reads the labels of that mirror
   message again. Each change of `SENT` or `DRAFT` clears `understood_at`
-  through the triggers of migration 37 (migration 41 adds `UNSENT` and
+  through the triggers of migration 37 (migration 42 adds `UNSENT` and
   `SENT_COPY`), so the message gets a new
   understanding with the new sender decision. Each other message in
   `sentitems` gets the label `Folders/Sent Items`, and the sender axis
@@ -620,6 +644,8 @@ reconciles with reads: not JSON, another shape, another state, above
 | The same message two times in one round | the last one wins | fake replays |
 | A message moves during the round of a folder | `Removed` in one folder, `Message` in the other | fake move |
 | A message moves after the round of its new folder | `Removed` only; the read by ID finds the new folder, and the message stays | fake move between rounds |
+| A message moves again after a later round listed it | the read by ID after the last round gives the folder of the last move | fake move between pages |
+| More than 1,000 removals in one sync | the first 1,000 get the read after the last round; each other one gets its read after its page and can keep an older folder until the next sync (#761) | fake mass move |
 | A folder of the mirror is not in the folder list | its link goes; each of its messages is read by ID: 404 is gone, else its new folder | fake folder delete |
 | An Outlook message with a forged `Authentication-Results: mx.google.com; dmarc=pass` | the header counts as absent; DMARC is unknown | unit test of the parser with the provider `outlook` |
 | A search folder in the folder list | left out with its children; its messages come from their real folders | fake search folder |
@@ -683,7 +709,12 @@ Each assumption has the evidence of a Microsoft Learn page, read on
   turns off its category writes in memory, before any request. R6-16:
   the provider also stores the switch in `account.categories_off_at`
   (migration 37), and the engine reads it each time it makes the
-  provider, so the switch lasts after a restart. Each later `label` and
+  provider, so the switch lasts after a restart. If the store write fails,
+  the switch stays on in memory, and each later refused category write
+  tries the store write again (issue #717). A stop of the engine before
+  one store write succeeds loses the switch: the next category write after
+  the start can reach Graph one time, and its `Differs` answer turns the
+  switch on again. Each later `label` and
   `unlabel` of the account gets the refusal "Outlook kept other
   categories than Iris asked for", which the person reads as the reason
   of the action. To turn category writes on again, a new release clears

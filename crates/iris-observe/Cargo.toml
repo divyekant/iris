@@ -10,12 +10,9 @@ publish.workspace = true
 [dependencies]
 iris-store = { version = "0.0.0", path = "../iris-store" }
 rusqlite = "=0.43.0"
-sha2 = { version = "=0.11.1", default-features = false }
 
 [dev-dependencies]
 iris-fakegmail = { version = "0.0.0", path = "../iris-fakegmail" }
 iris-gmail = { version = "0.0.0", path = "../iris-gmail" }
-iris-spec = { version = "0.0.0", path = "../iris-spec" }
 iris-sync = { version = "0.0.0", path = "../iris-sync" }
 iris-synth = { version = "0.0.0", path = "../iris-synth" }
-serde_json = "1"

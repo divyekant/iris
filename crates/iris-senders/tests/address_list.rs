@@ -54,7 +54,7 @@ fn entry(r: &mut Rng, a: &str) -> String {
         "Okafor (work)",
     ];
     let name = r.pick(NAMES);
-    match r.below(8) {
+    match r.below(10) {
         0 => a.to_string(),
         1 => format!("<{a}>"),
         2 => format!("\"{name}\" <{a}>"),
@@ -62,6 +62,11 @@ fn entry(r: &mut Rng, a: &str) -> String {
         4 => format!("{a} ({name})"),
         5 => format!("(note, {name}) {a}"),
         6 => format!("\"Ana \\\"the\\\" Lee\" <{a}>"),
+        // One quoted pair: a parser that ends the quote at `\"` splits
+        // the name at its comma (issue #482).
+        7 => format!("\"Ana \\\", x@evil.example\" <{a}>"),
+        // A quoted pair in a comment: `\)` does not end the comment.
+        8 => format!("{a} (x\\), <b@evil.example>, tail)"),
         _ => format!("=?UTF-8?Q?Ana_Lee?= <{a}>"),
     }
 }
