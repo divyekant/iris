@@ -711,10 +711,54 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
     assert!(socket::parse_answer("list", bad).is_none());
     let message = br#"{"ok":true,"result":{"message":{"id":"m-1","text":"x"}}}"#;
     assert!(matches!(socket::parse_answer("show", message), Some(Ok(_))));
-    let ask = br#"{"ok":true,"result":{"job":"j-3","state":"needs_you","question":"Which date?"}}"#;
-    assert!(matches!(socket::parse_answer("ask", ask), Some(Ok(_))));
-    let asked = br#"{"ok":true,"result":{"job":"j-3","state":"waiting","question":"Which date?"}}"#;
-    assert!(socket::parse_answer("ask", asked).is_none());
+    // The answers of the verbs that end a session (issue #586): the valid
+    // answer succeeds, and each required field that is missing or wrong
+    // makes the answer not valid.
+    let wait = json!({"job": "j-4", "state": "waiting", "until": "2030-01-02T00:00:00Z"});
+    let ask = json!({"job": "j-3", "state": "needs_you", "question": "Which date?"});
+    let cases = [
+        (
+            "wait",
+            wait,
+            vec![
+                ("job", vec![json!(7), json!("x")]),
+                ("state", vec![json!("working"), json!(7)]),
+                ("until", vec![json!(7), json!(null)]),
+            ],
+        ),
+        (
+            "ask",
+            ask,
+            vec![
+                ("job", vec![json!(7), json!("x")]),
+                ("state", vec![json!("waiting"), json!(7)]),
+                ("question", vec![json!(7), json!(null)]),
+            ],
+        ),
+    ];
+    let line = |r: &serde_json::Value| json!({"ok": true, "result": r}).to_string().into_bytes();
+    for (verb, good, fields) in cases {
+        assert!(
+            matches!(socket::parse_answer(verb, &line(&good)), Some(Ok(_))),
+            "{verb}"
+        );
+        for (field, bad) in fields {
+            let mut gone = good.clone();
+            gone.as_object_mut().unwrap().remove(field);
+            assert!(
+                socket::parse_answer(verb, &line(&gone)).is_none(),
+                "{verb} with no {field}"
+            );
+            for value in bad {
+                let mut r = good.clone();
+                r[field] = value.clone();
+                assert!(
+                    socket::parse_answer(verb, &line(&r)).is_none(),
+                    "{verb} {field}={value}"
+                );
+            }
+        }
+    }
     let run = br#"{"ok":true,"result":{"session":"se-12"}}"#;
     assert!(matches!(socket::parse_answer("job.run", run), Some(Ok(_))));
     let status = br#"{"ok":true,"result":{"job":"j-1","session":"se-2","goal":"g","state":"working","due":null,"threads":1,"messages":2,"items":0}}"#;
