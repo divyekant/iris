@@ -423,6 +423,61 @@ fn a_relative_path_entry_is_skipped() {
     );
 }
 
+/// Runs [`the_lookup_skips_a_file_that_the_engine_cannot_run`] again in a
+/// child process as the user `nobody` (65534). The checkout and `TMPDIR`
+/// of root can be closed to other users, so the child gets a copy of this
+/// test program and its own `TMPDIR` in a folder that `nobody` owns, under
+/// the first base folder whose path each user can pass.
+fn as_nobody() {
+    use std::os::unix::fs::{chown, MetadataExt};
+    use std::os::unix::process::CommandExt;
+    // Each folder from `/` to `p` lets other users pass (o+x).
+    let open = |p: &Path| {
+        p.ancestors()
+            .all(|a| std::fs::metadata(a).is_ok_and(|m| m.is_dir() && m.mode() & 0o001 != 0))
+    };
+    let bases = [
+        std::env::temp_dir(),
+        "/tmp".into(),
+        "/var/tmp".into(),
+        "/dev/shm".into(),
+    ];
+    let base = bases
+        .iter()
+        .find(|b| open(b))
+        .unwrap_or_else(|| panic!("no base folder that nobody can pass: {bases:?}"));
+    let home = base.join(format!("iris-cfg-nobody-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir(&home).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let exe = home.join("test");
+    std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let tmp = home.join("tmp");
+    std::fs::create_dir(&tmp).unwrap();
+    chown(&tmp, Some(65534), Some(65534)).unwrap();
+    let child = std::process::Command::new(&exe)
+        .args([
+            "--exact",
+            "config::tests::the_lookup_skips_a_file_that_the_engine_cannot_run",
+            "--test-threads=1",
+        ])
+        .env("TMPDIR", &tmp)
+        .current_dir(&tmp)
+        .uid(65534)
+        .gid(65534)
+        .output();
+    let _ = std::fs::remove_dir_all(&home);
+    let child = child.unwrap();
+    let out = String::from_utf8_lossy(&child.stdout);
+    // The child ran the test: a filter that matched nothing also succeeds.
+    assert!(
+        child.status.success() && out.contains("1 passed"),
+        "the child as nobody: {out}{}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+}
+
 /// A file with an execute bit that does not let the engine user run it is
 /// not a program, and the lookup goes on to the next folder of PATH (#432).
 /// Root can run a file with any execute bit, so as root the test runs
@@ -432,24 +487,7 @@ fn a_relative_path_entry_is_skipped() {
 fn the_lookup_skips_a_file_that_the_engine_cannot_run() {
     // SAFETY: geteuid has no memory effects.
     if unsafe { libc::geteuid() } == 0 {
-        use std::os::unix::process::CommandExt;
-        let child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "config::tests::the_lookup_skips_a_file_that_the_engine_cannot_run",
-                "--test-threads=1",
-            ])
-            .uid(65534)
-            .gid(65534)
-            .output()
-            .unwrap();
-        let out = String::from_utf8_lossy(&child.stdout);
-        // The child ran the test: a filter that matched nothing also succeeds.
-        assert!(
-            child.status.success() && out.contains("1 passed"),
-            "the child as nobody: {out}{}",
-            String::from_utf8_lossy(&child.stderr)
-        );
+        as_nobody();
     }
     let first = Bin::new("noexec-1", &["my-tool"]);
     let second = Bin::new("noexec-2", &["my-tool"]);
