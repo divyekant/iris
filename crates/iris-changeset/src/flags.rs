@@ -84,12 +84,6 @@ const ATTACHMENT_WORDS: [&str; 21] = [
 
 /// The byte ranges of the words of a text, as the full-text index splits
 /// them: runs of letters and digits.
-///
-/// Library check (issue #403): `unicode-segmentation` uses the word bounds of
-/// UAX #29, so "don't" and "3.14" stay one word, and the FTS5 `unicode61`
-/// tokenizer of the store splits them. `regex` and `aho-corasick` find
-/// patterns, not words, and need the same split first. This loop keeps the
-/// split of the store, and `tests/flags.rs` checks it with property tests.
 fn word_spans(text: &str) -> Vec<Range<usize>> {
     let mut out = Vec::new();
     let mut start = None;

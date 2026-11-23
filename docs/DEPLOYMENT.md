@@ -180,18 +180,20 @@ keep it private.
 To roll back, do these steps:
 
 1. Stop the engine. If the background service runs it, run
-   `iris service remove`.
-2. Install the release before the bad release:
+   `iris service remove`. Keep the service removed until step 5.
+2. Install the release before the bad release, with no service:
 
    ```bash
-   curl -fsSLO https://raw.githubusercontent.com/divyekant/iris/main/scripts/install.sh && IRIS_VERSION=v2026.11.16.1 sh install.sh
+   curl -fsSLO https://raw.githubusercontent.com/divyekant/iris/main/scripts/install.sh && IRIS_NO_SERVICE=1 IRIS_VERSION=v2026.11.16.1 sh install.sh
    ```
 
    Replace `v2026.11.16.1` with the tag of the earlier release (see the
    GitHub Releases page).
 3. If the bad release migrated the store, move the data folder away and copy
-   the backup in its place: `~/Library/Application Support/iris` on macOS,
-   `~/.local/share/iris` on Linux.
+   the backup in its place. Use the data folder of your installation: the
+   path of `--data` or `IRIS_DATA` if you set one. Else it is
+   `~/Library/Application Support/iris` on macOS, and `$XDG_DATA_HOME/iris`
+   or `~/.local/share/iris` on Linux.
 4. Run `iris status`. Make sure that it shows your accounts.
 5. Run `iris service install`.
 
