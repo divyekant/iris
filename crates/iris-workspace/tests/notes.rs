@@ -93,8 +93,10 @@ fn a_file_over_the_limit_keeps_the_last_copy() {
     fs::write(ws.join("notes.md"), &large).unwrap();
     assert_eq!(save_notes(&store, job, &ws, NOW).unwrap(), Notes::TooLarge);
     assert_eq!(notes(&store, job).unwrap().as_deref(), Some(&b"good"[..]));
-    // The build does not stop, and the file stays.
-    build(&store, job, &ws).unwrap();
+    // The build does not stop, and the file stays. It gives the log line.
+    let built = build(&store, job, &ws).unwrap();
+    assert_eq!(built.notes, Notes::TooLarge.problem());
+    assert!(built.notes.is_some());
     assert_eq!(fs::read(ws.join("notes.md")).unwrap(), large);
     assert!(iris_job::save_notes(&store, job, &large, NOW).is_err());
     // A path that cannot open for another reason.
@@ -121,8 +123,9 @@ fn no_copy_and_no_file_gives_the_heading() {
 fn assert_not_a_file(store: &Store, job: i64, ws: &Path) {
     assert_eq!(save_notes(store, job, ws, NOW).unwrap(), Notes::NotAFile);
     assert_eq!(notes(store, job).unwrap().as_deref(), Some(&b"good"[..]));
-    // The build keeps the path as the agent left it.
-    build(store, job, ws).unwrap();
+    // The build keeps the path as the agent left it, and gives the log line.
+    let built = build(store, job, ws).unwrap();
+    assert_eq!(built.notes, Notes::NotAFile.problem());
     assert_eq!(notes(store, job).unwrap().as_deref(), Some(&b"good"[..]));
 }
 
@@ -153,6 +156,66 @@ fn a_link_a_folder_or_a_fifo_keeps_the_last_copy() {
     // A FIFO with no writer: a blocking open would wait for ever.
     assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
     assert_not_a_file(&store, job, &ws);
+
+    // A socket fails at the open (ENXIO), before the type check.
+    fs::remove_file(ws.join("notes.md")).unwrap();
+    let _socket = std::os::unix::net::UnixListener::bind(ws.join("notes.md")).unwrap();
+    assert_not_a_file(&store, job, &ws);
+}
+
+/// The variable that makes [`a_file_with_no_read_permission_keeps_the_last_copy`]
+/// read the file in a child process as a user that is not root.
+#[cfg(unix)]
+const AS_NOBODY: &str = "IRIS_TEST_NOTES_AS_NOBODY";
+
+#[cfg(unix)]
+#[test]
+fn a_file_with_no_read_permission_keeps_the_last_copy() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
+    // The child: read the file that the parent made, and give the result.
+    if let Some(ws) = std::env::var_os(AS_NOBODY) {
+        let got = read_notes(Path::new(&ws));
+        assert!(matches!(got, Err(Notes::Unreadable(_))), "{got:?}");
+        return;
+    }
+    let tmp = TempDir::new("mode");
+    let (store, job, ws) = setup(&tmp);
+    fs::write(ws.join("notes.md"), b"good").unwrap();
+    save_notes(&store, job, &ws, NOW).unwrap();
+    fs::set_permissions(ws.join("notes.md"), fs::Permissions::from_mode(0o000)).unwrap();
+    if unsafe { libc::geteuid() } != 0 {
+        assert!(matches!(read_notes(&ws), Err(Notes::Unreadable(_))));
+        assert!(matches!(
+            save_notes(&store, job, &ws, NOW).unwrap(),
+            Notes::Unreadable(_)
+        ));
+    } else {
+        // Root reads a file of mode 000, so a child as the user `nobody`
+        // (65534) reads it. It needs a path to the file.
+        for d in [&tmp.0, &ws] {
+            fs::set_permissions(d, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "a_file_with_no_read_permission_keeps_the_last_copy",
+                "--test-threads=1",
+            ])
+            .env(AS_NOBODY, &ws)
+            .uid(65534)
+            .gid(65534)
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&child.stdout);
+        // The child ran the test: a filter that matched nothing also succeeds.
+        assert!(
+            child.status.success() && out.contains("1 passed"),
+            "the child as nobody: {out}{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+    }
+    assert_eq!(notes(&store, job).unwrap().as_deref(), Some(&b"good"[..]));
 }
 
 #[test]

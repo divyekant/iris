@@ -130,6 +130,8 @@ pub struct Running {
     pub status: ChildStderr,
     pub socket: UnixListener,
     pub socket_path: PathBuf,
+    /// The engine log line when the build kept the last copy of the notes.
+    pub notes: Option<String>,
 }
 
 /// The result of [`Launcher::finish`].
@@ -232,7 +234,7 @@ impl Launcher<'_> {
         let dir = iris_workspace::default_dir(self.data_dir, job);
         // 3. Build. A revoke during the build changes the revoke count.
         let mut tries = 0;
-        let comment = loop {
+        let built = loop {
             tries += 1;
             let built = match iris_workspace::build(self.store, job, &dir) {
                 Ok(b) => b,
@@ -243,7 +245,7 @@ impl Launcher<'_> {
                 return a;
             }
             match iris_job::revoked_count(self.store, job) {
-                Ok(n) if n == built.revoked => break built.comment,
+                Ok(n) if n == built.revoked => break built,
                 Ok(_) if tries < BUILD_TRIES => {}
                 Ok(_) => {
                     let why = format!("the scope changed during each of {BUILD_TRIES} builds");
@@ -282,7 +284,7 @@ impl Launcher<'_> {
         }
         (self.after)(Step::HelperStarted, session);
         // 6. The gate.
-        self.gate(job, session, comment, helper, socket, socket_path)
+        self.gate(job, session, built, helper, socket, socket_path)
     }
 
     /// Step 6: the check of the end, the start and the spawn, in one write
@@ -292,7 +294,7 @@ impl Launcher<'_> {
         &self,
         job: i64,
         session: i64,
-        comment: Option<i64>,
+        built: iris_workspace::Built,
         mut helper: Helper,
         socket: UnixListener,
         socket_path: PathBuf,
@@ -344,7 +346,7 @@ impl Launcher<'_> {
             }
             // The build of this session read each comment up to `comment`
             // (docs/specs/2026-11-17-review-comments.md, section 5).
-            if let Some(id) = comment {
+            if let Some(id) = built.comment {
                 if let Err(e) = tx.execute(
                     "INSERT INTO comment_delivery (session_id, comment_id) VALUES (?1, ?2)",
                     [session, id],
@@ -387,6 +389,7 @@ impl Launcher<'_> {
                 status: helper.status,
                 socket,
                 socket_path,
+                notes: built.notes,
             }),
             (_, Some(Err(Gate::Ended(end)))) => {
                 drop(socket);

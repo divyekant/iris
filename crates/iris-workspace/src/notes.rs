@@ -2,7 +2,7 @@
 //! a copy of `notes.md` in the store, saved while no process of the job runs,
 //! and written back when the file is not in the workspace.
 
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read};
 use std::path::Path;
 
@@ -58,7 +58,14 @@ pub fn read_notes(dir: &Path) -> std::result::Result<Vec<u8>, Notes> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(Notes::Absent),
         #[cfg(unix)]
         Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(Notes::NotAFile),
-        Err(e) => return Err(unreadable(e)),
+        // Some types fail at the open (a socket gives ENXIO). The type of the
+        // path, with no link follow, names the reason.
+        Err(e) => {
+            return Err(match fs::symlink_metadata(dir.join("notes.md")) {
+                Ok(m) if !m.is_file() => Notes::NotAFile,
+                _ => unreadable(e),
+            })
+        }
     };
     // The type of the open file, not of the path.
     if !file.metadata().map_err(unreadable)?.is_file() {

@@ -67,6 +67,9 @@ pub struct Built {
     /// from `iris_job::revoked_count`, a revoke came during the build: build
     /// again before a session starts.
     pub revoked: i64,
+    /// The engine log line when the build kept the last copy of the notes
+    /// ([`Notes::problem`]), else `None`.
+    pub notes: Option<String>,
 }
 
 /// `.<name><suffix>` beside the workspace `<name>`.
@@ -116,7 +119,7 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
     private(dir)?;
     // No session of the job runs during a build, so the file is stable.
     // A link, a folder or a large file keeps the last copy.
-    save_notes(store, job, dir, now_ms())?;
+    let notes = save_notes(store, job, dir, now_ms())?.problem();
     // A new empty `.iris` on each build: no entry of an earlier session
     // (an old socket, a file of the agent) reaches the next session.
     let dot = dir.join(".iris");
@@ -133,7 +136,8 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
     let part = beside(dir, ".notes")?;
     remove(&part)?;
 
-    let built = write_stage(store, job, &stage)?;
+    let mut built = write_stage(store, job, &stage)?;
+    built.notes = notes;
 
     // A crash in this loop can leave an owned path absent. A session starts
     // only after a build that returned Ok (R4-04).
@@ -672,7 +676,7 @@ fn write_thread(
             let p = people.entry(address.clone()).or_default();
             p.threads.insert(thread);
             p.first = Some(p.first.map_or(m.at, |f| f.min(m.at)));
-            p.last = p.last.max(m.at);
+            p.last = Some(p.last.map_or(m.at, |l| l.max(m.at)));
             if m.mine {
                 p.from_you += 1;
             } else if address == &m.from {
@@ -730,7 +734,7 @@ struct Seen {
     names: BTreeSet<String>,
     threads: BTreeSet<i64>,
     first: Option<i64>,
-    last: i64,
+    last: Option<i64>,
     from_them: u32,
     from_you: u32,
 }
@@ -766,7 +770,7 @@ fn write_people(c: &Connection, people: &People, folder: &Path) -> Result<u32> {
             "address": address,
             "names": seen.names,
             "first": rfc3339(seen.first.unwrap_or(0)),
-            "last": rfc3339(seen.last),
+            "last": rfc3339(seen.last.unwrap_or(0)),
             "from_them": seen.from_them,
             "from_you": seen.from_you,
             "threads": threads,
