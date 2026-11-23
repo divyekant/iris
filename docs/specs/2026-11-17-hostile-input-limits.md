@@ -151,7 +151,8 @@ the thread messages in the store, the scope rows of the job.
 | Input or event | Result | Test |
 |---|---|---|
 | A thread message with no header row, or a gone message | It gives no thread address, so more addresses are outside. | `outside.rs`, gone thread message |
-| A malformed `To` or `Cc` header in the thread | The parser gives fewer addresses, so more addresses are outside. | property test |
+| A `From`, `To` or `Cc` header in the thread with display names, quoted pairs, comments and groups (RFC 5322) | The parser gives the address of each entry and no address of a name or a comment. The flag agrees with a model of the entries. | property test (`property_random_thread_headers_give_the_model_flag`) |
+| A malformed `From`, `To` or `Cc` header in the thread (a stray `"`, `<`, `>`, `(`, `)`, `\`, `:`, `;` or `,`) | No list is the right one. An address that the header text does not name is always outside. A stray sign can make an address of a name or a comment a thread address. This gives the sender no new power: a sender can put any address in `Cc` (limit #435). | property test (same test) |
 | An address in another case (`Ana@X.org`) | Same address after ASCII lowercase. | property test |
 | An IDN domain in Unicode and in punycode | Two addresses: outside (fail closed). | Known limit issue |
 | A scope message that is not in the store | The job is marked. | `outside.rs` |
