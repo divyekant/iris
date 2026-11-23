@@ -157,8 +157,11 @@ fn ids(c: &Connection, action: i64) -> rusqlite::Result<(Option<String>, Option<
 
 /// The text cut at each end of a mark of `field`: each part with the flags
 /// of the marks over it, and for copied text the message it came from.
-/// Two marks of one flag and one source with no letter or digit between
-/// them are one mark ("Friday, Dec 4"). The parts together are the text.
+/// Two marks of one flag with no source and no letter or digit between
+/// them are one mark ("Friday, Dec 4"). Two copied runs of one message are
+/// one mark only when they overlap or touch: the scanner did not check the
+/// text between them against the message (#415). The parts together are
+/// the text.
 pub fn parts(text: &str, marks: &[Mark], field: Field) -> Vec<Value> {
     let mut ranges: Vec<(Range<usize>, &str, Option<i64>)> = marks
         .iter()
@@ -173,7 +176,8 @@ pub fn parts(text: &str, marks: &[Mark], field: Field) -> Vec<Value> {
                 if *lf == f
                     && *ls == s
                     && (r.start <= last.end
-                        || !text[last.end..r.start].chars().any(char::is_alphanumeric)) =>
+                        || s.is_none()
+                            && !text[last.end..r.start].chars().any(char::is_alphanumeric)) =>
             {
                 last.end = last.end.max(r.end);
             }
@@ -268,14 +272,18 @@ mod tests {
                         assert!(on, "{text:?} {marks:?} {parts:?}");
                     }
                 }
-                // A source names a copied run of that message on the part.
+                // A source names a copied run of that message on each byte
+                // of the part: the scanner checked each of these bytes
+                // against the message (#415).
                 if let Some(src) = p["source"].as_str() {
-                    let over = marks.iter().any(|m| {
-                        m.range.start < at + t.len()
-                            && at < m.range.end
-                            && m.source.map(|s| format_id(Kind::Message, s)).as_deref() == Some(src)
-                    });
-                    assert!(over, "{text:?} {marks:?} {parts:?}");
+                    for i in at..at + t.len() {
+                        let over = marks.iter().any(|m| {
+                            m.range.contains(&i)
+                                && m.source.map(|s| format_id(Kind::Message, s)).as_deref()
+                                    == Some(src)
+                        });
+                        assert!(over, "byte {i}: {text:?} {marks:?} {parts:?}");
+                    }
                 }
                 at += t.len();
                 got.push_str(t);
@@ -304,6 +312,31 @@ mod tests {
                 ("one two three".into(), json!("m-1")),
                 (". ".into(), Value::Null),
                 ("four five six".into(), json!("m-2")),
+            ]
+        );
+    }
+
+    /// Two copied runs of one message with changed punctuation between
+    /// them: the punctuation has no source (#415).
+    #[test]
+    fn the_gap_between_two_copied_runs_of_one_message_has_no_source() {
+        let text = "one two three; four five six";
+        let run = |range: Range<usize>| Mark {
+            flag: "untrusted_content",
+            field: Field::Body,
+            range,
+            source: Some(1),
+        };
+        let got: Vec<(String, Value)> = parts(text, &[run(0..13), run(15..28)], Field::Body)
+            .into_iter()
+            .map(|p| (p["text"].as_str().unwrap().to_string(), p["source"].clone()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("one two three".into(), json!("m-1")),
+                ("; ".into(), Value::Null),
+                ("four five six".into(), json!("m-1")),
             ]
         );
     }
