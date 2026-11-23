@@ -168,13 +168,32 @@ Use these steps if the release has no program for your system:
 
 ## 7. Roll back
 
-Install the release before the bad release:
+CAUTION: If the bad release migrated the store, the older program cannot open
+the store. It stops with an unknown schema version. The error stays after you
+remove an account or the data of a new feature. Only a backup from before the
+update lets you roll back.
 
-```bash
-curl -fsSLO https://raw.githubusercontent.com/divyekant/iris/main/scripts/install.sh && IRIS_VERSION=v2026.11.16.1 sh install.sh
-```
+Before each update, run `iris backup <empty-folder>`. Keep the backup until
+you no longer need to roll back. The backup holds your mail and the key, so
+keep it private.
 
-Replace `v2026.11.16.1` with the tag of the earlier release (see the GitHub Releases page).
+To roll back, do these steps:
+
+1. Stop the engine. If the background service runs it, run
+   `iris service remove`.
+2. Install the release before the bad release:
+
+   ```bash
+   curl -fsSLO https://raw.githubusercontent.com/divyekant/iris/main/scripts/install.sh && IRIS_VERSION=v2026.11.16.1 sh install.sh
+   ```
+
+   Replace `v2026.11.16.1` with the tag of the earlier release (see the
+   GitHub Releases page).
+3. If the bad release migrated the store, move the data folder away and copy
+   the backup in its place: `~/Library/Application Support/iris` on macOS,
+   `~/.local/share/iris` on Linux.
+4. Run `iris status`. Make sure that it shows your accounts.
+5. Run `iris service install`.
 
 The service file points to `~/.local/bin/iris`, so the service runs the old
 program after a restart of the service. To restart it:
