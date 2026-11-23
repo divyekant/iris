@@ -72,11 +72,13 @@ impl Store {
     /// of content files in the copy. A content file that the database
     /// refers to and that is not there is an error: the copy is not complete.
     ///
-    /// The copy is made in a folder next to `dest` and gets the name `dest`
-    /// only when it is complete. After an error, the function removes that
-    /// folder, so a new backup to the same path can start (#63). After a
-    /// crash, the folder `.<name>.partial-<pid>` can stay; it never blocks
-    /// a new backup.
+    /// The copy is made in a new folder next to `dest` (next to its target,
+    /// if `dest` is a symbolic link to an empty folder) and gets the name
+    /// `dest` only when it is complete. After an error, the function removes
+    /// that folder, so a new backup to the same path can start (#63). After
+    /// a crash, the folder `.<name>.partial-<pid>-<n>` can stay (#790); it
+    /// never blocks a new backup, and a backup never removes or writes into
+    /// a folder that it did not make.
     pub fn backup(&self, dest: &Path) -> Result<u64> {
         let _lock = self.backup_lock()?;
         if dest.exists() && fs::read_dir(dest)?.next().is_some() {
@@ -85,20 +87,15 @@ impl Store {
                 "the folder is not empty",
             )));
         }
-        let name = dest
-            .file_name()
-            .ok_or_else(|| Error::Io(io::Error::other("the backup path has no folder name")))?;
-        let partial = dest.with_file_name(format!(
-            ".{}.partial-{}",
-            name.to_string_lossy(),
-            std::process::id()
-        ));
-        // A folder of this name is a copy that an earlier run of this
-        // process ID did not end.
-        match fs::remove_dir_all(&partial) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
-            _ => {}
-        }
+        // The rename replaces a symbolic link itself: put the copy at the
+        // folder that the link names.
+        let dest = if dest.exists() {
+            fs::canonicalize(dest)?
+        } else {
+            dest.to_path_buf()
+        };
+        let dest = dest.as_path();
+        let partial = new_partial(dest)?;
         let files = match self.backup_into(&partial) {
             Ok(files) => files,
             Err(e) => {
@@ -374,6 +371,28 @@ fn copy_private(from: &Path, to: &Path) -> io::Result<()> {
 
 fn sync_file(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
+}
+
+/// Make a new private folder `.<name>.partial-<pid>-<n>` next to `dest`,
+/// with the first `n` that no file or folder has.
+fn new_partial(dest: &Path) -> Result<std::path::PathBuf> {
+    let name = dest
+        .file_name()
+        .ok_or_else(|| Error::Io(io::Error::other("the backup path has no folder name")))?
+        .to_string_lossy()
+        .into_owned();
+    for n in 0.. {
+        let partial = dest.with_file_name(format!(".{name}.partial-{}-{n}", std::process::id()));
+        let mut b = fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+        match b.create(&partial) {
+            Ok(()) => return Ok(partial),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    unreachable!("the loop returns")
 }
 
 /// Give the complete copy `partial` the name `dest`, and write the folder

@@ -578,3 +578,38 @@ fn a_failed_backup_leaves_no_partial_copy() {
     assert_eq!(store.backup(&dest.0).unwrap(), 1);
     assert!(missing_files(&dest.0).is_empty());
 }
+
+// Invariant (review of #785): a backup never removes or writes into a
+// folder that it did not make, and a symbolic link to an empty folder
+// gets the copy at its target.
+#[cfg(unix)]
+#[test]
+fn a_backup_keeps_other_folders_and_follows_a_link() {
+    let dir = TempDir::new("keep");
+    let dest = TempDir::new("keep-copy");
+    let target = TempDir::new("keep-target");
+    let store = Store::open(&dir.0).unwrap();
+    let name = dest.0.file_name().unwrap().to_string_lossy().to_string();
+    let other = dest
+        .0
+        .with_file_name(format!(".{name}.partial-{}-0", std::process::id()));
+    let _ = fs::remove_dir_all(&other);
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("mine"), b"keep").unwrap();
+    store.backup(&dest.0).unwrap();
+    assert_eq!(fs::read(other.join("mine")).unwrap(), b"keep");
+    assert!(dest.0.join("iris.db").exists());
+    fs::remove_dir_all(&other).unwrap();
+
+    fs::create_dir_all(&target.0).unwrap();
+    let link = dest.0.with_file_name(format!("{name}-link"));
+    let _ = fs::remove_file(&link);
+    std::os::unix::fs::symlink(&target.0, &link).unwrap();
+    store.backup(&link).unwrap();
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(target.0.join("iris.db").exists());
+    fs::remove_file(&link).unwrap();
+}

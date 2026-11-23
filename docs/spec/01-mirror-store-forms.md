@@ -368,9 +368,12 @@ makes a copy while the engine runs:
    backup cannot decrypt the secrets.
 5. Release the lock.
 
-The engine makes the copy in the folder `.<name>.partial-<pid>` next to the
-destination, and renames it to the destination only when it is complete.
-The failure list of the backup:
+The engine makes the copy in the folder `.<name>.partial-<pid>-<n>` next to the
+destination, with the first free number `<n>`, and renames it to the
+destination only when it is complete. If the destination is a symbolic link
+to an empty folder, the copy goes next to the target of the link, and the
+link stays. The backup never removes or writes into a folder that it did
+not make. The failure list of the backup:
 
 | Input or event | Result |
 |---|---|
