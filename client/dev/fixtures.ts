@@ -769,7 +769,7 @@ export const measures: Measures = {
     ["2026-11-09", 0], ["2026-11-08", 2], ["2026-11-07", 1], ["2026-11-05", 3], ["2026-11-04", 2], ["2026-11-03", 4],
   ].map(([day, opens]) => ({ day: day as string, opens: opens as number })),
   first_brief: { connect: "2026-11-03T08:00:00Z", brief: "2026-11-03T08:05:40Z", seconds: 340 },
-  mirror: [{ account: "owner@example.com", checked: "2026-11-16T07:12:00Z", differences: 0, complete: true }],
+  mirror: [{ account: "owner@example.com", checked: "2026-11-16T07:12:00Z", differences: 0, complete: true, skipped: 0, stopped: false }],
   memory: { rss_kib: 31_744, messages: 18_402 },
   approvals: { decided: 50, approved: 47 },
   undo: { applied: 48, undone: 1 },
