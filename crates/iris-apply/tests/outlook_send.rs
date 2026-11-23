@@ -603,3 +603,47 @@ fn a_failed_store_source_gives_an_error() {
     let id = b.fake.messages().into_keys().next().unwrap();
     assert!(failing.minimal(TOKEN, &id).is_err());
 }
+
+/// A provider value with no sent copies, as a sync that read the labels
+/// before the send completion committed.
+fn stale(b: &Box) -> Outlook {
+    Outlook::new(Graph::new(Config {
+        base_url: b.fake.base_url(),
+        ..Config::default()
+    }))
+}
+
+/// Migration 41 (review of #768): a label write that a stale read made
+/// cannot remove SENT from a confirmed copy, in any order of the sync and
+/// the completion.
+#[test]
+fn a_stale_label_write_keeps_sent_on_a_confirmed_copy() {
+    let b = setup("stale-remove");
+    let (s, _) = b.new_mail(AGED);
+    assert!(matches!(b.release(s), Outcome::Applied(_)));
+    let copy = b.row().1.expect("the send is complete");
+    iris_sync::sync(&b.store, &b.outlook, b.account, TOKEN).unwrap();
+    assert!(b.labels(&copy).contains(&"SENT".to_string()));
+    // The difference starts a full resync, which writes the stale labels.
+    assert!(b.differences(&stale(&b)) > 0);
+    iris_sync::sync(&b.store, &stale(&b), b.account, TOKEN).unwrap();
+    assert!(b.labels(&copy).contains(&"SENT".to_string()));
+    assert_eq!(b.differences(&b.outlook), 0);
+}
+
+/// The completion confirms a copy that is not in the mirror yet, and then a
+/// stale sync copies it: the copy gets SENT.
+#[test]
+fn a_stale_sync_of_a_confirmed_copy_adds_sent() {
+    let b = setup("stale-add");
+    let (s, _) = b.new_mail(AGED);
+    b.fake.hold_copies(true);
+    assert_eq!(b.release(s), Outcome::Pending);
+    b.fake.deliver_copies();
+    iris_apply::recover(&b.store, &b.outlook, &mut tok(), b.account).unwrap();
+    let copy = b.row().1.expect("the send is complete");
+    assert!(b.labels(&copy).is_empty(), "not in the mirror yet");
+    iris_sync::sync(&b.store, &stale(&b), b.account, TOKEN).unwrap();
+    assert!(b.labels(&copy).contains(&"SENT".to_string()));
+    assert_eq!(b.differences(&b.outlook), 0);
+}

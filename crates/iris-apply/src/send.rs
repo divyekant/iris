@@ -556,14 +556,10 @@ fn complete(
 /// sent (Outlook) gets this list at its start.
 pub fn sent_by_iris(store: &Store, account: i64) -> Result<Vec<String>> {
     Ok(store.read(|c| {
-        let mut st = c.prepare(
-            "SELECT d.sent_message FROM draft d
-             WHERE d.account_id = ?1 AND d.sent_message IS NOT NULL
-               AND NOT EXISTS (SELECT 1 FROM action_draft ad JOIN ledger l ON l.action_id = ad.action_id
-                               WHERE ad.draft_id = d.id AND l.error LIKE '% ' || ?2)",
-        )?;
+        // The view of migration 41: the store triggers that keep SENT read it too.
+        let mut st = c.prepare("SELECT provider_id FROM iris_sent_copy WHERE account_id = ?1")?;
         let ids = st
-            .query_map(params![account, SENT_OTHER_END], |r| r.get(0))?
+            .query_map([account], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         Ok(ids)
     })?)

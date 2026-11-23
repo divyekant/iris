@@ -450,7 +450,13 @@ person or a sender can set. Two existing rules read such data as proof:
   the account (`iris_apply::sent_by_iris`). The provider reads the source
   before each label read, so a send that another engine process completed
   counts too (issue #719). A failed read of the source is an error, not
-  labels with no `SENT`. A draft with a
+  labels with no `SENT`. Migration 41 keeps the rule in the store, for
+  each order of a sync and a completion: the view `iris_sent_copy` holds
+  the confirmed copies (`sent_by_iris` reads it), a write that removes
+  `SENT` from a confirmed copy of an Outlook account does nothing, and a
+  label write of a confirmed copy with no `SENT` adds `SENT`. The triggers
+  run in the transaction of the write, so a sync that read the labels
+  before the completion committed cannot remove `SENT`. A draft with a
   send whose copy had other content is left out. The completion calls
   `sent_confirmed` only after the content check. Each label read of the
   provider (sync, verify, the apply) adds `SENT` for these IDs, so the
