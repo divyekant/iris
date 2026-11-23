@@ -289,6 +289,16 @@ async fn status_with_no_account_and_with_a_sync() {
     assert_eq!(v["accounts"], json!([]));
     assert_eq!(v["mode"], "observe");
     assert_eq!(v["messages"]["total"], 0);
+    // No model is set: the client says how to set one (issue 740).
+    assert_eq!(v["model"], false);
+    exec(
+        &store,
+        "INSERT INTO model_setting(id, provider, base_url, model, version, max_tokens, timeout_s)
+         VALUES (1, 'local', 'http://127.0.0.1:1/v1', 'm', 1, 100, 5)",
+        [],
+    );
+    let (_, v) = get(&store, "/api/status").await;
+    assert_eq!(v["model"], true);
 
     let acc = store.add_account("gmail", "owner@example.com").unwrap();
     exec(

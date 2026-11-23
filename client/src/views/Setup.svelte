@@ -5,7 +5,8 @@
 <script lang="ts">
   import { get, type Status } from "../api";
   import { poll as every } from "../clock";
-  import { across, copying, unfinished } from "../format";
+  import { across, copying, needsModel, unfinished } from "../format";
+  import NoModel from "./NoModel.svelte";
 
   let { status: initial, poll = 2000 }: { status: Status; poll?: number } = $props();
   // svelte-ignore state_referenced_locally
@@ -65,6 +66,7 @@
       <p class="big"><strong>{number(m.fetched)}</strong> of {m.total ? number(m.total) : "all"} messages copied{across(status)}.</p>
       <progress max={m.total || 1} value={m.fetched} aria-label="Messages copied"></progress>
       <p class="quiet">Iris only reads. Nothing in your mailbox changes. You can close this page: the copy continues.</p>
+      {#if needsModel(status)}<NoModel />{/if}
       {#if m.understood > 0}
         <p>Your first brief is ready. It grows as the copy continues.</p>
         <a class="go" href="#/brief">Open the brief</a>
@@ -78,6 +80,7 @@
         <progress max={m.fetched || 1} value={m.understood} aria-label="Messages read"></progress>
         <p class="quiet">Iris reads the mail to make your brief: {number(m.understood)} of {number(m.fetched)} messages.</p>
       {/if}
+      {#if needsModel(status)}<NoModel />{/if}
       <a class="go" href="#/brief">Open the brief</a>
     </section>
   {/if}

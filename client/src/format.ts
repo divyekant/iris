@@ -268,3 +268,7 @@ export function addPage(items: Item[], more: Item[]): Item[] {
   const seen = new Set(items.map((i) => i.id));
   return [...items, ...more.filter((i) => !seen.has(i.id))];
 }
+
+/** True when mail waits for a model and no model is set (issue 740): only the fixed rules read mail. */
+export const needsModel = (status: Status | null): boolean =>
+  status?.model === false && status.messages.understood < status.messages.fetched;

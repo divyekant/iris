@@ -63,6 +63,9 @@ pub struct Status {
     pub mode: &'static str,
     pub accounts: Vec<Account>,
     pub messages: Counts,
+    /// True if a model is set. With no model, only the fixed rules read
+    /// the mail (`iris model set`).
+    pub model: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -322,10 +325,16 @@ pub fn status(store: &Store) -> Result<Status> {
                 })
             },
         )?;
+        let model = c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM model_setting WHERE id = 1)",
+            [],
+            |r| r.get(0),
+        )?;
         Ok(Status {
             mode: iris_policy::active(c)?.policy.mode.name(),
             accounts,
             messages,
+            model,
         })
     })?)
 }
