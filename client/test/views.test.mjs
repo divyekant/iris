@@ -545,6 +545,9 @@ test("each measure says when it has no data, and the sentence names a missed tar
   assert.match(skipped.detail, /^A check skipped 2 messages that changed during the check\. Last check on/);
   assert.doesNotMatch(skipped.detail, /stopped/);
   assert.match(rows(at({ skipped: 1, stopped: false }), now)[2].detail, /skipped 1 message that/);
+  // Two accounts with skipped messages: the count is for both checks together.
+  const two = { ...empty, mirror: [{ ...at({ skipped: 2 }).mirror[0] }, { ...at({ skipped: 3 }).mirror[0], account: "b@example.com" }] };
+  assert.match(rows(two, now)[2].detail, /^2 checks skipped 5 messages that changed during the check\. Last checks of 2 accounts/);
   // An error and skipped messages: both show.
   assert.match(rows(at({ skipped: 2, stopped: true }), now)[2].detail, /^A check stopped before its end\. A check skipped 2 messages/);
   // An error only, or a check that is not complete for no named cause: stopped.

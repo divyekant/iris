@@ -90,6 +90,7 @@ export function rows(m: Measures, now = new Date()): Row[] {
   const unchecked = m.mirror.length - checks.length;
   const differences = checks.reduce((a, c) => a + (c.differences ?? 0), 0);
   const skipped = checks.reduce((a, c) => a + (c.skipped ?? 0), 0);
+  const skippers = checks.filter((c) => c.skipped).length;
   // A check that is not complete for a cause that the API does not name counts as stopped.
   const stopped = checks.some((c) => c.stopped || c.differences === null || (!c.complete && !c.skipped));
   const oldest = checks.reduce((a, c) => (c.checked < a ? c.checked : a), checks[0]?.checked ?? "");
@@ -120,7 +121,7 @@ export function rows(m: Measures, now = new Date()): Row[] {
       : {
           name: "Differences from Gmail",
           value: num(differences),
-          detail: `${unchecked ? `${plural(unchecked, "account has", "accounts have")} no check yet. ` : ""}${stopped ? "A check stopped before its end. " : ""}${skipped ? `A check skipped ${plural(skipped, "message", "messages")} that changed during the check. ` : ""}${checks.length === 1 ? "Last check" : `Last checks of ${checks.length} accounts, the oldest`} on ${shortDay(oldest)}. Target: zero.`,
+          detail: `${unchecked ? `${plural(unchecked, "account has", "accounts have")} no check yet. ` : ""}${stopped ? "A check stopped before its end. " : ""}${skipped ? `${skippers === 1 ? "A check" : `${skippers} checks`} skipped ${plural(skipped, "message", "messages")} that changed during the check. ` : ""}${checks.length === 1 ? "Last check" : `Last checks of ${checks.length} accounts, the oldest`} on ${shortDay(oldest)}. Target: zero.`,
           tone: differences > 0 ? "missed" : stopped || skipped || unchecked ? "flat" : "met",
         },
     rss === null
