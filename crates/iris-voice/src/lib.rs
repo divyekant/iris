@@ -817,12 +817,17 @@ fn write_when(
             Ok(Some((account, me, snap, samples)))
         })?
         .ok_or(Error::NoThread(thread))?;
-    let based_on = check(&snap)?.id;
     // A newer mail than the one that the form answers: no call, no save
-    // (issue 576). The save checks the same snapshot again.
-    if form.parent.is_some_and(|p| p != based_on) {
+    // (issue 576). It comes before the other checks, so a new mail that
+    // understanding did not read yet gives the same answer. The save checks
+    // the same snapshot again.
+    if form
+        .parent
+        .is_some_and(|p| snap.newest.last().map(|m| m.id) != Some(p))
+    {
         return Err(Error::Changed);
     }
+    let based_on = check(&snap)?.id;
     let to = nudge
         .map(|n| n.to.to_string())
         .or_else(|| form_to.clone())

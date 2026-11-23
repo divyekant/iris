@@ -1631,6 +1631,40 @@ fn the_recipient_of_the_form_is_the_person_of_the_reply() {
     };
     write_reply(&b.store, t, to_bo, &fake, 1).unwrap();
     let calls = fake.calls.borrow();
-    let v: Value = serde_json::from_str(&calls[0].1).unwrap();
+    let data = &calls[0].1;
+    let v: Value = serde_json::from_str(data).unwrap();
     assert_eq!(v["reply_to"], "bo@example.org");
+    // The sent mail to Bo is the first sample now, before the mail to Ana.
+    let bo = data.find("Yo Bo").unwrap();
+    let ana = data.find("sure thing").unwrap();
+    assert!(bo < ana, "{data}");
+}
+
+#[test]
+fn a_new_mail_that_understanding_did_not_read_gives_changed_not_not_ready() {
+    let (b, t) = mailbox("voice-parent-unread");
+    let newest = b
+        .store
+        .read(|c| Ok(check(&snapshot(c, t)?).unwrap().id))
+        .unwrap();
+    // The new mail of the sync: the newest mail is not read yet.
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE message SET understood_at = NULL WHERE id = ?1",
+                [newest],
+            )?)
+        })
+        .unwrap();
+    let fake = Fake::new(r#"{"body": "Hi Ana, yes. D"}"#);
+    let older = Form {
+        parent: Some(newest - 1),
+        ..Form::default()
+    };
+    assert!(matches!(
+        write_reply(&b.store, t, older, &fake, 1),
+        Err(Error::Changed)
+    ));
+    assert!(fake.calls.borrow().is_empty());
+    assert_eq!(saved(&b.store, t), None);
 }
