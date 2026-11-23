@@ -1,7 +1,7 @@
 // Words for the jobs of the agents (card R4-09): the state of a job and each
 // step of its timeline, as plain sentences. Pure functions, so the tests need
 // no DOM. Text from an agent or from mail is data: the view shows it as text.
-import { get, post, type Job, type JobChangeset, type JobDetail, type JobEvent, type JobPage, type Target } from "./api";
+import { get, post, type Job, type JobChangeset, type JobDetail, type JobEvent, type JobPage, type JobSession, type Target } from "./api";
 import { daysFrom } from "./format";
 import { href } from "./route";
 
@@ -54,6 +54,31 @@ export function now(job: Job): string {
     case "done":
       return job.end === "cancel" ? `Cancelled ${day(job.updated)}.` : `Done ${day(job.updated)}.`;
   }
+}
+
+const ENDED: Record<NonNullable<JobSession["end"]>, string> = {
+  exit: "ended",
+  stop: "was stopped",
+  revoke: "ended because its access was taken back",
+  job_state: "ended when the job changed state",
+  time_limit: "ended at its time limit",
+  engine: "ended when the engine stopped",
+  launch_failed: "did not start",
+  helper_failed: "failed in its sandbox helper",
+};
+
+/**
+ * The state of a working job on its page (issue #742), from its newest session.
+ * `said` replaces the words of `now`. `ended` tells how the last session ended, and `run` is the command that starts a new one.
+ * A job that does not work, or whose session starts or runs, gives null: `now` is true for it.
+ */
+export function agent(d: Pick<JobDetail, "job" | "session">): { said: string; ended?: string; run: string } | null {
+  const s = d.session;
+  if (d.job.state !== "working" || s?.state === "starting" || s?.state === "running") return null;
+  const run = `iris job run --agent claude-code ${d.job.id}`;
+  if (!s || !s.end) return { said: "No agent works on it now.", run };
+  const code = s.end === "exit" && s.exit !== null && s.exit !== 0 ? ` with exit code ${s.exit}` : "";
+  return { said: "No agent works on it now.", ended: `The last session (${s.id}, ${s.agent}) ${ENDED[s.end]}${code}.`, run };
 }
 
 /** One step of the timeline. `quote` is text of the agent or the person, shown as text. */

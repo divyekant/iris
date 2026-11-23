@@ -80,6 +80,22 @@ test("the state now in words", () => {
   assert.equal(j.now({ ...jobs["j-9"], end: "cancel" }), "Cancelled Fri 13 Nov.");
 });
 
+test("a working job with no running session says that no agent works on it, and how to start one (issue #742)", async () => {
+  const d = fx.jobDetails["j-15"];
+  const run = "iris job run --agent claude-code j-15";
+  assert.deepEqual(j.agent(d), { said: "No agent works on it now.", ended: "The last session (se-3, claude-code) ended with exit code 1.", run });
+  assert.deepEqual(j.agent({ ...d, session: null }), { said: "No agent works on it now.", run });
+  const ended = (end, exit = null, state = "ended") => j.agent({ ...d, session: { ...d.session, state, end, exit } }).ended;
+  assert.equal(ended("exit", 0), "The last session (se-3, claude-code) ended.");
+  assert.equal(ended("launch_failed"), "The last session (se-3, claude-code) did not start.");
+  assert.equal(ended("stop", null, "ending"), "The last session (se-3, claude-code) was stopped.");
+  for (const state of ["starting", "running"]) assert.equal(j.agent({ ...d, session: { ...d.session, state, end: null, exit: null } }), null, state);
+  for (const id of ["j-12", "j-14"]) assert.equal(j.agent({ ...fx.jobDetails[id], session: null }), null, id);
+  const page = text(await render("/src/views/Job.svelte", { detail: d }));
+  for (const words of ["No agent works on it now.", "ended with exit code 1.", run]) assert.ok(page.includes(words), words);
+  assert.ok(!page.includes("The agent works on it."), page);
+});
+
 test("a due date has a tone near its day and after it; an ended job keeps the date with no tone", () => {
   const job = { ...fx.jobs["j-12"], due: "2026-11-20T00:00:00.000Z" };
   assert.equal(j.due(job, new Date("2026-11-10T12:00:00Z")).tone, "");

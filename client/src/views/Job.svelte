@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import type { JobDetail } from "../api";
-  import { clock, day, due, now, steps, waitMail } from "../jobs";
+  import { agent, clock, day, due, now, steps, waitMail } from "../jobs";
   import Grants from "./Grants.svelte";
 
   let { detail }: { detail: JobDetail } = $props();
@@ -15,6 +15,7 @@
   let limit = $derived(due(job));
   let list = $derived(steps(detail));
   let mail = $derived(job.state === "waiting" ? waitMail(detail.threads, job.wait?.thread) : null);
+  let idle = $derived(agent(detail));
   // The day shows above the first step of each day.
   const newDay = (i: number) => i === 0 || day(list[i - 1].at) !== day(list[i].at);
 </script>
@@ -26,12 +27,16 @@
   <span>Started {day(job.created)}</span>
 </p>
 
-<section class="now {job.state}" aria-label="Now">
+<section class="now {job.state}" class:idle aria-label="Now">
   {#if job.state === "needs_you"}
     <p class="label">The agent asks you</p>
     <p class="question">{job.question}</p>
   {:else}
-    <p class="said">{now(job)}</p>
+    <p class="said">{idle ? idle.said : now(job)}</p>
+    {#if idle}
+      {#if idle.ended}<p class="ended">{idle.ended}</p>{/if}
+      <p class="run">To start an agent, on the machine that runs Iris, run <code>{idle.run}</code>.</p>
+    {/if}
     {#if mail}<p class="mail"><a class="touch" href={mail.link}>{mail.subject}</a></p>{/if}
   {/if}
 </section>
@@ -103,6 +108,10 @@
   .now.done {
     border-left-color: var(--color-success);
   }
+  /* No agent works on the job: the border does not say "works". */
+  .now.working.idle {
+    border-left-color: var(--color-border);
+  }
   p {
     margin: 0;
   }
@@ -117,6 +126,16 @@
   }
   .said {
     font-size: var(--font-size-1);
+  }
+  .ended,
+  .run {
+    color: var(--color-text-muted);
+    font-size: var(--font-size--1);
+    margin-top: var(--space-1);
+  }
+  code {
+    font-family: var(--font-family-mono);
+    overflow-wrap: anywhere;
   }
   .mail {
     color: var(--color-text-muted);

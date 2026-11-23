@@ -389,7 +389,16 @@ export type JobPage = { jobs: Job[]; next: string | null };
 /** A submitted changeset of a job: `actions` counts the actions of its newest revision in each state. */
 export type JobChangeset = { id: string; at: string; state: string; why: string | null; actions: Record<string, number> };
 /** One job (GET /api/jobs/{id}): the job with its events, its changesets, and the newest mail of each wait thread. */
-export type JobDetail = { job: Job & { events: JobEvent[] }; changesets: JobChangeset[]; threads: Record<string, Target> };
+/** The newest session of a job (issue #742). */
+export type JobSession = {
+  id: string;
+  agent: string;
+  state: "starting" | "running" | "ending" | "ended";
+  end: "exit" | "stop" | "revoke" | "job_state" | "time_limit" | "engine" | "launch_failed" | "helper_failed" | null;
+  exit: number | null;
+  ended: string | null;
+};
+export type JobDetail = { job: Job & { events: JobEvent[] }; changesets: JobChangeset[]; threads: Record<string, Target>; session?: JobSession | null };
 
 export const SIGN_IN = "Sign in: run iris open in Terminal.";
 export const SIGN_IN_FAILED = "This sign-in address was used, ended or is not valid. Run iris open in Terminal for a new address.";

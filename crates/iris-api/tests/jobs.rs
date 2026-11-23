@@ -493,3 +493,46 @@ async fn an_answer_to_an_older_question_is_refused() {
         assert_eq!(code, StatusCode::OK);
     }
 }
+
+/// Issue #742: the job page says if an agent works on the job. `session`
+/// is the newest session of the job, or null.
+#[tokio::test]
+async fn one_job_names_its_newest_session() {
+    let dir = temp("session");
+    let s = store(&dir);
+    let job = iris_job::create(&s, "Get the contract.", None, NOW).unwrap();
+    let uri = format!("/api/jobs/{}", iris_job::format_job_id(job));
+
+    let (code, v) = get(&s, &uri).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(v["session"], Value::Null, "no session yet");
+
+    let first = iris_job::register(&s, job, "claude-code", NOW + 1).unwrap();
+    let (_, v) = get(&s, &uri).await;
+    assert_eq!(v["session"]["id"], iris_job::format_session_id(first));
+    assert_eq!(v["session"]["agent"], "claude-code");
+    assert_eq!(v["session"]["state"], "starting");
+    assert_eq!(v["session"]["end"], Value::Null);
+
+    iris_job::start(&s, first, NOW + 2).unwrap();
+    let (_, v) = get(&s, &uri).await;
+    assert_eq!(v["session"]["state"], "running");
+
+    iris_job::end(&s, first, iris_job::EndReason::Exit, Some(1), NOW + 3).unwrap();
+    let (_, v) = get(&s, &uri).await;
+    assert_eq!(v["session"]["state"], "ending", "not reaped yet");
+    iris_job::reap(&s, first, NOW + 3).unwrap();
+    let (_, v) = get(&s, &uri).await;
+    assert_eq!(v["session"]["state"], "ended");
+    assert_eq!(v["session"]["end"], "exit");
+    assert_eq!(v["session"]["exit"], 1);
+    assert!(v["session"]["ended"].is_string());
+
+    // The newest session wins.
+    let second = iris_job::register(&s, job, "codex", NOW + 4).unwrap();
+    iris_job::end(&s, second, iris_job::EndReason::LaunchFailed, None, NOW + 5).unwrap();
+    let (_, v) = get(&s, &uri).await;
+    assert_eq!(v["session"]["id"], iris_job::format_session_id(second));
+    assert_eq!(v["session"]["end"], "launch_failed");
+    assert_eq!(v["session"]["exit"], Value::Null);
+}

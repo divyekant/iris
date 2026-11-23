@@ -101,7 +101,7 @@ fn io(e: std::io::Error) -> Error {
     Error::Store(e.into())
 }
 
-/// `{"job", "changesets", "threads"}` of one job:
+/// `{"job", "changesets", "threads", "session"}` of one job:
 ///
 /// - `job`: the job document (`docs/spec/schema/job.schema.json`).
 /// - `changesets`: each submitted changeset of the job (`author_job`), the
@@ -110,6 +110,8 @@ fn io(e: std::io::Error) -> Error {
 ///   revision in each state.
 /// - `threads`: for each thread of a wait of the job, the summary of its
 ///   newest message that is not gone, or `{"id", "gone": true}`.
+/// - `session`: the newest session of the job, or null (see
+///   [`newest_session`]).
 ///
 /// The answer streams. All parts come from one read of the store. If the
 /// job document fails, `out` gets no byte (issue #303).
@@ -153,7 +155,43 @@ fn write_job_in(c: &Connection, row: i64, out: &mut impl Write) -> Result<()> {
     out.write_all(b"],\"threads\":").map_err(io)?;
     let threads = wait_threads(c, row).map_err(sql)?;
     serde_json::to_writer(&mut *out, &threads).map_err(|e| io(std::io::Error::other(e)))?;
+    out.write_all(b",\"session\":").map_err(io)?;
+    let session = newest_session(c, row)?;
+    serde_json::to_writer(&mut *out, &session).map_err(|e| io(std::io::Error::other(e)))?;
     out.write_all(b"}").map_err(io)
+}
+
+/// The newest session of `job` (issue #742), or null:
+/// `{"id", "agent", "state", "end", "exit", "ended"}`. `state` is
+/// `starting`, `running`, `ending` (ended, its processes not reaped yet)
+/// or `ended`, as `iris job session` says.
+fn newest_session(c: &Connection, job: i64) -> Result<Value> {
+    let id: Option<i64> = c
+        .query_row(
+            "SELECT id FROM job_session WHERE job_id = ?1 ORDER BY id DESC LIMIT 1",
+            [job],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql)?;
+    let Some(id) = id else {
+        return Ok(Value::Null);
+    };
+    let s = iris_job::session_in(c, id).map_err(job_error)?;
+    let state = match (s.started_ms, s.end, s.reaped_ms) {
+        (None, None, _) => "starting",
+        (Some(_), None, _) => "running",
+        (_, Some(_), None) => "ending",
+        (_, Some(_), Some(_)) => "ended",
+    };
+    Ok(json!({
+        "id": iris_job::format_session_id(s.id),
+        "agent": s.agent,
+        "state": state,
+        "end": s.end.map(|e| e.as_str()),
+        "exit": s.exit_code,
+        "ended": s.ended_ms.map(rfc3339),
+    }))
 }
 
 fn sql(e: rusqlite::Error) -> Error {
