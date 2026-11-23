@@ -547,18 +547,14 @@ fn read_answer(json: &Value, docs: &[Doc]) -> Option<(Vec<Claim>, Vec<Source>)> 
 }
 
 /// True if `text` holds `quote` with no word cut: with any run of white
-/// space as one space, and no difference of case. A word is letters and
+/// space as one space, no difference of case, and typographic marks as
+/// their plain forms (`prompt::squash`). A word is letters and
 /// digits, also joined by one mark of [`JOIN`] (`1,234`, `07:40`, `e-mail`).
 /// Neither end of a match may fall inside a word of the text, whatever the
 /// quote starts or ends with.
 fn has(text: &str, quote: &str) -> bool {
-    let norm = |s: &str| {
-        s.split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase()
-    };
-    let (text, quote) = (norm(text), norm(quote));
+    // The same fold as the quote check of an item (#102).
+    let (text, quote) = (crate::prompt::squash(text), crate::prompt::squash(quote));
     if quote.is_empty() {
         return false;
     }
@@ -746,6 +742,16 @@ mod tests {
         ] {
             assert_eq!(has(text, q), want, "{q:?}");
         }
+        // #102: typographic marks match their plain forms, on either side.
+        let text = "Don\u{2019}t miss it - the \"Lisbon\" gate\u{2026}";
+        assert!(has(
+            text,
+            "don't miss it \u{2013} the \u{201C}lisbon\u{201D} gate..."
+        ));
+        assert!(!has(
+            text,
+            "don't miss it \u{2013} the \u{201C}porto\u{201D}"
+        ));
     }
 
     /// A span of whole words of a text is a quote, also with the

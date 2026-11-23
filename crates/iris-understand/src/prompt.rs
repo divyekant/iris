@@ -385,9 +385,26 @@ fn in_mail(quote: &str, a: &Analysis) -> bool {
         .any(|t| squash(t).contains(&q))
 }
 
-/// `s` in lowercase, with each run of white space as one space.
-fn squash(s: &str) -> String {
-    s.split_whitespace()
+/// `s` in lowercase, with each run of white space as one space, and the
+/// typographic forms of a quote mark, an apostrophe, a dash and an ellipsis
+/// as their plain forms. Models often change these forms (#102). The fold
+/// is the same on both sides and changes no letter or digit, so a made-up
+/// quote still fails.
+pub(crate) fn squash(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' | '\u{2032}' => out.push('\''),
+            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' | '\u{2033}' | '\u{00AB}'
+            | '\u{00BB}' => out.push('"'),
+            '\u{2010}'..='\u{2015}' | '\u{2212}' => out.push('-'),
+            '\u{2026}' => out.push_str("..."),
+            // Invisible: a soft hyphen and the zero-width characters.
+            '\u{00AD}' | '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}' => {}
+            c => out.push(c),
+        }
+    }
+    out.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
