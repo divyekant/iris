@@ -1161,6 +1161,7 @@ dependencies = [
 name = "iris-policy"
 version = "0.0.0"
 dependencies = [
+ "iris-job",
  "iris-store",
  "rusqlite",
  "serde",
