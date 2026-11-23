@@ -591,7 +591,7 @@ fn one_large_header_gives_the_same_answer() {
 /// a display name, a quoted string or a comment. It is not an address of
 /// the entry.
 fn entry(rng: &mut Rng, a: &str, d: &str) -> String {
-    match rng.next() % 11 {
+    match rng.next() % 13 {
         0 => a.to_string(),
         1 => format!("<{a}>"),
         2 => format!("\"Ana Lee\" <{a}>"),
@@ -603,6 +603,9 @@ fn entry(rng: &mut Rng, a: &str, d: &str) -> String {
         7 => format!("\"Ana \\\", {d}, \\\"x\" <{a}>"),
         8 => format!("\"Ana (x, {d})\" <{a}>"),
         9 => format!("{a} (note \"x, {d}\")"),
+        // Quoted pairs in a comment: `\)` and `\(` do not end or open it.
+        10 => format!("{a} (x\\), <{d}>, tail)"),
+        11 => format!("(x\\( {d}, y) {a}"),
         _ => format!("Ana Lee <{a}>"),
     }
 }
