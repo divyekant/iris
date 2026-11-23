@@ -43,9 +43,10 @@ to review: the property test of "Acceptance criteria" passes.
 - Other verbs of a marked author (`trash`, `label`, the state verbs). The
   hostile hard limit (spec 2, section 6.5) covers mail with a hostile mark.
   A limit issue records the rest.
-- A new screen or new words. The review screen already shows
+- New words for the flag itself. The review screen already shows
   `outside_thread` as "Goes to an address that is not in the thread"
-  (`client/src/review.ts`).
+  (`client/src/review.ts`). The tag on each address came later (issue
+  462, see section 3).
 - The `draft` and `send` verbs in a session (spec 2, section 8.2). They
   stay refused.
 
@@ -99,11 +100,14 @@ stored raw bytes of the draft of a `send`.
 Submit (`iris_changeset::submit_in`) adds `outside_thread` to a `draft` or a
 `send` action when the changeset author is marked
 (`iris_changeset::marked_in`) and the content has an outside address
-(`iris_changeset::outside_marks` is not empty). The flag has no mark on
-a field: the drafts API of the review lists it in `unmarked`, and the
-review screen shows it in words ("Goes to an address that is not in the
-thread"). A mark on each address waits for a short tag in the review
-screen, a screen change for the owner to pick. Submit reads the mark and the thread addresses in its own
+(`iris_changeset::outside_marks` is not empty). The drafts API of the
+review (`GET /api/changesets/{id}/drafts`) marks each outside address of
+`to` and `cc` with the flag `outside_thread`, by the same rule
+(`outside_marks`). The review screen shows the tag "not in the thread"
+beside each marked address (issue 462). If no address has the mark (for
+example, the thread changed after the submit), the API lists the flag in
+`unmarked`, and the review screen shows it in words ("Goes to an address
+that is not in the thread"). Submit reads the mark and the thread addresses in its own
 transaction. The release does not compute the flag again: the person
 approved the action with the flag in view, and the content hash binds the
 recipients.
