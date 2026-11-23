@@ -161,9 +161,10 @@ it, and saves it encrypted. Use an app password if your provider has them.
 To give a new password, run `iris account add-imap <address>` with no
 `--host`. Then start the engine with `iris serve`.
 
-An IMAP account has these limits: Iris can change the read and star state
-and the keywords of a message. It cannot archive, move, trash or send, and it
-makes no new label.
+An IMAP account has these limits: Iris can change the read state of a
+message, and add or remove a keyword that the server already lists. It cannot
+archive, move, trash, draft or send (issues #775 and #628), and it makes no new
+keyword (issue #652).
 
 ## Data folder and the web client
 
