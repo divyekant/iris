@@ -977,3 +977,57 @@ fn read_to_writes_the_answer_after_the_read_ends() {
         .to_string_lossy()
         .starts_with(".spool")));
 }
+
+/// A peer writer that opens one more streamed answer at its first write,
+/// until a [`Store::read_to`] refuses.
+struct Nest<'a> {
+    store: &'a Store,
+    open: usize,
+    refused_at: &'a std::cell::Cell<Option<usize>>,
+}
+
+impl std::io::Write for Nest<'_> {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        if self.refused_at.get().is_none() {
+            let mut inner = Nest {
+                store: self.store,
+                open: self.open + 1,
+                refused_at: self.refused_at,
+            };
+            let r = self.store.read_to(&mut inner, |_, w| -> Result<(), Error> {
+                std::io::Write::write_all(w, b"x")?;
+                Ok(())
+            });
+            if r.is_err() {
+                self.refused_at.set(Some(self.open + 1));
+            }
+        }
+        Ok(b.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+// Invariant (#713): at most MAX_SPOOLS streamed answers of one store hold
+// a spool file at the same time, and each place comes back at the end.
+#[test]
+fn read_to_limits_the_open_spools() {
+    let dir = TempDir::new("read-to-limit");
+    let s = Store::open(&dir.0).unwrap();
+    for _ in 0..2 {
+        let refused_at = std::cell::Cell::new(None);
+        let mut out = Nest {
+            store: &s,
+            open: 1,
+            refused_at: &refused_at,
+        };
+        s.read_to(&mut out, |_, w| -> Result<(), Error> {
+            std::io::Write::write_all(w, b"x")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(refused_at.get(), Some(iris_store::MAX_SPOOLS + 1));
+    }
+}

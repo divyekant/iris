@@ -279,6 +279,20 @@ pub struct Body {
 /// The output of [`Store::read_to`]: a buffered spool file.
 pub type Spool = io::BufWriter<fs::File>;
 
+/// The most streamed answers ([`Store::read_to`]) of one store at the same
+/// time. Each one holds a spool file open until its peer reads the end, so
+/// many slow peers could use all file descriptors of the process (#713).
+pub const MAX_SPOOLS: usize = 32;
+
+/// One place of [`MAX_SPOOLS`], given back at the drop.
+struct SpoolSlot<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl Drop for SpoolSlot<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// An open data folder. One write connection and 2 read connections
 /// (specification 1, section 5.2). All writes go through the write connection.
 pub struct Store {
@@ -286,6 +300,8 @@ pub struct Store {
     key: [u8; 32],
     writer: Mutex<Connection>,
     readers: [Mutex<Connection>; 2],
+    /// The streamed answers that hold a spool file now.
+    spools: std::sync::atomic::AtomicUsize,
 }
 
 impl Store {
@@ -324,6 +340,7 @@ impl Store {
             key,
             readers: [reader()?, reader()?],
             writer: Mutex::new(writer),
+            spools: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -369,12 +386,14 @@ impl Store {
     /// reader of `out` then never holds a store connection, so the other
     /// threads of the engine never wait for a peer. The spool is a file in
     /// the data folder with no name, so memory stays flat. If `f` gives an
-    /// error, `out` gets no byte.
+    /// error, `out` gets no byte. With [`MAX_SPOOLS`] answers open, it
+    /// gives an error at once, with no read and no byte to `out`.
     pub fn read_to<T, E: From<Error>>(
         &self,
         out: &mut impl io::Write,
         f: impl FnOnce(&Connection, &mut Spool) -> std::result::Result<T, E>,
     ) -> std::result::Result<T, E> {
+        let _slot = self.spool_slot()?;
         let mut spool = io::BufWriter::new(self.spool_file()?);
         let mut res = None;
         self.read(|c| {
@@ -388,6 +407,19 @@ impl Store {
         io::Seek::rewind(&mut file).map_err(Error::Io)?;
         io::copy(&mut file, out).map_err(Error::Io)?;
         Ok(value)
+    }
+
+    /// Take one place of [`MAX_SPOOLS`], or give an error if none is free.
+    fn spool_slot(&self) -> Result<SpoolSlot<'_>> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let slot = SpoolSlot(&self.spools);
+        if self.spools.fetch_add(1, SeqCst) >= MAX_SPOOLS {
+            // The drop of `slot` gives the place back.
+            return Err(Error::Io(io::Error::other(
+                "too many answers are open at the same time; try again",
+            )));
+        }
+        Ok(slot)
     }
 
     /// A new file in the data folder (mode 0700) with no name: the open file
