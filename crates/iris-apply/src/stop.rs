@@ -50,24 +50,29 @@ pub fn stop_wait(store: &Store, wait: std::time::Duration) -> Result<Stopped> {
                changed_at = CAST(unixepoch('subsec') * 1000 AS INTEGER) WHERE id = 1",
             [],
         )?;
-        let open: Vec<i64> = {
-            let mut st = tx.prepare("SELECT id FROM job_session WHERE ended_at IS NULL")?;
-            let rows = st.query_map([], |r| r.get(0))?;
-            rows.collect::<rusqlite::Result<_>>()?
-        };
-        for &session in &open {
+        // One open session at a time, by ascending ID, so the memory does
+        // not grow with the count of open sessions (#571).
+        let mut last = 0i64;
+        let mut ended = 0usize;
+        while let Some(session) = tx.query_row(
+            "SELECT min(id) FROM job_session WHERE ended_at IS NULL AND id > ?1",
+            [last],
+            |r| r.get::<_, Option<i64>>(0),
+        )? {
             iris_job::end_in(tx, session, iris_job::EndReason::Stop, None, now()).map_err(|e| {
                 match e {
                     iris_job::Error::Store(e) => e,
                     other => iris_store::Error::Query(other.to_string()),
                 }
             })?;
+            last = session;
+            ended += 1;
         }
         let since: i64 =
             tx.query_row("SELECT stopped_at FROM stop_switch WHERE id = 1", [], |r| {
                 r.get(0)
             })?;
-        Ok((since, open.len()))
+        Ok((since, ended))
     })?;
     let (live, busy) = measure(store, wait)?;
     Ok(Stopped {
