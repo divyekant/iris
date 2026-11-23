@@ -473,6 +473,7 @@ times after an unknown result (spec 2 section 7.2).
 | A message ID that does not parse | `NotFound` | `bad_id` |
 | A message that came and went after the cursor | `Deleted` | `came_and_went_after_the_cursor` |
 | A new `UIDVALIDITY` between the read and the `STORE` | `NotFound`, nothing sent | `modify_uidvalidity` |
+| A new `UIDVALIDITY` of a folder between the check pass and the write pass | before the first `STORE`: `NotFound`, nothing sent; after a `STORE` of another folder: `Transport` (unknown result), no `STORE` to the changed folder | `modify_uidvalidity_between_the_passes` |
 | A cursor that does not parse | `HistoryExpired` | `bad_cursor` |
 | A new `UIDVALIDITY` of a folder | `HistoryExpired` | `uidvalidity_change` |
 | A folder deleted at the server | `HistoryExpired` | `folder_gone` |

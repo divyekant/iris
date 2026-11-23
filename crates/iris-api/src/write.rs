@@ -391,6 +391,7 @@ pub fn draft(
     thread: &str,
     parent: &str,
     intent: &str,
+    to: &[String],
     now_ms: fn() -> i64,
 ) -> Result<Option<Value>> {
     use iris_voice::{Error as V, Failure as F};
@@ -408,6 +409,10 @@ pub fn draft(
     if !exists {
         return Ok(None);
     }
+    // The person of the reply is the first recipient of the form (issue 535).
+    if let Some(a) = to.iter().find(|a| !valid_address(a)) {
+        return Err(Error::Query(format!("{a} is not a valid address.")));
+    }
     // The draft answers the mail that the form shows. A newer parent costs
     // no call: the person reads the new mail first. The draft gives
     // `based_on`, so the client can check it again after the call.
@@ -416,8 +421,14 @@ pub fn draft(
             "A new mail came into this thread. Read it, then ask again.".into(),
         ));
     }
-    let intent = (!intent.trim().is_empty()).then_some(intent);
-    let d = iris_voice::draft(store, row, intent, &|r| connect(r), now_ms(), &now_ms).map_err(
+    let form = iris_voice::Form {
+        intent: (!intent.trim().is_empty()).then_some(intent),
+        // The voice crate checks the parent again against the thread that it
+        // reads: a mail that arrives after the check above saves nothing (issue 576).
+        parent: now_parent,
+        to: to.first().map(String::as_str),
+    };
+    let d = iris_voice::draft(store, row, form, &|r| connect(r), now_ms(), &now_ms).map_err(
         |e| match e {
             F::Busy => Error::Unavailable(
                 "Iris reads mail with the model now. Try again in a minute.".into(),
