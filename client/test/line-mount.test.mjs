@@ -317,3 +317,67 @@ test("a ready draft owed to you shows as a nudge, and only such a line asks", as
     }
   }
 });
+
+test("a brief refresh that drops a held line keeps its Undo, and Undo sends nothing", async () => {
+  let briefs = 0;
+  const asked = [];
+  globalThis.fetch = async (url) => {
+    const path = String(url).replace(/^\/api\//, "");
+    asked.push(path);
+    let out = {};
+    // Each refresh no longer lists the item: newer items pushed it out of the section, or the list changed.
+    if (path === "brief") (briefs += 1), (out = closed());
+    else if (path === "status") out = fx.status;
+    else if (path === "watches") out = [];
+    else out = commitment("done");
+    return new Response(JSON.stringify(out), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const view = await mount("/src/views/Brief.svelte", { brief: copy(fx.brief), status: { ...fx.status }, watches: [], poll: 20, hold: 60_000 });
+  try {
+    box(view).click();
+    await until(() => button(view, "Undo"));
+    const seen = briefs;
+    await until(() => briefs >= seen + 2);
+    view.flushSync();
+    assert.ok(button(view, "Undo"), "the held line and its Undo stay after the refresh");
+    button(view, "Undo").click();
+    view.flushSync();
+    assert.ok(!button(view, "Undo"));
+    assert.ok(!owes(view), "after Undo, the line goes: the refreshed list does not have the item");
+    assert.ok(!asked.some((p) => p.startsWith("items/")), "Undo sends nothing");
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a held line pushed out of a full section takes the place of its last line: the section keeps 7 lines", async () => {
+  const held = commitment();
+  const filler = (n) => ({ ...held, id: `c-9${n}`, title: `Filler ${n}` });
+  const start = copy(fx.brief);
+  start.you_owe = { ...start.you_owe, count: 7, items: [held, ...[1, 2, 3, 4, 5, 6].map(filler)] };
+  const pushed = copy(start);
+  pushed.you_owe = { ...pushed.you_owe, count: 8, items: [...[11, 12, 13, 14, 15, 16, 17].map(filler), held] };
+  let briefs = 0;
+  globalThis.fetch = async (url) => {
+    const path = String(url).replace(/^\/api\//, "");
+    let out = {};
+    if (path === "brief") (briefs += 1), (out = pushed);
+    else if (path === "status") out = fx.status;
+    else if (path === "watches") out = [];
+    return new Response(JSON.stringify(out), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const view = await mount("/src/views/Brief.svelte", { brief: copy(start), status: { ...fx.status }, watches: [], poll: 20, hold: 60_000 });
+  try {
+    box(view).click();
+    await until(() => button(view, "Undo"));
+    const seen = briefs;
+    await until(() => briefs >= seen + 2);
+    view.flushSync();
+    const section = button(view, "Undo").closest("section");
+    assert.ok(section.textContent.includes("Filler 11"), "the refresh shows");
+    assert.equal(section.querySelectorAll("ul > li").length, 7, "at most 7 lines");
+    assert.ok(!section.textContent.includes("Filler 17"), "the held line takes the place of the last line");
+  } finally {
+    view.destroy();
+  }
+});
