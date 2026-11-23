@@ -400,6 +400,9 @@ pub(crate) fn squash(s: &str) -> String {
 /// (`ask::has`). Invisible characters (a soft hyphen, zero-width
 /// characters) are not text: they go out.
 pub(crate) fn fold(s: &str) -> (String, Vec<(usize, char)>) {
+    // Lowercase the whole text first, as before the fold: a final sigma
+    // needs the context of the word. The marks and white space have no case.
+    let s = s.to_lowercase();
     let mut out = String::with_capacity(s.len());
     let mut from = Vec::new();
     let mut space = false;
@@ -422,7 +425,7 @@ pub(crate) fn fold(s: &str) -> (String, Vec<(usize, char)>) {
         }
         space = false;
         if plain.is_empty() {
-            out.extend(c.to_lowercase());
+            out.push(c);
         } else {
             for p in plain.chars() {
                 from.push((out.len(), c));

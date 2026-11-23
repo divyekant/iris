@@ -759,6 +759,8 @@ mod tests {
             text,
             "don't miss it \u{2013} the \u{201C}porto\u{201D}"
         ));
+        // The case fold reads the whole word, as before: a final sigma.
+        assert!(has("ΟΣ ΚΑΙ", "ος και"));
         // The fold moves no word end: an em dash and an ellipsis do not
         // join words, as before the fold; a curly apostrophe still joins.
         let text = "Send by Friday\u{2014}please. Wait\u{2026}now. Don\u{2019}t go.";

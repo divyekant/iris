@@ -195,6 +195,16 @@ Don't wait \"too long\" - send the slides... by Friday\u{2014}please.
         let d = run(mail, Kind::Person, &[], &[], Some(&m)).1.unwrap();
         assert_eq!((d.calls, d.drafts.len()), (1, 1), "{q}");
     }
+    // The case fold reads the whole word: a final sigma (ς) matches.
+    let greek = "From: Ana Lee <ana@example.org>
+To: owner@example.com
+Subject: =?UTF-8?B?zp/Oow==?=
+
+Hello.
+";
+    let m = Fake::with(vec![answer(item("ος"))]);
+    let d = run(greek, Kind::Person, &[], &[], Some(&m)).1.unwrap();
+    assert_eq!((d.calls, d.drafts.len()), (1, 1));
     // A changed word is still not a quote from the mail.
     let bad = item("Don\u{2019}t wait \u{201C}too long\u{201D} \u{2013} send the money");
     let m = Fake::with(vec![answer(bad.clone()), answer(bad)]);
