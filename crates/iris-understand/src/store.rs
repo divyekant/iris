@@ -899,15 +899,12 @@ pub fn rerun_senders(tx: &Transaction, rows: &[i64], now_ms: i64) -> iris_store:
     let mut reset = 0;
     for &row in rows {
         tx.execute(
-            &format!(
-                "DELETE FROM item WHERE id IN (
-                   SELECT i.id FROM sender s
-                   JOIN header h ON h.from_addr = s.address
-                   JOIN message m ON m.id = h.message_id
-                   JOIN item_source src ON src.message_id = m.id
-                   JOIN item i ON i.id = src.item_id
-                   WHERE s.id = ?1 AND m.gone_at IS NULL AND {DROPPABLE})"
-            ),
+            "DELETE FROM item WHERE id IN (
+               SELECT d.item_id FROM sender s
+               JOIN header h ON h.from_addr = s.address
+               JOIN message m ON m.id = h.message_id
+               JOIN item_droppable d ON d.message_id = m.id
+               WHERE s.id = ?1 AND m.gone_at IS NULL)",
             [row],
         )?;
         reset += tx.execute(
@@ -958,20 +955,15 @@ pub fn update_due_talks(store: &Store, now_ms: i64) -> iris_store::Result<usize>
     }
 }
 
-/// The items of an origin message `src` that a new run replaces: not the
-/// conversation, made by a rule or the model, and not pinned (`item_pin`: a
-/// correction, or an open changeset action that names the item).
-const DROPPABLE: &str = "src.role = 'origin' AND i.form <> 'conversation'
-  AND i.derived_by IN ('rule', 'model')
-  AND NOT EXISTS (SELECT 1 FROM item_pin p WHERE p.item_id = i.id)";
-
+/// Deletes the items of `message` that a new run replaces: the rows of the
+/// view `item_droppable` (store migration 41). They are origin items, not
+/// the conversation, made by a rule or the model, and not pinned
+/// (`item_pin`: a correction, or an open changeset action that names the
+/// item). The label triggers of a draft or a copy read the same view.
 fn drop_old_items(tx: &Transaction, message: i64) -> rusqlite::Result<()> {
     tx.execute(
-        &format!(
-            "DELETE FROM item WHERE id IN (
-               SELECT i.id FROM item_source src JOIN item i ON i.id = src.item_id
-               WHERE src.message_id = ?1 AND {DROPPABLE})"
-        ),
+        "DELETE FROM item WHERE id IN
+           (SELECT item_id FROM item_droppable WHERE message_id = ?1)",
         [message],
     )?;
     Ok(())

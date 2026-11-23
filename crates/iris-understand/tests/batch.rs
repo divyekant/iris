@@ -337,7 +337,7 @@ fn migration_40_marks_each_understood_thread() {
         .write(|tx| {
             tx.execute_batch(
                 "DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender;
-                 DROP TRIGGER talk_due_sender_remove; DROP TABLE talk_due;
+                 DROP TRIGGER talk_due_sender_remove; DROP TABLE talk_due; DROP TRIGGER draft_or_copy_drops_items; DROP VIEW item_droppable;
                  PRAGMA user_version = 39;",
             )?;
             Ok(())
@@ -1055,7 +1055,7 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                  ALTER TABLE account DROP COLUMN imap_user;
                  ALTER TABLE account DROP COLUMN categories_off_at;
                  DROP TRIGGER understand_owner_label_add; DROP TRIGGER understand_owner_label_remove;
-                 DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower; DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender; DROP TRIGGER talk_due_sender_remove; DROP TABLE talk_due;
+                 DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower; DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender; DROP TRIGGER talk_due_sender_remove; DROP TABLE talk_due; DROP TRIGGER draft_or_copy_drops_items; DROP VIEW item_droppable;
                  PRAGMA user_version = 19;",
             )?;
             Ok(())

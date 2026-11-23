@@ -1207,29 +1207,66 @@ fn a_message_that_becomes_a_draft_loses_its_items() {
     assert!(at.is_none());
 }
 
-/// Each label that makes a message a draft or a copy, or your own mail,
-/// asks for a new understanding when a sync adds it in place, and that run
-/// drops the items (#677: an IMAP `\Draft` flag set in place gives `UNSENT`).
+/// Each label that makes a message a draft or a copy, added in place by a
+/// sync, drops the items of the message at once: the batch runner skips such
+/// a message, so no understanding runs to drop them (#677: an IMAP `\Draft`
+/// flag set in place gives `UNSENT`). The thread goes into `talk_due`, and
+/// the message gets a new understanding if the label goes again.
 #[test]
 fn each_draft_or_copy_label_added_in_place_drops_the_items() {
     for label in iris_store::DRAFT_OR_COPY {
         let b = store("in-place");
         let m = b.add("1", ASK, &["INBOX"]);
         understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW).unwrap();
+        iris_understand::store::update_due_talks(&b.store, NOW).unwrap();
         assert_eq!(b.items().len(), 1, "{label}");
         b.add("1", ASK, &["INBOX", label]);
+        assert!(b.items().is_empty(), "{label}: no run is needed");
+        let due: i64 = b.col(
+            "SELECT count(*) FROM talk_due t JOIN message m ON m.thread_id = t.thread_id
+             WHERE m.id = ?1",
+            m,
+        );
+        assert_eq!(due, 1, "{label}: the conversation is computed again");
         let at: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m);
-        assert!(
-            at.is_none(),
-            "{label}: the label asks for a new understanding"
-        );
-        assert!(
-            understand(&b.store, m, &Fake::default(), NOW)
-                .unwrap()
-                .draft
-        );
-        assert!(b.items().is_empty(), "{label}");
+        assert!(at.is_none(), "{label}");
     }
+}
+
+/// A store from before migration 41 can hold items of a message that got
+/// `UNSENT` in place. The migration drops them.
+#[test]
+fn the_upgrade_drops_the_items_of_a_draft_or_copy() {
+    let b = store("upgrade-41");
+    let m = b.add("1", ASK, &["INBOX"]);
+    understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW).unwrap();
+    // The store of version 40: no view and no item trigger.
+    b.store
+        .write(|tx| {
+            tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP VIEW item_droppable;")?;
+            Ok(())
+        })
+        .unwrap();
+    b.add("1", ASK, &["INBOX", "UNSENT"]);
+    assert_eq!(b.items().len(), 1);
+    b.store
+        .write(|tx| {
+            tx.execute_batch("PRAGMA user_version = 40;")?;
+            Ok(())
+        })
+        .unwrap();
+    let Box_ {
+        _dir,
+        store,
+        account,
+    } = b;
+    drop(store);
+    let b = Box_ {
+        store: Store::open(&_dir.0).unwrap(),
+        _dir,
+        account,
+    };
+    assert!(b.items().is_empty());
 }
 
 #[test]
