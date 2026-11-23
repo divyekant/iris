@@ -9,16 +9,33 @@ Read [the Iris manifesto](docs/manifesto.md) for the full model and the plan.
 
 ## State
 
-Iris is at release 0 (Foundation). **You cannot use Iris for mail yet.** Release
-0 makes the base. Release 1 (See) is the first release that reads a mailbox.
+Iris reads, understands and changes a Gmail, Outlook or IMAP mailbox. The
+releases of the manifesto, "The path", are built on the `develop` branch. The
+GitHub Releases page gives the newest release.
 
-| Part of release 0 | State |
+These checks are open before daily use:
+
+| Check | State |
 |---|---|
-| The `iris` program: `iris --version` and `iris serve` | Done |
-| The web client, embedded in the program | Done (an empty shell) |
-| Local CI with the memory and start time budget test | Done |
-| The synthetic mailbox and the fake Gmail server (`crates/iris-synth`, `crates/iris-fakegmail`) | Done |
-| The draft of the open model (`docs/spec/`) | Not yet |
+| Send. Iris sends no mail until you turn sending on with `iris sending on`. | Open: a send check on a real mailbox (issue #302). |
+| The Outlook and IMAP mirrors on a real mailbox for 7 days. | Open. |
+| The Gmail mirror on a real mailbox for 7 days. | Done: 0 differences. |
+
+## Install
+
+Use this command on macOS or Linux. It installs the newest release to
+`~/.local/bin/iris` and starts the background service with
+`iris service install`:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/divyekant/iris/main/scripts/install.sh && sh install.sh
+```
+
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md), "Install Iris", gives each step of the
+script and the data that it sends. Then connect an account (see below) and run
+`iris open`.
+
+To build from source, see "Build".
 
 ## What Iris is
 
@@ -66,6 +83,7 @@ the client. `IRIS_REQUIRE_CLIENT=1` makes the build stop in that case.
 [client/README.md](client/README.md) gives the details of the client build.
 
 `iris serve` listens on `127.0.0.1:4800`. Only this machine can connect to it.
+To use a phone, see "Open Iris on a phone".
 
 ## Connect a Gmail account
 
@@ -217,6 +235,68 @@ calls run only inside an approved budget (see "Understand the mail").
 
 The text of a message is data. `iris show` removes the control characters, so
 a message cannot send commands to your terminal.
+
+## Agents that do a job
+
+A job gives one goal and its threads to an agent (release 4). Start a session
+with this command:
+
+```bash
+iris job run --agent claude-code j-1
+```
+
+`iris job session j-1` shows the state of the last session. Its log is
+`sessions/<session>.log` in the data folder. The session runs in a sandbox
+with only the workspace of the job and no login file of yours. It gets only
+the variables and the hosts of its adapter:
+
+| Agent | Program | Variables | Hosts |
+|---|---|---|---|
+| `claude-code` | `claude` | `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` | `api.anthropic.com` |
+| `codex` | `codex` | `OPENAI_API_KEY`, `CODEX_HOME` | `api.openai.com` |
+
+The program must be on the `PATH` of the engine. The variables come from the
+environment of the engine (`iris serve` or the service), not from your
+terminal. If a variable is missing, the agent cannot sign in and the session
+ends with an error.
+
+To add another agent tool, or to change the time limit of a session (30
+minutes by default), write `agents.toml` in the data folder:
+
+```toml
+[agent.my-agent]
+command = ["my-agent", "--run"]
+pass_env = ["MY_AGENT_KEY"]
+allow_hosts = ["api.example.com"]
+
+[session]
+max_minutes = 60
+```
+
+Iris adds the fixed prompt as the last argument of `command`.
+
+## Open Iris on a phone
+
+The web client has a phone layout. The engine listens only on a loopback
+address (`127.0.0.1:4800`), because the API has no TLS. `iris serve --addr`
+refuses an address that is not a loopback address.
+
+CAUTION: Do not make port 4800 available on a network with a proxy or a port
+forward. The session token and your mail go without encryption.
+
+Use an SSH tunnel from the phone to the machine that runs Iris:
+
+1. Install an SSH client with port forward on the phone.
+2. Forward local port 4800 of the phone to `127.0.0.1:4800` of the Iris
+   machine. With the OpenSSH command, the forward is
+   `ssh -L 4800:127.0.0.1:4800 <user>@<iris-machine>`.
+3. On the Iris machine, run `iris open --print`. It prints a sign-in address
+   that works one time, for 2 minutes.
+4. Open that address in the browser of the phone while the tunnel is open.
+
+For a phone that is not on your local network, use a private network (for
+example a VPN) for the SSH connection. Do not put the SSH port of the
+machine on the internet without a key-only login.
 
 ## Watch for a mail
 
