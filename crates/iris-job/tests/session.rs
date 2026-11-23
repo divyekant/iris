@@ -238,6 +238,29 @@ fn done_of_a_session_completes_the_job_only_while_the_session_is_open() {
 }
 
 #[test]
+fn a_finish_after_an_answer_ahead_of_the_clock_ends_the_job() {
+    // The question is 1 ms after the clock, and the answer keeps that time.
+    for (end, by) in [(End::Complete, By::Person), (End::Cancel, By::Person)] {
+        let (_d, store, job) = setup(if end == End::Cancel {
+            "fin-cancel"
+        } else {
+            "fin-complete"
+        });
+        iris_job::ask(&store, job, "Which?", None, NOW).unwrap();
+        iris_job::answer(&store, job, "Blue.", None, NOW).unwrap();
+        finish(&store, job, by, end, None, NOW).unwrap();
+        let j = get(&store, job).unwrap();
+        assert_eq!((j.state, j.end), (State::Done, Some(end)));
+        assert_eq!(j.updated_ms, NOW + 1);
+    }
+    // A clock that went back 5 s: the agent still ends its job.
+    let (_d, store, job) = setup("fin-agent");
+    let s = register(&store, job, "codex", NOW).unwrap();
+    session_done(&store, s, job, None, NOW - 5000).unwrap();
+    assert_eq!(get(&store, job).unwrap().state, State::Done);
+}
+
+#[test]
 fn the_process_ids_are_set_once_and_never_zero_or_one() {
     let (_d, store, job) = setup("pids");
     let s = register(&store, job, "codex", NOW).unwrap();

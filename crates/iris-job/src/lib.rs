@@ -485,7 +485,11 @@ pub fn finish_in(
         why,
         ..Move::default()
     };
-    add_event(c, job, State::Done, by, m, now_ms)
+    // The end is never before the newest event: an ask can set the time of
+    // the job 1 ms after the clock, an answer keeps it, and a clock can go
+    // back. The move to `done` must not fail for that (#356).
+    let at = now_ms.max(get_in(c, job)?.updated_ms);
+    add_event(c, job, State::Done, by, m, at)
 }
 
 const JOB_COLUMNS: &str =
