@@ -76,6 +76,13 @@ test("a stopped IMAP account names the mail server and the IMAP sign-in command,
   }
 });
 
+test("the IMAP sign-in help ends the options before an address that starts with a dash", async () => {
+  const { signIn } = await load("/src/format.ts");
+  assert.equal(signIn({ provider: "imap", address: "-x@example.org" }).command, "iris account add-imap -- -x@example.org");
+  // Each other address keeps the command as it was.
+  assert.equal(signIn({ provider: "imap", address: "you@northwind.example" }).command, "iris account add-imap you@northwind.example");
+});
+
 test("each shell argument of a sign-in command keeps its exact text in a POSIX shell", async () => {
   const { shellArg } = await load("/src/format.ts");
   const { execFileSync } = await import("node:child_process");
