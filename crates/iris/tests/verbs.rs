@@ -347,6 +347,9 @@ fn job_finish_ends_the_job_once() {
     let store = Store::open(&dir).unwrap();
     let job = iris_job::create(&store, "Pay the invoice.", None, 1).unwrap();
     let id = iris_job::format_job_id(job);
+    // `iris done` is a verb of a session: the host refuses it.
+    let (ok, _, err) = iris(&store, &["done"]);
+    assert!(!ok && err.contains("verb of a session"), "{err}");
     let (ok, _, err) = iris(&store, &["job", "finish", "j-999"]);
     assert!(!ok && err.contains("no job"), "{err}");
     let (ok, out, err) = iris(&store, &["job", "finish", &id, "--cancel"]);

@@ -273,10 +273,9 @@ impl Sessions {
             Err(e) => {
                 self.launch_over(job);
                 // No session: no reap builds a job that moved to done
-                // during the launch (#356).
-                if self.live_of(job).is_none() {
-                    let _ = self.builds.send(job);
-                }
+                // during the launch (#356). The build checks the live
+                // sessions again.
+                let _ = self.builds.send(job);
                 return Err(e);
             }
         };
@@ -756,6 +755,10 @@ impl Sessions {
         }) else {
             return;
         };
+        // A failed read builds nothing: the next wake reads again.
+        let Ok(live) = iris_job::live_sessions(&self.store) else {
+            return;
+        };
         let mut seen = self.done_seen.lock().unwrap_or_else(|e| e.into_inner());
         for job in done {
             if seen.contains(&job) {
@@ -763,7 +766,7 @@ impl Sessions {
             }
             // A job with a live session or a launch stays for a later wake:
             // a launch can end with no session, so no reap builds it.
-            if self.live_of(job).is_none() && !self.state().launching.contains(&job) {
+            if live.iter().all(|s| s.job_id != job) && !self.state().launching.contains(&job) {
                 seen.insert(job);
                 let _ = self.builds.send(job);
             }
@@ -847,12 +850,16 @@ impl Sessions {
 
 /// Builds the workspace of `job` again if the job is done and its
 /// workspace folder exists: the mail files go, and the files of the agent
-/// stay. The caller sends only a job with no live session; a done job
-/// gets no new session.
+/// stay. A done job gets no new session. The build waits for the reap: with
+/// a live session of the job, or when the read of the live sessions fails,
+/// nothing changes, and the reap of the session sends the job again.
 fn build_done(store: &Store, job: i64) {
     let dir = iris_workspace::default_dir(store.dir(), job);
     let done = iris_job::get(store, job).is_ok_and(|j| j.state == iris_job::State::Done);
     if !done || std::fs::symlink_metadata(&dir).is_err() {
+        return;
+    }
+    if !iris_job::live_sessions(store).is_ok_and(|l| l.iter().all(|s| s.job_id != job)) {
         return;
     }
     if let Err(e) = iris_workspace::build(store, job, &dir) {
