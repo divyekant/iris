@@ -90,6 +90,9 @@ struct State {
     modseq: u64,
     validity: u32,
     commands: Vec<String>,
+    /// A folder that gets a new `UIDVALIDITY` at the Nth `SELECT` from now,
+    /// before the answer (for the race tests of `modify`).
+    renew_at: Option<(String, usize)>,
 }
 
 /// A running fake server. The thread lives until the process ends.
@@ -112,6 +115,7 @@ impl FakeImap {
             modseq: 1,
             validity: 1000,
             commands: Vec::new(),
+            renew_at: None,
         }));
         let fake = FakeImap { addr, state };
         fake.create("INBOX", None);
@@ -228,20 +232,14 @@ impl FakeImap {
     /// Give the folder a new `UIDVALIDITY`. Each message gets a new UID,
     /// from 1.
     pub fn renew(&self, folder: &str) {
-        let mut s = self.lock();
-        s.validity += 1;
-        let validity = s.validity;
-        let modseq = s.next_modseq();
-        let f = s.folders.get_mut(folder).expect("folder");
-        let old = std::mem::take(&mut f.messages);
-        f.uidvalidity = validity;
-        f.gone.clear();
-        f.uidnext = 1;
-        for (_, mut m) in old {
-            m.modseq = modseq;
-            f.messages.insert(f.uidnext, m);
-            f.uidnext += 1;
-        }
+        self.lock().renew(folder);
+    }
+
+    /// Give `folder` a new `UIDVALIDITY` at the `n`th `SELECT` from now
+    /// (1 is the next one), before the server answers it.
+    pub fn renew_at_select(&self, folder: &str, n: usize) {
+        assert!(n > 0, "n counts from 1");
+        self.lock().renew_at = Some((folder.to_owned(), n));
     }
 
     /// The state of a folder: `UIDVALIDITY` and each UID with its flags.
@@ -261,6 +259,22 @@ impl State {
     fn next_modseq(&mut self) -> u64 {
         self.modseq += 1;
         self.modseq
+    }
+
+    fn renew(&mut self, folder: &str) {
+        self.validity += 1;
+        let validity = self.validity;
+        let modseq = self.next_modseq();
+        let f = self.folders.get_mut(folder).expect("folder");
+        let old = std::mem::take(&mut f.messages);
+        f.uidvalidity = validity;
+        f.gone.clear();
+        f.uidnext = 1;
+        for (_, mut m) in old {
+            m.modseq = modseq;
+            f.messages.insert(f.uidnext, m);
+            f.uidnext += 1;
+        }
     }
 }
 
@@ -491,7 +505,14 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
             }
             "EXAMINE" | "SELECT" => {
                 let select = w[1].eq_ignore_ascii_case("SELECT");
-                let s = lock();
+                let mut s = lock();
+                if select {
+                    match s.renew_at.take() {
+                        Some((folder, 1)) => s.renew(&folder),
+                        Some((folder, n)) => s.renew_at = Some((folder, n - 1)),
+                        None => {}
+                    }
+                }
                 match w.get(2).and_then(|n| s.folders.get(n).map(|f| (n, f))) {
                     None => "NO no such folder".to_owned(),
                     Some((name, f)) => {
