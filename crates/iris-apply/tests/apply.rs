@@ -2565,6 +2565,29 @@ fn stop_ends_each_session_and_refuses_a_register() {
     iris_job::register(&b.store, other, "claude-code", now()).unwrap();
 }
 
+/// Stop ends each open session of many jobs, one row at a time (#571),
+/// and leaves an ended session as it was.
+#[test]
+fn stop_ends_many_sessions() {
+    let b = setup("stop-many", 30, Some(APPLY_POLICY));
+    let mut open = Vec::new();
+    for i in 0..5 {
+        let job = iris_job::create(&b.store, &format!("Job {i}."), None, now()).unwrap();
+        open.push(iris_job::register(&b.store, job, "claude-code", now()).unwrap());
+    }
+    let done = open.remove(2);
+    iris_job::end(&b.store, done, iris_job::EndReason::Exit, Some(0), now()).unwrap();
+    let wait = std::time::Duration::from_millis(50);
+    let s = iris_apply::stop_wait(&b.store, wait).unwrap();
+    assert_eq!(s.sessions, 4);
+    for id in open {
+        let got = iris_job::session(&b.store, id).unwrap();
+        assert_eq!(got.end, Some(iris_job::EndReason::Stop));
+    }
+    let got = iris_job::session(&b.store, done).unwrap();
+    assert_eq!(got.end, Some(iris_job::EndReason::Exit));
+}
+
 /// Stop waits for an apply that holds the lock, and says `busy` when the
 /// wait ends with the lock still held. The switch is set before the wait.
 #[test]
