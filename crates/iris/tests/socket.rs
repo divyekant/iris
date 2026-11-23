@@ -626,7 +626,7 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
                 seed = seed
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(1442695040888963407);
-                let abc = b"{}[]\":,oktruefalseresultcodeerrorid1234 nsessionreaped-jgoalstatethreadsmessagesitemsdueformtextmessageitem";
+                let abc = b"{}[]\":,oktruefalseresultcodeerrorid1234 nsessionreaped-jgoalstatethreadsmessagesitemsdueformtextmessageitemneeds_youquestionwaitinguntil";
                 abc[(seed >> 33) as usize % abc.len()]
             })
             .collect();
@@ -635,7 +635,7 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
     for line in &lines {
         for verb in [
             "show", "drafts", "add", "submit", "withdraw", "job.run", "job.stop", "status",
-            "search", "list",
+            "search", "list", "wait", "ask",
         ] {
             match socket::parse_answer(verb, line) {
                 None => {}
@@ -651,6 +651,21 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
                             .iter()
                             .all(|k| r[k].is_u64())
                         && (r["due"].is_null() || r["due"].is_string()),
+                    "{verb} {}",
+                    String::from_utf8_lossy(line)
+                ),
+                // The answer of a verb that ends the session: the job and its new state.
+                Some(Ok(r)) if verb == "wait" => assert!(
+                    r["job"].as_str().and_then(iris_job::parse_job_id).is_some()
+                        && r["state"] == "waiting"
+                        && r["until"].is_string(),
+                    "{verb} {}",
+                    String::from_utf8_lossy(line)
+                ),
+                Some(Ok(r)) if verb == "ask" => assert!(
+                    r["job"].as_str().and_then(iris_job::parse_job_id).is_some()
+                        && r["state"] == "needs_you"
+                        && r["question"].is_string(),
                     "{verb} {}",
                     String::from_utf8_lossy(line)
                 ),
@@ -696,6 +711,10 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
     assert!(socket::parse_answer("list", bad).is_none());
     let message = br#"{"ok":true,"result":{"message":{"id":"m-1","text":"x"}}}"#;
     assert!(matches!(socket::parse_answer("show", message), Some(Ok(_))));
+    let ask = br#"{"ok":true,"result":{"job":"j-3","state":"needs_you","question":"Which date?"}}"#;
+    assert!(matches!(socket::parse_answer("ask", ask), Some(Ok(_))));
+    let asked = br#"{"ok":true,"result":{"job":"j-3","state":"waiting","question":"Which date?"}}"#;
+    assert!(socket::parse_answer("ask", asked).is_none());
     let run = br#"{"ok":true,"result":{"session":"se-12"}}"#;
     assert!(matches!(socket::parse_answer("job.run", run), Some(Ok(_))));
     let status = br#"{"ok":true,"result":{"job":"j-1","session":"se-2","goal":"g","state":"working","due":null,"threads":1,"messages":2,"items":0}}"#;
@@ -943,7 +962,7 @@ fn session_mode_uses_only_the_session_socket() {
     let listener = std::os::unix::net::UnixListener::bind(work.join(".iris/socket")).unwrap();
     let server = std::thread::spawn(move || {
         let mut verbs = Vec::new();
-        for _ in 0..6 {
+        for _ in 0..7 {
             let (s, _) = listener.accept().unwrap();
             let mut line = String::new();
             std::io::BufReader::new(&s).read_line(&mut line).unwrap();
@@ -959,6 +978,8 @@ fn session_mode_uses_only_the_session_socket() {
                 "show" => json!({"item": item}),
                 "wait" => json!({"job": "j-4", "state": "waiting",
                     "until": "2030-01-02T00:00:00Z", "reply": "t-5"}),
+                "ask" => json!({"job": "j-4", "state": "needs_you",
+                    "question": "Which date works?"}),
                 _ => json!({"job": "j-4", "session": "se-9", "goal": "Get it.",
                     "state": "working", "threads": 1, "messages": 2, "items": 0}),
             };
@@ -1015,6 +1036,14 @@ fn session_mode_uses_only_the_session_socket() {
         String::from_utf8_lossy(&out.stdout).contains("j-4 waits until 2030-01-02T00:00:00Z"),
         "{out:?}"
     );
+    // `ask` sends the question and prints the state (issue #586).
+    let out = iris(&["ask", "Which date works?"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains("j-4 asks the person and waits for the answer"),
+        "{out:?}"
+    );
     assert_eq!(
         server.join().unwrap(),
         [
@@ -1024,6 +1053,7 @@ fn session_mode_uses_only_the_session_socket() {
             r#"show {"id":"c-1"}"#,
             r#"list {"form":"commitment"}"#,
             r#"wait {"reply":"t-5","until":"2030-01-02","why":"Dana reads it."}"#,
+            r#"ask {"question":"Which date works?"}"#,
         ]
     );
     assert!(!data.exists(), "the command made the data folder");

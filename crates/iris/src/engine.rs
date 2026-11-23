@@ -886,36 +886,47 @@ fn attention_loop(store: Arc<Store>) {
     let mut mark = None;
     let system = crate::notify::spawn(crate::notify::show);
     loop {
-        // The conversations first: a kind change marks their threads, and
-        // the attention reads the items.
-        if let Err(e) = iris_understand::store::update_due_talks(&store, now_ms()) {
-            say!("iris: conversations: {e}");
-        }
-        if let Err(e) = iris_policy::refresh_attention(&store, now_ms().div_euclid(1000)) {
-            say!("iris: attention: {e}");
-        }
-        if let Err(e) = iris_policy::propose::refresh(&store, now_ms().div_euclid(1000), &mut mark)
-        {
-            say!("iris: proposed rules: {e}");
-        }
-        // Notices by rule (R5-08): the row commits first, so a crash before
-        // the system notice still leaves the notice in the web client. The
-        // system notice runs on its own thread: this loop never waits for it.
-        // The Mac app shows some notices: the engine chooses before the queue.
-        match iris_policy::notice::refresh(&store, now_ms()) {
-            Ok(new) => crate::notify::for_system(new, now_ms())
-                .into_iter()
-                .for_each(|n| {
-                    let _ = system.try_send(n);
-                }),
-            Err(e) => say!("iris: notices: {e}"),
-        }
-        // The measure "time to the first brief" ends at the first brief with content.
-        if let Err(e) = iris_api::measures::check_brief(&store, now_ms()) {
-            say!("iris: measures: {e}");
+        // The system notice runs on its own thread: this loop never waits
+        // for it.
+        for n in attention_turn(&store, &mut mark) {
+            let _ = system.try_send(n);
         }
         std::thread::sleep(ATTENTION_EVERY);
     }
+}
+
+/// One turn of the attention loop. Gives the notices for the system. Each
+/// step logs its own error, so one failed step does not stop the others.
+pub fn attention_turn(
+    store: &Store,
+    mark: &mut Option<iris_policy::propose::Mark>,
+) -> Vec<iris_policy::notice::Notice> {
+    // The conversations first: a kind change marks their threads, and
+    // the attention reads the items.
+    if let Err(e) = iris_understand::store::update_due_talks(store, now_ms()) {
+        say!("iris: conversations: {e}");
+    }
+    if let Err(e) = iris_policy::refresh_attention(store, now_ms().div_euclid(1000)) {
+        say!("iris: attention: {e}");
+    }
+    if let Err(e) = iris_policy::propose::refresh(store, now_ms().div_euclid(1000), mark) {
+        say!("iris: proposed rules: {e}");
+    }
+    // Notices by rule (R5-08): the row commits first, so a crash before
+    // the system notice still leaves the notice in the web client.
+    // The Mac app shows some notices: the engine chooses before the queue.
+    let system = match iris_policy::notice::refresh(store, now_ms()) {
+        Ok(new) => crate::notify::for_system(new, now_ms()),
+        Err(e) => {
+            say!("iris: notices: {e}");
+            Vec::new()
+        }
+    };
+    // The measure "time to the first brief" ends at the first brief with content.
+    if let Err(e) = iris_api::measures::check_brief(store, now_ms()) {
+        say!("iris: measures: {e}");
+    }
+    system
 }
 
 /// The schedule: one sync thread for each account, so a long first sync of
