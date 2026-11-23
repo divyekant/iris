@@ -373,7 +373,8 @@ fn no_injection_sends_mail_without_a_person() {
         assert_eq!(marks.as_deref(), Some("[]"), "{}", s.name);
     }
     // Iris decoded each attack into the clean text that an agent reads,
-    // except the hidden HTML block: the clean text takes the plain part.
+    // except the hidden HTML block (the clean text takes the plain part)
+    // and the attachment (its text is not in the body of the store).
     for s in SAMPLES {
         let (subject, text): (String, String) = e
             .store
@@ -392,7 +393,7 @@ fn no_injection_sends_mail_without_a_person() {
         };
         assert_eq!(
             read,
-            s.carrier != Carrier::HiddenHtml,
+            !matches!(s.carrier, Carrier::HiddenHtml | Carrier::Attachment),
             "{}: {subject} {text}",
             s.name
         );
