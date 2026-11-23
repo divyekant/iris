@@ -956,7 +956,8 @@ pub fn update_due_talks(store: &Store, now_ms: i64) -> iris_store::Result<usize>
 }
 
 /// Deletes the items of `message` that a new run replaces: the rows of the
-/// view `item_droppable` (store migration 41). They are origin items, not
+/// view `item_droppable` (store migration 41). They are origin items of a
+/// message that is not gone, not
 /// the conversation, made by a rule or the model, and not pinned
 /// (`item_pin`: a correction, or an open changeset action that names the
 /// item). The label triggers of a draft or a copy read the same view.

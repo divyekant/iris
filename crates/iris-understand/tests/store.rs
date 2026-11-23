@@ -1268,6 +1268,8 @@ fn the_upgrade_drops_the_items_of_a_draft_or_copy() {
     let b = store("upgrade-41");
     let m = b.add("1", ASK, &["INBOX"]);
     understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW).unwrap();
+    let g = b.add_in("2", "t2", NOW - DAY, ASK, &["INBOX"]);
+    understand(&b.store, g, &Fake::with(&[COMMITMENT]), NOW).unwrap();
     // The store of version 40: no view and no item trigger.
     b.store
         .write(|tx| {
@@ -1276,7 +1278,16 @@ fn the_upgrade_drops_the_items_of_a_draft_or_copy() {
         })
         .unwrap();
     b.add("1", ASK, &["INBOX", "UNSENT"]);
-    assert_eq!(b.items().len(), 1);
+    // A second message with UNSENT whose origin is gone: its item counts as
+    // pinned (spec 1, section 7.5) and stays.
+    b.add_in("2", "t2", NOW - DAY, ASK, &["INBOX", "UNSENT"]);
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE message SET gone_at = 1 WHERE id = ?1", [g])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(b.items().len(), 2);
     b.store
         .write(|tx| {
             tx.execute_batch("PRAGMA user_version = 40;")?;
@@ -1294,7 +1305,16 @@ fn the_upgrade_drops_the_items_of_a_draft_or_copy() {
         _dir,
         account,
     };
-    assert!(b.items().is_empty());
+    let left: i64 = b.col(
+        "SELECT count(*) FROM item_source s JOIN item i ON i.id = s.item_id
+         WHERE s.message_id = ?1 AND i.form <> 'conversation'",
+        g,
+    );
+    assert_eq!(
+        (b.items().len(), left),
+        (1, 1),
+        "only the gone origin keeps its item"
+    );
 }
 
 #[test]

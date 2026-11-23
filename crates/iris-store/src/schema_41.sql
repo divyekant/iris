@@ -7,13 +7,15 @@
 -- the apply mirror and the send completion).
 
 -- The items that a new understanding of a message replaces: origin items
--- made by a rule or the model, never a conversation and never a pinned
--- item. `drop_old_items` and `rerun_senders` of `iris-understand` read this
+-- of a message that is not gone, made by a rule or the model, never a
+-- conversation and never a pinned item. An item whose origin message is
+-- gone counts as pinned (spec 1, section 7.5). `drop_old_items` and `rerun_senders` of `iris-understand` read this
 -- view too, so the three paths share one rule.
 CREATE VIEW item_droppable AS
   SELECT src.message_id AS message_id, i.id AS item_id
   FROM item_source src JOIN item i ON i.id = src.item_id
-  WHERE src.role = 'origin' AND i.form <> 'conversation'
+  JOIN message m ON m.id = src.message_id
+  WHERE src.role = 'origin' AND m.gone_at IS NULL AND i.form <> 'conversation'
     AND i.derived_by IN ('rule', 'model')
     AND NOT EXISTS (SELECT 1 FROM item_pin p WHERE p.item_id = i.id);
 
