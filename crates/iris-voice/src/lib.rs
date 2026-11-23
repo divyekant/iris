@@ -130,6 +130,10 @@ struct Msg {
     subject: String,
     text: Option<String>,
     sent: bool,
+    /// The `sent` evidence of iris-senders for the current content: each
+    /// recipient as the raw message names it, in lower case. The stored
+    /// lists lose the bounds of an address with a comma (#276).
+    sent_to: Vec<String>,
 }
 
 /// The state of a thread that a draft depends on, in memory that does not
@@ -500,7 +504,10 @@ fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
         "SELECT m.id, h.from_addr, h.from_name, h.to_addrs, h.cc_addrs, b.subject,
            substr(ltrim(b.text, char(32, 9, 10, 13)), 1, ?3),
            EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                   WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
+                   WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
+           (SELECT group_concat(se.address, char(10)) FROM sender_evidence se
+             WHERE se.message_id = m.id AND se.rule = 'sent'
+               AND se.content_sha256 IS m.content_sha256)
          {IN_THREAD}
          {ANSWERABLE}
          {NEWEST}
@@ -519,6 +526,10 @@ fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
                 subject: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
                 text: r.get(6)?,
                 sent: r.get(7)?,
+                sent_to: r
+                    .get::<_, Option<String>>(8)?
+                    .map(|l| l.lines().map(str::to_string).collect())
+                    .unwrap_or_default(),
             })
         },
     )?;
@@ -556,10 +567,45 @@ fn recipient(msgs: &[Msg], me: &str) -> Option<String> {
             .filter(|a| !a.is_empty());
     }
     let owners = [Some(me), last.from_addr.as_deref()];
-    first_other(
-        &[last.to_addrs.as_deref(), last.cc_addrs.as_deref()],
-        &owners,
-    )
+    let lists = [last.to_addrs.as_deref(), last.cc_addrs.as_deref()];
+    first_evidence(&lists, &last.sent_to, &owners).or_else(|| first_other(&lists, &owners))
+}
+
+/// The address of `sent_to` that comes first in the comma lists, and is not
+/// one of `owners`, in lower case. An address of `sent_to` that the lists
+/// do not show comes after the others, by name. `None` if no address
+/// qualifies.
+fn first_evidence(
+    lists: &[Option<&str>],
+    sent_to: &[String],
+    owners: &[Option<&str>],
+) -> Option<String> {
+    let joined = format!(
+        ",{},",
+        lists
+            .iter()
+            .flatten()
+            .flat_map(|l| l.split(','))
+            .map(|a| a.trim().to_lowercase())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    sent_to
+        .iter()
+        .map(|a| a.trim().to_lowercase())
+        .filter(|a| {
+            !a.is_empty()
+                && !owners
+                    .iter()
+                    .flatten()
+                    .any(|o| o.trim().eq_ignore_ascii_case(a))
+        })
+        .min_by_key(|a| {
+            (
+                joined.find(&format!(",{a},")).unwrap_or(usize::MAX),
+                a.clone(),
+            )
+        })
 }
 
 /// The first address of the comma lists that is not empty and not one of

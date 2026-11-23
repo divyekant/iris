@@ -660,6 +660,47 @@ fn a_sample_marked_spam_after_the_read_fails_the_last_check() {
     assert!(!ok(&b.store));
 }
 
+/// Invariant (#276): with the `sent` evidence of the message, the reply
+/// target is a whole recipient address of the raw message, also when the
+/// address has a comma, and the first one of the lists.
+#[test]
+fn the_recipient_of_sent_mail_comes_from_the_evidence() {
+    let m = |to: &str, sent_to: &[&str]| Msg {
+        id: 1,
+        from_addr: Some("me@example.com".into()),
+        from_name: None,
+        to_addrs: Some(to.into()),
+        cc_addrs: None,
+        subject: String::new(),
+        text: None,
+        sent: true,
+        sent_to: sent_to.iter().map(|a| a.to_string()).collect(),
+    };
+    let r = |to, ev: &[&str]| recipient(&[m(to, ev)], "me@example.com");
+    assert_eq!(
+        r(
+            "a,b@example.org,carol@example.org",
+            &["carol@example.org", "a,b@example.org"]
+        )
+        .as_deref(),
+        Some("a,b@example.org")
+    );
+    // A shorter address inside a longer one does not match it.
+    assert_eq!(
+        r("ana@x.org,na@x.org", &["na@x.org", "ana@x.org"]).as_deref(),
+        Some("ana@x.org")
+    );
+    assert_eq!(
+        r("me@example.com,bo@x.org", &["me@example.com", "bo@x.org"]).as_deref(),
+        Some("bo@x.org")
+    );
+    // Evidence of only the owner: the lists decide.
+    assert_eq!(
+        r("me@example.com,bo@x.org", &["me@example.com"]).as_deref(),
+        Some("bo@x.org")
+    );
+}
+
 /// A sent newest message: the reply goes to its first recipient that is
 /// not the owner, in `To` and then `Cc`.
 #[test]
@@ -673,6 +714,7 @@ fn the_recipient_of_sent_mail_is_never_the_owner() {
         subject: String::new(),
         text: None,
         sent: true,
+        sent_to: Vec::new(),
     };
     let r = |to, cc| recipient(&[m(to, cc)], "me@example.com");
     assert_eq!(
