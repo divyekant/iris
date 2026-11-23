@@ -516,3 +516,39 @@ test("a decided send names the mail, not a count of messages", async () => {
     view.destroy();
   }
 });
+
+// Issue 189: an open change of an older revision shows the reason of its own revision.
+test("an open change of an older revision shows the reason of its revision", async () => {
+  const c = { ...changeset([act({ n: 1, revision: 1 }), act({ n: 1, revision: 2, verb: "read", hash: "h2" })]), revision: 2, why: "Also mark the news as read." };
+  const asked = serve({ "changesets/cs-9/revisions": [200, { revisions: [{ revision: 1, why: "Tidy the inbox.", submitted: "2026-11-15T08:00:00Z" }, { revision: 2, why: "Also mark the news as read.", submitted: "2026-11-15T09:00:00Z" }] }] });
+  const view = await mount("/src/views/Request.svelte", { changeset: c });
+  try {
+    const rows = () => [...view.target.querySelectorAll(".actions > li")].map(text);
+    await until(() => /which asked/.test(rows().join()));
+    assert.match(rows()[0], /From revision 1, which asked: “Tidy the inbox\.”/);
+    assert.doesNotMatch(rows()[1], /From revision/, "a change of the newest revision has the quote above");
+    assert.ok(asked.includes("changesets/cs-9/revisions"));
+  } finally {
+    view.destroy();
+  }
+  // With no answer, the older change still names its revision.
+  serve({ "changesets/cs-9/revisions": () => { throw new TypeError("Failed to fetch"); } });
+  const lost = await mount("/src/views/Request.svelte", { changeset: c });
+  try {
+    await until(() => /From revision 1\./.test(text(lost.target)));
+  } finally {
+    lost.destroy();
+  }
+});
+
+test("a request with no older change does not ask for the revisions", async () => {
+  const asked = serve();
+  const view = await mount("/src/views/Request.svelte", { changeset: changeset([act({})]) });
+  try {
+    await until(() => view.target.querySelector(".actions"));
+    assert.ok(!asked.includes("changesets/cs-9/revisions"));
+    assert.doesNotMatch(text(view.target), /From revision/);
+  } finally {
+    view.destroy();
+  }
+});

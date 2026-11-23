@@ -154,6 +154,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/changesets", get(get_changesets))
         .route("/api/changesets/{id}", get(get_changeset))
         .route("/api/changesets/{id}/drafts", get(get_drafts))
+        .route("/api/changesets/{id}/revisions", get(get_revisions))
         .route("/api/changesets/{id}/decide", post(post_decide))
         .route("/api/changesets/{id}/withdraw", post(post_withdraw))
         .route(
@@ -275,6 +276,14 @@ async fn get_drafts(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resu
         return Ok(not_found());
     };
     Ok(stream(move |w| drafts::write_drafts(&s, row, w)).await)
+}
+
+/// The reason of each submitted revision (issue 189).
+async fn get_revisions(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    let Some(row) = changeset_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    Ok(Json(review::revisions(&s, row)?).into_response())
 }
 
 #[derive(Deserialize)]
