@@ -107,16 +107,7 @@ impl Store {
                 return Err(e);
             }
         };
-        // A rename replaces an empty folder, and never a folder with files.
-        if let Err(e) = fs::rename(&partial, dest) {
-            let _ = fs::remove_dir_all(&partial);
-            return Err(e.into());
-        }
-        let parent = dest
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        sync_dir(parent)?;
+        place(&partial, dest, sync_dir)?;
         Ok(files)
     }
 
@@ -383,4 +374,55 @@ fn copy_private(from: &Path, to: &Path) -> io::Result<()> {
 
 fn sync_file(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
+}
+
+/// Give the complete copy `partial` the name `dest`, and write the folder
+/// entry to disk with `sync`. After each error, neither name holds a copy:
+/// the destination is free for a new backup (#63).
+fn place(partial: &Path, dest: &Path, sync: impl FnOnce(&Path) -> io::Result<()>) -> Result<()> {
+    // A rename replaces an empty folder, and never a folder with files.
+    if let Err(e) = fs::rename(partial, dest) {
+        let _ = fs::remove_dir_all(partial);
+        return Err(e.into());
+    }
+    let parent = dest
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if let Err(e) = sync(parent) {
+        // The rename is maybe not on disk: remove the copy, so that the
+        // error never leaves a copy at the destination.
+        if fs::rename(dest, partial).is_ok() {
+            let _ = fs::remove_dir_all(partial);
+        } else {
+            let _ = fs::remove_dir_all(dest);
+        }
+        return Err(e.into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A failed sync after the rename leaves no copy at either name.
+    #[test]
+    fn a_failed_sync_after_the_rename_leaves_no_copy() {
+        let root = std::env::temp_dir().join(format!("iris-store-place-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let partial = root.join(".copy.partial-1");
+        let dest = root.join("copy");
+        fs::create_dir_all(&partial).unwrap();
+        fs::write(partial.join("iris.db"), b"db").unwrap();
+        let r = place(&partial, &dest, |_| Err(io::Error::other("sync")));
+        assert!(r.is_err());
+        assert!(!dest.exists() && !partial.exists());
+        // With a good sync the copy has the name of the destination.
+        fs::create_dir_all(&partial).unwrap();
+        fs::write(partial.join("iris.db"), b"db").unwrap();
+        place(&partial, &dest, |_| Ok(())).unwrap();
+        assert_eq!(fs::read(dest.join("iris.db")).unwrap(), b"db");
+        let _ = fs::remove_dir_all(&root);
+    }
 }

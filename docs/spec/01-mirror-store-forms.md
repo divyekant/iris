@@ -370,9 +370,18 @@ makes a copy while the engine runs:
 
 The engine makes the copy in the folder `.<name>.partial-<pid>` next to the
 destination, and renames it to the destination only when it is complete.
-After an error, the engine removes that folder, so a new backup to the same
-path can start. After a crash, the folder can stay; it does not block a new
-backup, and the person can delete it.
+The failure list of the backup:
+
+| Input or event | Result |
+|---|---|
+| The destination does not exist, or is an empty folder | Supported. The copy gets the name of the destination at the end. |
+| The destination has files, or the path has no folder name | Error before the copy. Nothing changes. |
+| An error during the copy (for example a missing content file or a full disk) | The engine removes the partial folder. The destination does not change, so a new backup to the same path can start. |
+| The rename fails | The engine removes the partial folder. The destination does not change. |
+| The write of the folder entry to disk fails after the rename | The engine removes the copy. The destination does not exist, so a new backup can start. |
+| A crash or a power loss before the rename | The partial folder stays (issue #790). It does not block a new backup. The person can delete it. |
+| A crash or a power loss after the rename | The destination holds the complete copy, or does not exist if the rename was not on disk. |
+| Any other error | The backup gives an error, and the destination holds no partial copy. |
 
 The engine makes the backup folder with mode `0700`, because it holds the key
 and the mail. The engine writes `policy.toml` to a temporary file, and it
