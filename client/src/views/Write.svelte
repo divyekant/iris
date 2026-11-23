@@ -186,7 +186,7 @@
   }
 
   // A draft that Iris wrote for this thread before (`iris write`, R3-05) fills an
-  // empty new form (issue #743). Only a reply to the mail that the form shows: a
+  // empty new form (issue 743). Only a reply to the mail that the form shows: a
   // nudge goes to another person, and the brief offers it.
   let filled = $state(false);
   if (thread && reply && !saved && !taken()) {
