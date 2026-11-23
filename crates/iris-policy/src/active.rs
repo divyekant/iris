@@ -116,17 +116,15 @@ pub(crate) fn check(conn: &Connection, data_dir: &std::path::Path) -> Result<Che
 pub fn file_state(store: &Store) -> Result<FileState> {
     // A policy writer (`Store::write_policy`, with the backup lock) moves
     // the old file aside, then links the new one: a read between the two
-    // sees no file (issue #141). While another holder has the lock, look
-    // again for a short time. With no holder, a missing file is missing.
-    // A backup also holds the lock, so the wait has a bound: at most
-    // 5 x 10 ms, and only for a missing file.
-    for _ in 0..5 {
-        let state = file_state_now(store)?;
-        if state != FileState::Missing || store.try_backup_lock()?.is_some() {
-            return Ok(state);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+    // sees no file (issue #141). For a missing file, wait for the backup
+    // lock, then read again: no writer is then in its write. The wait
+    // can be long during a backup, so call this off an async runtime
+    // thread. With no holder, the lock comes at once.
+    let state = file_state_now(store)?;
+    if state != FileState::Missing {
+        return Ok(state);
     }
+    let _lock = store.backup_lock()?;
     file_state_now(store)
 }
 

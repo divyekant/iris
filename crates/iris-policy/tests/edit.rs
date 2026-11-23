@@ -366,9 +366,9 @@ fn a_discard_keeps_a_copy_and_writes_the_active_text() {
 
 /// Issue #141: a policy writer renames the old file aside, then links the
 /// new one in place, with the backup lock. A read in that gap sees no file.
-/// `file_state` must not report `Missing` while a writer holds the lock and
-/// puts the file back soon; with no writer, a missing file is `Missing` at
-/// once.
+/// `file_state` must not report `Missing` while a writer holds the lock,
+/// for any length of the gap; with no writer, a missing file is `Missing`
+/// at once.
 #[test]
 fn a_read_during_a_policy_write_does_not_see_a_missing_file() {
     let (_d, s) = store("gap");
@@ -382,7 +382,8 @@ fn a_read_during_a_policy_write_does_not_see_a_missing_file() {
     let writer = {
         let path = path.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            // Longer than any short retry: the read must wait for the writer.
+            std::thread::sleep(std::time::Duration::from_millis(300));
             std::fs::write(&path, text).unwrap();
             drop(lock);
         })

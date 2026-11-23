@@ -659,7 +659,8 @@ async fn get_measures(State(s): State<Arc<Store>>) -> Result<Response> {
 }
 
 async fn get_policy(State(s): State<Arc<Store>>) -> Result<Response> {
-    Ok(Json(policy::policy(&s)?).into_response())
+    // The file state can wait for the backup lock (issue #141).
+    Ok(Json(blocking(move || policy::policy(&s)).await?).into_response())
 }
 
 /// The body of a route that takes none: zero bytes, or a JSON text that is
