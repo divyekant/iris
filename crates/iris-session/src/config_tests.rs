@@ -427,7 +427,8 @@ fn a_relative_path_entry_is_skipped() {
 /// child process as the user `nobody` (65534). The checkout and `TMPDIR`
 /// of root can be closed to other users, so the child gets a copy of this
 /// test program and its own `TMPDIR` in a folder that `nobody` owns, under
-/// the first base folder whose path each user can pass.
+/// the first base folder whose path each user can pass, on a mount that
+/// runs programs.
 fn as_nobody() {
     use std::os::unix::fs::{chown, MetadataExt};
     use std::os::unix::process::CommandExt;
@@ -442,10 +443,22 @@ fn as_nobody() {
         "/var/tmp".into(),
         "/dev/shm".into(),
     ];
+    // The child and its program files run from the base: no `noexec` mount.
+    let exec = |p: &Path| {
+        let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // SAFETY: zeroed statvfs is a valid out value; c is a valid C string.
+        let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+        let ok = unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0;
+        ok && st.f_flag & libc::ST_NOEXEC == 0
+    };
     let base = bases
         .iter()
-        .find(|b| open(b))
-        .unwrap_or_else(|| panic!("no base folder that nobody can pass: {bases:?}"));
+        .find(|b| open(b) && exec(b))
+        .unwrap_or_else(|| {
+            panic!("no base folder that nobody can pass and run programs in: {bases:?}")
+        });
     let home = base.join(format!("iris-cfg-nobody-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir(&home).unwrap();
