@@ -713,3 +713,33 @@ test("a late answer of a left view does not replace the record of a newer write"
     globalThis.fetch = saved;
   }
 });
+
+test("a draft that Iris saved for the thread fills a new reply form, and no other form (issue #743)", async () => {
+  const saved = { thread: "t-2", based_on: "m-9", nudge: false, to: null, item: null, body: "Hi Priya,\n\nYes, Friday at 10." };
+  for (const [name, draft, form, want] of [
+    ["a draft of the shown mail", saved, null, saved.body],
+    ["a draft of an older mail", { ...saved, based_on: "m-8" }, null, ""],
+    ["a nudge", { ...saved, nudge: true, to: "sam@example.com", item: "c-4" }, null, ""],
+    ["a form that the person started", saved, "My own words.", "My own words."],
+  ]) {
+    window.sessionStorage.clear();
+    const net = serve((path, method) => (method === "GET" && path === "threads/t-2/draft" ? [200, draft] : [404, { error: "Not found." }]));
+    if (form) {
+      const first = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+      type(first.target.querySelector("textarea"), form);
+      first.flushSync();
+      first.destroy();
+    }
+    const app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+    try {
+      await until(() => net.asked.some((a) => a.path === "threads/t-2/draft") || form);
+      await new Promise((r) => setTimeout(r, 30));
+      app.flushSync();
+      assert.equal(app.target.querySelector("textarea").value, want, name);
+      assert.equal(!!app.target.querySelector(".saved"), want === saved.body, name);
+    } finally {
+      app.destroy();
+      net.restore();
+    }
+  }
+});

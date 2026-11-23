@@ -18,7 +18,7 @@
 -->
 <script lang="ts">
   import { onDestroy, untrack } from "svelte";
-  import { get, own, post, type Account, type ReplyStart, type WriteState } from "../api";
+  import { get, own, post, type Account, type ReplyStart, type ThreadDraft, type WriteState } from "../api";
   import { chips, unique } from "../chips";
   import { initials, when } from "../format";
   import { FLAGS } from "../review";
@@ -183,6 +183,22 @@
       draftNote = own(e);
     }
     drafting = false;
+  }
+
+  // A draft that Iris wrote for this thread before (`iris write`, R3-05) fills an
+  // empty new form (issue #743). Only a reply to the mail that the form shows: a
+  // nudge goes to another person, and the brief offers it.
+  let filled = $state(false);
+  if (thread && reply && !saved && !taken()) {
+    get<ThreadDraft>(`threads/${encodeURIComponent(thread)}/draft`).then(
+      (d) => {
+        if (alive && !write && !d.nudge && d.based_on === reply.parent.id && body === "") {
+          body = d.body;
+          filled = true;
+        }
+      },
+      () => {},
+    );
   }
 
   // After the engine took the mail: the write `cs-N` and its state.
@@ -443,6 +459,7 @@
         <button type="button" class="pill" onclick={draftIt}>{drafting ? "Writing" : "Write it for me"}</button>
       </div>
       {#if draftNote}<p class="note" role="alert">{draftNote}</p>{/if}
+      {#if filled && !draftNote}<p class="saved">Iris wrote this draft for you before. Read it and change it before you send.</p>{/if}
     {/if}
     <textarea class="body" aria-label={reply ? "Reply text" : "Mail text"} placeholder={reply ? "Write your reply" : "Write your mail"} bind:value={body}></textarea>
 
@@ -698,6 +715,11 @@
   }
   .intent input:focus {
     outline: none;
+  }
+  .saved {
+    margin: var(--space-2) 0 0;
+    color: var(--color-text-muted);
+    font-size: var(--font-size--1);
   }
   .note {
     margin: var(--space-2) 0 0;
