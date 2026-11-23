@@ -4,9 +4,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use iris_job::{
-    add_scope, create, end, finish, format_session_id, live_sessions, open_session,
-    parse_session_id, reap, register, revoke_scope, session, set_agent, set_helper, start, wait,
-    By, End, EndReason, Error, Ref, Wait,
+    add_scope, create, end, finish, format_session_id, get, live_sessions, open_session,
+    parse_session_id, reap, register, revoke_scope, session, session_done, set_agent, set_helper,
+    start, wait, By, End, EndReason, Error, Ref, State, Wait,
 };
 use iris_store::Store;
 
@@ -213,6 +213,28 @@ fn a_job_move_ends_the_open_session_with_job_state() {
     )
     .unwrap();
     assert_eq!(session(&store, t).unwrap().end, Some(EndReason::Stop));
+}
+
+#[test]
+fn done_of_a_session_completes_the_job_only_while_the_session_is_open() {
+    let (_d, store, job) = setup("done");
+    let s = register(&store, job, "codex", NOW).unwrap();
+    // A session of another job cannot end this job.
+    let other = create(&store, "Pay the bill.", None, NOW).unwrap();
+    let t = register(&store, other, "codex", NOW).unwrap();
+    refused(session_done(&store, t, job, None, NOW + 1));
+    assert_eq!(get(&store, job).unwrap().state, State::Working);
+    session_done(&store, s, job, Some("sent the contract"), NOW + 2).unwrap();
+    let j = get(&store, job).unwrap();
+    assert_eq!(j.state, State::Done);
+    assert_eq!(j.end, Some(End::Complete));
+    assert_eq!(session(&store, s).unwrap().end, Some(EndReason::JobState));
+    // The session ended: a second done is refused.
+    refused(session_done(&store, s, job, None, NOW + 3));
+    // A session that a stop ended cannot end its job.
+    end(&store, t, EndReason::Stop, None, NOW + 4).unwrap();
+    refused(session_done(&store, t, other, None, NOW + 5));
+    assert_eq!(get(&store, other).unwrap().state, State::Working);
 }
 
 #[test]
