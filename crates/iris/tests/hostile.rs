@@ -523,3 +523,47 @@ fn no_injection_sends_mail_without_a_person() {
     e.step(t);
     assert_eq!(e.sends(), 1, "the send of the person did not leave");
 }
+
+/// Each attack reaches the data that the model reads, decoded: also the
+/// attack in the `notes.txt` attachment. Only the hidden HTML block stays
+/// out, because the clean text takes the plain part. So the send checks of
+/// [`no_injection_sends_mail_without_a_person`] cover attacks that a mail
+/// consumer can see.
+#[test]
+fn each_visible_attack_reaches_the_model_data() {
+    let labels = vec!["INBOX".to_string()];
+    let none = |_: &str| Vec::new();
+    for s in SAMPLES {
+        let cx = iris_understand::Context {
+            me: iris_synth::OWNER,
+            kind: iris_understand::Kind::Stranger,
+            labels: &labels,
+            authserv: Some(iris_understand::head::GMAIL_AUTHSERV),
+            internal_date: Some(now()),
+            now_ms: now(),
+            known_person: &none,
+            existing: &[],
+            thread: &[],
+            same_sender: &[],
+            known: &[],
+        };
+        let a = iris_understand::analyze(&s.raw(), &cx);
+        let data = iris_understand::prompt::data(&a, &cx);
+        assert_eq!(
+            data.contains(s.attack),
+            s.carrier != Carrier::HiddenHtml,
+            "{}: {data}",
+            s.name
+        );
+        if s.carrier == Carrier::Attachment {
+            assert!(
+                a.text
+                    .attachment_text
+                    .iter()
+                    .any(|(name, text)| name == "notes.txt" && text.contains(s.attack)),
+                "{}",
+                s.name
+            );
+        }
+    }
+}
