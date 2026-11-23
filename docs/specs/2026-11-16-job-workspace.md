@@ -131,26 +131,24 @@ The granted messages of a job:
 - A job in the state `done` grants nothing. The build of a done job writes
   the job files and no thread, item or person file. The read verbs of a
   session of a done job see nothing (R4-04 ends the session).
-- Each caller that moves a job to `done` (`iris_job::finish`) does these
-  steps in this order: move the job, end the session of the job if one
-  runs and wait until it ended (R4-04), then build the workspace. If the
-  caller is the agent of that session (`iris done`), the engine replies to
-  the command after the move, and then does the other steps by itself, so
-  the command does not wait for its own session to end. So the
-  mail files go at once, and no build runs while a session runs. The engine also
-  builds, at each start, the workspace of each done job whose workspace
-  folder exists. A partial build can leave any owned path absent, so the
-  check is the folder, not one path in it. If the engine stops between the move and the
-  build, the session ends with the engine, and the mail files stay only
-  until that start. If the build fails, the engine tries it again at that
-  start. The callers are `iris done` of a
-  session (the agent completes the job), and `iris job finish` and
-  `POST /api/jobs/{id}/finish` of the person (complete or cancel). The
-  person callers only move the job and reply: they do not wait for the
-  build. The supervisor of a running engine builds each done job at the
-  first wake (about one second) with no live session and no launch of the
-  job, also after a launch that ended with no session. With no running
-  engine, the build waits for the next engine start (#356).
+- A move of a job to `done` has two parts. The caller does the first part:
+  it moves the job in one transaction, which also ends the live session of
+  the job with `job_state`, and then replies. The caller does not wait for
+  the second part. The engine does the second part by itself: it builds
+  the workspace of the done job after the session ended, so no build runs
+  while a session runs. The callers:
+
+  | Caller | Who | Reply | Build of the workspace |
+  |---|---|---|---|
+  | `iris done` (a verb of the session) | The agent completes the job | After the move | After the reap of the session |
+  | `iris job finish`, `POST /api/jobs/{id}/finish` | The person completes or cancels the job | After the move | With a live session: after its reap. With no live session and no launch: at the next wake of the supervisor (about one second). After a launch that ended with no session: at the end of that launch. |
+
+  The engine also builds, at each start, the workspace of each done job
+  whose workspace folder exists. A partial build can leave any owned path
+  absent, so the check is the folder, not one path in it. If the engine
+  does not run, or stops between the move and the build, the mail files
+  stay until the next engine start. If the build fails, the engine tries it
+  again at that start (#356).
 
 - A thread of the scope grants each clean message that was in the thread
   at the add of the ref. The add writes these messages into the table
