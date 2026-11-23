@@ -206,8 +206,10 @@ A move at the server is a delete and an add (section 3), so a message
 moved into the Drafts or the Sent folder is a new message with the label
 from its first sync, before any understanding. Only a `\Draft` flag set
 in place gives `UNSENT` to a message that the understanding read before.
-Then its items stay, as the items of a gone message stay (spec 1): the
-label stops new understanding only. This is a limit issue too.
+Each change of a label of `iris_store::DRAFT_OR_COPY`, `SENT` included,
+clears `understood_at` through the triggers of store migration 41. The
+new understanding of the message then drops its items, as for a message
+that gets `DRAFT` (issue 677).
 
 Each folder label has the kind `system`, a folder that the person made
 too: the provider refuses each folder change (section 7), and the

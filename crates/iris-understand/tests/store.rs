@@ -1207,6 +1207,31 @@ fn a_message_that_becomes_a_draft_loses_its_items() {
     assert!(at.is_none());
 }
 
+/// Each label that makes a message a draft or a copy, or your own mail,
+/// asks for a new understanding when a sync adds it in place, and that run
+/// drops the items (#677: an IMAP `\Draft` flag set in place gives `UNSENT`).
+#[test]
+fn each_draft_or_copy_label_added_in_place_drops_the_items() {
+    for label in iris_store::DRAFT_OR_COPY {
+        let b = store("in-place");
+        let m = b.add("1", ASK, &["INBOX"]);
+        understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW).unwrap();
+        assert_eq!(b.items().len(), 1, "{label}");
+        b.add("1", ASK, &["INBOX", label]);
+        let at: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m);
+        assert!(
+            at.is_none(),
+            "{label}: the label asks for a new understanding"
+        );
+        assert!(
+            understand(&b.store, m, &Fake::default(), NOW)
+                .unwrap()
+                .draft
+        );
+        assert!(b.items().is_empty(), "{label}");
+    }
+}
+
 #[test]
 fn a_broken_phishing_answer_gives_no_mark() {
     for answer in [
