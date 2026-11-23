@@ -361,6 +361,54 @@ fn a_done_job_gets_its_workspace_again_after_the_reap() {
     appears(&workspace(&f).join("JOB.md"));
 }
 
+fn done_of_the_agent_ends_the_session_and_the_mail_files() {
+    let f = fixture("agentdone", "sleep 30");
+    let s = sessions(&f);
+    let id = s.run(f.job, "script").unwrap();
+    until(&s, &f, id, |r| r.started_ms.is_some());
+    let marker = workspace(&f).join(".iris/marker");
+    fs::write(&marker, "x").unwrap();
+    let v = ask(&f, "done", serde_json::json!({ "why": 7 })).unwrap();
+    assert_eq!(v["code"], 2, "{v}");
+    let v = ask(
+        &f,
+        "done",
+        serde_json::json!({ "why": "Sent the contract." }),
+    )
+    .unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["result"]["state"], "done", "{v}");
+    let job = iris_job::get(&f.store, f.job).unwrap();
+    assert_eq!(job.state, iris_job::State::Done);
+    assert_eq!(job.end, Some(iris_job::End::Complete));
+    let row = until(&s, &f, id, |r| r.reaped_ms.is_some());
+    assert_eq!(row.end, Some(EndReason::JobState));
+    gone(&marker);
+    appears(&workspace(&f).join("JOB.md"));
+}
+
+fn a_job_the_person_ends_with_no_session_gets_its_workspace_again() {
+    let f = fixture("persondone", "true");
+    let s = sessions(&f);
+    let marker = workspace(&f).join(".iris/marker");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "x").unwrap();
+    s.wake(now());
+    assert!(marker.exists(), "a working job keeps its workspace");
+    iris_job::finish(
+        &f.store,
+        f.job,
+        By::Person,
+        iris_job::End::Cancel,
+        None,
+        now(),
+    )
+    .unwrap();
+    s.wake(now());
+    gone(&marker);
+    appears(&workspace(&f).join("JOB.md"));
+}
+
 fn the_engine_start_builds_each_done_job_again() {
     let f = fixture("donestart", "true");
     let marker = workspace(&f).join(".iris/marker");
@@ -1382,6 +1430,14 @@ fn main() {
         .filter_map(|a| a.to_str())
         .find(|a| !a.starts_with('-'));
     let tests: &[(&str, fn())] = &[
+        (
+            "done_of_the_agent_ends_the_session_and_the_mail_files",
+            done_of_the_agent_ends_the_session_and_the_mail_files,
+        ),
+        (
+            "a_job_the_person_ends_with_no_session_gets_its_workspace_again",
+            a_job_the_person_ends_with_no_session_gets_its_workspace_again,
+        ),
         (
             "a_comment_during_a_session_starts_one_session_after_it",
             a_comment_during_a_session_starts_one_session_after_it,

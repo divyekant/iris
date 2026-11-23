@@ -143,8 +143,11 @@ The granted messages of a job:
   check is the folder, not one path in it. If the engine stops between the move and the
   build, the session ends with the engine, and the mail files stay only
   until that start. If the build fails, the engine tries it again at that
-  start. The callers come with
-  R4-04 and R4-09 (known limit until then, with a GitHub issue).
+  start. The callers are `iris done` of a
+  session (the agent completes the job), and `iris job finish` and
+  `POST /api/jobs/{id}/finish` of the person (complete or cancel). A job
+  that the person ends with no live session gets its build at the next wake
+  of the supervisor (#356).
 
 - A thread of the scope grants each clean message that was in the thread
   at the add of the ref. The add writes these messages into the table

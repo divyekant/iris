@@ -338,3 +338,24 @@ fn job_answer_answers_the_question_once() {
     assert_eq!(last.answer.as_deref(), Some("The blue card."));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `iris job finish` ends a job once (#356).
+#[test]
+fn job_finish_ends_the_job_once() {
+    let dir = std::env::temp_dir().join(format!("iris-verbs-finish-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    let job = iris_job::create(&store, "Pay the invoice.", None, 1).unwrap();
+    let id = iris_job::format_job_id(job);
+    let (ok, _, err) = iris(&store, &["job", "finish", "j-999"]);
+    assert!(!ok && err.contains("no job"), "{err}");
+    let (ok, out, err) = iris(&store, &["job", "finish", &id, "--cancel"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("done"), "{out}");
+    let j = iris_job::get(&store, job).unwrap();
+    assert_eq!(j.state, iris_job::State::Done);
+    assert_eq!(j.end, Some(iris_job::End::Cancel));
+    let (ok, _, err) = iris(&store, &["job", "finish", &id]);
+    assert!(!ok && err.contains("done already"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -75,6 +75,10 @@ pub struct Sessions {
     /// build can wait for the workspace lock without a limit, so no
     /// supervisor turn and no stop waits for it.
     builds: mpsc::Sender<i64>,
+    /// The done jobs that this engine saw. A job that moves to `done` with
+    /// no live session (the person ends it) gets one build at the next
+    /// wake; a job with a live session gets its build after the reap.
+    done_seen: Mutex<HashSet<i64>>,
     /// The egress proxies that the stop thread stops. A stop joins the
     /// threads of the proxy, so no supervisor turn and no stop or run
     /// waits for it.
@@ -165,6 +169,7 @@ impl Sessions {
             tried: Mutex::default(),
             comment_tried: Mutex::default(),
             builds,
+            done_seen: Mutex::default(),
             releases,
         });
         let live: HashSet<i64> = iris_job::live_sessions(&s.store)
@@ -172,11 +177,14 @@ impl Sessions {
             .iter()
             .map(|l| l.job_id)
             .collect();
+        let mut seen = s.done_seen.lock().unwrap_or_else(|e| e.into_inner());
         for job in iris_job::list(&s.store, iris_job::State::Done).map_err(|e| e.to_string())? {
+            seen.insert(job.id);
             if !live.contains(&job.id) {
                 let _ = s.builds.send(job.id);
             }
         }
+        drop(seen);
         s.remove_old_logs();
         Ok(s)
     }
@@ -705,6 +713,7 @@ impl Sessions {
             say!("iris: the wake of the waiting jobs failed: {e}");
         }
         self.comment_wake(now);
+        self.done_builds();
         let Ok(woken) = iris_job::woken(&self.store) else {
             return;
         };
@@ -725,6 +734,30 @@ impl Sessions {
                     "iris: {}: the session after the wake did not start: {e}",
                     iris_job::format_job_id(job)
                 );
+            }
+        }
+    }
+
+    /// One build for each job that moved to `done` since the last wake and
+    /// has no live session or launch: the mail files of its workspace go
+    /// (docs/specs/2026-11-16-job-workspace.md). A job with a live session
+    /// or a launch gets its build after the reap.
+    fn done_builds(&self) {
+        // Only the IDs: the index `job_state` covers the read.
+        let Ok(done) = self.store.read(|c| {
+            let mut q = c.prepare_cached("SELECT id FROM job WHERE state = 'done'")?;
+            let ids = q.query_map([], |r| r.get::<_, i64>(0))?;
+            Ok(ids.collect::<rusqlite::Result<Vec<i64>>>()?)
+        }) else {
+            return;
+        };
+        let mut seen = self.done_seen.lock().unwrap_or_else(|e| e.into_inner());
+        for job in done {
+            if !seen.insert(job) {
+                continue;
+            }
+            if self.live_of(job).is_none() && !self.state().launching.contains(&job) {
+                let _ = self.builds.send(job);
             }
         }
     }
