@@ -83,6 +83,11 @@ fn new_message(id: &str, thread: &str, date: i64, labels: &[&str], raw: &[u8]) -
         labels: labels.iter().map(|l| l.to_string()).collect(),
         header: Header {
             from_addr: Some(from_addr(raw)),
+            // The display name of `From`, as the understanding step saves it.
+            from_name: iris_senders::head::Head::parse(raw)
+                .get("from")
+                .and_then(|v| iris_senders::head::addresses(v).into_iter().next())
+                .and_then(|(_, n)| n),
             to_addrs: addr_list(raw, "To: "),
             cc_addrs: addr_list(raw, "Cc: "),
             ..Header::default()
@@ -1152,6 +1157,75 @@ fn synthetic_mailbox_meets_the_sender_targets() {
         .filter(|f| f.starts_with("sender "))
         .collect();
     assert!(failed.is_empty(), "{failed:?}\n{text}");
+}
+
+/// #111: when a name becomes the name of a known person, each other
+/// sender with mail under that name goes to `rerun`, so that the spoof
+/// check reads that mail again. Also when the name goes away.
+#[test]
+fn a_new_known_name_reruns_the_mail_of_other_senders_with_that_name() {
+    let mut c = Case::new("name-twins");
+    let forged = "From: Ana Lee <ana@evil.example.net>\r\nTo: owner@example.com";
+    c.put("t1", &["INBOX"], forged);
+    let evil = sender_id(&c, "ana@evil.example.net");
+    // You write to the real Ana: her name is now a known name.
+    let d = c.put(
+        "t2",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: Ana Lee <ana@example.org>"),
+    );
+    assert_eq!(d.rerun, [evil]);
+    // The same name again changes nothing.
+    let d = c.put(
+        "t3",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: ANA LEE <ana@example.org>"),
+    );
+    assert!(d.rerun.is_empty());
+    // A new name: the mail under the old name and the new name goes again.
+    let bo = "From: Ana Bo <x@other.example.net>\r\nTo: owner@example.com";
+    c.put("t4", &["INBOX"], bo);
+    let x = sender_id(&c, "x@other.example.net");
+    let d = c.put(
+        "t5",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: Ana Bo <ana@example.org>"),
+    );
+    assert_eq!(d.rerun, [evil, x]);
+}
+
+fn sender_id(c: &Case, addr: &str) -> i64 {
+    c.store
+        .read(|r| {
+            Ok(
+                r.query_row("SELECT id FROM sender WHERE address = ?1", [addr], |x| {
+                    x.get(0)
+                })?,
+            )
+        })
+        .unwrap()
+}
+
+/// #111: a sender that the person accepts at the gate makes its name a
+/// known name, so the mail of other senders with that name goes again.
+#[test]
+fn an_accept_at_the_gate_reruns_the_mail_under_the_name() {
+    let mut c = Case::new("gate-twins");
+    c.put(
+        "t1",
+        &["INBOX"],
+        "From: Cy Ray <cy@evil.example.net>\r\nTo: owner@example.com",
+    );
+    c.put(
+        "t2",
+        &["INBOX"],
+        "From: Cy Ray <cy@example.org>\r\nTo: owner@example.com",
+    );
+    let (evil, cy) = (
+        sender_id(&c, "cy@evil.example.net"),
+        sender_id(&c, "cy@example.org"),
+    );
+    assert_eq!(gate_of(&c, accept, cy), Gate::Done { rerun: vec![evil] });
 }
 
 // The stranger gate (spec 1 section 6.7, card R5-03).
