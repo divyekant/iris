@@ -368,16 +368,6 @@ makes a copy while the engine runs:
    backup cannot decrypt the secrets.
 5. Release the lock.
 
-The failure list of the backup:
-
-| Input or event | Result |
-|---|---|
-| The destination does not exist (its parent folders can be missing), or is an empty folder, or a symbolic link to an empty folder | Supported. The copy goes into that folder. |
-| The destination has files | Error before the copy. Nothing changes. |
-| An error during the copy (for example a missing content file or a full disk) | The engine removes each file that it wrote (`iris.db`, its journal, `content/`, `key`, `policy.toml`), and the destination folder if it made it. The destination is as before, so a new backup to the same path can start. Parent folders that the engine made stay. |
-| A crash or a power loss during the copy | The partial copy stays in the destination (issue #790). The person deletes it before a new backup to the same path. |
-| Any other error | The same as an error during the copy. |
-
 The engine makes the backup folder with mode `0700`, because it holds the key
 and the mail. The engine writes `policy.toml` to a temporary file, and it
 does not write the file during a backup. So the copy has one complete version

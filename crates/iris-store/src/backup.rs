@@ -71,27 +71,8 @@ impl Store {
     /// `dest` must not exist, or must be an empty folder. Gives the number
     /// of content files in the copy. A content file that the database
     /// refers to and that is not there is an error: the copy is not complete.
-    ///
-    /// After an error, the function removes each file that it wrote, and
-    /// `dest` if it made it, so `dest` is as before and a new backup to the
-    /// same path can start (#63). It never removes another file.
     pub fn backup(&self, dest: &Path) -> Result<u64> {
         let _lock = self.backup_lock()?;
-        let existed = dest.exists();
-        // A folder with files is refused before any write, so the removal
-        // after an error never meets a file of another owner.
-        if existed && fs::read_dir(dest)?.next().is_some() {
-            return Err(Error::Io(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "the folder is not empty",
-            )));
-        }
-        self.backup_into(dest)
-            .inspect_err(|_| remove_copy(dest, existed))
-    }
-
-    /// The copy of [`Store::backup`]. The caller holds the backup lock.
-    fn backup_into(&self, dest: &Path) -> Result<u64> {
         // The copy holds the key and the mail.
         new_private_dir(dest)?;
         let dest_content = dest.join("content");
@@ -352,33 +333,4 @@ fn copy_private(from: &Path, to: &Path) -> io::Result<()> {
 
 fn sync_file(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
-}
-
-/// The names that [`Store::backup`] writes in its destination, with the
-/// journal that SQLite can make next to the copy of `iris.db`.
-const COPY_NAMES: [&str; 5] = [
-    "iris.db",
-    "iris.db-journal",
-    "content",
-    "key",
-    "policy.toml",
-];
-
-/// Remove what a failed backup wrote in `dest`: each name of [`COPY_NAMES`],
-/// and `dest` itself if it did not exist before and is empty now. The
-/// backup checks that `dest` is empty first, and holds the backup lock, so
-/// these names are its own.
-fn remove_copy(dest: &Path, existed: bool) {
-    for name in COPY_NAMES {
-        let p = dest.join(name);
-        let _ = match fs::symlink_metadata(&p) {
-            Ok(m) if m.is_dir() => fs::remove_dir_all(&p),
-            Ok(_) => fs::remove_file(&p),
-            Err(_) => continue,
-        };
-    }
-    if !existed {
-        // remove_dir removes only an empty folder.
-        let _ = fs::remove_dir(dest);
-    }
 }
