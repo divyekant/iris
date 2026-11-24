@@ -252,6 +252,8 @@ export type Changeset = {
   id: string;
   revision: number;
   author: { kind: "person" | "agent" | "triage" | "local"; name?: string; session?: string; job?: string };
+  /** Since open model 1.2: who withdrew the changeset (decision D16). Absent when it is not known. */
+  withdrawn_by?: "author" | "person";
   why: string | null;
   created: string;
   submitted: string | null;

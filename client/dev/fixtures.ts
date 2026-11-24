@@ -465,6 +465,7 @@ export function withdraw(id: string): Changeset | undefined {
   const c = changesets.find((x) => x.id === id);
   if (!c) return undefined;
   c.state = "withdrawn";
+  c.withdrawn_by = "person";
   for (const a of c.actions) {
     if (a.decision && ["proposed", "in_review", "approved"].includes(a.decision.state)) a.decision = { state: "cancelled", by: "author" };
   }
