@@ -226,7 +226,7 @@ pub fn dismiss(store: &Store, id: i64, now: i64) -> Result<bool> {
 
 /// What a pass read last. A pass runs again only when it changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Mark([i64; 7]);
+pub struct Mark([i64; 8]);
 
 /// Writes the open proposals again from the decided actions, if the
 /// decisions, the active policy or the hour changed since `last`. Gives the
@@ -338,6 +338,13 @@ fn mark(tx: &Connection, now: i64) -> Result<Mark> {
     let version = crate::active(tx)?.version.unwrap_or(0);
     // A new open of a source mail (decision D12). A row never goes.
     let opens: i64 = tx.query_row("SELECT count(*) FROM use_open", [], |r| r.get(0))?;
+    // A dismiss: a dismissed proposal is never proposed again, and a
+    // dismissed domain gives its address proposals back.
+    let closed: i64 = tx.query_row(
+        "SELECT count(*) FROM rule_proposal WHERE state <> 'open'",
+        [],
+        |r| r.get(0),
+    )?;
     // Each hour too, for a change of a fact that a rule reads (a sender kind).
     Ok(Mark([
         count,
@@ -346,6 +353,7 @@ fn mark(tx: &Connection, now: i64) -> Result<Mark> {
         applied,
         version,
         opens,
+        closed,
         now.div_euclid(3600),
     ]))
 }
@@ -642,8 +650,9 @@ fn choices(conn: &Connection, policy: &mut Policy, now: i64, found: &mut Found) 
     Ok(())
 }
 
-/// The opens of the source mail (decision D12): the newest [`MAX_ACTIONS`]
-/// rows of `use_open`, which the measures page writes on this machine only.
+/// The opens of the source mail (decision D12): the rows of `use_open` of
+/// the newest days that hold the newest [`MAX_ACTIONS`] opens, each day
+/// whole. The measures page writes them, on this machine only.
 /// An open of a mail is a refusal of each `hide` candidate that would hide
 /// an item whose origin is that mail. An open of a mail that cannot be read
 /// again (its header is gone) names no sender, so it refuses nothing.
@@ -655,7 +664,12 @@ fn opens(
 ) -> Result<()> {
     let mut header = conn.prepare_cached("SELECT 1 FROM header WHERE message_id = ?1")?;
     let ids: Vec<i64> = conn
-        .prepare("SELECT DISTINCT message_id FROM (SELECT message_id FROM use_open ORDER BY day DESC LIMIT ?1)")?
+        // `use_open` has no order inside a day, so the window takes whole
+        // days: each day from the day of the newest MAX_ACTIONS-th open.
+        .prepare(
+            "SELECT DISTINCT message_id FROM use_open WHERE day >= coalesce(
+               (SELECT day FROM use_open ORDER BY day DESC LIMIT 1 OFFSET ?1 - 1), '')",
+        )?
         .query_map([MAX_ACTIONS as i64], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     for m in ids {

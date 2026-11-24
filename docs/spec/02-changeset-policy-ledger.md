@@ -708,14 +708,15 @@ The pass also proposes a `hide` rule from the choices of the person
   `hide` proposal of its form.
 - An undone choice whose item, origin message, header or sender cannot
   be read again stops each `hide` proposal of its form.
-- An open of a source mail is a refusal too. The pass reads the newest
-  2,000 rows of `use_open` (the opens of the measures page, store
-  migration 27, on this machine only). For each item whose origin is the
+- An open of a source mail is a refusal too. The pass reads the rows of
+  `use_open` (the opens of the measures page, store migration 27, on this
+  machine only) of each day from the day of the 2,000th newest open. A row
+  has a day but no time, so the window takes whole days. For each item whose origin is the
   opened mail, each candidate whose rule would change the attention of
   the item from shown to hidden gets a refusal. An open of mail from the
   person or of hostile mail refuses nothing, as such mail gives no
   candidate. An open whose header is gone names no sender, so it refuses
-  nothing. A new open changes the mark of the pass.
+  nothing. A new open and a dismiss change the mark of the pass.
 - The row has `verb = 'hide'` and the `form` (store migration 30). An
   `allow` row has the form `''`.
 

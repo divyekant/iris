@@ -578,3 +578,45 @@ fn a_new_open_runs_the_pass_again() {
     assert!(propose::refresh(&store, NOW, &mut mark).unwrap().is_some());
     assert!(hides(&store.read(propose::open).unwrap()).is_empty());
 }
+
+/// A dismissed domain gives its address proposals back at the next tick,
+/// with the mark of the pass before the dismiss.
+#[test]
+fn a_dismiss_runs_the_pass_again() {
+    let (_dir, store) = store("dismiss-mark");
+    choices(&store, "skip", "feed", "a@shop.example", MIN_APPROVALS);
+    choices(&store, "skip", "feed", "b@shop.example", 1);
+    let mut mark = None;
+    propose::refresh(&store, NOW, &mut mark).unwrap();
+    let ps = store.read(propose::open).unwrap();
+    assert_eq!(hides(&ps)[0].0, "@shop.example");
+    assert!(propose::dismiss(&store, ps[0].id, NOW).unwrap());
+    assert!(propose::refresh(&store, NOW, &mut mark).unwrap().is_some());
+    assert_eq!(
+        hides(&store.read(propose::open).unwrap()),
+        vec![("a@shop.example".to_string(), Form::Feed, MIN_APPROVALS)]
+    );
+}
+
+/// The window of opens takes whole days: an open of an old mail on the
+/// newest day counts, also when that day has more than MAX_ACTIONS opens.
+#[test]
+fn the_open_window_takes_whole_days() {
+    let (_dir, store) = store("open-window");
+    choices(&store, "skip", "feed", "news@shop.example", MIN_APPROVALS);
+    let i = item(&store, "feed", "news@shop.example", false, false);
+    open(&store, i);
+    store
+        .write(|tx| {
+            // Opens of other mail on the same day, with larger message IDs.
+            for m in 0..propose::MAX_ACTIONS as i64 {
+                tx.execute(
+                    "INSERT INTO use_open(day, message_id) VALUES ('2027-01-15', ?1)",
+                    [1_000_000 + m],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert!(hides(&refresh(&store)).is_empty());
+}
