@@ -770,6 +770,40 @@ async fn a_done_job_keeps_its_scope_and_a_gone_item_keeps_its_id() {
     assert!(raw.is_err(), "{raw:?}");
 }
 
+/// Decision D25: an item ref from before migration 50 whose item row is
+/// gone has no known form. It still has an ID, and the person removes it.
+#[tokio::test]
+async fn a_gone_item_ref_with_no_known_form_stays_removable() {
+    let d = open("scope-legacy");
+    let (code, _) = d.start("c-1").await;
+    assert_eq!(code, StatusCode::CREATED);
+    // A store from before migration 50: no form row. Then the item goes.
+    d.1.write(|tx| {
+        tx.execute_batch(
+            "DROP TRIGGER job_scope_form_delete;
+             DELETE FROM job_scope_form;
+             DELETE FROM item WHERE id = 1;",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let (code, page) = d.get("/api/jobs/j-1").await;
+    assert_eq!(code, StatusCode::OK, "{page}");
+    let ids: Vec<&Value> = page["scope"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| &r["id"])
+        .collect();
+    assert!(ids.contains(&&json!("r-1")), "{page}");
+    assert!(!ids.contains(&&Value::Null), "{page}");
+    let (code, page) = d
+        .post("/api/jobs/j-1/scope/remove", json!({"ref": "r-1"}))
+        .await;
+    assert_eq!(code, StatusCode::OK, "{page}");
+    assert!(!d.scope("j-1").contains(&Ref::Item(1)));
+}
+
 /// Decision D26 (issue #558): a job that starts from an item can wait for a
 /// reply on the thread of the item, and a reply on that thread wakes it.
 #[tokio::test]

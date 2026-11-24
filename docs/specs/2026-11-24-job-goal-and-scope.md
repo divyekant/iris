@@ -128,7 +128,9 @@ a second job on purpose is a second form.
   form of the item of each item ref, at the grant (a trigger on the insert
   of the ref). The scope list and `remove` read the form from the item row,
   else from this table, so the ref keeps its ID and the person can remove
-  it.
+  it. A ref from before migration 50 whose item row was gone at the
+  migration has no known form: its ID uses the record form (`r-<n>`), and
+  the remove takes any item ID with its row number.
 - The job page (`GET /api/jobs/{id}`) gets a `scope` list: each active ref
   with its ID, its kind and a label (the subject of the first message of a
   thread, the title of an item), and the count of granted messages.
@@ -174,6 +176,7 @@ a second job on purpose is a second form.
 | An add of a thread in the scope already | The add adds the messages of the thread now to its list (existing `add_scope_in`) | API test |
 | A remove of a ref that is not active in the scope | 404 | API test |
 | A remove of an item ref whose item row a later understanding deleted | The scope list keeps the ID of the ref, and the remove works | API test |
+| An item ref from before migration 50 whose item row was gone at the migration | The ID `r-<n>`; the remove takes any item ID with the row number | API test |
 | A revoke by SQL for a `done` job | The trigger refuses it | API test |
 | A remove while a session runs | The revoke ends the session (existing) | Existing test |
 | A typed start that the client sends again with the same request ID | 409 with the job of the first start, no second job | API test |
