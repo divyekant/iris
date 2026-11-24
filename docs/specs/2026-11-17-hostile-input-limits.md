@@ -101,7 +101,12 @@ stored raw bytes of the draft of a `send`.
 Submit (`iris_changeset::submit_in`) adds `outside_thread` to a `draft` or a
 `send` action when the changeset author is marked
 (`iris_changeset::marked_in`) and the content has an outside address
-(`iris_changeset::outside_marks` is not empty). The drafts API of the
+(`iris_changeset::outside_marks` is not empty). An address is in the
+thread only if it is the From of a live thread message, or it is in To or
+Cc of a live thread message that you sent (label `SENT`, not `DRAFT`).
+Your own addresses are never outside. An address that a stranger put in
+To or Cc of its own message is not in the thread (decision D13, issue
+#435). The drafts API of the
 review (`GET /api/changesets/{id}/drafts`) marks each outside address of
 `to` and `cc` with the flag `outside_thread`, by the same rule
 (`outside_marks`). The review screen shows the tag "not in the thread"
@@ -167,7 +172,7 @@ the thread messages in the store, the scope rows of the job.
 | A store error in the mark read or the address read | Submit fails, and no revision is submitted. | by construction (one transaction) |
 | A rule or engine approval of a flagged `draft` or `send`, from any code path | The trigger aborts the update. | property test |
 | A warning flag added to a `draft` or `send` that a rule approved | The trigger aborts the update. | `outside.rs` |
-| An external address that a stranger put in `Cc` of a thread message | It is a thread address, so no `outside_thread`. `new_recipient` still flags it if you never sent to it. | Known limit issue |
+| An external address that a stranger put in `Cc` of a thread message | It is not a thread address, so it gets `outside_thread` (decision D13, issue #435). | `outside.rs` |
 
 ## Impact
 
