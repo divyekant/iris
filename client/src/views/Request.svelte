@@ -71,23 +71,22 @@
   // Observe mode (decision D10): what a rule would decide for each proposed change, by its key.
   // Only a hint: without it, the review works as before.
   let rules: Record<string, Would> = $state({});
-  // The read is for one revision and one set of proposed changes. A new revision or a refresh
-  // asks again, clears the old lines, and drops an answer that comes after a newer read.
-  let rulesWant = $derived(
-    open.some((a) => a.decision?.state === "proposed")
-      ? `${c.id}@${c.revision}:${open.filter((a) => a.decision?.state === "proposed").map(key).join(",")}`
-      : "",
-  );
-  let rulesFor = "";
+  // Each load of the request (a new `c`: the first one, a new revision or a refresh) reads the
+  // lines again, because the active policy can change between two loads of the same revision.
+  // The load clears the old lines and drops an answer that comes after a newer read.
+  let rulesFor: Changeset | null = null;
+  let rulesRead = 0;
   $effect(() => {
-    const want = rulesWant;
-    if (want === rulesFor) return;
-    rulesFor = want;
+    const cur = c;
+    const ask = open.some((a) => a.decision?.state === "proposed");
+    if (cur === rulesFor) return;
+    rulesFor = cur;
     rules = {};
-    if (!want) return;
-    get<{ would: Would[] }>(`changesets/${encodeURIComponent(c.id)}/would`).then(
+    const read = ++rulesRead;
+    if (!ask) return;
+    get<{ would: Would[] }>(`changesets/${encodeURIComponent(cur.id)}/would`).then(
       (got) => {
-        if (rulesFor === want) rules = Object.fromEntries(got.would.map((w) => [`${w.revision}.${w.n}`, w]));
+        if (read === rulesRead) rules = Object.fromEntries(got.would.map((w) => [`${w.revision}.${w.n}`, w]));
       },
       () => {},
     );

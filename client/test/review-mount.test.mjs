@@ -608,3 +608,29 @@ test("a new revision of the request reads again what a rule would decide, and dr
     view.destroy();
   }
 });
+
+test("a refresh of the same revision reads again what a rule would decide, and drops the old lines", async () => {
+  // The policy can change between two loads of the same revision: the line must follow it.
+  const proposed = { state: "proposed" };
+  const before = changeset([act({ decision: proposed, resolved: { messages: ["m-1"] } })]);
+  const same = { ...before, actions: before.actions.map((a) => ({ ...a })) };
+  let answer = { would: [{ revision: 1, n: 1, outcome: "approved", rule: 3, policy: 1, reason: "r" }] };
+  const asked = serve({
+    "changesets/cs-9/would": () => [200, answer],
+    "changesets/cs-9/decide": () => [409, { error: "the hash changed" }],
+    "changesets/cs-9": [200, same],
+  });
+  const view = await mount("/src/views/Review.svelte", { changesets: [before] });
+  try {
+    await until(() => view.target.querySelector(".would"));
+    assert.match(view.target.querySelector(".would").textContent, /rule 3 would approve/);
+    answer = { would: [] };
+    await until(() => !view.target.querySelector("button.primary").disabled);
+    view.target.querySelector("button.primary").click();
+    await until(() => asked.filter((p) => p === "changesets/cs-9/would").length === 2);
+    await until(() => !view.target.querySelector(".would"));
+    assert.equal(view.target.querySelector(".would"), null, "no rule decides it now");
+  } finally {
+    view.destroy();
+  }
+});
