@@ -212,6 +212,39 @@ fn dmarc_of(head: &Head) -> Option<&str> {
         .and_then(|a| a.dmarc.as_deref())
 }
 
+/// True when the display name `name` holds an email address of another
+/// owner than the `From` address `from` (decision D32, issue 371), as in
+/// `"ceo@bank.example" <x@evil.example.net>`. Mail clients that show only
+/// the name show the false address. Not a spoof:
+/// - an address with the registrable domain of `from` (one owner);
+/// - a list form, a name with the word `via` (`"x@y.example via List"`).
+///
+/// An address in the name is a run of characters between separators (space,
+/// quotes, brackets, `,`, `;`, `:`) with one `@`, a local part, and a domain
+/// with a dot. Full-width at signs count as `@`.
+pub fn name_address_spoof(name: &str, from: &str) -> bool {
+    let name = name.replace(['\u{FF20}', '\u{FE6B}'], "@");
+    if name
+        .split_whitespace()
+        .any(|w| w.eq_ignore_ascii_case("via"))
+    {
+        return false;
+    }
+    let owner = |addr: &str| iris_senders::registrable(&head::ascii_domain(head::domain(addr)));
+    let from_owner = owner(from);
+    name.split(|c: char| c.is_whitespace() || "\"'<>()[],;:`".contains(c))
+        .filter_map(|w| {
+            let w = w.trim_matches(|c: char| c == '.' || c == '!' || c == '?');
+            let (local, domain) = w.split_once('@')?;
+            let ok = !local.is_empty()
+                && !domain.contains('@')
+                && domain.contains('.')
+                && domain.split('.').all(|l| !l.is_empty());
+            ok.then(|| w.to_lowercase())
+        })
+        .any(|a| a != from.to_lowercase() && owner(&a) != from_owner)
+}
+
 /// True when the links of a received message give the mark `link`
 /// ([`link::deceptive`]). The caller skips your sent mail.
 pub fn link_mark(head: &Head, links: &[iris_clean::Link], links_cut: bool) -> bool {
@@ -264,6 +297,15 @@ pub fn analyze_cut(raw: &[u8], raw_cut: bool, html_after: bool, cx: &Context) ->
                 marks.push(Mark::Spoof);
             }
         }
+    }
+    if !sent
+        && !marks.contains(&Mark::Spoof)
+        && head
+            .from_name
+            .as_deref()
+            .is_some_and(|n| name_address_spoof(n, from))
+    {
+        marks.push(Mark::Spoof);
     }
     if !sent && link_mark(&head, &text.links, text.links_cut) {
         marks.push(Mark::Link);

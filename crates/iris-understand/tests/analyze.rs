@@ -380,3 +380,77 @@ fn each_name_of_one_domain_is_the_same_domain() {
                 From: Shop <alerts@münchen.de>\nSubject: Hi\n\nHi.\n";
     assert_eq!(run(fail, &[], &[], &[]), vec![Mark::Dmarc]);
 }
+
+/// Decision D32 (issue 371): an address in the display name of another
+/// owner than the `From` address is a spoof. List forms with `via` and
+/// addresses of the same owner are not.
+#[test]
+fn an_address_in_the_name_of_another_owner_is_a_spoof() {
+    let raw = |from: &str| format!("From: {from}\nSubject: Hi\n\nPay this.\n");
+    for from in [
+        "\"ceo@bank.example\" <x@evil.example.net>",
+        "\"CEO <ceo@bank.example>\" <x@evil.example.net>",
+        "\"Bank (support@bank.example)\" <x@evil.example.net>",
+        "\"ceo\u{FF20}bank.example\" <x@evil.example.net>",
+        "=?utf-8?q?ceo=40bank=2Eexample?= <x@evil.example.net>",
+    ] {
+        assert_eq!(run(&raw(from), &[], &[], &[]), vec![Mark::Spoof], "{from}");
+    }
+    for from in [
+        "\"x@evil.example.net\" <x@evil.example.net>",
+        "\"support@bank.example\" <noreply@mail.bank.example>",
+        "\"ana@friends.example via Book Club\" <club@lists.example>",
+        "\"Ana Lee\" <ana@friends.example>",
+        "\"Ana @ home\" <ana@friends.example>",
+        "\"twitter: @ana\" <ana@friends.example>",
+    ] {
+        assert!(run(&raw(from), &[], &[], &[]).is_empty(), "{from}");
+    }
+    // Your sent mail never gets the mark.
+    let sent = raw("\"ceo@bank.example\" <x@evil.example.net>");
+    assert!(run(&sent, &["SENT"], &[], &[]).is_empty());
+}
+
+/// A small xorshift generator, so a failure repeats.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn pick<'a>(&mut self, xs: &[&'a str]) -> &'a str {
+        xs[(self.next() % xs.len() as u64) as usize]
+    }
+}
+
+/// Property of the name check (input that Iris does not control): any name
+/// with no at sign is never a spoof; a name that holds a foreign address,
+/// with no `via`, always is; the `From` address itself never is.
+#[test]
+fn the_name_address_check_holds_for_any_name() {
+    use iris_understand::name_address_spoof as spoof;
+    let parts = [
+        "Ana", "Lee", " ", "\"", "<", ">", "(", ")", ",", ";", ":", ".", "!", "-", "é", "\u{202E}",
+        "\t", "x.y", "[", "]", "'", "`", "?",
+    ];
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    for _ in 0..4000 {
+        let n = (rng.next() % 12) as usize;
+        let noise: String = (0..n).map(|_| rng.pick(&parts)).collect();
+        let from = "x@evil.example.net";
+        assert!(!spoof(&noise, from), "{noise:?}");
+        assert!(
+            !spoof(&format!("{noise} {from} {noise}"), from),
+            "{noise:?}"
+        );
+        let sep = rng.pick(&[" ", "\"", "<", "(", ",", ";", ":"]);
+        let name = format!("{noise}{sep}ceo@bank.example{sep}{noise}");
+        let has_via = name
+            .split_whitespace()
+            .any(|w| w.eq_ignore_ascii_case("via"));
+        assert_eq!(spoof(&name, from), !has_via, "{name:?}");
+    }
+}
