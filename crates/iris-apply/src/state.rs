@@ -262,7 +262,7 @@ fn apply_in(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<O
 /// its `pre` values again, and loses the correction rows of the entry. An
 /// item that changed after the entry stays as it is, and counts as
 /// unchanged. The undo has its own ledger entry, and the first entry
-/// becomes `undone`.
+/// becomes `undone` if the undo changed one or more items (decision D18).
 fn restore(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<Outcome, Inner> {
     #[allow(clippy::type_complexity)]
     let (entry, pre, post, ops): (i64, String, String, String) = tx.query_row(
@@ -281,8 +281,14 @@ fn restore(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<Ou
         .filter_map(|f| f.as_str().map(str::to_string))
         .collect();
     let corrections = ops["corrections"].to_string();
-    // `later`: the item is gone, or a state entry after this entry names it.
-    // The value check alone misses a later action that set the same values.
+    // `later`: the item is gone, or a later change of Iris on the item
+    // stands. The value check alone misses a later action that set the same
+    // values. A later change is an entry after this entry that did not fail
+    // and names the item:
+    // - a state verb entry, unless an undo of it restored the item;
+    // - a `restore` that restored the item and undoes an entry before this
+    //   entry. A `restore` of a later entry, or one that changed no item
+    //   (decision D18), is no change by itself.
     let rows: Vec<(i64, String, bool)> = {
         let mut st = tx.prepare(&format!(
             "SELECT i.id, i.doc, i.status = 'gone' OR EXISTS (
@@ -291,10 +297,18 @@ fn restore(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<Ou
                JOIN ledger l ON l.action_id = o.id
                WHERE x.item_id = i.id AND x.action_id != ?1 AND l.id > ?2
                  AND l.state != 'failed'
-                 AND o.verb IN ({}))
+                 AND ((o.verb IN ({}) AND NOT EXISTS (
+                        SELECT 1 FROM ledger_undo u JOIN ledger r ON r.action_id = u.action_id
+                        WHERE u.ledger_id = l.id AND r.state = 'applied'
+                          AND EXISTS (SELECT 1 FROM json_each(r.post)
+                                      WHERE key = i.doc ->> '$.id')))
+                   OR (o.verb = 'restore'
+                       AND EXISTS (SELECT 1 FROM json_each(l.post) WHERE key = i.doc ->> '$.id')
+                       AND EXISTS (SELECT 1 FROM ledger_undo u
+                                   WHERE u.action_id = o.id AND u.ledger_id < ?2))))
              FROM action_item ai JOIN item i ON i.id = ai.item_id
              WHERE ai.action_id = ?1 ORDER BY i.id",
-            iris_changeset::sql_list(iris_changeset::STATE_VERBS.iter().chain(&["restore"]))
+            iris_changeset::sql_list(iris_changeset::STATE_VERBS.iter())
         ))?;
         let rows = st.query_map(params![action, entry], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))

@@ -148,14 +148,20 @@ tick applies the approved action.
 The undo of the action is one action with the verb `restore` (section 7.4).
 Its apply sets the old values, sets the sender ID of each party from its
 address again, and deletes the correction rows of the entry (their IDs are in
-`ops`), in one transaction, with its own ledger row (the undo `none`), and
-the first entry becomes `undone`. The undo changes nothing on an item, and
-lists the item, if one of these is true:
+`ops`), in one transaction, with its own ledger row (the undo `none`). If
+the undo changed one or more items, the first entry becomes `undone`. If it
+changed no item, the first entry keeps its state, and the person can undo it
+again later (decision D18, issue #463). The undo changes nothing on an item,
+and lists the item, if one of these is true:
 
 - The current value is not the `post` value of the entry.
 - The item is gone.
-- A later state entry that did not fail names the item, also with the same
-  values. After the undo of a `correct` on a record with no
+- A later change of Iris on the item stands: an entry after this entry that
+  did not fail and names the item, also with the same values. A state verb
+  entry stands unless an undo of it restored the item. A `restore` is a
+  change only if it restored the item and undoes an entry before this
+  entry. So a `restore` that changed no item, or the undo of the later
+  entry, does not block a new undo of this entry. After the undo of a `correct` on a record with no
 correction left, the status of the record goes back to `kept`.
 
 `correct` cannot change `status`, a common field of section 6.1 of
