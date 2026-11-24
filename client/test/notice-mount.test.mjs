@@ -111,3 +111,19 @@ test("each fixture notice has its notify rule, and the Rules screen shows the No
     view.destroy();
   }
 });
+
+// Issue 706: with no answer of the engine, the write can be stored, so the words say that Iris does not know.
+test("Done with no answer keeps the notice and says that Iris does not know if it closed it", async () => {
+  globalThis.fetch = async () => {
+    throw new TypeError("Failed to fetch");
+  };
+  const view = await mount("/src/views/Notices.svelte", { first: copy(fx.notices).slice(0, 1), poll: 0 });
+  try {
+    button(view, "Done").click();
+    await until(() => view.target.querySelector("[role=alert]"));
+    assert.equal(cards(view).length, 1);
+    assert.match(text(view.target), /Iris does not know if it closed the notice\. Reload the page to see\./);
+  } finally {
+    view.destroy();
+  }
+});

@@ -84,6 +84,17 @@ pub fn answer_job(
     })
 }
 
+/// The person ends the job `row` with `end` (`complete` or `cancel`). The
+/// move ends a live session of the job with `job_state`, and the engine
+/// builds the workspace of the done job, so its mail files go. A job that
+/// is done already gives `Conflict`.
+pub fn finish_job(store: &Store, row: i64, end: iris_job::End, now_ms: i64) -> Result<()> {
+    iris_job::finish(store, row, By::Person, end, None, now_ms).map_err(|e| match e {
+        iris_job::Error::Refused(_) => Error::Conflict("The job is done already.".into()),
+        e => job_error(e),
+    })
+}
+
 /// The row of the job `id` (`j-42`), or `None` if no job has it.
 pub fn job_row(store: &Store, id: &str) -> Result<Option<i64>> {
     let Some(row) = iris_job::parse_job_id(id) else {

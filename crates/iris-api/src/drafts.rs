@@ -5,7 +5,7 @@
 use std::io::Write;
 use std::ops::Range;
 
-use iris_changeset::{action_content, draft_marks, Field, Mark};
+use iris_changeset::{action_content, draft_marks, outside_marks, Field, Mark};
 use iris_store::{format_id, Kind, Store};
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -86,11 +86,16 @@ fn next_draft(
             Vec::new()
         }
         Some((account, content)) => {
-            let marks: Vec<Mark> = draft_marks(c, &account, &content)
+            let mut marks: Vec<Mark> = draft_marks(c, &account, &content)
                 .map_err(store_error)?
                 .into_iter()
                 .filter(|m| flags.iter().any(|f| f == m.flag))
                 .collect();
+            // `outside_thread` marks each address that is not in the thread
+            // (issue 462), by the same rule as the submit.
+            if flags.iter().any(|f| f == "outside_thread") {
+                marks.extend(outside_marks(c, action, &content).map_err(store_error)?);
+            }
             let people = |list: &[String], field: fn(usize) -> Field| -> Vec<Value> {
                 list.iter()
                     .enumerate()

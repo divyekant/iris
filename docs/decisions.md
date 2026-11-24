@@ -15,6 +15,18 @@ edit an old entry. If a decision changes, add a new entry that names the old one
 - Links: <card, spec, PR, before/after page>
 ```
 
+## D11 (2026-11-24): The engine removes the grant rules of a done job
+
+- Decided by: dk
+- Why: A grant that the person gives inside one job ends with that job. A
+  rule of a done job matches nothing, but it stays in the Rules view and in
+  the file. The engine removes it as a normal policy change with a new
+  version, so the person can see each removal. This is the one exception to
+  "Only the person changes the policy" (spec 2, section 6.3).
+- Options not chosen: Keep the rule, and show a notice that asks the person
+  to remove it.
+- Links: issue #385, PR #803
+
 ## D10 (2026-11-18): Each user signs in to Outlook with an own Entra app registration
 
 - Decided by: Claude, as the technical owner (Outlook spec, PR #637)

@@ -206,8 +206,13 @@ A move at the server is a delete and an add (section 3), so a message
 moved into the Drafts or the Sent folder is a new message with the label
 from its first sync, before any understanding. Only a `\Draft` flag set
 in place gives `UNSENT` to a message that the understanding read before.
-Then its items stay, as the items of a gone message stay (spec 1): the
-label stops new understanding only. This is a limit issue too.
+Store migration 42 holds the rule at the label write (issue 677): a new
+`DRAFT`, `UNSENT` or `SENT_COPY` label deletes the items of the message
+that a new understanding would replace (the view `item_droppable`: not a
+conversation, not pinned), and marks its thread for a new conversation.
+The batch runner skips such a message, so no understanding run is
+needed. Each change of `SENT` or a label of `iris_store::DRAFT_OR_COPY`
+also clears `understood_at`.
 
 Each folder label has the kind `system`, a folder that the person made
 too: the provider refuses each folder change (section 7), and the
@@ -473,6 +478,7 @@ times after an unknown result (spec 2 section 7.2).
 | A message ID that does not parse | `NotFound` | `bad_id` |
 | A message that came and went after the cursor | `Deleted` | `came_and_went_after_the_cursor` |
 | A new `UIDVALIDITY` between the read and the `STORE` | `NotFound`, nothing sent | `modify_uidvalidity` |
+| A new `UIDVALIDITY` of a folder between the check pass and the write pass | before the first `STORE`: `NotFound`, nothing sent; after a `STORE` of another folder: `Transport` (unknown result), no `STORE` to the changed folder | `modify_uidvalidity_between_the_passes` |
 | A cursor that does not parse | `HistoryExpired` | `bad_cursor` |
 | A new `UIDVALIDITY` of a folder | `HistoryExpired` | `uidvalidity_change` |
 | A folder deleted at the server | `HistoryExpired` | `folder_gone` |

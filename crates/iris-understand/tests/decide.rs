@@ -172,6 +172,50 @@ fn a_quote_that_the_mail_does_not_hold_is_not_valid() {
     assert_eq!(d.unwrap().drafts.len(), 1);
 }
 
+/// #102: typographic forms of quote marks, apostrophes, dashes and the
+/// ellipsis match their plain forms, on either side. Other changes of the
+/// words still fail.
+#[test]
+fn a_quote_with_typographic_marks_matches_the_plain_mail() {
+    let mail = "From: Ana Lee <ana@example.org>
+To: owner@example.com
+Subject: Slides
+
+Don't wait \"too long\" - send the slides... by Friday\u{2014}please.
+";
+    let item = |q: &str| {
+        json!([{"form": "commitment", "title": "Send", "quote": q,
+                "direction": "you_owe", "kind": "task"}])
+    };
+    for q in [
+        "Don\u{2019}t wait \u{201C}too long\u{201D} \u{2013} send the slides\u{2026} by Friday-please.",
+        "don't wait \"too long\" - send the sli\u{00AD}des... by friday\u{2014}please",
+    ] {
+        let m = Fake::with(vec![answer(item(q))]);
+        let d = run(mail, Kind::Person, &[], &[], Some(&m)).1.unwrap();
+        assert_eq!((d.calls, d.drafts.len()), (1, 1), "{q}");
+    }
+    // The case fold reads the whole word: a final sigma (ς) matches.
+    let greek = "From: Ana Lee <ana@example.org>
+To: owner@example.com
+Subject: =?UTF-8?B?zp/Oow==?=
+
+Hello.
+";
+    let m = Fake::with(vec![answer(item("ος"))]);
+    let d = run(greek, Kind::Person, &[], &[], Some(&m)).1.unwrap();
+    assert_eq!((d.calls, d.drafts.len()), (1, 1));
+    // A changed word is still not a quote from the mail.
+    let bad = item("Don\u{2019}t wait \u{201C}too long\u{201D} \u{2013} send the money");
+    let m = Fake::with(vec![answer(bad.clone()), answer(bad)]);
+    assert!(
+        run(mail, Kind::Person, &[], &[], Some(&m))
+            .1
+            .unwrap()
+            .failed
+    );
+}
+
 #[test]
 fn phishing_is_hostile_with_no_item() {
     let m = Fake::with(vec![Ok(text(r#"{"items": [], "phishing": true}"#))]);

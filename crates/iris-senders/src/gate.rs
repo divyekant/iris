@@ -21,7 +21,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::{domain_of, recheck, rules, sweep, Changes, Kind};
+use crate::{domain_of, name_change, recheck, rules, sweep, Changes, Kind};
 
 /// The `basis` of a sender that the person accepted at the gate.
 pub const ACCEPTED: &str = "accepted at the gate";
@@ -128,6 +128,17 @@ pub fn accept(conn: &Connection, id: i64, now_ms: i64, at_gate: bool) -> rusqlit
         domains: vec![domain_of(&row.addr).to_string()],
         ..Changes::default()
     };
+    // The name of the sender is now the name of a known person.
+    let name: Option<String> =
+        conn.query_row("SELECT name FROM sender WHERE id = ?1", [id], |r| r.get(0))?;
+    let old = (row.kind.as_deref(), name.as_deref());
+    name_change(
+        conn,
+        &mut ch,
+        &row.addr,
+        old,
+        (Some(Kind::Person.name()), name.as_deref()),
+    )?;
     sweep(conn, now_ms, &mut ch)?;
     Ok(Answer::Done { rerun: ch.rerun })
 }
