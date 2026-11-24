@@ -342,7 +342,7 @@ fn a_stop_during_the_launch_cancels_it_with_no_retry() {
 }
 
 /// A launch that ends with a bad `notes.md` reaps in its cleanup: the
-/// reason of the end says that the store kept its last copy (R5-06).
+/// reason of the end says that the notes were not saved (R5-06).
 fn a_launch_that_ends_reports_bad_notes() {
     let f = fixture("badnotes", "data", "sleep 30");
     fs::create_dir_all(workspace(&f).join("notes.md")).unwrap();
@@ -353,7 +353,7 @@ fn a_launch_that_ends_reports_bad_notes() {
     }));
     assert_eq!(end, EndReason::Stop, "{why}");
     assert!(
-        why.contains("the store keeps its last copy of the notes: notes.md is not a regular file"),
+        why.contains("the notes were not saved: notes.md is not a regular file"),
         "{why}"
     );
     assert!(sessions(&f)[0].reaped_ms.is_some());

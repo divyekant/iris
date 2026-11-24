@@ -74,6 +74,7 @@ fn checked_content_reads_back_the_same() {
             raw_content.subject.retain(|c| !c.is_control());
             raw_content.subject.push('s');
             raw_content.body.retain(|c| c != '\0');
+            raw_content.body.push('b');
             for list in [&mut raw_content.to, &mut raw_content.cc] {
                 list.retain(|a| check_address(&a.to_ascii_lowercase()).is_ok());
             }
@@ -122,6 +123,8 @@ fn checks_refuse_bad_content() {
         content(&["a@example.com"], "a\rb", "x"),
         content(&["a@example.com"], "=?utf-8?q?x?=", "x"),
         content(&["a@example.com"], "Hi", "a\0b"),
+        content(&["a@example.com"], "Hi", ""),
+        content(&["a@example.com"], "Hi", " \n\t\r\n "),
         content(&["a@example.com"], &"s".repeat(MAX_SUBJECT + 1), "x"),
         content(&["a@example.com"], "Hi", &"b".repeat(MAX_BODY + 1)),
         content(&["a b@example.com"], "Hi", "x"),

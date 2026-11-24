@@ -231,10 +231,28 @@ fn the_category_switch_lasts_after_a_restart() {
         &message_json(&a, &etag, ""),
         &message_json(&a, &etag, r#""Other""#),
     ]);
+    // The store refuses the first write of the switch, as a full disk does
+    // (issue #717).
+    let trigger = |sql: &str| store.write(|tx| Ok(tx.execute_batch(sql)?)).unwrap();
+    trigger(
+        "CREATE TRIGGER no_switch BEFORE UPDATE OF categories_off_at ON account
+         BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+    );
     let e = mail
         .modify("t", &[&a], &["category:Blue"], &[])
         .unwrap_err();
     assert!(e.write_result_unknown(), "{e}");
+    assert!(off_at().is_none(), "the store refused the switch");
+    // Each later category write is refused, and stores the switch again.
+    let n = fake.requests().len();
+    assert!(mail.modify("t", &[&b], &["category:Blue"], &[]).is_err());
+    assert!(off_at().is_none());
+    trigger("DROP TRIGGER no_switch");
+    let e = mail
+        .modify("t", &[&b], &["category:Blue"], &[])
+        .unwrap_err();
+    assert!(!e.write_result_unknown(), "{e}");
+    assert_eq!(fake.requests().len(), n, "a refusal makes no request");
     assert!(off_at().is_some(), "the switch is stored");
     drop(mail);
 

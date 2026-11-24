@@ -559,3 +559,152 @@ fn an_outlook_draft_with_another_message_id_is_foreign() {
     assert_eq!(id, "other@example.com");
     assert!(b.fake.sent_mail().is_empty());
 }
+
+/// Two engine processes on one data folder (issue #719): a provider value
+/// that reads the sent copies from the store before each read of labels
+/// agrees with a send that the other process completes. A value with the
+/// list of its start does not, so the source is what keeps `SENT`.
+#[test]
+fn a_provider_with_a_store_source_sees_a_send_of_another_process() {
+    let b = setup("two-engines");
+    let config = Config {
+        base_url: b.fake.base_url(),
+        ..Config::default()
+    };
+    let (account, second) = (b.account, Store::open(&b.dir).unwrap());
+    let other = Outlook::new(Graph::new(config.clone())).with_sent_source(move || {
+        iris_apply::sent_by_iris(&second, account).map_err(|e| e.to_string())
+    });
+    let start = Outlook::new(Graph::new(config))
+        .with_sent(iris_apply::sent_by_iris(&b.store, account).unwrap());
+    assert_eq!(b.differences(&other), 0);
+    let (s, _) = b.new_mail(AGED);
+    assert!(matches!(b.release(s), Outcome::Applied(_)));
+    let copy = b.row().1.expect("the send is complete");
+    iris_sync::sync(&b.store, &b.outlook, account, TOKEN).unwrap();
+    assert!(b.labels(&copy).contains(&"SENT".to_string()));
+    assert_eq!(b.differences(&other), 0, "the other value keeps SENT");
+    assert!(b.labels(&copy).contains(&"SENT".to_string()));
+    assert!(
+        b.differences(&start) > 0,
+        "the list of the start lacks the copy"
+    );
+}
+
+/// A store source that fails gives an error, not labels without `SENT`.
+#[test]
+fn a_failed_store_source_gives_an_error() {
+    let b = setup("source-error");
+    let failing = Outlook::new(Graph::new(Config {
+        base_url: b.fake.base_url(),
+        ..Config::default()
+    }))
+    .with_sent_source(|| Err("disk I/O error".into()));
+    let id = b.fake.messages().into_keys().next().unwrap();
+    assert!(failing.minimal(TOKEN, &id).is_err());
+}
+
+/// A provider value with no sent copies, as a sync that read the labels
+/// before the send completion committed.
+fn stale(b: &Box) -> Outlook {
+    Outlook::new(Graph::new(Config {
+        base_url: b.fake.base_url(),
+        ..Config::default()
+    }))
+}
+
+/// Migration 41 (review of #768): a label write that a stale read made
+/// cannot remove SENT from a confirmed copy, in any order of the sync and
+/// the completion.
+#[test]
+fn a_stale_label_write_keeps_sent_on_a_confirmed_copy() {
+    let b = setup("stale-remove");
+    let (s, _) = b.new_mail(AGED);
+    assert!(matches!(b.release(s), Outcome::Applied(_)));
+    let copy = b.row().1.expect("the send is complete");
+    iris_sync::sync(&b.store, &b.outlook, b.account, TOKEN).unwrap();
+    assert!(b.labels(&copy).contains(&"SENT".to_string()));
+    // The difference starts a full resync, which writes the stale labels.
+    assert!(b.differences(&stale(&b)) > 0);
+    iris_sync::sync(&b.store, &stale(&b), b.account, TOKEN).unwrap();
+    assert!(b.labels(&copy).contains(&"SENT".to_string()));
+    assert_eq!(b.differences(&b.outlook), 0);
+}
+
+/// The completion confirms a copy that is not in the mirror yet, and then a
+/// stale sync copies it: the copy gets SENT.
+#[test]
+fn a_stale_sync_of_a_confirmed_copy_adds_sent() {
+    let b = setup("stale-add");
+    let (s, _) = b.new_mail(AGED);
+    b.fake.hold_copies(true);
+    assert_eq!(b.release(s), Outcome::Pending);
+    b.fake.deliver_copies();
+    iris_apply::recover(&b.store, &b.outlook, &mut tok(), b.account).unwrap();
+    let copy = b.row().1.expect("the send is complete");
+    assert!(b.labels(&copy).is_empty(), "not in the mirror yet");
+    iris_sync::sync(&b.store, &stale(&b), b.account, TOKEN).unwrap();
+    assert!(b.labels(&copy).contains(&"SENT".to_string()));
+    assert_eq!(b.differences(&b.outlook), 0);
+}
+
+/// Review round 2 of #768: the completion adds SENT to a mirrored copy in
+/// its own transaction. Here its later read of the labels gives no SENT
+/// (a provider value whose source has no copy yet), and the next sync has
+/// no change of the copy.
+#[test]
+fn the_completion_adds_sent_to_a_mirrored_copy() {
+    let b = setup("complete-adds");
+    let (s, _) = b.new_mail(AGED);
+    b.fake.hold_copies(true);
+    assert_eq!(b.release(s), Outcome::Pending);
+    b.fake.deliver_copies();
+    iris_sync::sync(&b.store, &b.outlook, b.account, TOKEN).unwrap();
+    let blind = stale(&b).with_sent_source(|| Ok(Vec::new()));
+    iris_apply::recover(&b.store, &blind, &mut tok(), b.account).unwrap();
+    let copy = b.row().1.expect("the send is complete");
+    assert!(b.labels(&copy).contains(&"SENT".to_string()));
+    // The engine value reads the copies from the store.
+    let (account, second) = (b.account, Store::open(&b.dir).unwrap());
+    let engine = stale(&b).with_sent_source(move || {
+        iris_apply::sent_by_iris(&second, account).map_err(|e| e.to_string())
+    });
+    iris_sync::sync(&b.store, &engine, b.account, TOKEN).unwrap();
+    assert!(b.labels(&copy).contains(&"SENT".to_string()));
+    assert_eq!(b.differences(&engine), 0);
+}
+
+/// Migration 41 adds SENT to each confirmed copy that a store of version 40
+/// has in its mirror with no SENT.
+#[test]
+fn migration_41_adds_sent_to_the_confirmed_copies() {
+    let b = setup("backfill");
+    let (s, _) = b.new_mail(AGED);
+    assert!(matches!(b.release(s), Outcome::Applied(_)));
+    iris_sync::sync(&b.store, &b.outlook, b.account, TOKEN).unwrap();
+    let copy = b.row().1.expect("the send is complete");
+    assert!(b.labels(&copy).contains(&"SENT".to_string()));
+    b.store
+        .write(|tx| {
+            tx.execute_batch(
+                "DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy;
+                 DELETE FROM message_label WHERE label_id IN (SELECT id FROM label WHERE provider_id = 'SENT');
+                 PRAGMA user_version = 40;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(!b.labels(&copy).contains(&"SENT".to_string()));
+    let again = Store::open(&b.dir).unwrap();
+    let has_sent: bool = again
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM message m JOIN message_label ml ON ml.message_id = m.id
+                   JOIN label l ON l.id = ml.label_id WHERE m.provider_id = ?1 AND l.provider_id = 'SENT')",
+                [&copy],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(has_sent);
+}

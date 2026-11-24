@@ -507,12 +507,19 @@ pub fn apply(
                 store.put_labels(account, &[(&l.id, &l.name, "user")])?;
                 Some(l.id.clone())
             }
-            Ok(None) if verb == "label" => match run.create_label(name)? {
-                Ok(id) => Some(id),
-                // The create was a write call: the action ends, with its
-                // ledger entry and no message (section 7.2, step 1).
-                Err(error) => return run.fail_unclaimed(action, &change, error),
-            },
+            Ok(None) if verb == "label" => {
+                // The reads before the create take time: check the action
+                // again just before the write call, as the claim does (#223).
+                if let Some(o) = run.recheck(action)? {
+                    return Ok(o);
+                }
+                match run.create_label(name)? {
+                    Ok(id) => Some(id),
+                    // The create was a write call: the action ends, with its
+                    // ledger entry and no message (section 7.2, step 1).
+                    Err(error) => return run.fail_unclaimed(action, &change, error),
+                }
+            }
             Ok(None) => None,
         };
         match (verb.as_str(), id) {
@@ -1171,6 +1178,24 @@ impl<'a, 'b> Run<'a, 'b> {
 }
 
 impl Run<'_, '_> {
+    /// In one transaction: the stop, the expiry, the mode and the grant of
+    /// [`gate`], and the state `approved`. Gives the outcome if the action
+    /// does not apply now, and [`Error::NotApproved`] if it is not approved.
+    fn recheck(&mut self, action: i64) -> Result<Option<Outcome>> {
+        let checked = self.store.write(|tx| {
+            if let Some(o) = gate(tx, action)? {
+                return Ok(Some(Some(o)));
+            }
+            let approved: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM changeset_action WHERE id = ?1 AND state = 'approved')",
+                [action],
+                |r| r.get(0),
+            )?;
+            Ok(approved.then_some(None))
+        })?;
+        checked.ok_or(Error::NotApproved(action))
+    }
+
     /// Make the user label `name` at Gmail, and save it in the store.
     /// Gives its ID. After each error (for example HTTP 409: a label with
     /// the name exists now, or an unknown result), the apply reads the

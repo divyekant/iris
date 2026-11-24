@@ -82,6 +82,31 @@ fn fake() -> Option<Connect> {
     Some(Arc::new(|_| Ok(Box::new(Fake) as Box<dyn Model>)))
 }
 
+/// [`Fake`] that also keeps the data of each call in `seen`.
+struct Seeing(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl Model for Seeing {
+    fn name(&self) -> &str {
+        "fake-1"
+    }
+
+    fn request_bytes(&self, _: &str, _: &str) -> u64 {
+        1000
+    }
+
+    fn ask(&self, instruction: &str, data: &str) -> Result<Reply, iris_model::Error> {
+        self.0.lock().unwrap().push(data.to_string());
+        Fake.ask(instruction, data)
+    }
+}
+
+fn seeing(seen: &Arc<std::sync::Mutex<Vec<String>>>) -> Option<Connect> {
+    let seen = seen.clone();
+    Some(Arc::new(move |_| {
+        Ok(Box::new(Seeing(seen.clone())) as Box<dyn Model>)
+    }))
+}
+
 async fn post(
     store: &Arc<Store>,
     connect: Option<Connect>,
@@ -209,10 +234,35 @@ async fn a_refused_draft_saves_nothing() {
         &s,
         fake(),
         "/api/threads/t-1/draft",
-        json!({"intent": "yes", "parent": "m-1", "to": "x"}),
+        json!({"intent": "yes", "parent": "m-1", "cc": "x"}),
     )
     .await;
     assert_eq!(code, StatusCode::BAD_REQUEST);
+    // A recipient of the form that fails the address check (issue 535).
+    let (code, v) = post(
+        &s,
+        fake(),
+        "/api/threads/t-1/draft",
+        json!({"intent": "yes", "parent": "m-1", "to": ["not an address"]}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{v}");
+    assert!(drafts(&s).is_empty());
+    // A valid recipient of the form is the person of the reply: the model
+    // data names Bo, not Ana of the thread.
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (code, v) = post(
+        &s,
+        seeing(&seen),
+        "/api/threads/t-1/draft",
+        json!({"intent": "yes", "parent": "m-1", "to": ["Bo@Example.org"]}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    let data: Value = serde_json::from_str(&seen.lock().unwrap()[0]).unwrap();
+    assert_eq!(data["reply_to"], "bo@example.org");
+    s.write(|tx| Ok(tx.execute("DELETE FROM reply_draft", [])?))
+        .unwrap();
     // A mail that understanding did not read, then a hostile mail.
     s.write(|tx| Ok(tx.execute("UPDATE message SET understood_at = NULL", [])?))
         .unwrap();
