@@ -301,6 +301,9 @@ async fn status_with_no_account_and_with_a_sync() {
         "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'first', 0)",
         [acc],
     );
+    // The sync runs: it holds the sync lock of the account, so its row
+    // stays open (issue #710).
+    let _sync = iris_sync::lock(&store, acc).unwrap();
     let (_, v) = get(&store, "/api/status").await;
     let a = &v["accounts"][0];
     assert_eq!(a["address"], "owner@example.com");
