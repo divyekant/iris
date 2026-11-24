@@ -210,9 +210,9 @@ cd client && pnpm test
 ## Known limits
 
 - The job page shows the goal and the due date now, not the list of the
-  edits.
+  edits (issue #846).
 - A session that runs keeps the goal of its start. The next session reads
-  the new goal.
+  the new goal (issue #847).
 
 ## Rollout
 
