@@ -1340,3 +1340,33 @@ fn iris_open_keeps_the_code_out_of_process_arguments() {
         assert!(iris::open_page(&d, bad).is_err(), "{bad}");
     }
 }
+
+/// `iris skip`, `mute` and `dismiss` add the state verb with the default
+/// reason of the web client, or the given reason (issue #441).
+#[test]
+fn skip_mute_and_dismiss_add_the_state_verb() {
+    use clap::Parser;
+    let cases = [
+        (vec!["skip", "f-3"], "skip", "Skipped."),
+        (vec!["mute", "v-2"], "mute", "Muted."),
+        (vec!["dismiss", "s-1"], "dismiss", "Dismissed."),
+        (
+            vec!["mute", "v-2", "--reason", "Done here."],
+            "mute",
+            "Done here.",
+        ),
+    ];
+    for (argv, verb, reason) in cases {
+        let cli =
+            iris::Cli::try_parse_from(std::iter::once("iris").chain(argv.iter().copied())).unwrap();
+        let request = iris::add_request(&cli.command).unwrap().unwrap();
+        assert_eq!(
+            request,
+            json!({ "verb": verb, "targets": [argv[1]], "args": { "reason": reason } }),
+            "{argv:?}"
+        );
+    }
+    let cli = iris::Cli::try_parse_from(["iris", "skip", "f-3", "--changeset", "cs-4"]).unwrap();
+    let request = iris::add_request(&cli.command).unwrap().unwrap();
+    assert_eq!(request["changeset"], json!("cs-4"));
+}

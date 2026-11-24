@@ -180,6 +180,33 @@ pub enum Command {
         #[command(flatten)]
         to: Draft,
     },
+    /// Skip a feed item (`f-3`) in a draft changeset. Needs the engine.
+    Skip {
+        id: String,
+        /// The reason, at most 500 characters. The default is "Skipped.".
+        #[arg(long)]
+        reason: Option<String>,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Mute a conversation item in a draft changeset. Needs the engine.
+    Mute {
+        id: String,
+        /// The reason, at most 500 characters. The default is "Muted.".
+        #[arg(long)]
+        reason: Option<String>,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Dismiss a signal item in a draft changeset. Needs the engine.
+    Dismiss {
+        id: String,
+        /// The reason, at most 500 characters. The default is "Dismissed.".
+        #[arg(long)]
+        reason: Option<String>,
+        #[command(flatten)]
+        to: Draft,
+    },
     /// Defer a commitment to a date in a draft changeset. Needs the engine.
     Defer {
         id: String,
@@ -448,6 +475,13 @@ fn action(c: &Command) -> Result<Option<Action<'_>>, socket::Failure> {
         Command::Close { id, reason: r, to } => ("close", vec![id.clone()], reason(r, "Done."), to),
         Command::Decline { id, reason: r, to } => {
             ("decline", vec![id.clone()], reason(r, "Declined."), to)
+        }
+        Command::Skip { id, reason: r, to } => {
+            ("skip", vec![id.clone()], reason(r, "Skipped."), to)
+        }
+        Command::Mute { id, reason: r, to } => ("mute", vec![id.clone()], reason(r, "Muted."), to),
+        Command::Dismiss { id, reason: r, to } => {
+            ("dismiss", vec![id.clone()], reason(r, "Dismissed."), to)
         }
         Command::Defer { id, date, to } => ("defer", vec![id.clone()], json!({ "date": date }), to),
         Command::Correct {
@@ -778,6 +812,14 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
     if matches!(c, Command::Compose { .. } | Command::Send { .. }) {
         return Err(denied(
             "a session cannot draft, send or nudge: a job has no grant of an account or a draft",
+        ));
+    }
+    if matches!(
+        c,
+        Command::Skip { .. } | Command::Mute { .. } | Command::Dismiss { .. }
+    ) {
+        return Err(denied(
+            "a session cannot skip, mute or dismiss: a job grants no feed, conversation or signal item",
         ));
     }
     if let Command::Wait { until, reply, why } = c {
@@ -1585,6 +1627,9 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         | Command::Submit { .. }
         | Command::Close { .. }
         | Command::Decline { .. }
+        | Command::Skip { .. }
+        | Command::Mute { .. }
+        | Command::Dismiss { .. }
         | Command::Defer { .. }
         | Command::Correct { .. }
         | Command::Archive(_)

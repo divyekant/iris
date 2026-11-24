@@ -151,6 +151,24 @@ const SPECS: &[Spec] = &[
         adds: true,
     },
     Spec {
+        name: "skip",
+        about: "Skip a feed item (f-3) in a draft changeset.",
+        args: &[ITEM, opt("reason", Kind::Text, "The reason. The default is \"Skipped.\".")],
+        adds: true,
+    },
+    Spec {
+        name: "mute",
+        about: "Mute a conversation item in a draft changeset.",
+        args: &[ITEM, opt("reason", Kind::Text, "The reason. The default is \"Muted.\".")],
+        adds: true,
+    },
+    Spec {
+        name: "dismiss",
+        about: "Dismiss a signal item in a draft changeset.",
+        args: &[ITEM, opt("reason", Kind::Text, "The reason. The default is \"Dismissed.\".")],
+        adds: true,
+    },
+    Spec {
         name: "defer",
         about: "Defer a commitment to a date in a draft changeset.",
         args: &[ITEM, arg("date", Kind::Text, "The day it opens again, YYYY-MM-DD.")],
@@ -359,6 +377,9 @@ fn request(spec: &Spec, args: &Map<String, Value>) -> Call {
             "send" => (one("id"), json!({})),
             "close" => (one("id"), reason("Done.")),
             "decline" => (one("id"), reason("Declined.")),
+            "skip" => (one("id"), reason("Skipped.")),
+            "mute" => (one("id"), reason("Muted.")),
+            "dismiss" => (one("id"), reason("Dismissed.")),
             "defer" => (one("id"), json!({ "date": text("date") })),
             "correct" => (
                 one("id"),

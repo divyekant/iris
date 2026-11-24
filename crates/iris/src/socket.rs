@@ -457,6 +457,15 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
                      account or a draft",
                 ));
             }
+            // A job grants only commitments and records
+            // (iris_workspace::grant_in), so a submit would deny each of these.
+            if session && matches!(verb, Some("skip" | "mute" | "dismiss")) {
+                return Err(Failure::new(
+                    code::DENIED,
+                    "a session cannot skip, mute or dismiss: a job grants no feed, \
+                     conversation or signal item",
+                ));
+            }
             let verb = verb
                 .and_then(Verb::parse)
                 .ok_or_else(|| usage("verb must be a verb of specification 2, section 4"))?;
