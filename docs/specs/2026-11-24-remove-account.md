@@ -127,15 +127,18 @@ It runs with `PRAGMA secure_delete = ON`, so SQLite writes zeros over the
 deleted content. Steps, each in batches of 500 rows, one write transaction
 for each batch:
 
-0. **Workspaces**: for each row of `removed_workspace` of the account,
-   delete the workspace folder of the job and its stage folder
-   (`<folder>.build`), while it holds the build lock of the workspace
-   (`<folder>.lock`). A build that runs holds the same lock, so the delete
-   waits for its end and then deletes what it published. A build after the
-   removal leaves out each message of an account in state `removing` or
-   `removed` (a condition in `iris_workspace::grant_in`). So no build can
-   publish mail of the account after this step. The row goes in the last
-   transaction (step 7).
+0. **Workspaces**: for each row of `removed_workspace` of the account
+   whose workspace folder exists, build the workspace again
+   (`iris_workspace::build`). A build after the removal leaves out each
+   message of an account in state `removing` or `removed` (a condition in
+   `iris_workspace::grant_in`), and replaces the mail files of the folder.
+   So the folder loses the mail of the account, and keeps the mail of other
+   accounts and the files of the agent (for example `drafts/`), as each
+   build does. A build that runs holds the build lock of the workspace, so
+   this build waits for its end. A job whose session runs is skipped: that
+   session started after the removal, so its build already left the
+   account out, and a build must not change the folder of a running
+   session. The row goes in the last transaction (step 7).
 
 1. **Items**: each item of the account, and each item that cites a message
    of the account. First the rows that refer to them with no cascade:
@@ -166,8 +169,11 @@ for each batch:
 7. **End**: `INSERT INTO message_fts(message_fts) VALUES ('optimize')`, and
    delete the `removed_workspace` rows of the account. Commit. Then
    `PRAGMA wal_checkpoint(TRUNCATE)`. Only if the checkpoint is not busy,
-   set `state = 'removed'`. A busy checkpoint keeps the state `removing`, so
-   the next call does step 7 and the checkpoint again. The write of the
+   set `state = 'removed'`. The waiting call of the command and the API
+   tries the checkpoint again each 100 ms, for at most 10 seconds (a reader
+   of the engine holds a read transaction for less). The tick tries once. A
+   checkpoint that stays busy keeps the state `removing`, so the next call
+   does step 7 and the checkpoint again. The write of the
    state adds only the page of the account row to the log.
 
 The engine calls `delete_removed` on each tick. The command and the API call
@@ -225,6 +231,13 @@ waits for the locks: the sync lock (a sync of the account fails at its next
 insert, so it ends soon) and the backup lock (a backup ends by itself). The
 engine tick uses no wait: it skips an account whose lock is held.
 
+The result of the call is the state of the account at its end. Only
+`removed` is a finished removal: the command prints "removed ... and its
+mail", and the client shows the account as gone. With `removing` (a
+checkpoint that stayed busy, or a crash), the command prints that the
+engine ends the delete, and the Accounts page shows "Iris deletes the mail
+of this account" until the state is `removed`.
+
 So when the person sees "removed", no view shows the mail of the account.
 During the call, the brief already has no item of the account, but another
 view (search, a message by ID) can still show its mail until its batch
@@ -265,9 +278,10 @@ engine tick ends the delete.
 | A sync of the account runs at the removal | Its next insert fails on the trigger. The delete waits for the sync lock. No message of the account stays. | store test with an insert after the removal |
 | That sync wrote a raw file before its insert failed | Step 6 deletes the file. | store test with a file and no row |
 | An understanding run writes after the removal | The trigger on `item` or `body` refuses the write. The batch query leaves the account out. | store test |
-| A workspace build runs at the delete | Step 0 waits for the build lock, then deletes the folder. A later build leaves the account out. | workspace test |
+| A workspace build runs at the delete | Step 0 waits for the build lock, then builds again with no mail of the account. | workspace test |
+| A job has scope in two accounts | The build of step 0 keeps the mail of the other account and `drafts/`. | workspace test |
 | A crash after the removal, after the items went | `removed_workspace` still names the jobs. | store test |
-| A reader keeps the log busy at the checkpoint | The state stays `removing`. The next call checkpoints again. | store test with an open read transaction |
+| A reader keeps the log busy at the checkpoint | The waiting call tries for 10 seconds. If it stays busy, the state stays `removing`, the result says so, and the next call checkpoints again. | store test with an open read transaction |
 | An apply step of the account runs at the removal | It holds the sync lock, so the delete waits. Its ledger entry stays. An unknown result of that step stays unknown (no recovery runs for a removed account). | limit issue |
 | A crash after the removal, before the delete | State `removing`. The brief is empty of the account. The next tick deletes. | store test: removal, no delete, open again, delete |
 | A crash in a batch of the delete | The transaction rolls back. A file deleted before the rollback is missing for a row that the next batch deletes. The next tick continues. | store test: delete in two calls |
@@ -284,8 +298,7 @@ engine tick ends the delete.
 - `crates/iris-store`: migration 46 (insert triggers, `removed_workspace`),
   `remove_account`, `delete_removed`, the change of `save_account_secret`.
 - `crates/iris-understand`: the batch query leaves out a removed account.
-- `crates/iris-workspace`: the grant leaves out a removed account, and a
-  remove of a workspace under its build lock.
+- `crates/iris-workspace`: the grant leaves out a removed account.
 - `crates/iris`: `iris account remove`, the engine tick.
 - `crates/iris-api`: the route, the status filter.
 - `client/`: the Accounts page.
