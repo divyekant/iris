@@ -1539,6 +1539,19 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
         Ok(c) => c,
         Err(why) => return Ok(Some(why)),
     };
+    // Only the person attaches a file (send content spec, scope): an agent
+    // could name a file of the folder by its hash.
+    if !content.attachments.is_empty() {
+        let person: bool = c.query_row(
+            "SELECT cs.author_kind = 'person' FROM changeset_action a
+             JOIN changeset cs ON cs.id = a.changeset_id WHERE a.id = ?1",
+            [action],
+            |r| r.get(0),
+        )?;
+        if !person {
+            return Ok(Some("only the person attaches a file to a draft".into()));
+        }
+    }
     // The size of the whole message has the limit of the provider of the
     // account (send content spec, section 5).
     let provider: Option<String> = c

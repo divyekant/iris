@@ -408,6 +408,32 @@ fn a_send_over_the_limit_of_the_provider_is_denied() {
     );
 }
 
+/// Only the person attaches a file: an agent draft that names a file of the
+/// folder by its hash is denied.
+#[test]
+fn only_the_person_attaches_a_file() {
+    let dir = TempDir::new("files");
+    let s = store(&dir);
+    let sha = s.put_attachment(b"quote").unwrap();
+    let mail = || {
+        json!({"to": ["priya@example.com"], "subject": "Q", "body": "Here.",
+               "attachments": [{"name": "q.pdf", "type": "application/pdf", "sha256": sha, "size": 5}]})
+    };
+    for by in [AuthorKind::Agent, AuthorKind::Local] {
+        let a = one(&s, by, Verb::Draft, &["a-1"], mail());
+        assert_eq!(state(&a), "denied", "{a}");
+        assert!(
+            a["decision"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("only the person attaches"),
+            "{a}"
+        );
+    }
+    let a = one(&s, AuthorKind::Person, Verb::Draft, &["a-1"], mail());
+    assert_eq!(state(&a), "proposed", "{a}");
+}
+
 /// The hash of a send covers the content hash of its draft.
 #[test]
 fn the_send_hash_covers_the_draft_content() {

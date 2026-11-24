@@ -35,8 +35,9 @@ The owner decided (`docs/decisions.md`, entry D12, items D4 and D5):
 - HTML bodies (D4).
 - Send-as aliases (D5). `From` stays the account address.
 - An attachment from an agent (the MCP tool `draft`, a job session).
-  An agent has no path to put a file into the store. A limit issue
-  records this.
+  Submit denies a draft with a file from an author that is not the
+  person, so an agent cannot name a file of the folder by its hash. A
+  limit issue records this.
 - A forward of an attachment of a received message.
 - A setting for the display name. Iris takes the name from the sent mail
   of the owner (section 3). A limit issue records this.
