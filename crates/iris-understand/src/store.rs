@@ -452,9 +452,9 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     let written = store.write(|tx| {
         // The model saw `after`: each input must still be the same now, for
         // example with no later SPAM label on an earlier message.
-        // A reopen after write 1 ends the decline: save nothing, so the next
-        // run calls the model.
-        if !read.same(tx)? || (skip && !declined_now(tx, from_addr.as_deref())?) {
+        // A decline, or the end of a decline, after write 1 changes the
+        // model step: save nothing, so the next run decides again.
+        if !read.same(tx)? || declined_now(tx, from_addr.as_deref())? != declined {
             changed = true;
             return Ok(Vec::new());
         }

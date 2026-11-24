@@ -546,8 +546,9 @@ fn threads_after(
 }
 
 /// The oldest pending message of `thread` that is not in `skip`. A message
-/// that the thread rule holds still runs when it is hostile mail: `SPAM`,
-/// or a `From` sender of the kind `hostile`. Sync saves no header row, so
+/// that the thread rule holds still runs when it is hostile mail (`SPAM`,
+/// or a `From` sender of the kind `hostile`), or when its `From` sender is
+/// a declined stranger. Sync saves no header row, so
 /// the `From` address of such a message comes from the head of its content
 /// file (fixed rules, no model).
 fn next_pending(
@@ -585,12 +586,17 @@ fn next_pending(
                 .and_then(|path| from_of(&path)),
         };
         if let Some(from) = from {
-            let kind: Option<String> = c
-                .prepare_cached("SELECT kind FROM sender WHERE address = ?1")?
-                .query_row([&from], |r| r.get(0))
-                .optional()?
-                .flatten();
-            if kind.as_deref() == Some("hostile") {
+            // Hostile mail gets its marks with no model call. The mail of a
+            // declined stranger gets no model call (decision D29). So
+            // neither waits for an older message.
+            let free: bool = c
+                .prepare_cached(
+                    "SELECT EXISTS (SELECT 1 FROM sender WHERE address = ?1
+                       AND (kind = 'hostile' OR (declined_at IS NOT NULL
+                            AND coalesce(kind, 'stranger') = 'stranger')))",
+                )?
+                .query_row([&from], |r| r.get(0))?;
+            if free {
                 return Ok(Some(id));
             }
         }

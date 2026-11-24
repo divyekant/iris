@@ -1445,3 +1445,52 @@ fn a_sender_rerun_clears_the_mark() {
         Some(0)
     );
 }
+
+/// Decision D29: the mail of a declined stranger makes no model call, so it
+/// waits for nothing that only the model needs: a budget refusal, the try
+/// limit, or an older message of the thread that waits for the model.
+#[test]
+fn the_mail_of_a_declined_stranger_does_not_wait_for_the_model() {
+    let b = store("declined-wait");
+    b.model(true, None);
+    let far = |n: &str| {
+        format!("From: Far <x@far.example>\nTo: owner@example.com\nSubject: Offer {n}\n\nCan you send the price list?\n")
+    };
+    // A message of the stranger that a budget refusal marked, and one at the
+    // try limit, before the decline.
+    let refused = b.add_raw("1", "b", 3, &far("1"), &["INBOX"]);
+    let limit = b.add_raw("2", "c", 3, &far("2"), &["INBOX"]);
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!((r.stop.as_deref(), b.script.calls()), (Some("budget"), 0));
+    assert!(!b.understood(refused) && !b.understood(limit));
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET waits_model = 1 WHERE id = ?1 AND waits_model = 0",
+                [refused],
+            )?;
+            tx.execute("UPDATE message SET tries = 99 WHERE id = ?1", [limit])?;
+            Ok(())
+        })
+        .unwrap();
+    // New mail of the stranger behind an older message that waits.
+    let older = b.add("3", "a", 2, &["INBOX"]);
+    let behind = b.add_raw("4", "a", 1, &far("4"), &["INBOX"]);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sender(address, kind, decided_by, declined_at)
+                 VALUES ('x@far.example', 'stranger', 'engine', 1)
+                 ON CONFLICT(address) DO UPDATE SET declined_at = 1",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.script.calls(), 0);
+    assert!(!b.understood(older), "the older message still waits");
+    for m in [refused, limit, behind] {
+        assert!(b.understood(m), "message {m}");
+    }
+}

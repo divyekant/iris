@@ -1440,6 +1440,10 @@ fn a_change_during_the_model_call_saves_nothing() {
          SELECT 'bo@other.example', 'Bo Ren', 'person', 'person' WHERE ?1 = ?1",
         // A known party in Cc that the model got turned hostile.
         "UPDATE sender SET kind = 'hostile' WHERE address = 'ana@example.org' AND ?1 = ?1",
+        // The person declined the sender, a stranger (decision D29).
+        "INSERT INTO sender(address, kind, decided_by, declined_at)
+         SELECT 'bo@example.org', 'stranger', 'engine', 1 WHERE ?1 = ?1
+         ON CONFLICT(address) DO UPDATE SET declined_at = 1",
     ] {
         let b = store("changed");
         b.kind("ana@example.org", "Ana Lee", "person");
@@ -2401,6 +2405,20 @@ fn a_declined_sender_gets_no_model_call_until_the_decline_ends() {
     assert!(out.declined && out.items.is_empty());
     assert_eq!(fake.calls.borrow().len(), 1, "no model call");
     assert!(!pending(m2) && skipped(m2));
+    // No model item. The conversation rule still runs: its item is in no
+    // section while the decline applies (spec 1, the Decline row).
+    let forms: Vec<String> = b
+        .store
+        .read(|c| {
+            let mut q = c.prepare(
+                "SELECT i.form FROM item i JOIN item_source s ON s.item_id = i.id
+                 WHERE s.message_id = ?1 ORDER BY i.form",
+            )?;
+            let rows = q.query_map([m2], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+        .unwrap();
+    assert!(forms.iter().all(|f| f == "conversation"), "{forms:?}");
     // The fixed steps ran: the header, the clean text and the marks.
     assert_eq!(
         b.col::<String>("SELECT subject FROM header WHERE message_id = ?1", m2),
