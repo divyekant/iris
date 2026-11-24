@@ -41,9 +41,10 @@ to review: the property test of "Acceptance criteria" passes.
 
 - A session field. The mark is a read of the job scope, so no migration of
   `job_session` is necessary, and `crates/iris-session` does not change.
-- Other verbs of a marked author (`trash`, `label`, the state verbs). The
-  hostile hard limit (spec 2, section 6.5) covers mail with a hostile mark.
-  A limit issue records the rest.
+- Other verbs of a marked author (the state verbs, `archive`, `unlabel`).
+  The hostile hard limit (spec 2, section 6.5) covers mail with a hostile
+  mark. Decision D14 (issue #437) later sent each `trash` and `label` of a
+  marked author to review (spec 2, section 6.5).
 - New words for the flag itself. The review screen already shows
   `outside_thread` as "Goes to an address that is not in the thread"
   (`client/src/review.ts`). The tag on each address came later (issue

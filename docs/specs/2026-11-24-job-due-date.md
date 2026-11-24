@@ -2,7 +2,7 @@
 
 - Date: 2026-11-24
 - Card: P9-D24
-- Status: Draft
+- Status: Built
 
 ## Problem
 
@@ -69,7 +69,9 @@ A job is due at `now` when all of these are true:
 1. The job is in `working` or `waiting`.
 2. `due_at` is not NULL and `due_at <= now`.
 3. No event of the job at or after `due_at` is a move to `needs_you` (by
-   the agent or the engine), or a move by the person.
+   the agent or the engine), or a move by the person. The first event of
+   the job (the start) does not count: a job that the person starts after
+   its due date moves on the next turn.
 
 Rule 3 makes the move happen once for each due date. After the move, or
 after the person acted on the job after the due date (an answer, a wake),
@@ -82,11 +84,19 @@ the job does not move again.
 
 ### The engine step
 
-`iris_job::move_due(store, now_ms) -> Result<Vec<Due>>` reads the due jobs
-(index `job_state`), then makes each move in its own write transaction that
-checks rules 1 to 3 again. So a move of the person or of the agent between
-the read and the write wins, and the step makes no move. `Due` holds the job
-ID and its goal.
+`iris_job::move_due(store, now_ms) -> Result<DueTurn>` reads the due jobs
+(`due_jobs`, index `job_state`), then makes each move in its own write
+transaction that checks rules 1 to 3 again (`move_due_one`). A move between
+the read and the write that makes a rule false wins, and the step makes no
+move: a finish, an ask, or a move of the person. A wait of the agent after
+the due date keeps the rules true, so the job still moves: the due date
+passed, and the person decides. `Due` holds the job ID and its goal.
+
+`DueTurn` has two fields. `moved` holds the `Due` of each committed move.
+`failed` holds the ID and the error of each job whose move failed. A
+failure of one job does not stop the moves of the others. The read of the
+due jobs is the only error of the whole step. The engine gives one notice
+for each entry of `moved`, and one log line for each entry of `failed`.
 
 The attention loop of the engine (`crates/iris/src/engine.rs`, each 10
 seconds) runs the step, then gives one system notice for each moved job to
@@ -122,7 +132,11 @@ one queue.
 | A job in `needs_you` or `done` on its due date | No move | Unit test |
 | A job that moved to `needs_you` after its due date (engine or agent) | No second move | Unit test |
 | The person answered or woke the job after the due date | No move | Unit test |
-| A move of the person or agent between the read and the write | The write sees it and makes no move | Unit test (move inside the gap) |
+| The move of one due job fails (for example a goal that is not UTF-8 from raw SQL) | That job does not move and stays in its state. The other due jobs still move and get their notices. Each turn writes one log line that names the job | Unit test (`a_job_whose_goal_is_not_utf8_does_not_stop_the_others`) |
+| A job that starts after its due date | One move on the next turn | Unit test (`a_job_that_starts_after_its_due_date_moves_once`) |
+| The engine turn with a due job | The move and one notice; the next turn gives no second notice | Engine test (`the_attention_turn_moves_a_due_job_once`) |
+| A move between the read and the write that makes rule 1, 2 or 3 false | The write sees it and makes no move | Unit test (`a_move_after_the_read_wins`) |
+| A wait of the agent between the read and the write | The job still moves | Rules 1 to 3 hold |
 | A `due` move by the agent or the person, with no due date, before `due_at`, or with another `why` | The trigger refuses it | Unit test |
 | A crash after the commit of the move and before the notice | The job stays in `needs_you`. No notice is shown. The jobs page shows it | Known limit |
 | The queue of system notices is full | The notice is dropped. The jobs page shows the job | Known limit |
@@ -132,7 +146,7 @@ one queue.
 
 - `crates/iris-store/src/schema_<n>.sql` (the next free number): the trigger `job_event_move` again,
   with the `due` row.
-- `crates/iris-job`: `move_due` and `Due`.
+- `crates/iris-job`: `move_due`, `Due` and `DueTurn`.
 - `crates/iris/src/engine.rs`, `crates/iris/src/notify.rs`: the step in the
   attention loop, and a plain queue of system notices.
 - `docs/specs/2026-11-16-job-store.md`: the move table and the paragraph on
@@ -178,6 +192,7 @@ None.
 ```bash
 cargo test -p iris-job --test due
 cargo test -p iris --lib notify
+cargo test -p iris-store
 ```
 
 ## Known limits
