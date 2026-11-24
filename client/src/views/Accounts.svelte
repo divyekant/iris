@@ -4,7 +4,7 @@
   accounts in one list.
 -->
 <script lang="ts">
-  import { get, post, statusOrder, type Account, type Status } from "../api";
+  import { postStatus, readStatus, type Account, type Status } from "../api";
   import { poll as every } from "../clock";
   import { accountNames, signIn, when } from "../format";
 
@@ -12,9 +12,10 @@
   // svelte-ignore state_referenced_locally
   let status = $state(initial);
 
-  // Polls, checks and removal answers can arrive out of order: the newest status wins.
-  const order = statusOrder((s) => (status = s));
-  $effect(() => (poll ? every(async () => [order.begin(), await get<Status>("status")] as const, ([put, s]) => put(s), poll) : undefined));
+  // Polls, checks and removal answers can arrive out of order: only the newest status shows (api.ts).
+  const show = (s: Status | null) => s && (status = s);
+  const refresh = () => readStatus().then(show);
+  $effect(() => (poll ? every(readStatus, show, poll) : undefined));
 
   let names = $derived(accountNames(status.accounts));
 
@@ -55,20 +56,22 @@
     error = "";
     try {
       // The engine answers after the delete of the mail, with the new status.
-      const next = await post<Status>(`accounts/${a.id}/remove`, { address: a.address });
+      const next = await postStatus(`accounts/${a.id}/remove`, { address: a.address });
       removals = { ...removals, [a.id]: { account: a, outcome: "sent" } };
-      order.after(next);
       asking = null;
+      show(next);
+      // A read that started during the removal can show the account from before the commit.
+      await refresh().catch(() => {});
     } catch (e) {
       const why = (e as Error).message;
       if ((e as { status?: number }).status === undefined) {
         // No answer: the removal can still run at the engine.
         removals = { ...removals, [a.id]: { account: a, outcome: "unsure" } };
         asking = null;
-        await order.read().catch(() => {});
+        await refresh().catch(() => {});
       } else {
         // A definite answer. A conflict can mean that the account is in a removal already.
-        if ((e as { status?: number }).status === 409) await order.read().catch(() => {});
+        if ((e as { status?: number }).status === 409) await refresh().catch(() => {});
         if (inRemoval(a)) {
           removals = { ...removals, [a.id]: { account: a, outcome: "sent" } };
           asking = null;
@@ -82,7 +85,7 @@
   async function check() {
     busy = true;
     try {
-      await order.read();
+      await refresh();
     } catch {
       // The account keeps its note: the next poll or check tells.
     } finally {
@@ -139,9 +142,9 @@
           <p class="state">Iris can read this mailbox, but it cannot change it. Your approved changes wait.</p>
           <p class="state">To give write access, run <code>iris account add client.json --write</code> on the machine that runs Iris and sign in again.</p>
         {/if}
-        {#if removals[a.id]?.outcome === "unsure" && a.state !== "removing"}
+        {#if removals[a.id] && a.state !== "removing"}
           <p class="state unsure" role="status">
-            Iris could not tell if this account is removed. The removal can still run.
+            {removals[a.id].outcome === "unsure" ? "Iris could not tell if this account is removed. The removal can still run." : "Iris removed this account."}
             <button type="button" class="quiet" onclick={check} disabled={busy}>{busy ? "Checking…" : "Check again"}</button>
           </p>
         {/if}

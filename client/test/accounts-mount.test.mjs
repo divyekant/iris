@@ -347,6 +347,8 @@ test("a slow poll that started before a removal does not put the removed account
     await wait(5);
     assert.equal(view.target.querySelectorAll(".accounts li").length, 1);
     assert.equal(view.target.querySelector(`button[aria-label="Remove ${one.address}"]`), null);
+    // The shared access state (the account pills, the sign-in notice) does not take the old answer either.
+    assert.equal(`a-${one.id}` in access.accounts, false, JSON.stringify(access.accounts));
   } finally {
     view.destroy();
     globalThis.fetch = saved;

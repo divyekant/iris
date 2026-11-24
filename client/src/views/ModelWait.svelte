@@ -4,12 +4,12 @@
   the wait at once. The backoff stays: a new error starts a longer wait.
 -->
 <script lang="ts">
-  import { post, type Status } from "../api";
+  import { postStatus, readStatus, type Status } from "../api";
   import { when } from "../format";
 
-  // `ontry` takes the answer of a try, `onover` reads the status at the end of the wait: both through
-  // the order of the brief, so an older answer never shows a wait that a newer status ended.
-  let { at, ontry, onover }: { at: string; ontry: (s: Status) => void; onover: () => Promise<void> } = $props();
+  // `onstatus` gets each status that this note reads, or null when a newer status answered first
+  // (api.ts): then the brief keeps the newer one.
+  let { at, onstatus }: { at: string; onstatus: (s: Status | null) => void } = $props();
   let busy = $state(false);
   let error = $state("");
   // At `at` the wait is over: the note goes, and a fresh status tells if a new wait started.
@@ -20,7 +20,7 @@
       () => {
         over = true;
         // A failed read leaves the next poll of the page to read the status.
-        onover().catch(() => {});
+        readStatus().then(onstatus, () => {});
       },
       Math.max(0, Date.parse(at) - Date.now()),
     );
@@ -31,7 +31,9 @@
     busy = true;
     error = "";
     try {
-      ontry(await post<Status>("model/try", {}));
+      onstatus(await postStatus("model/try", {}));
+      // A read that started during the try can show the wait from before it: read again.
+      onstatus(await readStatus().catch(() => null));
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {

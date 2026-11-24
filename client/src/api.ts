@@ -547,32 +547,6 @@ export function newest(): () => () => boolean {
   };
 }
 
-/**
- * The order of the status answers of a view. A read applies its answer only if no read that started
- * after it applied first. The answer of a change (a removal, a try now) comes after its commit, so it
- * applies at once and drops each read that started before it.
- */
-export function statusOrder(apply: (s: Status) => void) {
-  let started = 0;
-  let shown = 0;
-  const begin = () => {
-    const mine = ++started;
-    return (s: Status) => {
-      if (mine <= shown) return;
-      shown = mine;
-      apply(s);
-    };
-  };
-  return {
-    begin,
-    read: async () => begin()(await get<Status>("status")),
-    after: (s: Status) => {
-      shown = started;
-      apply(s);
-    },
-  };
-}
-
 /** The browser limit of all keepalive bodies in flight is 64 KiB: keep a margin for others. */
 export const KEEPALIVE_MAX = 60 * 1024;
 export const keepable = (json: string) => new TextEncoder().encode(json).length <= KEEPALIVE_MAX;
@@ -610,19 +584,58 @@ async function call(path: string, accept: string, body?: unknown): Promise<Respo
 
 /** Get one JSON resource from the local API. Throws an Error with the API's error text. */
 export async function get<T>(path: string): Promise<T> {
+  if (path === "status") return (await statusRead())[0] as T;
+  return getJson<T>(path);
+}
+
+async function getJson<T>(path: string): Promise<T> {
   const response = await call(path, "application/json");
   const body = await response.json().catch(() => null);
   // The status goes with the error, so that a caller can tell a 404 from other failures.
   if (!response.ok) throw Object.assign(new Error(body?.error ?? `The engine answered ${response.status}.`), { status: response.status });
-  // Spec 1 section 4.7: the provider refused the sign-in of these accounts, so their sync stopped.
-  if (path === "status") {
-    const accounts = (body as Status).accounts ?? [];
-    access.locked = accounts.filter((a) => a.state === "needs_sign_in").map(({ address, provider }) => ({ address, provider }));
-    access.none = accounts.length === 0;
-    access.accounts = accountNames(accounts);
-    access.zone = (body as Status).time_zone ?? null;
-  }
   return body as T;
+}
+
+// The order of the status answers. Each request that answers with the status (a read, or a change
+// such as a removal or a try now) takes a number at its start. An answer is the newest only if no
+// answer of a request that started after it came first: requests in flight can answer out of order.
+let statusStarted = 0;
+let statusTaken = 0;
+
+/** Take `s`, the answer of request `n`, if it is the newest. Gives true if it is. */
+function takeStatus(n: number, s: Status): boolean {
+  if (n <= statusTaken) return false;
+  statusTaken = n;
+  // Spec 1 section 4.7: the provider refused the sign-in of these accounts, so their sync stopped.
+  const accounts = s.accounts ?? [];
+  access.locked = accounts.filter((a) => a.state === "needs_sign_in").map(({ address, provider }) => ({ address, provider }));
+  access.none = accounts.length === 0;
+  access.accounts = accountNames(accounts);
+  access.zone = s.time_zone ?? null;
+  return true;
+}
+
+async function statusRead(): Promise<[Status, boolean]> {
+  const n = ++statusStarted;
+  const s = await getJson<Status>("status");
+  return [s, takeStatus(n, s)];
+}
+
+/** Read the status. Gives null if a newer status answered first: a view keeps the newer one. */
+export async function readStatus(): Promise<Status | null> {
+  const [s, newest] = await statusRead();
+  return newest ? s : null;
+}
+
+/**
+ * Send a change whose answer is the status (POST). Gives the status, or null if a newer status
+ * answered first. A read that started during the change can show the state from before its commit,
+ * so after a change, a view reads the status again.
+ */
+export async function postStatus(path: string, body: unknown): Promise<Status | null> {
+  const n = ++statusStarted;
+  const s = await post<Status>(path, body);
+  return takeStatus(n, s) ? s : null;
 }
 
 /** Send a policy change (POST with a JSON body). Throws an Error with the API's error text. */
