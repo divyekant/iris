@@ -365,6 +365,8 @@ async fn search_message_and_raw_source() {
         2,
         json!({"publisher": party("p-1")}),
     );
+    let (_, m) = get(&store, "/api/messages/m-3").await;
+    assert_eq!(m["items"], json!([format!("f-{item}")]));
     exec(
         &store,
         "UPDATE message SET hostile = '[\"spam\"]' WHERE id = 3",
@@ -380,7 +382,8 @@ async fn search_message_and_raw_source() {
     assert!(!m["text"].as_str().unwrap().is_empty());
     assert_eq!(m["gone"], false);
     assert_eq!(m["hostile"], json!(["spam"]));
-    assert_eq!(m["items"], json!([format!("f-{item}")]));
+    // No item of hostile mail is in a read (issue 112).
+    assert_eq!(m["items"], json!([]));
 
     // The raw source is the same bytes, as a download.
     let index = (0..COUNT)
@@ -1862,6 +1865,7 @@ async fn an_item_of_hostile_mail_is_hidden_until_the_state_clears() {
     assert_eq!(shown.1, vec![f.clone()]);
     assert_eq!(shown.2, json!({"receipt": 2}));
     assert_eq!((shown.3, shown.4), (StatusCode::OK, StatusCode::OK));
+    assert_eq!(shown.5, json!([f.clone(), r.clone()]));
     let states: [(&str, &str); 3] = [
         ("UPDATE message SET hostile = '[\"lookalike\"]' WHERE id = 1", "UPDATE message SET hostile = '[]' WHERE id = 1"),
         ("INSERT INTO message_label(message_id, label_id) SELECT 1, id FROM label WHERE provider_id = 'SPAM'",
@@ -1884,6 +1888,7 @@ async fn an_item_of_hostile_mail_is_hidden_until_the_state_clears() {
             (StatusCode::NOT_FOUND, StatusCode::NOT_FOUND),
             "{set}"
         );
+        assert_eq!(hidden.5, json!([]), "{set}");
         exec(&store, clear, []);
         assert_eq!(hostile_reads(&store, &f, &r).await, shown, "{clear}");
     }
@@ -1891,12 +1896,20 @@ async fn an_item_of_hostile_mail_is_hidden_until_the_state_clears() {
 
 /// The reads of the hostile item test: the IDs of `/api/items`, the IDs of
 /// the feed of the brief, the record counts of the brief, and the status of
-/// `/api/items/{feed}` and `/api/items/{record}`.
+/// `/api/items/{feed}` and `/api/items/{record}`, and the items of the mail
+/// view of the origin message.
 async fn hostile_reads(
     store: &Arc<Store>,
     feed: &str,
     record: &str,
-) -> (Vec<String>, Vec<String>, Value, StatusCode, StatusCode) {
+) -> (
+    Vec<String>,
+    Vec<String>,
+    Value,
+    StatusCode,
+    StatusCode,
+    Value,
+) {
     let ids_of = |v: &Value| -> Vec<String> {
         v["items"]
             .as_array()
@@ -1913,5 +1926,6 @@ async fn hostile_reads(
         brief["records"].clone(),
         get(store, &format!("/api/items/{feed}")).await.0,
         get(store, &format!("/api/items/{record}")).await.0,
+        get(store, "/api/messages/m-1").await.1["items"].clone(),
     )
 }

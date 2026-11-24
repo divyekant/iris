@@ -364,10 +364,13 @@ pub(crate) fn message_in(c: &Connection, row: i64) -> rusqlite::Result<Option<Me
         return Ok(None);
     };
     more.sender_kind = sender_kind(c, summary.from.address.as_deref())?;
-    let mut st = c.prepare_cached(
+    // The same items as `GET /api/items/{id}` shows: none of hostile mail.
+    let mut st = c.prepare_cached(concat!(
         "SELECT i.id, i.form FROM item_source s JOIN item i ON i.id = s.item_id
-         WHERE s.message_id = ?1 AND i.status != 'gone' ORDER BY i.id",
-    )?;
+         WHERE s.message_id = ?1 AND i.status != 'gone' AND NOT ",
+        iris_store::from_hostile_mail!("i"),
+        " ORDER BY i.id"
+    ))?;
     let items = st
         .query_map([row], |r| Ok(item_id(r.get(0)?, &r.get::<_, String>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
