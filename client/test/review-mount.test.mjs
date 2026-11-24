@@ -411,6 +411,7 @@ test("each flag of a draft shows as a tag on its words, on its own action only",
     const tags = [...send.querySelectorAll(".tag")].map((t) => [t.previousElementSibling.textContent, t.textContent]);
     assert.deepEqual(tags, [
       ["legal@acme-partners.example", "new address"],
+      ["new address", "not in the thread"],
       ["$48,000", "amount"],
       ["Friday, Dec 4", "date"],
       ["attached", "no file attached"],
@@ -437,7 +438,7 @@ test("a send waits for its draft before the decision, and a failed load can try 
     assert.match(alert.textContent, /The store is busy\./);
     assert.equal(view.target.querySelector("button.primary").disabled, true);
     // The flags show in words while the draft is not there.
-    assert.equal(view.target.querySelectorAll(".actions > li")[0].querySelectorAll(".flag").length, 5);
+    assert.equal(view.target.querySelectorAll(".actions > li")[0].querySelectorAll(".flag").length, 6);
     fail = false;
     alert.querySelector("button.more").click();
     await until(() => view.target.querySelector(".mail"));
@@ -454,7 +455,7 @@ test("a draft that Iris cannot read says so, and keeps each flag in words", asyn
   try {
     await until(() => text(view.target).includes("Iris cannot show the text of this draft"));
     const send = view.target.querySelectorAll(".actions > li")[0];
-    assert.equal(send.querySelectorAll(".flag").length, 5);
+    assert.equal(send.querySelectorAll(".flag").length, 6);
     assert.equal(send.querySelector(".mail"), null);
     // Spec 2 section 5.5: no approval without the final text. The person can only deny it.
     const box = send.querySelector("input[type=checkbox]");

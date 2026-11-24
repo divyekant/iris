@@ -150,10 +150,16 @@ impl Head {
 /// Remove RFC 5322 comments `( ... )`, which can hold any text.
 /// A `(` in a quoted string is text, not a comment.
 fn strip_comments(v: &str) -> String {
-    let (mut depth, mut quoted) = (0u32, false);
+    let (mut depth, mut quoted, mut escaped) = (0u32, false, false);
     v.chars()
         .filter(|c| {
+            // A quoted pair (`\"`, `\(`, `\)`) is text, in a quoted string
+            // and in a comment (RFC 5322 section 3.2.1).
+            if std::mem::take(&mut escaped) {
+                return depth == 0;
+            }
             match c {
+                '\\' if quoted || depth > 0 => escaped = true,
                 '"' if depth == 0 => quoted = !quoted,
                 '(' if !quoted => depth += 1,
                 ')' if !quoted && depth > 0 => depth -= 1,
@@ -200,6 +206,7 @@ pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
 /// with each (lowercase address, display name).
 pub fn each_address(v: &str, mut f: impl FnMut(String, Option<String>)) {
     let (mut quoted, mut angle, mut start, mut comment) = (false, false, 0, 0u32);
+    let mut escaped = false;
     let mut push = |entry: &str| {
         let s = strip_comments(entry);
         let s = s.trim();
@@ -222,7 +229,12 @@ pub fn each_address(v: &str, mut f: impl FnMut(String, Option<String>)) {
         }
     };
     for (i, c) in v.char_indices() {
+        // The sign after `\\` in a quoted string or a comment is text.
+        if std::mem::take(&mut escaped) {
+            continue;
+        }
         match c {
+            '\\' if quoted || comment > 0 => escaped = true,
             '(' if !quoted => comment += 1,
             ')' if !quoted => comment = comment.saturating_sub(1),
             _ if comment > 0 => {}

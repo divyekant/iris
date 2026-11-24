@@ -88,7 +88,7 @@ test("the routes of the write view", () => {
   assert.ok(route.NAV.some(([link]) => link === "#/write"));
 });
 
-test("a typed address becomes a chip, and Send waits for a valid one", async () => {
+test("a typed address becomes a chip, and Send waits for a valid one and for text", async () => {
   const net = serve(() => [500, {}]);
   const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS } });
   try {
@@ -100,6 +100,12 @@ test("a typed address becomes a chip, and Send waits for a valid one", async () 
     assert.deepEqual(chips.map((c) => c.firstChild.textContent.trim()), ["not-an-address", "sam@okafor.example"]);
     assert.ok(chips[0].classList.contains("bad"));
     type(app.target.querySelector("input.subject"), "Hi");
+    app.flushSync();
+    assert.equal(send().disabled, true, "no text: Send waits (issue 741)");
+    type(app.target.querySelector("textarea"), " \n\t");
+    app.flushSync();
+    assert.equal(send().disabled, true, "only white space: Send waits");
+    type(app.target.querySelector("textarea"), "Hello");
     app.flushSync();
     assert.equal(send().disabled, false);
     chips[1].querySelector("button").click();
@@ -348,7 +354,7 @@ test("Write it for me sends the intent to the engine and puts its draft in the t
     await until(() => app.target.querySelector("textarea").value.startsWith("Hi Priya"));
     const [post] = net.posts();
     assert.equal(post.path, "threads/t-2/draft");
-    assert.deepEqual(post.body, { intent: "yes, Wednesday", parent: "m-9" }, "the draft answers the mail that the form shows");
+    assert.deepEqual(post.body, { intent: "yes, Wednesday", parent: "m-9", to: ["priya@example.com"] }, "the draft answers the mail that the form shows, to the recipients of the form");
     assert.equal(app.target.querySelector("fieldset").disabled, false);
     assert.equal(app.target.querySelector("button[type=submit]").disabled, false, "the person can send the draft");
   } finally {

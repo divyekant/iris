@@ -168,13 +168,53 @@ Use these steps if the release has no program for your system:
 
 ## 7. Roll back
 
-Install the release before the bad release:
+CAUTION: If the bad release migrated the store, the older program cannot open
+the store. It stops with an unknown schema version. The error stays after you
+remove an account or the data of a new feature. Only a backup from before the
+update lets you roll back.
 
-```bash
-curl -fsSLO https://raw.githubusercontent.com/divyekant/iris/main/scripts/install.sh && IRIS_VERSION=v2026.11.16.1 sh install.sh
-```
+If you run Iris with another data folder (`--data <path>` or `IRIS_DATA`),
+give the same folder to each `iris` command below, for example
+`iris --data <path> backup <empty-folder>`. The background service uses
+only the default data folder (issue #243).
 
-Replace `v2026.11.16.1` with the tag of the earlier release (see the GitHub Releases page).
+Before each update, run `iris backup <empty-folder>`. Keep the backup until
+you no longer need to roll back. The backup holds your mail and the key, so
+keep it private.
+
+To roll back, do these steps:
+
+1. Stop the engine. If the background service runs it, run
+   `iris service remove`. Keep the service removed until step 5.
+2. Install the release before the bad release, with no service:
+
+   ```bash
+   curl -fsSLO https://raw.githubusercontent.com/divyekant/iris/main/scripts/install.sh && IRIS_NO_SERVICE=1 IRIS_VERSION=v2026.11.16.1 sh install.sh
+   ```
+
+   Replace `v2026.11.16.1` with the tag of the earlier release (see the
+   GitHub Releases page).
+
+   CAUTION: The restore in step 3 removes each local change since the
+   backup: decisions, ledger entries, items, drafts and job state. The mail
+   syncs again from the mail provider, but these local changes do not come
+   back. Keep the moved data folder until you no longer need it.
+
+   CAUTION: `iris backup` does not copy the `workspaces` folder (issue
+   #350). An agent draft that a job did not submit is only in the
+   `workspaces` folder of the moved data folder, also when the draft is older
+   than the backup. Before you start Iris in step 4, copy the `workspaces`
+   folder from the moved data folder into the restored data folder.
+
+3. If the bad release migrated the store, move the data folder away and copy
+   the backup in its place. Use the data folder of your installation: the
+   path of `--data` or `IRIS_DATA` if you set one. Else it is
+   `~/Library/Application Support/iris` on macOS, and `$XDG_DATA_HOME/iris`
+   or `~/.local/share/iris` on Linux.
+4. Run `iris status` (with the same `--data` if you set one). Make sure that
+   it shows your accounts.
+5. If you use the default data folder, run `iris service install`. Else
+   start `iris serve` with your data folder.
 
 The service file points to `~/.local/bin/iris`, so the service runs the old
 program after a restart of the service. To restart it:

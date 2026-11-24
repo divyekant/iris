@@ -407,7 +407,7 @@ fn downgrade(s: &Store) {
              ALTER TABLE account DROP COLUMN imap_user;
              ALTER TABLE account DROP COLUMN categories_off_at;
              DROP TRIGGER understand_owner_label_add; DROP TRIGGER understand_owner_label_remove;
-             DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower; DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender; DROP TRIGGER talk_due_sender_remove; DROP TABLE talk_due;
+             DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower; DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender; DROP TRIGGER talk_due_sender_remove; DROP TABLE talk_due; DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
              PRAGMA user_version = 26;",
         )?;
         Ok(())
@@ -534,9 +534,9 @@ async fn mirror_gives_the_newest_verify_of_each_account() {
         m["mirror"],
         json!([
             // Two skipped messages were not compared: not complete.
-            {"account": "a@example.com", "checked": "2026-11-16T12:00:01Z", "differences": 0, "complete": false},
-            {"account": "b@example.com", "checked": "2026-11-16T12:00:00Z", "differences": 1, "complete": false},
-            {"account": "c@example.com", "checked": null, "differences": null, "complete": false},
+            {"account": "a@example.com", "checked": "2026-11-16T12:00:01Z", "differences": 0, "complete": false, "skipped": 2, "stopped": false},
+            {"account": "b@example.com", "checked": "2026-11-16T12:00:00Z", "differences": 1, "complete": false, "skipped": 0, "stopped": true},
+            {"account": "c@example.com", "checked": null, "differences": null, "complete": false, "skipped": null, "stopped": false},
         ])
     );
 }

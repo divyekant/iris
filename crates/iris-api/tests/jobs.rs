@@ -435,6 +435,32 @@ async fn the_person_answers_the_question_of_a_job_once() {
     assert_eq!(code, StatusCode::CONFLICT);
 }
 
+/// The person ends a job once (#356).
+#[tokio::test]
+async fn the_person_ends_a_job_once() {
+    let dir = temp("finish");
+    let s = store(&dir);
+    let job = iris_job::create(&s, "Pay the invoice.", None, NOW).unwrap();
+    let uri = format!("/api/jobs/{}/finish", iris_job::format_job_id(job));
+    for bad in [json!({}), json!({ "end": "stop" }), json!({ "end": 1 })] {
+        let (code, _) = post(&s, &uri, bad.clone()).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    assert_eq!(
+        post(&s, "/api/jobs/j-999/finish", json!({ "end": "cancel" }))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    let (code, doc) = post(&s, &uri, json!({ "end": "cancel" })).await;
+    assert_eq!(code, StatusCode::OK, "{doc}");
+    assert_eq!(doc["job"]["state"], "done");
+    let last = doc["job"]["events"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["by"], "person");
+    let (code, _) = post(&s, &uri, json!({ "end": "complete" })).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+}
+
 #[tokio::test]
 async fn an_answer_to_an_older_question_is_refused() {
     let dir = temp("answer-race");

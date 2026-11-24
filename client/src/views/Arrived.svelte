@@ -3,7 +3,7 @@
   of the brief until the person says Done. The whole card opens the mail.
 -->
 <script lang="ts">
-  import { own } from "../api";
+  import { wrote } from "../api";
   import { when } from "../format";
   import { href } from "../route";
   import { removeWatch, type Watch } from "../watches";
@@ -24,7 +24,7 @@
     } catch (e) {
       // A 404: the watch is gone already (another tab, or the iris command).
       if ((e as { status?: number }).status === 404) return ondone(watch.id);
-      error = own(e) || "Iris could not remove the notice. Try again.";
+      error = wrote(e, "removed the notice", "Iris could not remove the notice. Try again.");
     } finally {
       busy = false;
     }

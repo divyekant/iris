@@ -473,3 +473,44 @@ async fn a_policy_writer_that_waits_for_the_lock_stops_no_other_request() {
         release.join().unwrap();
     }
 }
+
+/// Issue #141: with no policy file, the policy view waits for the backup
+/// lock (a writer or a backup can hold it). Each route that gives the view
+/// must wait off the one runtime thread, so another request still runs.
+#[tokio::test]
+async fn a_policy_view_that_waits_for_the_lock_stops_no_other_request() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let d = Arc::new(open("viewwait"));
+    decided(&d.1, "deals@acme.example", 12, "approved", true);
+    assert!(!d.0.join(iris_policy::FILE).exists());
+    let calls: Vec<(&str, &str, Option<Value>)> = vec![
+        ("GET", "/api/policy", None),
+        ("POST", "/api/policy/dismiss", Some(json!({ "id": 1 }))),
+    ];
+    for (method, path, body) in calls {
+        let lock = d.1.backup_lock().unwrap();
+        let released = Arc::new(AtomicBool::new(false));
+        // The release in 2 s, so that a blocked thread cannot hang the test.
+        let r = released.clone();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            r.store(true, Ordering::SeqCst);
+            drop(lock);
+        });
+        let view = {
+            let d = d.clone();
+            tokio::spawn(async move { d.call(method, path, body, true).await })
+        };
+        // The view runs first and comes to the lock.
+        tokio::task::yield_now().await;
+        let (code, _) = d.call("GET", "/api/notices", None, true).await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(
+            !released.load(Ordering::SeqCst),
+            "{path}: another request waited for the view"
+        );
+        let (code, v) = view.await.unwrap();
+        assert_eq!(code, StatusCode::OK, "{path}: {v}");
+        release.join().unwrap();
+    }
+}

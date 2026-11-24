@@ -302,3 +302,19 @@ test("in the brief, a row stays when a new brief comes before the answer", async
     view.destroy();
   }
 });
+
+// Issue 706: with no answer of the engine, the write can be stored, so the words say that Iris does not know.
+test("an answer with no reply of the engine says that Iris does not know if it saved it", async () => {
+  globalThis.fetch = async () => {
+    throw new TypeError("Failed to fetch");
+  };
+  const view = await mount("/src/views/Gate.svelte", { page: fx.gate });
+  try {
+    buttons(view, "Accept")[0].click();
+    await until(() => text(view.target).includes("Iris does not know if it saved the answer. Reload the page to see."));
+    assert.equal(buttons(view, "Accept").length, 3);
+    assert.doesNotMatch(text(view.target), /Try again/);
+  } finally {
+    view.destroy();
+  }
+});

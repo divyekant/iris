@@ -1207,6 +1207,155 @@ fn a_message_that_becomes_a_draft_loses_its_items() {
     assert!(at.is_none());
 }
 
+/// Each label that makes a message a draft or a copy, added in place by a
+/// sync, drops the items of the message at once: the batch runner skips such
+/// a message, so no understanding runs to drop them (#677: an IMAP `\Draft`
+/// flag set in place gives `UNSENT`). The thread goes into `talk_due`, and
+/// the message gets a new understanding if the label goes again.
+#[test]
+fn each_draft_or_copy_label_added_in_place_drops_the_items() {
+    for label in iris_store::DRAFT_OR_COPY {
+        let b = store("in-place");
+        let m = b.add("1", ASK, &["INBOX"]);
+        understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW).unwrap();
+        iris_understand::store::update_due_talks(&b.store, NOW).unwrap();
+        assert_eq!(b.items().len(), 1, "{label}");
+        b.add("1", ASK, &["INBOX", label]);
+        assert!(b.items().is_empty(), "{label}: no run is needed");
+        let due: i64 = b.col(
+            "SELECT count(*) FROM talk_due t JOIN message m ON m.thread_id = t.thread_id
+             WHERE m.id = ?1",
+            m,
+        );
+        assert_eq!(due, 1, "{label}: the conversation is computed again");
+        let at: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m);
+        assert!(at.is_none(), "{label}");
+    }
+}
+
+/// An understood message with no droppable item that gets a draft or copy
+/// label in place, or loses it, puts its thread in `talk_due`: the
+/// conversation leaves out drafts and copies.
+#[test]
+fn each_draft_or_copy_label_change_marks_the_conversation() {
+    for label in iris_store::DRAFT_OR_COPY {
+        let b = store("talk-due");
+        let m = b.add("1", ASK, &["INBOX"]);
+        understand(&b.store, m, &Fake::default(), NOW).unwrap();
+        iris_understand::store::update_due_talks(&b.store, NOW).unwrap();
+        assert!(b.items().is_empty(), "{label}: no droppable item");
+        let due = |b: &Box_| -> i64 {
+            b.col(
+                "SELECT count(*) FROM talk_due t JOIN message m ON m.thread_id = t.thread_id
+                 WHERE m.id = ?1",
+                m,
+            )
+        };
+        assert_eq!(due(&b), 0);
+        b.add("1", ASK, &["INBOX", label]);
+        assert_eq!(due(&b), 1, "{label}: added");
+        iris_understand::store::update_due_talks(&b.store, NOW).unwrap();
+        assert_eq!(due(&b), 0);
+        b.add("1", ASK, &["INBOX"]);
+        assert_eq!(due(&b), 1, "{label}: removed");
+    }
+}
+
+/// A gone message keeps its items. When it comes back with a draft or copy
+/// label, by the sync (`put_messages`) or by any other write of `gone_at`,
+/// its items go (#677).
+#[test]
+fn a_draft_that_comes_back_loses_its_items() {
+    for back in ["sync", "sql"] {
+        let b = store("back");
+        let m = b.add("1", ASK, &["INBOX"]);
+        understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW).unwrap();
+        // The message goes, then gets UNSENT while it is gone.
+        b.store
+            .write(|tx| {
+                tx.execute("UPDATE message SET gone_at = 1 WHERE id = ?1", [m])?;
+                tx.execute(
+                    "INSERT INTO message_label(message_id, label_id)
+                     SELECT ?1, id FROM label WHERE provider_id = 'UNSENT'",
+                    [m],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(b.items().len(), 1, "{back}: a gone origin keeps its item");
+        if back == "sync" {
+            // The upsert of `put_messages` clears `gone_at`.
+            b.add("1", ASK, &["INBOX", "UNSENT"]);
+        } else {
+            b.store
+                .write(|tx| {
+                    tx.execute("UPDATE message SET gone_at = NULL WHERE id = ?1", [m])?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let gone: Option<i64> = b.col("SELECT gone_at FROM message WHERE id = ?1", m);
+        assert!(gone.is_none(), "{back}");
+        assert!(b.items().is_empty(), "{back}");
+    }
+}
+
+/// A store from before migration 42 can hold items of a message that got
+/// `UNSENT` in place. The migration drops them.
+#[test]
+fn the_upgrade_drops_the_items_of_a_draft_or_copy() {
+    let b = store("upgrade-42");
+    let m = b.add("1", ASK, &["INBOX"]);
+    understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW).unwrap();
+    let g = b.add_in("2", "t2", NOW - DAY, ASK, &["INBOX"]);
+    understand(&b.store, g, &Fake::with(&[COMMITMENT]), NOW).unwrap();
+    // The store of version 41: no view and no item trigger.
+    b.store
+        .write(|tx| {
+            tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;")?;
+            Ok(())
+        })
+        .unwrap();
+    b.add("1", ASK, &["INBOX", "UNSENT"]);
+    // A second message with UNSENT whose origin is gone: its item counts as
+    // pinned (spec 1, section 7.5) and stays.
+    b.add_in("2", "t2", NOW - DAY, ASK, &["INBOX", "UNSENT"]);
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE message SET gone_at = 1 WHERE id = ?1", [g])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(b.items().len(), 2);
+    b.store
+        .write(|tx| {
+            tx.execute_batch("PRAGMA user_version = 41;")?;
+            Ok(())
+        })
+        .unwrap();
+    let Box_ {
+        _dir,
+        store,
+        account,
+    } = b;
+    drop(store);
+    let b = Box_ {
+        store: Store::open(&_dir.0).unwrap(),
+        _dir,
+        account,
+    };
+    let left: i64 = b.col(
+        "SELECT count(*) FROM item_source s JOIN item i ON i.id = s.item_id
+         WHERE s.message_id = ?1 AND i.form <> 'conversation'",
+        g,
+    );
+    assert_eq!(
+        (b.items().len(), left),
+        (1, 1),
+        "only the gone origin keeps its item"
+    );
+}
+
 #[test]
 fn a_broken_phishing_answer_gives_no_mark() {
     for answer in [

@@ -1,25 +1,16 @@
 //! Observe mode (release 1): the triage proposal.
 //!
-//! Triage reads the forms in the store and computes the mailbox changes that
-//! Iris would propose (specification 2, section 5). In release 1 the mode is
-//! always `observe`, so each action stays `proposed`, and the engine applies
-//! nothing. Release 1 does not store the proposal (specification 1,
-//! section 8): the engine computes it when the brief opens.
+//! The rules of triage: which inbox messages each rule proposes to archive
+//! (specification 2, section 5), and the count of each rule. `iris-triage`
+//! stores the proposal as a changeset of the author `triage`.
 //!
 //! This crate has no Gmail client and opens the store only to read. So it
 //! cannot change the mailbox or the store (specification 2, requirement C1).
 //!
-//! Memory: the counts are SQL `count(*)` queries. [`write_changeset`] streams
-//! each message ID to the writer, so the full list is never in memory.
+//! Memory: the counts are SQL `count(*)` queries. `iris-triage` stores the
+//! proposal as a changeset with the rules of this crate.
 
-use std::io::Write;
-
-use iris_store::{format_id, Kind, Store};
-use sha2::{Digest, Sha256};
-
-/// The flag `bulk`: more than this count of messages in one action, or in
-/// one changeset (specification 2, section 5.3).
-pub const BULK: u64 = 500;
+use iris_store::Store;
 
 /// One triage rule. Each rule gives one `archive` action. Archive only
 /// removes `INBOX`: the mail stays in Gmail, and the undo adds `INBOX` again.
@@ -46,7 +37,9 @@ impl Rule {
 
     pub fn why(self) -> &'static str {
         match self {
-            Rule::Hostile => "Hostile mail. Iris shows a count only.",
+            Rule::Hostile => {
+                "Hostile mail. Iris makes no item from it, and the brief shows a count only."
+            }
             Rule::ExpiredSignal => "Signals that stopped to matter.",
             Rule::Feed => "Feed items. They stay in the feed of Iris.",
             Rule::Record => "Records. Iris keeps them in records.",
@@ -123,107 +116,4 @@ fn count_in(c: &rusqlite::Connection, account: i64) -> iris_store::Result<Vec<(R
             Ok((rule, n as u64))
         })
         .collect()
-}
-
-/// Write the triage changeset as JSON (specification 2, section 5.1).
-///
-/// `created` is the time in RFC 3339. The ID comes from the content of the
-/// proposal (see `changeset_number`). A rule with no message gives no action. Each action has the
-/// state `proposed`.
-pub fn write_changeset(
-    store: &Store,
-    account: i64,
-    created: &str,
-    out: &mut impl Write,
-) -> iris_store::Result<()> {
-    store.read(|c| {
-        // One read transaction, so the counts and each ID list come from one
-        // snapshot, also when the sync writes at the same time.
-        let tx = c.unchecked_transaction()?;
-        let c = &*tx;
-        let counts = count_in(c, account)?;
-        let total: u64 = counts.iter().map(|(_, n)| n).sum();
-        write!(
-            out,
-            r#"{{"model":"{model}","id":"cs-{id}","revision":1,"author":{{"kind":"triage","name":"Iris"}},"why":"Triage proposes these mailbox changes. Nothing is applied.","created":{created:?},"submitted":{created:?},"state":"{state}","actions":["#,
-            model = iris_store::MODEL,
-            id = changeset_number(c, account)?,
-            state = if total == 0 { "closed" } else { "open" },
-        )?;
-        let mut n = 0;
-        for (rule, count) in counts.into_iter().filter(|(_, n)| *n > 0) {
-            n += 1;
-            if n > 1 {
-                out.write_all(b",")?;
-            }
-            write!(
-                out,
-                r#"{{"n":{n},"revision":1,"verb":"{}","targets":{{"messages":["#,
-                rule.verb()
-            )?;
-            write_ids(c, rule, account, out)?;
-            out.write_all(br#"]},"resolved":{"messages":["#)?;
-            write_ids(c, rule, account, out)?;
-            let bulk = count > BULK || total > BULK;
-            write!(
-                out,
-                // No hash: the proposal is not stored, so no one can approve it.
-                r#"]}},"args":{{}},"why":"{}","flags":[{}],"hash":null,"decision":{{"state":"proposed"}}}}"#,
-                rule.why(),
-                if bulk { r#""bulk""# } else { "" },
-            )?;
-        }
-        out.write_all(b"]}")?;
-        Ok(())
-    })
-}
-
-/// The changeset number of a snapshot: the first 63 bits of the SHA-256 of
-/// the account and the message IDs of each rule. Release 1 does not store the
-/// proposal, so the number names its content (specification 1, section 8): a
-/// different proposal gives a different number in each process and after a
-/// restart, and the same proposal gives the same number, also at a later
-/// time. Not 0, so it is never the row ID 0.
-fn changeset_number(c: &rusqlite::Connection, account: i64) -> iris_store::Result<u64> {
-    let mut hash = Hasher(Sha256::new());
-    write!(hash, "{account}")?;
-    for rule in Rule::ALL {
-        write!(hash, ";{rule:?}:")?;
-        write_ids(c, rule, account, &mut hash)?;
-    }
-    let digest = hash.0.finalize();
-    let n = u64::from_be_bytes(digest[..8].try_into().expect("8 bytes")) >> 1;
-    Ok(n.max(1))
-}
-
-struct Hasher(Sha256);
-
-impl Write for Hasher {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.update(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn write_ids(
-    c: &rusqlite::Connection,
-    rule: Rule,
-    account: i64,
-    out: &mut impl Write,
-) -> iris_store::Result<()> {
-    let mut st = c.prepare(&format!("{} ORDER BY 1", rule.query()))?;
-    let mut rows = st.query([account])?;
-    let mut first = true;
-    while let Some(row) = rows.next()? {
-        if !first {
-            out.write_all(b",")?;
-        }
-        first = false;
-        write!(out, "\"{}\"", format_id(Kind::Message, row.get(0)?))?;
-    }
-    Ok(())
 }

@@ -145,7 +145,8 @@
 
   const ADDRESS = /^[^\s@,<>]+@[^\s@,<>]+\.[^\s@,<>]+$/;
   const valid = (a: string) => ADDRESS.test(a);
-  let ready = $derived(to.some(valid) && (thread !== null || subject.trim() !== "") && !busy);
+  // No mail with no text (issue 741): the engine refuses it too.
+  let ready = $derived(to.some(valid) && (thread !== null || subject.trim() !== "") && body.trim() !== "" && !busy);
 
   function typed(field: "to" | "cc", end = false) {
     const [list, rest] = chips(field === "to" ? to : cc, field === "to" ? toText : ccText, end);
@@ -175,7 +176,7 @@
     draftNote = "";
     try {
       const parent = reply?.parent.id;
-      const v = await post<{ body: string; based_on: string }>(`threads/${encodeURIComponent(thread)}/draft`, { intent, parent });
+      const v = await post<{ body: string; based_on: string }>(`threads/${encodeURIComponent(thread)}/draft`, { intent, parent, to: [...to] });
       // The text goes in the form only if it answers the mail that the form shows.
       if (v.based_on !== parent) draftNote = "A new mail came into this thread. Read it, then ask again.";
       else if (alive) body = v.body;

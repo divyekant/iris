@@ -82,7 +82,7 @@ fn open_makes_the_data_folder() {
     }
     store
         .read(|c| {
-            assert_eq!(iris_store::schema_version(c)?, 40);
+            assert_eq!(iris_store::schema_version(c)?, 44);
             let journal: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
             assert_eq!(journal, "wal");
             let cache: i64 = c.query_row("PRAGMA cache_size", [], |r| r.get(0))?;
@@ -836,6 +836,31 @@ fn a_sender_lookup_without_case_uses_an_index() {
     );
 }
 
+#[test]
+fn the_changesets_of_one_job_use_an_index() {
+    // Issue 311: the job page finds the changesets of a job by
+    // `author_job` with an index search, not a scan of each changeset.
+    let dir = std::env::temp_dir().join(format!("iris-store-author-job-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    let plan: Vec<String> = store
+        .read(|c| {
+            Ok(
+                c.prepare("EXPLAIN QUERY PLAN SELECT id FROM changeset c WHERE c.author_job = ?1")?
+                    .query_map(["j-1"], |r| r.get(3))?
+                    .collect::<rusqlite::Result<_>>()?,
+            )
+        })
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        plan.iter()
+            .any(|p| p.contains("USING INDEX changeset_author_job")
+                || p.contains("USING COVERING INDEX changeset_author_job")),
+        "{plan:?}"
+    );
+}
+
 /// An address never gets the mirror and the apply state of another mailbox:
 /// a secret of another provider, or of another IMAP server or user, is
 /// refused before any change (IMAP spec section 8).
@@ -976,4 +1001,58 @@ fn read_to_writes_the_answer_after_the_read_ends() {
         .file_name()
         .to_string_lossy()
         .starts_with(".spool")));
+}
+
+/// A peer writer that opens one more streamed answer at its first write,
+/// until a [`Store::read_to`] refuses.
+struct Nest<'a> {
+    store: &'a Store,
+    open: usize,
+    refused_at: &'a std::cell::Cell<Option<usize>>,
+}
+
+impl std::io::Write for Nest<'_> {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        if self.refused_at.get().is_none() {
+            let mut inner = Nest {
+                store: self.store,
+                open: self.open + 1,
+                refused_at: self.refused_at,
+            };
+            let r = self.store.read_to(&mut inner, |_, w| -> Result<(), Error> {
+                std::io::Write::write_all(w, b"x")?;
+                Ok(())
+            });
+            if r.is_err() {
+                self.refused_at.set(Some(self.open + 1));
+            }
+        }
+        Ok(b.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+// Invariant (#713): at most MAX_SPOOLS streamed answers of one store hold
+// a spool file at the same time, and each place comes back at the end.
+#[test]
+fn read_to_limits_the_open_spools() {
+    let dir = TempDir::new("read-to-limit");
+    let s = Store::open(&dir.0).unwrap();
+    for _ in 0..2 {
+        let refused_at = std::cell::Cell::new(None);
+        let mut out = Nest {
+            store: &s,
+            open: 1,
+            refused_at: &refused_at,
+        };
+        s.read_to(&mut out, |_, w| -> Result<(), Error> {
+            std::io::Write::write_all(w, b"x")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(refused_at.get(), Some(iris_store::MAX_SPOOLS + 1));
+    }
 }

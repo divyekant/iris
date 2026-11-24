@@ -750,7 +750,11 @@ The `ledger_message` table has one row for each message of the entry:
 ### 7.2 Apply
 
 1. If the action adds a user label that Gmail does not have (`labels.list`),
-   call `labels.create`. If Gmail answers with an error (for example, the
+   call `labels.create`. Just before the call, one transaction checks the
+   stop, the expiry, the mode, the grant and the state `approved` again, as
+   the claim of step 3 does. If the action does not apply now, no call is
+   made. A change during the create call itself can still leave an empty
+   label at Gmail. If Gmail answers with an error (for example, the
    label exists) or the result is not known, call `labels.list` again and use
    the user label with that name. If
    no label of kind `user` has that name, the action is `failed`. The label
@@ -1111,6 +1115,7 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris list [<form>]` | Lists items, of one form if given. In session mode, only the items of the workspace, with the fields of `show` (card R4-04f). Host mode and the filters come in a later card (issue #523): until then, `iris list` in host mode gets exit code 2. | session | 1 |
 | `iris archive`, `inbox`, `label`, `unlabel`, `read`, `unread`, `trash` `<ids> [--changeset <cs-id>]` | Adds an action to a draft changeset. | both | 2 |
 | `iris close`, `defer`, `decline`, `correct` `<id> [--changeset <cs-id>]` | Adds a state action to a draft changeset. | both | 2 |
+| `iris skip`, `mute`, `dismiss` `<id> [--changeset <cs-id>]` | Adds a state action to a draft changeset. A session gets code 3: a job grants no feed, conversation or signal item. | host | 5 |
 | `iris changeset <cs-id>` | Shows a changeset. | both | 2 |
 | `iris revise <cs-id>` | Starts a new draft revision of a submitted changeset of the same author, after a review comment (section 5.5). | both | 4 |
 | `iris submit <cs-id> --why <text>` | Submits a draft changeset, and prints one result for each action. | both | 2 |

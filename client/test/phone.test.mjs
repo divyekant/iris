@@ -242,9 +242,9 @@ test("on a touch laptop with a mouse, the brief shows its quiet verbs and each c
   await page.close();
 });
 
-test("each other view has no small standalone link and no sideways scroll on a phone (#465)", async () => {
+test("each other view has no small standalone link and no sideways scroll on a phone, at each width (#465, #450)", async () => {
   const { base, browser } = await serve();
-  for (const width of [390, 768]) {
+  for (const width of WIDTHS) {
     const page = await browser.newPage({ viewport: { width, height: 800 }, isMobile: true, hasTouch: true, reducedMotion: "reduce" });
     for (const route of MORE) {
       await page.goto(base + route);
