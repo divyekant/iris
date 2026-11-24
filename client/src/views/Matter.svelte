@@ -53,7 +53,10 @@
   // Edit: the title and the members to remove, sent together on Save.
   let editing = $state(false);
   let title = $state("");
-  let removed: string[] = $state([]);
+  let marked: string[] = $state([]);
+  // Only marks of current members count: after a reload (another tab removed
+  // a marked member), a stale mark neither blocks Save nor goes in the request.
+  let removed = $derived(marked.filter((id) => all.some((i) => i.id === id)));
   let kept = $derived(all.length - removed.length);
   let changed = $derived(title.trim() !== matter.title || removed.length > 0);
   let ready = $derived(title.trim().length > 0 && kept > 0 && changed);
@@ -62,14 +65,14 @@
 
   function start() {
     title = matter.title;
-    removed = [];
+    marked = [];
     error = "";
     asking = false;
     editing = true;
   }
 
   function toggle(id: string) {
-    removed = removed.includes(id) ? removed.filter((r) => r !== id) : [...removed, id];
+    marked = marked.includes(id) ? marked.filter((r) => r !== id) : [...marked, id];
   }
 
   /** One edit request; the answer is the matter after the change. A 404 or 409 loads it again. */

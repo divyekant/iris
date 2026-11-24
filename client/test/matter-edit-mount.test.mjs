@@ -115,10 +115,13 @@ test("a matter that the person made says so, and a proposal has no Edit", async 
 test("the picker of an item adds it to a confirmed matter or makes a new matter", async () => {
   const item = fx.items.find((i) => i.form === "commitment" && !i.matter);
   const made = { ...view, matter: { ...view.matter, id: "g-10", title: "Rent" } };
-  const asked = serve((path, method) => (method === "GET" ? [200, fx.matters] : [200, made]));
+  const asked = serve((path, method) =>
+    path.endsWith("/joinable") ? [200, { joinable: true }] : method === "GET" ? [200, fx.matters] : [200, made],
+  );
   let joined = null;
   const v = await mount("/src/views/MatterPick.svelte", { item, onchange: (m) => (joined = m) });
   try {
+    await until(() => button(v, "Add to a matter"));
     button(v, "Add to a matter").click();
     await until(() => button(v, "Tokyo trip"));
     assert.ok(!button(v, fx.matterViews["g-5"].matter.title), "no proposal in the list");
@@ -129,7 +132,7 @@ test("the picker of an item adds it to a confirmed matter or makes a new matter"
     v.target.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await until(() => joined);
     assert.equal(joined, "g-10");
-    assert.deepEqual(asked.slice(1), [["matters", { title: "Rent", items: [item.id] }]]);
+    assert.deepEqual(asked.slice(2), [["matters", { title: "Rent", items: [item.id] }]]);
   } finally {
     v.destroy();
   }
@@ -145,21 +148,17 @@ test("a feed item has no picker", async () => {
   }
 });
 
-test("an ended signal, a cancelled item and a gone item have no picker; an active signal has one", async () => {
-  const signal = fx.items.find((i) => i.form === "signal" && !i.matter) ?? { ...fx.items.find((i) => i.form === "signal"), matter: undefined };
-  const commitment = fx.items.find((i) => i.form === "commitment" && !i.matter);
-  const cases = [
-    [{ ...signal, status: "active" }, true],
-    [{ ...signal, status: "used" }, false],
-    [{ ...signal, status: "dismissed" }, false],
-    [{ ...signal, status: "expired" }, false],
-    [{ ...commitment, status: "cancelled" }, false],
-    [{ ...commitment, status: "gone" }, false],
-  ];
-  for (const [item, shown] of cases) {
+test("the picker shows only when the engine says that the item can join a matter", async () => {
+  const item = fx.items.find((i) => i.form === "signal" && !i.matter) ?? fx.items.find((i) => i.form === "commitment" && !i.matter);
+  for (const joinable of [true, false]) {
+    const asked = serve(() => [200, { joinable }]);
     const v = await mount("/src/views/MatterPick.svelte", { item, onchange: () => {} });
     try {
-      assert.equal(Boolean(button(v, "Add to a matter")), shown, `${item.form} ${item.status}`);
+      await until(() => asked.length === 1);
+      await new Promise((r) => setTimeout(r, 0));
+      v.flushSync();
+      assert.deepEqual(asked[0], [`items/${encodeURIComponent(item.id)}/joinable`, undefined]);
+      assert.equal(Boolean(button(v, "Add to a matter")), joinable);
     } finally {
       v.destroy();
     }
@@ -175,6 +174,7 @@ test("a lost answer of a write that committed shows the matter; a refusal says t
     [false, 503, /does not know if it added/],
   ]) {
     serve((path, method) => {
+      if (path.endsWith("/joinable")) return [200, { joinable: true }];
       if (path === "matters" && method === "GET") return [200, fx.matters];
       if (method === "POST") return [answer, { error: "no" }];
       return [200, { ...item, matter: committed ? "g-4" : undefined }];
@@ -182,6 +182,7 @@ test("a lost answer of a write that committed shows the matter; a refusal says t
     let joined = null;
     const v = await mount("/src/views/MatterPick.svelte", { item, onchange: (m) => (joined = m) });
     try {
+      await until(() => button(v, "Add to a matter"));
       button(v, "Add to a matter").click();
       await until(() => button(v, "Tokyo trip"));
       button(v, "Tokyo trip").click();
@@ -197,5 +198,35 @@ test("a lost answer of a write that committed shows the matter; a refusal says t
     } finally {
       v.destroy();
     }
+  }
+});
+
+test("after another tab removes a marked member, Save sends only the title", async () => {
+  const signal = view.items.signal[0];
+  const fresh = { ...view, items: { ...view.items, signal: view.items.signal.slice(1) } };
+  const saved = { ...fresh, matter: { ...fresh.matter, title: "Tokyo, March" } };
+  let posts = 0;
+  const asked = serve((path, method) => {
+    if (method === "GET") return [200, fresh];
+    posts += 1;
+    return posts === 1 ? [409, { error: "an item to remove is not a member" }] : [200, saved];
+  });
+  const v = await mount("/src/views/Matter.svelte", { view });
+  try {
+    button(v, "Edit").click();
+    v.flushSync();
+    const input = v.target.querySelector("input[type=text]");
+    input.value = "Tokyo, March";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    v.target.querySelector(`button[aria-label="Remove ${signal.title}"]`).click();
+    v.flushSync();
+    button(v, "Save").click();
+    await until(() => asked.some(([p, b]) => p === `matters/${view.matter.id}` && b === undefined));
+    await until(() => !button(v, "Save").disabled);
+    button(v, "Save").click();
+    await until(() => posts === 2);
+    assert.deepEqual(asked.at(-1)[1], { title: "Tokyo, March" });
+  } finally {
+    v.destroy();
   }
 });

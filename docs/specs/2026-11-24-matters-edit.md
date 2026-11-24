@@ -278,6 +278,7 @@ or `additions` is not valid (rule 2.8). `iris_store::MODEL` becomes
 | `POST /api/matters` | `{"title": "...", "items": ["c-1", ...]}` | `create`. 201 with the matter view. |
 | `POST /api/matters/{id}/edit` | `{"title"?: "...", "add"?: [...], "remove"?: [...]}` | `edit`. The matter view. |
 | `POST /api/matters/{id}/delete` | none | `delete`. 204 with no body: the matter is no longer in the list. |
+| `GET /api/items/{id}/joinable` | none | `{"joinable": bool}`: true when `create` and `edit` accept the item now (live, and in no open matter). |
 
 The matter view (`GET /api/matters/{id}`) gets the key `additions`: the
 documents of the live additions of a confirmed matter, newest first. The
@@ -298,7 +299,9 @@ decides.
 - The brief: a confirmed matter with additions shows one line, "Add 1 item
   to Tokyo trip?", that opens the matter view.
 - The item view: "Add to a matter", with a list of the confirmed matters
-  and "New matter". A new matter asks for a title.
+  and "New matter". A new matter asks for a title. The view shows "Add to
+  a matter" only when `GET /api/items/{id}/joinable` is true, so the
+  client never repeats the live rule.
 - A signal member shows in a part "Signals" of the matter view.
 
 The layout goes to the owner as a before/after page before the client PR

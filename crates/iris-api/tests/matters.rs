@@ -783,3 +783,55 @@ async fn a_signal_id_joins_a_matter_through_the_api() {
     assert_eq!(v["matter"]["counts"]["signal"], 2, "{v}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// The picker of the web client shows only when this route says true. It
+/// follows the checks of `create`: each item that it calls joinable,
+/// `create` accepts, and each other item `create` refuses.
+#[tokio::test]
+async fn joinable_agrees_with_create() {
+    let (dir, s) = setup("joinable");
+    let (code, _) = call(&s, Method::POST, "/api/matters/g-2/decline", "").await;
+    assert_eq!(code, StatusCode::OK);
+    // Item 4 hidden, item 5 a duplicate of 4. Items 1 to 3 are in g-1.
+    s.write(|tx| {
+        tx.execute(
+            r#"UPDATE item SET doc = json_set(doc, '$.attention', json('{"state":"hidden"}')) WHERE id = 4"#,
+            [],
+        )?;
+        tx.execute("UPDATE item SET duplicate_of = 4 WHERE id = 5", [])?;
+        Ok(())
+    })
+    .unwrap();
+    for id in ["r-1", "v-2", "c-3", "r-4", "c-5"] {
+        let (code, v) = call(&s, Method::GET, &format!("/api/items/{id}/joinable"), "").await;
+        assert_eq!(code, StatusCode::OK, "{id}: {v}");
+        assert_eq!(v["joinable"], false, "{id}");
+        let body = format!(r#"{{"title":"T","items":["{id}"]}}"#);
+        let (code, v) = call(&s, Method::POST, "/api/matters", &body).await;
+        assert!(code.is_client_error(), "{id}: {code} {v}");
+    }
+    // Show item 4 again: it can join, and create accepts it.
+    s.write(|tx| {
+        tx.execute(
+            r#"UPDATE item SET doc = json_set(doc, '$.attention', json('{"state":"shown"}')) WHERE id = 4"#,
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, v) = call(&s, Method::GET, "/api/items/r-4/joinable", "").await;
+    assert_eq!(v["joinable"], true, "{v}");
+    let (code, v) = call(
+        &s,
+        Method::POST,
+        "/api/matters",
+        r#"{"title":"T","items":["r-4"]}"#,
+    )
+    .await;
+    assert_eq!(code, StatusCode::CREATED, "{v}");
+    let (_, v) = call(&s, Method::GET, "/api/items/r-4/joinable", "").await;
+    assert_eq!(v["joinable"], false, "in an open matter now: {v}");
+    let (code, _) = call(&s, Method::GET, "/api/items/f-1/joinable", "").await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let _ = std::fs::remove_dir_all(dir);
+}

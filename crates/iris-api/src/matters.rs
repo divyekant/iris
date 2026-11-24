@@ -265,6 +265,12 @@ fn additions(
     Ok(())
 }
 
+/// True when the item `id` can join a matter now (`iris_matters::joinable`):
+/// the web client shows its matter picker only then.
+pub fn joinable(store: &Store, id: &str) -> Result<bool> {
+    iris_matters::joinable(store, member(id)?).map_err(error)
+}
+
 /// The person makes a matter by hand with a title and 1 to 50 item IDs.
 /// The answer is the new matter view.
 pub fn create_matter(store: &Store, title: &str, items: &[String], now_ms: i64) -> Result<Value> {

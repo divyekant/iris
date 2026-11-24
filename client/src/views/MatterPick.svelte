@@ -10,13 +10,18 @@
 
   let { item, onchange }: { item: Item; onchange: (matter: string) => void } = $props();
 
-  // The status part of the live rule of `matter_live` (migration 46): only a
-  // live item can join, and a signal is live only while it is active.
-  const MEMBERS = ["commitment", "conversation", "record", "signal"];
-  const ENDED = ["gone", "cancelled", "declined"];
-  let can = $derived(
-    MEMBERS.includes(item.form) && !ENDED.includes(item.status) && (item.form !== "signal" || item.status === "active"),
-  );
+  // The engine decides if the item can join a matter (its live rule and
+  // no open matter), so the picker never offers a write that it refuses.
+  let can = $state(false);
+  $effect(() => {
+    const id = item.id;
+    can = false;
+    if (item.matter || item.form === "feed") return;
+    get<{ joinable: boolean }>(`items/${encodeURIComponent(id)}/joinable`).then(
+      (v) => item.id === id && (can = v.joinable),
+      () => {},
+    );
+  });
 
   let name = $state("");
   $effect(() => {

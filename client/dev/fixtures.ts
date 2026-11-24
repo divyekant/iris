@@ -620,6 +620,10 @@ export function answer(path: string): unknown {
   }
   if (name === "brief") return briefNow();
   if (name === "items" && id && url.pathname.endsWith("/job")) return startPreview(id);
+  if (name === "items" && id && url.pathname.endsWith("/joinable")) {
+    const item = items.find((i) => i.id === id);
+    return { joinable: !!item && !item.matter && ["commitment", "conversation", "record", "signal"].includes(item.form) };
+  }
   if (name === "items" && id) return [...items, ...hidden, ...strangers].find((i) => i.id === id);
   if (name === "items") {
     return { items: items.filter((i) => (!q.get("form") || i.form === q.get("form")) && (!q.get("type") || i.type === q.get("type"))), next: null };
