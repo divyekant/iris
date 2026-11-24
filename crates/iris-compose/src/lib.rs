@@ -95,6 +95,10 @@ impl Content {
             return Err("a subject has no \"=?\"".into());
         }
         self.body = line_ends(&self.body);
+        // One rule for each path that makes a draft: no mail with no text leaves.
+        if self.body.trim().is_empty() {
+            return Err("a draft needs a body".into());
+        }
         if self.body.len() > MAX_BODY {
             return Err(format!("a body has at most {MAX_BODY} bytes"));
         }

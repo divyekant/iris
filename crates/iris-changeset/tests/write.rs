@@ -183,6 +183,17 @@ fn submit_denies_a_draft_that_is_not_valid() {
         // A draft change waits for its undo (spec 2, section 7.5).
         (&["d-1"], REPLY(), "one account or one thread"),
         (&both, REPLY(), "one target"),
+        // No mail with no text, from any author (issue 741).
+        (
+            &["a-1"],
+            json!({"to": ["p@x.org"], "subject": "s", "body": ""}),
+            "needs a body",
+        ),
+        (
+            &["t-1"],
+            json!({"to": ["p@x.org"], "body": " \n\t"}),
+            "needs a body",
+        ),
     ];
     for (targets, a, why) in cases {
         let got = one(&s, AuthorKind::Agent, Verb::Draft, targets, a.clone());

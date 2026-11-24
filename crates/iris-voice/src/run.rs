@@ -11,7 +11,7 @@ use iris_understand::budget::{model_row, Budgeted, ModelRow};
 use iris_understand::Model;
 use rusqlite::params;
 
-use crate::{write, Saved, PROMPT};
+use crate::{write_reply, Form, Saved, PROMPT};
 
 /// Makes the model of a `model_setting` row.
 pub type Connect<'a> = &'a dyn Fn(&ModelRow) -> Result<Box<dyn Model>, String>;
@@ -62,7 +62,7 @@ impl std::fmt::Display for Failure {
 pub fn draft(
     store: &Store,
     thread: i64,
-    intent: Option<&str>,
+    form: Form<'_>,
     connect: Connect,
     now_ms: i64,
     clock: &dyn Fn() -> i64,
@@ -92,7 +92,7 @@ pub fn draft(
         })
         .map_err(Failure::Store)?;
     let budgeted = Budgeted::new(model.as_ref(), store, run, Some(&row));
-    let result = write(store, thread, intent, &budgeted, started);
+    let result = write_reply(store, thread, form, &budgeted, started);
     let s = budgeted.state();
     // The same stop names as a run of understanding. A valid draft can
     // still have an unknown charge or a cost above its reservation.

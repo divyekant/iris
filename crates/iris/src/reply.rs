@@ -38,7 +38,10 @@ pub fn write(
     let d = iris_voice::draft(
         store,
         thread,
-        intent,
+        iris_voice::Form {
+            intent,
+            ..iris_voice::Form::default()
+        },
         connect,
         now_ms,
         &crate::engine::now_ms,

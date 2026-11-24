@@ -385,12 +385,55 @@ fn in_mail(quote: &str, a: &Analysis) -> bool {
         .any(|t| squash(t).contains(&q))
 }
 
-/// `s` in lowercase, with each run of white space as one space.
-fn squash(s: &str) -> String {
-    s.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
+/// `s` in lowercase, with each run of white space as one space, and the
+/// typographic forms of a quote mark, an apostrophe, a dash and an ellipsis
+/// as their plain forms. Models often change these forms (#102). The fold
+/// is the same on both sides and changes no letter or digit, so a made-up
+/// quote still fails.
+pub(crate) fn squash(s: &str) -> String {
+    fold(s).0
+}
+
+/// [`squash`], and the byte offset in the result of each plain mark that
+/// replaced a typographic mark, with that original mark. A caller that
+/// finds word ends reads the original mark, so the fold moves no word end
+/// (`ask::has`). Invisible characters (a soft hyphen, zero-width
+/// characters) are not text: they go out.
+pub(crate) fn fold(s: &str) -> (String, Vec<(usize, char)>) {
+    // Lowercase the whole text first, as before the fold: a final sigma
+    // needs the context of the word. The marks and white space have no case.
+    let s = s.to_lowercase();
+    let mut out = String::with_capacity(s.len());
+    let mut from = Vec::new();
+    let mut space = false;
+    for c in s.chars() {
+        let plain = match c {
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' | '\u{2032}' => "'",
+            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' | '\u{2033}' | '\u{00AB}'
+            | '\u{00BB}' => "\"",
+            '\u{2010}'..='\u{2015}' | '\u{2212}' => "-",
+            '\u{2026}' => "...",
+            '\u{00AD}' | '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}' => continue,
+            c if c.is_whitespace() => {
+                space = true;
+                continue;
+            }
+            _ => "",
+        };
+        if space && !out.is_empty() {
+            out.push(' ');
+        }
+        space = false;
+        if plain.is_empty() {
+            out.push(c);
+        } else {
+            for p in plain.chars() {
+                from.push((out.len(), c));
+                out.push(p);
+            }
+        }
+    }
+    (out, from)
 }
 
 /// Make each model party a party of the open model: an owner address (`me`)
