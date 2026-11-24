@@ -509,12 +509,34 @@ async fn the_no_body_limit_is_64_bytes() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The three states of hostile mail of message 1 (issue 112): the SQL that
+/// sets each one, and the SQL that clears it.
+const HOSTILE: [(&str, &str); 3] = [
+    (
+        "UPDATE message SET hostile = '[\"lookalike\"]' WHERE id = 1",
+        "UPDATE message SET hostile = '[]' WHERE id = 1",
+    ),
+    (
+        "INSERT INTO message_label(message_id, label_id)
+           SELECT 1, id FROM label WHERE provider_id = 'SPAM'",
+        "DELETE FROM message_label WHERE message_id = 1
+           AND label_id IN (SELECT id FROM label WHERE provider_id = 'SPAM')",
+    ),
+    (
+        "UPDATE header SET from_addr = 'bad@example.com' WHERE message_id = 1;
+         INSERT INTO sender(address, kind) VALUES ('bad@example.com', 'hostile')
+           ON CONFLICT(address) DO UPDATE SET kind = 'hostile'",
+        "UPDATE sender SET kind = 'person' WHERE address = 'bad@example.com'",
+    ),
+];
+
 /// Issue 112: a member whose origin is hostile mail is in no matter read,
-/// also when a confirm pins it. A proposal counts only its other members.
-/// The member shows again when the state clears.
+/// also when a confirm pins it, and a proposal does not count it. The
+/// member shows again when the state clears.
 #[tokio::test]
 async fn a_member_of_hostile_mail_is_hidden_until_the_state_clears() {
     let (dir, s) = setup("hostile");
+    s.put_labels(1, &[("SPAM", "SPAM", "system")]).unwrap();
     let (code, _) = call(
         &s,
         Method::POST,
@@ -523,30 +545,29 @@ async fn a_member_of_hostile_mail_is_hidden_until_the_state_clears() {
     )
     .await;
     assert_eq!(code, StatusCode::OK);
-    // Items 2 and 5 come from the message of thread 1.
-    let mark = |v: &str| {
-        let sql = format!(
-            "UPDATE message SET hostile = '{v}'
-             WHERE id = (SELECT message_id FROM item_source WHERE item_id = 2)"
+    // Items 1 and 4 come from message 1.
+    for (set, clear) in HOSTILE {
+        s.write(|tx| Ok(tx.execute_batch(set)?)).unwrap();
+        let (_, v) = call(&s, Method::GET, "/api/matters/g-1", "").await;
+        agree(&v);
+        assert_eq!(v["matter"]["items"], json!(["v-2", "c-3"]), "{set}");
+        let (_, list) = call(&s, Method::GET, "/api/matters", "").await;
+        assert_eq!(ids(&list["proposed"]), Vec::<&str>::new(), "{set}");
+        assert_eq!(list["confirmed"][0]["counts"]["record"], 0, "{set}");
+        // g-2 keeps one live member, so it is not valid.
+        let (code, _) = call(&s, Method::GET, "/api/matters/g-2", "").await;
+        assert_eq!(code, StatusCode::NOT_FOUND, "{set}");
+        let (code, _) = call(&s, Method::POST, "/api/matters/g-2/decline", "").await;
+        assert_eq!(code, StatusCode::CONFLICT, "{set}");
+        s.write(|tx| Ok(tx.execute_batch(clear)?)).unwrap();
+        let (_, v) = call(&s, Method::GET, "/api/matters/g-1", "").await;
+        assert_eq!(
+            v["matter"]["items"],
+            json!(["r-1", "v-2", "c-3"]),
+            "{clear}"
         );
-        s.write(|tx| Ok(tx.execute(&sql, [])?)).unwrap();
-    };
-    mark(r#"["lookalike"]"#);
-    let (_, v) = call(&s, Method::GET, "/api/matters/g-1", "").await;
-    agree(&v);
-    assert_eq!(v["matter"]["items"], json!(["r-1", "c-3"]));
-    let (_, list) = call(&s, Method::GET, "/api/matters", "").await;
-    assert_eq!(ids(&list["proposed"]), Vec::<&str>::new());
-    assert_eq!(list["confirmed"][0]["counts"]["conversation"], 0);
-    // g-2 keeps one live member, so it is not valid.
-    let (code, _) = call(&s, Method::GET, "/api/matters/g-2", "").await;
-    assert_eq!(code, StatusCode::NOT_FOUND);
-    let (code, _) = call(&s, Method::POST, "/api/matters/g-2/decline", "").await;
-    assert_eq!(code, StatusCode::CONFLICT);
-    mark("[]");
-    let (_, v) = call(&s, Method::GET, "/api/matters/g-1", "").await;
-    assert_eq!(v["matter"]["items"], json!(["r-1", "v-2", "c-3"]));
-    let (_, list) = call(&s, Method::GET, "/api/matters", "").await;
-    assert_eq!(ids(&list["proposed"]), vec!["g-2"]);
+        let (_, list) = call(&s, Method::GET, "/api/matters", "").await;
+        assert_eq!(ids(&list["proposed"]), vec!["g-2"], "{clear}");
+    }
     let _ = std::fs::remove_dir_all(dir);
 }
