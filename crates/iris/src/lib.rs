@@ -101,7 +101,8 @@ pub enum Command {
     /// the reply comes or the date passes. A verb of a session only.
     Wait {
         /// The end of the wait: a day YYYY-MM-DD (its start, UTC), or an
-        /// RFC 3339 time with its offset, for example 2026-11-18T09:30:00-08:00.
+        /// RFC 3339 time with its offset in whole seconds, for example
+        /// 2026-11-18T09:30:00-08:00.
         #[arg(long)]
         until: String,
         /// The thread (`t-8841`) whose reply ends the wait first.

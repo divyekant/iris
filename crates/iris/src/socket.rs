@@ -706,16 +706,22 @@ fn status(store: &Store, me: &Author) -> Result<Value, Failure> {
 /// The end of a wait in milliseconds: a day `YYYY-MM-DD` (its start, UTC),
 /// or an RFC 3339 time with its offset, for example
 /// `2026-11-18T09:30:00-08:00` (issue #556). The parser of the time is
-/// `chrono`.
+/// `chrono`. The end has whole seconds: each output of a wait end (the
+/// answer, `job.json`, the job events) writes seconds, so a fraction other
+/// than zero gets an error and the output always shows the stored end.
 pub fn until_ms(text: &str) -> Result<i64, String> {
     if text.len() == 10 {
         return iris_store::day_ms(text).map_err(|e| e.to_string());
     }
-    chrono::DateTime::parse_from_rfc3339(text)
+    let ms = chrono::DateTime::parse_from_rfc3339(text)
         .map(|t| t.timestamp_millis())
         .map_err(|_| {
             format!("{text} is not a day YYYY-MM-DD or an RFC 3339 time (2026-11-18T09:30:00Z)")
-        })
+        })?;
+    if ms.rem_euclid(1000) != 0 {
+        return Err(format!("{text} has a fraction of a second: give whole seconds"));
+    }
+    Ok(ms)
 }
 
 /// `wait` of a session (docs/specs/2026-11-17-wait.md): the job moves to
