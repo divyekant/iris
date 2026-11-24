@@ -69,7 +69,9 @@ A job is due at `now` when all of these are true:
 1. The job is in `working` or `waiting`.
 2. `due_at` is not NULL and `due_at <= now`.
 3. No event of the job at or after `due_at` is a move to `needs_you` (by
-   the agent or the engine), or a move by the person.
+   the agent or the engine), or a move by the person. The first event of
+   the job (the start) does not count: a job that the person starts after
+   its due date moves on the next turn.
 
 Rule 3 makes the move happen once for each due date. After the move, or
 after the person acted on the job after the due date (an answer, a wake),
@@ -124,6 +126,8 @@ one queue.
 | A job in `needs_you` or `done` on its due date | No move | Unit test |
 | A job that moved to `needs_you` after its due date (engine or agent) | No second move | Unit test |
 | The person answered or woke the job after the due date | No move | Unit test |
+| A job that starts after its due date | One move on the next turn | Unit test (`a_job_that_starts_after_its_due_date_moves_once`) |
+| The engine turn with a due job | The move and one notice; the next turn gives no second notice | Engine test (`the_attention_turn_moves_a_due_job_once`) |
 | A move between the read and the write that makes rule 1, 2 or 3 false | The write sees it and makes no move | Unit test (`a_move_after_the_read_wins`) |
 | A wait of the agent between the read and the write | The job still moves | Rules 1 to 3 hold |
 | A `due` move by the agent or the person, with no due date, before `due_at`, or with another `why` | The trigger refuses it | Unit test |

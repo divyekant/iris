@@ -408,9 +408,11 @@ pub struct Due {
 /// row `j`: an open job that does not wait for the person, at or after its
 /// due date (`?1` is now), with no move to `needs_you` and no move by the
 /// person at or after the due date. So the move happens once for each due
-/// date.
+/// date. The first event (the start, by the person) is not a move: a job
+/// that starts after its due date also moves.
 const DUE_SQL: &str = "j.state IN ('working', 'waiting') AND j.due_at <= ?1
      AND NOT EXISTS (SELECT 1 FROM job_event e WHERE e.job_id = j.id
+                     AND e.id > (SELECT min(f.id) FROM job_event f WHERE f.job_id = j.id)
                      AND e.at >= j.due_at AND (e.state = 'needs_you' OR e.by = 'person'))";
 
 /// Moves each job that is due at `now_ms` to `needs_you` ([`due_jobs`],

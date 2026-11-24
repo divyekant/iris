@@ -162,3 +162,18 @@ fn the_move_table_refuses_each_other_due_move() {
     // From needs_you: no second due move.
     assert!(!insert(job, NOW + DAY + 1, "engine", "'due'"));
 }
+
+#[test]
+fn a_job_that_starts_after_its_due_date_moves_once() {
+    let f = fixture("past");
+    let s = &f.store;
+    // The start event is by the person, after the due date: it is no move.
+    let job = create(s, "Pay the late bill.", Some(NOW - DAY), NOW).unwrap();
+    assert_eq!(due_jobs(s, NOW).unwrap(), vec![job]);
+    assert_eq!(move_due(s, NOW).unwrap().len(), 1);
+    assert_eq!(get(s, job).unwrap().state, State::NeedsYou);
+    // The person answers: a move by the person after the due date.
+    assert!(move_due(s, NOW + DAY).unwrap().is_empty());
+    answer(s, job, "Go on.", None, NOW + 1).unwrap();
+    assert!(move_due(s, NOW + 2 * DAY).unwrap().is_empty());
+}
