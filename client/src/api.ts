@@ -248,6 +248,12 @@ export type Changeset = {
   actions: Action[];
 };
 
+/**
+ * GET /api/changesets/{id}/would: in observe mode, the decision that a rule of the active policy
+ * would give to each proposed action in apply mode (decision D10). Empty in apply mode.
+ */
+export type Would = { revision: number; n: number; outcome: "approved" | "in_review" | "denied"; rule: number; policy: number; reason: string };
+
 /** GET /api/handled: one action that an `allow` rule approved, with the reason. */
 export type HandledAction = {
   changeset: string;

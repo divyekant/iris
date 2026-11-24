@@ -553,3 +553,33 @@ test("a request with no older change does not ask for the revisions", async () =
     view.destroy();
   }
 });
+
+test("in observe mode, a proposed change says what a rule would decide in apply mode", async () => {
+  const asked = serve({
+    "changesets/cs-9/would": [200, { would: [{ revision: 1, n: 2, outcome: "approved", rule: 3, policy: 1, reason: "Rule 3 allows it." }] }],
+  });
+  const proposed = { state: "proposed" };
+  const view = await mount("/src/views/Request.svelte", {
+    changeset: changeset([act({ decision: proposed }), act({ n: 2, decision: proposed })]),
+  });
+  try {
+    const items = () => view.target.querySelectorAll(".actions > li");
+    await until(() => view.target.querySelector(".would"));
+    assert.equal(items()[0].querySelector(".would"), null, "no rule decides the first change");
+    assert.equal(items()[1].querySelector(".would").textContent, "In apply mode, rule 3 would approve this change.");
+    assert.equal(asked.filter((p) => p === "changesets/cs-9/would").length, 1);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a request with no proposed change does not ask what a rule would decide", async () => {
+  const asked = serve();
+  const view = await mount("/src/views/Request.svelte", { changeset: changeset([act({ resolved: { messages: ["m-1"] } })]) });
+  try {
+    await until(() => view.target.querySelectorAll(".messages li").length === 1);
+    assert.ok(!asked.includes("changesets/cs-9/would"));
+  } finally {
+    view.destroy();
+  }
+});
