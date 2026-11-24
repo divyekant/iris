@@ -17,6 +17,8 @@
 
   // The state of one account, in one sentence, and its tone.
   function stateOf(a: Account): { text: string; tone: "ok" | "busy" | "retry" | "stopped" } {
+    // An account that the person removed (decision D34): the engine deletes its mail now.
+    if (a.state === "removing") return { text: "Iris deletes the mail of this account from this machine.", tone: "busy" };
     if (a.state === "needs_sign_in") return { text: `The copy stopped: ${signIn(a).who} refused the sign-in. Sign in again to continue.`, tone: "stopped" };
     // A failed run comes before the busy states. The status cannot tell if a new try runs now, so the
     // sentence says only what it knows: the last try failed, and Iris tries again. Only a refused sign-in stops.

@@ -1,0 +1,25 @@
+{
+  "model": "iris/1.1",
+  "id": "g-9",
+  "title": "Tokyo trip",
+  "status": "confirmed",
+  "items": [
+    "r-1202",
+    "s-77"
+  ],
+  "counts": {
+    "commitment": 0,
+    "conversation": 0,
+    "record": 1,
+    "signal": 1
+  },
+  "additions": [
+    "r-1310"
+  ],
+  "created": "2026-11-24T09:00:00Z",
+  "updated": "2026-11-24T10:15:00Z",
+  "decided": "2026-11-24T09:00:00Z",
+  "derived": {
+    "by": "person"
+  }
+}

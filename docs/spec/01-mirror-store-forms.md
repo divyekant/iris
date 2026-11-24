@@ -2,7 +2,7 @@
 
 - Status: draft, for the approval of the maintainer
 - Applies to: release 1 ("See")
-- Open model version: 1.1
+- Open model version: 1.2
 - Related: [Specification 2](02-changeset-policy-ledger.md), the
   [schemas](schema/), the manifesto and the experience document "Iris: the
   ideal experience"
@@ -484,7 +484,7 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `body` | `message_id` INTEGER PK, `subject` TEXT, `sender` TEXT, `text` TEXT | The clean text of the message (section 7.2), with the subject and the sender name and address. `message_id` is the row ID. |
 | `message_fts` | FTS5 table on `subject`, `sender`, `text`, with `content='body'` and `content_rowid='message_id'` | Full-text search. Triggers on `body` keep it current. |
 | `sender` | `id` INTEGER PK, `address` TEXT UNIQUE, `name` TEXT, `kind` TEXT, `basis` TEXT, `decided_by` TEXT, `decided_at` INTEGER, `declined_at` INTEGER | The sender axis. Gives the `p-` IDs. `declined_at`: the time of a decline at the stranger gate (section 6.7), or NULL. |
-| `model_declined` | `message_id` INTEGER PK, FK to `message` | Migration 48: each message that understanding saved with no model call because its sender was a declined stranger (section 6.7). A trigger on `sender` makes these messages pending again when the decline stops applying, and marks their threads in `talk_due`. |
+| `model_declined` | `message_id` INTEGER PK, FK to `message` | Migration 49: each message that understanding saved with no model call because its sender was a declined stranger (section 6.7). A trigger on `sender` makes these messages pending again when the decline stops applying, and marks their threads in `talk_due`. |
 | `sender_evidence` | `message_id` FK, `address` TEXT, `rule` TEXT (`sent`, `replied` or `service`), `content_sha256` TEXT; PK (`address`, `rule`, `message_id`) | The messages that prove a `person` or `service` kind (section 6.7). The sender step writes the rows. A `sent` row: the sent message names the address in `To`, `Cc` or `Bcc`. A `replied` row: the sent message comes after a message from the address in its thread. A `service` row: the message from the address is automated mail with a Gmail DKIM pass; the rule counts its 2 earlier messages when it reads the row. A row counts only while its message is not gone and has the same content hash. |
 | `item` | `id` INTEGER PK, `form` TEXT, `account_id`, `status` TEXT, `status_before_gone` TEXT, `doc` TEXT (JSON), `created_at`, `updated_at`, `derived_by` TEXT, `duplicate_of` INTEGER | One row for each item of each form. `doc` is the form document of section 6. `duplicate_of` marks a possible duplicate (section 7.5). |
 | `item_source` | `item_id`, `message_id`, `role` TEXT, PK(`item_id`, `message_id`) | Many to many: one message can feed more than one item. |
@@ -558,7 +558,7 @@ Each item of each form has these fields:
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `model` | string, `"iris/1.1"` (`"iris/1.0"` in older documents) | yes | The version of the open model: `iris/<major>.<minor>` ([specification 4](04-open-model-versions.md)). |
+| `model` | string, `"iris/1.2"` (`"iris/1.0"` or `"iris/1.1"` in older documents) | yes | The version of the open model: `iris/<major>.<minor>` ([specification 4](04-open-model-versions.md)). |
 | `id` | string, for example `"c-311"` | yes | The ID of the item (section 5.7). |
 | `form` | `commitment`, `conversation`, `record`, `feed` or `signal` | yes | The form. |
 | `status` | string, values for each form | yes | The state of the item. |
@@ -718,7 +718,7 @@ The person gives one answer for each sender:
 | Answer | Effect |
 |---|---|
 | Accept | The kind becomes `person`, with `decided_by` `person` and the `basis` "accepted at the gate". The items go to their sections ("You owe", "Owed to you", "Conversations"). |
-| Decline | The engine sets `declined_at` on the sender row. The kind stays with the engine, so a declined sender can still become `hostile`, or known (for example after a reply of the person). The decline applies only while the kind is `stranger`: the items of a declined stranger are in no section of the brief, and the web client lists the declined senders. A conversation with a known person stays in "Conversations" (decision D30). It also stays on the list of declined senders, so the person can still accept the sender or ask again. New mail of a declined stranger gets no model call (decision D29): understanding runs the fixed steps (header, clean text, hostile marks, sender kind, fixed rules) and saves the message as understood with no items. The table `model_declined` (migration 48) holds each such message. When the decline stops applying (a reopen, an accept, a kind other than `stranger`), a trigger makes these messages pending again, so the next run understands them with the model. |
+| Decline | The engine sets `declined_at` on the sender row. The kind stays with the engine, so a declined sender can still become `hostile`, or known (for example after a reply of the person). The decline applies only while the kind is `stranger`: the items of a declined stranger are in no section of the brief, and the web client lists the declined senders. A conversation with a known person stays in "Conversations" (decision D30). It also stays on the list of declined senders, so the person can still accept the sender or ask again. New mail of a declined stranger gets no model call (decision D29): understanding runs the fixed steps (header, clean text, hostile marks, sender kind, fixed rules) and saves the message as understood with no items. The table `model_declined` (migration 49) holds each such message. When the decline stops applying (a reopen, an accept, a kind other than `stranger`), a trigger makes these messages pending again, so the next run understands them with the model. |
 | Reopen | Removes the accept or the decline of the gate. After an accept, the engine decides the kind again from the evidence in the store. A kind that a person set for another reason (for example, a correction) stays. |
 
 The web client shows the gate in the brief: one row for each sender, with
@@ -780,7 +780,7 @@ The `hostile` column of the message holds each mark that applies:
 | Mark | Rule |
 |---|---|
 | `dmarc` | `Authentication-Results` reports a DMARC fail for the domain of `From`. |
-| `spoof` | The display name is the name of a known person, the address is not the address of that person, and DKIM or DMARC does not pass for the domain of the address. If DKIM and DMARC pass, the address is a new sender, with the kind `stranger`. |
+| `spoof` | The display name is the name of a known person, the address is not the address of that person, and DKIM or DMARC does not pass for the domain of the address. If DKIM and DMARC pass, the address is a new sender, with the kind `stranger`. Also: the display name holds an email address whose registrable domain is not the one of the `From` address, as in `"ceo@bank.example" <x@evil.example.net>` (decision D32). A DKIM or DMARC pass does not clear this case. A name with the word `via` is a list form (`"x@y.example via List" <list@lists.example>`) and does not get the mark. |
 | `link` | An HTML link of the message (from `Clean.links`) shows a web address with the host `S` (text that starts with `http://`, `https://` or `www.`, or a first word that is a domain with a known public suffix, not a file name such as `report.pdf`), and its target is an `http` or `https` URL that a browser opens on another owner. Iris reads the target with the WHATWG URL standard. The owner of a host is its registrable domain by the public suffix list, with the hosts and the `From` domain in punycode (so `münchen.de` and `xn--mnchen-3ya.de` are one owner). The link is deceptive if one of these is true: the target host is an IP address or Iris cannot read it; the target has a user part, a backslash or a percent sign in front of its path; the target host has another owner than `S`. If DMARC passes for the domain of `From` and that domain has the owner of `S`, a target host of another owner is not deceptive: the sender owns the shown domain and can link through a redirect. The first two conditions (an IP address or a target that Iris cannot read; a user part, a backslash or a percent sign) apply also to this sender. DMARC for another domain proves nothing about `S`. If `iris-clean` could not list each link (`links_cut`), or the part of the file past the read limit has a part header (after a delimiter of a declared boundary) with the type `text/html`, the message gets the mark. |
 | `spam` | The message has the label `SPAM`. |
 | `phishing` | The understanding step marks the message as phishing. |

@@ -1,46 +1,55 @@
--- Migration 48 (decision D29, issue 263): no model call for the mail of a
--- declined sender. Understanding runs the fixed steps on such mail (the
--- header, the clean text, the hostile marks, the sender kind), and saves it
--- as understood with no items and no model call. `model_declined` holds
--- each such message. When the decline stops applying (a reopen, a new kind
--- other than `stranger`, a new address, a delete of the row), a trigger
--- makes these messages pending again, so the next run understands them with
--- the model. The trigger covers each writer of the sender row.
+-- Migration 48 (decision D34, issue #626, docs/specs/2026-11-24-remove-account.md):
+-- IF NOT EXISTS: a test that sets an older user_version runs this again.
+-- an account in state `removing` or `removed` gets no new mail. A sync that
+-- started before the removal fails at its next write, so it cannot add mail
+-- after the removal. The states need no column: `account.state` is TEXT.
 
-CREATE TABLE IF NOT EXISTS model_declined (
-  message_id INTEGER PRIMARY KEY REFERENCES message(id) ON DELETE CASCADE
-);
-
-CREATE TRIGGER IF NOT EXISTS model_declined_end AFTER UPDATE OF address, kind, declined_at ON sender
-  WHEN OLD.declined_at IS NOT NULL AND coalesce(OLD.kind, 'stranger') = 'stranger'
-   AND NOT (NEW.declined_at IS NOT NULL AND coalesce(NEW.kind, 'stranger') = 'stranger'
-            AND NEW.address IS OLD.address)
+CREATE TRIGGER IF NOT EXISTS removed_account_message BEFORE INSERT ON message
+  WHEN (SELECT state FROM account WHERE id = NEW.account_id) IN ('removing', 'removed')
 BEGIN
-  INSERT INTO talk_due(thread_id)
-    SELECT DISTINCT m.thread_id FROM model_declined d
-      JOIN header h ON h.message_id = d.message_id JOIN message m ON m.id = d.message_id
-     WHERE h.from_addr = lower(OLD.address)
-       AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = m.thread_id);
-  UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL, waits_model = 0
-   WHERE id IN (SELECT d.message_id FROM model_declined d
-                  JOIN header h ON h.message_id = d.message_id
-                 WHERE h.from_addr = lower(OLD.address));
-  DELETE FROM model_declined WHERE message_id IN (
-    SELECT h.message_id FROM header h WHERE h.from_addr = lower(OLD.address));
+  SELECT RAISE(ABORT, 'iris: the account is removed');
 END;
 
-CREATE TRIGGER IF NOT EXISTS model_declined_end_remove AFTER DELETE ON sender
-  WHEN OLD.declined_at IS NOT NULL AND coalesce(OLD.kind, 'stranger') = 'stranger'
+CREATE TRIGGER IF NOT EXISTS removed_account_thread BEFORE INSERT ON thread
+  WHEN (SELECT state FROM account WHERE id = NEW.account_id) IN ('removing', 'removed')
 BEGIN
-  INSERT INTO talk_due(thread_id)
-    SELECT DISTINCT m.thread_id FROM model_declined d
-      JOIN header h ON h.message_id = d.message_id JOIN message m ON m.id = d.message_id
-     WHERE h.from_addr = lower(OLD.address)
-       AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = m.thread_id);
-  UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL, waits_model = 0
-   WHERE id IN (SELECT d.message_id FROM model_declined d
-                  JOIN header h ON h.message_id = d.message_id
-                 WHERE h.from_addr = lower(OLD.address));
-  DELETE FROM model_declined WHERE message_id IN (
-    SELECT h.message_id FROM header h WHERE h.from_addr = lower(OLD.address));
+  SELECT RAISE(ABORT, 'iris: the account is removed');
 END;
+
+CREATE TRIGGER IF NOT EXISTS removed_account_label BEFORE INSERT ON label
+  WHEN (SELECT state FROM account WHERE id = NEW.account_id) IN ('removing', 'removed')
+BEGIN
+  SELECT RAISE(ABORT, 'iris: the account is removed');
+END;
+
+CREATE TRIGGER IF NOT EXISTS removed_account_item BEFORE INSERT ON item
+  WHEN (SELECT state FROM account WHERE id = NEW.account_id) IN ('removing', 'removed')
+BEGIN
+  SELECT RAISE(ABORT, 'iris: the account is removed');
+END;
+
+CREATE TRIGGER IF NOT EXISTS removed_account_body BEFORE INSERT ON body
+  WHEN (SELECT a.state FROM message m JOIN account a ON a.id = m.account_id
+        WHERE m.id = NEW.message_id) IN ('removing', 'removed')
+BEGIN
+  SELECT RAISE(ABORT, 'iris: the account is removed');
+END;
+
+-- The jobs whose workspace can hold mail of a removed account. The removal
+-- writes them before it deletes the items, because after that no other
+-- row links a job to the account. The delete builds each workspace again
+-- from an empty folder (other than notes.md), then deletes the row.
+CREATE TABLE IF NOT EXISTS removed_workspace (
+  account_id INTEGER NOT NULL REFERENCES account(id),
+  job_id INTEGER NOT NULL,
+  PRIMARY KEY (account_id, job_id)
+) WITHOUT ROWID;
+
+-- The sender addresses of the deleted messages of a removed account. Each
+-- batch of the delete writes them before it deletes the headers, so the
+-- last batch deletes only the senders of this account, also after a crash.
+CREATE TABLE IF NOT EXISTS removed_sender (
+  account_id INTEGER NOT NULL REFERENCES account(id),
+  address TEXT NOT NULL,
+  PRIMARY KEY (account_id, address)
+) WITHOUT ROWID;
