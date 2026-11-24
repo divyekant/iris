@@ -224,9 +224,8 @@ fn a_gone_thread_message_gives_no_thread_address() {
     assert!(f.contains(&"outside_thread".to_string()), "{f:?}");
 }
 
-/// A job agent: the mark of its changeset is the mark of its job. Submit
-/// refuses each draft of a job today (no grant of an account, spec 2
-/// section 8.2), so the test reads the mark that submit uses.
+/// A job agent: the mark of its changeset is the mark of its job. The test
+/// reads the mark that submit uses.
 #[test]
 fn a_job_agent_is_marked_by_its_job() {
     let dir = TempDir::new("job");

@@ -286,12 +286,13 @@ these rules:
   `submit` and again just before the apply, with the same results as for
   a message. A feed, signal or conversation item is never a target in a
   session, so `correct` on one is refused.
-- `iris draft`, `iris send` and `iris nudge` make draft and send actions,
-  which target an account and a draft that are not in the grant. The
-  engine refuses these verbs in session mode until a card defines the
-  grant of the account and of a job draft (R4-03). It also refuses, at
-  `submit`, each draft or send action in a changeset of a session, on
-  each path that makes one.
+- `iris send` and `iris nudge` make send actions. The engine refuses
+  these verbs in session mode, and refuses at `submit` each send action
+  in a changeset of a session, on each path that makes one: only a person
+  sends (decision D2). `iris draft` in session mode makes a reply in a
+  thread of the grant (decision D3, `docs/specs/2026-11-17-job-verbs.md`
+  section 4). A new mail targets an account, which no grant holds, so
+  submit refuses it.
 - `iris changeset <cs-id>`, `submit` and `withdraw` in a session give only
   changesets of the job of the session. In a session, the engine gives no
   subject or text of a target message in a changeset document.

@@ -49,7 +49,10 @@ to review: the property test of "Acceptance criteria" passes.
   (`client/src/review.ts`). The tag on each address came later (issue
   462, see section 3).
 - The `draft` and `send` verbs in a session (spec 2, section 8.2). They
-  stay refused.
+  stayed refused in this card. Decision D3 (2026-11-24) later let a
+  session make a reply `draft` in a granted thread
+  (`docs/specs/2026-11-17-job-verbs.md`). A `send` stays refused. The
+  flag `outside_thread` and its hard limit apply to such a draft.
 
 ## Design
 

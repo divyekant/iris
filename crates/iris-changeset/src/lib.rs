@@ -813,8 +813,9 @@ enum Phase {
     Apply,
 }
 
-/// The checks of one action against the grant of its job: no draft or
-/// send, each resolved message granted, each item an item of the workspace.
+/// The checks of one action against the grant of its job: no send, a
+/// draft only as a reply to a granted thread (decision D3), each resolved
+/// message granted, each item an item of the workspace.
 /// Invariant: an action of a session changes only granted rows, and a
 /// target that gives no row never passes. At submit, each declared target
 /// must also be in the grant, so a target that gives no row (each message
@@ -834,9 +835,12 @@ fn outside_grant(
         [action],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    if WRITE_VERBS.contains(&verb.as_str()) {
+    // A draft of a session is a reply: its thread is a target, and the
+    // checks below hold it to the grant. A new mail names an account, which
+    // no job grants. A send needs a person (decision D2).
+    if WRITE_VERBS.contains(&verb.as_str()) && verb != "draft" {
         return Ok(Some(format!(
-            "a session of {j} cannot {verb}: a job has no grant of an account or a draft"
+            "a session of {j} cannot {verb}: only a person sends mail"
         )));
     }
     let outside = || Ok(Some(format!("the targets are outside the grant of {j}")));
