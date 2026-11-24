@@ -131,8 +131,8 @@ struct Msg {
     text: Option<String>,
     sent: bool,
     /// The `sent` evidence of iris-senders for the current content: each
-    /// recipient as the raw message names it, in lower case. The stored
-    /// lists lose the bounds of an address with a comma (#276).
+    /// `To`, `Cc` and `Bcc` recipient, in lower case. Only the newest sent
+    /// message of a snapshot has it; it is empty for each other message.
     sent_to: Vec<String>,
 }
 
@@ -504,10 +504,7 @@ fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
         "SELECT m.id, h.from_addr, h.from_name, h.to_addrs, h.cc_addrs, b.subject,
            substr(ltrim(b.text, char(32, 9, 10, 13)), 1, ?3),
            EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                   WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
-           (SELECT group_concat(se.address, char(10)) FROM sender_evidence se
-             WHERE se.message_id = m.id AND se.rule = 'sent'
-               AND se.content_sha256 IS m.content_sha256)
+                   WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
          {IN_THREAD}
          {ANSWERABLE}
          {NEWEST}
@@ -526,15 +523,25 @@ fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
                 subject: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
                 text: r.get(6)?,
                 sent: r.get(7)?,
-                sent_to: r
-                    .get::<_, Option<String>>(8)?
-                    .map(|l| l.lines().map(str::to_string).collect())
-                    .unwrap_or_default(),
+                sent_to: Vec::new(),
             })
         },
     )?;
     let mut newest = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     newest.reverse();
+    // Only the newest message names the recipient (`recipient`), so only
+    // its evidence is in memory (#833).
+    if let Some(last) = newest.last_mut().filter(|m| m.sent) {
+        last.sent_to = c
+            .prepare_cached(
+                "SELECT se.address FROM sender_evidence se JOIN message m ON m.id = se.message_id
+                  WHERE se.message_id = ?1 AND se.rule = 'sent'
+                    AND se.content_sha256 IS m.content_sha256
+                  ORDER BY se.address",
+            )?
+            .query_map([last.id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+    }
     Ok(Snapshot {
         count,
         not_ready,
