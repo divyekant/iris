@@ -326,7 +326,8 @@ fn run_messages(
         store::recheck_links(store, now_ms, limits.max_messages).map_err(Error::Understand)?;
     // The fixed check after a kind or name change (decision D31), also with
     // no model.
-    let done = done + store::recheck_fixed(store, now_ms).map_err(Error::Understand)?;
+    let left = limits.max_messages.map(|n| n.saturating_sub(done));
+    let done = done + store::recheck_fixed(store, now_ms, left).map_err(Error::Understand)?;
     store.write(|tx| {
         tx.execute(
             "UPDATE understand_run SET messages = messages + ?2 WHERE id = ?1",

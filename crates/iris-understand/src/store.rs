@@ -212,8 +212,10 @@ pub const FIXED_CHECKS: i64 = 200;
 /// The check never calls the model, and mail whose model items still hold
 /// keeps them. A row goes only when the check read the state of now: a
 /// change during the check gives the message a new row. Gives the count of
-/// messages that it understood again.
-pub fn recheck_fixed(store: &Store, now_ms: i64) -> Result<u64> {
+/// messages that it understood again. With `max`, it stops before one more
+/// message would be understood again: the run limit counts them, and the
+/// rest of the queue waits for the next run.
+pub fn recheck_fixed(store: &Store, now_ms: i64, max: Option<u64>) -> Result<u64> {
     let mut done = 0;
     let mut after = 0;
     loop {
@@ -236,6 +238,9 @@ pub fn recheck_fixed(store: &Store, now_ms: i64) -> Result<u64> {
             let Ok(differs) = fixed_differs(store, id, now_ms) else {
                 continue;
             };
+            if differs && max.is_some_and(|n| done >= n) {
+                return Ok(done);
+            }
             if differs {
                 // No model: the run ends with a refusal when the message
                 // needs the model. Write 1 has made it pending then.
@@ -255,6 +260,18 @@ pub fn recheck_fixed(store: &Store, now_ms: i64) -> Result<u64> {
             })?;
         }
     }
+}
+
+/// Steps 1 to 3 for a message read from the store: one rule for
+/// [`understand`] and the fixed check. Mail past the read limit counts as
+/// cut text, and the mark `phishing` stays until a rebuild (section 6.7).
+fn analysis(raw: &[u8], raw_cut: bool, html_after: bool, cx: &Context, phishing: bool) -> Analysis {
+    let mut a = analyze_cut(raw, raw_cut, html_after, cx);
+    a.text.cut |= raw_cut;
+    if phishing {
+        a.marks.push(Mark::Phishing);
+    }
+    a
 }
 
 /// True when the fixed result of the understood received message `id` now
@@ -335,10 +352,7 @@ fn fixed_differs(store: &Store, id: i64, now_ms: i64) -> Result<bool> {
         same_sender: &inputs_now.same,
         known: &inputs_now.parties,
     };
-    let mut a = analyze_cut(&raw, raw_cut, html_after, &cx);
-    if row.phishing {
-        a.marks.push(Mark::Phishing);
-    }
+    let a = analysis(&raw, raw_cut, html_after, &cx, row.phishing);
     if marks_json(&a.marks, false) != stored_marks {
         return Ok(true);
     }
@@ -465,12 +479,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         same_sender: &first.same,
         known: &[],
     };
-    let mut a = analyze_cut(&raw, raw_cut, html_after, &cx);
-    a.text.cut |= raw_cut;
-    // The mark phishing stays until a rebuild (section 6.7).
-    if row.phishing {
-        a.marks.push(Mark::Phishing);
-    }
+    let a = analysis(&raw, raw_cut, html_after, &cx, row.phishing);
     // A draft is not understood and is not hostile mail (section 6.7).
     let marks = if draft { Vec::new() } else { a.marks.clone() };
 

@@ -2409,14 +2409,14 @@ Your one-time code is 918273. It ends in 10 minutes.
 
     // A service now: the code rule gives the signal, with no model.
     set("no-reply@bank.example.com", "service");
-    assert_eq!(recheck_fixed(&b.store, NOW).unwrap(), 1);
+    assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
     assert_eq!(rule(m).as_deref(), Some("code"));
     assert!(!pending(m));
     // The queue is empty: a second check does nothing.
-    assert_eq!(recheck_fixed(&b.store, NOW).unwrap(), 0);
+    assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 0);
     // Not a service: the rule item does not hold, the mail waits for the model.
     set("no-reply@bank.example.com", "stranger");
-    assert_eq!(recheck_fixed(&b.store, NOW).unwrap(), 1);
+    assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
     assert!(pending(m));
     assert_eq!(rule(m), None);
     assert_eq!(fake.calls.borrow().len(), 1, "the check called no model");
@@ -2432,7 +2432,7 @@ Call me.
     understand(&b.store, f, &fake, NOW).unwrap();
     let calls = fake.calls.borrow().len();
     b.kind("ana@example.org", "Ana Lee", "person");
-    recheck_fixed(&b.store, NOW).unwrap();
+    recheck_fixed(&b.store, NOW, None).unwrap();
     assert_eq!(
         b.col::<String>("SELECT hostile FROM message WHERE id = ?1", f),
         r#"["spoof"]"#
@@ -2442,11 +2442,65 @@ Call me.
     b.store
         .write(|tx| Ok(tx.execute("DELETE FROM sender WHERE address = 'ana@example.org'", [])?))
         .unwrap();
-    recheck_fixed(&b.store, NOW).unwrap();
+    recheck_fixed(&b.store, NOW, None).unwrap();
     assert!(pending(f));
     assert_eq!(
         fake.calls.borrow().len(),
         calls,
         "the check called no model"
     );
+}
+
+/// The fixed check reads mail past the read limit as cut text, as
+/// understanding does, so the code rule does not match it there either.
+/// It also stops at the message limit of the run, and the rest of the
+/// queue waits.
+#[test]
+fn the_fixed_check_keeps_the_cut_rule_and_the_run_limit() {
+    use iris_understand::store::{recheck_fixed, RAW_LIMIT};
+    let b = store("fixed-limit");
+    let fake = Fake::default();
+    let code = "From: Bank <no-reply@bank.example.com>
+To: owner@example.com
+Subject: Your sign-in
+
+Your one-time code is 918273. It ends in 10 minutes.
+";
+    let big = format!("{code}{}\n", " ".repeat(RAW_LIMIT as usize + 1024));
+    let cut = b.add("1", &big, &["INBOX"]);
+    let a = b.add("2", code, &["INBOX"]);
+    let c = b.add_in("3", "t3", NOW - DAY, code, &["INBOX"]);
+    for m in [cut, a, c] {
+        understand(&b.store, m, &fake, NOW).unwrap();
+    }
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE sender SET kind = 'service', decided_by = 'person'
+                  WHERE address = 'no-reply@bank.example.com'",
+                [],
+            )?)
+        })
+        .unwrap();
+    let queued = |id: i64| {
+        b.col::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM fixed_due WHERE message_id = ?1)",
+            id,
+        )
+    };
+    // The limit: one message now, the other waits in the queue.
+    assert_eq!(recheck_fixed(&b.store, NOW, Some(1)).unwrap(), 1);
+    assert!(queued(a) != queued(c), "one of the two waits");
+    // The cut message needs the model as before: no change, no new run.
+    assert!(!queued(cut));
+    assert_eq!(
+        b.col::<i64>(
+            "SELECT count(*) FROM item i JOIN item_source s ON s.item_id = i.id
+                      WHERE s.message_id = ?1 AND i.form <> 'conversation'",
+            cut
+        ),
+        0
+    );
+    assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
+    assert!(!queued(a) && !queued(c));
 }
