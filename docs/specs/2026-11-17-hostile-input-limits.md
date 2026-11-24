@@ -79,10 +79,13 @@ the job is the mark of each of its sessions.
 
 ### 2. Outside the thread
 
-The **thread addresses** of an action are the addresses in `From`, `To`
-and `Cc` of each live message (`gone_at IS NULL`) of the action threads (the SQL `ACTION_THREADS`
-of `iris-changeset`: the threads of its messages and the thread of its
-draft), parsed with `iris_senders::head::addresses`. The mirror keeps the
+The **thread addresses** of an action are the addresses in `From` of each
+live message (`gone_at IS NULL`) of the action threads (the SQL
+`ACTION_THREADS` of `iris-changeset`: the threads of its messages and the
+thread of its draft), and the addresses in `To` and `Cc` of each live
+message of these threads that you sent (label `SENT`, and not a draft or a
+copy). A `To` or `Cc` of a received message does not count (decision D13,
+issue #435). The parse is `iris_senders::head::addresses`. The mirror keeps the
 header of a gone message for 30 days, but the read skips it: a gone message
 gives no thread address. A new mail (target
 `accounts`) has no thread, so it has no thread addresses.
@@ -162,8 +165,8 @@ the thread messages in the store, the scope rows of the job.
 | Input or event | Result | Test |
 |---|---|---|
 | A thread message with no header row, or a gone message | It gives no thread address, so more addresses are outside. | `outside.rs`, gone thread message |
-| A `From`, `To` or `Cc` header in the thread with display names, quoted pairs, comments and groups (RFC 5322) | The parser gives the address of each entry and no address of a name or a comment. The flag agrees with a model of the entries. | property test (`property_random_thread_headers_give_the_model_flag`) |
-| A malformed `From`, `To` or `Cc` header in the thread (a stray `"`, `<`, `>`, `(`, `)`, `\`, `:`, `;` or `,`) | No list is the right one. An address that the header text does not name is always outside. A stray sign can make an address of a name or a comment a thread address. This gives the sender no new power: a sender can put any address in `Cc` (limit #435). | property test (same test) |
+| A `From` header in the thread, or a `To` or `Cc` header of your sent mail in the thread, with display names, quoted pairs, comments and groups (RFC 5322) | The parser gives the address of each entry and no address of a name or a comment. The flag agrees with a model of the entries. | property test (`property_random_thread_headers_give_the_model_flag`) |
+| A malformed `From` header in the thread, or a malformed `To` or `Cc` header of your sent mail (a stray `"`, `<`, `>`, `(`, `)`, `\`, `:`, `;` or `,`) | No list is the right one. An address that the header text does not name is always outside. A stray sign in a `From` can make an address of a name or a comment a thread address. This gives a sender little power: one `From` header gives the addresses of its text only. The `To` and `Cc` of a received message never count (decision D13). | property test (same test) |
 | An address in another case (`Ana@X.org`) | Same address after ASCII lowercase. | property test |
 | An IDN domain in Unicode and in punycode | Two addresses: outside (fail closed). | Known limit issue |
 | A scope message that is not in the store | The job is marked. | `outside.rs` |
