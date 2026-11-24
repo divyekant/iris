@@ -934,7 +934,12 @@ pub fn attention_turn(
     // The due date of a job (decision D24): the move to needs you, then one
     // system notice for each moved job. The jobs page shows the state.
     match iris_job::move_due(store, now_ms()) {
-        Ok(due) => system.extend(due.iter().map(crate::notify::Shown::job_due)),
+        Ok(turn) => {
+            for (job, e) in &turn.failed {
+                say!("iris: due job j-{job}: {e}");
+            }
+            system.extend(turn.moved.iter().map(crate::notify::Shown::job_due));
+        }
         Err(e) => say!("iris: due jobs: {e}"),
     }
     // The measure "time to the first brief" ends at the first brief with content.

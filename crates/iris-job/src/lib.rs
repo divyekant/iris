@@ -415,14 +415,26 @@ const DUE_SQL: &str = "j.state IN ('working', 'waiting') AND j.due_at <= ?1
                      AND e.id > (SELECT min(f.id) FROM job_event f WHERE f.job_id = j.id)
                      AND e.at >= j.due_at AND (e.state = 'needs_you' OR e.by = 'person'))";
 
+/// The result of [`move_due`]: the moved jobs, and each job whose move
+/// failed, with its error.
+#[derive(Debug, Default)]
+pub struct DueTurn {
+    pub moved: Vec<Due>,
+    pub failed: Vec<(i64, Error)>,
+}
+
 /// Moves each job that is due at `now_ms` to `needs_you` ([`due_jobs`],
-/// then [`move_due_one`] for each). Gives the moved jobs.
-pub fn move_due(store: &Store, now_ms: i64) -> Result<Vec<Due>> {
-    let mut moved = Vec::new();
+/// then [`move_due_one`] for each). The failure of one job does not stop
+/// the others, and a move that committed stays in `moved`.
+pub fn move_due(store: &Store, now_ms: i64) -> Result<DueTurn> {
+    let mut turn = DueTurn::default();
     for id in due_jobs(store, now_ms)? {
-        moved.extend(move_due_one(store, id, now_ms)?);
+        match move_due_one(store, id, now_ms) {
+            Ok(m) => turn.moved.extend(m),
+            Err(e) => turn.failed.push((id, e)),
+        }
     }
-    Ok(moved)
+    Ok(turn)
 }
 
 /// The IDs of the jobs that are due at `now_ms`, in a read (no write lock).
@@ -442,9 +454,10 @@ pub fn due_jobs(store: &Store, now_ms: i64) -> Result<Vec<i64>> {
 /// [`due_jobs`] wins, and this gives `None`.
 pub fn move_due_one(store: &Store, job: i64, now_ms: i64) -> Result<Option<Due>> {
     transaction(store, |c| {
-        let still: Option<String> = c
+        // The goal as bytes: a goal that is not UTF-8 must not stop the move.
+        let still: Option<Vec<u8>> = c
             .query_row(
-                &format!("SELECT j.goal FROM job j WHERE j.id = ?2 AND {DUE_SQL}"),
+                &format!("SELECT CAST(j.goal AS BLOB) FROM job j WHERE j.id = ?2 AND {DUE_SQL}"),
                 params![now_ms, job],
                 |r| r.get(0),
             )
@@ -459,8 +472,11 @@ pub fn move_due_one(store: &Store, job: i64, now_ms: i64) -> Result<Option<Due>>
         };
         // Not before the newest event: a clock that goes back must not fail
         // the move (as [`finish_in`]).
-        let at = now_ms.max(get_in(c, job)?.updated_ms);
+        let updated: i64 =
+            c.query_row("SELECT updated_at FROM job WHERE id = ?1", [job], |r| r.get(0))?;
+        let at = now_ms.max(updated);
         add_event(c, job, State::NeedsYou, By::Engine, m, at)?;
+        let goal = String::from_utf8_lossy(&goal).into_owned();
         Ok(Some(Due { id: job, goal }))
     })
 }

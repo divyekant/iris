@@ -48,8 +48,8 @@ fn an_open_job_moves_once_on_its_due_date() {
     wait(s, waiting, w, None, NOW + 1).unwrap();
     let no_due = create(s, "No date.", None, NOW).unwrap();
     // Before the due date: no move.
-    assert!(move_due(s, NOW + DAY - 1).unwrap().is_empty());
-    let moved = move_due(s, NOW + DAY).unwrap();
+    assert!(move_due(s, NOW + DAY - 1).unwrap().moved.is_empty());
+    let moved = move_due(s, NOW + DAY).unwrap().moved;
     assert_eq!(
         moved,
         vec![
@@ -73,9 +73,9 @@ fn an_open_job_moves_once_on_its_due_date() {
     }
     assert_eq!(get(s, no_due).unwrap().state, State::Working);
     // Once for each due date: not again, also after the answer.
-    assert!(move_due(s, NOW + 2 * DAY).unwrap().is_empty());
+    assert!(move_due(s, NOW + 2 * DAY).unwrap().moved.is_empty());
     answer(s, working, "Go on, book next week.", None, NOW + 2 * DAY).unwrap();
-    assert!(move_due(s, NOW + 3 * DAY).unwrap().is_empty());
+    assert!(move_due(s, NOW + 3 * DAY).unwrap().moved.is_empty());
     assert_eq!(get(s, working).unwrap().state, State::Working);
 }
 
@@ -87,7 +87,7 @@ fn a_job_that_the_person_or_the_agent_handled_after_the_due_date_does_not_move()
     let asked = create(s, "A.", Some(NOW + DAY), NOW).unwrap();
     ask(s, asked, "Which day?", None, NOW + 1).unwrap();
     assert!(
-        move_due(s, NOW + DAY).unwrap().is_empty(),
+        move_due(s, NOW + DAY).unwrap().moved.is_empty(),
         "needs_you already"
     );
     answer(s, asked, "Monday.", None, NOW + DAY + 1).unwrap();
@@ -106,7 +106,7 @@ fn a_job_that_the_person_or_the_agent_handled_after_the_due_date_does_not_move()
     // Done jobs never move.
     let done = create(s, "D.", Some(NOW + DAY), NOW).unwrap();
     finish(s, done, By::Person, End::Cancel, None, NOW + 1).unwrap();
-    assert!(move_due(s, NOW + 2 * DAY).unwrap().is_empty());
+    assert!(move_due(s, NOW + 2 * DAY).unwrap().moved.is_empty());
 }
 
 #[test]
@@ -170,10 +170,35 @@ fn a_job_that_starts_after_its_due_date_moves_once() {
     // The start event is by the person, after the due date: it is no move.
     let job = create(s, "Pay the late bill.", Some(NOW - DAY), NOW).unwrap();
     assert_eq!(due_jobs(s, NOW).unwrap(), vec![job]);
-    assert_eq!(move_due(s, NOW).unwrap().len(), 1);
+    assert_eq!(move_due(s, NOW).unwrap().moved.len(), 1);
     assert_eq!(get(s, job).unwrap().state, State::NeedsYou);
     // The person answers: a move by the person after the due date.
-    assert!(move_due(s, NOW + DAY).unwrap().is_empty());
+    assert!(move_due(s, NOW + DAY).unwrap().moved.is_empty());
     answer(s, job, "Go on.", None, NOW + 1).unwrap();
-    assert!(move_due(s, NOW + 2 * DAY).unwrap().is_empty());
+    assert!(move_due(s, NOW + 2 * DAY).unwrap().moved.is_empty());
+}
+
+#[test]
+fn a_job_whose_goal_is_not_utf8_does_not_stop_the_others() {
+    let f = fixture("utf8");
+    let s = &f.store;
+    let first = create(s, "First.", Some(NOW), NOW - 1).unwrap();
+    // Raw SQL stores a goal that is not UTF-8 (job.rs, a_reader_refuses_text_that_is_not_utf8).
+    assert!(sql(
+        s,
+        &format!(
+            "INSERT INTO job (goal, due_at, created_at, state, updated_at)
+               VALUES (CAST(x'41ff42' AS TEXT), {NOW}, {}, 'working', {})",
+            NOW - 1,
+            NOW - 1
+        )
+    ));
+    let third = create(s, "Third.", Some(NOW), NOW - 1).unwrap();
+    let turn = move_due(s, NOW).unwrap();
+    let ids: Vec<i64> = turn.moved.iter().map(|d| d.id).collect();
+    assert_eq!(ids.len(), 3, "{turn:?}");
+    assert!(ids.contains(&first) && ids.contains(&third));
+    assert!(turn.failed.is_empty(), "{turn:?}");
+    assert!(turn.moved.iter().any(|d| d.goal == "A\u{fffd}B"));
+    assert!(move_due(s, NOW + 1).unwrap().moved.is_empty());
 }
