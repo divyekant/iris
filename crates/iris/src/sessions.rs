@@ -104,37 +104,32 @@ enum Build {
 
 impl DoneBuilds {
     /// A build after a change (a reap, a launch that ended, the engine
-    /// start): one more build, also of a job that waits or was built.
+    /// start). A job that waits after a failed try keeps its wait: the wake
+    /// builds it when the wait ends, so the request is not lost.
     fn queue(&self, job: i64) {
         let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
-        self.start(&mut jobs, job);
-    }
-
-    /// A build of the wake: only a job that this engine did not build yet,
-    /// or whose failed build waited until `now`. The check and the move to
-    /// `Busy` are under one lock, so no failure ends between them.
-    fn due(&self, job: i64, now: i64) {
-        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
-        let due = match jobs.get(&job) {
-            None => true,
-            Some(Build::Wait { next_ms, .. }) => now >= *next_ms,
-            Some(_) => false,
-        };
-        if due {
-            self.start(&mut jobs, job);
+        match jobs.get_mut(&job) {
+            Some(Build::Busy { again, .. }) => *again = true,
+            Some(Build::Wait { .. }) => {}
+            _ => self.send(&mut jobs, job, 0),
         }
     }
 
-    /// Queue one build of `job`, or mark a busy job for one more build.
-    fn start(&self, jobs: &mut HashMap<i64, Build>, job: i64) {
-        let fails = match jobs.get_mut(&job) {
-            Some(Build::Busy { again, .. }) => {
-                *again = true;
-                return;
+    /// A build of the wake: only a job that this engine did not build yet,
+    /// or whose failed try waited until `now`. The check and the move to
+    /// `Busy` are under one lock, so no failure ends between them.
+    fn due(&self, job: i64, now: i64) {
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        match jobs.get(&job) {
+            None => self.send(&mut jobs, job, 0),
+            Some(&Build::Wait { fails, next_ms }) if now >= next_ms => {
+                self.send(&mut jobs, job, fails)
             }
-            Some(Build::Wait { fails, .. }) => *fails,
-            _ => 0,
-        };
+            Some(_) => {}
+        }
+    }
+
+    fn send(&self, jobs: &mut HashMap<i64, Build>, job: i64, fails: u32) {
         jobs.insert(
             job,
             Build::Busy {
@@ -145,29 +140,22 @@ impl DoneBuilds {
         let _ = self.queue.send(job);
     }
 
-    /// The end of one build of `job`, at `now`.
+    /// The end of one try of `job`, at `now`. After a failed try, the job
+    /// waits, also when a request came during the try: the wake serves it
+    /// when the wait ends. After another end, a request that came during
+    /// the try gets one more build.
     fn ended(&self, job: i64, end: BuildEnd, now: i64) {
         let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         let Some(&Build::Busy { fails, again }) = jobs.get(&job) else {
             return;
         };
-        let fails = if end == BuildEnd::Failed {
-            fails + 1
-        } else {
-            0
-        };
-        if again {
-            jobs.insert(
-                job,
-                Build::Busy {
-                    fails,
-                    again: false,
-                },
-            );
-            let _ = self.queue.send(job);
-            return;
-        }
         match end {
+            BuildEnd::Failed => {
+                let fails = fails + 1;
+                let next_ms = now.saturating_add(retry_wait(fails));
+                jobs.insert(job, Build::Wait { fails, next_ms });
+            }
+            _ if again => self.send(&mut jobs, job, 0),
             BuildEnd::Built => {
                 jobs.insert(job, Build::Built);
             }
@@ -175,10 +163,6 @@ impl DoneBuilds {
             // wake or reap builds it, as a job that this engine never saw.
             BuildEnd::NotDue => {
                 jobs.remove(&job);
-            }
-            BuildEnd::Failed => {
-                let next_ms = now.saturating_add(retry_wait(fails));
-                jobs.insert(job, Build::Wait { fails, next_ms });
             }
         }
     }
@@ -1130,12 +1114,23 @@ mod egress_tests {
         assert_eq!(sent(), Vec::<i64>::new());
         b.due(1, 70_000);
         assert_eq!(sent(), [1]);
-        // A reap during the try: one more try after it, not two sends.
+        // A reap during a try that fails: the job waits, and the reap
+        // starts no try before the wait ends (2 minutes after 80 s).
         b.queue(1);
         assert_eq!(sent(), Vec::<i64>::new());
         b.ended(1, BuildEnd::Failed, 80_000);
+        assert_eq!(sent(), Vec::<i64>::new());
+        // A reap or a failed launch during the wait: no try either.
+        b.queue(1);
+        b.due(1, 199_999);
+        assert_eq!(sent(), Vec::<i64>::new());
+        b.due(1, 200_000);
         assert_eq!(sent(), [1]);
-        b.ended(1, BuildEnd::Built, 90_000);
+        // A reap during a try that works: one more build after it.
+        b.queue(1);
+        b.ended(1, BuildEnd::Built, 210_000);
+        assert_eq!(sent(), [1]);
+        b.ended(1, BuildEnd::Built, 220_000);
         b.due(1, i64::MAX);
         assert_eq!(
             sent(),
