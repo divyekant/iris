@@ -304,3 +304,6 @@ export function bytes(n: number): string {
 
 /** The files of a mail in one line: "q4.pdf (12 KB), notes.txt (820 B)". */
 export const fileLine = (files: { name: string; size: number }[]) => files.map((f) => `${f.name} (${bytes(f.size)})`).join(", ");
+
+/** The name of a mail provider, as the person knows it. */
+export const PROVIDER: Record<string, string> = { gmail: "Gmail", outlook: "Outlook" };

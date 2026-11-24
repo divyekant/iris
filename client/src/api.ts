@@ -374,7 +374,7 @@ export type ReplyStart = {
 /** GET /api/write/{cs}: the state of one press of Send (write spec, section 4). */
 export type WriteState =
   | { state: "saving" }
-  | { state: "waiting"; draft: string; sending: boolean; leaves_at: string | null }
+  | { state: "waiting"; draft: string; sending: boolean; bcc_check?: string | null; leaves_at: string | null }
   | { state: "review"; draft: string; reason: string | null }
   | { state: "sent"; draft: string }
   | { state: "stopped"; reason: string; draft: string | null };

@@ -117,6 +117,27 @@ test("a typed address becomes a chip, and Send waits for a valid one and for tex
   }
 });
 
+test("a send with Bcc says that it waits for the Bcc check, with no time line", async () => {
+  const net = serve((path, method) => {
+    if (method === "POST" && path === "write") return [201, { write: "cs-3" }];
+    if (path === "write/cs-3") return [200, { state: "waiting", draft: "d-7", sending: true, bcc_check: "gmail", leaves_at: new Date(Date.now() - 5_000).toISOString() }];
+    return [404, { error: "Not found." }];
+  });
+  const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+  try {
+    await fill(app);
+    press(app);
+    await until(() => app.target.querySelector(".state h2")?.textContent.includes("On its way"));
+    app.flushSync();
+    assert.match(text(app.target), /Waits for the Bcc check of Gmail\./);
+    assert.doesNotMatch(text(app.target), /Leaves now/);
+    assert.equal(app.target.querySelector(".state .bar"), null);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
 test("a 409 shows the warnings; the next press sends them with the same key, then the state follows the engine", async () => {
   let reads = 0;
   const net = serve((path, method, body) => {

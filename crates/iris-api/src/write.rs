@@ -182,6 +182,11 @@ fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Val
     let Some((state, reason, send, draft, foreign, sent, changeset, pressed)) = mark else {
         return Ok(None);
     };
+    // A send with Bcc waits for the gate of its provider, also after the hold.
+    let bcc_check = match draft {
+        Some(d) => iris_apply::bcc_waits(c, d)?,
+        None => None,
+    };
     let draft = draft.map(|d| format_id(Kind::Draft, d));
     let stopped = |why: &str| json!({"state": "stopped", "reason": why, "draft": draft});
     if let Some(send) = send {
@@ -200,6 +205,7 @@ fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Val
                 "state": "waiting",
                 "draft": draft,
                 "sending": on.is_some(),
+                "bcc_check": bcc_check,
                 "leaves_at": on.zip(decided_at)
                     .map(|(on, at)| rfc3339(at.max(on) + iris_apply::HOLD_MS)),
             }),

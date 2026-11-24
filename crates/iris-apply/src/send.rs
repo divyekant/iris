@@ -818,7 +818,7 @@ pub fn release(
     }
     // After the read of the draft, so that a closed gate does not hide a
     // change at the provider. The claim checks the gate again.
-    if store.read(|c| bcc_waits(c, d.id))?.is_some() {
+    if store.read(|c| Ok(bcc_waits(c, d.id)?))?.is_some() {
         return Ok(Outcome::BccUnchecked);
     }
     // Step 3: the claim.
@@ -917,7 +917,7 @@ pub(crate) fn changeset_error(e: iris_changeset::Error) -> iris_store::Error {
 /// the test send of the owner check (exactly `To` = `test_to`, no `Cc`,
 /// `Bcc` = `test_bcc`). A draft row whose content does not read gives
 /// `None`: the release check of its bytes decides.
-pub fn bcc_waits(c: &rusqlite::Connection, draft: i64) -> iris_store::Result<Option<String>> {
+pub fn bcc_waits(c: &rusqlite::Connection, draft: i64) -> rusqlite::Result<Option<String>> {
     let (content, provider): (String, String) = c.query_row(
         "SELECT d.content, a.provider FROM draft d JOIN account a ON a.id = d.account_id
          WHERE d.id = ?1",
@@ -1003,9 +1003,31 @@ pub fn set_sending(store: &Store, on: bool) -> Result<()> {
 /// `iris sending bcc-test`: write the test addresses of the `Bcc` gate of
 /// `provider`, with the gate closed (send content spec, section 6.2). A
 /// new test replaces the addresses of a closed gate. Gives false, and
-/// changes nothing, if the gate is open.
+/// changes nothing, if the gate is open. Refuses, with
+/// [`Error::BccTest`], an address that a draft cannot have, two equal
+/// addresses, and an address of an account of `provider`: the test needs
+/// two other mailboxes, so that the provider cannot merge the copies.
 pub fn bcc_test(store: &Store, provider: &str, to: &str, bcc: &str) -> Result<bool> {
     let (to, bcc) = (to.to_ascii_lowercase(), bcc.to_ascii_lowercase());
+    for a in [&to, &bcc] {
+        iris_compose::check_address(a).map_err(Error::BccTest)?;
+    }
+    if to == bcc {
+        return Err(Error::BccTest("use two different addresses".into()));
+    }
+    let own: bool = store.read(|c| {
+        Ok(c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM account WHERE provider = ?1
+               AND lower(address) IN (?2, ?3))",
+            params![provider, to, bcc],
+            |r| r.get(0),
+        )?)
+    })?;
+    if own {
+        return Err(Error::BccTest(format!(
+            "use two addresses that are not an account of {provider} in Iris"
+        )));
+    }
     Ok(store.write(|tx| {
         Ok(tx.execute(
             "INSERT INTO bcc_check (provider, test_to, test_bcc) VALUES (?1, ?2, ?3)

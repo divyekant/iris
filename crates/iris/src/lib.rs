@@ -2533,9 +2533,7 @@ fn bcc_gate(
     if test {
         let (to, bcc) = (to.unwrap_or_default(), bcc.unwrap_or_default());
         for a in [to, bcc] {
-            if !a.contains('@') || a.chars().any(|c| c.is_whitespace() || c.is_control()) {
-                return Err(format!("{a} is not a mail address"));
-            }
+            iris_compose::check_address(&a.to_ascii_lowercase())?;
         }
         if to.eq_ignore_ascii_case(bcc) {
             return Err("use two different addresses".into());

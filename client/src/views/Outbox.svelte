@@ -9,7 +9,7 @@
   import { onDestroy } from "svelte";
   import { loadOutbox, own, post, type Outbox, type OutboxSend } from "../api";
   import { FLAGS } from "../review";
-  import { fileLine } from "../format";
+  import { fileLine, PROVIDER } from "../format";
 
   // `every`: the ms between two reads of the outbox (a prop for the tests).
   let { first, every = 5000 }: { first: Outbox; every?: number } = $props();
@@ -81,7 +81,6 @@
     return Math.min(1, Math.max(0, (now - start) / 60_000));
   }
 
-  const PROVIDER: Record<string, string> = { gmail: "Gmail", outlook: "Outlook" };
   function when(s: OutboxSend): string {
     if (!box.sending.on) return "Waits until sending is on";
     // The Bcc gate of the provider is closed (send content spec, section 6.2).

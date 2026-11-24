@@ -1536,6 +1536,30 @@ fn a_closed_bcc_gate_still_sees_a_change_at_gmail() {
     assert_eq!(b.sends(), 1);
 }
 
+/// The gate takes only a test that a draft can make: two valid, different
+/// addresses, and neither an account of the provider.
+#[test]
+fn the_bcc_gate_refuses_a_test_that_cannot_test_it() {
+    let b = setup("bcc-bad-test");
+    let own = OWNER.to_ascii_uppercase();
+    for (to, bcc) in [
+        ("alice@example", "sam@example.org"),
+        ("priya@example.com", "sam example.org"),
+        ("Sam@example.org", "sam@example.org"),
+        (own.as_str(), "sam@example.org"),
+        ("priya@example.com", OWNER),
+    ] {
+        match iris_apply::bcc_test(&b.store, "gmail", to, bcc) {
+            Err(iris_apply::Error::BccTest(_)) => {}
+            other => panic!("{to} {bcc}: {other:?}"),
+        }
+    }
+    // No test row: the gate cannot open.
+    assert!(!iris_apply::bcc_open(&b.store, "gmail").unwrap());
+    // The address of a Gmail account is a valid test for Outlook.
+    assert!(iris_apply::bcc_test(&b.store, "outlook", OWNER, "sam@example.org").unwrap());
+}
+
 #[test]
 fn a_sent_copy_with_no_bcc_takes_the_approved_bcc_with_a_note() {
     let b = setup("bcc-note");

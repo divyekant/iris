@@ -160,6 +160,18 @@ async fn a_press_writes_the_mail_after_its_warnings() {
     assert_eq!(st["draft"], "d-1");
     assert_eq!(st["sending"], false);
     assert_eq!(st["leaves_at"], Value::Null);
+    assert_eq!(st["bcc_check"], Value::Null);
+    // A send with Bcc says that it waits for the Bcc gate of its provider.
+    s.write(|tx| {
+        let c = json!({"content": {"to": ["priya@example.com"], "cc": [], "bcc": ["sam@example.org"],
+                                   "subject": "Q4", "body": "Hi.\n"}, "reply": null});
+        tx.execute("UPDATE draft SET content = ?1 WHERE id = 1", [c.to_string()])?;
+        tx.execute("UPDATE send_switch SET on_at = 0 WHERE id = 1", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    assert_eq!((&st["state"], &st["bcc_check"]), (&json!("waiting"), &json!("gmail")), "{st}");
     // The cancel of the outbox stops the write.
     let (code, _) = call(&s, "POST", "/api/outbox/d-1/cancel", None).await;
     assert_eq!(code, StatusCode::OK);

@@ -20,7 +20,7 @@
   import { onDestroy, untrack } from "svelte";
   import { get, own, post, upload, type Account, type Attachment, type ReplyStart, type ThreadDraft, type WriteState } from "../api";
   import { chips, unique } from "../chips";
-  import { bytes, initials, when } from "../format";
+  import { bytes, initials, PROVIDER, when } from "../format";
   import { FLAGS } from "../review";
   import { href } from "../route";
 
@@ -452,7 +452,9 @@
       <h2>On its way to {who}</h2>
       {#if ws.sending}
         <p class="muted">It waits 60 seconds in the Outbox before it leaves, so you can still change your mind.</p>
-        {#if ws.leaves_at}
+        {#if ws.bcc_check}
+          <p class="small">Waits for the Bcc check of {PROVIDER[ws.bcc_check] ?? ws.bcc_check}. Run <code>iris sending bcc-test</code> at the terminal.</p>
+        {:else if ws.leaves_at}
           <span class="bar" aria-hidden="true"><span style:width="{gone(ws.leaves_at) * 100}%"></span></span>
           <p class="small">{left(ws.leaves_at) ? `Leaves in ${left(ws.leaves_at)}` : "Leaves now"}</p>
         {/if}

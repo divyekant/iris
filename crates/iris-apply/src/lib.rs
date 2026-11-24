@@ -81,6 +81,9 @@ pub enum Error {
     /// error that ends with [`SENT_OTHER_END`]). Each release stops until the owner checks
     /// assumption 6 of the send spec. The action stays as it was.
     SendStopped,
+    /// The test addresses of the `Bcc` gate cannot test it, with the
+    /// reason ([`bcc_test`]). Nothing changed.
+    BccTest(String),
 }
 
 impl std::fmt::Display for Error {
@@ -93,6 +96,7 @@ impl std::fmt::Display for Error {
             Error::OtherMailbox => write!(f, "the token is of another mailbox"),
             Error::Verb(v) => write!(f, "the verb {v} has no Gmail apply"),
             Error::Undo(why) => write!(f, "no undo: {why}"),
+            Error::BccTest(why) => write!(f, "{why}"),
             Error::SendStopped => write!(
                 f,
                 "a mail provider {SENT_OTHER_END}: each send stops until the owner checks"
