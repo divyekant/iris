@@ -46,6 +46,8 @@ fn action(verb: Verb, author: Author) -> Action<'static> {
         author,
         job: None,
         bulk: false,
+        warning: false,
+        in_thread: false,
         now: NOW,
     }
 }
@@ -431,6 +433,8 @@ fn random_case(rng: &mut Rng) -> Case {
         author: *rng.pick(Author::ALL),
         job: None,
         bulk: rng.next().is_multiple_of(5),
+        warning: false,
+        in_thread: false,
         now: NOW,
     };
     Case { msgs, act }
@@ -538,4 +542,51 @@ fn property_parse_never_panics() {
             assert!(!e.message.is_empty());
         }
     }
+}
+
+/// Decision D3: `recipients = "thread"` matches only a draft whose
+/// recipients are in its thread. Spec 2 section 6.5: a draft with a warning
+/// flag goes to review, even if a rule allows it.
+#[test]
+fn a_draft_rule_reads_the_recipients_and_the_warning_flags() {
+    let p = policy(&rule(
+        1,
+        "allow",
+        "\"draft\"",
+        "recipients = \"thread\", author = \"agent\"",
+    ));
+    let m = || [msg("a@x.example", SenderKind::Person, &[])];
+    let draft = |in_thread, warning| Action {
+        in_thread,
+        warning,
+        ..action(Verb::Draft, Author::Agent)
+    };
+    let d = p.decide(&draft(true, false), m());
+    assert_eq!((d.outcome, d.rule), (Outcome::Allow, Some(1)));
+    assert_eq!(p.decide(&draft(false, false), m()).outcome, Outcome::Review);
+    let d = p.decide(&draft(true, true), m());
+    assert_eq!((d.outcome, d.rule), (Outcome::Review, None));
+    assert!(d.reason.contains("warning flag"), "{}", d.reason);
+    // A new mail has no message: an allow rule never matches it.
+    assert_eq!(p.decide(&draft(true, false), []).outcome, Outcome::Review);
+    // The rule names only `draft`.
+    assert_eq!(
+        p.decide(
+            &Action {
+                in_thread: true,
+                ..action(Verb::Archive, Author::Agent)
+            },
+            m()
+        )
+        .outcome,
+        Outcome::Review
+    );
+    // A rule with no `recipients` allows a draft to each address.
+    let p = policy(&rule(1, "allow", "\"draft\"", "sender_kind = \"person\""));
+    assert_eq!(p.decide(&draft(false, false), m()).outcome, Outcome::Allow);
+    // A hostile thread: only a person drafts in it.
+    let mut h = msg("a@x.example", SenderKind::Person, &[]);
+    h.hostile = true;
+    let p = policy(&rule(1, "allow", "\"draft\"", "author = \"agent\""));
+    assert_eq!(p.decide(&draft(true, false), [h]).outcome, Outcome::Deny);
 }
