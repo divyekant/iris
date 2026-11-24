@@ -311,8 +311,10 @@ pub struct Filter<'a> {
 pub fn status(store: &Store) -> Result<Status> {
     let mut status = store.read(|c| {
         let mut st = c.prepare(
+            // A removed account is a tombstone: not an account of the person.
+            // A removing one shows until its mail is gone.
             "SELECT id, address, provider, state, mirror_ready_at, sync_kind, sync_step
-             FROM account ORDER BY id",
+             FROM account WHERE state IS NOT 'removed' ORDER BY id",
         )?;
         let rows = st.query_map([], |r| {
             let kind: Option<String> = r.get(5)?;

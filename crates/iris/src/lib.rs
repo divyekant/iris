@@ -599,6 +599,15 @@ pub enum AccountCommand {
         #[arg(long)]
         paste: bool,
     },
+    /// Remove an account and its mail from Iris. The mailbox at the
+    /// provider does not change. Backups keep the mail.
+    Remove {
+        /// The mail address of the account.
+        address: String,
+        /// Do not ask for the address again.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Add an IMAP mailbox, or give a new password to one. The command reads
     /// the password (an app password of the provider) from the terminal
     /// with no echo, or one line of standard input, and signs in once to
@@ -1456,6 +1465,16 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
                     paste,
                 },
         } => account_add_outlook(&open()?, client_id, tenant, *paste),
+        Command::Account {
+            command: AccountCommand::Remove { address, yes },
+        } => {
+            let store = open()?;
+            if !yes {
+                let stdin = std::io::stdin();
+                remove_confirm(address, &mut stdin.lock())?;
+            }
+            print(account_remove(&store, address))
+        }
         Command::Mirror { command } => mirror(Arc::new(open()?), command),
         Command::Mcp => mcp(engine::data_dir(cli.data.clone()).map_err(|e| e.to_string())?),
         Command::Status { json } => print(verbs::status(&open()?, *json)),
@@ -2368,6 +2387,47 @@ fn stop_text(s: &iris_apply::Stopped) -> String {
 /// a script with no terminal does not turn sending on by mistake.
 /// `terminal` is true when standard input is a terminal: a script or an
 /// agent without a terminal cannot turn sending on.
+/// Ask for the address of the account again before a removal. A wrong
+/// answer refuses the removal.
+fn remove_confirm(address: &str, input: &mut impl BufRead) -> Result<(), String> {
+    eprint!(
+        "This removes {address} and its mail from Iris on this machine. \
+         The mailbox at the provider does not change. The files of agents in the \
+         workspaces of its jobs go. Type the address to remove it: "
+    );
+    let mut line = String::new();
+    input.read_line(&mut line).map_err(|e| e.to_string())?;
+    if line.trim() != address {
+        return Err("The account stays.".into());
+    }
+    Ok(())
+}
+
+/// `iris account remove`: the removal, then the delete of the mail. The
+/// delete waits for a sync or a backup that holds its lock.
+fn account_remove(store: &Store, address: &str) -> Result<String, String> {
+    let id = store
+        .remove_account(address, engine::now_ms())
+        .map_err(|e| e.to_string())?;
+    let done = engine::delete_removed(store, true).map_err(|e| e.to_string())?;
+    let state: Option<String> = store
+        .read(|c| Ok(c.query_row("SELECT state FROM account WHERE id = ?1", [id], |r| r.get(0))?))
+        .map_err(|e| e.to_string())?;
+    let first = if state.as_deref() == Some(iris_store::STATE_REMOVED) {
+        format!(
+            "iris: removed {address} and its mail ({} messages).",
+            done.map_or(0, |d| d.messages)
+        )
+    } else {
+        // A busy checkpoint: the next engine tick ends the delete.
+        format!("iris: removed {address}. `iris serve` ends the delete of its mail.")
+    };
+    Ok(format!(
+        "{first}\niris: a backup copy that you made, the copies iris.db.v*.bak in the data \
+         folder and the notes of jobs still hold this mail.\n"
+    ))
+}
+
 fn sending_on_confirm(terminal: bool, input: &mut impl BufRead) -> Result<(), String> {
     if !terminal {
         return Err("`iris sending on` needs a terminal: standard input is not a TTY".into());
@@ -2465,6 +2525,19 @@ mod outbox_tests {
         }
         let r = sending_on_confirm(false, &mut "yes\n".as_bytes());
         assert!(r.unwrap_err().contains("needs a terminal"));
+    }
+
+    #[test]
+    fn only_the_address_removes_an_account() {
+        let a = "a@example.org";
+        assert_eq!(remove_confirm(a, &mut "a@example.org\n".as_bytes()), Ok(()));
+        for answer in ["yes\n", "\n", "", "b@example.org\n", "A@example.org\n"] {
+            assert_eq!(
+                remove_confirm(a, &mut answer.as_bytes()),
+                Err("The account stays.".to_string()),
+                "{answer:?}"
+            );
+        }
     }
 
     /// A store with account 1 and draft d-1 (a new mail that the apply

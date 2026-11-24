@@ -120,6 +120,26 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
     // No session of the job runs during a build, so the file is stable.
     // A link, a folder or a large file keeps the last copy.
     let notes = save_notes(store, job, dir, now_ms())?.problem();
+    // The scope of the job had mail of a removed account
+    // (docs/specs/2026-11-24-remove-account.md): each file of the folder can
+    // hold a copy of that mail, also a file of the agent. Each entry goes,
+    // other than `notes.md`: the notes are the record, and the save above can
+    // fail (a large file, a link), so the delete never depends on it.
+    let removed = store.read(|c| {
+        Ok(c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM removed_workspace WHERE job_id = ?1)",
+            [job],
+            |r| r.get::<_, bool>(0),
+        )?)
+    })?;
+    if removed {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            if entry.file_name() != "notes.md" {
+                remove(&entry.path())?;
+            }
+        }
+    }
     // A new empty `.iris` on each build: no entry of an earlier session
     // (an old socket, a file of the agent) reaches the next session.
     let dot = dir.join(".iris");
@@ -245,13 +265,16 @@ pub fn grant_in(c: &Connection, job: i64) -> Result<Grant> {
             None => true,
         };
         let s: Vec<(i64, i64)> = if live {
-            let mut q = c.prepare_cached(
+            // The mail of a removed account never goes into a workspace
+            // (docs/specs/2026-11-24-remove-account.md).
+            let mut q = c.prepare_cached(concat!(
                 "SELECT m.id, m.thread_id FROM job_scope s
                  JOIN job_scope_message l ON l.scope_id = s.id
                  JOIN message m ON m.id = l.message_id
                  WHERE s.job_id = ?1 AND s.revoked_at IS NULL
-                   AND s.thread_id IS ?2 AND s.item_id IS ?3",
-            )?;
+                   AND s.thread_id IS ?2 AND s.item_id IS ?3 AND NOT ",
+                iris_store::removed_account!("m")
+            ))?;
             let rows = q.query_map(params![job, thread_id, item_id], |r| {
                 Ok((r.get(0)?, r.get(1)?))
             })?;

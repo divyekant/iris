@@ -113,7 +113,9 @@ holds no sign-in and no sync state. Reasons:
    other row links the job to the account. So the delete and each build of
    the workspace read this table, also after a crash.
 6. Delete the items of the account (step "items" below), so the brief is
-   empty of the account at the commit.
+   empty of the account at the commit. The removal transaction runs with
+   `PRAGMA secure_delete = ON`, as each batch of the delete, so no free
+   page keeps the text of a deleted item (issue #882).
 
 Migration 46 adds triggers that refuse an insert into `message`, `thread`,
 `label`, `item` and `body` for an account in state `removing` or `removed`.

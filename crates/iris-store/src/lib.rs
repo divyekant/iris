@@ -73,6 +73,20 @@ macro_rules! draft_or_copy {
     };
 }
 
+/// SQL: the message `$m` is of an account in state `removing` or
+/// `removed` (docs/specs/2026-11-24-remove-account.md). Its mail goes, so no
+/// reader passes it on: understanding and the workspace of a job skip it.
+#[macro_export]
+macro_rules! removed_account {
+    ($m:literal) => {
+        concat!(
+            "coalesce((SELECT a.state FROM account a WHERE a.id = ",
+            $m,
+            ".account_id), '') IN ('removing', 'removed')"
+        )
+    };
+}
+
 /// The labels of [`draft_or_copy!`], for a check in Rust.
 pub const DRAFT_OR_COPY: [&str; 3] = ["DRAFT", "UNSENT", "SENT_COPY"];
 
@@ -80,6 +94,7 @@ mod backup;
 mod content;
 mod file_lock;
 mod id;
+mod remove;
 mod search;
 mod secret;
 mod watch;
@@ -95,6 +110,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 
 pub use backup::{BackupLock, Cleaned, PolicyExpect, PolicyWrite, GONE_KEEP_MS};
 pub use content::ContentWriter;
+pub use remove::{Deleted, STATE_REMOVED, STATE_REMOVING};
 pub use file_lock::{FileLock, Probe};
 
 /// The result of a `sync_log` row whose process ended before the sync
@@ -152,6 +168,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_43.sql"),
     include_str!("schema_44.sql"),
     include_str!("schema_45.sql"),
+    include_str!("schema_46.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
@@ -561,14 +578,32 @@ impl Store {
         };
         self.write(|tx| {
             type Row = (i64, String, Option<String>, Option<u16>, Option<String>);
-            let old: Option<Row> = tx
+            let old: Option<(Row, Option<String>)> = tx
                 .query_row(
-                    "SELECT id, provider, imap_host, imap_port, imap_user FROM account
+                    "SELECT id, provider, imap_host, imap_port, imap_user, state FROM account
                      WHERE address = ?1",
                     [address],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                    |r| Ok(((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?), r.get(5)?)),
                 )
                 .optional()?;
+            // A removed account (a tombstone) keeps its ID and mailbox for
+            // the record of actions, and never signs in again. The address
+            // gets a new row (docs/specs/2026-11-24-remove-account.md).
+            let old = match old {
+                Some((_, Some(s))) if s == STATE_REMOVING => {
+                    return Err(Error::Account(
+                        "Iris still deletes the mail of this account; try again in a minute",
+                    ))
+                }
+                Some(((id, ..), Some(s))) if s == STATE_REMOVED => {
+                    tx.execute(
+                        "UPDATE account SET address = 'removed:' || id || ':' || address WHERE id = ?1",
+                        [id],
+                    )?;
+                    None
+                }
+                o => o.map(|(row, _)| row),
+            };
             let id = match old {
                 None => tx.query_row(
                     "INSERT INTO account(provider, address, imap_host, imap_port, imap_user)

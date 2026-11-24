@@ -181,6 +181,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/notices/{id}/done", post(post_notice_done))
         .route("/api/watches", get(get_watches).post(post_watch))
         .route("/api/watches/{id}/remove", post(post_watch_remove))
+        .route("/api/accounts/{id}/remove", post(post_account_remove))
         .route("/api/stop", get(get_stop).post(post_stop))
         .route("/api/resume", post(post_resume))
         .route("/api/outbox", get(get_outbox))
@@ -1015,6 +1016,96 @@ fn stop_answer(s: &Store, since: Option<i64>) -> Result<serde_json::Value> {
         "live": live,
         "busy": busy,
     }))
+}
+
+/// Delete the mail of each removed account (`Store::delete_removed`,
+/// docs/specs/2026-11-24-remove-account.md), for the engine tick, the
+/// command and the API call. Step 0 builds the workspace of each job with
+/// mail of the account again (a job with no folder has nothing to delete).
+/// Step 5 derives the sender kinds again from the evidence that stays, and
+/// runs understanding again on the mail of a sender whose hostile kind
+/// changed, as the understanding batch does. With no `wait`: `None` while a
+/// backup runs, and an account whose sync lock is held waits for a later
+/// call.
+pub fn delete_removed(
+    store: &Store,
+    wait: bool,
+) -> iris_store::Result<Option<iris_store::Deleted>> {
+    store.delete_removed(
+        wait,
+        &mut |job| {
+            let dir = iris_workspace::default_dir(store.dir(), job);
+            if !dir.exists() {
+                return Ok(());
+            }
+            iris_workspace::build(store, job, &dir)
+                .map(|_| ())
+                .map_err(|e| std::io::Error::other(e.to_string()))
+        },
+        &mut |tx| {
+            let now = now_ms();
+            let rows = iris_senders::refresh(tx, now)?;
+            iris_understand::store::rerun_senders(tx, &rows, now)?;
+            Ok(())
+        },
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountRemoveBody {
+    address: String,
+}
+
+/// `POST /api/accounts/{id}/remove` (decision D34,
+/// docs/specs/2026-11-24-remove-account.md): remove the account and delete
+/// its mail from Iris. Nothing changes at the provider. The address must be
+/// the address of the account `a-<id>`, so a stale page cannot remove
+/// another account. The delete waits for the locks of a sync and a backup,
+/// on a blocking thread. The answer is the status: the account is gone from
+/// it when the delete ended, or it has the state `removing`.
+async fn post_account_remove(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<AccountRemoveBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let row = id
+        .strip_prefix("a-")
+        .unwrap_or(&id)
+        .parse::<i64>()
+        .map_err(|_| Error::Query(format!("not an account ID: {id}")))?;
+    let address: Option<String> = s.read(|c| {
+        Ok(c.query_row(
+            "SELECT address FROM account WHERE id = ?1",
+            [row],
+            |r| r.get(0),
+        )
+        .map_or_else(
+            |e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(e),
+            },
+            |a| Ok(Some(a)),
+        )?)
+    })?;
+    if address.as_deref() != Some(b.address.as_str()) {
+        return Err(Error::Query(
+            "The address is not the address of this account.".into(),
+        ));
+    }
+    let task = s.clone();
+    tokio::task::spawn_blocking(move || {
+        task.remove_account(&b.address, now_ms())
+            .map_err(|e| match e {
+                iris_store::Error::Account(why) => Error::Conflict(why.into()),
+                e => e.into(),
+            })?;
+        Ok::<_, Error>(delete_removed(&task, true)?)
+    })
+    .await
+    .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;
+    Ok(Json(read::status(&s)?).into_response())
 }
 
 /// `POST /api/stop`: Stop all agent work. The answer adds `sessions` (the
