@@ -917,7 +917,7 @@ async fn post_dismiss(
     b: std::result::Result<Json<DismissBody>, JsonRejection>,
 ) -> Result<Response> {
     let b = body(b)?;
-    Ok(Json(policy::dismiss(&s, b.id, now_s())?).into_response())
+    Ok(Json(blocking(move || policy::dismiss(&s, b.id, now_s())).await?).into_response())
 }
 
 async fn get_notices(State(s): State<Arc<Store>>) -> Result<Response> {
