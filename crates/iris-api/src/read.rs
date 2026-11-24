@@ -273,22 +273,7 @@ pub struct Filter<'a> {
 }
 
 pub fn status(store: &Store) -> Result<Status> {
-    // A sync row with no end whose account has no sync that runs is of a
-    // stopped process: close it first, so no status shows it as running
-    // (issue #710). The sync lock decides, so the row of a sync that runs
-    // stays open.
-    let open: Vec<i64> = store.read(|c| {
-        let mut st =
-            c.prepare("SELECT DISTINCT account_id FROM sync_log WHERE ended_at IS NULL")?;
-        let ids = st.query_map([], |r| r.get(0))?;
-        Ok(ids.collect::<rusqlite::Result<_>>()?)
-    })?;
-    for account in open {
-        // A failed close keeps the row open: the status still answers, and
-        // shows the row as before.
-        let _ = iris_sync::close_stopped(store, account);
-    }
-    Ok(store.read(|c| {
+    let mut status = store.read(|c| {
         let mut st = c.prepare(
             "SELECT id, address, provider, state, mirror_ready_at, sync_kind, sync_step
              FROM account ORDER BY id",
@@ -342,7 +327,18 @@ pub fn status(store: &Store) -> Result<Status> {
             accounts,
             messages,
         })
-    })?)
+    })?;
+    // A row with no end while no sync of its account holds the lock is of
+    // a stopped process: show it as stopped (issue #710). The read writes
+    // nothing. The next sync of the account closes the row.
+    for a in &mut status.accounts {
+        if let Some(run) = a.last_sync.as_mut().filter(|r| r.ended.is_none()) {
+            if store.sync_lock(a.id)?.is_some() {
+                run.result = Some(iris_store::SYNC_STOPPED.into());
+            }
+        }
+    }
+    Ok(status)
 }
 
 /// Search the messages that are not gone, newest first (specification 1,

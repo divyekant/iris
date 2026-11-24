@@ -19,7 +19,6 @@ iris-matters = { version = "0.0.0", path = "../iris-matters" }
 iris-policy = { version = "0.0.0", path = "../iris-policy" }
 iris-senders = { version = "0.0.0", path = "../iris-senders" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
-iris-sync = { version = "0.0.0", path = "../iris-sync" }
 iris-understand = { version = "0.0.0", path = "../iris-understand" }
 iris-voice = { version = "0.0.0", path = "../iris-voice" }
 iris-workspace = { version = "0.0.0", path = "../iris-workspace" }

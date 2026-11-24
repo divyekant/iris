@@ -61,6 +61,10 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 pub use backup::{BackupLock, Cleaned, PolicyExpect, PolicyWrite, GONE_KEEP_MS};
 pub use content::ContentWriter;
 pub use file_lock::FileLock;
+
+/// The result of a `sync_log` row whose process ended before the sync
+/// ended (issue #710).
+pub const SYNC_STOPPED: &str = "stopped: the process ended before the sync ended";
 pub use id::{format_id, parse_id, Kind};
 pub use search::{day_ms, Query};
 pub use watch::{Watch, SINCE_MARGIN_MS, TEXT_MAX, WAIT_MAX};
@@ -428,6 +432,13 @@ impl Store {
                 [now],
             )?)
         })
+    }
+
+    /// Take the sync lock of `account`. `None`: a sync of the account runs
+    /// (another holder has the lock). Each sync holds it from its first
+    /// `sync_log` row to its result (specification 1, section 4.3).
+    pub fn sync_lock(&self, account: i64) -> Result<Option<FileLock>> {
+        FileLock::try_take(&self.dir().join(format!("sync-{account}.lock"))).map_err(Error::Io)
     }
 
     /// Add a mailbox, or give the ID of the mailbox with this address.

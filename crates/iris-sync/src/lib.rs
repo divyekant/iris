@@ -156,8 +156,7 @@ pub struct SyncLock(#[allow(dead_code)] iris_store::FileLock);
 /// Take the sync lock of `account`, or give [`Error::OtherSync`] if another
 /// sync holds it.
 pub fn lock(store: &Store, account: i64) -> Result<SyncLock> {
-    let path = store.dir().join(format!("sync-{account}.lock"));
-    match iris_store::FileLock::try_take(&path).map_err(iris_store::Error::Io)? {
+    match store.sync_lock(account)? {
         Some(l) => Ok(SyncLock(l)),
         None => Err(Error::OtherSync),
     }
@@ -873,7 +872,7 @@ impl Running {
 }
 
 /// The result of a sync row whose process ended before the sync ended.
-pub const STOPPED: &str = "stopped: the process ended before the sync ended";
+pub use iris_store::SYNC_STOPPED as STOPPED;
 
 /// Close each row of `account` with no end: a crash or a stop of its
 /// process left it (issue #710). Call it only with the sync lock of the
@@ -883,19 +882,6 @@ fn close_stopped_in(tx: &rusqlite::Connection, account: i64, now: i64) -> rusqli
         "UPDATE sync_log SET ended_at = ?2, result = ?3 WHERE account_id = ?1 AND ended_at IS NULL",
         params![account, now, STOPPED],
     )
-}
-
-/// Close the sync rows of `account` that a process left with no end. If
-/// another sync of the account runs, it does nothing and gives 0. The
-/// engine calls it at its start, so the status does not show a sync that
-/// does not run.
-pub fn close_stopped(store: &Store, account: i64) -> Result<usize> {
-    let _lock = match lock(store, account) {
-        Ok(l) => l,
-        Err(Error::OtherSync) => return Ok(0),
-        Err(e) => return Err(e),
-    };
-    Ok(store.write(|tx| Ok(close_stopped_in(tx, account, now_ms())?))?)
 }
 
 /// Add the row of a sync that starts, with no end and no result. Gives its
