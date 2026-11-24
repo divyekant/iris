@@ -66,7 +66,10 @@ WHEN new.id IS NOT old.id OR new.author IS NOT old.author
     OR (new.status = 'confirmed' AND (new.keep IS NOT old.keep
                                       OR new.decided_at IS NOT old.decided_at))
     -- The delete sets its own time as the decision and the last change.
+    -- A declined matter needs 2 member rows: one with fewer goes as a row.
     OR (new.status = 'declined' AND (new.decided_at IS NOT new.updated_at
+                                     OR (SELECT count(*) FROM matter_item
+                                         WHERE matter_id = old.id) < 2
                                      OR new.updated_at < old.updated_at
                                      OR new.decided_at IS old.decided_at))))
 BEGIN

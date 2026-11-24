@@ -289,7 +289,17 @@ fn a_delete_remembers_the_grouping() {
     assert!(matches!(delete(&b.store, m, 8), Err(Error::Conflict(_))));
     assert!(matches!(delete(&b.store, 99, 8), Err(Error::NotFound)));
     // A matter of one item goes as a row.
+    // Invariant: a declined matter has 2 member rows or more, for each
+    // writer. A direct SQL decline of a matter with one member is refused.
     let one = create(&b.store, "One", &[r(4)], 1).unwrap();
+    assert!(sql(
+        &b,
+        &format!(
+            "UPDATE matter SET status = 'declined', keep = NULL, decided_at = 9, updated_at = 9
+             WHERE id = {one}"
+        )
+    )
+    .is_err());
     delete(&b.store, one, 8).unwrap();
     assert_eq!(
         q::<i64>(&b, &format!("SELECT count(*) FROM matter WHERE id = {one}")),
