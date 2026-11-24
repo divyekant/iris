@@ -233,7 +233,7 @@ give the reason of the action. A draft does nothing until you submit it.
 `iris mcp` serves the same verbs as MCP (Model Context Protocol) tools, on
 standard input and output. Use it with an agent that speaks MCP but does not
 use a terminal. Each tool has the name and the arguments of its verb:
-`status`, `search`, `show`, `draft`, `send`, `close`, `decline`, `skip`,
+`status`, `search`, `show`, `list`, `draft`, `send`, `close`, `decline`, `skip`,
 `mute`, `dismiss`, `defer`, `correct`, `archive`, `inbox`, `read`, `unread`, `trash`, `label`,
 `unlabel`, `submit`, `changeset`, `drafts`, `withdraw`, `revise`,
 `watch_add`, `watch_list`, `watch_remove`, `matters_list` and
