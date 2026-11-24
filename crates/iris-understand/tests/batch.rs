@@ -1386,6 +1386,33 @@ fn a_change_during_a_refused_call_leaves_no_mark() {
     assert_eq!(marks, Some(0), "the changed message has no mark");
 }
 
+/// A decline of the sender during a refused call leaves no mark (decision
+/// D29): the mail of a declined stranger never waits for the model.
+#[test]
+fn a_decline_during_a_refused_call_leaves_no_mark() {
+    let b = store("refusal-decline");
+    b.model(false, None);
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    let db = b._dir.0.join("iris.db");
+    b.script.push(Err(ModelError::Budget("refused".into())));
+    *b.script.during.borrow_mut() = Some(std::boxed::Box::new(move || {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO sender(address, kind, decided_by, declined_at)
+                 VALUES ('ana@example.org', 'stranger', 'engine', 1)
+                 ON CONFLICT(address) DO UPDATE SET declined_at = 1, kind = 'stranger'",
+                [],
+            )
+            .unwrap();
+    }));
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(
+        b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
+        Some(0)
+    );
+}
+
 /// A change of the thread context during a refused call (a SPAM label on
 /// an earlier message) leaves no mark either (#153).
 #[test]
