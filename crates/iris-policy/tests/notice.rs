@@ -532,7 +532,13 @@ fn a_later_hostile_sign_hides_the_notice() {
         let id = put(&s, &mail(), 0);
         let new = notice::refresh(&s, NOW).unwrap();
         assert_eq!(new.len(), 1, "case {i}");
+        assert!(s.read(|c| notice::is_open(c, new[0].id)).unwrap());
         s.write(|tx| Ok(tx.execute(sql, [id])?)).unwrap();
+        // The system notice checks again at the show (it waits in a queue).
+        assert!(
+            !s.read(|c| notice::is_open(c, new[0].id)).unwrap(),
+            "case {i}"
+        );
         assert!(s.read(notice::list).unwrap().is_empty(), "case {i}");
         assert!(
             s.read(|c| notice::after(c, 0, 10)).unwrap().is_empty(),

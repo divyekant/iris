@@ -370,3 +370,75 @@ fn a_match_that_becomes_hostile_gives_no_notice() {
         assert_eq!((got.message, got.arrived_at), (Some(good), Some(t + 3)));
     }
 }
+
+/// Decision D33 with the content cleanup: the cleanup deletes the header
+/// (the sender evidence) and then the message row (the marks and labels) of
+/// gone mail. A notice or a watch match on hostile mail must stay hidden
+/// after that; a safe one stays as it is.
+#[test]
+fn the_cleanup_keeps_a_hostile_match_hidden() {
+    let dir = TempDir::new("clean-hostile");
+    let (store, acc) = setup(&dir);
+    let cases = [
+        (
+            "mark",
+            "UPDATE message SET hostile = '[\"phishing\"]' WHERE id = ?1",
+        ),
+        (
+            "sender",
+            "INSERT INTO sender(address, kind, decided_by)
+               SELECT from_addr, 'hostile', 'engine' FROM header WHERE message_id = ?1",
+        ),
+        ("safe", "UPDATE message SET hostile = hostile WHERE id = ?1"),
+    ];
+    let notice = |id: i64| {
+        store
+            .write(|tx| {
+                Ok(tx.execute(
+                    "INSERT INTO notice(message_id, rule, rule_name, policy_version, title, text, created_at)
+                     VALUES (?1, 1, 'r', 1, 't', 'x', 0)",
+                    [id],
+                )?)
+            })
+            .unwrap();
+    };
+    let open = |id: i64| -> bool {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT done_at IS NULL FROM notice WHERE message_id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    let mut rows = Vec::new();
+    for (i, (name, sql)) in cases.iter().enumerate() {
+        let t = NOW + 10 * i as i64;
+        let w = store.add_watch(&format!("visa{i}"), t).unwrap();
+        let m = put(
+            &store,
+            acc,
+            msg(&format!("c{i}"), t, &["INBOX"], &format!("visa{i}"), true),
+        );
+        assert_eq!(store.check_watches(t).unwrap(), [(w, m)], "{name}");
+        notice(m);
+        store.write(|tx| Ok(tx.execute(sql, [m])?)).unwrap();
+        store
+            .write(|tx| Ok(tx.execute("UPDATE message SET gone_at = 1 WHERE id = ?1", [m])?))
+            .unwrap();
+        rows.push((*name, w, m));
+    }
+    store.clean_gone(NOW).unwrap();
+    let left: i64 = store
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM message", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(left, 0, "the cleanup deleted the evidence");
+    for (name, w, m) in rows {
+        let got = store.watch(w).unwrap().unwrap();
+        let safe = name == "safe";
+        assert_eq!(got.message.is_some(), safe, "{name}");
+        assert_eq!(open(m), safe, "{name}");
+    }
+}

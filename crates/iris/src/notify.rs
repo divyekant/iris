@@ -71,15 +71,19 @@ pub fn run(mut c: Command, wait: Duration) -> Result<(), String> {
 pub const QUEUE: usize = 100;
 
 /// Starts the thread that shows each notice that it gets with `show`, one
-/// at a time. The sender never waits: a slow command must not hold the
-/// attention thread (spec: the pass runs each 10 seconds).
+/// at a time, if `open` is still true for its ID just before. A notice can
+/// wait in the queue while its mail becomes hostile, so the check runs at
+/// the show, not at the send (decision D33). The sender never waits: a slow
+/// command must not hold the attention thread (spec: the pass runs each 10
+/// seconds).
 pub fn spawn(
+    open: impl Fn(i64) -> bool + Send + 'static,
     show: fn(&iris_policy::notice::Notice),
 ) -> std::sync::mpsc::SyncSender<iris_policy::notice::Notice> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<iris_policy::notice::Notice>(QUEUE);
     let _ = std::thread::Builder::new()
         .name("notices".into())
-        .spawn(move || rx.iter().for_each(|n| show(&n)));
+        .spawn(move || rx.iter().filter(|n| open(n.id)).for_each(|n| show(&n)));
     tx
 }
 
@@ -227,7 +231,7 @@ mod tests {
     #[test]
     fn slow_system_notices_never_hold_the_sender() {
         // Each notice takes 1 second to show. The sends still end at once.
-        let tx = spawn(|_| std::thread::sleep(Duration::from_secs(1)));
+        let tx = spawn(|_| true, |_| std::thread::sleep(Duration::from_secs(1)));
         let t = Instant::now();
         for id in 0..(QUEUE as i64 + 20) {
             let _ = tx.try_send(notice(id));
@@ -237,6 +241,22 @@ mod tests {
             "{:?}",
             t.elapsed()
         );
+    }
+
+    #[test]
+    fn a_notice_that_is_no_longer_open_at_the_show_is_not_shown() {
+        static SHOWN: std::sync::Mutex<Vec<i64>> = std::sync::Mutex::new(Vec::new());
+        // Notice 2 became hostile while it waited in the queue.
+        let tx = spawn(|id| id != 2, |n| SHOWN.lock().unwrap().push(n.id));
+        for id in 1..=3 {
+            tx.send(notice(id)).unwrap();
+        }
+        drop(tx);
+        let t = Instant::now();
+        while SHOWN.lock().unwrap().len() < 2 && t.elapsed() < Duration::from_secs(5) {
+            std::thread::yield_now();
+        }
+        assert_eq!(*SHOWN.lock().unwrap(), vec![1, 3]);
     }
 
     #[test]

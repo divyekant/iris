@@ -149,8 +149,11 @@ pub fn line(s: &str) -> String {
 
 /// The SQL condition "the notice is open": not done, and its mail is not
 /// hostile mail now. A mark that came after the notice (a model `phishing`
-/// mark, a `hostile` sender, the label `SPAM`) hides the notice, so a notice
-/// never points to phishing (decision D33). Each read of notices uses it.
+/// mark, a `hostile` sender, the label `SPAM`, a pending link check) hides
+/// the notice, so a notice never points to phishing (decision D33). The
+/// content cleanup of gone mail marks such a notice done before it deletes
+/// the evidence (`Store::clean_gone`). Each read of notices and the system
+/// notice ([`is_open`]) use it.
 const OPEN: &str = concat!(
     "done_at IS NULL AND NOT EXISTS (SELECT 1 FROM message m WHERE m.id = notice.message_id AND (",
     iris_store::hostile_mail!(),
@@ -158,6 +161,17 @@ const OPEN: &str = concat!(
     iris_store::may_be_hostile!(),
     "))"
 );
+
+/// True while notice `id` is open ([`OPEN`]). The engine checks it again
+/// just before it shows a system notice, because a notice can wait in the
+/// queue while the mail becomes hostile.
+pub fn is_open(conn: &Connection, id: i64) -> Result<bool> {
+    Ok(conn.query_row(
+        &format!("SELECT EXISTS (SELECT 1 FROM notice WHERE id = ?1 AND {OPEN})"),
+        [id],
+        |r| r.get(0),
+    )?)
+}
 
 /// The notices that are open, newest first, at most [`LIST_MAX`].
 pub fn list(conn: &Connection) -> Result<Vec<Notice>> {
