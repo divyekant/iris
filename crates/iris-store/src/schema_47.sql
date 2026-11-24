@@ -1,4 +1,4 @@
--- Migration 46 (decision D34, issue #626, docs/specs/2026-11-24-remove-account.md):
+-- Migration 47 (decision D34, issue #626, docs/specs/2026-11-24-remove-account.md):
 -- IF NOT EXISTS: a test that sets an older user_version runs this again.
 -- an account in state `removing` or `removed` gets no new mail. A sync that
 -- started before the removal fails at its next write, so it cannot add mail

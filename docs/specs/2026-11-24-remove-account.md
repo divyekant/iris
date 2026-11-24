@@ -121,7 +121,7 @@ holds no sign-in and no sync state. Reasons:
    `PRAGMA secure_delete = ON`, as each batch of the delete, so no free
    page keeps the text of a deleted item (issue #882).
 
-Migration 46 adds triggers that refuse an insert into `message`, `thread`,
+Migration 47 adds triggers that refuse an insert into `message`, `thread`,
 `label`, `item` and `body` for an account in state `removing` or `removed`.
 So no writer can add mail or a derived row after the removal:
 
@@ -375,7 +375,7 @@ engine tick ends the delete.
 
 ## Impact
 
-- `crates/iris-store`: migration 46 (insert triggers, `removed_workspace`,
+- `crates/iris-store`: migration 47 (insert triggers, `removed_workspace`,
   `removed_sender`),
   `remove_account`, `delete_removed`, the change of `save_account_secret`.
 - `crates/iris-understand`: the batch query leaves out a removed account.
