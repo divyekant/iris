@@ -173,6 +173,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/jobs", get(get_jobs).post(post_job))
         .route("/api/jobs/{id}", get(get_job))
         .route("/api/jobs/{id}/answer", post(post_job_answer))
+        .route("/api/jobs/{id}/finish", post(post_job_finish))
         .route("/api/policy/accept", post(post_accept))
         .route("/api/policy/dismiss", post(post_dismiss))
         .route("/api/notices", get(get_notices))
@@ -902,6 +903,28 @@ async fn post_job_answer(
         updated: &b.updated,
     };
     answer_job(&s, row, &b.answer, Some(asked), now_ms())?;
+    Ok(stream(move |w| write_job(&s, row, w)).await)
+}
+
+#[derive(Deserialize)]
+struct JobFinishBody {
+    /// `complete` or `cancel`.
+    end: String,
+}
+
+/// The person ends a job. The answer is the job document.
+async fn post_job_finish(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<JobFinishBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let end = iris_job::End::parse(&b.end)
+        .ok_or_else(|| Error::Query("end must be complete or cancel".into()))?;
+    let Some(row) = job_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    finish_job(&s, row, end, now_ms())?;
     Ok(stream(move |w| write_job(&s, row, w)).await)
 }
 

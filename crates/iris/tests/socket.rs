@@ -615,6 +615,10 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
         r#"{"ok":true,"result":{"job":"j-1","session":"se-1","goal":"g","state":"working","threads":"1","messages":1,"items":1}}"#,
         r#"{"ok":true,"result":{"job":"j-1","session":"se-1","goal":"g","state":"working","threads":1,"messages":1,"items":1,"due":5}}"#,
         r#"{"ok":true,"result":{"job":"x","session":"se-1","goal":"g","state":"working","threads":1,"messages":1,"items":1}}"#,
+        r#"{"ok":true,"result":{"state":"done"}}"#,
+        r#"{"ok":true,"result":{"job":"j-01","state":"done"}}"#,
+        r#"{"ok":true,"result":{"job":"j-1","state":"working"}}"#,
+        r#"{"ok":true,"result":{"job":1,"state":"done"}}"#,
     ]
     .iter()
     .map(|l| l.as_bytes().to_vec())
@@ -635,7 +639,7 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
     for line in &lines {
         for verb in [
             "show", "drafts", "add", "submit", "withdraw", "job.run", "job.stop", "status",
-            "search", "list", "wait", "ask",
+            "search", "list", "wait", "ask", "done",
         ] {
             match socket::parse_answer(verb, line) {
                 None => {}
@@ -666,6 +670,13 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
                     r["job"].as_str().and_then(iris_job::parse_job_id).is_some()
                         && r["state"] == "needs_you"
                         && r["question"].is_string(),
+                    "{verb} {}",
+                    String::from_utf8_lossy(line)
+                ),
+                // `done`: only a canonical job ID in the state `done`.
+                Some(Ok(r)) if verb == "done" => assert!(
+                    r["job"].as_str().and_then(iris_job::parse_job_id).is_some()
+                        && r["state"] == "done",
                     "{verb} {}",
                     String::from_utf8_lossy(line)
                 ),
@@ -701,6 +712,8 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
             }
         }
     }
+    let done = br#"{"ok":true,"result":{"job":"j-3","state":"done"}}"#;
+    assert!(matches!(socket::parse_answer("done", done), Some(Ok(_))));
     let ok = br#"{"ok":true,"result":{"id":"cs-1","state":"draft","actions":[]}}"#;
     assert!(matches!(socket::parse_answer("show", ok), Some(Ok(_))));
     assert!(socket::parse_answer("drafts", ok).is_none());
@@ -979,9 +992,9 @@ fn session_mode_uses_only_the_session_socket() {
             .output()
             .unwrap()
     };
-    // Host mode (no `.iris/` above the folder): `list` and `wait` are usage
+    // Host mode (no `.iris/` above the folder): `list`, `wait` and `done` are usage
     // errors.
-    for args in [&["list"][..], &["wait", "--until", "2030-01-02"]] {
+    for args in [&["list"][..], &["wait", "--until", "2030-01-02"], &["done"]] {
         let out = Command::new(env!("CARGO_BIN_EXE_iris"))
             .current_dir(&root)
             .arg("--data")

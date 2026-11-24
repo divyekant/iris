@@ -553,6 +553,7 @@ const NOT_TOOLS: &[&str] = &[
     "list",
     "wait",
     "ask",
+    "done",
     // A sign-in of the web client is for the person, never a tool of an agent.
     "open",
 ];
