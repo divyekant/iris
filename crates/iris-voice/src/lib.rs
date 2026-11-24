@@ -566,63 +566,31 @@ fn recipient(msgs: &[Msg], me: &str) -> Option<String> {
             .map(|a| a.trim().to_lowercase())
             .filter(|a| !a.is_empty());
     }
-    let owners = [Some(me), last.from_addr.as_deref()];
-    let lists = [last.to_addrs.as_deref(), last.cc_addrs.as_deref()];
-    first_evidence(&lists, &last.sent_to, &owners).or_else(|| first_other(&lists, &owners))
-}
-
-/// The address of `sent_to` that comes first in the comma lists, and is not
-/// one of `owners`, in lower case. An address of `sent_to` that the lists
-/// do not show comes after the others, by name. `None` if no address
-/// qualifies.
-fn first_evidence(
-    lists: &[Option<&str>],
-    sent_to: &[String],
-    owners: &[Option<&str>],
-) -> Option<String> {
-    let joined = format!(
-        ",{},",
-        lists
+    let owner = |a: &str| {
+        [Some(me), last.from_addr.as_deref()]
             .iter()
             .flatten()
-            .flat_map(|l| l.split(','))
-            .map(|a| a.trim().to_lowercase())
-            .collect::<Vec<_>>()
-            .join(",")
-    );
-    sent_to
-        .iter()
-        .map(|a| a.trim().to_lowercase())
-        .filter(|a| {
-            !a.is_empty()
-                && !owners
-                    .iter()
-                    .flatten()
-                    .any(|o| o.trim().eq_ignore_ascii_case(a))
-        })
-        .min_by_key(|a| {
-            (
-                joined.find(&format!(",{a},")).unwrap_or(usize::MAX),
-                a.clone(),
-            )
-        })
+            .any(|o| o.trim().eq_ignore_ascii_case(a))
+    };
+    // A message with evidence rows takes its target only from an entry
+    // with evidence. A `Bcc` address has evidence but is in no list.
+    let evidence =
+        |a: &str| last.sent_to.is_empty() || last.sent_to.iter().any(|e| e.eq_ignore_ascii_case(a));
+    [last.to_addrs.as_deref(), last.cc_addrs.as_deref()]
+        .into_iter()
+        .flatten()
+        .flat_map(entries)
+        .find(|a| !owner(a) && evidence(a))
 }
 
-/// The first address of the comma lists that is not empty and not one of
-/// `owners`, in lower case.
-fn first_other(lists: &[Option<&str>], owners: &[Option<&str>]) -> Option<String> {
-    lists
-        .iter()
-        .flatten()
-        .flat_map(|l| l.split(','))
-        .map(|a| a.trim().to_lowercase())
-        .find(|a| {
-            !a.is_empty()
-                && !owners
-                    .iter()
-                    .flatten()
-                    .any(|o| o.trim().eq_ignore_ascii_case(a))
-        })
+/// The entries of a stored address list, through the parser that wrote the
+/// list (`iris_understand::head::addresses`): a `,` inside a quoted local
+/// part (`"a, b"@example.org`) does not split.
+fn entries(list: &str) -> Vec<String> {
+    iris_understand::head::addresses(list)
+        .into_iter()
+        .map(|(a, _)| a)
+        .collect()
 }
 
 /// A sent message that shows the voice of the owner.

@@ -660,45 +660,119 @@ fn a_sample_marked_spam_after_the_read_fails_the_last_check() {
     assert!(!ok(&b.store));
 }
 
-/// Invariant (#276): with the `sent` evidence of the message, the reply
-/// target is a whole recipient address of the raw message, also when the
-/// address has a comma, and the first one of the lists.
+/// A sent newest message with evidence rows: the reply goes to the first
+/// whole `To` or `Cc` entry with evidence that is not the owner. A quoted
+/// local part can hold a comma and a space. A `Bcc` address is never the
+/// target.
 #[test]
 fn the_recipient_of_sent_mail_comes_from_the_evidence() {
-    let m = |to: &str, sent_to: &[&str]| Msg {
+    let m = |to: &str, cc: Option<&str>, sent_to: &[&str]| Msg {
         id: 1,
         from_addr: Some("me@example.com".into()),
         from_name: None,
         to_addrs: Some(to.into()),
-        cc_addrs: None,
+        cc_addrs: cc.map(str::to_string),
         subject: String::new(),
         text: None,
         sent: true,
         sent_to: sent_to.iter().map(|a| a.to_string()).collect(),
     };
-    let r = |to, ev: &[&str]| recipient(&[m(to, ev)], "me@example.com");
+    let r = |to, cc, ev: &[&str]| recipient(&[m(to, cc, ev)], "me@example.com");
     assert_eq!(
         r(
-            "a,b@example.org,carol@example.org",
-            &["carol@example.org", "a,b@example.org"]
+            "\"a, b\"@example.org,carol@example.org",
+            None,
+            &["carol@example.org", "\"a, b\"@example.org"]
         )
         .as_deref(),
-        Some("a,b@example.org")
+        Some("\"a, b\"@example.org")
     );
     // A shorter address inside a longer one does not match it.
     assert_eq!(
-        r("ana@x.org,na@x.org", &["na@x.org", "ana@x.org"]).as_deref(),
+        r("ana@x.org,na@x.org", None, &["na@x.org", "ana@x.org"]).as_deref(),
         Some("ana@x.org")
     );
+    // Only the owner in `To`, and a `Bcc` recipient: no target.
+    assert_eq!(r("me@example.com", None, &["bo@example.org"]), None);
     assert_eq!(
-        r("me@example.com,bo@x.org", &["me@example.com", "bo@x.org"]).as_deref(),
-        Some("bo@x.org")
+        r(
+            "me@example.com",
+            Some("cy@x.org"),
+            &["bo@x.org", "cy@x.org"]
+        )
+        .as_deref(),
+        Some("cy@x.org")
     );
-    // Evidence of only the owner: the lists decide.
-    assert_eq!(
-        r("me@example.com,bo@x.org", &["me@example.com"]).as_deref(),
-        Some("bo@x.org")
-    );
+}
+
+/// For generated `To`, `Cc` and `Bcc` lists with quoted local parts and
+/// owner addresses, the target is the first whole `To` or `Cc` address
+/// that is not an owner, and never a `Bcc` address.
+#[test]
+fn the_recipient_of_sent_mail_is_the_first_eligible_entry() {
+    const ADDRS: [&str; 8] = [
+        "me@example.com",
+        "alias@example.com",
+        "a@x.org",
+        "na@x.org",
+        "ana@x.org",
+        "\"a, b\"@x.org",
+        "\"na@x.org, \"@y.org",
+        "\"c d\"@x.org",
+    ];
+    let mut x: u64 = 0x0bad_cafe_f00d_1234;
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    for _ in 0..5000 {
+        let mut pick = |n: u64| -> Vec<&str> {
+            let mut v: Vec<&str> = Vec::new();
+            for _ in 0..next() % n {
+                let a = ADDRS[(next() % ADDRS.len() as u64) as usize];
+                if !v.contains(&a) {
+                    v.push(a);
+                }
+            }
+            v
+        };
+        let (to, cc, bcc) = (pick(4), pick(3), pick(3));
+        let mut ev: Vec<&str> = Vec::new();
+        for a in to.iter().chain(&cc).chain(&bcc) {
+            // `decide` writes no evidence for the account address.
+            if *a != "me@example.com" && !ev.contains(a) {
+                ev.push(a);
+            }
+        }
+        ev.reverse();
+        if ev.is_empty() {
+            continue;
+        }
+        let join = |v: &[&str]| (!v.is_empty()).then(|| v.join(","));
+        let msg = Msg {
+            id: 1,
+            from_addr: Some("alias@example.com".into()),
+            from_name: None,
+            to_addrs: join(&to),
+            cc_addrs: join(&cc),
+            subject: String::new(),
+            text: None,
+            sent: true,
+            sent_to: ev.iter().map(|a| a.to_string()).collect(),
+        };
+        let want = to
+            .iter()
+            .chain(&cc)
+            .find(|a| !["me@example.com", "alias@example.com"].contains(a))
+            .map(|a| a.to_string());
+        assert_eq!(
+            recipient(&[msg], "me@example.com"),
+            want,
+            "to={to:?} cc={cc:?} bcc={bcc:?}"
+        );
+    }
 }
 
 /// A sent newest message: the reply goes to its first recipient that is
@@ -727,7 +801,8 @@ fn the_recipient_of_sent_mail_is_never_the_owner() {
     );
     assert_eq!(r(Some("alias@example.com"), Some("ME@example.com")), None);
 
-    // For any lists, the result is an address of the lists and no owner.
+    // For any lists with no quotes, the result is the first valid entry
+    // that is no owner.
     const PIECES: [&str; 7] = [
         "me@example.com",
         "ME@Example.com",
@@ -737,7 +812,6 @@ fn the_recipient_of_sent_mail_is_never_the_owner() {
         " ",
         "",
     ];
-    let owners = [Some("me@example.com"), Some("b@x.org")];
     let mut x: u64 = 0x1234_5678_9abc_def1;
     let mut next = || {
         x ^= x << 13;
@@ -752,7 +826,13 @@ fn the_recipient_of_sent_mail_is_never_the_owner() {
                 l.push_str(PIECES[(next() % PIECES.len() as u64) as usize]);
             }
         }
-        let got = first_other(&[Some(&lists[0]), Some(&lists[1])], &owners);
+        let msg = Msg {
+            from_addr: Some("B@x.org".into()),
+            to_addrs: Some(lists[0].clone()),
+            cc_addrs: Some(lists[1].clone()),
+            ..m(None, None)
+        };
+        let got = recipient(&[msg], "me@example.com");
         let all: Vec<String> = lists
             .iter()
             .flat_map(|l| l.split(','))
@@ -760,7 +840,9 @@ fn the_recipient_of_sent_mail_is_never_the_owner() {
             .collect();
         let others: Vec<&String> = all
             .iter()
-            .filter(|a| !a.is_empty() && *a != "me@example.com" && *a != "b@x.org")
+            // An entry with white space outside quotes is no address.
+            .filter(|a| !a.is_empty() && !a.contains(' '))
+            .filter(|a| *a != "me@example.com" && *a != "b@x.org")
             .collect();
         assert_eq!(got.as_ref(), others.first().copied(), "{lists:?}");
     }
