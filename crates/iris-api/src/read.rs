@@ -929,12 +929,13 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
         let section =
             |sql: &(String, String)| read_section(c, sql, &tails, MAX_LIMIT, None).map(|(s, _)| s);
         let records = count_records(c, SHOWN)?;
+        // The same definition as the items that the reads hide (issue 112).
         let hostile = c.query_row(
-            "SELECT count(*) FROM message m LEFT JOIN header h ON h.message_id = m.id
-             WHERE m.gone_at IS NULL AND m.internal_date >= ?1
-               AND ((m.hostile IS NOT NULL AND m.hostile NOT IN ('', '[]'))
-                 OR EXISTS (SELECT 1 FROM sender s
-                            WHERE s.address = h.from_addr COLLATE NOCASE AND s.kind = 'hostile'))",
+            concat!(
+                "SELECT count(*) FROM message m
+                 WHERE m.gone_at IS NULL AND m.internal_date >= ?1 AND ",
+                iris_store::hostile_mail!()
+            ),
             [now - 7 * DAY_MS],
             |r| r.get(0),
         )?;

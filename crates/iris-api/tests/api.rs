@@ -1852,6 +1852,16 @@ async fn an_item_of_hostile_mail_is_hidden_until_the_state_clears() {
     let record = add_item(&store, "record", "active", 1, 2, json!({"type": "receipt"}));
     // A record of another message stays in each read.
     let other = add_item(&store, "record", "active", 2, 3, json!({"type": "receipt"}));
+    // The brief counts the hostile mail of the last 7 days.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    exec(
+        &store,
+        "UPDATE message SET internal_date = ?1 WHERE id = 1",
+        [now],
+    );
     let (f, r, o) = (
         format!("f-{feed}"),
         format!("r-{record}"),
@@ -1866,6 +1876,7 @@ async fn an_item_of_hostile_mail_is_hidden_until_the_state_clears() {
     assert_eq!(shown.2, json!({"receipt": 2}));
     assert_eq!((shown.3, shown.4), (StatusCode::OK, StatusCode::OK));
     assert_eq!(shown.5, json!([f.clone(), r.clone()]));
+    assert_eq!(shown.6, 0);
     let states: [(&str, &str); 3] = [
         ("UPDATE message SET hostile = '[\"lookalike\"]' WHERE id = 1", "UPDATE message SET hostile = '[]' WHERE id = 1"),
         ("INSERT INTO message_label(message_id, label_id) SELECT 1, id FROM label WHERE provider_id = 'SPAM'",
@@ -1889,6 +1900,8 @@ async fn an_item_of_hostile_mail_is_hidden_until_the_state_clears() {
             "{set}"
         );
         assert_eq!(hidden.5, json!([]), "{set}");
+        // Each state counts as hostile mail of the brief (spec 1, section 8).
+        assert_eq!(hidden.6, 1, "{set}");
         exec(&store, clear, []);
         assert_eq!(hostile_reads(&store, &f, &r).await, shown, "{clear}");
     }
@@ -1897,7 +1910,7 @@ async fn an_item_of_hostile_mail_is_hidden_until_the_state_clears() {
 /// The reads of the hostile item test: the IDs of `/api/items`, the IDs of
 /// the feed of the brief, the record counts of the brief, and the status of
 /// `/api/items/{feed}` and `/api/items/{record}`, and the items of the mail
-/// view of the origin message.
+/// view of the origin message, and the count of hostile mail of the brief.
 async fn hostile_reads(
     store: &Arc<Store>,
     feed: &str,
@@ -1908,6 +1921,7 @@ async fn hostile_reads(
     Value,
     StatusCode,
     StatusCode,
+    Value,
     Value,
 ) {
     let ids_of = |v: &Value| -> Vec<String> {
@@ -1927,5 +1941,6 @@ async fn hostile_reads(
         get(store, &format!("/api/items/{feed}")).await.0,
         get(store, &format!("/api/items/{record}")).await.0,
         get(store, "/api/messages/m-1").await.1["items"].clone(),
+        brief["hostile"].clone(),
     )
 }

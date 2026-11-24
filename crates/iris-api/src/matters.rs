@@ -24,7 +24,8 @@ const MEMBER_FORMS: [(&str, Kind); 3] = [
 /// one row for each member that it shows (or one row of NULLs): the live
 /// members of a proposal, the kept members of a confirmed matter, and each
 /// member of a declined matter (the full grouping that the person
-/// declined). A proposal that is not valid now is not read.
+/// declined). A proposal that is not valid now is not read. A member that
+/// comes from hostile mail is not read (issue 112).
 fn select(filter: &str, order: &str) -> String {
     format!(
         "SELECT m.id, m.title, m.status, m.model, m.prompt, m.created_at, m.updated_at,
@@ -35,10 +36,11 @@ fn select(filter: &str, order: &str) -> String {
                   (SELECT l.item_id FROM matter_live l WHERE l.matter_id = m.id)
                 WHEN 'confirmed' THEN mi.kept = 1
                 ELSE 1 END
-           LEFT JOIN item ON item.id = mi.item_id
+           LEFT JOIN item ON item.id = mi.item_id AND NOT {from_hostile}
           WHERE (m.status <> 'proposed' OR m.id IN (SELECT matter_id FROM matter_valid))
             AND ({filter})
-          ORDER BY {order}, m.id DESC, item.id"
+          ORDER BY {order}, m.id DESC, item.id",
+        from_hostile = crate::read::FROM_HOSTILE
     )
 }
 

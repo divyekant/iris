@@ -27,11 +27,7 @@ const ALLOWED: [(&str, usize, &str); 9] = [
         10,
         "the writer of the marks and the queue of the link check",
     ),
-    (
-        "iris-api/src/read.rs",
-        3,
-        "shows the marks, and the count of hostile mail in the brief",
-    ),
+    ("iris-api/src/read.rs", 1, "shows the marks"),
     (
         "iris-observe/src/lib.rs",
         3,

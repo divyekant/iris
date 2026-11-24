@@ -508,3 +508,45 @@ async fn the_no_body_limit_is_64_bytes() {
     assert_eq!(ids(&list["proposed"]), vec!["g-2"]);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Issue 112: a member whose origin is hostile mail is in no matter read,
+/// also when a confirm pins it. A proposal counts only its other members.
+/// The member shows again when the state clears.
+#[tokio::test]
+async fn a_member_of_hostile_mail_is_hidden_until_the_state_clears() {
+    let (dir, s) = setup("hostile");
+    let (code, _) = call(
+        &s,
+        Method::POST,
+        "/api/matters/g-1/confirm",
+        r#"{"title":"Tokyo","items":["r-1","v-2","c-3"]}"#,
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    // Items 2 and 5 come from the message of thread 1.
+    let mark = |v: &str| {
+        let sql = format!(
+            "UPDATE message SET hostile = '{v}'
+             WHERE id = (SELECT message_id FROM item_source WHERE item_id = 2)"
+        );
+        s.write(|tx| Ok(tx.execute(&sql, [])?)).unwrap();
+    };
+    mark(r#"["lookalike"]"#);
+    let (_, v) = call(&s, Method::GET, "/api/matters/g-1", "").await;
+    agree(&v);
+    assert_eq!(v["matter"]["items"], json!(["r-1", "c-3"]));
+    let (_, list) = call(&s, Method::GET, "/api/matters", "").await;
+    assert_eq!(ids(&list["proposed"]), Vec::<&str>::new());
+    assert_eq!(list["confirmed"][0]["counts"]["conversation"], 0);
+    // g-2 keeps one live member, so it is not valid.
+    let (code, _) = call(&s, Method::GET, "/api/matters/g-2", "").await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    let (code, _) = call(&s, Method::POST, "/api/matters/g-2/decline", "").await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    mark("[]");
+    let (_, v) = call(&s, Method::GET, "/api/matters/g-1", "").await;
+    assert_eq!(v["matter"]["items"], json!(["r-1", "v-2", "c-3"]));
+    let (_, list) = call(&s, Method::GET, "/api/matters", "").await;
+    assert_eq!(ids(&list["proposed"]), vec!["g-2"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
