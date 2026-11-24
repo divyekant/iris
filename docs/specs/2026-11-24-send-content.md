@@ -83,13 +83,24 @@ draft of an older build stays the same.
 
 ### 2. The attachment files
 
-An attachment file is in the content folder of the store (spec 1,
-section 5.3), at the path of its SHA-256, as a raw message is. The
-folder is content addressed, so one file serves each draft that uses it.
+An attachment file is in the attachment folder of the store,
+`attachments/<aa>/<sha256>`, next to the content folder (spec 1, section
+5.3). The folder is content addressed, so one file serves each draft
+that uses it. It is a folder of its own, not the content folder, because
+the content cleanup (spec 1, section 4.5) deletes a content file that no
+message uses, and the backup copies only the content files of messages.
 
+- The writer of the attachment folder is the writer of the content
+  folder (`ContentWriter`: a temporary file, `fsync`, then a rename to
+  the SHA-256), with another root.
+- Nothing deletes a file of the attachment folder. The content cleanup
+  reads only the content folder. A limit issue records the growth.
+- `iris backup` copies each file of the attachment folder, with the
+  check of its SHA-256, as it copies the content files. A restore then
+  has each file that a draft action names.
 - `POST /api/attachments` of the local API takes the bytes of one file
   as the request body, at most the largest limit of section 5. It writes
-  the file with `Store::put_content` and gives
+  the file to the attachment folder and gives
   `{"sha256": "...", "size": N}`. The client then puts the entry, with
   the name and the type, into the content of the draft.
 - The submit of a `draft` action checks the entries (section 1). It does
@@ -179,6 +190,43 @@ bytes"). The API refuses a request body over 10 MiB with HTTP 413.
 - The write view gets a `Bcc` field and a file button. Each change of
   the write view gets a before and after page and the owner's pick.
 
+### 6.1 `POST /api/write`
+
+The body of the press of Send (write spec
+`docs/specs/2026-11-17-write.md`, section 2) gets two optional fields,
+for a new mail and for a reply:
+
+| Field | Rule |
+|---|---|
+| `bcc` | A list of addresses (section 1). Can be empty or absent. |
+| `attachments` | A list of entries (section 1). Can be empty or absent. |
+
+The engine puts each field that is not empty into the `args` of the
+`draft` action. The `request_hash` of the send mark is the SHA-256 of
+the target, the parent and the args, so it covers `bcc` and each entry
+of `attachments`. A second press with the same key and another `bcc` or
+another file gets 409 "This key belongs to another mail.". The client
+makes a new key for each change of the form content (write spec,
+section 6), and a change of `Bcc` or of the files is a change of the
+form content.
+
+### 6.2 What Iris can check of a `Bcc`
+
+Iris reads the copy of the sender only. It cannot see if a `Bcc`
+address got the mail, or if the copy of a `To` address shows the `Bcc`
+header. So:
+
+- The owner check of the send switch (issue #302 for Gmail, issue #649
+  for Outlook) gets two steps for each provider: send one mail with a `To` test address and a `Bcc` test
+  address, then confirm that the `Bcc` address got the mail and that the
+  copy of the `To` address has no `Bcc` header. The send switch stays
+  off until the owner runs `iris sending on` after this check. No send
+  with `bcc` leaves before it.
+- If the sent copy has no `Bcc` header, the completion takes the
+  approved `bcc` (section 4), and the ledger entry gets the note "The
+  sent copy shows no Bcc. Iris cannot confirm the blind copies." The
+  ledger view shows the note.
+
 ### 7. The open model
 
 `changeset.schema.json`: the `args` of `draft` get `bcc` (an array of
@@ -224,6 +272,9 @@ the drafts that the person changes at Gmail.
 | The sent copy has a `Bcc` header with another address | The error "Gmail sent other content than the approved content" | unit test of the sent check |
 | A display name with a control character or over 128 characters | `From` is the address only | unit test |
 | A crash after the claim of a draft with attachments | Recovery makes the same bytes from the post and the files | crash test |
+| A backup, then a restore, with a draft action that names a file | The restore has the file; the apply sends | backup test |
+| Two presses with the same key, the second with another `bcc` or file | 409 "This key belongs to another mail." | API test |
+| The sent copy has no `Bcc` header | The ledger note "The sent copy shows no Bcc. Iris cannot confirm the blind copies." | unit test |
 | A request body over 10 MiB to `POST /api/attachments` | HTTP 413, and no file | API test |
 | A draft of an older build (no `bcc`, no `attachments`) | The same hash as before | unit test with a fixed hash |
 | Any other input | The submit or the apply denies the action, and Iris sends nothing | |
@@ -236,11 +287,14 @@ the drafts that the person changes at Gmail.
   flags `new_recipient` and `attachment`.
 - `crates/iris-apply`: the files and the display name at the apply of a
   `draft`; the `post` of the claim.
+- `crates/iris-store`: the attachment folder, its writer and its copy in
+  `iris backup`.
 - `crates/iris-api`: `POST /api/attachments`; `bcc` and `attachments` in
-  the draft view and the outbox.
+  `POST /api/write`, the draft view and the outbox.
 - `crates/iris-mcp`: the text of the tool `draft`.
 - `client/`: the write view, the review and the outbox.
-- `docs/specs/2026-11-16-send.md`, `docs/spec/02-changeset-policy-ledger.md`
+- `docs/specs/2026-11-16-send.md`, `docs/specs/2026-11-17-write.md`
+  section 2, `docs/spec/02-changeset-policy-ledger.md`
   section 4 and `docs/spec/schema/changeset.schema.json`.
 - No migration.
 
@@ -251,9 +305,10 @@ the drafts that the person changes at Gmail.
    recipients. Evidence: Gmail API guide "Sending email"
    (developers.google.com/gmail/api/guides/sending) builds the message
    with its headers, and RFC 5322 section 3.6.3. `pending`: the owner
-   checks it on the Mac (issue #302). If the sent copy keeps no `Bcc`,
-   the sent check of section 4 takes the approved `bcc`. If Gmail does
-   not send to `Bcc`, the owner sees it in the check, and the send
+   checks it on the Mac (section 6.2). If the sent copy keeps no `Bcc`,
+   the sent check of section 4 takes the approved `bcc` and writes the
+   note of section 6.2. If Gmail does not send to `Bcc`, or shows the
+   header to a `To` address, the check of section 6.2 fails, and the send
    switch stays off.
 2. Graph `POST /me/messages` and `POST /me/sendMail` with MIME text take
    `Bcc` and attachments, and a request has at most 4 MB. Evidence:
@@ -261,7 +316,7 @@ the drafts that the person changes at Gmail.
    message in MIME format" (learn.microsoft.com). `pending` on the
    owner's Mac. If Graph drops `Bcc` or a file from the draft, the read
    back gives other content, and the release denies the send: Iris sends
-   nothing.
+   nothing. The recipient side is the check of section 6.2.
 3. Gmail takes a `raw` message of 10 MiB of files in the JSON body of
    `drafts.create` and `drafts.send`. Evidence: Gmail API reference,
    `users.drafts.create` (the message size limit is 35 MB). `pending` on
