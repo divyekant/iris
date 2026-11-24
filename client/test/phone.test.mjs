@@ -134,6 +134,33 @@ test("on a phone, More opens the other views and a tap goes to one", async () =>
   assert.equal(await tabs.getByRole("button", { name: "More" }).evaluate((b) => b.classList.contains("current")), true);
 });
 
+test("on a phone, the notices fold to one line with a count, and a tap opens them", async () => {
+  const { base, browser } = await serve();
+  for (const [width, phone] of [[360, true], [600, true], [601, false], [1024, false]]) {
+    const page = await browser.newPage({ viewport: { width, height: 800 }, isMobile: phone, hasTouch: true, reducedMotion: "reduce" });
+    await page.goto(base + "#/brief");
+    const notices = page.getByRole("region", { name: "Notices by your rules" });
+    await notices.waitFor();
+    const line = notices.getByRole("button", { name: /notices by your rules/ });
+    const cards = notices.locator("article");
+    const shown = () => cards.evaluateAll((a) => a.filter((e) => e.checkVisibility()).length);
+    if (phone) {
+      assert.equal((await line.textContent()).replace(/\s+/g, " ").trim(), "4 notices by your rules Show");
+      assert.equal(await shown(), 0, `notice cards show at ${width} px`);
+      const box = await line.boundingBox();
+      assert.ok(box.height >= TOUCH && box.height < 2 * TOUCH, `the line is ${box.height} px high at ${width} px`);
+      await line.tap();
+      await page.waitForFunction(() => document.querySelectorAll("article.notice").length === 4);
+      assert.equal(await shown(), 4);
+      assert.equal(await line.isVisible(), false);
+    } else {
+      assert.equal(await line.isVisible(), false, `the line shows at ${width} px`);
+      assert.equal(await shown(), 3);
+    }
+    await page.close();
+  }
+});
+
 // Each control and line of text that is in the visible area keeps out of the safe-area
 // insets (the notch, the rounded corners and the home indicator).
 // At the end of the page (atEnd), nothing is under the tabs or the home indicator.

@@ -1,6 +1,8 @@
 <!--
   Notices by rule (card R5-08): each notice that is not done, above every view.
   A notice comes only from a `notify` rule of the person. The card opens the mail.
+  On a phone, the notices fold to one line with a count, so each view starts at the
+  top. A tap on the line opens them (decision D38, issue 452).
 -->
 <script lang="ts">
   import { wrote } from "../api";
@@ -44,7 +46,12 @@
 </script>
 
 {#if list.length}
-  <section class="notices" aria-label="Notices by your rules">
+  <section class="notices" class:folded={!open} aria-label="Notices by your rules">
+    <button class="line" type="button" aria-expanded="false" onclick={() => (open = true)}>
+      <span class="dot" aria-hidden="true"></span>
+      <span class="count">{list.length} {list.length === 1 ? "notice" : "notices"} by your rules</span>
+      <span class="show">Show</span>
+    </button>
     {#each shown as n (n.id)}
       <article class="notice">
         <span class="dot" aria-hidden="true"></span>
@@ -152,6 +159,42 @@
   }
   .more {
     justify-self: start;
+  }
+  .line {
+    display: none;
+  }
+  /* A phone: one line until the person opens the notices. */
+  @media (max-width: 600px) {
+    .folded .notice,
+    .folded .more {
+      display: none;
+    }
+    .folded .line {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      min-height: 44px;
+      padding: var(--space-2) var(--space-4);
+      border: 1px solid var(--color-border-subtle);
+      border-left: 4px solid var(--color-primary);
+      border-radius: var(--radius-md);
+      background: var(--color-background-elevated);
+      font-size: inherit;
+      text-align: left;
+    }
+    .line .dot {
+      margin-top: 0;
+    }
+    .count {
+      flex: 1;
+      min-width: 0;
+      font-weight: 500;
+      overflow-wrap: anywhere;
+    }
+    .show {
+      color: var(--color-text-muted);
+      font-size: var(--font-size--1);
+    }
   }
   .error {
     margin: 0;
