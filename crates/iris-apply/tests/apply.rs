@@ -481,7 +481,10 @@ fn a_withdraw_during_the_apply_keeps_the_action() {
     b.fake.modify_labels(&b.provider_id(ms[0]), &[], &["INBOX"]);
     b.store
         .write(|tx| {
-            tx.execute("UPDATE changeset SET state = 'withdrawn'", [])?;
+            tx.execute(
+                "UPDATE changeset SET state = 'withdrawn', withdrawn_by = 'person'",
+                [],
+            )?;
             tx.execute(
                 "INSERT INTO policy_version(text, sha256, confirmed_at)
                  VALUES ('version = 0\nmode = \"observe\"\n', 'h3', 3)",

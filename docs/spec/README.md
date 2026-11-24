@@ -18,9 +18,11 @@ This folder holds the specifications of Iris and the open model.
 
 ## Status
 
-Version 1.1 of the open model is stable. Each JSON document that Iris
-writes has the `model` value `iris/1.1`. Version 1.1 adds the optional
-field `account` to each item. Each document of version 1.0 stays valid. The policy file (TOML) has no `model` value: its
+Version 1.2 of the open model is stable. Each JSON document that Iris
+writes has the `model` value `iris/1.2`. Version 1.1 adds the optional
+field `account` to each item. Version 1.2 adds the optional fields
+`withdrawn_by` and `comments` to each changeset. Each document of version
+1.0 and 1.1 stays valid. The policy file (TOML) has no `model` value: its
 integer `version` is `1` (`0` has the same meaning). A minor version of version 1 only adds to the model, and
 a change that is not an addition is version 2. Specification 4 gives the
 rules: [04-open-model-versions.md](04-open-model-versions.md).

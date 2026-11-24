@@ -153,6 +153,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_44.sql"),
     include_str!("schema_45.sql"),
     include_str!("schema_46.sql"),
+    include_str!("schema_47.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
@@ -229,7 +230,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// document. Same value as `iris_clean::TEXT_LIMIT`.
 /// The `model` value of each open model document that Iris writes
 /// (spec 4, rule 2.1).
-pub const MODEL: &str = "iris/1.1";
+pub const MODEL: &str = "iris/1.2";
 
 /// The `$id` of the common definitions of the open model.
 pub const COMMON_SCHEMA_ID: &str = "urn:iris:model:1:common";

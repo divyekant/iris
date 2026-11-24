@@ -1550,6 +1550,8 @@ fn a_withdraw_cancels_the_open_actions() {
         [&json!("approved"), &json!("cancelled"), &json!("cancelled")]
     );
     assert_eq!(d["actions"][1]["decision"]["by"], "author");
+    // Decision D16: the document names who withdrew.
+    assert_eq!(d["withdrawn_by"], "author");
     refused(withdraw(&s, cs, None));
     refused(revise(&s, cs, &agent()));
 
@@ -1565,11 +1567,13 @@ fn a_withdraw_cancels_the_open_actions() {
         None,
     )
     .unwrap();
+    assert!(doc(&s, draft).get("withdrawn_by").is_none());
     withdraw(&s, draft, None).unwrap();
     assert_eq!(
         doc(&s, draft)["actions"][0]["decision"]["state"],
         "cancelled"
     );
+    assert_eq!(doc(&s, draft)["withdrawn_by"], "person");
     refused(add_action(
         &s,
         draft,
@@ -2006,4 +2010,30 @@ fn the_document_goes_out_after_the_read() {
         !out.2,
         "a store connection was held during a write to the peer"
     );
+}
+
+/// Decision D16 (issue #221): each withdraw names who withdrew, in the same
+/// update as the state, and the value never changes. The store refuses
+/// each other path.
+#[test]
+fn the_store_keeps_who_withdrew() {
+    let dir = TempDir::new("withdrawnby");
+    let s = store(&dir);
+    let cs = create(&s, &agent(), NOW).unwrap();
+    let sql = |q: &str| s.write(|tx| Ok(tx.execute(q, [cs])?));
+    // A withdraw with no actor, and an actor with no withdraw.
+    assert!(sql("UPDATE changeset SET state = 'withdrawn' WHERE id = ?1").is_err());
+    assert!(sql("UPDATE changeset SET withdrawn_by = 'person' WHERE id = ?1").is_err());
+    assert!(
+        sql("UPDATE changeset SET state = 'withdrawn', withdrawn_by = 'robot' WHERE id = ?1")
+            .is_err()
+    );
+    withdraw(&s, cs, None).unwrap();
+    for q in [
+        "UPDATE changeset SET withdrawn_by = 'author' WHERE id = ?1",
+        "UPDATE changeset SET withdrawn_by = NULL WHERE id = ?1",
+    ] {
+        assert!(sql(q).is_err(), "{q}");
+    }
+    assert_eq!(doc(&s, cs)["withdrawn_by"], "person");
 }

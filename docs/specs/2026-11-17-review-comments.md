@@ -65,18 +65,22 @@ runs in one write transaction, and does these checks in this order:
    comment, and write nothing. A retry after a lost answer makes no second
    comment. If its `revision` or `text` is not the same, refuse: the key
    names another comment.
-3. If `author_job` is NULL: refuse, "only a changeset of a job takes a
-   comment".
+3. If the author kind is not `agent` or `local`: refuse, "only a
+   changeset of an agent or a local author takes a comment". An agent with
+   no job (the MCP host) and a local author read the comments in the
+   changeset document, `comments` (open model 1.2, decision D15, issue
+   #538).
 4. If the state is not `open`: refuse. A `draft` has a new revision that
    the person cannot see yet, a `withdrawn` changeset changes no more, and
    a `closed` changeset is not on the review screen, which shows only
    open changesets. The person writes the comment first, then denies.
 5. If `revision` is not the newest revision: refuse, "the changeset has a
    newer revision". The person reloads and sees the new revision.
-6. If the job is `done`: refuse, "the job is done".
+6. If the changeset has a job and the job is `done`: refuse, "the job is
+   done".
 7. If the text breaks the rules of the column: refuse.
 8. Insert the row.
-9. If the job is `waiting`, wake it in the same transaction:
+9. If the changeset has a job and the job is `waiting`, wake it in the same transaction:
    `iris_job::wake_in(c, job, By::Person, Some("comment"), now)`. Spec 2
    of the job store lets the person wake a waiting job. So a commented job
    is never `waiting`, and a session can start for it.

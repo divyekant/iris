@@ -174,7 +174,7 @@ documents in `schema/examples/` (files `changeset*.json`).
 
 ```json
 {
-  "model": "iris/1.1",
+  "model": "iris/1.2",
   "id": "cs-77",
   "revision": 1,
   "author": { "kind": "agent", "name": "Claude Code", "session": "se-12", "job": "j-142" },
@@ -218,6 +218,8 @@ documents in `schema/examples/` (files `changeset*.json`).
 | `author.kind` | `person`, `agent`, `triage` or `local`. |
 | `why` | The reason of the author, in one or two sentences. Required. |
 | `state` | `draft` (the newest revision is not submitted), `open` (one or more actions are open, section 5.2), `closed` (no action is open) or `withdrawn`. |
+| `withdrawn_by` | Since `iris/1.2`. Only on a withdrawn changeset: `author` (its author withdrew it) or `person` (you withdrew it). Absent when a version before store migration 47 withdrew it (decision D16, issue #221). |
+| `comments` | Since `iris/1.2`. The review comments of the person, oldest first: `revision`, `text` and `at` of each. Absent when there is none. An author with no job workspace reads them here (decision D15, issue #538). |
 | `actions[].n` | The number of the action in the changeset, from 1. |
 | `actions[].revision` | The revision of the action. The document lists the actions of each revision, because an old revision can keep decided actions and `approved` actions. |
 | `actions[].targets` | What the author named: `threads`, `messages` or `items`. The write verbs of release 3 also name `accounts` (`a-N`, a new mail) or `drafts` (`d-N`), with exactly one target (`docs/specs/2026-11-16-send.md`, section 4). |
@@ -381,6 +383,7 @@ section 5.1) keep other users out.
 | A changeset state that does not agree with its actions | A reader sees a closed changeset with an open action | The triggers write the state from the actions, and refuse any other value. Only a withdraw writes `withdrawn`. |
 | The submit of a new revision while older actions are `proposed` or `in_review` | An action that the author revised gets an approval | The trigger `changeset_submit` replaces them in the same write. Only that submit replaces an action, with no check of the clock (the marker `changeset.replacing` is set once for each revision, in its submit): an older action that comes back to review after the submit stays for the person. |
 | A new revision with a new reason | The reason that the person saw for an older revision is lost | The table `changeset_revision` keeps the reason and the submit time of each submitted revision. Its rows do not change. |
+| A withdraw that does not name who withdrew, or a later change of `withdrawn_by` | The document names the wrong actor | The triggers `changeset_withdraw_by` and `changeset_withdrawn_by` (migration 47) refuse the write. |
 | A withdraw while an action is open | A withdrawn changeset applies an action | The trigger `changeset_withdraw` cancels each open action and each draft action in the same write. A withdrawn changeset stays withdrawn. |
 | A withdraw while the ledger has a row in `writing` for an action (section 5.5) | The provider changed the messages, and recovery cannot record the result | The trigger `changeset_withdraw` (migration 11) keeps such an action `approved`. The trigger `action_state` then allows only `applied` or `failed`, as the row ends. Migration 11 replaces the mark `applying` of migration 9 with the row. |
 | A move to `applied`, `failed` or `undone` | A state with no ledger entry, or an apply that changes the decision | Only the state of the ledger entry moves the action: the trigger `ledger_state` writes the same state to the action, and the trigger `action_state` refuses the move when the entry has another state. The action keeps the decision that approved it (section 7.1). |
