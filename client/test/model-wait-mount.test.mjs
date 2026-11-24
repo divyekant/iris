@@ -66,3 +66,41 @@ test("the model wait note goes when its time comes, and the brief reads the stat
     globalThis.fetch = saved;
   }
 });
+
+test("a slow poll that started before Try now does not bring the wait note back", async () => {
+  const saved = globalThis.fetch;
+  const waiting = { ...fx.status, model_retry_at: new Date(Date.now() + 3_600_000).toISOString() };
+  let release;
+  let polls = 0;
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    if (u === "/api/model/try") return json({ ...fx.status });
+    if (u === "/api/status") {
+      polls += 1;
+      // The first poll reads the old status and answers only after the try.
+      if (polls === 1) {
+        await new Promise((r) => (release = r));
+        return json(waiting);
+      }
+      return json({ ...fx.status });
+    }
+    return json(u.startsWith("/api/brief") ? fx.brief : []);
+  };
+  const view = await mount("/src/views/Brief.svelte", { brief: fx.brief, status: waiting, now: NOW, poll: 10 });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  try {
+    // Not syncing: the brief polls each 12 * 10 ms.
+    for (let i = 0; i < 40 && polls === 0; i++) await wait(10);
+    assert.equal(polls, 1, "the first poll waits");
+    view.target.querySelector(".model-wait button").click();
+    await wait(10);
+    assert.equal(view.target.querySelector(".model-wait"), null);
+    release();
+    await wait(5);
+    assert.equal(view.target.querySelector(".model-wait"), null);
+  } finally {
+    view.destroy();
+    globalThis.fetch = saved;
+  }
+});

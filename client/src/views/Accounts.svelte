@@ -11,7 +11,26 @@
   let { status: initial, poll = 60000 }: { status: Status; poll?: number } = $props();
   // svelte-ignore state_referenced_locally
   let status = $state(initial);
-  $effect(() => (poll ? every(() => get<Status>("status"), (s) => (status = s), poll) : undefined));
+
+  // Each read of the status takes a number at its start, and only a read that started after the
+  // shown status replaces it. The answer of a removal comes after its commit, so it drops each read
+  // that started before it: a slow poll never puts back an account that the removal removed.
+  let started = 0;
+  let shown = 0;
+  async function read(): Promise<[number, Status]> {
+    const n = ++started;
+    return [n, await get<Status>("status")];
+  }
+  function take([n, next]: [number, Status]) {
+    if (n <= shown) return;
+    shown = n;
+    status = next;
+  }
+  function after(next: Status) {
+    shown = started;
+    status = next;
+  }
+  $effect(() => (poll ? every(read, take, poll) : undefined));
 
   let names = $derived(accountNames(status.accounts));
 
@@ -20,43 +39,50 @@
   let busy = $state(false);
   let error = $state("");
   let removed = $state("");
+  // The accounts that the person removed and that the status still lists (in state removing).
+  let going: Account[] = $state([]);
 
   // The removal can end at the engine although its answer is lost: then a fresh status tells.
   let unknown = $state(false);
   const UNKNOWN = "Iris could not tell if the account is removed. Check again before you remove it again.";
 
-  // Each status, from an answer, a check or a poll: the question of an account that is gone or in
-  // a removal closes. Gone: the delete ended. Removing: the engine ends the delete, and the line says so.
+  // In a removal: the account is gone from the status, or it is in state removing.
+  const inRemoval = (a: Account, s: Status) => {
+    const now = s.accounts.find((x) => x.id === a.id);
+    return !now || now.state === "removing";
+  };
+
+  // Each status, from an answer, a check or a poll. The question of an account in a removal closes,
+  // and the account joins `going`. An account of `going` that the status no longer lists is removed.
   $effect(() => {
     const a = asking;
-    if (!a) return;
-    const now = status.accounts.find((x) => x.id === a.id);
-    if (now && now.state !== "removing") return;
-    removed = now ? "" : a.address;
-    asking = null;
-    unknown = false;
-    error = "";
+    if (a && inRemoval(a, status)) {
+      if (!going.some((g) => g.id === a.id)) going = [...going, a];
+      asking = null;
+      unknown = false;
+      error = "";
+    }
+    const gone = going.filter((g) => !status.accounts.some((x) => x.id === g.id));
+    if (gone.length) {
+      removed = gone.map((g) => g.address).join(", ");
+      going = going.filter((g) => !gone.includes(g));
+    }
   });
-
-  // Take `next` as the status. Gives false if `a` is in `next` and not in a removal.
-  function show(a: Account, next: Status): boolean {
-    status = next;
-    unknown = false;
-    const now = next.accounts.find((x) => x.id === a.id);
-    return !now || now.state === "removing";
-  }
 
   async function remove(a: Account) {
     busy = true;
     error = "";
     try {
       // The engine answers after the delete of the mail, with the new status.
-      show(a, await post<Status>(`accounts/${a.id}/remove`, { address: a.address }));
+      after(await post<Status>(`accounts/${a.id}/remove`, { address: a.address }));
+      unknown = false;
     } catch (e) {
       // A refusal, a lost answer or a time-out: the status tells what happened.
       const why = (e as Error).message;
       try {
-        if (!show(a, await get<Status>("status"))) error = why;
+        take(await read());
+        unknown = false;
+        if (!inRemoval(a, status)) error = why;
       } catch {
         unknown = true;
         error = UNKNOWN;
@@ -66,11 +92,12 @@
     }
   }
 
-  async function check(a: Account) {
+  async function check() {
     busy = true;
     error = "";
     try {
-      show(a, await get<Status>("status"));
+      take(await read());
+      unknown = false;
     } catch {
       error = UNKNOWN;
     } finally {
@@ -136,7 +163,7 @@
             </p>
             <p class="actions">
               {#if unknown}
-                <button type="button" class="quiet" onclick={() => check(a)} disabled={busy}>{busy ? "Checking…" : "Check again"}</button>
+                <button type="button" class="quiet" onclick={check} disabled={busy}>{busy ? "Checking…" : "Check again"}</button>
               {:else}
                 <button type="button" class="danger" onclick={() => remove(a)} disabled={busy}>{busy ? "Removing…" : "Remove"}</button>
               {/if}

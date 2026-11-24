@@ -69,6 +69,10 @@
   // Two loads of the brief can answer out of order (a poll, an answer at the gate):
   // each takes a ticket, and a brief shows only while its ticket is the newest.
   const briefTicket = newest();
+  // The status: a poll shows its answer only if it started after the shown status. An answer of
+  // "Try now" comes after its change, so it drops each poll that started before it.
+  let statusStarted = 0;
+  let statusShown = 0;
 
   // Load the brief again while it is open: every 5 seconds while the first sync
   // runs (spec 1 section 4.2), then every minute for new mail.
@@ -78,9 +82,9 @@
     return every(
       () => {
         const fresh = briefTicket();
-        return Promise.all([loadBrief(), get<Status>("status"), fresh] as const);
+        return Promise.all([loadBrief(), get<Status>("status"), fresh, ++statusStarted] as const);
       },
-      ([b, s, fresh]) => (fresh() && (brief = b), (status = s)),
+      ([b, s, fresh, n]) => (fresh() && (brief = b), n > statusShown && ((statusShown = n), (status = s))),
       syncing ? poll : poll * 12,
     );
   });
@@ -248,7 +252,7 @@
 </div>
 
 {#if needsModel(status)}<NoModel />{/if}
-{#if status?.model_retry_at}<ModelWait at={status.model_retry_at} onstatus={(s) => (status = s)} />{/if}
+{#if status?.model_retry_at}<ModelWait at={status.model_retry_at} onstatus={(s) => ((statusShown = statusStarted), (status = s))} />{/if}
 
 {#if arrived.length}
   <div class="arrivals">
