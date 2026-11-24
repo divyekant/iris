@@ -56,6 +56,7 @@ fn setup(dir: &TempDir) -> (Store, i64) {
                 ("DRAFT", "DRAFT", "system"),
                 ("UNSENT", "UNSENT", "system"),
                 ("SENT_COPY", "SENT_COPY", "system"),
+                ("SPAM", "SPAM", "system"),
             ],
         )
         .unwrap();
@@ -133,6 +134,8 @@ fn a_watch_skips_mail_that_is_not_a_safe_new_arrival() {
         acc,
         msg("d3", NOW, &["INBOX", "SENT_COPY"], "x", true),
     );
+    // The label SPAM before the check (decision D33).
+    put(&store, acc, msg("s", NOW, &["INBOX", "SPAM"], "x", true));
     let marked = put(&store, acc, msg("e", NOW, &["INBOX"], "x", true));
     let _hostile_sender = put(&store, acc, msg("f", NOW, &["INBOX"], "x", true));
     let gone = put(&store, acc, msg("g", NOW, &["INBOX"], "x", true));
@@ -317,9 +320,6 @@ fn a_watch_waits_for_the_link_check() {
 fn a_match_that_becomes_hostile_gives_no_notice() {
     let dir = TempDir::new("later-mark");
     let (store, acc) = setup(&dir);
-    store
-        .put_labels(acc, &[("SPAM", "SPAM", "system")])
-        .unwrap();
     let cases: [(&str, &str); 3] = [
         (
             "mark",
