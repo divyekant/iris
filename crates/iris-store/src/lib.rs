@@ -168,6 +168,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_43.sql"),
     include_str!("schema_44.sql"),
     include_str!("schema_45.sql"),
+    include_str!("schema_46.sql"),
     include_str!("schema_47.sql"),
 ];
 

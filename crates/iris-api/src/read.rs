@@ -663,8 +663,20 @@ fn places(now: i64) -> Vec<String> {
 /// strangers the person declined: an open commitment whose counterparty
 /// (you owe) or owner (owed to you) is declined, or an active conversation
 /// with a declined participant and no stranger that waits. These items are
-/// in no section of the brief (specification 1, section 6.7).
+/// the list of declined senders (specification 1, section 6.7), so each
+/// declined sender with an item keeps "Ask again" and "Accept".
+pub(crate) fn declined_list_sql() -> String {
+    declined_with("1")
+}
+
+/// The items of [`declined_list_sql`] that are in no section of the brief:
+/// a conversation with a known person is in Conversations (decision D30).
 pub(crate) fn declined_sql() -> String {
+    declined_with(&format!("NOT {}", participant_sql("= 'person'")))
+}
+
+/// [`declined_list_sql`] with the extra condition `talk` on a conversation.
+fn declined_with(talk: &str) -> String {
     let counter = kind_sql("doc", "$.counterparty.sender");
     let owner = kind_sql("doc", "$.owner.sender");
     format!(
@@ -672,9 +684,9 @@ pub(crate) fn declined_sql() -> String {
              (json_extract(doc, '$.direction') = 'you_owe' AND {counter} = 'declined')
           OR (json_extract(doc, '$.direction') = 'owed_to_you' AND {owner} = 'declined')))
           OR (form = 'conversation' AND status = 'active'
-              AND {} AND NOT {}))",
+              AND {} AND NOT {} AND {talk}))",
         participant_sql("= 'declined'"),
-        participant_sql("= 'stranger'")
+        participant_sql("= 'stranger'"),
     )
 }
 
@@ -776,13 +788,15 @@ fn sections_of(now: i64) -> [(String, String); 6] {
         "created_at, id".to_string(),
     );
     let conversations = (
-        // A conversation with a stranger is only in `strangers` (dk, 2026-11-16),
-        // and a conversation with a declined stranger is in no section.
+        // A conversation with a stranger is only in `strangers` (dk, 2026-11-16).
+        // A conversation with a declined stranger is in no section, unless a
+        // known person is in it too (decision D30, issue 264).
         format!(
             "form = 'conversation' AND status = 'active'
              AND (json_extract(doc, '$.new') > 0 OR json_extract(doc, '$.your_turn') = 1)
-             AND NOT {}",
-            participant_sql("IN ('stranger', 'declined')")
+             AND NOT {stranger_participant} AND NOT ({} AND NOT {})",
+            participant_sql("= 'declined'"),
+            participant_sql("= 'person'")
         ),
         "unixepoch(json_extract(doc, '$.latest.at'), 'subsec') DESC, id DESC".to_string(),
     );

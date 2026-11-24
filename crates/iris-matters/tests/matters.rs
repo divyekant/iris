@@ -230,12 +230,11 @@ fn the_triggers_hold_the_member_rules() {
         &format!("UPDATE matter_item SET item_id = 4 WHERE matter_id = {m}")
     )
     .is_err());
-    // A decided matter does not change and is not deleted.
+    // A decided matter does not go back to a proposal and is not deleted
+    // (migration 46 lets the person edit a confirmed matter: see edit.rs).
     confirm(&b.store, m, "Trip", &[1], 2).unwrap();
     for text in [
-        format!("UPDATE matter SET title = 'x' WHERE id = {m}"),
         format!("UPDATE matter SET status = 'proposed', decided_at = NULL WHERE id = {m}"),
-        format!("UPDATE matter_item SET kept = 1 WHERE matter_id = {m}"),
         format!("DELETE FROM matter WHERE id = {m}"),
         "INSERT INTO matter(title, status, model, prompt, created_at, updated_at, decided_at)
          VALUES ('x', 'confirmed', 'm', 'p', 0, 0, 0)"
