@@ -47,15 +47,22 @@ test("grantView: a switch takes only its exact rule; each other grant of the job
   // Each verb of a group is a verb that a rule can allow, and no verb is in two groups.
   const all = s.GRANTS.flatMap((g) => g.verbs);
   assert.equal(new Set(all).size, all.length);
-  for (const v of all) assert.ok(!["draft", "send"].includes(v));
+  assert.ok(!all.includes("send"), "no rule can allow a send");
+  // A draft switch is a draft rule with recipients = "thread" (decision D3); a draft rule to each address is its own line.
+  const replies = s.GRANTS.find((g) => g.key === "replies");
+  const draft = { ...grant(30, ["draft"]), when: { author: "agent", recipients: "thread" } };
+  assert.ok(s.isSwitch(draft, replies));
+  assert.ok(!s.isSwitch(grant(31, ["draft"]), replies), "no recipients condition");
+  assert.ok(!s.isSwitch({ ...draft, when: { ...draft.when, sender: "@x.example" } }, replies), "one more condition");
+  assert.ok(!s.isSwitch({ ...draft, when: { author: "agent", recipients: "all" } }, replies));
 });
 
 test("a switch adds the grant of its group, with the version that the page saw; off removes the rule", async () => {
   const after = policy([grant(1, ["trash"]), grant(20, [...s.GRANTS[0].verbs])]);
   const asked = serve((path) => [200, path === "policy/grant" ? after : path === "policy" ? policy([grant(1, ["trash"])]) : policy([])]);
   const view = await mount("/src/views/Grants.svelte", { job: job() });
-  await until(() => switches(view).length === 3);
-  assert.deepEqual(switches(view).map((x) => x.checked), [false, false, true]);
+  await until(() => switches(view).length === 4);
+  assert.deepEqual(switches(view).map((x) => x.checked), [false, false, true, false]);
   switches(view)[0].click();
   await until(() => asked.length === 2);
   assert.deepEqual(asked[1], ["policy/grant", { version: 7, job: "j-12", verbs: [...s.GRANTS[0].verbs] }]);
@@ -69,7 +76,7 @@ test("a switch adds the grant of its group, with the version that the page saw; 
 test("a refused switch shows the policy as it is, in both directions, and the page reads the policy again", async () => {
   const asked = serve((path) => (path === "policy" ? [200, { ...policy([grant(1, ["trash"])]), version: 7 + asked.length }] : [409, { error: "The policy changed. Load it again." }]));
   const view = await mount("/src/views/Grants.svelte", { job: job() });
-  await until(() => switches(view).length === 3);
+  await until(() => switches(view).length === 4);
   for (const i of [0, 2]) {
     const was = switches(view)[i].checked;
     switches(view)[i].click();
@@ -85,8 +92,8 @@ test("a refused switch shows the policy as it is, in both directions, and the pa
 test("a conditioned grant shows as its own line with its condition and Remove; a refusal shows the reason", async () => {
   serve((path) => (path === "policy" ? [200, policy([{ ...grant(5, ["trash"]), when: { author: "agent", sender: "@shop.example" } }, grant(6, ["trash"], "j-1")])] : [409, { error: "The policy changed. Load it again." }]));
   const view = await mount("/src/views/Grants.svelte", { job: job() });
-  await until(() => switches(view).length === 3);
-  assert.deepEqual(switches(view).map((x) => x.checked), [false, false, false], "the trash switch is off: the grant has a condition");
+  await until(() => switches(view).length === 4);
+  assert.deepEqual(switches(view).map((x) => x.checked), [false, false, false, false], "the trash switch is off: the grant has a condition");
   assert.match(text(view.target), /From @shop\.example\. From your policy file, rule 5/);
   assert.doesNotMatch(text(view.target), /rule 6/, "a grant of another job does not show");
   [...view.target.querySelectorAll("button")].find((b) => text(b).includes("Remove")).click();
@@ -98,7 +105,7 @@ test("a conditioned grant shows as its own line with its condition and Remove; a
 test("an allow rule of the whole policy shows, and the page does not say that the agent asks before each change", async () => {
   serve(() => [200, policy([{ ...grant(7, ["archive"]), job: null, when: {} }])]);
   const view = await mount("/src/views/Grants.svelte", { job: job() });
-  await until(() => switches(view).length === 3);
+  await until(() => switches(view).length === 4);
   assert.match(text(view.target), /Also allowed by your whole policy/);
   assert.match(text(view.target), /unless a grant of this job or a rule of your whole policy below allows it/);
   assert.match(text(view.target), /rule 7/);
@@ -108,8 +115,8 @@ test("an allow rule of the whole policy shows, and the page does not say that th
 test("a job that ended adds no grant, but its grants can still go; observe mode says that nothing applies", async () => {
   serve(() => [200, { ...policy([grant(1, ["trash"])]), mode: "observe" }]);
   const view = await mount("/src/views/Grants.svelte", { job: job("done") });
-  await until(() => switches(view).length === 3);
-  assert.deepEqual(switches(view).map((x) => x.disabled), [true, true, false]);
+  await until(() => switches(view).length === 4);
+  assert.deepEqual(switches(view).map((x) => x.disabled), [true, true, false, true]);
   assert.match(text(view.target), /The job ended, so these grants allow nothing more\./);
   assert.match(text(view.target), /observe mode/);
   view.destroy();
@@ -125,7 +132,7 @@ test("a failed read of the policy shows the reason and Try again, not an empty l
   assert.equal(switches(view).length, 0);
   ok = true;
   [...view.target.querySelectorAll("button")].find((b) => text(b).includes("Try again")).click();
-  await until(() => switches(view).length === 3);
+  await until(() => switches(view).length === 4);
   assert.equal(view.target.querySelector("[role=alert]"), null);
   view.destroy();
 });
@@ -133,7 +140,7 @@ test("a failed read of the policy shows the reason and Try again, not an empty l
 test("the note never says that each change needs you: also with a grant of the job and no rule of the whole policy", async () => {
   serve(() => [200, policy([grant(1, ["trash"])])]);
   const view = await mount("/src/views/Grants.svelte", { job: job() });
-  await until(() => switches(view).length === 3);
+  await until(() => switches(view).length === 4);
   const note = text(view.target.querySelector(".note"));
   assert.match(note, /unless a grant of this job or a rule of your whole policy below allows it/);
   assert.doesNotMatch(note, /before each change to your mail\./);
@@ -147,12 +154,12 @@ test("a change with a lost answer, then a failed read: the switches hide, and th
     return ++reads === 1 ? [200, policy([])] : reads === 2 ? [500, { error: "The store is busy." }] : [200, policy([grant(20, [...s.GRANTS[0].verbs])])];
   });
   const view = await mount("/src/views/Grants.svelte", { job: job() });
-  await until(() => switches(view).length === 3);
+  await until(() => switches(view).length === 4);
   switches(view)[0].click();
   await until(() => (view.flushSync(), switches(view).length === 0));
   assert.match(text(view.target.querySelector("[role=alert]")), /No answer from the engine\..*Iris cannot read your policy now.*The store is busy\./);
   [...view.target.querySelectorAll("button")].find((b) => text(b).includes("Try again")).click();
-  await until(() => (view.flushSync(), switches(view).length === 3));
+  await until(() => (view.flushSync(), switches(view).length === 4));
   assert.ok(switches(view)[0].checked, "the grant that the lost answer made shows as on");
   assert.equal(view.target.querySelector("[role=alert]"), null, "no old reason stays after the read");
   view.destroy();
