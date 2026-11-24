@@ -13,7 +13,7 @@ and a `From` with the account address only (send spec
 file, cannot send a blind copy, and the recipients see an address with
 no name. A mail with no name looks like spam.
 
-The owner decided (`docs/decisions.md`, entry D12):
+The owner decided (`docs/decisions.md`, entry D12, items D4 and D5):
 
 - D4, option A: attachments yes, HTML no. The body stays plain text.
 - D5, option A: a display name and `Bcc`. Send-as aliases come later,
@@ -25,8 +25,8 @@ The owner decided (`docs/decisions.md`, entry D12):
    the name, the type, the SHA-256 and the size of each attachment.
 2. A draft can have `bcc` recipients. The approval binds to them, and the
    review shows them.
-3. The `From` of each new draft has the display name of the owner, when
-   Iris knows it.
+3. The `From` of each new Gmail draft has the display name of the owner,
+   when Iris knows it.
 4. Each rule of the send spec stays true: no second send, the read back,
    the hash check, the hold and the checks before the send.
 
@@ -40,6 +40,10 @@ The owner decided (`docs/decisions.md`, entry D12):
 - A forward of an attachment of a received message.
 - A setting for the display name. Iris takes the name from the sent mail
   of the owner (section 3). A limit issue records this.
+- The display name of an Outlook draft. The Outlook provider gives the
+  label `SENT` only to a copy of a mail that Iris sent, so the mirror has
+  no safe source of the name. An Outlook draft keeps the address only. A
+  limit issue records this.
 - Display names of the recipients. `To`, `Cc` and `Bcc` stay bare
   addresses.
 - A cleanup of attachment files that no draft uses. A limit issue
@@ -63,9 +67,10 @@ The content of send spec section 1 gets two optional fields:
   leaves `bcc`, as an address in `to` leaves `cc`. A draft still needs
   one or more addresses in `to`.
 - `attachments`: 0 to 10 entries, in the order of the author. Each entry:
-  - `name`: 1 to 255 characters, with no control character, no `/` and
-    no `\`, and not `.` or `..`. The normal form has no space at the
-    ends.
+  - `name`: 1 to 255 characters, with no control character, no `/`, no
+    `\` and no `=?`, and not `.` or `..`. A reader decodes `=?..?=` in a
+    file name as an encoded word, so such a name does not read back the
+    same (as a subject, #270). The normal form has no space at the ends.
   - `type`: a MIME type `type/subtype` in lower case, 127 characters or
     fewer, with only the characters of an RFC 2045 token. The type
     `multipart/*` and `message/*` are refused, because a reader opens
@@ -73,8 +78,8 @@ The content of send spec section 1 gets two optional fields:
   - `sha256`: the SHA-256 of the file, 64 lower case hexadecimal
     characters.
   - `size`: the size of the file in bytes, 1 or more.
-  - The sum of the sizes is at most the limit of the provider of the
-    account (section 5).
+  - The bound of the size of the message (section 5) is at most the
+    limit of the provider of the account.
 
 The content hash (send spec section 1) gets the fields `bcc` and
 `attachments`, in the canonical JSON with sorted keys. An empty `bcc`
@@ -112,8 +117,8 @@ message uses, and the backup copies only the content files of messages.
 
 ### 3. The display name
 
-At the apply of a `draft` action, Iris takes the display name of the
-owner: the `From` name of the newest message in the mirror that is from
+At the apply of a `draft` action of a Gmail account, Iris takes the
+display name of the owner: the `From` name of the newest message in the mirror that is from
 the account address and has the label `SENT`, from the `header` table.
 A name with a control character, or with more than 128 characters, is
 not used. With no name, `From` is the address only, as before.
@@ -168,14 +173,37 @@ release sends the `raw` bytes of the draft row.
 
 ### 5. Size limits
 
-| Provider | Most bytes of all attachments of one draft | Reason |
-|---|---|---|
-| Gmail | 10 MiB (10,485,760) | The JSON `raw` field of `drafts.create` and `drafts.send` holds the base64 text of the message (assumption 3). Iris holds a few copies of the message in memory during the apply. |
-| Outlook | 1.5 MiB (1,572,864) | Graph takes the message as base64 text in one request of at most 4 MB (assumption 2). A body of 256 KiB and 1.5 MiB of files fit. |
+The release reads the draft back at the provider (send spec, section 5,
+step 2). `Provider::draft_raw` keeps at most `DRAFT_LIMIT` (4 MiB) of a
+draft: a larger draft gives no raw message, and the release denies the
+send. So the whole message, not only the files, must fit the limit.
 
-The submit takes the limit of the provider of the account of the draft,
-and denies a larger sum ("the attachments of a draft have at most N
-bytes"). The API refuses a request body over 10 MiB with HTTP 413.
+| Provider | Most bytes of the message | Reason |
+|---|---|---|
+| Gmail | 4 MiB (4,194,304), `DRAFT_LIMIT` | The read back of the release keeps at most this size. |
+| Outlook | 2,900,000 | Graph takes the message as base64 text in one request of at most 4 MB (assumption 2). 2,900,000 bytes give at most 3,866,668 characters of base64. |
+
+The submit computes an upper bound of the size of the message that
+compose writes, and denies a draft whose bound is over the limit of the
+provider ("the mail is too large for <provider>: remove a file"). The
+bound is:
+
+- 64 KiB for the headers of the message and of each part, apart from
+  `In-Reply-To` and `References`,
+- three bytes for each byte of the body (quoted-printable at most
+  triples a byte),
+- for each file, 78 bytes for each 57 bytes of the file, rounded up
+  (base64 lines of 76 characters and CRLF).
+
+Compose never writes more than the bound plus the size of the reply
+headers. The reply headers come from the parent at the apply (send spec,
+section 3), so the apply checks the size of the bytes that compose made,
+and denies a larger message with the same reason, before the claim. With a body of 256 KiB, the
+files of a Gmail draft can have about 2.2 MiB, and of an Outlook draft
+about 1.4 MiB. The memory of the apply holds a few copies of a message
+of 4 MiB at most.
+
+The API refuses a request body over 4 MiB with HTTP 413.
 
 ### 6. Flags and the review
 
@@ -214,14 +242,37 @@ form content.
 
 Iris reads the copy of the sender only. It cannot see if a `Bcc`
 address got the mail, or if the copy of a `To` address shows the `Bcc`
-header. So:
+header. So each provider gets a `Bcc` gate of its own, apart from the
+send switch:
 
-- The owner check of the send switch (issue #302 for Gmail, issue #649
-  for Outlook) gets two steps for each provider: send one mail with a `To` test address and a `Bcc` test
-  address, then confirm that the `Bcc` address got the mail and that the
-  copy of the `To` address has no `Bcc` header. The send switch stays
-  off until the owner runs `iris sending on` after this check. No send
-  with `bcc` leaves before it.
+- A new table holds the providers whose owner check of `Bcc` passed
+  (migration: the next free number on `develop` at the build):
+
+  ```sql
+  CREATE TABLE bcc_check (
+    provider TEXT PRIMARY KEY,   -- 'gmail' or 'outlook'
+    checked_at INTEGER NOT NULL  -- milliseconds since the Unix epoch
+  );
+  ```
+
+  The migration adds no row. So a store whose send switch is already on
+  still has no `Bcc` gate open.
+- The owner check (issue #302 for Gmail, issue #649 for Outlook): send
+  one mail from the provider with a `To` test address and a `Bcc` test
+  address, from Gmail or Outlook itself. Confirm that the `Bcc` address
+  got the mail and that the copy of the `To` address has no `Bcc`
+  header. Then run `iris sending bcc <gmail|outlook>`. As
+  `iris sending on`, it needs a terminal and a typed `yes`, and it opens
+  the store directly. It inserts the row of the provider.
+- The release of a send whose draft content has `bcc` reads the row of
+  the provider of the account, in the transaction of the claim. With no
+  row, the claim does not happen: the send stays `held`, the release
+  gives the outcome "waits for the Bcc check", and the outbox card says
+  "Waits for the Bcc check of Gmail." (or Outlook). A held send expires
+  14 days after its submit, as each held send does. A send with no `bcc`
+  does not read the gate.
+- No command removes a row. The owner turns all sends off with
+  `iris sending off`.
 - If the sent copy has no `Bcc` header, the completion takes the
   approved `bcc` (section 4), and the ledger entry gets the note "The
   sent copy shows no Bcc. Iris cannot confirm the blind copies." The
@@ -274,8 +325,10 @@ the drafts that the person changes at Gmail.
 | A crash after the claim of a draft with attachments | Recovery makes the same bytes from the post and the files | crash test |
 | A backup, then a restore, with a draft action that names a file | The restore has the file; the apply sends | backup test |
 | Two presses with the same key, the second with another `bcc` or file | 409 "This key belongs to another mail." | API test |
+| A send with `bcc` while the provider has no `bcc_check` row, also with the send switch on | The send stays `held`; the outbox says it waits for the Bcc check | release test |
+| A draft whose size bound is over the limit of the provider | Submit denies it ("the mail is too large ...") | unit test; property test that compose never passes the bound |
 | The sent copy has no `Bcc` header | The ledger note "The sent copy shows no Bcc. Iris cannot confirm the blind copies." | unit test |
-| A request body over 10 MiB to `POST /api/attachments` | HTTP 413, and no file | API test |
+| A request body over 4 MiB to `POST /api/attachments` | HTTP 413, and no file | API test |
 | A draft of an older build (no `bcc`, no `attachments`) | The same hash as before | unit test with a fixed hash |
 | Any other input | The submit or the apply denies the action, and Iris sends nothing | |
 
@@ -296,7 +349,8 @@ the drafts that the person changes at Gmail.
 - `docs/specs/2026-11-16-send.md`, `docs/specs/2026-11-17-write.md`
   section 2, `docs/spec/02-changeset-policy-ledger.md`
   section 4 and `docs/spec/schema/changeset.schema.json`.
-- No migration.
+- `crates/iris-store`: one migration, the table `bcc_check`.
+- `crates/iris`: the command `iris sending bcc <provider>`.
 
 ## Assumptions
 
@@ -317,7 +371,7 @@ the drafts that the person changes at Gmail.
    owner's Mac. If Graph drops `Bcc` or a file from the draft, the read
    back gives other content, and the release denies the send: Iris sends
    nothing. The recipient side is the check of section 6.2.
-3. Gmail takes a `raw` message of 10 MiB of files in the JSON body of
+3. Gmail takes a `raw` message of 4 MiB in the JSON body of
    `drafts.create` and `drafts.send`. Evidence: Gmail API reference,
    `users.drafts.create` (the message size limit is 35 MB). `pending` on
    the owner's Mac. If Gmail refuses the size, the call is a definite
@@ -361,8 +415,9 @@ scripts/local-ci/run.sh
 
 ## Rollout
 
-None. No migration, no flag. The send switch stays off until the owner
-check of #302.
+1. The migration of `bcc_check` runs at the first start. It adds no row.
+2. The send switch stays off until the owner check of #302. Each `Bcc`
+   gate stays closed until the owner runs `iris sending bcc <provider>`.
 
 ## Risks
 
@@ -370,14 +425,16 @@ check of #302.
   each `bcc` address, and `new_recipient` marks a new one.
 - A large file raises the memory of the apply for some seconds. The
   limits of section 5 bound it.
-- Rollback: revert the code. A draft with `bcc` or attachments that a
-  newer build made does not read back in an older build, so the older
-  build denies its send (the safe result).
+- Rollback: the migration goes forward only. An older program refuses a
+  store with the new migration (`UnknownSchema`). Fix forward, or restore
+  the backup copy that the store makes before each migration (spec 1,
+  section 5.5). A draft with `bcc` or attachments does not read back in
+  an older build, so the older build denies its send (the safe result).
 
 ## Plan
 
 1. Spec (this PR).
 2. `iris-compose`: content, checks, compose, read back and hash.
-3. Engine: submit limits, flags, apply (files and name), API upload and
-   draft view, MCP text, open model.
+3. Engine: submit limits, flags, apply (files and name), the `Bcc` gate
+   and its command, API upload and draft view, MCP text, open model.
 4. Client: write view, review and outbox, with a before and after page.
