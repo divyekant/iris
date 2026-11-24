@@ -99,6 +99,17 @@ test("the difference names the effect of each rule, also when only the effect ch
   assert.match(t, new RegExp(`Removed ${rule.name} Never`));
 });
 
+test("two removed rules with one name and one effect show their verbs and conditions", async () => {
+  const { verbs } = await load("/src/rules.ts");
+  const [rule] = fx.policy.rules;
+  const a = { ...rule, id: 7, verbs: ["archive"], when: { sender: "news@shop.example" } };
+  const b = { ...rule, id: 8, verbs: ["trash"], when: { sender: "deals@shop.example" } };
+  const file = { ...fx.policy.file, mode: same.mode, added: [], removed: [a, b], changed: [] };
+  const t = text(await render("/src/views/Rules.svelte", { policy: { ...same, file } }));
+  assert.match(t, new RegExp(`Removed ${rule.name} .*${verbs(a)} From news@shop[.]example`));
+  assert.match(t, new RegExp(`Removed ${rule.name} .*${verbs(b)} From deals@shop[.]example`));
+});
+
 test("the difference shows a change of the author or the date of a rule", async () => {
   const [rule] = fx.policy.rules;
   const after = { ...rule, by: "proposal", added: "2026-11-12" };
