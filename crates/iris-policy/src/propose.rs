@@ -226,7 +226,7 @@ pub fn dismiss(store: &Store, id: i64, now: i64) -> Result<bool> {
 
 /// What a pass read last. A pass runs again only when it changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Mark([i64; 6]);
+pub struct Mark([i64; 8]);
 
 /// Writes the open proposals again from the decided actions, if the
 /// decisions, the active policy or the hour changed since `last`. Gives the
@@ -336,6 +336,15 @@ fn mark(tx: &Connection, now: i64) -> Result<Mark> {
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
     let version = crate::active(tx)?.version.unwrap_or(0);
+    // A new open of a source mail (decision D12). A row never goes.
+    let opens: i64 = tx.query_row("SELECT count(*) FROM use_open", [], |r| r.get(0))?;
+    // A dismiss: a dismissed proposal is never proposed again, and a
+    // dismissed domain gives its address proposals back.
+    let closed: i64 = tx.query_row(
+        "SELECT count(*) FROM rule_proposal WHERE state <> 'open'",
+        [],
+        |r| r.get(0),
+    )?;
     // Each hour too, for a change of a fact that a rule reads (a sender kind).
     Ok(Mark([
         count,
@@ -343,6 +352,8 @@ fn mark(tx: &Connection, now: i64) -> Result<Mark> {
         undone,
         applied,
         version,
+        opens,
+        closed,
         now.div_euclid(3600),
     ]))
 }
@@ -359,6 +370,9 @@ struct Count {
     no: i64,
     /// An approved action with no hostile mail has the key.
     sourced: bool,
+    /// The addresses of the counted approvals of a domain key. A domain
+    /// proposal needs two or more: with one, the address proposal covers it.
+    from: BTreeSet<String>,
 }
 
 /// The result of a pass: the proposals of now (the key and the number of
@@ -444,13 +458,14 @@ pub(crate) fn pass(conn: &Connection, now: i64) -> Result<Found> {
         // An allow rule with one condition matches an action only when each
         // message has the value, so these two keys are the only rules that
         // can change this action.
+        let address = |m: &Facts| {
+            crate::check_sender(m.sender.clone())
+                .ok()
+                .filter(|s| !s.starts_with('@'))
+        };
         let keys = [
-            same(&messages, |m| {
-                crate::check_sender(m.sender.clone())
-                    .ok()
-                    .filter(|s| !s.starts_with('@'))
-            })
-            .map(|s| ("sender", s)),
+            same(&messages, address).map(|s| ("sender", s)),
+            same(&messages, |m| address(m).and_then(|a| domain(&a))).map(|d| ("sender", d)),
             same(&messages, |m| Some(kind(m))).map(|k| ("sender_kind", k.name().to_string())),
         ];
         for (cond, value) in keys.into_iter().flatten() {
@@ -469,13 +484,19 @@ pub(crate) fn pass(conn: &Connection, now: i64) -> Result<Found> {
             policy.rules.push(rule);
             let changed = !base && allows(&policy, &action, &messages);
             policy.rules.pop();
+            let is_domain = value.starts_with('@');
             let c = counts.entry((verb, cond, value)).or_default();
             // An action on hostile mail gives no candidate: Iris does not
             // propose a rule from it, even one that the hard limits allow.
             c.sourced |= approved && !hostile;
             // An approval on hostile mail does not count either; a refusal does.
             match (changed, approved) {
-                (true, true) if !hostile => c.yes += 1,
+                (true, true) if !hostile => {
+                    c.yes += 1;
+                    if is_domain && c.from.len() < 2 {
+                        c.from.extend(messages.iter().filter_map(address));
+                    }
+                }
                 (true, false) => c.no += 1,
                 _ => {}
             }
@@ -485,6 +506,7 @@ pub(crate) fn pass(conn: &Connection, now: i64) -> Result<Found> {
         if c.sourced
             && c.no == 0
             && c.yes >= MIN_APPROVALS
+            && (!value.starts_with('@') || c.from.len() >= 2)
             && !blocked.contains(&verb)
             && !decided_before(
                 conn,
@@ -508,7 +530,31 @@ pub(crate) fn pass(conn: &Connection, now: i64) -> Result<Found> {
         }
     }
     choices(conn, &mut policy, now, &mut found)?;
+    // One proposal for a domain, not one more for each of its addresses
+    // (decision D11). A dismissed domain gives the addresses back.
+    let covered: Vec<Key> = found
+        .proposals
+        .keys()
+        .filter(|(verb, cond, value, form)| {
+            cond == "sender"
+                && !value.starts_with('@')
+                && domain(value).is_some_and(|d| {
+                    found
+                        .proposals
+                        .contains_key(&(verb.clone(), cond.clone(), d, form.clone()))
+                })
+        })
+        .cloned()
+        .collect();
+    for k in covered {
+        found.proposals.remove(&k);
+    }
     Ok(found)
+}
+
+/// The domain of a checked address, as a `sender` value: `@` and the domain.
+fn domain(address: &str) -> Option<String> {
+    address.rsplit_once('@').map(|(_, d)| format!("@{d}"))
 }
 
 /// The `hide` proposals of card R5-02: one pass over the newest
@@ -568,43 +614,35 @@ fn choices(conn: &Connection, policy: &mut Policy, now: i64, found: &mut Found) 
         if sender.starts_with('@') {
             continue;
         }
-        let base = policy.attention(item, &msg, now);
-        policy.rules.push(Rule {
-            id: u32::MAX,
-            name: String::new(),
-            effect: Effect::Hide,
-            verbs: vec![],
-            when: When {
-                sender: Some(sender.clone()),
-                form: Some(form),
-                ..When::default()
-            },
-            by: By::Proposal,
-            added: String::new(),
-            job: None,
-            line: 0,
-        });
-        let with = policy.attention(item, &msg, now);
-        policy.rules.pop();
-        let changed = base == Attention::Shown && with == Attention::Hidden { rule: u32::MAX };
-        let c = counts.entry((f, sender)).or_default();
-        c.sourced |= chosen;
-        match (changed, chosen) {
-            (true, true) => c.yes += 1,
-            (true, false) => c.no += 1,
-            _ => {}
+        for value in candidates(&sender) {
+            let changed = hides(policy, &value, form, item, &msg, now);
+            let is_domain = value.starts_with('@');
+            let c = counts.entry((f, value)).or_default();
+            c.sourced |= chosen;
+            match (changed, chosen) {
+                (true, true) => {
+                    c.yes += 1;
+                    if is_domain && c.from.len() < 2 {
+                        c.from.insert(sender.clone());
+                    }
+                }
+                (true, false) => c.no += 1,
+                _ => {}
+            }
         }
     }
-    for ((f, sender), c) in counts {
+    opens(conn, policy, now, &mut counts)?;
+    for ((f, value), c) in counts {
         let key = (
             "hide".to_string(),
             "sender".to_string(),
-            sender,
+            value,
             CHOICES[f].1.name().to_string(),
         );
         if c.sourced
             && c.no == 0
             && c.yes >= MIN_APPROVALS
+            && (!key.2.starts_with('@') || c.from.len() >= 2)
             && !blocked.contains(&f)
             && !decided_before(conn, &key)?
         {
@@ -612,6 +650,100 @@ fn choices(conn: &Connection, policy: &mut Policy, now: i64, found: &mut Found) 
         }
     }
     Ok(())
+}
+
+/// The opens of the source mail (decision D12): the rows of `use_open` of
+/// the newest days that hold the newest [`MAX_ACTIONS`] opens, each day
+/// whole. The measures page writes them, on this machine only.
+/// An open of a mail is a refusal of each `hide` candidate that would hide
+/// an item whose origin is that mail. An open of a mail that cannot be read
+/// again (its header is gone) names no sender, so it refuses nothing.
+fn opens(
+    conn: &Connection,
+    policy: &mut Policy,
+    now: i64,
+    counts: &mut BTreeMap<(usize, String), Count>,
+) -> Result<()> {
+    let mut header = conn.prepare_cached("SELECT 1 FROM header WHERE message_id = ?1")?;
+    let mut st = conn
+        // `use_open` has no order inside a day, so the window takes whole
+        // days: each day from the day of the newest MAX_ACTIONS-th open.
+        .prepare(
+            "SELECT DISTINCT message_id FROM use_open WHERE day >= coalesce(
+               (SELECT day FROM use_open ORDER BY day DESC LIMIT 1 OFFSET ?1 - 1), '')",
+        )?;
+    // Streamed: the cut-off day can hold more than MAX_ACTIONS opens.
+    let ids = st.query_map([MAX_ACTIONS as i64], |r| r.get::<_, i64>(0))?;
+    for m in ids {
+        let m = m?;
+        if !header.exists([m])? {
+            continue;
+        }
+        let Some(facts) = facts(conn, m, now)? else {
+            continue;
+        };
+        // The same mail that gives no candidate gives no refusal.
+        if facts.sender_kind == SenderKind::SelfOwner || kind(&facts) == SenderKind::Hostile {
+            continue;
+        }
+        let Ok(sender) = crate::check_sender(facts.sender.clone()) else {
+            continue;
+        };
+        if sender.starts_with('@') {
+            continue;
+        }
+        let msg = facts.message();
+        for item in &facts.items {
+            let Some(f) = CHOICES.iter().position(|(_, form)| *form == item.form) else {
+                continue;
+            };
+            for value in candidates(&sender) {
+                if hides(policy, &value, item.form, item, &msg, now) {
+                    counts.entry((f, value)).or_default().no += 1;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The `sender` values of a `hide` candidate for a checked address: the
+/// address and its domain.
+fn candidates(address: &str) -> impl Iterator<Item = String> {
+    [Some(address.to_string()), domain(address)]
+        .into_iter()
+        .flatten()
+}
+
+/// True when the `hide` rule for `sender` and `form`, added to the active
+/// policy, changes the attention of `item` from shown to hidden.
+fn hides(
+    policy: &mut Policy,
+    sender: &str,
+    form: Form,
+    item: &crate::Item,
+    msg: &crate::Message,
+    now: i64,
+) -> bool {
+    let base = policy.attention(item, msg, now);
+    policy.rules.push(Rule {
+        id: u32::MAX,
+        name: String::new(),
+        effect: Effect::Hide,
+        verbs: vec![],
+        when: When {
+            sender: Some(sender.to_string()),
+            form: Some(form),
+            ..When::default()
+        },
+        by: By::Proposal,
+        added: String::new(),
+        job: None,
+        line: 0,
+    });
+    let with = policy.attention(item, msg, now);
+    policy.rules.pop();
+    base == Attention::Shown && with == Attention::Hidden { rule: u32::MAX }
 }
 
 /// The facts of the origin message of the one item of action `id`, with the
@@ -721,7 +853,10 @@ fn when(cond: &str, value: &str) -> Option<When> {
 /// The name of the rule: one line in the words of the brief.
 fn name(verb: Option<Verb>, when: &When) -> String {
     let who = match (&when.sender, when.sender_kind) {
-        (Some(s), _) => s.clone(),
+        (Some(s), _) => match s.strip_prefix('@') {
+            Some(d) => format!("anyone at {d}"),
+            None => s.clone(),
+        },
         (None, Some(SenderKind::SelfOwner)) => "you".into(),
         (None, Some(SenderKind::Person)) => "people".into(),
         (None, Some(SenderKind::Service)) => "services".into(),
@@ -921,5 +1056,13 @@ mod tests {
             ..When::default()
         };
         assert_eq!(name(None, &w), "Hide feed items from news@shop.example");
+        let w = When {
+            sender: Some("@shop.example".into()),
+            ..When::default()
+        };
+        assert_eq!(
+            name(Some(Verb::Archive), &w),
+            "Archive mail from anyone at shop.example"
+        );
     }
 }

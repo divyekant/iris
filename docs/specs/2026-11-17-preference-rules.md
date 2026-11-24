@@ -32,11 +32,9 @@ cannot tell which sender the person wants to see.
 
 ## Not in scope
 
-- Opens as a signal. The opens of R5-12 have no item and no sender. A
-  later card adds them when the store records the item of each open
-  (issue #433).
 - A proposal with a `sender_kind` condition. A `hide` rule for each
-  service hides too much mail. The proposal names one address.
+  service hides too much mail. The proposal names one address, or one
+  domain (decision D11, 2026-11-24).
 - A `hide` rule for commitments or records. An obligation or a receipt
   that a learned rule hides is a loss that the person cannot see.
 - A verb of the `iris` command for skip, mute and dismiss. A changeset
@@ -111,9 +109,11 @@ in the same read transaction:
 - For each action: its item, the form of the item, and the facts of the
   origin message of the item (`attention::facts`, the facts that the
   attention of the item reads).
-- The candidate is one `hide` rule:
-  `when = { sender = "<address>", form = "<form>" }`. The address is the
-  `sender` of the origin message. An action whose origin message has no
+- The candidates are two `hide` rules:
+  `when = { sender = "<address>", form = "<form>" }` and
+  `when = { sender = "@<domain>", form = "<form>" }` (decision D11). The
+  address is the `sender` of the origin message, and the domain is the
+  domain of that address. An action whose origin message has no
   address, a hostile mark or a `hostile` sender gives no candidate. Its
   choice and its refusal do not count.
 - An origin message from the person (sender kind `you`: the label `SENT`
@@ -128,7 +128,14 @@ in the same read transaction:
   item that another rule hides or bundles does not count.
 - The engine proposes the rule when 10 or more choices count and no
   refusal counts. A refusal is an `undone` action whose item the rule
-  would hide.
+  would hide, or an open of a source mail with an item that the rule
+  would hide (decision D12, spec 2 section 6.6). The opens are the rows
+  of `use_open` (store migration 27) of each day from the day of the
+  2,000th newest open. An open of mail from the person, of hostile mail
+  or of mail whose header is gone refuses nothing.
+- A domain candidate also needs counted choices on two or more addresses.
+  A domain proposal covers the address proposals of its form. If the
+  person dismisses the domain, the address proposals come back.
 - An action is unreadable when its item, the origin message of the item,
   the `header` row of that message or a sender address in it is missing
   (a cleanup of a gone message deletes the header, spec 1 section 5.5,
@@ -321,7 +328,9 @@ Migrations 29 and 30 run on the first start of the new program. No flag.
 - [x] Each assumption holds when an outcome is unknown: the apply and the
   ledger commit together.
 - [x] Each dropped mechanism was dropped for a reason that makes it
-  unnecessary: opens have no item, so they cannot name a sender.
+  unnecessary. At first, opens had no item, so they could not name a
+  sender. The store of R5-12 (`use_open`) now names the message of each
+  open, and decision D12 counts it as a refusal.
 - [x] No step is called idempotent.
 - [x] Each property has a test: the count invariant has a property test.
 - [x] The spec addresses the hardest problem: a learned rule that hides
