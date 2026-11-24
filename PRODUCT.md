@@ -25,7 +25,8 @@ Quiet, exact, calm, trustworthy.
 ## Do not
 
 - Do not look or feel like an inbox: no message list in time order as the main view.
-- Do not interrupt. Iris interrupts only by a rule that the person wrote.
+- Do not interrupt. Iris interrupts only by a rule that the person wrote, or
+  on a due date that the person gave to a job (decision D24).
 - Do not add a separate AI feature. The agent sees what the person sees.
 - Do not change the mailbox without a changeset that the person can review and undo.
 

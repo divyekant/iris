@@ -31,7 +31,7 @@ UTC. IDs have the format of specification 1, section 5.7 (`m-42`).
 
 | Endpoint | Gives |
 |---|---|
-| `/api/status` | `{"mode": "observe", "accounts": [...], "messages": {"total", "fetched", "understood", "gone"}, "model": false, "waits_model": 0}`. `model` is `true` when a model is set (`iris model set`). `waits_model` counts the live messages that the understanding step marked as waiting for a model or a budget. A draft, a copy, gone mail and understood mail never count. Each account has `id`, `address`, `provider`, `state`, `mirror_ready_at`, `sync` (`{"kind", "step"}` of an unfinished first sync or resync, or `null`) and `last_sync` (`{"kind", "started", "ended", "result"}` or `null`). With no account, `accounts` is `[]`. |
+| `/api/status` | `{"mode": "observe", "accounts": [...], "messages": {"total", "fetched", "understood", "gone"}, "model": false, "waits_model": 0}`. `model` is `true` when a model is set (`iris model set`). `waits_model` counts the live messages that the understanding step marked as waiting for a model or a budget. A draft, a copy, gone mail and understood mail never count. Each account has `id`, `address`, `provider`, `state`, `mirror_ready_at`, `sync` (`{"kind", "step"}` of an unfinished first sync or resync, or `null`) and `last_sync` (`{"kind", "started", "ended", "result", "after_failure"}` or `null`). `after_failure` is `true` when the sync before this one failed or stopped. With no account, `accounts` is `[]`. |
 | `/api/brief` | The first brief of specification 1, section 8. See [Brief](#brief). The first brief with content writes the time of the first brief (see [Measures](#measures)). |
 | `/api/brief/{section}?limit=&after=` | One page of a list section of the brief (`you_owe`, `owed_to_you`, `conversations`, `feed`, `signals` or `strangers`), of the bundle of rule N (`bundle-N`, newest first), or of the items that a `hide` rule leaves out (`hidden`, newest first; each item has the rule and the reason in `attention`): `{"count", "items", "next"}`, in the same order and with the same filter as the brief. The page has `duplicates` only when an item of the page has a duplicate, as in the brief. `limit` is 1 to 200, default 50. `after` is the `next` value of the page before. With no `after`, the page starts at the first item. `next` is a text value that holds the section name and the sort keys of the last item of the page. Do not make or change it. The API does not sign it, so a made cursor gives the items after its keys. The next page starts after these keys in the order of the section. An item that leaves the section, or that changes its sort key behind these keys, moves no other item. An item whose sort key moves across these keys between two pages can show twice or not show. For a new view, read the section again from the start. An empty `after`, or an `after` that is not a cursor of the same section, is a 400. An unknown section is a 404. `bundle-N` is a 404 when the active policy has no `bundle` rule N and no item of the brief is in its bundle. |
 | `/api/handled?limit=&after=` | `{"count", "actions": [...], "next"}`: each action that a rule decided without the person, in its state now (`approved`, `held`, `applied`, `failed`, `undone` or `denied`; not `in_review`, which the review lists), the newest first. A `failed` action can have changed some of its messages. `count` is the count of all such actions. Each action is `{"changeset", "revision", "n", "verb", "args", "messages", "state", "rule", "policy", "why", "reason", "at"}`. `messages` is the count of its messages. `why` is the reason of the author, and `reason` is the reason of the decision. `limit` is 1 to 200, default 50. `after` is the `next` value of the page before. An `after` that is not such a value is a 400. |
@@ -175,7 +175,8 @@ section 7).
 
 Each entry is `{"id", "verb", "args", "state", "at", "error", "messages",
 "changed", "items", "title", "changeset", "author", "decided_by", "rule",
-"policy", "reason", "why", "can_undo", "undo_open", "undone_by", "undo_of"}`:
+"policy", "reason", "why", "can_undo", "undo_open", "undone_by", "undo_of",
+"skipped", "tried", "retry"}`:
 
 - `args` holds only the short arguments that the words of a verb need: `label`, `until`, `date` and `field`. Each other argument (for example the body of a draft) stays out.
 - Each text has at most 2,000 characters, so a page stays small.
@@ -185,6 +186,7 @@ Each entry is `{"id", "verb", "args", "state", "at", "error", "messages",
 - `author` is `{"kind", "name", "job", "goal"}`: `goal` is the goal of the job of an agent.
 - `decided_by` is `rule` (with `rule` and `policy`) or `person`. `reason` is the reason of the decision, and `why` is the reason of the author.
 - `can_undo` is true when an undo can start now (the view `ledger_can_undo`). `undo_open` is true while an undo waits or applies. `undone_by` is the entry of the undo. `undo_of` is the entry that this entry undoes.
+- `tried` counts the targets that an undo entry tries to restore: each message that the undone entry changed (also a message that is gone now) and each item of a state entry. Step 2 of the undo of `trash` (`archive`) tries only the messages that had no `INBOX` before the trash. `skipped` counts the targets of `tried` that an applied undo entry left as they were, because an earlier undo restored them, they changed again after the undone entry, or they are gone. `retry` is true when an undo of the undone entry can start now. For each other entry, `tried` and `skipped` are 0 and `retry` is false. An undo that changed nothing keeps the undone entry open (D18).
 
 ## Measures
 
@@ -251,7 +253,7 @@ same request.
 |---|---|
 | `POST /api/items/{id}/close` | Body `{}` or `{"reason"}`. Sets the status `done`. The default reason is "Done.". |
 | `POST /api/items/{id}/decline` | Body `{}` or `{"reason"}`. Sets the status `declined`. The default reason is "Declined.". |
-| `POST /api/items/{id}/defer` | Body `{"date": "YYYY-MM-DD"}`, with an optional `reason`. Sets the status `deferred` and `deferred_until`. The commitment opens again on that date (UTC). |
+| `POST /api/items/{id}/defer` | Body `{"date": "YYYY-MM-DD"}`, with an optional `reason`. Sets the status `deferred` and `deferred_until`. The commitment opens again at the start of that date in the time zone of the owner (`iris zone`; the default is the time zone of the computer). |
 
 A `reason` is 1 to 500 characters and not blank. The answer is the item
 after the change. The verb changes only a commitment with the status `open`

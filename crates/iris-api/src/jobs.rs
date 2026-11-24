@@ -166,6 +166,9 @@ fn write_job_in(c: &Connection, row: i64, out: &mut impl Write) -> Result<()> {
     out.write_all(b"],\"threads\":").map_err(io)?;
     let threads = wait_threads(c, row).map_err(sql)?;
     serde_json::to_writer(&mut *out, &threads).map_err(|e| io(std::io::Error::other(e)))?;
+    out.write_all(b",\"scope\":").map_err(io)?;
+    let scope = scope_list(c, row).map_err(sql)?;
+    serde_json::to_writer(&mut *out, &scope).map_err(|e| io(std::io::Error::other(e)))?;
     out.write_all(b",\"session\":").map_err(io)?;
     let session = newest_session(c, row)?;
     serde_json::to_writer(&mut *out, &session).map_err(|e| io(std::io::Error::other(e)))?;
@@ -405,32 +408,8 @@ pub fn start_job(
     now_ms: i64,
 ) -> Result<Started> {
     let (form, row) = start_item(item)?;
-    let goal = goal.trim();
-    // The checks of the job table, so that each value it refuses is a 400.
-    if goal.is_empty() || goal.chars().count() > GOAL_MAX || goal.contains('\0') {
-        return Err(Error::Query(format!(
-            "the goal must have 1 to {GOAL_MAX} characters, and no NUL"
-        )));
-    }
-    let due_ms = match due {
-        None => None,
-        Some(d) => Some(
-            iris_understand::time::parse_rfc3339(d)
-                .filter(|ms| (0..=TIME_MAX).contains(ms))
-                .ok_or_else(|| {
-                    Error::Query(format!(
-                        "due is not an RFC 3339 time from 1970 to 9999: {d:?}"
-                    ))
-                })?,
-        ),
-    };
-    let mut seen = BTreeSet::new();
-    for m in messages {
-        match iris_store::parse_id(m) {
-            Some((Kind::Message, id)) => seen.insert(id),
-            _ => return Err(Error::Query(format!("not a message ID: {m:?}"))),
-        };
-    }
+    let (goal, due_ms) = goal_and_due(goal, due)?;
+    let seen = message_ids(messages)?;
     enum Out {
         Done(Started),
         Refused(&'static str),
@@ -460,7 +439,7 @@ pub fn start_job(
         if grant_list(c, row)?.into_iter().collect::<BTreeSet<_>>() != seen {
             return Ok(Out::Refused("The mail changed. Look at it again."));
         }
-        let job = iris_job::create_in(c, goal, due_ms, now_ms)?;
+        let job = iris_job::create_in(c, &goal, due_ms, now_ms)?;
         iris_job::add_scope_in(c, job, Ref::Item(row), By::Person, now_ms)?;
         let mut q = c.prepare_cached(
             "SELECT DISTINCT m.thread_id FROM item_source s
@@ -488,4 +467,319 @@ pub fn start_job(
         Out::Done(s) => Ok(s),
         Out::Refused(why) => Err(Error::Conflict(why.into())),
     }
+}
+
+/// The goal and the due date of a start or an edit, with the checks of the
+/// job table, so that each value that the table refuses is a 400. The goal
+/// loses the white space at its ends.
+fn goal_and_due(goal: &str, due: Option<&str>) -> Result<(String, Option<i64>)> {
+    let goal = goal.trim();
+    if goal.is_empty() || goal.chars().count() > GOAL_MAX || goal.contains('\0') {
+        return Err(Error::Query(format!(
+            "the goal must have 1 to {GOAL_MAX} characters, and no NUL"
+        )));
+    }
+    let due_ms = match due {
+        None => None,
+        Some(d) => Some(
+            iris_understand::time::parse_rfc3339(d)
+                .filter(|ms| (0..=TIME_MAX).contains(ms))
+                .ok_or_else(|| {
+                    Error::Query(format!(
+                        "due is not an RFC 3339 time from 1970 to 9999: {d:?}"
+                    ))
+                })?,
+        ),
+    };
+    Ok((goal.to_string(), due_ms))
+}
+
+/// The message IDs of a preview that the person saw, as a set.
+fn message_ids(messages: &[String]) -> Result<BTreeSet<i64>> {
+    let mut seen = BTreeSet::new();
+    for m in messages {
+        match iris_store::parse_id(m) {
+            Some((Kind::Message, id)) => seen.insert(id),
+            _ => return Err(Error::Query(format!("not a message ID: {m:?}"))),
+        };
+    }
+    Ok(seen)
+}
+
+/// The most characters of the request ID of a typed start.
+const REQUEST_MAX: usize = 64;
+
+/// The document of `job`, as GET gives it.
+fn document_in(c: &Connection, job: i64) -> iris_job::Result<Value> {
+    let mut doc = Vec::new();
+    iris_job::write_document_in(c, job, &mut doc)?;
+    serde_json::from_slice(&doc)
+        .map_err(|e| iris_job::Error::Store(iris_store::Error::Query(format!("job document: {e}"))))
+}
+
+/// A refusal of the job store is a 409; each other error is the error of
+/// the store.
+fn refused(e: iris_job::Error) -> Error {
+    match e {
+        iris_job::Error::Refused(why) => Error::Conflict(why),
+        e => job_error(e),
+    }
+}
+
+/// Start a job from a typed goal, with no mail (decision D25,
+/// `docs/specs/2026-11-24-job-goal-and-scope.md`). `request` is the ID that
+/// the start form made: a retry with the same ID gives [`Started::Open`]
+/// with the job of the first start, and makes no job.
+pub fn start_typed_job(
+    store: &Store,
+    goal: &str,
+    due: Option<&str>,
+    request: &str,
+    now_ms: i64,
+) -> Result<Started> {
+    let (goal, due_ms) = goal_and_due(goal, due)?;
+    let request = request.trim();
+    if request.is_empty() || request.chars().count() > REQUEST_MAX || request.contains('\0') {
+        return Err(Error::Query(format!(
+            "the request must have 1 to {REQUEST_MAX} characters, and no NUL"
+        )));
+    }
+    iris_job::transaction(store, |c| {
+        let (job, made) = iris_job::create_for_request_in(c, &goal, due_ms, request, now_ms)?;
+        Ok(if made {
+            Started::Created(document_in(c, job)?)
+        } else {
+            Started::Open(iris_job::format_job_id(job))
+        })
+    })
+    .map_err(refused)
+}
+
+/// The person changes the goal and the due date of an open job (decision
+/// D25). `None` when no job has the ID. A done job, or an edit that
+/// changes nothing, is a 409. The answer is the job document.
+pub fn edit_job(
+    store: &Store,
+    id: &str,
+    goal: &str,
+    due: Option<&str>,
+    now_ms: i64,
+) -> Result<Option<Value>> {
+    let (goal, due_ms) = goal_and_due(goal, due)?;
+    let Some(row) = iris_job::parse_job_id(id) else {
+        return Ok(None);
+    };
+    iris_job::transaction(store, |c| {
+        match iris_job::edit_in(c, row, &goal, due_ms, now_ms) {
+            Err(iris_job::Error::NotFound) => return Ok(None),
+            r => r?,
+        }
+        Ok(Some(document_in(c, row)?))
+    })
+    .map_err(refused)
+}
+
+/// The thread row of `thread` (`t-<n>`), if it exists.
+fn thread_row(c: &Connection, thread: &str) -> Result<Option<i64>> {
+    let Some((Kind::Thread, row)) = iris_store::parse_id(thread) else {
+        return Err(Error::Query(format!("not a thread ID: {thread:?}")));
+    };
+    c.query_row("SELECT id FROM thread WHERE id = ?1", [row], |r| r.get(0))
+        .optional()
+        .map_err(sql)
+}
+
+/// Each message of thread `row` that an add of the thread grants now, in
+/// the order of the start preview.
+fn thread_list(c: &Connection, row: i64) -> rusqlite::Result<Vec<i64>> {
+    let mut q = c.prepare_cached(
+        "SELECT m.id FROM message m WHERE m.thread_id = ?1
+         ORDER BY coalesce((SELECT h.date FROM header h WHERE h.message_id = m.id),
+                           m.internal_date, 0),
+                  m.id",
+    )?;
+    let ids = q.query_map([row], |r| r.get(0))?.collect();
+    ids
+}
+
+/// The state of `job`, or `None` when no job has the row.
+fn job_state(c: &Connection, job: i64) -> rusqlite::Result<Option<String>> {
+    c.query_row("SELECT state FROM job WHERE id = ?1", [job], |r| r.get(0))
+        .optional()
+}
+
+/// The mail that an add of `thread` to the scope of job `id` grants now
+/// (`GET /api/jobs/{id}/scope/{thread}`): `{"messages": [...]}`, the
+/// summary of each message with `readable`. `None` when the job or the
+/// thread does not exist. A done job is a 409.
+pub fn scope_preview(store: &Store, id: &str, thread: &str) -> Result<Option<Value>> {
+    let Some(job) = iris_job::parse_job_id(id) else {
+        return Ok(None);
+    };
+    store.read(|c| {
+        let tx = c.unchecked_transaction()?;
+        let out = match job_state(&tx, job)?.as_deref() {
+            None => Ok(None),
+            Some("done") => Err(Error::Conflict("the job is done".into())),
+            Some(_) => match thread_row(&tx, thread) {
+                Err(e) => Err(e),
+                Ok(None) => Ok(None),
+                Ok(Some(t)) => {
+                    let mut messages = Vec::new();
+                    for m in thread_list(&tx, t)? {
+                        let Some((summary, _)) = message_row(&tx, m)? else {
+                            continue;
+                        };
+                        let mut v = serde_json::to_value(summary).map_err(std::io::Error::other)?;
+                        v["readable"] = iris_workspace::readable(&tx, m)?.into();
+                        messages.push(v);
+                    }
+                    Ok(Some(json!({ "messages": messages })))
+                }
+            },
+        };
+        Ok(out)
+    })?
+}
+
+/// Add `thread` to the scope of job `id`, for the person (decision D25).
+/// `messages` are the IDs of the preview that the person saw. One write
+/// transaction compares them with the messages of the thread now: if they
+/// differ, 409 and nothing changes. `false` when the job or the thread does
+/// not exist.
+pub fn add_thread(
+    store: &Store,
+    id: &str,
+    thread: &str,
+    messages: &[String],
+    now_ms: i64,
+) -> Result<bool> {
+    let seen = message_ids(messages)?;
+    let Some(job) = iris_job::parse_job_id(id) else {
+        return Ok(false);
+    };
+    enum Out {
+        Done(bool),
+        Refused(Error),
+    }
+    let out = iris_job::transaction(store, |c| {
+        if job_state(c, job)?.is_none() {
+            return Ok(Out::Done(false));
+        }
+        let t = match thread_row(c, thread) {
+            Ok(Some(t)) => t,
+            Ok(None) => return Ok(Out::Done(false)),
+            Err(e) => return Ok(Out::Refused(e)),
+        };
+        if thread_list(c, t)?.into_iter().collect::<BTreeSet<_>>() != seen {
+            return Ok(Out::Refused(Error::Conflict(
+                "The mail changed. Look at it again.".into(),
+            )));
+        }
+        iris_job::add_scope_in(c, job, Ref::Thread(t), By::Person, now_ms)?;
+        Ok(Out::Done(true))
+    })
+    .map_err(refused)?;
+    match out {
+        Out::Done(found) => Ok(found),
+        Out::Refused(e) => Err(e),
+    }
+}
+
+/// Take `what` (a thread `t-<n>` or an item ID) out of the scope of job
+/// `id`, for the person (decision D25). The revoke ends the open session of
+/// the job. `false` when the job does not exist or the ref is not active in
+/// its scope.
+pub fn remove_ref(store: &Store, id: &str, what: &str, now_ms: i64) -> Result<bool> {
+    let (r, form) = match iris_store::parse_id(what) {
+        Some((Kind::Thread, t)) => (Ref::Thread(t), None),
+        Some((Kind::Commitment, i)) => (Ref::Item(i), Some("commitment")),
+        Some((Kind::Conversation, i)) => (Ref::Item(i), Some("conversation")),
+        Some((Kind::Record, i)) => (Ref::Item(i), Some("record")),
+        Some((Kind::Feed, i)) => (Ref::Item(i), Some("feed")),
+        Some((Kind::Signal, i)) => (Ref::Item(i), Some("signal")),
+        _ => {
+            return Err(Error::Query(format!(
+                "not a thread or an item ID: {what:?}"
+            )))
+        }
+    };
+    let Some(job) = iris_job::parse_job_id(id) else {
+        return Ok(false);
+    };
+    iris_job::transaction(store, |c| {
+        match job_state(c, job)?.as_deref() {
+            None => return Ok(false),
+            Some("done") => return Err(iris_job::Error::Refused("the job is done".into())),
+            Some(_) => {}
+        }
+        // An item ID names the row and its form: `c-3` is not record 3. The
+        // form of the grant (`job_scope_form`) holds when the item row is
+        // gone. A ref from before migration 50 whose item row is gone has
+        // no known form: any item ID with its row number names it.
+        let form_ok = match (r, form) {
+            (Ref::Item(i), Some(f)) => match c
+                .query_row(
+                    "SELECT coalesce(i.form, sf.form) FROM job_scope s
+                     LEFT JOIN item i ON i.id = s.item_id
+                     LEFT JOIN job_scope_form sf ON sf.scope_id = s.id
+                     WHERE s.job_id = ?1 AND s.item_id = ?2 AND s.revoked_at IS NULL",
+                    rusqlite::params![job, i],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()?
+            {
+                Some(Some(known)) => known == f,
+                Some(None) => true,
+                None => false,
+            },
+            _ => true,
+        };
+        let active = form_ok && iris_job::scope_in(c, job)?.contains(&r);
+        if !active {
+            return Ok(false);
+        }
+        iris_job::revoke_scope_in(c, job, r, By::Person, now_ms)?;
+        Ok(true)
+    })
+    .map_err(refused)
+}
+
+/// The active refs of the scope of `job`, for the job page: the ID, the
+/// kind, a label (the subject of the first message of a thread, the title
+/// of an item) and the count of the granted messages.
+fn scope_list(c: &Connection, job: i64) -> rusqlite::Result<Value> {
+    let mut q = c.prepare_cached(
+        "SELECT s.thread_id, coalesce(i.form, sf.form), s.item_id,
+           CASE WHEN s.thread_id IS NOT NULL THEN
+             (SELECT h.subject FROM message m LEFT JOIN header h ON h.message_id = m.id
+              WHERE m.thread_id = s.thread_id
+              ORDER BY coalesce(h.date, m.internal_date, 0), m.id LIMIT 1)
+           ELSE json_extract(i.doc, '$.title') END,
+           (SELECT count(*) FROM job_scope_message sm WHERE sm.scope_id = s.id)
+         FROM job_scope s LEFT JOIN item i ON i.id = s.item_id
+           LEFT JOIN job_scope_form sf ON sf.scope_id = s.id
+         WHERE s.job_id = ?1 AND s.revoked_at IS NULL ORDER BY s.id",
+    )?;
+    let rows = q.query_map([job], |r| {
+        let thread: Option<i64> = r.get(0)?;
+        let form: Option<String> = r.get(1)?;
+        let item: Option<i64> = r.get(2)?;
+        let id = match (thread, form.as_deref(), item) {
+            (Some(t), _, _) => Some(format_id(Kind::Thread, t)),
+            (None, Some(f), Some(i)) => crate::read::item_id(i, f),
+            // No known form (a ref from before migration 50 whose item row
+            // is gone): the record form. The remove takes any item ID with
+            // this row number.
+            (None, None, Some(i)) => Some(format_id(Kind::Record, i)),
+            _ => None,
+        };
+        Ok(json!({
+            "id": id,
+            "kind": if thread.is_some() { "thread" } else { "item" },
+            "label": r.get::<_, Option<String>>(3)?,
+            "messages": r.get::<_, i64>(4)?,
+        }))
+    })?;
+    Ok(Value::Array(rows.collect::<rusqlite::Result<_>>()?))
 }

@@ -118,7 +118,8 @@ export type Account = {
   state: string | null;
   mirror_ready_at: string | null;
   sync: { kind: string; step: number | null } | null;
-  last_sync: { kind: string; started: string; ended: string | null; result: string | null } | null;
+  /** `after_failure`: the sync before this one failed or stopped. An older engine leaves it out. */
+  last_sync: { kind: string; started: string; ended: string | null; result: string | null; after_failure?: boolean } | null;
 };
 
 export type Status = {
@@ -130,6 +131,8 @@ export type Status = {
   model?: boolean;
   /** The live messages that wait for a model or a budget. Drafts and gone mail never count. An older engine leaves it out. */
   waits_model?: number;
+  /** The time zone of defer dates and due dates (an IANA name, `iris zone`). Null or left out: the zone of the browser. */
+  time_zone?: string | null;
 };
 
 /** A rule of policy.toml (spec 2 section 6.2). `when` holds only the conditions that the rule sets. */
@@ -247,6 +250,12 @@ export type Changeset = {
   actions: Action[];
 };
 
+/**
+ * GET /api/changesets/{id}/would: in observe mode, the decision that a rule of the active policy
+ * would give to each proposed action in apply mode (decision D10). Empty in apply mode.
+ */
+export type Would = { revision: number; n: number; outcome: "approved" | "in_review" | "denied"; rule: number; policy: number; reason: string };
+
 /** GET /api/handled: one action that an `allow` rule approved, with the reason. */
 export type HandledAction = {
   changeset: string;
@@ -291,6 +300,12 @@ export type LedgerEntry = {
   undo_open: boolean;
   undone_by: string | null;
   undo_of: string | null;
+  /** For an applied undo: the messages or items that it did not change (they changed again, or are gone). */
+  skipped: number;
+  /** For an undo: the targets that it tries to restore, also a gone message. 0 for each other entry. */
+  tried: number;
+  /** For an undo: true when the change that it undoes can be undone now. */
+  retry: boolean;
 };
 
 export type LedgerPage = { entries: LedgerEntry[]; next: string | null };
@@ -577,6 +592,7 @@ export async function get<T>(path: string): Promise<T> {
     access.locked = accounts.filter((a) => a.state === "needs_sign_in").map(({ address, provider }) => ({ address, provider }));
     access.none = accounts.length === 0;
     access.accounts = accountNames(accounts);
+    access.zone = (body as Status).time_zone ?? null;
   }
   return body as T;
 }

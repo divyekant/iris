@@ -130,6 +130,7 @@ pub fn measures(store: &Store, rss_kib: Option<i64>) -> Result<Measures> {
             "SELECT a.address, coalesce(l.ended_at, l.started_at), l.result
              FROM account a LEFT JOIN sync_log l ON l.id =
                (SELECT max(id) FROM sync_log WHERE account_id = a.id AND kind = 'verify')
+             WHERE coalesce(a.state, '') NOT IN ('removing', 'removed')
              ORDER BY a.id",
         )?;
         let mirror = q

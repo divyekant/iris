@@ -73,6 +73,20 @@ macro_rules! draft_or_copy {
     };
 }
 
+/// SQL: the message `$m` is of an account in state `removing` or
+/// `removed` (docs/specs/2026-11-24-remove-account.md). Its mail goes, so no
+/// reader passes it on: understanding and the workspace of a job skip it.
+#[macro_export]
+macro_rules! removed_account {
+    ($m:literal) => {
+        concat!(
+            "coalesce((SELECT a.state FROM account a WHERE a.id = ",
+            $m,
+            ".account_id), '') IN ('removing', 'removed')"
+        )
+    };
+}
+
 /// The labels of [`draft_or_copy!`], for a check in Rust.
 pub const DRAFT_OR_COPY: [&str; 3] = ["DRAFT", "UNSENT", "SENT_COPY"];
 
@@ -80,6 +94,7 @@ mod backup;
 mod content;
 mod file_lock;
 mod id;
+mod remove;
 mod search;
 mod secret;
 mod watch;
@@ -96,6 +111,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 pub use backup::{BackupLock, Cleaned, PolicyExpect, PolicyWrite, GONE_KEEP_MS};
 pub use content::ContentWriter;
 pub use file_lock::{FileLock, Probe};
+pub use remove::{Deleted, STATE_REMOVED, STATE_REMOVING};
 
 /// The result of a `sync_log` row whose process ended before the sync
 /// ended (issue #710).
@@ -152,6 +168,11 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_43.sql"),
     include_str!("schema_44.sql"),
     include_str!("schema_45.sql"),
+    include_str!("schema_46.sql"),
+    include_str!("schema_47.sql"),
+    include_str!("schema_48.sql"),
+    include_str!("schema_49.sql"),
+    include_str!("schema_50.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
@@ -185,6 +206,8 @@ pub enum Error {
     /// The address has an account of another provider or of another
     /// mailbox ([`Store::save_account_secret`]).
     Account(&'static str),
+    /// The time zone name is not in the time zone database of the computer.
+    TimeZone(String),
 }
 
 impl fmt::Display for Error {
@@ -202,6 +225,10 @@ impl fmt::Display for Error {
             Error::MissingContent(sha) => write!(f, "content file {sha} is missing"),
             Error::Watch(why) => write!(f, "watch: {why}"),
             Error::Account(why) => write!(f, "account: {why}"),
+            Error::TimeZone(name) => write!(
+                f,
+                "time zone: {name} is not a time zone of this computer (use an IANA name, for example Europe/Berlin)"
+            ),
         }
     }
 }
@@ -228,7 +255,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// document. Same value as `iris_clean::TEXT_LIMIT`.
 /// The `model` value of each open model document that Iris writes
 /// (spec 4, rule 2.1).
-pub const MODEL: &str = "iris/1.1";
+pub const MODEL: &str = "iris/1.2";
 
 /// The `$id` of the common definitions of the open model.
 pub const COMMON_SCHEMA_ID: &str = "urn:iris:model:1:common";
@@ -488,8 +515,26 @@ impl Store {
         Ok(file)
     }
 
+    /// Set the time zone of the owner to the IANA name `name`, or with
+    /// `None` to the time zone of the computer (decision D1).
+    pub fn set_time_zone(&self, name: Option<&str>) -> Result<()> {
+        if let Some(name) = name {
+            jiff::tz::TimeZone::get(name).map_err(|_| Error::TimeZone(name.to_string()))?;
+        }
+        self.write(|tx| {
+            tx.execute("DELETE FROM owner_setting", [])?;
+            if let Some(name) = name {
+                tx.execute(
+                    "INSERT INTO owner_setting(id, time_zone) VALUES (1, ?1)",
+                    [name],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
     /// Open each deferred commitment again on its `deferred_until` date, in
-    /// UTC (specification 1, section 6.8). The document gets the new status
+    /// the time zone of the owner ([`today`], specification 1, section 6.8). The document gets the new status
     /// and `updated` (RFC 3339 with milliseconds, as `iris_talk::rfc3339`).
     /// A gone item keeps its status. Gives the number of commitments that
     /// opened.
@@ -501,8 +546,8 @@ impl Store {
                      strftime('%Y-%m-%dT%H:%M:%S', ?1 / 1000, 'unixepoch')
                        || printf('.%03dZ', ?1 % 1000)), '$.deferred_until')
                  WHERE form = 'commitment' AND status = 'deferred'
-                   AND json_extract(doc, '$.deferred_until') <= date(?1 / 1000, 'unixepoch')",
-                [now],
+                   AND json_extract(doc, '$.deferred_until') <= ?2",
+                rusqlite::params![now, today(tx, now)?],
             )?)
         })
     }
@@ -561,14 +606,32 @@ impl Store {
         };
         self.write(|tx| {
             type Row = (i64, String, Option<String>, Option<u16>, Option<String>);
-            let old: Option<Row> = tx
+            let old: Option<(Row, Option<String>)> = tx
                 .query_row(
-                    "SELECT id, provider, imap_host, imap_port, imap_user FROM account
+                    "SELECT id, provider, imap_host, imap_port, imap_user, state FROM account
                      WHERE address = ?1",
                     [address],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                    |r| Ok(((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?), r.get(5)?)),
                 )
                 .optional()?;
+            // A removed account (a tombstone) keeps its ID and mailbox for
+            // the record of actions, and never signs in again. The address
+            // gets a new row (docs/specs/2026-11-24-remove-account.md).
+            let old = match old {
+                Some((_, Some(s))) if s == STATE_REMOVING => {
+                    return Err(Error::Account(
+                        "Iris still deletes the mail of this account; try again in a minute",
+                    ))
+                }
+                Some(((id, ..), Some(s))) if s == STATE_REMOVED => {
+                    tx.execute(
+                        "UPDATE account SET address = 'removed:' || id || ':' || address WHERE id = ?1",
+                        [id],
+                    )?;
+                    None
+                }
+                o => o.map(|(row, _)| row),
+            };
             let id = match old {
                 None => tx.query_row(
                     "INSERT INTO account(provider, address, imap_host, imap_port, imap_user)
@@ -922,6 +985,31 @@ fn migrate(conn: &mut Connection, db: &Path) -> Result<()> {
         tx.commit()?;
     }
     Ok(())
+}
+
+/// The time zone of the owner (decision D1): the zone of `owner_setting`,
+/// else the time zone of the computer. A saved name that the computer no
+/// longer knows gives the time zone of the computer too.
+pub fn time_zone(c: &Connection) -> rusqlite::Result<jiff::tz::TimeZone> {
+    let name: Option<String> = c
+        .query_row("SELECT time_zone FROM owner_setting", [], |r| r.get(0))
+        .optional()?;
+    Ok(name
+        .and_then(|n| jiff::tz::TimeZone::get(&n).ok())
+        .unwrap_or_else(jiff::tz::TimeZone::system))
+}
+
+/// The day of the instant `now_ms` (milliseconds since the epoch) in the
+/// time zone of the owner, as `YYYY-MM-DD`.
+pub fn today(c: &Connection, now_ms: i64) -> rusqlite::Result<String> {
+    Ok(day_in(&time_zone(c)?, now_ms))
+}
+
+/// The day of the instant `now_ms` in the time zone `zone`, as `YYYY-MM-DD`.
+/// An instant out of range gives the day of the epoch.
+pub fn day_in(zone: &jiff::tz::TimeZone, now_ms: i64) -> String {
+    let at = jiff::Timestamp::from_millisecond(now_ms).unwrap_or(jiff::Timestamp::UNIX_EPOCH);
+    zone.to_datetime(at).date().to_string()
 }
 
 /// The schema version of an open database.

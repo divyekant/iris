@@ -22,39 +22,54 @@ export function ymd(d: Date): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-function plus(now: Date, days: number): Date {
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate() + days);
+/**
+ * The day of `now` as `YYYY-MM-DD` in the time zone `zone` (an IANA name):
+ * the time zone of the owner, from the engine (`iris zone`, decision D1).
+ * With no zone, or a zone that the browser does not know, the zone of the
+ * browser.
+ */
+export function today(now: Date, zone?: string | null): string {
+  if (zone) {
+    try {
+      const parts = new Intl.DateTimeFormat("en-US", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(now);
+      const part = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+      return `${part("year").padStart(4, "0")}-${part("month")}-${part("day")}`;
+    } catch {
+      // An unknown zone: the zone of the browser.
+    }
+  }
+  return ymd(now);
+}
+
+/** The day `days` after `date` (`YYYY-MM-DD`), and its weekday (0 is Sunday). */
+function plus(date: string, days: number): { date: string; weekday: number } {
+  const [y, m, d] = date.split("-").map(Number);
+  const t = new Date(0);
+  // Not Date.UTC(y, ...): it maps the years 0 to 99 to 1900 to 1999.
+  t.setUTCFullYear(y, m - 1, d + days);
+  const pad = (n: number, w = 2) => String(n).padStart(w, "0");
+  return { date: `${pad(t.getUTCFullYear(), 4)}-${pad(t.getUTCMonth() + 1)}-${pad(t.getUTCDate())}`, weekday: t.getUTCDay() };
 }
 
 /**
- * The first day that Later can give: the local day after `now`, or a later
- * day if that day already started in UTC. The engine opens a deferred
- * commitment again when its date starts in UTC (spec 1 section 6.8, issue
- * #121), so an earlier day would open it again at once.
+ * The first day that Later can give: the day after `now` in the time zone
+ * of the owner. The engine opens a deferred commitment again when its day
+ * starts in that zone (spec 1 section 6.8), so an earlier day would open it
+ * again at once.
  */
-export function first(now: Date): string {
-  const local = ymd(plus(now, 1));
-  const utc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString().slice(0, 10);
-  return local > utc ? local : utc;
+export function first(now: Date, zone?: string | null): string {
+  return plus(today(now, zone), 1).date;
 }
 
-/**
- * The Monday after `now`. On a Monday, the Monday a week later. Null when
- * that Monday already started in UTC (a Sunday evening west of UTC).
- */
-export function nextWeek(now: Date): string | null {
-  const monday = ymd(plus(now, ((8 - now.getDay()) % 7) || 7));
-  return started(monday, now) ? null : monday;
+/** The Monday after `now` in the time zone of the owner. On a Monday, the Monday a week later. */
+export function nextWeek(now: Date, zone?: string | null): string {
+  const day = today(now, zone);
+  return plus(day, ((8 - plus(day, 0).weekday) % 7) || 7).date;
 }
 
-/** True when the day `date` (`YYYY-MM-DD`) started in UTC at `now`, so a defer to it would open the item again at once. */
-export function started(date: string, now: Date): boolean {
-  return date < first(now);
-}
-
-/** The name of the first day of Later: "Tomorrow", or the day after when tomorrow already started in UTC. */
-export function firstName(now: Date): string {
-  return first(now) === ymd(plus(now, 1)) ? "Tomorrow" : "In 2 days";
+/** True when the day `date` (`YYYY-MM-DD`) started in the time zone of the owner at `now`, so a defer to it would open the item again at once. */
+export function started(date: string, now: Date, zone?: string | null): boolean {
+  return date < first(now, zone);
 }
 
 /** A day as short words: "Tue 17 Nov". */

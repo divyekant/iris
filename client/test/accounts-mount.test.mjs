@@ -135,3 +135,37 @@ test("each shell argument of a sign-in command keeps its exact text in a POSIX s
     assert.equal(out, s);
   }
 });
+
+test("a try that runs after a failed try says that the last try failed", async () => {
+  const running = { kind: "incremental", started: "2026-11-23T10:01:00Z", ended: null, result: null, after_failure: true };
+  const first = { ...fx.status.accounts[0], mirror_ready_at: null, sync: { kind: "first", step: 4 }, last_sync: { ...running, kind: "first" } };
+  const later = { ...fx.status.accounts[1], state: "active", last_sync: running };
+  // The same running try after a good try, and from an older engine with no field.
+  const good = { ...fx.status.accounts[1], id: 9, state: "active", last_sync: { ...running, after_failure: false } };
+  const { after_failure, ...old } = running;
+  const older = { ...fx.status.accounts[1], id: 10, state: "active", last_sync: old };
+  const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [first, later, good, older] }, poll: 0 });
+  try {
+    const rows = [...view.target.querySelectorAll(".accounts li")].map(text);
+    for (const row of rows.slice(0, 2)) {
+      assert.match(row, /The last try failed\. Iris tries again now\./);
+      assert.doesNotMatch(row, /copies this mailbox|Up to date/);
+    }
+    for (const row of rows.slice(2)) assert.match(row, /Up to date\./);
+    assert.equal(view.target.querySelectorAll(".tone.retry").length, 2);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("an account in state removing says that Iris deletes its mail, not that it copies it", async () => {
+  const going = { ...fx.status.accounts[0], state: "removing", mirror_ready_at: null, sync: null };
+  const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [going] }, poll: 0 });
+  try {
+    const row = text(view.target.querySelector(".accounts li"));
+    assert.match(row, /Iris deletes the mail of this account from this machine\./);
+    assert.doesNotMatch(row, /copies this mailbox/);
+  } finally {
+    view.destroy();
+  }
+});

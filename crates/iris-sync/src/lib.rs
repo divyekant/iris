@@ -165,7 +165,7 @@ pub fn lock(store: &Store, account: i64) -> Result<SyncLock> {
 }
 
 fn lock_path(store: &Store, account: i64) -> std::path::PathBuf {
-    store.dir().join(format!("sync-{account}.lock"))
+    store.sync_lock_path(account)
 }
 
 /// Another process holds the sync lock of `account` now. A shared probe
