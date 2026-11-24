@@ -153,7 +153,17 @@ test("on a phone, the notices fold to one line with a count, and a tap opens the
       await page.waitForFunction(() => document.querySelectorAll("article.notice").length === 4);
       assert.equal(await shown(), 4);
       assert.equal(await line.isVisible(), false);
+      // A tap on a notice opens its mail, and the new view starts with the notices folded again.
+      await cards.first().locator("a").tap();
+      await page.waitForURL(/#\/mail\/m-1$/);
+      await line.waitFor({ state: "visible", timeout: 2000 });
+      assert.equal(await shown(), 0, `notice cards stay open after a view change at ${width} px`);
     } else {
+      // Show more holds for one view only.
+      await notices.getByRole("button", { name: "Show 1 more" }).click();
+      await page.waitForFunction(() => document.querySelectorAll("article.notice").length === 4);
+      await page.evaluate(() => (location.hash = "#/review"));
+      await page.waitForFunction(() => document.querySelectorAll("article.notice").length === 3);
       assert.equal(await line.isVisible(), false, `the line shows at ${width} px`);
       assert.equal(await shown(), 3);
     }

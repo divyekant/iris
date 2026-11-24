@@ -24,6 +24,13 @@
   let list = $derived(notices.filter((n) => !gone.has(n.id)));
   let shown = $derived(open ? list : list.slice(0, SHOW));
 
+  // Each new view starts with the notices folded again: a phone shows the line, a wide screen three cards.
+  $effect(() => {
+    const fold = () => (open = false);
+    addEventListener("hashchange", fold);
+    return () => removeEventListener("hashchange", fold);
+  });
+
   $effect(() => {
     if (!poll) return;
     return follow(loadNotices, (n) => (notices = n), poll);
@@ -173,7 +180,7 @@
       display: flex;
       align-items: center;
       gap: var(--space-3);
-      min-height: 44px;
+      min-height: var(--size-touch);
       padding: var(--space-2) var(--space-4);
       border: 1px solid var(--color-border-subtle);
       border-left: 4px solid var(--color-primary);
