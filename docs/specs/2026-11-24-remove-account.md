@@ -135,15 +135,20 @@ for each batch:
    workspace: a draft, a scratch file, a file with no known name. Iris
    cannot tell which file holds a copy. So the rule is one rule for the
    whole folder: a build of the workspace of a job with a row in
-   `removed_workspace` deletes the whole folder and builds it again from
-   an empty folder. Order, under the build lock of the workspace:
-   1. Save `notes.md` to the store (`save_notes`), as each build does.
-   2. Delete the folder and make it again, empty.
+   `removed_workspace` deletes each entry of the folder other than
+   `notes.md`, and builds the rest again. The notes are the record, so the
+   delete never touches `notes.md`, and it does not depend on the result
+   of the save. Order, under the build lock of the workspace:
+   1. Save `notes.md` to the store (`save_notes`), as each build does. A
+      save can fail (a file larger than 64 KiB, a link, a folder). Then
+      the store keeps its last copy, and the file stays as it is.
+   2. Delete each entry of the folder other than `notes.md`.
    3. Build as usual. The grant leaves out each message of an account in
       state `removing` or `removed` (a condition in
-      `iris_workspace::grant_in`). `notes.md` comes back from the store.
+      `iris_workspace::grant_in`). If `notes.md` is missing, it comes back
+      from the store.
 
-   The files of the agent go, also the files that hold no mail of the
+   The other files of the agent go, also the files that hold no mail of the
    account and the mail of other accounts in them. The next session of
    the job builds them again from its grant. Step 0 runs this build for
    each row of `removed_workspace` of the account whose workspace folder
@@ -300,7 +305,8 @@ engine tick ends the delete.
 | That sync wrote a raw file before its insert failed | Step 6 deletes the file. | store test with a file and no row |
 | An understanding run writes after the removal | The trigger on `item` or `body` refuses the write. The batch query leaves the account out. | store test |
 | A workspace build runs at the delete | Step 0 waits for the build lock, then builds again with no mail of the account. | workspace test |
-| An agent copied mail of the account into a draft or another file | The build of step 0 deletes the whole folder first. Only `notes.md` comes back, from the record. | workspace test |
+| An agent copied mail of the account into a draft or another file | The build of step 0 deletes each entry other than `notes.md` first. | workspace test |
+| `notes.md` is too large, a link or a folder, so the save fails | `notes.md` stays as it is. The other entries go. | workspace test |
 | A job has scope in two accounts | The build of step 0 builds the mail of the other account again. The files of the agent go. | workspace test |
 | A proposed matter has members in two accounts | The proposal goes (trigger `matter_item_lost`). The items of the other account stay. | store test |
 | A crash after the removal, after the items went | `removed_workspace` still names the jobs. | store test |
@@ -322,7 +328,8 @@ engine tick ends the delete.
   `remove_account`, `delete_removed`, the change of `save_account_secret`.
 - `crates/iris-understand`: the batch query leaves out a removed account.
 - `crates/iris-workspace`: the grant leaves out a removed account. A build
-  of a job with a row in `removed_workspace` starts from an empty folder.
+  of a job with a row in `removed_workspace` deletes each entry other than
+  `notes.md` first.
 - `crates/iris`: `iris account remove`, the engine tick.
 - `crates/iris-api`: the route, the status filter.
 - `client/`: the Accounts page.
