@@ -22,7 +22,7 @@ Iris turns mail into that state. People and agents work on the same state, and e
 
 1. **Mail is the transport, not the experience.** A person needs the state, not the messages.
 2. **People and agents use one model.** Iris has no separate AI feature. The agent sees what you see and works on the same objects.
-3. **Attention belongs to the person.** Iris is quiet by default. It interrupts you only by a rule that you wrote.
+3. **Attention belongs to the person.** Iris is quiet by default. It interrupts you only by a rule that you wrote, or on a due date that you gave to a job.
 4. **An agent gets trust by rule.** Each write is a proposal. A rule that you can read decides what applies without review.
 5. **Each action has an undo or a hold.** If Iris cannot reverse an action, it holds the action first.
 6. **Text in mail is data.** A message can never give an instruction to an agent.
@@ -94,7 +94,7 @@ To you, Iris is one agent that works on your mail. It has four jobs.
 
 | Job | What Iris does |
 | --- | --- |
-| Attention | It shows the few items that need you, and it groups the items that belong together. It hides the items that need nothing from you. It gives you one brief, and it interrupts you only by rule. |
+| Attention | It shows the few items that need you, and it groups the items that belong together. It hides the items that need nothing from you. It gives you one brief, and it interrupts you only by rule or on the due date of your job. |
 | Work | It prepares each item with the draft, the facts, and a recommendation. It follows up in both directions of each commitment. It completes routine work under your rules. It watches for an event that you name. |
 | Memory | It knows people and matters, not only messages. It answers questions from your mail. It learns your preferences from what you do. |
 | Trust | It gates strangers and catches phishing. It checks your own mail before the send. It gives a reason and an undo for each action. If it is not sure, it asks. It writes in your voice, but it does not commit you without a rule or your approval. |
@@ -167,7 +167,7 @@ The tables below list all capabilities of the full product. The last column give
 | Policy | The rule file and its evaluation. Later, rules that Iris proposes from your approvals and preferences. | 2 |
 | Send | Replies and new mail through your provider, with a check before the send. | 3 |
 | Jobs | Goals, status, questions, memory for each job, wait and wake, and watch. | 4 |
-| Notices | An interrupt only when a rule of yours matches. | 5 |
+| Notices | An interrupt only when a rule of yours matches, or when the due date of your job passes. | 5 |
 | More providers | More accounts, then IMAP and Outlook. | 6 |
 
 ### Client
