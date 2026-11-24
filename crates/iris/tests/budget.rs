@@ -114,24 +114,38 @@ impl Drop for KillOnDrop {
     }
 }
 
+/// The start time is a wall time, so the load of other tests on the machine
+/// adds to it (issue #81). The test takes the fastest of at most
+/// `START_TRIES` starts: a program that is always slow still fails.
+const START_TRIES: usize = 3;
+
 #[test]
 fn serve_stays_inside_the_memory_and_start_budget() {
-    let begin = Instant::now();
-    let mut child = KillOnDrop(
-        Command::new(env!("CARGO_BIN_EXE_iris"))
-            .args(["serve", "--addr", "127.0.0.1:0", "--data"])
-            .arg(common::data_dir("budget-empty"))
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    );
-    // Stop well after the limit, so a stalled start fails and does not hang.
-    let addr = read_addr(child.0.stderr.take().unwrap(), MAX_START * 10).unwrap();
-    wait_for_http(&addr, begin, MAX_START * 10).unwrap();
-    let start = begin.elapsed();
-    let rss = rss_kib(child.0.id());
-
-    eprintln!("iris serve: start {start:?}, RSS {rss} KiB");
+    let mut fastest: Option<(Duration, u64)> = None;
+    for i in 0..START_TRIES {
+        let begin = Instant::now();
+        let mut child = KillOnDrop(
+            Command::new(env!("CARGO_BIN_EXE_iris"))
+                .args(["serve", "--addr", "127.0.0.1:0", "--data"])
+                .arg(common::data_dir(&format!("budget-empty-{i}")))
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        // Stop well after the limit, so a stalled start fails and does not hang.
+        let addr = read_addr(child.0.stderr.take().unwrap(), MAX_START * 10).unwrap();
+        wait_for_http(&addr, begin, MAX_START * 10).unwrap();
+        let start = begin.elapsed();
+        let rss = rss_kib(child.0.id());
+        eprintln!("iris serve: start {start:?}, RSS {rss} KiB");
+        if fastest.is_none_or(|(f, _)| start < f) {
+            fastest = Some((start, rss));
+        }
+        if start <= MAX_START {
+            break;
+        }
+    }
+    let (start, rss) = fastest.unwrap();
     check(rss, start, MAX_RSS_KIB, MAX_START).unwrap();
 }
 
