@@ -6,8 +6,9 @@
 //! The steps of [`apply`]:
 //!
 //! 1. Expire an action 14 days after its submit. Wait while the active
-//!    policy has the mode `observe` (not for an undo). Send an action that a rule approved
-//!    to review (issue #168). Deny an action whose hash does not agree with
+//!    policy has the mode `observe` (not for an undo). Evaluate an action
+//!    that a rule approved again, with the `bulk` count of the last hour
+//!    ([`recheck_rule`]). Deny an action whose hash does not agree with
 //!    its rows. Before these checks, run the recovery of each ledger row
 //!    of the account in `writing`. For `label` and `unlabel`, find the
 //!    user label of the name at Gmail, and make it for `label` if Gmail
@@ -385,20 +386,18 @@ pub fn apply(
     // them to the mirror, so no label that a sync saved is lost.
     let _sync = sync_lock(store, account)?;
     #[allow(clippy::type_complexity)]
-    let head: Option<(String, Option<String>, String, Option<i64>, Option<i64>)> =
-        store.read(|c| {
-            Ok(c.query_row(
-                "SELECT a.verb, a.hash, a.decided_by, l.id, l.account_id
+    let head: Option<(String, Option<String>, Option<i64>, Option<i64>)> = store.read(|c| {
+        Ok(c.query_row(
+            "SELECT a.verb, a.hash, l.id, l.account_id
                  FROM changeset_action a
                  LEFT JOIN ledger l ON l.action_id = a.id AND l.state = 'writing'
                  WHERE a.id = ?1 AND a.state = 'approved'",
-                [action],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .optional()?)
-        })?;
-    let (verb, approved_hash, decided_by, writing, writing_account) =
-        head.ok_or(Error::NotApproved(action))?;
+            [action],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?)
+    })?;
+    let (verb, approved_hash, writing, writing_account) = head.ok_or(Error::NotApproved(action))?;
     let write_verb = verb == "draft" || verb == "send";
     // The label name of `label` and `unlabel`; submit checked the argument.
     let label: Option<String> = match verb.as_str() {
@@ -446,7 +445,7 @@ pub fn apply(
     if verb == "send" {
         return Err(Error::Verb(verb));
     }
-    if let Some(o) = check(store, account, action, &decided_by, approved_hash)? {
+    if let Some(o) = check(store, account, action, approved_hash)? {
         return Ok(o);
     }
     let mut run = match run {
@@ -1378,8 +1377,82 @@ fn gate(tx: &Connection, action: i64) -> iris_store::Result<Option<Outcome>> {
     if let Some(why) = deny_outside_grant(tx, action)? {
         return Ok(Some(Outcome::Denied(why)));
     }
-    Ok(None)
+    recheck_rule(tx, action)
 }
+
+/// Section 5.4: before the apply of an action that a rule approved, the
+/// engine computes the flag `bulk` again, with the count of the last hour,
+/// and evaluates the action again against the active policy, in the
+/// transaction of the caller. If the result is not `allow`, the action gets
+/// the new result, by `engine`, and the outcome tells the caller. An action
+/// with a ledger row in `writing` continues to its end (section 7.3).
+pub(crate) fn recheck_rule(tx: &Connection, action: i64) -> iris_store::Result<Option<Outcome>> {
+    let row: Option<(String, Option<String>, String)> = tx
+        .query_row(
+            "SELECT c.author_kind, c.author_job, a.flags FROM changeset_action a
+             JOIN changeset c ON c.id = a.changeset_id
+             WHERE a.id = ?1 AND a.state = 'approved' AND a.decided_by = 'rule'
+               AND NOT EXISTS (SELECT 1 FROM ledger WHERE action_id = ?1 AND state = 'writing')",
+            [action],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((kind, job, flags)) = row else {
+        return Ok(None);
+    };
+    let author = iris_policy::Author::from_name(&kind).expect("the CHECK of the table");
+    let now = now();
+    // The flag of submit, or more than BULK messages of the same author that
+    // a rule approved in the last hour, with this action (section 5.3). An
+    // entry that an undo reversed later still changed its messages.
+    let bulk = flags.contains("\"bulk\"")
+        || tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM action_message WHERE action_id = ?1)
+               AND (SELECT count(*) FROM action_message WHERE action_id = ?1)
+                 + (SELECT count(*) FROM ledger l
+                    JOIN ledger_message lm ON lm.ledger_id = l.id
+                    JOIN changeset_action a ON a.id = l.action_id
+                    JOIN changeset c ON c.id = a.changeset_id
+                    WHERE l.at > ?2 AND l.action_id <> ?1 AND a.decided_by = 'rule'
+                      AND c.author_kind = ?3) > ?4",
+            params![action, now - HOUR_MS, kind, iris_changeset::BULK],
+            |r| r.get::<_, bool>(0),
+        )?;
+    let active = iris_policy::active(tx)?;
+    let decision = iris_policy::decide_action(
+        tx,
+        &active.policy,
+        action,
+        author,
+        job.as_deref(),
+        bulk,
+        now.div_euclid(1000),
+    )?;
+    let (state, reason) = match decision {
+        Some(d) if d.outcome == iris_policy::Outcome::Allow && d.rule.is_some() => return Ok(None),
+        Some(d) if d.outcome == iris_policy::Outcome::Deny => ("denied", d.reason),
+        Some(d) => ("in_review", d.reason),
+        None => (
+            "in_review",
+            "No rule can allow this verb: a person decides.".into(),
+        ),
+    };
+    let reason = format!("Checked again before the apply: {reason}");
+    tx.execute(
+        "UPDATE changeset_action SET state = ?2, decided_by = 'engine', rule = NULL,
+           policy = NULL, reason = ?3, decided_at = ?4
+         WHERE id = ?1 AND state = 'approved'",
+        params![action, state, reason, now],
+    )?;
+    Ok(Some(if state == "denied" {
+        Outcome::Denied(reason)
+    } else {
+        Outcome::Review(reason)
+    }))
+}
+
+/// One hour, the window of the `bulk` count of section 5.4.
+const HOUR_MS: i64 = 3_600_000;
 
 /// Why an action of a job session is outside the grant of its job now
 /// (docs/specs/2026-11-17-job-verbs.md, section 4), or `None`.
@@ -1440,22 +1513,10 @@ fn check(
     store: &Store,
     account: i64,
     action: i64,
-    decided_by: &str,
     approved_hash: Option<String>,
 ) -> Result<Option<Outcome>> {
     if let Some(o) = store.write(|tx| gate(tx, action))? {
         return Ok(Some(o));
-    }
-    // Section 5.4 evaluates a rule approval again before the apply, with
-    // the bulk count of the last hour from the ledger. With no ledger, the
-    // count is not known, so only a person approves an apply.
-    // shortcut: each rule approval goes to review; evaluate it again with
-    // the ledger (issue #168).
-    if decided_by == "rule" {
-        let reason = "A person must approve the action: Iris cannot check the rule again \
-                      before the ledger exists.";
-        decide(store, action, "in_review", reason)?;
-        return Ok(Some(Outcome::Review(reason.into())));
     }
     // Each mailbox that the action names: the account of each message,
     // of its draft, and each account target of a new mail. All must be the

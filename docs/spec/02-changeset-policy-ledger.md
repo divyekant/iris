@@ -127,9 +127,8 @@ with no provider call. These rules apply:
 - A state verb changes no mailbox. So, in the mode `observe`, an action that
   a person approved applies, as an undo does. An action that a rule approved
   waits in the mode `observe`.
-- An action that a rule approved goes to review first, as a mailbox verb
-  does, until the engine evaluates the rule again before the apply (issue
-  #168).
+- The engine evaluates an action that a rule approved again before the
+  apply, as for a mailbox verb (section 5.4).
 - `close`, `decline` and `defer` change only a commitment with the status
   `open` or `deferred` (specification 1, section 6.8). `close` and `decline`
   remove `deferred_until`. If an item does not agree (for example,
@@ -296,10 +295,14 @@ A change of the mode does not evaluate open actions again:
 The engine applies one action at a time, on the one write connection. Before
 the engine applies an action that a rule approved, it computes the flag
 `bulk` again and evaluates the action again against the active policy
-(section 6.4). For the count of the last hour, `bulk` counts the messages of
-each ledger row of the same author that a rule decided in that hour, in the
-state `writing`, `applied` or `failed`. If the result is not `allow`, the
-action gets the new result: `in_review` or `denied`. So a rule that the
+(section 6.4), in the transaction of the claim (`iris_apply::recheck_rule`).
+For the count of the last hour, `bulk` counts the messages of the action and
+the messages of each ledger row of that hour whose action a rule decided,
+in each state. An undone entry counts, because it changed its messages. The
+same author is the same author kind (`person`, `agent`, `triage` or
+`local`), as in the policy (section 6.4), so two jobs of agents share one
+count. If the result is not `allow`, the action gets the new result,
+`in_review` or `denied`, by `engine`, with the reason of the policy. So a rule that the
 person removed while the action waited applies nothing, and two changesets
 that a rule approved at the same time cannot together go past the limit of
 500 messages.
@@ -808,7 +811,7 @@ the expiry and the mode again.
 | An action 14 days or more after its submit (section 5.5) | An action applies after the person stopped to expect it | The apply sets `expired`, by `expiry`, with no call. An action with a row in `writing`, and an undo, do not expire. |
 | The mode is `observe`, also when the person changes it during the reads of step 2 | An action applies without the mode `apply` | The action stays `approved` and waits. The claim transaction checks the mode and the expiry again. A row in `writing` continues to its end (section 5.4). |
 | A token of another mailbox | The Gmail IDs of one mailbox change messages of another | Before step 2, and after each new token, the address of the Gmail profile must be the address of the account. Else the apply changes nothing (`OtherMailbox`), or the new token counts as no token. A row in `writing` recovers only with a token of its own account. |
-| An action that a rule approved | A rule that the person removed applies the action, or two rule approvals of one author go past the `bulk` limit of 500 messages in one hour (section 5.4) | Until the engine counts the ledger rows of the last hour (issue #168), the engine sends each rule approval to `in_review`, by `engine`, and only a person approval applies. |
+| An action that a rule approved | A rule that the person removed applies the action, or two rule approvals of one author go past the `bulk` limit of 500 messages in one hour (section 5.4) | The gate and the claim transaction compute `bulk` again with the ledger rows of the last hour, and evaluate the action again against the active policy. If the result is not `allow`, the action gets `in_review` or `denied`, by `engine`, with no call. A row in `writing` continues to its end. |
 | The hash of the rows does not agree with the hash of the approval | The person approved one action, and another applies | The engine denies the action, by `engine`. |
 | A message of another account | One token changes two mailboxes | The engine denies the action, by `engine`. |
 | A message that is gone in the mirror, or HTTP 404 in step 2 | A call on a message that does not exist | The apply skips it, and lists it in the result. A message that is gone in the mirror after the claim is listed `gone`, with no call. |

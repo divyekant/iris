@@ -399,7 +399,8 @@ impl Box {
 }
 
 /// In the mode `observe`, an action that a person did not approve waits.
-/// In the mode `apply`, a rule approval goes to review (issue #168). The
+/// In the mode `apply`, a rule approval that no rule allows now goes to
+/// review (section 5.4). The
 /// tick applies each approved state action.
 #[test]
 fn only_the_person_approval_applies() {
