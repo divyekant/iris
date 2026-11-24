@@ -890,7 +890,15 @@ pub const ATTENTION_EVERY: Duration = Duration::from_secs(10);
 /// and the notices by rule ([`iris_policy::notice::refresh`]).
 fn attention_loop(store: Arc<Store>) {
     let mut mark = None;
-    let system = crate::notify::spawn(crate::notify::show);
+    let open = {
+        let store = store.clone();
+        move |id| {
+            store
+                .read(|c| iris_policy::notice::is_open(c, id))
+                .unwrap_or(false)
+        }
+    };
+    let system = crate::notify::spawn(open, crate::notify::show);
     loop {
         // The system notice runs on its own thread: this loop never waits
         // for it.

@@ -257,6 +257,7 @@ impl Store {
                 )?
                 .query_map(params![cutoff, CLEAN_BATCH], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?;
+            settle_hostile(&tx, cutoff, now)?;
             for (id, _) in &batch {
                 tx.execute("DELETE FROM header WHERE message_id = ?1", [id])?;
                 // The delete trigger on body removes the search text too.
@@ -301,6 +302,43 @@ impl Store {
             }
         }
     }
+}
+
+/// Before the cleanup deletes the evidence of gone mail (the header that
+/// names the sender, then the message row with its marks and labels), it
+/// keeps the last verdict of each notice and each watch match on such mail
+/// (decision D33). An open notice on hostile mail is marked done, so it
+/// stays hidden. A watch whose match is hostile mail, a draft or a copy
+/// waits again. A safe notice or match stays as it is.
+fn settle_hostile(tx: &rusqlite::Transaction, cutoff: i64, now: i64) -> Result<()> {
+    tx.execute(
+        concat!(
+            "UPDATE notice SET done_at = ?2 WHERE done_at IS NULL AND EXISTS (
+               SELECT 1 FROM message m WHERE m.id = notice.message_id AND m.gone_at <= ?1
+                 AND (",
+            crate::hostile_mail!(),
+            " OR ",
+            crate::may_be_hostile!(),
+            "))"
+        ),
+        params![cutoff, now],
+    )?;
+    tx.execute(
+        concat!(
+            "UPDATE watch SET message_id = NULL, arrived_at = NULL
+             WHERE message_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM message m WHERE m.id = watch.message_id AND m.gone_at <= ?1
+                 AND (",
+            crate::hostile_mail!(),
+            " OR ",
+            crate::may_be_hostile!(),
+            " OR ",
+            crate::draft_or_copy!("m"),
+            "))"
+        ),
+        [cutoff],
+    )?;
+    Ok(())
 }
 
 /// A file with mode 0600 at `path`. With `new`, refuses a file that exists.

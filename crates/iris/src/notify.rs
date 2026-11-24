@@ -75,6 +75,9 @@ pub const QUEUE: usize = 100;
 pub struct Shown {
     pub title: String,
     pub text: String,
+    /// The row ID of a notice by rule. The queue shows it only while the
+    /// notice is still open. `None` for a job notice.
+    pub notice: Option<i64>,
 }
 
 /// The most characters of the text of a job notice.
@@ -86,6 +89,7 @@ impl Shown {
         Shown {
             title: format!("Iris: {}", n.rule_name),
             text: format!("{}: {}", n.title, n.text),
+            notice: Some(n.id),
         }
     }
 
@@ -96,18 +100,29 @@ impl Shown {
         Shown {
             title: "Iris: Job due".into(),
             text: text.chars().take(JOB_TEXT_MAX).collect(),
+            notice: None,
         }
     }
 }
 
 /// Starts the thread that shows each notice that it gets with `show`, one
-/// at a time. The sender never waits: a slow command must not hold the
-/// attention thread (spec: the pass runs each 10 seconds).
-pub fn spawn(show: fn(&Shown)) -> std::sync::mpsc::SyncSender<Shown> {
+/// at a time, if `open` is still true just before (see [`Shown::notice`]).
+/// A notice can wait in the queue while its mail becomes hostile, so the
+/// check runs at the show, not at the send (decision D33). The sender never
+/// waits: a slow command must not hold the attention thread (spec: the pass
+/// runs each 10 seconds).
+pub fn spawn(
+    open: impl Fn(i64) -> bool + Send + 'static,
+    show: fn(&Shown),
+) -> std::sync::mpsc::SyncSender<Shown> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<Shown>(QUEUE);
     let _ = std::thread::Builder::new()
         .name("notices".into())
-        .spawn(move || rx.iter().for_each(|n| show(&n)));
+        .spawn(move || {
+            rx.iter()
+                .filter(|n| n.notice.is_none_or(&open))
+                .for_each(|n| show(&n))
+        });
     tx
 }
 
@@ -266,7 +281,7 @@ mod tests {
     #[test]
     fn slow_system_notices_never_hold_the_sender() {
         // Each notice takes 1 second to show. The sends still end at once.
-        let tx = spawn(|_| std::thread::sleep(Duration::from_secs(1)));
+        let tx = spawn(|_| true, |_| std::thread::sleep(Duration::from_secs(1)));
         let t = Instant::now();
         for id in 0..(QUEUE as i64 + 20) {
             let _ = tx.try_send(Shown::rule(&notice(id)));
@@ -276,6 +291,31 @@ mod tests {
             "{:?}",
             t.elapsed()
         );
+    }
+
+    #[test]
+    fn a_notice_that_is_no_longer_open_at_the_show_is_not_shown() {
+        static SHOWN: std::sync::Mutex<Vec<i64>> = std::sync::Mutex::new(Vec::new());
+        // Notice 2 became hostile while it waited in the queue.
+        let tx = spawn(
+            |id| id != 2,
+            |n| SHOWN.lock().unwrap().push(n.notice.unwrap_or(0)),
+        );
+        for id in 1..=3 {
+            tx.send(Shown::rule(&notice(id))).unwrap();
+        }
+        // A job notice has no notice row: the check does not apply.
+        let due = iris_job::Due {
+            id: 7,
+            goal: "g".into(),
+        };
+        tx.send(Shown::job_due(&due)).unwrap();
+        drop(tx);
+        let t = Instant::now();
+        while SHOWN.lock().unwrap().len() < 3 && t.elapsed() < Duration::from_secs(5) {
+            std::thread::yield_now();
+        }
+        assert_eq!(*SHOWN.lock().unwrap(), vec![1, 3, 0]);
     }
 
     #[test]

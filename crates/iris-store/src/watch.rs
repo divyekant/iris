@@ -17,13 +17,43 @@ pub const WAIT_MAX: i64 = 100;
 /// match. Old mail that a first sync or a full resync adds cannot.
 pub const SINCE_MARGIN_MS: i64 = 3_600_000;
 
+/// The SQL condition "the watch `watch` has a match that is still a safe
+/// arrival": not hostile mail now, and not a draft or a copy. A match that
+/// became hostile mail after the check (a model `phishing` mark, a `hostile`
+/// sender, the label `SPAM`) gives no notice: the watch waits again, and a
+/// later safe arrival can match (decision D33).
+macro_rules! safe_match {
+    () => {
+        concat!(
+            "(watch.message_id IS NOT NULL AND NOT EXISTS (
+               SELECT 1 FROM message m WHERE m.id = watch.message_id AND (",
+            crate::hostile_mail!(),
+            " OR ",
+            crate::may_be_hostile!(),
+            " OR ",
+            crate::draft_or_copy!("m"),
+            ")))"
+        )
+    };
+}
+
+/// The columns of a [`Watch`]: the match and its time only when it is safe.
+const COLUMNS: &str = concat!(
+    "id, text, created_at, CASE WHEN ",
+    safe_match!(),
+    " THEN message_id END, CASE WHEN ",
+    safe_match!(),
+    " THEN arrived_at END"
+);
+
 /// One watch, as `iris watch list` and the API show it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Watch {
     pub id: i64,
     pub text: String,
     pub created_at: i64,
-    /// The first new message that matched. `None` while the watch waits.
+    /// The first new message that matched. `None` while the watch waits,
+    /// also when the match is hostile mail now.
     pub message: Option<i64>,
     pub arrived_at: Option<i64>,
 }
@@ -43,7 +73,7 @@ impl Store {
         Query::parse(text)?;
         self.write(|tx| {
             let waiting: i64 = tx.query_row(
-                "SELECT count(*) FROM watch WHERE message_id IS NULL",
+                concat!("SELECT count(*) FROM watch WHERE NOT ", safe_match!()),
                 [],
                 |r| r.get(0),
             )?;
@@ -62,9 +92,7 @@ impl Store {
     /// Each watch, newest first.
     pub fn watches(&self) -> Result<Vec<Watch>> {
         self.read(|c| {
-            let mut st = c.prepare(
-                "SELECT id, text, created_at, message_id, arrived_at FROM watch ORDER BY id DESC",
-            )?;
+            let mut st = c.prepare(&format!("SELECT {COLUMNS} FROM watch ORDER BY id DESC"))?;
             let rows = st.query_map([], |r| {
                 Ok(Watch {
                     id: r.get(0)?,
@@ -85,14 +113,17 @@ impl Store {
     }
 
     /// Find the first new match of each watch that waits, and keep it. Each
-    /// watch matches one time only. Gives the pairs (watch, message) that
-    /// matched in this call.
+    /// watch matches one time only. A watch whose match became hostile mail
+    /// waits again. Gives the pairs (watch, message) that matched in this
+    /// call.
     pub fn check_watches(&self, now_ms: i64) -> Result<Vec<(i64, i64)>> {
         let waiting: Vec<(i64, String, i64, i64)> = self.read(|c| {
-            let mut st = c.prepare(
+            let mut st = c.prepare(concat!(
                 "SELECT id, text, created_at, after_message FROM watch
-                 WHERE message_id IS NULL ORDER BY id",
-            )?;
+                 WHERE NOT ",
+                safe_match!(),
+                " ORDER BY id"
+            ))?;
             let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })?;
@@ -108,8 +139,11 @@ impl Store {
                     return Ok(None);
                 };
                 let set = tx.execute(
-                    "UPDATE watch SET message_id = ?2, arrived_at = ?3
-                     WHERE id = ?1 AND message_id IS NULL",
+                    concat!(
+                        "UPDATE watch SET message_id = ?2, arrived_at = ?3
+                         WHERE id = ?1 AND NOT ",
+                        safe_match!()
+                    ),
                     params![id, m, now_ms],
                 )?;
                 Ok((set > 0).then_some(m))
@@ -125,7 +159,7 @@ impl Store {
     pub fn watch(&self, id: i64) -> Result<Option<Watch>> {
         self.read(|c| {
             Ok(c.query_row(
-                "SELECT id, text, created_at, message_id, arrived_at FROM watch WHERE id = ?1",
+                &format!("SELECT {COLUMNS} FROM watch WHERE id = ?1"),
                 [id],
                 |r| {
                     Ok(Watch {
