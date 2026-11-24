@@ -1473,6 +1473,21 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
         if let Some(why) = draft_busy(c, action, draft)? {
             return Ok(Some(why));
         }
+        // The stored bytes have the limit of the provider of the draft
+        // account (send content spec, section 5): a refresh from the
+        // provider can make them larger than a draft that Iris wrote.
+        let (size, provider): (i64, String) = c.query_row(
+            "SELECT length(d.raw), a.provider FROM draft d JOIN account a ON a.id = d.account_id
+             WHERE d.id = ?1",
+            [draft],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let limit = iris_compose::max_message(&provider);
+        if size as u64 > limit {
+            return Ok(Some(format!(
+                "the mail is too large for {provider}: at most {limit} bytes with its files"
+            )));
+        }
         // The flags come from the stored bytes (docs/specs/2026-11-17-send-checks.md).
         match action_content(c, action)? {
             None => {
