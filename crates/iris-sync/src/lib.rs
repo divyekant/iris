@@ -156,7 +156,8 @@ pub struct SyncLock(#[allow(dead_code)] iris_store::FileLock);
 /// Take the sync lock of `account`, or give [`Error::OtherSync`] if another
 /// sync holds it.
 pub fn lock(store: &Store, account: i64) -> Result<SyncLock> {
-    match store.sync_lock(account)? {
+    let path = store.dir().join(format!("sync-{account}.lock"));
+    match iris_store::FileLock::try_take(&path).map_err(iris_store::Error::Io)? {
         Some(l) => Ok(SyncLock(l)),
         None => Err(Error::OtherSync),
     }
@@ -188,10 +189,8 @@ fn sync_locked(store: &Store, mail: &dyn Provider, account: i64, token: &str) ->
     // The row of a running sync is the newest row, so a reader of the log
     // does not take the error row of an earlier call (for example a 401 of
     // a token that ran out) as the state of this call.
-    let mut log = Running {
-        row: log_start(store, account, kind, now_ms())?,
-        kind,
-    };
+    let (row, live) = log_start(store, account, kind, now_ms())?;
+    let mut log = Running { row, kind };
     let result = run(store, mail, account, token, &mut log);
     let text = match &result {
         Ok(s) => format!(
@@ -201,6 +200,12 @@ fn sync_locked(store: &Store, mail: &dyn Provider, account: i64, token: &str) ->
         Err(e) => format!("error: {e}"),
     };
     let logged = log_end(store, log.row, log.kind, &text);
+    // The run lock goes after the result: a reader that takes it then reads
+    // the end of the row.
+    drop(live);
+    if logged.is_ok() {
+        let _ = std::fs::remove_file(store.sync_run_path(log.row));
+    }
     let synced = result?;
     logged?;
     Ok(synced)
@@ -874,28 +879,45 @@ impl Running {
 /// The result of a sync row whose process ended before the sync ended.
 pub use iris_store::SYNC_STOPPED as STOPPED;
 
-/// Close each row of `account` with no end: a crash or a stop of its
-/// process left it (issue #710). Call it only with the sync lock of the
-/// account held, so no sync of the account runs.
-fn close_stopped_in(tx: &rusqlite::Connection, account: i64, now: i64) -> rusqlite::Result<usize> {
-    tx.execute(
-        "UPDATE sync_log SET ended_at = ?2, result = ?3 WHERE account_id = ?1 AND ended_at IS NULL",
-        params![account, now, STOPPED],
-    )
-}
-
-/// Add the row of a sync that starts, with no end and no result. Gives its
-/// ID. The caller holds the sync lock, so a row with no end is of a process
-/// that stopped: it gets [`STOPPED`] first.
-fn log_start(store: &Store, account: i64, kind: &str, started: i64) -> Result<i64> {
-    Ok(store.write(|tx| {
-        close_stopped_in(tx, account, started)?;
+/// Add the row of a sync that starts, with no end and no result, and take
+/// its run lock before the row is visible (`Store::sync_run_lock`). Gives
+/// its ID and the lock. The caller holds the sync lock of the account, so
+/// no other sync of the account runs: each row of the account with no end
+/// is of a process that stopped, and gets [`STOPPED`] first (issue #710).
+fn log_start(
+    store: &Store,
+    account: i64,
+    kind: &str,
+    started: i64,
+) -> Result<(i64, iris_store::FileLock)> {
+    let (row, live, stopped) = store.write(|tx| {
+        let stopped: Vec<i64> = tx
+            .prepare("SELECT id FROM sync_log WHERE account_id = ?1 AND ended_at IS NULL")?
+            .query_map([account], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        tx.execute(
+            "UPDATE sync_log SET ended_at = ?2, result = ?3 WHERE account_id = ?1 AND ended_at IS NULL",
+            params![account, started, STOPPED],
+        )?;
         tx.execute(
             "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, ?2, ?3)",
             params![account, kind, started],
         )?;
-        Ok(tx.last_insert_rowid())
-    })?)
+        let row = tx.last_insert_rowid();
+        // A new row has no other holder. A status read takes the lock only
+        // for a row that it saw, so if one holds it now, the transaction
+        // rolls back and the sync fails with this error.
+        let live = store.sync_run_lock(row)?.ok_or_else(|| {
+            iris_store::Error::Io(std::io::Error::other(format!(
+                "the run lock of sync row {row} is held"
+            )))
+        })?;
+        Ok((row, live, stopped))
+    })?;
+    for old in stopped {
+        let _ = std::fs::remove_file(store.sync_run_path(old));
+    }
+    Ok((row, live))
 }
 
 /// Write the kind, the end and the result of the sync row `row`.

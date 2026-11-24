@@ -86,20 +86,20 @@ fn serve_keeps_running_when_stderr_is_closed() {
 
 /// A sync row that a stopped process left shows as stopped in `iris
 /// status`, with no engine and no new sync. The row of a sync that runs
-/// (its account lock is held) stays running (issue #710).
+/// (its run lock is held) stays running (issue #710).
 #[test]
 fn status_shows_a_stopped_sync_row_as_stopped() {
     let dir = std::env::temp_dir().join(format!("iris-status-stopped-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let store = iris_store::Store::open(&dir).unwrap();
     let account = store.add_account("gmail", "a@example.com").unwrap();
-    store
+    let row = store
         .write(|tx| {
             tx.execute(
                 "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'incremental', 1)",
                 [account],
             )?;
-            Ok(())
+            Ok(tx.last_insert_rowid())
         })
         .unwrap();
     let status = || {
@@ -112,7 +112,7 @@ fn status_shows_a_stopped_sync_row_as_stopped() {
         assert!(out.status.success(), "{out:?}");
         String::from_utf8(out.stdout).unwrap()
     };
-    let held = iris_sync::lock(&store, account).unwrap();
+    let held = store.sync_run_lock(row).unwrap().unwrap();
     let running = status();
     drop(held);
     let stopped = status();

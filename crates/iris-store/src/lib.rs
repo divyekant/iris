@@ -434,11 +434,18 @@ impl Store {
         })
     }
 
-    /// Take the sync lock of `account`. `None`: a sync of the account runs
-    /// (another holder has the lock). Each sync holds it from its first
-    /// `sync_log` row to its result (specification 1, section 4.3).
-    pub fn sync_lock(&self, account: i64) -> Result<Option<FileLock>> {
-        FileLock::try_take(&self.dir().join(format!("sync-{account}.lock"))).map_err(Error::Io)
+    /// Take the run lock of the `sync_log` row `row`. The sync of the row
+    /// holds it from before its row is visible until after its result is
+    /// written, and no other writer takes it. `None`: the sync runs. A free
+    /// lock on a row with no end: the process of the sync stopped
+    /// (issue #710).
+    pub fn sync_run_lock(&self, row: i64) -> Result<Option<FileLock>> {
+        FileLock::try_take(&self.sync_run_path(row)).map_err(Error::Io)
+    }
+
+    /// The file of the run lock of the `sync_log` row `row`.
+    pub fn sync_run_path(&self, row: i64) -> PathBuf {
+        self.dir().join(format!("sync-run-{row}.lock"))
     }
 
     /// Add a mailbox, or give the ID of the mailbox with this address.

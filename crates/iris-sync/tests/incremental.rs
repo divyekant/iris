@@ -467,7 +467,14 @@ fn a_sync_closes_the_row_of_a_stopped_sync() {
             Ok(tx.last_insert_rowid())
         })
         .unwrap();
+    // A status read probes the run lock of the stopped row at this time:
+    // the sync still runs (issue #710, review of PR #809).
+    let probe = store
+        .sync_run_lock(stale)
+        .unwrap()
+        .expect("no process holds it");
     sync(&store, &client(fake.base_url()), account, TOKEN).unwrap();
+    drop(probe);
     let rows: Vec<(i64, Option<i64>, Option<String>)> = store
         .read(|c| {
             let mut st =
@@ -483,4 +490,8 @@ fn a_sync_closes_the_row_of_a_stopped_sync() {
     assert_eq!(rows[0].2.as_deref(), Some(iris_sync::STOPPED));
     assert!(rows[1].1.is_some(), "{rows:?}");
     assert_ne!(rows[1].2.as_deref(), Some(iris_sync::STOPPED));
+    // The sync removed its run lock file after its result, and the next
+    // sync removed the file of the stopped row.
+    assert!(!store.sync_run_path(rows[1].0).exists());
+    assert!(!store.sync_run_path(stale).exists());
 }

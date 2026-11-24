@@ -328,17 +328,62 @@ pub fn status(store: &Store) -> Result<Status> {
             messages,
         })
     })?;
-    // A row with no end while no sync of its account holds the lock is of
-    // a stopped process: show it as stopped (issue #710). The read writes
-    // nothing. The next sync of the account closes the row.
-    for a in &mut status.accounts {
-        if let Some(run) = a.last_sync.as_mut().filter(|r| r.ended.is_none()) {
-            if store.sync_lock(a.id)?.is_some() {
+    settle_runs(store, &mut status.accounts)?;
+    Ok(status)
+}
+
+/// Settle the last sync of each account in a status snapshot. A row with no
+/// end whose run lock is free is of a process that stopped: it shows the
+/// result `SYNC_STOPPED` (issue #710). Only the sync of a row takes its run
+/// lock, so this probe never stops a sync. The newest row is read again
+/// while the probe holds the lock, so a sync that ended in between shows its
+/// own end. The read writes nothing to the store; the next sync of the
+/// account closes the row.
+fn settle_runs(store: &Store, accounts: &mut [Account]) -> Result<()> {
+    for a in accounts {
+        if a.last_sync.as_ref().is_none_or(|r| r.ended.is_some()) {
+            continue;
+        }
+        let newest = || -> Result<(i64, SyncRun)> {
+            Ok(store.read(|c| {
+                Ok(c.query_row(
+                    // A `fetch` row is the failure of one message, not a sync.
+                    "SELECT id, kind, started_at, ended_at, result FROM sync_log
+                     WHERE account_id = ?1 AND kind <> 'fetch' ORDER BY id DESC LIMIT 1",
+                    [a.id],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            SyncRun {
+                                kind: r.get(1)?,
+                                started: rfc3339(r.get(2)?),
+                                ended: r.get::<_, Option<i64>>(3)?.map(rfc3339),
+                                result: r.get(4)?,
+                            },
+                        ))
+                    },
+                )?)
+            })?)
+        };
+        let (row, run) = newest()?;
+        let run = if run.ended.is_some() {
+            run
+        } else {
+            let Some(_probe) = store.sync_run_lock(row)? else {
+                continue; // The sync runs.
+            };
+            let (again, mut run) = newest()?;
+            if again != row {
+                continue; // A newer sync started: it holds its own lock.
+            }
+            if run.ended.is_none() {
                 run.result = Some(iris_store::SYNC_STOPPED.into());
             }
-        }
+            run
+        };
+        a.last_sync = Some(run);
     }
-    Ok(status)
+    Ok(())
 }
 
 /// Search the messages that are not gone, newest first (specification 1,
@@ -1272,6 +1317,45 @@ pub fn rfc3339(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sync that ends between the snapshot and the probe of its run lock
+    /// shows its own end, not the stopped result (issue #710).
+    #[test]
+    fn a_sync_that_ends_after_the_snapshot_shows_its_end() {
+        let dir = std::env::temp_dir().join(format!("iris-settle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let account = store.add_account("gmail", "a@example.com").unwrap();
+        let row = store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'incremental', 1)",
+                    [account],
+                )?;
+                Ok(tx.last_insert_rowid())
+            })
+            .unwrap();
+        let live = store.sync_run_lock(row).unwrap().unwrap();
+        // The snapshot of a status read: the sync runs.
+        let mut snapshot = status(&store).unwrap().accounts;
+        assert_eq!(snapshot[0].last_sync.as_ref().unwrap().result, None);
+        // The sync ends and drops its lock before the probe.
+        store
+            .write(|tx| {
+                tx.execute(
+                    "UPDATE sync_log SET ended_at = 2, result = 'ok: done' WHERE id = ?1",
+                    [row],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        drop(live);
+        settle_runs(&store, &mut snapshot).unwrap();
+        let run = snapshot[0].last_sync.as_ref().unwrap();
+        assert_eq!(run.result.as_deref(), Some("ok: done"));
+        assert!(run.ended.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_bundle_name_is_canonical_or_no_bundle() {
