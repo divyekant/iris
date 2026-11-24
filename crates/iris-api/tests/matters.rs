@@ -641,6 +641,8 @@ async fn the_person_makes_edits_and_deletes_a_matter() {
     for (body, want) in [
         (r#"{"add":["r-1"]}"#, StatusCode::CONFLICT),
         (r#"{"add":["f-1"]}"#, StatusCode::BAD_REQUEST),
+        // No signal member until the web client shows signals (#884).
+        (r#"{"add":["s-1"]}"#, StatusCode::BAD_REQUEST),
         (r#"{"remove":["r-4"]}"#, StatusCode::CONFLICT),
         (r#"{}"#, StatusCode::BAD_REQUEST),
         (r#"{"title":"x","other":1}"#, StatusCode::BAD_REQUEST),

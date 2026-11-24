@@ -430,12 +430,13 @@ version gives one new proposal call at the next step.
 1. This spec.
 2. Store and writes: migration 46, `create`, `edit`, `delete`,
    `propose_by_agent`, signal members (D19, D21). The proposal step leaves
-   out signal candidates until step 4, because the local API of step 3
-   shows signal members.
+   out signal candidates until step 5.
 3. API routes, open model 1.2, the socket verb, the command and the MCP
-   tool (D19, D20, D22).
-4. Proposal step: signal candidates, additions (D20, D21).
-5. Client screens, after the owner picks a layout.
+   tool (D19, D20, D22). A request does not accept an `s-` ID until step
+   5, because the web client shows no signal member before it (#884).
+4. Proposal step: additions (D20).
+5. Client screens, after the owner picks a layout. This step accepts `s-`
+   IDs in requests and signal candidates in the proposal step (D21).
 
 ## Spec checks
 
