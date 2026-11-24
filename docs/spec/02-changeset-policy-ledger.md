@@ -1073,11 +1073,8 @@ Release 1 has no verb that adds an action, so no request can skip the policy.
 The socket comes with the first verb that adds an action (release 2). Then
 each verb that adds, submits or withdraws an action goes through the socket
 (`docs/specs/2026-11-16-engine-socket.md`). In host mode, the read verbs
-(`status`, `search`, `show` and `brief`) keep the exception of
-release 1: they change nothing, so they cannot skip the policy. A host
-`list` is not built yet (issue #523): until its card, `iris list` in host
-mode gets exit code 2, and when it comes it reads the store directly under
-the same exception. In session
+(`status`, `search`, `show`, `list` and `brief`) keep the exception of
+release 1: they change nothing, so they cannot skip the policy. In session
 mode (release 4), each read verb goes through the session socket, and the
 engine applies the current grant of the job of the session
 (`docs/specs/2026-11-16-job-workspace.md`). A session never opens the store
@@ -1149,7 +1146,7 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris brief` | Shows the brief. | host | 1 |
 | `iris search <query>` | Full-text search (specification 1, section 5.6). In session mode, it searches only the messages that the job grants (`docs/specs/2026-11-16-job-workspace.md`), and it adds nothing to the workspace. | both | 1 |
 | `iris show <id>` | Shows one item or message. Release 1 has no read path for a thread or a sender, so a thread and a sender come in a later release. In session mode, only an item or a message that the job grants, and an item is a job item (`id`, `form` and `sources`, with no text of the model and no status). | both | 1 |
-| `iris list [<form>]` | Lists items, of one form if given. In session mode, only the items of the workspace, with the fields of `show` (card R4-04f). Host mode and the filters come in a later card (issue #523): until then, `iris list` in host mode gets exit code 2. | session | 1 |
+| `iris list [<form>] [--status <s>] [--type <t>] [--before <id>] [--limit <n>]` | Lists items, newest first, of one form if given. In host mode, the filters and the page of `GET /api/items` (issue #523): `--type` needs the form `record`, `--before` takes the last ID of the page before, and `--limit` is 1 to 200 (default 50). The text form ends with the `--before` value of the next page. In session mode, only the items of the workspace, with the fields of `show` (card R4-04f), and only the form: a filter is a usage error. | both | 1 |
 | `iris archive`, `inbox`, `label`, `unlabel`, `read`, `unread`, `trash` `<ids> [--changeset <cs-id>]` | Adds an action to a draft changeset. | both | 2 |
 | `iris close`, `defer`, `decline`, `correct` `<id> [--changeset <cs-id>]` | Adds a state action to a draft changeset. | both | 2 |
 | `iris skip`, `mute`, `dismiss` `<id> [--changeset <cs-id>]` | Adds a state action to a draft changeset. A session gets code 3: a job grants no feed, conversation or signal item. | host | 5 |
@@ -1235,7 +1232,7 @@ agent that does not work in a folder. The rules for the MCP interface:
 
   | Tools | Path |
   |---|---|
-  | `status`, `search`, `show`, `matters_list`, `matters_show` | Read the store directly (section 8.1). |
+  | `status`, `search`, `show`, `list`, `matters_list`, `matters_show` | Read the store directly (section 8.1). |
   | `watch_add`, `watch_list`, `watch_remove` | Read and write the watch rows of the store directly, as `iris watch` does. A watch changes no mailbox, so it does not go through the policy. |
   | All other tools | A request on `iris.sock`, with the author `local`. |
 

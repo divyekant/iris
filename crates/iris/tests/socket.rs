@@ -992,9 +992,9 @@ fn session_mode_uses_only_the_session_socket() {
             .output()
             .unwrap()
     };
-    // Host mode (no `.iris/` above the folder): `list`, `wait` and `done` are usage
-    // errors.
-    for args in [&["list"][..], &["wait", "--until", "2030-01-02"], &["done"]] {
+    // Host mode (no `.iris/` above the folder): `wait` and `done` are usage
+    // errors. `list` is a host read verb too (issue #523).
+    for args in [&["wait", "--until", "2030-01-02"][..], &["done"]] {
         let out = Command::new(env!("CARGO_BIN_EXE_iris"))
             .current_dir(&root)
             .arg("--data")
@@ -1072,6 +1072,16 @@ fn session_mode_uses_only_the_session_socket() {
         (&shown["id"], &shown["form"]),
         (&json!("c-1"), &json!("commitment"))
     );
+    // A filter of the host list is a usage error in a session, and sends
+    // nothing to the socket (issue #523).
+    for args in [
+        &["list", "--status", "open"][..],
+        &["list", "--type", "receipt"],
+        &["list", "--before", "c-1"],
+        &["list", "--limit", "5"],
+    ] {
+        assert_eq!(iris(args).status.code(), Some(2), "{args:?}");
+    }
     let out = iris(&["list", "commitment"]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     assert!(
