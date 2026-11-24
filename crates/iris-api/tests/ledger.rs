@@ -309,12 +309,104 @@ async fn the_entry_of_an_undo_names_its_entry() {
     // The undo changed no message: its one message counts as skipped.
     assert_eq!(p["entries"][0]["skipped"], 1);
     assert_eq!(p["entries"][1]["skipped"], 0);
+    assert_eq!(p["entries"][0]["tried"], 1);
     let first = &p["entries"][1];
     assert_eq!(first["id"], format!("l-{l}"));
     assert_eq!(first["state"], "undone");
     assert_eq!(first["undone_by"], format!("l-{u}"));
     assert_eq!(first["undo_open"], false);
     assert_eq!(first["can_undo"], false);
+}
+
+/// The entry of an applied undo, with its id. `rows` are the message,
+/// `done` and `listed` values of its ledger messages.
+fn undo_applied(s: &Store, l: i64, rows: &[(i64, bool, Option<&str>)]) -> i64 {
+    s.write(|tx| {
+        let a: i64 = tx.query_row(
+            "SELECT action_id FROM ledger_undo WHERE ledger_id = ?1 AND step = 1",
+            [l],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+             VALUES (?1, 1, '{\"call\":\"batchModify\",\"add\":[\"INBOX\"],\"remove\":[],\"calls\":1}', 'writing', 'inverse', ?2)",
+            params![a, NOW + 1],
+        )?;
+        let u = tx.last_insert_rowid();
+        for (m, done, listed) in rows {
+            tx.execute(
+                "INSERT INTO ledger_message(ledger_id, message_id, call, pre, post)
+                 VALUES (?1, ?2, 1, '[]', '[\"INBOX\"]')",
+                params![u, m],
+            )?;
+        }
+        tx.execute("UPDATE ledger SET call = 1 WHERE id = ?1", [u])?;
+        for (m, done, listed) in rows {
+            tx.execute(
+                "UPDATE ledger_message SET listed = ?3 WHERE ledger_id = ?1 AND message_id = ?2",
+                params![u, m, listed],
+            )?;
+            if *done {
+                tx.execute(
+                    "UPDATE ledger_message SET done = 1 WHERE ledger_id = ?1 AND message_id = ?2",
+                    params![u, m],
+                )?;
+            }
+        }
+        tx.execute("UPDATE ledger SET state = 'applied' WHERE id = ?1", [u])?;
+        Ok(u)
+    })
+    .unwrap()
+}
+
+/// The skipped count of an undo comes from the entry that it undoes: a
+/// message that is gone before the undo starts counts, and a message that
+/// the undo listed but did not change counts once (decision D18).
+#[tokio::test]
+async fn an_undo_counts_each_target_of_its_entry() {
+    let dir = temp("undo-skipped");
+    let s = store(&dir);
+    let gone = |m: i64| {
+        s.write(|tx| {
+            tx.execute("UPDATE message SET gone_at = 1 WHERE id = ?1", [m])?;
+            Ok(())
+        })
+        .unwrap()
+    };
+    let entry = |p: &Value, id: i64| {
+        p["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == format!("l-{id}"))
+            .unwrap()
+            .clone()
+    };
+
+    // Message 2 is gone before the undo starts: submit leaves it out, and
+    // the undo changes message 1 only.
+    let l = archived(&s, "person", &[1, 2], PERSON);
+    gone(2);
+    let (code, _) = call(&s, true, &format!("/api/ledger/l-{l}/undo")).await;
+    assert_eq!(code, StatusCode::OK);
+    let u = undo_applied(&s, l, &[(1, true, None)]);
+    let (_, p) = call(&s, false, "/api/ledger").await;
+    let e = entry(&p, u);
+    assert_eq!((e["changed"].clone(), e["tried"].clone(), e["skipped"].clone()), (json!(1), json!(2), json!(1)));
+    assert_eq!(entry(&p, l)["tried"], 0);
+    assert_eq!(entry(&p, l)["skipped"], 0);
+
+    // Message 3 is gone after the undo starts: the undo lists it and does
+    // not change it. It counts once, and the entry has no undo now.
+    let l = archived(&s, "person", &[3], PERSON);
+    call(&s, true, &format!("/api/ledger/l-{l}/undo")).await;
+    gone(3);
+    let u = undo_applied(&s, l, &[(3, false, Some("gone"))]);
+    let (_, p) = call(&s, false, "/api/ledger").await;
+    let e = entry(&p, u);
+    assert_eq!((e["changed"].clone(), e["tried"].clone(), e["skipped"].clone()), (json!(0), json!(1), json!(1)));
+    assert_eq!(e["retry"], false);
+    assert_eq!(entry(&p, l)["can_undo"], false);
 }
 
 /// Each value of an entry is bounded: a large argument (the body of a

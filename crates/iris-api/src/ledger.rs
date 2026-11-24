@@ -46,10 +46,17 @@ pub struct LedgerEntry {
     pub undone_by: Option<String>,
     /// The entry that this entry undoes.
     pub undo_of: Option<String>,
-    /// For an applied undo (step 1): the messages or items that it did not
+    /// For an applied undo (step 1): the targets of `tried` that it did not
     /// change, because they changed again after the entry or are gone
     /// (decision D18). 0 for each other entry.
     pub skipped: i64,
+    /// For an undo (step 1): the targets that it tries to restore, that is
+    /// each message that the undone entry changed (also a gone one) and each
+    /// item of a state entry. 0 for each other entry.
+    pub tried: i64,
+    /// For an undo (step 1): true when an undo of the undone entry can
+    /// start now (`ledger_can_undo`). False for each other entry.
+    pub retry: bool,
 }
 
 /// The author of the changeset of an entry. `goal` is the goal of the job of
@@ -79,6 +86,19 @@ const ARGS: &str = "json_patch('{}', json_object(
           'date', CASE WHEN json_type(a.args, '$.date') = 'text' THEN substr(json_extract(a.args, '$.date'), 1, 2000) END,
           'field', CASE WHEN json_type(a.args, '$.field') = 'text' THEN substr(json_extract(a.args, '$.field'), 1, 2000) END))";
 
+/// The entry that step 1 of an undo undoes, or NULL for an entry that is
+/// no undo. Step 2 of the undo of `trash` restores no other target.
+const UNDONE: &str =
+    "(SELECT u.ledger_id FROM ledger_undo u WHERE u.action_id = a.id AND u.step = 1)";
+
+/// The targets that an undo tries to restore: each message that the
+/// undone entry changed (also one that is gone now, because submit leaves
+/// it out of the undo), and each item of a state entry. NULL for an entry
+/// that is no undo. `{undone}` is [`UNDONE`].
+const TRIED: &str = "(SELECT (SELECT count(*) FROM ledger_message lm WHERE lm.ledger_id = le.id AND lm.done = 1)
+               + (SELECT count(*) FROM action_item ai WHERE ai.action_id = le.action_id)
+         FROM ledger le WHERE le.id = {undone})";
+
 /// The entry query. `{args}` is [`ARGS`]. Each text has at most 2,000
 /// characters (`substr(x, 1, 2000)`), so a page of 200 entries stays small
 /// also when an action has a large text (the body of a draft has up to
@@ -100,15 +120,13 @@ const ENTRY: &str = "SELECT l.id, a.verb, {args}, l.state, l.at, substr(l.error,
                   AND coalesce(o.state, 'proposed') IN ('proposed', 'in_review', 'approved')),
         l.undone_by,
         (SELECT u.ledger_id FROM ledger_undo u WHERE u.action_id = a.id),
-        CASE WHEN l.state = 'applied'
-                  AND EXISTS (SELECT 1 FROM ledger_undo u WHERE u.action_id = a.id AND u.step = 1)
-             THEN max(0, (SELECT count(*) FROM action_message am WHERE am.action_id = a.id
-                            AND NOT EXISTS (SELECT 1 FROM ledger_message lm
-                                            WHERE lm.ledger_id = l.id
-                                              AND lm.message_id = am.message_id AND lm.done = 1))
-                       + (SELECT count(*) FROM action_item ai WHERE ai.action_id = a.id)
+        CASE WHEN l.state = 'applied' AND {undone} IS NOT NULL
+             THEN max(0, {tried}
+                       - (SELECT count(*) FROM ledger_message lm WHERE lm.ledger_id = l.id AND lm.done = 1)
                        - (SELECT count(*) FROM json_each(coalesce(l.post, '{}'))))
-             ELSE 0 END
+             ELSE 0 END,
+        coalesce({tried}, 0),
+        EXISTS (SELECT 1 FROM ledger_can_undo v WHERE v.ledger_id = {undone})
      FROM ledger l
      JOIN changeset_action a ON a.id = l.action_id
      JOIN changeset c ON c.id = a.changeset_id
@@ -117,6 +135,8 @@ const ENTRY: &str = "SELECT l.id, a.verb, {args}, l.state, l.at, substr(l.error,
 fn entry_sql(tail: &str) -> String {
     // The title of an item of hostile mail is not shown (issue 112).
     let entry = ENTRY
+        .replace("{tried}", TRIED)
+        .replace("{undone}", UNDONE)
         .replace("{args}", ARGS)
         .replace("{hostile}", iris_store::from_hostile_mail!("i"));
     format!("{entry} {tail}")
@@ -153,6 +173,8 @@ fn entry(r: &rusqlite::Row) -> rusqlite::Result<LedgerEntry> {
         undone_by: l(r.get(22)?),
         undo_of: l(r.get(23)?),
         skipped: r.get(24)?,
+        tried: r.get(25)?,
+        retry: r.get(26)?,
     })
 }
 

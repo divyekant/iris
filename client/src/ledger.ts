@@ -54,8 +54,8 @@ export function what(e: LedgerEntry): string {
   if (e.verb === "send" || e.verb === "draft") return "a mail";
   if (e.items === 1 && e.title) return `“${e.title}”`;
   if (e.items > 0) return count(e.items, "item", "items");
-  // An undo lists only the messages that it changed: the skipped ones count too (decision D18).
-  return count(e.messages + (e.undo_of ? e.skipped : 0), "message", "messages");
+  // An undo counts each message that the change it undoes changed, also a gone one (decision D18).
+  return count(e.undo_of && e.tried > 0 ? e.tried : e.messages, "message", "messages");
 }
 
 /**
@@ -81,10 +81,10 @@ export function status(e: LedgerEntry): string {
   // An undo that skipped messages or items: they changed again after the change, or are gone (decision D18).
   if (e.undo_of && e.state === "applied" && e.skipped > 0) {
     const unit = e.items > 0 ? ["item", "items"] : ["message", "messages"];
-    const total = e.items > 0 ? e.items : e.messages + e.skipped;
-    if (e.skipped >= total) {
-      const subject = total === 1 ? `The ${unit[0]} changed` : `The ${unit[1]} changed`;
-      return `Nothing changed. ${subject} again after that change, or ${total === 1 ? "is" : "are"} gone. That change keeps its Undo.`;
+    if (e.skipped >= e.tried) {
+      const subject = e.tried === 1 ? `The ${unit[0]} changed` : `The ${unit[1]} changed`;
+      // Promise the Undo only when the change has one now: a gone message cannot change back.
+      return `Nothing changed. ${subject} again after that change, or ${e.tried === 1 ? "is" : "are"} gone.${e.retry ? " That change keeps its Undo." : ""}`;
     }
     return `${count(e.skipped, unit[0], unit[1])} stayed as ${e.skipped === 1 ? "it was" : "they were"}: changed again after that change, or gone.`;
   }

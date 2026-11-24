@@ -57,15 +57,21 @@ test("a failed or a running entry says so; a done entry needs no words", () => {
 });
 
 test("an undo that skipped messages says so, and the change keeps its Undo (D18)", () => {
-  const u = (x) => e({ verb: "inbox", undo_of: "l-23", state: "applied", error: null, ...x });
-  assert.equal(`${l.did(u({ messages: 0, skipped: 4 }))} ${l.what(u({ messages: 0, skipped: 4 }))}`, "Moved to the inbox 4 messages");
-  assert.equal(l.status(u({ messages: 0, changed: 0, skipped: 4 })), "Nothing changed. The messages changed again after that change, or are gone. That change keeps its Undo.");
-  assert.equal(l.status(u({ messages: 0, changed: 0, skipped: 1 })), "Nothing changed. The message changed again after that change, or is gone. That change keeps its Undo.");
-  assert.equal(l.status(u({ messages: 3, changed: 3, skipped: 2 })), "2 messages stayed as they were: changed again after that change, or gone.");
-  assert.equal(l.status(u({ verb: "restore", items: 1, messages: 0, skipped: 1 })), "Nothing changed. The item changed again after that change, or is gone. That change keeps its Undo.");
-  assert.equal(l.status(u({ messages: 3, changed: 3, skipped: 0 })), "");
-  // An entry that is no undo never counts skipped messages.
-  assert.equal(l.what(e({ undo_of: null, messages: 2, skipped: 5 })), "2 messages");
+  const u = (x) => e({ verb: "inbox", undo_of: "l-23", state: "applied", error: null, retry: true, ...x });
+  // The count is each target of the change, also a message that was gone before the undo started.
+  assert.equal(`${l.did(u({ messages: 0, tried: 4, skipped: 4 }))} ${l.what(u({ messages: 0, tried: 4, skipped: 4 }))}`, "Moved to the inbox 4 messages");
+  assert.equal(l.what(u({ messages: 1, changed: 1, tried: 2, skipped: 1 })), "2 messages");
+  assert.equal(l.status(u({ messages: 0, changed: 0, tried: 4, skipped: 4 })), "Nothing changed. The messages changed again after that change, or are gone. That change keeps its Undo.");
+  // A message that the undo listed and did not change counts once.
+  assert.equal(l.what(u({ messages: 1, changed: 0, tried: 1, skipped: 1 })), "1 message");
+  assert.equal(l.status(u({ messages: 1, changed: 0, tried: 1, skipped: 1 })), "Nothing changed. The message changed again after that change, or is gone. That change keeps its Undo.");
+  // No Undo is promised when the change has none now (each message is gone).
+  assert.equal(l.status(u({ messages: 1, changed: 0, tried: 1, skipped: 1, retry: false })), "Nothing changed. The message changed again after that change, or is gone.");
+  assert.equal(l.status(u({ messages: 1, changed: 1, tried: 3, skipped: 2 })), "2 messages stayed as they were: changed again after that change, or gone.");
+  assert.equal(l.status(u({ verb: "restore", items: 1, messages: 0, tried: 1, skipped: 1 })), "Nothing changed. The item changed again after that change, or is gone. That change keeps its Undo.");
+  assert.equal(l.status(u({ messages: 3, changed: 3, tried: 3, skipped: 0 })), "");
+  // An entry that is no undo never counts its tried targets.
+  assert.equal(l.what(e({ undo_of: null, messages: 2, tried: 5 })), "2 messages");
 });
 
 test("the entries group by the local day, in the order of the list", () => {
