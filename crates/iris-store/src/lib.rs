@@ -154,6 +154,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_45.sql"),
     include_str!("schema_46.sql"),
     include_str!("schema_47.sql"),
+    include_str!("schema_48.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
@@ -187,6 +188,8 @@ pub enum Error {
     /// The address has an account of another provider or of another
     /// mailbox ([`Store::save_account_secret`]).
     Account(&'static str),
+    /// The time zone name is not in the time zone database of the computer.
+    TimeZone(String),
 }
 
 impl fmt::Display for Error {
@@ -204,6 +207,10 @@ impl fmt::Display for Error {
             Error::MissingContent(sha) => write!(f, "content file {sha} is missing"),
             Error::Watch(why) => write!(f, "watch: {why}"),
             Error::Account(why) => write!(f, "account: {why}"),
+            Error::TimeZone(name) => write!(
+                f,
+                "time zone: {name} is not a time zone of this computer (use an IANA name, for example Europe/Berlin)"
+            ),
         }
     }
 }
@@ -490,8 +497,26 @@ impl Store {
         Ok(file)
     }
 
+    /// Set the time zone of the owner to the IANA name `name`, or with
+    /// `None` to the time zone of the computer (decision D1).
+    pub fn set_time_zone(&self, name: Option<&str>) -> Result<()> {
+        if let Some(name) = name {
+            jiff::tz::TimeZone::get(name).map_err(|_| Error::TimeZone(name.to_string()))?;
+        }
+        self.write(|tx| {
+            tx.execute("DELETE FROM owner_setting", [])?;
+            if let Some(name) = name {
+                tx.execute(
+                    "INSERT INTO owner_setting(id, time_zone) VALUES (1, ?1)",
+                    [name],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
     /// Open each deferred commitment again on its `deferred_until` date, in
-    /// UTC (specification 1, section 6.8). The document gets the new status
+    /// the time zone of the owner ([`today`], specification 1, section 6.8). The document gets the new status
     /// and `updated` (RFC 3339 with milliseconds, as `iris_talk::rfc3339`).
     /// A gone item keeps its status. Gives the number of commitments that
     /// opened.
@@ -503,8 +528,8 @@ impl Store {
                      strftime('%Y-%m-%dT%H:%M:%S', ?1 / 1000, 'unixepoch')
                        || printf('.%03dZ', ?1 % 1000)), '$.deferred_until')
                  WHERE form = 'commitment' AND status = 'deferred'
-                   AND json_extract(doc, '$.deferred_until') <= date(?1 / 1000, 'unixepoch')",
-                [now],
+                   AND json_extract(doc, '$.deferred_until') <= ?2",
+                rusqlite::params![now, today(tx, now)?],
             )?)
         })
     }
@@ -924,6 +949,31 @@ fn migrate(conn: &mut Connection, db: &Path) -> Result<()> {
         tx.commit()?;
     }
     Ok(())
+}
+
+/// The time zone of the owner (decision D1): the zone of `owner_setting`,
+/// else the time zone of the computer. A saved name that the computer no
+/// longer knows gives the time zone of the computer too.
+pub fn time_zone(c: &Connection) -> rusqlite::Result<jiff::tz::TimeZone> {
+    let name: Option<String> = c
+        .query_row("SELECT time_zone FROM owner_setting", [], |r| r.get(0))
+        .optional()?;
+    Ok(name
+        .and_then(|n| jiff::tz::TimeZone::get(&n).ok())
+        .unwrap_or_else(jiff::tz::TimeZone::system))
+}
+
+/// The day of the instant `now_ms` (milliseconds since the epoch) in the
+/// time zone of the owner, as `YYYY-MM-DD`.
+pub fn today(c: &Connection, now_ms: i64) -> rusqlite::Result<String> {
+    Ok(day_in(&time_zone(c)?, now_ms))
+}
+
+/// The day of the instant `now_ms` in the time zone `zone`, as `YYYY-MM-DD`.
+/// An instant out of range gives the day of the epoch.
+pub fn day_in(zone: &jiff::tz::TimeZone, now_ms: i64) -> String {
+    let at = jiff::Timestamp::from_millisecond(now_ms).unwrap_or(jiff::Timestamp::UNIX_EPOCH);
+    zone.to_datetime(at).date().to_string()
 }
 
 /// The schema version of an open database.

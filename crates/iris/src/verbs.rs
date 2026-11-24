@@ -1,5 +1,5 @@
-//! The read verbs (tracker item R1-23): `iris status`, `iris search` and
-//! `iris show`. Each verb calls the same `iris_api` function as the HTTP
+//! The read verbs (tracker item R1-23): `iris status`, `iris search`,
+//! `iris show` and `iris list`. Each verb calls the same `iris_api` function as the HTTP
 //! route, so the verb and the client get the same data. `--json` prints the
 //! JSON of the route.
 
@@ -173,6 +173,40 @@ pub fn watch(store: &Store, command: &crate::WatchCommand) -> Output {
             }
         }
     }
+}
+
+/// `iris list` in host mode (issue #523): the items of `iris_api::items`,
+/// the same page as `GET /api/items`. A list is JSON Lines (specification
+/// 2, section 8.3). The text form names the command of the next page.
+pub fn list(store: &Store, filter: &iris_api::Filter, limit: u32, as_json: bool) -> Output {
+    let page = iris_api::items(store, filter, limit).map_err(|e| e.to_string())?;
+    let mut out = String::new();
+    for i in &page.items {
+        if as_json {
+            out.push_str(&serde_json::to_string(i).map_err(|e| e.to_string())?);
+            out.push('\n');
+        } else {
+            let s = |k: &str| field(i[k].as_str().unwrap_or("-"));
+            let _ = writeln!(
+                out,
+                "{}  {}  {}  {}",
+                s("id"),
+                s("form"),
+                s("status"),
+                s("title")
+            );
+        }
+    }
+    if as_json {
+        return Ok(out);
+    }
+    if page.items.is_empty() {
+        out.push_str("No items.\n");
+    }
+    if let Some(next) = &page.next {
+        let _ = writeln!(out, "More: add --before {}", field(next));
+    }
+    Ok(out)
 }
 
 fn summary_line(m: &iris_api::MessageSummary) -> String {
