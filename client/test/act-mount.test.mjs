@@ -1,6 +1,6 @@
 // Done, Later and Decline on a commitment in a DOM: the hold with Undo, the
 // request, and the answers of the engine (spec 2 section 4).
-// A zone west of UTC: there, "tomorrow" can already have started in UTC in the evening.
+// The browser is west of UTC. The time zone of the owner comes from the engine.
 process.env.TZ = "America/Los_Angeles";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -32,14 +32,30 @@ test("the days of Later", () => {
   assert.equal(act.nextWeek(NOW), "2026-11-23", "on a Monday, the Monday a week later");
   assert.equal(act.nextWeek(new Date(2026, 10, 22)), "2026-11-23", "on a Sunday, the next day");
   assert.equal(act.first(new Date(2026, 11, 31)), "2027-01-01");
-  // Each offered day starts later in UTC than now, also in a zone west of UTC
-  // late in the evening (the engine opens a deferred item when its day starts in UTC).
-  for (let h = 0; h < 24 * 14; h++) {
+  // In the time zone of the owner (fixed offsets, so the test knows the day
+  // without the code under test): the first day is tomorrow there, Next week
+  // is the next Monday there, and only today or earlier has started.
+  const zones = { "Asia/Tokyo": 9, "Pacific/Kiritimati": 14, "Etc/GMT+12": -12, UTC: 0 };
+  const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
+  for (let h = 0; h < 24 * 14; h += 0.5) {
     const now = new Date(Date.UTC(2026, 10, 10) + h * 3_600_000);
-    const week = act.nextWeek(now);
-    if (week) assert.equal(new Date(`${week}T12:00:00`).getDay(), 1, `${week} is a Monday`);
-    for (const d of [act.first(now), week ?? act.first(now)]) assert.ok(Date.parse(`${d}T00:00:00Z`) > now.getTime(), `${d} at ${now.toISOString()}`);
+    for (const [zone, offset] of Object.entries(zones)) {
+      const local = now.getTime() + offset * 3_600_000;
+      const today = iso(local);
+      const at = `${zone} at ${now.toISOString()}`;
+      assert.equal(act.today(now, zone), today, at);
+      assert.equal(act.first(now, zone), iso(local + 86_400_000), at);
+      const week = act.nextWeek(now, zone);
+      const ahead = (Date.parse(week) - Date.parse(today)) / 86_400_000;
+      assert.ok(new Date(`${week}T12:00:00Z`).getUTCDay() === 1 && ahead >= 1 && ahead <= 7, `${week}: ${at}`);
+      assert.ok(act.started(today, now, zone) && !act.started(act.first(now, zone), now, zone), at);
+    }
   }
+  // No zone, or a zone that the browser does not know: the zone of the browser.
+  const evening = new Date(Date.UTC(2026, 10, 17, 5)); // 21:00 on 16 Nov in Los Angeles.
+  assert.equal(act.today(evening), "2026-11-16");
+  assert.equal(act.today(evening, "Mars/Olympus"), "2026-11-16");
+  assert.equal(act.today(evening, "Asia/Tokyo"), "2026-11-17");
   assert.equal(act.said("defer", "2026-11-23"), "Later, on Mon 23 Nov.");
 });
 
@@ -100,33 +116,47 @@ test("Later sends defer with the day, and leaving in the hold still sends", asyn
   assert.deepEqual(asked, [["items/c-311/defer", { date: "2026-11-23" }]]);
 });
 
-test("on a Sunday evening west of UTC, Next week is not offered", async () => {
-  const sunday = new Date(2026, 10, 22, 17, 0); // 01:00 UTC on Monday.
-  assert.equal(act.nextWeek(sunday), null);
+test("the days of Later are in the time zone of the owner, not of the browser", async () => {
+  // 17:00 on Sunday in Los Angeles (the browser) is 10:00 on Monday in Tokyo (the owner).
+  const sunday = new Date(2026, 10, 22, 17, 0);
   serve(() => [200, commitment()]);
-  const view = await mount("/src/views/Act.svelte", { item: commitment(), clock: () => sunday, onchange: () => {} });
+  const view = await mount("/src/views/Act.svelte", { item: commitment(), clock: () => sunday, zone: "Asia/Tokyo", onchange: () => {} });
   try {
     button(view, "Later").click();
-    await until(() => button(view, "In 2 days"));
-    assert.match(text(button(view, "In 2 days")), /Tue 24 Nov/);
-    assert.equal(button(view, "Next week"), undefined);
+    await until(() => button(view, "Tomorrow"));
+    assert.match(text(button(view, "Tomorrow")), /Tue 24 Nov/);
+    assert.match(text(button(view, "Next week")), /Mon 30 Nov/);
   } finally {
     view.destroy();
   }
 });
 
-test("a day that starts in UTC during the hold is not sent", async () => {
+test("a Sunday evening west of UTC offers Tomorrow and Next week, the same Monday", async () => {
+  const sunday = new Date(2026, 10, 22, 17, 0); // 01:00 UTC on Monday.
+  serve(() => [200, commitment()]);
+  const view = await mount("/src/views/Act.svelte", { item: commitment(), clock: () => sunday, zone: "America/Los_Angeles", onchange: () => {} });
+  try {
+    button(view, "Later").click();
+    await until(() => button(view, "Tomorrow"));
+    assert.match(text(button(view, "Tomorrow")), /Mon 23 Nov/);
+    assert.equal(button(view, "Next week"), undefined, "Next week is the same day as Tomorrow");
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a day that starts during the hold is still sent, also when the page closes (issue #241)", async () => {
   const asked = serve(() => [200, commitment("deferred")]);
-  let now = new Date(Date.UTC(2026, 10, 16, 23, 59, 58)); // 15:59:58 in Los Angeles.
-  const view = await mount("/src/views/Act.svelte", { item: commitment(), clock: () => now, delay: 50, onchange: () => {} });
+  let now = new Date(2026, 10, 16, 23, 59, 58);
+  const view = await mount("/src/views/Act.svelte", { item: commitment(), clock: () => now, zone: "America/Los_Angeles", onchange: () => {} });
   try {
     button(view, "Later").click();
     await until(() => button(view, "Tomorrow"));
     button(view, "Tomorrow").click(); // Tue 17 Nov.
-    now = new Date(Date.UTC(2026, 10, 17, 0, 0, 1));
-    await new Promise((r) => setTimeout(r, 120));
-    assert.equal(asked.length, 0);
-    assert.ok(button(view, "In 2 days"), "the days come back, from the new time");
+    now = new Date(2026, 10, 17, 0, 0, 1);
+    window.dispatchEvent(new Event("pagehide"));
+    await until(() => asked.length === 1);
+    assert.deepEqual(asked, [["items/c-311/defer", { date: "2026-11-17" }]]);
   } finally {
     view.destroy();
   }

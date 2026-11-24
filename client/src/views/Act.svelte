@@ -8,16 +8,20 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
   import { get, post, type Item } from "../api";
-  import { day, first, firstName, hold, HOLD, nextWeek, quiet, said, started, type Verb } from "../act";
+  import { access } from "../access.svelte.ts";
+  import { day, first, hold, HOLD, nextWeek, quiet, said, started, type Verb } from "../act";
 
   // `delay`: the time for Undo, shorter in tests. `clock`: the time now.
+  // `zone`: the time zone of the owner; by default the one of the engine status.
   let {
     item,
     onchange,
     delay = HOLD,
     clock = () => new Date(),
+    zone,
     more,
-  }: { item: Item; onchange: (item: Item) => void; delay?: number; clock?: () => Date; more?: Snippet } = $props();
+  }: { item: Item; onchange: (item: Item) => void; delay?: number; clock?: () => Date; zone?: string | null; more?: Snippet } = $props();
+  let tz = $derived(zone ?? access.zone);
 
   type Phase =
     | { at: "idle" }
@@ -34,8 +38,8 @@
   let away = $derived(quiet(item));
   // The days of Later come from the time when Later opens, and a click checks them again.
   let now = $state(new Date(0));
-  let soon = $derived(first(now));
-  let week = $derived(nextWeek(now));
+  let soon = $derived(first(now, tz));
+  let week = $derived(nextWeek(now, tz));
 
   function openLater() {
     now = clock();
@@ -43,8 +47,8 @@
   }
 
   function defer(date: string | null) {
-    // A page kept open past midnight: a day that started in UTC would open the item again at once.
-    if (!date || started(date, clock())) {
+    // A page kept open past midnight: a day that started would open the item again at once.
+    if (!date || started(date, clock(), tz)) {
       now = clock();
       picked = "";
       return;
@@ -66,13 +70,8 @@
 
   async function send(verb: Verb, date?: string) {
     pending = undefined;
-    // The day can start in UTC during the hold: then send nothing, and offer the days again.
-    if (date && started(date, clock())) {
-      now = clock();
-      later = true;
-      phase = { at: "idle" };
-      return;
-    }
+    // The day can start during the hold (issue #241). Send it as chosen: the
+    // engine records Later, and the item comes back on that day, now.
     phase = { at: "sending", verb, date };
     try {
       const next = await post<Item>(`items/${encodeURIComponent(item.id)}/${verb}`, date ? { date } : {});
@@ -143,8 +142,8 @@
     </div>
     {#if later}
       <div class="when">
-        <button class="chip" type="button" onclick={() => defer(soon)}>{firstName(now)} <span>{day(soon)}</span></button>
-        {#if week && week !== soon}<button class="chip" type="button" onclick={() => defer(week)}>Next week <span>{day(week)}</span></button>{/if}
+        <button class="chip" type="button" onclick={() => defer(soon)}>Tomorrow <span>{day(soon)}</span></button>
+        {#if week !== soon}<button class="chip" type="button" onclick={() => defer(week)}>Next week <span>{day(week)}</span></button>{/if}
         <label class="chip">
           Pick a date
           <input type="date" min={soon} bind:value={picked} onchange={() => defer(picked)} />
