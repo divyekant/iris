@@ -2,7 +2,7 @@
 
 - Status: draft, for the approval of the maintainer
 - Applies to: release 1 ("See")
-- Open model version: 1.1
+- Open model version: 1.2
 - Related: [Specification 2](02-changeset-policy-ledger.md), the
   [schemas](schema/), the manifesto and the experience document "Iris: the
   ideal experience"
@@ -281,6 +281,30 @@ However verify ends (a result, an error or a crash), the engine starts the
 sync of the account again. After a crash, the next start does this. A
 difference of step 7 starts a full resync (section 4.4).
 
+If another process runs the first copy of the account (section 4.2),
+no full mirror exists to compare. Verify of that account prints that the
+first copy runs, and the command does not fail for that account. Verify
+checks this before any token or provider call. If another process runs a
+later sync of the account, verify of that account fails.
+
+#### Failure list of a verify during another sync
+
+Supported input: the state of the sync lock of the account (`sync-<id>.lock`)
+and `account.mirror_ready_at`.
+
+| Lock and mirror | Result |
+|---|---|
+| Lock held, no full mirror | The line "the first copy runs now". No token call. No failure for the account. |
+| Lock held, no full mirror, the token endpoint fails | The same: the check comes before the token call. |
+| No lock file, or the lock is free, no full mirror | Verify takes the lock, finishes the first copy (step 1), then compares. |
+| Lock held, full mirror | Error "another sync of the account runs". The command fails. |
+| A first copy starts between the check and the lock of verify | The same line as a held lock, from the lock error. |
+| A sync tries the lock while the check probes it | That sync gets "another sync of the account runs" once. The engine tries again at its next sync turn. |
+| The probe or the store read fails | Error. The command fails. Nothing changes. |
+
+All other states: verify takes the lock as before, or fails for the account
+with the error.
+
 Verify does not compare `internalDate` or the size. Gmail does not change the
 bytes of a message, and step 8 checks the bytes. A difference of step 8 is a
 local defect, not a sync defect. The engine fetches the message again
@@ -533,7 +557,7 @@ Each item of each form has these fields:
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `model` | string, `"iris/1.1"` (`"iris/1.0"` in older documents) | yes | The version of the open model: `iris/<major>.<minor>` ([specification 4](04-open-model-versions.md)). |
+| `model` | string, `"iris/1.2"` (`"iris/1.0"` or `"iris/1.1"` in older documents) | yes | The version of the open model: `iris/<major>.<minor>` ([specification 4](04-open-model-versions.md)). |
 | `id` | string, for example `"c-311"` | yes | The ID of the item (section 5.7). |
 | `form` | `commitment`, `conversation`, `record`, `feed` or `signal` | yes | The form. |
 | `status` | string, values for each form | yes | The state of the item. |
@@ -693,7 +717,7 @@ The person gives one answer for each sender:
 | Answer | Effect |
 |---|---|
 | Accept | The kind becomes `person`, with `decided_by` `person` and the `basis` "accepted at the gate". The items go to their sections ("You owe", "Owed to you", "Conversations"). |
-| Decline | The engine sets `declined_at` on the sender row. The kind stays with the engine, so a declined sender can still become `hostile`, or known (for example after a reply of the person). The decline applies only while the kind is `stranger`: the items of a declined stranger are in no section of the brief, and the web client lists the declined senders. |
+| Decline | The engine sets `declined_at` on the sender row. The kind stays with the engine, so a declined sender can still become `hostile`, or known (for example after a reply of the person). The decline applies only while the kind is `stranger`: the items of a declined stranger are in no section of the brief, and the web client lists the declined senders. A conversation with a known person stays in "Conversations" (decision D30). It also stays on the list of declined senders, so the person can still accept the sender or ask again. |
 | Reopen | Removes the accept or the decline of the gate. After an accept, the engine decides the kind again from the evidence in the store. A kind that a person set for another reason (for example, a correction) stays. |
 
 The web client shows the gate in the brief: one row for each sender, with
@@ -755,7 +779,7 @@ The `hostile` column of the message holds each mark that applies:
 | Mark | Rule |
 |---|---|
 | `dmarc` | `Authentication-Results` reports a DMARC fail for the domain of `From`. |
-| `spoof` | The display name is the name of a known person, the address is not the address of that person, and DKIM or DMARC does not pass for the domain of the address. If DKIM and DMARC pass, the address is a new sender, with the kind `stranger`. |
+| `spoof` | The display name is the name of a known person, the address is not the address of that person, and DKIM or DMARC does not pass for the domain of the address. If DKIM and DMARC pass, the address is a new sender, with the kind `stranger`. Also: the display name holds an email address whose registrable domain is not the one of the `From` address, as in `"ceo@bank.example" <x@evil.example.net>` (decision D32). A DKIM or DMARC pass does not clear this case. A name with the word `via` is a list form (`"x@y.example via List" <list@lists.example>`) and does not get the mark. |
 | `link` | An HTML link of the message (from `Clean.links`) shows a web address with the host `S` (text that starts with `http://`, `https://` or `www.`, or a first word that is a domain with a known public suffix, not a file name such as `report.pdf`), and its target is an `http` or `https` URL that a browser opens on another owner. Iris reads the target with the WHATWG URL standard. The owner of a host is its registrable domain by the public suffix list, with the hosts and the `From` domain in punycode (so `münchen.de` and `xn--mnchen-3ya.de` are one owner). The link is deceptive if one of these is true: the target host is an IP address or Iris cannot read it; the target has a user part, a backslash or a percent sign in front of its path; the target host has another owner than `S`. If DMARC passes for the domain of `From` and that domain has the owner of `S`, a target host of another owner is not deceptive: the sender owns the shown domain and can link through a redirect. The first two conditions (an IP address or a target that Iris cannot read; a user part, a backslash or a percent sign) apply also to this sender. DMARC for another domain proves nothing about `S`. If `iris-clean` could not list each link (`links_cut`), or the part of the file past the read limit has a part header (after a delimiter of a declared boundary) with the type `text/html`, the message gets the mark. |
 | `spam` | The message has the label `SPAM`. |
 | `phishing` | The understanding step marks the message as phishing. |
@@ -788,7 +812,7 @@ mail" is a message with a hostile mark, or a message from a `hostile` sender.
 | Each form | To `gone`, and back | The engine (section 4.5). |
 | Commitment | `open` to `done`, `declined`, `deferred` or `cancelled` | A person, through a changeset (release 2). Understanding sets `done` or `cancelled` when a later message of the thread says so. |
 | Commitment | `deferred` to `done`, `declined`, or `deferred` with a new date | A person, through a changeset (release 2): `close`, `decline` and `defer` (specification 2, section 4). |
-| Commitment | `deferred` to `open` | The engine, on the `deferred_until` date (UTC). The engine checks once each minute. |
+| Commitment | `deferred` to `open` | The engine, at the start of the `deferred_until` date in the time zone of the owner (`iris zone`; the default is the time zone of the computer). The engine checks once each minute. |
 | Conversation | `active` to `quiet`, and back | The engine: 14 days with no message, and the next message. |
 | Conversation | `active` or `quiet` to `muted` | A person, through a changeset (release 5): `mute` (`docs/specs/2026-11-17-preference-rules.md`). A new message keeps it `muted`. |
 | Record | `kept` to `corrected` | A correction (release 2). |
@@ -1057,6 +1081,12 @@ no item, and the message stays not understood.
   changeset or a ledger entry of specification 2 refers to it. A rebuild
   never deletes a pinned item and never changes its ID, so each correction
   and each reference stays on the same item.
+- A pinned item whose origin message is hostile mail (a hostile mark, the
+  label `SPAM` or a `hostile` sender) stays in the store, but no read of the
+  local API, the brief, the matters or the matters proposal shows it. It is
+  not a live member of a matter. The brief counts the message as hostile
+  mail. The item keeps its ID and its corrections. It shows again when the
+  message is no longer hostile mail (issue 112).
 - A rebuild runs understanding again on the source messages of a pinned item
   that are not gone. The engine gives the model the pinned items of the
   message as existing items. For each item that it finds, the model returns a
@@ -1094,7 +1124,7 @@ with the original, whatever its own attention.
 |---|---|
 | You owe | Commitments with `direction` `you_owe` and `status` `open`, where the counterparty is a `person` or a `service`. Order by `due`, then by `created`. |
 | Owed to you | Commitments with `direction` `owed_to_you` and `status` `open`, where the owner is a `person` or a `service`. Order by age. |
-| Conversations | Conversations with `status` `active`, and `new` greater than 0 or `your_turn` true, with no `stranger` participant and no declined participant. |
+| Conversations | Conversations with `status` `active`, and `new` greater than 0 or `your_turn` true, with no `stranger` participant. A conversation with a declined participant shows here only if a `person` participant is in it too. |
 | Records | Count for each record type. |
 | Feed | Feed items with `status` `new`, by publisher. |
 | Signals | Signals with `status` `active` and an `expires` time later than now. The engine sets `expired` at `expires`, so this also covers the time before the engine changes the status. |
@@ -1105,15 +1135,17 @@ with the original, whatever its own attention.
 The sections do not overlap. A conversation with a `stranger` participant
 shows only under Strangers, so each item shows one time and each section count
 is exact. An item whose stranger the person declined, with no other stranger,
-is in no section. The client uses the counts of the engine and does not remove
+is in no section. The exception is a conversation with a known person: it
+stays in Conversations, so a decline of one sender does not hide the thread of
+a known person. The client uses the counts of the engine and does not remove
 duplicates between sections.
 
 After the live login codes, the web client shows these sections first, in
 this order: "A question for you" (card R5-05), only when an agent asks a
 question, with the job whose question is the newest (`updated` of the job)
 and a field for the answer; then Due soon (card R3-08). Due soon holds each item of You owe that is due in 2 days or
-less, or that is late, in the local day of the viewer. The engine does not
-know that day (it has no time zone of the owner), so the client makes this
+less, or that is late, on the day of the owner: the day in the time zone of
+`/api/status` (`iris zone`, decision D1). The client makes this
 split from the You owe items, and the API keeps one You owe section. The
 client shows You owe with the rest of its items, and with the engine count
 less the Due soon items. The "All" link of You owe, and the link of Due soon,

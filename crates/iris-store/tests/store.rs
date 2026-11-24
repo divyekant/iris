@@ -82,7 +82,7 @@ fn open_makes_the_data_folder() {
     }
     store
         .read(|c| {
-            assert_eq!(iris_store::schema_version(c)?, 42);
+            assert_eq!(iris_store::schema_version(c)?, 51);
             let journal: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
             assert_eq!(journal, "wal");
             let cache: i64 = c.query_row("PRAGMA cache_size", [], |r| r.get(0))?;
@@ -748,9 +748,90 @@ fn dry_write_gives_the_result_and_writes_nothing() {
 }
 
 #[test]
+fn a_deferred_commitment_opens_at_midnight_of_the_owner() {
+    let dir = TempDir::new("deferred-zone");
+    let (store, acc) = setup(&dir);
+    let add = |until: &str| -> i64 {
+        store
+            .write(|tx| {
+                Ok(tx.query_row(
+                    "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                     VALUES ('commitment', ?1, 'deferred', json_object('status', 'deferred',
+                       'deferred_until', ?2), 0, 0) RETURNING id",
+                    rusqlite::params![acc, until],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    let status = |id: i64| -> String {
+        store
+            .read(|c| Ok(c.query_row("SELECT status FROM item WHERE id = ?1", [id], |r| r.get(0))?))
+            .unwrap()
+    };
+    let hour = 3_600_000;
+    // 2026-11-16T00:00:00Z
+    let midnight_utc = 1_794_787_200_000;
+
+    // West of UTC: at 05:00 UTC it is still 21:00 on 15 November in Los Angeles.
+    store.set_time_zone(Some("America/Los_Angeles")).unwrap();
+    let west = add("2026-11-16");
+    assert_eq!(store.reopen_deferred(midnight_utc + 5 * hour).unwrap(), 0);
+    assert_eq!(status(west), "deferred");
+    // 08:00 UTC is midnight in Los Angeles.
+    assert_eq!(store.reopen_deferred(midnight_utc + 8 * hour).unwrap(), 1);
+    assert_eq!(status(west), "open");
+
+    // East of UTC: at 15:00 UTC on 15 November it is already 16 November in Tokyo.
+    store.set_time_zone(Some("Asia/Tokyo")).unwrap();
+    let east = add("2026-11-16");
+    assert_eq!(store.reopen_deferred(midnight_utc - 10 * hour).unwrap(), 0);
+    assert_eq!(store.reopen_deferred(midnight_utc - 9 * hour).unwrap(), 1);
+    assert_eq!(status(east), "open");
+}
+
+#[test]
+fn the_time_zone_setting_takes_only_a_known_zone() {
+    let dir = TempDir::new("zone-setting");
+    let (store, _) = setup(&dir);
+    let zone = || store.read(|c| Ok(iris_store::time_zone(c)?)).unwrap();
+    let computer = jiff::tz::TimeZone::system();
+    assert_eq!(zone().iana_name(), computer.iana_name());
+
+    store.set_time_zone(Some("Asia/Kolkata")).unwrap();
+    assert_eq!(zone().iana_name(), Some("Asia/Kolkata"));
+    let r = store.set_time_zone(Some("Mars/Olympus"));
+    assert!(matches!(r, Err(iris_store::Error::TimeZone(_))), "{r:?}");
+    // A refused name keeps the old setting.
+    assert_eq!(zone().iana_name(), Some("Asia/Kolkata"));
+
+    store.set_time_zone(None).unwrap();
+    assert_eq!(zone().iana_name(), computer.iana_name());
+}
+
+#[test]
+fn a_day_is_the_day_of_the_zone() {
+    let tz = |n: &str| jiff::tz::TimeZone::get(n).unwrap();
+    // 2026-11-16T05:00:00Z
+    let at = 1_794_805_200_000;
+    assert_eq!(iris_store::day_in(&tz("UTC"), at), "2026-11-16");
+    assert_eq!(
+        iris_store::day_in(&tz("America/Los_Angeles"), at),
+        "2026-11-15"
+    );
+    assert_eq!(
+        iris_store::day_in(&tz("Pacific/Kiritimati"), at),
+        "2026-11-16"
+    );
+    // Out of range: the day of the epoch, no panic.
+    assert_eq!(iris_store::day_in(&tz("UTC"), i64::MAX), "1970-01-01");
+}
+
+#[test]
 fn a_deferred_commitment_opens_on_its_date() {
     let dir = TempDir::new("deferred");
     let (store, acc) = setup(&dir);
+    store.set_time_zone(Some("UTC")).unwrap();
     // 2026-11-16T12:00:00.007Z
     let now = 1_794_830_400_007;
     let add = |status: &str, before: Option<&str>, doc: &str| -> i64 {
@@ -832,6 +913,31 @@ fn a_sender_lookup_without_case_uses_an_index() {
     assert!(
         plan.iter()
             .any(|p| p.contains("USING INDEX sender_address_nocase")),
+        "{plan:?}"
+    );
+}
+
+#[test]
+fn the_changesets_of_one_job_use_an_index() {
+    // Issue 311: the job page finds the changesets of a job by
+    // `author_job` with an index search, not a scan of each changeset.
+    let dir = std::env::temp_dir().join(format!("iris-store-author-job-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    let plan: Vec<String> = store
+        .read(|c| {
+            Ok(
+                c.prepare("EXPLAIN QUERY PLAN SELECT id FROM changeset c WHERE c.author_job = ?1")?
+                    .query_map(["j-1"], |r| r.get(3))?
+                    .collect::<rusqlite::Result<_>>()?,
+            )
+        })
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        plan.iter()
+            .any(|p| p.contains("USING INDEX changeset_author_job")
+                || p.contains("USING COVERING INDEX changeset_author_job")),
         "{plan:?}"
     );
 }
@@ -976,4 +1082,58 @@ fn read_to_writes_the_answer_after_the_read_ends() {
         .file_name()
         .to_string_lossy()
         .starts_with(".spool")));
+}
+
+/// A peer writer that opens one more streamed answer at its first write,
+/// until a [`Store::read_to`] refuses.
+struct Nest<'a> {
+    store: &'a Store,
+    open: usize,
+    refused_at: &'a std::cell::Cell<Option<usize>>,
+}
+
+impl std::io::Write for Nest<'_> {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        if self.refused_at.get().is_none() {
+            let mut inner = Nest {
+                store: self.store,
+                open: self.open + 1,
+                refused_at: self.refused_at,
+            };
+            let r = self.store.read_to(&mut inner, |_, w| -> Result<(), Error> {
+                std::io::Write::write_all(w, b"x")?;
+                Ok(())
+            });
+            if r.is_err() {
+                self.refused_at.set(Some(self.open + 1));
+            }
+        }
+        Ok(b.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+// Invariant (#713): at most MAX_SPOOLS streamed answers of one store hold
+// a spool file at the same time, and each place comes back at the end.
+#[test]
+fn read_to_limits_the_open_spools() {
+    let dir = TempDir::new("read-to-limit");
+    let s = Store::open(&dir.0).unwrap();
+    for _ in 0..2 {
+        let refused_at = std::cell::Cell::new(None);
+        let mut out = Nest {
+            store: &s,
+            open: 1,
+            refused_at: &refused_at,
+        };
+        s.read_to(&mut out, |_, w| -> Result<(), Error> {
+            std::io::Write::write_all(w, b"x")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(refused_at.get(), Some(iris_store::MAX_SPOOLS + 1));
+    }
 }

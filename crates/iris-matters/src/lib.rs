@@ -12,14 +12,49 @@
 
 use std::fmt;
 
+/// The SQL condition "item `i` is live": a member form, a status that is
+/// not ended, no duplicate, not hidden, and no hostile origin mail. The
+/// same rule as the views `matter_live` and `matter_add_live` (migration
+/// 46), for one item.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! live_item {
+    () => {
+        concat!(
+            "NOT ",
+            iris_store::from_hostile_mail!("i"),
+            " AND i.form IN ('commitment', 'conversation', 'record', 'signal')
+    AND i.status NOT IN ('gone', 'cancelled', 'declined')
+    AND (i.form <> 'signal' OR i.status = 'active')
+    AND i.duplicate_of IS NULL
+    AND coalesce(json_extract(i.doc, '$.attention.state'), 'shown') <> 'hidden'"
+        )
+    };
+}
+
+/// The SQL condition "item `i` is free": no kept member of an open matter,
+/// and no pending addition.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! free_item {
+    () => {
+        "NOT EXISTS (
+      SELECT 1 FROM matter_item mi JOIN matter m ON m.id = mi.matter_id
+      WHERE mi.item_id = i.id AND mi.kept = 1 AND m.status IN ('proposed', 'confirmed'))
+    AND NOT EXISTS (SELECT 1 FROM matter_add ma WHERE ma.item_id = i.id)"
+    };
+}
+
+pub mod edit;
 pub mod propose;
+pub use edit::{create, delete, edit, joinable, parse_ref, propose_by_agent, Edit};
 pub use propose::{propose, Gate, Outcome, Skip};
 
 use iris_store::Store;
 use rusqlite::{params, OptionalExtension, Transaction};
 
 /// The prompt version of the proposal step.
-pub const PROMPT: &str = "matters/0.1";
+pub const PROMPT: &str = "matters/0.2";
 
 /// The longest title, in characters (the schema `matter.schema.json`).
 pub const MAX_TITLE: usize = 80;
@@ -39,8 +74,11 @@ pub enum Error {
     Bad(&'static str),
     /// Understanding, or another proposal step, holds the run lock.
     Busy,
-    /// The program could not make the model from the model row.
+    /// The program could not make the model from the model row, or
+    /// another part of the program failed.
     Model(String),
+    /// The caller may not use an item (a job session and its grant).
+    Denied(String),
 }
 
 impl fmt::Display for Error {
@@ -51,6 +89,7 @@ impl fmt::Display for Error {
             Error::Conflict(why) | Error::Bad(why) => f.write_str(why),
             Error::Busy => f.write_str("a run is in progress"),
             Error::Model(e) => write!(f, "model: {e}"),
+            Error::Denied(why) => f.write_str(why),
         }
     }
 }
@@ -110,10 +149,26 @@ pub fn insert_proposal(
     items: &[i64],
     now: i64,
 ) -> Result<i64> {
+    insert_by(tx, "model", title, model, PROMPT, run, items, now)
+}
+
+/// [`insert_proposal`] for the author `author` (`model`, `agent` or
+/// `person`). An agent or the person gives no model and no prompt (`''`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn insert_by(
+    tx: &Transaction,
+    author: &str,
+    title: &str,
+    model: &str,
+    prompt: &str,
+    run: Option<i64>,
+    items: &[i64],
+    now: i64,
+) -> Result<i64> {
     tx.execute(
-        "INSERT INTO matter(title, status, model, prompt, run_id, created_at, updated_at)
-         VALUES (?1, 'proposed', ?2, ?3, ?4, ?5, ?5)",
-        params![title, model, PROMPT, run, now],
+        "INSERT INTO matter(title, status, author, model, prompt, run_id, created_at, updated_at)
+         VALUES (?1, 'proposed', ?2, ?3, ?4, ?5, ?6, ?6)",
+        params![title, author, model, prompt, run, now],
     )?;
     let id = tx.last_insert_rowid();
     let mut add =
@@ -129,6 +184,12 @@ pub fn insert_proposal(
 /// with its member rows (the cascade). Gives the number of proposals that
 /// it deleted.
 pub fn clean(tx: &Transaction) -> Result<usize> {
+    // An addition that is not live (the item ended, or became hidden) goes
+    // too: the person never sees it, and its item is a candidate again.
+    tx.execute(
+        "DELETE FROM matter_add WHERE item_id NOT IN (SELECT item_id FROM matter_add_live)",
+        [],
+    )?;
     Ok(tx.execute(
         "DELETE FROM matter WHERE status = 'proposed'
            AND id NOT IN (SELECT matter_id FROM matter_valid)",
@@ -137,7 +198,7 @@ pub fn clean(tx: &Transaction) -> Result<usize> {
 }
 
 /// The status of the matter, or `NotFound`.
-fn status(tx: &Transaction, matter: i64) -> Result<String> {
+pub(crate) fn status(tx: &Transaction, matter: i64) -> Result<String> {
     tx.query_row("SELECT status FROM matter WHERE id = ?1", [matter], |r| {
         r.get(0)
     })

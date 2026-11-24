@@ -1,7 +1,7 @@
 // Words for the jobs of the agents (card R4-09): the state of a job and each
 // step of its timeline, as plain sentences. Pure functions, so the tests need
 // no DOM. Text from an agent or from mail is data: the view shows it as text.
-import { get, post, type Job, type JobChangeset, type JobDetail, type JobEvent, type JobPage, type Target } from "./api";
+import { get, post, type Job, type JobChangeset, type JobDetail, type JobEvent, type JobPage, type JobSession, type Target } from "./api";
 import { daysFrom } from "./format";
 import { href } from "./route";
 
@@ -24,7 +24,8 @@ export const pageSize = (state: Job["state"]) => (state === "done" ? 20 : 50);
 export function due(job: Job, now = new Date()): { text: string; tone: "late" | "soon" | "" } | null {
   if (!job.due) return null;
   if (job.state === "done") return { text: `Was due ${day(job.due)}`, tone: "" };
-  const days = daysFrom(job.due, now);
+  // A job due date is a day of the browser (start.ts, issue #892), not of the owner zone.
+  const days = daysFrom(job.due, now, null);
   // The words say "late" each time the tone does, so color is not the only sign.
   if (Date.parse(job.due) <= now.getTime()) return { text: `Was due ${day(job.due)}, ${days < 0 ? relative.format(days, "day") : "earlier today"}`, tone: "late" };
   return { text: `Due ${day(job.due)}, ${relative.format(days, "day")}`, tone: days <= 2 ? "soon" : "" };
@@ -54,6 +55,35 @@ export function now(job: Job): string {
     case "done":
       return job.end === "cancel" ? `Cancelled ${day(job.updated)}.` : `Done ${day(job.updated)}.`;
   }
+}
+
+const ENDED: Record<NonNullable<JobSession["end"]>, string> = {
+  exit: "ended",
+  stop: "was stopped",
+  revoke: "ended because its access was taken back",
+  job_state: "ended when the job changed state",
+  time_limit: "ended at its time limit",
+  engine: "ended when the engine stopped",
+  launch_failed: "did not start",
+  helper_failed: "failed in its sandbox helper",
+};
+
+/**
+ * The state of a working job on its page (issue 742), from its newest session.
+ * `said` replaces the words of `now`. `ended` tells how the last session ended. `run` is the command that starts a
+ * new session, with the agent of the last session (claude-code when the job had none). An ending session is still
+ * live, and the engine refuses a new one, so it gives no `run`.
+ * A job that does not work, or whose session starts or runs, gives null: `now` is true for it.
+ */
+export function agent(d: Pick<JobDetail, "job" | "session">): { said: string; ended?: string; run?: string } | null {
+  const s = d.session;
+  if (d.job.state !== "working" || s?.state === "starting" || s?.state === "running") return null;
+  const said = "No agent works on it now.";
+  if (s?.state === "ending") return { said, ended: `The last session (${s.id}, ${s.agent}) stops now. When it has stopped, you can start an agent again.` };
+  const run = `iris job run --agent ${s?.agent ?? "claude-code"} ${d.job.id}`;
+  if (!s || !s.end) return { said, run };
+  const code = s.end === "exit" && s.exit !== null && s.exit !== 0 ? ` with exit code ${s.exit}` : "";
+  return { said, ended: `The last session (${s.id}, ${s.agent}) ${ENDED[s.end]}${code}.`, run };
 }
 
 /** One step of the timeline. `quote` is text of the agent or the person, shown as text. */

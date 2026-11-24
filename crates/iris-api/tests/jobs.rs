@@ -435,6 +435,32 @@ async fn the_person_answers_the_question_of_a_job_once() {
     assert_eq!(code, StatusCode::CONFLICT);
 }
 
+/// The person ends a job once (#356).
+#[tokio::test]
+async fn the_person_ends_a_job_once() {
+    let dir = temp("finish");
+    let s = store(&dir);
+    let job = iris_job::create(&s, "Pay the invoice.", None, NOW).unwrap();
+    let uri = format!("/api/jobs/{}/finish", iris_job::format_job_id(job));
+    for bad in [json!({}), json!({ "end": "stop" }), json!({ "end": 1 })] {
+        let (code, _) = post(&s, &uri, bad.clone()).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    assert_eq!(
+        post(&s, "/api/jobs/j-999/finish", json!({ "end": "cancel" }))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    let (code, doc) = post(&s, &uri, json!({ "end": "cancel" })).await;
+    assert_eq!(code, StatusCode::OK, "{doc}");
+    assert_eq!(doc["job"]["state"], "done");
+    let last = doc["job"]["events"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["by"], "person");
+    let (code, _) = post(&s, &uri, json!({ "end": "complete" })).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+}
+
 #[tokio::test]
 async fn an_answer_to_an_older_question_is_refused() {
     let dir = temp("answer-race");
@@ -492,4 +518,47 @@ async fn an_answer_to_an_older_question_is_refused() {
         .await;
         assert_eq!(code, StatusCode::OK);
     }
+}
+
+/// Issue #742: the job page says if an agent works on the job. `session`
+/// is the newest session of the job, or null.
+#[tokio::test]
+async fn one_job_names_its_newest_session() {
+    let dir = temp("session");
+    let s = store(&dir);
+    let job = iris_job::create(&s, "Get the contract.", None, NOW).unwrap();
+    let uri = format!("/api/jobs/{}", iris_job::format_job_id(job));
+
+    let (code, v) = get(&s, &uri).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(v["session"], Value::Null, "no session yet");
+
+    let first = iris_job::register(&s, job, "claude-code", NOW + 1).unwrap();
+    let (_, v) = get(&s, &uri).await;
+    assert_eq!(v["session"]["id"], iris_job::format_session_id(first));
+    assert_eq!(v["session"]["agent"], "claude-code");
+    assert_eq!(v["session"]["state"], "starting");
+    assert_eq!(v["session"]["end"], Value::Null);
+
+    iris_job::start(&s, first, NOW + 2).unwrap();
+    let (_, v) = get(&s, &uri).await;
+    assert_eq!(v["session"]["state"], "running");
+
+    iris_job::end(&s, first, iris_job::EndReason::Exit, Some(1), NOW + 3).unwrap();
+    let (_, v) = get(&s, &uri).await;
+    assert_eq!(v["session"]["state"], "ending", "not reaped yet");
+    iris_job::reap(&s, first, NOW + 3).unwrap();
+    let (_, v) = get(&s, &uri).await;
+    assert_eq!(v["session"]["state"], "ended");
+    assert_eq!(v["session"]["end"], "exit");
+    assert_eq!(v["session"]["exit"], 1);
+    assert!(v["session"]["ended"].is_string());
+
+    // The newest session wins.
+    let second = iris_job::register(&s, job, "codex", NOW + 4).unwrap();
+    iris_job::end(&s, second, iris_job::EndReason::LaunchFailed, None, NOW + 5).unwrap();
+    let (_, v) = get(&s, &uri).await;
+    assert_eq!(v["session"]["id"], iris_job::format_session_id(second));
+    assert_eq!(v["session"]["end"], "launch_failed");
+    assert_eq!(v["session"]["exit"], Value::Null);
 }

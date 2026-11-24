@@ -1373,3 +1373,105 @@ fn two_accounts_sync_with_zero_differences() {
     assert_eq!((per_account(s.account), per_account(second)), (30, 29));
     verify_both();
 }
+
+/// Issue #385: the hourly pass of the tick removes the grant rules of a
+/// job that is done, and keeps the rules of a job that still works.
+#[test]
+fn a_tick_removes_the_grants_of_a_done_job() {
+    use iris_policy::{active, change, Change, Edited, Mode, Verb};
+    let store = Arc::new(Store::open(&data_dir("end-grants")).unwrap());
+    let done = iris_job::create(&store, "Book the trip", None, 0).unwrap();
+    let working = iris_job::create(&store, "Answer Dana", None, 0).unwrap();
+    change(&store, None, Change::Mode(Mode::Apply), 0).unwrap();
+    for job in [done, working] {
+        let seen = store.read(active).unwrap().version;
+        let grant = Change::Grant {
+            job: format!("j-{job}"),
+            verbs: vec![Verb::Archive],
+        };
+        let e = change(&store, seen, grant, 0).unwrap();
+        assert!(matches!(e, Edited::Done { .. }), "{e:?}");
+    }
+    let (by, end) = (iris_job::By::Person, iris_job::End::Complete);
+    iris_job::finish(&store, done, by, end, None, 0).unwrap();
+    // No token: the tick starts no sync worker.
+    let mut e = Engine::new(store.clone(), config("http://127.0.0.1:9".into()), None);
+    assert!(e.tick().unwrap().is_empty());
+    let jobs: Vec<_> = store
+        .read(active)
+        .unwrap()
+        .policy
+        .rules
+        .into_iter()
+        .map(|r| r.job)
+        .collect();
+    assert_eq!(jobs, [Some(format!("j-{working}"))]);
+}
+
+/// docs/specs/2026-11-24-remove-account.md: the removal and the delete take
+/// only the mail of one account, a worker of the removed account syncs
+/// nothing more, and the address added again gets a full new copy.
+#[test]
+fn remove_one_account_and_add_it_again() {
+    let s = setup("remove-account", 30);
+    let other = FakeGmail::start(Mailbox::new(7, 30)).unwrap();
+    other.set_address("second@example.com");
+    let second = sign_in(
+        &s.store,
+        &gmail(other.base_url()),
+        &client_json(),
+        "refresh-two",
+    );
+    let worker_of = |account: i64, fake: &FakeGmail| {
+        Worker::new(
+            s.store.clone(),
+            gmail(fake.base_url()),
+            account,
+            Some(s.tokens.uri.clone()),
+        )
+    };
+    worker_of(s.account, &s.fake).sync().unwrap();
+    worker_of(second, &other).sync().unwrap();
+    let per_account = |account: i64| {
+        count(
+            &s.store,
+            &format!("SELECT count(*) FROM message WHERE account_id = {account}"),
+        )
+    };
+    // A worker that got its token before the removal.
+    let mut late = worker_of(second, &other);
+    late.sync().unwrap();
+
+    s.store
+        .remove_account("second@example.com", iris::engine::now_ms())
+        .unwrap();
+    assert!(!iris::engine::sync_accounts(&s.store)
+        .unwrap()
+        .contains(&second));
+    let done = iris::engine::delete_removed(&s.store, Some(second))
+        .unwrap()
+        .unwrap();
+    assert_eq!(done.accounts, 1);
+    assert_eq!((per_account(s.account), per_account(second)), (30, 0));
+    // The late worker writes nothing for the removed account.
+    other.modify_labels(&FakeGmail::id_of(1), &["STARRED"], &[]);
+    assert!(late.sync().is_err());
+    assert_eq!(per_account(second), 0);
+    assert_eq!(worker_of(s.account, &s.fake).verify().unwrap().total, 0);
+
+    // The same address again: a new account and a full first copy. The
+    // tombstone keeps the old ID.
+    let again = sign_in(
+        &s.store,
+        &gmail(other.base_url()),
+        &client_json(),
+        "refresh-three",
+    );
+    assert_ne!(again, second);
+    worker_of(again, &other).sync().unwrap();
+    assert_eq!((per_account(again), per_account(second)), (30, 0));
+    assert_eq!(worker_of(again, &other).verify().unwrap().total, 0);
+    assert!(!iris::engine::sync_accounts(&s.store)
+        .unwrap()
+        .contains(&second));
+}

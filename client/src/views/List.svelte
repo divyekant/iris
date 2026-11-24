@@ -77,7 +77,7 @@
 
 <h1>{title}</h1>
 {#if shown.length === 0}
-  <p class="empty">Nothing here now. New items show here after the next sync.</p>
+  <p class="empty">Nothing here now.</p>
 {:else}
   <ul>
     {#each shown as item (item.id)}<Line {item} {now} twins={duplicates[item.id]} ondone={act ? gone : undefined} {delay} />{/each}

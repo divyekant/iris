@@ -57,19 +57,28 @@ export type Item = {
 
 // A matter: mail that belongs together, as Iris proposes it and the person decides it
 // (docs/spec/schema/matter.schema.json).
-export type MatterForm = "commitment" | "conversation" | "record";
+export type MatterForm = "commitment" | "conversation" | "record" | "signal";
 export type Matter = {
   id: string;
   title: string;
   status: "proposed" | "confirmed" | "declined";
   items: string[];
-  counts: Record<MatterForm, number>;
+  /** `signal` since open model 1.2: an older engine leaves it out. */
+  counts: Record<Exclude<MatterForm, "signal">, number> & { signal?: number };
   created: string;
   updated: string;
   decided?: string;
+  /** The items that Iris proposes to add to a confirmed matter (open model 1.2). */
+  additions?: string[];
+  derived?: { by: "model" | "agent" | "person"; model?: string; prompt?: string };
 };
 export type MatterList = { proposed: Matter[]; confirmed: Matter[] };
-export type MatterView = { matter: Matter; items: Record<MatterForm, Item[]> };
+export type MatterView = {
+  matter: Matter;
+  items: Record<Exclude<MatterForm, "signal">, Item[]> & { signal?: Item[] };
+  /** The documents of the additions of a confirmed matter, newest first. */
+  additions?: Item[];
+};
 
 // `duplicates` maps an item ID to newer items that can be the same thing (spec 1
 // section 7.5). The newer items are not in `items`: the client shows a pair as one line.
@@ -118,7 +127,8 @@ export type Account = {
   state: string | null;
   mirror_ready_at: string | null;
   sync: { kind: string; step: number | null } | null;
-  last_sync: { kind: string; started: string; ended: string | null; result: string | null } | null;
+  /** `after_failure`: the sync before this one failed or stopped. An older engine leaves it out. */
+  last_sync: { kind: string; started: string; ended: string | null; result: string | null; after_failure?: boolean } | null;
 };
 
 export type Status = {
@@ -126,6 +136,12 @@ export type Status = {
   mode?: string;
   accounts: Account[];
   messages: { total: number; fetched: number; understood: number; gone: number };
+  /** False when no model is set: only the fixed rules read the mail. An older engine leaves it out. */
+  model?: boolean;
+  /** The live messages that wait for a model or a budget. Drafts and gone mail never count. An older engine leaves it out. */
+  waits_model?: number;
+  /** The time zone of defer dates and due dates (an IANA name, `iris zone`). Null or left out: the zone of the browser. */
+  time_zone?: string | null;
 };
 
 /** A rule of policy.toml (spec 2 section 6.2). `when` holds only the conditions that the rule sets. */
@@ -243,6 +259,12 @@ export type Changeset = {
   actions: Action[];
 };
 
+/**
+ * GET /api/changesets/{id}/would: in observe mode, the decision that a rule of the active policy
+ * would give to each proposed action in apply mode (decision D10). Empty in apply mode.
+ */
+export type Would = { revision: number; n: number; outcome: "approved" | "in_review" | "denied"; rule: number; policy: number; reason: string };
+
 /** GET /api/handled: one action that an `allow` rule approved, with the reason. */
 export type HandledAction = {
   changeset: string;
@@ -287,6 +309,12 @@ export type LedgerEntry = {
   undo_open: boolean;
   undone_by: string | null;
   undo_of: string | null;
+  /** For an applied undo: the messages or items that it did not change (they changed again, or are gone). */
+  skipped: number;
+  /** For an undo: the targets that it tries to restore, also a gone message. 0 for each other entry. */
+  tried: number;
+  /** For an undo: true when the change that it undoes can be undone now. */
+  retry: boolean;
 };
 
 export type LedgerPage = { entries: LedgerEntry[]; next: string | null };
@@ -389,7 +417,16 @@ export type JobPage = { jobs: Job[]; next: string | null };
 /** A submitted changeset of a job: `actions` counts the actions of its newest revision in each state. */
 export type JobChangeset = { id: string; at: string; state: string; why: string | null; actions: Record<string, number> };
 /** One job (GET /api/jobs/{id}): the job with its events, its changesets, and the newest mail of each wait thread. */
-export type JobDetail = { job: Job & { events: JobEvent[] }; changesets: JobChangeset[]; threads: Record<string, Target> };
+/** The newest session of a job (issue #742). */
+export type JobSession = {
+  id: string;
+  agent: string;
+  state: "starting" | "running" | "ending" | "ended";
+  end: "exit" | "stop" | "revoke" | "job_state" | "time_limit" | "engine" | "launch_failed" | "helper_failed" | null;
+  exit: number | null;
+  ended: string | null;
+};
+export type JobDetail = { job: Job & { events: JobEvent[] }; changesets: JobChangeset[]; threads: Record<string, Target>; session?: JobSession | null };
 
 export const SIGN_IN = "Sign in: run iris open in Terminal.";
 export const SIGN_IN_FAILED = "This sign-in address was used, ended or is not valid. Run iris open in Terminal for a new address.";
@@ -401,6 +438,16 @@ export const UNREACHABLE = "Iris cannot reach its engine. Start it with iris ser
 export function own(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error);
   return text === access.problem ? "" : text;
+}
+
+/**
+ * The text that a view shows for a failed write. When the engine gave no answer,
+ * the engine can have stored the write, so the text says that Iris does not know (issue 706).
+ * `what` completes "Iris does not know if it ...". `otherwise` is for an error with no words.
+ */
+export function wrote(error: unknown, what: string, otherwise: string): string {
+  if (error instanceof Error && error.message === UNREACHABLE) return `Iris does not know if it ${what}. Reload the page to see.`;
+  return own(error) || otherwise;
 }
 
 /** Set the access state that App.svelte shows above each view, and throw it. */
@@ -554,6 +601,7 @@ export async function get<T>(path: string): Promise<T> {
     access.locked = accounts.filter((a) => a.state === "needs_sign_in").map(({ address, provider }) => ({ address, provider }));
     access.none = accounts.length === 0;
     access.accounts = accountNames(accounts);
+    access.zone = (body as Status).time_zone ?? null;
   }
   return body as T;
 }

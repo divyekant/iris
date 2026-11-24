@@ -289,6 +289,16 @@ async fn status_with_no_account_and_with_a_sync() {
     assert_eq!(v["accounts"], json!([]));
     assert_eq!(v["mode"], "observe");
     assert_eq!(v["messages"]["total"], 0);
+    // No model is set: the client says how to set one (issue 740).
+    assert_eq!(v["model"], false);
+    exec(
+        &store,
+        "INSERT INTO model_setting(id, provider, base_url, model, version, max_tokens, timeout_s)
+         VALUES (1, 'local', 'http://127.0.0.1:1/v1', 'm', 1, 100, 5)",
+        [],
+    );
+    let (_, v) = get(&store, "/api/status").await;
+    assert_eq!(v["model"], true);
 
     let acc = store.add_account("gmail", "owner@example.com").unwrap();
     exec(
@@ -301,6 +311,11 @@ async fn status_with_no_account_and_with_a_sync() {
         "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'first', 0)",
         [acc],
     );
+    // The sync runs: it holds the run lock of its row (issue #710).
+    let row: i64 = store
+        .read(|c| Ok(c.query_row("SELECT max(id) FROM sync_log", [], |r| r.get(0))?))
+        .unwrap();
+    let _sync = store.sync_run_lock(row).unwrap().unwrap();
     let (_, v) = get(&store, "/api/status").await;
     let a = &v["accounts"][0];
     assert_eq!(a["address"], "owner@example.com");
@@ -365,6 +380,8 @@ async fn search_message_and_raw_source() {
         2,
         json!({"publisher": party("p-1")}),
     );
+    let (_, m) = get(&store, "/api/messages/m-3").await;
+    assert_eq!(m["items"], json!([format!("f-{item}")]));
     exec(
         &store,
         "UPDATE message SET hostile = '[\"spam\"]' WHERE id = 3",
@@ -380,7 +397,8 @@ async fn search_message_and_raw_source() {
     assert!(!m["text"].as_str().unwrap().is_empty());
     assert_eq!(m["gone"], false);
     assert_eq!(m["hostile"], json!(["spam"]));
-    assert_eq!(m["items"], json!([format!("f-{item}")]));
+    // No item of hostile mail is in a read (issue 112).
+    assert_eq!(m["items"], json!([]));
 
     // The raw source is the same bytes, as a download.
     let index = (0..COUNT)
@@ -1737,11 +1755,24 @@ async fn an_item_shows_a_ready_draft_of_its_thread_until_the_draft_is_stale() {
     let (_, one) = get(&store, &format!("/api/items/c-{without}")).await;
     assert_eq!(one["ready"], Value::Null, "{one}");
 
-    // Hostile mail in the thread: the draft is not ready.
+    // Hostile mail in the thread: the draft is not ready. The newest message
+    // of the thread is not the origin of the item, which a read leaves out
+    // while it is hostile mail (issue 112).
     exec(
         &store,
-        "UPDATE message SET hostile = '[\"spoof\"]' WHERE id = ?1",
+        "UPDATE message SET hostile = '[\"spoof\"]'
+         WHERE id = (SELECT based_on FROM reply_draft) AND id <> ?1",
         [first],
+    );
+    assert_eq!(
+        store
+            .read(|c| Ok(c.query_row(
+                "SELECT count(*) FROM message WHERE hostile = '[\"spoof\"]'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?))
+            .unwrap(),
+        1
     );
     let (_, brief) = get(&store, "/api/brief").await;
     assert_eq!(
@@ -1814,4 +1845,226 @@ async fn the_brief_shows_the_items_of_each_account() {
         .map(|a| a["address"].as_str().unwrap())
         .collect();
     assert_eq!(addresses, ["owner@example.com", "second@example.com"]);
+    // A removed account leaves the brief at once, and the status at the end
+    // of its delete (docs/specs/2026-11-24-remove-account.md).
+    // The delete derives each engine sender kind again from the evidence
+    // that stays. This test has no evidence rows, so Dana is a decision of
+    // the person, which no refresh changes.
+    exec(
+        &store,
+        "UPDATE sender SET decided_by = 'person' WHERE ?1",
+        [1],
+    );
+    // The route refuses an address that is not the address of the ID.
+    let uri = format!("/api/accounts/a-{second}/remove");
+    for (address, code) in [("owner@example.com", 400), ("other@example.com", 400)] {
+        let (got, _) = post(&store, &uri, json!({ "address": address })).await;
+        assert_eq!(got.as_u16(), code, "{address}");
+    }
+    let (got, _) = post(
+        &store,
+        "/api/accounts/a-x/remove",
+        json!({ "address": "x" }),
+    )
+    .await;
+    assert_eq!(got, StatusCode::BAD_REQUEST);
+    let (_, status) = get(&store, "/api/status").await;
+    assert_eq!(status["accounts"].as_array().unwrap().len(), 2);
+
+    let (got, status) = post(&store, &uri, json!({ "address": "second@example.com" })).await;
+    assert_eq!(got, StatusCode::OK);
+    assert_eq!(status["accounts"].as_array().unwrap().len(), 1);
+    let (_, brief) = get(&store, "/api/brief").await;
+    let ids: Vec<&str> = brief["you_owe"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [format!("c-{first}")]);
+    // A second removal of the same account is a conflict.
+    let (got, _) = post(&store, &uri, json!({ "address": "second@example.com" })).await;
+    assert_eq!(got, StatusCode::CONFLICT);
+}
+
+async fn post(store: &Arc<Store>, uri: &str, body: Value) -> (StatusCode, Value) {
+    let req = Request::post(uri)
+        .header("host", "127.0.0.1:4800")
+        .header("authorization", auth().bearer())
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let res = iris_api::router(store.clone(), auth())
+        .oneshot(req)
+        .await
+        .unwrap();
+    let code = res.status();
+    let body = to_bytes(res.into_body(), 64 << 20).await.unwrap();
+    (code, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+/// Issue 740 (review of PR #786): `waits_model` counts only live mail that
+/// the understanding step marked as waiting for a model. A draft, gone mail
+/// and understood mail never count, so the client never says that mail
+/// waits for a model when none does.
+#[tokio::test]
+async fn status_counts_only_live_mail_that_waits_for_a_model() {
+    let dir = temp("waits-model");
+    let (store, _) = filled_n(&dir, 6);
+    let (_, v) = get(&store, "/api/status").await;
+    assert_eq!(v["waits_model"], 0, "no mark yet");
+
+    exec(&store, "UPDATE message SET waits_model = 1", []);
+    exec(&store, "UPDATE message SET gone_at = 1 WHERE id = 1", []);
+    exec(
+        &store,
+        "UPDATE message SET understood_at = 1 WHERE id = 2",
+        [],
+    );
+    exec(
+        &store,
+        "INSERT INTO label(account_id, provider_id, name, kind) VALUES (1, 'DRAFT', 'DRAFT', 'system')",
+        [],
+    );
+    exec(
+        &store,
+        "INSERT INTO message_label(message_id, label_id)
+         SELECT 3, id FROM label WHERE provider_id = 'DRAFT'",
+        [],
+    );
+    // The mark of a model error is not a missing model.
+    exec(
+        &store,
+        "UPDATE message SET waits_model = 2 WHERE id = 4",
+        [],
+    );
+    let (_, v) = get(&store, "/api/status").await;
+    assert_eq!(v["waits_model"], 2, "messages 5 and 6 only");
+}
+
+/// Issue 112: an item whose origin message is hostile mail (a hostile
+/// mark, the label `SPAM` or a hostile sender) is in no read of the API,
+/// also when it stays in the store. It shows again when the state clears.
+#[tokio::test]
+async fn an_item_of_hostile_mail_is_hidden_until_the_state_clears() {
+    let dir = temp("hostile-items");
+    let (store, _) = filled_n(&dir, 4);
+    store.put_labels(1, &[("SPAM", "SPAM", "system")]).unwrap();
+    let feed = add_item(
+        &store,
+        "feed",
+        "new",
+        1,
+        1,
+        json!({"status": "new", "publisher": {"address": "news@example.com"},
+               "published": "2026-11-01T00:00:00Z"}),
+    );
+    let record = add_item(&store, "record", "active", 1, 2, json!({"type": "receipt"}));
+    // A record of another message stays in each read.
+    let other = add_item(&store, "record", "active", 2, 3, json!({"type": "receipt"}));
+    // The brief counts the hostile mail of the last 7 days.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    exec(
+        &store,
+        "UPDATE message SET internal_date = ?1 WHERE id = 1",
+        [now],
+    );
+    let (f, r, o) = (
+        format!("f-{feed}"),
+        format!("r-{record}"),
+        format!("r-{other}"),
+    );
+    let shown = hostile_reads(&store, &f, &r).await;
+    assert!(
+        shown.0.contains(&f) && shown.0.contains(&r) && shown.0.contains(&o),
+        "{shown:?}"
+    );
+    assert_eq!(shown.1, vec![f.clone()]);
+    assert_eq!(shown.2, json!({"receipt": 2}));
+    assert_eq!((shown.3, shown.4), (StatusCode::OK, StatusCode::OK));
+    assert_eq!(shown.5, json!([f.clone(), r.clone()]));
+    assert_eq!(shown.6, 0);
+    let states: [(&str, &str); 3] = [
+        ("UPDATE message SET hostile = '[\"lookalike\"]' WHERE id = 1", "UPDATE message SET hostile = '[]' WHERE id = 1"),
+        ("INSERT INTO message_label(message_id, label_id) SELECT 1, id FROM label WHERE provider_id = 'SPAM'",
+         "DELETE FROM message_label WHERE message_id = 1 AND label_id = (SELECT id FROM label WHERE provider_id = 'SPAM')"),
+        ("INSERT INTO sender(address, kind) SELECT from_addr, 'hostile' FROM header WHERE message_id = 1
+            ON CONFLICT(address) DO UPDATE SET kind = 'hostile'",
+         "UPDATE sender SET kind = 'person' WHERE address = (SELECT from_addr FROM header WHERE message_id = 1)"),
+    ];
+    for (set, clear) in states {
+        exec(&store, set, []);
+        let hidden = hostile_reads(&store, &f, &r).await;
+        assert!(
+            !hidden.0.contains(&f) && !hidden.0.contains(&r) && hidden.0.contains(&o),
+            "{set}: {hidden:?}"
+        );
+        assert!(hidden.1.is_empty(), "{set}: {hidden:?}");
+        assert_eq!(hidden.2, json!({"receipt": 1}), "{set}");
+        assert_eq!(
+            (hidden.3, hidden.4),
+            (StatusCode::NOT_FOUND, StatusCode::NOT_FOUND),
+            "{set}"
+        );
+        assert_eq!(hidden.5, json!([]), "{set}");
+        // Each state counts as hostile mail of the brief (spec 1, section 8).
+        assert_eq!(hidden.6, 1, "{set}");
+        exec(&store, clear, []);
+        assert_eq!(hostile_reads(&store, &f, &r).await, shown, "{clear}");
+    }
+}
+
+/// The reads of the hostile item test: the IDs of `/api/items`, the IDs of
+/// the feed of the brief, the record counts of the brief, and the status of
+/// `/api/items/{feed}` and `/api/items/{record}`, and the items of the mail
+/// view of the origin message, and the count of hostile mail of the brief.
+async fn hostile_reads(
+    store: &Arc<Store>,
+    feed: &str,
+    record: &str,
+) -> (
+    Vec<String>,
+    Vec<String>,
+    Value,
+    StatusCode,
+    StatusCode,
+    Value,
+    Value,
+) {
+    let ids_of = |v: &Value| -> Vec<String> {
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (_, items) = get(store, "/api/items?limit=100").await;
+    let (_, brief) = get(store, "/api/brief").await;
+    (
+        ids_of(&items),
+        ids_of(&brief["feed"]),
+        brief["records"].clone(),
+        get(store, &format!("/api/items/{feed}")).await.0,
+        get(store, &format!("/api/items/{record}")).await.0,
+        get(store, "/api/messages/m-1").await.1["items"].clone(),
+        brief["hostile"].clone(),
+    )
+}
+
+/// Decision D1: the status gives the time zone of the owner, so the client
+/// offers the days of Later in that zone.
+#[tokio::test]
+async fn status_gives_the_time_zone_of_the_owner() {
+    let dir = temp("time-zone");
+    let (store, _) = filled_n(&dir, 1);
+    let (_, v) = get(&store, "/api/status").await;
+    let computer = jiff::tz::TimeZone::system();
+    assert_eq!(v["time_zone"], serde_json::json!(computer.iana_name()));
+    store.set_time_zone(Some("Asia/Kolkata")).unwrap();
+    let (_, v) = get(&store, "/api/status").await;
+    assert_eq!(v["time_zone"], "Asia/Kolkata");
 }

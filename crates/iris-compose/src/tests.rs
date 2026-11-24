@@ -8,6 +8,7 @@ fn content(to: &[&str], subject: &str, body: &str) -> Content {
         cc: Vec::new(),
         subject: subject.into(),
         body: body.into(),
+        ..Default::default()
     }
 }
 
@@ -65,9 +66,28 @@ fn checked_content_reads_back_the_same() {
         let mut raw_content = Content {
             to: (0..1 + g.below(3)).map(|_| g.address()).collect(),
             cc: (0..g.below(3)).map(|_| g.address()).collect(),
+            bcc: (0..g.below(3)).map(|_| g.address()).collect(),
             subject: g.text(12),
             body: g.text(60),
+            ..Default::default()
         };
+        let files: Vec<Vec<u8>> = (0..g.below(3))
+            .map(|_| g.text(20).into_bytes())
+            .filter(|f| !f.is_empty())
+            .collect();
+        for f in &files {
+            let name = g.text(8);
+            let mime = [
+                "application/pdf",
+                "text/plain",
+                "TEXT/CSV",
+                "image/png",
+                "text/html",
+                "multipart/mixed",
+                "x",
+            ][g.below(7)];
+            raw_content.attachments.push(Attachment::of(&name, mime, f));
+        }
         // Two in three cases keep only what the checks can accept, so that
         // most cases reach compose; the others test the refusals.
         if i % 3 != 0 {
@@ -75,7 +95,15 @@ fn checked_content_reads_back_the_same() {
             raw_content.subject.push('s');
             raw_content.body.retain(|c| c != '\0');
             raw_content.body.push('b');
-            for list in [&mut raw_content.to, &mut raw_content.cc] {
+            for a in &mut raw_content.attachments {
+                a.name.retain(|c| !c.is_control() && c != '/' && c != '\\');
+                a.name.push('n');
+            }
+            for list in [
+                &mut raw_content.to,
+                &mut raw_content.cc,
+                &mut raw_content.bcc,
+            ] {
                 list.retain(|a| check_address(&a.to_ascii_lowercase()).is_ok());
             }
             if raw_content.to.is_empty() {
@@ -88,10 +116,47 @@ fn checked_content_reads_back_the_same() {
         accepted += 1;
         let reply =
             (i % 2 == 0).then(|| references("<p.1@x.org>", Some("<r.0@x.org>"), None).unwrap());
-        let raw = compose(ME, "iris.1@example.com", &c, reply.as_ref(), 1_800_000_000);
+        let files: Vec<&[u8]> = c
+            .attachments
+            .iter()
+            .map(|a| files.iter().find(|f| a.is_file(f)).unwrap().as_slice())
+            .collect();
+        let name = (i % 4 == 1).then_some("Ówner \"O\" Name");
+        let raw = compose_with(
+            ME,
+            name,
+            "iris.1@example.com",
+            &c,
+            reply.as_ref(),
+            1_800_000_000,
+            &files,
+        );
+        assert_eq!(
+            raw,
+            compose_with(
+                ME,
+                name,
+                "iris.1@example.com",
+                &c,
+                reply.as_ref(),
+                1_800_000_000,
+                &files
+            ),
+            "the same input gives the same bytes"
+        );
         let back = read(&raw, ME)
             .unwrap_or_else(|| panic!("no read back of {c:?}:\n{}", String::from_utf8_lossy(&raw)));
         assert_eq!(back.content, c, "{}", String::from_utf8_lossy(&raw));
+        assert_eq!(back.files, files);
+        if reply.is_none() {
+            assert!(
+                raw.len() as u64 <= c.size_bound(),
+                "{} > {}",
+                raw.len(),
+                c.size_bound()
+            );
+        }
+        assert_eq!(back.bcc_header, !c.bcc.is_empty());
         assert_eq!(back.reply, reply);
         assert_eq!(back.message_id, "iris.1@example.com");
         assert_eq!(
@@ -121,7 +186,6 @@ fn checks_refuse_bad_content() {
         content(&["a@example.com"], "  ", "x"),
         content(&["a@example.com"], "a\nBcc: b@c.d", "x"),
         content(&["a@example.com"], "a\rb", "x"),
-        content(&["a@example.com"], "=?utf-8?q?x?=", "x"),
         content(&["a@example.com"], "Hi", "a\0b"),
         content(&["a@example.com"], "Hi", ""),
         content(&["a@example.com"], "Hi", " \n\t\r\n "),
@@ -191,8 +255,15 @@ fn a_draft_that_the_person_changed_does_not_read_back() {
         String::from_utf8(compose(ME, "iris.3@example.com", &c, None, 1_800_000_000)).unwrap();
     assert!(read(raw.as_bytes(), ME).is_some());
     assert!(read(raw.as_bytes(), "other@example.com").is_none());
+    // A Bcc that the person adds is in the content, so in the hash.
+    let spy = read(
+        raw.replacen("To: ", "Bcc: spy@x.org\r\nTo: ", 1).as_bytes(),
+        ME,
+    )
+    .unwrap();
+    assert_eq!(spy.content.bcc, ["spy@x.org"]);
+    assert_ne!(hash(&spy.content, None), hash(&c, None));
     for (from, to) in [
-        ("To: ", "Bcc: spy@x.org\r\nTo: "),
         ("To: ", "Reply-To: spy@x.org\r\nTo: "),
         ("To: ", "X-Other: 1\r\nTo: "),
         ("To: ", "To: spy@x.org\r\nTo: "),
@@ -208,7 +279,32 @@ fn a_draft_that_the_person_changed_does_not_read_back() {
         MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n--b\r\n\
         Content-Type: text/plain\r\n\r\nBody\r\n--b\r\nContent-Type: application/pdf\r\n\
         Content-Disposition: attachment; filename=\"a.pdf\"\r\n\r\nxx\r\n--b--\r\n";
-    assert!(read(multi.as_bytes(), ME).is_none());
+    // A file that the person adds is in the content, so in the hash.
+    let added = read(multi.as_bytes(), ME).unwrap();
+    assert_eq!(
+        added.content.attachments,
+        [Attachment::of("a.pdf", "application/pdf", b"xx")]
+    );
+    assert_eq!(added.files, [b"xx".to_vec()]);
+    // Each other form gives no content: HTML, a nested part, a file with
+    // no name, a part that is not a file, a first part that is not text.
+    for (from, to) in [
+        ("Content-Disposition: attachment; filename=\"a.pdf\"", "Content-Disposition: inline; filename=\"a.pdf\""),
+        ("Content-Disposition: attachment; filename=\"a.pdf\"", "Content-Disposition: attachment"),
+        ("Content-Disposition: attachment; filename=\"a.pdf\"\r\n", ""),
+        ("Content-Type: text/plain\r\n\r\nBody", "Content-Type: text/html\r\n\r\nBody"),
+        ("Content-Type: text/plain\r\n\r\nBody", "Content-Type: text/plain\r\nContent-Disposition: attachment; filename=b\r\n\r\nBody"),
+        (
+            "Content-Type: application/pdf\r\n",
+            "Content-Type: multipart/mixed; boundary=\"c\"\r\n\r\n--c\r\nContent-Type: text/plain\r\n\r\nx\r\n--c--\r\n",
+        ),
+        ("Content-Type: application/pdf", "Content-Type: message/rfc822"),
+        ("multipart/mixed", "multipart/alternative"),
+    ] {
+        let changed = multi.replacen(from, to, 1);
+        assert_ne!(changed, multi);
+        assert!(read(changed.as_bytes(), ME).is_none(), "{changed}");
+    }
 }
 
 #[test]
@@ -241,22 +337,57 @@ fn a_sent_copy_reads_back_with_transport_headers() {
         String::from_utf8(compose(ME, "iris.4@example.com", &c, None, 1_800_000_000)).unwrap();
     let sent = format!("Received: by 10.0.0.1; Mon, 1 Jan 2027\r\nX-Gm-Spam: 0\r\n{raw}");
     assert!(read(sent.as_bytes(), ME).is_none());
-    let back = read_sent(sent.as_bytes(), ME).unwrap();
+    let back = read_sent(sent.as_bytes(), ME, &[]).unwrap();
     assert_eq!(hash(&back.content, None), hash(&c, None));
     // A second To, another part or another From still gives no content.
     for (from, to) in [
         ("To: ", "To: spy@x.org\r\nTo: "),
         ("From: <owner@example.com>", "From: <other@example.com>"),
         ("Content-Type: text/plain", "Content-Type: text/html"),
-        ("To: ", "Bcc: spy@x.org\r\nTo: "),
         ("To: ", "Reply-To: spy@x.org\r\nTo: "),
         ("To: ", "Resent-To: spy@x.org\r\nTo: "),
         ("To: ", "References: <z@x.org>\r\nTo: "),
     ] {
         let changed = sent.replacen(from, to, 1);
         assert_ne!(changed, sent);
-        assert!(read_sent(changed.as_bytes(), ME).is_none(), "{changed}");
+        assert!(
+            read_sent(changed.as_bytes(), ME, &[]).is_none(),
+            "{changed}"
+        );
     }
+    // A Bcc of the sent copy is in its content; with no Bcc header the
+    // caller takes the approved bcc (send content spec, section 4).
+    let bcc = read_sent(
+        sent.replacen("To: ", "Bcc: spy@x.org\r\nTo: ", 1)
+            .as_bytes(),
+        ME,
+        &[],
+    )
+    .unwrap();
+    assert!(bcc.bcc_header);
+    assert_eq!(bcc.content.bcc, ["spy@x.org"]);
+    assert!(!back.bcc_header);
+    // The approved bcc: a copy with no Bcc header takes it, and a copy
+    // whose Bcc header names other addresses keeps its own.
+    let approved = vec!["sam@x.org".to_string()];
+    let with = Content {
+        bcc: approved.clone(),
+        ..c.clone()
+    }
+    .check()
+    .unwrap();
+    let omitted = read_sent(sent.as_bytes(), ME, &approved).unwrap();
+    assert!(!omitted.bcc_header);
+    assert_eq!(hash(&omitted.content, None), hash(&with, None));
+    let other = read_sent(
+        sent.replacen("To: ", "Bcc: spy@x.org\r\nTo: ", 1)
+            .as_bytes(),
+        ME,
+        &approved,
+    )
+    .unwrap();
+    assert_eq!(other.content.bcc, ["spy@x.org"]);
+    assert_ne!(hash(&other.content, None), hash(&with, None));
 }
 
 /// A read back of any changed message does not panic. If it gives a
@@ -287,17 +418,30 @@ fn a_changed_message_reads_back_only_as_what_it_sends() {
         cc: vec!["q@x.org".into()],
         subject: "Hi".into(),
         body: "Body\nline 2\n".into(),
+        ..Default::default()
     }
     .check()
     .unwrap();
+    let mut with_file = c.clone();
+    with_file.bcc = vec!["b@x.org".into()];
+    with_file.attachments = vec![Attachment::of("a.pdf", "application/pdf", b"%PDF-1")];
     let reply = references("<p.1@x.org>", Some("<r.0@x.org>"), None).unwrap();
     let bases = [
         compose(ME, "iris.7@example.com", &c, Some(&reply), 1_800_000_000),
         compose(ME, "iris.8@example.com", &c, None, 1_800_000_000),
+        compose_with(
+            ME,
+            None,
+            "iris.9@example.com",
+            &with_file,
+            None,
+            1_800_000_000,
+            &[b"%PDF-1"],
+        ),
     ];
     let mut some = 0;
     for i in 0..6000 {
-        let mut raw = bases[i % 2].clone();
+        let mut raw = bases[i % 3].clone();
         for _ in 0..1 + g.below(3) {
             let at = g.below(raw.len() + 1);
             match g.below(3) {
@@ -322,7 +466,6 @@ fn a_changed_message_reads_back_only_as_what_it_sends() {
             };
             some += 1;
             let m = MessageParser::default().parse(&raw[..]).unwrap();
-            assert!(m.bcc().is_none(), "{}", String::from_utf8_lossy(&raw));
             if strict {
                 for h in m.headers() {
                     let name = h.raw_name().to_ascii_lowercase();
@@ -340,6 +483,16 @@ fn a_changed_message_reads_back_only_as_what_it_sends() {
             assert_eq!(back.content.clone().check(), Ok(back.content.clone()));
             assert_eq!(seen(m.to()), back.content.to);
             assert_eq!(seen(m.cc()), back.content.cc);
+            assert_eq!(seen(m.bcc()), back.content.bcc);
+            // Each file of the message is an entry of the content: the hash
+            // covers it.
+            assert_eq!(back.files.len(), back.content.attachments.len());
+            for (a, f) in back.content.attachments.iter().zip(&back.files) {
+                assert!(a.is_file(f));
+            }
+            assert!(m
+                .parts()
+                .all(|p| !p.is_content_type("text", "html") || p.is_attachment()));
             // The thread headers are all in the content, so in the hash.
             let ids = |l: Option<mail_parser::TextList<'_>>| -> Vec<String> {
                 l.map(|l| {
@@ -379,9 +532,15 @@ fn the_hash_is_the_documented_canonical_json() {
         references: vec!["r.0@x.org".into(), "p.1@x.org".into()],
     };
     assert_eq!(hash(&c, Some(&r)), HASH_REPLY);
+    // An empty bcc and an empty attachments list are not in the JSON.
+    let mut full = c.clone();
+    full.bcc = vec!["b@x.org".into()];
+    full.attachments = vec![Attachment::of("a.pdf", "application/pdf", b"x")];
+    assert_eq!(hash(&full, None), HASH_FULL);
 }
 
 const HASH_NEW: &str = "5cf35dc73cda62d2c9366a385788df198e432bbcc223a3fb7e20e27683ccfbf6";
+const HASH_FULL: &str = "3d5d29238a90167e4422140d52fdcff57e0ede467962f8c28e48715c2b1da567";
 const HASH_REPLY: &str = "5aa550b8080a1ff0861877a81017d207d2448c6b3326cd2e54236a94f4104d8c";
 
 /// Each parent header value gives reply headers that write and read back
@@ -448,7 +607,7 @@ fn a_changed_draft_keeps_the_limits() {
     );
     assert_ne!(crowded, raw);
     assert!(read(crowded.as_bytes(), ME).is_none());
-    assert!(read_sent(crowded.as_bytes(), ME).is_none());
+    assert!(read_sent(crowded.as_bytes(), ME, &[]).is_none());
     let large = format!("{raw}{}\r\n", "x".repeat(MAX_BODY));
     assert!(read(large.as_bytes(), ME).is_none());
     // A duplicate or upper case address that the check would erase.
@@ -463,7 +622,10 @@ fn a_changed_draft_keeps_the_limits() {
         let changed = raw.replacen(from, to, 1).replacen("Body", "Other", 1);
         assert_ne!(changed, raw);
         assert!(read(changed.as_bytes(), ME).is_none(), "{changed}");
-        assert!(read_sent(changed.as_bytes(), ME).is_none(), "{changed}");
+        assert!(
+            read_sent(changed.as_bytes(), ME, &[]).is_none(),
+            "{changed}"
+        );
     }
     assert!(read(raw.as_bytes(), ME).is_some());
 }
@@ -479,7 +641,7 @@ fn a_subject_with_changed_spaces_does_not_read_back() {
     let changed = raw.replacen("Subject: Hi there", "Subject: Hi  there", 1);
     assert_ne!(changed, raw);
     assert!(read(changed.as_bytes(), ME).is_none());
-    assert!(read_sent(changed.as_bytes(), ME).is_none());
+    assert!(read_sent(changed.as_bytes(), ME, &[]).is_none());
 }
 
 /// Spec section 1: `From` is checked by address only, because Gmail can
@@ -497,7 +659,10 @@ fn a_display_name_on_from_reads_back_on_both_paths() {
     );
     assert_ne!(named, raw);
     let sent = format!("Received: by 10.0.0.1; Mon, 1 Jan 2027\r\n{named}");
-    for back in [read(named.as_bytes(), ME), read_sent(sent.as_bytes(), ME)] {
+    for back in [
+        read(named.as_bytes(), ME),
+        read_sent(sent.as_bytes(), ME, &[]),
+    ] {
         assert_eq!(hash(&back.unwrap().content, None), hash(&c, None));
     }
     let other = named.replacen("<owner@example.com>", "<other@example.com>", 1);
@@ -536,12 +701,221 @@ fn a_gmail_draft_reads_back_with_the_gmail_message_id() {
     assert!(read(twice.as_bytes(), ME).is_some());
     // An addressing header or another unknown header still gives no content.
     for extra in [
-        "Bcc: spy@x.org",
         "Reply-To: spy@x.org",
         "Disposition-Notification-To: spy@x.org",
         "X-Gm-Spam: 0",
     ] {
         let changed = format!("{extra}\r\n{gmail}");
         assert!(read(changed.as_bytes(), ME).is_none(), "{changed}");
+    }
+}
+
+/// Invariant (#270): a subject with `=?` reads back the same, as the
+/// content that the hash binds. Also long and non-ASCII ones.
+#[test]
+fn a_subject_with_an_encoded_word_reads_back_the_same() {
+    for subject in [
+        "=?utf-8?q?x?=",
+        "Re: =?ISO-8859-1?Q?caf=E9?= and more",
+        "a =? b",
+        &format!("=?{}日本😀", "x".repeat(MAX_SUBJECT - 10)),
+    ] {
+        let c = content(&["a@example.com"], subject, "Body")
+            .check()
+            .unwrap();
+        let raw = compose(
+            "me@example.com",
+            "id.1@example.com",
+            &c,
+            None,
+            1_700_000_000,
+        );
+        let text = String::from_utf8(raw.clone()).unwrap();
+        for line in text.lines() {
+            assert!(line.len() <= 998, "{line}");
+        }
+        let back = read(&raw, "me@example.com").expect("the message reads back");
+        assert_eq!(back.content.subject, c.subject, "{text}");
+    }
+}
+
+#[test]
+fn checks_refuse_bad_attachments() {
+    let ok = Attachment::of("a.pdf", "application/pdf", b"x");
+    let with = |a: Attachment| {
+        let mut c = content(&["p@x.org"], "Hi", "Body");
+        c.attachments = vec![a];
+        c.check()
+    };
+    let normal = with(Attachment {
+        name: " a.pdf ".into(),
+        mime: "Application/PDF".into(),
+        ..ok.clone()
+    })
+    .unwrap();
+    assert_eq!(normal.attachments, std::slice::from_ref(&ok));
+    for bad in [
+        Attachment {
+            name: "".into(),
+            ..ok.clone()
+        },
+        Attachment {
+            name: "a\r\nb".into(),
+            ..ok.clone()
+        },
+        Attachment {
+            name: "a/b".into(),
+            ..ok.clone()
+        },
+        Attachment {
+            name: "a\\b".into(),
+            ..ok.clone()
+        },
+        Attachment {
+            name: "..".into(),
+            ..ok.clone()
+        },
+        Attachment {
+            name: "x".repeat(256),
+            ..ok.clone()
+        },
+        Attachment {
+            mime: "pdf".into(),
+            ..ok.clone()
+        },
+        Attachment {
+            mime: "multipart/mixed".into(),
+            ..ok.clone()
+        },
+        Attachment {
+            mime: "message/rfc822".into(),
+            ..ok.clone()
+        },
+        Attachment {
+            mime: "text/plain; charset=x".into(),
+            ..ok.clone()
+        },
+        Attachment {
+            sha256: "AB".repeat(32),
+            ..ok.clone()
+        },
+        Attachment {
+            sha256: "ab".into(),
+            ..ok.clone()
+        },
+        Attachment {
+            size: 0,
+            ..ok.clone()
+        },
+        Attachment {
+            size: MAX_MESSAGE,
+            ..ok.clone()
+        },
+    ] {
+        assert!(with(bad.clone()).is_err(), "{bad:?}");
+    }
+    let mut many = content(&["p@x.org"], "Hi", "Body");
+    many.attachments = vec![ok.clone(); MAX_ATTACHMENTS + 1];
+    assert!(many.check().is_err());
+    let mut fifty = content(&["p@x.org"], "Hi", "Body");
+    fifty.bcc = (1..MAX_RECIPIENTS).map(|i| format!("b{i}@x.org")).collect();
+    assert!(fifty.clone().check().is_ok());
+    fifty.cc.push("c@x.org".into());
+    assert!(fifty.check().is_err());
+    let mut dup = content(&["p@x.org"], "Hi", "Body");
+    dup.cc = vec!["q@x.org".into()];
+    dup.bcc = vec!["P@x.org".into(), "q@x.org".into(), "r@x.org".into()];
+    assert_eq!(dup.check().unwrap().bcc, ["r@x.org"]);
+    assert_eq!(max_message("outlook"), MAX_MESSAGE_OUTLOOK);
+    assert_eq!(max_message("gmail"), MAX_MESSAGE);
+}
+
+#[test]
+fn a_display_name_goes_on_from_and_reads_back_by_address() {
+    assert_eq!(from_name("  Dana Diaz "), Some("Dana Diaz".into()));
+    assert_eq!(from_name(""), None);
+    assert_eq!(from_name("a\r\nBcc: x@y.z"), None);
+    // A control character at any place of a name is refused: the trim of
+    // the ends takes spaces only (send content spec, sections 2 and 3).
+    let ok = Attachment::of("a.pdf", "application/pdf", b"x");
+    for c in ['\r', '\n', '\t', '\u{0}', '\u{7f}', '\u{85}', '\u{1b}'] {
+        for name in [
+            format!("{c}a.pdf"),
+            format!("a{c}.pdf"),
+            format!("a.pdf{c}"),
+            format!(" {c} a.pdf "),
+        ] {
+            assert_eq!(from_name(&name), None, "{name:?}");
+            let mut m = content(&["p@x.org"], "Hi", "Body");
+            m.attachments = vec![Attachment {
+                name: name.clone(),
+                ..ok.clone()
+            }];
+            assert!(m.check().is_err(), "{name:?}");
+        }
+    }
+    assert_eq!(from_name(&"x".repeat(MAX_NAME + 1)), None);
+    let c = content(&["p@x.org"], "Hi", "Body").check().unwrap();
+    let raw = compose_with(
+        ME,
+        Some("Dana Diaz"),
+        "iris.2@example.com",
+        &c,
+        None,
+        1,
+        &[],
+    );
+    let m = MessageParser::default().parse(&raw[..]).unwrap();
+    let from = m.from().unwrap();
+    assert_eq!(from.first().unwrap().name(), Some("Dana Diaz"));
+    assert_eq!(hash(&read(&raw, ME).unwrap().content, None), hash(&c, None));
+}
+
+/// The bound of section 5 holds for the largest parts: a body of only
+/// non-ASCII characters and files of random bytes of many sizes.
+#[test]
+fn the_size_bound_holds_for_large_content() {
+    let mut g = Gen(0x1234_5678_9abc_def1);
+    for body in [
+        "é".repeat(MAX_BODY / 4),
+        "=\u{7f}".repeat(MAX_BODY / 4),
+        "a".repeat(MAX_BODY / 2),
+    ] {
+        let mut c = Content {
+            to: (0..20).map(|i| format!("a{i}@x.org")).collect(),
+            cc: (0..15).map(|i| format!("c{i}@x.org")).collect(),
+            bcc: (0..15).map(|i| format!("b{i}@x.org")).collect(),
+            subject: "日本".repeat(499),
+            body,
+            ..Default::default()
+        };
+        let files: Vec<Vec<u8>> = (0..MAX_ATTACHMENTS)
+            .map(|i| (0..1 + i * 9973).map(|_| g.next() as u8).collect())
+            .collect();
+        for (i, f) in files.iter().enumerate() {
+            c.attachments.push(Attachment::of(
+                &format!("ü{i}日本.bin"),
+                "application/octet-stream",
+                f,
+            ));
+        }
+        let c = c.check().unwrap();
+        let refs: Vec<&[u8]> = files.iter().map(Vec::as_slice).collect();
+        let raw = compose_with(
+            ME,
+            Some(&"Ñ".repeat(MAX_NAME)),
+            "iris.1@example.com",
+            &c,
+            None,
+            1,
+            &refs,
+        );
+        assert!(
+            raw.len() as u64 <= c.size_bound(),
+            "{} > {}",
+            raw.len(),
+            c.size_bound()
+        );
+        assert_eq!(read(&raw, ME).unwrap().content, c);
     }
 }

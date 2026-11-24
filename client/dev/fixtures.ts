@@ -12,6 +12,7 @@ import feed from "../../docs/spec/schema/examples/feed.json" with { type: "json"
 import signal from "../../docs/spec/schema/examples/signal-code.json" with { type: "json" };
 import matterConfirmed from "../../docs/spec/schema/examples/matter-confirmed.json" with { type: "json" };
 import matterProposed from "../../docs/spec/schema/examples/matter-proposed.json" with { type: "json" };
+import matterByHand from "../../docs/spec/schema/examples/matter-by-hand.json" with { type: "json" };
 
 // Two accounts (card R6-02): the work mailbox has the conversation and the commitment owed to you.
 const work = new Set(["commitment-owed-to-you", "conversation"]);
@@ -155,6 +156,9 @@ const entry = (id: number, at: string, rest: Partial<LedgerEntry>): LedgerEntry 
   undo_open: false,
   undone_by: null,
   undo_of: null,
+  skipped: 0,
+  tried: 0,
+  retry: false,
   ...rest,
 });
 export const ledger: LedgerPage = {
@@ -167,6 +171,9 @@ export const ledger: LedgerPage = {
     entry(27, "2026-11-16T18:20:00Z", { state: "failed", messages: 40, changed: 12, error: "Gmail refused one call.", why: "Old notices from Example Air.", can_undo: true }),
     entry(26, "2026-11-16T17:05:00Z", { verb: "close", items: 1, title: "Send the Q4 numbers to Priya", why: "Done." }),
     entry(25, "2026-11-16T08:02:00Z", { verb: "read", state: "undone", messages: 6, changed: 6, author: { kind: "triage", name: null, job: null, goal: null }, decided_by: "rule", rule: 5, policy: 3, why: "Receipts that need no reply.", undone_by: "l-32" }),
+    // An undo that changed nothing (decision D18): each message changed again after l-23, so l-23 keeps its Undo.
+    entry(24, "2026-11-15T10:20:00Z", { verb: "inbox", skipped: 4, tried: 4, retry: true, why: "Undo of l-23", undo_of: "l-23" }),
+    entry(23, "2026-11-15T10:05:00Z", { messages: 4, changed: 4, why: "Shipping notices that arrived.", can_undo: true }),
   ],
 };
 
@@ -403,7 +410,7 @@ export const changesets: Changeset[] = [
     submitted: "2026-11-17T08:02:31Z",
     state: "open",
     actions: [
-      action({ n: 1, verb: "send", targets: { drafts: ["d-21"] }, resolved: { messages: ["m-9002"] }, why: "Dana waits for the terms since Monday.", flags: ["new_recipient", "money", "date", "attachment", "untrusted_content"] }),
+      action({ n: 1, verb: "send", targets: { drafts: ["d-21"] }, resolved: { messages: ["m-9002"] }, why: "Dana waits for the terms since Monday.", flags: ["new_recipient", "outside_thread", "money", "date", "attachment", "untrusted_content"] }),
       action({ n: 2, verb: "label", targets: { threads: ["t-9001"] }, resolved: { messages: ["m-9001", "m-9002"] }, args: { label: "Renewals" }, why: "So you find the thread with the other renewals." }),
     ],
   },
@@ -424,7 +431,7 @@ export const drafts: Record<string, DraftView[]> = {
       thread: "t-9001",
       readable: true,
       to: [{ address: "dana@acme.example" }],
-      cc: [{ address: "legal@acme-partners.example", flags: ["new_recipient"] }],
+      cc: [{ address: "legal@acme-partners.example", flags: ["new_recipient", "outside_thread"] }],
       subject: [{ text: "Re: Renewal for 2027" }],
       body: [
         { text: "Hi Dana,\n\nThanks for the call. As we agreed, the renewal is " },
@@ -565,6 +572,13 @@ export const jobDetails: Record<string, JobDetail> = {
     changesets: [],
     threads: {},
   },
+  // A working job whose session ended with an error: no agent works on it (issue #742).
+  "j-15": {
+    job: { ...jobs["j-15"], events: [{ at: at(16, 11), state: "working", by: "person" }] },
+    changesets: [],
+    threads: {},
+    session: { id: "se-3", agent: "claude-code", state: "ended", end: "exit", exit: 1, ended: at(16, 11, 1) },
+  },
 };
 const jobPage = (state: string | null) => {
   const list = Object.values(jobs)
@@ -612,6 +626,10 @@ export function answer(path: string): unknown {
   }
   if (name === "brief") return briefNow();
   if (name === "items" && id && url.pathname.endsWith("/job")) return startPreview(id);
+  if (name === "items" && id && url.pathname.endsWith("/joinable")) {
+    const item = items.find((i) => i.id === id);
+    return { joinable: !!item && !item.matter && ["commitment", "conversation", "record", "signal"].includes(item.form) };
+  }
   if (name === "items" && id) return [...items, ...hidden, ...strangers].find((i) => i.id === id);
   if (name === "items") {
     return { items: items.filter((i) => (!q.get("form") || i.form === q.get("form")) && (!q.get("type") || i.type === q.get("type"))), next: null };
@@ -653,17 +671,21 @@ const replyStart: ReplyStart = {
 };
 
 // Matters: the two examples, with members from the item examples above.
-const members = (base: object, list: Item[]): MatterView => {
+// g-4 has a signal member and one item that Iris proposes to add (D20, D21).
+const members = (base: object, list: Item[], added: Item[] = []): MatterView => {
   const by = (form: string) => list.filter((i) => i.form === form);
-  const items = { commitment: by("commitment"), conversation: by("conversation"), record: by("record") };
-  const counts = { commitment: items.commitment.length, conversation: items.conversation.length, record: items.record.length };
-  return { matter: { ...(base as Matter), items: list.map((i) => i.id), counts }, items };
+  const items = { commitment: by("commitment"), conversation: by("conversation"), record: by("record"), signal: by("signal") };
+  const counts = { commitment: items.commitment.length, conversation: items.conversation.length, record: items.record.length, signal: items.signal.length };
+  const { additions: _, ...rest } = base as Matter;
+  const extra = added.length ? { additions: added.map((i) => i.id) } : {};
+  return { matter: { ...rest, items: list.map((i) => i.id), counts, ...extra }, items, ...(added.length ? { additions: added } : {}) };
 };
 export const matterViews: Record<string, MatterView> = {
-  "g-4": members(matterConfirmed, [youOwe, conversation, booking] as unknown as Item[]),
+  "g-4": members(matterConfirmed, [youOwe, conversation, booking, signal] as unknown as Item[], [payment] as unknown as Item[]),
   "g-5": members(matterProposed, [receipt, owedToYou] as unknown as Item[]),
+  [matterByHand.id]: members({ ...matterByHand, title: "Kitchen remodel" }, [owedToYou] as unknown as Item[]),
 };
-export const matters: MatterList = { proposed: [matterViews["g-5"].matter], confirmed: [matterViews["g-4"].matter] };
+export const matters: MatterList = { proposed: [matterViews["g-5"].matter], confirmed: [matterViews["g-4"].matter, matterViews[matterByHand.id].matter] };
 
 /** POST /api/senders/<id>/<answer> in the fixture state: the sender row after the answer. */
 // The answers at the gate in the dev server: the state of each sender, from the fixtures.
@@ -718,7 +740,9 @@ export function answerJob(id: string, body: { answer?: unknown; question?: unkno
   const asked = jobDetails[id]?.job.events ?? [];
   jobs[id] = { ...job, state: "working", question: undefined, updated: new Date().toISOString() };
   const events = [...asked, { at: jobs[id].updated, state: "working" as const, by: "person" as const, answer: said }];
-  jobDetails[id] = { job: { ...jobs[id], events }, changesets: jobDetails[id]?.changesets ?? [], threads: jobDetails[id]?.threads ?? {} };
+  // The engine starts a new session with the answer.
+  const session = { id: "se-4", agent: "claude-code", state: "starting" as const, end: null, exit: null, ended: null };
+  jobDetails[id] = { job: { ...jobs[id], events }, changesets: jobDetails[id]?.changesets ?? [], threads: jobDetails[id]?.threads ?? {}, session };
   return [200, jobDetails[id]];
 }
 /** POST /api/jobs: the fixture job j-12 stands for the new job. */
@@ -769,7 +793,7 @@ export const measures: Measures = {
     ["2026-11-09", 0], ["2026-11-08", 2], ["2026-11-07", 1], ["2026-11-05", 3], ["2026-11-04", 2], ["2026-11-03", 4],
   ].map(([day, opens]) => ({ day: day as string, opens: opens as number })),
   first_brief: { connect: "2026-11-03T08:00:00Z", brief: "2026-11-03T08:05:40Z", seconds: 340 },
-  mirror: [{ account: "owner@example.com", checked: "2026-11-16T07:12:00Z", differences: 0, complete: true }],
+  mirror: [{ account: "owner@example.com", checked: "2026-11-16T07:12:00Z", differences: 0, complete: true, skipped: 0, stopped: false }],
   memory: { rss_kib: 31_744, messages: 18_402 },
   approvals: { decided: 50, approved: 47 },
   undo: { applied: 48, undone: 1 },

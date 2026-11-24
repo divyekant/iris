@@ -46,6 +46,19 @@ pub struct LedgerEntry {
     pub undone_by: Option<String>,
     /// The entry that this entry undoes.
     pub undo_of: Option<String>,
+    /// For an applied undo: the targets of `tried` that it did not
+    /// change, because they changed again after the entry, an earlier undo
+    /// restored them, or they are gone (decision D18). 0 for each other entry.
+    pub skipped: i64,
+    /// For an undo: the targets that this step tries to restore, that is
+    /// each message that the undone entry changed (also a gone one) and each
+    /// item of a state entry. Step 2 of the undo of `trash` (`archive`) has
+    /// only the messages with no `INBOX` before the entry. 0 for each other
+    /// entry.
+    pub tried: i64,
+    /// For an undo: true when an undo of the undone entry can
+    /// start now (`ledger_can_undo`). False for each other entry.
+    pub retry: bool,
 }
 
 /// The author of the changeset of an entry. `goal` is the goal of the job of
@@ -75,6 +88,23 @@ const ARGS: &str = "json_patch('{}', json_object(
           'date', CASE WHEN json_type(a.args, '$.date') = 'text' THEN substr(json_extract(a.args, '$.date'), 1, 2000) END,
           'field', CASE WHEN json_type(a.args, '$.field') = 'text' THEN substr(json_extract(a.args, '$.field'), 1, 2000) END))";
 
+/// The entry that an undo undoes, or NULL for an entry that is no undo.
+const UNDONE: &str = "(SELECT u.ledger_id FROM ledger_undo u WHERE u.action_id = a.id)";
+
+/// The targets that one step of an undo tries to restore. Step 1: each
+/// message that the undone entry changed (also one that is gone now,
+/// because submit leaves it out of the undo), and each item of a state
+/// entry. Step 2 (the `archive` of the undo of `trash`): each such message
+/// that had no `INBOX` before the entry. NULL for an entry that is no undo.
+const TRIED: &str = "(SELECT (SELECT count(*) FROM ledger_message lm
+                WHERE lm.ledger_id = u.ledger_id AND lm.done = 1
+                  AND (u.step = 1 OR NOT EXISTS (SELECT 1 FROM json_each(lm.pre) WHERE value = 'INBOX')))
+               + CASE WHEN u.step = 1
+                      THEN (SELECT count(*) FROM action_item ai JOIN ledger le ON le.id = u.ledger_id
+                            WHERE ai.action_id = le.action_id)
+                      ELSE 0 END
+         FROM ledger_undo u WHERE u.action_id = a.id)";
+
 /// The entry query. `{args}` is [`ARGS`]. Each text has at most 2,000
 /// characters (`substr(x, 1, 2000)`), so a page of 200 entries stays small
 /// also when an action has a large text (the body of a draft has up to
@@ -85,7 +115,7 @@ const ENTRY: &str = "SELECT l.id, a.verb, {args}, l.state, l.at, substr(l.error,
         (SELECT count(*) FROM action_item ai WHERE ai.action_id = a.id),
         (SELECT CASE WHEN json_type(i.doc, '$.title') = 'text' THEN substr(json_extract(i.doc, '$.title'), 1, 2000) END
          FROM action_item ai JOIN item i ON i.id = ai.item_id
-         WHERE ai.action_id = a.id ORDER BY ai.item_id LIMIT 1),
+         WHERE ai.action_id = a.id AND NOT {hostile} ORDER BY ai.item_id LIMIT 1),
         a.changeset_id, c.author_kind, substr(c.author_name, 1, 2000), substr(c.author_job, 1, 2000),
         substr(j.goal, 1, 2000), a.decided_by, a.rule, a.policy, substr(a.reason, 1, 2000),
         substr(coalesce(a.why, (SELECT r.why FROM changeset_revision r
@@ -95,14 +125,27 @@ const ENTRY: &str = "SELECT l.id, a.verb, {args}, l.state, l.at, substr(l.error,
                 WHERE u.ledger_id = l.id
                   AND coalesce(o.state, 'proposed') IN ('proposed', 'in_review', 'approved')),
         l.undone_by,
-        (SELECT u.ledger_id FROM ledger_undo u WHERE u.action_id = a.id)
+        (SELECT u.ledger_id FROM ledger_undo u WHERE u.action_id = a.id),
+        CASE WHEN l.state = 'applied' AND {undone} IS NOT NULL
+             THEN max(0, {tried}
+                       - (SELECT count(*) FROM ledger_message lm WHERE lm.ledger_id = l.id AND lm.done = 1)
+                       - (SELECT count(*) FROM json_each(coalesce(l.post, '{}'))))
+             ELSE 0 END,
+        coalesce({tried}, 0),
+        EXISTS (SELECT 1 FROM ledger_can_undo v WHERE v.ledger_id = {undone})
      FROM ledger l
      JOIN changeset_action a ON a.id = l.action_id
      JOIN changeset c ON c.id = a.changeset_id
      LEFT JOIN job j ON c.author_job = 'j-' || j.id";
 
 fn entry_sql(tail: &str) -> String {
-    format!("{} {tail}", ENTRY.replace("{args}", ARGS))
+    // The title of an item of hostile mail is not shown (issue 112).
+    let entry = ENTRY
+        .replace("{tried}", TRIED)
+        .replace("{undone}", UNDONE)
+        .replace("{args}", ARGS)
+        .replace("{hostile}", iris_store::from_hostile_mail!("i"));
+    format!("{entry} {tail}")
 }
 
 fn entry(r: &rusqlite::Row) -> rusqlite::Result<LedgerEntry> {
@@ -135,6 +178,9 @@ fn entry(r: &rusqlite::Row) -> rusqlite::Result<LedgerEntry> {
         undo_open: r.get(21)?,
         undone_by: l(r.get(22)?),
         undo_of: l(r.get(23)?),
+        skipped: r.get(24)?,
+        tried: r.get(25)?,
+        retry: r.get(26)?,
     })
 }
 

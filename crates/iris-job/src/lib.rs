@@ -190,6 +190,66 @@ pub fn create_in(c: &Connection, goal: &str, due_ms: Option<i64>, now_ms: i64) -
     Ok(c.last_insert_rowid())
 }
 
+/// Make a job from a typed goal with the request ID `request` of the
+/// start form (decision D25). A request ID that has a job gives that job
+/// and makes no job, so a retry after a lost answer makes one job. Gives
+/// the job and `true` when this call made it.
+pub fn create_for_request_in(
+    c: &Connection,
+    goal: &str,
+    due_ms: Option<i64>,
+    request: &str,
+    now_ms: i64,
+) -> Result<(i64, bool)> {
+    let have: Option<i64> = c
+        .query_row(
+            "SELECT job_id FROM job_request WHERE request = ?1",
+            [request],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(job) = have {
+        return Ok((job, false));
+    }
+    let job = create_in(c, goal, due_ms, now_ms)?;
+    c.execute(
+        "INSERT INTO job_request (request, job_id) VALUES (?1, ?2)",
+        params![request, job],
+    )?;
+    Ok((job, true))
+}
+
+/// The person changes the goal and the due date of an open job (decision
+/// D25). Migration 50 keeps the values before and after in `job_edit`, and
+/// refuses an edit of a done job or an edit that changes nothing. An edit
+/// is not a move: the state, `updated` and the sessions do not change.
+pub fn edit(store: &Store, job: i64, goal: &str, due_ms: Option<i64>, now_ms: i64) -> Result<()> {
+    transaction(store, |c| edit_in(c, job, goal, due_ms, now_ms))
+}
+
+pub fn edit_in(
+    c: &Connection,
+    job: i64,
+    goal: &str,
+    due_ms: Option<i64>,
+    now_ms: i64,
+) -> Result<()> {
+    let j = get_in(c, job)?;
+    // Not before the newest edit: a clock that goes back must not fail it.
+    let last: Option<i64> = c.query_row(
+        "SELECT max(at) FROM job_edit WHERE job_id = ?1",
+        [job],
+        |r| r.get(0),
+    )?;
+    let at = last.map_or(now_ms, |l| now_ms.max(l));
+    c.execute(
+        "INSERT INTO job_edit (job_id, at, goal_before, due_before, goal, due_at, after_event)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, (SELECT max(id) FROM job_event WHERE job_id = ?1))",
+        params![job, at, j.goal, j.due_ms, goal, due_ms],
+    )?;
+    Ok(())
+}
+
 /// The values of one move. Each `None` is NULL.
 #[derive(Default)]
 struct Move<'a> {
@@ -336,6 +396,24 @@ pub fn session_ask(
     })
 }
 
+/// `done` of a session: in one write transaction, a check that `session`
+/// of `job` is still open, then the move of the job to `done` with the end
+/// `complete` by the agent. The trigger of migration 21 ends the session
+/// with `job_state` in the same transaction. A session that a revoke or a
+/// stop ended is refused, and nothing changes.
+pub fn session_done(
+    store: &Store,
+    session: i64,
+    job: i64,
+    why: Option<&str>,
+    now_ms: i64,
+) -> Result<()> {
+    transaction(store, |c| {
+        open_in(c, session, job)?;
+        finish_in(c, job, By::Agent, End::Complete, why, now_ms)
+    })
+}
+
 /// The agent asks the person one question. The time of the question is
 /// `now_ms`, or 1 ms after the newest event of the job if that is later.
 pub fn ask(store: &Store, job: i64, question: &str, why: Option<&str>, now_ms: i64) -> Result<()> {
@@ -373,6 +451,102 @@ pub fn wake_in(c: &Connection, job: i64, by: By, why: Option<&str>, now_ms: i64)
         ..Move::default()
     };
     add_event(c, job, State::Working, by, m, now_ms)
+}
+
+/// The question of the move on the due date (decision D24). Fixed engine
+/// text: no mail text and no goal goes into it.
+pub const DUE_QUESTION: &str = "The due date passed. Answer to go on, or end the job.";
+
+/// A job that [`move_due`] moved to `needs_you`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Due {
+    pub id: i64,
+    pub goal: String,
+}
+
+/// The rule of docs/specs/2026-11-24-job-due-date.md, as SQL on the job
+/// row `j`: an open job that does not wait for the person, at or after its
+/// due date (`?1` is now), with no move to `needs_you` and no move by the
+/// person at or after the due date. So the move happens once for each due
+/// date. The first event (the start, by the person) is not a move: a job
+/// that starts after its due date also moves.
+/// Rule 3 counts the events at or after the due date, and after the newest
+/// edit of the due date: an edit to a past date (decision D25) is a new due
+/// date, and an event before the edit does not count. The edit keeps the ID
+/// of the newest event (`after_event`), so the order holds also when the
+/// clock goes back.
+const DUE_SQL: &str = "j.state IN ('working', 'waiting') AND j.due_at <= ?1
+     AND NOT EXISTS (SELECT 1 FROM job_event e WHERE e.job_id = j.id
+                     AND e.id > max((SELECT min(f.id) FROM job_event f WHERE f.job_id = j.id),
+                                    coalesce((SELECT max(d.after_event) FROM job_edit d
+                                              WHERE d.job_id = j.id AND d.due_at IS NOT d.due_before), 0))
+                     AND e.at >= j.due_at AND (e.state = 'needs_you' OR e.by = 'person'))";
+
+/// The result of [`move_due`]: the moved jobs, and each job whose move
+/// failed, with its error.
+#[derive(Debug, Default)]
+pub struct DueTurn {
+    pub moved: Vec<Due>,
+    pub failed: Vec<(i64, Error)>,
+}
+
+/// Moves each job that is due at `now_ms` to `needs_you` ([`due_jobs`],
+/// then [`move_due_one`] for each). The failure of one job does not stop
+/// the others, and a move that committed stays in `moved`.
+pub fn move_due(store: &Store, now_ms: i64) -> Result<DueTurn> {
+    let mut turn = DueTurn::default();
+    for id in due_jobs(store, now_ms)? {
+        match move_due_one(store, id, now_ms) {
+            Ok(m) => turn.moved.extend(m),
+            Err(e) => turn.failed.push((id, e)),
+        }
+    }
+    Ok(turn)
+}
+
+/// The IDs of the jobs that are due at `now_ms`, in a read (no write lock).
+pub fn due_jobs(store: &Store, now_ms: i64) -> Result<Vec<i64>> {
+    Ok(store.read(|c| {
+        let mut st = c.prepare_cached(&format!(
+            "SELECT j.id FROM job j WHERE {DUE_SQL} ORDER BY j.id"
+        ))?;
+        let rows = st.query_map([now_ms], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    })?)
+}
+
+/// Moves `job` to `needs_you`, by the engine, with [`DUE_QUESTION`] and
+/// the reason `due`, if it is due at `now_ms`. One write transaction reads
+/// the rule again, so a move of the person or of the agent after
+/// [`due_jobs`] wins, and this gives `None`.
+pub fn move_due_one(store: &Store, job: i64, now_ms: i64) -> Result<Option<Due>> {
+    transaction(store, |c| {
+        // A goal that is not UTF-8 fails here, before the move: each reader
+        // of the job refuses it, so the job must not ask a question.
+        let still: Option<String> = c
+            .query_row(
+                &format!("SELECT j.goal FROM job j WHERE j.id = ?2 AND {DUE_SQL}"),
+                params![now_ms, job],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(goal) = still else {
+            return Ok(None);
+        };
+        let m = Move {
+            question: Some(DUE_QUESTION),
+            why: Some("due"),
+            ..Move::default()
+        };
+        // Not before the newest event: a clock that goes back must not fail
+        // the move (as [`finish_in`]).
+        let updated: i64 = c.query_row("SELECT updated_at FROM job WHERE id = ?1", [job], |r| {
+            r.get(0)
+        })?;
+        let at = now_ms.max(updated);
+        add_event(c, job, State::NeedsYou, By::Engine, m, at)?;
+        Ok(Some(Due { id: job, goal }))
+    })
 }
 
 /// The jobs that wait for a new session after a wake by the engine or an
@@ -467,7 +641,11 @@ pub fn finish_in(
         why,
         ..Move::default()
     };
-    add_event(c, job, State::Done, by, m, now_ms)
+    // The end is never before the newest event: an ask can set the time of
+    // the job 1 ms after the clock, an answer keeps it, and a clock can go
+    // back. The move to `done` must not fail for that (#356).
+    let at = now_ms.max(get_in(c, job)?.updated_ms);
+    add_event(c, job, State::Done, by, m, at)
 }
 
 const JOB_COLUMNS: &str =

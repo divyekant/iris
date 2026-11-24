@@ -249,3 +249,40 @@ fn a_second_mirror_sync_after_a_model_error_makes_no_call() {
         "the wait after a model error holds across commands"
     );
 }
+
+/// Issue #679: while another process runs the first copy of an account,
+/// verify of that account says that the first copy runs, and the command
+/// does not fail for it. A held lock of an account with a full mirror is
+/// still a failure.
+#[test]
+fn mirror_verify_during_a_first_copy_says_so_and_does_not_fail() {
+    let fake = FakeGmail::start(Mailbox::new(5, 3)).unwrap();
+    let tokens = token_server();
+    let dir = data_dir("mirror-first-copy");
+    let store = Store::open(&dir).unwrap();
+    let account = add_account(&store, &gmail(fake.base_url()));
+    let held = iris_sync::lock(&store, account).unwrap();
+    // The token endpoint fails: the check comes before any token call.
+    tokens
+        .answers
+        .lock()
+        .unwrap()
+        .extend([(500, "{}".to_string()), (500, "{}".to_string())]);
+    let (ok, out, err) = iris(&dir, &fake, &tokens, &["mirror", "verify"]);
+    assert!(ok, "{err}");
+    assert!(
+        out.contains(&format!(
+            "account {account}: the first copy runs now, so no full mirror exists to verify. Run verify after it ends."
+        )),
+        "{out}"
+    );
+    assert!(tokens.calls.lock().unwrap().is_empty(), "a token call");
+    tokens.answers.lock().unwrap().clear();
+    drop(held);
+    let (ok, _, err) = iris(&dir, &fake, &tokens, &["mirror", "sync"]);
+    assert!(ok, "{err}");
+    let _held = iris_sync::lock(&store, account).unwrap();
+    let (ok, _, err) = iris(&dir, &fake, &tokens, &["mirror", "verify"]);
+    assert!(!ok);
+    assert!(err.contains("another sync of the account runs"), "{err}");
+}

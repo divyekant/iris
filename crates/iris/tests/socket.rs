@@ -615,6 +615,10 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
         r#"{"ok":true,"result":{"job":"j-1","session":"se-1","goal":"g","state":"working","threads":"1","messages":1,"items":1}}"#,
         r#"{"ok":true,"result":{"job":"j-1","session":"se-1","goal":"g","state":"working","threads":1,"messages":1,"items":1,"due":5}}"#,
         r#"{"ok":true,"result":{"job":"x","session":"se-1","goal":"g","state":"working","threads":1,"messages":1,"items":1}}"#,
+        r#"{"ok":true,"result":{"state":"done"}}"#,
+        r#"{"ok":true,"result":{"job":"j-01","state":"done"}}"#,
+        r#"{"ok":true,"result":{"job":"j-1","state":"working"}}"#,
+        r#"{"ok":true,"result":{"job":1,"state":"done"}}"#,
     ]
     .iter()
     .map(|l| l.as_bytes().to_vec())
@@ -635,7 +639,7 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
     for line in &lines {
         for verb in [
             "show", "drafts", "add", "submit", "withdraw", "job.run", "job.stop", "status",
-            "search", "list", "wait", "ask",
+            "search", "list", "wait", "ask", "done",
         ] {
             match socket::parse_answer(verb, line) {
                 None => {}
@@ -666,6 +670,13 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
                     r["job"].as_str().and_then(iris_job::parse_job_id).is_some()
                         && r["state"] == "needs_you"
                         && r["question"].is_string(),
+                    "{verb} {}",
+                    String::from_utf8_lossy(line)
+                ),
+                // `done`: only a canonical job ID in the state `done`.
+                Some(Ok(r)) if verb == "done" => assert!(
+                    r["job"].as_str().and_then(iris_job::parse_job_id).is_some()
+                        && r["state"] == "done",
                     "{verb} {}",
                     String::from_utf8_lossy(line)
                 ),
@@ -701,6 +712,8 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
             }
         }
     }
+    let done = br#"{"ok":true,"result":{"job":"j-3","state":"done"}}"#;
+    assert!(matches!(socket::parse_answer("done", done), Some(Ok(_))));
     let ok = br#"{"ok":true,"result":{"id":"cs-1","state":"draft","actions":[]}}"#;
     assert!(matches!(socket::parse_answer("show", ok), Some(Ok(_))));
     assert!(socket::parse_answer("drafts", ok).is_none());
@@ -789,6 +802,7 @@ fn the_command_adds_and_submits_draft_and_send() {
                 cc: Vec::new(),
                 subject: "Hi".into(),
                 body: "Hello".into(),
+                ..Default::default()
             }
             .check()
             .unwrap();
@@ -979,9 +993,9 @@ fn session_mode_uses_only_the_session_socket() {
             .output()
             .unwrap()
     };
-    // Host mode (no `.iris/` above the folder): `list` and `wait` are usage
-    // errors.
-    for args in [&["list"][..], &["wait", "--until", "2030-01-02"]] {
+    // Host mode (no `.iris/` above the folder): `wait` and `done` are usage
+    // errors. `list` is a host read verb too (issue #523).
+    for args in [&["wait", "--until", "2030-01-02"][..], &["done"]] {
         let out = Command::new(env!("CARGO_BIN_EXE_iris"))
             .current_dir(&root)
             .arg("--data")
@@ -991,8 +1005,10 @@ fn session_mode_uses_only_the_session_socket() {
             .unwrap();
         assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
     }
-    // No socket: code 4, for a socket verb and for a store verb.
-    let draft = ["draft", "t-1", "missing.json"];
+    // No socket: code 4, for a socket verb and for a store verb. The socket check
+    // comes first, so `iris send` also gives 4 here. `session.rs`
+    // (`a_session_cannot_send_or_nudge`) tests that a session send is refused.
+    let draft = ["send", "d-1"];
     for args in [
         &["status"][..],
         &["withdraw", "cs-1"],
@@ -1059,6 +1075,16 @@ fn session_mode_uses_only_the_session_socket() {
         (&shown["id"], &shown["form"]),
         (&json!("c-1"), &json!("commitment"))
     );
+    // A filter of the host list is a usage error in a session, and sends
+    // nothing to the socket (issue #523).
+    for args in [
+        &["list", "--status", "open"][..],
+        &["list", "--type", "receipt"],
+        &["list", "--before", "c-1"],
+        &["list", "--limit", "5"],
+    ] {
+        assert_eq!(iris(args).status.code(), Some(2), "{args:?}");
+    }
     let out = iris(&["list", "commitment"]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     assert!(
@@ -1325,5 +1351,100 @@ fn iris_open_keeps_the_code_out_of_process_arguments() {
         "javascript:x",
     ] {
         assert!(iris::open_page(&d, bad).is_err(), "{bad}");
+    }
+}
+
+/// `iris skip`, `mute` and `dismiss` add the state verb with the default
+/// reason of the web client, or the given reason (issue #441).
+#[test]
+fn skip_mute_and_dismiss_add_the_state_verb() {
+    use clap::Parser;
+    let cases = [
+        (vec!["skip", "f-3"], "skip", "Skipped."),
+        (vec!["mute", "v-2"], "mute", "Muted."),
+        (vec!["dismiss", "s-1"], "dismiss", "Dismissed."),
+        (
+            vec!["mute", "v-2", "--reason", "Done here."],
+            "mute",
+            "Done here.",
+        ),
+    ];
+    for (argv, verb, reason) in cases {
+        let cli =
+            iris::Cli::try_parse_from(std::iter::once("iris").chain(argv.iter().copied())).unwrap();
+        let request = iris::add_request(&cli.command).unwrap().unwrap();
+        assert_eq!(
+            request,
+            json!({ "verb": verb, "targets": [argv[1]], "args": { "reason": reason } }),
+            "{argv:?}"
+        );
+    }
+    let cli = iris::Cli::try_parse_from(["iris", "skip", "f-3", "--changeset", "cs-4"]).unwrap();
+    let request = iris::add_request(&cli.command).unwrap().unwrap();
+    assert_eq!(request["changeset"], json!("cs-4"));
+}
+
+/// `--until` of `iris wait`: a day gives its start in UTC, and an RFC 3339
+/// time with any offset gives its instant (issue #556). Property: each
+/// instant of whole seconds, written with any offset of -14:00 to +14:00,
+/// reads back to the same millisecond, and the RFC 3339 text of the answer
+/// reads back to the same end. A fraction of a second other than zero is an
+/// error, because each output writes seconds. Other text is an error, never
+/// a panic.
+#[test]
+fn the_end_of_a_wait_is_a_day_or_an_rfc3339_time() {
+    use chrono::{FixedOffset, TimeZone};
+    assert_eq!(socket::until_ms("2026-11-18"), Ok(1_794_960_000_000));
+    assert_eq!(
+        socket::until_ms("2026-11-18T00:00:00Z"),
+        Ok(1_794_960_000_000)
+    );
+    assert_eq!(
+        socket::until_ms("2026-11-18T09:30:00-08:00"),
+        Ok(1_794_960_000_000 + (17 * 60 + 30) * 60_000)
+    );
+    let mut x = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    for _ in 0..2_000 {
+        // 1970 to about 2100, in milliseconds.
+        let ms = (next() % 4_102_444_800) as i64 * 1000;
+        let offset = (next() % (28 * 60 + 1)) as i32 - 14 * 60;
+        let zone = FixedOffset::east_opt(offset * 60).unwrap();
+        let t = zone.timestamp_millis_opt(ms).unwrap();
+        let text = t.to_rfc3339_opts(chrono::SecondsFormat::Millis, offset == 0);
+        assert_eq!(socket::until_ms(&text), Ok(ms), "{text}");
+        // The answer of `wait` shows the same end that the job stores.
+        assert_eq!(socket::until_ms(&iris_api::rfc3339(ms)), Ok(ms), "{text}");
+        // Any fraction other than zero: an error, not a shown end that differs.
+        let frac = 1 + (next() % 999) as i64;
+        let t = zone.timestamp_millis_opt(ms + frac).unwrap();
+        let text = t.to_rfc3339_opts(chrono::SecondsFormat::Millis, offset == 0);
+        assert!(socket::until_ms(&text).is_err(), "{text}");
+    }
+    for bad in [
+        "",
+        "2026-11",
+        "2026-13-01",
+        "2026-11-18 09:30",
+        "2026-11-18T09:30",
+        "2026-11-18T25:00:00Z",
+        "tomorrow",
+        "2026-11-18T09:30:00+15:00x",
+        "\u{0662}026-11-18",
+        "2026-11-18T09:30:00",
+        "2026-11-18T09:30:00.750Z",
+    ] {
+        assert!(socket::until_ms(bad).is_err(), "{bad:?}");
+    }
+    for _ in 0..2_000 {
+        let s: String = (0..(next() % 30))
+            .map(|_| b"0123456789-:TZ+. x"[(next() % 18) as usize] as char)
+            .collect();
+        let _ = socket::until_ms(&s);
     }
 }

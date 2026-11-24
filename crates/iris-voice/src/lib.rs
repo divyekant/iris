@@ -130,6 +130,10 @@ struct Msg {
     subject: String,
     text: Option<String>,
     sent: bool,
+    /// The `sent` evidence of iris-senders for the current content: each
+    /// `To`, `Cc` and `Bcc` recipient, in lower case. Only the newest sent
+    /// message of a snapshot has it; it is empty for each other message.
+    sent_to: Vec<String>,
 }
 
 /// The state of a thread that a draft depends on, in memory that does not
@@ -262,22 +266,25 @@ pub const LATE_AFTER_MS: i64 = 2 * 86_400_000;
 ///   the person (its `From`), not `SENT`, and the commitment has a due
 ///   date.
 ///
-/// With `now` (an SQL expression of milliseconds), the time rules apply
-/// too: the due date passed (a `due.at` at its instant, a `due.date` at the
-/// end of that day in UTC), and an ask is at least [`LATE_AFTER_MS`] old,
+/// With `now` (SQL expressions of the time in milliseconds and of the day
+/// `YYYY-MM-DD` of that time in the zone of the owner, [`iris_store::today`]),
+/// the time rules apply too: the due date passed (a `due.at` at its instant,
+/// a `due.date` at the end of that day in the time zone of the owner), and an ask is at least [`LATE_AFTER_MS`] old,
 /// so a nudge that the owner sent starts the wait again. With no `now`,
 /// they do not count: what passed stays passed.
 ///
 /// One thread has one nudge, so a second commitment waits for the first.
 /// A change of the commitment, its person or the newest message changes
 /// the key or makes it NULL, so a saved nudge with the old key is stale.
-pub fn nudge_key_sql(thread: &str, now: Option<&str>) -> String {
+pub fn nudge_key_sql(thread: &str, now: Option<(&str, &str)>) -> String {
     let in_thread = in_thread!("om.thread_id");
-    let due_at = "coalesce(unixepoch(json_extract(ki.doc, '$.due.at'), 'subsec'),
-                           unixepoch(json_extract(ki.doc, '$.due.date'), '+1 day'))";
-    let (due, wait) = now.map_or((String::new(), String::new()), |now| {
+    let at = "unixepoch(json_extract(ki.doc, '$.due.at'), 'subsec')";
+    let date = "date(json_extract(ki.doc, '$.due.date'))";
+    let due_at = format!("coalesce({at}, {date})");
+    let (due, wait) = now.map_or((String::new(), String::new()), |(now, today)| {
         (
-            format!("AND coalesce({due_at}, 0) * 1000 <= {now}"),
+            // No valid due date: no time rule of the due date.
+            format!("AND coalesce({at} * 1000 <= {now}, {date} < {today}, 1)"),
             format!("AND coalesce(km.internal_date, 0) <= {now} - {LATE_AFTER_MS}"),
         )
     });
@@ -340,7 +347,7 @@ pub fn late(
 ) -> rusqlite::Result<Vec<Late>> {
     let newest = in_thread!("t.thread");
     let all = in_thread!("k.thread");
-    let key = nudge_key_sql("n.thread", Some("?1"));
+    let key = nudge_key_sql("n.thread", Some(("?1", "?4")));
     let ready = ready_sql("SELECT k.thread");
     let mut st = c.prepare_cached(&format!(
         "WITH t(thread) AS (
@@ -365,7 +372,8 @@ pub fn late(
           ORDER BY coalesce(nt.tried_at, 0), k.newest
           LIMIT ?3"
     ))?;
-    let rows = st.query_map(params![now_ms, thread, limit as i64], |r| {
+    let today = iris_store::today(c, now_ms)?;
+    let rows = st.query_map(params![now_ms, thread, limit as i64, today], |r| {
         Ok(Late {
             thread: r.get(0)?,
             newest: r.get(1)?,
@@ -519,11 +527,25 @@ fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
                 subject: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
                 text: r.get(6)?,
                 sent: r.get(7)?,
+                sent_to: Vec::new(),
             })
         },
     )?;
     let mut newest = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     newest.reverse();
+    // Only the newest message names the recipient (`recipient`), so only
+    // its evidence is in memory (#833).
+    if let Some(last) = newest.last_mut().filter(|m| m.sent) {
+        last.sent_to = c
+            .prepare_cached(
+                "SELECT se.address FROM sender_evidence se JOIN message m ON m.id = se.message_id
+                  WHERE se.message_id = ?1 AND se.rule = 'sent'
+                    AND se.content_sha256 IS m.content_sha256
+                  ORDER BY se.address",
+            )?
+            .query_map([last.id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+    }
     Ok(Snapshot {
         count,
         not_ready,
@@ -555,28 +577,31 @@ fn recipient(msgs: &[Msg], me: &str) -> Option<String> {
             .map(|a| a.trim().to_lowercase())
             .filter(|a| !a.is_empty());
     }
-    let owners = [Some(me), last.from_addr.as_deref()];
-    first_other(
-        &[last.to_addrs.as_deref(), last.cc_addrs.as_deref()],
-        &owners,
-    )
+    let owner = |a: &str| {
+        [Some(me), last.from_addr.as_deref()]
+            .iter()
+            .flatten()
+            .any(|o| o.trim().eq_ignore_ascii_case(a))
+    };
+    // A message with evidence rows takes its target only from an entry
+    // with evidence. A `Bcc` address has evidence but is in no list.
+    let evidence =
+        |a: &str| last.sent_to.is_empty() || last.sent_to.iter().any(|e| e.eq_ignore_ascii_case(a));
+    [last.to_addrs.as_deref(), last.cc_addrs.as_deref()]
+        .into_iter()
+        .flatten()
+        .flat_map(entries)
+        .find(|a| !owner(a) && evidence(a))
 }
 
-/// The first address of the comma lists that is not empty and not one of
-/// `owners`, in lower case.
-fn first_other(lists: &[Option<&str>], owners: &[Option<&str>]) -> Option<String> {
-    lists
-        .iter()
-        .flatten()
-        .flat_map(|l| l.split(','))
-        .map(|a| a.trim().to_lowercase())
-        .find(|a| {
-            !a.is_empty()
-                && !owners
-                    .iter()
-                    .flatten()
-                    .any(|o| o.trim().eq_ignore_ascii_case(a))
-        })
+/// The entries of a stored address list, through the parser that wrote the
+/// list (`iris_understand::head::addresses`): a `,` inside a quoted local
+/// part (`"a, b"@example.org`) does not split.
+fn entries(list: &str) -> Vec<String> {
+    iris_understand::head::addresses(list)
+        .into_iter()
+        .map(|(a, _)| a)
+        .collect()
 }
 
 /// A sent message that shows the voice of the owner.

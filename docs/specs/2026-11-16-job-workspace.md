@@ -131,20 +131,25 @@ The granted messages of a job:
 - A job in the state `done` grants nothing. The build of a done job writes
   the job files and no thread, item or person file. The read verbs of a
   session of a done job see nothing (R4-04 ends the session).
-- Each caller that moves a job to `done` (`iris_job::finish`) does these
-  steps in this order: move the job, end the session of the job if one
-  runs and wait until it ended (R4-04), then build the workspace. If the
-  caller is the agent of that session (`iris done`), the engine replies to
-  the command after the move, and then does the other steps by itself, so
-  the command does not wait for its own session to end. So the
-  mail files go at once, and no build runs while a session runs. The engine also
-  builds, at each start, the workspace of each done job whose workspace
-  folder exists. A partial build can leave any owned path absent, so the
-  check is the folder, not one path in it. If the engine stops between the move and the
-  build, the session ends with the engine, and the mail files stay only
-  until that start. If the build fails, the engine tries it again at that
-  start. The callers come with
-  R4-04 and R4-09 (known limit until then, with a GitHub issue).
+- A move of a job to `done` has two parts. The caller does the first part:
+  it moves the job in one transaction, which also ends the live session of
+  the job with `job_state`, and then replies. The caller does not wait for
+  the second part. The engine does the second part by itself: it builds
+  the workspace of the done job after the session ended, so no build runs
+  while a session runs. The callers:
+
+  | Caller | Who | Reply | Build of the workspace |
+  |---|---|---|---|
+  | `iris done` (a verb of the session) | The agent completes the job | After the move | After the reap of the session |
+  | `iris job finish`, `POST /api/jobs/{id}/finish` | The person completes or cancels the job | After the move | With a live session: after its reap. With no live session and no launch: at the next wake of the supervisor (about one second). After a launch that ended with no session: at the end of that launch. |
+
+  The engine also builds, at each start, the workspace of each done job
+  whose workspace folder exists. A partial build can leave any owned path
+  absent, so the check is the folder, not one path in it. If the engine
+  does not run, or stops between the move and the build, the mail files
+  stay until the next engine start. If the build fails, the running engine
+  tries it again after 1 minute, doubled after each failure, at most
+  1 hour (issue #502). The next engine start also tries it (#356).
 
 - A thread of the scope grants each clean message that was in the thread
   at the add of the ref. The add writes these messages into the table
@@ -281,12 +286,13 @@ these rules:
   `submit` and again just before the apply, with the same results as for
   a message. A feed, signal or conversation item is never a target in a
   session, so `correct` on one is refused.
-- `iris draft`, `iris send` and `iris nudge` make draft and send actions,
-  which target an account and a draft that are not in the grant. The
-  engine refuses these verbs in session mode until a card defines the
-  grant of the account and of a job draft (R4-03). It also refuses, at
-  `submit`, each draft or send action in a changeset of a session, on
-  each path that makes one.
+- `iris send` and `iris nudge` make send actions. The engine refuses
+  these verbs in session mode, and refuses at `submit` each send action
+  in a changeset of a session, on each path that makes one: only a person
+  sends (decision D2). `iris draft` in session mode makes a reply in a
+  thread of the grant (decision D3, `docs/specs/2026-11-17-job-verbs.md`
+  section 4). A new mail targets an account, which no grant holds, so
+  submit refuses it.
 - `iris changeset <cs-id>`, `submit` and `withdraw` in a session give only
   changesets of the job of the session. In a session, the engine gives no
   subject or text of a target message in a changeset document.

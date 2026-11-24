@@ -516,6 +516,68 @@ pub fn comments(store: &Store, changeset: i64) -> Result<Value> {
     Ok(serde_json::json!({ "comments": all.iter().map(comment_doc).collect::<Vec<_>>() }))
 }
 
+/// The reason of each submitted revision of `changeset`, oldest first
+/// (spec 2 section 5.6, issue 189). An open action of an older revision
+/// shows the reason of its own revision.
+/// `{"would": [{"revision", "n", "outcome", "rule", "policy", "reason"}]}`:
+/// what a rule of the active policy would decide for each `proposed`
+/// action, in the mode `observe` only (`iris_triage::would_next`).
+/// `outcome` is `approved`, `in_review` or `denied`. An empty list in the
+/// mode `apply`. Streamed, one action for each read.
+pub fn write_would(store: &Store, changeset: i64, now_ms: i64, out: &mut impl Write) -> Result<()> {
+    out.write_all(b"{\"would\":[").map_err(io)?;
+    let pass = store
+        .read(|c| Ok(iris_triage::would_start(c, changeset)))?
+        .map_err(changeset_error)?;
+    if let Some(pass) = pass {
+        let (mut after, mut first) = (0, true);
+        while let Some((id, w)) = store
+            .read(|c| Ok(iris_triage::would_next(c, &pass, changeset, after, now_ms)))?
+            .map_err(changeset_error)?
+        {
+            after = id;
+            let Some(w) = w else { continue };
+            if !first {
+                out.write_all(b",").map_err(io)?;
+            }
+            first = false;
+            let v = json!({
+                "revision": w.revision,
+                "n": w.n,
+                "outcome": match w.outcome {
+                    iris_policy::Outcome::Allow => "approved",
+                    iris_policy::Outcome::Review => "in_review",
+                    iris_policy::Outcome::Deny => "denied",
+                },
+                "rule": w.rule,
+                "policy": w.policy,
+                "reason": w.reason,
+            });
+            serde_json::to_writer(&mut *out, &v).map_err(|e| io(e.into()))?;
+        }
+    }
+    out.write_all(b"]}").map_err(io)
+}
+
+pub fn revisions(store: &Store, changeset: i64) -> Result<Value> {
+    let all: Vec<Value> = store.read(|c| {
+        c.prepare(
+            "SELECT revision, why, submitted_at FROM changeset_revision
+             WHERE changeset_id = ?1 ORDER BY revision",
+        )?
+        .query_map([changeset], |r| {
+            Ok(json!({
+                "revision": r.get::<_, i64>(0)?,
+                "why": r.get::<_, String>(1)?,
+                "submitted": crate::rfc3339(r.get(2)?),
+            }))
+        })?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(Into::into)
+    })?;
+    Ok(json!({ "revisions": all }))
+}
+
 fn comment_doc(c: &iris_changeset::Comment) -> Value {
     serde_json::json!({
         "id": c.id,

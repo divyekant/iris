@@ -66,9 +66,14 @@ pub struct Check {
     /// The differences that the check found, or `null` when there is no
     /// check or the text of the log row has no count.
     pub differences: Option<i64>,
-    /// `false` when there is no check, or when an error stopped the check
-    /// before its end.
+    /// `false` when there is no check, when an error stopped the check
+    /// before its end, or when the check skipped a message.
     pub complete: bool,
+    /// The messages that the check skipped because they changed during the
+    /// check, or `null` when there is no check or the log has no count.
+    pub skipped: Option<i64>,
+    /// `true` when an error stopped the check before its end.
+    pub stopped: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -125,20 +130,28 @@ pub fn measures(store: &Store, rss_kib: Option<i64>) -> Result<Measures> {
             "SELECT a.address, coalesce(l.ended_at, l.started_at), l.result
              FROM account a LEFT JOIN sync_log l ON l.id =
                (SELECT max(id) FROM sync_log WHERE account_id = a.id AND kind = 'verify')
+             WHERE coalesce(a.state, '') NOT IN ('removing', 'removed')
              ORDER BY a.id",
         )?;
         let mirror = q
             .query_map([], |r| {
                 let checked: Option<i64> = r.get(1)?;
-                let (differences, complete) = match checked {
+                let v = match checked {
                     Some(_) => verify_result(&r.get::<_, Option<String>>(2)?.unwrap_or_default()),
-                    None => (None, false),
+                    None => Verify {
+                        differences: None,
+                        skipped: None,
+                        stopped: false,
+                        complete: false,
+                    },
                 };
                 Ok(Check {
                     account: r.get(0)?,
                     checked: checked.map(rfc3339),
-                    differences,
-                    complete,
+                    differences: v.differences,
+                    complete: v.complete,
+                    skipped: v.skipped,
+                    stopped: v.stopped,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -242,16 +255,30 @@ fn brief_seconds(ms: i64) -> i64 {
 /// `sync_log.result`: "N differences, M skipped", then ", then error: ..."
 /// when an error stopped the check. The check is complete only with no
 /// error and 0 skipped messages: a skipped message was not compared.
-fn verify_result(text: &str) -> (Option<i64>, bool) {
+fn verify_result(text: &str) -> Verify {
     let first = text.lines().next().unwrap_or("");
-    let count = first
+    let differences = first
         .split_once(" differences")
         .and_then(|(n, _)| n.parse().ok());
     let skipped = first
         .split_once(" skipped")
         .and_then(|(n, _)| n.rsplit(' ').next()?.parse::<i64>().ok());
     let none_skipped = skipped == Some(0) || !first.contains(" skipped");
-    (count, none_skipped && !first.contains(", then error"))
+    let stopped = first.contains(", then error");
+    Verify {
+        differences,
+        skipped,
+        stopped,
+        complete: none_skipped && !stopped,
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct Verify {
+    differences: Option<i64>,
+    skipped: Option<i64>,
+    stopped: bool,
+    complete: bool,
 }
 
 /// Count one use of the web client on `day` (the local date of the person,
@@ -400,20 +427,40 @@ mod tests {
 
     #[test]
     fn verify_result_reads_the_text_of_the_verify() {
-        assert_eq!(verify_result("0 differences, 0 skipped"), (Some(0), true));
+        let v = |differences, skipped, stopped, complete| Verify {
+            differences,
+            skipped,
+            stopped,
+            complete,
+        };
+        assert_eq!(
+            verify_result("0 differences, 0 skipped"),
+            v(Some(0), Some(0), false, true)
+        );
         // A skipped message was not compared: the check is not complete.
-        assert_eq!(verify_result("0 differences, 2 skipped"), (Some(0), false));
+        assert_eq!(
+            verify_result("0 differences, 2 skipped"),
+            v(Some(0), Some(2), false, false)
+        );
         assert_eq!(
             verify_result("3 differences, 1 skipped\nmessage a: other labels"),
-            (Some(3), false)
+            v(Some(3), Some(1), false, false)
         );
-        assert_eq!(verify_result("0 differences, x skipped"), (Some(0), false));
+        assert_eq!(
+            verify_result("0 differences, x skipped"),
+            v(Some(0), None, false, false)
+        );
         assert_eq!(
             verify_result("2 differences, 0 skipped, then error: HTTP 401"),
-            (Some(2), false)
+            v(Some(2), Some(0), true, false)
         );
-        assert_eq!(verify_result(""), (None, true));
-        assert_eq!(verify_result("x differences"), (None, true));
+        // An error and skipped messages: the measure names both.
+        assert_eq!(
+            verify_result("0 differences, 4 skipped, then error: HTTP 401"),
+            v(Some(0), Some(4), true, false)
+        );
+        assert_eq!(verify_result(""), v(None, None, false, true));
+        assert_eq!(verify_result("x differences"), v(None, None, false, true));
     }
 
     /// Property: the shown seconds are never under the real time, so a

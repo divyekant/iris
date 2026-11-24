@@ -19,19 +19,15 @@ const READS: [&str; 4] = ["m.hostile", "(hostile", "SET hostile", "FROM link_che
 const ALLOWED: [(&str, usize, &str); 9] = [
     (
         "iris-store/src/lib.rs",
-        3,
-        "the definition of may_be_hostile",
+        5,
+        "the definitions of may_be_hostile and of hostile_mail",
     ),
     (
         "iris-understand/src/store.rs",
         10,
         "the writer of the marks and the queue of the link check",
     ),
-    (
-        "iris-api/src/read.rs",
-        3,
-        "shows the marks, and the count of hostile mail in the brief",
-    ),
+    ("iris-api/src/read.rs", 1, "shows the marks"),
     (
         "iris-observe/src/lib.rs",
         3,

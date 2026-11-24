@@ -238,6 +238,23 @@ test("the setup flow says mirror ready and that nothing changed", async () => {
   assert.match(html, /href="#\/brief">Open the brief</);
 });
 
+test("setup and the brief say how to set a model while mail waits for one (issue 740)", async () => {
+  const messages = { total: 400, fetched: 400, understood: 6, gone: 0 };
+  const status = { ...fx.status, accounts: [fx.status.accounts[0]], messages, model: false, waits_model: 394 };
+  for (const html of [
+    await render("/src/views/Setup.svelte", { status, poll: 0 }),
+    await render("/src/views/Brief.svelte", { brief: fx.brief, status, now: NOW, poll: 0 }),
+  ]) {
+    assert.match(text(html), /Iris needs a model to read the rest of your mail\./);
+    assert.match(text(html), /iris model set local/);
+  }
+  // A model is set, an older engine says nothing, or no live mail waits (a draft or gone mail is not read): no note.
+  for (const s of [{ ...status, model: true }, { ...status, model: undefined }, { ...status, waits_model: 0 }, { ...status, waits_model: undefined }]) {
+    assert.doesNotMatch(text(await render("/src/views/Setup.svelte", { status: s, poll: 0 })), /needs a model/);
+    assert.doesNotMatch(text(await render("/src/views/Brief.svelte", { brief: fx.brief, status: s, now: NOW, poll: 0 })), /needs a model/);
+  }
+});
+
 test("an item shows the quote of its mail first, its fields, and opens each source mail", async () => {
   const html = await render("/src/views/Item.svelte", { item: item("v-88"), now: NOW });
   const t = text(html);
@@ -537,6 +554,22 @@ test("each measure says when it has no data, and the sentence names a missed tar
   assert.match(rows(mixed, now)[2].detail, /^1 account has no check yet\. Last check on/);
   assert.equal(rows({ ...empty, mirror: [none] }, now)[2].tone, "none");
   assert.equal(rows({ ...mixed, mirror: [{ ...mixed.mirror[0], differences: 2 }, none] }, now)[2].tone, "missed");
+
+  // Issue 725: a check that skipped messages says so, not that it stopped.
+  const at = (fields) => ({ ...empty, mirror: [{ ...check(0, false).mirror[0], ...fields }] });
+  const skipped = rows(at({ skipped: 2, stopped: false }), now)[2];
+  assert.equal(skipped.tone, "flat");
+  assert.match(skipped.detail, /^A check skipped 2 messages that changed during the check\. Last check on/);
+  assert.doesNotMatch(skipped.detail, /stopped/);
+  assert.match(rows(at({ skipped: 1, stopped: false }), now)[2].detail, /skipped 1 message that/);
+  // Two accounts with skipped messages: the count is for both checks together.
+  const two = { ...empty, mirror: [{ ...at({ skipped: 2 }).mirror[0] }, { ...at({ skipped: 3 }).mirror[0], account: "b@example.com" }] };
+  assert.match(rows(two, now)[2].detail, /^2 checks skipped 5 messages that changed during the check\. Last checks of 2 accounts/);
+  // An error and skipped messages: both show.
+  assert.match(rows(at({ skipped: 2, stopped: true }), now)[2].detail, /^A check stopped before its end\. A check skipped 2 messages/);
+  // An error only, or a check that is not complete for no named cause: stopped.
+  assert.match(rows(at({ skipped: 0, stopped: true }), now)[2].detail, /^A check stopped before its end\. Last check/);
+  assert.match(rows(at({ skipped: null, stopped: false }), now)[2].detail, /^A check stopped before its end\. Last check/);
 });
 
 test("each request while the person is active sends the local day, and a poll of an idle tab does not", async () => {

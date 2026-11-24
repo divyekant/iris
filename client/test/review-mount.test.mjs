@@ -411,6 +411,7 @@ test("each flag of a draft shows as a tag on its words, on its own action only",
     const tags = [...send.querySelectorAll(".tag")].map((t) => [t.previousElementSibling.textContent, t.textContent]);
     assert.deepEqual(tags, [
       ["legal@acme-partners.example", "new address"],
+      ["new address", "not in the thread"],
       ["$48,000", "amount"],
       ["Friday, Dec 4", "date"],
       ["attached", "no file attached"],
@@ -437,7 +438,7 @@ test("a send waits for its draft before the decision, and a failed load can try 
     assert.match(alert.textContent, /The store is busy\./);
     assert.equal(view.target.querySelector("button.primary").disabled, true);
     // The flags show in words while the draft is not there.
-    assert.equal(view.target.querySelectorAll(".actions > li")[0].querySelectorAll(".flag").length, 5);
+    assert.equal(view.target.querySelectorAll(".actions > li")[0].querySelectorAll(".flag").length, 6);
     fail = false;
     alert.querySelector("button.more").click();
     await until(() => view.target.querySelector(".mail"));
@@ -454,7 +455,7 @@ test("a draft that Iris cannot read says so, and keeps each flag in words", asyn
   try {
     await until(() => text(view.target).includes("Iris cannot show the text of this draft"));
     const send = view.target.querySelectorAll(".actions > li")[0];
-    assert.equal(send.querySelectorAll(".flag").length, 5);
+    assert.equal(send.querySelectorAll(".flag").length, 6);
     assert.equal(send.querySelector(".mail"), null);
     // Spec 2 section 5.5: no approval without the final text. The person can only deny it.
     const box = send.querySelector("input[type=checkbox]");
@@ -512,6 +513,123 @@ test("a decided send names the mail, not a count of messages", async () => {
   try {
     const row = await until(() => [...view.target.querySelectorAll(".decided li")].find((li) => li.textContent.includes("Send")));
     assert.equal(text(row), "Send a mail You denied it");
+  } finally {
+    view.destroy();
+  }
+});
+
+// Issue 189: an open change of an older revision shows the reason of its own revision.
+test("an open change of an older revision shows the reason of its revision", async () => {
+  const c = { ...changeset([act({ n: 1, revision: 1 }), act({ n: 1, revision: 2, verb: "read", hash: "h2" })]), revision: 2, why: "Also mark the news as read." };
+  const asked = serve({ "changesets/cs-9/revisions": [200, { revisions: [{ revision: 1, why: "Tidy the inbox.", submitted: "2026-11-15T08:00:00Z" }, { revision: 2, why: "Also mark the news as read.", submitted: "2026-11-15T09:00:00Z" }] }] });
+  const view = await mount("/src/views/Request.svelte", { changeset: c });
+  try {
+    const rows = () => [...view.target.querySelectorAll(".actions > li")].map(text);
+    await until(() => /which asked/.test(rows().join()));
+    assert.match(rows()[0], /From revision 1, which asked: “Tidy the inbox\.”/);
+    assert.doesNotMatch(rows()[1], /From revision/, "a change of the newest revision has the quote above");
+    assert.ok(asked.includes("changesets/cs-9/revisions"));
+  } finally {
+    view.destroy();
+  }
+  // With no answer, the older change still names its revision.
+  serve({ "changesets/cs-9/revisions": () => { throw new TypeError("Failed to fetch"); } });
+  const lost = await mount("/src/views/Request.svelte", { changeset: c });
+  try {
+    await until(() => /From revision 1\./.test(text(lost.target)));
+  } finally {
+    lost.destroy();
+  }
+});
+
+test("a request with no older change does not ask for the revisions", async () => {
+  const asked = serve();
+  const view = await mount("/src/views/Request.svelte", { changeset: changeset([act({})]) });
+  try {
+    await until(() => view.target.querySelector(".actions"));
+    assert.ok(!asked.includes("changesets/cs-9/revisions"));
+    assert.doesNotMatch(text(view.target), /From revision/);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("in observe mode, a proposed change says what a rule would decide in apply mode", async () => {
+  const asked = serve({
+    "changesets/cs-9/would": [200, { would: [{ revision: 1, n: 2, outcome: "approved", rule: 3, policy: 1, reason: "Rule 3 allows it." }] }],
+  });
+  const proposed = { state: "proposed" };
+  const view = await mount("/src/views/Request.svelte", {
+    changeset: changeset([act({ decision: proposed }), act({ n: 2, decision: proposed })]),
+  });
+  try {
+    const items = () => view.target.querySelectorAll(".actions > li");
+    await until(() => view.target.querySelector(".would"));
+    assert.equal(items()[0].querySelector(".would"), null, "no rule decides the first change");
+    assert.equal(items()[1].querySelector(".would").textContent, "In apply mode, rule 3 would approve this change.");
+    assert.equal(asked.filter((p) => p === "changesets/cs-9/would").length, 1);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a request with no proposed change does not ask what a rule would decide", async () => {
+  const asked = serve();
+  const view = await mount("/src/views/Request.svelte", { changeset: changeset([act({ resolved: { messages: ["m-1"] } })]) });
+  try {
+    await until(() => view.target.querySelectorAll(".messages li").length === 1);
+    assert.ok(!asked.includes("changesets/cs-9/would"));
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a new revision of the request reads again what a rule would decide, and drops the old lines", async () => {
+  const proposed = { state: "proposed" };
+  const before = changeset([act({ decision: proposed, resolved: { messages: ["m-1"] } })]);
+  const after = { ...before, revision: 2, actions: [{ ...before.actions[0], decision: { state: "replaced", by: "author" } }, act({ revision: 2, hash: "h2", decision: proposed, resolved: { messages: ["m-1"] } })] };
+  let answer = { would: [{ revision: 1, n: 1, outcome: "approved", rule: 3, policy: 1, reason: "r" }] };
+  const asked = serve({
+    "changesets/cs-9/would": () => [200, answer],
+    "changesets/cs-9/decide": () => [409, { error: "the hash changed" }],
+    "changesets/cs-9": [200, after],
+  });
+  const view = await mount("/src/views/Review.svelte", { changesets: [before] });
+  try {
+    await until(() => view.target.querySelector(".would"));
+    assert.match(view.target.querySelector(".would").textContent, /rule 3 would approve/);
+    answer = { would: [{ revision: 2, n: 1, outcome: "denied", rule: 4, policy: 2, reason: "r" }] };
+    await until(() => !view.target.querySelector("button.primary").disabled);
+    view.target.querySelector("button.primary").click();
+    await until(() => view.target.querySelector(".would")?.textContent.includes("rule 4"));
+    assert.equal(view.target.querySelector(".would").textContent, "In apply mode, rule 4 would deny this change.");
+    assert.equal(asked.filter((p) => p === "changesets/cs-9/would").length, 2);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a refresh of the same revision reads again what a rule would decide, and drops the old lines", async () => {
+  // The policy can change between two loads of the same revision: the line must follow it.
+  const proposed = { state: "proposed" };
+  const before = changeset([act({ decision: proposed, resolved: { messages: ["m-1"] } })]);
+  const same = { ...before, actions: before.actions.map((a) => ({ ...a })) };
+  let answer = { would: [{ revision: 1, n: 1, outcome: "approved", rule: 3, policy: 1, reason: "r" }] };
+  const asked = serve({
+    "changesets/cs-9/would": () => [200, answer],
+    "changesets/cs-9/decide": () => [409, { error: "the hash changed" }],
+    "changesets/cs-9": [200, same],
+  });
+  const view = await mount("/src/views/Review.svelte", { changesets: [before] });
+  try {
+    await until(() => view.target.querySelector(".would"));
+    assert.match(view.target.querySelector(".would").textContent, /rule 3 would approve/);
+    answer = { would: [] };
+    await until(() => !view.target.querySelector("button.primary").disabled);
+    view.target.querySelector("button.primary").click();
+    await until(() => asked.filter((p) => p === "changesets/cs-9/would").length === 2);
+    await until(() => !view.target.querySelector(".would"));
+    assert.equal(view.target.querySelector(".would"), null, "no rule decides it now");
   } finally {
     view.destroy();
   }

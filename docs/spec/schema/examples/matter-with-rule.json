@@ -1,0 +1,26 @@
+{
+  "model": "iris/1.0",
+  "id": "g-4",
+  "title": "Tokyo trip",
+  "status": "confirmed",
+  "items": [
+    "r-1202",
+    "r-1203",
+    "v-880",
+    "c-311"
+  ],
+  "counts": {
+    "commitment": 1,
+    "conversation": 1,
+    "record": 2
+  },
+  "created": "2026-11-06T09:00:00Z",
+  "updated": "2026-11-06T10:15:00Z",
+  "decided": "2026-11-06T10:15:00Z",
+  "derived": {
+    "by": "model",
+    "model": "example-model-1",
+    "prompt": "matters/0.1",
+    "rule": "matters"
+  }
+}

@@ -175,5 +175,5 @@ test("a flag that the draft marks has no line; a flag with no mark keeps its wor
   assert.deepEqual(r.unmarked(a, undefined).length, 3);
   assert.deepEqual(r.unmarked(a, { revision: 1, n: 1, draft: "d-1", thread: null, readable: false }).length, 3);
   // Each flag has a tag.
-  for (const f of ["new_recipient", "money", "date", "attachment", "untrusted_content"]) assert.ok(r.TAGS[f], f);
+  for (const f of ["new_recipient", "outside_thread", "money", "date", "attachment", "untrusted_content"]) assert.ok(r.TAGS[f], f);
 });

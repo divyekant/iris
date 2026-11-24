@@ -5,9 +5,10 @@
 
 use crate::active::{active, check, record, Checked};
 use crate::{
-    line_of, parse, sha256_hex, Author, By, Effect, Error, Mode, Policy, Rule, Verb, When,
+    line_of, parse, sha256_hex, Author, By, Effect, Error, Mode, Policy, Recipients, Rule, Verb,
+    When,
 };
-use iris_store::{PolicyExpect, Result, Store};
+use iris_store::{BackupLock, PolicyExpect, Result, Store};
 use std::path::PathBuf;
 use toml_edit::{DocumentMut, Item, Value};
 
@@ -40,19 +41,30 @@ pub enum Change {
 }
 
 /// The rule of a grant inside `job`, with the ID `id`, added on `added`.
+///
+/// A grant of `draft` allows only a reply to the addresses of its thread
+/// (decision D3), so `verbs` with `draft` must be `[Verb::Draft]`: a rule
+/// with `recipients` has only the verb `draft`.
 pub fn grant_rule(id: u32, job: &str, verbs: &[Verb], added: &str) -> Rule {
     let names: Vec<&str> = verbs.iter().map(|v| v.name()).collect();
     let list = match names.split_last() {
         Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
         _ => names.join(""),
     };
+    let draft = verbs.contains(&Verb::Draft);
+    let name = if draft {
+        format!("In job {job}, allow drafts to the people in the thread without review")
+    } else {
+        format!("In job {job}, allow {list} without review")
+    };
     Rule {
         id,
-        name: format!("In job {job}, allow {list} without review"),
+        name,
         effect: Effect::Allow,
         verbs: verbs.to_vec(),
         when: When {
             author: Some(Author::Agent),
+            recipients: draft.then_some(Recipients::Thread),
             ..When::default()
         },
         by: By::Person,
@@ -101,6 +113,55 @@ pub enum Discarded {
 pub fn change(store: &Store, seen: Option<i64>, change: Change, now: i64) -> Result<Edited> {
     // The lock order of the store: the backup lock, then the write transaction.
     let lock = store.backup_lock()?;
+    change_locked(store, &lock, seen, change, now)
+}
+
+/// Removes each rule of the active policy whose `job` names a job that
+/// ended (issue #385): a grant inside a job matches nothing after the job
+/// is done, and the move to done has more than one caller. Gives the count
+/// of removed rules. Changes nothing while another holder has the backup
+/// lock (a backup, or a policy writer), or while the file on disk is not
+/// the active policy (the person has a change to confirm). The engine runs
+/// it again later.
+pub fn end_grants(store: &Store, now: i64) -> Result<usize> {
+    let Some(lock) = store.try_backup_lock()? else {
+        return Ok(0);
+    };
+    let mut removed = 0;
+    loop {
+        let (version, ended) = store.read(|c| {
+            let active = active(c)?;
+            let mut done = c.prepare("SELECT 1 FROM job WHERE id = ?1 AND state = 'done'")?;
+            let mut ended = None;
+            for rule in &active.policy.rules {
+                // Only the form of a job ID ("j-12", not "j-012" or "j-+12")
+                // names a job: the session matches the same text.
+                if let Some(id) = rule.job.as_deref().and_then(iris_job::parse_job_id) {
+                    if done.exists([id])? {
+                        ended = Some(rule.id);
+                        break;
+                    }
+                }
+            }
+            Ok((active.version, ended))
+        })?;
+        let Some(id) = ended else {
+            return Ok(removed);
+        };
+        match change_locked(store, &lock, version, Change::Remove(id), now)? {
+            Edited::Done { .. } => removed += 1,
+            _ => return Ok(removed),
+        }
+    }
+}
+
+fn change_locked(
+    store: &Store,
+    lock: &BackupLock,
+    seen: Option<i64>,
+    change: Change,
+    now: i64,
+) -> Result<Edited> {
     store.write(|tx| {
         let active = active(tx)?;
         if active.version != seen {
@@ -164,7 +225,7 @@ pub fn change(store: &Store, seen: Option<i64>, change: Change, now: i64) -> Res
         };
         // The write checks the file again: a save since the check stays.
         if !store
-            .write_policy(&lock, expect, Some(text.as_bytes()))?
+            .write_policy(lock, expect, Some(text.as_bytes()))?
             .done
         {
             return Ok(Edited::FileChanged);
@@ -336,6 +397,7 @@ fn add_rule(text: &str, rule: &crate::Rule, why: &str) -> std::result::Result<St
             w.commitment_kind.map(|c| c.name().to_string()),
         ),
         ("author", w.author.map(|a| a.name().to_string())),
+        ("recipients", w.recipients.map(|r| r.name().to_string())),
     ];
     for (key, value) in texts {
         if let Some(v) = value {

@@ -1329,7 +1329,7 @@ fn the_upgrade_drops_the_items_of_a_draft_or_copy() {
     assert_eq!(b.items().len(), 2);
     b.store
         .write(|tx| {
-            tx.execute_batch("PRAGMA user_version = 41;")?;
+            tx.execute_batch("DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; PRAGMA user_version = 41;")?;
             Ok(())
         })
         .unwrap();

@@ -15,6 +15,70 @@ edit an old entry. If a decision changes, add a new entry that names the old one
 - Links: <card, spec, PR, before/after page>
 ```
 
+## D12 (2026-11-24): The answers to 38 open product questions
+
+- Decided by: dk (accepted each recommended option)
+- Why: 43 open limit issues waited on a product choice. The list gave each
+  question its options, their effect and a recommendation. The table gives
+  the chosen option of each question. The item IDs (D1 to D38) are the IDs
+  of the list and of the issue comments, not entries of this log.
+- Options not chosen: the last column of the table.
+- Links: https://claude.ai/artifact/9yamkrHxBSMLRruRGsWg5q, and a comment
+  on each issue.
+
+| Item | Issues | Question | Chosen | Not chosen |
+|---|---|---|---|---|
+| D1 | #121, #579, #241 | Use your time zone for defer dates and due dates? | Add a time zone setting. The default comes from the computer. A deferred item opens at your midnight, and a promise is late at the end of your day. Fixes all three issues. | B. Keep UTC |
+| D2 | #239 | Can a policy rule allow draft or send? | Rules can allow draft only. An agent can put a draft in the held outbox with no review. You still approve each send. | B. Rules can allow draft and send; C. No rules for draft or send |
+| D3 | #386 | Can a job grant allow replies to the people in the thread? | Yes, for drafts. A job grant can allow drafts to addresses already in the thread. Each send still needs you. Needs D2 option A or B. | B. No |
+| D4 | #235 | Can sent mail have attachments or HTML? | Attachments yes, HTML no. You can attach files. The body stays plain text. | B. Both; C. Neither for now |
+| D5 | #236 | Add Bcc, your display name and send-as aliases? | Display name and Bcc. Recipients see your name. Aliases come later, when someone asks. | B. All three; C. None for now |
+| D6 | #238 | Can you change a draft and undo the change? | Yes, in the write view. Build the draft change and its undo together, as spec 2 section 7.5 says. | B. No |
+| D7 | #278 | Keep one reply draft per thread? | One draft, one automatic retry. Keep one draft per thread. Iris tries again once when the model answer is not valid. | B. Several versions per thread |
+| D8 | #578, #580 | How far do nudges go? | Prepared reply, all late promises. The nudge stays a prepared reply. One draft names each late promise of the thread. Close #578. | B. Also a nudge command; C. Keep as is |
+| D9 | #168 | Can an action that a rule approved apply with no review by you? | Yes, within the limits. Before the apply, Iris checks the active policy again and the hourly bulk count from the ledger. | B. No |
+| D10 | #193 | In observe mode, show what the policy would do? | Yes. Review shows "a rule would approve this" before you turn on apply mode. Needs a store migration. | B. No |
+| D11 | #297, #442 | Can rule proposals name a domain? | Add a domain condition. A proposal can name a domain, with the same count rule as for one address. | B. Keep one address |
+| D12 | #433 | Learn from the items that you open? | Yes. Iris records the item of each open, on your computer only. An open stops a hide proposal for that sender. | B. No |
+| D13 | #435 | Does an address in Cc from a stranger count as part of the thread? | No, use a stricter rule. An address is in the thread only if you sent to it, or if it wrote from its own address. | B. Yes, keep the header rule |
+| D14 | #437 | Limit trash and label for an agent that read outside mail? | Yes, send them to review. Trash and label by a marked agent always go to review. | B. No |
+| D15 | #538 | Can agents with no job read your review comments? | Yes. Show comments in iris show cs-ID for MCP and local agents. Minor schema version. | B. No |
+| D16 | #221 | Record who withdrew a changeset? | Yes. Store the author or you, and show it in Review. Add it with the next changeset migration. | B. No |
+| D17 | #225 | Undo after you change the same message again in Gmail? | Accept. This is rare, you see it, and you can archive again. Close the issue. | B. Detect it |
+| D18 | #463 | What if an undo changes no message? | Keep the entry open. Show the skipped messages. You can undo the entry again later. | B. Mark it undone |
+| D19 | #284, #286 | Can you edit matters and make one by hand? | Both. Rename, add and remove items, delete, and make a matter by hand. | B. Edit only; C. Not now |
+| D20 | #285 | Can a new item join a confirmed matter? | Yes, as a proposal. Iris proposes the addition and you confirm. | B. No |
+| D21 | #287 | Can feeds and signals be members of a matter? | Signals yes, feeds no. For example the delivery signal of an order joins the order. | B. Both; C. Neither |
+| D22 | #288 | What can agents do with matters? | Propose. An agent can propose a matter. Only you confirm. | B. Read only |
+| D23 | #289 | Members of a declined matter stay pinned? | Accept. Close the issue. Change it only if duplicates show in the brief. | B. Find a new identity |
+| D24 | #248 | What happens on the due date of a job? | Needs you. The job moves to needs you, with a notice. | B. Mark late only; C. End the job |
+| D25 | #384 | Start a job from a typed goal, and edit a job after the start? | Both. Start a job with no mail, and edit the goal, the due date and the scope (add a thread from a search). | B. Edits only; C. Neither for now |
+| D26 | #558 | Can a job that starts from an item wait for a reply? | Yes. The start adds the thread of the item as a thread ref. | B. No |
+| D27 | #574 | Add a way to clear the notes of an open job? | Accept. You edit notes.md. Close the issue. | B. Add a clear action |
+| D28 | #523 | Add iris list with filters in host mode? | Yes. Add a card. Agents on the host need lists of items. | B. No |
+| D29 | #263 | Skip the model for mail from a declined sender? | Yes. No model call. Understanding runs again when you reopen the sender. | B. No |
+| D30 | #264 | Where does a group thread with a known person and a declined sender go? | Conversations. It stays in Conversations when a known person is in it. | B. Declined senders |
+| D31 | #111 | Check mail again after a sender kind or a known name changes? | Fixed rules only. Run the code-signal rule and the spoof mark again. No model call. | B. Full understanding; C. Keep |
+| D32 | #371 | Mark an address in the display name that is not the From address? | Yes. Add a spoof mark. Known list forms such as "x via List" are exceptions. | B. Wait |
+| D33 | #257 | Check a watch notice against marks that come later? | Yes. Check the hostile marks again before each notice goes out. | B. Accept |
+| D34 | #626 | Can you remove an account? | Yes. A command and a button remove the account and its mail from Iris, not from the provider. Spec first. | B. Not now |
+| D35 | #136 | The wait after a model error can reach 1 hour. Change it? | Add Try now. A button in the web client tries the model at once. The backoff stays. | B. Cap at 10 minutes; C. Keep |
+| D36 | #716 | What does Accounts say while a sync tries again after a failure? | New text. "The last try failed. Iris tries again now." | B. Keep |
+| D37 | #451 | Support phone browsers with no Popover API? | Accept. Modern browsers only. Close the issue. | B. Add a fallback |
+| D38 | #452 | How do notices show on a phone? | One line. One line with a count. Tap it to open the notices. | B. Brief only; C. Keep |
+
+## D11 (2026-11-24): The engine removes the grant rules of a done job
+
+- Decided by: dk
+- Why: A grant that the person gives inside one job ends with that job. A
+  rule of a done job matches nothing, but it stays in the Rules view and in
+  the file. The engine removes it as a normal policy change with a new
+  version, so the person can see each removal. This is the one exception to
+  "Only the person changes the policy" (spec 2, section 6.3).
+- Options not chosen: Keep the rule, and show a notice that asks the person
+  to remove it.
+- Links: issue #385, PR #803
+
 ## D10 (2026-11-18): Each user signs in to Outlook with an own Entra app registration
 
 - Decided by: Claude, as the technical owner (Outlook spec, PR #637)

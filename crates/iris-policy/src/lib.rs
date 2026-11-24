@@ -18,8 +18,12 @@ pub mod propose;
 pub use active::{
     active, confirm, file_state, next_rule_id, version_text, Active, Confirm, FileState,
 };
-pub use edit::{change, discard, edit_text, grant_rule, Change, Discarded, Edited, DEFAULT_TEXT};
-pub use eval::{Action, Attention, Decision, Item, Message, Outcome};
+pub use edit::{
+    change, discard, edit_text, end_grants, grant_rule, Change, Discarded, Edited, DEFAULT_TEXT,
+};
+pub use eval::{
+    Action, Attention, Decision, Item, Message, Outcome, MARKED_REASON, WARNING_REASON,
+};
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -75,8 +79,9 @@ impl Effect {
     }
 }
 
-/// The verbs of release 2 (spec 2, section 4), and `skip`, `mute` and
-/// `dismiss` of release 5 (docs/specs/2026-11-17-preference-rules.md).
+/// The verbs of release 2 (spec 2, section 4), `draft` of release 3
+/// (decision D2: a rule can allow a draft, never a send), and `skip`, `mute`
+/// and `dismiss` of release 5 (docs/specs/2026-11-17-preference-rules.md).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Verb {
     Archive,
@@ -93,10 +98,11 @@ pub enum Verb {
     Skip,
     Mute,
     Dismiss,
+    Draft,
 }
 
 impl Verb {
-    pub const ALL: [Verb; 14] = [
+    pub const ALL: [Verb; 15] = [
         Verb::Archive,
         Verb::Inbox,
         Verb::Label,
@@ -111,6 +117,7 @@ impl Verb {
         Verb::Skip,
         Verb::Mute,
         Verb::Dismiss,
+        Verb::Draft,
     ];
 
     pub fn name(self) -> &'static str {
@@ -129,6 +136,7 @@ impl Verb {
             Verb::Skip => "skip",
             Verb::Mute => "mute",
             Verb::Dismiss => "dismiss",
+            Verb::Draft => "draft",
         }
     }
 
@@ -159,6 +167,13 @@ names!(
 );
 
 names!(
+    /// The values of the condition `recipients`. `thread`: each address in
+    /// To and Cc of the draft is in From, To or Cc of a live message of its
+    /// thread, or is one of your addresses (decision D3).
+    Recipients { Thread = "thread" }
+);
+
+names!(
     /// Who wrote a rule.
     By { Person = "person", Proposal = "proposal" }
 );
@@ -175,6 +190,8 @@ pub struct When {
     pub commitment_kind: Option<CommitmentKind>,
     pub author: Option<Author>,
     pub older_than_days: Option<u32>,
+    /// A condition of a `draft` action, not of a message.
+    pub recipients: Option<Recipients>,
 }
 
 /// One rule of the file.
@@ -317,6 +334,7 @@ struct RawWhen {
     commitment_kind: Option<String>,
     author: Option<String>,
     older_than_days: Option<i64>,
+    recipients: Option<String>,
 }
 
 /// Reads and checks the text of a policy file. The error names the line.
@@ -401,7 +419,14 @@ fn check_rule(raw: RawRule, line: usize) -> Result<Rule, String> {
         (true, Some(v)) if v.is_empty() => return Err("verbs is empty".into()),
         (true, Some(v)) => v
             .iter()
-            .map(|s| Verb::from_name(s).ok_or_else(|| format!("the verb \"{s}\" is not known")))
+            .map(|s| match Verb::from_name(s) {
+                Some(v) => Ok(v),
+                // Decision D2: a send has no undo, so a person approves each one.
+                None if s == "send" => {
+                    Err("no rule can have the verb send: a person approves each send".to_string())
+                }
+                None => Err(format!("the verb \"{s}\" is not known")),
+            })
             .collect::<Result<Vec<_>, _>>()?,
         (false, None) => Vec::new(),
         (false, Some(_)) => return Err(format!("a {} rule has no verbs", raw.effect)),
@@ -410,6 +435,13 @@ fn check_rule(raw: RawRule, line: usize) -> Result<Rule, String> {
     if !effect.is_action() && (when.author.is_some() || raw.job.is_some()) {
         // An item has no author and no job. Such a rule could never match.
         return Err(format!("a {} rule cannot have author or job", raw.effect));
+    }
+    if when.recipients.is_some() && !effect.is_action() {
+        return Err(format!("a {} rule cannot have recipients", raw.effect));
+    }
+    if when.recipients.is_some() && verbs.iter().any(|v| *v != Verb::Draft) {
+        // Only a draft has recipients. Such a rule could never match another verb.
+        return Err("a rule with recipients can have only the verb draft".into());
     }
     let by = match raw.by.as_str() {
         "person" => By::Person,
@@ -467,6 +499,7 @@ fn check_when(raw: RawWhen) -> Result<When, String> {
                 u32::try_from(d).map_err(|_| format!("older_than_days {d} is not a number of days"))
             })
             .transpose()?,
+        recipients: one(raw.recipients, "recipients", Recipients::from_name)?,
     };
     if when == When::default() {
         // An empty `when` matches each message. A person must write that wish

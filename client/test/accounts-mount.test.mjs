@@ -63,6 +63,50 @@ test("the accounts view lists each account with its state and how to add one", a
   }
 });
 
+test("a sync whose process stopped says so, for the first copy and for a later sync", async () => {
+  const stopped = { kind: "first", started: "2026-11-23T10:00:00Z", ended: null, result: "stopped: the process ended before the sync ended" };
+  const first = { ...fx.status.accounts[0], mirror_ready_at: null, sync: { kind: "first", step: 4 }, last_sync: stopped };
+  const later = { ...fx.status.accounts[1], state: "active", last_sync: { ...stopped, kind: "incremental" } };
+  const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [first, later] }, poll: 0 });
+  try {
+    const rows = [...view.target.querySelectorAll(".accounts li")].map(text);
+    assert.match(rows[0], /The last try of the first copy stopped before it ended\. Iris tries again each minute\./);
+    assert.match(rows[1], /The last sync stopped before it ended\. Iris tries again each minute\./);
+    for (const row of rows) assert.doesNotMatch(row, /copies this mailbox|Up to date/);
+    assert.equal(view.target.querySelectorAll(".tone.retry").length, 2);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a read-only account says that its approved changes wait, and names the command that gives write access", async () => {
+  const reader = { ...fx.status.accounts[0], state: "read_only" };
+  const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [reader] }, poll: 0 });
+  try {
+    const row = text(view.target.querySelector(".accounts li"));
+    assert.match(row, /Iris can read this mailbox, but it cannot change it\. Your approved changes wait\./);
+    assert.match(row, /To give write access, run iris account add client\.json --write on the machine that runs Iris and sign in again\./);
+    // The copy still runs: the sync state stays, and the tone is not a plain "ok".
+    assert.match(row, /Up to date/);
+    assert.ok(view.target.querySelector(".tone.retry"));
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a read-only account with a failed sync shows the failure and the read-only words", async () => {
+  const reader = { ...fx.status.accounts[0], state: "read_only", last_sync: { ...fx.status.accounts[0].last_sync, result: "error: HTTP 503" } };
+  const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [reader] }, poll: 0 });
+  try {
+    const row = text(view.target.querySelector(".accounts li"));
+    assert.match(row, /The last sync failed\. Iris tries again each minute\./);
+    assert.match(row, /Iris can read this mailbox, but it cannot change it\./);
+    assert.match(row, /iris account add client\.json --write/);
+  } finally {
+    view.destroy();
+  }
+});
+
 test("a stopped IMAP account names the mail server and the IMAP sign-in command, which needs only the address", async () => {
   const stopped = { ...fx.status.accounts[1], provider: "imap", state: "needs_sign_in" };
   const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [stopped] }, poll: 0 });
@@ -76,11 +120,52 @@ test("a stopped IMAP account names the mail server and the IMAP sign-in command,
   }
 });
 
+test("the IMAP sign-in help ends the options before an address that starts with a dash", async () => {
+  const { signIn } = await load("/src/format.ts");
+  assert.equal(signIn({ provider: "imap", address: "-x@example.org" }).command, "iris account add-imap -- -x@example.org");
+  // Each other address keeps the command as it was.
+  assert.equal(signIn({ provider: "imap", address: "you@northwind.example" }).command, "iris account add-imap you@northwind.example");
+});
+
 test("each shell argument of a sign-in command keeps its exact text in a POSIX shell", async () => {
   const { shellArg } = await load("/src/format.ts");
   const { execFileSync } = await import("node:child_process");
   for (const s of ["you@example.com", "o'brien@example.com", "a b@example.com", "x\\y@example.com", "$(id)@example.com", "-n"]) {
     const out = execFileSync("sh", ["-c", `printf %s ${shellArg(s)}`]).toString();
     assert.equal(out, s);
+  }
+});
+
+test("a try that runs after a failed try says that the last try failed", async () => {
+  const running = { kind: "incremental", started: "2026-11-23T10:01:00Z", ended: null, result: null, after_failure: true };
+  const first = { ...fx.status.accounts[0], mirror_ready_at: null, sync: { kind: "first", step: 4 }, last_sync: { ...running, kind: "first" } };
+  const later = { ...fx.status.accounts[1], state: "active", last_sync: running };
+  // The same running try after a good try, and from an older engine with no field.
+  const good = { ...fx.status.accounts[1], id: 9, state: "active", last_sync: { ...running, after_failure: false } };
+  const { after_failure, ...old } = running;
+  const older = { ...fx.status.accounts[1], id: 10, state: "active", last_sync: old };
+  const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [first, later, good, older] }, poll: 0 });
+  try {
+    const rows = [...view.target.querySelectorAll(".accounts li")].map(text);
+    for (const row of rows.slice(0, 2)) {
+      assert.match(row, /The last try failed\. Iris tries again now\./);
+      assert.doesNotMatch(row, /copies this mailbox|Up to date/);
+    }
+    for (const row of rows.slice(2)) assert.match(row, /Up to date\./);
+    assert.equal(view.target.querySelectorAll(".tone.retry").length, 2);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("an account in state removing says that Iris deletes its mail, not that it copies it", async () => {
+  const going = { ...fx.status.accounts[0], state: "removing", mirror_ready_at: null, sync: null };
+  const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [going] }, poll: 0 });
+  try {
+    const row = text(view.target.querySelector(".accounts li"));
+    assert.match(row, /Iris deletes the mail of this account from this machine\./);
+    assert.doesNotMatch(row, /copies this mailbox/);
+  } finally {
+    view.destroy();
   }
 });

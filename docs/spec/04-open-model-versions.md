@@ -1,6 +1,6 @@
 # Specification 4: the versions of the open model
 
-- Status: version 1.1
+- Status: version 1.2
 - Design: `docs/specs/2026-11-17-open-model-v1.md` (card R6-07)
 
 ## 1. Purpose
@@ -105,7 +105,7 @@ action from it.
 ## 6. The conformance kit
 
 The kit checks the documents of a producer with no Iris code. Its version
-is in [`VERSION`](VERSION) (`1.1`), and it names the newest minor version
+is in [`VERSION`](VERSION) (`1.2`), and it names the newest minor version
 that it knows.
 
 | Path | Content |
@@ -139,3 +139,4 @@ exits 0. [`conformance/README.md`](conformance/README.md) gives the steps.
 |---|---|---|
 | 1.0 | The first stable version. | R6-07 |
 | 1.1 | The optional field `account` (an `a-` ID) of each item. | R6-02 |
+| 1.2 | Matters: signal members (`s-` IDs, the optional field `counts.signal`), `derived.by` `agent` and `person`, and the optional field `additions`. Changesets: the optional fields `withdrawn_by` (`author` or `person`, decision D16) and `comments` (the review comments of the person, decision D15). | P8 (`docs/specs/2026-11-24-matters-edit.md`), P7 (issues #221, #538) |

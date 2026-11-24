@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { untrack } from "svelte";
-  import { answerSender, get, own, type GateAnswer, type GatePage, type GateSender } from "../api";
+  import { answerSender, get, own, wrote, type GateAnswer, type GatePage, type GateSender } from "../api";
   import { initials } from "../format";
   import { href } from "../route";
 
@@ -86,7 +86,7 @@
         done = { ...done, [sender.id]: stateOf(row) };
       }
     } catch (e) {
-      problem = { ...problem, [sender.id]: own(e) || "Iris could not save the answer. Try again." };
+      problem = { ...problem, [sender.id]: wrote(e, "saved the answer", "Iris could not save the answer. Try again.") };
     } finally {
       const { [sender.id]: _, ...rest } = busy;
       busy = rest;

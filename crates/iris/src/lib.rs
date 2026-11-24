@@ -87,11 +87,25 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// In a job workspace: list the items of the job, of one form if given.
-    /// A verb of a session only.
+    /// List the items, newest first, with the filters of the web client.
+    /// In a job workspace: only the items of the job, of one form if given.
     List {
         /// commitment, conversation, record, feed or signal.
         form: Option<String>,
+        /// Only the items with this status, for example open. Host mode only.
+        #[arg(long)]
+        status: Option<String>,
+        /// Only the records of this type, for example receipt. Needs the form
+        /// record. Host mode only.
+        #[arg(long = "type")]
+        kind: Option<String>,
+        /// Only the items older than this item ID: the last ID of the page
+        /// before. Host mode only.
+        #[arg(long)]
+        before: Option<String>,
+        /// The most items to show, 1 to 200. The default is 50. Host mode only.
+        #[arg(long)]
+        limit: Option<u32>,
         /// Print one JSON line for each item.
         #[arg(long)]
         json: bool,
@@ -100,7 +114,9 @@ pub enum Command {
     /// of the job or for a date. Iris starts a new session of the job when
     /// the reply comes or the date passes. A verb of a session only.
     Wait {
-        /// The end of the wait: the start of the day YYYY-MM-DD, UTC.
+        /// The end of the wait: a day YYYY-MM-DD (its start, UTC), or an
+        /// RFC 3339 time with its offset in whole seconds, for example
+        /// 2026-11-18T09:30:00-08:00.
         #[arg(long)]
         until: String,
         /// The thread (`t-8841`) whose reply ends the wait first.
@@ -116,6 +132,13 @@ pub enum Command {
     Ask {
         /// The question, at most 2000 characters.
         question: String,
+    },
+    /// In a job workspace: the job is complete. The session ends, and Iris
+    /// removes the mail files of the workspace. A verb of a session only.
+    Done {
+        /// What the agent did, for the person. At most 2000 characters.
+        #[arg(long)]
+        why: Option<String>,
     },
     /// Copy the data folder to a new folder while the engine runs.
     Backup {
@@ -137,6 +160,16 @@ pub enum Command {
     Model {
         #[command(subcommand)]
         command: ModelCommand,
+    },
+    /// Show or set the time zone of defer dates and due dates. With no
+    /// argument, show it. The default is the time zone of the computer.
+    Zone {
+        /// An IANA time zone name, for example `Europe/Berlin`.
+        #[arg(conflicts_with = "computer")]
+        name: Option<String>,
+        /// Use the time zone of the computer again.
+        #[arg(long)]
+        computer: bool,
     },
     /// Show the send switch, or turn it on or off. No send leaves while it
     /// is off. `on` needs a terminal and a typed "yes".
@@ -168,6 +201,33 @@ pub enum Command {
     Decline {
         id: String,
         /// The reason, at most 500 characters. The default is "Declined.".
+        #[arg(long)]
+        reason: Option<String>,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Skip a feed item (`f-3`) in a draft changeset. Needs the engine.
+    Skip {
+        id: String,
+        /// The reason, at most 500 characters. The default is "Skipped.".
+        #[arg(long)]
+        reason: Option<String>,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Mute a conversation item in a draft changeset. Needs the engine.
+    Mute {
+        id: String,
+        /// The reason, at most 500 characters. The default is "Muted.".
+        #[arg(long)]
+        reason: Option<String>,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Dismiss a signal item in a draft changeset. Needs the engine.
+    Dismiss {
+        id: String,
+        /// The reason, at most 500 characters. The default is "Dismissed.".
         #[arg(long)]
         reason: Option<String>,
         #[command(flatten)]
@@ -348,6 +408,13 @@ pub enum JobCommand {
         /// The answer, at most 10000 characters.
         text: String,
     },
+    /// End the job as complete, or with `--cancel` as cancelled. A session
+    /// of the job ends, and Iris removes the mail files of its workspace.
+    Finish {
+        id: String,
+        #[arg(long)]
+        cancel: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -356,9 +423,17 @@ pub enum MattersCommand {
     List,
     /// One matter (`g-4`) with its members, by form.
     Show { id: String },
-    /// Ask the model for new proposals now: at most one call, after the
-    /// wait of a model error, and only for a new set of candidates.
-    Propose,
+    /// With no title and no items: ask the model for new proposals now (at
+    /// most one call, after the wait of a model error, and only for a new
+    /// set of candidates). With `--title` and 2 or more item IDs: propose a
+    /// matter of these items; the person confirms it in the web client.
+    Propose {
+        /// The title of the matter, 1 to 80 characters.
+        #[arg(long)]
+        title: Option<String>,
+        /// The item IDs, for example `c-1 r-4 s-9`.
+        items: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -434,6 +509,13 @@ fn action(c: &Command) -> Result<Option<Action<'_>>, socket::Failure> {
         Command::Close { id, reason: r, to } => ("close", vec![id.clone()], reason(r, "Done."), to),
         Command::Decline { id, reason: r, to } => {
             ("decline", vec![id.clone()], reason(r, "Declined."), to)
+        }
+        Command::Skip { id, reason: r, to } => {
+            ("skip", vec![id.clone()], reason(r, "Skipped."), to)
+        }
+        Command::Mute { id, reason: r, to } => ("mute", vec![id.clone()], reason(r, "Muted."), to),
+        Command::Dismiss { id, reason: r, to } => {
+            ("dismiss", vec![id.clone()], reason(r, "Dismissed."), to)
         }
         Command::Defer { id, date, to } => ("defer", vec![id.clone()], json!({ "date": date }), to),
         Command::Correct {
@@ -549,6 +631,15 @@ pub enum AccountCommand {
         #[arg(long)]
         paste: bool,
     },
+    /// Remove an account and its mail from Iris. The mailbox at the
+    /// provider does not change. Backups keep the mail.
+    Remove {
+        /// The mail address of the account.
+        address: String,
+        /// Do not ask for the address again.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Add an IMAP mailbox, or give a new password to one. The command reads
     /// the password (an app password of the provider) from the terminal
     /// with no echo, or one line of standard input, and signs in once to
@@ -633,7 +724,8 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
         let (JobCommand::Run { id, .. }
         | JobCommand::Stop { id }
         | JobCommand::Session { id }
-        | JobCommand::Answer { id, .. }) = command;
+        | JobCommand::Answer { id, .. }
+        | JobCommand::Finish { id, .. }) = command;
         if iris_job::parse_job_id(id).is_none() {
             return Err(socket::Failure {
                 code: socket::code::USAGE,
@@ -653,7 +745,7 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
             return r;
         }
     }
-    if let Command::List { .. } | Command::Wait { .. } | Command::Ask { .. } = &cli.command {
+    if let Command::Wait { .. } | Command::Ask { .. } | Command::Done { .. } = &cli.command {
         return Err(socket::Failure {
             code: socket::code::USAGE,
             error: "this is a verb of a session: run it in a job workspace".into(),
@@ -695,6 +787,21 @@ fn socket_request(
         }
         Command::Revise { id, json } => {
             Some(("revise", serde_json::json!({ "changeset": id }), *json))
+        }
+        Command::Matters {
+            command: Some(MattersCommand::Propose { title, items }),
+        } if title.is_some() || !items.is_empty() => {
+            let Some(title) = title else {
+                return Err(socket::Failure {
+                    code: socket::code::USAGE,
+                    error: "give the title with --title".into(),
+                });
+            };
+            Some((
+                "matters.propose",
+                serde_json::json!({ "title": title, "items": items }),
+                true,
+            ))
         }
         c => add_request(c)?.map(|r| ("add", r, false)),
     })
@@ -755,10 +862,19 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
         print!("{}", session_status_text(&r, *json));
         return Ok(());
     }
-    // A job has no grant of an account or a draft (docs/specs/2026-11-17-job-verbs.md).
-    if matches!(c, Command::Compose { .. } | Command::Send { .. }) {
+    // Only a person sends (decision D2). A session drafts a reply in a
+    // granted thread: submit checks the grant (docs/specs/2026-11-17-job-verbs.md).
+    if matches!(c, Command::Send { .. }) {
         return Err(denied(
-            "a session cannot draft, send or nudge: a job has no grant of an account or a draft",
+            "a session cannot send or nudge: only a person sends mail",
+        ));
+    }
+    if matches!(
+        c,
+        Command::Skip { .. } | Command::Mute { .. } | Command::Dismiss { .. }
+    ) {
+        return Err(denied(
+            "a session cannot skip, mute or dismiss: a job grants no feed, conversation or signal item",
         ));
     }
     if let Command::Wait { until, reply, why } = c {
@@ -786,6 +902,15 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
         );
         return Ok(());
     }
+    if let Command::Done { why } = c {
+        // The done ends this session: after a lost answer, the job page
+        // shows the state of the job.
+        let args = serde_json::json!({ "why": why });
+        let r = socket::request_at(path, "done", args, socket::ANSWER_WAIT, "the job page")
+            .map_err(unreachable)?;
+        println!("{} is done", verbs::field(r["job"].as_str().unwrap_or("-")));
+        return Ok(());
+    }
     // The read verbs of a session (R4-04f): only the grant of the job.
     let read = match c {
         Command::Search { text, limit, json } => Some((
@@ -794,7 +919,20 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
             *json,
         )),
         Command::Show { id, json } => Some(("show", serde_json::json!({ "id": id }), *json)),
-        Command::List { form, json } => Some(("list", serde_json::json!({ "form": form }), *json)),
+        Command::List {
+            form,
+            status: None,
+            kind: None,
+            before: None,
+            limit: None,
+            json,
+        } => Some(("list", serde_json::json!({ "form": form }), *json)),
+        Command::List { .. } => {
+            return Err(socket::Failure {
+                code: socket::code::USAGE,
+                error: "in a job workspace, iris list takes only a form".into(),
+            })
+        }
         _ => None,
     };
     if let Some((verb, args, json)) = read {
@@ -806,7 +944,14 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
     }
     // Only the write verbs of a session (R4-03): `drafts`, for example, is
     // a host verb of the socket.
-    const SESSION_VERBS: [&str; 5] = ["add", "submit", "show", "withdraw", "revise"];
+    const SESSION_VERBS: [&str; 6] = [
+        "add",
+        "submit",
+        "show",
+        "withdraw",
+        "revise",
+        "matters.propose",
+    ];
     let request = socket_request(c)?.filter(|(verb, ..)| SESSION_VERBS.contains(verb));
     let Some((verb, args, json)) = request else {
         return Err(denied("this verb is not a verb of a session"));
@@ -925,7 +1070,9 @@ fn job_request(dir: &std::path::Path, c: &JobCommand) -> Option<Result<(), socke
             serde_json::json!({ "job": id, "agent": agent }),
         ),
         JobCommand::Stop { id } => ("job.stop", id, serde_json::json!({ "job": id })),
-        JobCommand::Session { .. } | JobCommand::Answer { .. } => return None,
+        JobCommand::Session { .. } | JobCommand::Answer { .. } | JobCommand::Finish { .. } => {
+            return None
+        }
     };
     Some(
         match socket::request_with(
@@ -1139,6 +1286,8 @@ fn socket_verb_at(
             r["n"]
         ),
         "drafts" => drafts_text(&r, json),
+        // The matter view, as `iris matters show` prints it.
+        "matters.propose" => format!("{r}\n"),
         "submit" => {
             let code = submit_code(&r);
             if code != 0 {
@@ -1184,6 +1333,21 @@ fn mcp(dir: PathBuf) -> Result<(), String> {
                 read(open().and_then(|s| verbs::search(&s, &text, limit, true)))
             }
             Call::Show { id } => read(open().and_then(|s| verbs::show(&s, &id, true))),
+            Call::List {
+                form,
+                status,
+                kind,
+                before,
+                limit,
+            } => {
+                let filter = iris_api::Filter {
+                    form: form.as_deref(),
+                    status: status.as_deref(),
+                    kind: kind.as_deref(),
+                    before: before.as_deref(),
+                };
+                read(open().and_then(|s| verbs::list(&s, &filter, limit, true)))
+            }
             Call::WatchAdd { text } => watch(WatchCommand::Add { text }),
             Call::WatchList => watch(WatchCommand::List { json: true }),
             Call::WatchRemove { id } => watch(WatchCommand::Remove { id }),
@@ -1301,6 +1465,19 @@ pub fn changeset_text(doc: &serde_json::Value, json: bool) -> String {
         out.push_str(&line);
         out.push('\n');
     }
+    // Since open model 1.2: who withdrew (D16), and the review comments of
+    // the person (D15), so an author with no job workspace reads them.
+    if let Some(by) = doc["withdrawn_by"].as_str() {
+        out.push_str(&format!("Withdrawn by: {by}\n"));
+    }
+    for k in doc["comments"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "Comment on revision {} at {}: {}\n",
+            k["revision"],
+            s(&k["at"]),
+            verbs::field(&s(&k["text"]))
+        ));
+    }
     out
 }
 
@@ -1382,6 +1559,16 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
                     paste,
                 },
         } => account_add_outlook(&open()?, client_id, tenant, *paste),
+        Command::Account {
+            command: AccountCommand::Remove { address, yes },
+        } => {
+            let store = open()?;
+            if !yes {
+                let stdin = std::io::stdin();
+                remove_confirm(address, &mut stdin.lock())?;
+            }
+            print(account_remove(&store, address))
+        }
         Command::Mirror { command } => mirror(Arc::new(open()?), command),
         Command::Mcp => mcp(engine::data_dir(cli.data.clone()).map_err(|e| e.to_string())?),
         Command::Status { json } => print(verbs::status(&open()?, *json)),
@@ -1389,8 +1576,24 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             print(verbs::search(&open()?, text, *limit, *json))
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
+        Command::List {
+            form,
+            status,
+            kind,
+            before,
+            limit,
+            json,
+        } => {
+            let filter = iris_api::Filter {
+                form: form.as_deref(),
+                status: status.as_deref(),
+                kind: kind.as_deref(),
+                before: before.as_deref(),
+            };
+            print(verbs::list(&open()?, &filter, limit.unwrap_or(50), *json))
+        }
         // `run` refuses it in host mode, before the store.
-        Command::List { .. } | Command::Wait { .. } | Command::Ask { .. } => {
+        Command::Wait { .. } | Command::Ask { .. } | Command::Done { .. } => {
             Err("this is a verb of a session".into())
         }
         Command::Watch { command } => print(verbs::watch(&open()?, command)),
@@ -1425,11 +1628,31 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             println!("{id}: answered. Iris starts a new session of the job.");
             Ok(())
         }
+        Command::Job {
+            command: JobCommand::Finish { id, cancel },
+        } => {
+            let job = iris_job::parse_job_id(id).ok_or(format!("{id} is not a job ID"))?;
+            let store = open()?;
+            iris_api::job_row(&store, id)
+                .map_err(|e| e.to_string())?
+                .ok_or(format!("no job has the ID {id}"))?;
+            let end = if *cancel {
+                iris_job::End::Cancel
+            } else {
+                iris_job::End::Complete
+            };
+            iris_api::finish_job(&store, job, end, engine::now_ms()).map_err(|e| e.to_string())?;
+            println!(
+                "{id}: done. The engine removes the mail files of its workspace when no \
+                 session of the job runs, or at its next start."
+            );
+            Ok(())
+        }
         Command::Job { .. } => Err("the engine socket runs this verb".into()),
         Command::Matters { command } => {
             let store = open()?;
             let text = match command.as_ref().unwrap_or(&MattersCommand::List) {
-                MattersCommand::Propose => {
+                MattersCommand::Propose { title: None, items } if items.is_empty() => {
                     cost::propose_matters(&store, iris_matters::Gate::Now, engine::now_ms())?
                         .ok_or("an understanding run holds the lock; try again later")?
                 }
@@ -1464,6 +1687,16 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
                 ModelCommand::Set { provider } => model_set(&open()?, provider)?,
             };
             println!("{text}");
+            Ok(())
+        }
+        Command::Zone { name, computer } => {
+            let store = open()?;
+            if name.is_some() || *computer {
+                store
+                    .set_time_zone(name.as_deref())
+                    .map_err(|e| e.to_string())?;
+            }
+            println!("{}", zone_text(&store).map_err(|e| e.to_string())?);
             Ok(())
         }
         Command::Sending { state } => {
@@ -1534,6 +1767,9 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         | Command::Submit { .. }
         | Command::Close { .. }
         | Command::Decline { .. }
+        | Command::Skip { .. }
+        | Command::Mute { .. }
+        | Command::Dismiss { .. }
         | Command::Defer { .. }
         | Command::Correct { .. }
         | Command::Archive(_)
@@ -1585,6 +1821,22 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
 
 /// `iris model set`: checks the input first, then reads the key, then
 /// writes the row.
+/// What `iris zone` shows: the time zone of the owner and where it comes from.
+fn zone_text(store: &Store) -> iris_store::Result<String> {
+    use rusqlite::OptionalExtension;
+    store.read(|c| {
+        let set: Option<String> = c
+            .query_row("SELECT time_zone FROM owner_setting", [], |r| r.get(0))
+            .optional()?;
+        let zone = iris_store::time_zone(c)?;
+        let name = zone.iana_name().unwrap_or("UTC offset of the computer");
+        Ok(match set {
+            Some(_) => format!("Time zone: {name}. Change it with iris zone <name>, or use the computer's with iris zone --computer."),
+            None => format!("Time zone: {name}, from the computer. Set another with iris zone <name>."),
+        })
+    })
+}
+
 fn model_set(store: &Store, provider: &SetModel) -> Result<String, String> {
     let m = match provider {
         SetModel::Anthropic {
@@ -1636,8 +1888,27 @@ fn model_set(store: &Store, provider: &SetModel) -> Result<String, String> {
     ))
 }
 
+/// The line of `iris mirror verify` for an account whose first copy runs
+/// in another process.
+const FIRST_COPY_RUNS: &str =
+    "the first copy runs now, so no full mirror exists to verify. Run verify after it ends.";
+
+/// The first copy of the account ended (`account.mirror_ready_at` is set).
+fn mirror_ready(store: &Store, account: i64) -> Result<bool, String> {
+    store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT mirror_ready_at IS NOT NULL FROM account WHERE id = ?1",
+                [account],
+                |r| r.get(0),
+            )?)
+        })
+        .map_err(|e| e.to_string())
+}
+
 /// `iris mirror sync|verify`: each account that has a sign-in, one at a time.
-/// If another process syncs an account, that account gives an error.
+/// If another process syncs an account, that account gives an error,
+/// except for a verify during the first copy of the account.
 fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
     let config = gmail_config()?;
     let accounts = engine::signed_in_accounts(&store).map_err(|e| e.to_string())?;
@@ -1650,6 +1921,16 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
         if state.as_deref() == Some(engine::STATE_NEEDS_SIGN_IN) {
             failed = true;
             say!("iris: account {account}: {}", engine::Error::NeedsSignIn);
+            continue;
+        }
+        // Another process runs the first copy: no full mirror exists to
+        // compare (issue #679). The check comes before any token or
+        // provider call, so their errors cannot hide it.
+        if matches!(command, MirrorCommand::Verify)
+            && !mirror_ready(&store, account)?
+            && iris_sync::other_sync_runs(&store, account).map_err(|e| e.to_string())?
+        {
+            println!("account {account}: {FIRST_COPY_RUNS}");
             continue;
         }
         let mail = match engine::provider_for(&store, account, &config) {
@@ -1697,6 +1978,12 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
         };
         match line {
             Ok(text) => println!("account {account}: {text}"),
+            // A first copy that started after the check above.
+            Err(engine::Error::Sync(iris_sync::Error::OtherSync))
+                if matches!(command, MirrorCommand::Verify) && !mirror_ready(&store, account)? =>
+            {
+                println!("account {account}: {FIRST_COPY_RUNS}")
+            }
             Err(e) => {
                 failed = true;
                 say!("iris: account {account}: {e}");
@@ -2103,6 +2390,31 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// Decisions D15 and D16: the text form of a changeset names who
+    /// withdrew it and gives each review comment, oldest first.
+    #[test]
+    fn the_changeset_text_shows_who_withdrew_and_the_comments() {
+        let doc = serde_json::json!({
+            "id": "cs-4", "state": "withdrawn", "revision": 2, "why": null, "actions": [],
+            "withdrawn_by": "person",
+            "comments": [
+                {"revision": 1, "text": "Keep the mail of Dana.", "at": "2026-11-20T10:00:00Z"},
+                {"revision": 2, "text": "Not\nthis one.", "at": "2026-11-21T10:00:00Z"}
+            ]
+        });
+        let t = changeset_text(&doc, false);
+        assert!(t.contains("Withdrawn by: person\n"), "{t}");
+        let one = t.find("Comment on revision 1 at 2026-11-20T10:00:00Z: Keep the mail of Dana.\n");
+        let two = t.find("Comment on revision 2 at 2026-11-21T10:00:00Z: ");
+        assert!(one.is_some() && two.is_some() && one < two, "{t}");
+        // A line break in a comment does not start a new line of the output.
+        assert_eq!(
+            t.lines().filter(|l| l.starts_with("Comment")).count(),
+            2,
+            "{t}"
+        );
+    }
+
     #[test]
     fn version_line_names_the_program() {
         assert!(version_line().starts_with("iris "));
@@ -2155,6 +2467,20 @@ mod tests {
         ] {
             assert!(!is_local_url(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn cli_parses_an_imap_address_that_starts_with_a_dash_after_the_end_of_options() {
+        // The web client shows this command for such an address (issue 694).
+        let cli =
+            Cli::try_parse_from(["iris", "account", "add-imap", "--", "-x@example.org"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Account {
+                command: AccountCommand::AddImap { address, .. }
+            } if address == "-x@example.org"
+        ));
+        assert!(Cli::try_parse_from(["iris", "account", "add-imap", "-x@example.org"]).is_err());
     }
 
     #[test]
@@ -2215,6 +2541,60 @@ fn stop_text(s: &iris_apply::Stopped) -> String {
     }
     text.push_str("\nRun `iris stop` again.");
     text
+}
+
+/// What stays after a removal. The question says it before the removal,
+/// and the result says it again.
+const REMOVE_KEEPS: &str = "A backup copy that you made, the copies iris.db.v*.bak in the \
+     data folder and the notes of jobs still hold this mail.";
+
+/// The question of `iris account remove`, before the removal.
+fn remove_question(address: &str) -> String {
+    format!(
+        "This removes {address} and its mail from Iris on this machine. \
+         The mailbox at the provider does not change. The files of agents in the \
+         workspaces of its jobs go. {REMOVE_KEEPS} Type the address to remove it: "
+    )
+}
+
+/// Ask for the address of the account again before a removal. A wrong
+/// answer refuses the removal.
+fn remove_confirm(address: &str, input: &mut impl BufRead) -> Result<(), String> {
+    eprint!("{}", remove_question(address));
+    let mut line = String::new();
+    input.read_line(&mut line).map_err(|e| e.to_string())?;
+    if line.trim() != address {
+        return Err("The account stays.".into());
+    }
+    Ok(())
+}
+
+/// `iris account remove`: the removal, then the delete of the mail. The
+/// delete waits for a sync or a backup that holds its lock.
+fn account_remove(store: &Store, address: &str) -> Result<String, String> {
+    let id = store
+        .remove_account(address, engine::now_ms())
+        .map_err(|e| e.to_string())?;
+    let done = engine::delete_removed(store, Some(id)).map_err(|e| e.to_string())?;
+    let state: Option<String> = store
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT state FROM account WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .map_err(|e| e.to_string())?;
+    let first = if state.as_deref() == Some(iris_store::STATE_REMOVED) {
+        format!(
+            "iris: removed {address} and its mail ({} messages).",
+            done.map_or(0, |d| d.messages)
+        )
+    } else {
+        // A busy checkpoint: the next engine tick ends the delete.
+        format!("iris: removed {address}. `iris serve` ends the delete of its mail.")
+    };
+    Ok(format!("{first}\niris: {REMOVE_KEEPS}\n"))
 }
 
 /// The confirmation of `iris sending on`: a terminal and a typed "yes". So
@@ -2320,6 +2700,30 @@ mod outbox_tests {
         assert!(r.unwrap_err().contains("needs a terminal"));
     }
 
+    #[test]
+    fn only_the_address_removes_an_account() {
+        let a = "a@example.org";
+        assert_eq!(remove_confirm(a, &mut "a@example.org\n".as_bytes()), Ok(()));
+        for answer in ["yes\n", "\n", "", "b@example.org\n", "A@example.org\n"] {
+            assert_eq!(
+                remove_confirm(a, &mut answer.as_bytes()),
+                Err("The account stays.".to_string()),
+                "{answer:?}"
+            );
+        }
+        // The question says what stays before the removal (spec, "Command").
+        let q = remove_question(a);
+        for word in [
+            "backup copy",
+            "iris.db.v*.bak",
+            "notes of jobs",
+            "files of agents",
+            "provider does not change",
+        ] {
+            assert!(q.contains(word), "{word}: {q}");
+        }
+    }
+
     /// A store with account 1 and draft d-1 (a new mail that the apply
     /// made), and a function that submits and approves a send of d-1.
     fn draft_store(name: &str) -> (std::path::PathBuf, Store) {
@@ -2339,6 +2743,7 @@ mod outbox_tests {
                     cc: Vec::new(),
                     subject: "Plan".into(),
                     body: "Hello".into(),
+                    ..Default::default()
                 }
                 .check()
                 .unwrap();

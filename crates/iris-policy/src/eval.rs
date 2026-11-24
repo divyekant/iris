@@ -49,9 +49,26 @@ pub struct Action<'a> {
     pub job: Option<&'a str>,
     /// True when the action has the flag `bulk` (spec 2, section 5.3).
     pub bulk: bool,
+    /// True when a `draft` has a warning flag: `new_recipient`,
+    /// `outside_thread`, `money` or `date` (spec 2, section 6.5).
+    pub warning: bool,
+    /// True when the action is a reply `draft` whose recipients match
+    /// `recipients = "thread"` (spec 2, section 6.2).
+    pub in_thread: bool,
+    /// True when the author read mail that you did not send (the mark of
+    /// spec R4-06). A `trash` or a `label` of a marked author goes to
+    /// review (decision D14, issue #437).
+    pub marked: bool,
     /// The time of the evaluation, in seconds since 1970-01-01 UTC.
     pub now: i64,
 }
+
+/// The reason of the hard limit of a warning flag (spec 2, section 6.5).
+pub const WARNING_REASON: &str = "The mail has a warning flag, so a person must review it.";
+
+/// The reason of the hard limit of a marked author (decision D14).
+pub const MARKED_REASON: &str =
+    "The author read mail that you did not send, so a person must review a trash or a label.";
 
 /// The result for one action, from the least strict to the most strict.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -114,6 +131,7 @@ impl Policy {
                     && r.verbs.contains(&action.verb)
                     && r.when.author.is_none_or(|a| a == action.author)
                     && r.job.as_deref().is_none_or(|j| action.job == Some(j))
+                    && r.when.recipients.is_none_or(|_| action.in_thread)
             })
             .collect();
         // For allow: true while each message matched. Else: true when one did.
@@ -146,6 +164,18 @@ impl Policy {
                 reason: format!(
                     "The target has hostile mail. Only a person can {verb} it; other authors can only archive, trash or label it."
                 ),
+            })
+        } else if action.marked && matches!(action.verb, Verb::Trash | Verb::Label) {
+            Some(Decision {
+                outcome: Outcome::Review,
+                rule: None,
+                reason: MARKED_REASON.to_string(),
+            })
+        } else if action.warning {
+            Some(Decision {
+                outcome: Outcome::Review,
+                rule: None,
+                reason: WARNING_REASON.to_string(),
             })
         } else if action.bulk {
             Some(Decision {
@@ -232,8 +262,8 @@ impl Policy {
     }
 }
 
-/// True when each condition of `when` matches the message. `author` is a
-/// condition of the action, and the caller checks it.
+/// True when each condition of `when` matches the message. `author` and
+/// `recipients` are conditions of the action, and the caller checks them.
 fn matches(when: &When, msg: &Message, now: i64, items: Items) -> bool {
     fn item_value<T: PartialEq + Copy>(
         want: Option<T>,

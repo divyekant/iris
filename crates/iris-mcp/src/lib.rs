@@ -29,6 +29,14 @@ pub enum Call {
     Search { text: String, limit: u32 },
     /// `iris show <id> --json`.
     Show { id: String },
+    /// `iris list [<form>] --status --type --before --limit --json`.
+    List {
+        form: Option<String>,
+        status: Option<String>,
+        kind: Option<String>,
+        before: Option<String>,
+        limit: u32,
+    },
     /// `iris watch add <text>`.
     WatchAdd { text: String },
     /// `iris watch list --json`.
@@ -124,6 +132,18 @@ const SPECS: &[Spec] = &[
         adds: false,
     },
     Spec {
+        name: "list",
+        about: "List the items, newest first, with the filters of the web client. Gives JSON Lines. For the next page, give the last ID as before.",
+        args: &[
+            opt("form", Kind::Text, "commitment, conversation, record, feed or signal."),
+            opt("status", Kind::Text, "Only the items with this status, for example open."),
+            opt("type", Kind::Text, "Only the records of this type, for example receipt. Needs the form record."),
+            opt("before", Kind::Text, "Only the items older than this item ID."),
+            opt("limit", Kind::Limit, "The most items to show, 1 to 200. The default is 50."),
+        ],
+        adds: false,
+    },
+    Spec {
         name: "draft",
         about: "Write a reply to a thread (t-3) or a new mail from an account (a-1) in a draft changeset.",
         args: &[
@@ -148,6 +168,24 @@ const SPECS: &[Spec] = &[
         name: "decline",
         about: "Decline a commitment in a draft changeset.",
         args: &[ITEM, opt("reason", Kind::Text, "The reason. The default is \"Declined.\".")],
+        adds: true,
+    },
+    Spec {
+        name: "skip",
+        about: "Skip a feed item (f-3) in a draft changeset.",
+        args: &[ITEM, opt("reason", Kind::Text, "The reason. The default is \"Skipped.\".")],
+        adds: true,
+    },
+    Spec {
+        name: "mute",
+        about: "Mute a conversation item in a draft changeset.",
+        args: &[ITEM, opt("reason", Kind::Text, "The reason. The default is \"Muted.\".")],
+        adds: true,
+    },
+    Spec {
+        name: "dismiss",
+        about: "Dismiss a signal item in a draft changeset.",
+        args: &[ITEM, opt("reason", Kind::Text, "The reason. The default is \"Dismissed.\".")],
         adds: true,
     },
     Spec {
@@ -267,6 +305,15 @@ const SPECS: &[Spec] = &[
         about: "One matter (g-4) with its members, by form.",
         args: &[arg("id", Kind::Text, "The matter ID, for example g-4.")],
         adds: false,
+    },    Spec {
+        name: "matters_propose",
+        about: "Propose a matter: a title and 2 to 50 items (commitments, conversations, \
+                records or signals) from 2 or more threads. The person confirms it.",
+        args: &[
+            arg("title", Kind::Text, "The title, 1 to 80 characters, for example Tokyo trip."),
+            arg("items", Kind::Ids, "Item IDs, for example c-1, r-4, s-9."),
+        ],
+        adds: false,
     },
 ];
 
@@ -359,6 +406,9 @@ fn request(spec: &Spec, args: &Map<String, Value>) -> Call {
             "send" => (one("id"), json!({})),
             "close" => (one("id"), reason("Done.")),
             "decline" => (one("id"), reason("Declined.")),
+            "skip" => (one("id"), reason("Skipped.")),
+            "mute" => (one("id"), reason("Muted.")),
+            "dismiss" => (one("id"), reason("Dismissed.")),
             "defer" => (one("id"), json!({ "date": text("date") })),
             "correct" => (
                 one("id"),
@@ -385,6 +435,13 @@ fn request(spec: &Spec, args: &Map<String, Value>) -> Call {
         "show" => Call::Show {
             id: text("id").unwrap_or_default(),
         },
+        "list" => Call::List {
+            form: text("form"),
+            status: text("status"),
+            kind: text("type"),
+            before: text("before"),
+            limit: args.get("limit").and_then(Value::as_f64).unwrap_or(50.0) as u32,
+        },
         "submit" => socket(
             "submit",
             json!({ "changeset": text("changeset"), "why": text("why") }),
@@ -400,6 +457,10 @@ fn request(spec: &Spec, args: &Map<String, Value>) -> Call {
         "watch_remove" => Call::WatchRemove {
             id: text("id").unwrap_or_default(),
         },
+        "matters_propose" => socket(
+            "matters.propose",
+            json!({ "title": text("title"), "items": args.get("items") }),
+        ),
         "matters_list" => Call::MattersList,
         "matters_show" => Call::MattersShow {
             id: text("id").unwrap_or_default(),

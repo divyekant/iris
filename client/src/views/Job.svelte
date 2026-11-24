@@ -5,16 +5,44 @@
   shows as text only.
 -->
 <script lang="ts">
-  import type { JobDetail } from "../api";
-  import { clock, day, due, now, steps, waitMail } from "../jobs";
+  import { get, type JobDetail } from "../api";
+  import { agent, clock, day, due, now, steps, waitMail } from "../jobs";
   import Grants from "./Grants.svelte";
 
-  let { detail }: { detail: JobDetail } = $props();
+  // `every`: the ms between two reads of a job whose session can still change (a prop for the tests).
+  let { detail: first, every = 5000 }: { detail: JobDetail; every?: number } = $props();
+  // svelte-ignore state_referenced_locally
+  let detail = $state(first);
+  // A failed read counts here, so the next read is planned again.
+  let misses = $state(0);
+  // While the job works, its session can start, fail or end at any time, also
+  // from `iris job run` at the terminal: read the job again (issue 742).
+  $effect(() => {
+    void misses;
+    if (detail.job.state !== "working") return;
+    const id = detail.job.id;
+    let live = true;
+    const timer = setTimeout(() => {
+      get<JobDetail>(`jobs/${encodeURIComponent(id)}`).then(
+        (d) => {
+          if (live) detail = d;
+        },
+        () => {
+          if (live) misses++;
+        },
+      );
+    }, every);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  });
 
   let job = $derived(detail.job);
   let limit = $derived(due(job));
   let list = $derived(steps(detail));
   let mail = $derived(job.state === "waiting" ? waitMail(detail.threads, job.wait?.thread) : null);
+  let idle = $derived(agent(detail));
   // The day shows above the first step of each day.
   const newDay = (i: number) => i === 0 || day(list[i - 1].at) !== day(list[i].at);
 </script>
@@ -26,12 +54,18 @@
   <span>Started {day(job.created)}</span>
 </p>
 
-<section class="now {job.state}" aria-label="Now">
+<section class="now {job.state}" class:idle aria-label="Now">
   {#if job.state === "needs_you"}
     <p class="label">The agent asks you</p>
     <p class="question">{job.question}</p>
   {:else}
-    <p class="said">{now(job)}</p>
+    <p class="said">{idle ? idle.said : now(job)}</p>
+    {#if idle}
+      {#if idle.ended}<p class="ended">{idle.ended}</p>{/if}
+      {#if idle.run}
+        <p class="run">To start an agent, on the machine that runs Iris, run <code>{idle.run}</code>. For another agent, put its name after <code>--agent</code>: <code>claude-code</code>, <code>codex</code>, or a name from <code>agents.toml</code>.</p>
+      {/if}
+    {/if}
     {#if mail}<p class="mail"><a class="touch" href={mail.link}>{mail.subject}</a></p>{/if}
   {/if}
 </section>
@@ -103,6 +137,10 @@
   .now.done {
     border-left-color: var(--color-success);
   }
+  /* No agent works on the job: the border does not say "works". */
+  .now.working.idle {
+    border-left-color: var(--color-border);
+  }
   p {
     margin: 0;
   }
@@ -117,6 +155,16 @@
   }
   .said {
     font-size: var(--font-size-1);
+  }
+  .ended,
+  .run {
+    color: var(--color-text-muted);
+    font-size: var(--font-size--1);
+    margin-top: var(--space-1);
+  }
+  code {
+    font-family: var(--font-family-mono);
+    overflow-wrap: anywhere;
   }
   .mail {
     color: var(--color-text-muted);

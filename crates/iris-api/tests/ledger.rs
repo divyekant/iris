@@ -84,6 +84,31 @@ fn archived_args(
     why: Option<&str>,
     args: &str,
 ) -> i64 {
+    applied(
+        s,
+        "archive",
+        "[\"INBOX\"]",
+        author,
+        messages,
+        decision,
+        why,
+        args,
+    )
+}
+
+/// An entry of `verb` in the state `applied`, with `pre` as the labels of
+/// each message before it. Gives the ledger row ID.
+#[allow(clippy::too_many_arguments)]
+fn applied(
+    s: &Store,
+    verb: &str,
+    pre: &str,
+    author: &str,
+    messages: &[i64],
+    decision: &str,
+    why: Option<&str>,
+    args: &str,
+) -> i64 {
     s.write(|tx| {
         let job = (author == "agent").then_some("j-1");
         tx.execute(
@@ -94,8 +119,8 @@ fn archived_args(
         let ids: Vec<String> = messages.iter().map(|m| format!("\"m-{m}\"")).collect();
         tx.execute(
             "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args, why)
-             VALUES (?1, 1, 1, 'archive', ?2, ?4, ?3)",
-            params![cs, format!("{{\"messages\":[{}]}}", ids.join(",")), why, args],
+             VALUES (?1, 1, 1, ?5, ?2, ?4, ?3)",
+            params![cs, format!("{{\"messages\":[{}]}}", ids.join(",")), why, args, verb],
         )?;
         let a = tx.last_insert_rowid();
         for m in messages {
@@ -124,8 +149,8 @@ fn archived_args(
         for m in messages {
             tx.execute(
                 "INSERT INTO ledger_message(ledger_id, message_id, call, pre, post)
-                 VALUES (?1, ?2, 1, '[\"INBOX\"]', '[]')",
-                params![l, m],
+                 VALUES (?1, ?2, 1, ?3, '[]')",
+                params![l, m, pre],
             )?;
         }
         tx.execute("UPDATE ledger SET call = 1 WHERE id = ?1", [l])?;
@@ -306,12 +331,168 @@ async fn the_entry_of_an_undo_names_its_entry() {
         })
         .unwrap();
     let (_, p) = call(&s, false, "/api/ledger").await;
+    // The undo changed no message: its one message counts as skipped.
+    assert_eq!(p["entries"][0]["skipped"], 1);
+    assert_eq!(p["entries"][1]["skipped"], 0);
+    assert_eq!(p["entries"][0]["tried"], 1);
     let first = &p["entries"][1];
     assert_eq!(first["id"], format!("l-{l}"));
     assert_eq!(first["state"], "undone");
     assert_eq!(first["undone_by"], format!("l-{u}"));
     assert_eq!(first["undo_open"], false);
     assert_eq!(first["can_undo"], false);
+}
+
+/// The entry of an applied undo, with its id. `rows` are the message,
+/// `done` and `listed` values of its ledger messages.
+fn undo_applied(s: &Store, l: i64, rows: &[(i64, bool, Option<&str>)]) -> i64 {
+    undo_step_applied(s, l, 1, rows)
+}
+
+/// As `undo_applied`, for step `step` of the undo.
+fn undo_step_applied(s: &Store, l: i64, step: i64, rows: &[(i64, bool, Option<&str>)]) -> i64 {
+    s.write(|tx| {
+        let a: i64 = tx.query_row(
+            "SELECT action_id FROM ledger_undo WHERE ledger_id = ?1 AND step = ?2",
+            [l, step],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+             VALUES (?1, 1, '{\"call\":\"batchModify\",\"add\":[\"INBOX\"],\"remove\":[],\"calls\":1}', 'writing', 'inverse', ?2)",
+            params![a, NOW + 1],
+        )?;
+        let u = tx.last_insert_rowid();
+        for (m, _, _) in rows {
+            tx.execute(
+                "INSERT INTO ledger_message(ledger_id, message_id, call, pre, post)
+                 VALUES (?1, ?2, 1, '[]', '[\"INBOX\"]')",
+                params![u, m],
+            )?;
+        }
+        tx.execute("UPDATE ledger SET call = 1 WHERE id = ?1", [u])?;
+        for (m, done, listed) in rows {
+            tx.execute(
+                "UPDATE ledger_message SET listed = ?3 WHERE ledger_id = ?1 AND message_id = ?2",
+                params![u, m, listed],
+            )?;
+            if *done {
+                tx.execute(
+                    "UPDATE ledger_message SET done = 1 WHERE ledger_id = ?1 AND message_id = ?2",
+                    params![u, m],
+                )?;
+            }
+        }
+        tx.execute("UPDATE ledger SET state = 'applied' WHERE id = ?1", [u])?;
+        Ok(u)
+    })
+    .unwrap()
+}
+
+/// The skipped count of an undo comes from the entry that it undoes: a
+/// message that is gone before the undo starts counts, and a message that
+/// the undo listed but did not change counts once (decision D18).
+#[tokio::test]
+async fn an_undo_counts_each_target_of_its_entry() {
+    let dir = temp("undo-skipped");
+    let s = store(&dir);
+    let gone = |m: i64| {
+        s.write(|tx| {
+            tx.execute("UPDATE message SET gone_at = 1 WHERE id = ?1", [m])?;
+            Ok(())
+        })
+        .unwrap()
+    };
+    let entry = |p: &Value, id: i64| {
+        p["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == format!("l-{id}"))
+            .unwrap()
+            .clone()
+    };
+
+    // Message 2 is gone before the undo starts: submit leaves it out, and
+    // the undo changes message 1 only.
+    let l = archived(&s, "person", &[1, 2], PERSON);
+    gone(2);
+    let (code, _) = call(&s, true, &format!("/api/ledger/l-{l}/undo")).await;
+    assert_eq!(code, StatusCode::OK);
+    let u = undo_applied(&s, l, &[(1, true, None)]);
+    let (_, p) = call(&s, false, "/api/ledger").await;
+    let e = entry(&p, u);
+    assert_eq!(
+        (
+            e["changed"].clone(),
+            e["tried"].clone(),
+            e["skipped"].clone()
+        ),
+        (json!(1), json!(2), json!(1))
+    );
+    assert_eq!(entry(&p, l)["tried"], 0);
+    assert_eq!(entry(&p, l)["skipped"], 0);
+
+    // Message 3 is gone after the undo starts: the undo lists it and does
+    // not change it. It counts once, and the entry has no undo now.
+    let l = archived(&s, "person", &[3], PERSON);
+    call(&s, true, &format!("/api/ledger/l-{l}/undo")).await;
+    gone(3);
+    let u = undo_applied(&s, l, &[(3, false, Some("gone"))]);
+    let (_, p) = call(&s, false, "/api/ledger").await;
+    let e = entry(&p, u);
+    assert_eq!(
+        (
+            e["changed"].clone(),
+            e["tried"].clone(),
+            e["skipped"].clone()
+        ),
+        (json!(0), json!(1), json!(1))
+    );
+    assert_eq!(e["retry"], false);
+    assert_eq!(entry(&p, l)["can_undo"], false);
+}
+
+/// Each step of the undo of `trash` counts its own targets: step 2
+/// (`archive`) has the messages with no `INBOX` before the trash, and a
+/// message that it skips counts as skipped (decision D18).
+#[tokio::test]
+async fn each_step_of_a_trash_undo_counts_its_targets() {
+    let dir = temp("undo-trash");
+    let s = store(&dir);
+    let l = applied(
+        &s,
+        "trash",
+        "[]",
+        "person",
+        &[1, 2],
+        PERSON,
+        Some("Old mail."),
+        "{}",
+    );
+    let (code, v) = call(&s, true, &format!("/api/ledger/l-{l}/undo")).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    let u1 = undo_step_applied(&s, l, 1, &[(1, true, None), (2, true, None)]);
+    let u2 = undo_step_applied(&s, l, 2, &[(1, true, None), (2, false, Some("skipped"))]);
+    let (_, p) = call(&s, false, "/api/ledger").await;
+    let e = |id: i64| {
+        p["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == format!("l-{id}"))
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        (e(u1)["tried"].clone(), e(u1)["skipped"].clone()),
+        (json!(2), json!(0))
+    );
+    assert_eq!(
+        (e(u2)["tried"].clone(), e(u2)["skipped"].clone()),
+        (json!(2), json!(1))
+    );
+    assert_eq!(e(u2)["undo_of"], format!("l-{l}"));
 }
 
 /// Each value of an entry is bounded: a large argument (the body of a
@@ -401,6 +582,17 @@ async fn a_state_verb_names_its_item() {
     assert_eq!(e["state"], "applied");
     assert_eq!(e["items"], 1);
     assert_eq!(e["title"], doc["title"]);
+    // The title of an item of hostile mail is not shown, and comes back
+    // when the state clears.
+    s.put_labels(1, &[("SPAM", "SPAM", "system")]).unwrap();
+    for (set, clear) in HOSTILE {
+        s.write(|tx| Ok(tx.execute_batch(set)?)).unwrap();
+        let (_, p) = call(&s, false, "/api/ledger").await;
+        assert_eq!(p["entries"][0]["title"], Value::Null, "{set}");
+        s.write(|tx| Ok(tx.execute_batch(clear)?)).unwrap();
+        let (_, p) = call(&s, false, "/api/ledger").await;
+        assert_eq!(p["entries"][0]["title"], doc["title"], "{clear}");
+    }
     assert_eq!(e["messages"], 0);
     assert_eq!(e["can_undo"], true);
     let undo = format!("/api/ledger/{}/undo", e["id"].as_str().unwrap());
@@ -455,3 +647,24 @@ async fn an_entry_keeps_the_reason_of_its_revision() {
     let (_, p) = call(&s, false, "/api/ledger").await;
     assert_eq!(p["entries"][0]["why"], "Tidy up.");
 }
+
+/// The three states of hostile mail of message 1 (issue 112): the SQL that
+/// sets each one, and the SQL that clears it.
+const HOSTILE: [(&str, &str); 3] = [
+    (
+        "UPDATE message SET hostile = '[\"lookalike\"]' WHERE id = 1",
+        "UPDATE message SET hostile = '[]' WHERE id = 1",
+    ),
+    (
+        "INSERT INTO message_label(message_id, label_id)
+           SELECT 1, id FROM label WHERE provider_id = 'SPAM'",
+        "DELETE FROM message_label WHERE message_id = 1
+           AND label_id IN (SELECT id FROM label WHERE provider_id = 'SPAM')",
+    ),
+    (
+        "UPDATE header SET from_addr = 'bad@example.com' WHERE message_id = 1;
+         INSERT INTO sender(address, kind) VALUES ('bad@example.com', 'hostile')
+           ON CONFLICT(address) DO UPDATE SET kind = 'hostile'",
+        "UPDATE sender SET kind = 'person' WHERE address = 'bad@example.com'",
+    ),
+];

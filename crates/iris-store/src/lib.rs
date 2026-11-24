@@ -19,6 +19,41 @@ macro_rules! may_be_hostile {
     };
 }
 
+/// The SQL condition "message `m` is hostile mail": a hostile mark, the
+/// label `SPAM`, or a `hostile` sender (specification 1, section 6.7).
+/// Understanding deletes the unpinned items of such a message. Each read
+/// that shows items to the person or to the model leaves out an item whose
+/// origin is such a message, so a pinned item is hidden too (issue 112).
+/// A message that only waits for its link check is not hostile mail here:
+/// a gate of mail uses [`may_be_hostile!`].
+#[macro_export]
+macro_rules! hostile_mail {
+    () => {
+        "((m.hostile IS NOT NULL AND m.hostile NOT IN ('', '[]'))
+          OR EXISTS (SELECT 1 FROM message_label hml JOIN label hl ON hl.id = hml.label_id
+               WHERE hml.message_id = m.id AND hl.provider_id = 'SPAM')
+          OR EXISTS (SELECT 1 FROM header hh JOIN sender hs
+               ON hs.address = hh.from_addr COLLATE NOCASE
+               WHERE hh.message_id = m.id AND hs.kind = 'hostile'))"
+    };
+}
+
+/// The SQL condition "item `$i` comes from hostile mail": its origin
+/// message is [`hostile_mail!`].
+#[macro_export]
+macro_rules! from_hostile_mail {
+    ($i:literal) => {
+        concat!(
+            "EXISTS (SELECT 1 FROM item_source hos JOIN message m ON m.id = hos.message_id
+               WHERE hos.item_id = ",
+            $i,
+            ".id AND hos.role = 'origin' AND ",
+            $crate::hostile_mail!(),
+            ")"
+        )
+    };
+}
+
 /// The SQL condition "message `$m` is not received mail": it has the label
 /// `DRAFT`, `UNSENT` or `SENT_COPY` (docs/specs/2026-11-17-imap-provider.md,
 /// section 4). The understanding, the watches, the people, the conversations,
@@ -38,6 +73,20 @@ macro_rules! draft_or_copy {
     };
 }
 
+/// SQL: the message `$m` is of an account in state `removing` or
+/// `removed` (docs/specs/2026-11-24-remove-account.md). Its mail goes, so no
+/// reader passes it on: understanding and the workspace of a job skip it.
+#[macro_export]
+macro_rules! removed_account {
+    ($m:literal) => {
+        concat!(
+            "coalesce((SELECT a.state FROM account a WHERE a.id = ",
+            $m,
+            ".account_id), '') IN ('removing', 'removed')"
+        )
+    };
+}
+
 /// The labels of [`draft_or_copy!`], for a check in Rust.
 pub const DRAFT_OR_COPY: [&str; 3] = ["DRAFT", "UNSENT", "SENT_COPY"];
 
@@ -45,6 +94,7 @@ mod backup;
 mod content;
 mod file_lock;
 mod id;
+mod remove;
 mod search;
 mod secret;
 mod watch;
@@ -60,7 +110,12 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 
 pub use backup::{BackupLock, Cleaned, PolicyExpect, PolicyWrite, GONE_KEEP_MS};
 pub use content::ContentWriter;
-pub use file_lock::FileLock;
+pub use file_lock::{FileLock, Probe};
+pub use remove::{Deleted, STATE_REMOVED, STATE_REMOVING};
+
+/// The result of a `sync_log` row whose process ended before the sync
+/// ended (issue #710).
+pub const SYNC_STOPPED: &str = "stopped: the process ended before the sync ended";
 pub use id::{format_id, parse_id, Kind};
 pub use search::{day_ms, Query};
 pub use watch::{Watch, SINCE_MARGIN_MS, TEXT_MAX, WAIT_MAX};
@@ -110,6 +165,15 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_40.sql"),
     include_str!("schema_41.sql"),
     include_str!("schema_42.sql"),
+    include_str!("schema_43.sql"),
+    include_str!("schema_44.sql"),
+    include_str!("schema_45.sql"),
+    include_str!("schema_46.sql"),
+    include_str!("schema_47.sql"),
+    include_str!("schema_48.sql"),
+    include_str!("schema_49.sql"),
+    include_str!("schema_50.sql"),
+    include_str!("schema_51.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
@@ -143,6 +207,8 @@ pub enum Error {
     /// The address has an account of another provider or of another
     /// mailbox ([`Store::save_account_secret`]).
     Account(&'static str),
+    /// The time zone name is not in the time zone database of the computer.
+    TimeZone(String),
 }
 
 impl fmt::Display for Error {
@@ -160,6 +226,10 @@ impl fmt::Display for Error {
             Error::MissingContent(sha) => write!(f, "content file {sha} is missing"),
             Error::Watch(why) => write!(f, "watch: {why}"),
             Error::Account(why) => write!(f, "account: {why}"),
+            Error::TimeZone(name) => write!(
+                f,
+                "time zone: {name} is not a time zone of this computer (use an IANA name, for example Europe/Berlin)"
+            ),
         }
     }
 }
@@ -186,7 +256,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// document. Same value as `iris_clean::TEXT_LIMIT`.
 /// The `model` value of each open model document that Iris writes
 /// (spec 4, rule 2.1).
-pub const MODEL: &str = "iris/1.1";
+pub const MODEL: &str = "iris/1.2";
 
 /// The `$id` of the common definitions of the open model.
 pub const COMMON_SCHEMA_ID: &str = "urn:iris:model:1:common";
@@ -281,6 +351,20 @@ pub struct Body {
 /// The output of [`Store::read_to`]: a buffered spool file.
 pub type Spool = io::BufWriter<fs::File>;
 
+/// The most streamed answers ([`Store::read_to`]) of one store at the same
+/// time. Each one holds a spool file open until its peer reads the end, so
+/// many slow peers could use all file descriptors of the process (#713).
+pub const MAX_SPOOLS: usize = 32;
+
+/// One place of [`MAX_SPOOLS`], given back at the drop.
+struct SpoolSlot<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl Drop for SpoolSlot<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// An open data folder. One write connection and 2 read connections
 /// (specification 1, section 5.2). All writes go through the write connection.
 pub struct Store {
@@ -288,6 +372,8 @@ pub struct Store {
     key: [u8; 32],
     writer: Mutex<Connection>,
     readers: [Mutex<Connection>; 2],
+    /// The streamed answers that hold a spool file now.
+    spools: std::sync::atomic::AtomicUsize,
 }
 
 impl Store {
@@ -326,6 +412,7 @@ impl Store {
             key,
             readers: [reader()?, reader()?],
             writer: Mutex::new(writer),
+            spools: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -371,12 +458,14 @@ impl Store {
     /// reader of `out` then never holds a store connection, so the other
     /// threads of the engine never wait for a peer. The spool is a file in
     /// the data folder with no name, so memory stays flat. If `f` gives an
-    /// error, `out` gets no byte.
+    /// error, `out` gets no byte. With [`MAX_SPOOLS`] answers open, it
+    /// gives an error at once, with no read and no byte to `out`.
     pub fn read_to<T, E: From<Error>>(
         &self,
         out: &mut impl io::Write,
         f: impl FnOnce(&Connection, &mut Spool) -> std::result::Result<T, E>,
     ) -> std::result::Result<T, E> {
+        let _slot = self.spool_slot()?;
         let mut spool = io::BufWriter::new(self.spool_file()?);
         let mut res = None;
         self.read(|c| {
@@ -390,6 +479,21 @@ impl Store {
         io::Seek::rewind(&mut file).map_err(Error::Io)?;
         io::copy(&mut file, out).map_err(Error::Io)?;
         Ok(value)
+    }
+
+    /// Take one place of [`MAX_SPOOLS`], or give an error if none is free.
+    fn spool_slot(&self) -> Result<SpoolSlot<'_>> {
+        use std::sync::atomic::Ordering::SeqCst;
+        // A refused request leaves the count as it is, so the count is
+        // always the number of slots held (#823).
+        self.spools
+            .try_update(SeqCst, SeqCst, |n| (n < MAX_SPOOLS).then_some(n + 1))
+            .map(|_| SpoolSlot(&self.spools))
+            .map_err(|_| {
+                Error::Io(io::Error::other(
+                    "too many answers are open at the same time; try again",
+                ))
+            })
     }
 
     /// A new file in the data folder (mode 0700) with no name: the open file
@@ -412,8 +516,26 @@ impl Store {
         Ok(file)
     }
 
+    /// Set the time zone of the owner to the IANA name `name`, or with
+    /// `None` to the time zone of the computer (decision D1).
+    pub fn set_time_zone(&self, name: Option<&str>) -> Result<()> {
+        if let Some(name) = name {
+            jiff::tz::TimeZone::get(name).map_err(|_| Error::TimeZone(name.to_string()))?;
+        }
+        self.write(|tx| {
+            tx.execute("DELETE FROM owner_setting", [])?;
+            if let Some(name) = name {
+                tx.execute(
+                    "INSERT INTO owner_setting(id, time_zone) VALUES (1, ?1)",
+                    [name],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
     /// Open each deferred commitment again on its `deferred_until` date, in
-    /// UTC (specification 1, section 6.8). The document gets the new status
+    /// the time zone of the owner ([`today`], specification 1, section 6.8). The document gets the new status
     /// and `updated` (RFC 3339 with milliseconds, as `iris_talk::rfc3339`).
     /// A gone item keeps its status. Gives the number of commitments that
     /// opened.
@@ -425,10 +547,30 @@ impl Store {
                      strftime('%Y-%m-%dT%H:%M:%S', ?1 / 1000, 'unixepoch')
                        || printf('.%03dZ', ?1 % 1000)), '$.deferred_until')
                  WHERE form = 'commitment' AND status = 'deferred'
-                   AND json_extract(doc, '$.deferred_until') <= date(?1 / 1000, 'unixepoch')",
-                [now],
+                   AND json_extract(doc, '$.deferred_until') <= ?2",
+                rusqlite::params![now, today(tx, now)?],
             )?)
         })
+    }
+
+    /// Take the run lock of the `sync_log` row `row`, and create its file.
+    /// Only the sync of the row calls it. The sync holds it from before its
+    /// row is visible until after its result is written. `None`: the sync runs. A free
+    /// lock on a row with no end: the process of the sync stopped
+    /// (issue #710).
+    pub fn sync_run_lock(&self, row: i64) -> Result<Option<FileLock>> {
+        FileLock::try_take(&self.sync_run_path(row)).map_err(Error::Io)
+    }
+
+    /// Probe the run lock of the `sync_log` row `row` with no new file. A
+    /// reader uses it (issue #710).
+    pub fn sync_run_probe(&self, row: i64) -> Result<Probe> {
+        FileLock::probe(&self.sync_run_path(row)).map_err(Error::Io)
+    }
+
+    /// The file of the run lock of the `sync_log` row `row`.
+    pub fn sync_run_path(&self, row: i64) -> PathBuf {
+        self.dir().join(format!("sync-run-{row}.lock"))
     }
 
     /// Add a mailbox, or give the ID of the mailbox with this address.
@@ -465,14 +607,32 @@ impl Store {
         };
         self.write(|tx| {
             type Row = (i64, String, Option<String>, Option<u16>, Option<String>);
-            let old: Option<Row> = tx
+            let old: Option<(Row, Option<String>)> = tx
                 .query_row(
-                    "SELECT id, provider, imap_host, imap_port, imap_user FROM account
+                    "SELECT id, provider, imap_host, imap_port, imap_user, state FROM account
                      WHERE address = ?1",
                     [address],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                    |r| Ok(((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?), r.get(5)?)),
                 )
                 .optional()?;
+            // A removed account (a tombstone) keeps its ID and mailbox for
+            // the record of actions, and never signs in again. The address
+            // gets a new row (docs/specs/2026-11-24-remove-account.md).
+            let old = match old {
+                Some((_, Some(s))) if s == STATE_REMOVING => {
+                    return Err(Error::Account(
+                        "Iris still deletes the mail of this account; try again in a minute",
+                    ))
+                }
+                Some(((id, ..), Some(s))) if s == STATE_REMOVED => {
+                    tx.execute(
+                        "UPDATE account SET address = 'removed:' || id || ':' || address WHERE id = ?1",
+                        [id],
+                    )?;
+                    None
+                }
+                o => o.map(|(row, _)| row),
+            };
             let id = match old {
                 None => tx.query_row(
                     "INSERT INTO account(provider, address, imap_host, imap_port, imap_user)
@@ -828,6 +988,31 @@ fn migrate(conn: &mut Connection, db: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The time zone of the owner (decision D1): the zone of `owner_setting`,
+/// else the time zone of the computer. A saved name that the computer no
+/// longer knows gives the time zone of the computer too.
+pub fn time_zone(c: &Connection) -> rusqlite::Result<jiff::tz::TimeZone> {
+    let name: Option<String> = c
+        .query_row("SELECT time_zone FROM owner_setting", [], |r| r.get(0))
+        .optional()?;
+    Ok(name
+        .and_then(|n| jiff::tz::TimeZone::get(&n).ok())
+        .unwrap_or_else(jiff::tz::TimeZone::system))
+}
+
+/// The day of the instant `now_ms` (milliseconds since the epoch) in the
+/// time zone of the owner, as `YYYY-MM-DD`.
+pub fn today(c: &Connection, now_ms: i64) -> rusqlite::Result<String> {
+    Ok(day_in(&time_zone(c)?, now_ms))
+}
+
+/// The day of the instant `now_ms` in the time zone `zone`, as `YYYY-MM-DD`.
+/// An instant out of range gives the day of the epoch.
+pub fn day_in(zone: &jiff::tz::TimeZone, now_ms: i64) -> String {
+    let at = jiff::Timestamp::from_millisecond(now_ms).unwrap_or(jiff::Timestamp::UNIX_EPOCH);
+    zone.to_datetime(at).date().to_string()
+}
+
 /// The schema version of an open database.
 pub fn schema_version(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
@@ -842,4 +1027,40 @@ pub fn stopped(conn: &Connection) -> Result<Option<i64>> {
             r.get(0)
         })?,
     )
+}
+
+#[cfg(test)]
+mod spool_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+
+    /// Invariant (#823): the spool count is never more than the slots
+    /// held, also while refused requests run at the same time.
+    #[test]
+    fn a_refused_request_does_not_change_the_spool_count() {
+        let dir = std::env::temp_dir().join(format!("iris-spool-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let s = Store::open(&dir).unwrap();
+        let held: Vec<_> = (0..MAX_SPOOLS).map(|_| s.spool_slot().unwrap()).collect();
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|t| {
+            for _ in 0..4 {
+                t.spawn(|| {
+                    let mut accepted = 0;
+                    while !stop.load(SeqCst) {
+                        accepted += usize::from(s.spool_slot().is_ok());
+                    }
+                    assert_eq!(accepted, 0);
+                });
+            }
+            let most = (0..200_000).map(|_| s.spools.load(SeqCst)).max();
+            stop.store(true, SeqCst);
+            assert_eq!(most, Some(MAX_SPOOLS));
+        });
+        drop(held);
+        assert_eq!(s.spools.load(SeqCst), 0);
+        assert!(s.spool_slot().is_ok());
+        drop(s);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

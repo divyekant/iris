@@ -399,7 +399,8 @@ impl Box {
 }
 
 /// In the mode `observe`, an action that a person did not approve waits.
-/// In the mode `apply`, a rule approval goes to review (issue #168). The
+/// In the mode `apply`, a rule approval that no rule allows now goes to
+/// review, and one that a rule allows applies (section 5.4). The
 /// tick applies each approved state action.
 #[test]
 fn only_the_person_approval_applies() {
@@ -432,6 +433,33 @@ fn only_the_person_approval_applies() {
         assert_eq!(b.state(a), want);
         assert_eq!(b.one("SELECT status FROM item WHERE id = 1"), json!("open"));
     }
+    // While an `allow` rule for `close` is in the active policy, the rule
+    // approval applies with no person (section 5.4, decision D9).
+    let allow = format!(
+        "{APPLY_POLICY}\n[[rule]]\nid = 1\nname = \"Close\"\neffect = \"allow\"\n\
+         verbs = [\"close\"]\nwhen = {{ author = \"agent\" }}\nby = \"person\"\n\
+         added = 2026-11-10\n"
+    );
+    let b = setup("rule-allow", "open", Some(&allow));
+    let (a, _) = b.submitted(AuthorKind::Agent, Verb::Close, json!({ "reason": "Done." }));
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                &format!("UPDATE changeset_action SET {rule} WHERE id = ?1"),
+                [a],
+            )?)
+        })
+        .unwrap();
+    assert_eq!(apply_states(&b.store).unwrap(), 1);
+    assert_eq!(b.state(a), "applied");
+    assert_eq!(
+        b.one(&format!(
+            "SELECT decided_by FROM changeset_action WHERE id = {a}"
+        )),
+        json!("rule")
+    );
+    assert_eq!(b.one("SELECT status FROM item WHERE id = 1"), json!("done"));
+
     let b = setup("tick", "open", Some(APPLY_POLICY));
     let a = b.approved(Verb::Close, json!({ "reason": "Done." }));
     assert_eq!(apply_states(&b.store).unwrap(), 1);
@@ -752,6 +780,28 @@ fn the_undo_of_a_state_entry_keeps_a_later_change() {
         Ok(Outcome::Failed { .. })
     ));
     assert!(iris_apply::undo(&b.store, b.ledger_of(failed), now()).is_err());
+    // Decision D18 (issue #463): the undo changed no item, so the entry
+    // stays open. The skipped undo is no change: the undo of the later
+    // close restores the deferred item, and then the undo of the defer
+    // applies.
+    assert_eq!(b.state(a), "applied");
+    let (_, outcome) = b.undo(later);
+    assert!(
+        matches!(outcome, Outcome::Applied(ref c) if (c.changed, c.unchanged) == (1, 0)),
+        "{outcome:?}"
+    );
+    assert_eq!(b.state(later), "undone");
+    assert_eq!(
+        b.one("SELECT status FROM item WHERE id = 1"),
+        json!("deferred")
+    );
+    let (_, outcome) = b.undo(a);
+    assert!(
+        matches!(outcome, Outcome::Applied(ref c) if (c.changed, c.unchanged) == (1, 0)),
+        "{outcome:?}"
+    );
+    assert_eq!(b.state(a), "undone");
+    assert_eq!(b.one("SELECT status FROM item WHERE id = 1"), json!("open"));
 }
 
 /// Only an undo makes `restore`: submit denies it from any other path.

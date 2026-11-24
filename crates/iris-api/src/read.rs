@@ -63,6 +63,21 @@ pub struct Status {
     pub mode: &'static str,
     pub accounts: Vec<Account>,
     pub messages: Counts,
+    /// True if a model is set. With no model, only the fixed rules read
+    /// the mail (`iris model set`).
+    pub model: bool,
+    /// The live messages that the understanding step marked as waiting for
+    /// a model or a budget (`waits_model` = `WAITS_INPUT`). A draft, a copy
+    /// and gone mail never count.
+    pub waits_model: i64,
+    /// The IANA name of the time zone of defer dates and due dates
+    /// (`iris zone`, decision D1). `None` when the time zone of the computer
+    /// has no IANA name: then a client uses its own.
+    pub time_zone: Option<String>,
+    /// The end of the wait after model errors (RFC 3339), while it runs.
+    /// No model call runs before it, unless the person asks for a try now
+    /// (`POST /api/model/try`, issue #136).
+    pub model_retry_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -90,6 +105,35 @@ pub struct SyncRun {
     pub started: String,
     pub ended: Option<String>,
     pub result: Option<String>,
+    /// True when the sync row before this one failed or stopped: a running
+    /// row is then a new try after a failure (issue #716).
+    pub after_failure: bool,
+}
+
+/// The newest sync row of account `?1`, with the outcome of the row before
+/// it. A `fetch` row is the failure of one message, not a sync. A row before
+/// with no end is of a process that stopped. The marks are the ones of the
+/// client: `error:` anywhere, or [`iris_store::SYNC_STOPPED`] at the start.
+const NEWEST_RUN: &str = "SELECT s.id, s.kind, s.started_at, s.ended_at, s.result,
+       coalesce((SELECT p.ended_at IS NULL OR instr(p.result, 'error:') > 0
+                        OR substr(p.result, 1, 8) = 'stopped:'
+                 FROM sync_log p
+                 WHERE p.account_id = s.account_id AND p.kind <> 'fetch' AND p.id < s.id
+                 ORDER BY p.id DESC LIMIT 1), 0)
+     FROM sync_log s
+     WHERE s.account_id = ?1 AND s.kind <> 'fetch' ORDER BY s.id DESC LIMIT 1";
+
+fn newest_run(r: &rusqlite::Row) -> rusqlite::Result<(i64, SyncRun)> {
+    Ok((
+        r.get(0)?,
+        SyncRun {
+            kind: r.get(1)?,
+            started: rfc3339(r.get(2)?),
+            ended: r.get::<_, Option<i64>>(3)?.map(rfc3339),
+            result: r.get(4)?,
+            after_failure: r.get(5)?,
+        },
+    ))
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -273,10 +317,12 @@ pub struct Filter<'a> {
 }
 
 pub fn status(store: &Store) -> Result<Status> {
-    Ok(store.read(|c| {
+    let mut status = store.read(|c| {
         let mut st = c.prepare(
+            // A removed account is a tombstone: not an account of the person.
+            // A removing one shows until its mail is gone.
             "SELECT id, address, provider, state, mirror_ready_at, sync_kind, sync_step
-             FROM account ORDER BY id",
+             FROM account WHERE state IS NOT 'removed' ORDER BY id",
         )?;
         let rows = st.query_map([], |r| {
             let kind: Option<String> = r.get(5)?;
@@ -294,21 +340,9 @@ pub fn status(store: &Store) -> Result<Status> {
         let mut accounts = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         for a in &mut accounts {
             a.last_sync = c
-                .query_row(
-                    // A `fetch` row is the failure of one message, not a sync.
-                    "SELECT kind, started_at, ended_at, result FROM sync_log
-                     WHERE account_id = ?1 AND kind <> 'fetch' ORDER BY id DESC LIMIT 1",
-                    [a.id],
-                    |r| {
-                        Ok(SyncRun {
-                            kind: r.get(0)?,
-                            started: rfc3339(r.get(1)?),
-                            ended: r.get::<_, Option<i64>>(2)?.map(rfc3339),
-                            result: r.get(3)?,
-                        })
-                    },
-                )
-                .optional()?;
+                .query_row(NEWEST_RUN, [a.id], newest_run)
+                .optional()?
+                .map(|(_, run)| run);
         }
         let messages = c.query_row(
             "SELECT count(*), count(fetched_at), count(understood_at), count(gone_at) FROM message",
@@ -322,12 +356,90 @@ pub fn status(store: &Store) -> Result<Status> {
                 })
             },
         )?;
+        let model = c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM model_setting WHERE id = 1)",
+            [],
+            |r| r.get(0),
+        )?;
+        let waits_model = c.query_row(
+            concat!(
+                "SELECT count(*) FROM message m
+                 WHERE m.gone_at IS NULL AND m.understood_at IS NULL AND m.waits_model = ?1
+                   AND NOT ",
+                iris_store::draft_or_copy!("m")
+            ),
+            [iris_understand::batch::WAITS_INPUT],
+            |r| r.get(0),
+        )?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        let model_retry_at = iris_understand::batch::retry_after(c)?
+            .filter(|&t| t > now)
+            .map(rfc3339);
         Ok(Status {
             mode: iris_policy::active(c)?.policy.mode.name(),
             accounts,
             messages,
+            model,
+            waits_model,
+            time_zone: iris_store::time_zone(c)?.iana_name().map(str::to_string),
+            model_retry_at,
         })
-    })?)
+    })?;
+    settle_runs(store, &mut status.accounts)?;
+    Ok(status)
+}
+
+/// Settle the last sync of each account in a status snapshot. A row with no
+/// end whose run lock is free is of a process that stopped: it shows the
+/// result `SYNC_STOPPED` (issue #710). Only the sync of a row takes its run
+/// lock, so this probe never stops a sync. The newest row is read again
+/// while the probe holds the lock, so a sync that ended in between shows its
+/// own end. The read writes nothing: no store row and no file. The next
+/// sync of the account closes the row.
+fn settle_runs(store: &Store, accounts: &mut [Account]) -> Result<()> {
+    for a in accounts {
+        if a.last_sync.as_ref().is_none_or(|r| r.ended.is_some()) {
+            continue;
+        }
+        let newest = || -> Result<(i64, SyncRun)> {
+            Ok(store.read(|c| Ok(c.query_row(NEWEST_RUN, [a.id], newest_run)?))?)
+        };
+        // A sync can start or end at each step: follow the newest row until
+        // the probe and the read agree. Three tries are enough for each
+        // case except a new sync at each step; then the snapshot stays.
+        for _ in 0..3 {
+            let (row, mut run) = newest()?;
+            if run.ended.is_some() {
+                a.last_sync = Some(run);
+                break;
+            }
+            // A visible row with no end and no lock file: its sync stopped
+            // before this program had run locks, or the data folder came
+            // from a backup. The sync of a row creates the file before the
+            // row is visible.
+            let _probe = match store.sync_run_probe(row)? {
+                iris_store::Probe::Held => {
+                    a.last_sync = Some(run);
+                    break;
+                }
+                iris_store::Probe::Missing => None,
+                iris_store::Probe::Free(l) => Some(l),
+            };
+            let (again, again_run) = newest()?;
+            if again != row {
+                continue;
+            }
+            run = again_run;
+            if run.ended.is_none() {
+                run.result = Some(iris_store::SYNC_STOPPED.into());
+            }
+            a.last_sync = Some(run);
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Search the messages that are not gone, newest first (specification 1,
@@ -364,10 +476,13 @@ pub(crate) fn message_in(c: &Connection, row: i64) -> rusqlite::Result<Option<Me
         return Ok(None);
     };
     more.sender_kind = sender_kind(c, summary.from.address.as_deref())?;
-    let mut st = c.prepare_cached(
+    // The same items as `GET /api/items/{id}` shows: none of hostile mail.
+    let mut st = c.prepare_cached(concat!(
         "SELECT i.id, i.form FROM item_source s JOIN item i ON i.id = s.item_id
-         WHERE s.message_id = ?1 AND i.status != 'gone' ORDER BY i.id",
-    )?;
+         WHERE s.message_id = ?1 AND i.status != 'gone' AND NOT ",
+        iris_store::from_hostile_mail!("i"),
+        " ORDER BY i.id"
+    ))?;
     let items = st
         .query_map([row], |r| Ok(item_id(r.get(0)?, &r.get::<_, String>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -397,6 +512,7 @@ pub fn raw(store: &Store, id: &str) -> Result<Option<PathBuf>> {
 }
 
 /// One item by its ID (`c-`, `v-`, `r-`, `f-` or `s-`), also when it is gone.
+/// An item that comes from hostile mail is not there (issue 112).
 pub fn item(store: &Store, id: &str) -> Result<Option<Value>> {
     let (kind, row) = parse_id(id).ok_or_else(|| bad_id(id))?;
     let form = FORMS
@@ -407,7 +523,8 @@ pub fn item(store: &Store, id: &str) -> Result<Option<Value>> {
     Ok(store.read(|c| {
         Ok(c.query_row(
             &format!(
-                "SELECT id, form, status, doc, {MATTER} FROM item WHERE id = ?1 AND form = ?2"
+                "SELECT id, form, status, doc, {MATTER} FROM item
+                 WHERE id = ?1 AND form = ?2 AND NOT {FROM_HOSTILE}"
             ),
             params![row, form],
             doc_of,
@@ -472,6 +589,7 @@ pub fn items(store: &Store, filter: &Filter, limit: u32) -> Result<Page> {
              WHERE (?1 IS NULL OR form = ?1)
                AND (status = ?2 OR (?2 IS NULL AND status != 'gone'))
                AND (?3 IS NULL OR json_extract(doc, '$.type') = ?3)
+               AND NOT {FROM_HOSTILE}
                AND (?4 IS NULL OR ({outer}, id) <
                     (SELECT {inner}, i.id FROM item i WHERE i.id = ?4))
              ORDER BY {outer} DESC, id DESC LIMIT ?5"
@@ -530,7 +648,10 @@ pub(crate) fn section_sql(now: i64) -> [(String, String); 6] {
 }
 
 /// The filter of each record that the brief counts: not gone.
-const RECORD: &str = "form = 'record' AND status != 'gone'";
+const RECORD: &str = concat!(
+    "form = 'record' AND status != 'gone' AND NOT ",
+    iris_store::from_hostile_mail!("item")
+);
 
 /// The filter of the head of each pair in the place `filter`: an item of the
 /// place that is not a possible duplicate of an item of the same place
@@ -558,18 +679,30 @@ fn places(now: i64) -> Vec<String> {
 /// strangers the person declined: an open commitment whose counterparty
 /// (you owe) or owner (owed to you) is declined, or an active conversation
 /// with a declined participant and no stranger that waits. These items are
-/// in no section of the brief (specification 1, section 6.7).
+/// the list of declined senders (specification 1, section 6.7), so each
+/// declined sender with an item keeps "Ask again" and "Accept".
+pub(crate) fn declined_list_sql() -> String {
+    declined_with("1")
+}
+
+/// The items of [`declined_list_sql`] that are in no section of the brief:
+/// a conversation with a known person is in Conversations (decision D30).
 pub(crate) fn declined_sql() -> String {
+    declined_with(&format!("NOT {}", participant_sql("= 'person'")))
+}
+
+/// [`declined_list_sql`] with the extra condition `talk` on a conversation.
+fn declined_with(talk: &str) -> String {
     let counter = kind_sql("doc", "$.counterparty.sender");
     let owner = kind_sql("doc", "$.owner.sender");
     format!(
-        "((form = 'commitment' AND status = 'open' AND (
+        "NOT {FROM_HOSTILE} AND ((form = 'commitment' AND status = 'open' AND (
              (json_extract(doc, '$.direction') = 'you_owe' AND {counter} = 'declined')
           OR (json_extract(doc, '$.direction') = 'owed_to_you' AND {owner} = 'declined')))
           OR (form = 'conversation' AND status = 'active'
-              AND {} AND NOT {}))",
+              AND {} AND NOT {} AND {talk}))",
         participant_sql("= 'declined'"),
-        participant_sql("= 'stranger'")
+        participant_sql("= 'stranger'"),
     )
 }
 
@@ -641,6 +774,15 @@ fn bundle_rule(name: &str) -> Option<u32> {
 /// The filter and the order of each list section of the brief, with no
 /// attention condition.
 fn base_sql(now: i64) -> [(String, String); 6] {
+    sections_of(now).map(|(filter, order)| (format!("({filter}) AND NOT {FROM_HOSTILE}"), order))
+}
+
+/// The SQL condition "item `item` comes from hostile mail". Each read of
+/// items in this file leaves such an item out (issue 112).
+pub(crate) const FROM_HOSTILE: &str = iris_store::from_hostile_mail!("item");
+
+/// [`base_sql`] with no hostile condition.
+fn sections_of(now: i64) -> [(String, String); 6] {
     let counter = kind_sql("doc", "$.counterparty.sender");
     let owner = kind_sql("doc", "$.owner.sender");
     let known = "IN ('person', 'service')";
@@ -662,13 +804,15 @@ fn base_sql(now: i64) -> [(String, String); 6] {
         "created_at, id".to_string(),
     );
     let conversations = (
-        // A conversation with a stranger is only in `strangers` (dk, 2026-11-16),
-        // and a conversation with a declined stranger is in no section.
+        // A conversation with a stranger is only in `strangers` (dk, 2026-11-16).
+        // A conversation with a declined stranger is in no section, unless a
+        // known person is in it too (decision D30, issue 264).
         format!(
             "form = 'conversation' AND status = 'active'
              AND (json_extract(doc, '$.new') > 0 OR json_extract(doc, '$.your_turn') = 1)
-             AND NOT {}",
-            participant_sql("IN ('stranger', 'declined')")
+             AND NOT {stranger_participant} AND NOT ({} AND NOT {})",
+            participant_sql("= 'declined'"),
+            participant_sql("= 'person'")
         ),
         "unixepoch(json_extract(doc, '$.latest.at'), 'subsec') DESC, id DESC".to_string(),
     );
@@ -911,12 +1055,13 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
         let section =
             |sql: &(String, String)| read_section(c, sql, &tails, MAX_LIMIT, None).map(|(s, _)| s);
         let records = count_records(c, SHOWN)?;
+        // The same definition as the items that the reads hide (issue 112).
         let hostile = c.query_row(
-            "SELECT count(*) FROM message m LEFT JOIN header h ON h.message_id = m.id
-             WHERE m.gone_at IS NULL AND m.internal_date >= ?1
-               AND ((m.hostile IS NOT NULL AND m.hostile NOT IN ('', '[]'))
-                 OR EXISTS (SELECT 1 FROM sender s
-                            WHERE s.address = h.from_addr COLLATE NOCASE AND s.kind = 'hostile'))",
+            concat!(
+                "SELECT count(*) FROM message m
+                 WHERE m.gone_at IS NULL AND m.internal_date >= ?1 AND ",
+                iris_store::hostile_mail!()
+            ),
             [now - 7 * DAY_MS],
             |r| r.get(0),
         )?;
@@ -1218,7 +1363,7 @@ pub(crate) fn doc_at(r: &rusqlite::Row, at: usize) -> rusqlite::Result<Value> {
     Ok(doc)
 }
 
-fn item_id(row: i64, form: &str) -> Option<String> {
+pub(crate) fn item_id(row: i64, form: &str) -> Option<String> {
     FORMS
         .iter()
         .find(|(f, _)| *f == form)
@@ -1261,6 +1406,167 @@ pub fn rfc3339(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A running sync says if the sync row before it failed or stopped, for
+    /// each outcome of that row (issue #716). A `fetch` row never counts.
+    #[test]
+    fn a_running_sync_says_if_the_try_before_it_failed() {
+        // The rows before the running row (kind and result), and the answer.
+        type Rows<'a> = &'a [(&'a str, Option<&'a str>)];
+        let cases: [(Rows, bool); 7] = [
+            (&[], false),
+            (&[("incremental", Some("ok: history 1"))], false),
+            (&[("incremental", Some("error: HTTP 500"))], true),
+            (
+                &[("verify", Some("2 differences, 0 skipped, then error: x"))],
+                true,
+            ),
+            (&[("first", Some(iris_store::SYNC_STOPPED))], true),
+            (&[("incremental", None)], true),
+            (
+                &[
+                    ("incremental", Some("error: x")),
+                    ("fetch", Some("failed 18a: HTTP 500")),
+                ],
+                true,
+            ),
+        ];
+        for (n, (before, want)) in cases.into_iter().enumerate() {
+            let dir =
+                std::env::temp_dir().join(format!("iris-after-failure-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let store = Store::open(&dir).unwrap();
+            let account = store.add_account("gmail", "a@example.com").unwrap();
+            let row = store
+                .write(|tx| {
+                    for (i, (kind, result)) in before.iter().enumerate() {
+                        tx.execute(
+                            "INSERT INTO sync_log(account_id, kind, started_at, ended_at, result)
+                             VALUES (?1, ?2, ?3, CASE WHEN ?4 IS NULL THEN NULL ELSE ?3 END, ?4)",
+                            rusqlite::params![account, kind, i as i64, result],
+                        )?;
+                    }
+                    tx.execute(
+                        "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'incremental', 100)",
+                        [account],
+                    )?;
+                    Ok(tx.last_insert_rowid())
+                })
+                .unwrap();
+            let _live = store.sync_run_lock(row).unwrap().unwrap();
+            let s = status(&store).unwrap();
+            let run = s.accounts[0].last_sync.as_ref().unwrap();
+            assert_eq!(
+                (run.ended.as_deref(), run.result.as_deref()),
+                (None, None),
+                "case {n}"
+            );
+            assert_eq!(run.after_failure, want, "case {n}");
+            drop(_live);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A new sync that starts between the snapshot and the settle shows as
+    /// the running sync, not the row that it closed (issue #710).
+    #[test]
+    fn a_sync_that_starts_after_the_snapshot_shows_as_running() {
+        let dir = std::env::temp_dir().join(format!("iris-settle-new-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let account = store.add_account("gmail", "a@example.com").unwrap();
+        let open_row = |started: i64| {
+            store
+                .write(|tx| {
+                    tx.execute(
+                        "UPDATE sync_log SET ended_at = ?2, result = ?3
+                         WHERE account_id = ?1 AND ended_at IS NULL",
+                        rusqlite::params![account, started, iris_store::SYNC_STOPPED],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'incremental', ?2)",
+                        rusqlite::params![account, started],
+                    )?;
+                    Ok(tx.last_insert_rowid())
+                })
+                .unwrap()
+        };
+        let stale = open_row(1_000);
+        let _held_stale = store.sync_run_lock(stale).unwrap().unwrap();
+        let mut snapshot = status(&store).unwrap().accounts;
+        drop(_held_stale);
+        // The new sync closes the stale row and holds the lock of its own.
+        let new = open_row(2_000);
+        let _live = store.sync_run_lock(new).unwrap().unwrap();
+        settle_runs(&store, &mut snapshot).unwrap();
+        let run = snapshot[0].last_sync.as_ref().unwrap();
+        assert_eq!(run.started, rfc3339(2_000));
+        assert_eq!((run.ended.as_deref(), run.result.as_deref()), (None, None));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A row with no end and no lock file, as in a restored backup, shows
+    /// as stopped, and the status creates no file (issue #710).
+    #[test]
+    fn a_row_with_no_lock_file_shows_as_stopped_and_gets_no_file() {
+        let dir = std::env::temp_dir().join(format!("iris-settle-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let account = store.add_account("gmail", "a@example.com").unwrap();
+        let row = store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'incremental', 1)",
+                    [account],
+                )?;
+                Ok(tx.last_insert_rowid())
+            })
+            .unwrap();
+        let s = status(&store).unwrap();
+        let run = s.accounts[0].last_sync.as_ref().unwrap();
+        assert_eq!(run.result.as_deref(), Some(iris_store::SYNC_STOPPED));
+        assert!(!store.sync_run_path(row).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sync that ends between the snapshot and the probe of its run lock
+    /// shows its own end, not the stopped result (issue #710).
+    #[test]
+    fn a_sync_that_ends_after_the_snapshot_shows_its_end() {
+        let dir = std::env::temp_dir().join(format!("iris-settle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let account = store.add_account("gmail", "a@example.com").unwrap();
+        let row = store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'incremental', 1)",
+                    [account],
+                )?;
+                Ok(tx.last_insert_rowid())
+            })
+            .unwrap();
+        let live = store.sync_run_lock(row).unwrap().unwrap();
+        // The snapshot of a status read: the sync runs.
+        let mut snapshot = status(&store).unwrap().accounts;
+        assert_eq!(snapshot[0].last_sync.as_ref().unwrap().result, None);
+        // The sync ends and drops its lock before the probe.
+        store
+            .write(|tx| {
+                tx.execute(
+                    "UPDATE sync_log SET ended_at = 2, result = 'ok: done' WHERE id = ?1",
+                    [row],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        drop(live);
+        settle_runs(&store, &mut snapshot).unwrap();
+        let run = snapshot[0].last_sync.as_ref().unwrap();
+        assert_eq!(run.result.as_deref(), Some("ok: done"));
+        assert!(run.ended.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_bundle_name_is_canonical_or_no_bundle() {

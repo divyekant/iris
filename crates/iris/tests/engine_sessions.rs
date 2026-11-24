@@ -355,8 +355,222 @@ fn a_done_job_gets_its_workspace_again_after_the_reap() {
         now(),
     )
     .unwrap();
+    // Before the reap, no wake builds the workspace: the agent can still
+    // run (#356).
+    for _ in 0..3 {
+        s.wake(now());
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(marker.exists(), "the build ran before the reap");
+    }
     let row = until(&s, &f, id, |r| r.reaped_ms.is_some());
     assert_eq!(row.end, Some(EndReason::JobState));
+    gone(&marker);
+    appears(&workspace(&f).join("JOB.md"));
+}
+
+fn done_of_the_agent_ends_the_session_and_the_mail_files() {
+    let f = fixture("agentdone", "sleep 30");
+    let s = sessions(&f);
+    let id = s.run(f.job, "script").unwrap();
+    until(&s, &f, id, |r| r.started_ms.is_some());
+    let marker = workspace(&f).join(".iris/marker");
+    fs::write(&marker, "x").unwrap();
+    let v = ask(&f, "done", serde_json::json!({ "why": 7 })).unwrap();
+    assert_eq!(v["code"], 2, "{v}");
+    let v = ask(
+        &f,
+        "done",
+        serde_json::json!({ "why": "Sent the contract." }),
+    )
+    .unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["result"]["state"], "done", "{v}");
+    let job = iris_job::get(&f.store, f.job).unwrap();
+    assert_eq!(job.state, iris_job::State::Done);
+    assert_eq!(job.end, Some(iris_job::End::Complete));
+    let row = until(&s, &f, id, |r| r.reaped_ms.is_some());
+    assert_eq!(row.end, Some(EndReason::JobState));
+    gone(&marker);
+    appears(&workspace(&f).join("JOB.md"));
+}
+
+/// A launch that the finish of the person refuses before the register
+/// leaves no session to reap: the mail files go all the same (#356).
+fn a_launch_refused_for_a_done_job_removes_the_mail_files() {
+    let f = fixture("launchdone", "true");
+    let s = sessions(&f);
+    let marker = workspace(&f).join(".iris/marker");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "x").unwrap();
+    s.wake(now());
+    iris_job::finish(
+        &f.store,
+        f.job,
+        By::Person,
+        iris_job::End::Cancel,
+        None,
+        now(),
+    )
+    .unwrap();
+    assert!(s.run(f.job, "script").is_err());
+    gone(&marker);
+}
+
+/// Issue #502: a failed build of a done workspace is tried again after
+/// 1 minute, counted from the end of the failed try, not only at the next
+/// engine start. One failure gives one wait of 1 minute: a second try
+/// without a pause would make the wait 2 minutes, and the try at 61 s would
+/// not come.
+fn a_failed_build_of_a_done_workspace_is_tried_again_later() {
+    // The build fails: a folder at the lock path of the build.
+    let lock = |dir: &Path| {
+        dir.with_file_name(format!(
+            ".{}.lock",
+            dir.file_name().unwrap().to_str().unwrap()
+        ))
+    };
+    // The job ends with no session: the wake queues the build.
+    let f = fixture("donebuild-retry", "true");
+    let s = sessions(&f);
+    let marker = workspace(&f).join(".iris/marker");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "x").unwrap();
+    fs::create_dir_all(lock(&workspace(&f))).unwrap();
+    iris_job::finish(
+        &f.store,
+        f.job,
+        By::Person,
+        iris_job::End::Cancel,
+        None,
+        now(),
+    )
+    .unwrap();
+    s.wake(now());
+    retried(&s, &marker, || {
+        fs::remove_dir(lock(&workspace(&f))).unwrap()
+    });
+
+    // The job ends with a live session: the reap queues the build, and the
+    // next wake queues no second try.
+    let f = fixture("donebuild-reap", "sleep 30");
+    let s = sessions(&f);
+    let id = s.run(f.job, "script").unwrap();
+    until(&s, &f, id, |r| r.started_ms.is_some());
+    let marker = workspace(&f).join(".iris/marker");
+    fs::write(&marker, "x").unwrap();
+    // The launch left the lock file of its build.
+    let _ = fs::remove_file(lock(&workspace(&f)));
+    fs::create_dir_all(lock(&workspace(&f))).unwrap();
+    let v = ask(&f, "done", serde_json::json!({ "why": "Sent it." })).unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    until(&s, &f, id, |r| r.reaped_ms.is_some());
+    s.wake(now());
+    retried(&s, &marker, || {
+        fs::remove_dir(lock(&workspace(&f))).unwrap()
+    });
+
+    // A check before the build fails (a file in place of the folder of the
+    // workspaces): the same retry.
+    let f = fixture("donebuild-check", "true");
+    let s = sessions(&f);
+    let marker = workspace(&f).join(".iris/marker");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "x").unwrap();
+    let all = f.store.dir().join("workspaces");
+    let away = f.store.dir().join("workspaces.away");
+    fs::rename(&all, &away).unwrap();
+    fs::write(&all, "x").unwrap();
+    iris_job::finish(
+        &f.store,
+        f.job,
+        By::Person,
+        iris_job::End::Cancel,
+        None,
+        now(),
+    )
+    .unwrap();
+    s.wake(now());
+    retried(&s, &marker, || {
+        fs::remove_file(&all).unwrap();
+        fs::rename(&away, &all).unwrap();
+    });
+}
+
+/// A reap of an open job queues a check that finds no build due. A later
+/// finish of the job with no live session still gets its build at the
+/// next wake.
+fn a_done_build_after_a_check_of_the_open_job_still_runs() {
+    let f = fixture("donebuild-open", "sleep 30");
+    let s = sessions(&f);
+    let id = s.run(f.job, "script").unwrap();
+    until(&s, &f, id, |r| r.started_ms.is_some());
+    let _ = s.stop(f.job).unwrap();
+    until(&s, &f, id, |r| r.reaped_ms.is_some());
+    // Let the build thread end the check of the open job.
+    std::thread::sleep(Duration::from_millis(500));
+    let marker = workspace(&f).join(".iris/marker");
+    fs::write(&marker, "x").unwrap();
+    iris_job::finish(
+        &f.store,
+        f.job,
+        By::Person,
+        iris_job::End::Cancel,
+        None,
+        now(),
+    )
+    .unwrap();
+    s.wake(now());
+    gone(&marker);
+}
+
+/// After one failed build: no try 59 s after it, a try 61 s after it.
+/// `fix` removes the cause of the failure before the second try.
+fn retried(s: &Arc<Sessions>, marker: &Path, fix: impl FnOnce()) {
+    // Let the build thread end the failed try.
+    std::thread::sleep(Duration::from_millis(500));
+    fix();
+    assert!(marker.exists(), "the first build failed");
+    s.wake(now() + 59_000);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(marker.exists(), "a try before the wait ended");
+    s.wake(now() + 61_000);
+    gone(marker);
+}
+
+/// The command `iris done` of the agent, in its workspace, completes the
+/// job through the session socket (#356).
+fn the_done_command_of_the_agent_completes_the_job() {
+    let script = format!("{} done --why 'Sent it.'", env!("CARGO_BIN_EXE_iris"));
+    let f = fixture("donecmd", &script);
+    let s = sessions(&f);
+    let id = s.run(f.job, "script").unwrap();
+    let row = until(&s, &f, id, |r| r.reaped_ms.is_some());
+    assert_eq!(row.end, Some(EndReason::JobState), "{row:?}");
+    let job = iris_job::get(&f.store, f.job).unwrap();
+    assert_eq!(job.state, iris_job::State::Done);
+    assert_eq!(job.end, Some(iris_job::End::Complete));
+    let last = iris_job::events(&f.store, f.job).unwrap().pop().unwrap();
+    assert_eq!(last.why.as_deref(), Some("Sent it."));
+}
+
+fn a_job_the_person_ends_with_no_session_gets_its_workspace_again() {
+    let f = fixture("persondone", "true");
+    let s = sessions(&f);
+    let marker = workspace(&f).join(".iris/marker");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "x").unwrap();
+    s.wake(now());
+    assert!(marker.exists(), "a working job keeps its workspace");
+    iris_job::finish(
+        &f.store,
+        f.job,
+        By::Person,
+        iris_job::End::Cancel,
+        None,
+        now(),
+    )
+    .unwrap();
+    s.wake(now());
     gone(&marker);
     appears(&workspace(&f).join("JOB.md"));
 }
@@ -914,6 +1128,41 @@ fn a_job_waits_three_days_and_continues() {
     let _ = s.stop(f.job).unwrap();
 }
 
+/// Issue #557: a start after a wake that fails (the agent left
+/// `agents.toml`) is tried again after 1 minute, not at each wake and not
+/// only at the next engine start.
+fn a_failed_start_after_a_wake_is_tried_again_later() {
+    let f = fixture("wake-retry", "sleep 30");
+    let s = sessions(&f);
+    let (until_day, until_ms) = day(3);
+    let first = s.run(f.job, "script").unwrap();
+    until(&s, &f, first, |r| r.started_ms.is_some());
+    let _ = s.stop(f.job).unwrap();
+    let first = wait(&s, &f, serde_json::json!({ "until": until_day }));
+    let toml = f.store.dir().join("agents.toml");
+    let saved = fs::read_to_string(&toml).unwrap();
+    fs::write(&toml, "").unwrap();
+    s.wake(until_ms);
+    assert_eq!(
+        iris_job::get(&f.store, f.job).unwrap().state,
+        iris_job::State::Working
+    );
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first.id);
+    // The second try at 1 minute fails too: the third waits 2 minutes
+    // more (issue #837).
+    s.wake(until_ms + 59_000);
+    s.wake(until_ms + 60_000);
+    fs::write(&toml, &saved).unwrap();
+    s.wake(until_ms + 179_000);
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first.id);
+    s.wake(until_ms + 180_000);
+    let next = next_session(&s, &f, first.id);
+    // A start that worked is not tried again.
+    s.wake(until_ms + 3_600_000);
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, next.id);
+    let _ = s.stop(f.job).unwrap();
+}
+
 /// The supervisor loop of the engine wakes a job at the end of its wait,
 /// with its own clock.
 fn the_supervisor_loop_wakes_the_job() {
@@ -1371,6 +1620,27 @@ fn a_comment_wakes_a_job_that_waits_after_it() {
     let _ = s.stop(f.job).unwrap();
 }
 
+/// A comment wakes a waiting job, and the start fails (the agent left
+/// `agents.toml`): a later turn makes no second try for the same comment,
+/// also after the backoff of other wakes (issue #557, review-comments spec).
+fn a_failed_start_after_a_comment_wake_is_tried_once() {
+    let (f, s, first, _) = commented("comment-wake-once");
+    let (until_day, _) = day(3);
+    let v = ask(&f, "wait", serde_json::json!({ "until": until_day })).unwrap();
+    assert_eq!(v["result"]["state"], "waiting", "{v}");
+    until(&s, &f, first, |r| r.reaped_ms.is_some());
+    let toml = f.store.dir().join("agents.toml");
+    let saved = fs::read_to_string(&toml).unwrap();
+    fs::write(&toml, "").unwrap();
+    let t = now();
+    s.wake(t);
+    let woke = iris_job::events(&f.store, f.job).unwrap().pop().unwrap();
+    assert_eq!(woke.why.as_deref(), Some("comment"));
+    fs::write(&toml, &saved).unwrap();
+    s.wake(t + 3_600_000);
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first);
+}
+
 /// Set in a child run of this program: the child runs one scenario of
 /// [`the_engine_log_names_bad_notes_at_the_launch_and_the_done_rebuild`].
 const LOG_CHILD: &str = "IRIS_TEST_LOG_CHILD";
@@ -1459,6 +1729,22 @@ fn main() {
             the_engine_log_names_bad_notes_at_the_launch_and_the_done_rebuild,
         ),
         (
+            "done_of_the_agent_ends_the_session_and_the_mail_files",
+            done_of_the_agent_ends_the_session_and_the_mail_files,
+        ),
+        (
+            "the_done_command_of_the_agent_completes_the_job",
+            the_done_command_of_the_agent_completes_the_job,
+        ),
+        (
+            "a_launch_refused_for_a_done_job_removes_the_mail_files",
+            a_launch_refused_for_a_done_job_removes_the_mail_files,
+        ),
+        (
+            "a_job_the_person_ends_with_no_session_gets_its_workspace_again",
+            a_job_the_person_ends_with_no_session_gets_its_workspace_again,
+        ),
+        (
             "a_comment_during_a_session_starts_one_session_after_it",
             a_comment_during_a_session_starts_one_session_after_it,
         ),
@@ -1473,6 +1759,22 @@ fn main() {
         (
             "a_wake_by_the_person_starts_no_session",
             a_wake_by_the_person_starts_no_session,
+        ),
+        (
+            "a_failed_start_after_a_wake_is_tried_again_later",
+            a_failed_start_after_a_wake_is_tried_again_later,
+        ),
+        (
+            "a_failed_build_of_a_done_workspace_is_tried_again_later",
+            a_failed_build_of_a_done_workspace_is_tried_again_later,
+        ),
+        (
+            "a_done_build_after_a_check_of_the_open_job_still_runs",
+            a_done_build_after_a_check_of_the_open_job_still_runs,
+        ),
+        (
+            "a_failed_start_after_a_comment_wake_is_tried_once",
+            a_failed_start_after_a_comment_wake_is_tried_once,
         ),
         (
             "a_failed_start_for_a_comment_is_tried_once",

@@ -450,11 +450,21 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
         Some("add") => {
             only(&["verb", "targets", "args", "why", "changeset"])?;
             let verb = text(args, "verb")?;
-            if session && matches!(verb, Some("draft" | "send" | "nudge")) {
+            // A session drafts only a reply in a granted thread (decision
+            // D3): submit checks the grant. Only a person sends.
+            if session && matches!(verb, Some("send" | "nudge")) {
                 return Err(Failure::new(
                     code::DENIED,
-                    "a session cannot draft, send or nudge: a job has no grant of an \
-                     account or a draft",
+                    "a session cannot send or nudge: only a person sends mail",
+                ));
+            }
+            // A job grants only commitments and records
+            // (iris_workspace::grant_in), so a submit would deny each of these.
+            if session && matches!(verb, Some("skip" | "mute" | "dismiss")) {
+                return Err(Failure::new(
+                    code::DENIED,
+                    "a session cannot skip, mute or dismiss: a job grants no feed, \
+                     conversation or signal item",
                 ));
             }
             let verb = verb
@@ -490,6 +500,62 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
             Ok(Done::Value(
                 json!({ "changeset": format_changeset_id(cs), "n": n }),
             ))
+        }
+        // An agent proposes a matter (docs/specs/2026-11-24-matters-edit.md,
+        // D22). In a session each item must be in the grant of the job, in
+        // the transaction of the write.
+        Some("matters.propose") => {
+            only(&["title", "items"])?;
+            let title = text(args, "title")?.ok_or_else(|| usage("give the title"))?;
+            let ids: Vec<&str> = args["items"]
+                .as_array()
+                .and_then(|t| t.iter().map(Value::as_str).collect())
+                .ok_or_else(|| usage("items must be a list of IDs"))?;
+            let mut items = Vec::with_capacity(ids.len());
+            for id in &ids {
+                items.push(
+                    iris_matters::parse_ref(id)
+                        .ok_or_else(|| usage(format!("{id} is not an item ID of a matter")))?,
+                );
+            }
+            let job = me.job.as_deref().and_then(iris_job::parse_job_id);
+            if session && job.is_none() {
+                return Err(Failure::new(code::ERROR, "the session has no job"));
+            }
+            let now = crate::engine::now_ms();
+            let row = iris_matters::write(store, |tx| {
+                if let Some(job) = job {
+                    let g = iris_workspace::grant_in(tx, job)
+                        .map_err(|e| iris_matters::Error::Model(e.to_string()))?;
+                    for (id, (row, _)) in ids.iter().zip(&items) {
+                        let kind = iris_store::parse_id(id).map(|(k, _)| k);
+                        let granted = g
+                            .item(tx, *row)
+                            .map_err(|e| iris_matters::Error::Model(e.to_string()))?
+                            .is_some_and(|d| {
+                                kind.is_some_and(|k| d["id"] == iris_store::format_id(k, *row))
+                            });
+                        if !granted {
+                            return Err(iris_matters::Error::Denied(format!(
+                                "{id} is not in this job"
+                            )));
+                        }
+                    }
+                }
+                iris_matters::propose_by_agent(tx, title, &items, now)
+            })
+            .map_err(|e| match e {
+                iris_matters::Error::Bad(why) => usage(why),
+                iris_matters::Error::Denied(why) => Failure::new(code::DENIED, why),
+                e => Failure::new(code::ERROR, e.to_string()),
+            })?;
+            // The answer is the matter document only: the member documents
+            // can hold model text from mail outside the grant of a session.
+            let id = iris_store::format_id(Kind::Matter, row);
+            iris_api::matter(store, &id)
+                .map_err(|e| Failure::new(code::ERROR, e.to_string()))?
+                .map(|v| Done::Value(json!({ "matter": v["matter"] })))
+                .ok_or_else(|| Failure::new(code::ERROR, "the new matter is not visible"))
         }
         Some("revise") => {
             only(&["changeset"])?;
@@ -545,6 +611,11 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
             ask(store, me, args).map(Done::Value)
         }
         Some("ask") => Err(usage("ask is a verb of a session")),
+        Some("done") if session => {
+            only(&["why"])?;
+            done(store, me, args).map(Done::Value)
+        }
+        Some("done") => Err(usage("done is a verb of a session")),
         // The read verbs of a session (card R4-04f): only what the grant
         // holds now. The host command reads the store, not the socket.
         Some("search") if session => {
@@ -689,6 +760,29 @@ fn status(store: &Store, me: &Author) -> Result<Value, Failure> {
     }))
 }
 
+/// The end of a wait in milliseconds: a day `YYYY-MM-DD` (its start, UTC),
+/// or an RFC 3339 time with its offset, for example
+/// `2026-11-18T09:30:00-08:00` (issue #556). The parser of the time is
+/// `chrono`. The end has whole seconds: each output of a wait end (the
+/// answer, `job.json`, the job events) writes seconds, so a fraction other
+/// than zero gets an error and the output always shows the stored end.
+pub fn until_ms(text: &str) -> Result<i64, String> {
+    if text.len() == 10 {
+        return iris_store::day_ms(text).map_err(|e| e.to_string());
+    }
+    let ms = chrono::DateTime::parse_from_rfc3339(text)
+        .map(|t| t.timestamp_millis())
+        .map_err(|_| {
+            format!("{text} is not a day YYYY-MM-DD or an RFC 3339 time (2026-11-18T09:30:00Z)")
+        })?;
+    if ms.rem_euclid(1000) != 0 {
+        return Err(format!(
+            "{text} has a fraction of a second: give whole seconds"
+        ));
+    }
+    Ok(ms)
+}
+
 /// `wait` of a session (docs/specs/2026-11-17-wait.md): the job moves to
 /// `waiting`, and the same transaction ends the session with `job_state`.
 /// The reap thread sends this answer before the agent gets a signal.
@@ -703,12 +797,12 @@ fn wait(
         .and_then(iris_job::parse_job_id)
         .ok_or_else(|| Failure::new(code::ERROR, "the session has no job"))?;
     let until = text(args, "until")?
-        .ok_or_else(|| usage("give the end of the wait: --until YYYY-MM-DD"))?;
-    let until_ms = iris_store::day_ms(until).map_err(|e| usage(e.to_string()))?;
+        .ok_or_else(|| usage("give the end of the wait: --until YYYY-MM-DD or an RFC 3339 time"))?;
+    let until_ms = until_ms(until).map_err(usage)?;
     let now = crate::engine::now_ms();
     if until_ms <= now {
         return Err(usage(format!(
-            "{until} is not in the future (the day starts at 00:00 UTC)"
+            "{until} is not in the future (a day starts at 00:00 UTC)"
         )));
     }
     let thread = match text(args, "reply")? {
@@ -767,6 +861,36 @@ fn ask(
         "state": "needs_you",
         "question": question,
     }))
+}
+
+/// `done` of a session: the agent completes its job. The same transaction
+/// ends the session with `job_state`; after the reap, the engine builds the
+/// workspace of the done job, so the mail files go.
+fn done(
+    store: &Store,
+    me: &Author,
+    args: &serde_json::Map<String, Value>,
+) -> Result<Value, Failure> {
+    let job = me
+        .job
+        .as_deref()
+        .and_then(iris_job::parse_job_id)
+        .ok_or_else(|| Failure::new(code::ERROR, "the session has no job"))?;
+    let why = text(args, "why")?;
+    if let Some(w) = why {
+        iris_job::check_text(w, 2000).map_err(usage)?;
+    }
+    let session = me
+        .session
+        .as_deref()
+        .and_then(iris_job::parse_session_id)
+        .ok_or_else(|| Failure::new(code::ERROR, "the session has no ID"))?;
+    let now = crate::engine::now_ms();
+    iris_job::session_done(store, session, job, why, now).map_err(|e| match e {
+        iris_job::Error::Refused(why) => Failure::new(code::DENIED, why),
+        e => Failure::new(code::ERROR, e.to_string()),
+    })?;
+    Ok(json!({ "job": iris_job::format_job_id(job), "state": "done" }))
 }
 
 /// Run `f` on the grant of the job of the session `me` now, in one read of
@@ -975,6 +1099,7 @@ pub fn parse_answer(verb: &str, line: &[u8]) -> Option<Result<Value, Failure>> {
                     .as_array()
                     .is_some_and(|a| a.iter().all(Value::is_string)),
                 "add" => r["changeset"].is_string() && r["n"].is_u64(),
+                "matters.propose" => r["matter"]["id"].is_string(),
                 "job.run" => session_id(r),
                 "job.stop" => session_id(r) && r["reaped"].is_boolean(),
                 "status" => {
@@ -999,6 +1124,10 @@ pub fn parse_answer(verb: &str, line: &[u8]) -> Option<Result<Value, Failure>> {
                     r["job"].as_str().and_then(iris_job::parse_job_id).is_some()
                         && r["state"] == "needs_you"
                         && r["question"].is_string()
+                }
+                "done" => {
+                    r["job"].as_str().and_then(iris_job::parse_job_id).is_some()
+                        && r["state"] == "done"
                 }
                 "search" => all_of(&r["messages"], |m| m["id"].is_string()),
                 "list" => all_of(&r["items"], item),

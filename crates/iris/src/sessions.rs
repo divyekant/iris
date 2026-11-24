@@ -64,21 +64,147 @@ pub struct Sessions {
     stop_marks: Mutex<HashSet<i64>>,
     after: Mutex<Option<Arc<AfterStep>>>,
     /// The wakes (job, last session before the wake) whose session this
-    /// engine tried to start: one try for each wake and engine. After a failed start, the
-    /// person runs `iris job run`.
-    tried: Mutex<HashSet<(i64, i64)>>,
+    /// engine tried to start, with the time of the next try. A start that
+    /// worked is not tried again. A failed start is tried again after
+    /// [`retry_wait`] (issue #557).
+    tried: Mutex<HashMap<(i64, i64), Retry>>,
     /// Each (job, highest pending comment ID) that a review comment tried to
     /// start (R4-08): one try for each new comment and engine, also when the
     /// start fails before a session registers.
     comment_tried: Mutex<HashSet<(i64, i64)>>,
-    /// The done jobs whose workspace the build thread builds again. A
-    /// build can wait for the workspace lock without a limit, so no
+    /// The builds of the workspaces of done jobs. The build thread builds
+    /// them. A build can wait for the workspace lock without a limit, so no
     /// supervisor turn and no stop waits for it.
-    builds: mpsc::Sender<i64>,
+    builds: Arc<DoneBuilds>,
     /// The egress proxies that the stop thread stops. A stop joins the
     /// threads of the proxy, so no supervisor turn and no stop or run
     /// waits for it.
     releases: mpsc::Sender<Proxy>,
+}
+
+/// The builds of the workspaces of done jobs in this engine (issue #502).
+/// Invariant: each job has at most one build queued or running, and a job
+/// whose build failed gets a new try after [`retry_wait`], counted from the
+/// end of the failed try, until one build works.
+struct DoneBuilds {
+    jobs: Mutex<HashMap<i64, Build>>,
+    queue: mpsc::Sender<i64>,
+}
+
+/// The state of the done build of one job.
+enum Build {
+    /// Queued or running. `again`: a reap or a launch asked for one more
+    /// build while this one ran. `fails`: the failed tries before it.
+    Busy { fails: u32, again: bool },
+    /// The last try failed: no try of the wake before `next_ms`.
+    Wait { fails: u32, next_ms: i64 },
+    /// The last try built the workspace, or found that no build is due.
+    Built,
+}
+
+impl DoneBuilds {
+    /// A build after a change (a reap, a launch that ended, the engine
+    /// start). A job that waits after a failed try keeps its wait: the wake
+    /// builds it when the wait ends, so the request is not lost.
+    fn queue(&self, job: i64) {
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        match jobs.get_mut(&job) {
+            Some(Build::Busy { again, .. }) => *again = true,
+            Some(Build::Wait { .. }) => {}
+            _ => self.send(&mut jobs, job, 0),
+        }
+    }
+
+    /// A build of the wake: only a job that this engine did not build yet,
+    /// or whose failed try waited until `now`. The check and the move to
+    /// `Busy` are under one lock, so no failure ends between them.
+    fn due(&self, job: i64, now: i64) {
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        match jobs.get(&job) {
+            None => self.send(&mut jobs, job, 0),
+            Some(&Build::Wait { fails, next_ms }) if now >= next_ms => {
+                self.send(&mut jobs, job, fails)
+            }
+            Some(_) => {}
+        }
+    }
+
+    fn send(&self, jobs: &mut HashMap<i64, Build>, job: i64, fails: u32) {
+        jobs.insert(
+            job,
+            Build::Busy {
+                fails,
+                again: false,
+            },
+        );
+        let _ = self.queue.send(job);
+    }
+
+    /// The end of one try of `job`, at `now`. After a failed try, the job
+    /// waits, also when a request came during the try: the wake serves it
+    /// when the wait ends. After another end, a request that came during
+    /// the try gets one more build.
+    fn ended(&self, job: i64, end: BuildEnd, now: i64) {
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(&Build::Busy { fails, again }) = jobs.get(&job) else {
+            return;
+        };
+        match end {
+            BuildEnd::Failed => {
+                let fails = fails + 1;
+                let next_ms = now.saturating_add(retry_wait(fails));
+                jobs.insert(job, Build::Wait { fails, next_ms });
+            }
+            _ if again => self.send(&mut jobs, job, 0),
+            BuildEnd::Built => {
+                jobs.insert(job, Build::Built);
+            }
+            // The job is not done, or a session of it is live: a later
+            // wake or reap builds it, as a job that this engine never saw.
+            BuildEnd::NotDue => {
+                jobs.remove(&job);
+            }
+        }
+    }
+}
+
+/// The end of one try of [`build_done`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BuildEnd {
+    /// The workspace was built again, or its folder is gone.
+    Built,
+    /// The job is not done, or a session of it is live: no build now.
+    NotDue,
+    /// The build or a check before it failed.
+    Failed,
+}
+
+/// The tries of the start after one wake.
+struct Retry {
+    fails: u32,
+    /// No try before this time. `i64::MAX`: the start worked.
+    next_ms: i64,
+}
+
+/// The last event of the job is the wake of the engine for a review
+/// comment. A failed read counts as one: no retry.
+fn woke_for_comment(store: &Store, job: i64) -> bool {
+    store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT coalesce(why = 'comment' AND by = 'engine', 0) FROM job_event
+                 WHERE job_id = ?1 ORDER BY id DESC LIMIT 1",
+                [job],
+                |r| r.get::<_, bool>(0),
+            )?)
+        })
+        .unwrap_or(true)
+}
+
+/// The wait before the next try of a start after a wake that failed
+/// `fails` times: 1 minute, doubled after each failure, at most 1 hour.
+fn retry_wait(fails: u32) -> i64 {
+    (60_000i64 << fails.saturating_sub(1).min(6)).min(3_600_000)
 }
 
 #[derive(Default)]
@@ -134,14 +260,25 @@ impl Sessions {
                     .map_err(|e| e.to_string())?;
             }
         }
-        let (builds, queue) = mpsc::channel::<i64>();
+        let (tx, queue) = mpsc::channel::<i64>();
+        let builds = Arc::new(DoneBuilds {
+            jobs: Mutex::default(),
+            queue: tx,
+        });
         {
             let store = store.clone();
+            // Weak: the sender in `DoneBuilds` goes with the sessions, so
+            // the channel closes and this thread ends.
+            let builds = Arc::downgrade(&builds);
             std::thread::Builder::new()
                 .name("workspace-builds".into())
                 .spawn(move || {
                     for job in queue {
-                        build_done(&store, job);
+                        let end = build_done(&store, job);
+                        let Some(builds) = builds.upgrade() else {
+                            return;
+                        };
+                        builds.ended(job, end, now_ms());
                     }
                 })
                 .map_err(|e| format!("the build thread did not start: {e}"))?;
@@ -173,8 +310,9 @@ impl Sessions {
             .map(|l| l.job_id)
             .collect();
         for job in iris_job::list(&s.store, iris_job::State::Done).map_err(|e| e.to_string())? {
+            // A job with a live session: its reap queues the build.
             if !live.contains(&job.id) {
-                let _ = s.builds.send(job.id);
+                s.builds.queue(job.id);
             }
         }
         s.remove_old_logs();
@@ -264,6 +402,10 @@ impl Sessions {
             Ok(b) => b,
             Err(e) => {
                 self.launch_over(job);
+                // No session: no reap builds a job that moved to done
+                // during the launch (#356). The build checks the live
+                // sessions again.
+                self.builds.queue(job);
                 return Err(e);
             }
         };
@@ -413,7 +555,7 @@ impl Sessions {
         }
         drop(st);
         if reaped {
-            let _ = self.builds.send(job);
+            self.builds.queue(job);
         }
     }
 
@@ -664,7 +806,7 @@ impl Sessions {
                 }
                 st.left.remove(&session);
                 drop(st);
-                let _ = self.builds.send(job);
+                self.builds.queue(job);
             }
             Err(why) => {
                 st.left.insert(session, why);
@@ -708,6 +850,7 @@ impl Sessions {
             say!("iris: the wake of the waiting jobs failed: {e}");
         }
         self.comment_wake(now);
+        self.done_builds(now);
         let Ok(woken) = iris_job::woken(&self.store) else {
             return;
         };
@@ -715,19 +858,61 @@ impl Sessions {
             if self.live_of(job).is_some() || self.state().launching.contains(&job) {
                 continue;
             }
-            let first = self
-                .tried
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert((job, last));
-            if !first {
-                continue;
+            {
+                let mut tried = self.tried.lock().unwrap_or_else(|e| e.into_inner());
+                let r = tried.entry((job, last)).or_insert(Retry {
+                    fails: 0,
+                    next_ms: now,
+                });
+                if now < r.next_ms {
+                    continue;
+                }
+                r.next_ms = i64::MAX;
             }
             if let Err(e) = self.run(job, &agent) {
+                let id = iris_job::format_job_id(job);
+                // A wake for a review comment gets one try for each comment
+                // (docs/specs/2026-11-17-review-comments.md): the next try
+                // waits for a new comment or `iris job run`.
+                if woke_for_comment(&self.store, job) {
+                    say!("iris: {id}: the session for a review comment did not start: {e}");
+                    continue;
+                }
+                let mut tried = self.tried.lock().unwrap_or_else(|e| e.into_inner());
+                let r = tried.get_mut(&(job, last)).expect("the entry of this try");
+                r.fails += 1;
+                let wait = retry_wait(r.fails);
+                r.next_ms = now.saturating_add(wait);
                 say!(
-                    "iris: {}: the session after the wake did not start: {e}",
-                    iris_job::format_job_id(job)
+                    "iris: {id}: the session after the wake did not start: {e}. Iris tries again in {} minutes.",
+                    wait / 60_000
                 );
+            }
+        }
+    }
+
+    /// One build for each done job that this engine did not build yet and
+    /// that has no live session or launch now: the mail files of its
+    /// workspace go (docs/specs/2026-11-16-job-workspace.md). A job with a
+    /// live session or a launch waits for a later wake.
+    fn done_builds(&self, now: i64) {
+        // Only the IDs: the index `job_state` covers the read.
+        let Ok(done) = self.store.read(|c| {
+            let mut q = c.prepare_cached("SELECT id FROM job WHERE state = 'done'")?;
+            let ids = q.query_map([], |r| r.get::<_, i64>(0))?;
+            Ok(ids.collect::<rusqlite::Result<Vec<i64>>>()?)
+        }) else {
+            return;
+        };
+        // A failed read builds nothing: the next wake reads again.
+        let Ok(live) = iris_job::live_sessions(&self.store) else {
+            return;
+        };
+        for job in done {
+            // A job with a live session or a launch stays for a later wake:
+            // a launch can end with no session, so no reap builds it.
+            if live.iter().all(|s| s.job_id != job) && !self.state().launching.contains(&job) {
+                self.builds.due(job, now);
             }
         }
     }
@@ -809,24 +994,48 @@ impl Sessions {
 
 /// Builds the workspace of `job` again if the job is done and its
 /// workspace folder exists: the mail files go, and the files of the agent
-/// stay. The caller sends only a job with no live session; a done job
-/// gets no new session.
-fn build_done(store: &Store, job: i64) {
+/// stay. A done job gets no new session. The build waits for the reap: with
+/// a live session of the job, or when the read of the live sessions fails,
+/// nothing changes, and the reap of the session queues the job again.
+/// A failed build or check gets a new try of the wake later (issue #502).
+fn build_done(store: &Store, job: i64) -> BuildEnd {
+    let id = iris_job::format_job_id(job);
     let dir = iris_workspace::default_dir(store.dir(), job);
-    let done = iris_job::get(store, job).is_ok_and(|j| j.state == iris_job::State::Done);
-    if !done || std::fs::symlink_metadata(&dir).is_err() {
-        return;
+    let checked = (|| -> Result<Option<BuildEnd>, String> {
+        let j = iris_job::get(store, job).map_err(|e| e.to_string())?;
+        if j.state != iris_job::State::Done {
+            return Ok(Some(BuildEnd::NotDue));
+        }
+        match std::fs::symlink_metadata(&dir) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Some(BuildEnd::Built)),
+            Err(e) => return Err(e.to_string()),
+            Ok(_) => {}
+        }
+        let live = iris_job::live_sessions(store).map_err(|e| e.to_string())?;
+        Ok(live
+            .iter()
+            .any(|s| s.job_id == job)
+            .then_some(BuildEnd::NotDue))
+    })();
+    match checked {
+        Ok(None) => {}
+        Ok(Some(end)) => return end,
+        Err(e) => {
+            say!("iris: {id}: the check before the build of the done job failed: {e}. Iris tries again later.");
+            return BuildEnd::Failed;
+        }
     }
     match iris_workspace::build(store, job, &dir) {
         Ok(b) => {
             if let Some(p) = b.notes {
-                say!("iris: {}: {p}", iris_job::format_job_id(job));
+                say!("iris: {id}: {p}");
             }
+            BuildEnd::Built
         }
-        Err(e) => say!(
-            "iris: {}: the workspace of the done job was not built again: {e}",
-            iris_job::format_job_id(job)
-        ),
+        Err(e) => {
+            say!("iris: {id}: the workspace of the done job was not built again: {e}. Iris tries again later.");
+            BuildEnd::Failed
+        }
     }
 }
 
@@ -882,6 +1091,65 @@ fn egress_identity(session: i64, macos: bool) -> Result<(Ipv4Addr, Option<String
 #[cfg(test)]
 mod egress_tests {
     use super::*;
+
+    /// The wait before each next try: 1, 2, 4, 8, 16 and 32 minutes, then
+    /// 60 minutes for each later try (issues #557, #502, #837).
+    /// The states of a done build (issue #502): one build queued or running
+    /// for each job, and the wait counted from the end of a failed try.
+    #[test]
+    fn a_done_build_has_one_try_at_a_time_and_waits_after_a_failure() {
+        let (tx, rx) = mpsc::channel();
+        let b = DoneBuilds {
+            jobs: Mutex::default(),
+            queue: tx,
+        };
+        let sent = || rx.try_iter().collect::<Vec<i64>>();
+        // A reap and a wake at the same time: one send.
+        b.queue(1);
+        b.due(1, 0);
+        assert_eq!(sent(), [1]);
+        // The try fails at 10 s: no try of the wake before 70 s.
+        b.ended(1, BuildEnd::Failed, 10_000);
+        b.due(1, 69_999);
+        assert_eq!(sent(), Vec::<i64>::new());
+        b.due(1, 70_000);
+        assert_eq!(sent(), [1]);
+        // A reap during a try that fails: the job waits, and the reap
+        // starts no try before the wait ends (2 minutes after 80 s).
+        b.queue(1);
+        assert_eq!(sent(), Vec::<i64>::new());
+        b.ended(1, BuildEnd::Failed, 80_000);
+        assert_eq!(sent(), Vec::<i64>::new());
+        // A reap or a failed launch during the wait: no try either.
+        b.queue(1);
+        b.due(1, 199_999);
+        assert_eq!(sent(), Vec::<i64>::new());
+        b.due(1, 200_000);
+        assert_eq!(sent(), [1]);
+        // A reap during a try that works: one more build after it.
+        b.queue(1);
+        b.ended(1, BuildEnd::Built, 210_000);
+        assert_eq!(sent(), [1]);
+        b.ended(1, BuildEnd::Built, 220_000);
+        b.due(1, i64::MAX);
+        assert_eq!(
+            sent(),
+            Vec::<i64>::new(),
+            "a built job gets no try of the wake"
+        );
+        // A check that finds the job open leaves no state.
+        b.queue(2);
+        b.ended(2, BuildEnd::NotDue, 0);
+        b.due(2, 0);
+        assert_eq!(sent(), [2, 2]);
+    }
+
+    #[test]
+    fn the_retry_wait_doubles_up_to_one_hour() {
+        let minutes: Vec<i64> = (1..=10).map(|f| retry_wait(f) / 60_000).collect();
+        assert_eq!(minutes, [1, 2, 4, 8, 16, 32, 60, 60, 60, 60]);
+        assert_eq!(retry_wait(u32::MAX), 3_600_000);
+    }
 
     #[test]
     fn macos_gets_a_new_token_and_linux_the_session_address() {

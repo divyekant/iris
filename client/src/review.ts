@@ -210,6 +210,7 @@ export function to(d: DraftView): string {
 /** The short words beside a marked part of a draft (option C of card R4-07, the owner's pick). */
 export const TAGS: Record<string, string> = {
   new_recipient: "new address",
+  outside_thread: "not in the thread",
   money: "amount",
   date: "date",
   attachment: "no file attached",
@@ -225,4 +226,10 @@ export const TAGS: Record<string, string> = {
 export function unmarked(a: Action, d: DraftView | undefined): string[] {
   const on = new Set(d?.readable ? [...d.to, ...d.cc, ...d.subject, ...d.body].flatMap((p) => p.flags ?? []) : []);
   return a.flags.filter((f) => !on.has(f)).map((f) => FLAGS[f] ?? f);
+}
+
+/** The line for what a rule would decide in apply mode (decision D10). */
+export function would(w: { outcome: "approved" | "in_review" | "denied"; rule: number }): string {
+  const does = w.outcome === "approved" ? "approve this change" : w.outcome === "denied" ? "deny this change" : "send this change to you";
+  return `In apply mode, rule ${w.rule} would ${does}.`;
 }

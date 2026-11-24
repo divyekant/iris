@@ -5,6 +5,7 @@ import { load, render } from "./render.mjs";
 
 const fx = await load("/dev/fixtures.ts");
 const j = await load("/src/jobs.ts");
+const { access } = await load("/src/access.svelte.ts");
 const { parse, href, NAV, JOB_ID } = await load("/src/route.ts");
 const text = (html) => html.replace(/<!--[^>]*-->/g, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
 
@@ -78,6 +79,26 @@ test("the state now in words", () => {
   assert.equal(j.now({ ...jobs["j-12"], wait: { until: jobs["j-12"].wait.until } }), "Waits, until Wed 18 Nov.");
   assert.equal(j.now(jobs["j-9"]), "Done Fri 13 Nov.");
   assert.equal(j.now({ ...jobs["j-9"], end: "cancel" }), "Cancelled Fri 13 Nov.");
+});
+
+test("a working job with no running session says that no agent works on it, and how to start one (issue 742)", async () => {
+  const d = fx.jobDetails["j-15"];
+  const run = "iris job run --agent claude-code j-15";
+  assert.deepEqual(j.agent(d), { said: "No agent works on it now.", ended: "The last session (se-3, claude-code) ended with exit code 1.", run });
+  assert.deepEqual(j.agent({ ...d, session: null }), { said: "No agent works on it now.", run });
+  const ended = (end, exit = null, state = "ended") => j.agent({ ...d, session: { ...d.session, state, end, exit } }).ended;
+  assert.equal(ended("exit", 0), "The last session (se-3, claude-code) ended.");
+  assert.equal(ended("launch_failed"), "The last session (se-3, claude-code) did not start.");
+  assert.equal(ended("stop"), "The last session (se-3, claude-code) was stopped.");
+  // An ending session is still live: the engine refuses a new one, so no start step.
+  assert.deepEqual(j.agent({ ...d, session: { ...d.session, state: "ending" } }), { said: "No agent works on it now.", ended: "The last session (se-3, claude-code) stops now. When it has stopped, you can start an agent again." });
+  // The start step names the agent of the last session.
+  assert.equal(j.agent({ ...d, session: { ...d.session, agent: "codex" } }).run, "iris job run --agent codex j-15");
+  for (const state of ["starting", "running"]) assert.equal(j.agent({ ...d, session: { ...d.session, state, end: null, exit: null } }), null, state);
+  for (const id of ["j-12", "j-14"]) assert.equal(j.agent({ ...fx.jobDetails[id], session: null }), null, id);
+  const page = text(await render("/src/views/Job.svelte", { detail: d }));
+  for (const words of ["No agent works on it now.", "ended with exit code 1.", run]) assert.ok(page.includes(words), words);
+  assert.ok(!page.includes("The agent works on it."), page);
 });
 
 test("a due date has a tone near its day and after it; an ended job keeps the date with no tone", () => {
@@ -161,4 +182,20 @@ test("an old job that asks you shows first, also behind a full page of newer wor
   const html = text(await render("/src/views/Jobs.svelte", { pages: pages({ working }) }));
   assert.ok(html.indexOf("Pay the Q4 invoice") < html.indexOf("Goal 0."));
   assert.ok(html.includes("Show more"));
+});
+
+test("a job due date counts days in the browser, also when the owner zone differs (issue #892)", () => {
+  // The day of the browser, as the start page picked it: the end of 17 Nov here.
+  const end = new Date(2026, 10, 17, 23, 59);
+  const job = { ...fx.jobs["j-12"], due: end.toISOString() };
+  const now = new Date(2026, 10, 17, 0, 0);
+  const browser = j.due(job, now).text;
+  assert.match(browser, /today$/);
+  const offset = -now.getTimezoneOffset() / 60;
+  access.zone = offset >= 0 ? "Pacific/Kiritimati" : "Etc/GMT+12"; // A zone far from the browser.
+  try {
+    assert.equal(j.due(job, now).text, browser);
+  } finally {
+    access.zone = undefined;
+  }
 });

@@ -223,3 +223,36 @@ test("the fixture gives each new watch its own ID", () => {
   const [, c] = fx.watchPost("/watches", { text: "three" });
   assert.equal(new Set([a.id, b.id, c.id]).size, 3);
 });
+
+// Issue 706: with no answer of the engine, the write can be stored, so the words say that Iris does not know.
+test("a watch write with no answer says that Iris does not know if it happened", async () => {
+  globalThis.fetch = async () => {
+    throw new TypeError("Failed to fetch");
+  };
+  const notice = await mount("/src/views/Arrived.svelte", { watch: arrived(), ondone: () => assert.fail("no answer, no Done") });
+  try {
+    button(notice, "Done").click();
+    await until(() => notice.target.querySelector("[role=alert]"));
+    assert.match(text(notice.target), /Iris does not know if it removed the notice\. Reload the page to see\./);
+  } finally {
+    notice.destroy();
+  }
+  const view = await mount("/src/views/Watches.svelte", { watches: waiting(), onadded: () => assert.fail("no answer, no watch"), onstopped: () => assert.fail("no answer, no stop") });
+  try {
+    view.target.querySelector('button[aria-label^="Stop the watch for"]').click();
+    await until(() => view.target.querySelector("[role=alert]"));
+    assert.match(text(view.target), /Iris does not know if it stopped the watch\./);
+    button(view, "Watch for another mail").click();
+    view.flushSync();
+    const input = view.target.querySelector("input");
+    input.value = "passport from:consulate";
+    input.dispatchEvent(new Event("input"));
+    view.flushSync();
+    button(view, "Watch").click();
+    await until(() => /started the watch/.test(text(view.target)));
+    assert.match(text(view.target), /Iris does not know if it started the watch\. Reload the page to see\./);
+    assert.doesNotMatch(text(view.target), /Try again/);
+  } finally {
+    view.destroy();
+  }
+});

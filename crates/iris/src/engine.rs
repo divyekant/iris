@@ -906,7 +906,7 @@ fn attention_loop(store: Arc<Store>) {
 pub fn attention_turn(
     store: &Store,
     mark: &mut Option<iris_policy::propose::Mark>,
-) -> Vec<iris_policy::notice::Notice> {
+) -> Vec<crate::notify::Shown> {
     // The conversations first: a kind change marks their threads, and
     // the attention reads the items.
     if let Err(e) = iris_understand::store::update_due_talks(store, now_ms()) {
@@ -921,18 +921,38 @@ pub fn attention_turn(
     // Notices by rule (R5-08): the row commits first, so a crash before
     // the system notice still leaves the notice in the web client.
     // The Mac app shows some notices: the engine chooses before the queue.
-    let system = match iris_policy::notice::refresh(store, now_ms()) {
-        Ok(new) => crate::notify::for_system(new, now_ms()),
+    let mut system: Vec<_> = match iris_policy::notice::refresh(store, now_ms()) {
+        Ok(new) => crate::notify::for_system(new, now_ms())
+            .iter()
+            .map(crate::notify::Shown::rule)
+            .collect(),
         Err(e) => {
             say!("iris: notices: {e}");
             Vec::new()
         }
     };
+    // The due date of a job (decision D24): the move to needs you, then one
+    // system notice for each moved job. The jobs page shows the state.
+    match iris_job::move_due(store, now_ms()) {
+        Ok(turn) => {
+            for (job, e) in &turn.failed {
+                say!("iris: due job j-{job}: {e}");
+            }
+            system.extend(turn.moved.iter().map(crate::notify::Shown::job_due));
+        }
+        Err(e) => say!("iris: due jobs: {e}"),
+    }
     // The measure "time to the first brief" ends at the first brief with content.
     if let Err(e) = iris_api::measures::check_brief(store, now_ms()) {
         say!("iris: measures: {e}");
     }
     system
+}
+
+/// Delete the mail of each removed account, with the workspaces of its
+/// jobs: [`iris_api::delete_removed`].
+pub fn delete_removed(store: &Store, only: Option<i64>) -> Result<Option<iris_store::Deleted>> {
+    Ok(iris_api::delete_removed(store, only)?)
 }
 
 /// The schedule: one sync thread for each account, so a long first sync of
@@ -967,8 +987,8 @@ impl Engine {
 
     /// Start a sync thread for each account that has none, open the
     /// deferred commitments whose date came, expire the changeset actions
-    /// 14 days after their submit, check the watches, and run the content cleanup if
-    /// [`CLEAN_EVERY`] passed. So an account that
+    /// 14 days after their submit, check the watches, and run the content cleanup
+    /// and the removal of the grants of ended jobs if [`CLEAN_EVERY`] passed. So an account that
     /// `iris account add` adds or signs in again starts to sync without a
     /// restart. Gives the accounts that got a new thread.
     pub fn tick(&mut self) -> Result<Vec<i64>> {
@@ -1014,6 +1034,11 @@ impl Engine {
                 .map_err(iris_store::Error::Io)?;
             self.attention = Some(handle);
         }
+        // The delete of a removed account continues after a crash or a
+        // held lock.
+        if let Err(e) = delete_removed(&self.store, None) {
+            say!("iris: delete of a removed account: {e}");
+        }
         if let Err(e) = self.store.reopen_deferred(now_ms()) {
             say!("iris: deferred commitments: {e}");
         }
@@ -1040,6 +1065,12 @@ impl Engine {
             self.last_clean = Some(Instant::now());
             if let Err(e) = self.store.clean_gone(now_ms()) {
                 say!("iris: content cleanup: {e}");
+            }
+            // The grants of an ended job match nothing: remove them from
+            // the policy (issue #385). A held lock or a file with a change
+            // to confirm waits for the next pass.
+            if let Err(e) = iris_policy::end_grants(&self.store, now_ms().div_euclid(1000)) {
+                say!("iris: grants of ended jobs: {e}");
             }
         }
         Ok(started)

@@ -88,7 +88,7 @@ test("the routes of the write view", () => {
   assert.ok(route.NAV.some(([link]) => link === "#/write"));
 });
 
-test("a typed address becomes a chip, and Send waits for a valid one", async () => {
+test("a typed address becomes a chip, and Send waits for a valid one and for text", async () => {
   const net = serve(() => [500, {}]);
   const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS } });
   try {
@@ -100,6 +100,12 @@ test("a typed address becomes a chip, and Send waits for a valid one", async () 
     assert.deepEqual(chips.map((c) => c.firstChild.textContent.trim()), ["not-an-address", "sam@okafor.example"]);
     assert.ok(chips[0].classList.contains("bad"));
     type(app.target.querySelector("input.subject"), "Hi");
+    app.flushSync();
+    assert.equal(send().disabled, true, "no text: Send waits (issue 741)");
+    type(app.target.querySelector("textarea"), " \n\t");
+    app.flushSync();
+    assert.equal(send().disabled, true, "only white space: Send waits");
+    type(app.target.querySelector("textarea"), "Hello");
     app.flushSync();
     assert.equal(send().disabled, false);
     chips[1].querySelector("button").click();
@@ -711,5 +717,161 @@ test("a late answer of a left view does not replace the record of a newer write"
   } finally {
     app.destroy();
     globalThis.fetch = saved;
+  }
+});
+
+test("a draft that Iris saved for the thread fills a new reply form, and no other form (issue #743)", async () => {
+  const saved = { thread: "t-2", based_on: "m-9", nudge: false, to: null, item: null, body: "Hi Priya,\n\nYes, Friday at 10." };
+  for (const [name, draft, form, want] of [
+    ["a draft of the shown mail", saved, null, saved.body],
+    ["a draft of an older mail", { ...saved, based_on: "m-8" }, null, ""],
+    ["a nudge", { ...saved, nudge: true, to: "sam@example.com", item: "c-4" }, null, ""],
+    ["a form that the person started", saved, "My own words.", "My own words."],
+  ]) {
+    window.sessionStorage.clear();
+    const net = serve((path, method) => (method === "GET" && path === "threads/t-2/draft" ? [200, draft] : [404, { error: "Not found." }]));
+    if (form) {
+      const first = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+      type(first.target.querySelector("textarea"), form);
+      first.flushSync();
+      first.destroy();
+    }
+    const app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+    try {
+      await until(() => net.asked.some((a) => a.path === "threads/t-2/draft") || form);
+      await new Promise((r) => setTimeout(r, 30));
+      app.flushSync();
+      assert.equal(app.target.querySelector("textarea").value, want, name);
+      assert.equal(!!app.target.querySelector(".saved"), want === saved.body, name);
+    } finally {
+      app.destroy();
+      net.restore();
+    }
+  }
+});
+
+test("an untouched saved form still gets the saved draft, and a late read does not change the form after Write it for me (issue 743)", async () => {
+  const saved = { thread: "t-2", based_on: "m-9", nudge: false, to: null, item: null, body: "Hi Priya,\n\nYes, Friday at 10." };
+  // The person opened the reply, changed nothing and left: the form is saved with no text.
+  let net = serve(() => [404, { error: "Not found." }]);
+  let first = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+  first.flushSync();
+  first.destroy();
+  net.restore();
+  assert.ok(window.sessionStorage.getItem("iris.write.t-2"), "the untouched form is saved");
+  net = serve((path, method) => (method === "GET" && path === "threads/t-2/draft" ? [200, saved] : [404, { error: "Not found." }]));
+  let app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+  try {
+    await until(() => app.target.querySelector("textarea").value === saved.body);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+
+  // The read of the saved draft answers while Write it for me runs: the form does not change, and keeps the new draft.
+  window.sessionStorage.clear();
+  let releaseGet, releasePost;
+  const heldGet = new Promise((r) => (releaseGet = r));
+  const heldPost = new Promise((r) => (releasePost = r));
+  net = serve((path, method) => {
+    if (method === "GET" && path === "threads/t-2/draft") return [200, saved];
+    if (method === "POST" && path === "threads/t-2/draft") return [200, { body: "Hi Priya,\n\nThe new one.", based_on: "m-9", samples: 3, unknown_cost: false, overrun: false }];
+    return [404, { error: "Not found." }];
+  });
+  const fetch = globalThis.fetch;
+  globalThis.fetch = async (...a) => {
+    if (!String(a[0]).endsWith("/draft")) return fetch(...a);
+    await ((a[1]?.method ?? "GET") === "GET" ? heldGet : heldPost);
+    return fetch(...a);
+  };
+  app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+  try {
+    [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Write it for me").click();
+    app.flushSync();
+    releaseGet();
+    await new Promise((r) => setTimeout(r, 30));
+    app.flushSync();
+    assert.equal(app.target.querySelector("textarea").value, "", "the form does not change while Iris writes");
+    releasePost();
+    await until(() => app.target.querySelector("textarea").value.includes("The new one."));
+    assert.equal(app.target.querySelector(".saved"), null);
+  } finally {
+    globalThis.fetch = fetch;
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("a saved form with a changed intent or recipient does not get the saved draft (issue 743)", async () => {
+  const saved = { thread: "t-2", based_on: "m-9", nudge: false, to: null, item: null, body: "Hi Priya,\n\nYes, Friday at 10." };
+  for (const [name, change] of [
+    ["an intent", (app) => type(app.target.querySelector(".intent input"), "no, Monday")],
+    ["a recipient", (app) => {
+      [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Change").click();
+      app.flushSync();
+      type(app.target.querySelector("#write-to"), "sam@example.com ");
+    }],
+  ]) {
+    window.sessionStorage.clear();
+    let net = serve(() => [404, { error: "Not found." }]);
+    const first = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+    // The first view reads the draft too: let that read end before the next engine.
+    await new Promise((r) => setTimeout(r, 20));
+    change(first);
+    first.flushSync();
+    first.destroy();
+    net.restore();
+    net = serve((path, method) => (method === "GET" && path === "threads/t-2/draft" ? [200, saved] : [404, { error: "Not found." }]));
+    const app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+    try {
+      await new Promise((r) => setTimeout(r, 40));
+      app.flushSync();
+      assert.equal(app.target.querySelector("textarea").value, "", name);
+      assert.equal(net.asked.filter((a) => a.path === "threads/t-2/draft").length, 0, `${name}: no read`);
+    } finally {
+      app.destroy();
+      net.restore();
+    }
+  }
+});
+
+test("a change to the intent or a recipient while the saved draft loads keeps the draft out (issue 743)", async () => {
+  const saved = { thread: "t-2", based_on: "m-9", nudge: false, to: null, item: null, body: "Hi Priya,\n\nYes, Friday at 10." };
+  for (const [name, change] of [
+    ["an intent", (app) => type(app.target.querySelector(".intent input"), "no, Monday")],
+    ["a recipient", (app) => {
+      [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Change").click();
+      app.flushSync();
+      type(app.target.querySelector("#write-to"), "sam@example.com ");
+    }],
+    ["open address text", (app) => {
+      [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Change").click();
+      app.flushSync();
+      type(app.target.querySelector("#write-to"), "sam@exa");
+    }],
+  ]) {
+    window.sessionStorage.clear();
+    let release;
+    const held = new Promise((r) => (release = r));
+    const net = serve((path, method) => (method === "GET" && path === "threads/t-2/draft" ? [200, saved] : [404, { error: "Not found." }]));
+    const fetch = globalThis.fetch;
+    globalThis.fetch = async (...a) => {
+      if (String(a[0]).endsWith("/draft")) await held;
+      return fetch(...a);
+    };
+    const app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+    try {
+      change(app);
+      app.flushSync();
+      release();
+      await new Promise((r) => setTimeout(r, 30));
+      app.flushSync();
+      assert.equal(app.target.querySelector("textarea").value, "", name);
+      assert.equal(app.target.querySelector(".saved"), null, name);
+    } finally {
+      globalThis.fetch = fetch;
+      app.destroy();
+      net.restore();
+    }
   }
 });
