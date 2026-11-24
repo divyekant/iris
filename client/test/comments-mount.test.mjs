@@ -221,3 +221,45 @@ test("after an unknown result the comments load again", async () => {
     view.destroy();
   }
 });
+
+// Decision D15: an author with no job reads the comment with the request, so the confirmation does not promise a session.
+test("a comment to an author with no job says when the author reads it", async () => {
+  for (const kind of ["agent", "local"]) {
+    serve((b) => [200, { id: 5, changeset: "cs-9", revision: 2, text: b.text, at: "2026-11-15T09:30:00Z" }]);
+    const view = await mount("/src/views/Request.svelte", { changeset: changeset({ kind, name: "Claude Code" }) });
+    try {
+      await write(view, "Keep the invoices.");
+      const status = await until(() => view.target.querySelector(".comments [role=status]"));
+      assert.match(status.textContent, /Claude Code reads it the next time it looks at this request\./, kind);
+      assert.doesNotMatch(status.textContent, /session|new revision/, kind);
+    } finally {
+      view.destroy();
+    }
+  }
+});
+
+// A closed or withdrawn request with no comments shows no empty Comments part; one with comments keeps them.
+test("an ended request with no comments has no Comments part", async () => {
+  for (const state of ["closed", "withdrawn"]) {
+    for (const author of [job, { kind: "agent", name: "Claude Code" }, { kind: "local", name: "Claude Code" }]) {
+      let asked = false;
+      serve(() => [200, {}], async () => ((asked = true), [200, { comments: [] }]));
+      const view = await mount("/src/views/Request.svelte", { changeset: { ...changeset(author), state } });
+      try {
+        await until(() => asked);
+        await new Promise((r) => setTimeout(r, 50));
+        view.flushSync();
+        assert.equal(view.target.querySelector(".comments"), null, `${state} ${author.kind}`);
+      } finally {
+        view.destroy();
+      }
+      serve(() => [200, {}]);
+      const kept = await mount("/src/views/Request.svelte", { changeset: { ...changeset(author), state } });
+      try {
+        await until(() => kept.target.querySelectorAll(".comments li").length === 1);
+      } finally {
+        kept.destroy();
+      }
+    }
+  }
+});

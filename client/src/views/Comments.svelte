@@ -17,6 +17,9 @@
   // The box opens from one quiet button (option B, the owner's pick).
   let writing = $state(false);
 
+  // When the author reads a comment: each line of copy uses this one text.
+  let reads = $derived(job ? "The agent reads it in its next session and sends a new revision." : `${agent} reads it the next time it looks at this request.`);
+
   // The engine keeps 1 to 4,000 characters (spec section 3).
   const MAX = 4000;
   let path = $derived(`changesets/${encodeURIComponent(c.id)}/comments`);
@@ -65,7 +68,7 @@
       const got = await post<Comment>(path, { revision: c.revision, text: body, key });
       keep([got]);
       text = keyed = "";
-      saved = `Iris gave your comment to ${agent}. The agent reads it in its next session and sends a new revision.`;
+      saved = `Iris gave your comment to ${agent}. ${reads}`;
     } catch (err) {
       const status = (err as { status?: number }).status;
       if (status === 409) {
@@ -104,7 +107,7 @@
     <button type="button" class="quiet" onclick={() => (writing = true)}>Ask {agent} for a change</button>
   {:else if c.state === "open"}
     <form onsubmit={send}>
-      <label class="hint" for={`${c.id}-comment`}>Tell {agent} what to change. {job ? "The agent sends a new revision of this request." : `${agent} reads it the next time it looks at this request.`}</label>
+      <label class="hint" for={`${c.id}-comment`}>Tell {agent} what to change. {job ? "The agent sends a new revision of this request." : reads}</label>
       <textarea id={`${c.id}-comment`} rows="3" bind:value={text} disabled={busy}></textarea>
       <div class="row">
         <button type="submit" class="outline" disabled={!ready}>Send to {agent}</button>
