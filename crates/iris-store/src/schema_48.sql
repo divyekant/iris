@@ -1,7 +1,7 @@
 -- Migration 48: who withdrew a changeset (decision D16, issue #221).
 -- 'author': the author of the changeset withdrew it. 'person': you withdrew
 -- it. NULL on a changeset that is not withdrawn, and on a changeset that a
--- version before migration 47 withdrew (the actor is not known).
+-- version before migration 48 withdrew (the actor is not known).
 ALTER TABLE changeset ADD COLUMN withdrawn_by TEXT
   CHECK (withdrawn_by IN ('author', 'person'));
 
