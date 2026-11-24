@@ -93,6 +93,21 @@ struct Retry {
     next_ms: i64,
 }
 
+/// The last event of the job is the wake of the engine for a review
+/// comment. A failed read counts as one: no retry.
+fn woke_for_comment(store: &Store, job: i64) -> bool {
+    store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT coalesce(why = 'comment' AND by = 'engine', 0) FROM job_event
+                 WHERE job_id = ?1 ORDER BY id DESC LIMIT 1",
+                [job],
+                |r| r.get::<_, bool>(0),
+            )?)
+        })
+        .unwrap_or(true)
+}
+
 /// The wait before the next try of a start after a wake that failed
 /// `fails` times: 1 minute, doubled after each failure, at most 1 hour.
 fn retry_wait(fails: u32) -> i64 {
@@ -754,14 +769,21 @@ impl Sessions {
                 r.next_ms = i64::MAX;
             }
             if let Err(e) = self.run(job, &agent) {
+                let id = iris_job::format_job_id(job);
+                // A wake for a review comment gets one try for each comment
+                // (docs/specs/2026-11-17-review-comments.md): the next try
+                // waits for a new comment or `iris job run`.
+                if woke_for_comment(&self.store, job) {
+                    say!("iris: {id}: the session for a review comment did not start: {e}");
+                    continue;
+                }
                 let mut tried = self.tried.lock().unwrap_or_else(|e| e.into_inner());
                 let r = tried.get_mut(&(job, last)).expect("the entry of this try");
                 r.fails += 1;
                 let wait = retry_wait(r.fails);
                 r.next_ms = now.saturating_add(wait);
                 say!(
-                    "iris: {}: the session after the wake did not start: {e}. Iris tries again in {} minutes.",
-                    iris_job::format_job_id(job),
+                    "iris: {id}: the session after the wake did not start: {e}. Iris tries again in {} minutes.",
                     wait / 60_000
                 );
             }
