@@ -1077,18 +1077,18 @@ async fn post_account_remove(
         .parse::<i64>()
         .map_err(|_| Error::Query(format!("not an account ID: {id}")))?;
     let address: Option<String> = s.read(|c| {
-        Ok(c.query_row(
-            "SELECT address FROM account WHERE id = ?1",
-            [row],
-            |r| r.get(0),
+        Ok(
+            c.query_row("SELECT address FROM account WHERE id = ?1", [row], |r| {
+                r.get(0)
+            })
+            .map_or_else(
+                |e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    e => Err(e),
+                },
+                |a| Ok(Some(a)),
+            )?,
         )
-        .map_or_else(
-            |e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                e => Err(e),
-            },
-            |a| Ok(Some(a)),
-        )?)
     })?;
     if address.as_deref() != Some(b.address.as_str()) {
         return Err(Error::Query(
@@ -1097,7 +1097,8 @@ async fn post_account_remove(
     }
     let task = s.clone();
     tokio::task::spawn_blocking(move || {
-        let id = task.remove_account(&b.address, now_ms())
+        let id = task
+            .remove_account(&b.address, now_ms())
             .map_err(|e| match e {
                 iris_store::Error::Account(why) => Error::Conflict(why.into()),
                 e => e.into(),

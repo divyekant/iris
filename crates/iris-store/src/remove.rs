@@ -238,7 +238,9 @@ impl Store {
                    AND NOT EXISTS (SELECT 1 FROM job_session s
                                    WHERE s.job_id = w.job_id AND s.reaped_at IS NULL)",
             )?;
-            let ids = q.query_map([account], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            let ids = q
+                .query_map([account], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
             Ok(ids)
         })?;
         for job in jobs {
@@ -252,7 +254,9 @@ impl Store {
             // Items that cite mail of the account from another account.
             delete_items(&tx, account)?;
             let batch: Vec<(i64, Option<String>)> = tx
-                .prepare_cached("SELECT id, content_sha256 FROM message WHERE account_id = ?1 LIMIT ?2")?
+                .prepare_cached(
+                    "SELECT id, content_sha256 FROM message WHERE account_id = ?1 LIMIT ?2",
+                )?
                 .query_map(params![account, BATCH], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?;
             for (id, _) in &batch {
@@ -308,7 +312,12 @@ impl Store {
             // The deleted pages leave the write-ahead log. A busy checkpoint
             // (a reader) keeps the state, so the next call tries again. A
             // waiting call tries for CHECKPOINT_WAIT.
-            let deadline = Instant::now() + if wait { CHECKPOINT_WAIT } else { Duration::ZERO };
+            let deadline = Instant::now()
+                + if wait {
+                    CHECKPOINT_WAIT
+                } else {
+                    Duration::ZERO
+                };
             let busy = loop {
                 let busy: i64 =
                     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
@@ -362,9 +371,18 @@ fn end(c: &Connection, account: i64) -> Result<()> {
            AND NOT EXISTS (SELECT 1 FROM sender_evidence e WHERE e.address = lower(sender.address))",
         [account],
     )?;
-    c.execute("DELETE FROM removed_sender WHERE account_id = ?1", [account])?;
-    c.execute("DELETE FROM removed_workspace WHERE account_id = ?1", [account])?;
-    c.execute("INSERT INTO message_fts(message_fts) VALUES ('optimize')", [])?;
+    c.execute(
+        "DELETE FROM removed_sender WHERE account_id = ?1",
+        [account],
+    )?;
+    c.execute(
+        "DELETE FROM removed_workspace WHERE account_id = ?1",
+        [account],
+    )?;
+    c.execute(
+        "INSERT INTO message_fts(message_fts) VALUES ('optimize')",
+        [],
+    )?;
     Ok(())
 }
 

@@ -1027,7 +1027,10 @@ fn a_removed_account_gives_no_mail_to_a_workspace() {
     assert!(ws.join("drafts").is_dir());
     // The notes are the record: the build saved them first, then wrote the
     // copy of the store back.
-    assert_eq!(fs::read_to_string(ws.join("notes.md")).unwrap(), "AGENT-NOTE");
+    assert_eq!(
+        fs::read_to_string(ws.join("notes.md")).unwrap(),
+        "AGENT-NOTE"
+    );
 
     // A notes file that the save refuses (too large) stays, with its text.
     let big = format!("BIG-NOTE {}", "x".repeat(70_000));
@@ -1044,5 +1047,8 @@ fn a_removed_account_gives_no_mail_to_a_workspace() {
         .write(|tx| Ok(tx.execute("DELETE FROM removed_workspace", [])?))
         .unwrap();
     build(&store, job, &ws).unwrap();
-    assert_eq!(fs::read_to_string(ws.join("drafts/reply.md")).unwrap(), "AGENT-DRAFT");
+    assert_eq!(
+        fs::read_to_string(ws.join("drafts/reply.md")).unwrap(),
+        "AGENT-DRAFT"
+    );
 }

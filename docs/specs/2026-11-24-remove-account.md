@@ -109,7 +109,11 @@ holds no sign-in and no sync state. Reasons:
 5. Write one row in the new table `removed_workspace(account_id, job_id)`
    for each job whose scope has mail of the account: a scope thread of the
    account, a scope item of the account, or a listed message
-   (`job_scope_message`) of the account. After step 6 and the delete, no
+   (`job_scope_message`) of the account. A scope row whose thread, item or
+   listed message is gone (an item that changed, a message that
+   `clean_gone` deleted) counts too, for each removal: the store keeps no
+   account for the gone row, and the workspace can still hold its mail.
+   After step 6 and the delete, no
    other row links the job to the account. So the delete and each build of
    the workspace read this table, also after a crash.
 6. Delete the items of the account (step "items" below), so the brief is
@@ -226,8 +230,12 @@ for each batch:
    does step 7 and the checkpoint again. The write of the
    state adds only the page of the account row to the log.
 
-The engine calls `delete_removed` on each tick. The command and the API call
-it once at once after the removal. So the delete continues after a crash or
+The engine calls `delete_removed` on each tick, for each account in state
+`removing`, and skips a held lock. The command and the API call it once at
+once after the removal, for their own account only (`only = Some(id)`): the
+call waits for the locks of that account, and its counts are of that
+account. An account of an earlier removal that waits for its delete does
+not hold up a new removal. So the delete continues after a crash or
 a stop, with no new step by the person.
 
 ### What stays

@@ -48,13 +48,26 @@ fn the_delete_keeps_each_sender_kind_that_the_evidence_of_another_account_suppor
     let mut all = Vec::new();
     for (acc, list) in [
         // Account a: sent mail to Dana and Eve, and mail from Dana.
-        (a, vec![("1", "SENT", "a@example.org", "dana@example.com,eve@example.com"),
-                 ("2", "INBOX", "dana@example.com", "a@example.org")]),
+        (
+            a,
+            vec![
+                (
+                    "1",
+                    "SENT",
+                    "a@example.org",
+                    "dana@example.com,eve@example.com",
+                ),
+                ("2", "INBOX", "dana@example.com", "a@example.org"),
+            ],
+        ),
         // Account b: sent mail to Dana only.
         (b, vec![("1", "SENT", "b@example.org", "dana@example.com")]),
     ] {
         store
-            .put_labels(acc, &[("INBOX", "INBOX", "system"), ("SENT", "SENT", "system")])
+            .put_labels(
+                acc,
+                &[("INBOX", "INBOX", "system"), ("SENT", "SENT", "system")],
+            )
             .unwrap();
         let (msgs, raws): (Vec<_>, Vec<_>) = list
             .iter()
@@ -72,16 +85,28 @@ fn the_delete_keeps_each_sender_kind_that_the_evidence_of_another_account_suppor
         })
         .unwrap();
     let before = senders(&store);
-    assert!(before.contains(&("dana@example.com".into(), "person".into())), "{before:?}");
-    assert!(before.contains(&("eve@example.com".into(), "person".into())), "{before:?}");
+    assert!(
+        before.contains(&("dana@example.com".into(), "person".into())),
+        "{before:?}"
+    );
+    assert!(
+        before.contains(&("eve@example.com".into(), "person".into())),
+        "{before:?}"
+    );
 
     store.remove_account("a@example.org", NOW).unwrap();
     iris_api::delete_removed(&store, Some(a)).unwrap().unwrap();
     let after = senders(&store);
     // Dana stays a person: account b sent mail to Dana. Eve was known only
     // through the mail of account a, so the row goes.
-    assert!(after.contains(&("dana@example.com".into(), "person".into())), "{after:?}");
-    assert!(!after.iter().any(|(a, _)| a == "eve@example.com"), "{after:?}");
+    assert!(
+        after.contains(&("dana@example.com".into(), "person".into())),
+        "{after:?}"
+    );
+    assert!(
+        !after.iter().any(|(a, _)| a == "eve@example.com"),
+        "{after:?}"
+    );
     // A new refresh changes nothing: the rows agree with the evidence.
     store
         .write(|tx| Ok(iris_senders::refresh(tx, NOW + 1)?))

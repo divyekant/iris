@@ -1850,14 +1850,23 @@ async fn the_brief_shows_the_items_of_each_account() {
     // The delete derives each engine sender kind again from the evidence
     // that stays. This test has no evidence rows, so Dana is a decision of
     // the person, which no refresh changes.
-    exec(&store, "UPDATE sender SET decided_by = 'person' WHERE ?1", [1]);
+    exec(
+        &store,
+        "UPDATE sender SET decided_by = 'person' WHERE ?1",
+        [1],
+    );
     // The route refuses an address that is not the address of the ID.
     let uri = format!("/api/accounts/a-{second}/remove");
     for (address, code) in [("owner@example.com", 400), ("other@example.com", 400)] {
         let (got, _) = post(&store, &uri, json!({ "address": address })).await;
         assert_eq!(got.as_u16(), code, "{address}");
     }
-    let (got, _) = post(&store, "/api/accounts/a-x/remove", json!({ "address": "x" })).await;
+    let (got, _) = post(
+        &store,
+        "/api/accounts/a-x/remove",
+        json!({ "address": "x" }),
+    )
+    .await;
     assert_eq!(got, StatusCode::BAD_REQUEST);
     let (_, status) = get(&store, "/api/status").await;
     assert_eq!(status["accounts"].as_array().unwrap().len(), 2);
@@ -1885,7 +1894,10 @@ async fn post(store: &Arc<Store>, uri: &str, body: Value) -> (StatusCode, Value)
         .header("content-type", "application/json")
         .body(Body::from(body.to_string()))
         .unwrap();
-    let res = iris_api::router(store.clone(), auth()).oneshot(req).await.unwrap();
+    let res = iris_api::router(store.clone(), auth())
+        .oneshot(req)
+        .await
+        .unwrap();
     let code = res.status();
     let body = to_bytes(res.into_body(), 64 << 20).await.unwrap();
     (code, serde_json::from_slice(&body).unwrap_or(Value::Null))

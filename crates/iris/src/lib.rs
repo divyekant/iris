@@ -2417,7 +2417,13 @@ fn account_remove(store: &Store, address: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     let done = engine::delete_removed(store, Some(id)).map_err(|e| e.to_string())?;
     let state: Option<String> = store
-        .read(|c| Ok(c.query_row("SELECT state FROM account WHERE id = ?1", [id], |r| r.get(0))?))
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT state FROM account WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
         .map_err(|e| e.to_string())?;
     let first = if state.as_deref() == Some(iris_store::STATE_REMOVED) {
         format!(
@@ -2435,7 +2441,6 @@ fn account_remove(store: &Store, address: &str) -> Result<String, String> {
 /// a script with no terminal does not turn sending on by mistake.
 /// `terminal` is true when standard input is a terminal: a script or an
 /// agent without a terminal cannot turn sending on.
-
 fn sending_on_confirm(terminal: bool, input: &mut impl BufRead) -> Result<(), String> {
     if !terminal {
         return Err("`iris sending on` needs a terminal: standard input is not a TTY".into());
@@ -2548,7 +2553,13 @@ mod outbox_tests {
         }
         // The question says what stays before the removal (spec, "Command").
         let q = remove_question(a);
-        for word in ["backup copy", "iris.db.v*.bak", "notes of jobs", "files of agents", "provider does not change"] {
+        for word in [
+            "backup copy",
+            "iris.db.v*.bak",
+            "notes of jobs",
+            "files of agents",
+            "provider does not change",
+        ] {
             assert!(q.contains(word), "{word}: {q}");
         }
     }

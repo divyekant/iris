@@ -110,8 +110,8 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 
 pub use backup::{BackupLock, Cleaned, PolicyExpect, PolicyWrite, GONE_KEEP_MS};
 pub use content::ContentWriter;
-pub use remove::{Deleted, STATE_REMOVED, STATE_REMOVING};
 pub use file_lock::{FileLock, Probe};
+pub use remove::{Deleted, STATE_REMOVED, STATE_REMOVING};
 
 /// The result of a `sync_log` row whose process ended before the sync
 /// ended (issue #710).
