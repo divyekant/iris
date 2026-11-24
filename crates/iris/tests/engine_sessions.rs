@@ -1007,6 +1007,38 @@ fn a_job_waits_three_days_and_continues() {
     let _ = s.stop(f.job).unwrap();
 }
 
+/// Issue #557: a start after a wake that fails (the agent left
+/// `agents.toml`) is tried again after 1 minute, not at each wake and not
+/// only at the next engine start.
+fn a_failed_start_after_a_wake_is_tried_again_later() {
+    let f = fixture("wake-retry", "sleep 30");
+    let s = sessions(&f);
+    let (until_day, until_ms) = day(3);
+    let first = s.run(f.job, "script").unwrap();
+    until(&s, &f, first, |r| r.started_ms.is_some());
+    let _ = s.stop(f.job).unwrap();
+    let first = wait(&s, &f, serde_json::json!({ "until": until_day }));
+    let toml = f.store.dir().join("agents.toml");
+    let saved = fs::read_to_string(&toml).unwrap();
+    fs::write(&toml, "").unwrap();
+    s.wake(until_ms);
+    assert_eq!(
+        iris_job::get(&f.store, f.job).unwrap().state,
+        iris_job::State::Working
+    );
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first.id);
+    fs::write(&toml, &saved).unwrap();
+    // The agent is back, but the next try waits 1 minute.
+    s.wake(until_ms + 59_000);
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first.id);
+    s.wake(until_ms + 60_000);
+    let next = next_session(&s, &f, first.id);
+    // A start that worked is not tried again.
+    s.wake(until_ms + 3_600_000);
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, next.id);
+    let _ = s.stop(f.job).unwrap();
+}
+
 /// The supervisor loop of the engine wakes a job at the end of its wait,
 /// with its own clock.
 fn the_supervisor_loop_wakes_the_job() {
@@ -1582,6 +1614,10 @@ fn main() {
         (
             "a_wake_by_the_person_starts_no_session",
             a_wake_by_the_person_starts_no_session,
+        ),
+        (
+            "a_failed_start_after_a_wake_is_tried_again_later",
+            a_failed_start_after_a_wake_is_tried_again_later,
         ),
         (
             "a_failed_start_for_a_comment_is_tried_once",
