@@ -456,14 +456,16 @@ impl Store {
     /// Take one place of [`MAX_SPOOLS`], or give an error if none is free.
     fn spool_slot(&self) -> Result<SpoolSlot<'_>> {
         use std::sync::atomic::Ordering::SeqCst;
-        let slot = SpoolSlot(&self.spools);
-        if self.spools.fetch_add(1, SeqCst) >= MAX_SPOOLS {
-            // The drop of `slot` gives the place back.
-            return Err(Error::Io(io::Error::other(
-                "too many answers are open at the same time; try again",
-            )));
-        }
-        Ok(slot)
+        // A refused request leaves the count as it is, so the count is
+        // always the number of slots held (#823).
+        self.spools
+            .try_update(SeqCst, SeqCst, |n| (n < MAX_SPOOLS).then_some(n + 1))
+            .map(|_| SpoolSlot(&self.spools))
+            .map_err(|_| {
+                Error::Io(io::Error::other(
+                    "too many answers are open at the same time; try again",
+                ))
+            })
     }
 
     /// A new file in the data folder (mode 0700) with no name: the open file
@@ -936,4 +938,40 @@ pub fn stopped(conn: &Connection) -> Result<Option<i64>> {
             r.get(0)
         })?,
     )
+}
+
+#[cfg(test)]
+mod spool_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+
+    /// Invariant (#823): the spool count is never more than the slots
+    /// held, also while refused requests run at the same time.
+    #[test]
+    fn a_refused_request_does_not_change_the_spool_count() {
+        let dir = std::env::temp_dir().join(format!("iris-spool-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let s = Store::open(&dir).unwrap();
+        let held: Vec<_> = (0..MAX_SPOOLS).map(|_| s.spool_slot().unwrap()).collect();
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|t| {
+            for _ in 0..4 {
+                t.spawn(|| {
+                    let mut accepted = 0;
+                    while !stop.load(SeqCst) {
+                        accepted += usize::from(s.spool_slot().is_ok());
+                    }
+                    assert_eq!(accepted, 0);
+                });
+            }
+            let most = (0..200_000).map(|_| s.spools.load(SeqCst)).max();
+            stop.store(true, SeqCst);
+            assert_eq!(most, Some(MAX_SPOOLS));
+        });
+        drop(held);
+        assert_eq!(s.spools.load(SeqCst), 0);
+        assert!(s.spool_slot().is_ok());
+        drop(s);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
