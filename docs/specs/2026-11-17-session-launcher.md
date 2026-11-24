@@ -474,6 +474,10 @@ machine.
   removes `sessions/` logs older than 30 days.
 - After the reap of a session of a done job, the engine builds the
   workspace of the job the same way.
+- While the engine runs, the supervisor wake also builds each done job
+  that this engine did not build yet and that has no live session and no
+  launch (a job that the person ended with no session), and a launch that
+  fails before its register builds its job (#356).
 - One build thread of the engine does these builds, in order. A build can
   wait for the workspace lock with no limit, so no supervisor turn, stop
   or run waits for a build.
@@ -763,8 +767,9 @@ exit code 3.
   code 4. `--data` has no effect in session mode. The command refuses
   each verb that is not a session verb with exit code 3, and sends
   nothing. The session verbs are `status`, the read verbs `search`,
-  `show` and `list` (R4-04f), and the write verbs `add`, `submit`, `show`
-  of a changeset, `withdraw` and `revise` (R4-03). So
+  `show` and `list` (R4-04f), the write verbs `add`, `submit`, `show`
+  of a changeset, `withdraw` and `revise` (R4-03), and the job verbs
+  `wait` (R5-04), `ask` (R5-05) and `done` (#356). So
   `iris changeset --drafts` gets code 3. `iris list [<form>]` is a verb of a
   session only: in host mode it gets exit code 2.
 

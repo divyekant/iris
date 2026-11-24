@@ -336,6 +336,24 @@ pub fn session_ask(
     })
 }
 
+/// `done` of a session: in one write transaction, a check that `session`
+/// of `job` is still open, then the move of the job to `done` with the end
+/// `complete` by the agent. The trigger of migration 21 ends the session
+/// with `job_state` in the same transaction. A session that a revoke or a
+/// stop ended is refused, and nothing changes.
+pub fn session_done(
+    store: &Store,
+    session: i64,
+    job: i64,
+    why: Option<&str>,
+    now_ms: i64,
+) -> Result<()> {
+    transaction(store, |c| {
+        open_in(c, session, job)?;
+        finish_in(c, job, By::Agent, End::Complete, why, now_ms)
+    })
+}
+
 /// The agent asks the person one question. The time of the question is
 /// `now_ms`, or 1 ms after the newest event of the job if that is later.
 pub fn ask(store: &Store, job: i64, question: &str, why: Option<&str>, now_ms: i64) -> Result<()> {
@@ -467,7 +485,11 @@ pub fn finish_in(
         why,
         ..Move::default()
     };
-    add_event(c, job, State::Done, by, m, now_ms)
+    // The end is never before the newest event: an ask can set the time of
+    // the job 1 ms after the clock, an answer keeps it, and a clock can go
+    // back. The move to `done` must not fail for that (#356).
+    let at = now_ms.max(get_in(c, job)?.updated_ms);
+    add_event(c, job, State::Done, by, m, at)
 }
 
 const JOB_COLUMNS: &str =

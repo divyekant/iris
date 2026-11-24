@@ -263,6 +263,32 @@ impl Report {
     }
 }
 
+/// The pair score of a grouping (issue #290, matters): each pair of members
+/// of one group is one answer. `expected` counts the pairs of `truth`,
+/// `answered` the pairs of `got`, and `correct` the pairs in both. A member
+/// in two groups of one side counts each of its pairs once.
+pub fn pair_scores<T: Ord>(truth: &[Vec<T>], got: &[Vec<T>]) -> Count {
+    fn pairs<T: Ord>(groups: &[Vec<T>]) -> std::collections::BTreeSet<(&T, &T)> {
+        let mut out = std::collections::BTreeSet::new();
+        for g in groups {
+            for (i, a) in g.iter().enumerate() {
+                for b in &g[i + 1..] {
+                    if a != b {
+                        out.insert(if a < b { (a, b) } else { (b, a) });
+                    }
+                }
+            }
+        }
+        out
+    }
+    let (want, have) = (pairs(truth), pairs(got));
+    Count {
+        correct: have.intersection(&want).count(),
+        answered: have.len(),
+        expected: want.len(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,6 +377,19 @@ mod tests {
         assert!(r
             .text()
             .contains(&format!("Under target: {}", failures.len())));
+    }
+
+    #[test]
+    fn pair_scores_count_each_pair_once() {
+        // Truth {1,2,3} {4,5}; got {1,2} {3,4} {5}: one right pair of 2.
+        let s = pair_scores(
+            &[vec![1, 2, 3], vec![4, 5]],
+            &[vec![1, 2], vec![3, 4], vec![5]],
+        );
+        assert_eq!((s.correct, s.answered, s.expected), (1, 2, 4));
+        // Order and repeats do not count.
+        let s = pair_scores(&[vec![2, 1]], &[vec![1, 2, 2], vec![2, 1]]);
+        assert_eq!((s.correct, s.answered, s.expected), (1, 1, 1));
     }
 
     #[test]

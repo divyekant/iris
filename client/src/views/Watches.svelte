@@ -3,7 +3,7 @@
   ring without a center marks a watch that waits. The Arrived card fills the ring.
 -->
 <script lang="ts">
-  import { own } from "../api";
+  import { wrote } from "../api";
   import { addWatch, day, removeWatch, type Watch } from "../watches";
 
   // `onadded` gets the new watch, or null when the engine gave none (an older engine).
@@ -30,7 +30,7 @@
       adding = false;
       onadded(w?.id ? w : null);
     } catch (e) {
-      error = own(e) || "Iris could not start the watch. Try again.";
+      error = wrote(e, "started the watch", "Iris could not start the watch. Try again.");
     } finally {
       busy = false;
     }
@@ -44,7 +44,7 @@
       onstopped(id);
     } catch (e) {
       if ((e as { status?: number }).status === 404) onstopped(id);
-      else error = own(e) || "Iris could not stop the watch. Try again.";
+      else error = wrote(e, "stopped the watch", "Iris could not stop the watch. Try again.");
     } finally {
       busy = false;
     }

@@ -318,10 +318,10 @@ async fn the_drafts_stream_one_at_a_time_and_name_a_flag_with_no_mark() {
 }
 
 /// Spec R4-06: a marked author (an agent with no job) writes a new mail,
-/// so it gets `outside_thread`. The flag has no mark on a field: it is in
-/// `unmarked`, and the review shows it in words.
+/// so it gets `outside_thread`. The flag marks each address that is not in
+/// the thread (issue 462); your own address has no mark.
 #[tokio::test]
-async fn outside_thread_is_a_flag_with_no_mark() {
+async fn outside_thread_marks_each_outside_address() {
     let dir = temp("outside");
     let s = store(&dir);
     let cs = create(&s, &agent(), NOW).unwrap();
@@ -335,6 +335,11 @@ async fn outside_thread_is_a_flag_with_no_mark() {
     let (code, v) = get(&s, &format!("/api/changesets/cs-{cs}/drafts")).await;
     assert_eq!(code, StatusCode::OK, "{v}");
     let d = &v["drafts"][0];
-    assert_eq!(d["to"], json!([{"address": "dana@acme.example"}]), "{v}");
-    assert_eq!(d["unmarked"], json!(["outside_thread"]), "{v}");
+    assert_eq!(
+        d["to"],
+        json!([{"address": "dana@acme.example", "flags": ["outside_thread"]}]),
+        "{v}"
+    );
+    assert_eq!(d["cc"], json!([{"address": OWNER}]), "{v}");
+    assert_eq!(d["unmarked"], json!([]), "{v}");
 }

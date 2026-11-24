@@ -364,10 +364,13 @@ pub(crate) fn message_in(c: &Connection, row: i64) -> rusqlite::Result<Option<Me
         return Ok(None);
     };
     more.sender_kind = sender_kind(c, summary.from.address.as_deref())?;
-    let mut st = c.prepare_cached(
+    // The same items as `GET /api/items/{id}` shows: none of hostile mail.
+    let mut st = c.prepare_cached(concat!(
         "SELECT i.id, i.form FROM item_source s JOIN item i ON i.id = s.item_id
-         WHERE s.message_id = ?1 AND i.status != 'gone' ORDER BY i.id",
-    )?;
+         WHERE s.message_id = ?1 AND i.status != 'gone' AND NOT ",
+        iris_store::from_hostile_mail!("i"),
+        " ORDER BY i.id"
+    ))?;
     let items = st
         .query_map([row], |r| Ok(item_id(r.get(0)?, &r.get::<_, String>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -397,6 +400,7 @@ pub fn raw(store: &Store, id: &str) -> Result<Option<PathBuf>> {
 }
 
 /// One item by its ID (`c-`, `v-`, `r-`, `f-` or `s-`), also when it is gone.
+/// An item that comes from hostile mail is not there (issue 112).
 pub fn item(store: &Store, id: &str) -> Result<Option<Value>> {
     let (kind, row) = parse_id(id).ok_or_else(|| bad_id(id))?;
     let form = FORMS
@@ -407,7 +411,8 @@ pub fn item(store: &Store, id: &str) -> Result<Option<Value>> {
     Ok(store.read(|c| {
         Ok(c.query_row(
             &format!(
-                "SELECT id, form, status, doc, {MATTER} FROM item WHERE id = ?1 AND form = ?2"
+                "SELECT id, form, status, doc, {MATTER} FROM item
+                 WHERE id = ?1 AND form = ?2 AND NOT {FROM_HOSTILE}"
             ),
             params![row, form],
             doc_of,
@@ -472,6 +477,7 @@ pub fn items(store: &Store, filter: &Filter, limit: u32) -> Result<Page> {
              WHERE (?1 IS NULL OR form = ?1)
                AND (status = ?2 OR (?2 IS NULL AND status != 'gone'))
                AND (?3 IS NULL OR json_extract(doc, '$.type') = ?3)
+               AND NOT {FROM_HOSTILE}
                AND (?4 IS NULL OR ({outer}, id) <
                     (SELECT {inner}, i.id FROM item i WHERE i.id = ?4))
              ORDER BY {outer} DESC, id DESC LIMIT ?5"
@@ -530,7 +536,10 @@ pub(crate) fn section_sql(now: i64) -> [(String, String); 6] {
 }
 
 /// The filter of each record that the brief counts: not gone.
-const RECORD: &str = "form = 'record' AND status != 'gone'";
+const RECORD: &str = concat!(
+    "form = 'record' AND status != 'gone' AND NOT ",
+    iris_store::from_hostile_mail!("item")
+);
 
 /// The filter of the head of each pair in the place `filter`: an item of the
 /// place that is not a possible duplicate of an item of the same place
@@ -563,7 +572,7 @@ pub(crate) fn declined_sql() -> String {
     let counter = kind_sql("doc", "$.counterparty.sender");
     let owner = kind_sql("doc", "$.owner.sender");
     format!(
-        "((form = 'commitment' AND status = 'open' AND (
+        "NOT {FROM_HOSTILE} AND ((form = 'commitment' AND status = 'open' AND (
              (json_extract(doc, '$.direction') = 'you_owe' AND {counter} = 'declined')
           OR (json_extract(doc, '$.direction') = 'owed_to_you' AND {owner} = 'declined')))
           OR (form = 'conversation' AND status = 'active'
@@ -641,6 +650,15 @@ fn bundle_rule(name: &str) -> Option<u32> {
 /// The filter and the order of each list section of the brief, with no
 /// attention condition.
 fn base_sql(now: i64) -> [(String, String); 6] {
+    sections_of(now).map(|(filter, order)| (format!("({filter}) AND NOT {FROM_HOSTILE}"), order))
+}
+
+/// The SQL condition "item `item` comes from hostile mail". Each read of
+/// items in this file leaves such an item out (issue 112).
+pub(crate) const FROM_HOSTILE: &str = iris_store::from_hostile_mail!("item");
+
+/// [`base_sql`] with no hostile condition.
+fn sections_of(now: i64) -> [(String, String); 6] {
     let counter = kind_sql("doc", "$.counterparty.sender");
     let owner = kind_sql("doc", "$.owner.sender");
     let known = "IN ('person', 'service')";
@@ -911,12 +929,13 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
         let section =
             |sql: &(String, String)| read_section(c, sql, &tails, MAX_LIMIT, None).map(|(s, _)| s);
         let records = count_records(c, SHOWN)?;
+        // The same definition as the items that the reads hide (issue 112).
         let hostile = c.query_row(
-            "SELECT count(*) FROM message m LEFT JOIN header h ON h.message_id = m.id
-             WHERE m.gone_at IS NULL AND m.internal_date >= ?1
-               AND ((m.hostile IS NOT NULL AND m.hostile NOT IN ('', '[]'))
-                 OR EXISTS (SELECT 1 FROM sender s
-                            WHERE s.address = h.from_addr COLLATE NOCASE AND s.kind = 'hostile'))",
+            concat!(
+                "SELECT count(*) FROM message m
+                 WHERE m.gone_at IS NULL AND m.internal_date >= ?1 AND ",
+                iris_store::hostile_mail!()
+            ),
             [now - 7 * DAY_MS],
             |r| r.get(0),
         )?;

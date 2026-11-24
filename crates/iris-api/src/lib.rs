@@ -174,6 +174,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/jobs", get(get_jobs).post(post_job))
         .route("/api/jobs/{id}", get(get_job))
         .route("/api/jobs/{id}/answer", post(post_job_answer))
+        .route("/api/jobs/{id}/finish", post(post_job_finish))
         .route("/api/policy/accept", post(post_accept))
         .route("/api/policy/dismiss", post(post_dismiss))
         .route("/api/notices", get(get_notices))
@@ -204,12 +205,23 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
             measures::Counter::new(store),
             measures::count,
         ))
+        // Outside each layer that uses the store, so no store call runs on
+        // the runtime thread.
+        .layer(middleware::from_fn(off_runtime))
         .layer(middleware::from_fn_with_state(auth, auth::guard))
 }
 
-// shortcut: the handlers read SQLite on the runtime thread (searches take
-// up to about 50 ms at 100k messages); move them to spawn_blocking if the
-// API gets more than one client at a time.
+/// Runs the rest of the request (the measure count and the handler) on a
+/// blocking thread. `iris serve` has one runtime thread, which also answers
+/// the command socket: a handler that waits for a store connection there
+/// stops each other request (#700). The runtime thread keeps the drivers of
+/// I/O and time, so the handler can still await them.
+async fn off_runtime(req: axum::extract::Request, next: middleware::Next) -> Response {
+    let rt = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || rt.block_on(next.run(req)))
+        .await
+        .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "the request failed"))
+}
 
 async fn get_status(State(s): State<Arc<Store>>) -> Result<Response> {
     Ok(Json(status(&s)?).into_response())
@@ -672,7 +684,8 @@ async fn get_measures(State(s): State<Arc<Store>>) -> Result<Response> {
 }
 
 async fn get_policy(State(s): State<Arc<Store>>) -> Result<Response> {
-    Ok(Json(policy::policy(&s)?).into_response())
+    // The file state can wait for the backup lock (issue #141).
+    Ok(Json(blocking(move || policy::policy(&s)).await?).into_response())
 }
 
 /// The body of a route that takes none: zero bytes, or a JSON text that is
@@ -902,6 +915,28 @@ async fn post_job_answer(
     Ok(stream(move |w| write_job(&s, row, w)).await)
 }
 
+#[derive(Deserialize)]
+struct JobFinishBody {
+    /// `complete` or `cancel`.
+    end: String,
+}
+
+/// The person ends a job. The answer is the job document.
+async fn post_job_finish(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<JobFinishBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let end = iris_job::End::parse(&b.end)
+        .ok_or_else(|| Error::Query("end must be complete or cancel".into()))?;
+    let Some(row) = job_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    finish_job(&s, row, end, now_ms())?;
+    Ok(stream(move |w| write_job(&s, row, w)).await)
+}
+
 /// `id` is the ID of an open proposal (spec 2, section 6.6).
 #[derive(Deserialize)]
 struct ProposalBody {
@@ -929,7 +964,7 @@ async fn post_dismiss(
     b: std::result::Result<Json<DismissBody>, JsonRejection>,
 ) -> Result<Response> {
     let b = body(b)?;
-    Ok(Json(policy::dismiss(&s, b.id, now_s())?).into_response())
+    Ok(Json(blocking(move || policy::dismiss(&s, b.id, now_s())).await?).into_response())
 }
 
 async fn get_notices(State(s): State<Arc<Store>>) -> Result<Response> {

@@ -85,7 +85,7 @@ const ENTRY: &str = "SELECT l.id, a.verb, {args}, l.state, l.at, substr(l.error,
         (SELECT count(*) FROM action_item ai WHERE ai.action_id = a.id),
         (SELECT CASE WHEN json_type(i.doc, '$.title') = 'text' THEN substr(json_extract(i.doc, '$.title'), 1, 2000) END
          FROM action_item ai JOIN item i ON i.id = ai.item_id
-         WHERE ai.action_id = a.id ORDER BY ai.item_id LIMIT 1),
+         WHERE ai.action_id = a.id AND NOT {hostile} ORDER BY ai.item_id LIMIT 1),
         a.changeset_id, c.author_kind, substr(c.author_name, 1, 2000), substr(c.author_job, 1, 2000),
         substr(j.goal, 1, 2000), a.decided_by, a.rule, a.policy, substr(a.reason, 1, 2000),
         substr(coalesce(a.why, (SELECT r.why FROM changeset_revision r
@@ -102,7 +102,11 @@ const ENTRY: &str = "SELECT l.id, a.verb, {args}, l.state, l.at, substr(l.error,
      LEFT JOIN job j ON c.author_job = 'j-' || j.id";
 
 fn entry_sql(tail: &str) -> String {
-    format!("{} {tail}", ENTRY.replace("{args}", ARGS))
+    // The title of an item of hostile mail is not shown (issue 112).
+    let entry = ENTRY
+        .replace("{args}", ARGS)
+        .replace("{hostile}", iris_store::from_hostile_mail!("i"));
+    format!("{entry} {tail}")
 }
 
 fn entry(r: &rusqlite::Row) -> rusqlite::Result<LedgerEntry> {
