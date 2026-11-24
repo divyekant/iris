@@ -744,3 +744,104 @@ fn random_additions_keep_the_rules() {
         "no random addition passed: the test proves nothing"
     );
 }
+
+/// D20: the fingerprint holds each sent matter and its last change, so an
+/// edit of a confirmed matter makes a new call.
+#[test]
+fn an_edit_of_a_sent_matter_makes_a_new_call() {
+    let b = setup("medit", 3, &titles(4), &["record", "conversation"]);
+    let m =
+        iris_matters::create(&b.store, "Trip", &[(1, "record"), (2, "conversation")], NOW).unwrap();
+    let f = fake(vec![]);
+    assert_eq!(run(&b, &f, Gate::Now, NOW).skip, None);
+    assert_eq!(run(&b, &f, Gate::Now, NOW + 1).skip, Some(Skip::Same));
+    let e = iris_matters::Edit {
+        title: Some("Tokyo trip".into()),
+        ..Default::default()
+    };
+    iris_matters::edit(&b.store, m, &e, NOW + 2).unwrap();
+    assert_eq!(run(&b, &f, Gate::Now, NOW + 3).skip, None);
+    assert_eq!(f.data.borrow().len(), 2);
+    assert!(f.data.borrow()[1].contains("Tokyo trip"));
+}
+
+/// The request stays in its bound with the lines of the confirmed matters
+/// first: long titles of matters and members, and many long items.
+#[test]
+fn the_request_with_matter_lines_stays_in_its_bound() {
+    let long: Vec<String> = (0..300)
+        .map(|i| format!("{i} {}", "<<<é".repeat(60)))
+        .collect();
+    let b = setup("mbound", 7, &long, &["record", "conversation"]);
+    // 25 confirmed matters of 2 members each (rows 1 to 50): 20 go.
+    for k in 0..25i64 {
+        let title = format!("{k} {}", "é<".repeat(38));
+        iris_matters::create(
+            &b.store,
+            &title,
+            &[(2 * k + 1, "record"), (2 * k + 2, "conversation")],
+            NOW + k,
+        )
+        .unwrap();
+    }
+    let f = fake(vec![]);
+    run(&b, &f, Gate::Now, NOW + 100);
+    let data = f.data.borrow()[0].clone();
+    let bytes = Shared(f.clone()).request_bytes(iris_matters::propose::INSTRUCTION, &data);
+    assert!(bytes <= MAX_REQUEST, "{bytes}");
+    let sent = data.lines().filter(|l| l.contains("\"matter\"")).count();
+    assert_eq!(sent, iris_matters::propose::MAX_SENT_MATTERS, "{sent}");
+    assert!(data.lines().next().unwrap().contains("\"matter\""));
+}
+
+/// An addition that takes a matter over 50 members is dropped, and one
+/// that fits is kept.
+#[test]
+fn an_addition_over_50_members_is_dropped() {
+    let b = setup("m50", 3, &titles(60), &["record", "conversation"]);
+    let m =
+        iris_matters::create(&b.store, "Trip", &[(1, "record"), (2, "conversation")], NOW).unwrap();
+    let id = |row: i64| format!("{}-{row}", if row % 2 == 1 { "r" } else { "v" });
+    let over: Vec<String> = (3..=51).map(id).collect();
+    let fits: Vec<String> = (3..=50).map(id).collect();
+    let f = fake(vec![
+        Ok(
+            json!({"matters": [], "additions": [{"matter": format!("g-{m}"), "items": over}]})
+                .to_string(),
+        ),
+        Ok(
+            json!({"matters": [], "additions": [{"matter": format!("g-{m}"), "items": fits}]})
+                .to_string(),
+        ),
+    ]);
+    let o = run(&b, &f, Gate::Now, NOW);
+    assert_eq!((o.added, o.dropped), (0, 1), "{o:?}");
+    assert_eq!(col(&b, "SELECT count(*) FROM matter_add"), 0);
+    reset_fingerprint(&b);
+    let o = run(&b, &f, Gate::Now, NOW + 1);
+    assert_eq!((o.added, o.dropped), (48, 0), "{o:?}");
+    assert_eq!(col(&b, "SELECT count(*) FROM matter_add"), 48);
+}
+
+/// A matter that the person deletes during the call gets no addition.
+#[test]
+fn an_addition_to_a_matter_deleted_during_the_call_is_dropped() {
+    let b = setup("mgone", 3, &titles(4), &["record", "conversation"]);
+    let m =
+        iris_matters::create(&b.store, "Trip", &[(1, "record"), (2, "conversation")], NOW).unwrap();
+    let f = fake_during(
+        vec![Ok(json!({"matters": [], "additions": [{"matter": format!("g-{m}"), "items": ["r-3"]}]})
+            .to_string())],
+        Some((
+            b.dir.clone(),
+            format!(
+                "UPDATE matter SET status = 'declined', keep = NULL, decided_at = {t}, updated_at = {t} WHERE id = {m}",
+                t = NOW + 5
+            ),
+        )),
+    );
+    let o = run(&b, &f, Gate::Now, NOW + 1);
+    assert!(f.data.borrow()[0].contains(&format!("\"matter\":\"g-{m}\"")));
+    assert_eq!((o.added, o.dropped), (0, 1), "{o:?}");
+    assert_eq!(col(&b, "SELECT count(*) FROM matter_add"), 0);
+}
