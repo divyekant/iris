@@ -43,9 +43,10 @@ to review: the property test of "Acceptance criteria" passes.
 - Other verbs of a marked author (`trash`, `label`, the state verbs). The
   hostile hard limit (spec 2, section 6.5) covers mail with a hostile mark.
   A limit issue records the rest.
-- A new screen or new words. The review screen already shows
+- New words for the flag itself. The review screen already shows
   `outside_thread` as "Goes to an address that is not in the thread"
-  (`client/src/review.ts`).
+  (`client/src/review.ts`). The tag on each address came later (issue
+  462, see section 3).
 - The `draft` and `send` verbs in a session (spec 2, section 8.2). They
   stay refused.
 
@@ -99,11 +100,14 @@ stored raw bytes of the draft of a `send`.
 Submit (`iris_changeset::submit_in`) adds `outside_thread` to a `draft` or a
 `send` action when the changeset author is marked
 (`iris_changeset::marked_in`) and the content has an outside address
-(`iris_changeset::outside_marks` is not empty). The flag has no mark on
-a field: the drafts API of the review lists it in `unmarked`, and the
-review screen shows it in words ("Goes to an address that is not in the
-thread"). A mark on each address waits for a short tag in the review
-screen, a screen change for the owner to pick. Submit reads the mark and the thread addresses in its own
+(`iris_changeset::outside_marks` is not empty). The drafts API of the
+review (`GET /api/changesets/{id}/drafts`) marks each outside address of
+`to` and `cc` with the flag `outside_thread`, by the same rule
+(`outside_marks`). The review screen shows the tag "not in the thread"
+beside each marked address (issue 462). If no address has the mark (for
+example, the thread changed after the submit), the API lists the flag in
+`unmarked`, and the review screen shows it in words ("Goes to an address
+that is not in the thread"). Submit reads the mark and the thread addresses in its own
 transaction. The release does not compute the flag again: the person
 approved the action with the flag in view, and the content hash binds the
 recipients.
@@ -173,8 +177,11 @@ the thread messages in the store, the scope rows of the job.
 - An agent with no job is marked, so its new mail gets `outside_thread`.
   Tests of the other draft flags use a person author or expect the flag.
 - `docs/spec/02-changeset-policy-ledger.md`: sections 5.3 and 6.5.
-- No API, schema or screen change. The flag name exists in
+- No schema change. The flag name exists in
   `docs/spec/schema/changeset.schema.json`.
+- The drafts API and the review screen (issue 462, after this spec): the
+  API marks each outside address with `outside_thread`, and the review
+  screen shows the tag "not in the thread" beside it (section 3).
 - Memory: the check holds only the recipients of the draft (at most the
   limit of `Content::check`). It streams your addresses and the thread
   headers, one row at a time, and removes each recipient that a row names
