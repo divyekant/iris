@@ -146,11 +146,14 @@ fn the_grants_of_an_ended_job_go() {
     let id = |j: i64| format!("j-{j}");
     change(&store, None, Change::Mode(Mode::Apply), NOW).unwrap();
     for (job, verbs) in [
-        (ended, &[Verb::Archive][..]),
-        (working, &[Verb::Read][..]),
-        (ended, &[Verb::Label][..]),
+        (id(ended), &[Verb::Archive][..]),
+        (id(working), &[Verb::Read][..]),
+        (id(ended), &[Verb::Label][..]),
+        // Not the form of a job ID: it names no job, so it stays.
+        (format!("j-0{ended}"), &[Verb::Unread][..]),
+        (format!("j-+{ended}"), &[Verb::Unread][..]),
     ] {
-        let e = change(&store, version(&store), grant(&id(job), verbs), NOW).unwrap();
+        let e = change(&store, version(&store), grant(&job, verbs), NOW).unwrap();
         assert!(matches!(e, Edited::Done { .. }), "{e:?}");
     }
     // No job ended yet: nothing goes.
@@ -178,7 +181,14 @@ fn the_grants_of_an_ended_job_go() {
     assert_eq!(end_grants(&store, NOW).unwrap(), 2);
     let rules = store.read(active).unwrap().policy.rules;
     let jobs: Vec<_> = rules.iter().map(|r| r.job.clone()).collect();
-    assert_eq!(jobs, [Some(id(working))]);
+    assert_eq!(
+        jobs,
+        [
+            Some(id(working)),
+            Some(format!("j-0{ended}")),
+            Some(format!("j-+{ended}"))
+        ]
+    );
     assert_eq!(
         parse(&std::fs::read_to_string(&path).unwrap())
             .unwrap()
