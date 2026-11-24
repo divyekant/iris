@@ -2022,19 +2022,24 @@ fn document(c: &Connection, changeset: i64, out: &mut impl Write) -> Result<()> 
     out.write_all(b"]")?;
     // Since iris/1.2: the review comments of the person, oldest first, so an
     // author with no job workspace can read them too (decision D15).
-    let comments = comments_in(c, changeset)?;
-    if !comments.is_empty() {
-        let list: Vec<Value> = comments
-            .into_iter()
-            .map(|k| {
-                serde_json::json!({
-                    "revision": k.revision,
-                    "text": k.text,
-                    "at": time(Some(k.at_ms)),
-                })
-            })
-            .collect();
-        write!(out, r#","comments":{}"#, Value::Array(list))?;
+    // One comment at a time, so memory holds one comment.
+    let mut st = c.prepare_cached(
+        "SELECT revision, text, at_ms FROM changeset_comment WHERE changeset_id = ?1 ORDER BY id",
+    )?;
+    let mut rows = st.query([changeset])?;
+    let mut first = true;
+    while let Some(r) = rows.next()? {
+        out.write_all(if first { br#","comments":["# } else { b"," })?;
+        first = false;
+        let k = serde_json::json!({
+            "revision": r.get::<_, i64>(0)?,
+            "text": r.get::<_, String>(1)?,
+            "at": time(Some(r.get(2)?)),
+        });
+        write!(out, "{k}")?;
+    }
+    if !first {
+        out.write_all(b"]")?;
     }
     out.write_all(b"}")?;
     Ok(())

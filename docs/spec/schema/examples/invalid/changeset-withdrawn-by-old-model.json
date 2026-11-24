@@ -35,12 +35,5 @@
       }
     }
   ],
-  "withdrawn_by": "author",
-  "comments": [
-    {
-      "revision": 1,
-      "text": "Keep the mail of Dana.",
-      "at": "2026-11-20T10:00:00Z"
-    }
-  ]
+  "withdrawn_by": "author"
 }

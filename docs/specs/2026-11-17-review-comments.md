@@ -28,9 +28,10 @@ change, and the only way to change a proposal is a new job.
 
 ## Not in scope
 
-- A comment on a changeset with no job (an agent of the MCP host, triage,
-  `local`). These authors have no workspace. The engine refuses the
-  comment. A limit issue records it.
+- A comment on a changeset of triage or of the person. These authors read
+  no comment. An agent with no job (the MCP host) and a `local` author take
+  a comment since decision D15 (issue #538): they read it in the changeset
+  document (section 3).
 - An edit or a delete of a comment. A comment is a record of what the
   person said.
 - An answer of the agent to a comment. The new revision and its `why` are
@@ -98,8 +99,11 @@ bad body, and 404 for not found.
 - `GET /api/changesets/{id}/comments` gives `{"comments": [...]}`, oldest
   first.
 
-The changeset document of the open model (`changeset.schema.json`) does not
-change.
+Since open model 1.2 (decision D15), the changeset document
+(`changeset.schema.json`, `iris show cs-<id>`, `iris changeset cs-<id>`)
+has the optional field `comments`: the `revision`, `text` and `at` of each
+comment, oldest first. An author with no workspace reads the comments
+there. A job agent also gets the comment files of section 4.
 
 ### 4. The workspace
 
@@ -205,9 +209,10 @@ covers each case:
 
 ## Options not chosen
 
-- The comment in the changeset document (`iris show cs-<id>`): a change of
-  `changeset.schema.json`, and the agent must know to ask. A file in the
-  workspace is what spec 2 says.
+- The comment in the changeset document only, for a job agent too: the
+  agent must know to ask. A file in the workspace is what spec 2 says. The
+  document has the comments since decision D15, for the authors with no
+  workspace.
 - A comment on each action: the person comments on the whole proposal. One
   comment can name an action by its number.
 - No key: a retry after a lost answer would write the comment two times.
@@ -220,7 +225,7 @@ covers each case:
 | Key missing, too short, too long, or with other characters | 400, nothing written | Unit test |
 | A retry with the same key and the same body | The first comment, one row | Unit test |
 | The same key with another text or revision | 409, nothing written | Unit test |
-| A changeset with no job, a draft revision, a withdrawn or closed changeset, an old revision, a done job | 409, nothing written | Unit test for each |
+| A changeset of triage or of the person, a draft revision, a withdrawn or closed changeset, an old revision, a done job | 409, nothing written | Unit test for each |
 | Two comments at the same time | Both rows, in order of ID (one write connection) | Covered by the order rule |
 | A build or a launch fails, or the engine stops before the gate | No `comment_delivery` row: the comment stays pending | Launch test |
 | A crash before the commit | No row. The client gets no answer, reloads the comments, and can send again with the same key | Store transaction |
