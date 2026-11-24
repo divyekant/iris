@@ -2576,6 +2576,7 @@ mod outbox_tests {
                     cc: Vec::new(),
                     subject: "Plan".into(),
                     body: "Hello".into(),
+                    ..Default::default()
                 }
                 .check()
                 .unwrap();

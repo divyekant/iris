@@ -94,6 +94,7 @@ fn content(to: &str, subject: &str, body: &str) -> Content {
         cc: Vec::new(),
         subject: subject.into(),
         body: body.into(),
+        ..Default::default()
     }
     .check()
     .unwrap()
@@ -422,6 +423,7 @@ fn draft_flags_hold_for_random_text() {
             cc: Vec::new(),
             subject: "Hi".into(),
             body: body.clone(),
+            ..Default::default()
         };
         let Ok(c) = c.check() else { continue };
         let first = s.read(|x| Ok(draft_flags(x, OWNER, &c).unwrap())).unwrap();
@@ -521,6 +523,7 @@ fn a_mark_covers_the_whole_amount_and_date() {
             cc: Vec::new(),
             subject: "Hi".into(),
             body: text.into(),
+            ..Default::default()
         };
         let marks = s.read(|x| Ok(draft_marks(x, OWNER, &c).unwrap())).unwrap();
         let got: Vec<&str> = marks.iter().map(|m| &text[m.range.clone()]).collect();
@@ -584,6 +587,7 @@ fn marks_agree_with_the_flags_for_random_text() {
             cc: Vec::new(),
             subject,
             body,
+            ..Default::default()
         })
         .check() else {
             continue;

@@ -802,6 +802,7 @@ fn the_command_adds_and_submits_draft_and_send() {
                 cc: Vec::new(),
                 subject: "Hi".into(),
                 body: "Hello".into(),
+                ..Default::default()
             }
             .check()
             .unwrap();

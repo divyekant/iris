@@ -676,6 +676,7 @@ fn apply_mode_sends_a_send_to_a_person_by_its_flags() {
                 cc: vec![],
                 subject: "Hi".into(),
                 body: "Thanks.".into(),
+                ..Default::default()
             }
             .check()
             .unwrap();
