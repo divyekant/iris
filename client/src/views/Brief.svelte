@@ -6,7 +6,8 @@
 <script lang="ts">
   import { get, loadBrief, newest, type Brief, type Item, type Job, type Status } from "../api";
   import { poll as every, watch } from "../clock";
-  import { NOTHING, across, copying, dueSoon, greeting, nextDay, party, partyKey, signals, summary, unfinished, when } from "../format";
+  import NoModel from "./NoModel.svelte";
+  import { NOTHING, across, copying, needsModel, dueSoon, greeting, nextDay, party, partyKey, signals, summary, unfinished, when } from "../format";
   import Code from "./Code.svelte";
   import Bundle from "./Bundle.svelte";
   import Line from "./Line.svelte";
@@ -244,6 +245,8 @@
   <p class="day">{greeting(now)} It is {day}.</p>
   <h1>{opening}</h1>
 </div>
+
+{#if needsModel(status)}<NoModel />{/if}
 
 {#if arrived.length}
   <div class="arrivals">

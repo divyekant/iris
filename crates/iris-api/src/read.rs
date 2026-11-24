@@ -63,6 +63,13 @@ pub struct Status {
     pub mode: &'static str,
     pub accounts: Vec<Account>,
     pub messages: Counts,
+    /// True if a model is set. With no model, only the fixed rules read
+    /// the mail (`iris model set`).
+    pub model: bool,
+    /// The live messages that the understanding step marked as waiting for
+    /// a model or a budget (`waits_model` = `WAITS_INPUT`). A draft, a copy
+    /// and gone mail never count.
+    pub waits_model: i64,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -322,10 +329,27 @@ pub fn status(store: &Store) -> Result<Status> {
                 })
             },
         )?;
+        let model = c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM model_setting WHERE id = 1)",
+            [],
+            |r| r.get(0),
+        )?;
+        let waits_model = c.query_row(
+            concat!(
+                "SELECT count(*) FROM message m
+                 WHERE m.gone_at IS NULL AND m.understood_at IS NULL AND m.waits_model = ?1
+                   AND NOT ",
+                iris_store::draft_or_copy!("m")
+            ),
+            [iris_understand::batch::WAITS_INPUT],
+            |r| r.get(0),
+        )?;
         Ok(Status {
             mode: iris_policy::active(c)?.policy.mode.name(),
             accounts,
             messages,
+            model,
+            waits_model,
         })
     })?)
 }
