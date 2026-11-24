@@ -525,3 +525,28 @@ fn a_failed_count_write_starts_no_wait() {
         0
     );
 }
+
+/// Issue 112: no item of hostile mail goes to the model, also when the
+/// item stays in the store.
+#[test]
+fn no_item_of_hostile_mail_goes_to_the_model() {
+    let b = setup("hostile", 4, &titles(4), &["record"]);
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE message SET hostile = '[\"lookalike\"]' WHERE id = 1",
+                [],
+            )?)
+        })
+        .unwrap();
+    let f = fake(vec![]);
+    assert_eq!(run(&b, &f, Gate::Now, NOW).skip, None);
+    let data = f.data.borrow();
+    assert_eq!(data.len(), 1);
+    assert!(!data[0].contains("Item 0"), "{}", data[0]);
+    assert!(
+        data[0].contains("Item 1") && data[0].contains("Item 3"),
+        "{}",
+        data[0]
+    );
+}

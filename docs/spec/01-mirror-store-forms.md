@@ -1057,6 +1057,11 @@ no item, and the message stays not understood.
   changeset or a ledger entry of specification 2 refers to it. A rebuild
   never deletes a pinned item and never changes its ID, so each correction
   and each reference stays on the same item.
+- A pinned item whose origin message is hostile mail (a hostile mark, the
+  label `SPAM` or a `hostile` sender) stays in the store, but no read of the
+  local API, the brief or the matters proposal shows it. The item keeps its
+  ID and its corrections. It shows again when the message is no longer
+  hostile mail (issue 112).
 - A rebuild runs understanding again on the source messages of a pinned item
   that are not gone. The engine gives the model the pinned items of the
   message as existing items. For each item that it finds, the model returns a

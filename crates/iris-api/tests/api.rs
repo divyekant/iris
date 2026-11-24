@@ -1737,11 +1737,24 @@ async fn an_item_shows_a_ready_draft_of_its_thread_until_the_draft_is_stale() {
     let (_, one) = get(&store, &format!("/api/items/c-{without}")).await;
     assert_eq!(one["ready"], Value::Null, "{one}");
 
-    // Hostile mail in the thread: the draft is not ready.
+    // Hostile mail in the thread: the draft is not ready. The newest message
+    // of the thread is not the origin of the item, which a read leaves out
+    // while it is hostile mail (issue 112).
     exec(
         &store,
-        "UPDATE message SET hostile = '[\"spoof\"]' WHERE id = ?1",
+        "UPDATE message SET hostile = '[\"spoof\"]'
+         WHERE id = (SELECT based_on FROM reply_draft) AND id <> ?1",
         [first],
+    );
+    assert_eq!(
+        store
+            .read(|c| Ok(c.query_row(
+                "SELECT count(*) FROM message WHERE hostile = '[\"spoof\"]'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?))
+            .unwrap(),
+        1
     );
     let (_, brief) = get(&store, "/api/brief").await;
     assert_eq!(
@@ -1814,4 +1827,91 @@ async fn the_brief_shows_the_items_of_each_account() {
         .map(|a| a["address"].as_str().unwrap())
         .collect();
     assert_eq!(addresses, ["owner@example.com", "second@example.com"]);
+}
+
+/// Issue 112: an item whose origin message is hostile mail (a hostile
+/// mark, the label `SPAM` or a hostile sender) is in no read of the API,
+/// also when it stays in the store. It shows again when the state clears.
+#[tokio::test]
+async fn an_item_of_hostile_mail_is_hidden_until_the_state_clears() {
+    let dir = temp("hostile-items");
+    let (store, _) = filled_n(&dir, 4);
+    store.put_labels(1, &[("SPAM", "SPAM", "system")]).unwrap();
+    let feed = add_item(
+        &store,
+        "feed",
+        "new",
+        1,
+        1,
+        json!({"status": "new", "publisher": {"address": "news@example.com"},
+               "published": "2026-11-01T00:00:00Z"}),
+    );
+    let record = add_item(&store, "record", "active", 1, 2, json!({"type": "receipt"}));
+    // A record of another message stays in each read.
+    let other = add_item(&store, "record", "active", 2, 3, json!({"type": "receipt"}));
+    let (f, r, o) = (
+        format!("f-{feed}"),
+        format!("r-{record}"),
+        format!("r-{other}"),
+    );
+    let shown = hostile_reads(&store, &f, &r).await;
+    assert!(
+        shown.0.contains(&f) && shown.0.contains(&r) && shown.0.contains(&o),
+        "{shown:?}"
+    );
+    assert_eq!(shown.1, vec![f.clone()]);
+    assert_eq!(shown.2, json!({"receipt": 2}));
+    assert_eq!((shown.3, shown.4), (StatusCode::OK, StatusCode::OK));
+    let states: [(&str, &str); 3] = [
+        ("UPDATE message SET hostile = '[\"lookalike\"]' WHERE id = 1", "UPDATE message SET hostile = '[]' WHERE id = 1"),
+        ("INSERT INTO message_label(message_id, label_id) SELECT 1, id FROM label WHERE provider_id = 'SPAM'",
+         "DELETE FROM message_label WHERE message_id = 1 AND label_id = (SELECT id FROM label WHERE provider_id = 'SPAM')"),
+        ("INSERT INTO sender(address, kind) SELECT from_addr, 'hostile' FROM header WHERE message_id = 1
+            ON CONFLICT(address) DO UPDATE SET kind = 'hostile'",
+         "UPDATE sender SET kind = 'person' WHERE address = (SELECT from_addr FROM header WHERE message_id = 1)"),
+    ];
+    for (set, clear) in states {
+        exec(&store, set, []);
+        let hidden = hostile_reads(&store, &f, &r).await;
+        assert!(
+            !hidden.0.contains(&f) && !hidden.0.contains(&r) && hidden.0.contains(&o),
+            "{set}: {hidden:?}"
+        );
+        assert!(hidden.1.is_empty(), "{set}: {hidden:?}");
+        assert_eq!(hidden.2, json!({"receipt": 1}), "{set}");
+        assert_eq!(
+            (hidden.3, hidden.4),
+            (StatusCode::NOT_FOUND, StatusCode::NOT_FOUND),
+            "{set}"
+        );
+        exec(&store, clear, []);
+        assert_eq!(hostile_reads(&store, &f, &r).await, shown, "{clear}");
+    }
+}
+
+/// The reads of the hostile item test: the IDs of `/api/items`, the IDs of
+/// the feed of the brief, the record counts of the brief, and the status of
+/// `/api/items/{feed}` and `/api/items/{record}`.
+async fn hostile_reads(
+    store: &Arc<Store>,
+    feed: &str,
+    record: &str,
+) -> (Vec<String>, Vec<String>, Value, StatusCode, StatusCode) {
+    let ids_of = |v: &Value| -> Vec<String> {
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (_, items) = get(store, "/api/items?limit=100").await;
+    let (_, brief) = get(store, "/api/brief").await;
+    (
+        ids_of(&items),
+        ids_of(&brief["feed"]),
+        brief["records"].clone(),
+        get(store, &format!("/api/items/{feed}")).await.0,
+        get(store, &format!("/api/items/{record}")).await.0,
+    )
 }
