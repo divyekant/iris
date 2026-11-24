@@ -54,7 +54,7 @@ use iris_store::Store;
 use rusqlite::{params, OptionalExtension, Transaction};
 
 /// The prompt version of the proposal step.
-pub const PROMPT: &str = "matters/0.1";
+pub const PROMPT: &str = "matters/0.2";
 
 /// The longest title, in characters (the schema `matter.schema.json`).
 pub const MAX_TITLE: usize = 80;

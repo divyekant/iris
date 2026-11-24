@@ -532,6 +532,307 @@ async fn an_item_that_closed_after_the_preview_starts_no_job() {
     assert_eq!(d.start("v-13").await.0, StatusCode::CREATED);
 }
 
+/// Decision D25: a job from a typed goal, with no mail. A retry with the
+/// same request ID makes no second job.
+#[tokio::test]
+async fn a_typed_goal_starts_a_job_with_no_mail_once_for_each_request() {
+    let d = open("typed");
+    let body =
+        json!({"goal": " Book the dentist. ", "due": "2026-11-20T17:00:00Z", "request": "r-1"});
+    let (code, job) = d.post("/api/jobs", body.clone()).await;
+    assert_eq!(code, StatusCode::CREATED, "{job}");
+    assert_eq!(job["goal"], json!("Book the dentist."));
+    assert!(d.scope("j-1").is_empty());
+    let (code, again) = d.post("/api/jobs", body).await;
+    assert_eq!((code, &again["job"]), (StatusCode::CONFLICT, &json!("j-1")));
+    let (code, other) = d
+        .post(
+            "/api/jobs",
+            json!({"goal": "Book the dentist.", "request": "r-2"}),
+        )
+        .await;
+    assert_eq!((code, &other["id"]), (StatusCode::CREATED, &json!("j-2")));
+    // No request, an item with a request, messages with no item, or a bad
+    // request ID: 400.
+    for bad in [
+        json!({"goal": "A."}),
+        json!({"goal": "A.", "request": "r-3", "item": "c-1", "messages": []}),
+        json!({"goal": "A.", "request": "r-3", "messages": []}),
+        json!({"goal": "A.", "request": "r-3", "messages": null}),
+        json!({"goal": "A.", "request": "r-3", "item": null}),
+        json!({"goal": "A.", "request": null}),
+        json!({"goal": "A.", "request": " "}),
+        json!({"goal": "A.", "request": "x".repeat(65)}),
+        json!({"goal": " ", "request": "r-3"}),
+        json!({"goal": "A.", "due": "soon", "request": "r-3"}),
+    ] {
+        let (code, v) = d.post("/api/jobs", bad.clone()).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{bad}: {v}");
+    }
+}
+
+/// Decision D25: the person edits the goal and the due date of an open job.
+#[tokio::test]
+async fn the_person_edits_the_goal_and_the_due_date() {
+    let d = open("edit");
+    d.post("/api/jobs", json!({"goal": "A.", "request": "r-1"}))
+        .await;
+    let (code, job) = d
+        .post(
+            "/api/jobs/j-1/edit",
+            json!({"goal": " B. ", "due": "2026-12-01T00:00:00Z"}),
+        )
+        .await;
+    assert_eq!(code, StatusCode::OK, "{job}");
+    assert_eq!(
+        (&job["goal"], &job["due"]),
+        (&json!("B."), &json!("2026-12-01T00:00:00.000Z"))
+    );
+    let (code, job) = d
+        .post("/api/jobs/j-1/edit", json!({"goal": "B.", "due": null}))
+        .await;
+    assert_eq!(code, StatusCode::OK, "{job}");
+    assert_eq!(job.get("due"), None);
+    // The same values: 409. No due key, a bad goal: 400. No job: 404.
+    let (code, _) = d
+        .post("/api/jobs/j-1/edit", json!({"goal": "B.", "due": null}))
+        .await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    let (code, _) = d.post("/api/jobs/j-1/edit", json!({"goal": "C."})).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let (code, _) = d
+        .post("/api/jobs/j-1/edit", json!({"goal": "", "due": null}))
+        .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let (code, _) = d
+        .post("/api/jobs/j-9/edit", json!({"goal": "C.", "due": null}))
+        .await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    // A done job: 409.
+    iris_job::finish(
+        &d.1,
+        1,
+        iris_job::By::Person,
+        iris_job::End::Complete,
+        None,
+        NOW,
+    )
+    .unwrap();
+    let (code, _) = d
+        .post("/api/jobs/j-1/edit", json!({"goal": "C.", "due": null}))
+        .await;
+    assert_eq!(code, StatusCode::CONFLICT);
+}
+
+/// Decision D25: the person adds a thread from the preview that they saw,
+/// and takes a ref out of the scope.
+#[tokio::test]
+async fn the_person_adds_a_thread_and_removes_a_ref() {
+    let d = open("scope");
+    d.post("/api/jobs", json!({"goal": "A.", "request": "r-1"}))
+        .await;
+    let (code, preview) = d.get("/api/jobs/j-1/scope/t-3").await;
+    assert_eq!(code, StatusCode::OK, "{preview}");
+    let ids: Vec<String> = preview["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, ["m-3", "m-4", "m-5", "m-8"]);
+    // Message 4 is hostile: the preview marks it.
+    assert_eq!(preview["messages"][1]["readable"], json!(false));
+    // A preview that misses a message: 409, and nothing changes.
+    let (code, _) = d
+        .post(
+            "/api/jobs/j-1/scope",
+            json!({"thread": "t-3", "messages": &ids[..3]}),
+        )
+        .await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert!(d.scope("j-1").is_empty());
+    let (code, page) = d
+        .post(
+            "/api/jobs/j-1/scope",
+            json!({"thread": "t-3", "messages": ids}),
+        )
+        .await;
+    assert_eq!(code, StatusCode::OK, "{page}");
+    assert_eq!(d.scope("j-1"), vec![Ref::Thread(3)]);
+    assert_eq!(
+        page["scope"],
+        json!([{"id": "t-3", "kind": "thread", "label": "News", "messages": 4}])
+    );
+    // No thread, no job: 404. Not a thread ID: 400.
+    let (code, _) = d.get("/api/jobs/j-1/scope/t-99").await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    let (code, _) = d.get("/api/jobs/j-9/scope/t-3").await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    let (code, _) = d.get("/api/jobs/j-1/scope/m-3").await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    // Remove: a ref that is not in the scope is 404; the thread goes.
+    let (code, _) = d
+        .post("/api/jobs/j-1/scope/remove", json!({"ref": "t-2"}))
+        .await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    let (code, page) = d
+        .post("/api/jobs/j-1/scope/remove", json!({"ref": "t-3"}))
+        .await;
+    assert_eq!(code, StatusCode::OK, "{page}");
+    assert_eq!(page["scope"], json!([]));
+    assert!(d.scope("j-1").is_empty());
+    // An item ref of a job from an item: the ID names the form.
+    let (code, _) = d.start("c-1").await;
+    assert_eq!(code, StatusCode::CREATED);
+    let (code, _) = d
+        .post("/api/jobs/j-2/scope/remove", json!({"ref": "r-1"}))
+        .await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    let (code, _) = d
+        .post("/api/jobs/j-2/scope/remove", json!({"ref": "c-1"}))
+        .await;
+    assert_eq!(code, StatusCode::OK);
+    // A done job: no preview and no add.
+    iris_job::finish(
+        &d.1,
+        2,
+        iris_job::By::Person,
+        iris_job::End::Cancel,
+        None,
+        NOW,
+    )
+    .unwrap();
+    let (code, _) = d.get("/api/jobs/j-2/scope/t-3").await;
+    assert_eq!(code, StatusCode::CONFLICT);
+}
+
+/// Decision D25: the person cannot change the scope of a done job, and an item ref
+/// keeps its ID after a later understanding deletes the item row.
+#[tokio::test]
+async fn a_done_job_keeps_its_scope_and_a_gone_item_keeps_its_id() {
+    let d = open("scope-done");
+    let (code, _) = d.start("c-1").await;
+    assert_eq!(code, StatusCode::CREATED);
+    let before = d.scope("j-1");
+    assert!(before.contains(&Ref::Item(1)), "{before:?}");
+    // The understanding deletes the item row: the ref keeps the ID `c-1`.
+    d.1.write(|tx| Ok(tx.execute("DELETE FROM item WHERE id = 1", [])?))
+        .unwrap();
+    let (code, page) = d.get("/api/jobs/j-1").await;
+    assert_eq!(code, StatusCode::OK, "{page}");
+    let ids: Vec<&Value> = page["scope"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| &r["id"])
+        .collect();
+    assert!(ids.contains(&&json!("c-1")), "{page}");
+    assert!(!ids.contains(&&Value::Null), "{page}");
+    // The ID of another form does not name it.
+    let (code, _) = d
+        .post("/api/jobs/j-1/scope/remove", json!({"ref": "r-1"}))
+        .await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    let (code, page) = d
+        .post("/api/jobs/j-1/scope/remove", json!({"ref": "c-1"}))
+        .await;
+    assert_eq!(code, StatusCode::OK, "{page}");
+    assert!(!d.scope("j-1").contains(&Ref::Item(1)));
+    // A done job: a remove is 409, and the scope stays.
+    let scope = d.scope("j-1");
+    assert!(!scope.is_empty());
+    iris_job::finish(
+        &d.1,
+        1,
+        iris_job::By::Person,
+        iris_job::End::Cancel,
+        None,
+        NOW,
+    )
+    .unwrap();
+    for r in &scope {
+        let id = match r {
+            Ref::Thread(t) => format!("t-{t}"),
+            Ref::Item(i) => format!("c-{i}"),
+        };
+        let (code, v) = d
+            .post("/api/jobs/j-1/scope/remove", json!({"ref": id}))
+            .await;
+        assert_eq!(code, StatusCode::CONFLICT, "{id}: {v}");
+    }
+    assert_eq!(d.scope("j-1"), scope);
+}
+
+/// Decision D25: an item ref from before migration 50 whose item row is
+/// gone has no known form. It still has an ID, and the person removes it.
+#[tokio::test]
+async fn a_gone_item_ref_with_no_known_form_stays_removable() {
+    let d = open("scope-legacy");
+    let (code, _) = d.start("c-1").await;
+    assert_eq!(code, StatusCode::CREATED);
+    // A store from before migration 50: no form row. Then the item goes.
+    d.1.write(|tx| {
+        tx.execute_batch(
+            "DROP TRIGGER job_scope_form_delete;
+             DELETE FROM job_scope_form;
+             DELETE FROM item WHERE id = 1;",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let (code, page) = d.get("/api/jobs/j-1").await;
+    assert_eq!(code, StatusCode::OK, "{page}");
+    let ids: Vec<&Value> = page["scope"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| &r["id"])
+        .collect();
+    assert!(ids.contains(&&json!("r-1")), "{page}");
+    assert!(!ids.contains(&&Value::Null), "{page}");
+    let (code, page) = d
+        .post("/api/jobs/j-1/scope/remove", json!({"ref": "r-1"}))
+        .await;
+    assert_eq!(code, StatusCode::OK, "{page}");
+    assert!(!d.scope("j-1").contains(&Ref::Item(1)));
+}
+
+/// Decision D25: the label of a thread ref is the subject of the first
+/// message of the thread, also when that message has no header yet.
+#[tokio::test]
+async fn the_label_of_a_thread_is_the_subject_of_its_first_message() {
+    let d = open("scope-label");
+    d.post("/api/jobs", json!({"goal": "A.", "request": "r-1"}))
+        .await;
+    let (_, preview) = d.get("/api/jobs/j-1/scope/t-3").await;
+    let ids: Vec<String> = preview["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap().to_string())
+        .collect();
+    let (code, page) = d
+        .post(
+            "/api/jobs/j-1/scope",
+            json!({"thread": "t-3", "messages": ids}),
+        )
+        .await;
+    assert_eq!(code, StatusCode::OK, "{page}");
+    assert_eq!(page["scope"][0]["label"], json!("News"));
+    // A first message of the thread with no header yet: no label.
+    d.1.write(|tx| {
+        tx.execute(
+            "INSERT INTO message (id, account_id, thread_id, provider_id, internal_date)
+             VALUES (60, 1, 3, 'm60', 1)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, page) = d.get("/api/jobs/j-1").await;
+    assert_eq!(page["scope"][0]["label"], Value::Null, "{page}");
+}
+
 /// Decision D26 (issue #558): a job that starts from an item can wait for a
 /// reply on the thread of the item, and a reply on that thread wakes it.
 #[tokio::test]
