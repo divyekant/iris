@@ -1198,7 +1198,7 @@ agent that does not work in a folder. The rules for the MCP interface:
 
   | Tools | Path |
   |---|---|
-  | `status`, `search`, `show`, `matters_list`, `matters_show` | Read the store directly (section 8.1). |
+  | `status`, `search`, `show`, `list`, `matters_list`, `matters_show` | Read the store directly (section 8.1). |
   | `watch_add`, `watch_list`, `watch_remove` | Read and write the watch rows of the store directly, as `iris watch` does. A watch changes no mailbox, so it does not go through the policy. |
   | All other tools | A request on `iris.sock`, with the author `local`. |
 
