@@ -458,7 +458,7 @@ added = 2026-11-10
 | `id` | yes | A positive integer, unique in the file. |
 | `name` | yes | One line that the brief and the ledger show. |
 | `effect` | yes | `allow`, `review` or `deny` (actions); `hide`, `bundle` or `notify` (attention). |
-| `verbs` | for `allow`, `review` and `deny` | The verbs of section 4, except `draft` and `send`: a rule with these verbs is refused until R3-03 (`docs/specs/2026-11-16-send.md`). |
+| `verbs` | for `allow`, `review` and `deny` | The verbs of section 4, except `send`. A rule with `send` is refused: a send has no undo, so a person approves each send (decision D2, issue #239). A rule can allow `draft`: after the apply gate, the engine makes the draft at the provider. Only a `send` enters the held outbox, and a person approves each send. |
 | `when` | yes | The conditions. Each condition must match. |
 | `by` | yes | `person` (written by the person) or `proposal` (proposed by Iris and accepted by the person). |
 | `added` | yes | The date. |
@@ -476,11 +476,13 @@ Conditions in `when`:
 | `commitment_kind` | The kind of a commitment. |
 | `author` | `person`, `agent`, `triage` or `local`. Each value matches only that author. |
 | `older_than_days` | The age of the message in days. |
+| `recipients` | `thread`: the action is a reply `draft`, and each address in To and Cc of the draft is in From, To or Cc of a live message of its thread, or is one of your addresses. A new mail has no thread, so it never matches. A rule with `recipients` has only the verb `draft` (decision D3, issue #386). |
 
 Version 1 has no other condition, and no expression language. A new condition
 needs a change to this specification.
 
-Each condition matches one message. For an action on an item, the message is
+Each condition other than `author` and `recipients` matches one message.
+`author` and `recipients` are conditions of the action. For an action on an item, the message is
 the origin message of the item. `form`, `record_type` and `commitment_kind`
 match in two ways, so that each reading is the strict one:
 
@@ -505,8 +507,9 @@ valid when:
   cannot make a rule wider than the person wrote it.
 - A value is not one of the values above, or two rules have the same `id`.
 - `when` has no condition, or a `name` has more than one line.
-- A `hide`, a `bundle` or a `notify` rule has `verbs`, `author` or `job`. An item has no
-  author and no job, so such a rule could never match.
+- A `hide`, a `bundle` or a `notify` rule has `verbs`, `author`, `recipients` or `job`. An item has no
+  author, no recipients and no job, so such a rule could never match.
+- A rule has `recipients` and a verb other than `draft`, or has the verb `send`.
 - The file is larger than 256 KiB, or has more than 1,000 rules (section 9).
 
 An `allow` rule never matches an action with no message.
@@ -631,7 +634,8 @@ in the file.
 | Limit | Result |
 |---|---|
 | A `send` never goes at once. | It waits in the held outbox for the hold delay, after the approval (release 3). |
-| A `draft` or a `send` with the flag `new_recipient`, `outside_thread`, `money` or `date`. | Review, even if a rule allows it. Only a person approves it (store migration 25). |
+| A `draft` or a `send` with the flag `new_recipient`, `outside_thread`, `money` or `date`. | Review, even if a rule allows it. Only a person approves it (store migration 25). The decision is by `limit`. |
+| A `send`. | Review. No rule can allow a send (section 6.2). |
 | An action with the flag `bulk`. | Review, even if a rule allows it. |
 | An action by an author other than `person`, whose target has hostile mail: a message with a hostile mark, a message that waits for its link check (a `link_check` row), or a message from a `hostile` sender (specification 1, section 6.7). For a thread or a draft target, each message of the thread counts. | Only `archive`, `trash` and `label`. Other verbs are denied. |
 | Stop is on (release 4). | No provider write. Actions in the outbox wait. |

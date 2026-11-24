@@ -27,6 +27,8 @@
     // The process of the last sync ended before the sync ended (SYNC_STOPPED of iris-store, issue 710).
     if (last?.result?.startsWith("stopped:"))
       return { text: `${a.mirror_ready_at ? "The last sync" : "The last try of the first copy"} stopped before it ended. Iris tries again each minute.`, tone: "retry" };
+    // A running try after a failed try: the failure stays in view (issue 716).
+    if (last && !last.ended && !last.result && last.after_failure) return { text: "The last try failed. Iris tries again now.", tone: "retry" };
     // `sync` is set while a first copy or a full copy again runs (iris-sync, account.sync_kind).
     if (!a.mirror_ready_at) return { text: "Iris copies this mailbox now. The brief shows the mail that it copied so far.", tone: "busy" };
     if (a.sync) return { text: "Iris copies this mailbox again now, to find each change.", tone: "busy" };
