@@ -118,6 +118,12 @@ waits for the budget or for its `retry_at`. A message whose hostile state
 depends on its own headers (marks `dmarc`, `spoof`) is not known before
 write 1, so it waits like other mail.
 
+The same exception applies to a message whose `From` sender is a stranger
+that the person declined at the gate (decision D29, spec 1 section 6.7).
+Such mail never goes to a model either. A decline that starts also clears
+the model wait of the pending mail of the sender (`waits_model`, `tries`,
+`retry_at`), and a refusal after the decline sets no `waits_model` mark.
+
 So a message gets the thread context of each older message that can still
 be understood (spec 1 sections 7.1 and 7.4). `store::understand` keeps its
 own check of the retry state.

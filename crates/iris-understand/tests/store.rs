@@ -2418,7 +2418,7 @@ fn a_declined_sender_gets_no_model_call_until_the_decline_ends() {
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })
         .unwrap();
-    assert!(forms.iter().all(|f| f == "conversation"), "{forms:?}");
+    assert_eq!(forms, ["conversation"], "only the conversation item");
     // The fixed steps ran: the header, the clean text and the marks.
     assert_eq!(
         b.col::<String>("SELECT subject FROM header WHERE message_id = ?1", m2),
