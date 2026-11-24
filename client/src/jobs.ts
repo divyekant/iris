@@ -68,17 +68,21 @@ const ENDED: Record<NonNullable<JobSession["end"]>, string> = {
 };
 
 /**
- * The state of a working job on its page (issue #742), from its newest session.
- * `said` replaces the words of `now`. `ended` tells how the last session ended, and `run` is the command that starts a new one.
+ * The state of a working job on its page (issue 742), from its newest session.
+ * `said` replaces the words of `now`. `ended` tells how the last session ended. `run` is the command that starts a
+ * new session, with the agent of the last session (claude-code when the job had none). An ending session is still
+ * live, and the engine refuses a new one, so it gives no `run`.
  * A job that does not work, or whose session starts or runs, gives null: `now` is true for it.
  */
-export function agent(d: Pick<JobDetail, "job" | "session">): { said: string; ended?: string; run: string } | null {
+export function agent(d: Pick<JobDetail, "job" | "session">): { said: string; ended?: string; run?: string } | null {
   const s = d.session;
   if (d.job.state !== "working" || s?.state === "starting" || s?.state === "running") return null;
-  const run = `iris job run --agent claude-code ${d.job.id}`;
-  if (!s || !s.end) return { said: "No agent works on it now.", run };
+  const said = "No agent works on it now.";
+  if (s?.state === "ending") return { said, ended: `The last session (${s.id}, ${s.agent}) stops now. When it has stopped, you can start an agent again.` };
+  const run = `iris job run --agent ${s?.agent ?? "claude-code"} ${d.job.id}`;
+  if (!s || !s.end) return { said, run };
   const code = s.end === "exit" && s.exit !== null && s.exit !== 0 ? ` with exit code ${s.exit}` : "";
-  return { said: "No agent works on it now.", ended: `The last session (${s.id}, ${s.agent}) ${ENDED[s.end]}${code}.`, run };
+  return { said, ended: `The last session (${s.id}, ${s.agent}) ${ENDED[s.end]}${code}.`, run };
 }
 
 /** One step of the timeline. `quote` is text of the agent or the person, shown as text. */

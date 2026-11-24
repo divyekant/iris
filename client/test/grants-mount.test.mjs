@@ -157,3 +157,23 @@ test("a change with a lost answer, then a failed read: the switches hide, and th
   assert.equal(view.target.querySelector("[role=alert]"), null, "no old reason stays after the read");
   view.destroy();
 });
+
+test("the job page reads the job again while its session can change, and stops when it ended (issue 742)", async () => {
+  const running = { ...fx.jobDetails["j-15"], session: { ...fx.jobDetails["j-15"].session, state: "running", end: null, exit: null, ended: null } };
+  const ending = { ...running, session: { ...running.session, state: "ending", end: "exit", exit: 1 } };
+  const ended = fx.jobDetails["j-15"];
+  let next = ending;
+  const asked = serve((path) => (path === "jobs/j-15" ? [200, next] : [200, policy([])]));
+  const view = await mount("/src/views/Job.svelte", { detail: running, every: 10 });
+  const reads = () => asked.filter(([p]) => p === "jobs/j-15").length;
+  assert.match(text(view.target), /The agent works on it\./);
+  await until(() => /stops now/.test(text(view.target)));
+  assert.doesNotMatch(text(view.target), /iris job run/, "an ending session gives no start step");
+  next = ended;
+  await until(() => /ended with exit code 1\./.test(text(view.target)));
+  assert.match(text(view.target), /iris job run --agent claude-code j-15/);
+  const after = reads();
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(reads(), after, "an ended session is not read again");
+  view.destroy();
+});

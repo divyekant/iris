@@ -80,7 +80,7 @@ test("the state now in words", () => {
   assert.equal(j.now({ ...jobs["j-9"], end: "cancel" }), "Cancelled Fri 13 Nov.");
 });
 
-test("a working job with no running session says that no agent works on it, and how to start one (issue #742)", async () => {
+test("a working job with no running session says that no agent works on it, and how to start one (issue 742)", async () => {
   const d = fx.jobDetails["j-15"];
   const run = "iris job run --agent claude-code j-15";
   assert.deepEqual(j.agent(d), { said: "No agent works on it now.", ended: "The last session (se-3, claude-code) ended with exit code 1.", run });
@@ -88,7 +88,11 @@ test("a working job with no running session says that no agent works on it, and 
   const ended = (end, exit = null, state = "ended") => j.agent({ ...d, session: { ...d.session, state, end, exit } }).ended;
   assert.equal(ended("exit", 0), "The last session (se-3, claude-code) ended.");
   assert.equal(ended("launch_failed"), "The last session (se-3, claude-code) did not start.");
-  assert.equal(ended("stop", null, "ending"), "The last session (se-3, claude-code) was stopped.");
+  assert.equal(ended("stop"), "The last session (se-3, claude-code) was stopped.");
+  // An ending session is still live: the engine refuses a new one, so no start step.
+  assert.deepEqual(j.agent({ ...d, session: { ...d.session, state: "ending" } }), { said: "No agent works on it now.", ended: "The last session (se-3, claude-code) stops now. When it has stopped, you can start an agent again." });
+  // The start step names the agent of the last session.
+  assert.equal(j.agent({ ...d, session: { ...d.session, agent: "codex" } }).run, "iris job run --agent codex j-15");
   for (const state of ["starting", "running"]) assert.equal(j.agent({ ...d, session: { ...d.session, state, end: null, exit: null } }), null, state);
   for (const id of ["j-12", "j-14"]) assert.equal(j.agent({ ...fx.jobDetails[id], session: null }), null, id);
   const page = text(await render("/src/views/Job.svelte", { detail: d }));

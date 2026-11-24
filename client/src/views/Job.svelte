@@ -5,11 +5,33 @@
   shows as text only.
 -->
 <script lang="ts">
-  import type { JobDetail } from "../api";
+  import { get, type JobDetail } from "../api";
   import { agent, clock, day, due, now, steps, waitMail } from "../jobs";
   import Grants from "./Grants.svelte";
 
-  let { detail }: { detail: JobDetail } = $props();
+  // `every`: the ms between two reads of a job whose session can still change (a prop for the tests).
+  let { detail: first, every = 5000 }: { detail: JobDetail; every?: number } = $props();
+  // svelte-ignore state_referenced_locally
+  let detail = $state(first);
+  // While a session starts, runs or stops, its state can change: read the job again (issue 742).
+  $effect(() => {
+    const s = detail.session;
+    if (detail.job.state !== "working" || !s || s.state === "ended") return;
+    const id = detail.job.id;
+    let live = true;
+    const timer = setTimeout(() => {
+      get<JobDetail>(`jobs/${encodeURIComponent(id)}`).then(
+        (d) => {
+          if (live) detail = d;
+        },
+        () => {},
+      );
+    }, every);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  });
 
   let job = $derived(detail.job);
   let limit = $derived(due(job));
@@ -35,7 +57,9 @@
     <p class="said">{idle ? idle.said : now(job)}</p>
     {#if idle}
       {#if idle.ended}<p class="ended">{idle.ended}</p>{/if}
-      <p class="run">To start an agent, on the machine that runs Iris, run <code>{idle.run}</code>.</p>
+      {#if idle.run}
+        <p class="run">To start an agent, on the machine that runs Iris, run <code>{idle.run}</code>. For another agent, put its name after <code>--agent</code>: <code>claude-code</code>, <code>codex</code>, or a name from <code>agents.toml</code>.</p>
+      {/if}
     {/if}
     {#if mail}<p class="mail"><a class="touch" href={mail.link}>{mail.subject}</a></p>{/if}
   {/if}
