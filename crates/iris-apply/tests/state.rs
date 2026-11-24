@@ -773,6 +773,16 @@ fn the_undo_of_a_state_entry_keeps_a_later_change() {
         json!(1),
         "the corrections of the later action stay"
     );
+    // Decision D18 (issue #463): the undo changed no item, so the entry
+    // stays open. After the undo of the later close, its undo applies.
+    assert_eq!(b.state(a), "applied");
+    b.undo(later);
+    let (_, outcome) = b.undo(a);
+    assert!(
+        matches!(outcome, Outcome::Applied(c) if (c.changed, c.unchanged) == (1, 0)),
+        "{outcome:?}"
+    );
+    assert_eq!(b.state(a), "undone");
     // A failed entry has no undo.
     let failed = b.approved(Verb::Close, json!({ "reason": "Again." }));
     assert!(matches!(

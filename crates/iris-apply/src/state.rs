@@ -370,13 +370,16 @@ fn restore(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<Ou
     )?;
     let undo = tx.last_insert_rowid();
     // The trigger ledger_state moves the action to `applied`, and the first
-    // entry's action to `undone`.
+    // entry's action to `undone`. An undo that changed no item keeps the
+    // entry open, so the person can undo it again (decision D18, issue #463).
     tx.execute("UPDATE ledger SET state = 'applied' WHERE id = ?1", [undo])?;
-    tx.execute(
-        "UPDATE ledger SET state = 'undone', undone_by = ?2
-         WHERE id = ?1 AND state IN ('applied', 'failed')",
-        params![entry, undo],
-    )?;
+    if counts.changed > 0 {
+        tx.execute(
+            "UPDATE ledger SET state = 'undone', undone_by = ?2
+             WHERE id = ?1 AND state IN ('applied', 'failed')",
+            params![entry, undo],
+        )?;
+    }
     Ok(Outcome::Applied(counts))
 }
 
