@@ -719,7 +719,9 @@ pub fn until_ms(text: &str) -> Result<i64, String> {
             format!("{text} is not a day YYYY-MM-DD or an RFC 3339 time (2026-11-18T09:30:00Z)")
         })?;
     if ms.rem_euclid(1000) != 0 {
-        return Err(format!("{text} has a fraction of a second: give whole seconds"));
+        return Err(format!(
+            "{text} has a fraction of a second: give whole seconds"
+        ));
     }
     Ok(ms)
 }
