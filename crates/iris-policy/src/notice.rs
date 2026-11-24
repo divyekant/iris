@@ -66,6 +66,7 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
                    AND m.internal_date >= m.fetched_at - ?2
                    AND EXISTS (SELECT 1 FROM body b WHERE b.message_id = m.id)
                    AND NOT ", iris_store::may_be_hostile!(), "
+                   AND NOT ", iris_store::hostile_mail!(), "
                    AND NOT EXISTS (SELECT 1 FROM notice n WHERE n.message_id = m.id)
                    AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                        WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))
@@ -146,30 +147,42 @@ pub fn line(s: &str) -> String {
     }
 }
 
-/// The notices that are not done, newest first, at most [`LIST_MAX`].
+/// The SQL condition "the notice is open": not done, and its mail is not
+/// hostile mail now. A mark that came after the notice (a model `phishing`
+/// mark, a `hostile` sender, the label `SPAM`) hides the notice, so a notice
+/// never points to phishing (decision D33). Each read of notices uses it.
+const OPEN: &str = concat!(
+    "done_at IS NULL AND NOT EXISTS (SELECT 1 FROM message m WHERE m.id = notice.message_id AND (",
+    iris_store::hostile_mail!(),
+    " OR ",
+    iris_store::may_be_hostile!(),
+    "))"
+);
+
+/// The notices that are open, newest first, at most [`LIST_MAX`].
 pub fn list(conn: &Connection) -> Result<Vec<Notice>> {
     select(
         conn,
-        "WHERE done_at IS NULL ORDER BY id DESC LIMIT ?1",
+        &format!("WHERE {OPEN} ORDER BY id DESC LIMIT ?1"),
         params![LIST_MAX],
     )
 }
 
-/// The notices that are not done with a row ID larger than `after`, oldest
+/// The notices that are open with a row ID larger than `after`, oldest
 /// first, at most `limit` (the Mac app, `docs/specs/2026-11-17-mac-app.md`).
 pub fn after(conn: &Connection, after: i64, limit: i64) -> Result<Vec<Notice>> {
     select(
         conn,
-        "WHERE done_at IS NULL AND id > ?1 ORDER BY id LIMIT ?2",
+        &format!("WHERE {OPEN} AND id > ?1 ORDER BY id LIMIT ?2"),
         params![after, limit],
     )
 }
 
-/// The count of notices that are not done, and the largest row ID of all
+/// The count of notices that are open, and the largest row ID of all
 /// notices (0 with no notice).
 pub fn counts(conn: &Connection) -> Result<(i64, i64)> {
     Ok(conn.query_row(
-        "SELECT count(*) FILTER (WHERE done_at IS NULL), coalesce(max(id), 0) FROM notice",
+        &format!("SELECT count(*) FILTER (WHERE {OPEN}), coalesce(max(id), 0) FROM notice"),
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?)

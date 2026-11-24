@@ -308,3 +308,65 @@ fn a_watch_waits_for_the_link_check() {
         .unwrap();
     assert_eq!(store.check_watches(NOW).unwrap(), [(w, id)]);
 }
+
+/// Decision D33 (issue 257): a match that becomes hostile mail after the
+/// check gives no notice. The watch waits again, and the next safe arrival
+/// matches. Each later sign of hostile mail counts: a mark, the label
+/// `SPAM`, a hostile sender.
+#[test]
+fn a_match_that_becomes_hostile_gives_no_notice() {
+    let dir = TempDir::new("later-mark");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(acc, &[("SPAM", "SPAM", "system")])
+        .unwrap();
+    let cases: [(&str, &str); 3] = [
+        (
+            "mark",
+            "UPDATE message SET hostile = '[\"phishing\"]' WHERE id = ?1",
+        ),
+        (
+            "spam",
+            "INSERT INTO message_label(message_id, label_id)
+               SELECT ?1, id FROM label WHERE provider_id = 'SPAM'",
+        ),
+        (
+            "sender",
+            "INSERT INTO sender(address, kind, decided_by)
+               SELECT from_addr, 'hostile', 'engine' FROM header WHERE message_id = ?1",
+        ),
+    ];
+    for (i, (name, sql)) in cases.iter().enumerate() {
+        let t = NOW + 10 * i as i64;
+        let w = store.add_watch(&format!("visa{i}"), t).unwrap();
+        let bad = put(
+            &store,
+            acc,
+            msg(&format!("b{i}"), t, &["INBOX"], &format!("visa{i}"), true),
+        );
+        assert_eq!(store.check_watches(t).unwrap(), [(w, bad)], "{name}");
+        store.write(|tx| Ok(tx.execute(sql, [bad])?)).unwrap();
+        // The readers show no notice now, also before the next check.
+        let got = store.watch(w).unwrap().unwrap();
+        assert_eq!((got.message, got.arrived_at), (None, None), "{name}");
+        let listed = store.watches().unwrap();
+        let row = listed.iter().find(|x| x.id == w).unwrap();
+        assert_eq!(row.message, None, "{name}");
+        assert_eq!(store.check_watches(t + 1).unwrap(), [], "{name}");
+
+        let good = put(
+            &store,
+            acc,
+            msg(
+                &format!("g{i}"),
+                t + 2,
+                &["INBOX"],
+                &format!("visa{i}"),
+                true,
+            ),
+        );
+        assert_eq!(store.check_watches(t + 3).unwrap(), [(w, good)], "{name}");
+        let got = store.watch(w).unwrap().unwrap();
+        assert_eq!((got.message, got.arrived_at), (Some(good), Some(t + 3)));
+    }
+}

@@ -147,8 +147,9 @@ impl Query {
 
     /// The first message that matches and arrived for a watch (card R5-07):
     /// a row ID above `after`, a date from `since`, clean text and no
-    /// `link_check` row (so the hostile checks ran), no hostile mark or
-    /// hostile sender, no label `SENT`, and not [`crate::draft_or_copy!`].
+    /// `link_check` row (so the hostile checks ran), not hostile mail
+    /// ([`crate::hostile_mail!`]: a hostile mark, the label `SPAM` or a
+    /// hostile sender), no label `SENT`, and not [`crate::draft_or_copy!`].
     /// The lowest row ID is the first arrival.
     pub(crate) fn first_arrival(
         &self,
@@ -163,15 +164,13 @@ impl Query {
         sql.push_str(&format!(
             " AND m.id > ?{a} AND m.internal_date >= ?{s}
               AND EXISTS (SELECT 1 FROM body b WHERE b.message_id = m.id)
-              AND NOT {may_be_hostile}
-              AND NOT EXISTS (SELECT 1 FROM header h JOIN sender x
-                    ON x.address = h.from_addr COLLATE NOCASE
-                  WHERE h.message_id = m.id AND x.kind = 'hostile')
+              AND NOT {may_be_hostile} AND NOT {hostile_mail}
               AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                   WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
               AND NOT {draft_or_copy}
              ORDER BY m.id LIMIT 1",
             may_be_hostile = crate::may_be_hostile!(),
+            hostile_mail = crate::hostile_mail!(),
             draft_or_copy = crate::draft_or_copy!("m"),
         ));
         let mut st = conn.prepare(&sql)?;
