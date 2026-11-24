@@ -748,9 +748,90 @@ fn dry_write_gives_the_result_and_writes_nothing() {
 }
 
 #[test]
+fn a_deferred_commitment_opens_at_midnight_of_the_owner() {
+    let dir = TempDir::new("deferred-zone");
+    let (store, acc) = setup(&dir);
+    let add = |until: &str| -> i64 {
+        store
+            .write(|tx| {
+                Ok(tx.query_row(
+                    "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                     VALUES ('commitment', ?1, 'deferred', json_object('status', 'deferred',
+                       'deferred_until', ?2), 0, 0) RETURNING id",
+                    rusqlite::params![acc, until],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    let status = |id: i64| -> String {
+        store
+            .read(|c| Ok(c.query_row("SELECT status FROM item WHERE id = ?1", [id], |r| r.get(0))?))
+            .unwrap()
+    };
+    let hour = 3_600_000;
+    // 2026-11-16T00:00:00Z
+    let midnight_utc = 1_794_787_200_000;
+
+    // West of UTC: at 05:00 UTC it is still 21:00 on 15 November in Los Angeles.
+    store.set_time_zone(Some("America/Los_Angeles")).unwrap();
+    let west = add("2026-11-16");
+    assert_eq!(store.reopen_deferred(midnight_utc + 5 * hour).unwrap(), 0);
+    assert_eq!(status(west), "deferred");
+    // 08:00 UTC is midnight in Los Angeles.
+    assert_eq!(store.reopen_deferred(midnight_utc + 8 * hour).unwrap(), 1);
+    assert_eq!(status(west), "open");
+
+    // East of UTC: at 15:00 UTC on 15 November it is already 16 November in Tokyo.
+    store.set_time_zone(Some("Asia/Tokyo")).unwrap();
+    let east = add("2026-11-16");
+    assert_eq!(store.reopen_deferred(midnight_utc - 10 * hour).unwrap(), 0);
+    assert_eq!(store.reopen_deferred(midnight_utc - 9 * hour).unwrap(), 1);
+    assert_eq!(status(east), "open");
+}
+
+#[test]
+fn the_time_zone_setting_takes_only_a_known_zone() {
+    let dir = TempDir::new("zone-setting");
+    let (store, _) = setup(&dir);
+    let zone = || store.read(|c| Ok(iris_store::time_zone(c)?)).unwrap();
+    let computer = jiff::tz::TimeZone::system();
+    assert_eq!(zone().iana_name(), computer.iana_name());
+
+    store.set_time_zone(Some("Asia/Kolkata")).unwrap();
+    assert_eq!(zone().iana_name(), Some("Asia/Kolkata"));
+    let r = store.set_time_zone(Some("Mars/Olympus"));
+    assert!(matches!(r, Err(iris_store::Error::TimeZone(_))), "{r:?}");
+    // A refused name keeps the old setting.
+    assert_eq!(zone().iana_name(), Some("Asia/Kolkata"));
+
+    store.set_time_zone(None).unwrap();
+    assert_eq!(zone().iana_name(), computer.iana_name());
+}
+
+#[test]
+fn a_day_is_the_day_of_the_zone() {
+    let tz = |n: &str| jiff::tz::TimeZone::get(n).unwrap();
+    // 2026-11-16T05:00:00Z
+    let at = 1_794_805_200_000;
+    assert_eq!(iris_store::day_in(&tz("UTC"), at), "2026-11-16");
+    assert_eq!(
+        iris_store::day_in(&tz("America/Los_Angeles"), at),
+        "2026-11-15"
+    );
+    assert_eq!(
+        iris_store::day_in(&tz("Pacific/Kiritimati"), at),
+        "2026-11-16"
+    );
+    // Out of range: the day of the epoch, no panic.
+    assert_eq!(iris_store::day_in(&tz("UTC"), i64::MAX), "1970-01-01");
+}
+
+#[test]
 fn a_deferred_commitment_opens_on_its_date() {
     let dir = TempDir::new("deferred");
     let (store, acc) = setup(&dir);
+    store.set_time_zone(Some("UTC")).unwrap();
     // 2026-11-16T12:00:00.007Z
     let now = 1_794_830_400_007;
     let add = |status: &str, before: Option<&str>, doc: &str| -> i64 {

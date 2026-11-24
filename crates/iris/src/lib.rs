@@ -147,6 +147,16 @@ pub enum Command {
         #[command(subcommand)]
         command: ModelCommand,
     },
+    /// Show or set the time zone of defer dates and due dates. With no
+    /// argument, show it. The default is the time zone of the computer.
+    Zone {
+        /// An IANA time zone name, for example `Europe/Berlin`.
+        #[arg(conflicts_with = "computer")]
+        name: Option<String>,
+        /// Use the time zone of the computer again.
+        #[arg(long)]
+        computer: bool,
+    },
     /// Show the send switch, or turn it on or off. No send leaves while it
     /// is off. `on` needs a terminal and a typed "yes".
     Sending {
@@ -1561,6 +1571,16 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             println!("{text}");
             Ok(())
         }
+        Command::Zone { name, computer } => {
+            let store = open()?;
+            if name.is_some() || *computer {
+                store
+                    .set_time_zone(name.as_deref())
+                    .map_err(|e| e.to_string())?;
+            }
+            println!("{}", zone_text(&store).map_err(|e| e.to_string())?);
+            Ok(())
+        }
         Command::Sending { state } => {
             let store = open()?;
             match state {
@@ -1683,6 +1703,22 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
 
 /// `iris model set`: checks the input first, then reads the key, then
 /// writes the row.
+/// What `iris zone` shows: the time zone of the owner and where it comes from.
+fn zone_text(store: &Store) -> iris_store::Result<String> {
+    use rusqlite::OptionalExtension;
+    store.read(|c| {
+        let set: Option<String> = c
+            .query_row("SELECT time_zone FROM owner_setting", [], |r| r.get(0))
+            .optional()?;
+        let zone = iris_store::time_zone(c)?;
+        let name = zone.iana_name().unwrap_or("UTC offset of the computer");
+        Ok(match set {
+            Some(_) => format!("Time zone: {name}. Change it with iris zone <name>, or use the computer's with iris zone --computer."),
+            None => format!("Time zone: {name}, from the computer. Set another with iris zone <name>."),
+        })
+    })
+}
+
 fn model_set(store: &Store, provider: &SetModel) -> Result<String, String> {
     let m = match provider {
         SetModel::Anthropic {

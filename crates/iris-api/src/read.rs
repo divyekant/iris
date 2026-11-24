@@ -70,6 +70,10 @@ pub struct Status {
     /// a model or a budget (`waits_model` = `WAITS_INPUT`). A draft, a copy
     /// and gone mail never count.
     pub waits_model: i64,
+    /// The IANA name of the time zone of defer dates and due dates
+    /// (`iris zone`, decision D1). `None` when the time zone of the computer
+    /// has no IANA name: then a client uses its own.
+    pub time_zone: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -350,6 +354,7 @@ pub fn status(store: &Store) -> Result<Status> {
             messages,
             model,
             waits_model,
+            time_zone: iris_store::time_zone(c)?.iana_name().map(str::to_string),
         })
     })?;
     settle_runs(store, &mut status.accounts)?;
