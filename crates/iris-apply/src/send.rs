@@ -778,9 +778,6 @@ pub fn release(
     let Some(on_at) = store.read(switch_on)? else {
         return Ok(Outcome::SendingOff);
     };
-    if store.read(|c| bcc_waits(c, d.id))?.is_some() {
-        return Ok(Outcome::BccUnchecked);
-    }
     let until = decided_at.max(on_at) + HOLD_MS;
     if now() < until {
         return Ok(Outcome::Hold(until));
@@ -818,6 +815,11 @@ pub fn release(
     let content = &read.as_ref().expect("same").content;
     if grown(store, action, &run.address, content)? {
         return Ok(Outcome::Denied(GROWN.into()));
+    }
+    // After the read of the draft, so that a closed gate does not hide a
+    // change at the provider. The claim checks the gate again.
+    if store.read(|c| bcc_waits(c, d.id))?.is_some() {
+        return Ok(Outcome::BccUnchecked);
     }
     // Step 3: the claim.
     let ops = Ops::Send {

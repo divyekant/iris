@@ -1514,6 +1514,28 @@ fn a_send_with_bcc_waits_for_the_bcc_gate() {
     assert_eq!(b.sends(), 3);
 }
 
+/// A closed gate does not hide a change at Gmail: release reads the draft
+/// first, so an edit that removes the Bcc denies the send and refreshes
+/// the row, and a new send of the edited draft goes out.
+#[test]
+fn a_closed_bcc_gate_still_sees_a_change_at_gmail() {
+    let b = setup("bcc-edit");
+    let a = b.approved(Verb::Draft, "a-1", bcc_mail(&[]), 0);
+    assert!(matches!(b.apply(a), Ok(Outcome::Applied(_))));
+    let d = b.draft(a);
+    let s = b.approved(Verb::Send, &d.0, json!({}), AGED);
+    let raw = String::from_utf8(b.gmail.draft_raw(TOKEN, &d.1).unwrap().raw.unwrap()).unwrap();
+    let edited: String = raw.lines().filter(|l| !l.starts_with("Bcc:")).map(|l| format!("{l}\r\n")).collect();
+    assert!(b.fake.edit_draft(&d.1, edited.as_bytes()));
+    match b.release(s) {
+        Ok(Outcome::Denied(why)) => assert!(why.contains("changed at Gmail"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    let again = b.approved(Verb::Send, &d.0, json!({}), AGED);
+    assert!(matches!(b.release(again), Ok(Outcome::Applied(_))));
+    assert_eq!(b.sends(), 1);
+}
+
 #[test]
 fn a_sent_copy_with_no_bcc_takes_the_approved_bcc_with_a_note() {
     let b = setup("bcc-note");

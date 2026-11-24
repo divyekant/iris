@@ -33,7 +33,7 @@ function serve(answer) {
   globalThis.fetch = async (url, init = {}) => {
     const path = String(url).replace(/^\/api\//, "");
     const method = init.method ?? "GET";
-    const body = init.body ? JSON.parse(init.body) : undefined;
+    const body = typeof init.body?.arrayBuffer === "function" ? init.body : init.body ? JSON.parse(init.body) : undefined;
     asked.push({ method, path, body });
     const [status, out] = answer(path, method, body);
     return new Response(JSON.stringify(out), { status, headers: { "content-type": "application/json" } });
@@ -873,5 +873,58 @@ test("a change to the intent or a recipient while the saved draft loads keeps th
       app.destroy();
       net.restore();
     }
+  }
+});
+
+test("Add Bcc opens the blind copy, a chosen file goes to the engine first, and Send sends both (send content spec)", async () => {
+  const net = serve((path, method) => {
+    if (path === "attachments") return [201, { sha256: "ab".repeat(32), size: 5 }];
+    if (path === "write" && method === "POST") return [201, { write: "cs-3" }];
+    return [200, { state: "saving" }];
+  });
+  const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 60_000 });
+  try {
+    await fill(app);
+    assert.equal(app.target.querySelector("#write-bcc"), null, "the blind copy waits for its button");
+    [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Add Bcc").click();
+    app.flushSync();
+    type(app.target.querySelector("#write-bcc"), "lee@example.org ");
+    app.flushSync();
+    const input = app.target.querySelector("input[type=file]");
+    const file = new window.File(["hello"], "notes.txt", { type: "text/plain;charset=utf-8" });
+    Object.defineProperty(input, "files", { configurable: true, value: [file] });
+    input.dispatchEvent(new window.Event("change", { bubbles: true }));
+    await until(() => app.target.querySelector(".files .chip"));
+    app.flushSync();
+    assert.match(text(app.target.querySelector(".files")), /notes\.txt\s*5 B/);
+    const up = net.posts().find((a) => a.path === "attachments");
+    assert.equal(typeof up.body.arrayBuffer, "function", "the file goes as its bytes");
+    press(app);
+    await until(() => net.posts().some((a) => a.path === "write"));
+    const mail = net.posts().find((a) => a.path === "write").body;
+    assert.deepEqual(mail.bcc, ["lee@example.org"]);
+    assert.deepEqual(mail.attachments, [{ name: "notes.txt", type: "text/plain", size: 5, sha256: "ab".repeat(32) }]);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("a file that the engine refuses names its reason and does not join the mail", async () => {
+  const net = serve((path) => (path === "attachments" ? [413, { error: "The file is too large." }] : [200, {}]));
+  const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 60_000 });
+  try {
+    await fill(app);
+    const input = app.target.querySelector("input[type=file]");
+    Object.defineProperty(input, "files", { configurable: true, value: [new window.File(["x"], "big.bin")] });
+    input.dispatchEvent(new window.Event("change", { bubbles: true }));
+    await until(() => app.target.querySelector(".note"));
+    app.flushSync();
+    assert.match(text(app.target.querySelector(".note")), /big\.bin: The file is too large\./);
+    assert.equal(app.target.querySelector(".files .chip"), null);
+    assert.equal(app.target.querySelector("button[type=submit]").disabled, false);
+  } finally {
+    app.destroy();
+    net.restore();
   }
 });

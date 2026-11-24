@@ -18,9 +18,9 @@
 -->
 <script lang="ts">
   import { onDestroy, untrack } from "svelte";
-  import { get, own, post, type Account, type ReplyStart, type ThreadDraft, type WriteState } from "../api";
+  import { get, own, post, upload, type Account, type Attachment, type ReplyStart, type ThreadDraft, type WriteState } from "../api";
   import { chips, unique } from "../chips";
-  import { initials, when } from "../format";
+  import { bytes, initials, when } from "../format";
   import { FLAGS } from "../review";
   import { href } from "../route";
 
@@ -40,6 +40,8 @@
     account: string;
     to: string[];
     cc: string[];
+    bcc?: string[];
+    files?: Attachment[];
     subject: string;
     body: string;
     key: string;
@@ -47,6 +49,7 @@
     flags: string[];
     toText?: string;
     ccText?: string;
+    bccText?: string;
     intent?: string;
   };
   function storage(): Storage | undefined {
@@ -102,9 +105,17 @@
   let cc = $state<string[]>(startCc);
   let subject = $state(saved?.subject ?? "");
   let body = $state(saved?.body ?? "");
+  const startBcc = unique(saved?.bcc ?? []);
+  let bcc = $state<string[]>(startBcc);
+  // The files of the mail: each one is in the attachment folder of the engine.
+  let files = $state<Attachment[]>(saved?.files ?? []);
+  let adding = $state(0);
+  let fileNote = $state("");
   let copy = $state(startCc.length > 0);
+  let blind = $state(startBcc.length > 0);
   let toText = $state(saved?.toText ?? "");
   let ccText = $state(saved?.ccText ?? "");
+  let bccText = $state(saved?.bccText ?? "");
   // The key of the press and the content that it belongs to. A new content gets a new key.
   let key = $state(saved?.key ?? "");
   let sig = $state(saved?.sig ?? "");
@@ -115,7 +126,7 @@
   let busy = $state(false);
 
   // The parent is part of the content: a reply to a new parent is a new mail.
-  let content = $derived(JSON.stringify([thread ? [thread, reply?.parent.id] : account, to, cc, thread ? "" : subject, body]));
+  let content = $derived(JSON.stringify([thread ? [thread, reply?.parent.id] : account, to, cc, bcc, files.map((f) => [f.sha256, f.name, f.type]), thread ? "" : subject, body]));
   // One key for one content: a new content gets a new key. Send calls it too,
   // after it ends the open address text, so each press sends the key of its own content.
   function rekey() {
@@ -134,7 +145,7 @@
   // Save each part of the form that a reload must keep: the text of an address
   // not yet a chip, and the warnings that the next press sends, too.
   $effect(() => {
-    const form: Saved = { account, to, cc, subject, body, key, sig, flags, toText, ccText, intent };
+    const form: Saved = { account, to, cc, bcc, files, subject, body, key, sig, flags, toText, ccText, bccText, intent };
     if (write) return;
     try {
       storage()?.setItem(place, JSON.stringify(form));
@@ -146,24 +157,49 @@
   const ADDRESS = /^[^\s@,<>]+@[^\s@,<>]+\.[^\s@,<>]+$/;
   const valid = (a: string) => ADDRESS.test(a);
   // No mail with no text (issue 741): the engine refuses it too.
-  let ready = $derived(to.some(valid) && (thread !== null || subject.trim() !== "") && body.trim() !== "" && !busy);
+  let ready = $derived(to.some(valid) && (thread !== null || subject.trim() !== "") && body.trim() !== "" && !busy && adding === 0);
 
-  function typed(field: "to" | "cc", end = false) {
-    const [list, rest] = chips(field === "to" ? to : cc, field === "to" ? toText : ccText, end);
-    if (field === "to") [to, toText] = [list, rest];
-    else [cc, ccText] = [list, rest];
+  type Field = "to" | "cc" | "bcc";
+  const list = (f: Field) => (f === "to" ? to : f === "cc" ? cc : bcc);
+  const open_ = (f: Field) => (f === "to" ? toText : f === "cc" ? ccText : bccText);
+  function set(f: Field, l: string[], rest = open_(f)) {
+    if (f === "to") [to, toText] = [l, rest];
+    else if (f === "cc") [cc, ccText] = [l, rest];
+    else [bcc, bccText] = [l, rest];
   }
-  function keydown(field: "to" | "cc", e: KeyboardEvent) {
-    const text = field === "to" ? toText : ccText;
+  function typed(field: Field, end = false) {
+    const [l, rest] = chips(list(field), open_(field), end);
+    set(field, l, rest);
+  }
+  function keydown(field: Field, e: KeyboardEvent) {
     if (e.key === "Enter") {
       e.preventDefault();
       typed(field, true);
-    } else if (e.key === "Backspace" && text === "") {
-      if (field === "to") to = to.slice(0, -1);
-      else cc = cc.slice(0, -1);
+    } else if (e.key === "Backspace" && open_(field) === "") {
+      set(field, list(field).slice(0, -1));
     }
   }
-  const remove = (field: "to" | "cc", a: string) => (field === "to" ? (to = to.filter((x: string) => x !== a)) : (cc = cc.filter((x: string) => x !== a)));
+  const remove = (field: Field, a: string) => set(field, list(field).filter((x: string) => x !== a));
+
+  // Each chosen file goes into the attachment folder of the engine first. The
+  // mail holds its entry: the name, the type, the size and the SHA-256.
+  async function attach(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const chosen = [...(input.files ?? [])];
+    input.value = "";
+    fileNote = "";
+    for (const f of chosen) {
+      adding++;
+      try {
+        const a = await upload(f);
+        if (alive && !files.some((x) => x.sha256 === a.sha256 && x.name === a.name)) files = [...files, a];
+      } catch (err) {
+        fileNote = `${f.name}: ${own(err)}`;
+      }
+      adding--;
+    }
+  }
+  const unattach = (a: Attachment) => (files = files.filter((x) => x !== a));
 
   // The intent path (spec section 8): the engine writes the text in the voice of
   // the person from what they want to say. The person reads and edits it before Send.
@@ -195,14 +231,23 @@
   // "Write it for me", only that answer fills the form. The form must still be
   // untouched when the read answers.
   const same = (a: string[], b: string[]) => a.length === b.length && unique(a).every((x) => b.includes(x));
-  const untouched = (f: Pick<Saved, "to" | "cc" | "body" | "intent" | "toText" | "ccText"> | null) =>
-    !f || (!f.body.trim() && !f.intent?.trim() && !f.toText?.trim() && !f.ccText?.trim() && same(f.to, reply?.to ?? []) && same(f.cc, reply?.cc ?? []));
+  const untouched = (f: Pick<Saved, "to" | "cc" | "bcc" | "files" | "body" | "intent" | "toText" | "ccText" | "bccText"> | null) =>
+    !f ||
+    (!f.body.trim() &&
+      !f.intent?.trim() &&
+      !f.toText?.trim() &&
+      !f.ccText?.trim() &&
+      !f.bccText?.trim() &&
+      !f.bcc?.length &&
+      !f.files?.length &&
+      same(f.to, reply?.to ?? []) &&
+      same(f.cc, reply?.cc ?? []));
   let filled = $state(false);
   let asked = false;
   if (thread && reply && untouched(saved) && !taken()) {
     get<ThreadDraft>(`threads/${encodeURIComponent(thread)}/draft`).then(
       (d) => {
-        if (alive && !write && !asked && !d.nudge && d.based_on === reply.parent.id && untouched({ to, cc, body, intent, toText, ccText })) {
+        if (alive && !write && !asked && !d.nudge && d.based_on === reply.parent.id && untouched({ to, cc, bcc, files, body, intent, toText, ccText, bccText })) {
           body = d.body;
           filled = true;
         }
@@ -220,13 +265,16 @@
   async function send() {
     typed("to", true);
     typed("cc", true);
+    typed("bcc", true);
     rekey();
     if (!ready) return;
     busy = true;
     problem = "";
     const target = thread ? { thread, parent: reply?.parent.id } : { account, subject };
     const sent = key;
-    const mail = { ...target, to: [...to], cc: [...cc], body, key, flags: [...flags] };
+    // Bcc and files go only when the mail has them, as an older engine takes no such field.
+    const extra = { ...(bcc.length ? { bcc: [...bcc] } : {}), ...(files.length ? { attachments: files.map((f) => ({ ...f })) } : {}) };
+    const mail = { ...target, to: [...to], cc: [...cc], ...extra, body, key, flags: [...flags] };
     try {
       const v = await post<{ write: string }>("write", mail);
       // A view that the person left keeps the record only while the saved form is still the form of this
@@ -322,9 +370,10 @@
     keep(null, write);
     if (thread) return void (location.hash = "#/write");
     clearTimeout(timer);
-    [write, to, cc, subject, body, note, toText, ccText] = ["", [], [], "", "", "", "", ""];
+    [write, to, cc, bcc, files, subject, body, note, toText, ccText, bccText] = ["", [], [], [], [], "", "", "", "", "", ""];
     ws = { state: "saving" };
     copy = false;
+    blind = false;
   }
 
   // The recipient of the mail that the engine took, not of the form now.
@@ -439,24 +488,29 @@
       </label>
     {/if}
     <!-- Each address that Send can send shows in the form: open address text opens the fields. -->
-    {#if reply && !editing && to.some(valid) && !toText && !ccText}
-      <p class="who">Reply to <strong>{named}</strong>{#if cc.length}<span class="faint">, copy to {cc.join(", ")}</span>{/if}<button type="button" class="end" onclick={() => (editing = true)}>Change</button></p>
+    {#if reply && !editing && to.some(valid) && !toText && !ccText && !bccText}
+      <p class="who">Reply to <strong>{named}</strong>{#if cc.length}<span class="faint">, copy to {cc.join(", ")}</span>{/if}{#if bcc.length}<span class="faint">, Bcc {bcc.join(", ")}</span>{/if}<button type="button" class="end" onclick={() => (editing = true)}>Change</button></p>
     {:else}
-      {#each [["to", "To"], ["cc", "Copy"]] as const as [field, label] (field)}
-        {#if field === "to" || copy || cc.length > 0 || ccText !== ""}
+      {#each [["to", "To"], ["cc", "Copy"], ["bcc", "Bcc"]] as const as [field, label] (field)}
+        {#if field === "to" || (field === "cc" ? copy || cc.length > 0 || ccText !== "" : blind || bcc.length > 0 || bccText !== "")}
           <div class="line">
             <label class="k" for="write-{field}">{label}</label>
-            {#each field === "to" ? to : cc as a (a)}
+            {#each list(field) as a (a)}
               <span class="chip" class:bad={!valid(a)} title={valid(a) ? undefined : "This address does not look valid"}>
                 {a}<button type="button" aria-label="Remove {a}" onclick={() => remove(field, a)}>×</button>
               </span>
             {/each}
             {#if field === "to"}
               <input id="write-to" type="text" autocomplete="off" bind:value={toText} oninput={() => typed("to")} onkeydown={(e) => keydown("to", e)} onblur={() => typed("to", true)} />
-            {:else}
+            {:else if field === "cc"}
               <input id="write-cc" type="text" autocomplete="off" bind:value={ccText} oninput={() => typed("cc")} onkeydown={(e) => keydown("cc", e)} onblur={() => typed("cc", true)} />
+            {:else}
+              <input id="write-bcc" type="text" autocomplete="off" bind:value={bccText} oninput={() => typed("bcc")} onkeydown={(e) => keydown("bcc", e)} onblur={() => typed("bcc", true)} />
             {/if}
-            {#if field === "to" && !copy && cc.length === 0 && ccText === ""}<button type="button" class="end" onclick={() => (copy = true)}>Add copy</button>{/if}
+            {#if field === "to"}
+              {#if !copy && cc.length === 0 && ccText === ""}<button type="button" class="end" onclick={() => (copy = true)}>Add copy</button>{/if}
+              {#if !blind && bcc.length === 0 && bccText === ""}<button type="button" class="end" onclick={() => (blind = true)}>Add Bcc</button>{/if}
+            {/if}
           </div>
         {/if}
       {/each}
@@ -472,6 +526,15 @@
       {#if filled && !draftNote}<p class="saved">Iris wrote this draft for you before. Read it and change it before you send.</p>{/if}
     {/if}
     <textarea class="body" aria-label={reply ? "Reply text" : "Mail text"} placeholder={reply ? "Write your reply" : "Write your mail"} bind:value={body}></textarea>
+    {#if files.length > 0 || adding > 0}
+      <ul class="files" aria-label="Files">
+        {#each files as f (f.sha256 + f.name)}
+          <li class="chip">{f.name}<span class="faint">{bytes(f.size)}</span><button type="button" aria-label="Remove {f.name}" onclick={() => unattach(f)}>×</button></li>
+        {/each}
+        {#if adding > 0}<li class="chip faint">Adding {adding === 1 ? "a file" : `${adding} files`}</li>{/if}
+      </ul>
+    {/if}
+    {#if fileNote}<p class="note" role="alert">{fileNote}</p>{/if}
 
     {#if flags.length > 0}
       <ul class="flags">{#each flags as f (f)}<li>{FLAGS[f] ?? f}</li>{/each}</ul>
@@ -484,6 +547,7 @@
     <div class="foot">
       <button type="submit" class="primary" disabled={!ready}>{busy ? "Sending" : "Send"}</button>
       <p class="hint">It waits 60 seconds in the Outbox, so you can still cancel it.</p>
+      <label class="quiet attach">Attach a file<input type="file" multiple onchange={attach} /></label>
       <button type="button" class="quiet" onclick={discard}>Discard</button>
     </div>
     </fieldset>
@@ -730,6 +794,33 @@
     margin: var(--space-2) 0 0;
     color: var(--color-text-muted);
     font-size: var(--font-size--1);
+  }
+  .files {
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin: var(--space-2) 0 0;
+    padding: 0;
+  }
+  .files .faint {
+    color: var(--color-text-faint);
+  }
+  /* The file input stays in the label for the keyboard and the screen reader, with no box of its own. */
+  .attach {
+    position: relative;
+    cursor: pointer;
+  }
+  .attach input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    width: 100%;
+    cursor: pointer;
+  }
+  .attach:focus-within {
+    outline: 2px solid var(--color-primary);
+    border-radius: var(--radius-sm);
   }
   .note {
     margin: var(--space-2) 0 0;
