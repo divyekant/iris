@@ -1,4 +1,4 @@
--- Migration 46: the due date of a job moves it to needs you (decision D24,
+-- Migration 47: the due date of a job moves it to needs you (decision D24,
 -- docs/specs/2026-11-24-job-due-date.md, issue #248).
 --
 -- The trigger job_event_move of migration 14 again, with one more row of
