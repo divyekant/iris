@@ -2095,20 +2095,18 @@ fn each_write_keeps_withdrawn_by_with_the_withdraw() {
                 }
                 // Another trigger can refuse a start row (the state of a
                 // changeset comes from its actions); skip that start.
-                let Ok(id) = s
-                    .write(|tx| {
-                        tx.execute(
-                            "INSERT INTO changeset(author_kind, created_at) VALUES ('agent', 0)",
-                            [],
-                        )?;
-                        let id = tx.last_insert_rowid();
-                        tx.execute(
-                            "UPDATE changeset SET state = ?2, withdrawn_by = ?3 WHERE id = ?1",
-                            rusqlite::params![id, st0, by0],
-                        )?;
-                        Ok(id)
-                    })
-                else {
+                let Ok(id) = s.write(|tx| {
+                    tx.execute(
+                        "INSERT INTO changeset(author_kind, created_at) VALUES ('agent', 0)",
+                        [],
+                    )?;
+                    let id = tx.last_insert_rowid();
+                    tx.execute(
+                        "UPDATE changeset SET state = ?2, withdrawn_by = ?3 WHERE id = ?1",
+                        rusqlite::params![id, st0, by0],
+                    )?;
+                    Ok(id)
+                }) else {
                     continue;
                 };
                 tried += 1;
