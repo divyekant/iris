@@ -1007,6 +1007,38 @@ fn a_job_waits_three_days_and_continues() {
     let _ = s.stop(f.job).unwrap();
 }
 
+/// Issue #557: a start after a wake that fails (the agent left
+/// `agents.toml`) is tried again after 1 minute, not at each wake and not
+/// only at the next engine start.
+fn a_failed_start_after_a_wake_is_tried_again_later() {
+    let f = fixture("wake-retry", "sleep 30");
+    let s = sessions(&f);
+    let (until_day, until_ms) = day(3);
+    let first = s.run(f.job, "script").unwrap();
+    until(&s, &f, first, |r| r.started_ms.is_some());
+    let _ = s.stop(f.job).unwrap();
+    let first = wait(&s, &f, serde_json::json!({ "until": until_day }));
+    let toml = f.store.dir().join("agents.toml");
+    let saved = fs::read_to_string(&toml).unwrap();
+    fs::write(&toml, "").unwrap();
+    s.wake(until_ms);
+    assert_eq!(
+        iris_job::get(&f.store, f.job).unwrap().state,
+        iris_job::State::Working
+    );
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first.id);
+    fs::write(&toml, &saved).unwrap();
+    // The agent is back, but the next try waits 1 minute.
+    s.wake(until_ms + 59_000);
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first.id);
+    s.wake(until_ms + 60_000);
+    let next = next_session(&s, &f, first.id);
+    // A start that worked is not tried again.
+    s.wake(until_ms + 3_600_000);
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, next.id);
+    let _ = s.stop(f.job).unwrap();
+}
+
 /// The supervisor loop of the engine wakes a job at the end of its wait,
 /// with its own clock.
 fn the_supervisor_loop_wakes_the_job() {
@@ -1464,6 +1496,27 @@ fn a_comment_wakes_a_job_that_waits_after_it() {
     let _ = s.stop(f.job).unwrap();
 }
 
+/// A comment wakes a waiting job, and the start fails (the agent left
+/// `agents.toml`): a later turn makes no second try for the same comment,
+/// also after the backoff of other wakes (issue #557, review-comments spec).
+fn a_failed_start_after_a_comment_wake_is_tried_once() {
+    let (f, s, first, _) = commented("comment-wake-once");
+    let (until_day, _) = day(3);
+    let v = ask(&f, "wait", serde_json::json!({ "until": until_day })).unwrap();
+    assert_eq!(v["result"]["state"], "waiting", "{v}");
+    until(&s, &f, first, |r| r.reaped_ms.is_some());
+    let toml = f.store.dir().join("agents.toml");
+    let saved = fs::read_to_string(&toml).unwrap();
+    fs::write(&toml, "").unwrap();
+    let t = now();
+    s.wake(t);
+    let woke = iris_job::events(&f.store, f.job).unwrap().pop().unwrap();
+    assert_eq!(woke.why.as_deref(), Some("comment"));
+    fs::write(&toml, &saved).unwrap();
+    s.wake(t + 3_600_000);
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first);
+}
+
 /// Set in a child run of this program: the child runs one scenario of
 /// [`the_engine_log_names_bad_notes_at_the_launch_and_the_done_rebuild`].
 const LOG_CHILD: &str = "IRIS_TEST_LOG_CHILD";
@@ -1582,6 +1635,14 @@ fn main() {
         (
             "a_wake_by_the_person_starts_no_session",
             a_wake_by_the_person_starts_no_session,
+        ),
+        (
+            "a_failed_start_after_a_wake_is_tried_again_later",
+            a_failed_start_after_a_wake_is_tried_again_later,
+        ),
+        (
+            "a_failed_start_after_a_comment_wake_is_tried_once",
+            a_failed_start_after_a_comment_wake_is_tried_once,
         ),
         (
             "a_failed_start_for_a_comment_is_tried_once",

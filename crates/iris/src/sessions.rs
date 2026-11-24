@@ -64,9 +64,10 @@ pub struct Sessions {
     stop_marks: Mutex<HashSet<i64>>,
     after: Mutex<Option<Arc<AfterStep>>>,
     /// The wakes (job, last session before the wake) whose session this
-    /// engine tried to start: one try for each wake and engine. After a failed start, the
-    /// person runs `iris job run`.
-    tried: Mutex<HashSet<(i64, i64)>>,
+    /// engine tried to start, with the time of the next try. A start that
+    /// worked is not tried again. A failed start is tried again after
+    /// [`retry_wait`] (issue #557).
+    tried: Mutex<HashMap<(i64, i64), Retry>>,
     /// Each (job, highest pending comment ID) that a review comment tried to
     /// start (R4-08): one try for each new comment and engine, also when the
     /// start fails before a session registers.
@@ -83,6 +84,34 @@ pub struct Sessions {
     /// threads of the proxy, so no supervisor turn and no stop or run
     /// waits for it.
     releases: mpsc::Sender<Proxy>,
+}
+
+/// The tries of the start after one wake.
+struct Retry {
+    fails: u32,
+    /// No try before this time. `i64::MAX`: the start worked.
+    next_ms: i64,
+}
+
+/// The last event of the job is the wake of the engine for a review
+/// comment. A failed read counts as one: no retry.
+fn woke_for_comment(store: &Store, job: i64) -> bool {
+    store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT coalesce(why = 'comment' AND by = 'engine', 0) FROM job_event
+                 WHERE job_id = ?1 ORDER BY id DESC LIMIT 1",
+                [job],
+                |r| r.get::<_, bool>(0),
+            )?)
+        })
+        .unwrap_or(true)
+}
+
+/// The wait before the next try of a start after a wake that failed
+/// `fails` times: 1 minute, doubled after each failure, at most 1 hour.
+fn retry_wait(fails: u32) -> i64 {
+    (60_000i64 << fails.saturating_sub(1).min(6)).min(3_600_000)
 }
 
 #[derive(Default)]
@@ -728,18 +757,34 @@ impl Sessions {
             if self.live_of(job).is_some() || self.state().launching.contains(&job) {
                 continue;
             }
-            let first = self
-                .tried
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert((job, last));
-            if !first {
-                continue;
+            {
+                let mut tried = self.tried.lock().unwrap_or_else(|e| e.into_inner());
+                let r = tried.entry((job, last)).or_insert(Retry {
+                    fails: 0,
+                    next_ms: now,
+                });
+                if now < r.next_ms {
+                    continue;
+                }
+                r.next_ms = i64::MAX;
             }
             if let Err(e) = self.run(job, &agent) {
+                let id = iris_job::format_job_id(job);
+                // A wake for a review comment gets one try for each comment
+                // (docs/specs/2026-11-17-review-comments.md): the next try
+                // waits for a new comment or `iris job run`.
+                if woke_for_comment(&self.store, job) {
+                    say!("iris: {id}: the session for a review comment did not start: {e}");
+                    continue;
+                }
+                let mut tried = self.tried.lock().unwrap_or_else(|e| e.into_inner());
+                let r = tried.get_mut(&(job, last)).expect("the entry of this try");
+                r.fails += 1;
+                let wait = retry_wait(r.fails);
+                r.next_ms = now.saturating_add(wait);
                 say!(
-                    "iris: {}: the session after the wake did not start: {e}",
-                    iris_job::format_job_id(job)
+                    "iris: {id}: the session after the wake did not start: {e}. Iris tries again in {} minutes.",
+                    wait / 60_000
                 );
             }
         }
