@@ -1,0 +1,192 @@
+# Spec: the due date of a job moves it to needs you
+
+- Date: 2026-11-24
+- Card: P9-D24
+- Status: Draft
+
+## Problem
+
+A job has a due date (`due_at`), but nothing happens on that date (issue
+#248). A job past its due date looks the same as a job before it. The
+person sees the late job only if they open the job page and read the date.
+
+Decision D24 (dk, 2026-11-24, `docs/decisions.md`): on the due date, the job
+moves to "needs you", with a notice. Ending the job is too strong.
+
+## Goal
+
+- On its due date, the engine moves each job in `working` or `waiting` to
+  `needs_you`, once for each due date.
+- The question of the move tells the person what happened and what they can
+  do.
+- The engine shows a system notice for each move.
+- The person answers the question (the agent goes on with the answer), or
+  ends the job, as for each other question.
+
+## Not in scope
+
+- A change of the due date after the start. Card P9-D25 (decision D25)
+  adds the edit. This spec says how an edit and this move work together.
+- A notice for the questions of an agent (`iris ask`). They have none
+  today. This card does not change that.
+- A row in the notice list of the web client or of the Mac app for the
+  move. See "Known limits".
+
+## Design
+
+### The move
+
+The move table of `docs/specs/2026-11-16-job-store.md` gets one row:
+
+| From | To | Who | Name | Values |
+|---|---|---|---|---|
+| `working`, `waiting` | `needs_you` | engine | due | `question`, `why` = `due`, `at` not before `due_at` |
+
+A new migration (the next free number at the build) drops the trigger `job_event_move` and makes it again with this
+row. Each other row of the table stays the same. The trigger refuses a `due`
+move of a job with no due date, a move with `at` before `due_at`, and a move
+by the engine to `needs_you` with another `why`.
+
+The move to `needs_you` ends the open session of the job (trigger
+`job_session_job_state` of migration 21), the same as an `ask`. The
+supervisor then stops the processes of the session.
+
+The question is fixed engine text, not mail text:
+
+> The due date passed. Answer to let the agent go on, or end the job.
+
+### When the move is due
+
+A job is due at `now` when all of these are true:
+
+1. The job is in `working` or `waiting`.
+2. `due_at` is not NULL and `due_at <= now`.
+3. No event of the job at or after `due_at` is a move to `needs_you` (by
+   the agent or the engine), or a move by the person.
+
+Rule 3 makes the move happen once for each due date. After the move, or
+after the person acted on the job after the due date (an answer, a wake),
+the person knows that the date passed. A later due date (card P9-D25) has no
+event after it yet, so it moves the job again on that date.
+
+A job in `needs_you` on its due date does not move: it already waits for the
+person. If the person answers after the due date, rule 3 sees the answer, and
+the job does not move again.
+
+### The engine step
+
+`iris_job::move_due(store, now_ms) -> Result<Vec<Due>>` reads the due jobs
+(index `job_state`), then makes each move in its own write transaction that
+checks rules 1 to 3 again. So a move of the person or of the agent between
+the read and the write wins, and the step makes no move. `Due` holds the job
+ID and its goal.
+
+The attention loop of the engine (`crates/iris/src/engine.rs`, each 10
+seconds) runs the step, then gives one system notice for each moved job to
+the notice thread (`crates/iris/src/notify.rs`):
+
+- Title: `Iris: Job due`
+- Text: `j-<n>: <goal>`, cut to 200 characters on a character boundary.
+
+The goal is the words of the person, never mail text. The notice command
+gets it as an argument, as for the notices by rule.
+
+The notice thread gets a plain title and text in place of
+`iris_policy::notice::Notice`, so the notices by rule and the job notices use
+one queue.
+
+## Options not chosen
+
+- End the job on its due date (option B of D24): dk chose A.
+- A row in the `notice` table for the move: the table has one row for each
+  message (`message_id NOT NULL UNIQUE`). A job notice needs a new kind of
+  row, a change of `/api/notices`, the notice list of the web client and the
+  Mac app. The job page and the "Needs you" group of the jobs page show the
+  state. See "Known limits".
+- A fixed time of the day for the move: the due date of the start page is a
+  time already (the end of the day of the person).
+
+## Failure list
+
+| Input or event | Result | Test |
+|---|---|---|
+| A job with no due date | No move | Unit test |
+| A job before its due date | No move | Unit test |
+| A job in `needs_you` or `done` on its due date | No move | Unit test |
+| A job that moved to `needs_you` after its due date (engine or agent) | No second move | Unit test |
+| The person answered or woke the job after the due date | No move | Unit test |
+| A move of the person or agent between the read and the write | The write sees it and makes no move | Unit test (move inside the gap) |
+| A `due` move by the agent or the person, with no due date, before `due_at`, or with another `why` | The trigger refuses it | Unit test |
+| A crash after the commit of the move and before the notice | The job stays in `needs_you`. No notice is shown. The jobs page shows it | Known limit |
+| No notice command on the system | One log line. The jobs page shows the job | Existing behavior of `notify::show` |
+
+## Impact
+
+- `crates/iris-store/src/schema_<n>.sql` (the next free number): the trigger `job_event_move` again,
+  with the `due` row.
+- `crates/iris-job`: `move_due` and `Due`.
+- `crates/iris/src/engine.rs`, `crates/iris/src/notify.rs`: the step in the
+  attention loop, and a plain queue of system notices.
+- `docs/specs/2026-11-16-job-store.md`: the move table and the paragraph on
+  the due date.
+- No change to the job document or its schema: an event by the engine with
+  the state `needs_you` and a question is valid now.
+
+## Assumptions
+
+- The job document schema allows an event by `engine` with the state
+  `needs_you`. Evidence: `docs/spec/schema/job.schema.json`, `by` enum and
+  the `needs_you` rule.
+- A move out of `working` ends the open session. Evidence:
+  `crates/iris-store/src/schema_21.sql`, trigger `job_session_job_state`.
+- An answer of the person starts a new session. Evidence:
+  `iris_job::woken` (an event with an answer).
+
+## External writes
+
+None. The move writes only the store. The notice is a local command.
+
+## Open questions
+
+None.
+
+## Acceptance criteria
+
+1. A job in `working` or `waiting` moves to `needs_you` by the engine at its
+   due date, with the fixed question and `why` = `due`. Red if the step
+   skips the job.
+2. The move happens once: the next steps make no move, also after the
+   answer of the person. Red if rule 3 is missing.
+3. The engine gives one system notice for each move. Red if the step gives
+   no notice.
+4. The trigger refuses a `due` move that the move table does not allow. Red
+   if the trigger is not changed.
+
+## Verify
+
+```bash
+cargo test -p iris-job --test due
+cargo test -p iris --lib notify
+```
+
+## Known limits
+
+- The move has no row in the notice list of the web client and of the Mac
+  app. The system notice and the jobs page show it.
+- A crash between the commit of the move and the system notice loses the
+  notice. The job stays in `needs_you`.
+
+## Rollout
+
+The new migration runs at the next start of the engine.
+
+## Risks
+
+A wrong rule 3 can move a job again and again. The unit tests cover each
+case of rule 3. Rollback: revert the PR. The migration only makes a trigger
+again; an old engine on a new store allows the `due` move but never makes
+it.
+
+## Plan
+
+1. P9-D24: the migration, `move_due`, the engine step and the notice.
