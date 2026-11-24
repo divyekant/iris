@@ -240,7 +240,7 @@ test("the setup flow says mirror ready and that nothing changed", async () => {
 
 test("setup and the brief say how to set a model while mail waits for one (issue 740)", async () => {
   const messages = { total: 400, fetched: 400, understood: 6, gone: 0 };
-  const status = { ...fx.status, accounts: [fx.status.accounts[0]], messages, model: false };
+  const status = { ...fx.status, accounts: [fx.status.accounts[0]], messages, model: false, waits_model: 394 };
   for (const html of [
     await render("/src/views/Setup.svelte", { status, poll: 0 }),
     await render("/src/views/Brief.svelte", { brief: fx.brief, status, now: NOW, poll: 0 }),
@@ -248,8 +248,8 @@ test("setup and the brief say how to set a model while mail waits for one (issue
     assert.match(text(html), /Iris needs a model to read the rest of your mail\./);
     assert.match(text(html), /iris model set local/);
   }
-  // A model is set, an older engine says nothing, or each message was read: no note.
-  for (const s of [{ ...status, model: true }, { ...status, model: undefined }, { ...status, messages: { ...messages, understood: 400 } }]) {
+  // A model is set, an older engine says nothing, or no live mail waits (a draft or gone mail is not read): no note.
+  for (const s of [{ ...status, model: true }, { ...status, model: undefined }, { ...status, waits_model: 0 }, { ...status, waits_model: undefined }]) {
     assert.doesNotMatch(text(await render("/src/views/Setup.svelte", { status: s, poll: 0 })), /needs a model/);
     assert.doesNotMatch(text(await render("/src/views/Brief.svelte", { brief: fx.brief, status: s, now: NOW, poll: 0 })), /needs a model/);
   }

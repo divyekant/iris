@@ -269,6 +269,8 @@ export function addPage(items: Item[], more: Item[]): Item[] {
   return [...items, ...more.filter((i) => !seen.has(i.id))];
 }
 
-/** True when mail waits for a model and no model is set (issue 740): only the fixed rules read mail. */
-export const needsModel = (status: Status | null): boolean =>
-  status?.model === false && status.messages.understood < status.messages.fetched;
+/**
+ * True when no model is set and the understanding step marked live mail as waiting for one (issue 740):
+ * only the fixed rules read mail. Drafts and gone mail never count (the engine gives `waits_model`).
+ */
+export const needsModel = (status: Status | null): boolean => status?.model === false && (status.waits_model ?? 0) > 0;

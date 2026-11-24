@@ -1825,3 +1825,42 @@ async fn the_brief_shows_the_items_of_each_account() {
         .collect();
     assert_eq!(addresses, ["owner@example.com", "second@example.com"]);
 }
+
+/// Issue 740 (review of PR #786): `waits_model` counts only live mail that
+/// the understanding step marked as waiting for a model. A draft, gone mail
+/// and understood mail never count, so the client never says that mail
+/// waits for a model when none does.
+#[tokio::test]
+async fn status_counts_only_live_mail_that_waits_for_a_model() {
+    let dir = temp("waits-model");
+    let (store, _) = filled_n(&dir, 6);
+    let (_, v) = get(&store, "/api/status").await;
+    assert_eq!(v["waits_model"], 0, "no mark yet");
+
+    exec(&store, "UPDATE message SET waits_model = 1", []);
+    exec(&store, "UPDATE message SET gone_at = 1 WHERE id = 1", []);
+    exec(
+        &store,
+        "UPDATE message SET understood_at = 1 WHERE id = 2",
+        [],
+    );
+    exec(
+        &store,
+        "INSERT INTO label(account_id, provider_id, name, kind) VALUES (1, 'DRAFT', 'DRAFT', 'system')",
+        [],
+    );
+    exec(
+        &store,
+        "INSERT INTO message_label(message_id, label_id)
+         SELECT 3, id FROM label WHERE provider_id = 'DRAFT'",
+        [],
+    );
+    // The mark of a model error is not a missing model.
+    exec(
+        &store,
+        "UPDATE message SET waits_model = 2 WHERE id = 4",
+        [],
+    );
+    let (_, v) = get(&store, "/api/status").await;
+    assert_eq!(v["waits_model"], 2, "messages 5 and 6 only");
+}
