@@ -205,5 +205,8 @@ fn a_job_whose_goal_is_not_utf8_does_not_stop_the_others() {
         .unwrap();
     assert_eq!(state, "working");
     let again = move_due(s, NOW + 1).unwrap();
-    assert!(again.moved.is_empty() && again.failed.len() == 1, "{again:?}");
+    assert!(
+        again.moved.is_empty() && again.failed.len() == 1,
+        "{again:?}"
+    );
 }

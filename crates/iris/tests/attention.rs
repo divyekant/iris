@@ -76,13 +76,19 @@ fn the_attention_turn_moves_a_due_job_once() {
     let job = iris_job::create(&store, "Renew the passport.", Some(now - 1), now - 2).unwrap();
     let mut mark = None;
     let shown = iris::engine::attention_turn(&store, &mut mark);
-    let due: Vec<_> = shown.iter().filter(|s| s.title == "Iris: Job due").collect();
+    let due: Vec<_> = shown
+        .iter()
+        .filter(|s| s.title == "Iris: Job due")
+        .collect();
     assert_eq!(due.len(), 1, "{shown:?}");
     assert!(due[0].text.contains("Renew the passport."), "{:?}", due[0]);
     let j = iris_job::get(&store, job).unwrap();
     assert_eq!(j.state, iris_job::State::NeedsYou);
     assert_eq!(j.question.as_deref(), Some(iris_job::DUE_QUESTION));
     let again = iris::engine::attention_turn(&store, &mut mark);
-    assert!(again.iter().all(|s| s.title != "Iris: Job due"), "{again:?}");
+    assert!(
+        again.iter().all(|s| s.title != "Iris: Job due"),
+        "{again:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

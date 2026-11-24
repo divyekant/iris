@@ -473,8 +473,9 @@ pub fn move_due_one(store: &Store, job: i64, now_ms: i64) -> Result<Option<Due>>
         };
         // Not before the newest event: a clock that goes back must not fail
         // the move (as [`finish_in`]).
-        let updated: i64 =
-            c.query_row("SELECT updated_at FROM job WHERE id = ?1", [job], |r| r.get(0))?;
+        let updated: i64 = c.query_row("SELECT updated_at FROM job WHERE id = ?1", [job], |r| {
+            r.get(0)
+        })?;
         let at = now_ms.max(updated);
         add_event(c, job, State::NeedsYou, By::Engine, m, at)?;
         Ok(Some(Due { id: job, goal }))
