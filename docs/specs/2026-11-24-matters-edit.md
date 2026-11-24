@@ -240,7 +240,9 @@ with these changes:
 - the set is not a subset of a declined matter.
 
 It writes a sealed proposal of the author `agent`, with no run row and no
-model call. The answer is the matter document. A refusal gives exit code
+model call. The answer is `{"matter": <the matter document>}`, with no
+member document: a member document can hold model text from mail outside
+the grant of a session. A refusal gives exit code
 2 (usage) with the reason, and writes nothing.
 
 In a job session, each item must also be in the grant of the job now

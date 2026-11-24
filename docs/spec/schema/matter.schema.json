@@ -107,6 +107,11 @@
         "prompt": {
           "type": "string",
           "minLength": 1
+        },
+        "rule": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Allowed with by model, as in iris/1.0 and iris/1.1 (the common derived schema)."
         }
       },
       "if": {
@@ -133,6 +138,11 @@
             {
               "required": [
                 "prompt"
+              ]
+            },
+            {
+              "required": [
+                "rule"
               ]
             }
           ]

@@ -825,6 +825,7 @@ fn an_agent_proposes_a_matter_of_its_grant_only() {
     )
     .unwrap()
     .is_ok());
+    assert!(v.get("items").is_none(), "{v}");
     // The same items again: they are in an open matter now.
     let again = json!({ "title": "Again", "items": ["c-1", "c-4"] });
     assert_eq!(
@@ -833,4 +834,32 @@ fn an_agent_proposes_a_matter_of_its_grant_only() {
             .0,
         code::USAGE
     );
+}
+
+/// D22: the answer of a session proposal is the matter document only. A
+/// member document can hold model text from mail outside the grant, so a
+/// marker in it never comes back.
+#[test]
+fn a_session_proposal_answers_no_member_document() {
+    let (store, job) = fixture("matters-propose-ok");
+    add_scope(&store, job, Ref::Thread(2), By::Person, NOW).unwrap();
+    store
+        .write(|tx| {
+            tx.execute(
+                r#"UPDATE item SET doc = '{"id":"c-1","form":"commitment","title":"OUTSIDE-MARKER"}' WHERE id = 1"#,
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let me = session(job, "se-1");
+    let v = call(
+        &store,
+        &me,
+        "matters.propose",
+        json!({ "title": "Contract", "items": ["c-1", "c-4"] }),
+    )
+    .unwrap();
+    assert_eq!(v["matter"]["items"], json!(["c-1", "c-4"]), "{v}");
+    assert!(!v.to_string().contains("OUTSIDE-MARKER"), "{v}");
 }

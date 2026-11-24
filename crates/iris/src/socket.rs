@@ -548,10 +548,12 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
                 iris_matters::Error::Denied(why) => Failure::new(code::DENIED, why),
                 e => Failure::new(code::ERROR, e.to_string()),
             })?;
+            // The answer is the matter document only: the member documents
+            // can hold model text from mail outside the grant of a session.
             let id = iris_store::format_id(Kind::Matter, row);
             iris_api::matter(store, &id)
                 .map_err(|e| Failure::new(code::ERROR, e.to_string()))?
-                .map(Done::Value)
+                .map(|v| Done::Value(json!({ "matter": v["matter"] })))
                 .ok_or_else(|| Failure::new(code::ERROR, "the new matter is not visible"))
         }
         Some("revise") => {
