@@ -9,7 +9,7 @@
   import { href } from "../route";
 
   let { list }: { list: MatterList } = $props();
-  let total = (m: Matter) => m.counts.commitment + m.counts.conversation + m.counts.record;
+  let total = (m: Matter) => m.counts.commitment + m.counts.conversation + m.counts.record + (m.counts.signal ?? 0);
 </script>
 
 {#snippet line(m: Matter)}
@@ -18,7 +18,7 @@
       <span class="stack" aria-hidden="true"><span></span><span>{total(m)}</span></span>
       <span class="what">
         <span class="title">{m.title}</span>
-        <span class="detail">{matterCounts(m.counts)}</span>
+        <span class="detail">{matterCounts(m.counts)}{#if m.additions?.length}<span class="add"> · {m.additions.length} to add</span>{/if}</span>
       </span>
       <span class="chevron" aria-hidden="true">›</span>
     </a>
@@ -129,6 +129,9 @@
   .detail {
     color: var(--color-text-muted);
     font-size: var(--font-size--1);
+  }
+  .add {
+    color: var(--color-primary);
   }
   .chevron {
     flex: none;
