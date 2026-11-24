@@ -147,8 +147,9 @@ The granted messages of a job:
   whose workspace folder exists. A partial build can leave any owned path
   absent, so the check is the folder, not one path in it. If the engine
   does not run, or stops between the move and the build, the mail files
-  stay until the next engine start. If the build fails, the engine tries it
-  again at that start (#356).
+  stay until the next engine start. If the build fails, the running engine
+  tries it again after 1 minute, doubled after each failure, at most
+  1 hour (issue #502). The next engine start also tries it (#356).
 
 - A thread of the scope grants each clean message that was in the thread
   at the add of the ref. The add writes these messages into the table
