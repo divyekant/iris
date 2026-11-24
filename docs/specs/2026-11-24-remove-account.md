@@ -187,7 +187,8 @@ for each batch:
 1. **Items**: each item of the account, and each item that cites a message
    of the account. First the rows that refer to them with no cascade:
    `correction`, and `item.duplicate_of` (set to NULL). The cascades delete
-   `item_source`, `matter_item` and the rows that hang on them.
+   `item_source`, `matter_item`, `matter_add` (a pending addition of
+   migration 46) and the rows that hang on them.
 2. **Messages**: for each message: `header`, `body` (the trigger deletes the
    search text), `message_label`, `attention_due`, `link_check`,
    `sender_evidence`, `reply_draft`, `use_open`, and the `notice` rows of the

@@ -449,7 +449,7 @@ fn delete_items(c: &Connection, account: i64) -> Result<()> {
         ),
         [account],
     )?;
-    // The cascades delete item_source and matter_item.
+    // The cascades delete item_source, matter_item and matter_add.
     c.execute(&format!("DELETE FROM item WHERE {ITEMS}"), [account])?;
     Ok(())
 }
