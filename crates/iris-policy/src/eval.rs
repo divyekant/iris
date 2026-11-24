@@ -49,6 +49,12 @@ pub struct Action<'a> {
     pub job: Option<&'a str>,
     /// True when the action has the flag `bulk` (spec 2, section 5.3).
     pub bulk: bool,
+    /// True when a `draft` has a warning flag: `new_recipient`,
+    /// `outside_thread`, `money` or `date` (spec 2, section 6.5).
+    pub warning: bool,
+    /// True when the action is a reply `draft` whose recipients match
+    /// `recipients = "thread"` (spec 2, section 6.2).
+    pub in_thread: bool,
     /// The time of the evaluation, in seconds since 1970-01-01 UTC.
     pub now: i64,
 }
@@ -114,6 +120,7 @@ impl Policy {
                     && r.verbs.contains(&action.verb)
                     && r.when.author.is_none_or(|a| a == action.author)
                     && r.job.as_deref().is_none_or(|j| action.job == Some(j))
+                    && r.when.recipients.is_none_or(|_| action.in_thread)
             })
             .collect();
         // For allow: true while each message matched. Else: true when one did.
@@ -146,6 +153,12 @@ impl Policy {
                 reason: format!(
                     "The target has hostile mail. Only a person can {verb} it; other authors can only archive, trash or label it."
                 ),
+            })
+        } else if action.warning {
+            Some(Decision {
+                outcome: Outcome::Review,
+                rule: None,
+                reason: "The draft has a warning flag, so a person must review it.".to_string(),
             })
         } else if action.bulk {
             Some(Decision {
@@ -232,8 +245,8 @@ impl Policy {
     }
 }
 
-/// True when each condition of `when` matches the message. `author` is a
-/// condition of the action, and the caller checks it.
+/// True when each condition of `when` matches the message. `author` and
+/// `recipients` are conditions of the action, and the caller checks them.
 fn matches(when: &When, msg: &Message, now: i64, items: Items) -> bool {
     fn item_value<T: PartialEq + Copy>(
         want: Option<T>,

@@ -497,8 +497,8 @@ fn apply_mode_deny_rule() {
     assert_eq!(run(&s, a, NOW + 1).unwrap(), Outcome::Nothing);
 }
 
-/// A draft and a send are verbs that no rule decides: a submit of each
-/// goes to a person in the mode `apply`, and the decision does not panic.
+/// A draft with a warning flag goes to a person in the mode `apply`, and
+/// the decision does not panic.
 #[test]
 fn apply_mode_sends_a_draft_and_a_send_to_a_person() {
     use iris_changeset::{add_action, create, submit, Author, AuthorKind, Verb};
@@ -531,11 +531,13 @@ fn apply_mode_sends_a_draft_and_a_send_to_a_person() {
     })
     .unwrap();
     let d = decisions(&s, cs);
+    // The draft goes to a new address: the flag new_recipient is a hard
+    // limit (spec 2, section 6.5).
     assert_eq!(
         (d[0].0.as_str(), d[0].1.as_str(), d[0].2),
-        ("in_review", "policy", None)
+        ("in_review", "limit", None)
     );
-    assert!(d[0].3.contains("a person decides"), "{}", d[0].3);
+    assert!(d[0].3.contains("warning flag"), "{}", d[0].3);
 }
 
 /// `skip`, `mute` and `dismiss` (R5-02) are verbs of the policy: a rule can
@@ -583,4 +585,66 @@ fn apply_mode_decides_skip_with_the_rules_and_the_hard_limits() {
     let d = decisions(&s, cs);
     assert_eq!((d[0].0.as_str(), d[0].2), ("approved", Some(1)), "{d:?}");
     assert_eq!(d[1].0, "denied", "{d:?}");
+}
+
+/// Decisions D2 and D3: a rule allows a reply draft whose recipients are in
+/// its thread. A draft with a warning flag still goes to a person.
+#[test]
+fn apply_mode_lets_a_rule_allow_a_draft_to_the_thread() {
+    use iris_changeset::{add_action, create, submit, Author, AuthorKind, Verb};
+    let dir = TempDir::new("applydraft");
+    let (s, _) = store(&dir);
+    apply_policy(
+        &s,
+        &dir,
+        "[[rule]]\nid = 1\nname = \"Replies\"\neffect = \"allow\"\nverbs = [\"draft\"]\n\
+         when = { recipients = \"thread\", author = \"local\" }\nby = \"person\"\nadded = 2026-11-10\n",
+    );
+    let who = Author {
+        kind: AuthorKind::Local,
+        name: Some("t".into()),
+        session: None,
+        job: None,
+    };
+    let thread: i64 = s
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT thread_id FROM message WHERE provider_id = 'g1'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    let cs = create(&s, &who, NOW).unwrap();
+    // To your own address: no new recipient, and in the thread.
+    for to in ["owner@example.com", "p@x.org"] {
+        let args = serde_json::json!({"to": [to], "body": "Thanks."});
+        add_action(
+            &s,
+            cs,
+            &who,
+            Verb::Draft,
+            &[&format!("t-{thread}")],
+            args.as_object().unwrap(),
+            None,
+        )
+        .unwrap();
+    }
+    submit(&s, cs, &who, "Reply.", NOW).unwrap();
+    s.write(|c| {
+        iris_triage::decide_submitted(c, cs, 1, iris_policy::Author::Local, NOW)
+            .map_err(|e| iris_store::Error::Io(std::io::Error::other(e.to_string())))
+    })
+    .unwrap();
+    let d = decisions(&s, cs);
+    assert_eq!(
+        (d[0].0.as_str(), d[0].1.as_str(), d[0].2),
+        ("approved", "rule", Some(1)),
+        "{d:?}"
+    );
+    assert_eq!(
+        (d[1].0.as_str(), d[1].1.as_str(), d[1].2),
+        ("in_review", "limit", None),
+        "{d:?}"
+    );
 }
