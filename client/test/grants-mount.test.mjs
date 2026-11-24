@@ -73,6 +73,24 @@ test("a switch adds the grant of its group, with the version that the page saw; 
   view.destroy();
 });
 
+test("the reply switch sends a grant of draft alone, shows the returned rule as on, and off removes that rule (decision D3)", async () => {
+  const draft = { ...grant(30, ["draft"]), when: { author: "agent", recipients: "thread" } };
+  const asked = serve((path) => [200, path === "policy/grant" ? policy([draft]) : path === "policy" ? policy([]) : policy([])]);
+  const view = await mount("/src/views/Grants.svelte", { job: job() });
+  await until(() => switches(view).length === 4);
+  const i = s.GRANTS.findIndex((g) => g.key === "replies");
+  assert.equal(switches(view)[i].checked, false);
+  switches(view)[i].click();
+  await until(() => asked.length === 2);
+  assert.deepEqual(asked[1], ["policy/grant", { version: 7, job: "j-12", verbs: ["draft"] }]);
+  await until(() => (view.flushSync(), switches(view)[i].checked));
+  assert.equal(view.target.querySelector("[role=alert]"), null);
+  switches(view)[i].click();
+  await until(() => asked.length === 3);
+  assert.deepEqual(asked[2], ["policy/remove", { version: 7, id: 30 }]);
+  view.destroy();
+});
+
 test("a refused switch shows the policy as it is, in both directions, and the page reads the policy again", async () => {
   const asked = serve((path) => (path === "policy" ? [200, { ...policy([grant(1, ["trash"])]), version: 7 + asked.length }] : [409, { error: "The policy changed. Load it again." }]));
   const view = await mount("/src/views/Grants.svelte", { job: job() });
