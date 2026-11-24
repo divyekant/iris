@@ -54,6 +54,7 @@ Migration 50 adds the table `job_edit`:
 | `due_before` | INTEGER | The due date before the edit, or NULL |
 | `goal` | TEXT NOT NULL | The goal after the edit (the checks of `job.goal`) |
 | `due_at` | INTEGER | The due date after the edit, or NULL (the checks of `job.due_at`) |
+| `after_event` | INTEGER NOT NULL | The ID of the newest event of the job at the edit: the order of the edits and the events, also when the clock goes back |
 
 An edit holds the full values before and after the edit. So the first edit
 keeps the goal and the due date of the start, also for a job that existed
@@ -61,8 +62,9 @@ before the migration, and the newest edit is the truth. The triggers:
 
 - `job_edit_insert` (BEFORE INSERT) refuses an edit of a job that does not
   exist or is `done`, an edit with `at` before the newest edit of the job,
-  an edit whose before-values are not the values of the job row now, and
-  an edit that changes nothing.
+  an edit whose before-values are not the values of the job row now, an
+  edit whose `after_event` is not the newest event of the job, and an edit
+  that changes nothing.
 - `job_edit_apply` (AFTER INSERT) copies `goal` and `due_at` to the job
   row.
 - The trigger `job_row` of migration 14 is made again. It allows a change of

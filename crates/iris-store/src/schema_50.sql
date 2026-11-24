@@ -18,7 +18,11 @@ CREATE TABLE IF NOT EXISTS job_edit (
   goal_before TEXT NOT NULL,
   due_before INTEGER,
   goal TEXT NOT NULL CHECK (typeof(goal) = 'text' AND instr(goal, char(0)) = 0 AND length(goal) BETWEEN 1 AND 2000),
-  due_at INTEGER CHECK (due_at IS NULL OR typeof(due_at) = 'integer' AND due_at BETWEEN 0 AND 253402300799999)
+  due_at INTEGER CHECK (due_at IS NULL OR typeof(due_at) = 'integer' AND due_at BETWEEN 0 AND 253402300799999),
+  -- The newest event of the job at the edit. The order of the edits and the
+  -- events of a job, also when the clock goes back (rule 3 of the due date,
+  -- docs/specs/2026-11-24-job-due-date.md).
+  after_event INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS job_edit_job ON job_edit(job_id, id);
@@ -31,6 +35,7 @@ WHEN NOT EXISTS (SELECT 1 FROM job WHERE id = new.job_id AND state <> 'done')
   OR NOT EXISTS (SELECT 1 FROM job WHERE id = new.job_id
                  AND goal = new.goal_before AND due_at IS new.due_before)
   OR (new.goal = new.goal_before AND new.due_at IS new.due_before)
+  OR new.after_event IS NOT (SELECT max(id) FROM job_event WHERE job_id = new.job_id)
 BEGIN
   SELECT RAISE(ABORT, 'job: an edit changes the goal or the due date of an open job');
 END;

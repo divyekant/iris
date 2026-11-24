@@ -849,11 +849,23 @@ async fn get_start(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StartBody {
-    item: Option<String>,
+    #[serde(default, deserialize_with = "field")]
+    item: Option<Option<String>>,
     goal: String,
     due: Option<String>,
-    messages: Option<Vec<String>>,
-    request: Option<String>,
+    #[serde(default, deserialize_with = "field")]
+    messages: Option<Option<Vec<String>>>,
+    #[serde(default, deserialize_with = "field")]
+    request: Option<Option<String>>,
+}
+
+/// A field whose presence counts: `None` when the key is not in the body,
+/// `Some(None)` for a null. The kind of a start depends on the keys, so a
+/// null key is not the same as no key.
+fn field<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> std::result::Result<Option<Option<T>>, D::Error> {
+    Option::<T>::deserialize(d).map(Some)
 }
 
 /// Start a job. With `item` and `messages`: from one item ("Handle this").
@@ -866,11 +878,11 @@ async fn post_job(
 ) -> Result<Response> {
     let b = body(b)?;
     let (started, open) = match (&b.item, &b.messages, &b.request) {
-        (Some(item), Some(messages), None) => (
+        (Some(Some(item)), Some(Some(messages)), None) => (
             start_job(&s, item, &b.goal, b.due.as_deref(), messages, now_ms())?,
             "A job that is not done has this item already.",
         ),
-        (None, None, Some(request)) => (
+        (None, None, Some(Some(request))) => (
             start_typed_job(&s, &b.goal, b.due.as_deref(), request, now_ms())?,
             "This start made a job already.",
         ),
