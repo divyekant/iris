@@ -1379,7 +1379,9 @@ mod tests {
     /// each outcome of that row (issue #716). A `fetch` row never counts.
     #[test]
     fn a_running_sync_says_if_the_try_before_it_failed() {
-        let cases: [(&[(&str, Option<&str>)], bool); 7] = [
+        // The rows before the running row (kind and result), and the answer.
+        type Rows<'a> = &'a [(&'a str, Option<&'a str>)];
+        let cases: [(Rows, bool); 7] = [
             (&[], false),
             (&[("incremental", Some("ok: history 1"))], false),
             (&[("incremental", Some("error: HTTP 500"))], true),
