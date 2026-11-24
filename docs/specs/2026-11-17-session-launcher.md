@@ -770,8 +770,8 @@ exit code 3.
   `show` and `list` (R4-04f), the write verbs `add`, `submit`, `show`
   of a changeset, `withdraw` and `revise` (R4-03), and the job verbs
   `wait` (R5-04), `ask` (R5-05) and `done` (#356). So
-  `iris changeset --drafts` gets code 3. `iris list [<form>]` is a verb of a
-  session only: in host mode it gets exit code 2.
+  `iris changeset --drafts` gets code 3. In host mode, `iris list` lists
+  all items with filters (issue #523).
 
 ## Options not chosen
 

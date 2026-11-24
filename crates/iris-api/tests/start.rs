@@ -464,7 +464,7 @@ async fn a_grant_writes_one_rule_for_an_open_job() {
             StatusCode::BAD_REQUEST,
         ),
         (
-            json!({"job": "j-1", "verbs": ["draft"], "version": version}),
+            json!({"job": "j-1", "verbs": ["draft", "archive"], "version": version}),
             StatusCode::BAD_REQUEST,
         ),
         (
@@ -564,4 +564,23 @@ async fn a_job_from_an_item_waits_for_a_reply_on_the_thread_of_the_item() {
     assert_eq!(iris_workspace::wake_due(&d.1, NOW + 3).unwrap(), vec![job]);
     let last = iris_job::events(&d.1, job).unwrap().pop().unwrap();
     assert_eq!(last.why.as_deref(), Some("reply"));
+}
+
+/// Decision D3: a grant of `draft` alone allows drafts of the agent to the
+/// people in the thread.
+#[tokio::test]
+async fn a_draft_grant_allows_drafts_to_the_thread() {
+    let d = open("draftgrant");
+    d.start("c-1").await;
+    let (code, p) = d
+        .post(
+            "/api/policy/grant",
+            json!({"job": "j-1", "verbs": ["draft"], "version": null}),
+        )
+        .await;
+    assert_eq!(code, StatusCode::OK, "{p}");
+    let rule = &p["rules"][0];
+    assert_eq!(rule["verbs"], json!(["draft"]));
+    assert_eq!(rule["when"]["recipients"], json!("thread"));
+    assert_eq!(rule["when"]["author"], json!("agent"));
 }

@@ -13,7 +13,8 @@
 //! 2. In the mode `observe`, an action that a person did not approve
 //!    waits. The approval of a person applies, as an undo does: a state
 //!    verb changes no mailbox (section 6.5).
-//! 3. An action that a rule approved goes to review (issue #168).
+//! 3. An action that a rule approved is evaluated again against the active
+//!    policy (specification 2, section 5.4).
 //! 4. An action whose hash does not agree with its rows is denied.
 //! 5. `close`, `decline` and `defer` change only a commitment that is `open`
 //!    or `deferred`. If one item is not, or is gone, the entry is `failed`
@@ -139,13 +140,9 @@ fn apply_in(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<O
     {
         return Ok(Outcome::Waiting);
     }
-    // shortcut: each rule approval goes to review, as for a mailbox verb;
-    // evaluate the rule again before the apply (issue #168).
-    if decided_by == "rule" {
-        let reason = "A person must approve the action: Iris does not check the rule again \
-                      before the apply yet.";
-        decide(tx, action, "in_review", reason, now_ms)?;
-        return Ok(Outcome::Review(reason.into()));
+    // Section 5.4: a rule approval is evaluated again before the apply.
+    if let Some(o) = crate::recheck_rule(tx, action)? {
+        return Ok(o);
     }
     let now_hash = iris_changeset::hash(tx, action).map_err(|e| match e {
         iris_changeset::Error::Store(e) => Inner::Store(e),

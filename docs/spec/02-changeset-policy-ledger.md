@@ -127,9 +127,10 @@ with no provider call. These rules apply:
 - A state verb changes no mailbox. So, in the mode `observe`, an action that
   a person approved applies, as an undo does. An action that a rule approved
   waits in the mode `observe`.
-- An action that a rule approved goes to review first, as a mailbox verb
-  does, until the engine evaluates the rule again before the apply (issue
-  #168).
+- The engine evaluates an action that a rule approved again before the
+  apply, as for a mailbox verb (section 5.4), from the origin messages of
+  its items. A state verb has no `bulk`, also not from the count of the
+  last hour.
 - `close`, `decline` and `defer` change only a commitment with the status
   `open` or `deferred` (specification 1, section 6.8). `close` and `decline`
   remove `deferred_until`. If an item does not agree (for example,
@@ -280,7 +281,13 @@ content of the draft (section 7.5).
 If the policy mode is `observe`, the rules do not run in step 5, and each
 action stays `proposed`, except an action that a hard limit denies (section
 6.5): it gets `denied` by `limit` in both modes. A `proposed` action has no decision columns (section 5.6), so the
-engine does not store what the policy would do. The triage changeset of
+engine does not store what the policy would do. The review computes it
+at each read (decision D10, `GET /api/changesets/{id}/would`): for each
+`proposed` action, the decision that a rule of the active policy gives
+in the mode `apply`, with the same facts, flags and author. It is empty
+in the mode `apply` and with no confirmed policy. A read never changes an
+action, and it always follows the active policy of now, so a changed
+rule changes the answer at the next read. The triage changeset of
 release 2 follows the mode of the active policy, as each other changeset does
 (specification 1, section 8). Release 1 computes the triage proposal and does
 not store it (specification 1, section 8).
@@ -296,10 +303,20 @@ A change of the mode does not evaluate open actions again:
 The engine applies one action at a time, on the one write connection. Before
 the engine applies an action that a rule approved, it computes the flag
 `bulk` again and evaluates the action again against the active policy
-(section 6.4). For the count of the last hour, `bulk` counts the messages of
-each ledger row of the same author that a rule decided in that hour, in the
-state `writing`, `applied` or `failed`. If the result is not `allow`, the
-action gets the new result: `in_review` or `denied`. So a rule that the
+(section 6.4), in the transaction of the claim (`iris_apply::recheck_rule`,
+with the same `iris_triage::evaluate` as the submit).
+For the count of the last hour, `bulk` counts the messages of the action and
+the messages of each ledger row of that hour whose action a rule decided,
+in each state. An undone entry counts, because it changed its messages. The
+same author is the same author kind (`person`, `agent`, `triage` or
+`local`), as in the policy (section 6.4), so two jobs of agents share one
+count. If the result is not `allow`, the action gets the new result,
+`in_review` or `denied`, by `engine`, with the reason of the policy. A
+`bulk` from the count of the last hour is added to the flags of the action.
+A rule approval of `label` whose label Gmail does not have goes to
+`in_review`: the create of the label is a write call before the claim, and a
+policy change during that call cannot stop it. Only a person approval makes
+a new label. So a rule that the
 person removed while the action waited applies nothing, and two changesets
 that a rule approved at the same time cannot together go past the limit of
 500 messages.
@@ -830,7 +847,7 @@ the expiry and the mode again.
 | An action 14 days or more after its submit (section 5.5) | An action applies after the person stopped to expect it | The apply sets `expired`, by `expiry`, with no call. An action with a row in `writing`, and an undo, do not expire. |
 | The mode is `observe`, also when the person changes it during the reads of step 2 | An action applies without the mode `apply` | The action stays `approved` and waits. The claim transaction checks the mode and the expiry again. A row in `writing` continues to its end (section 5.4). |
 | A token of another mailbox | The Gmail IDs of one mailbox change messages of another | Before step 2, and after each new token, the address of the Gmail profile must be the address of the account. Else the apply changes nothing (`OtherMailbox`), or the new token counts as no token. A row in `writing` recovers only with a token of its own account. |
-| An action that a rule approved | A rule that the person removed applies the action, or two rule approvals of one author go past the `bulk` limit of 500 messages in one hour (section 5.4) | Until the engine counts the ledger rows of the last hour (issue #168), the engine sends each rule approval to `in_review`, by `engine`, and only a person approval applies. |
+| An action that a rule approved | A rule that the person removed applies the action, or two rule approvals of one author go past the `bulk` limit of 500 messages in one hour (section 5.4) | The gate and the claim transaction compute `bulk` again with the ledger rows of the last hour, and evaluate the action again against the active policy. If the result is not `allow`, the action gets `in_review` or `denied`, by `engine`, with no call. A row in `writing` continues to its end. |
 | The hash of the rows does not agree with the hash of the approval | The person approved one action, and another applies | The engine denies the action, by `engine`. |
 | A message of another account | One token changes two mailboxes | The engine denies the action, by `engine`. |
 | A message that is gone in the mirror, or HTTP 404 in step 2 | A call on a message that does not exist | The apply skips it, and lists it in the result. A message that is gone in the mirror after the claim is listed `gone`, with no call. |
@@ -1062,11 +1079,8 @@ Release 1 has no verb that adds an action, so no request can skip the policy.
 The socket comes with the first verb that adds an action (release 2). Then
 each verb that adds, submits or withdraws an action goes through the socket
 (`docs/specs/2026-11-16-engine-socket.md`). In host mode, the read verbs
-(`status`, `search`, `show` and `brief`) keep the exception of
-release 1: they change nothing, so they cannot skip the policy. A host
-`list` is not built yet (issue #523): until its card, `iris list` in host
-mode gets exit code 2, and when it comes it reads the store directly under
-the same exception. In session
+(`status`, `search`, `show`, `list` and `brief`) keep the exception of
+release 1: they change nothing, so they cannot skip the policy. In session
 mode (release 4), each read verb goes through the session socket, and the
 engine applies the current grant of the job of the session
 (`docs/specs/2026-11-16-job-workspace.md`). A session never opens the store
@@ -1131,13 +1145,14 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris mirror verify` | Compares the mirror with Gmail (specification 1, section 4.8). | host | 1 |
 | `iris rebuild [--since-prompt <v>]` | Runs understanding again. | host | 1 |
 | `iris model set`, `iris model show` | Sets the model of understanding and its key (read from standard input), or shows the settings without the key (`docs/specs/2026-11-16-cost-control.md`). | host | 1 |
+| `iris zone [<name>]`, `iris zone --computer` | Shows or sets the time zone of defer dates and due dates: an IANA name, for example `Europe/Berlin`. `--computer` uses the time zone of the computer again (the default). Decision D1. | host | 1 |
 | `iris understand --estimate`, `iris understand --approve <code> --budget <usd>`, `iris understand [--max-cost <usd>] [--max-messages <n>]` | Shows the estimate and its approval code, approves a budget for paid runs after the estimate, and runs understanding on the pending messages. | host | 1 |
 | `iris backup <path>` | Copies the data folder while the engine runs. | host | 1 |
 | `iris export <path>` | Writes each item as JSON Lines, and copies the raw messages. | host | 1 |
 | `iris brief` | Shows the brief. | host | 1 |
 | `iris search <query>` | Full-text search (specification 1, section 5.6). In session mode, it searches only the messages that the job grants (`docs/specs/2026-11-16-job-workspace.md`), and it adds nothing to the workspace. | both | 1 |
 | `iris show <id>` | Shows one item or message. Release 1 has no read path for a thread or a sender, so a thread and a sender come in a later release. In session mode, only an item or a message that the job grants, and an item is a job item (`id`, `form` and `sources`, with no text of the model and no status). | both | 1 |
-| `iris list [<form>]` | Lists items, of one form if given. In session mode, only the items of the workspace, with the fields of `show` (card R4-04f). Host mode and the filters come in a later card (issue #523): until then, `iris list` in host mode gets exit code 2. | session | 1 |
+| `iris list [<form>] [--status <s>] [--type <t>] [--before <id>] [--limit <n>]` | Lists items, newest first, of one form if given. In host mode, the filters and the page of `GET /api/items` (issue #523): `--type` needs the form `record`, `--before` takes the last ID of the page before, and `--limit` is 1 to 200 (default 50). The text form ends with the `--before` value of the next page. In session mode, only the items of the workspace, with the fields of `show` (card R4-04f), and only the form: a filter is a usage error. | both | 1 |
 | `iris archive`, `inbox`, `label`, `unlabel`, `read`, `unread`, `trash` `<ids> [--changeset <cs-id>]` | Adds an action to a draft changeset. | both | 2 |
 | `iris close`, `defer`, `decline`, `correct` `<id> [--changeset <cs-id>]` | Adds a state action to a draft changeset. | both | 2 |
 | `iris skip`, `mute`, `dismiss` `<id> [--changeset <cs-id>]` | Adds a state action to a draft changeset. A session gets code 3: a job grants no feed, conversation or signal item. | host | 5 |
@@ -1165,9 +1180,11 @@ engine checks each message that a target resolves to, at `submit` and again
 just before the apply. A message outside the grant at `submit` makes the
 submit fail with no change. A message that left the grant before the apply
 makes the action refused, with the reason. Each item target must be an item
-of the workspace now, by the same two checks. `iris draft`, `iris send` and `iris nudge` are
-refused in session mode until a card defines their grant, and `submit`
-refuses each draft or send action in a changeset of a session.
+of the workspace now, by the same two checks. `iris send` and `iris nudge` are
+refused in session mode, and `submit` refuses each send action in a
+changeset of a session. `iris draft` in session mode makes only a reply in a
+granted thread (decision D3): `submit` refuses a new mail and a reply whose
+parent message is not in the grant.
 
 ### 8.3 Output
 
@@ -1223,7 +1240,7 @@ agent that does not work in a folder. The rules for the MCP interface:
 
   | Tools | Path |
   |---|---|
-  | `status`, `search`, `show`, `matters_list`, `matters_show` | Read the store directly (section 8.1). |
+  | `status`, `search`, `show`, `list`, `matters_list`, `matters_show` | Read the store directly (section 8.1). |
   | `watch_add`, `watch_list`, `watch_remove` | Read and write the watch rows of the store directly, as `iris watch` does. A watch changes no mailbox, so it does not go through the policy. |
   | All other tools | A request on `iris.sock`, with the author `local`. |
 
