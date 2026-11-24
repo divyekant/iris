@@ -2,7 +2,7 @@
 
 - Date: 2026-11-24
 - Card: P9-D24
-- Status: Draft
+- Status: Built
 
 ## Problem
 
@@ -83,10 +83,12 @@ the job does not move again.
 ### The engine step
 
 `iris_job::move_due(store, now_ms) -> Result<Vec<Due>>` reads the due jobs
-(index `job_state`), then makes each move in its own write transaction that
-checks rules 1 to 3 again. So a move of the person or of the agent between
-the read and the write wins, and the step makes no move. `Due` holds the job
-ID and its goal.
+(`due_jobs`, index `job_state`), then makes each move in its own write
+transaction that checks rules 1 to 3 again (`move_due_one`). A move between
+the read and the write that makes a rule false wins, and the step makes no
+move: a finish, an ask, or a move of the person. A wait of the agent after
+the due date keeps the rules true, so the job still moves: the due date
+passed, and the person decides. `Due` holds the job ID and its goal.
 
 The attention loop of the engine (`crates/iris/src/engine.rs`, each 10
 seconds) runs the step, then gives one system notice for each moved job to
@@ -122,7 +124,8 @@ one queue.
 | A job in `needs_you` or `done` on its due date | No move | Unit test |
 | A job that moved to `needs_you` after its due date (engine or agent) | No second move | Unit test |
 | The person answered or woke the job after the due date | No move | Unit test |
-| A move of the person or agent between the read and the write | The write sees it and makes no move | Unit test (move inside the gap) |
+| A move between the read and the write that makes rule 1, 2 or 3 false | The write sees it and makes no move | Unit test (`a_move_after_the_read_wins`) |
+| A wait of the agent between the read and the write | The job still moves | Rules 1 to 3 hold |
 | A `due` move by the agent or the person, with no due date, before `due_at`, or with another `why` | The trigger refuses it | Unit test |
 | A crash after the commit of the move and before the notice | The job stays in `needs_you`. No notice is shown. The jobs page shows it | Known limit |
 | The queue of system notices is full | The notice is dropped. The jobs page shows the job | Known limit |
@@ -178,6 +181,7 @@ None.
 ```bash
 cargo test -p iris-job --test due
 cargo test -p iris --lib notify
+cargo test -p iris-store
 ```
 
 ## Known limits
