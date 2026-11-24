@@ -1004,8 +1004,9 @@ fn session_mode_uses_only_the_session_socket() {
             .unwrap();
         assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
     }
-    // No socket: code 4, for a socket verb and for a store verb.
-    // A session sends no mail (decision D2): `iris send` is refused before the socket.
+    // No socket: code 4, for a socket verb and for a store verb. The socket check
+    // comes first, so `iris send` also gives 4 here. `session.rs`
+    // (`a_session_cannot_send_or_nudge`) tests that a session send is refused.
     let draft = ["send", "d-1"];
     for args in [
         &["status"][..],
