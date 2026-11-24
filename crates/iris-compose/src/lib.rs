@@ -8,16 +8,21 @@
 //!   can compute the hash of a draft as Gmail has it.
 //! - [`hash`] is the content hash that the approval of a send binds to.
 //! - [`reply_subject`] and [`references`] give the reply headers.
+//!
+//! Attachments, `Bcc` and the display name of `From` are in spec
+//! `docs/specs/2026-11-24-send-content.md`.
 
 use mail_builder::headers::address::Address;
+use mail_builder::headers::content_type::ContentType;
 use mail_builder::headers::message_id::MessageId;
 use mail_builder::headers::raw::Raw;
+use mail_builder::mime::{BodyPart, MimePart};
 use mail_builder::MessageBuilder;
-use mail_parser::MessageParser;
+use mail_parser::{MessageParser, PartKind};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// The most recipients of a draft: `to` and `cc` together.
+/// The most recipients of a draft: `to`, `cc` and `bcc` together.
 pub const MAX_RECIPIENTS: usize = 50;
 /// The most bytes of a body.
 pub const MAX_BODY: usize = 256 * 1024;
@@ -25,6 +30,33 @@ pub const MAX_BODY: usize = 256 * 1024;
 pub const MAX_SUBJECT: usize = 998;
 /// The most bytes of an address (RFC 5321 path length).
 const MAX_ADDRESS: usize = 254;
+/// The most attachments of a draft (send content spec, section 1).
+pub const MAX_ATTACHMENTS: usize = 10;
+/// The most bytes of the message of a draft, for each provider (send
+/// content spec, section 5). Gmail: the read back of the release keeps at
+/// most 4 MiB (`DRAFT_LIMIT` of `iris-provider`). Outlook: Graph takes
+/// the message as base64 text in one request of at most 4 MB.
+pub const MAX_MESSAGE: u64 = 4 * 1024 * 1024;
+pub const MAX_MESSAGE_OUTLOOK: u64 = 2_900_000;
+/// The bytes of the bound for the headers of the message and of each
+/// part, apart from the reply headers.
+const HEADER_BOUND: u64 = 64 * 1024;
+/// The most characters of a file name, and of a MIME type.
+const MAX_FILE_NAME: usize = 255;
+const MAX_TYPE: usize = 127;
+/// The most characters of the display name of `From` (send content spec,
+/// section 3).
+pub const MAX_NAME: usize = 128;
+
+/// The most bytes of the message of a draft of an account of the
+/// provider `provider` (the `provider` of the `account` row).
+pub fn max_message(provider: &str) -> u64 {
+    if provider == "outlook" {
+        MAX_MESSAGE_OUTLOOK
+    } else {
+        MAX_MESSAGE
+    }
+}
 
 /// The content of a draft (section 1). The JSON field names are the
 /// `args` of a `draft` action.
@@ -34,9 +66,55 @@ pub struct Content {
     pub to: Vec<String>,
     #[serde(default)]
     pub cc: Vec<String>,
+    /// Empty is not in the JSON, so a draft of an older build keeps its
+    /// JSON and its hash.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bcc: Vec<String>,
     #[serde(default)]
     pub subject: String,
     pub body: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+}
+
+/// One attachment of a draft (send content spec, section 1). The file is
+/// in the attachment folder of the store, at its SHA-256. The fields are
+/// in sorted order, so the JSON of the hash is canonical.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Attachment {
+    pub name: String,
+    /// 64 lower case hexadecimal characters.
+    pub sha256: String,
+    pub size: u64,
+    /// The MIME type, `type/subtype` in lower case.
+    #[serde(rename = "type")]
+    pub mime: String,
+}
+
+impl Attachment {
+    /// The entry of the file `bytes`, with a name and a type.
+    pub fn of(name: &str, mime: &str, bytes: &[u8]) -> Attachment {
+        Attachment {
+            name: name.into(),
+            sha256: sha256(bytes),
+            size: bytes.len() as u64,
+            mime: mime.into(),
+        }
+    }
+
+    /// True if `bytes` is the file of this entry.
+    pub fn is_file(&self, bytes: &[u8]) -> bool {
+        bytes.len() as u64 == self.size && sha256(bytes) == self.sha256
+    }
+}
+
+/// The SHA-256 of `bytes` in lower case hexadecimal.
+pub fn sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// The reply headers of a draft in a thread (section 3). The IDs have no
@@ -54,15 +132,21 @@ pub struct Read {
     pub message_id: String,
     pub content: Content,
     pub reply: Option<Reply>,
+    /// The decoded file of each entry of `content.attachments`, in order.
+    pub files: Vec<Vec<u8>>,
+    /// True if the message has a `Bcc` header. A provider can remove it
+    /// from a sent copy (send content spec, section 4).
+    pub bcc_header: bool,
 }
 
 impl Content {
     /// Check the content and give its normal form: addresses in lower case
-    /// with no duplicate (an address in `to` leaves `cc`), and line ends
-    /// as LF. Gives the reason of a refusal.
+    /// with no duplicate (an address in `to` leaves `cc` and `bcc`, an
+    /// address in `cc` leaves `bcc`), line ends as LF, and file names and
+    /// types in their normal form. Gives the reason of a refusal.
     pub fn check(mut self) -> Result<Content, String> {
         let mut seen = std::collections::HashSet::new();
-        for list in [&mut self.to, &mut self.cc] {
+        for list in [&mut self.to, &mut self.cc, &mut self.bcc] {
             let mut out = Vec::with_capacity(list.len());
             for a in list.iter() {
                 let a = a.to_ascii_lowercase();
@@ -76,7 +160,7 @@ impl Content {
         if self.to.is_empty() {
             return Err("a draft needs one or more addresses in to".into());
         }
-        if self.to.len() + self.cc.len() > MAX_RECIPIENTS {
+        if self.to.len() + self.cc.len() + self.bcc.len() > MAX_RECIPIENTS {
             return Err(format!("a draft has at most {MAX_RECIPIENTS} recipients"));
         }
         if self.subject.chars().any(char::is_control) {
@@ -101,8 +185,102 @@ impl Content {
         if self.body.contains('\0') {
             return Err("a body has no NUL character".into());
         }
+        if self.attachments.len() > MAX_ATTACHMENTS {
+            return Err(format!("a draft has at most {MAX_ATTACHMENTS} attachments"));
+        }
+        for a in &mut self.attachments {
+            a.name = a.name.trim().to_string();
+            a.mime = a.mime.to_ascii_lowercase();
+            check_attachment(a)?;
+        }
+        self.check_size(MAX_MESSAGE)?;
         Ok(self)
     }
+
+    /// An upper bound of the bytes of the message that [`compose_with`]
+    /// writes for this content, apart from the reply headers (send content
+    /// spec, section 5).
+    pub fn size_bound(&self) -> u64 {
+        let files: u64 = self
+            .attachments
+            .iter()
+            .map(|a| a.size.div_ceil(57).saturating_mul(78))
+            .fold(0, u64::saturating_add);
+        HEADER_BOUND
+            .saturating_add(3 * self.body.len() as u64)
+            .saturating_add(files)
+    }
+
+    /// Refuse a content whose [`Content::size_bound`] is over `limit`.
+    pub fn check_size(&self, limit: u64) -> Result<(), String> {
+        if self.size_bound() > limit {
+            return Err(format!(
+                "the mail is too large: at most {limit} bytes with its files; remove a file"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The checks of one attachment entry in its normal form (section 1).
+fn check_attachment(a: &Attachment) -> Result<(), String> {
+    let chars = a.name.chars().count();
+    if chars == 0 || chars > MAX_FILE_NAME {
+        return Err(format!(
+            "a file name has 1 to {MAX_FILE_NAME} characters: {:?}",
+            a.name
+        ));
+    }
+    if a.name
+        .chars()
+        .any(|c| c.is_control() || c == '/' || c == '\\')
+        || a.name == "."
+        || a.name == ".."
+        // A reader decodes `=?..?=` in a file name as an encoded word, so
+        // such a name does not read back the same (as a subject, #270).
+        || a.name.contains("=?")
+    {
+        return Err(format!(
+            "a file name has no control character, no /, no \\ and no =?: {:?}",
+            a.name
+        ));
+    }
+    // An RFC 2045 token: printable ASCII with no space and no tspecial.
+    let token = |t: &str| {
+        !t.is_empty()
+            && t.chars()
+                .all(|c| c.is_ascii_graphic() && !"()<>@,;:\\\"/[]?=".contains(c))
+    };
+    let ok = a.mime.len() <= MAX_TYPE
+        && a.mime
+            .split_once('/')
+            .is_some_and(|(t, s)| token(t) && token(s) && t != "multipart" && t != "message");
+    if !ok {
+        return Err(format!(
+            "a file type is type/subtype, not multipart or message: {:?}",
+            a.mime
+        ));
+    }
+    let hex = a.sha256.len() == 64
+        && a.sha256
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    if !hex {
+        return Err("a file sha256 is 64 lower case hexadecimal characters".into());
+    }
+    if a.size == 0 {
+        return Err(format!("a file has 1 or more bytes: {:?}", a.name));
+    }
+    Ok(())
+}
+
+/// A display name of `From` that Iris can use: no control character and
+/// at most [`MAX_NAME`] characters, with no space at the ends. `None` for
+/// an empty name (send content spec, section 3).
+pub fn from_name(name: &str) -> Option<String> {
+    let n = name.trim();
+    (!n.is_empty() && n.chars().count() <= MAX_NAME && !n.chars().any(char::is_control))
+        .then(|| n.to_string())
 }
 
 /// A subject in its normal form: no space at the ends, and one space for
@@ -228,6 +406,12 @@ pub fn hash(content: &Content, reply: Option<&Reply>) -> String {
     // Fields in sorted order, so the JSON is canonical.
     #[derive(Serialize)]
     struct Canonical<'a> {
+        // Empty lists are not in the JSON: the hash of a draft of an older
+        // build stays the same (send content spec, section 1).
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        attachments: &'a [Attachment],
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        bcc: &'a [String],
         body: &'a str,
         cc: &'a [String],
         // New mail has no reply fields (spec R3-01, section 1).
@@ -239,6 +423,8 @@ pub fn hash(content: &Content, reply: Option<&Reply>) -> String {
         to: &'a [String],
     }
     let c = Canonical {
+        attachments: &content.attachments,
+        bcc: &content.bcc,
         body: &content.body,
         cc: &content.cc,
         in_reply_to: reply.map(|r| r.in_reply_to.as_str()),
@@ -246,16 +432,11 @@ pub fn hash(content: &Content, reply: Option<&Reply>) -> String {
         subject: &content.subject,
         to: &content.to,
     };
-    let json = serde_json::to_vec(&c).expect("plain data");
-    Sha256::digest(&json)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    sha256(&serde_json::to_vec(&c).expect("plain data"))
 }
 
-/// The RFC 5322 message of a draft (section 2). `from` is the account
-/// address, `message_id` has no angle brackets, `date` is in seconds since
-/// 1970. Give the content of [`Content::check`].
+/// The RFC 5322 message of a draft with no attachment and no display
+/// name. See [`compose_with`].
 pub fn compose(
     from: &str,
     message_id: &str,
@@ -263,9 +444,38 @@ pub fn compose(
     reply: Option<&Reply>,
     date: i64,
 ) -> Vec<u8> {
+    compose_with(from, None, message_id, content, reply, date, &[])
+}
+
+/// The RFC 5322 message of a draft (section 2). `from` is the account
+/// address and `name` its display name, `message_id` has no angle
+/// brackets, `date` is in seconds since 1970. `files` has the bytes of
+/// each attachment of the content, in order. Give the content of
+/// [`Content::check`]. The same input gives the same bytes: the MIME
+/// boundary comes from the input, not from a clock.
+///
+/// Panics if `files` does not have one file for each attachment.
+pub fn compose_with(
+    from: &str,
+    name: Option<&str>,
+    message_id: &str,
+    content: &Content,
+    reply: Option<&Reply>,
+    date: i64,
+    files: &[&[u8]],
+) -> Vec<u8> {
     fn list(v: &[String]) -> Address<'_> {
         Address::new_list(v.iter().map(|a| Address::from(a.as_str())).collect())
     }
+    assert_eq!(
+        files.len(),
+        content.attachments.len(),
+        "one file for each attachment"
+    );
+    let from = match name {
+        Some(n) => Address::new_address(Some(n), from),
+        None => Address::from(from),
+    };
     let mut m = MessageBuilder::new()
         .from(from)
         .to(list(&content.to))
@@ -282,14 +492,38 @@ pub fn compose(
     if !content.cc.is_empty() {
         m = m.cc(list(&content.cc));
     }
+    if !content.bcc.is_empty() {
+        m = m.bcc(list(&content.bcc));
+    }
     if let Some(r) = reply {
         m = m
             .in_reply_to(r.in_reply_to.as_str())
             .references(MessageId::new_list(r.references.iter().map(String::as_str)));
     }
-    m.text_body(content.body.as_str())
-        .write_to_vec()
-        .expect("a write to memory does not fail")
+    m = if content.attachments.is_empty() {
+        m.text_body(content.body.as_str())
+    } else {
+        // The boundary is the hash of the input: it is the same for the
+        // same input, and an author cannot put it into the body, because
+        // the body is part of the input.
+        let seed = format!("{message_id}\n{date}\n{}", hash(content, reply));
+        let boundary = format!("iris-{}", &sha256(seed.as_bytes())[..32]);
+        let mut parts = vec![MimePart::new(
+            "text/plain",
+            BodyPart::Text(content.body.as_str().into()),
+        )];
+        for (a, bytes) in content.attachments.iter().zip(files) {
+            parts.push(
+                MimePart::new(a.mime.as_str(), BodyPart::Binary((*bytes).into()))
+                    .attachment(a.name.as_str()),
+            );
+        }
+        m.body(MimePart::new(
+            ContentType::new("multipart/mixed").attribute("boundary", boundary),
+            parts,
+        ))
+    };
+    m.write_to_vec().expect("a write to memory does not fail")
 }
 
 /// `text` as RFC 2047 encoded words (`=?utf-8?B?...?=`), one folded line
@@ -315,10 +549,11 @@ fn encoded_words(text: &str) -> String {
 }
 
 /// The headers that Iris writes. A read back refuses each other header.
-const HEADERS: [&str; 11] = [
+const HEADERS: [&str; 12] = [
     "from",
     "to",
     "cc",
+    "bcc",
     "subject",
     "date",
     "message-id",
@@ -329,10 +564,11 @@ const HEADERS: [&str; 11] = [
     "content-transfer-encoding",
 ];
 
-/// The headers that change who gets a message or who gets the answer.
-/// Iris never writes them, so a read back refuses each of them, also in
-/// [`read_sent`]. Each `Resent-` header is refused too.
-const ADDRESSING: [&str; 3] = ["bcc", "reply-to", "sender"];
+/// The headers that change who gets a message or who gets the answer,
+/// and that Iris never writes, so a read back refuses each of them, also
+/// in [`read_sent`]. Each `Resent-` header is refused too. `Bcc` is in the
+/// content (send content spec, section 4).
+const ADDRESSING: [&str; 2] = ["reply-to", "sender"];
 
 /// The transport header that Gmail adds to each draft at `drafts.create`
 /// (send spec, assumption 3). A draft read back ignores it, at any count.
@@ -340,11 +576,12 @@ const TRANSPORT: &str = "received";
 
 /// Read a message back to its content (section 1). `None` if the message
 /// does not have exactly the form that Iris writes: one `text/plain` part,
-/// only the headers of [`HEADERS`], each at most one time, `From` equal to
+/// or a `multipart/mixed` of one `text/plain` part and file parts; only
+/// the headers of [`HEADERS`], each at most one time, `From` equal to
 /// `account`, and a `Message-ID`. A `Received` header is ignored, because
 /// Gmail adds one to each draft. A draft that the person changed to HTML,
-/// or gave a `Bcc`, a `Reply-To` or an attachment, does not read back, so
-/// its hash is never an approved hash.
+/// or gave a `Reply-To` or a nested part, does not read back, so its hash
+/// is never an approved hash.
 pub fn read(raw: &[u8], account: &str) -> Option<Read> {
     read_with(raw, account, true)
 }
@@ -370,9 +607,7 @@ fn read_with(raw: &[u8], account: &str, strict: bool) -> Option<Read> {
             return None;
         }
     }
-    if m.has_attachments() || m.text_body().len() != 1 {
-        return None;
-    }
+    let (body, attachments, files) = parts(&m)?;
     let from = m.from()?;
     match (
         from.mailboxes().count(),
@@ -380,11 +615,6 @@ fn read_with(raw: &[u8], account: &str, strict: bool) -> Option<Read> {
     ) {
         (1, Some(a)) if a.eq_ignore_ascii_case(account) => {}
         _ => return None,
-    }
-    let root = m.root_part();
-    let ct = root.content_type()?;
-    if !ct.ctype().eq_ignore_ascii_case("text") || !ct.subtype()?.eq_ignore_ascii_case("plain") {
-        return None;
     }
     let addresses = |l: Option<mail_parser::AddressList<'_>>| -> Option<Vec<String>> {
         let Some(l) = l else { return Some(Vec::new()) };
@@ -404,9 +634,11 @@ fn read_with(raw: &[u8], account: &str, strict: bool) -> Option<Read> {
     let content = Content {
         to: addresses(m.to())?,
         cc: addresses(m.cc())?,
+        bcc: addresses(m.bcc())?,
         subject: spaces(m.subject().unwrap_or("")),
         // Mail has CRLF line ends; the content has LF (Content::check).
-        body: line_ends(&m.body_text(0)?),
+        body: line_ends(&body),
+        attachments,
     };
     // The content must be in the normal form of Content::check: a change
     // that the check refuses (too many recipients, a large body) or erases
@@ -436,18 +668,23 @@ fn read_with(raw: &[u8], account: &str, strict: bool) -> Option<Read> {
         message_id: m.message_id()?.to_string(),
         content,
         reply,
+        files,
+        bcc_header: names.contains("bcc"),
     };
     // By construction: the message that Iris writes for this content has
     // the same recipient, subject and ID headers, as mail-parser reads them
     // (display names, groups, comments and white space included). So a field that the content
     // does not hold gives no content. `From` is checked above by address
     // only, because Gmail can add the display name of the account.
-    let again = compose(
+    let files: Vec<&[u8]> = read.files.iter().map(Vec::as_slice).collect();
+    let again = compose_with(
         account,
+        None,
         &read.message_id,
         &read.content,
         read.reply.as_ref(),
         0,
+        &files,
     );
     let again = MessageParser::default().parse(&again[..])?;
     (fields(&m) == fields(&again)).then_some(read)
@@ -455,14 +692,71 @@ fn read_with(raw: &[u8], account: &str, strict: bool) -> Option<Read> {
 
 /// The headers of the hash, parsed, in order. The body is compared as
 /// text by the content itself.
-const FIELDS: [&str; 6] = [
+const FIELDS: [&str; 7] = [
     "to",
     "cc",
+    "bcc",
     "subject",
     "message-id",
     "in-reply-to",
     "references",
 ];
+
+/// The body text, the attachment entries and the files of a message in
+/// the form that Iris writes (send content spec, section 4): a root
+/// `text/plain` part; or a root `multipart/mixed` whose first part is
+/// `text/plain` and whose other parts are each a file with a name, with
+/// no nested part. `None` for each other form, also for a part that
+/// mail-parser read with a problem.
+#[allow(clippy::type_complexity)]
+fn parts(m: &mail_parser::Message<'_>) -> Option<(String, Vec<Attachment>, Vec<Vec<u8>>)> {
+    let plain = |p: &mail_parser::MessagePart<'_>| {
+        matches!(p.kind(), PartKind::Text)
+            && p.is_content_type("text", "plain")
+            && p.content_disposition().is_none()
+            && !p.has_problems()
+    };
+    let root = m.root_part();
+    if !root.is_multipart() {
+        if !plain(&root) || m.parts().len() != 1 {
+            return None;
+        }
+        return Some((root.text()?.into_owned(), vec![], vec![]));
+    }
+    if !root.is_content_type("multipart", "mixed") || root.has_problems() {
+        return None;
+    }
+    let children: Vec<_> = root.children().collect();
+    // Each part of the message is the root or a child of it: no nested part.
+    if children.len() < 2 || m.parts().len() != children.len() + 1 {
+        return None;
+    }
+    let (first, rest) = children.split_first()?;
+    if !plain(first) {
+        return None;
+    }
+    let mut attachments = Vec::with_capacity(rest.len());
+    let mut files = Vec::with_capacity(rest.len());
+    for p in rest {
+        // A file of any type, also `text/html`: the disposition makes it a
+        // file, not a body.
+        let is_file = matches!(
+            p.kind(),
+            PartKind::Text | PartKind::Html | PartKind::Binary | PartKind::InlineBinary
+        ) && !p.has_problems()
+            && p.content_disposition()
+                .is_some_and(|d| d.ctype().eq_ignore_ascii_case("attachment"));
+        if !is_file {
+            return None;
+        }
+        let ct = p.content_type()?;
+        let mime = format!("{}/{}", ct.ctype(), ct.subtype()?);
+        let bytes = p.decoded().into_owned();
+        attachments.push(Attachment::of(p.attachment_name()?, &mime, &bytes));
+        files.push(bytes);
+    }
+    Some((first.text()?.into_owned(), attachments, files))
+}
 
 fn fields(m: &mail_parser::Message<'_>) -> Vec<(String, String)> {
     let mut v: Vec<(String, String)> = m
