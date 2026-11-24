@@ -16,9 +16,10 @@ it (section 6.5), for release 4. No code sets the flag. Today three
 separate guards stop an agent send:
 
 1. The session socket refuses `draft` and `send` (`crates/iris/src/socket.rs`).
-2. No rule decides a `draft` or a `send` (`iris_triage::decide_submitted`).
-3. The apply sends each rule approval back to review (`iris_apply::check`,
-   issue #168), and only a person releases a send (`iris_apply::release`).
+2. No rule decides a `send` (`iris_triage::decide_submitted`).
+3. The apply evaluates each rule approval again, and sends a verb that no
+   rule decides to review (`iris_apply::recheck_rule`). Only a person
+   releases a send (`iris_apply::release`).
 
 None of these guards knows about hostile input. A later card that lets a
 session write a draft, or that adds a `send` verb to the policy file, can
