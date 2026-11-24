@@ -1525,7 +1525,11 @@ fn a_closed_bcc_gate_still_sees_a_change_at_gmail() {
     let d = b.draft(a);
     let s = b.approved(Verb::Send, &d.0, json!({}), AGED);
     let raw = String::from_utf8(b.gmail.draft_raw(TOKEN, &d.1).unwrap().raw.unwrap()).unwrap();
-    let edited: String = raw.lines().filter(|l| !l.starts_with("Bcc:")).map(|l| format!("{l}\r\n")).collect();
+    let edited: String = raw
+        .lines()
+        .filter(|l| !l.starts_with("Bcc:"))
+        .map(|l| format!("{l}\r\n"))
+        .collect();
     assert!(b.fake.edit_draft(&d.1, edited.as_bytes()));
     match b.release(s) {
         Ok(Outcome::Denied(why)) => assert!(why.contains("changed at Gmail"), "{why}"),

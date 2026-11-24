@@ -171,7 +171,11 @@ async fn a_press_writes_the_mail_after_its_warnings() {
     })
     .unwrap();
     let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
-    assert_eq!((&st["state"], &st["bcc_check"]), (&json!("waiting"), &json!("gmail")), "{st}");
+    assert_eq!(
+        (&st["state"], &st["bcc_check"]),
+        (&json!("waiting"), &json!("gmail")),
+        "{st}"
+    );
     // The cancel of the outbox stops the write.
     let (code, _) = call(&s, "POST", "/api/outbox/d-1/cancel", None).await;
     assert_eq!(code, StatusCode::OK);
