@@ -7,6 +7,7 @@
   import { get, loadBrief, newest, type Brief, type Item, type Job, type Status } from "../api";
   import { poll as every, watch } from "../clock";
   import NoModel from "./NoModel.svelte";
+  import ModelWait from "./ModelWait.svelte";
   import { NOTHING, across, copying, needsModel, dueSoon, greeting, nextDay, party, partyKey, signals, summary, unfinished, when } from "../format";
   import Code from "./Code.svelte";
   import Bundle from "./Bundle.svelte";
@@ -247,6 +248,7 @@
 </div>
 
 {#if needsModel(status)}<NoModel />{/if}
+{#if status?.model_retry_at}<ModelWait at={status.model_retry_at} onstatus={(s) => (status = s)} />{/if}
 
 {#if arrived.length}
   <div class="arrivals">

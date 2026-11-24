@@ -133,6 +133,8 @@ export type Status = {
   waits_model?: number;
   /** The time zone of defer dates and due dates (an IANA name, `iris zone`). Null or left out: the zone of the browser. */
   time_zone?: string | null;
+  /** After model errors: the time of the next model call (RFC 3339), while it is later than now. An older engine leaves it out. */
+  model_retry_at?: string;
 };
 
 /** A rule of policy.toml (spec 2 section 6.2). `when` holds only the conditions that the rule sets. */

@@ -158,13 +158,48 @@ test("a try that runs after a failed try says that the last try failed", async (
   }
 });
 
-test("an account in state removing says that Iris deletes its mail, not that it copies it", async () => {
+test("remove asks one question in place, Keep changes nothing, and Remove posts the address", async () => {
+  const saved = globalThis.fetch;
+  const asked = [];
+  const [one, two] = fx.status.accounts;
+  globalThis.fetch = async (url, init) => {
+    asked.push([String(url), JSON.parse(init.body)]);
+    return new Response(JSON.stringify({ ...fx.status, accounts: [two] }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const view = await mount("/src/views/Accounts.svelte", { status: fx.status, poll: 0 });
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  const press = (label) => [...view.target.querySelectorAll("button")].find((b) => b.textContent.trim() === label).click();
+  try {
+    view.target.querySelector(`button[aria-label="Remove ${one.address}"]`).click();
+    await tick();
+    assert.match(text(view.target), new RegExp(`Remove ${one.address.replace(".", "\\.")}\\? Iris deletes its mail from this machine\\.`));
+    assert.match(text(view.target), /The files of agents in its jobs go\. A backup and the notes of jobs keep their copy\./);
+    press("Keep");
+    await tick();
+    assert.doesNotMatch(text(view.target), /Iris deletes its mail/);
+    assert.equal(asked.length, 0);
+
+    view.target.querySelector(`button[aria-label="Remove ${one.address}"]`).click();
+    await tick();
+    press("Remove");
+    for (let i = 0; i < 5; i++) await tick();
+    assert.deepEqual(asked, [[`/api/accounts/${one.id}/remove`, { address: one.address }]]);
+    assert.match(text(view.target), new RegExp(`Removed ${one.address.replace(".", "\\.")}\\. Its mail is gone from Iris on this machine\\.`));
+    assert.equal(view.target.querySelectorAll(".accounts li").length, 1);
+  } finally {
+    view.destroy();
+    globalThis.fetch = saved;
+  }
+});
+
+test("an account in state removing says that Iris deletes its mail and offers no remove", async () => {
   const going = { ...fx.status.accounts[0], state: "removing", mirror_ready_at: null, sync: null };
   const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [going] }, poll: 0 });
   try {
     const row = text(view.target.querySelector(".accounts li"));
     assert.match(row, /Iris deletes the mail of this account from this machine\./);
     assert.doesNotMatch(row, /copies this mailbox/);
+    assert.equal(view.target.querySelector("button.remove"), null);
   } finally {
     view.destroy();
   }
