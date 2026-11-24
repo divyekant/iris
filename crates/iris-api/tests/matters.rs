@@ -82,7 +82,7 @@ fn setup(name: &str) -> (std::path::PathBuf, Arc<Store>) {
 /// same counts.
 fn agree(v: &Value) {
     let mut named: Vec<&str> = Vec::new();
-    for form in ["commitment", "conversation", "record"] {
+    for form in ["commitment", "conversation", "record", "signal"] {
         let list = v["items"][form].as_array().unwrap();
         assert_eq!(v["matter"]["counts"][form], list.len(), "{v}");
         named.extend(list.iter().map(|d| d["id"].as_str().unwrap()));
@@ -123,7 +123,7 @@ async fn list_view_confirm_and_decline() {
     assert_eq!(v["matter"]["items"], json!(["r-1", "v-2", "c-3"]));
     assert_eq!(
         v["matter"]["counts"],
-        json!({"commitment": 1, "conversation": 1, "record": 1})
+        json!({"commitment": 1, "conversation": 1, "record": 1, "signal": 0})
     );
     assert_eq!(v["items"]["record"][0]["id"], "r-1");
     assert_eq!(v["items"]["record"][0]["matter"], Value::Null);
@@ -609,5 +609,102 @@ async fn a_matter_with_too_few_members_to_show_is_not_read() {
         let (_, list) = call(&s, Method::GET, "/api/matters", "").await;
         assert_eq!(ids(&list["confirmed"]), vec!["g-1"], "{clear}");
     }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Decisions D19 and D20 (`docs/specs/2026-11-24-matters-edit.md`): a
+/// matter by hand, an edit, an addition, and the delete. Each document
+/// passes `matter.schema.json`.
+#[tokio::test]
+async fn the_person_makes_edits_and_deletes_a_matter() {
+    let (dir, s) = setup("edit");
+    let schema = iris_spec::validator("matter");
+    // Decline g-2 so items 4 and 5 are free.
+    let (code, _) = call(&s, Method::POST, "/api/matters/g-2/decline", "").await;
+    assert_eq!(code, StatusCode::OK);
+
+    let (code, v) = call(
+        &s,
+        Method::POST,
+        "/api/matters",
+        r#"{"title":"Lease","items":["r-4"]}"#,
+    )
+    .await;
+    assert_eq!(code, StatusCode::CREATED, "{v}");
+    assert!(schema.is_valid(&v["matter"]), "{v}");
+    assert_eq!(v["matter"]["derived"], json!({"by": "person"}));
+    assert_eq!(v["matter"]["status"], "confirmed");
+    let id = v["matter"]["id"].as_str().unwrap().to_string();
+    let edit = format!("/api/matters/{id}/edit");
+
+    // An item of an open proposal, a feed ID, a bad body.
+    for (body, want) in [
+        (r#"{"add":["r-1"]}"#, StatusCode::CONFLICT),
+        (r#"{"add":["f-1"]}"#, StatusCode::BAD_REQUEST),
+        // No signal member until the web client shows signals (#884).
+        (r#"{"add":["s-1"]}"#, StatusCode::BAD_REQUEST),
+        (r#"{"remove":["r-4"]}"#, StatusCode::CONFLICT),
+        (r#"{}"#, StatusCode::BAD_REQUEST),
+        (r#"{"title":"x","other":1}"#, StatusCode::BAD_REQUEST),
+    ] {
+        let (code, v) = call(&s, Method::POST, &edit, body).await;
+        assert_eq!(code, want, "{body}: {v}");
+    }
+    let (code, v) = call(&s, Method::POST, &edit, r#"{"title":"Flat","add":["c-5"]}"#).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert!(schema.is_valid(&v["matter"]), "{v}");
+    agree(&v);
+    assert_eq!(v["matter"]["title"], "Flat");
+    let (_, item) = call(&s, Method::GET, "/api/items/c-5", "").await;
+    assert_eq!(item["matter"], id.as_str(), "{item}");
+
+    // An addition shows on the list and in the view, and Not this ends it.
+    let row: i64 = id[2..].parse().unwrap();
+    s.write(|tx| {
+        tx.execute(
+            "INSERT INTO matter_add(item_id, matter_id, created_at) VALUES (1, ?1, 5)",
+            [row],
+        )
+        .map(|_| ())
+        .map_err(Into::into)
+    })
+    .unwrap_err(); // item 1 is a kept member of the proposal g-1
+    let (code, _) = call(&s, Method::POST, "/api/matters/g-1/decline", "").await;
+    assert_eq!(code, StatusCode::OK);
+    s.write(|tx| {
+        tx.execute(
+            "INSERT INTO matter_add(item_id, matter_id, created_at) VALUES (1, ?1, 5)",
+            [row],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, list) = call(&s, Method::GET, "/api/matters", "").await;
+    let doc = &list["confirmed"][0];
+    assert_eq!(doc["additions"], json!(["r-1"]), "{list}");
+    assert!(schema.is_valid(doc), "{doc}");
+    let (_, v) = call(&s, Method::GET, &format!("/api/matters/{id}"), "").await;
+    assert_eq!(v["additions"][0]["id"], "r-1", "{v}");
+    let (code, v) = call(&s, Method::POST, &edit, r#"{"remove":["r-1"]}"#).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert!(v["matter"].get("additions").is_none(), "{v}");
+
+    // The delete: 204, then the matter is not in the list.
+    let (code, _) = call(&s, Method::POST, &format!("/api/matters/{id}/delete"), "").await;
+    assert_eq!(code, StatusCode::NO_CONTENT);
+    let (_, list) = call(&s, Method::GET, "/api/matters", "").await;
+    assert_eq!(list["confirmed"], json!([]));
+    let (code, _) = call(&s, Method::POST, &format!("/api/matters/{id}/delete"), "").await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    let (code, _) = call(&s, Method::POST, "/api/matters/g-99/delete", "").await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    let (code, _) = call(
+        &s,
+        Method::POST,
+        &format!("/api/matters/{id}/delete"),
+        "{\"x\":1}",
+    )
+    .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
     let _ = std::fs::remove_dir_all(dir);
 }

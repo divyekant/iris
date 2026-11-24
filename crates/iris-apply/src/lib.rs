@@ -994,11 +994,12 @@ impl<'a, 'b> Run<'a, 'b> {
                  WHERE id = ?1 AND state = 'writing'",
                 params![ledger, state, error, history],
             )?;
-            // An undo whose actions are each `applied` makes its entry
-            // `undone`, with the entry of step 1 (section 7.4). After a failed
-            // action of the undo, the entry keeps its state, and the person
-            // can undo it again: the next undo skips each message that is
-            // back.
+            // An undo whose actions are each `applied`, and that changed one
+            // or more messages, makes its entry `undone`, with the entry of
+            // step 1 (section 7.4). After a failed action of the undo, or an
+            // undo that skipped each message (decision D18, issue #463), the
+            // entry keeps its state, and the person can undo it again: the
+            // next undo skips each message that is back.
             if state == "applied" {
                 tx.execute(
                     "UPDATE ledger SET state = 'undone', undone_by = (
@@ -1015,6 +1016,14 @@ impl<'a, 'b> Run<'a, 'b> {
                          SELECT 1 FROM ledger n JOIN changeset_action a ON a.id = n.action_id
                          JOIN changeset_action x ON x.changeset_id = a.changeset_id
                          WHERE n.id = ?1 AND x.state IS NOT 'applied')
+                       -- An undo that changed no message does not use up
+                       -- the undo of the entry.
+                       AND EXISTS (
+                         SELECT 1 FROM ledger n JOIN changeset_action a ON a.id = n.action_id
+                         JOIN changeset_action x ON x.changeset_id = a.changeset_id
+                         JOIN ledger lx ON lx.action_id = x.id
+                         JOIN ledger_message lm ON lm.ledger_id = lx.id AND lm.done = 1
+                         WHERE n.id = ?1)
                        -- No step 1 entry: no undo to record, and the end of
                        -- this entry must not fail.
                        AND EXISTS (
