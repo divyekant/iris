@@ -663,16 +663,17 @@ fn opens(
     counts: &mut BTreeMap<(usize, String), Count>,
 ) -> Result<()> {
     let mut header = conn.prepare_cached("SELECT 1 FROM header WHERE message_id = ?1")?;
-    let ids: Vec<i64> = conn
+    let mut st = conn
         // `use_open` has no order inside a day, so the window takes whole
         // days: each day from the day of the newest MAX_ACTIONS-th open.
         .prepare(
             "SELECT DISTINCT message_id FROM use_open WHERE day >= coalesce(
                (SELECT day FROM use_open ORDER BY day DESC LIMIT 1 OFFSET ?1 - 1), '')",
-        )?
-        .query_map([MAX_ACTIONS as i64], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+        )?;
+    // Streamed: the cut-off day can hold more than MAX_ACTIONS opens.
+    let ids = st.query_map([MAX_ACTIONS as i64], |r| r.get::<_, i64>(0))?;
     for m in ids {
+        let m = m?;
         if !header.exists([m])? {
             continue;
         }
