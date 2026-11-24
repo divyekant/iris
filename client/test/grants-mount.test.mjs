@@ -80,6 +80,7 @@ test("the reply switch sends a grant of draft alone, shows the returned rule as 
   await until(() => switches(view).length === 4);
   const i = s.GRANTS.findIndex((g) => g.key === "replies");
   assert.equal(switches(view)[i].checked, false);
+  assert.match(text(view.target), /Only to the people in the thread and your own addresses\. Each send still waits for you/);
   switches(view)[i].click();
   await until(() => asked.length === 2);
   assert.deepEqual(asked[1], ["policy/grant", { version: 7, job: "j-12", verbs: ["draft"] }]);

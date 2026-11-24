@@ -58,7 +58,7 @@ export function conditions(rule: Rule): string[] {
     else if (key === "label") out.push(`Label ${v}`);
     else if (key === "record_type" || key === "commitment_kind") out.push(PLURAL[v] ?? `${cap(v)}s`);
     else if (key === "author") out.push(v === "person" ? "By you" : `By ${v}`);
-    else if (key === "recipients") out.push(v === "thread" ? "To the people in the thread" : `Recipients ${v}`);
+    else if (key === "recipients") out.push(v === "thread" ? "To the people in the thread and your own addresses" : `Recipients ${v}`);
     else if (key === "older_than_days") out.push(`Older than ${v} ${v === "1" ? "day" : "days"}`);
     else out.push(`${key} ${v}`);
   }

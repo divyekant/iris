@@ -64,7 +64,7 @@ export const GRANTS = [
   { key: "tidy", title: "Tidy the mail", note: "Archive, add or remove labels, mark as read or unread, move back to the inbox", verbs: ["archive", "label", "unlabel", "read", "unread", "inbox"] },
   { key: "commitments", title: "Update commitments", note: "Mark as done, put off to a later day, decline", verbs: ["close", "defer", "decline"] },
   { key: "trash", title: "Move mail to the trash", note: "You can take it back from the trash for 30 days", verbs: ["trash"] },
-  { key: "replies", title: "Write reply drafts", note: "Only to the people in the thread. Each send still waits for you", verbs: ["draft"] },
+  { key: "replies", title: "Write reply drafts", note: "Only to the people in the thread and your own addresses. Each send still waits for you", verbs: ["draft"] },
 ] as const;
 
 /** The grants of `job` in the active policy: the allow rules with this job. */

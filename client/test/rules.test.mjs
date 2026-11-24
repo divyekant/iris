@@ -17,7 +17,7 @@ test("a rule reads as words", async () => {
   // Decision D3: a draft rule to the people of the thread.
   const replies = { ...hide, effect: "allow", verbs: ["draft"], when: { author: "agent", recipients: "thread" } };
   assert.equal(verbs(replies), "Write a draft");
-  assert.deepEqual(conditions(replies), ["By agent", "To the people in the thread"]);
+  assert.deepEqual(conditions(replies), ["By agent", "To the people in the thread and your own addresses"]);
   assert.deepEqual(conditions({ ...hide, when: { record_type: "receipt", commitment_kind: "reply", older_than_days: 1, author: "agent" }, job: "j-1" }), [
     "Receipts",
     "Replies",
