@@ -59,6 +59,9 @@ pub struct Action<'a> {
     pub now: i64,
 }
 
+/// The reason of the hard limit of a warning flag (spec 2, section 6.5).
+pub const WARNING_REASON: &str = "The mail has a warning flag, so a person must review it.";
+
 /// The result for one action, from the least strict to the most strict.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Outcome {
@@ -158,7 +161,7 @@ impl Policy {
             Some(Decision {
                 outcome: Outcome::Review,
                 rule: None,
-                reason: "The draft has a warning flag, so a person must review it.".to_string(),
+                reason: WARNING_REASON.to_string(),
             })
         } else if action.bulk {
             Some(Decision {

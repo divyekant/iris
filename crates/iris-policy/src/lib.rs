@@ -21,7 +21,7 @@ pub use active::{
 pub use edit::{
     change, discard, edit_text, end_grants, grant_rule, Change, Discarded, Edited, DEFAULT_TEXT,
 };
-pub use eval::{Action, Attention, Decision, Item, Message, Outcome};
+pub use eval::{Action, Attention, Decision, Item, Message, Outcome, WARNING_REASON};
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};

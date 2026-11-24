@@ -232,27 +232,27 @@ pub fn decide_submitted(
             revision,
             n,
         };
-        // No rule decides a verb that the policy does not know: `send`
-        // (decision D2, issue #239). It goes to a person, in the mode
-        // `apply`; in the mode `observe` it stays proposed, as other actions.
-        let Some(verb) = iris_policy::Verb::from_name(&verb) else {
-            if apply {
-                decide_in(
-                    c,
-                    id_n,
-                    State::InReview,
-                    By::Policy,
-                    Some("No rule can allow a send: a person decides."),
-                    now_ms,
-                )?;
-            }
-            continue;
-        };
         let flags = serde_json::from_str::<Vec<String>>(&flags)
             .map_err(|e| Error::Refused(format!("flags: {e}")))?;
         let bulk = flags.iter().any(|f| f == "bulk");
         // The flags that only a person approves (store migration 25).
         let warning = flags.iter().any(|f| WARNINGS.contains(&f.as_str()));
+        // No rule decides a verb that the policy does not know: `send`
+        // (decision D2, issue #239). It goes to a person, in the mode
+        // `apply`; in the mode `observe` it stays proposed, as other actions.
+        // A warning flag is a hard limit first (spec 2, section 6.5), so the
+        // decision is by `limit` for a draft and a send alike.
+        let Some(verb) = iris_policy::Verb::from_name(&verb) else {
+            if apply {
+                let (by, why) = if warning {
+                    (By::Limit, iris_policy::WARNING_REASON)
+                } else {
+                    (By::Policy, "No rule can allow a send: a person decides.")
+                };
+                decide_in(c, id_n, State::InReview, by, Some(why), now_ms)?;
+            }
+            continue;
+        };
         // At most CHUNK messages: the action holds their facts.
         let mut facts: Vec<Facts> = Vec::new();
         let ids: Vec<i64> = c
