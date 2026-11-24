@@ -1734,8 +1734,27 @@ fn model_set(store: &Store, provider: &SetModel) -> Result<String, String> {
     ))
 }
 
+/// The line of `iris mirror verify` for an account whose first copy runs
+/// in another process.
+const FIRST_COPY_RUNS: &str =
+    "the first copy runs now, so no full mirror exists to verify. Run verify after it ends.";
+
+/// The first copy of the account ended (`account.mirror_ready_at` is set).
+fn mirror_ready(store: &Store, account: i64) -> Result<bool, String> {
+    store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT mirror_ready_at IS NOT NULL FROM account WHERE id = ?1",
+                [account],
+                |r| r.get(0),
+            )?)
+        })
+        .map_err(|e| e.to_string())
+}
+
 /// `iris mirror sync|verify`: each account that has a sign-in, one at a time.
-/// If another process syncs an account, that account gives an error.
+/// If another process syncs an account, that account gives an error,
+/// except for a verify during the first copy of the account.
 fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
     let config = gmail_config()?;
     let accounts = engine::signed_in_accounts(&store).map_err(|e| e.to_string())?;
@@ -1748,6 +1767,16 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
         if state.as_deref() == Some(engine::STATE_NEEDS_SIGN_IN) {
             failed = true;
             say!("iris: account {account}: {}", engine::Error::NeedsSignIn);
+            continue;
+        }
+        // Another process runs the first copy: no full mirror exists to
+        // compare (issue #679). The check comes before any token or
+        // provider call, so their errors cannot hide it.
+        if matches!(command, MirrorCommand::Verify)
+            && !mirror_ready(&store, account)?
+            && iris_sync::other_sync_runs(&store, account).map_err(|e| e.to_string())?
+        {
+            println!("account {account}: {FIRST_COPY_RUNS}");
             continue;
         }
         let mail = match engine::provider_for(&store, account, &config) {
@@ -1795,6 +1824,12 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
         };
         match line {
             Ok(text) => println!("account {account}: {text}"),
+            // A first copy that started after the check above.
+            Err(engine::Error::Sync(iris_sync::Error::OtherSync))
+                if matches!(command, MirrorCommand::Verify) && !mirror_ready(&store, account)? =>
+            {
+                println!("account {account}: {FIRST_COPY_RUNS}")
+            }
             Err(e) => {
                 failed = true;
                 say!("iris: account {account}: {e}");
