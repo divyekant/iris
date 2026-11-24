@@ -1036,12 +1036,13 @@ pub fn delete_removed(
         only,
         &mut |job| {
             let dir = iris_workspace::default_dir(store.dir(), job);
-            if !dir.exists() {
-                return Ok(());
-            }
-            iris_workspace::build(store, job, &dir)
-                .map(|_| ())
-                .map_err(|e| std::io::Error::other(e.to_string()))
+            let out = if dir.exists() {
+                iris_workspace::build(store, job, &dir).map(|_| ())
+            } else {
+                // No workspace, but a stopped build can leave mail beside it.
+                iris_workspace::clear_beside(&dir).map(|_| ())
+            };
+            out.map_err(|e| std::io::Error::other(e.to_string()))
         },
         &mut |tx| {
             let now = now_ms();

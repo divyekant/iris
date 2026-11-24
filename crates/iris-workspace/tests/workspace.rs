@@ -1005,6 +1005,14 @@ fn a_removed_account_gives_no_mail_to_a_workspace() {
     fs::write(ws.join("drafts/reply.md"), "AGENT-DRAFT DANA-TEXT").unwrap();
     fs::write(ws.join("scratch.txt"), "DANA-TEXT").unwrap();
     fs::write(ws.join("notes.md"), "AGENT-NOTE").unwrap();
+    // A build that stopped left its stage and a notes part beside the
+    // workspace, with a copy of the mail.
+    let name = ws.file_name().unwrap().to_str().unwrap().to_owned();
+    let stage = ws.with_file_name(format!(".{name}.build"));
+    let part = ws.with_file_name(format!(".{name}.notes"));
+    fs::create_dir_all(stage.join("threads")).unwrap();
+    fs::write(stage.join("threads/t-3.md"), "DANA-TEXT").unwrap();
+    fs::write(&part, "DANA-TEXT").unwrap();
     store
         .write(|tx| {
             tx.execute("UPDATE account SET state = 'removing' WHERE id = 1", [])?;
@@ -1022,6 +1030,7 @@ fn a_removed_account_gives_no_mail_to_a_workspace() {
         assert!(!text.contains(gone), "{gone} is in the workspace");
     }
     assert!(text.contains("SECTION-TEXT"));
+    assert!(!stage.exists() && !part.exists());
     assert!(!ws.join("drafts/reply.md").exists());
     assert!(!ws.join("scratch.txt").exists());
     assert!(ws.join("drafts").is_dir());
@@ -1064,4 +1073,25 @@ fn a_removed_account_gives_no_mail_to_a_workspace() {
         fs::read_to_string(ws.join("drafts/reply.md")).unwrap(),
         "AGENT-DRAFT"
     );
+}
+
+/// docs/specs/2026-11-24-remove-account.md: with no workspace folder, the
+/// delete of an account clears the stage that a stopped build left beside
+/// it, before the purge record goes.
+#[test]
+fn the_clear_removes_a_stage_left_beside_a_missing_workspace() {
+    let tmp = TempDir::new("beside");
+    let store = store(&tmp.0.join("data"));
+    let job = job(&store);
+    let ws = default_dir(&tmp.0.join("data"), job);
+    build(&store, job, &ws).unwrap();
+    fs::remove_dir_all(&ws).unwrap();
+    let name = ws.file_name().unwrap().to_str().unwrap().to_owned();
+    let stage = ws.with_file_name(format!(".{name}.build"));
+    fs::create_dir_all(&stage).unwrap();
+    fs::write(stage.join("t-3.md"), "DANA-TEXT").unwrap();
+    iris_workspace::clear_beside(&ws).unwrap();
+    assert!(!stage.exists());
+    // A job that never had a build has nothing to clear.
+    iris_workspace::clear_beside(&default_dir(&tmp.0.join("data"), job + 1)).unwrap();
 }

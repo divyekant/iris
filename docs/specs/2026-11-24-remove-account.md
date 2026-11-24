@@ -161,8 +161,12 @@ for each batch:
    1. Save `notes.md` to the store (`save_notes`), as each build does. A
       save can fail (a file larger than 64 KiB, a link, a folder). Then
       the store keeps its last copy, and the file stays as it is.
-   2. Delete each entry of the folder other than `notes.md`.
-   3. Build as usual. The grant leaves out each message of an account in
+   2. Delete the entries that a stopped build can leave beside the
+      folder: the stage `.<name>.build` and the part file `.<name>.notes`
+      (`iris_workspace::clear_beside`). They can hold a copy of the mail.
+   3. Delete each entry of the folder other than `notes.md`, then the row
+      of the job in `removed_workspace`.
+   4. Build as usual. The grant leaves out each message of an account in
       state `removing` or `removed` (a condition in
       `iris_workspace::grant_in`). If `notes.md` is missing, it comes back
       from the store.
@@ -171,7 +175,8 @@ for each batch:
    account and the mail of other accounts in them. The next session of
    the job builds them again from its grant. Step 0 runs this build for
    each row of `removed_workspace` of the account whose workspace folder
-   exists. A build that runs holds the build lock, so this build waits for
+   exists. If the folder does not exist, step 0 runs only the clear of
+   item 2, under the build lock. A build that runs holds the build lock, so this build waits for
    its end. A job with a live session (`reaped_at IS NULL`) is skipped: step
    2 refused each live session of the job at the removal, so this session
    started after the removal. Its build saw the row and already deleted the
@@ -323,7 +328,10 @@ engine tick ends the delete.
 
 - `POST /api/accounts/{id}/remove` with the JSON body
   `{"address": "<address>"}`. The address must match the account: this makes
-  a removal by a wrong ID impossible. The response comes after the delete
+  a removal by a wrong ID impossible. The removal checks the ID and the
+  address in its own write transaction (`remove_account_id`): if another
+  request removed the ID and the person added the address again (a new
+  ID), the removal is refused with 409 and the new account stays. The response comes after the delete
   (see "The call waits for the delete").
 - `/api/status` lists accounts in state `removing` with that state, and does
   not list `removed` accounts.

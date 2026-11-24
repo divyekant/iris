@@ -95,6 +95,29 @@ pub fn default_dir(data_dir: &Path, job: i64) -> PathBuf {
     data_dir.join("workspaces").join(format_job_id(job))
 }
 
+/// Remove the entries that a stopped build can leave beside the workspace
+/// `dir`, with a copy of the mail of the scope: the stage of the new files
+/// (a folder that the agent cannot write) and the part file of a restore of
+/// the notes. Gives their paths. Run it with no build of `dir` at the same
+/// time: it takes the lock of the build.
+pub fn clear_beside(dir: &Path) -> Result<()> {
+    let lock = beside(dir, ".lock")?;
+    if !exists(&lock)? {
+        // No build of `dir` ever started, so no build left an entry.
+        return Ok(());
+    }
+    let _lock = FileLock::take(&lock)?;
+    clear(dir).map(|_| ())
+}
+
+fn clear(dir: &Path) -> Result<(PathBuf, PathBuf)> {
+    let stage = beside(dir, ".build")?;
+    remove(&stage)?;
+    let part = beside(dir, ".notes")?;
+    remove(&part)?;
+    Ok((stage, part))
+}
+
 /// Build the workspace of `job` in `dir`. Run it while no session of the job
 /// runs (R4-04): the build changes the folder that the session uses.
 pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
@@ -120,6 +143,9 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
     // No session of the job runs during a build, so the file is stable.
     // A link, a folder or a large file keeps the last copy.
     let notes = save_notes(store, job, dir, now_ms())?.problem();
+    // Before the purge below ends: a stopped build can leave a copy of the
+    // mail of the scope beside the workspace.
+    let (stage, part) = clear(dir)?;
     // The scope of the job had mail of a removed account
     // (docs/specs/2026-11-24-remove-account.md): each file of the folder can
     // hold a copy of that mail, also a file of the agent. Each entry goes,
@@ -139,8 +165,9 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
                 remove(&entry.path())?;
             }
         }
-        // The purge is done: the row goes, so the delete of the account can
-        // end (a session that started after the removal purges here).
+        // The purge is done (the stage and the notes part went above): the
+        // row goes, so the delete of the account can end (a session that
+        // started after the removal purges here).
         store.write(|tx| {
             Ok(tx.execute("DELETE FROM removed_workspace WHERE job_id = ?1", [job])?)
         })?;
@@ -150,16 +177,7 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
     let dot = dir.join(".iris");
     remove(&dot)?;
     new_dir(&dot)?;
-    // The new files go into a folder beside the workspace, which the agent
-    // cannot write. A build that stopped can leave this folder.
-    let stage = beside(dir, ".build")?;
-    remove(&stage)?;
     new_dir(&stage)?;
-
-    // A restore of the notes that stopped can leave its file beside the
-    // workspace.
-    let part = beside(dir, ".notes")?;
-    remove(&part)?;
 
     let mut built = write_stage(store, job, &stage)?;
     built.notes = notes;
