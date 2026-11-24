@@ -84,9 +84,13 @@ holds no sign-in and no sync state. Reasons:
 
 1. Refuse if the account does not exist, or its state is `removing` or
    `removed`.
-2. Refuse if a session of a job runs (`job_session.ended_at IS NULL`) whose
-   scope has a thread or an item of the account. The agent has a copy of the
-   mail in its workspace. The person must stop the job first.
+2. Refuse if a session of a job is live whose scope has mail of the
+   account. A live session is a session whose processes did not stop yet
+   (`job_session.reaped_at IS NULL`), as in the session spec: `ended_at`
+   ends only the grant, and the process of an ended session can still
+   write to its workspace until the reap check passes. The agent has a copy
+   of the mail in its workspace. The person must stop the job and wait for
+   its end. This is the one meaning of "live session" in this spec.
 3. Set `state = 'removing'`, and set `token`, `history_id`,
    `mirror_ready_at`, `sync_kind`, `sync_start` and `sync_step` to NULL. With
    no token, `sync_accounts` drops the account, so no new sync or apply
@@ -153,9 +157,12 @@ for each batch:
    the job builds them again from its grant. Step 0 runs this build for
    each row of `removed_workspace` of the account whose workspace folder
    exists. A build that runs holds the build lock, so this build waits for
-   its end. A job whose session runs is skipped: that session started after
-   the removal, so its build saw the row and already deleted the folder,
-   and a build must not change the folder of a running session. The rows go
+   its end. A job with a live session (`reaped_at IS NULL`) is skipped: step
+   2 refused each live session of the job at the removal, so this session
+   started after the removal. Its build saw the row and already deleted the
+   files, and a build must not change the folder of a live session. No
+   process that started before the removal can write to the folder after
+   this step. The rows go
    in the last transaction (step 7). A crash before step 7 keeps the rows,
    so the next delete builds again.
 
@@ -173,10 +180,16 @@ for each batch:
    `talk_due` and `nudge_try`. Each label. A thread that a draft refers to
    stays as a bare row (an ID and a provider ID, no mail).
 4. **Sync rows**: `sync_log` and `sync_seen` of the account.
-5. **Senders**: each `sender` row whose address sent no message that is
-   still in the store, and that the person did not decide
+5. **Senders**: each `sender` row whose address sent a message of the
+   account, that sent no message that is still in the store, and that the
+   person did not decide
    (`decided_by IS NOT 'person'`). A decision of the person about an address
-   is a rule of the person, not mail.
+   is a rule of the person, not mail. Each batch writes the sender
+   addresses of its messages to the new table
+   `removed_sender(account_id, address)` before it deletes the headers. So
+   this step finds them also after a crash, and a sender of another
+   account only is never a candidate. The step deletes the rows of
+   `removed_sender` of the account.
 6. **Orphan files**: each raw message file that no message row refers to
    and whose time of change is before the start of this delete. A sync of
    the account can write a raw file and then fail at the insert of its row
@@ -300,7 +313,8 @@ engine tick ends the delete.
 | Unknown address or ID | Refused, nothing changes. | store test |
 | Address of a `removing` or `removed` account | Refused, nothing changes. | store test |
 | API body address that does not match the ID | HTTP 400, nothing changes. | API test |
-| A job session with scope in the account runs | Refused with "stop the job first". | store test |
+| A job session with scope in the account is live (not reaped) | Refused with "stop the job, then try again". This includes an ended session whose process did not stop yet. | store test |
+| A sender row of another account only, with no header | It stays. | store test |
 | A sync of the account runs at the removal | Its next insert fails on the trigger. The delete waits for the sync lock. No message of the account stays. | store test with an insert after the removal |
 | That sync wrote a raw file before its insert failed | Step 6 deletes the file. | store test with a file and no row |
 | An understanding run writes after the removal | The trigger on `item` or `body` refuses the write. The batch query leaves the account out. | store test |
@@ -324,7 +338,8 @@ engine tick ends the delete.
 
 ## Impact
 
-- `crates/iris-store`: migration 46 (insert triggers, `removed_workspace`),
+- `crates/iris-store`: migration 46 (insert triggers, `removed_workspace`,
+  `removed_sender`),
   `remove_account`, `delete_removed`, the change of `save_account_secret`.
 - `crates/iris-understand`: the batch query leaves out a removed account.
 - `crates/iris-workspace`: the grant leaves out a removed account. A build
