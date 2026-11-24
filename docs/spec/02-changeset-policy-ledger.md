@@ -2,7 +2,7 @@
 
 - Status: draft, for the approval of the maintainer
 - Applies to: release 2 ("Apply"). Parts for releases 3 to 5 are marked.
-- Open model version: 1.1
+- Open model version: 1.2
 - Related: [Specification 1](01-mirror-store-forms.md), the manifesto and the
   experience document "Iris: the ideal experience"
 
@@ -180,7 +180,7 @@ documents in `schema/examples/` (files `changeset*.json`).
 
 ```json
 {
-  "model": "iris/1.1",
+  "model": "iris/1.2",
   "id": "cs-77",
   "revision": 1,
   "author": { "kind": "agent", "name": "Claude Code", "session": "se-12", "job": "j-142" },
@@ -1238,13 +1238,15 @@ agent that does not work in a folder. The rules for the MCP interface:
 - One MCP tool for each verb of the command, with the same name and the same
   arguments. A verb with subcommands gives one tool for each subcommand,
   with an underscore (`watch_add`, `watch_list`, `watch_remove`,
-  `matters_list`, `matters_show`). `iris changeset --drafts` is the tool
+  `matters_list`, `matters_show`, `matters_propose`). `iris changeset --drafts` is the tool
   `drafts`, and the file of `iris draft` is the object `draft`. MCP gives no
   verb that the command does not have. It gives no verb of the person
   (`sending`, `cancel`), no verb of the host (`serve`, `account`,
   `mirror`, `backup`, `export`, `service`, `model`, `understand`, `mcp`),
-  and not `matters propose` or `write` (the draft in your voice, R3-05),
-  which spend model budget. A test checks
+  and not `write` (the draft in your voice, R3-05) or `matters propose`
+  with no title, which spend model budget. `matters_propose` takes a title
+  and items only: it proposes a matter of these items for the person
+  (docs/specs/2026-11-24-matters-edit.md). A test checks
   that each verb is a tool or is in this list.
 - Each tool call takes the path of its verb in the same mode, so MCP adds
   no power. In host mode, these are the paths:
@@ -1268,8 +1270,8 @@ agent that does not work in a folder. The rules for the MCP interface:
   | `watch_add`, `watch_remove` | The text of the verb (`w-1: Iris tells you ...`, `w-1 removed.`), because the verb has no `--json`. The line starts with the watch ID. |
   | Each tool that adds an action | The JSON of the engine answer (`{"changeset": ..., "n": ...}`). The verb prints `<cs-id> <n>` and has no `--json`. |
 
-  `matters_list` and `matters_show` give JSON, because the verb always
-  prints JSON. A verb that ends with a code that is not 0 gives an error
+  `matters_list`, `matters_show` and `matters_propose` give JSON, because
+  the verb always prints JSON. A verb that ends with a code that is not 0 gives an error
   result: the printed text, then the error line of standard error
   (`iris: <error>`), then `exit code N` (section 8.4).
 

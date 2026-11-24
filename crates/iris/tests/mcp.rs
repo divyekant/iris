@@ -550,8 +550,8 @@ fn a_bad_or_long_line_is_dropped_and_the_next_line_is_read() {
 
 /// The verbs that have no tool: the verbs of the person (the send switch
 /// and the cancel of a send), of the host (sign-in, service, model, backup,
-/// export, sync, understanding, the engine), and the paid proposal of
-/// matters.
+/// export, sync, understanding, the engine). `matters_propose` is a tool
+/// with a title and items only (D22); the paid model step is not.
 const NOT_TOOLS: &[&str] = &[
     "serve",
     "account",
@@ -567,7 +567,6 @@ const NOT_TOOLS: &[&str] = &[
     "cancel",
     "understand",
     "mcp",
-    "matters_propose",
     "write",
     "job",
     // The verbs of a job session only: `iris mcp` serves the host.

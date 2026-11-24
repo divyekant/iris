@@ -423,9 +423,17 @@ pub enum MattersCommand {
     List,
     /// One matter (`g-4`) with its members, by form.
     Show { id: String },
-    /// Ask the model for new proposals now: at most one call, after the
-    /// wait of a model error, and only for a new set of candidates.
-    Propose,
+    /// With no title and no items: ask the model for new proposals now (at
+    /// most one call, after the wait of a model error, and only for a new
+    /// set of candidates). With `--title` and 2 or more item IDs: propose a
+    /// matter of these items; the person confirms it in the web client.
+    Propose {
+        /// The title of the matter, 1 to 80 characters.
+        #[arg(long)]
+        title: Option<String>,
+        /// The item IDs, for example `c-1 r-4 s-9`.
+        items: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -771,6 +779,21 @@ fn socket_request(
         Command::Revise { id, json } => {
             Some(("revise", serde_json::json!({ "changeset": id }), *json))
         }
+        Command::Matters {
+            command: Some(MattersCommand::Propose { title, items }),
+        } if title.is_some() || !items.is_empty() => {
+            let Some(title) = title else {
+                return Err(socket::Failure {
+                    code: socket::code::USAGE,
+                    error: "give the title with --title".into(),
+                });
+            };
+            Some((
+                "matters.propose",
+                serde_json::json!({ "title": title, "items": items }),
+                true,
+            ))
+        }
         c => add_request(c)?.map(|r| ("add", r, false)),
     })
 }
@@ -912,7 +935,14 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
     }
     // Only the write verbs of a session (R4-03): `drafts`, for example, is
     // a host verb of the socket.
-    const SESSION_VERBS: [&str; 5] = ["add", "submit", "show", "withdraw", "revise"];
+    const SESSION_VERBS: [&str; 6] = [
+        "add",
+        "submit",
+        "show",
+        "withdraw",
+        "revise",
+        "matters.propose",
+    ];
     let request = socket_request(c)?.filter(|(verb, ..)| SESSION_VERBS.contains(verb));
     let Some((verb, args, json)) = request else {
         return Err(denied("this verb is not a verb of a session"));
@@ -1247,6 +1277,8 @@ fn socket_verb_at(
             r["n"]
         ),
         "drafts" => drafts_text(&r, json),
+        // The matter view, as `iris matters show` prints it.
+        "matters.propose" => format!("{r}\n"),
         "submit" => {
             let code = submit_code(&r);
             if code != 0 {
@@ -1588,7 +1620,7 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         Command::Matters { command } => {
             let store = open()?;
             let text = match command.as_ref().unwrap_or(&MattersCommand::List) {
-                MattersCommand::Propose => {
+                MattersCommand::Propose { title: None, items } if items.is_empty() => {
                     cost::propose_matters(&store, iris_matters::Gate::Now, engine::now_ms())?
                         .ok_or("an understanding run holds the lock; try again later")?
                 }
