@@ -400,7 +400,7 @@ impl Box {
 
 /// In the mode `observe`, an action that a person did not approve waits.
 /// In the mode `apply`, a rule approval that no rule allows now goes to
-/// review (section 5.4). The
+/// review, and one that a rule allows applies (section 5.4). The
 /// tick applies each approved state action.
 #[test]
 fn only_the_person_approval_applies() {
@@ -433,6 +433,33 @@ fn only_the_person_approval_applies() {
         assert_eq!(b.state(a), want);
         assert_eq!(b.one("SELECT status FROM item WHERE id = 1"), json!("open"));
     }
+    // While an `allow` rule for `close` is in the active policy, the rule
+    // approval applies with no person (section 5.4, decision D9).
+    let allow = format!(
+        "{APPLY_POLICY}\n[[rule]]\nid = 1\nname = \"Close\"\neffect = \"allow\"\n\
+         verbs = [\"close\"]\nwhen = {{ author = \"agent\" }}\nby = \"person\"\n\
+         added = 2026-11-10\n"
+    );
+    let b = setup("rule-allow", "open", Some(&allow));
+    let (a, _) = b.submitted(AuthorKind::Agent, Verb::Close, json!({ "reason": "Done." }));
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                &format!("UPDATE changeset_action SET {rule} WHERE id = ?1"),
+                [a],
+            )?)
+        })
+        .unwrap();
+    assert_eq!(apply_states(&b.store).unwrap(), 1);
+    assert_eq!(b.state(a), "applied");
+    assert_eq!(
+        b.one(&format!(
+            "SELECT decided_by FROM changeset_action WHERE id = {a}"
+        )),
+        json!("rule")
+    );
+    assert_eq!(b.one("SELECT status FROM item WHERE id = 1"), json!("done"));
+
     let b = setup("tick", "open", Some(APPLY_POLICY));
     let a = b.approved(Verb::Close, json!({ "reason": "Done." }));
     assert_eq!(apply_states(&b.store).unwrap(), 1);

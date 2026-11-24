@@ -1022,6 +1022,20 @@ fn rule_approvals_of_one_author_stop_at_the_bulk_limit() {
     applied(b.apply(first));
     assert!(matches!(b.apply(second), Ok(Outcome::Review(r)) if r.contains("bulk")));
     assert_eq!(b.state(second), ("in_review".into(), "engine".into()));
+    let flags: String = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT flags FROM changeset_action WHERE id = ?1",
+                [second],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        flags, r#"["bulk"]"#,
+        "the flag of the apply stays on the action"
+    );
     let person = b.approved("archive", &ms[600..], PERSON);
     applied(b.apply(person));
 }

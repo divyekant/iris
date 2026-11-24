@@ -128,7 +128,9 @@ with no provider call. These rules apply:
   a person approved applies, as an undo does. An action that a rule approved
   waits in the mode `observe`.
 - The engine evaluates an action that a rule approved again before the
-  apply, as for a mailbox verb (section 5.4).
+  apply, as for a mailbox verb (section 5.4), from the origin messages of
+  its items. A state verb has no `bulk`, also not from the count of the
+  last hour.
 - `close`, `decline` and `defer` change only a commitment with the status
   `open` or `deferred` (specification 1, section 6.8). `close` and `decline`
   remove `deferred_until`. If an item does not agree (for example,
@@ -302,7 +304,8 @@ in each state. An undone entry counts, because it changed its messages. The
 same author is the same author kind (`person`, `agent`, `triage` or
 `local`), as in the policy (section 6.4), so two jobs of agents share one
 count. If the result is not `allow`, the action gets the new result,
-`in_review` or `denied`, by `engine`, with the reason of the policy. So a rule that the
+`in_review` or `denied`, by `engine`, with the reason of the policy. A
+`bulk` from the count of the last hour is added to the flags of the action. So a rule that the
 person removed while the action waited applies nothing, and two changesets
 that a rule approved at the same time cannot together go past the limit of
 500 messages.
