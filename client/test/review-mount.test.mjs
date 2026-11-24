@@ -14,7 +14,8 @@ function serve(routes = {}) {
   globalThis.fetch = async (url, init) => {
     const path = String(url).replace(/^\/api\//, "");
     asked.push(init?.body ? [path, JSON.parse(init.body)] : path);
-    const route = routes[path];
+    // The comment box of an agent author loads its comments (decision D15).
+    const route = routes[path] ?? (path.endsWith("/comments") ? [200, { comments: [] }] : undefined);
     // A function route can wait, throw (no answer) or answer with the request body.
     const [status, body] = typeof route === "function" ? await route(init?.body ? JSON.parse(init.body) : undefined) : (route ?? [200, fx.answer(`/${path}`)]);
     return new Response(JSON.stringify(body ?? { error: "Not found." }), { status: body === undefined ? 404 : status, headers: { "content-type": "application/json" } });
@@ -554,6 +555,28 @@ test("a request with no older change does not ask for the revisions", async () =
   }
 });
 
+// Decision D16: a withdrawn request names who withdrew it. A store from before the change does not know.
+test("a withdrawn request names who withdrew it", async () => {
+  const before = three();
+  for (const [by, words] of [
+    ["author", "Claude Code withdrew this request."],
+    ["person", "You withdrew this request."],
+    [undefined, "This request is withdrawn."],
+  ]) {
+    const gone = { ...before, state: "withdrawn", withdrawn_by: by, actions: before.actions.map((a) => ({ ...a, decision: { state: "cancelled", by: "author" } })) };
+    serve({ "changesets/cs-9/withdraw": () => [409, { error: "the changeset is withdrawn" }], "changesets/cs-9": [200, gone] });
+    const view = await mount("/src/views/Review.svelte", { changesets: [before] });
+    try {
+      view.target.querySelector("button.end").click();
+      view.flushSync();
+      view.target.querySelector(".question button.outline").click();
+      await until(() => text(view.target).includes(words));
+    } finally {
+      view.destroy();
+    }
+  }
+});
+
 test("in observe mode, a proposed change says what a rule would decide in apply mode", async () => {
   const asked = serve({
     "changesets/cs-9/would": [200, { would: [{ revision: 1, n: 2, outcome: "approved", rule: 3, policy: 1, reason: "Rule 3 allows it." }] }],
@@ -630,6 +653,25 @@ test("a refresh of the same revision reads again what a rule would decide, and d
     await until(() => asked.filter((p) => p === "changesets/cs-9/would").length === 2);
     await until(() => !view.target.querySelector(".would"));
     assert.equal(view.target.querySelector(".would"), null, "no rule decides it now");
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a draft shows its Bcc and its files (send content spec)", async () => {
+  const d = structuredClone(fx.answer("/changesets/cs-79/drafts"));
+  d.drafts[0].bcc = [{ address: "lee@example.org", flags: ["new_recipient"] }];
+  d.drafts[0].attachments = [{ name: "quote.pdf", type: "application/pdf", size: 2_516_582 }];
+  serve({ "changesets/cs-79/drafts": [200, d] });
+  const cs = fx.changesets.find((c) => c.id === "cs-79");
+  const view = await mount("/src/views/Request.svelte", { changeset: structuredClone(cs) });
+  try {
+    const mail = await until(() => view.target.querySelector(".mail"));
+    const rows = [...mail.querySelectorAll("dt")].map((dt) => [dt.textContent, text(dt.nextElementSibling)]);
+    assert.deepEqual(rows.slice(2), [
+      ["Bcc", "lee@example.orgnew address"],
+      ["Files", "quote.pdf (2.4 MB)"],
+    ]);
   } finally {
     view.destroy();
   }

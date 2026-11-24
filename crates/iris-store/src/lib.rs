@@ -172,6 +172,9 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_47.sql"),
     include_str!("schema_48.sql"),
     include_str!("schema_49.sql"),
+    include_str!("schema_50.sql"),
+    include_str!("schema_51.sql"),
+    include_str!("schema_52.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
@@ -839,6 +842,24 @@ impl Store {
         content::path(&self.dir.join("content"), sha256)
     }
 
+    /// Write one attachment file to the attachment folder and give its
+    /// SHA-256 (send content spec `docs/specs/2026-11-24-send-content.md`,
+    /// section 2). Nothing deletes a file of this folder, and the content
+    /// cleanup never reads it.
+    pub fn put_attachment(&self, bytes: &[u8]) -> Result<String> {
+        let root = self.dir.join(ATTACHMENTS);
+        make_private_dir(&root)?;
+        let mut w = ContentWriter::with_ext(&root, "")?;
+        io::Write::write_all(&mut w, bytes)?;
+        w.finish()
+    }
+
+    /// The path of the attachment file with this SHA-256, or `None` if the
+    /// value is not a SHA-256 in lowercase hexadecimal.
+    pub fn attachment_path(&self, sha256: &str) -> Option<PathBuf> {
+        content::file_path(&self.dir.join(ATTACHMENTS), sha256, "")
+    }
+
     /// Encrypt a secret (specification 1, section 5.4) for a BLOB column.
     pub fn seal(&self, plain: &[u8]) -> Result<Vec<u8>> {
         secret::seal(&self.key, plain)
@@ -849,6 +870,9 @@ impl Store {
         secret::unseal(&self.key, sealed)
     }
 }
+
+/// The attachment folder of the data folder.
+pub(crate) const ATTACHMENTS: &str = "attachments";
 
 /// `text` with at most `limit` characters before the cut mark. A text that
 /// ends with the mark already and is in the limit stays as it is.

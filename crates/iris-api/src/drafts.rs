@@ -116,6 +116,8 @@ fn next_draft(
             v["readable"] = true.into();
             v["to"] = people(&content.to, Field::To).into();
             v["cc"] = people(&content.cc, Field::Cc).into();
+            v["bcc"] = people(&content.bcc, Field::Bcc).into();
+            v["attachments"] = files(&content.attachments).into();
             v["subject"] = parts(&content.subject, &marks, Field::Subject).into();
             v["body"] = parts(&content.body, &marks, Field::Body).into();
             marks
@@ -128,6 +130,14 @@ fn next_draft(
         .collect();
     v["unmarked"] = unmarked.into();
     Ok(Some(((revision, n), v)))
+}
+
+/// The files of a draft that the review and the outbox show (send content
+/// spec, section 6): name, type and size.
+pub(crate) fn files(list: &[iris_compose::Attachment]) -> Vec<Value> {
+    list.iter()
+        .map(|a| json!({"name": a.name, "type": a.mime, "size": a.size}))
+        .collect()
 }
 
 fn store_error(e: iris_changeset::Error) -> iris_store::Error {

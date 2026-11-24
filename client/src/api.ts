@@ -57,19 +57,28 @@ export type Item = {
 
 // A matter: mail that belongs together, as Iris proposes it and the person decides it
 // (docs/spec/schema/matter.schema.json).
-export type MatterForm = "commitment" | "conversation" | "record";
+export type MatterForm = "commitment" | "conversation" | "record" | "signal";
 export type Matter = {
   id: string;
   title: string;
   status: "proposed" | "confirmed" | "declined";
   items: string[];
-  counts: Record<MatterForm, number>;
+  /** `signal` since open model 1.2: an older engine leaves it out. */
+  counts: Record<Exclude<MatterForm, "signal">, number> & { signal?: number };
   created: string;
   updated: string;
   decided?: string;
+  /** The items that Iris proposes to add to a confirmed matter (open model 1.2). */
+  additions?: string[];
+  derived?: { by: "model" | "agent" | "person"; model?: string; prompt?: string };
 };
 export type MatterList = { proposed: Matter[]; confirmed: Matter[] };
-export type MatterView = { matter: Matter; items: Record<MatterForm, Item[]> };
+export type MatterView = {
+  matter: Matter;
+  items: Record<Exclude<MatterForm, "signal">, Item[]> & { signal?: Item[] };
+  /** The documents of the additions of a confirmed matter, newest first. */
+  additions?: Item[];
+};
 
 // `duplicates` maps an item ID to newer items that can be the same thing (spec 1
 // section 7.5). The newer items are not in `items`: the client shows a pair as one line.
@@ -230,6 +239,10 @@ export type Action = {
 export type Part = { text: string; flags?: string[]; source?: string };
 /** A recipient of a draft, with the flag `new_recipient` if the owner never wrote to the address. */
 export type Recipient = { address: string; flags?: string[] };
+/** A file of a draft, as the review and the outbox show it. */
+export type FileView = { name: string; type: string; size: number };
+/** A file in the attachment folder of the engine (POST /api/attachments), with its name and type for a draft. */
+export type Attachment = FileView & { sha256: string };
 /**
  * GET /api/changesets/{id}/drafts: the draft of each `draft` and `send`
  * action that waits, as the review shows it. Each part of the text carries
@@ -237,7 +250,7 @@ export type Recipient = { address: string; flags?: string[] };
  * cannot read has `readable: false` and no text.
  */
 export type DraftView = { revision: number; n: number; draft: string | null; thread: string | null } & (
-  | { readable: true; to: Recipient[]; cc: Recipient[]; subject: Part[]; body: Part[] }
+  | { readable: true; to: Recipient[]; cc: Recipient[]; bcc?: Recipient[]; attachments?: FileView[]; subject: Part[]; body: Part[] }
   | { readable: false }
 );
 
@@ -245,6 +258,8 @@ export type Changeset = {
   id: string;
   revision: number;
   author: { kind: "person" | "agent" | "triage" | "local"; name?: string; session?: string; job?: string };
+  /** Since open model 1.2: who withdrew the changeset (decision D16). Absent when it is not known. */
+  withdrawn_by?: "author" | "person";
   why: string | null;
   created: string;
   submitted: string | null;
@@ -326,7 +341,11 @@ export type OutboxSend = {
   readable: boolean;
   to?: string[];
   cc?: string[];
+  bcc?: string[];
+  attachments?: FileView[];
   subject?: string;
+  /** The provider ("gmail" or "outlook") whose Bcc check keeps the send held, or null. An older engine leaves it out. */
+  bcc_check?: string | null;
 };
 /** GET /api/outbox: the send switch and each send that waits. Only `iris sending on|off` changes the switch. */
 export type Outbox = { sending: { on: boolean; since: string | null }; count: number; sends: OutboxSend[]; next: string | null };
@@ -374,7 +393,7 @@ export type ReplyStart = {
 /** GET /api/write/{cs}: the state of one press of Send (write spec, section 4). */
 export type WriteState =
   | { state: "saving" }
-  | { state: "waiting"; draft: string; sending: boolean; leaves_at: string | null }
+  | { state: "waiting"; draft: string; sending: boolean; bcc_check?: string | null; leaves_at: string | null }
   | { state: "review"; draft: string; reason: string | null }
   | { state: "sent"; draft: string }
   | { state: "stopped"; reason: string; draft: string | null };
@@ -419,7 +438,9 @@ export type JobSession = {
   exit: number | null;
   ended: string | null;
 };
-export type JobDetail = { job: Job & { events: JobEvent[] }; changesets: JobChangeset[]; threads: Record<string, Target>; session?: JobSession | null };
+/** One thread or item in the scope of a job (decision D25): the mail that the agent reads. `id` is null for a row that the page cannot name. */
+export type ScopeRef = { id: string | null; kind: "thread" | "item"; label: string | null; messages: number };
+export type JobDetail = { job: Job & { events: JobEvent[] }; changesets: JobChangeset[]; threads: Record<string, Target>; scope?: ScopeRef[]; session?: JobSession | null };
 
 export const SIGN_IN = "Sign in: run iris open in Terminal.";
 export const SIGN_IN_FAILED = "This sign-in address was used, ended or is not valid. Run iris open in Terminal for a new address.";
@@ -560,13 +581,17 @@ async function call(path: string, accept: string, body?: unknown): Promise<Respo
   if (active()) headers["x-iris-day"] = localDay();
   const sent = token;
   if (sent) headers.authorization = `Bearer ${sent}`;
-  const json = body === undefined ? undefined : JSON.stringify(body);
+  // A file (a Blob of any window) goes as its own bytes (POST /api/attachments).
+  const file = typeof (body as Blob | undefined)?.arrayBuffer === "function" ? (body as Blob) : undefined;
+  const json = body === undefined || file ? undefined : JSON.stringify(body);
   const init: RequestInit =
-    json === undefined
-      ? { headers }
-      : // keepalive: a POST that starts as the page closes still reaches the engine (Act.svelte).
-        // A browser refuses a keepalive body over 64 KiB, so a larger body (a long mail) goes without it.
-        { method: "POST", keepalive: keepable(json), headers: { ...headers, "content-type": "application/json" }, body: json };
+    file
+      ? { method: "POST", headers: { ...headers, "content-type": "application/octet-stream" }, body: file }
+      : json === undefined
+        ? { headers }
+        : // keepalive: a POST that starts as the page closes still reaches the engine (Act.svelte).
+          // A browser refuses a keepalive body over 64 KiB, so a larger body (a long mail) goes without it.
+          { method: "POST", keepalive: keepable(json), headers: { ...headers, "content-type": "application/json" }, body: json };
   const response = await fetch(`/api/${path}`, init).catch(() => fail(UNREACHABLE));
   if (response.status === 401) {
     // The engine does not know the token (for example after a restart of iris serve).
@@ -636,6 +661,12 @@ export async function postStatus(path: string, body: unknown): Promise<Status | 
   const n = ++statusStarted;
   const s = await post<Status>(path, body);
   return takeStatus(n, s) ? s : null;
+}
+
+/** Put one file into the attachment folder of the engine. The entry of a draft adds the name and the type. */
+export async function upload(file: File): Promise<Attachment> {
+  const v = await post<{ sha256: string; size: number }>("attachments", file);
+  return { name: file.name, type: file.type.split(";")[0].trim() || "application/octet-stream", size: v.size, sha256: v.sha256 };
 }
 
 /** Send a policy change (POST with a JSON body). Throws an Error with the API's error text. */

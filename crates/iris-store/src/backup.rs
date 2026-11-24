@@ -127,6 +127,14 @@ impl Store {
         drop(copy);
         sync_dir(&dest_content)?;
 
+        // Each attachment file (send content spec, section 2): a draft
+        // action can name a file that no message names. Nothing deletes
+        // one, so the copy takes each file whose name is its SHA-256.
+        copy_attachments(
+            &self.dir.join(crate::ATTACHMENTS),
+            &dest.join(crate::ATTACHMENTS),
+        )?;
+
         // Without the key, the copy cannot decrypt the secrets.
         copy_private(&self.dir.join("key"), &dest.join("key"))?;
         let policy = self.dir.join("policy.toml");
@@ -257,6 +265,7 @@ impl Store {
                 )?
                 .query_map(params![cutoff, CLEAN_BATCH], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?;
+            settle_hostile(&tx, cutoff, now)?;
             for (id, _) in &batch {
                 tx.execute("DELETE FROM header WHERE message_id = ?1", [id])?;
                 // The delete trigger on body removes the search text too.
@@ -303,6 +312,43 @@ impl Store {
     }
 }
 
+/// Before the cleanup deletes the evidence of gone mail (the header that
+/// names the sender, then the message row with its marks and labels), it
+/// keeps the last verdict of each notice and each watch match on such mail
+/// (decision D33). An open notice on hostile mail is marked done, so it
+/// stays hidden. A watch whose match is hostile mail, a draft or a copy
+/// waits again. A safe notice or match stays as it is.
+fn settle_hostile(tx: &rusqlite::Transaction, cutoff: i64, now: i64) -> Result<()> {
+    tx.execute(
+        concat!(
+            "UPDATE notice SET done_at = ?2 WHERE done_at IS NULL AND EXISTS (
+               SELECT 1 FROM message m WHERE m.id = notice.message_id AND m.gone_at <= ?1
+                 AND (",
+            crate::hostile_mail!(),
+            " OR ",
+            crate::may_be_hostile!(),
+            "))"
+        ),
+        params![cutoff, now],
+    )?;
+    tx.execute(
+        concat!(
+            "UPDATE watch SET message_id = NULL, arrived_at = NULL
+             WHERE message_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM message m WHERE m.id = watch.message_id AND m.gone_at <= ?1
+                 AND (",
+            crate::hostile_mail!(),
+            " OR ",
+            crate::may_be_hostile!(),
+            " OR ",
+            crate::draft_or_copy!("m"),
+            "))"
+        ),
+        [cutoff],
+    )?;
+    Ok(())
+}
+
 /// A file with mode 0600 at `path`. With `new`, refuses a file that exists.
 fn private_file(path: &Path, new: bool) -> io::Result<File> {
     let mut o = fs::OpenOptions::new();
@@ -324,6 +370,47 @@ fn private_file(path: &Path, new: bool) -> io::Result<File> {
 }
 
 /// Copy `from` to a new file `to` with mode 0600, and write it to disk.
+/// Copy each file `<aa>/<sha256>` of the attachment folder `src` whose
+/// bytes have that SHA-256. A file with another name (a temporary file of
+/// a writer) is not copied. A file whose bytes do not agree with its name
+/// is an error: the copy would hold a damaged file.
+fn copy_attachments(src: &Path, dest: &Path) -> Result<()> {
+    use sha2::Digest as _;
+    let dirs = match fs::read_dir(src) {
+        Ok(d) => d,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    make_private_dir(dest)?;
+    for d in dirs {
+        let d = d?;
+        if !d.file_type()?.is_dir() {
+            continue;
+        }
+        for f in fs::read_dir(d.path())? {
+            let f = f?;
+            let name = f.file_name();
+            let Some(sha) = name.to_str() else { continue };
+            let Some(to) = content::file_path(dest, sha, "") else {
+                continue;
+            };
+            let bytes = fs::read(f.path())?;
+            if content::hex(&sha2::Sha256::digest(&bytes)) != sha {
+                return Err(Error::Io(io::Error::other(format!(
+                    "the attachment file {sha} does not have its SHA-256"
+                ))));
+            }
+            let dir = to.parent().expect("the path has a folder");
+            make_private_dir(dir)?;
+            fs::write(&to, &bytes)?;
+            sync_file(&to)?;
+            sync_dir(dir)?;
+        }
+    }
+    sync_dir(dest)?;
+    Ok(())
+}
+
 fn copy_private(from: &Path, to: &Path) -> io::Result<()> {
     let mut src = File::open(from)?;
     let mut dst = private_file(to, false)?;

@@ -74,7 +74,7 @@ test("generated timelines: each event and each changeset shows once, in time ord
 test("the state now in words", () => {
   const { jobs, jobDetails } = fx;
   assert.equal(j.now(jobs["j-15"]), "The agent works on it.");
-  assert.equal(j.now(jobs["j-14"]), "The agent asks you a question.");
+  assert.equal(j.now(jobs["j-14"]), "It asks you a question.");
   assert.equal(j.now(jobs["j-12"]), "Waits for a reply, until Wed 18 Nov.");
   assert.equal(j.now({ ...jobs["j-12"], wait: { until: jobs["j-12"].wait.until } }), "Waits, until Wed 18 Nov.");
   assert.equal(j.now(jobs["j-9"]), "Done Fri 13 Nov.");

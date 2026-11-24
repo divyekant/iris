@@ -394,7 +394,7 @@ fn a_withdraw_after_the_draft_makes_no_send() {
         Ok(Outcome::Applied(_))
     ));
     b.sql(
-        "UPDATE changeset SET state = 'withdrawn' WHERE id = ?1",
+        "UPDATE changeset SET state = 'withdrawn', withdrawn_by = 'person' WHERE id = ?1",
         [cs],
     );
     assert_eq!(send_written(&b.store, b.account, &|| now()).unwrap(), 0);

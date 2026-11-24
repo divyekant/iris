@@ -11,6 +11,7 @@
   import { canStart } from "../start";
   import { quiet } from "../act";
   import Code from "./Code.svelte";
+  import MatterPick from "./MatterPick.svelte";
 
   let { item: given, now: start = new Date() }: { item: Item; now?: Date } = $props();
   // The item after a change of the person (Done, Later, Decline).
@@ -107,6 +108,8 @@
       </figcaption>
     </figure>
   {/if}
+
+  <MatterPick {item} onchange={(matter) => (item = { ...item, matter })} />
 
   <dl>
     {#each rows as [label, value] (label)}

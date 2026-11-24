@@ -8,6 +8,7 @@
 -->
 <script lang="ts">
   import { href } from "../route";
+  import { fileLine } from "../format";
   import { get, post, type Changeset, type DraftView, type Item, type Part, type Recipient, type Target, type Would } from "../api";
   import Comments from "./Comments.svelte";
   import { author, detail, FLAGS, itemRow, mail, TAGS, to, unmarked, key, messageRow, outcome, pages, plan, short, shown, target, targets, verb, waits, would, type Row } from "../review";
@@ -36,6 +37,14 @@
   // with an unknown result, or a 409, until the request loads again.
   let stale = $state(false);
   let who = $derived(author(c));
+  // Who withdrew the request (decision D16). A store from before the change does not know.
+  let withdrawn = $derived(
+    c.withdrawn_by === "person" || (c.withdrawn_by === "author" && c.author.kind === "person")
+      ? "You withdrew this request."
+      : c.withdrawn_by === "author"
+        ? `${who} withdrew this request.`
+        : "This request is withdrawn.",
+  );
   let mark = $derived(who.split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase()).join(""));
 
   // The targets of each action, loaded in pages: messages by their summaries, items one by one.
@@ -239,7 +248,10 @@
 {#snippet draft(d: DraftView)}
   {#if d.readable}
     <div class="mail">
-      <dl>{@render people("To", d.to)}{@render people("Cc", d.cc)}</dl>
+      <dl>
+        {@render people("To", d.to)}{@render people("Cc", d.cc)}{@render people("Bcc", d.bcc ?? [])}
+        {#if d.attachments?.length}<dt>Files</dt><dd>{fileLine(d.attachments)}</dd>{/if}
+      </dl>
       <p class="subject-line">{@render text(d.subject)}</p>
       <p class="text">{@render text(d.body)}</p>
     </div>
@@ -269,9 +281,9 @@
   {/if}
 {/snippet}
 
-<!-- Only a changeset of a job takes a comment: its agent reads the comment in the next session. -->
+<!-- An agent or a local author takes a comment (decision D15). A job agent reads it in its next session; another author reads it with the request. -->
 {#snippet comments()}
-  {#if c.author.job}<Comments changeset={c} agent={who} refused={refresh} />{/if}
+  {#if c.author.kind === "agent" || c.author.kind === "local"}<Comments changeset={c} agent={who} job={!!c.author.job} refused={refresh} />{/if}
 {/snippet}
 
 <!-- Withdraw ends the whole request, so it sits at the end of the decision row (option B, the owner's pick). -->
@@ -348,7 +360,7 @@
     {/if}
   {/if}
   {#if asking}{@render question()}{/if}
-  {#if c.state === "withdrawn" && !saved}<p class="saved">This request is withdrawn.</p>{/if}
+  {#if c.state === "withdrawn" && !saved}<p class="saved">{withdrawn}</p>{/if}
   {#if problem}
     <p role="alert">
       {problem}

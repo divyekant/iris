@@ -102,3 +102,21 @@ export function grantView(rules: Rule[], job: string): { switches: Record<Group[
   const general = rules.filter((r) => r.effect === "allow" && !r.job && (r.when?.author == null || r.when.author === "agent"));
   return { switches, others: mine.filter((r) => !taken.has(r.id)), general };
 }
+
+/** The `due` of a typed goal or an edit (decision D25): the old instant if the person kept its day, else the end of the picked day, or null. */
+export function keepDue(old: string | undefined, field: string): string | null {
+  if (!field) return null;
+  if (old && ymd(new Date(old)) === field) return old;
+  return endOfDay(field);
+}
+
+/** The threads of the messages of a search, in the order of the list: one line for each thread, with the subject of its first hit. */
+export function threadsOf(messages: Summary[]): { thread: string; subject: string; hits: number }[] {
+  const out = new Map<string, { thread: string; subject: string; hits: number }>();
+  for (const m of messages) {
+    const t = out.get(m.thread);
+    if (t) t.hits++;
+    else out.set(m.thread, { thread: m.thread, subject: subjectOf(m), hits: 1 });
+  }
+  return [...out.values()];
+}

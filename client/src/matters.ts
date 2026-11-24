@@ -1,5 +1,11 @@
 // The proposals of Iris for the brief (card R6-01): the newest proposal with its members, and the count of all.
-import { get, type MatterList, type MatterView } from "./api";
+import { get, type Matter, type MatterList, type MatterView } from "./api";
+
+/** The confirmed matters with items that Iris proposes to add (D20), newest change first. */
+export async function loadGrowing(): Promise<Matter[]> {
+  const list = await get<MatterList>("matters");
+  return list.confirmed.filter((m) => (m.additions?.length ?? 0) > 0);
+}
 
 export type Proposed = { view: MatterView; count: number };
 

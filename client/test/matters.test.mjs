@@ -61,13 +61,13 @@ test("the list shows the proposals first, then the matters that you kept, each w
   assert.doesNotMatch(empty, /Iris proposes\b(?! a matter)|Yours/);
 });
 
-test("a confirmed matter shows its commitments, records and conversations", async () => {
+test("a confirmed matter shows its commitments, records, conversations and signals, and the items that Iris proposes to add", async () => {
   const view = fx.matterViews["g-4"];
   const t = text(await render("/src/views/Matter.svelte", { view, now: new Date("2026-11-17T09:00:00Z") }));
   assert.match(t, /Tokyo trip/);
-  assert.match(t, /Three items\. Kept together /);
-  assert.match(t, /Kept together /);
-  const order = ["You owe", "Records", "Conversations"].map((h) => t.indexOf(h));
+  assert.match(t, /Four items\. Kept together /);
+  assert.match(t, /Iris thinks this belongs here Pay invoice Add Not this/);
+  const order = ["Iris thinks", "You owe", "Records", "Conversations", "Signals"].map((h) => t.indexOf(h));
   assert.ok(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1])), String(order));
   assert.doesNotMatch(t, /Owed to you/);
   for (const list of Object.values(view.items)) for (const item of list) assert.ok(t.includes(item.title), item.title);

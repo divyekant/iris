@@ -190,6 +190,66 @@ pub fn create_in(c: &Connection, goal: &str, due_ms: Option<i64>, now_ms: i64) -
     Ok(c.last_insert_rowid())
 }
 
+/// Make a job from a typed goal with the request ID `request` of the
+/// start form (decision D25). A request ID that has a job gives that job
+/// and makes no job, so a retry after a lost answer makes one job. Gives
+/// the job and `true` when this call made it.
+pub fn create_for_request_in(
+    c: &Connection,
+    goal: &str,
+    due_ms: Option<i64>,
+    request: &str,
+    now_ms: i64,
+) -> Result<(i64, bool)> {
+    let have: Option<i64> = c
+        .query_row(
+            "SELECT job_id FROM job_request WHERE request = ?1",
+            [request],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(job) = have {
+        return Ok((job, false));
+    }
+    let job = create_in(c, goal, due_ms, now_ms)?;
+    c.execute(
+        "INSERT INTO job_request (request, job_id) VALUES (?1, ?2)",
+        params![request, job],
+    )?;
+    Ok((job, true))
+}
+
+/// The person changes the goal and the due date of an open job (decision
+/// D25). Migration 50 keeps the values before and after in `job_edit`, and
+/// refuses an edit of a done job or an edit that changes nothing. An edit
+/// is not a move: the state, `updated` and the sessions do not change.
+pub fn edit(store: &Store, job: i64, goal: &str, due_ms: Option<i64>, now_ms: i64) -> Result<()> {
+    transaction(store, |c| edit_in(c, job, goal, due_ms, now_ms))
+}
+
+pub fn edit_in(
+    c: &Connection,
+    job: i64,
+    goal: &str,
+    due_ms: Option<i64>,
+    now_ms: i64,
+) -> Result<()> {
+    let j = get_in(c, job)?;
+    // Not before the newest edit: a clock that goes back must not fail it.
+    let last: Option<i64> = c.query_row(
+        "SELECT max(at) FROM job_edit WHERE job_id = ?1",
+        [job],
+        |r| r.get(0),
+    )?;
+    let at = last.map_or(now_ms, |l| now_ms.max(l));
+    c.execute(
+        "INSERT INTO job_edit (job_id, at, goal_before, due_before, goal, due_at, after_event)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, (SELECT max(id) FROM job_event WHERE job_id = ?1))",
+        params![job, at, j.goal, j.due_ms, goal, due_ms],
+    )?;
+    Ok(())
+}
+
 /// The values of one move. Each `None` is NULL.
 #[derive(Default)]
 struct Move<'a> {
@@ -410,9 +470,16 @@ pub struct Due {
 /// person at or after the due date. So the move happens once for each due
 /// date. The first event (the start, by the person) is not a move: a job
 /// that starts after its due date also moves.
+/// Rule 3 counts the events at or after the due date, and after the newest
+/// edit of the due date: an edit to a past date (decision D25) is a new due
+/// date, and an event before the edit does not count. The edit keeps the ID
+/// of the newest event (`after_event`), so the order holds also when the
+/// clock goes back.
 const DUE_SQL: &str = "j.state IN ('working', 'waiting') AND j.due_at <= ?1
      AND NOT EXISTS (SELECT 1 FROM job_event e WHERE e.job_id = j.id
-                     AND e.id > (SELECT min(f.id) FROM job_event f WHERE f.job_id = j.id)
+                     AND e.id > max((SELECT min(f.id) FROM job_event f WHERE f.job_id = j.id),
+                                    coalesce((SELECT max(d.after_event) FROM job_edit d
+                                              WHERE d.job_id = j.id AND d.due_at IS NOT d.due_before), 0))
                      AND e.at >= j.due_at AND (e.state = 'needs_you' OR e.by = 'person'))";
 
 /// The result of [`move_due`]: the moved jobs, and each job whose move

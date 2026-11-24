@@ -75,8 +75,12 @@ A job is due at `now` when all of these are true:
 
 Rule 3 makes the move happen once for each due date. After the move, or
 after the person acted on the job after the due date (an answer, a wake),
-the person knows that the date passed. A later due date (card P9-D25) has no
-event after it yet, so it moves the job again on that date.
+the person knows that the date passed. An edit of the due date (card
+P9-D25) is a new due date: rule 3 then counts only the events after the
+newest edit of the due date (by event ID, `job_edit.after_event`, so the
+order holds when the clock goes back). So an edit to
+a later date moves the job again on that date, and an edit to a past date
+moves it on the next turn. An edit of the goal only does not count.
 
 A job in `needs_you` on its due date does not move: it already waits for the
 person. If the person answers after the due date, rule 3 sees the answer, and

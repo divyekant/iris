@@ -514,3 +514,36 @@ fn a_mail_waits_for_its_link_check_then_gets_one_notice() {
     .unwrap();
     assert_eq!(notice::refresh(&s, NOW).unwrap().len(), 1);
 }
+
+/// Decision D33 (issue 257): a notice whose mail becomes hostile mail after
+/// the notice (a model mark, the label SPAM, a hostile sender) is not in
+/// the list, the Mac page or the open count.
+#[test]
+fn a_later_hostile_sign_hides_the_notice() {
+    let cases = [
+        "UPDATE message SET hostile = '[\"phishing\"]' WHERE id = ?1",
+        "INSERT INTO message_label(message_id, label_id) VALUES (?1, 4)",
+        "UPDATE sender SET kind = 'hostile' WHERE address =
+           (SELECT from_addr FROM header WHERE message_id = ?1)",
+    ];
+    for (i, sql) in cases.iter().enumerate() {
+        let (_d, s) = store(&format!("later-{i}"));
+        activate(&s, ANN);
+        let id = put(&s, &mail(), 0);
+        let new = notice::refresh(&s, NOW).unwrap();
+        assert_eq!(new.len(), 1, "case {i}");
+        assert!(s.read(|c| notice::is_open(c, new[0].id)).unwrap());
+        s.write(|tx| Ok(tx.execute(sql, [id])?)).unwrap();
+        // The system notice checks again at the show (it waits in a queue).
+        assert!(
+            !s.read(|c| notice::is_open(c, new[0].id)).unwrap(),
+            "case {i}"
+        );
+        assert!(s.read(notice::list).unwrap().is_empty(), "case {i}");
+        assert!(
+            s.read(|c| notice::after(c, 0, 10)).unwrap().is_empty(),
+            "case {i}"
+        );
+        assert_eq!(s.read(notice::counts).unwrap(), (0, new[0].id), "case {i}");
+    }
+}

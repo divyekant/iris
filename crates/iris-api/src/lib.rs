@@ -12,7 +12,7 @@ use axum::{
     body::{Body, Bytes},
     extract::{
         rejection::{JsonRejection, QueryRejection},
-        Path, Query, State,
+        DefaultBodyLimit, Path, Query, State,
     },
     http::{header, StatusCode},
     middleware,
@@ -151,6 +151,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/items", get(get_items))
         .route("/api/items/{id}", get(get_item))
         .route("/api/items/{id}/job", get(get_start))
+        .route("/api/items/{id}/joinable", get(get_joinable))
         .route("/api/items/{id}/{verb}", post(post_verb))
         .route("/api/search", get(get_search))
         .route("/api/changesets", get(get_changesets))
@@ -178,6 +179,10 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/jobs/{id}", get(get_job))
         .route("/api/jobs/{id}/answer", post(post_job_answer))
         .route("/api/jobs/{id}/finish", post(post_job_finish))
+        .route("/api/jobs/{id}/edit", post(post_job_edit))
+        .route("/api/jobs/{id}/scope", post(post_scope_add))
+        .route("/api/jobs/{id}/scope/remove", post(post_scope_remove))
+        .route("/api/jobs/{id}/scope/{thread}", get(get_scope_preview))
         .route("/api/policy/accept", post(post_accept))
         .route("/api/policy/dismiss", post(post_dismiss))
         .route("/api/notices", get(get_notices))
@@ -191,6 +196,10 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/outbox", get(get_outbox))
         .route("/api/outbox/{draft}/cancel", post(post_outbox_cancel))
         .route("/api/write", post(post_write))
+        .route(
+            "/api/attachments",
+            post(post_attachment).layer(DefaultBodyLimit::max(ATTACHMENT_LIMIT)),
+        )
         .route("/api/write/{id}", get(get_write))
         .route("/api/threads/{id}/reply", get(get_reply))
         .route("/api/threads/{id}/draft", get(get_draft))
@@ -779,6 +788,14 @@ fn present<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option
     Option::deserialize(d)
 }
 
+/// As [`present`], for a text: the key must be in the body, with a text or
+/// null.
+fn present_text<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    Option::deserialize(d)
+}
+
 /// `version` is the active version that the person saw, `null` for the
 /// policy of the first start. A body with no `version` field is refused.
 #[derive(Deserialize)]
@@ -838,40 +855,129 @@ async fn get_start(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StartBody {
-    item: String,
+    #[serde(default, deserialize_with = "field")]
+    item: Option<Option<String>>,
     goal: String,
     due: Option<String>,
-    messages: Vec<String>,
+    #[serde(default, deserialize_with = "field")]
+    messages: Option<Option<Vec<String>>>,
+    #[serde(default, deserialize_with = "field")]
+    request: Option<Option<String>>,
 }
 
-/// Start a job from one item ("Handle this"). The answer is 201 with the
-/// job document. If an open job has the item, 409 names that job.
+/// A field whose presence counts: `None` when the key is not in the body,
+/// `Some(None)` for a null. The kind of a start depends on the keys, so a
+/// null key is not the same as no key.
+fn field<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> std::result::Result<Option<Option<T>>, D::Error> {
+    Option::<T>::deserialize(d).map(Some)
+}
+
+/// Start a job. With `item` and `messages`: from one item ("Handle this").
+/// With `request` and no item: from a typed goal, with no mail (decision
+/// D25). The answer is 201 with the job document. If an open job has the
+/// item, or the request ID has a job, 409 names that job.
 async fn post_job(
     State(s): State<Arc<Store>>,
     b: std::result::Result<Json<StartBody>, JsonRejection>,
 ) -> Result<Response> {
     let b = body(b)?;
-    Ok(
-        match start_job(
-            &s,
-            &b.item,
-            &b.goal,
-            b.due.as_deref(),
-            &b.messages,
-            now_ms(),
-        )? {
-            Started::Created(doc) => (StatusCode::CREATED, Json(doc)).into_response(),
-            Started::NotFound => not_found(),
-            Started::Open(job) => (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({
-                    "error": "A job that is not done has this item already.",
-                    "job": job,
-                })),
-            )
-                .into_response(),
-        },
-    )
+    let (started, open) = match (&b.item, &b.messages, &b.request) {
+        (Some(Some(item)), Some(Some(messages)), None) => (
+            start_job(&s, item, &b.goal, b.due.as_deref(), messages, now_ms())?,
+            "A job that is not done has this item already.",
+        ),
+        (None, None, Some(Some(request))) => (
+            start_typed_job(&s, &b.goal, b.due.as_deref(), request, now_ms())?,
+            "This start made a job already.",
+        ),
+        _ => {
+            return Err(Error::Query(
+                "give item and messages, or request with no item".into(),
+            ))
+        }
+    };
+    Ok(match started {
+        Started::Created(doc) => (StatusCode::CREATED, Json(doc)).into_response(),
+        Started::NotFound => not_found(),
+        Started::Open(job) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": open, "job": job })),
+        )
+            .into_response(),
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditBody {
+    goal: String,
+    /// Required: null for no due date.
+    #[serde(deserialize_with = "present_text")]
+    due: Option<String>,
+}
+
+/// The person changes the goal and the due date of an open job (decision
+/// D25). The answer is the job document.
+async fn post_job_edit(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<EditBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    Ok(edit_job(&s, &id, &b.goal, b.due.as_deref(), now_ms())?
+        .map_or_else(not_found, |d| Json(d).into_response()))
+}
+
+/// The mail that an add of the thread to the scope of the job grants now.
+async fn get_scope_preview(
+    State(s): State<Arc<Store>>,
+    Path((id, thread)): Path<(String, String)>,
+) -> Result<Response> {
+    Ok(scope_preview(&s, &id, &thread)?.map_or_else(not_found, |v| Json(v).into_response()))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScopeAddBody {
+    thread: String,
+    messages: Vec<String>,
+}
+
+/// Add a thread to the scope of a job (decision D25). The answer is the
+/// job page.
+async fn post_scope_add(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<ScopeAddBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    if !add_thread(&s, &id, &b.thread, &b.messages, now_ms())? {
+        return Ok(not_found());
+    }
+    get_job(State(s), Path(id)).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScopeRemoveBody {
+    #[serde(rename = "ref")]
+    what: String,
+}
+
+/// Take a thread or an item out of the scope of a job (decision D25). The
+/// answer is the job page.
+async fn post_scope_remove(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<ScopeRemoveBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    if !remove_ref(&s, &id, &b.what, now_ms())? {
+        return Ok(not_found());
+    }
+    get_job(State(s), Path(id)).await
 }
 
 #[derive(Deserialize)]
@@ -1194,6 +1300,26 @@ async fn post_outbox_cancel(
     })
 }
 
+/// The most bytes of a request to `POST /api/attachments`: the limit of
+/// the largest message (send content spec, section 5). A larger body gets
+/// 413.
+pub const ATTACHMENT_LIMIT: usize = iris_compose::MAX_MESSAGE as usize;
+
+/// One file for a draft (send content spec, section 2): the request body
+/// is the file. 201 with `{"sha256", "size"}`. The client puts the entry,
+/// with the name and the type, into the draft.
+async fn post_attachment(State(s): State<Arc<Store>>, body: Bytes) -> Result<Response> {
+    if body.is_empty() {
+        return Err(Error::Query("a file has 1 or more bytes".into()));
+    }
+    let sha = s.put_attachment(&body)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "sha256": sha, "size": body.len() })),
+    )
+        .into_response())
+}
+
 /// The press of Send in the write view (docs/specs/2026-11-17-write.md,
 /// section 2): 201 for a new write, 200 for an earlier try of the same
 /// press, 409 with `flags` for warnings that the person did not see.
@@ -1293,6 +1419,11 @@ async fn post_watch_remove(
     Ok(Json(serde_json::json!({ "removed": id })).into_response())
 }
 
+/// `{"joinable": bool}`: the item can join a matter now.
+async fn get_joinable(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    Ok(Json(serde_json::json!({ "joinable": matters::joinable(&s, &id)? })).into_response())
+}
+
 /// The valid proposals and the confirmed matters.
 async fn get_matters(State(s): State<Arc<Store>>) -> Result<Response> {
     Ok(Json(matters(&s)?).into_response())
@@ -1330,9 +1461,17 @@ async fn post_matter_decline(
 }
 
 /// The person makes a matter by hand.
+/// The body of a matter by hand: a title and its items, nothing else (#909).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MatterCreate {
+    title: String,
+    items: Vec<String>,
+}
+
 async fn post_matter_create(
     State(s): State<Arc<Store>>,
-    b: std::result::Result<Json<MatterConfirm>, JsonRejection>,
+    b: std::result::Result<Json<MatterCreate>, JsonRejection>,
 ) -> Result<Response> {
     let b = body(b)?;
     let view = create_matter(&s, &b.title, &b.items, now_ms())?;
