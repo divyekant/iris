@@ -457,6 +457,15 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
                      account or a draft",
                 ));
             }
+            // A job grants only commitments and records
+            // (iris_workspace::grant_in), so a submit would deny each of these.
+            if session && matches!(verb, Some("skip" | "mute" | "dismiss")) {
+                return Err(Failure::new(
+                    code::DENIED,
+                    "a session cannot skip, mute or dismiss: a job grants no feed, \
+                     conversation or signal item",
+                ));
+            }
             let verb = verb
                 .and_then(Verb::parse)
                 .ok_or_else(|| usage("verb must be a verb of specification 2, section 4"))?;
@@ -545,6 +554,11 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
             ask(store, me, args).map(Done::Value)
         }
         Some("ask") => Err(usage("ask is a verb of a session")),
+        Some("done") if session => {
+            only(&["why"])?;
+            done(store, me, args).map(Done::Value)
+        }
+        Some("done") => Err(usage("done is a verb of a session")),
         // The read verbs of a session (card R4-04f): only what the grant
         // holds now. The host command reads the store, not the socket.
         Some("search") if session => {
@@ -767,6 +781,36 @@ fn ask(
         "state": "needs_you",
         "question": question,
     }))
+}
+
+/// `done` of a session: the agent completes its job. The same transaction
+/// ends the session with `job_state`; after the reap, the engine builds the
+/// workspace of the done job, so the mail files go.
+fn done(
+    store: &Store,
+    me: &Author,
+    args: &serde_json::Map<String, Value>,
+) -> Result<Value, Failure> {
+    let job = me
+        .job
+        .as_deref()
+        .and_then(iris_job::parse_job_id)
+        .ok_or_else(|| Failure::new(code::ERROR, "the session has no job"))?;
+    let why = text(args, "why")?;
+    if let Some(w) = why {
+        iris_job::check_text(w, 2000).map_err(usage)?;
+    }
+    let session = me
+        .session
+        .as_deref()
+        .and_then(iris_job::parse_session_id)
+        .ok_or_else(|| Failure::new(code::ERROR, "the session has no ID"))?;
+    let now = crate::engine::now_ms();
+    iris_job::session_done(store, session, job, why, now).map_err(|e| match e {
+        iris_job::Error::Refused(why) => Failure::new(code::DENIED, why),
+        e => Failure::new(code::ERROR, e.to_string()),
+    })?;
+    Ok(json!({ "job": iris_job::format_job_id(job), "state": "done" }))
 }
 
 /// Run `f` on the grant of the job of the session `me` now, in one read of
@@ -999,6 +1043,10 @@ pub fn parse_answer(verb: &str, line: &[u8]) -> Option<Result<Value, Failure>> {
                     r["job"].as_str().and_then(iris_job::parse_job_id).is_some()
                         && r["state"] == "needs_you"
                         && r["question"].is_string()
+                }
+                "done" => {
+                    r["job"].as_str().and_then(iris_job::parse_job_id).is_some()
+                        && r["state"] == "done"
                 }
                 "search" => all_of(&r["messages"], |m| m["id"].is_string()),
                 "list" => all_of(&r["items"], item),

@@ -615,6 +615,10 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
         r#"{"ok":true,"result":{"job":"j-1","session":"se-1","goal":"g","state":"working","threads":"1","messages":1,"items":1}}"#,
         r#"{"ok":true,"result":{"job":"j-1","session":"se-1","goal":"g","state":"working","threads":1,"messages":1,"items":1,"due":5}}"#,
         r#"{"ok":true,"result":{"job":"x","session":"se-1","goal":"g","state":"working","threads":1,"messages":1,"items":1}}"#,
+        r#"{"ok":true,"result":{"state":"done"}}"#,
+        r#"{"ok":true,"result":{"job":"j-01","state":"done"}}"#,
+        r#"{"ok":true,"result":{"job":"j-1","state":"working"}}"#,
+        r#"{"ok":true,"result":{"job":1,"state":"done"}}"#,
     ]
     .iter()
     .map(|l| l.as_bytes().to_vec())
@@ -626,7 +630,7 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
                 seed = seed
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(1442695040888963407);
-                let abc = b"{}[]\":,oktruefalseresultcodeerrorid1234 nsessionreaped-jgoalstatethreadsmessagesitemsdueformtextmessageitem";
+                let abc = b"{}[]\":,oktruefalseresultcodeerrorid1234 nsessionreaped-jgoalstatethreadsmessagesitemsdueformtextmessageitemneeds_youquestionwaitinguntil";
                 abc[(seed >> 33) as usize % abc.len()]
             })
             .collect();
@@ -635,7 +639,7 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
     for line in &lines {
         for verb in [
             "show", "drafts", "add", "submit", "withdraw", "job.run", "job.stop", "status",
-            "search", "list",
+            "search", "list", "wait", "ask", "done",
         ] {
             match socket::parse_answer(verb, line) {
                 None => {}
@@ -651,6 +655,28 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
                             .iter()
                             .all(|k| r[k].is_u64())
                         && (r["due"].is_null() || r["due"].is_string()),
+                    "{verb} {}",
+                    String::from_utf8_lossy(line)
+                ),
+                // The answer of a verb that ends the session: the job and its new state.
+                Some(Ok(r)) if verb == "wait" => assert!(
+                    r["job"].as_str().and_then(iris_job::parse_job_id).is_some()
+                        && r["state"] == "waiting"
+                        && r["until"].is_string(),
+                    "{verb} {}",
+                    String::from_utf8_lossy(line)
+                ),
+                Some(Ok(r)) if verb == "ask" => assert!(
+                    r["job"].as_str().and_then(iris_job::parse_job_id).is_some()
+                        && r["state"] == "needs_you"
+                        && r["question"].is_string(),
+                    "{verb} {}",
+                    String::from_utf8_lossy(line)
+                ),
+                // `done`: only a canonical job ID in the state `done`.
+                Some(Ok(r)) if verb == "done" => assert!(
+                    r["job"].as_str().and_then(iris_job::parse_job_id).is_some()
+                        && r["state"] == "done",
                     "{verb} {}",
                     String::from_utf8_lossy(line)
                 ),
@@ -686,6 +712,8 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
             }
         }
     }
+    let done = br#"{"ok":true,"result":{"job":"j-3","state":"done"}}"#;
+    assert!(matches!(socket::parse_answer("done", done), Some(Ok(_))));
     let ok = br#"{"ok":true,"result":{"id":"cs-1","state":"draft","actions":[]}}"#;
     assert!(matches!(socket::parse_answer("show", ok), Some(Ok(_))));
     assert!(socket::parse_answer("drafts", ok).is_none());
@@ -696,6 +724,54 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
     assert!(socket::parse_answer("list", bad).is_none());
     let message = br#"{"ok":true,"result":{"message":{"id":"m-1","text":"x"}}}"#;
     assert!(matches!(socket::parse_answer("show", message), Some(Ok(_))));
+    // The answers of the verbs that end a session (issue #586): the valid
+    // answer succeeds, and each required field that is missing or wrong
+    // makes the answer not valid.
+    let wait = json!({"job": "j-4", "state": "waiting", "until": "2030-01-02T00:00:00Z"});
+    let ask = json!({"job": "j-3", "state": "needs_you", "question": "Which date?"});
+    let cases = [
+        (
+            "wait",
+            wait,
+            vec![
+                ("job", vec![json!(7), json!("x")]),
+                ("state", vec![json!("working"), json!(7)]),
+                ("until", vec![json!(7), json!(null)]),
+            ],
+        ),
+        (
+            "ask",
+            ask,
+            vec![
+                ("job", vec![json!(7), json!("x")]),
+                ("state", vec![json!("waiting"), json!(7)]),
+                ("question", vec![json!(7), json!(null)]),
+            ],
+        ),
+    ];
+    let line = |r: &serde_json::Value| json!({"ok": true, "result": r}).to_string().into_bytes();
+    for (verb, good, fields) in cases {
+        assert!(
+            matches!(socket::parse_answer(verb, &line(&good)), Some(Ok(_))),
+            "{verb}"
+        );
+        for (field, bad) in fields {
+            let mut gone = good.clone();
+            gone.as_object_mut().unwrap().remove(field);
+            assert!(
+                socket::parse_answer(verb, &line(&gone)).is_none(),
+                "{verb} with no {field}"
+            );
+            for value in bad {
+                let mut r = good.clone();
+                r[field] = value.clone();
+                assert!(
+                    socket::parse_answer(verb, &line(&r)).is_none(),
+                    "{verb} {field}={value}"
+                );
+            }
+        }
+    }
     let run = br#"{"ok":true,"result":{"session":"se-12"}}"#;
     assert!(matches!(socket::parse_answer("job.run", run), Some(Ok(_))));
     let status = br#"{"ok":true,"result":{"job":"j-1","session":"se-2","goal":"g","state":"working","due":null,"threads":1,"messages":2,"items":0}}"#;
@@ -916,9 +992,9 @@ fn session_mode_uses_only_the_session_socket() {
             .output()
             .unwrap()
     };
-    // Host mode (no `.iris/` above the folder): `list` and `wait` are usage
+    // Host mode (no `.iris/` above the folder): `list`, `wait` and `done` are usage
     // errors.
-    for args in [&["list"][..], &["wait", "--until", "2030-01-02"]] {
+    for args in [&["list"][..], &["wait", "--until", "2030-01-02"], &["done"]] {
         let out = Command::new(env!("CARGO_BIN_EXE_iris"))
             .current_dir(&root)
             .arg("--data")
@@ -943,7 +1019,7 @@ fn session_mode_uses_only_the_session_socket() {
     let listener = std::os::unix::net::UnixListener::bind(work.join(".iris/socket")).unwrap();
     let server = std::thread::spawn(move || {
         let mut verbs = Vec::new();
-        for _ in 0..6 {
+        for _ in 0..7 {
             let (s, _) = listener.accept().unwrap();
             let mut line = String::new();
             std::io::BufReader::new(&s).read_line(&mut line).unwrap();
@@ -959,6 +1035,8 @@ fn session_mode_uses_only_the_session_socket() {
                 "show" => json!({"item": item}),
                 "wait" => json!({"job": "j-4", "state": "waiting",
                     "until": "2030-01-02T00:00:00Z", "reply": "t-5"}),
+                "ask" => json!({"job": "j-4", "state": "needs_you",
+                    "question": "Which date works?"}),
                 _ => json!({"job": "j-4", "session": "se-9", "goal": "Get it.",
                     "state": "working", "threads": 1, "messages": 2, "items": 0}),
             };
@@ -1015,6 +1093,14 @@ fn session_mode_uses_only_the_session_socket() {
         String::from_utf8_lossy(&out.stdout).contains("j-4 waits until 2030-01-02T00:00:00Z"),
         "{out:?}"
     );
+    // `ask` sends the question and prints the state (issue #586).
+    let out = iris(&["ask", "Which date works?"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains("j-4 asks the person and waits for the answer"),
+        "{out:?}"
+    );
     assert_eq!(
         server.join().unwrap(),
         [
@@ -1024,6 +1110,7 @@ fn session_mode_uses_only_the_session_socket() {
             r#"show {"id":"c-1"}"#,
             r#"list {"form":"commitment"}"#,
             r#"wait {"reply":"t-5","until":"2030-01-02","why":"Dana reads it."}"#,
+            r#"ask {"question":"Which date works?"}"#,
         ]
     );
     assert!(!data.exists(), "the command made the data folder");
@@ -1252,4 +1339,34 @@ fn iris_open_keeps_the_code_out_of_process_arguments() {
     ] {
         assert!(iris::open_page(&d, bad).is_err(), "{bad}");
     }
+}
+
+/// `iris skip`, `mute` and `dismiss` add the state verb with the default
+/// reason of the web client, or the given reason (issue #441).
+#[test]
+fn skip_mute_and_dismiss_add_the_state_verb() {
+    use clap::Parser;
+    let cases = [
+        (vec!["skip", "f-3"], "skip", "Skipped."),
+        (vec!["mute", "v-2"], "mute", "Muted."),
+        (vec!["dismiss", "s-1"], "dismiss", "Dismissed."),
+        (
+            vec!["mute", "v-2", "--reason", "Done here."],
+            "mute",
+            "Done here.",
+        ),
+    ];
+    for (argv, verb, reason) in cases {
+        let cli =
+            iris::Cli::try_parse_from(std::iter::once("iris").chain(argv.iter().copied())).unwrap();
+        let request = iris::add_request(&cli.command).unwrap().unwrap();
+        assert_eq!(
+            request,
+            json!({ "verb": verb, "targets": [argv[1]], "args": { "reason": reason } }),
+            "{argv:?}"
+        );
+    }
+    let cli = iris::Cli::try_parse_from(["iris", "skip", "f-3", "--changeset", "cs-4"]).unwrap();
+    let request = iris::add_request(&cli.command).unwrap().unwrap();
+    assert_eq!(request["changeset"], json!("cs-4"));
 }

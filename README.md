@@ -206,6 +206,7 @@ the data folder. They do not read the store. Start the engine with
 | `iris withdraw <cs-id>` | Withdraws a changeset that the command made. Applied actions stay. |
 | `iris close <c-id>` | Adds `close` of a commitment to a draft changeset. `--reason` is optional. The reason has at most 500 characters: submit denies a longer reason. |
 | `iris decline <c-id>` | Adds `decline` of a commitment to a draft changeset. `--reason` is optional. The reason has at most 500 characters: submit denies a longer reason. |
+| `iris skip <f-id>`, `iris mute <id>`, `iris dismiss <s-id>` | Adds `skip` of a feed item, `mute` of a conversation or `dismiss` of a signal to a draft changeset. `--reason` is optional, with the same limit as `close`. |
 | `iris defer <c-id> --date <YYYY-MM-DD>` | Adds `defer` of a commitment to a draft changeset. |
 | `iris correct <id> --field <path> --value <json>` | Adds a correction of one field of an item to a draft changeset. |
 | `iris archive`, `inbox`, `read`, `unread`, `trash <ids>` | Adds the mail action on threads (`t-3`) or messages (`m-42`) to a draft changeset. |
@@ -231,8 +232,8 @@ give the reason of the action. A draft does nothing until you submit it.
 `iris mcp` serves the same verbs as MCP (Model Context Protocol) tools, on
 standard input and output. Use it with an agent that speaks MCP but does not
 use a terminal. Each tool has the name and the arguments of its verb:
-`status`, `search`, `show`, `draft`, `send`, `close`, `decline`, `defer`,
-`correct`, `archive`, `inbox`, `read`, `unread`, `trash`, `label`,
+`status`, `search`, `show`, `draft`, `send`, `close`, `decline`, `skip`,
+`mute`, `dismiss`, `defer`, `correct`, `archive`, `inbox`, `read`, `unread`, `trash`, `label`,
 `unlabel`, `submit`, `changeset`, `drafts`, `withdraw`, `revise`,
 `watch_add`, `watch_list`, `watch_remove`, `matters_list` and
 `matters_show`. The result is what the verb prints with `--json`, or its

@@ -30,7 +30,8 @@
     // `sync` is set while a first copy or a full copy again runs (iris-sync, account.sync_kind).
     if (!a.mirror_ready_at) return { text: "Iris copies this mailbox now. The brief shows the mail that it copied so far.", tone: "busy" };
     if (a.sync) return { text: "Iris copies this mailbox again now, to find each change.", tone: "busy" };
-    return { text: last?.ended ? `Up to date. Last sync ${when(last.ended)}.` : "Up to date.", tone: "ok" };
+    // A read-only account copies, but its approved changes wait: not a plain "ok" (issue 681).
+    return { text: last?.ended ? `Up to date. Last sync ${when(last.ended)}.` : "Up to date.", tone: a.state === "read_only" ? "retry" : "ok" };
   }
 </script>
 
@@ -50,6 +51,10 @@
         {#if a.state === "needs_sign_in"}
           {@const s = signIn(a)}
           <p class="state">On the machine that runs Iris, run <code>{s.command}</code> {s.detail}.</p>
+        {:else if a.state === "read_only"}
+          <!-- The copy runs, but Iris has no write access: approved changes wait (issue 681). -->
+          <p class="state">Iris can read this mailbox, but it cannot change it. Your approved changes wait.</p>
+          <p class="state">To give write access, run <code>iris account add client.json --write</code> on the machine that runs Iris and sign in again.</p>
         {/if}
       </div>
     </li>

@@ -79,6 +79,34 @@ test("a sync whose process stopped says so, for the first copy and for a later s
   }
 });
 
+test("a read-only account says that its approved changes wait, and names the command that gives write access", async () => {
+  const reader = { ...fx.status.accounts[0], state: "read_only" };
+  const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [reader] }, poll: 0 });
+  try {
+    const row = text(view.target.querySelector(".accounts li"));
+    assert.match(row, /Iris can read this mailbox, but it cannot change it\. Your approved changes wait\./);
+    assert.match(row, /To give write access, run iris account add client\.json --write on the machine that runs Iris and sign in again\./);
+    // The copy still runs: the sync state stays, and the tone is not a plain "ok".
+    assert.match(row, /Up to date/);
+    assert.ok(view.target.querySelector(".tone.retry"));
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a read-only account with a failed sync shows the failure and the read-only words", async () => {
+  const reader = { ...fx.status.accounts[0], state: "read_only", last_sync: { ...fx.status.accounts[0].last_sync, result: "error: HTTP 503" } };
+  const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [reader] }, poll: 0 });
+  try {
+    const row = text(view.target.querySelector(".accounts li"));
+    assert.match(row, /The last sync failed\. Iris tries again each minute\./);
+    assert.match(row, /Iris can read this mailbox, but it cannot change it\./);
+    assert.match(row, /iris account add client\.json --write/);
+  } finally {
+    view.destroy();
+  }
+});
+
 test("a stopped IMAP account names the mail server and the IMAP sign-in command, which needs only the address", async () => {
   const stopped = { ...fx.status.accounts[1], provider: "imap", state: "needs_sign_in" };
   const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [stopped] }, poll: 0 });
@@ -90,6 +118,13 @@ test("a stopped IMAP account names the mail server and the IMAP sign-in command,
   } finally {
     view.destroy();
   }
+});
+
+test("the IMAP sign-in help ends the options before an address that starts with a dash", async () => {
+  const { signIn } = await load("/src/format.ts");
+  assert.equal(signIn({ provider: "imap", address: "-x@example.org" }).command, "iris account add-imap -- -x@example.org");
+  // Each other address keeps the command as it was.
+  assert.equal(signIn({ provider: "imap", address: "you@northwind.example" }).command, "iris account add-imap you@northwind.example");
 });
 
 test("each shell argument of a sign-in command keeps its exact text in a POSIX shell", async () => {

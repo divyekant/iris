@@ -37,7 +37,9 @@ impl Rule {
 
     pub fn why(self) -> &'static str {
         match self {
-            Rule::Hostile => "Hostile mail. Iris shows a count only.",
+            Rule::Hostile => {
+                "Hostile mail. Iris makes no item from it, and the brief shows a count only."
+            }
             Rule::ExpiredSignal => "Signals that stopped to matter.",
             Rule::Feed => "Feed items. They stay in the feed of Iris.",
             Rule::Record => "Records. Iris keeps them in records.",

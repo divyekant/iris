@@ -210,6 +210,7 @@ export function to(d: DraftView): string {
 /** The short words beside a marked part of a draft (option C of card R4-07, the owner's pick). */
 export const TAGS: Record<string, string> = {
   new_recipient: "new address",
+  outside_thread: "not in the thread",
   money: "amount",
   date: "date",
   attachment: "no file attached",

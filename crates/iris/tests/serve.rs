@@ -47,34 +47,50 @@ fn serve_shows_a_page() {
 /// write must not stop the engine.
 #[test]
 fn serve_keeps_running_when_stderr_is_closed() {
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let addr = format!("127.0.0.1:{port}");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_iris"))
-        .args(["serve", "--addr", &addr, "--data"])
-        .arg(std::env::temp_dir().join(format!("iris-serve-closed-{}", std::process::id())))
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    // Close the read end before the program writes its first line.
-    drop(child.stderr.take());
-
-    let begin = std::time::Instant::now();
-    let mut response = String::new();
-    while begin.elapsed() < std::time::Duration::from_secs(10) {
-        if let Ok(mut stream) = TcpStream::connect(&addr) {
-            let request = format!("GET / HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-            if stream.write_all(request.as_bytes()).is_ok() {
-                let _ = stream.read_to_string(&mut response);
-                if !response.is_empty() {
-                    break;
-                }
+    // The test picks a free port and frees it, and another test can take it
+    // before `iris serve` binds it (issue #81). A program that ends at once
+    // gets a new port, at most three times.
+    let mut tries = 0;
+    let (mut child, addr) = loop {
+        tries += 1;
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let addr = format!("127.0.0.1:{port}");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_iris"))
+            .args(["serve", "--addr", &addr, "--data"])
+            .arg(std::env::temp_dir().join(format!("iris-serve-closed-{}", std::process::id())))
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Close the read end before the program writes its first line.
+        drop(child.stderr.take());
+        let begin = std::time::Instant::now();
+        let mut up = false;
+        while begin.elapsed() < std::time::Duration::from_secs(10) {
+            if child.try_wait().unwrap().is_some() {
+                break;
             }
+            if TcpStream::connect(&addr).is_ok() {
+                up = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        if up || tries == 3 {
+            break (child, addr);
+        }
+        let _ = child.wait();
+    };
+
+    let mut response = String::new();
+    if let Ok(mut stream) = TcpStream::connect(&addr) {
+        let request = format!("GET / HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+        if stream.write_all(request.as_bytes()).is_ok() {
+            let _ = stream.read_to_string(&mut response);
+        }
     }
     let exited = child.try_wait().unwrap();
     let _ = child.kill();

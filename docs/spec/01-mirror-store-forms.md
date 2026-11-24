@@ -454,7 +454,7 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `sync_seen` | `account_id`, `message_id`, `labels` TEXT (JSON), PK(`account_id`, `message_id`) | The messages that the lists of a full resync or a verify name, with their label sets. The engine clears it when a new run starts, not when an unfinished run continues after a crash. |
 | `label` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, `name` TEXT, `kind` TEXT (`system` or `user`), UNIQUE(`account_id`, `provider_id`) | Labels of the provider. |
 | `thread` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, `viewed_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | Threads of the provider. Gives the `t-` IDs. `viewed_at` is the last view of the thread in Iris. |
-| `message` | `id` INTEGER PK, `account_id`, `thread_id`, `provider_id` TEXT, `content_sha256` TEXT, `size` INTEGER, `internal_date` INTEGER, `fetched_at` INTEGER, `gone_at` INTEGER, `understood_at` INTEGER, `hostile` TEXT (JSON), `tries` INTEGER, `retry_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | One row for each message. Gives the `m-` IDs. `hostile` is the list of the hostile marks of the message (section 6.7). `tries` and `retry_at` hold the failed tries of the model (section 7.4). The store clears `understood_at` when the content hash changes, when a gone message comes back, and when the message gets or loses the label `SENT` or `DRAFT`. |
+| `message` | `id` INTEGER PK, `account_id`, `thread_id`, `provider_id` TEXT, `content_sha256` TEXT, `size` INTEGER, `internal_date` INTEGER, `fetched_at` INTEGER, `gone_at` INTEGER, `understood_at` INTEGER, `hostile` TEXT (JSON), `tries` INTEGER, `retry_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | One row for each message. Gives the `m-` IDs. `hostile` is the list of the hostile marks of the message (section 6.7). `tries` and `retry_at` hold the failed tries of the model (section 7.4). The store clears `understood_at` when the content hash changes, when a gone message comes back, and when the message gets or loses the label `SENT`, `DRAFT`, `UNSENT` or `SENT_COPY`. A message with `DRAFT`, `UNSENT` or `SENT_COPY` that is not gone keeps no item that a new understanding replaces: the triggers of store migration 42 delete such items when the label comes and when the message comes back. |
 | `message_label` | `message_id`, `label_id`, PK(`message_id`, `label_id`) | The label set of each message. |
 | `header` | `message_id` PK, `date` INTEGER, `from_addr` TEXT, `from_name` TEXT, `to_addrs` TEXT, `cc_addrs` TEXT, `subject` TEXT, `message_id_hdr` TEXT, `in_reply_to` TEXT, `list_id` TEXT, `auth` TEXT | Parsed headers that queries need. `auth` holds the SPF, DKIM and DMARC results from `Authentication-Results`. `to_addrs` and `cc_addrs` hold bare lowercase addresses joined by `,`. `from_addr` is ASCII lowercase: the triggers of store migration 39 keep this form for each write. |
 | `body` | `message_id` INTEGER PK, `subject` TEXT, `sender` TEXT, `text` TEXT | The clean text of the message (section 7.2), with the subject and the sender name and address. `message_id` is the row ID. |
@@ -1057,6 +1057,12 @@ no item, and the message stays not understood.
   changeset or a ledger entry of specification 2 refers to it. A rebuild
   never deletes a pinned item and never changes its ID, so each correction
   and each reference stays on the same item.
+- A pinned item whose origin message is hostile mail (a hostile mark, the
+  label `SPAM` or a `hostile` sender) stays in the store, but no read of the
+  local API, the brief, the matters or the matters proposal shows it. It is
+  not a live member of a matter. The brief counts the message as hostile
+  mail. The item keeps its ID and its corrections. It shows again when the
+  message is no longer hostile mail (issue 112).
 - A rebuild runs understanding again on the source messages of a pinned item
   that are not gone. The engine gives the model the pinned items of the
   message as existing items. For each item that it finds, the model returns a
