@@ -17,6 +17,7 @@ CREATE TABLE matter_add (
 );
 CREATE INDEX matter_add_matter ON matter_add(matter_id);
 
+DROP TRIGGER matter_insert;
 DROP TRIGGER matter_update;
 DROP TRIGGER matter_decide;
 DROP TRIGGER matter_item_insert;
@@ -32,6 +33,19 @@ WHEN old.status = 'declined'
       AND (SELECT count(*) FROM matter_item WHERE matter_id = old.id) >= 2)
 BEGIN
   SELECT RAISE(ABORT, 'iris: not a valid delete of a matter');
+END;
+
+-- Rule 1: a matter starts as an unsealed proposal. A matter of the model
+-- names its model and prompt; a matter of an agent or the person has
+-- none ('').
+CREATE TRIGGER matter_insert BEFORE INSERT ON matter
+WHEN new.status IS NOT 'proposed' OR new.sealed IS NOT 0 OR new.keep IS NOT NULL
+  -- `INSERT OR REPLACE` must not replace a matter that exists.
+  OR EXISTS (SELECT 1 FROM matter WHERE id = new.id)
+  OR (new.author = 'model' AND (new.model = '' OR new.prompt = ''))
+  OR (new.author IS NOT 'model' AND (new.model IS NOT '' OR new.prompt IS NOT ''))
+BEGIN
+  SELECT RAISE(ABORT, 'iris: a matter starts as a proposal of its author');
 END;
 
 -- Rules 1 and 3: a proposal changes as in migration 16. A confirmed matter
@@ -50,7 +64,11 @@ WHEN new.id IS NOT old.id OR new.author IS NOT old.author
     new.sealed IS NOT old.sealed
     OR new.status NOT IN ('confirmed', 'declined')
     OR (new.status = 'confirmed' AND (new.keep IS NOT old.keep
-                                      OR new.decided_at IS NOT old.decided_at))))
+                                      OR new.decided_at IS NOT old.decided_at))
+    -- The delete sets its own time as the decision and the last change.
+    OR (new.status = 'declined' AND (new.decided_at IS NOT new.updated_at
+                                     OR new.updated_at < old.updated_at
+                                     OR new.decided_at IS old.decided_at))))
 BEGIN
   SELECT RAISE(ABORT, 'iris: not a valid change of a matter');
 END;
@@ -66,7 +84,7 @@ WHEN old.status = 'proposed' AND new.status IS NOT 'proposed' AND (
   OR (old.author = 'person' AND new.status IS NOT 'confirmed')
   OR (new.status = 'confirmed' AND NOT CASE
     WHEN json_valid(new.keep) AND json_type(new.keep) = 'array' THEN
-      json_array_length(new.keep) >= 1
+      json_array_length(new.keep) BETWEEN 1 AND 50
       AND (SELECT count(DISTINCT value) FROM json_each(new.keep))
           = json_array_length(new.keep)
       AND NOT EXISTS (
@@ -99,9 +117,9 @@ WHEN new.kept NOT IN (0, 1)
     SELECT 1 FROM matter_item mi JOIN matter m ON m.id = mi.matter_id
     WHERE mi.item_id = new.item_id AND mi.kept = 1
       AND m.status IN ('proposed', 'confirmed')))
-  OR (new.kept = 1 AND (SELECT status FROM matter WHERE id = new.matter_id) = 'confirmed'
-      AND (SELECT count(*) FROM matter_item
-           WHERE matter_id = new.matter_id AND kept = 1) >= 50)
+  -- No matter has more than 50 kept members: a proposal or a confirmed one.
+  OR (new.kept = 1 AND (SELECT count(*) FROM matter_item
+                        WHERE matter_id = new.matter_id AND kept = 1) >= 50)
 BEGIN
   SELECT RAISE(ABORT, 'iris: not a valid member');
 END;

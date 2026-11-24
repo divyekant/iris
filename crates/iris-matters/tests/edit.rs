@@ -424,9 +424,18 @@ fn the_triggers_hold_the_rules_of_migration_46() {
     ] {
         assert!(sql(&b, &text).is_err(), "{text}");
     }
+    // A delete names its own time: not the time of the confirm.
+    assert!(sql(
+        &b,
+        &format!("UPDATE matter SET status = 'declined', keep = NULL WHERE id = {m}")
+    )
+    .is_err());
     sql(
         &b,
-        &format!("UPDATE matter SET status = 'declined', keep = NULL WHERE id = {m}"),
+        &format!(
+            "UPDATE matter SET status = 'declined', keep = NULL, decided_at = 5, updated_at = 5
+             WHERE id = {m}"
+        ),
     )
     .unwrap();
     for text in [
@@ -460,4 +469,77 @@ fn the_triggers_hold_the_rules_of_migration_46() {
         &format!("UPDATE matter SET status = 'declined', decided_at = 1 WHERE id = {p}")
     )
     .is_err());
+}
+
+/// The author names the model fields: a matter of the model has them, a
+/// matter of an agent or the person has none.
+#[test]
+fn the_author_and_the_model_fields_agree() {
+    let b = setup("author", 4, &FORMS);
+    for (author, model, prompt) in [
+        ("person", "m", "p"),
+        ("agent", "m", ""),
+        ("model", "", "p"),
+        ("model", "m", ""),
+    ] {
+        let text = format!(
+            "INSERT INTO matter(title, status, author, model, prompt, created_at, updated_at)
+             VALUES ('x', 'proposed', '{author}', '{model}', '{prompt}', 0, 0)"
+        );
+        assert!(sql(&b, &text).is_err(), "{text}");
+    }
+}
+
+/// No matter has more than 50 kept members: a proposal of 51 cannot be
+/// made, so it cannot be confirmed.
+#[test]
+fn a_proposal_holds_50_members_at_most() {
+    let forms = vec!["record"; 51];
+    let b = setup("fifty-one", 2, &forms);
+    let all: Vec<i64> = (1..=51).collect();
+    assert!(write(&b.store, |tx| insert_proposal(
+        tx, "Big", "fake", None, &all, 1
+    ))
+    .is_err());
+    let m = write(&b.store, |tx| {
+        insert_proposal(tx, "Big", "fake", None, &all[..50], 1)
+    })
+    .unwrap();
+    // A direct confirm with a `keep` of 51 is refused too.
+    let keep = serde_json::to_string(&all).unwrap();
+    assert!(sql(
+        &b,
+        &format!(
+            "UPDATE matter SET status = 'confirmed', keep = '{keep}', decided_at = 2,
+             updated_at = 2 WHERE id = {m}"
+        )
+    )
+    .is_err());
+}
+
+/// Step 0 deletes an addition whose item is not live, and the item is a
+/// candidate again.
+#[test]
+fn clean_ends_an_addition_that_is_not_live() {
+    let b = setup("clean-add", 4, &FORMS);
+    let m = confirmed(&b, &[1, 2]);
+    sql(
+        &b,
+        &format!("INSERT INTO matter_add(item_id, matter_id, created_at) VALUES (3, {m}, 1)"),
+    )
+    .unwrap();
+    sql(
+        &b,
+        r#"UPDATE item SET doc = '{"attention":{"state":"hidden"}}' WHERE id = 3"#,
+    )
+    .unwrap();
+    write(&b.store, iris_matters::clean).unwrap();
+    assert_eq!(q::<i64>(&b, "SELECT count(*) FROM matter_add"), 0);
+    sql(
+        &b,
+        "UPDATE item SET doc = json_set(doc, '$.attention.state', 'shown') WHERE id = 3",
+    )
+    .unwrap();
+    // Free again: an agent can propose it.
+    write(&b.store, |tx| propose_by_agent(tx, "New", &[r(3), r(4)], 3)).unwrap();
 }

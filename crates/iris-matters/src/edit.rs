@@ -252,10 +252,18 @@ pub fn delete(store: &Store, matter: i64, now: i64) -> Result<()> {
             tx.execute("DELETE FROM matter WHERE id = ?1", [matter])?;
             return Ok(());
         }
+        // The delete is a new decision: its time is later than the confirm
+        // and not earlier than the last change (the trigger checks it).
+        let (decided, updated): (i64, i64) = tx.query_row(
+            "SELECT decided_at, updated_at FROM matter WHERE id = ?1",
+            [matter],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let at = now.max(decided + 1).max(updated);
         tx.execute(
             "UPDATE matter SET status = 'declined', keep = NULL, decided_at = ?2, updated_at = ?2
              WHERE id = ?1 AND status = 'confirmed'",
-            params![matter, now],
+            params![matter, at],
         )?;
         Ok(())
     })
