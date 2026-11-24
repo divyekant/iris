@@ -2037,3 +2037,105 @@ fn the_store_keeps_who_withdrew() {
     }
     assert_eq!(doc(&s, cs)["withdrawn_by"], "person");
 }
+
+/// The invariant of `withdrawn_by` for each write: a value only on a withdrawn
+/// changeset, each new withdraw names who withdrew, and the value does not
+/// change after the withdraw. The test tries each insert and each update of
+/// `state` and `withdrawn_by` from each start row, and checks the row after
+/// each write that the store takes.
+#[test]
+fn each_write_keeps_withdrawn_by_with_the_withdraw() {
+    let dir = TempDir::new("withdrawnby-all");
+    let s = store(&dir);
+    let states = ["draft", "open", "closed", "withdrawn"];
+    let actors: [Option<&str>; 4] = [None, Some("author"), Some("person"), Some("robot")];
+    let row = |id: i64| -> (String, Option<String>) {
+        s.read(|c| {
+            Ok(c.query_row(
+                "SELECT state, withdrawn_by FROM changeset WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap()
+    };
+    let ok = |(state, by): &(String, Option<String>)| by.is_none() || state == "withdrawn";
+    // Each insert.
+    for st in states {
+        for by in actors {
+            let r = s.write(|tx| {
+                tx.execute(
+                    "INSERT INTO changeset(author_kind, created_at, state, withdrawn_by)
+                     VALUES ('agent', 0, ?1, ?2)",
+                    rusqlite::params![st, by],
+                )?;
+                Ok(tx.last_insert_rowid())
+            });
+            if let Ok(id) = r {
+                assert!(ok(&row(id)), "insert {st} {by:?}");
+                assert!(by.is_none(), "insert {st} {by:?} took an actor");
+            }
+        }
+    }
+    // Each update from each start row that the store holds.
+    let starts: Vec<(&str, Option<&str>)> = vec![
+        ("draft", None),
+        ("open", None),
+        ("closed", None),
+        ("withdrawn", Some("author")),
+        ("withdrawn", Some("person")),
+    ];
+    let news: Vec<Option<&str>> = states.iter().map(|s| Some(*s)).chain([None]).collect();
+    let mut tried = 0;
+    for (st0, by0) in &starts {
+        for new_state in &news {
+            for new_by in actors.iter().map(Some).chain([None]) {
+                if new_state.is_none() && new_by.is_none() {
+                    continue;
+                }
+                // Another trigger can refuse a start row (the state of a
+                // changeset comes from its actions); skip that start.
+                let Ok(id) = s
+                    .write(|tx| {
+                        tx.execute(
+                            "INSERT INTO changeset(author_kind, created_at) VALUES ('agent', 0)",
+                            [],
+                        )?;
+                        let id = tx.last_insert_rowid();
+                        tx.execute(
+                            "UPDATE changeset SET state = ?2, withdrawn_by = ?3 WHERE id = ?1",
+                            rusqlite::params![id, st0, by0],
+                        )?;
+                        Ok(id)
+                    })
+                else {
+                    continue;
+                };
+                tried += 1;
+                let mut sets = Vec::new();
+                if let Some(ns) = new_state {
+                    sets.push(format!("state = '{ns}'"));
+                }
+                if let Some(nb) = new_by {
+                    sets.push(match nb {
+                        Some(v) => format!("withdrawn_by = '{v}'"),
+                        None => "withdrawn_by = NULL".into(),
+                    });
+                }
+                let q = format!("UPDATE changeset SET {} WHERE id = ?1", sets.join(", "));
+                if s.write(|tx| Ok(tx.execute(&q, [id])?)).is_ok() {
+                    let after = row(id);
+                    assert!(ok(&after), "{st0} {by0:?}: {q} gave {after:?}");
+                    if *st0 != "withdrawn" && after.0 == "withdrawn" {
+                        assert!(after.1.is_some(), "{st0}: {q} withdrew with no actor");
+                    }
+                    if *st0 == "withdrawn" && after.0 == "withdrawn" {
+                        assert_eq!(after.1.as_deref(), *by0, "{q} changed the actor");
+                    }
+                }
+            }
+        }
+    }
+    // The draft start and both withdrawn starts are always possible.
+    assert!(tried >= 3 * news.len() * 4, "{tried} updates tried");
+}

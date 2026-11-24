@@ -2,8 +2,11 @@
 -- 'author': the author of the changeset withdrew it. 'person': you withdrew
 -- it. NULL on a changeset that is not withdrawn, and on a changeset that a
 -- version before migration 50 withdrew (the actor is not known).
+-- The CHECK holds for each insert and each update: a value only on a
+-- withdrawn changeset.
 ALTER TABLE changeset ADD COLUMN withdrawn_by TEXT
-  CHECK (withdrawn_by IN ('author', 'person'));
+  CHECK (withdrawn_by IS NULL
+         OR (withdrawn_by IN ('author', 'person') AND state = 'withdrawn'));
 
 -- Each new withdraw names who withdrew, in the same update as the state.
 CREATE TRIGGER changeset_withdraw_by BEFORE UPDATE OF state ON changeset
