@@ -753,3 +753,55 @@ async fn gives_the_reason_of_each_submitted_revision() {
         StatusCode::NOT_FOUND
     );
 }
+
+/// Decision D10 (issue #193): in the mode `observe`, the review reads what
+/// a rule would decide for each proposed action. In the mode `apply`, the
+/// list is empty.
+#[tokio::test]
+async fn gives_what_a_rule_would_decide_in_observe_mode() {
+    let dir = temp("would");
+    let s = store(&dir);
+    let cs = changeset(&s, "Old mail.", &[&["m-1"], &["m-3"]], 1_000);
+    let uri = format!("/api/changesets/cs-{cs}/would");
+    // No confirmed policy: no rule decides.
+    assert_eq!(get(&s, &uri).await, (StatusCode::OK, json!({"would": []})));
+    let confirm = |mode: &str| {
+        let text = format!(
+            "version = 0\nmode = \"{mode}\"\n[[rule]]\nid = 1\nname = \"Archive Priya\"\n\
+             effect = \"allow\"\nverbs = [\"archive\"]\nwhen = {{ sender = \"priya@example.com\" }}\n\
+             by = \"person\"\nadded = 2026-11-10\n"
+        );
+        std::fs::write(dir.0.join(iris_policy::FILE), &text).unwrap();
+        iris_policy::confirm(&s, &iris_policy::sha256_hex(&text), 0).unwrap();
+    };
+    confirm("observe");
+    let (status, body) = get(&s, &uri).await;
+    assert_eq!(status, StatusCode::OK);
+    let would = body["would"].as_array().unwrap();
+    assert_eq!(would.len(), 2, "{body}");
+    for (w, n) in would.iter().zip([1, 2]) {
+        assert_eq!(
+            (
+                &w["revision"],
+                &w["n"],
+                &w["outcome"],
+                &w["rule"],
+                &w["policy"]
+            ),
+            (
+                &json!(1),
+                &json!(n),
+                &json!("approved"),
+                &json!(1),
+                &json!(1)
+            )
+        );
+        assert!(w["reason"].as_str().unwrap().contains("Rule 1"), "{w}");
+    }
+    confirm("apply");
+    assert_eq!(get(&s, &uri).await, (StatusCode::OK, json!({"would": []})));
+    assert_eq!(
+        get(&s, "/api/changesets/cs-99/would").await.0,
+        StatusCode::NOT_FOUND
+    );
+}

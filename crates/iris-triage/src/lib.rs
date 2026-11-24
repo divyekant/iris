@@ -245,29 +245,16 @@ pub fn decide_submitted(
             }
             continue;
         };
-        let bulk = serde_json::from_str::<Vec<String>>(&flags)
-            .map_err(|e| Error::Refused(format!("flags: {e}")))?
-            .iter()
-            .any(|f| f == "bulk");
-        // At most CHUNK messages: the action holds their facts.
-        let mut facts: Vec<Facts> = Vec::new();
-        let ids: Vec<i64> = c
-            .prepare("SELECT message_id FROM action_message WHERE action_id = ?1 ORDER BY 1")?
-            .query_map([id], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        for m in ids {
-            facts.extend(iris_policy::facts(c, m, now)?);
-        }
-        let d = active.policy.decide(
-            &iris_policy::Action {
-                verb,
-                author,
-                job: job.as_deref(),
-                bulk,
-                now,
-            },
-            facts.iter().map(Facts::message),
-        );
+        let (d, bulk) = evaluate(
+            c,
+            &active.policy,
+            id,
+            verb,
+            &flags,
+            author,
+            job.as_deref(),
+            now,
+        )?;
         // A hard limit: a denial with no rule (spec 2 section 6.5).
         if !apply && !(d.outcome == Policy::Deny && d.rule.is_none()) {
             continue;
@@ -291,6 +278,136 @@ pub fn decide_submitted(
         decide_in(c, id_n, to, by, Some(&d.reason), now_ms)?;
     }
     Ok(())
+}
+
+/// The decision of `policy` on the submitted action `id` with the verb
+/// `verb` and the flags `flags`, and the flag `bulk`. [`decide_submitted`]
+/// and [`would`] both use it, so the review shows the decision that the
+/// mode `apply` would give.
+#[allow(clippy::too_many_arguments)]
+fn evaluate(
+    c: &Connection,
+    policy: &iris_policy::Policy,
+    id: i64,
+    verb: iris_policy::Verb,
+    flags: &str,
+    author: iris_policy::Author,
+    job: Option<&str>,
+    now: i64,
+) -> Result<(iris_policy::Decision, bool), Error> {
+    let bulk = serde_json::from_str::<Vec<String>>(flags)
+        .map_err(|e| Error::Refused(format!("flags: {e}")))?
+        .iter()
+        .any(|f| f == "bulk");
+    // At most CHUNK messages: the action holds their facts.
+    let mut facts: Vec<Facts> = Vec::new();
+    let ids: Vec<i64> = c
+        .prepare_cached("SELECT message_id FROM action_message WHERE action_id = ?1 ORDER BY 1")?
+        .query_map([id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for m in ids {
+        facts.extend(iris_policy::facts(c, m, now)?);
+    }
+    let d = policy.decide(
+        &iris_policy::Action {
+            verb,
+            author,
+            job,
+            bulk,
+            now,
+        },
+        facts.iter().map(Facts::message),
+    );
+    Ok((d, bulk))
+}
+
+/// What a rule of the active policy would decide (decision D10, issue
+/// #193). In the mode `observe`, each `proposed` action of the changeset
+/// stays `proposed` and stores no decision (spec 2, section 5.4). The
+/// review reads this to show the person which actions a rule would approve
+/// before the person turns on the mode `apply`. Computed at each read, so
+/// it always follows the active policy of now. Empty in the mode `apply`,
+/// and with no confirmed policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Would {
+    pub revision: i64,
+    pub n: i64,
+    pub outcome: Policy,
+    /// The rule ID and the policy version of the decision.
+    pub rule: u32,
+    pub policy: i64,
+    pub reason: String,
+}
+
+/// [`Would`] for each `proposed` action of `changeset` that a rule decides.
+/// One action at a time, so memory holds the facts of one action.
+pub fn would(c: &Connection, changeset: i64, now_ms: i64) -> Result<Vec<Would>, Error> {
+    let active = iris_policy::active(c)?;
+    let (Mode::Observe, Some(policy), None) = (active.policy.mode, active.version, &active.error)
+    else {
+        return Ok(Vec::new());
+    };
+    let now = now_ms.div_euclid(1000);
+    let Some((author, job)) = c
+        .query_row(
+            "SELECT author_kind, author_job FROM changeset WHERE id = ?1",
+            [changeset],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?
+    else {
+        return Ok(Vec::new());
+    };
+    let Some(author) = iris_policy::Author::from_name(&author) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    let mut last = 0i64;
+    while let Some((id, revision, n, verb, flags)) = c
+        .query_row(
+            "SELECT id, revision, n, verb, flags FROM changeset_action
+             WHERE changeset_id = ?1 AND state = 'proposed' AND id > ?2
+             ORDER BY id LIMIT 1",
+            params![changeset, last],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()?
+    {
+        last = id;
+        // No rule decides a verb that the policy does not know (issue #239).
+        let Some(verb) = iris_policy::Verb::from_name(&verb) else {
+            continue;
+        };
+        let (d, _) = evaluate(
+            c,
+            &active.policy,
+            id,
+            verb,
+            &flags,
+            author,
+            job.as_deref(),
+            now,
+        )?;
+        if let Some(rule) = d.rule {
+            out.push(Would {
+                revision,
+                n,
+                outcome: d.outcome,
+                rule,
+                policy,
+                reason: d.reason,
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// Call `f` for each action of the proposal, in order: each rule, in groups

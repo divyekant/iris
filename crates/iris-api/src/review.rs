@@ -519,6 +519,33 @@ pub fn comments(store: &Store, changeset: i64) -> Result<Value> {
 /// The reason of each submitted revision of `changeset`, oldest first
 /// (spec 2 section 5.6, issue 189). An open action of an older revision
 /// shows the reason of its own revision.
+/// `{"would": [{"revision", "n", "outcome", "rule", "policy", "reason"}]}`:
+/// what a rule of the active policy would decide for each `proposed`
+/// action, in the mode `observe` only (`iris_triage::would`). `outcome` is
+/// `approved`, `in_review` or `denied`. An empty list in the mode `apply`.
+pub fn would(store: &Store, changeset: i64, now_ms: i64) -> Result<Value> {
+    let list: Vec<iris_triage::Would> = store
+        .read(|c| Ok(iris_triage::would(c, changeset, now_ms)))?
+        .map_err(changeset_error)?;
+    Ok(json!({
+        "would": list
+            .into_iter()
+            .map(|w| json!({
+                "revision": w.revision,
+                "n": w.n,
+                "outcome": match w.outcome {
+                    iris_policy::Outcome::Allow => "approved",
+                    iris_policy::Outcome::Review => "in_review",
+                    iris_policy::Outcome::Deny => "denied",
+                },
+                "rule": w.rule,
+                "policy": w.policy,
+                "reason": w.reason,
+            }))
+            .collect::<Vec<_>>(),
+    }))
+}
+
 pub fn revisions(store: &Store, changeset: i64) -> Result<Value> {
     let all: Vec<Value> = store.read(|c| {
         c.prepare(
