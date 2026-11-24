@@ -464,14 +464,71 @@ fn the_delete_removes_the_workspace_of_each_job_with_mail_of_the_account() {
         .unwrap();
     gone.sort();
     assert_eq!(gone, [1, 3, 5]);
-    assert_eq!(
+    // Job 4 registered its session after the removal, but its launch did
+    // not build yet: its row stays, so the account stays removing, and no
+    // later call ends the delete before that purge.
+    let rows = |store: &Store| {
         n(
-            &store,
+            store,
             "SELECT count(*) FROM removed_workspace WHERE account_id = ?1",
-            a
-        ),
-        0
-    );
+            a,
+        )
+    };
+    assert_eq!(rows(&store), 1);
+    assert_eq!(state(&store, a).as_deref(), Some(STATE_REMOVING));
+    store
+        .delete_removed(None, &mut none, &mut |_| Ok(()))
+        .unwrap();
+    assert_eq!(state(&store, a).as_deref(), Some(STATE_REMOVING));
+    // The build of the launch purges the folder and deletes the row
+    // (iris-workspace); the next call ends the delete.
+    store
+        .write(|tx| Ok(tx.execute("DELETE FROM removed_workspace WHERE job_id = 4", [])?))
+        .unwrap();
+    store
+        .delete_removed(None, &mut none, &mut |_| Ok(()))
+        .unwrap();
+    assert_eq!(state(&store, a).as_deref(), Some(STATE_REMOVED));
+    assert_eq!(rows(&store), 0);
+}
+
+/// A removal that waits for the sync lock of its own account does not hold
+/// up the removal of another account.
+#[test]
+fn a_wait_for_one_account_does_not_hold_up_another() {
+    let dir = TempDir::new("two-waits");
+    let store = std::sync::Arc::new(Store::open(&dir.0).unwrap());
+    let (a, b) = two(&store);
+    store.remove_account("a@example.org", NOW).unwrap();
+    store.remove_account("b@example.org", NOW).unwrap();
+    let held = FileLock::try_take(&store.sync_lock_path(a))
+        .unwrap()
+        .unwrap();
+    let s2 = store.clone();
+    let waiter = std::thread::spawn(move || {
+        s2.delete_removed(Some(a), &mut none, &mut |_| Ok(()))
+            .unwrap()
+            .unwrap()
+    });
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (send, done) = std::sync::mpsc::channel();
+    let s3 = store.clone();
+    std::thread::spawn(move || {
+        send.send(
+            s3.delete_removed(Some(b), &mut none, &mut |_| Ok(()))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+    });
+    let got = done
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("b waits for a");
+    assert_eq!(got.accounts, 1);
+    assert_eq!(state(&store, b).as_deref(), Some(STATE_REMOVED));
+    drop(held);
+    assert_eq!(waiter.join().unwrap().accounts, 1);
+    assert_eq!(state(&store, a).as_deref(), Some(STATE_REMOVED));
 }
 
 /// Each table with a column that names a message, a thread, an item or an

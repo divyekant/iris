@@ -1032,6 +1032,19 @@ fn a_removed_account_gives_no_mail_to_a_workspace() {
         "AGENT-NOTE"
     );
 
+    // The purge deleted the row of the job: a later build is a normal build.
+    let rows: i64 = store
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM removed_workspace", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(rows, 0);
+    store
+        .write(|tx| {
+            Ok(tx.execute(
+                "INSERT INTO removed_workspace (account_id, job_id) VALUES (1, ?1)",
+                [job],
+            )?)
+        })
+        .unwrap();
     // A notes file that the save refuses (too large) stays, with its text.
     let big = format!("BIG-NOTE {}", "x".repeat(70_000));
     fs::write(ws.join("notes.md"), &big).unwrap();

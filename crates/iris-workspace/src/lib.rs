@@ -139,6 +139,11 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
                 remove(&entry.path())?;
             }
         }
+        // The purge is done: the row goes, so the delete of the account can
+        // end (a session that started after the removal purges here).
+        store.write(|tx| {
+            Ok(tx.execute("DELETE FROM removed_workspace WHERE job_id = ?1", [job])?)
+        })?;
     }
     // A new empty `.iris` on each build: no entry of an earlier session
     // (an old socket, a file of the agent) reaches the next session.

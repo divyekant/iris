@@ -181,39 +181,44 @@ impl Store {
         workspace: &mut dyn FnMut(i64) -> io::Result<()>,
         senders: &mut dyn FnMut(&rusqlite::Transaction) -> Result<()>,
     ) -> Result<Option<Deleted>> {
-        let wait = only.is_some();
-        let _backup = if wait {
-            self.backup_lock()?
-        } else {
-            match self.try_backup_lock()? {
-                Some(l) => l,
-                None => return Ok(None),
+        let mut out = Deleted::default();
+        if let Some(account) = only {
+            // The sync lock of this account first, then the backup lock: a
+            // wait for this account never holds the backup lock, so it never
+            // holds up the delete of another account. No holder of the
+            // backup lock waits for a sync lock, so the order cannot
+            // deadlock.
+            let _sync = FileLock::take(&self.sync_lock_path(account))?;
+            let _backup = self.backup_lock()?;
+            let removing: bool = self.read(|c| {
+                Ok(c.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM account WHERE id = ?1 AND state = ?2)",
+                    params![account, STATE_REMOVING],
+                    |r| r.get(0),
+                )?)
+            })?;
+            if removing {
+                self.delete_account(account, true, workspace, senders, &mut out)?;
             }
+            return Ok(Some(out));
+        }
+        let Some(_backup) = self.try_backup_lock()? else {
+            return Ok(None);
         };
         let accounts: Vec<i64> = self.read(|c| {
-            let mut q = c.prepare(
-                "SELECT id FROM account WHERE state = ?1 AND (?2 IS NULL OR id = ?2) ORDER BY id",
-            )?;
+            let mut q = c.prepare("SELECT id FROM account WHERE state = ?1 ORDER BY id")?;
             let ids = q
-                .query_map(params![STATE_REMOVING, only], |r| r.get(0))?
+                .query_map([STATE_REMOVING], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
             Ok(ids)
         })?;
-        let mut out = Deleted::default();
         for account in accounts {
             // No sync or apply of the account runs while the delete runs.
-            // A sync of the account fails at its next insert (the triggers
-            // of migration 46), so a wait ends soon.
-            let path = self.sync_lock_path(account);
-            let _sync = if wait {
-                FileLock::take(&path)?
-            } else {
-                match FileLock::try_take(&path)? {
-                    Some(l) => l,
-                    None => continue,
-                }
+            // A held lock waits for a later tick.
+            let Some(_sync) = FileLock::try_take(&self.sync_lock_path(account))? else {
+                continue;
             };
-            self.delete_account(account, wait, workspace, senders, &mut out)?;
+            self.delete_account(account, false, workspace, senders, &mut out)?;
         }
         Ok(Some(out))
     }
@@ -228,10 +233,13 @@ impl Store {
     ) -> Result<()> {
         // A raw file older than this can only be of a sync that ended.
         let start = SystemTime::now();
-        // The workspaces first. A build after the removal leaves the mail of
-        // the account out (iris-workspace). A job with a live session (not
-        // reaped) is skipped: the removal refused each live session, so this
-        // one started after the removal, and its build already ran.
+        // The workspaces first. `workspace` purges the folder of the job (a
+        // build that deletes each entry other than notes.md), and then its
+        // row goes. A job with a live session (not reaped) is skipped: the
+        // removal refused each live session, so this one started after the
+        // removal, and the build of its launch purges the folder and deletes
+        // the row. A row goes only after its purge, and the account becomes
+        // removed only when it has no row left.
         let jobs: Vec<i64> = self.read(|c| {
             let mut q = c.prepare(
                 "SELECT job_id FROM removed_workspace w WHERE account_id = ?1
@@ -245,6 +253,9 @@ impl Store {
         })?;
         for job in jobs {
             workspace(job)?;
+            self.write(|tx| {
+                Ok(tx.execute("DELETE FROM removed_workspace WHERE job_id = ?1", [job])?)
+            })?;
         }
         let root = self.dir().join("content");
         loop {
@@ -327,11 +338,13 @@ impl Store {
                 std::thread::sleep(Duration::from_millis(100));
             };
             if busy == 0 {
-                conn.execute(
-                    "UPDATE account SET state = ?2 WHERE id = ?1",
+                // A workspace that waits for its purge keeps the state
+                // removing: the next call tries again.
+                out.accounts += conn.execute(
+                    "UPDATE account SET state = ?2 WHERE id = ?1
+                       AND NOT EXISTS (SELECT 1 FROM removed_workspace WHERE account_id = ?1)",
                     params![account, STATE_REMOVED],
-                )?;
-                out.accounts += 1;
+                )? as u64;
             }
             return Ok(());
         }
@@ -373,10 +386,6 @@ fn end(c: &Connection, account: i64) -> Result<()> {
     )?;
     c.execute(
         "DELETE FROM removed_sender WHERE account_id = ?1",
-        [account],
-    )?;
-    c.execute(
-        "DELETE FROM removed_workspace WHERE account_id = ?1",
         [account],
     )?;
     c.execute(

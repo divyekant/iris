@@ -138,8 +138,13 @@ So no writer can add mail or a derived row after the removal:
 `removing`. It holds the sync lock of the account (`iris_sync::lock`), so no
 sync or apply of the account runs at the same time, in this process or in
 another. It holds the backup lock, as `clean_gone` does, so a backup does not
-copy a half state. If a lock is held, it does nothing and the next call
-tries again.
+copy a half state. The engine tick takes the backup lock, then the sync
+lock of each account, and skips a held lock: the next tick tries again.
+The waiting call of the command and the API takes the sync lock of its own
+account first, then the backup lock. So a wait for one account never holds
+the backup lock, and never holds up the delete of another account. No
+holder of the backup lock waits for a sync lock, so this order cannot
+deadlock.
 
 It runs with `PRAGMA secure_delete = ON`, so SQLite writes zeros over the
 deleted content. Steps, each in batches of 500 rows, one write transaction
@@ -172,9 +177,12 @@ for each batch:
    started after the removal. Its build saw the row and already deleted the
    files, and a build must not change the folder of a live session. No
    process that started before the removal can write to the folder after
-   this step. The rows go
-   in the last transaction (step 7). A crash before step 7 keeps the rows,
-   so the next delete builds again.
+   this step. A row goes only after the purge of its job: step 0 deletes
+   the row after its build, and the build of a session launch deletes the
+   row after its own purge. A session that registered after the removal
+   but did not build yet keeps its row, so the account stays `removing`
+   until that build (step 7). A crash before a purge keeps the row, so the
+   next delete builds again.
 
 1. **Items**: each item of the account, and each item that cites a message
    of the account. First the rows that refer to them with no cascade:
@@ -220,10 +228,10 @@ for each batch:
    old file of another account goes in the moment before its row insert,
    that insert finds the file missing and fails with `MissingContent`, as
    with `clean_gone`, and the next sync fetches the message again.
-7. **End**: `INSERT INTO message_fts(message_fts) VALUES ('optimize')`, and
-   delete the `removed_workspace` rows of the account. Commit. Then
-   `PRAGMA wal_checkpoint(TRUNCATE)`. Only if the checkpoint is not busy,
-   set `state = 'removed'`. The waiting call of the command and the API
+7. **End**: `INSERT INTO message_fts(message_fts) VALUES ('optimize')`.
+   Commit. Then `PRAGMA wal_checkpoint(TRUNCATE)`. Only if the checkpoint
+   is not busy and no `removed_workspace` row of the account is left, set
+   `state = 'removed'`. The waiting call of the command and the API
    tries the checkpoint again each 100 ms, for at most 10 seconds (a reader
    of the engine holds a read transaction for less). The tick tries once. A
    checkpoint that stays busy keeps the state `removing`, so the next call
