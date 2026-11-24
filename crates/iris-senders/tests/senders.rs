@@ -1206,6 +1206,36 @@ fn sender_id(c: &Case, addr: &str) -> i64 {
         .unwrap()
 }
 
+/// #111: a second Ana Lee has a spoof result while the first is known.
+/// When you write to the second one, its own mail goes again too, so the
+/// mark can clear. A sender with no other person of its name does not.
+#[test]
+fn a_new_person_with_a_known_name_reruns_its_own_mail() {
+    let mut c = Case::new("own-twin");
+    c.put(
+        "t1",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: Ana Lee <ana@example.org>"),
+    );
+    c.put(
+        "t2",
+        &["INBOX"],
+        "From: Ana Lee <ana@work.example.net>\r\nTo: owner@example.com",
+    );
+    c.put(
+        "t3",
+        &["INBOX"],
+        "From: Bo Ray <bo@example.net>\r\nTo: owner@example.com",
+    );
+    let work = sender_id(&c, "ana@work.example.net");
+    let d = c.put(
+        "t4",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: Ana Lee <ana@work.example.net>, Bo Ray <bo@example.net>"),
+    );
+    assert_eq!(d.rerun, [work]);
+}
+
 /// #111: a sender that the person accepts at the gate makes its name a
 /// known name, so the mail of other senders with that name goes again.
 #[test]

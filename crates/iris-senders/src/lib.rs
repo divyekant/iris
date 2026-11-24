@@ -596,9 +596,11 @@ fn upsert(
 /// The spoof check (spec 1 section 6.7) compares the `From` name of a
 /// message with the names of the known persons. When the name of a known
 /// person of `addr` comes or goes (a new person, a new name, a person no
-/// more), add to `ch.rerun` each other sender with mail under the old or the
-/// new name, so that understanding checks the mark of that mail again
-/// (#111). `old` and `new` are (kind, name) of the row of `addr`.
+/// more), add to `ch.rerun` each sender whose spoof result under the old or
+/// the new name can change, so that understanding checks the mark of its
+/// mail again (#111): each other sender with mail under that name, and
+/// `addr` itself if it has mail under that name and another known person
+/// has that name. `old` and `new` are (kind, name) of the row of `addr`.
 pub(crate) fn name_change(
     conn: &Connection,
     ch: &mut Changes,
@@ -620,7 +622,9 @@ pub(crate) fn name_change(
     // index on `from_name`), upgrade to an index if a large mailbox is slow.
     let mut st = conn.prepare_cached(
         "SELECT DISTINCT s.id FROM header h JOIN sender s ON s.address = h.from_addr
-          WHERE h.from_name = ?1 COLLATE NOCASE AND h.from_addr != ?2",
+          WHERE h.from_name = ?1 COLLATE NOCASE AND (h.from_addr != ?2 OR EXISTS (
+            SELECT 1 FROM sender o WHERE o.kind = 'person' AND o.address != ?2
+               AND o.name = ?1 COLLATE NOCASE))",
     )?;
     for name in [was, is].into_iter().flatten() {
         for id in st.query_map(params![name, addr], |r| r.get::<_, i64>(0))? {
