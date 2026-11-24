@@ -18,7 +18,7 @@ edit an old entry. If a decision changes, add a new entry that names the old one
 ## D12 (2026-11-24): The answers to 38 open product questions
 
 - Decided by: dk (accepted each recommended option)
-- Why: 50 open limit issues waited on a product choice. The list gave each
+- Why: 43 open limit issues waited on a product choice. The list gave each
   question its options, their effect and a recommendation. The table gives
   the chosen option of each question. The item IDs (D1 to D38) are the IDs
   of the list and of the issue comments, not entries of this log.
