@@ -454,10 +454,11 @@ pub fn due_jobs(store: &Store, now_ms: i64) -> Result<Vec<i64>> {
 /// [`due_jobs`] wins, and this gives `None`.
 pub fn move_due_one(store: &Store, job: i64, now_ms: i64) -> Result<Option<Due>> {
     transaction(store, |c| {
-        // The goal as bytes: a goal that is not UTF-8 must not stop the move.
-        let still: Option<Vec<u8>> = c
+        // A goal that is not UTF-8 fails here, before the move: each reader
+        // of the job refuses it, so the job must not ask a question.
+        let still: Option<String> = c
             .query_row(
-                &format!("SELECT CAST(j.goal AS BLOB) FROM job j WHERE j.id = ?2 AND {DUE_SQL}"),
+                &format!("SELECT j.goal FROM job j WHERE j.id = ?2 AND {DUE_SQL}"),
                 params![now_ms, job],
                 |r| r.get(0),
             )
@@ -476,7 +477,6 @@ pub fn move_due_one(store: &Store, job: i64, now_ms: i64) -> Result<Option<Due>>
             c.query_row("SELECT updated_at FROM job WHERE id = ?1", [job], |r| r.get(0))?;
         let at = now_ms.max(updated);
         add_event(c, job, State::NeedsYou, By::Engine, m, at)?;
-        let goal = String::from_utf8_lossy(&goal).into_owned();
         Ok(Some(Due { id: job, goal }))
     })
 }

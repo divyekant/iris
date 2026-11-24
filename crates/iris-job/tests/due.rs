@@ -196,9 +196,14 @@ fn a_job_whose_goal_is_not_utf8_does_not_stop_the_others() {
     let third = create(s, "Third.", Some(NOW), NOW - 1).unwrap();
     let turn = move_due(s, NOW).unwrap();
     let ids: Vec<i64> = turn.moved.iter().map(|d| d.id).collect();
-    assert_eq!(ids.len(), 3, "{turn:?}");
-    assert!(ids.contains(&first) && ids.contains(&third));
-    assert!(turn.failed.is_empty(), "{turn:?}");
-    assert!(turn.moved.iter().any(|d| d.goal == "A\u{fffd}B"));
-    assert!(move_due(s, NOW + 1).unwrap().moved.is_empty());
+    assert_eq!(ids, vec![first, third], "{turn:?}");
+    // The bad job fails closed: no move, and it stays in `working`.
+    assert_eq!(turn.failed.len(), 1, "{turn:?}");
+    let bad = turn.failed[0].0;
+    let state: String = s
+        .read(|c| Ok(c.query_row("SELECT state FROM job WHERE id = ?1", [bad], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(state, "working");
+    let again = move_due(s, NOW + 1).unwrap();
+    assert!(again.moved.is_empty() && again.failed.len() == 1, "{again:?}");
 }
