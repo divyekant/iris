@@ -106,8 +106,8 @@ test("two removed rules with one name and one effect show their verbs and condit
   const b = { ...rule, id: 8, verbs: ["trash"], when: { sender: "deals@shop.example" } };
   const file = { ...fx.policy.file, mode: same.mode, added: [], removed: [a, b], changed: [] };
   const t = text(await render("/src/views/Rules.svelte", { policy: { ...same, file } }));
-  assert.match(t, new RegExp(`Removed ${rule.name} .*${verbs(a)} From news@shop\\.example`));
-  assert.match(t, new RegExp(`Removed ${rule.name} .*${verbs(b)} From deals@shop\\.example`));
+  assert.match(t, new RegExp(`Removed ${rule.name} .*${verbs(a)} From news@shop[.]example`));
+  assert.match(t, new RegExp(`Removed ${rule.name} .*${verbs(b)} From deals@shop[.]example`));
 });
 
 test("the difference shows a change of the author or the date of a rule", async () => {
