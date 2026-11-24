@@ -118,7 +118,8 @@ export type Account = {
   state: string | null;
   mirror_ready_at: string | null;
   sync: { kind: string; step: number | null } | null;
-  last_sync: { kind: string; started: string; ended: string | null; result: string | null } | null;
+  /** `after_failure`: the sync before this one failed or stopped. An older engine leaves it out. */
+  last_sync: { kind: string; started: string; ended: string | null; result: string | null; after_failure?: boolean } | null;
 };
 
 export type Status = {
