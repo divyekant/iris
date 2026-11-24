@@ -1732,8 +1732,22 @@ fn model_set(store: &Store, provider: &SetModel) -> Result<String, String> {
     ))
 }
 
+/// The first copy of the account ended (`account.mirror_ready_at` is set).
+fn mirror_ready(store: &Store, account: i64) -> Result<bool, String> {
+    store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT mirror_ready_at IS NOT NULL FROM account WHERE id = ?1",
+                [account],
+                |r| r.get(0),
+            )?)
+        })
+        .map_err(|e| e.to_string())
+}
+
 /// `iris mirror sync|verify`: each account that has a sign-in, one at a time.
-/// If another process syncs an account, that account gives an error.
+/// If another process syncs an account, that account gives an error,
+/// except for a verify during the first copy of the account.
 fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
     let config = gmail_config()?;
     let accounts = engine::signed_in_accounts(&store).map_err(|e| e.to_string())?;
@@ -1793,6 +1807,15 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
         };
         match line {
             Ok(text) => println!("account {account}: {text}"),
+            // Another process runs the first copy: no full mirror exists to
+            // compare, so verify has nothing to check yet (issue #679).
+            Err(engine::Error::Sync(iris_sync::Error::OtherSync))
+                if matches!(command, MirrorCommand::Verify) && !mirror_ready(&store, account)? =>
+            {
+                println!(
+                    "account {account}: the first copy runs now, so no full mirror exists to verify. Run verify after it ends."
+                )
+            }
             Err(e) => {
                 failed = true;
                 say!("iris: account {account}: {e}");

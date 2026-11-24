@@ -281,6 +281,11 @@ However verify ends (a result, an error or a crash), the engine starts the
 sync of the account again. After a crash, the next start does this. A
 difference of step 7 starts a full resync (section 4.4).
 
+If another process runs the first copy of the account (section 4.2),
+no full mirror exists to compare. Verify of that account prints that the
+first copy runs, and the command does not fail for that account. If another
+process runs a later sync of the account, verify of that account fails.
+
 Verify does not compare `internalDate` or the size. Gmail does not change the
 bytes of a message, and step 8 checks the bytes. A difference of step 8 is a
 local defect, not a sync defect. The engine fetches the message again
