@@ -953,10 +953,13 @@ pub fn marked_in(c: &Connection, changeset: i64) -> Result<bool> {
 }
 
 /// The marks of the flag `outside_thread` (spec R4-06): each address of
-/// `to` and `cc` of `content` that is not in From, To or Cc of a live
-/// message of the threads of `action`, and is not one of your addresses. A
-/// new mail has no thread. Submit gives the flag to a marked author when
-/// this list is not empty.
+/// `to` and `cc` of `content` that is not in the thread of `action`, and is
+/// not one of your addresses. An address is in the thread only if it is the
+/// From of a live thread message, or in To or Cc of a live thread message
+/// that you sent (decision D13, issue #435). So a stranger cannot widen
+/// the thread with an address in Cc of its own message. A new mail has no
+/// thread. Submit gives the flag to a marked author when this list is not
+/// empty.
 pub fn outside_marks(
     c: &Connection,
     action: i64,
@@ -977,9 +980,14 @@ pub fn outside_marks(
     })?;
     if !open.is_empty() {
         let mut st = c.prepare(&format!(
-            "SELECT h.from_addr, h.to_addrs, h.cc_addrs
+            "SELECT h.from_addr, s.to_addrs, s.cc_addrs
              FROM changeset_action a, message t JOIN header h ON h.message_id = t.id
-             WHERE a.id = ?1 AND t.gone_at IS NULL AND t.thread_id IN ({ACTION_THREADS})"
+             LEFT JOIN header s ON s.message_id = t.id
+               AND EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                           WHERE ml.message_id = t.id AND l.provider_id = 'SENT')
+               AND NOT {copy}
+             WHERE a.id = ?1 AND t.gone_at IS NULL AND t.thread_id IN ({ACTION_THREADS})",
+            copy = iris_store::draft_or_copy!("t")
         ))?;
         let mut rows = st.query([action])?;
         while let (false, Some(r)) = (open.is_empty(), rows.next()?) {
