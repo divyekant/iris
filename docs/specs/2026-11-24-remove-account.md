@@ -91,10 +91,14 @@ holds no sign-in and no sync state. Reasons:
    write to its workspace until the reap check passes. The agent has a copy
    of the mail in its workspace. The person must stop the job and wait for
    its end. This is the one meaning of "live session" in this spec.
-3. Set `state = 'removing'`, and set `token`, `history_id`,
-   `mirror_ready_at`, `sync_kind`, `sync_start` and `sync_step` to NULL. With
-   no token, `sync_accounts` drops the account, so no new sync or apply
-   starts.
+3. Set `state = 'removing'`, and set each other column of the row to NULL,
+   other than `id`, `provider` and `address`: the token, the IMAP server,
+   port and user (`imap_host`, `imap_port`, `imap_user`), the sync state
+   (`history_id`, `mirror_ready_at`, `sync_kind`, `sync_start`,
+   `sync_step`) and each column that a later migration adds. The removal
+   reads the column list from the schema (`pragma_table_info`), so a new
+   column cannot stay by mistake. With no token, `sync_accounts` drops the
+   account, so no new sync or apply starts.
 4. Deny each open action (`proposed`, `approved`, `held`) that
    targets a message, an item or a draft of the account:
    `state = 'denied'`, `decided_by = 'engine'`, reason "the account was
@@ -180,16 +184,28 @@ for each batch:
    `talk_due` and `nudge_try`. Each label. A thread that a draft refers to
    stays as a bare row (an ID and a provider ID, no mail).
 4. **Sync rows**: `sync_log` and `sync_seen` of the account.
-5. **Senders**: each `sender` row whose address sent a message of the
-   account, that sent no message that is still in the store, and that the
-   person did not decide
-   (`decided_by IS NOT 'person'`). A decision of the person about an address
-   is a rule of the person, not mail. Each batch writes the sender
-   addresses of its messages to the new table
-   `removed_sender(account_id, address)` before it deletes the headers. So
-   this step finds them also after a crash, and a sender of another
-   account only is never a candidate. The step deletes the rows of
-   `removed_sender` of the account.
+5. **Senders**: a sender kind comes from the evidence in the store
+   (spec 1 section 6.7): the mail from the address (`header.from_addr`) and
+   the evidence rows (`sender_evidence`, for example a recipient of sent
+   mail). The delete removes the evidence of the account, so it does two
+   things, in the transaction of the last batch:
+   1. Delete each `sender` row whose address the mail of the account was
+      evidence for, that no message that stays is evidence for (no
+      `from_addr` and no `sender_evidence` row), and that the person did
+      not decide (`decided_by IS NOT 'person'`). A decision of the person
+      about an address is a rule of the person, not mail. Each batch writes
+      these addresses (the `from_addr` and each evidence address of its
+      messages) to the new table `removed_sender(account_id, address)`
+      before it deletes the messages, so this step finds them also after a
+      crash. The step deletes the rows of `removed_sender` of the account.
+   2. Derive each engine kind again from the evidence that stays in all
+      accounts: `iris_senders::refresh`, then
+      `iris_understand::store::rerun_senders` for a sender whose `hostile`
+      kind changed, as the understanding batch does. So a person known
+      through the sent mail of another account stays a person, and a person
+      known only through the removed account becomes what the evidence that
+      stays says.
+
 6. **Orphan files**: each raw message file that no message row refers to
    and whose time of change is before the start of this delete. A sync of
    the account can write a raw file and then fail at the insert of its row
@@ -315,6 +331,9 @@ engine tick ends the delete.
 | API body address that does not match the ID | HTTP 400, nothing changes. | API test |
 | A job session with scope in the account is live (not reaped) | Refused with "stop the job, then try again". This includes an ended session whose process did not stop yet. | store test |
 | A sender row of another account only, with no header | It stays. | store test |
+| An address known through sent mail of the account and of another account | It stays a `person`: the refresh reads the evidence of the other account. | API test |
+| An address known only through sent mail of the account | Its row goes. | API test |
+| An IMAP account | The tombstone keeps no IMAP server, port or user. | store test of each column |
 | A sync of the account runs at the removal | Its next insert fails on the trigger. The delete waits for the sync lock. No message of the account stays. | store test with an insert after the removal |
 | That sync wrote a raw file before its insert failed | Step 6 deletes the file. | store test with a file and no row |
 | An understanding run writes after the removal | The trigger on `item` or `body` refuses the write. The batch query leaves the account out. | store test |
@@ -346,7 +365,9 @@ engine tick ends the delete.
   of a job with a row in `removed_workspace` deletes each entry other than
   `notes.md` first.
 - `crates/iris`: `iris account remove`, the engine tick.
-- `crates/iris-api`: the route, the status filter.
+- `crates/iris-api`: the route, the status filter, and `delete_removed` (the
+  delete with the workspace build and the sender refresh) for the engine,
+  the command and the route.
 - `client/`: the Accounts page.
 - Memory: no new cache. The delete reads 500 rows at a time.
 
