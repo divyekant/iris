@@ -74,7 +74,7 @@
         </ul>
       {/if}
       <form class="new" onsubmit={(e) => (e.preventDefault(), make())}>
-        <input type="text" bind:value={title} maxlength="80" placeholder="New matter, for example Tokyo trip" aria-label="Title of a new matter" />
+        <input type="text" bind:value={title} maxlength="80" placeholder="New matter" aria-label="Title of a new matter" />
         <button class="keep" type="submit" disabled={busy || !title.trim()}>Make</button>
       </form>
       <button class="quiet" type="button" onclick={() => (open = false)}>Cancel</button>
@@ -98,7 +98,7 @@
     color: var(--color-text);
   }
   .pick {
-    margin-top: var(--space-4);
+    margin: var(--space-4) 0;
     background: var(--color-background-elevated);
     border: 1px solid var(--color-border-subtle);
     border-radius: var(--radius-lg);
