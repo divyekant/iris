@@ -281,7 +281,13 @@ content of the draft (section 7.5).
 If the policy mode is `observe`, the rules do not run in step 5, and each
 action stays `proposed`, except an action that a hard limit denies (section
 6.5): it gets `denied` by `limit` in both modes. A `proposed` action has no decision columns (section 5.6), so the
-engine does not store what the policy would do. The triage changeset of
+engine does not store what the policy would do. The review computes it
+at each read (decision D10, `GET /api/changesets/{id}/would`): for each
+`proposed` action, the decision that a rule of the active policy gives
+in the mode `apply`, with the same facts, flags and author. It is empty
+in the mode `apply` and with no confirmed policy. A read never changes an
+action, and it always follows the active policy of now, so a changed
+rule changes the answer at the next read. The triage changeset of
 release 2 follows the mode of the active policy, as each other changeset does
 (specification 1, section 8). Release 1 computes the triage proposal and does
 not store it (specification 1, section 8).
