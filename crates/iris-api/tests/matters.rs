@@ -571,3 +571,43 @@ async fn a_member_of_hostile_mail_is_hidden_until_the_state_clears() {
     }
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Issue 112: a matter with too few members that are not hostile mail (one
+/// for a confirmed matter, two for a declined matter) is not read, so each
+/// matter document that a route gives passes its schema. It shows again
+/// when the state clears.
+#[tokio::test]
+async fn a_matter_with_too_few_members_to_show_is_not_read() {
+    let (dir, s) = setup("hostile-few");
+    s.put_labels(1, &[("SPAM", "SPAM", "system")]).unwrap();
+    let schema = iris_spec::validator("matter");
+    // g-1 keeps only r-1 (message 1). g-2 is declined: r-4 (message 1) and c-5.
+    let (code, _) = call(
+        &s,
+        Method::POST,
+        "/api/matters/g-1/confirm",
+        r#"{"title":"Tokyo","items":["r-1"]}"#,
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    let (code, _) = call(&s, Method::POST, "/api/matters/g-2/decline", "").await;
+    assert_eq!(code, StatusCode::OK);
+    for (set, clear) in HOSTILE {
+        s.write(|tx| Ok(tx.execute_batch(set)?)).unwrap();
+        for g in ["g-1", "g-2"] {
+            let (code, v) = call(&s, Method::GET, &format!("/api/matters/{g}"), "").await;
+            assert_eq!(code, StatusCode::NOT_FOUND, "{set}: {g} {v}");
+        }
+        let (_, list) = call(&s, Method::GET, "/api/matters", "").await;
+        assert_eq!(ids(&list["confirmed"]), Vec::<&str>::new(), "{set}");
+        s.write(|tx| Ok(tx.execute_batch(clear)?)).unwrap();
+        for g in ["g-1", "g-2"] {
+            let (code, v) = call(&s, Method::GET, &format!("/api/matters/{g}"), "").await;
+            assert_eq!(code, StatusCode::OK, "{clear}: {g}");
+            assert!(schema.is_valid(&v["matter"]), "{}", v["matter"]);
+        }
+        let (_, list) = call(&s, Method::GET, "/api/matters", "").await;
+        assert_eq!(ids(&list["confirmed"]), vec!["g-1"], "{clear}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -25,7 +25,8 @@ const MEMBER_FORMS: [(&str, Kind); 3] = [
 /// members of a proposal, the kept members of a confirmed matter, and each
 /// member of a declined matter (the full grouping that the person
 /// declined). A proposal that is not valid now is not read. A member that
-/// comes from hostile mail is not read (issue 112).
+/// comes from hostile mail is not read (issue 112), and [`load`] leaves out
+/// a matter with too few members to show.
 fn select(filter: &str, order: &str) -> String {
     format!(
         "SELECT m.id, m.title, m.status, m.model, m.prompt, m.created_at, m.updated_at,
@@ -100,6 +101,14 @@ fn load(
             }
         }
     }
+    // A matter with fewer members to show than its schema needs (one for a
+    // confirmed matter, two for another) is not read, like a proposal that
+    // is not valid. Only hidden members of hostile mail can cause it, and
+    // the matter shows again when the state clears (issue 112).
+    out.retain(|(doc, _)| {
+        let min = if doc["status"] == "confirmed" { 1 } else { 2 };
+        doc["items"].as_array().map_or(0, Vec::len) >= min
+    });
     Ok(out)
 }
 
@@ -124,7 +133,8 @@ pub fn matters(store: &Store) -> Result<Value> {
 }
 
 /// One matter (`g-4`) with the documents of its members, by form. `None`
-/// when no such matter exists, or for a proposal that is not valid now.
+/// when no such matter exists, for a proposal that is not valid now, or
+/// for a matter with too few members that are not hostile mail.
 pub fn matter(store: &Store, id: &str) -> Result<Option<Value>> {
     let row = row_of(id, Kind::Matter)?;
     Ok(store.read(|c| Ok(view(c, row)?))?)
