@@ -173,9 +173,18 @@ pub enum Command {
     },
     /// Show the send switch, or turn it on or off. No send leaves while it
     /// is off. `on` needs a terminal and a typed "yes".
+    /// `bcc-test <gmail|outlook> <to> <bcc>` and `bcc <gmail|outlook>` are
+    /// the owner check of the Bcc gate of a provider (send content spec,
+    /// section 6.2). They need a terminal and a typed "yes" too.
     Sending {
         #[arg(value_enum)]
         state: Option<Switch>,
+        /// The provider of the Bcc gate: gmail or outlook.
+        provider: Option<String>,
+        /// The `To` address of the test send.
+        to: Option<String>,
+        /// The `Bcc` address of the test send.
+        bcc: Option<String>,
     },
     /// Stop all agent work: end each session of a job, and apply and send
     /// nothing until `iris resume`. `--show` only shows the state.
@@ -543,10 +552,12 @@ fn action(c: &Command) -> Result<Option<Action<'_>>, socket::Failure> {
     }))
 }
 
-#[derive(Clone, Copy, clap::ValueEnum)]
+#[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
 pub enum Switch {
     On,
     Off,
+    BccTest,
+    Bcc,
 }
 
 #[derive(Subcommand)]
@@ -1699,8 +1710,29 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             println!("{}", zone_text(&store).map_err(|e| e.to_string())?);
             Ok(())
         }
-        Command::Sending { state } => {
+        Command::Sending {
+            state,
+            provider,
+            to,
+            bcc,
+        } => {
             let store = open()?;
+            if let Some(Switch::BccTest | Switch::Bcc) = state {
+                use std::io::IsTerminal;
+                let stdin = std::io::stdin();
+                let text = bcc_gate(
+                    &store,
+                    *state == Some(Switch::BccTest),
+                    [provider, to, bcc].map(|a| a.as_deref()),
+                    stdin.is_terminal(),
+                    &mut stdin.lock(),
+                )?;
+                println!("{text}");
+                return Ok(());
+            }
+            if provider.is_some() {
+                return Err("`iris sending on` and `off` take no address".into());
+            }
             match state {
                 Some(Switch::On) => {
                     {
@@ -1717,7 +1749,7 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
                     }
                     Err(e) => return Err(e.to_string()),
                 },
-                None => {}
+                _ => {}
             }
             println!(
                 "{}",
@@ -2617,6 +2649,72 @@ fn sending_on_confirm(terminal: bool, input: &mut impl BufRead) -> Result<(), St
     Ok(())
 }
 
+/// `iris sending bcc-test` (`test` true) and `iris sending bcc`: the owner
+/// check of the Bcc gate of a provider (send content spec, section 6.2).
+/// `args` are the provider, the `To` address and the `Bcc` address.
+fn bcc_gate(
+    store: &Store,
+    test: bool,
+    args: [Option<&str>; 3],
+    terminal: bool,
+    input: &mut impl BufRead,
+) -> Result<&'static str, String> {
+    let usage = if test {
+        "usage: iris sending bcc-test <gmail|outlook> <to> <bcc>"
+    } else {
+        "usage: iris sending bcc <gmail|outlook>"
+    };
+    let [Some(provider @ ("gmail" | "outlook")), to, bcc] = args else {
+        return Err(usage.into());
+    };
+    if test != (to.is_some() && bcc.is_some()) || (!test && (to.is_some() || bcc.is_some())) {
+        return Err(usage.into());
+    }
+    if !terminal {
+        return Err("the Bcc check needs a terminal: standard input is not a TTY".into());
+    }
+    if test {
+        let (to, bcc) = (to.unwrap_or_default(), bcc.unwrap_or_default());
+        for a in [to, bcc] {
+            iris_compose::check_address(&a.to_ascii_lowercase())?;
+        }
+        if to.eq_ignore_ascii_case(bcc) {
+            return Err("use two different addresses".into());
+        }
+        eprint!(
+            "Only a send with exactly To {to}, no Cc and Bcc {bcc} passes the Bcc gate of \
+             {provider} until you run `iris sending bcc {provider}`. Type yes to continue: "
+        );
+    } else {
+        eprint!(
+            "Confirm that the Bcc mailbox got the test mail, and that the To copy does not \
+             show the Bcc address. Then each send with Bcc of {provider} can leave. \
+             Type yes to open the Bcc gate: "
+        );
+    }
+    let mut line = String::new();
+    input.read_line(&mut line).map_err(|e| e.to_string())?;
+    if line.trim() != "yes" {
+        return Err("Nothing changed.".into());
+    }
+    if test {
+        let (to, bcc) = (to.unwrap_or_default(), bcc.unwrap_or_default());
+        if !iris_apply::bcc_test(store, provider, to, bcc).map_err(|e| e.to_string())? {
+            return Err(format!(
+                "The Bcc gate of {provider} is open. Nothing changed."
+            ));
+        }
+        Ok("The test is ready. Write and approve the test send in Iris.")
+    } else {
+        if !iris_apply::bcc_open(store, provider).map_err(|e| e.to_string())? {
+            return Err(format!(
+                "Run `iris sending bcc-test {provider} <to> <bcc>` first."
+            ));
+        }
+        Ok("The Bcc gate is open.")
+    }
+}
+
 /// `iris cancel d-4`: cancel the open send of the draft.
 fn cancel_send(store: &Store, id: &str, now: i64) -> Result<&'static str, String> {
     let draft = match iris_store::parse_id(id) {
@@ -2698,6 +2796,52 @@ mod outbox_tests {
         }
         let r = sending_on_confirm(false, &mut "yes\n".as_bytes());
         assert!(r.unwrap_err().contains("needs a terminal"));
+    }
+
+    /// The Bcc gate commands need the right arguments, a terminal and a
+    /// typed "yes", and open the gate only after a test.
+    #[test]
+    fn the_bcc_gate_needs_a_test_a_terminal_and_yes() {
+        let dir = std::env::temp_dir().join(format!("iris-bcc-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let gate = |test, args, terminal, answer: &str| {
+            bcc_gate(&store, test, args, terminal, &mut answer.as_bytes())
+        };
+        let (to, bcc) = (Some("a@example.org"), Some("b@example.org"));
+        for args in [
+            [Some("imap"), to, bcc],
+            [Some("gmail"), to, None],
+            [None, None, None],
+        ] {
+            assert!(gate(true, args, true, "yes\n")
+                .unwrap_err()
+                .starts_with("usage"));
+        }
+        assert!(gate(false, [Some("gmail"), to, None], true, "yes\n")
+            .unwrap_err()
+            .starts_with("usage"));
+        assert!(gate(true, [Some("gmail"), to, to], true, "yes\n").is_err());
+        assert!(gate(true, [Some("gmail"), Some("a b@x"), bcc], true, "yes\n").is_err());
+        assert!(gate(true, [Some("gmail"), to, bcc], false, "yes\n")
+            .unwrap_err()
+            .contains("terminal"));
+        assert_eq!(
+            gate(true, [Some("gmail"), to, bcc], true, "no\n"),
+            Err("Nothing changed.".into())
+        );
+        assert!(gate(false, [Some("gmail"), None, None], true, "yes\n")
+            .unwrap_err()
+            .contains("bcc-test"));
+        assert!(gate(true, [Some("gmail"), to, bcc], true, "yes\n").is_ok());
+        assert_eq!(
+            gate(false, [Some("gmail"), None, None], true, "yes\n"),
+            Ok("The Bcc gate is open.")
+        );
+        assert!(gate(true, [Some("gmail"), to, bcc], true, "yes\n")
+            .unwrap_err()
+            .contains("is open"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

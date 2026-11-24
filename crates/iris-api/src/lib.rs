@@ -12,7 +12,7 @@ use axum::{
     body::{Body, Bytes},
     extract::{
         rejection::{JsonRejection, QueryRejection},
-        Path, Query, State,
+        DefaultBodyLimit, Path, Query, State,
     },
     http::{header, StatusCode},
     middleware,
@@ -196,6 +196,10 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/outbox", get(get_outbox))
         .route("/api/outbox/{draft}/cancel", post(post_outbox_cancel))
         .route("/api/write", post(post_write))
+        .route(
+            "/api/attachments",
+            post(post_attachment).layer(DefaultBodyLimit::max(ATTACHMENT_LIMIT)),
+        )
         .route("/api/write/{id}", get(get_write))
         .route("/api/threads/{id}/reply", get(get_reply))
         .route("/api/threads/{id}/draft", get(get_draft))
@@ -1294,6 +1298,26 @@ async fn post_outbox_cancel(
         ),
         Cancelled::NotOpen => not_found(),
     })
+}
+
+/// The most bytes of a request to `POST /api/attachments`: the limit of
+/// the largest message (send content spec, section 5). A larger body gets
+/// 413.
+pub const ATTACHMENT_LIMIT: usize = iris_compose::MAX_MESSAGE as usize;
+
+/// One file for a draft (send content spec, section 2): the request body
+/// is the file. 201 with `{"sha256", "size"}`. The client puts the entry,
+/// with the name and the type, into the draft.
+async fn post_attachment(State(s): State<Arc<Store>>, body: Bytes) -> Result<Response> {
+    if body.is_empty() {
+        return Err(Error::Query("a file has 1 or more bytes".into()));
+    }
+    let sha = s.put_attachment(&body)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "sha256": sha, "size": body.len() })),
+    )
+        .into_response())
 }
 
 /// The press of Send in the write view (docs/specs/2026-11-17-write.md,

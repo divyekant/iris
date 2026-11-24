@@ -259,3 +259,20 @@ test("the fixture server cancels a send, as the API does", () => {
   assert.equal(fx.outboxPost("/outbox/d-16/cancel")[0], 404);
   assert.equal(fx.outboxPost("/outbox/d-16/other"), undefined);
 });
+
+test("a send with Bcc shows the blind copy and its files, and waits for the Bcc check of its provider", async () => {
+  const box = fx.outbox();
+  box.sends = [{ ...box.sends[0], bcc: ["lee@example.org"], attachments: [{ name: "q4.pdf", type: "application/pdf", size: 12_288 }], bcc_check: "gmail" }];
+  const net = serve(() => [200, box]);
+  const app = await mount("/src/views/Outbox.svelte", { first: box });
+  try {
+    const card = app.target.querySelector("li.card");
+    assert.match(text(card), /Bcc lee@example\.org/);
+    assert.match(text(card), /q4\.pdf \(12 KB\)/);
+    assert.match(text(card), /Waits for the Bcc check of Gmail/);
+    assert.equal(card.querySelector(".bar"), null, "no time bar while the gate holds the send");
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});

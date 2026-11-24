@@ -298,7 +298,7 @@ fn line_ends(text: &str) -> String {
 
 /// An address `local@domain`: ASCII, printable, no space and none of the
 /// characters that have a meaning in an address header.
-fn check_address(a: &str) -> Result<(), String> {
+pub fn check_address(a: &str) -> Result<(), String> {
     let bad = || Err(format!("not an address of the form local@domain: {a:?}"));
     if a.len() > MAX_ADDRESS {
         return bad();

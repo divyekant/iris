@@ -148,7 +148,7 @@ const SPECS: &[Spec] = &[
         about: "Write a reply to a thread (t-3) or a new mail from an account (a-1) in a draft changeset.",
         args: &[
             arg("target", Kind::Text, "The thread (t-3) or the account (a-1)."),
-            arg("draft", Kind::Object, "The mail: to, cc, subject (not for a reply) and body."),
+            arg("draft", Kind::Object, "The mail: to, cc, bcc, subject (not for a reply) and body. An agent cannot attach a file."),
         ],
         adds: true,
     },

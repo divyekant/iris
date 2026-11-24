@@ -237,6 +237,10 @@ export type Action = {
 export type Part = { text: string; flags?: string[]; source?: string };
 /** A recipient of a draft, with the flag `new_recipient` if the owner never wrote to the address. */
 export type Recipient = { address: string; flags?: string[] };
+/** A file of a draft, as the review and the outbox show it. */
+export type FileView = { name: string; type: string; size: number };
+/** A file in the attachment folder of the engine (POST /api/attachments), with its name and type for a draft. */
+export type Attachment = FileView & { sha256: string };
 /**
  * GET /api/changesets/{id}/drafts: the draft of each `draft` and `send`
  * action that waits, as the review shows it. Each part of the text carries
@@ -244,7 +248,7 @@ export type Recipient = { address: string; flags?: string[] };
  * cannot read has `readable: false` and no text.
  */
 export type DraftView = { revision: number; n: number; draft: string | null; thread: string | null } & (
-  | { readable: true; to: Recipient[]; cc: Recipient[]; subject: Part[]; body: Part[] }
+  | { readable: true; to: Recipient[]; cc: Recipient[]; bcc?: Recipient[]; attachments?: FileView[]; subject: Part[]; body: Part[] }
   | { readable: false }
 );
 
@@ -335,7 +339,11 @@ export type OutboxSend = {
   readable: boolean;
   to?: string[];
   cc?: string[];
+  bcc?: string[];
+  attachments?: FileView[];
   subject?: string;
+  /** The provider ("gmail" or "outlook") whose Bcc check keeps the send held, or null. An older engine leaves it out. */
+  bcc_check?: string | null;
 };
 /** GET /api/outbox: the send switch and each send that waits. Only `iris sending on|off` changes the switch. */
 export type Outbox = { sending: { on: boolean; since: string | null }; count: number; sends: OutboxSend[]; next: string | null };
@@ -383,7 +391,7 @@ export type ReplyStart = {
 /** GET /api/write/{cs}: the state of one press of Send (write spec, section 4). */
 export type WriteState =
   | { state: "saving" }
-  | { state: "waiting"; draft: string; sending: boolean; leaves_at: string | null }
+  | { state: "waiting"; draft: string; sending: boolean; bcc_check?: string | null; leaves_at: string | null }
   | { state: "review"; draft: string; reason: string | null }
   | { state: "sent"; draft: string }
   | { state: "stopped"; reason: string; draft: string | null };
@@ -571,13 +579,17 @@ async function call(path: string, accept: string, body?: unknown): Promise<Respo
   if (active()) headers["x-iris-day"] = localDay();
   const sent = token;
   if (sent) headers.authorization = `Bearer ${sent}`;
-  const json = body === undefined ? undefined : JSON.stringify(body);
+  // A file (a Blob of any window) goes as its own bytes (POST /api/attachments).
+  const file = typeof (body as Blob | undefined)?.arrayBuffer === "function" ? (body as Blob) : undefined;
+  const json = body === undefined || file ? undefined : JSON.stringify(body);
   const init: RequestInit =
-    json === undefined
-      ? { headers }
-      : // keepalive: a POST that starts as the page closes still reaches the engine (Act.svelte).
-        // A browser refuses a keepalive body over 64 KiB, so a larger body (a long mail) goes without it.
-        { method: "POST", keepalive: keepable(json), headers: { ...headers, "content-type": "application/json" }, body: json };
+    file
+      ? { method: "POST", headers: { ...headers, "content-type": "application/octet-stream" }, body: file }
+      : json === undefined
+        ? { headers }
+        : // keepalive: a POST that starts as the page closes still reaches the engine (Act.svelte).
+          // A browser refuses a keepalive body over 64 KiB, so a larger body (a long mail) goes without it.
+          { method: "POST", keepalive: keepable(json), headers: { ...headers, "content-type": "application/json" }, body: json };
   const response = await fetch(`/api/${path}`, init).catch(() => fail(UNREACHABLE));
   if (response.status === 401) {
     // The engine does not know the token (for example after a restart of iris serve).
@@ -608,6 +620,12 @@ export async function get<T>(path: string): Promise<T> {
     access.zone = (body as Status).time_zone ?? null;
   }
   return body as T;
+}
+
+/** Put one file into the attachment folder of the engine. The entry of a draft adds the name and the type. */
+export async function upload(file: File): Promise<Attachment> {
+  const v = await post<{ sha256: string; size: number }>("attachments", file);
+  return { name: file.name, type: file.type.split(";")[0].trim() || "application/octet-stream", size: v.size, sha256: v.sha256 };
 }
 
 /** Send a policy change (POST with a JSON body). Throws an Error with the API's error text. */

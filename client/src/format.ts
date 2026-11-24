@@ -294,3 +294,16 @@ export function addPage(items: Item[], more: Item[]): Item[] {
  * only the fixed rules read mail. Drafts and gone mail never count (the engine gives `waits_model`).
  */
 export const needsModel = (status: Status | null): boolean => status?.model === false && (status.waits_model ?? 0) > 0;
+
+/** The size of a file in short words: "820 B", "12 KB", "2.4 MB". */
+export function bytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** The files of a mail in one line: "q4.pdf (12 KB), notes.txt (820 B)". */
+export const fileLine = (files: { name: string; size: number }[]) => files.map((f) => `${f.name} (${bytes(f.size)})`).join(", ");
+
+/** The name of a mail provider, as the person knows it. */
+export const PROVIDER: Record<string, string> = { gmail: "Gmail", outlook: "Outlook" };
