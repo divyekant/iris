@@ -172,6 +172,7 @@
   let draftNote = $state("");
   async function draftIt() {
     if (!thread || drafting) return;
+    asked = true;
     drafting = true;
     draftNote = "";
     try {
@@ -189,11 +190,14 @@
   // A draft that Iris wrote for this thread before (`iris write`, R3-05) fills an
   // empty new form (issue 743). Only a reply to the mail that the form shows: a
   // nudge goes to another person, and the brief offers it.
+  // A saved form with no text is a form that the person did not start. After a press
+  // of "Write it for me", only that answer fills the form.
   let filled = $state(false);
-  if (thread && reply && !saved && !taken()) {
+  let asked = false;
+  if (thread && reply && !saved?.body.trim() && !taken()) {
     get<ThreadDraft>(`threads/${encodeURIComponent(thread)}/draft`).then(
       (d) => {
-        if (alive && !write && !d.nudge && d.based_on === reply.parent.id && body === "") {
+        if (alive && !write && !asked && !d.nudge && d.based_on === reply.parent.id && body === "") {
           body = d.body;
           filled = true;
         }

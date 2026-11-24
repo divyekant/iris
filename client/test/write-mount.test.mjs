@@ -749,3 +749,55 @@ test("a draft that Iris saved for the thread fills a new reply form, and no othe
     }
   }
 });
+
+test("an untouched saved form still gets the saved draft, and a late read does not change the form after Write it for me (issue 743)", async () => {
+  const saved = { thread: "t-2", based_on: "m-9", nudge: false, to: null, item: null, body: "Hi Priya,\n\nYes, Friday at 10." };
+  // The person opened the reply, changed nothing and left: the form is saved with no text.
+  let net = serve(() => [404, { error: "Not found." }]);
+  let first = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+  first.flushSync();
+  first.destroy();
+  net.restore();
+  assert.ok(window.sessionStorage.getItem("iris.write.t-2"), "the untouched form is saved");
+  net = serve((path, method) => (method === "GET" && path === "threads/t-2/draft" ? [200, saved] : [404, { error: "Not found." }]));
+  let app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+  try {
+    await until(() => app.target.querySelector("textarea").value === saved.body);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+
+  // The read of the saved draft answers while Write it for me runs: the form does not change, and keeps the new draft.
+  window.sessionStorage.clear();
+  let releaseGet, releasePost;
+  const heldGet = new Promise((r) => (releaseGet = r));
+  const heldPost = new Promise((r) => (releasePost = r));
+  net = serve((path, method) => {
+    if (method === "GET" && path === "threads/t-2/draft") return [200, saved];
+    if (method === "POST" && path === "threads/t-2/draft") return [200, { body: "Hi Priya,\n\nThe new one.", based_on: "m-9", samples: 3, unknown_cost: false, overrun: false }];
+    return [404, { error: "Not found." }];
+  });
+  const fetch = globalThis.fetch;
+  globalThis.fetch = async (...a) => {
+    if (!String(a[0]).endsWith("/draft")) return fetch(...a);
+    await ((a[1]?.method ?? "GET") === "GET" ? heldGet : heldPost);
+    return fetch(...a);
+  };
+  app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+  try {
+    [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Write it for me").click();
+    app.flushSync();
+    releaseGet();
+    await new Promise((r) => setTimeout(r, 30));
+    app.flushSync();
+    assert.equal(app.target.querySelector("textarea").value, "", "the form does not change while Iris writes");
+    releasePost();
+    await until(() => app.target.querySelector("textarea").value.includes("The new one."));
+    assert.equal(app.target.querySelector(".saved"), null);
+  } finally {
+    globalThis.fetch = fetch;
+    app.destroy();
+    net.restore();
+  }
+});
