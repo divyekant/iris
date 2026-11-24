@@ -624,8 +624,9 @@ A `notify` rule does not change the attention of an item. It gives one
 notice for each new mail that it matches, in the web client and in the
 system (`docs/specs/2026-11-16-notices.md`). It matches with the reading of
 a `review` rule: an item condition matches when one or more items of the
-message have the value. With no `notify` rule that matches, no notice
-appears.
+message have the value. With no `notify` rule that matches, no mail notice
+appears. One system notice comes from no rule: the due date that the person
+gave to a job (decision D24, `docs/specs/2026-11-24-job-due-date.md`).
 
 The engine evaluates the attention of an item again at these times:
 
