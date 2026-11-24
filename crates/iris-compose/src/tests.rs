@@ -121,7 +121,6 @@ fn checks_refuse_bad_content() {
         content(&["a@example.com"], "  ", "x"),
         content(&["a@example.com"], "a\nBcc: b@c.d", "x"),
         content(&["a@example.com"], "a\rb", "x"),
-        content(&["a@example.com"], "=?utf-8?q?x?=", "x"),
         content(&["a@example.com"], "Hi", "a\0b"),
         content(&["a@example.com"], "Hi", ""),
         content(&["a@example.com"], "Hi", " \n\t\r\n "),
@@ -543,5 +542,34 @@ fn a_gmail_draft_reads_back_with_the_gmail_message_id() {
     ] {
         let changed = format!("{extra}\r\n{gmail}");
         assert!(read(changed.as_bytes(), ME).is_none(), "{changed}");
+    }
+}
+
+/// Invariant (#270): a subject with `=?` reads back the same, as the
+/// content that the hash binds. Also long and non-ASCII ones.
+#[test]
+fn a_subject_with_an_encoded_word_reads_back_the_same() {
+    for subject in [
+        "=?utf-8?q?x?=",
+        "Re: =?ISO-8859-1?Q?caf=E9?= and more",
+        "a =? b",
+        &format!("=?{}日本😀", "x".repeat(MAX_SUBJECT - 10)),
+    ] {
+        let c = content(&["a@example.com"], subject, "Body")
+            .check()
+            .unwrap();
+        let raw = compose(
+            "me@example.com",
+            "id.1@example.com",
+            &c,
+            None,
+            1_700_000_000,
+        );
+        let text = String::from_utf8(raw.clone()).unwrap();
+        for line in text.lines() {
+            assert!(line.len() <= 998, "{line}");
+        }
+        let back = read(&raw, "me@example.com").expect("the message reads back");
+        assert_eq!(back.content.subject, c.subject, "{text}");
     }
 }

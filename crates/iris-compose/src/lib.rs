@@ -11,6 +11,7 @@
 
 use mail_builder::headers::address::Address;
 use mail_builder::headers::message_id::MessageId;
+use mail_builder::headers::raw::Raw;
 use mail_builder::MessageBuilder;
 use mail_parser::MessageParser;
 use serde::{Deserialize, Serialize};
@@ -88,11 +89,6 @@ impl Content {
         }
         if chars > MAX_SUBJECT {
             return Err(format!("a subject has at most {MAX_SUBJECT} characters"));
-        }
-        // mail-builder writes a short ASCII subject as it is, and a reader
-        // decodes `=?..?=` in it as an encoded word: the subject changes.
-        if self.subject.contains("=?") {
-            return Err("a subject has no \"=?\"".into());
         }
         self.body = line_ends(&self.body);
         // One rule for each path that makes a draft: no mail with no text leaves.
@@ -273,9 +269,16 @@ pub fn compose(
     let mut m = MessageBuilder::new()
         .from(from)
         .to(list(&content.to))
-        .subject(content.subject.as_str())
         .date(date)
         .message_id(message_id);
+    // mail-builder writes a short ASCII subject as it is, and a reader
+    // decodes `=?..?=` in it as an encoded word: such a subject goes out
+    // as encoded words, so that it reads back the same (#270).
+    m = if content.subject.contains("=?") {
+        m.header("Subject", Raw::new(encoded_words(&content.subject)))
+    } else {
+        m.subject(content.subject.as_str())
+    };
     if !content.cc.is_empty() {
         m = m.cc(list(&content.cc));
     }
@@ -287,6 +290,28 @@ pub fn compose(
     m.text_body(content.body.as_str())
         .write_to_vec()
         .expect("a write to memory does not fail")
+}
+
+/// `text` as RFC 2047 encoded words (`=?utf-8?B?...?=`), one folded line
+/// for each word. Each word holds whole characters of at most 45 bytes, so
+/// it has at most 72 characters (the limit is 75).
+fn encoded_words(text: &str) -> String {
+    use base64::Engine;
+    let mut words = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut end = start;
+        for (i, ch) in text[start..].char_indices() {
+            if i + ch.len_utf8() > 45 {
+                break;
+            }
+            end = start + i + ch.len_utf8();
+        }
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&text[start..end]);
+        words.push(format!("=?utf-8?B?{b64}?="));
+        start = end;
+    }
+    words.join("\r\n ")
 }
 
 /// The headers that Iris writes. A read back refuses each other header.
