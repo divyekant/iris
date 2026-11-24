@@ -845,3 +845,34 @@ fn an_addition_to_a_matter_deleted_during_the_call_is_dropped() {
     assert_eq!((o.added, o.dropped), (0, 1), "{o:?}");
     assert_eq!(col(&b, "SELECT count(*) FROM matter_add"), 0);
 }
+
+/// Decision D35: after a failed proposal call, "Try now" ends the wait and
+/// opens the hourly gate, so the next hourly step calls the model at once.
+/// A new failure starts the wait again.
+#[test]
+fn try_now_after_a_failed_call_lets_the_hourly_step_call_again() {
+    let b = setup("trynow", 2, &titles(2), &["record"]);
+    let f = fake(vec![
+        Err(ModelError::BadAnswer("no content".into())),
+        Err(ModelError::BadAnswer("no content".into())),
+    ]);
+    assert!(run(&b, &f, Gate::Hourly, NOW).failed);
+    assert_eq!(run(&b, &f, Gate::Hourly, NOW + 1).skip, Some(Skip::Wait));
+    let waited = b
+        .store
+        .write(|tx| Ok(iris_matters::propose::try_now(tx, NOW + 2)?))
+        .unwrap();
+    assert!(waited);
+    // Within the hour of the failed call: the step calls again.
+    assert!(run(&b, &f, Gate::Hourly, NOW + 3).failed);
+    assert_eq!(f.data.borrow().len(), 2);
+    assert_eq!(run(&b, &f, Gate::Hourly, NOW + 4).skip, Some(Skip::Wait));
+    // With no wait, a try changes nothing: the hourly gate stays.
+    let later = col(&b, "SELECT retry_at FROM model_setting") + 1;
+    let waited = b
+        .store
+        .write(|tx| Ok(iris_matters::propose::try_now(tx, later)?))
+        .unwrap();
+    assert!(!waited);
+    assert_eq!(run(&b, &f, Gate::Hourly, later).skip, Some(Skip::Hourly));
+}
