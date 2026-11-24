@@ -400,6 +400,8 @@ fn an_address_in_the_name_of_another_owner_is_a_spoof() {
         "\"x@evil.example.net\" <x@evil.example.net>",
         "\"support@bank.example\" <noreply@mail.bank.example>",
         "\"ana@friends.example via Book Club\" <club@lists.example>",
+        "\"ana@friends.example (via Book Club)\" <club@lists.example>",
+        "\"ana@friends.example [Via: Book Club]\" <club@lists.example>",
         "\"Ana Lee\" <ana@friends.example>",
         "\"Ana @ home\" <ana@friends.example>",
         "\"twitter: @ana\" <ana@friends.example>",
@@ -428,7 +430,8 @@ impl Rng {
 
 /// Property of the name check (input that Iris does not control): any name
 /// with no at sign is never a spoof; a name that holds a foreign address,
-/// with no `via`, always is; the `From` address itself never is.
+/// with no `via`, always is; a name with the word `via` between any
+/// separators never is; the `From` address itself never is.
 #[test]
 fn the_name_address_check_holds_for_any_name() {
     use iris_understand::name_address_spoof as spoof;
@@ -452,5 +455,11 @@ fn the_name_address_check_holds_for_any_name() {
             .split_whitespace()
             .any(|w| w.eq_ignore_ascii_case("via"));
         assert_eq!(spoof(&name, from), !has_via, "{name:?}");
+        let (a, b) = (
+            rng.pick(&[" ", "(", "[", "\"", ","]),
+            rng.pick(&[" ", ")", "]", ":", "."]),
+        );
+        let list = format!("{noise}ceo@bank.example {a}VIA{b} {noise}");
+        assert!(!spoof(&list, from), "{list:?}");
     }
 }

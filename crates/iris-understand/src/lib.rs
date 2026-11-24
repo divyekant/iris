@@ -224,17 +224,20 @@ fn dmarc_of(head: &Head) -> Option<&str> {
 /// with a dot. Full-width at signs count as `@`.
 pub fn name_address_spoof(name: &str, from: &str) -> bool {
     let name = name.replace(['\u{FF20}', '\u{FE6B}'], "@");
-    if name
-        .split_whitespace()
-        .any(|w| w.eq_ignore_ascii_case("via"))
-    {
+    // One word split for the list exception and the address scan, so that
+    // "(via List)" and "via List" give the same words.
+    let words: Vec<&str> = name
+        .split(|c: char| c.is_whitespace() || "\"'<>()[],;:`".contains(c))
+        .map(|w| w.trim_matches(|c: char| c == '.' || c == '!' || c == '?'))
+        .collect();
+    if words.iter().any(|w| w.eq_ignore_ascii_case("via")) {
         return false;
     }
     let owner = |addr: &str| iris_senders::registrable(&head::ascii_domain(head::domain(addr)));
     let from_owner = owner(from);
-    name.split(|c: char| c.is_whitespace() || "\"'<>()[],;:`".contains(c))
+    words
+        .iter()
         .filter_map(|w| {
-            let w = w.trim_matches(|c: char| c == '.' || c == '!' || c == '?');
             let (local, domain) = w.split_once('@')?;
             let ok = !local.is_empty()
                 && !domain.contains('@')
