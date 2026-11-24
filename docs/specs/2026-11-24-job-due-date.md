@@ -126,6 +126,7 @@ one queue.
 | A job in `needs_you` or `done` on its due date | No move | Unit test |
 | A job that moved to `needs_you` after its due date (engine or agent) | No second move | Unit test |
 | The person answered or woke the job after the due date | No move | Unit test |
+| The move of one due job fails (for example a goal that is not UTF-8 from raw SQL) | The other due jobs still move and get their notices. One log line names the job | Unit test (`a_job_whose_goal_is_not_utf8_does_not_stop_the_others`) |
 | A job that starts after its due date | One move on the next turn | Unit test (`a_job_that_starts_after_its_due_date_moves_once`) |
 | The engine turn with a due job | The move and one notice; the next turn gives no second notice | Engine test (`the_attention_turn_moves_a_due_job_once`) |
 | A move between the read and the write that makes rule 1, 2 or 3 false | The write sees it and makes no move | Unit test (`a_move_after_the_read_wins`) |
