@@ -447,11 +447,23 @@ fn the_mirror_gets_the_labels_of_gmail() {
         .modify_labels(&b.provider_id(ms[1]), &["Label_1"], &[]);
     assert_ne!(b.mirror_labels(ms[0]), b.gmail_labels(ms[0]));
     let a = b.approved("archive", &ms, PERSON);
+    let n = b.fake.requests().len();
     let c = applied(b.apply(a));
+    let log = b.fake.requests();
     assert_eq!((c.changed, c.unchanged), (2, 1));
     for &m in &ms {
         assert_eq!(b.mirror_labels(m), b.gmail_labels(m));
     }
+    // Gmail labels are not folders: the mirror takes the change of the
+    // call, with no read of a message after the batchModify.
+    let at = log[n..]
+        .iter()
+        .position(|r| r.contains("batchModify"))
+        .unwrap();
+    assert!(
+        !log[n + at + 1..].iter().any(|r| r.contains("/messages/")),
+        "{log:?}"
+    );
 }
 
 /// A withdraw keeps an action with a ledger row in `writing`. The next
@@ -877,7 +889,7 @@ fn a_failed_recovery_read_keeps_the_row() {
     b.stopped(a, &ms, 1);
     // The profile call passes, the first read gets 400.
     b.fake.fail_next(&[0, 400]);
-    assert!(matches!(b.apply(a), Err(Error::Gmail(_))));
+    assert!(matches!(b.apply(a), Err(Error::Provider(_))));
     assert!(b.writing(a));
     assert_eq!(b.state(a).0, "approved");
     assert!(matches!(b.apply(a), Ok(Outcome::Failed { .. })));
@@ -910,7 +922,7 @@ fn a_refused_token_gets_one_new_token() {
     b.fake.fail_next(&[401]);
     assert!(matches!(
         b.apply_as(b.account, a, &mut || None),
-        Err(Error::Gmail(iris_gmail::Error::Unauthorized))
+        Err(Error::Provider(iris_gmail::Error::Unauthorized))
     ));
     assert_eq!(b.state(a).0, "approved");
     assert!(!b.writing(a));
@@ -926,7 +938,7 @@ fn a_refused_token_gets_one_new_token() {
     };
     assert!(matches!(
         apply(&b.store, &b.gmail, &mut token, b.account, a),
-        Err(Error::Gmail(iris_gmail::Error::Unauthorized))
+        Err(Error::Provider(iris_gmail::Error::Unauthorized))
     ));
     assert!(token.refused);
     applied(b.apply(a));
@@ -1236,26 +1248,75 @@ fn a_failed_label_create_checks_the_mode_again() {
     let b = setup("label-gate", 60, Some(APPLY_POLICY));
     let ms = b.messages(IN_INBOX, 2);
     let a = b.labelled("label", "Never", &ms);
-    // The profile call passes; labels.list gets 401, and the new token
-    // comes after the person changed the mode.
-    b.fake.fail_next(&[0, 401]);
+    // The person changes the mode while the create runs, and the create
+    // gets HTTP 409 with no label of the name.
     b.fake.fail_next_write(&[409], false);
-    let r = b.apply_as(b.account, a, &mut || {
-        b.store
-            .write(|tx| {
-                Ok(tx.execute(
-                    "INSERT INTO policy_version(text, sha256, confirmed_at)
-                     VALUES ('version = 0\nmode = \"observe\"\n', 'h7', 7)",
-                    [],
-                )?)
-            })
-            .unwrap();
-        Some(TOKEN.into())
-    });
+    let other = iris_store::Store::open(b.store.dir()).unwrap();
+    b.fake
+        .before_next_matching("POST /gmail/v1/users/me/labels", move || {
+            other
+                .write(|tx| {
+                    Ok(tx.execute(
+                        "INSERT INTO policy_version(text, sha256, confirmed_at)
+                         VALUES ('version = 0\nmode = \"observe\"\n', 'h7', 7)",
+                        [],
+                    )?)
+                })
+                .unwrap();
+        });
+    let r = b.apply(a);
     assert_eq!(r.unwrap(), Outcome::Waiting);
     assert_eq!(b.state(a).0, "approved");
     assert_eq!(b.calls("/labels"), 1);
     assert_eq!(b.calls("batchModify"), 0);
+}
+
+/// A change of the action during the read of the labels stops the create:
+/// no label comes to Gmail from an action that does not apply (#223).
+#[test]
+fn a_change_before_the_label_create_makes_no_label() {
+    for change in ["observe", "withdraw", "stop"] {
+        let b = setup(&format!("label-recheck-{change}"), 60, Some(APPLY_POLICY));
+        let ms = b.messages(IN_INBOX, 2);
+        let a = b.labelled("label", "Never", &ms);
+        let other = iris_store::Store::open(b.store.dir()).unwrap();
+        b.fake
+            .before_next_matching("GET /gmail/v1/users/me/labels", move || {
+                other
+                    .write(|tx| {
+                        match change {
+                            "observe" => tx.execute(
+                                "INSERT INTO policy_version(text, sha256, confirmed_at)
+                                 VALUES ('version = 0\nmode = \"observe\"\n', 'h7', 7)",
+                                [],
+                            )?,
+                            "withdraw" => {
+                                let cs: i64 = tx.query_row(
+                                    "SELECT changeset_id FROM changeset_action WHERE id = ?1",
+                                    [a],
+                                    |r| r.get(0),
+                                )?;
+                                iris_changeset::withdraw_in(tx, cs, None).unwrap();
+                                0
+                            }
+                            _ => 0,
+                        };
+                        Ok(())
+                    })
+                    .unwrap();
+                if change == "stop" {
+                    iris_apply::stop_wait(&other, Duration::ZERO).unwrap();
+                }
+            });
+        let r = b.apply(a);
+        match change {
+            "observe" => assert_eq!(r.unwrap(), Outcome::Waiting),
+            "stop" => assert_eq!(r.unwrap(), Outcome::Stopped),
+            _ => assert!(matches!(r, Err(iris_apply::Error::NotApproved(_))), "{r:?}"),
+        }
+        assert_eq!(b.calls("/labels"), 0, "{change}");
+        assert_eq!(label_id(&b, "Never"), None, "{change}");
+    }
 }
 
 impl Box {
@@ -2452,4 +2513,151 @@ fn a_long_undo_chain_gives_its_net_change() {
     }
     let l = b.gmail_labels(ms[0]);
     assert!(l.contains(&"UNREAD".to_string()) && l.contains(&"INBOX".to_string()));
+}
+
+/// While stopped, an approved action does not apply and makes no call; it
+/// applies after the resume (docs/specs/2026-11-17-stop.md).
+#[test]
+fn no_action_applies_while_stopped() {
+    let b = setup("stop", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 1);
+    let a = b.approved("archive", &ms, PERSON);
+    let s = iris_apply::stop(&b.store).unwrap();
+    assert!(!s.busy);
+    assert!(matches!(b.apply(a), Ok(Outcome::Stopped)));
+    assert_eq!(b.state(a).0, "approved");
+    assert_eq!(b.calls("batchModify"), 0);
+    // The switch is in the store: a new connection reads it.
+    let again = iris_store::Store::open(b.store.dir()).unwrap();
+    assert!(again.read(iris_store::stopped).unwrap().is_some());
+    // The backstop: no code path claims while stopped.
+    let e = b.store.write(|tx| {
+        Ok(tx.execute(
+            "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+             VALUES (?1, ?2, '{}', 'writing', 'inverse', 1)",
+            params![a, b.account],
+        )?)
+    });
+    assert!(format!("{e:?}").contains("Iris is stopped"), "{e:?}");
+    assert!(iris_apply::resume(&b.store).unwrap());
+    assert!(!iris_apply::resume(&b.store).unwrap());
+    applied(b.apply(a));
+}
+
+/// A stop between two calls of one action: the call that ran stays done,
+/// the later call never runs, and the entry is failed.
+#[test]
+fn a_stop_between_two_calls_stops_the_later_calls() {
+    let b = setup("stop-calls", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    let a = b.approved("archive", &ms, PERSON);
+    b.fake.modify_labels(&b.provider_id(ms[0]), &[], &["INBOX"]);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+                 VALUES (?1, ?2, '{\"call\":\"batchModify\",\"add\":[],\"remove\":[\"INBOX\"],\"calls\":2}', 'writing', 'inverse', 1)",
+                params![a, b.account],
+            )?;
+            let l = tx.last_insert_rowid();
+            for (i, m) in ms.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO ledger_message(ledger_id, message_id, call, pre, post)
+                     VALUES (?1, ?2, ?3, '[\"INBOX\"]', '[]')",
+                    params![l, m, i as i64 + 1],
+                )?;
+            }
+            tx.execute("UPDATE ledger SET call = 1 WHERE id = ?1", [l])?;
+            tx.execute(
+                "UPDATE ledger_message SET done = 1 WHERE ledger_id = ?1 AND call = 1",
+                [l],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    iris_apply::stop(&b.store).unwrap();
+    match b.apply(a) {
+        Ok(Outcome::Failed { error, .. }) => assert_eq!(error, iris_apply::STOPPED_CALL),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.calls("batchModify"), 0);
+    let (state, call, rows) = b.ledger(a);
+    assert_eq!((state.as_str(), call), ("failed", 1));
+    let done: Vec<bool> = rows.iter().map(|r| r.3).collect();
+    assert_eq!(done, vec![true, false]);
+    assert!(b.gmail_labels(ms[1]).contains(&"INBOX".to_string()));
+}
+
+/// Stop ends each open session in its transaction, and no session
+/// registers while stopped. A second stop keeps the first time.
+#[test]
+fn stop_ends_each_session_and_refuses_a_register() {
+    let b = setup("stop-sessions", 30, Some(APPLY_POLICY));
+    let job = iris_job::create(&b.store, "Tidy the inbox.", None, now()).unwrap();
+    let s1 = iris_job::register(&b.store, job, "claude-code", now()).unwrap();
+    let wait = std::time::Duration::from_millis(300);
+    let first = iris_apply::stop_wait(&b.store, wait).unwrap();
+    // No supervisor runs here, so the session is not reaped: not complete.
+    assert_eq!((first.sessions, first.live, first.busy), (1, 1, false));
+    let ended = iris_job::session(&b.store, s1).unwrap();
+    assert_eq!(ended.end, Some(iris_job::EndReason::Stop));
+    let e = iris_job::register(&b.store, job, "claude-code", now());
+    assert!(e.unwrap_err().to_string().contains("Iris is stopped"));
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let second = iris_apply::stop_wait(&b.store, wait).unwrap();
+    assert_eq!(
+        (second.since, second.sessions, second.live),
+        (first.since, 0, 1)
+    );
+    iris_apply::resume(&b.store).unwrap();
+    let other = iris_job::create(&b.store, "Sort the receipts.", None, now()).unwrap();
+    iris_job::register(&b.store, other, "claude-code", now()).unwrap();
+}
+
+/// Stop ends each open session of many jobs, one row at a time (#571),
+/// and leaves an ended session as it was.
+#[test]
+fn stop_ends_many_sessions() {
+    let b = setup("stop-many", 30, Some(APPLY_POLICY));
+    let mut open = Vec::new();
+    for i in 0..5 {
+        let job = iris_job::create(&b.store, &format!("Job {i}."), None, now()).unwrap();
+        open.push(iris_job::register(&b.store, job, "claude-code", now()).unwrap());
+    }
+    let done = open.remove(2);
+    iris_job::end(&b.store, done, iris_job::EndReason::Exit, Some(0), now()).unwrap();
+    let wait = std::time::Duration::from_millis(50);
+    let s = iris_apply::stop_wait(&b.store, wait).unwrap();
+    assert_eq!(s.sessions, 4);
+    for id in open {
+        let got = iris_job::session(&b.store, id).unwrap();
+        assert_eq!(got.end, Some(iris_job::EndReason::Stop));
+    }
+    let got = iris_job::session(&b.store, done).unwrap();
+    assert_eq!(got.end, Some(iris_job::EndReason::Exit));
+}
+
+/// Stop waits for an apply that holds the lock, and says `busy` when the
+/// wait ends with the lock still held. The switch is set before the wait.
+#[test]
+fn stop_waits_for_the_apply_lock() {
+    let b = setup("stop-lock", 30, Some(APPLY_POLICY));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(b.store.dir().join(iris_apply::LOCK_FILE))
+        .unwrap();
+    file.try_lock().unwrap();
+    let store = iris_store::Store::open(b.store.dir()).unwrap();
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(store.read(iris_store::stopped).unwrap().is_some());
+        drop(file);
+    });
+    let start = std::time::Instant::now();
+    let s = iris_apply::stop(&b.store).unwrap();
+    assert!(!s.busy);
+    assert!(start.elapsed() >= std::time::Duration::from_millis(300));
+    holder.join().unwrap();
 }

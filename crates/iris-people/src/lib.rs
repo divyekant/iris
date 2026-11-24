@@ -130,7 +130,8 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
              FROM message m JOIN header h ON h.message_id = m.id
              WHERE m.account_id = ?1 AND m.gone_at IS NULL",
             sent = flag("SENT"),
-            draft = flag("DRAFT"),
+            // A draft or a sent copy is no history (IMAP spec section 4).
+            draft = iris_store::draft_or_copy!("m"),
             spam = flag("SPAM"),
         ))?;
         // Pass 1: your addresses (with aliases) and the threads where you sent mail.
@@ -464,11 +465,14 @@ fn valid_address(text: &str) -> Option<String> {
     ok.then_some(a)
 }
 
-/// Check a local part: an atom with no `@` or `"`, or one quoted string that
-/// ends at the end of the part. So `a@b@c.d` and `"a"@b"@c.d` fail.
+/// Check a local part: an atom with no `@`, `"` or white space, or one
+/// quoted string that ends at the end of the part. So `a@b@c.d`,
+/// `"a"@b"@c.d` and `da na@c.d` fail, as in `person.schema.json`.
 fn valid_local(local: &str) -> bool {
     let Some(inner) = local.strip_prefix('"') else {
-        return !local.is_empty() && !local.contains(['@', '"']);
+        return !local.is_empty()
+            && !local.contains(['@', '"'])
+            && !local.contains(char::is_whitespace);
     };
     let mut chars = inner.chars();
     while let Some(c) = chars.next() {
@@ -599,8 +603,11 @@ mod tests {
                 let (local, domain) = a.rsplit_once('@').unwrap();
                 assert!(!domain.is_empty(), "{text:?} gave {a:?}");
                 let Some(inner) = local.strip_prefix('"') else {
+                    // The person schema refuses white space in an unquoted local part.
                     assert!(
-                        !local.is_empty() && !local.contains(['@', '"']),
+                        !local.is_empty()
+                            && !local.contains(['@', '"'])
+                            && !local.contains(char::is_whitespace),
                         "{text:?} gave {a:?}"
                     );
                     continue;
@@ -616,6 +623,64 @@ mod tests {
                 }
                 assert_eq!(close, Some(inner.len()), "{text:?} gave {a:?}");
             }
+        }
+    }
+
+    /// A generated list of mailbox forms (bare, in `<>`, with a name, a bare
+    /// or bracketed quoted local part, groups) gives each address once, in
+    /// order. This covers the join of a bare quoted local part (#92).
+    #[test]
+    fn property_each_entry_keeps_its_address() {
+        const LOCALS: [&str; 3] = ["ana", "Bo.Lee", "c-y"];
+        // shortcut: no `<` or `>` in a quoted local part: mail-parser 1.0.1
+        // then drops the whole list (#83); upgrade with the parser.
+        const QUOTED: [&str; 5] = ["a,b", "a:b", "j o", "x;y", "a.b"];
+        const DOMAINS: [&str; 2] = ["example.org", "Mail.Example.net"];
+        let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = |n: usize| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % n as u64) as usize
+        };
+        for case in 0..5000 {
+            let (mut list, mut want) = (Vec::new(), Vec::new());
+            let mut group: Option<Vec<String>> = None;
+            for _ in 0..1 + next(5) {
+                let d = DOMAINS[next(DOMAINS.len())];
+                let (addr, quoted) = match next(2) {
+                    0 => (format!("{}@{d}", LOCALS[next(LOCALS.len())]), false),
+                    _ => (format!("\"{}\"@{d}", QUOTED[next(QUOTED.len())]), true),
+                };
+                let entry = match next(4) {
+                    0 => addr.clone(),
+                    1 => format!("<{addr}>"),
+                    2 => format!("Ana Lee <{addr}>"),
+                    _ => format!("\"Lee, Ana\" <{addr}>"),
+                };
+                // A bare form with a quoted local part is the join case.
+                let entry = if quoted && next(2) == 0 {
+                    addr.clone()
+                } else {
+                    entry
+                };
+                want.push(addr.to_lowercase());
+                match (&mut group, next(4)) {
+                    (None, 0) => group = Some(vec![entry]),
+                    (Some(g), 0) => {
+                        g.push(entry);
+                        list.push(format!("team: {};", g.join(", ")));
+                        group = None;
+                    }
+                    (Some(g), _) => g.push(entry),
+                    (None, _) => list.push(entry),
+                }
+            }
+            if let Some(g) = group {
+                list.push(format!("team: {};", g.join(", ")));
+            }
+            let text = list.join(", ");
+            assert_eq!(addresses(&text), want, "case {case}: {text}");
         }
     }
 

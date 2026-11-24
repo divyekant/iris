@@ -496,3 +496,32 @@ fn an_unknown_answer_waits_and_tries_again() {
         .as_millis() as i64;
     assert!(col(&b, "SELECT retry_at FROM model_setting") > clock);
 }
+
+/// A failed store write of the counts of the call is no evidence against
+/// the model (#156): it starts no wait.
+#[test]
+fn a_failed_count_write_starts_no_wait() {
+    let b = setup("count-write", 3, &titles(3), &["record"]);
+    b.store
+        .write(|tx| {
+            Ok(tx.execute_batch(
+                "CREATE TRIGGER fail_counts BEFORE UPDATE OF unknown_calls ON understand_run
+                 WHEN NEW.unknown_calls <> OLD.unknown_calls OR NEW.calls <> OLD.calls
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END",
+            )?)
+        })
+        .unwrap();
+    let f = fake(vec![answer(json!([]))]);
+    let connect = |_: &ModelRow| -> Result<std::boxed::Box<dyn Model>, String> {
+        Ok(std::boxed::Box::new(Shared(f.clone())))
+    };
+    let _ = propose(&b.store, &connect, Gate::Now, NOW);
+    assert_eq!(f.data.borrow().len(), 1, "the call went out");
+    assert_eq!(
+        col(
+            &b,
+            "SELECT coalesce(retry_at, 0) + retry_failures FROM model_setting"
+        ),
+        0
+    );
+}

@@ -13,7 +13,11 @@ import signal from "../../docs/spec/schema/examples/signal-code.json" with { typ
 import matterConfirmed from "../../docs/spec/schema/examples/matter-confirmed.json" with { type: "json" };
 import matterProposed from "../../docs/spec/schema/examples/matter-proposed.json" with { type: "json" };
 
-export const items = [youOwe, owedToYou, payment, conversation, receipt, booking, feed, signal] as unknown as Item[];
+// Two accounts (card R6-02): the work mailbox has the conversation and the commitment owed to you.
+const work = new Set(["commitment-owed-to-you", "conversation"]);
+export const items = Object.entries({ "commitment-you-owe": youOwe, "commitment-owed-to-you": owedToYou, payment, conversation, receipt, booking, feed, signal }).map(
+  ([name, item]) => ({ ...item, model: "iris/1.1", account: work.has(name) ? "a-2" : "a-1" }),
+) as unknown as Item[];
 
 const of = (list: Item[]) => ({ count: list.length, items: list });
 const byForm = (form: string) => items.filter((i) => i.form === form);
@@ -28,7 +32,16 @@ export const status: Status = {
       state: null,
       mirror_ready_at: "2026-11-16T08:00:00Z",
       sync: null,
-      last_sync: { kind: "incremental", started: "2026-11-16T09:00:00Z", ended: "2026-11-16T09:00:02Z", result: "ok" },
+      last_sync: { kind: "incremental", started: "2026-11-16T09:00:00Z", ended: "2026-11-16T09:00:02Z", result: "ok: history 9120, fetched 3, gone 0, failed 0" },
+    },
+    {
+      id: 2,
+      address: "you@northwind.example",
+      provider: "gmail",
+      state: null,
+      mirror_ready_at: "2026-11-16T08:30:00Z",
+      sync: null,
+      last_sync: { kind: "incremental", started: "2026-11-16T09:00:00Z", ended: "2026-11-16T09:00:01Z", result: "ok: history 4410, fetched 1, gone 0, failed 0" },
     },
   ],
   messages: { total: 84212, fetched: 84212, understood: 84212, gone: 0 },
@@ -66,7 +79,8 @@ export const ignored: GatePage = {
 export const brief: Brief = {
   // Iris prepared a reply for the first item (card R3-09).
   you_owe: of(byForm("commitment").filter((i) => i.direction === "you_owe").map((i, n) => (n ? i : { ...i, ready: ["draft"] }))),
-  owed_to_you: of(byForm("commitment").filter((i) => i.direction === "owed_to_you")),
+  // Alex is late: Iris prepared a nudge (card R3-07).
+  owed_to_you: of(byForm("commitment").filter((i) => i.direction === "owed_to_you").map((i, n) => (n ? i : { ...i, ready: ["draft"] }))),
   conversations: of(byForm("conversation")),
   records: { receipt: 1, booking: 1 },
   // The feed example is bundled by rule 3 ("Bundle the feed"), so it is only in its bundle.
@@ -395,6 +409,11 @@ export const changesets: Changeset[] = [
   },
 ];
 
+/** The comments of the person on each changeset of a job (card R4-08), oldest first. */
+export const comments: Record<string, { id: number; changeset: string; revision: number; text: string; at: string }[]> = {
+  "cs-79": [{ id: 1, changeset: "cs-79", revision: 1, text: "Use the price of the October quote, not the list price.", at: "2026-11-17T08:20:00Z" }],
+};
+
 /** The draft of each draft and send action of a changeset, with the parts that gave each flag (card R4-07). */
 export const drafts: Record<string, DraftView[]> = {
   "cs-79": [
@@ -554,11 +573,29 @@ const jobPage = (state: string | null) => {
   return { jobs: list, next: null };
 };
 
+/** The stop switch of the fixtures (docs/specs/2026-11-17-stop.md). */
+let stoppedAt: string | null = null;
+
+/** POST /api/stop and /api/resume, as the API answers. */
+export function stopPost(path: string): [number, unknown] | undefined {
+  if (path === "/stop") {
+    stoppedAt ??= new Date().toISOString();
+    return [200, { stopped: true, since: stoppedAt, sessions: 1, live: 0, busy: false }];
+  }
+  if (path === "/resume") {
+    const resumed = stoppedAt !== null;
+    stoppedAt = null;
+    return [200, { stopped: false, since: null, resumed }];
+  }
+  return undefined;
+}
+
 export function answer(path: string): unknown {
   const url = new URL(path, "http://local/");
   const q = url.searchParams;
   const [name, id] = url.pathname.slice(1).split("/");
   if (name === "status") return status;
+  if (name === "stop" && !id) return { stopped: stoppedAt !== null, since: stoppedAt, live: 0, busy: false };
   if (name === "brief" && id?.startsWith("bundle-")) {
     const bundle = brief.bundles?.find((b) => `bundle-${b.rule}` === id);
     return bundle ? { count: bundle.count, items: bundle.items, next: null } : undefined;
@@ -581,6 +618,7 @@ export function answer(path: string): unknown {
   }
   if (name === "messages" && id) return message(id);
   if (name === "messages" && q.get("ids")) return { messages: q.get("ids")!.split(",").map(summaryOf) };
+  if (name === "changesets" && id && url.pathname.endsWith("/comments")) return changesets.some((c) => c.id === id) ? { comments: comments[id] ?? [] } : undefined;
   if (name === "changesets" && id && url.pathname.endsWith("/drafts")) return drafts[id] ? { drafts: drafts[id] } : undefined;
   if (name === "changesets" && id) return changesets.find((c) => c.id === id);
   if (name === "changesets") return { changesets };
@@ -594,6 +632,7 @@ export function answer(path: string): unknown {
   if (name === "notices") return notices;
   if (name === "measures") return measures;
   if (name === "threads" && id === "t-8841" && url.pathname.endsWith("/reply")) return replyStart;
+  if (name === "threads" && id === "t-8700" && url.pathname.endsWith("/draft")) return nudgeDraft;
   return undefined;
 }
 
@@ -668,6 +707,20 @@ function startPreview(id: string) {
   // The engine order: the thread, then the date.
   return list && { messages: list.map(([m, readable], i) => ({ ...(summaryOf(m) as Summary), date: at(15, 9 + 3 * i, 12), readable })) };
 }
+/** POST /api/jobs/<id>/answer, as the engine answers: the job with the answer, 400 for no text, 409 with no question (R5-05). */
+export function answerJob(id: string, body: { answer?: unknown; question?: unknown; updated?: unknown }): [number, unknown] {
+  const job = jobs[id];
+  if (!job) return [404, { error: "not found" }];
+  const said = body.answer;
+  if (typeof said !== "string" || !said.trim()) return [400, { error: "the answer must have 1 to 10000 characters and no NUL character" }];
+  if (typeof body.question !== "string" || typeof body.updated !== "string") return [400, { error: "the body needs question and updated" }];
+  if (job.state !== "needs_you" || job.question !== body.question || job.updated !== body.updated) return [409, { error: "The job does not ask this question now." }];
+  const asked = jobDetails[id]?.job.events ?? [];
+  jobs[id] = { ...job, state: "working", question: undefined, updated: new Date().toISOString() };
+  const events = [...asked, { at: jobs[id].updated, state: "working" as const, by: "person" as const, answer: said }];
+  jobDetails[id] = { job: { ...jobs[id], events }, changesets: jobDetails[id]?.changesets ?? [], threads: jobDetails[id]?.threads ?? {} };
+  return [200, jobDetails[id]];
+}
 /** POST /api/jobs: the fixture job j-12 stands for the new job. */
 export function startJob(): [number, unknown] {
   return [201, jobs["j-12"]];
@@ -720,4 +773,23 @@ export const measures: Measures = {
   memory: { rss_kib: 31_744, messages: 18_402 },
   approvals: { decided: 50, approved: 47 },
   undo: { applied: 48, undone: 1 },
+};
+
+/** GET /api/threads/t-8700/draft: the nudge to Alex, who is late with the SDK examples (R3-07). */
+export const nudgeDraft = {
+  thread: "t-8700",
+  based_on: "m-54001",
+  nudge: true,
+  to: "alex@example.com",
+  item: "c-207",
+  body: "Hi Alex,\n\nA quick check on the SDK examples. When can you send them?\n\nThanks",
+};
+
+/** POST /api/threads/t-8841/draft: a draft of the reply in your voice (R3-04 intent path). */
+export const replyDraft = {
+  body: "Hi Priya,\n\nYes, I will add the Q3 numbers next to Q4, so the board sees the trend. You get the deck on Monday morning.\n\nThanks",
+  based_on: "m-55212",
+  samples: 6,
+  unknown_cost: false,
+  overrun: false,
 };

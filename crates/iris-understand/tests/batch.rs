@@ -49,6 +49,9 @@ fn usage(input: u64, output: u64) -> Usage {
 struct Script {
     answers: RefCell<VecDeque<Answer>>,
     calls: RefCell<u32>,
+    /// Runs in the next call, before the answer: a write of another
+    /// writer during the call.
+    during: RefCell<Option<std::boxed::Box<dyn FnOnce()>>>,
 }
 
 impl Script {
@@ -74,6 +77,9 @@ impl Model for Fake {
 
     fn ask(&self, _: &str, _: &str) -> Result<Reply, ModelError> {
         *self.0.calls.borrow_mut() += 1;
+        if let Some(during) = self.0.during.borrow_mut().take() {
+            during();
+        }
         let (text, usage) = self
             .0
             .answers
@@ -107,6 +113,8 @@ fn store(name: &str) -> Box_ {
                 ("SENT", "SENT", "system"),
                 ("SPAM", "SPAM", "system"),
                 ("DRAFT", "DRAFT", "system"),
+                ("UNSENT", "UNSENT", "system"),
+                ("SENT_COPY", "SENT_COPY", "system"),
             ],
         )
         .unwrap();
@@ -259,6 +267,87 @@ fn no_model_runs_the_free_steps() {
     let r = b.run(&Limits::default()).unwrap();
     assert_eq!(r.stop.as_deref(), Some("no_model"));
     assert!(b.understood(spam) && !b.understood(m));
+}
+
+/// Issue 106: a run computes again the conversations of the threads that a
+/// sender kind change marked, and empties the queue.
+#[test]
+fn a_run_updates_the_talks_of_a_kind_change() {
+    let b = store("talkdue");
+    b.add("1", "a", 1, &["INBOX"]);
+    b.run(&Limits::default()).unwrap();
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sender(address, kind) VALUES ('ana@example.org', 'service')
+                 ON CONFLICT(address) DO UPDATE SET kind = 'service', decided_by = 'person'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(due(&b), Some(1));
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(due(&b), Some(0));
+}
+
+fn due(b: &Box_) -> Option<i64> {
+    b.col("SELECT count(*) FROM talk_due")
+}
+
+/// Issue 106: a kind change that the understanding of the last messages of
+/// a run makes (a sent message makes its recipient a person) marks talks
+/// after the last sender refresh. The run empties the queue before it ends.
+#[test]
+fn a_run_ends_with_no_marked_talk() {
+    let b = store("talkend");
+    b.add("1", "a", 2, &["INBOX"]);
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(due(&b), Some(0));
+    b.add_raw(
+        "2",
+        "b",
+        1,
+        "From: owner@example.com\nTo: Ana Lee <ana@example.org>\nSubject: Hi\n\
+         Message-ID: <s2@example.com>\nDate: Wed, 31 Dec 2025 08:00:00 +0000\n\
+         Content-Type: text/plain\n\nHello Ana.\n",
+        &["SENT"],
+    );
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(
+        b.col("SELECT count(*) FROM sender WHERE address = 'ana@example.org' AND kind = 'person'"),
+        Some(1),
+        "the sent message makes Ana a person"
+    );
+    assert_eq!(due(&b), Some(0));
+}
+
+/// Issue 106: migration 40 marks each thread with understood mail, so a
+/// conversation that a kind change of an older store left stale is
+/// computed again once.
+#[test]
+fn migration_40_marks_each_understood_thread() {
+    let b = store("talkup");
+    b.model(false, None);
+    b.add("1", "a", 2, &["INBOX"]);
+    b.add("2", "b", 1, &["INBOX"]);
+    b.run(&Limits::default()).unwrap();
+    b.add("3", "c", 1, &["INBOX"]);
+    b.store
+        .write(|tx| {
+            tx.execute_batch(
+                "DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender;
+                 DROP TRIGGER talk_due_sender_remove; DROP TABLE talk_due; DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
+                 PRAGMA user_version = 39;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let store = Store::open(&b._dir.0).unwrap();
+    let due: i64 = store
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM talk_due", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(due, 2, "the two understood threads, not the new one");
 }
 
 #[test]
@@ -495,6 +584,36 @@ fn a_later_message_waits_for_an_older_one_that_failed() {
     assert!(!b.understood(first) && !b.understood(second));
 }
 
+/// A draft and a copy in a Sent folder (IMAP `UNSENT`, `SENT_COPY`) are not
+/// pending, and a later message of the thread does not wait for them.
+#[test]
+fn drafts_and_sent_copies_are_not_pending() {
+    let b = store("copies");
+    b.model(false, None);
+    b.add("1", "a", 4, &["DRAFT"]);
+    b.add("2", "a", 3, &["UNSENT"]);
+    b.add("3", "a", 2, &["INBOX", "SENT_COPY"]);
+    let last = b.add("4", "a", 1, &["INBOX"]);
+    // A draft and a copy with no raw content yet do not hold the thread
+    // (issue #686).
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET content_sha256 = NULL WHERE provider_id IN ('1', '2', '3')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(batch::estimate(&b.store, NOW).unwrap().messages, 1);
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(
+        (r.stop.as_deref(), r.messages, r.calls),
+        (Some("done"), 1, 1)
+    );
+    assert!(b.understood(last));
+}
+
 #[test]
 fn the_estimate_counts_each_message_and_changes_nothing() {
     let b = store("estimate");
@@ -728,8 +847,8 @@ fn an_idle_run_keeps_its_row_only_with_keep_idle() {
 }
 
 /// Property: the mark `waits_model` goes away on each change of an input
-/// of a refused call (labels, content, gone state, hostile marks, the model
-/// row), by any write path, and stays when only the budget changes (the
+/// of a refused call (labels, content, gone state, hostile marks, tries,
+/// the model row), by any write path, and not on a write of the same values, and stays when only the budget changes (the
 /// runner spends and refunds it; an approval clears in its own write).
 #[test]
 fn the_waits_model_mark_clears_on_each_input_change() {
@@ -781,9 +900,22 @@ fn the_waits_model_mark_clears_on_each_input_change() {
             "INSERT INTO message_label(message_id, label_id) SELECT :m, id FROM label LIMIT 1",
             true,
         ),
+        // A write of the same values is no change (#154): a full resync
+        // writes each listed message again.
+        (
+            "same content",
+            "UPDATE message SET content_sha256 = content_sha256, gone_at = gone_at,
+               hostile = hostile, tries = tries WHERE id = :m",
+            false,
+        ),
         (
             "content",
-            "UPDATE message SET content_sha256 = content_sha256 WHERE id = :m",
+            "UPDATE message SET content_sha256 = 'new' || content_sha256 WHERE id = :m",
+            true,
+        ),
+        (
+            "tries",
+            "UPDATE message SET tries = tries + 1 WHERE id = :m",
             true,
         ),
         ("gone", "UPDATE message SET gone_at = 1 WHERE id = :m", true),
@@ -794,7 +926,8 @@ fn the_waits_model_mark_clears_on_each_input_change() {
         ),
         (
             "hostile",
-            "UPDATE message SET hostile = '[]' WHERE id = :m",
+            "UPDATE message SET hostile = CASE WHEN hostile IS '[]' THEN '[\"spoof\"]' ELSE '[]' END
+               WHERE id = :m",
             true,
         ),
         (
@@ -902,7 +1035,7 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                  DROP TRIGGER link_check_label; DROP TRIGGER link_check_attention_add;
                  DROP TRIGGER link_check_attention_end;
                  DROP TABLE link_check;
-                 -- Migrations 21 to 28 run again after 20. The triggers
+                 -- Migrations 21 to 32 run again after 20. The triggers
                  -- of 22 replace themselves.
                  DROP TRIGGER job_session_revoke; DROP TRIGGER job_session_job_state;
                  DROP TRIGGER action_flagged_write;
@@ -913,7 +1046,16 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                  DROP TRIGGER measure_connect; DROP TRIGGER measure_time_update;
                  DROP TRIGGER person_decision; DROP TABLE person_decision;
                  DROP TABLE use_open; DROP TABLE use_day; DROP TABLE measure_time;
-                 DROP TABLE write_send;
+                 DROP TABLE write_send; DROP TABLE comment_delivery;
+                 DROP TABLE changeset_comment; DROP TABLE nudge_try;
+                 DROP TRIGGER job_notes_end; DROP TABLE job_notes;
+                 DROP TRIGGER ledger_stop; DROP TABLE stop_switch;
+                 ALTER TABLE account DROP COLUMN imap_host;
+                 ALTER TABLE account DROP COLUMN imap_port;
+                 ALTER TABLE account DROP COLUMN imap_user;
+                 ALTER TABLE account DROP COLUMN categories_off_at;
+                 DROP TRIGGER understand_owner_label_add; DROP TRIGGER understand_owner_label_remove;
+                 DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower; DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender; DROP TRIGGER talk_due_sender_remove; DROP TABLE talk_due; DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
                  PRAGMA user_version = 19;",
             )?;
             Ok(())
@@ -1153,4 +1295,153 @@ fn a_label_change_during_a_check_queues_the_message_again() {
         })
         .unwrap();
     assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(1));
+}
+
+/// A failed store write of the counts of a call is no evidence against the
+/// model (#156): the message gets no `waits_model` mark and no model wait
+/// starts. The next run after a sync reads the message.
+#[test]
+fn a_failed_count_write_marks_no_mail_and_starts_no_wait() {
+    let b = store("count-write");
+    b.model(false, None);
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    let fail = "CREATE TRIGGER fail_counts BEFORE UPDATE OF calls ON understand_run
+                WHEN NEW.calls <> OLD.calls BEGIN SELECT RAISE(ABORT, 'disk full'); END";
+    b.store.write(|tx| Ok(tx.execute_batch(fail)?)).unwrap();
+    let after_sync = Limits {
+        wait_after_error: true,
+        ..Limits::default()
+    };
+    assert!(matches!(b.run(&after_sync), Err(Error::Store(_))));
+    assert_eq!(
+        b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
+        Some(0)
+    );
+    assert_eq!(b.col("SELECT retry_at FROM model_setting"), None);
+
+    b.store
+        .write(|tx| Ok(tx.execute_batch("DROP TRIGGER fail_counts")?))
+        .unwrap();
+    b.run(&after_sync).unwrap();
+    assert!(b.understood(m));
+    assert_eq!(b.script.calls(), 2);
+}
+
+/// `iris understand` does not wait (#155): it clears the marks of an
+/// automatic wait and calls the repaired model before `retry_at`.
+#[test]
+fn a_manual_run_reads_mail_that_waits_for_the_model_wait() {
+    let b = store("manual-wait");
+    b.model(false, None);
+    let waited = b.add("1", "a", 1, &["INBOX"]);
+    let refused = b.add("2", "b", 1, &["INBOX"]);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE model_setting SET retry_failures = 1, retry_at = ?1",
+                [NOW + 3_600_000],
+            )?;
+            tx.execute("UPDATE message SET waits_model = 2 WHERE id = ?1", [waited])?;
+            tx.execute(
+                "UPDATE message SET waits_model = 1 WHERE id = ?1",
+                [refused],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!((r.stop.as_deref(), r.calls), (Some("done"), 1));
+    assert!(b.understood(waited));
+    assert!(!b.understood(refused), "a refusal mark stays");
+    assert_eq!(
+        b.col("SELECT retry_at FROM model_setting"),
+        None,
+        "the call ended the wait"
+    );
+}
+
+/// A sync write between a refusal and its mark (#153): the mark is only
+/// set if the message is still in the state that the refusal read, so the
+/// changed message is read again by the next run.
+#[test]
+fn a_change_during_a_refused_call_leaves_no_mark() {
+    let b = store("refusal-race");
+    b.model(false, None);
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    let db = b._dir.0.join("iris.db");
+    b.script.push(Err(ModelError::Budget("refused".into())));
+    *b.script.during.borrow_mut() = Some(std::boxed::Box::new(move || {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO message_label(message_id, label_id)
+                 SELECT ?1, id FROM label WHERE provider_id = 'UNSENT'",
+                [m],
+            )
+            .unwrap();
+    }));
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.script.calls(), 1);
+    let marks = b.col("SELECT count(*) FROM message WHERE waits_model <> 0");
+    assert_eq!(marks, Some(0), "the changed message has no mark");
+}
+
+/// A change of the thread context during a refused call (a SPAM label on
+/// an earlier message) leaves no mark either (#153).
+#[test]
+fn a_context_change_during_a_refused_call_leaves_no_mark() {
+    let b = store("refusal-context");
+    b.model(false, None);
+    let earlier = b.add("0", "a", 2, &["INBOX"]);
+    b.run(&Limits::default()).unwrap();
+    assert!(b.understood(earlier));
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    let db = b._dir.0.join("iris.db");
+    b.script.push(Err(ModelError::Budget("refused".into())));
+    *b.script.during.borrow_mut() = Some(std::boxed::Box::new(move || {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO message_label(message_id, label_id)
+                 SELECT ?1, id FROM label WHERE provider_id = 'SPAM'",
+                [earlier],
+            )
+            .unwrap();
+    }));
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(
+        b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
+        Some(0)
+    );
+}
+
+/// A sender rerun resets the mail of the sender for a new understanding,
+/// also when its retry fields have the reset values already: the mark goes.
+#[test]
+fn a_sender_rerun_clears_the_mark() {
+    let b = store("rerun-mark");
+    b.model(true, None);
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(
+        b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
+        Some(1),
+        "no budget: a refusal"
+    );
+    b.store
+        .write(|tx| {
+            let sender: i64 = tx.query_row(
+                "SELECT s.id FROM sender s JOIN header h ON h.from_addr = s.address
+                 WHERE h.message_id = ?1",
+                [m],
+                |r| r.get(0),
+            )?;
+            iris_understand::store::rerun_senders(tx, &[sender], NOW)?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
+        Some(0)
+    );
 }

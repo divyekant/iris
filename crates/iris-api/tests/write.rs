@@ -271,6 +271,12 @@ async fn a_body_that_is_not_valid_writes_nothing() {
     let mut v = base.clone();
     v["extra"] = json!(1);
     cases.push(v);
+    // No mail with no text (issue 741).
+    for body in ["", " \n\t\r\n"] {
+        let mut v = base.clone();
+        v["body"] = json!(body);
+        cases.push(v);
+    }
     let mut v = base.clone();
     v["account"] = json!("a-9");
     cases.push(v);
@@ -382,7 +388,8 @@ async fn a_reply_shows_the_conversation() {
         tx.execute_batch(
             "INSERT INTO label(account_id, provider_id, name, kind) VALUES
                (1, 'SENT', 'SENT', 'system'), (1, 'DRAFT', 'DRAFT', 'system'),
-               (1, 'TRASH', 'TRASH', 'system');",
+               (1, 'TRASH', 'TRASH', 'system'), (1, 'UNSENT', 'UNSENT', 'system'),
+               (1, 'SENT_COPY', 'SENT_COPY', 'system');",
         )?;
         // Messages 3 to n: mail of the person (label SENT) with a long text.
         for i in 3..=n {
@@ -407,8 +414,14 @@ async fn a_reply_shows_the_conversation() {
             )?;
         }
         tx.execute("INSERT INTO link_check(message_id) VALUES (?1)", [n])?;
-        // A newer draft and a newer mail in the trash.
-        for (i, label) in [(n + 1, "DRAFT"), (n + 2, "TRASH")] {
+        // A newer draft, a newer mail in the trash, an IMAP draft and a
+        // copy in a Sent folder.
+        for (i, label) in [
+            (n + 1, "DRAFT"),
+            (n + 2, "TRASH"),
+            (n + 3, "UNSENT"),
+            (n + 4, "SENT_COPY"),
+        ] {
             tx.execute(
                 "INSERT INTO message(account_id, thread_id, provider_id, internal_date)
                    VALUES (1, 1, ?1, ?2)",
@@ -573,7 +586,7 @@ async fn property_each_start_address_is_valid() {
                 to: vec![a.clone()],
                 cc: vec![],
                 subject: "s".into(),
-                body: String::new(),
+                body: "b".into(),
             };
             assert!(c.check().is_ok(), "{text:?} gave {a:?}");
         }

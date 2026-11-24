@@ -49,21 +49,24 @@ pending state that the store gives. Each one has an issue:
   calls the runner of this spec. R1-28 note: `iris serve` runs it in one
   understanding thread apart from the sync threads, each 10 seconds. A run
   with nothing pending reads nothing and leaves no row
-  (`Limits::keep_idle`). A run that stopped on `model`, `unknown` or
-  `error` starts a wait that doubles from 60 seconds to 1 hour. The model
+  (`Limits::keep_idle`). A run that stopped on `model` or `unknown`,
+  or that could not make the model, starts a wait that doubles from 60
+  seconds to 1 hour. A store error (`error`) starts no wait, and a refusal
+  after a failed store write of the run marks no mail (#156). The model
   row holds the wait (`model_setting.retry_failures` and `retry_at`,
   schema 5), so `iris serve` and each `iris mirror sync` command see the
   same wait, and `iris model set` (a new row) ends it. Only evidence of the
   model changes the wait: each run that can call the model updates it in
-  its end write, under the run lock. An error stop doubles it, a run with
-  a call and no error ends it and clears the marks, and a run with no call
+  its end write, under the run lock. A model failure doubles it, a run with
+  a call and no model failure ends it and clears the marks, and a run with no call
   changes nothing. During the wait, the run after a sync makes no call
   (`Limits::wait_after_error`), and the mail that needs the model gets
   `waits_model = 2`. The mark names its cause: 1 for a refusal of the
   model row or the budget, 2 for the wait. The end of the wait clears only
   the marks 2; the triggers and the approval clear both. The first such run after the wait sets `retry_at` to NULL
   and clears the marks in the write that starts it, under the lock, then
-  calls the model. `iris understand` does not wait.
+  calls the model. `iris understand` does not wait: it clears the marks 2 in the write
+  that starts it, under the lock, and keeps the marks 1 (#155).
 - The estimate on a screen of the web client.
 - Prices from the network. The person gives the price of the model.
 
@@ -82,7 +85,11 @@ A message is pending when all of these are true:
   call of the message was refused before it went out (no model, or no
   budget). Triggers of the store set it to 0 on each change of an input of
   that refusal: a label, the content, `gone_at`, `hostile` or `tries` of
-  the message, or a new or changed model row (`version`). A budget change
+  the message, or a new or changed model row (`version`). A write of the
+  same value is no change (schema 38, #154). The runner sets the mark only
+  if the message is still in the state that the refused call read
+  (`store::mark_waiting`, #153), so a change between the refusal and the
+  mark leaves no mark. A budget change
   clears nothing, because the runner spends and refunds the budget itself.
   The approval (`iris understand --approve`) clears the marks in its own
   write. So no write path can leave the mark after a change of an input,

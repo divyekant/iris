@@ -330,8 +330,12 @@ fn engine_env() -> HashMap<&'static str, &'static str> {
 }
 
 fn env_of(a: &Adapter, port: Option<u16>) -> HashMap<String, String> {
+    env_with(a, port.map(|port| Endpoint { port, token: None }))
+}
+
+fn env_with(a: &Adapter, end: Option<Endpoint>) -> HashMap<String, String> {
     let e = engine_env();
-    agent_env(a, port, |k| e.get(k).map(|v| v.into()))
+    agent_env(a, end.as_ref(), |k| e.get(k).map(|v| v.into()))
         .into_iter()
         .map(|(k, v)| (k, v.into_string().unwrap()))
         .collect()
@@ -366,6 +370,16 @@ fn the_agent_env_has_only_the_listed_variables() {
     );
     assert_eq!(c["HTTPS_PROXY"], "http://127.0.0.1:4000");
     assert_eq!(c["https_proxy"], "http://127.0.0.1:4000");
+    // macOS: the URL holds the token of the session, in both variables.
+    let t = env_with(
+        &adapter(&f, "claude-code", Some(&path)).unwrap(),
+        Some(Endpoint {
+            port: 4003,
+            token: Some("ab12".into()),
+        }),
+    );
+    assert_eq!(t["HTTPS_PROXY"], "http://iris:ab12@127.0.0.1:4003");
+    assert_eq!(t["https_proxy"], "http://iris:ab12@127.0.0.1:4003");
     let x = env_of(&adapter(&f, "codex", Some(&path)).unwrap(), Some(4001));
     assert!(x.contains_key("OPENAI_API_KEY") && x.contains_key("CODEX_HOME"));
     assert!(!x.contains_key("ANTHROPIC_API_KEY") && !x.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
@@ -409,12 +423,80 @@ fn a_relative_path_entry_is_skipped() {
     );
 }
 
+/// Runs [`the_lookup_skips_a_file_that_the_engine_cannot_run`] again in a
+/// child process as the user `nobody` (65534). The checkout and `TMPDIR`
+/// of root can be closed to other users or on a `noexec` mount. So for
+/// each base folder in turn, the child gets a copy of this test program
+/// and its own `TMPDIR` (owned by `nobody`) in one new folder of the base.
+/// The first base where the child program starts gives the result: the
+/// test files are on the same mount as the program, so they can run too.
+fn as_nobody() {
+    use std::os::unix::fs::chown;
+    use std::os::unix::process::CommandExt;
+    let bases = [
+        std::env::temp_dir(),
+        "/tmp".into(),
+        "/var/tmp".into(),
+        "/dev/shm".into(),
+    ];
+    let mut why = Vec::new();
+    for base in &bases {
+        let home = base.join(format!("iris-cfg-nobody-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let tmp = home.join("tmp");
+        let exe = home.join("test");
+        let made = std::fs::create_dir(&home)
+            .and_then(|()| std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)))
+            .and_then(|()| std::fs::copy(std::env::current_exe()?, &exe))
+            .and_then(|_| std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)))
+            .and_then(|()| std::fs::create_dir(&tmp))
+            .and_then(|()| chown(&tmp, Some(65534), Some(65534)));
+        let child = made.and_then(|()| {
+            std::process::Command::new(&exe)
+                .args([
+                    "--exact",
+                    "config::tests::the_lookup_skips_a_file_that_the_engine_cannot_run",
+                    "--test-threads=1",
+                ])
+                .env("TMPDIR", &tmp)
+                .current_dir(&tmp)
+                .uid(65534)
+                .gid(65534)
+                .output()
+        });
+        let _ = std::fs::remove_dir_all(&home);
+        // The program did not start from this base (no path for nobody,
+        // a `noexec` mount): try the next base.
+        let child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                why.push(format!("{}: {e}", base.display()));
+                continue;
+            }
+        };
+        let out = String::from_utf8_lossy(&child.stdout);
+        // The child ran the test: a filter that matched nothing also succeeds.
+        assert!(
+            child.status.success() && out.contains("1 passed"),
+            "the child as nobody: {out}{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        return;
+    }
+    panic!("the child as nobody started from no base: {why:?}");
+}
+
 /// A file with an execute bit that does not let the engine user run it is
 /// not a program, and the lookup goes on to the next folder of PATH (#432).
-/// Root can run a file with any execute bit, so the check of the first
-/// folder runs only for a user that is not root.
+/// Root can run a file with any execute bit, so as root the test runs
+/// itself again in a child process as the user `nobody` (65534), which
+/// owns the files that it makes (#458).
 #[test]
 fn the_lookup_skips_a_file_that_the_engine_cannot_run() {
+    // SAFETY: geteuid has no memory effects.
+    if unsafe { libc::geteuid() } == 0 {
+        as_nobody();
+    }
     let first = Bin::new("noexec-1", &["my-tool"]);
     let second = Bin::new("noexec-2", &["my-tool"]);
     // Only "others" may run the first file; the engine user owns it.

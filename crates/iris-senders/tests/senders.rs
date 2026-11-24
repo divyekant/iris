@@ -38,6 +38,8 @@ fn open(dir: &TempDir) -> (Store, i64) {
                 ("INBOX", "INBOX", "system"),
                 ("SENT", "SENT", "system"),
                 ("DRAFT", "DRAFT", "system"),
+                ("UNSENT", "UNSENT", "system"),
+                ("SENT_COPY", "SENT_COPY", "system"),
             ],
         )
         .unwrap();
@@ -81,6 +83,11 @@ fn new_message(id: &str, thread: &str, date: i64, labels: &[&str], raw: &[u8]) -
         labels: labels.iter().map(|l| l.to_string()).collect(),
         header: Header {
             from_addr: Some(from_addr(raw)),
+            // The display name of `From`, as the understanding step saves it.
+            from_name: iris_senders::head::Head::parse(raw)
+                .get("from")
+                .and_then(|v| iris_senders::head::addresses(v).into_iter().next())
+                .and_then(|(_, n)| n),
             to_addrs: addr_list(raw, "To: "),
             cc_addrs: addr_list(raw, "Cc: "),
             ..Header::default()
@@ -179,6 +186,39 @@ fn sent_mail_makes_each_recipient_a_person() {
     assert_eq!((d.kind, d.previous), (Kind::Person, Some(Kind::Person)));
 }
 
+/// #109: a name that you wrote in sent mail replaces a name from received
+/// mail, and later received mail does not replace it. The spoof check reads
+/// this name, so a forged `From: Ana Lee` finds the known person.
+#[test]
+fn a_name_you_wrote_replaces_a_received_name() {
+    let mut c = Case::new("sent-name");
+    let support = "From: Support <ana@example.org>\r\nTo: owner@example.com";
+    c.put("t1", &["INBOX"], support);
+    assert_eq!(c.row("ana@example.org").0.as_deref(), Some("Support"));
+    c.put(
+        "t2",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: Ana Lee <ana@example.org>"),
+    );
+    assert_eq!(c.row("ana@example.org").0.as_deref(), Some("Ana Lee"));
+    // Received mail, and sent mail with no name, keep your name.
+    c.put("t3", &["INBOX"], support);
+    c.put(
+        "t4",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: ana@example.org"),
+    );
+    assert_eq!(
+        c.row("ana@example.org"),
+        (
+            Some("Ana Lee".into()),
+            Some("person".into()),
+            Some("sent".into()),
+            Some("engine".into())
+        )
+    );
+}
+
 #[test]
 fn a_reply_in_the_thread_makes_a_person_and_a_draft_does_not() {
     let mut c = Case::new("reply");
@@ -197,6 +237,26 @@ fn a_reply_in_the_thread_makes_a_person_and_a_draft_does_not() {
     c.put("t1", &["SENT"], &format!("From: {OWNER}"));
     let d = c.put("t9", &["INBOX"], head);
     assert_eq!((d.kind, d.basis.as_str()), (Kind::Person, "replied"));
+}
+
+/// An IMAP draft and a copy in a Sent folder are no evidence of a sender:
+/// they are not earlier mail of a service, and a reply after a copy does
+/// not make its sender a person (IMAP spec section 4).
+#[test]
+fn drafts_and_sent_copies_are_no_sender_evidence() {
+    let mut c = Case::new("copies-replied");
+    let head = "From: Cy <cy@example.net>\r\nTo: owner@example.com";
+    c.put("t1", &["SENT_COPY"], head);
+    c.put("t1", &["UNSENT"], head);
+    c.put("t1", &["SENT"], &format!("From: {OWNER}"));
+    assert_eq!(c.put("t9", &["INBOX"], head).kind, Kind::Stranger);
+
+    let mut c = Case::new("copies-service");
+    c.put("t1", &["UNSENT"], &service_mail());
+    c.put("t2", &["SENT_COPY"], &service_mail());
+    assert_eq!(c.put("t3", &[], &service_mail()).kind, Kind::Stranger);
+    assert_eq!(c.put("t4", &[], &service_mail()).kind, Kind::Stranger);
+    assert_eq!(c.put("t5", &[], &service_mail()).kind, Kind::Service);
 }
 
 #[test]
@@ -285,6 +345,25 @@ fn a_service_needs_automated_mail_gmail_dkim_and_two_earlier_messages() {
     let mut c = Case::new("service-forged");
     for t in ["t1", "t2", "t3"] {
         assert_eq!(c.put(t, &[], &forged).kind, Kind::Stranger);
+    }
+}
+
+/// For an account that is not Gmail, a header with the Gmail authserv-id is
+/// text that any sender can write: it is no DKIM pass (IMAP spec section 8).
+#[test]
+fn a_gmail_header_counts_only_for_a_gmail_account() {
+    let mut c = Case::new("service-imap");
+    c.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE account SET provider = 'imap' WHERE id = ?1",
+                [c.acc],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    for t in ["t1", "t2", "t3", "t4"] {
+        assert_eq!(c.put(t, &[], &service_mail()).kind, Kind::Stranger);
     }
 }
 
@@ -1078,6 +1157,105 @@ fn synthetic_mailbox_meets_the_sender_targets() {
         .filter(|f| f.starts_with("sender "))
         .collect();
     assert!(failed.is_empty(), "{failed:?}\n{text}");
+}
+
+/// #111: when a name becomes the name of a known person, each other
+/// sender with mail under that name goes to `rerun`, so that the spoof
+/// check reads that mail again. Also when the name goes away.
+#[test]
+fn a_new_known_name_reruns_the_mail_of_other_senders_with_that_name() {
+    let mut c = Case::new("name-twins");
+    let forged = "From: Ana Lee <ana@evil.example.net>\r\nTo: owner@example.com";
+    c.put("t1", &["INBOX"], forged);
+    let evil = sender_id(&c, "ana@evil.example.net");
+    // You write to the real Ana: her name is now a known name.
+    let d = c.put(
+        "t2",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: Ana Lee <ana@example.org>"),
+    );
+    assert_eq!(d.rerun, [evil]);
+    // The same name again changes nothing.
+    let d = c.put(
+        "t3",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: ANA LEE <ana@example.org>"),
+    );
+    assert!(d.rerun.is_empty());
+    // A new name: the mail under the old name and the new name goes again.
+    let bo = "From: Ana Bo <x@other.example.net>\r\nTo: owner@example.com";
+    c.put("t4", &["INBOX"], bo);
+    let x = sender_id(&c, "x@other.example.net");
+    let d = c.put(
+        "t5",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: Ana Bo <ana@example.org>"),
+    );
+    assert_eq!(d.rerun, [evil, x]);
+}
+
+fn sender_id(c: &Case, addr: &str) -> i64 {
+    c.store
+        .read(|r| {
+            Ok(
+                r.query_row("SELECT id FROM sender WHERE address = ?1", [addr], |x| {
+                    x.get(0)
+                })?,
+            )
+        })
+        .unwrap()
+}
+
+/// #111: a second Ana Lee has a spoof result while the first is known.
+/// When you write to the second one, its own mail goes again too, so the
+/// mark can clear. A sender with no other person of its name does not.
+#[test]
+fn a_new_person_with_a_known_name_reruns_its_own_mail() {
+    let mut c = Case::new("own-twin");
+    c.put(
+        "t1",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: Ana Lee <ana@example.org>"),
+    );
+    c.put(
+        "t2",
+        &["INBOX"],
+        "From: Ana Lee <ana@work.example.net>\r\nTo: owner@example.com",
+    );
+    c.put(
+        "t3",
+        &["INBOX"],
+        "From: Bo Ray <bo@example.net>\r\nTo: owner@example.com",
+    );
+    let work = sender_id(&c, "ana@work.example.net");
+    let d = c.put(
+        "t4",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: Ana Lee <ana@work.example.net>, Bo Ray <bo@example.net>"),
+    );
+    assert_eq!(d.rerun, [work]);
+}
+
+/// #111: a sender that the person accepts at the gate makes its name a
+/// known name, so the mail of other senders with that name goes again.
+#[test]
+fn an_accept_at_the_gate_reruns_the_mail_under_the_name() {
+    let mut c = Case::new("gate-twins");
+    c.put(
+        "t1",
+        &["INBOX"],
+        "From: Cy Ray <cy@evil.example.net>\r\nTo: owner@example.com",
+    );
+    c.put(
+        "t2",
+        &["INBOX"],
+        "From: Cy Ray <cy@example.org>\r\nTo: owner@example.com",
+    );
+    let (evil, cy) = (
+        sender_id(&c, "cy@evil.example.net"),
+        sender_id(&c, "cy@example.org"),
+    );
+    assert_eq!(gate_of(&c, accept, cy), Gate::Done { rerun: vec![evil] });
 }
 
 // The stranger gate (spec 1 section 6.7, card R5-03).

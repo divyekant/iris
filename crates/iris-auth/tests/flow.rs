@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use iris_auth::{Client, Error, Secret, CALLBACK, SCOPE};
+use iris_auth::{Client, Error, Secret, CALLBACK, SCOPE, WRITE_SCOPE};
 use sha2::{Digest, Sha256};
 
 const CLIENT_SECRET: &str = "fake-client-secret-77";
@@ -217,11 +217,86 @@ fn wait_ends_at_the_time_limit() {
 }
 
 fn finish_with(answer: (u16, String)) -> Result<iris_auth::Tokens, Error> {
+    finish_as(answer, false)
+}
+
+/// A sign-in that asks for write access when `write` is true.
+fn finish_as(answer: (u16, String), write: bool) -> Result<iris_auth::Tokens, Error> {
     let (_fake, uri) = token_server(vec![answer]);
     let client = test_client(Some(&uri));
-    let sign_in = client.sign_in().unwrap();
+    let sign_in = if write {
+        client.sign_in_write().unwrap()
+    } else {
+        client.sign_in().unwrap()
+    };
     let state = params(&sign_in.url())["state"].clone();
     sign_in.finish(&format!("{}?state={state}&code=c", sign_in.redirect_uri()))
+}
+
+fn granted(scope: &str) -> (u16, String) {
+    (
+        200,
+        format!(
+            r#"{{"access_token":"{ACCESS}","expires_in":3599,"refresh_token":"{REFRESH}","scope":"{scope}"}}"#
+        ),
+    )
+}
+
+#[test]
+fn a_write_sign_in_asks_for_gmail_modify_only() {
+    let client = test_client(None);
+    assert_eq!(
+        params(&client.sign_in_write().unwrap().url())["scope"],
+        WRITE_SCOPE
+    );
+    // The write sign-in does not change the client: its next sign-in reads only.
+    assert_eq!(params(&client.sign_in().unwrap().url())["scope"], SCOPE);
+}
+
+/// A sign-in can write only if it asked for write access and Google
+/// granted `gmail.modify`.
+#[test]
+fn write_access_comes_from_the_granted_scope() {
+    let both = format!("{SCOPE} {WRITE_SCOPE}");
+    let other = format!("openid {WRITE_SCOPE}");
+    // (asked for write, granted scope text, expected: Some(write) or None for an error)
+    let cases: [(bool, &str, Option<bool>); 8] = [
+        (false, SCOPE, Some(false)),
+        // A plain sign-in is read only, also with an earlier write grant.
+        (false, WRITE_SCOPE, Some(false)),
+        (false, &both, Some(false)),
+        (true, WRITE_SCOPE, Some(true)),
+        (true, &other, Some(true)),
+        (true, &both, Some(true)),
+        (true, SCOPE, None),
+        (true, "openid", None),
+    ];
+    for (write, scope, want) in cases {
+        let got = finish_as(granted(scope), write);
+        match want {
+            Some(w) => assert_eq!(got.unwrap().write, w, "{write} {scope}"),
+            None => assert!(
+                matches!(got, Err(Error::WriteScopeMissing)),
+                "{write} {scope}: {got:?}"
+            ),
+        }
+    }
+    // A scope that only starts like the write scope is not the write scope.
+    let near = format!("{SCOPE} {WRITE_SCOPE}.x");
+    assert!(matches!(
+        finish_as(granted(&near), true),
+        Err(Error::WriteScopeMissing)
+    ));
+}
+
+#[test]
+fn a_write_sign_in_with_no_scope_text_is_write_scope_missing() {
+    let answer =
+        format!(r#"{{"access_token":"{ACCESS}","expires_in":3599,"refresh_token":"{REFRESH}"}}"#);
+    assert!(matches!(
+        finish_as((200, answer), true),
+        Err(Error::WriteScopeMissing)
+    ));
 }
 
 #[test]
@@ -506,4 +581,269 @@ fn empty_tokens_are_refused() {
         test_client(Some(&uri)).refresh(&Secret::new(REFRESH)),
         Err(Error::BadAnswer)
     ));
+}
+
+// Microsoft sign-in (Outlook spec section 7). All values are made up.
+
+const APP_ID: &str = "00000000-1111-2222-3333-444444444444";
+const MS_SCOPE: &str =
+    "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/MailboxSettings.Read https://graph.microsoft.com/User.Read";
+
+fn ms_client(token_uri: &str) -> Client {
+    Client::microsoft(APP_ID, "common")
+        .unwrap()
+        .with_test_token_uri(token_uri)
+        .unwrap()
+}
+
+fn ms_answer(refresh: &str, scope: &str) -> (u16, String) {
+    (
+        200,
+        format!(
+            r#"{{"token_type":"Bearer","scope":"{scope}","expires_in":3599,"access_token":"{ACCESS}","refresh_token":"{refresh}"}}"#
+        ),
+    )
+}
+
+#[test]
+fn microsoft_sign_in_with_pkce_and_no_secret() {
+    let (fake, uri) = token_server(vec![ms_answer(REFRESH, MS_SCOPE)]);
+    let client = ms_client(&uri);
+    let sign_in = client.sign_in().unwrap();
+    let url = sign_in.url();
+    assert!(
+        url.starts_with("https://login.microsoftonline.com/common/oauth2/v2.0/authorize?"),
+        "{url}"
+    );
+    let p = params(&url);
+    assert_eq!(p["scope"], iris_auth::MICROSOFT_SCOPE);
+    assert!(p["scope"].split(' ').any(|s| s == "offline_access"));
+    assert_eq!(p["client_id"], APP_ID);
+    assert_eq!(p["code_challenge_method"], "S256");
+    assert!(!p.contains_key("access_type"));
+    let redirect = p["redirect_uri"].clone();
+    assert!(redirect.starts_with("http://localhost:") && redirect.ends_with(CALLBACK));
+    let state = p["state"].clone();
+    let challenge = p["code_challenge"].clone();
+    let browser =
+        std::thread::spawn(move || browser_get(&redirect, &format!("state={state}&code=m1")));
+    let tokens = sign_in.wait(Duration::from_secs(10)).unwrap();
+    assert!(browser.join().unwrap().contains("200"));
+    assert_eq!(tokens.refresh.expose(), REFRESH);
+    let form = fake.forms.lock().unwrap()[0].clone();
+    assert_eq!(form["code"], "m1");
+    assert_eq!(form["client_id"], APP_ID);
+    assert!(
+        !form.contains_key("client_secret"),
+        "a public client has no secret"
+    );
+    assert_eq!(form["redirect_uri"], sign_in.redirect_uri());
+    assert_eq!(
+        URL_SAFE_NO_PAD.encode(Sha256::digest(&form["code_verifier"])),
+        challenge
+    );
+}
+
+#[test]
+fn a_microsoft_refresh_keeps_the_new_refresh_token() {
+    let (fake, uri) = token_server(vec![
+        ms_answer("rotated-refresh-33", MS_SCOPE),
+        (
+            200,
+            format!(r#"{{"access_token":"a2","expires_in":3599,"scope":"{MS_SCOPE}"}}"#),
+        ),
+        (
+            400,
+            r#"{"error":"invalid_grant","error_description":"AADSTS70000"}"#.into(),
+        ),
+    ]);
+    let client = ms_client(&uri);
+    let r = client.refresh_tokens(&Secret::new(REFRESH)).unwrap();
+    assert_eq!(r.refresh.unwrap().expose(), "rotated-refresh-33");
+    assert_eq!(r.access.token.expose(), ACCESS);
+    let form = fake.forms.lock().unwrap()[0].clone();
+    assert_eq!(form["grant_type"], "refresh_token");
+    assert_eq!(form["refresh_token"], REFRESH);
+    assert_eq!(form["scope"], iris_auth::MICROSOFT_SCOPE);
+    assert!(!form.contains_key("client_secret"));
+    // No new token in the answer: keep the old one.
+    assert!(client
+        .refresh_tokens(&Secret::new(REFRESH))
+        .unwrap()
+        .refresh
+        .is_none());
+    assert!(matches!(
+        client.refresh_tokens(&Secret::new(REFRESH)),
+        Err(Error::Revoked)
+    ));
+}
+
+#[test]
+fn a_missing_mail_permission_is_named() {
+    let cases = [
+        (
+            "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read",
+            Some("Mail.Send"),
+        ),
+        (
+            "https://graph.microsoft.com/Mail.Send",
+            Some("Mail.ReadWrite"),
+        ),
+        ("Mail.Read Mail.Send", Some("Mail.ReadWrite")),
+        ("", Some("Mail.ReadWrite")),
+        // The permissions of the old scope: the category list cannot be read.
+        (
+            "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read",
+            Some("MailboxSettings.Read"),
+        ),
+        // Without the resource prefix, and in another case: accepted.
+        (
+            "mail.readwrite MAIL.SEND mailboxsettings.read User.Read openid profile",
+            None,
+        ),
+        (MS_SCOPE, None),
+    ];
+    for (scope, missing) in cases {
+        let (_, uri) = token_server(vec![ms_answer(REFRESH, scope), ms_answer(REFRESH, scope)]);
+        let client = ms_client(&uri);
+        let sign_in = client.sign_in().unwrap();
+        let state = params(&sign_in.url())["state"].clone();
+        let got = sign_in.finish(&format!("http://localhost/?state={state}&code=c"));
+        let refreshed = client.refresh_tokens(&Secret::new(REFRESH));
+        match missing {
+            Some(p) => {
+                assert!(
+                    matches!(got, Err(Error::PermissionMissing(x)) if x == p),
+                    "{scope}: {got:?}"
+                );
+                assert!(
+                    matches!(refreshed, Err(Error::PermissionMissing(x)) if x == p),
+                    "{scope}"
+                );
+                assert!(got.unwrap_err().to_string().contains(p));
+            }
+            None => {
+                assert!(got.is_ok(), "{scope}: {got:?}");
+                assert!(refreshed.is_ok(), "{scope}");
+            }
+        }
+    }
+    // A code exchange must name the scope; a refresh may leave it out.
+    let no_scope = (
+        200,
+        format!(r#"{{"access_token":"{ACCESS}","expires_in":1,"refresh_token":"{REFRESH}"}}"#),
+    );
+    let (_, uri) = token_server(vec![no_scope.clone(), no_scope]);
+    let client = ms_client(&uri);
+    let sign_in = client.sign_in().unwrap();
+    let state = params(&sign_in.url())["state"].clone();
+    let got = sign_in.finish(&format!("http://localhost/?state={state}&code=c"));
+    assert!(matches!(got, Err(Error::PermissionMissing(_))), "{got:?}");
+    assert!(client.refresh_tokens(&Secret::new(REFRESH)).is_ok());
+}
+
+/// Examples: the client ID and the tenant are GUIDs (the tenant may also be
+/// `common`), so the endpoints always stay on the fixed host.
+#[test]
+fn only_a_guid_or_common_reaches_the_endpoints() {
+    let parts = [
+        "common",
+        "organizations",
+        "consumers",
+        "COMMON",
+        APP_ID,
+        "00000000-1111-2222-3333-44444444444",
+        "00000000-1111-2222-3333-4444444444444",
+        "0000000g-1111-2222-3333-444444444444",
+        "00000000-1111-2222-3333-444444444444/x",
+        "evil.example",
+        "../x",
+        "",
+        "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+        "00000000_1111-2222-3333-444444444444",
+        "common@evil.example",
+    ];
+    let guid = |s: &str| {
+        let p: Vec<&str> = s.split('-').collect();
+        p.len() == 5
+            && p.iter()
+                .zip([8, 4, 4, 4, 12])
+                .all(|(x, n)| x.len() == n && x.bytes().all(|b| b.is_ascii_hexdigit()))
+    };
+    for id in parts {
+        for tenant in parts {
+            let got = Client::microsoft(id, tenant);
+            let ok = guid(id) && (tenant == "common" || guid(tenant));
+            assert_eq!(got.is_ok(), ok, "{id} {tenant}");
+            if let Ok(c) = got {
+                let t = tenant.to_ascii_lowercase();
+                assert_eq!(
+                    c.token_uri(),
+                    format!("https://login.microsoftonline.com/{t}/oauth2/v2.0/token")
+                );
+                let url = c.sign_in().unwrap().url();
+                assert!(url.starts_with(&format!(
+                    "https://login.microsoftonline.com/{t}/oauth2/v2.0/authorize?"
+                )));
+            }
+        }
+    }
+}
+
+#[test]
+fn microsoft_secrets_stay_out_of_debug_text() {
+    let (_, uri) = token_server(vec![ms_answer("rotated-refresh-33", MS_SCOPE)]);
+    let r = ms_client(&uri)
+        .refresh_tokens(&Secret::new(REFRESH))
+        .unwrap();
+    let text = format!("{r:?}");
+    assert!(
+        !text.contains("rotated-refresh-33") && !text.contains(ACCESS),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_microsoft_client_cannot_drop_the_new_refresh_token() {
+    let (fake, uri) = token_server(vec![]);
+    let got = ms_client(&uri).refresh(&Secret::new(REFRESH));
+    assert!(matches!(got, Err(Error::RotatingRefresh)), "{got:?}");
+    assert!(fake.forms.lock().unwrap().is_empty(), "no request");
+}
+
+/// A token endpoint that answers 307 to another listener. The other
+/// listener must get no connection: the code, the verifier and the refresh
+/// token stay on the token host.
+#[test]
+fn a_token_endpoint_redirect_is_not_followed() {
+    let other = TcpListener::bind("127.0.0.1:0").unwrap();
+    let target = format!("http://{}/steal", other.local_addr().unwrap());
+    other.set_nonblocking(true).unwrap();
+    let endpoint = TcpListener::bind("127.0.0.1:0").unwrap();
+    let uri = format!("http://{}/token", endpoint.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in endpoint.incoming() {
+            let mut stream = stream.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: {target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+        }
+    });
+    let google = test_client(Some(&uri));
+    let ms = ms_client(&uri);
+    assert!(google.refresh(&Secret::new(REFRESH)).is_err());
+    assert!(ms.refresh_tokens(&Secret::new(REFRESH)).is_err());
+    let sign_in = ms.sign_in().unwrap();
+    let state = params(&sign_in.url())["state"].clone();
+    assert!(sign_in
+        .finish(&format!("http://localhost/?state={state}&code=c"))
+        .is_err());
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        other.accept().is_err(),
+        "the redirect target got a connection"
+    );
 }

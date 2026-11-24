@@ -207,6 +207,25 @@ async fn a_bad_request_writes_nothing() {
     assert_eq!(one(&s, "SELECT status FROM item"), "open");
 }
 
+/// A state verb of a commitment on an item of another form (a record) is
+/// a 400: the changeset submit denies the target, and nothing is written,
+/// no ledger entry too (issue 232).
+#[tokio::test]
+async fn a_commitment_verb_on_a_record_writes_nothing() {
+    let s = store_of("record", "record", "record-receipt.json", "r-1", "new");
+    for (verb, body) in [
+        ("close", "{}"),
+        ("decline", "{}"),
+        ("defer", r#"{"date":"2099-01-05"}"#),
+    ] {
+        let (code, b) = post(&s, &format!("/api/items/r-1/{verb}"), body).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{verb}: {b}");
+    }
+    assert_eq!(count(&s, "SELECT count(*) FROM changeset"), 0);
+    assert_eq!(count(&s, "SELECT count(*) FROM ledger"), 0);
+    assert_eq!(one(&s, "SELECT status FROM item"), "new");
+}
+
 /// The verbs of R5-02 (docs/specs/2026-11-17-preference-rules.md): each
 /// moves its form from each allowed status to its own status, through a
 /// person changeset and the ledger. Each other status gives 409 and no

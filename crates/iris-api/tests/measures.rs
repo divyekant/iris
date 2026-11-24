@@ -384,18 +384,31 @@ async fn first_brief_runs_to_the_first_brief_with_content() {
     assert!(brief > connect, "{first:?}");
     assert_eq!(m["first_brief"]["connect"], iris_api::rfc3339(connect));
     assert_eq!(m["first_brief"]["brief"], iris_api::rfc3339(brief));
-    assert_eq!(m["first_brief"]["seconds"], (brief - connect) / 1000);
+    // Rounded up: a time just over the target does not show as met.
+    assert_eq!(m["first_brief"]["seconds"], (brief - connect + 999) / 1000);
 }
 
-/// Make the store a store of migration 26 again. Migration 28 (the write
-/// view) runs again after 27, so its table goes too.
+/// Make the store a store of migration 26 again. The later migrations (28
+/// the write view, 32 the review comments, 33 the nudges) run again after
+/// 27, so what they add goes too.
 fn downgrade(s: &Store) {
     s.write(|tx| {
         tx.execute_batch(
             "DROP TRIGGER measure_connect;
              DROP TRIGGER person_decision; DROP TABLE person_decision;
              DROP TABLE use_open; DROP TABLE use_day; DROP TABLE measure_time;
-             DROP TABLE write_send; PRAGMA user_version = 26;",
+             DROP TABLE write_send; DROP TABLE comment_delivery;
+             DROP TABLE changeset_comment; DROP TABLE nudge_try;
+             ALTER TABLE reply_draft DROP COLUMN ask;
+             DROP TRIGGER job_notes_end; DROP TABLE job_notes;
+             DROP TRIGGER job_session_stop; DROP TRIGGER ledger_stop; DROP TABLE stop_switch;
+             ALTER TABLE account DROP COLUMN imap_host;
+             ALTER TABLE account DROP COLUMN imap_port;
+             ALTER TABLE account DROP COLUMN imap_user;
+             ALTER TABLE account DROP COLUMN categories_off_at;
+             DROP TRIGGER understand_owner_label_add; DROP TRIGGER understand_owner_label_remove;
+             DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower; DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender; DROP TRIGGER talk_due_sender_remove; DROP TABLE talk_due; DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
+             PRAGMA user_version = 26;",
         )?;
         Ok(())
     })
@@ -520,7 +533,8 @@ async fn mirror_gives_the_newest_verify_of_each_account() {
     assert_eq!(
         m["mirror"],
         json!([
-            {"account": "a@example.com", "checked": "2026-11-16T12:00:01Z", "differences": 0, "complete": true},
+            // Two skipped messages were not compared: not complete.
+            {"account": "a@example.com", "checked": "2026-11-16T12:00:01Z", "differences": 0, "complete": false},
             {"account": "b@example.com", "checked": "2026-11-16T12:00:00Z", "differences": 1, "complete": false},
             {"account": "c@example.com", "checked": null, "differences": null, "complete": false},
         ])

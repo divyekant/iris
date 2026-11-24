@@ -585,3 +585,137 @@ fn one_large_header_gives_the_same_answer() {
     let (_, f) = draft(&s, &local, "t-1", &["q20000@crowd.example"], &[]);
     assert!(f.contains(&"outside_thread".to_string()), "{f:?}");
 }
+
+/// One entry of an address list for the address `a`, in a form of RFC 5322
+/// that mail uses. `d` is a decoy: an address that the entry holds only in
+/// a display name, a quoted string or a comment. It is not an address of
+/// the entry.
+fn entry(rng: &mut Rng, a: &str, d: &str) -> String {
+    match rng.next() % 13 {
+        0 => a.to_string(),
+        1 => format!("<{a}>"),
+        2 => format!("\"Ana Lee\" <{a}>"),
+        3 => format!("\"{d}\" <{a}>"),
+        4 => format!("\"Lee, {d}\" <{a}>"),
+        5 => format!("{a} ({d})"),
+        6 => format!("({d}, note) {a}"),
+        // A quoted pair: the name is `Ana ", <d>, "x`.
+        7 => format!("\"Ana \\\", {d}, \\\"x\" <{a}>"),
+        8 => format!("\"Ana (x, {d})\" <{a}>"),
+        9 => format!("{a} (note \"x, {d}\")"),
+        // Quoted pairs in a comment: `\)` and `\(` do not end or open it.
+        10 => format!("{a} (x\\), <{d}>, tail)"),
+        11 => format!("(x\\( {d}, y) {a}"),
+        _ => format!("Ana Lee <{a}>"),
+    }
+}
+
+/// An address list of the addresses `xs`, with groups and decoys.
+fn list(rng: &mut Rng, xs: &[String], decoys: &[String]) -> String {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < xs.len() {
+        let one = |rng: &mut Rng, k: usize| {
+            let d = rng.pick(decoys).clone();
+            entry(rng, &xs[k], &d)
+        };
+        if rng.next().is_multiple_of(4) && i + 1 < xs.len() {
+            let (x, y) = (one(rng, i), one(rng, i + 1));
+            out.push(format!("Team: {x}, {y};"));
+            i += 2;
+        } else {
+            out.push(one(rng, i));
+            i += 1;
+        }
+    }
+    out.join(", ")
+}
+
+/// Issue #482: the thread headers come from the sender. For random headers
+/// of the forms of RFC 5322, with decoy addresses in display names, quoted
+/// strings and comments, the flag is set exactly when a recipient is not an
+/// address of the headers (the model). For headers with a stray delimiter,
+/// a recipient that no header text names always gets the flag.
+#[test]
+fn property_random_thread_headers_give_the_model_flag() {
+    let dir = TempDir::new("heads");
+    let s = store(&dir);
+    let local = author(AuthorKind::Local, None);
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    let addr = |rng: &mut Rng, kind: &str| {
+        let n = rng.next() % 1000;
+        match rng.next() % 2 {
+            0 => format!("{kind}{n}@Example.ORG"),
+            _ => format!("{kind}{n}@mail.example.net"),
+        }
+    };
+    for case in 0..300 {
+        let real: Vec<String> = (0..1 + rng.next() % 6)
+            .map(|_| addr(&mut rng, "r"))
+            .collect();
+        let decoys: Vec<String> = (0..3).map(|_| addr(&mut rng, "d")).collect();
+        let from = list(&mut rng, &real[..1], &decoys);
+        let cut = 1 + (rng.next() as usize) % real.len();
+        let to = list(&mut rng, &real[1..cut], &decoys);
+        let cc = list(&mut rng, &real[cut..], &decoys);
+        let mut heads = [from, to, cc];
+        // The text of the headers before a stray delimiter goes in.
+        let text = heads.concat().to_ascii_lowercase();
+        let stray = rng.next().is_multiple_of(3);
+        if stray {
+            let h = &mut heads[(rng.next() % 3) as usize];
+            let at = (0..=h.len())
+                .filter(|i| h.is_char_boundary(*i))
+                .nth((rng.next() as usize) % (h.len() + 1))
+                .unwrap_or(0);
+            h.insert(
+                at,
+                *rng.pick(&['"', '<', '>', '(', ')', '\\', ':', ';', ',']),
+            );
+        }
+        // Message 1 gets the random headers; message 2 (your sent mail)
+        // keeps your From and has no other address.
+        s.write(|tx| {
+            tx.execute(
+                "UPDATE header SET from_addr = ?1, to_addrs = ?2, cc_addrs = ?3
+                 WHERE message_id = 1",
+                rusqlite::params![heads[0], heads[1], heads[2]],
+            )?;
+            tx.execute(
+                "UPDATE header SET to_addrs = ?1, cc_addrs = NULL WHERE message_id = 2",
+                [OWNER],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let never = addr(&mut rng, "n");
+        let mut pool = real.clone();
+        pool.extend(decoys.iter().cloned());
+        pool.push(never);
+        pool.push(OWNER.into());
+        let n = 1 + rng.next() % 3;
+        let to: Vec<String> = (0..n).map(|_| rng.pick(&pool).clone()).collect();
+        let all: Vec<&str> = to.iter().map(String::as_str).collect();
+        let (_, f) = draft(&s, &local, "t-1", &all[..1], &all[1..]);
+        let has = f.iter().any(|x| x == "outside_thread");
+        let real: Vec<String> = real.iter().map(|a| a.to_ascii_lowercase()).collect();
+        let lower = |a: &&str| a.to_ascii_lowercase();
+        if stray {
+            // A stray delimiter: no model of the right list. An address
+            // that no header named before the stray sign is always outside.
+            if all
+                .iter()
+                .map(lower)
+                .any(|a| a != OWNER && !text.contains(&a))
+            {
+                assert!(has, "case {case}: {heads:?} {all:?} {f:?}");
+            }
+        } else {
+            let want = all
+                .iter()
+                .map(lower)
+                .any(|a| a != OWNER && !real.contains(&a));
+            assert_eq!(has, want, "case {case}: {heads:?} {all:?} {f:?}");
+        }
+    }
+}

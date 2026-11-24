@@ -230,53 +230,98 @@ pub struct Mark([i64; 6]);
 
 /// Writes the open proposals again from the decided actions, if the
 /// decisions, the active policy or the hour changed since `last`. Gives the
-/// number of open proposals after a pass, or `None` when no pass ran.
+/// number of open proposals after a pass, or `None` when no pass ran or a
+/// change came between the read and the write.
 pub fn refresh(store: &Store, now: i64, last: &mut Option<Mark>) -> Result<Option<usize>> {
-    // The pass reads many facts: it runs on a read connection, so it holds
-    // no write lock. A decision after the read gives a new mark, and the
-    // next tick runs again; an accept checks its proposal again.
-    let (mark, found) = store.read(|c| {
+    match read_pass(store, now, last)? {
+        Some(pass) => write_pass(store, pass, now, last),
+        None => Ok(None),
+    }
+}
+
+/// The result of the read half of [`refresh`], for [`write_pass`].
+pub struct Pass {
+    mark: Mark,
+    found: Found,
+}
+
+/// The read half of [`refresh`]: a pass on a read connection, so it holds
+/// no write lock. Gives `None` when nothing changed since `last`.
+pub fn read_pass(store: &Store, now: i64, last: &Option<Mark>) -> Result<Option<Pass>> {
+    store.read(|c| {
         let mark = mark(c, now)?;
-        Ok((
+        if *last == Some(mark) {
+            return Ok(None);
+        }
+        Ok(Some(Pass {
             mark,
-            (*last != Some(mark)).then(|| pass(c, now)).transpose()?,
-        ))
-    })?;
-    let Some(found) = found else {
-        return Ok(None);
-    };
+            found: pass(c, now)?,
+        }))
+    })
+}
+
+/// The write half of [`refresh`]. The pass is the truth only of the state
+/// that it read: a decision or an accept (a new policy) after the read
+/// changes the mark, and the write then drops the pass. The next tick
+/// runs again, because `last` does not change.
+pub fn write_pass(
+    store: &Store,
+    pass: Pass,
+    now: i64,
+    last: &mut Option<Mark>,
+) -> Result<Option<usize>> {
     let n = store.write(|tx| {
-        let mut keep = BTreeSet::new();
-        for (key, approvals) in &found.proposals {
-            let (verb, cond, value, form) = key;
-            tx.execute(
-                "INSERT INTO rule_proposal (verb, cond, value, form, approvals, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
-                 ON CONFLICT (verb, cond, value, form) DO UPDATE
-                 SET approvals = excluded.approvals, updated_at = excluded.updated_at
-                 WHERE state = 'open' AND approvals <> excluded.approvals",
-                params![verb, cond, value, form, approvals, now],
-            )?;
-            keep.insert(key.clone());
+        if mark(tx, now)? != pass.mark {
+            return Ok(None);
         }
-        // A pattern that is gone (a refusal, an undo, a new rule) is no longer proposed.
-        let open: Vec<(i64, Key)> = tx
-            .prepare("SELECT id, verb, cond, value, form FROM rule_proposal WHERE state = 'open'")?
-            .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))))?
-            .collect::<rusqlite::Result<_>>()?;
-        let mut n = 0;
-        for (id, key) in open {
-            if keep.contains(&key) {
-                n += 1;
-            } else {
-                tx.execute("DELETE FROM rule_proposal WHERE id = ?1", [id])?;
-            }
-        }
-        Ok(n)
+        write(tx, &pass.found, now).map(Some)
     })?;
     // Only after the commit: a pass that did not commit runs again.
-    *last = Some(mark);
-    Ok(Some(n))
+    if n.is_some() {
+        *last = Some(pass.mark);
+    }
+    Ok(n)
+}
+
+/// Runs a pass in `tx` and writes its proposals. [`crate::active::record`]
+/// calls this for each policy that becomes active, so an accepted rule also
+/// removes each other open proposal that it covers, in the same transaction.
+pub(crate) fn reconcile(tx: &Connection, now: i64) -> Result<usize> {
+    write(tx, &pass(tx, now)?, now)
+}
+
+/// Writes the proposals of `found`, and removes each open proposal that is
+/// not in it. Gives the number of open proposals.
+fn write(tx: &Connection, found: &Found, now: i64) -> Result<usize> {
+    let mut keep = BTreeSet::new();
+    for (key, approvals) in &found.proposals {
+        let (verb, cond, value, form) = key;
+        tx.execute(
+            "INSERT INTO rule_proposal (verb, cond, value, form, approvals, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             ON CONFLICT (verb, cond, value, form) DO UPDATE
+             SET approvals = excluded.approvals, updated_at = excluded.updated_at
+             WHERE state = 'open' AND approvals <> excluded.approvals",
+            params![verb, cond, value, form, approvals, now],
+        )?;
+        keep.insert(key.clone());
+    }
+    // A pattern that is gone (a refusal, an undo, a new rule) is no longer proposed.
+    let open: Vec<(i64, Key)> = tx
+        .prepare("SELECT id, verb, cond, value, form FROM rule_proposal WHERE state = 'open'")?
+        .query_map([], |r| {
+            Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut n = 0;
+    for (id, key) in open {
+        if keep.contains(&key) {
+            n += 1;
+        } else {
+            tx.execute("DELETE FROM rule_proposal WHERE id = ?1", [id])?;
+        }
+    }
+    Ok(n)
 }
 
 fn mark(tx: &Connection, now: i64) -> Result<Mark> {
@@ -341,24 +386,37 @@ pub(crate) fn pass(conn: &Connection, now: i64) -> Result<Found> {
     let mut policy = active.policy;
     policy.mode = crate::Mode::Apply;
     let mut st = conn.prepare(
-        "SELECT a.id, a.verb, a.state, c.author_kind, c.author_job
+        // The window holds the bulk actions too (section 6.6): the loop
+        // skips them after the LIMIT, so that they use up the window.
+        "SELECT a.id, a.verb, a.state, c.author_kind, c.author_job,
+           EXISTS (SELECT 1 FROM json_each(a.flags) WHERE value = 'bulk')
          FROM changeset_action a JOIN changeset c ON c.id = a.changeset_id
          WHERE a.verb IN ('archive', 'read', 'unread', 'inbox', 'trash')
            AND c.author_kind <> 'person'
            AND ((a.decided_by = 'person'
                  AND a.state IN ('approved', 'held', 'applied', 'failed', 'denied'))
                 OR a.state = 'undone')
-           AND NOT EXISTS (SELECT 1 FROM json_each(a.flags) WHERE value = 'bulk')
          ORDER BY a.id DESC LIMIT ?1",
     )?;
-    let rows: Vec<(i64, String, String, String, Option<String>)> = st
+    type Row = (i64, String, String, String, Option<String>, bool);
+    let rows: Vec<Row> = st
         .query_map([MAX_ACTIONS as i64], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
         })?
         .collect::<rusqlite::Result<_>>()?;
     let mut counts: BTreeMap<(Verb, &'static str, String), Count> = BTreeMap::new();
     let mut blocked = BTreeSet::new();
-    for (id, verb, state, author, job) in rows {
+    for (id, verb, state, author, job, bulk) in rows {
+        if bulk {
+            continue;
+        }
         let (Some(verb), Some(author)) = (Verb::from_name(&verb), Author::from_name(&author))
         else {
             continue;
@@ -767,6 +825,66 @@ mod tests {
             Some(&30),
             "the bulk action does not count"
         );
+    }
+
+    /// Spec 2 section 6.6: the window is the newest MAX_ACTIONS eligible
+    /// actions, bulk ones too, and the pass then skips the bulk ones. An
+    /// older action outside the window gives no proposal (issue 315).
+    #[test]
+    fn bulk_actions_use_up_the_window() {
+        let dir = std::env::temp_dir().join(format!("iris-propose-window-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        store
+            .write(|tx| {
+                tx.execute_batch(
+                    "INSERT INTO account(id, provider, address) VALUES (1, 'gmail', 'me@x.example');
+                     INSERT INTO thread(id, account_id, provider_id) VALUES (1, 1, 't');",
+                )?;
+                // MIN_APPROVALS old actions, then MAX_ACTIONS newer bulk actions.
+                let old = std::iter::repeat_n(("old@y.example", "[]"), MIN_APPROVALS as usize);
+                let bulk = std::iter::repeat_n(("new@y.example", "[\"bulk\"]"), MAX_ACTIONS);
+                for (a, (from, flags)) in old.chain(bulk).enumerate() {
+                    tx.execute("INSERT INTO changeset(author_kind, created_at) VALUES ('agent', 0)", [])?;
+                    let cs = tx.last_insert_rowid();
+                    tx.execute(
+                        "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args, hash)
+                         VALUES (?1, 1, 1, 'archive', '{}', '{}', 'h')",
+                        [cs],
+                    )?;
+                    let id = tx.last_insert_rowid();
+                    tx.execute(
+                        "INSERT INTO message(account_id, thread_id, provider_id, internal_date)
+                         VALUES (1, 1, ?1, 0)",
+                        [format!("m{a}")],
+                    )?;
+                    let msg = tx.last_insert_rowid();
+                    tx.execute(
+                        "INSERT INTO header(message_id, from_addr) VALUES (?1, ?2)",
+                        params![msg, from],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO action_message(action_id, message_id) VALUES (?1, ?2)",
+                        [id, msg],
+                    )?;
+                    tx.execute("UPDATE changeset SET why = 'w', submitted_at = 1 WHERE id = ?1", [cs])?;
+                    tx.execute(
+                        "UPDATE changeset_action SET flags = ?2, state = 'approved',
+                         decided_by = 'person', decided_at = 2 WHERE id = ?1",
+                        params![id, flags],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let found = store.read(|c| pass(c, 1_800_000_000)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            found.proposals.keys().all(|k| k.2 != "old@y.example"),
+            "{:?}",
+            found.proposals
+        );
+        assert!(found.proposals.is_empty(), "{:?}", found.proposals);
     }
 
     #[test]

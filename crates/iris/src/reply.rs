@@ -1,17 +1,11 @@
 //! `iris write`: a draft of a reply in your voice (card R3-05, crate
-//! `iris-voice`). The model call goes through the one budget of
-//! understanding (docs/specs/2026-11-16-cost-control.md): the command makes
-//! an `understand_run` row with the prompt `draft/0.1` for the counts of
-//! the call, and the `Budgeted` model reserves the worst case first.
+//! `iris-voice`). `iris_voice::draft` makes the call through the one budget
+//! of understanding (docs/specs/2026-11-16-cost-control.md).
 
 use iris_store::{parse_id, Kind, Store};
-use iris_understand::batch;
-use iris_understand::budget::{model_row, Budgeted, ModelRow};
-use iris_understand::Model;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::OptionalExtension;
 
-/// Makes the model of a `model_setting` row.
-pub type Connect<'a> = &'a dyn Fn(&ModelRow) -> Result<Box<dyn Model>, String>;
+pub use iris_voice::Connect;
 
 /// The thread of `id`: a thread (`t-42`), or the thread of a message (`m-42`).
 fn thread_of(store: &Store, id: &str) -> Result<i64, String> {
@@ -41,86 +35,33 @@ pub fn write(
     now_ms: i64,
 ) -> Result<String, String> {
     let thread = thread_of(store, id)?;
-    // The lock of cost control: no `iris model set` and no budget approval
-    // can change the model row or the budget during the call.
-    // shortcut: a running understanding run makes this command fail at once, wait for the lock if this bothers the owner.
-    let _lock = batch::lock(store).map_err(|e| match e {
-        batch::Error::Busy => {
-            "an understanding run or a model change is in progress: try again in a minute"
-                .to_string()
+    let d = iris_voice::draft(
+        store,
+        thread,
+        iris_voice::Form {
+            intent,
+            ..iris_voice::Form::default()
+        },
+        connect,
+        now_ms,
+        &crate::engine::now_ms,
+    )
+    .map_err(|e| match e {
+        iris_voice::Failure::Budget(e) => {
+            format!("{e}\nApprove a budget first: `iris understand --estimate`, then `--approve`.")
         }
         e => e.to_string(),
     })?;
-    let row = store
-        .read(|c| Ok(model_row(c)?))
-        .map_err(|e| e.to_string())?
-        .ok_or("No model is set. Use `iris model set`.")?;
-    let model = connect(&row)?;
-    let run = store
-        .write(|tx| {
-            tx.execute(
-                "INSERT INTO understand_run(started_at, model, prompt, cost_micro_usd,
-                                            unknown_cost_micro_usd)
-                 VALUES (?1, ?2, ?3, ?4, ?4)",
-                params![
-                    now_ms,
-                    row.model,
-                    iris_voice::PROMPT,
-                    row.price.is_some().then_some(0)
-                ],
-            )?;
-            Ok(tx.last_insert_rowid())
-        })
-        .map_err(|e| e.to_string())?;
-    let budgeted = Budgeted::new(model.as_ref(), store, run, Some(&row));
-    let result = iris_voice::write(store, thread, intent, &budgeted, now_ms);
-    let s = budgeted.state();
-    // The same stop names as a run of understanding. A valid draft can
-    // still have an unknown charge or a cost above its reservation.
-    let stop = if s.refused || s.overrun {
-        "budget"
-    } else if s.unknown {
-        "unknown"
-    } else if s.key_refused || s.server_failed {
-        "model"
-    } else if result.is_ok() {
-        "done"
-    } else {
-        "error"
-    };
-    // The wait after a model error is shared with understanding: only
-    // evidence of the model changes it. An error of the draft itself (a
-    // hostile thread, an invalid answer) is no evidence against the model.
-    let failed = matches!(stop, "unknown" | "model");
-    let end = store.write(|tx| {
-        let ended = now_ms.max(crate::engine::now_ms());
-        tx.execute(
-            "UPDATE understand_run SET ended_at = ?2, stop = ?3 WHERE id = ?1",
-            params![run, ended, stop],
-        )?;
-        let r = batch::report(tx, run)?;
-        batch::update_wait(tx, failed, r.calls > 0, ended)?;
-        Ok(())
-    });
-    if let Some(e) = budgeted.take_error() {
-        return Err(format!("store: {e}"));
-    }
-    let saved = result.map_err(|e| match stop {
-        "budget" => {
-            format!("{e}\nApprove a budget first: `iris understand --estimate`, then `--approve`.")
-        }
-        _ => e.to_string(),
-    })?;
-    end.map_err(|e| e.to_string())?;
+    let saved = d.saved;
     // Spec 2 section 8.3: the labeled fields first, then the text.
     let mut out = format!(
         "Thread: t-{thread}\nBased on: m-{}\nSamples: {}\nSaved: yes\nSent: no\n",
         saved.based_on, saved.samples
     );
-    if s.unknown {
+    if d.unknown_cost {
         out += "Warning: the cost of the call is not known. Iris kept its worst case from the budget.\n";
     }
-    if s.overrun {
+    if d.overrun {
         out += "Warning: the call cost more than its reservation. The budget left can be below zero.\n";
     }
     out += &format!("\n{}\n", saved.body);
@@ -131,6 +72,9 @@ pub fn write(
 mod tests {
     use iris_model::{Reply, Stop, Usage};
     use iris_store::{Body, Header, NewMessage};
+    use iris_understand::batch;
+    use iris_understand::budget::ModelRow;
+    use iris_understand::Model;
 
     use super::*;
 

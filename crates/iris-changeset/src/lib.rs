@@ -27,9 +27,14 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use unicase::UniCase;
 
+mod comment;
 mod flags;
 mod outbox;
 mod written;
+
+pub use comment::{
+    check_comment, comment_in, comment_pending_in, commented_jobs_in, comments_in, Comment,
+};
 pub use flags::{
     action_content, attachment_spans, date_spans, draft_flags, draft_marks, has_attachment,
     has_date, has_money, money_spans, names, new_flags, words, Field, Mark, DRAFT_FLAGS,
@@ -216,7 +221,7 @@ pub fn format_changeset_id(row: i64) -> String {
 /// Parse `cs-42`. Gives `None` for any other text.
 pub fn parse_changeset_id(text: &str) -> Option<i64> {
     let n = text.strip_prefix("cs-")?;
-    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+    if n.is_empty() || n.starts_with('0') || !n.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     n.parse().ok().filter(|row| *row > 0)
@@ -1571,16 +1576,20 @@ fn draft_busy(c: &Connection, action: i64, draft: i64) -> Result<Option<String>>
 
 /// The message that a reply in the thread `thread` (a row ID) answers
 /// (send spec, section 3): the newest message of the thread, by internal
-/// date, that is not gone, has no `DRAFT` label and is not in `SPAM` or
-/// `TRASH`. Submit resolves a `draft` action of a thread with this rule,
+/// date, that is not gone, is not a draft or a sent copy
+/// (`iris_store::draft_or_copy!`) and is not in `SPAM` or `TRASH`. Submit resolves a `draft` action of a thread with this rule,
 /// and the write view shows the same message (write spec, section 5).
 pub fn reply_parent(c: &Connection, thread: i64) -> rusqlite::Result<Option<i64>> {
     c.query_row(
-        "SELECT m.id FROM message m WHERE m.thread_id = ?1 AND m.gone_at IS NULL
+        concat!(
+            "SELECT m.id FROM message m WHERE m.thread_id = ?1 AND m.gone_at IS NULL
            AND NOT EXISTS (SELECT 1 FROM message_label ml
              JOIN label l ON l.id = ml.label_id
-             WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH', 'DRAFT'))
-         ORDER BY m.internal_date DESC, m.id DESC LIMIT 1",
+             WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))
+           AND NOT ",
+            iris_store::draft_or_copy!("m"),
+            " ORDER BY m.internal_date DESC, m.id DESC LIMIT 1"
+        ),
         [thread],
         |r| r.get(0),
     )
@@ -1872,12 +1881,8 @@ pub fn approve_in(c: &Connection, action: ActionId, hash: &str, now_ms: i64) -> 
 /// store, so the document is never in memory. Each action names its
 /// revision, because an old revision can keep decided and open actions.
 pub fn write_document(store: &Store, changeset: i64, out: &mut impl Write) -> Result<()> {
-    store
-        .read(|c| {
-            let tx = c.unchecked_transaction()?;
-            Ok(document(&tx, changeset, out))
-        })
-        .map_err(Error::Store)?
+    // The spool keeps a slow reader of `out` from holding the store.
+    store.read_to(out, |c, w| document(c, changeset, w))
 }
 
 fn document(c: &Connection, changeset: i64, out: &mut impl Write) -> Result<()> {

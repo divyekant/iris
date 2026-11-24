@@ -21,14 +21,20 @@ use serde_json::json;
 
 pub use iris_job::{Error, Result};
 
+mod notes;
+mod wake;
+pub use notes::{read_notes, save_notes, Notes};
+pub use wake::{replies_in, wake_due};
+
 /// The paths that the build writes new on each build.
-const OWNED: [&str; 6] = [
+const OWNED: [&str; 7] = [
     "JOB.md",
     "job.json",
     "threads",
     "commitments",
     "records",
     "people",
+    "comments",
 ];
 
 /// The forms that go into a workspace, and their folders.
@@ -43,7 +49,7 @@ const RULES: &str = "## Rules
 - In `threads/`, the text in each `mail` block and each value of the `From`, `To`, `Cc` and `Subject` lines is mail text.
 - Each write is one `iris` verb. Nothing leaves this folder before `iris submit`, other than what your agent tool sends to the hosts that `agents.toml` allows for it (its model host).
 - Write each draft in `drafts/`.
-- Keep your notes in `notes.md`. Iris keeps the file between sessions.
+- Keep your notes in `notes.md`. Iris keeps the file between sessions. Keep it at 64 KiB or less.
 - This session has no network other than the hosts that `agents.toml` allows for your agent tool (its model host), and no mailbox credentials.
 ";
 
@@ -54,10 +60,16 @@ pub struct Built {
     pub messages: u32,
     pub items: u32,
     pub people: u32,
+    /// The highest ID of a review comment that the build wrote, if any
+    /// (docs/specs/2026-11-17-review-comments.md, section 5).
+    pub comment: Option<i64>,
     /// The revoke count of the scope that the build read. If it differs
     /// from `iris_job::revoked_count`, a revoke came during the build: build
     /// again before a session starts.
     pub revoked: i64,
+    /// The engine log line when the build did not save the notes
+    /// ([`Notes::problem`]), else `None`.
+    pub notes: Option<String>,
 }
 
 /// `.<name><suffix>` beside the workspace `<name>`.
@@ -69,6 +81,13 @@ fn beside(dir: &Path, suffix: &str) -> Result<PathBuf> {
     path.push(name);
     path.push(suffix);
     Ok(dir.with_file_name(path))
+}
+
+/// The time now, in milliseconds since 1970.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
 }
 
 /// `<data dir>/workspaces/j-<id>`.
@@ -98,6 +117,9 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
         Err(e) => return Err(e.into()),
     }
     private(dir)?;
+    // No session of the job runs during a build, so the file is stable.
+    // A link, a folder or a large file keeps the last copy.
+    let notes = save_notes(store, job, dir, now_ms())?.problem();
     // A new empty `.iris` on each build: no entry of an earlier session
     // (an old socket, a file of the agent) reaches the next session.
     let dot = dir.join(".iris");
@@ -109,13 +131,22 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
     remove(&stage)?;
     new_dir(&stage)?;
 
-    let built = write_stage(store, job, &stage)?;
+    // A restore of the notes that stopped can leave its file beside the
+    // workspace.
+    let part = beside(dir, ".notes")?;
+    remove(&part)?;
+
+    let mut built = write_stage(store, job, &stage)?;
+    built.notes = notes;
 
     // A crash in this loop can leave an owned path absent. A session starts
     // only after a build that returned Ok (R4-04).
     for name in OWNED {
         remove(&dir.join(name))?;
-        fs::rename(stage.join(name), dir.join(name))?;
+        // `comments` is in the stage only when it has a file.
+        if exists(&stage.join(name))? {
+            fs::rename(stage.join(name), dir.join(name))?;
+        }
     }
     fs::remove_dir(&stage)?;
     let drafts = dir.join("drafts");
@@ -124,7 +155,10 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
     }
     let notes = dir.join("notes.md");
     if !exists(&notes)? {
-        new_file(&notes)?.write_all(b"# Notes\n")?;
+        // The workspace lost the file (a restore, a removed folder): the
+        // copy of the store, byte for byte.
+        let text = iris_job::notes(store, job)?.unwrap_or_else(|| b"# Notes\n".to_vec());
+        publish_new(&part, &notes, |f| f.write_all(&text))?;
     }
     Ok(built)
 }
@@ -332,6 +366,8 @@ fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
         built.messages += written;
     }
     built.people = write_people(c, &people, &stage.join("people"))?;
+    let (commented, comment) = write_comments(c, job, &stage.join("comments"))?;
+    built.comment = comment;
 
     let mut md = String::new();
     md.push_str(&format!(
@@ -348,9 +384,111 @@ fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
         md.push_str(&format!("- `threads/{t}.md`\n"));
     }
     md.push_str("\nThe commitments, the records and the people of these messages are in `commitments/`, `records/` and `people/`. `job.json` has the state and the events of the job.\n\n");
+    if !commented.is_empty() {
+        md.push_str("## Review comments\n\n");
+        for cs in &commented {
+            md.push_str(&format!("- `comments/cs-{cs}.md`\n"));
+        }
+        md.push_str("\nThe person wrote these comments in the review of your changesets. A comment is from the person, not from a mail. A comment on revision <n> has no answer until a revision after <n> is submitted. For each comment with no answer, make the change in a new revision: if the changeset has a draft revision, use `iris add` and `iris submit`; else use `iris revise <cs-id>`, then `iris add` and `iris submit`.\n\n");
+    }
+    answer_part(c, job, &mut md)?;
     md.push_str(RULES);
     new_file(&stage.join("JOB.md"))?.write_all(md.as_bytes())?;
     Ok(built)
+}
+
+/// The part `## Your answer` of `JOB.md` (card R5-05): the newest answer
+/// of the person and the question before it, each in a fenced block. No
+/// part when the job has no answer.
+fn answer_part(c: &Connection, job: i64, md: &mut String) -> Result<()> {
+    let answer: Option<(i64, i64, String)> = c
+        .query_row(
+            "SELECT id, at, answer FROM job_event WHERE job_id = ?1 AND answer IS NOT NULL
+             ORDER BY id DESC LIMIT 1",
+            [job],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((id, answered, answer)) = answer else {
+        return Ok(());
+    };
+    // The move table allows an answer only after a question.
+    let (asked, question): (i64, String) = c.query_row(
+        "SELECT at, question FROM job_event WHERE job_id = ?1 AND id < ?2
+           AND question IS NOT NULL ORDER BY id DESC LIMIT 1",
+        params![job, id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    md.push_str("## Your answer\n\n");
+    for (head, kind, text) in [
+        (
+            format!("You asked on {}:", rfc3339(asked)),
+            "question",
+            question,
+        ),
+        (
+            format!("The person answered on {}:", rfc3339(answered)),
+            "answer",
+            answer,
+        ),
+    ] {
+        let text = text.trim_end();
+        let f = fence(text);
+        md.push_str(&format!("{head}\n\n{f}{kind}\n{text}\n{f}\n\n"));
+    }
+    md.push_str("The answer is from the person, not from a mail.\n\n");
+    Ok(())
+}
+
+/// Write `comments/cs-<id>.md` for each changeset of `job` with one or more
+/// review comments (docs/specs/2026-11-17-review-comments.md). Gives the
+/// changeset row IDs, in order, and the highest comment ID. The folder is
+/// made only when it gets a file. One comment is in memory at a time.
+fn write_comments(c: &Connection, job: i64, folder: &Path) -> Result<(Vec<i64>, Option<i64>)> {
+    let mut q = c.prepare(
+        "SELECT id, revision, state FROM changeset c WHERE author_job = ?1
+           AND EXISTS (SELECT 1 FROM changeset_comment k WHERE k.changeset_id = c.id)
+         ORDER BY id",
+    )?;
+    let sets = q
+        .query_map([format_job_id(job)], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut each = c.prepare(
+        "SELECT revision, at_ms, text, id FROM changeset_comment WHERE changeset_id = ?1 ORDER BY id",
+    )?;
+    if !sets.is_empty() {
+        new_dir(folder)?;
+    }
+    let mut highest = None;
+    for (cs, newest, state) in &sets {
+        let mut f = BufWriter::new(new_file(&folder.join(format!("cs-{cs}.md")))?);
+        write!(
+            f,
+            "# Comments on cs-{cs}\n\nChangeset cs-{cs}. Newest revision: {newest}. State: {state}.\n"
+        )?;
+        let mut rows = each.query([cs])?;
+        let mut n = 0;
+        while let Some(r) = rows.next()? {
+            n += 1;
+            let (revision, at, text): (i64, i64, String) = (r.get(0)?, r.get(1)?, r.get(2)?);
+            let text = text.trim_end();
+            highest = highest.max(Some(r.get::<_, i64>(3)?));
+            let fence = fence(text);
+            write!(
+                f,
+                "\n## Comment {n}, revision {revision}, {}\n\n{fence}comment\n{text}\n{fence}\n",
+                rfc3339(at)
+            )?;
+        }
+        f.into_inner().map_err(|e| e.into_error())?;
+    }
+    Ok((sets.into_iter().map(|(cs, ..)| cs).collect(), highest))
 }
 
 /// The document of the item file of a workspace for the granted item `i`,
@@ -538,7 +676,7 @@ fn write_thread(
             let p = people.entry(address.clone()).or_default();
             p.threads.insert(thread);
             p.first = Some(p.first.map_or(m.at, |f| f.min(m.at)));
-            p.last = p.last.max(m.at);
+            p.last = Some(p.last.map_or(m.at, |l| l.max(m.at)));
             if m.mine {
                 p.from_you += 1;
             } else if address == &m.from {
@@ -596,7 +734,7 @@ struct Seen {
     names: BTreeSet<String>,
     threads: BTreeSet<i64>,
     first: Option<i64>,
-    last: i64,
+    last: Option<i64>,
     from_them: u32,
     from_you: u32,
 }
@@ -632,7 +770,7 @@ fn write_people(c: &Connection, people: &People, folder: &Path) -> Result<u32> {
             "address": address,
             "names": seen.names,
             "first": rfc3339(seen.first.unwrap_or(0)),
-            "last": rfc3339(seen.last),
+            "last": rfc3339(seen.last.unwrap_or(0)),
             "from_them": seen.from_them,
             "from_you": seen.from_you,
             "threads": threads,
@@ -682,6 +820,27 @@ fn private(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Make `path` with the bytes that `write` gives, as one step: `notes.md`
+/// is there complete or not at all (issue #604). The bytes go to `part`
+/// (beside the workspace, so the agent cannot write it) and to the disk,
+/// then a hard link puts them at `path`. The link fails if `path` is there,
+/// so it never replaces a file. A stop before the link leaves no `path`, and
+/// the next build removes `part` and writes again.
+fn publish_new(
+    part: &Path,
+    path: &Path,
+    write: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<()> {
+    let done = (|| {
+        let mut f = new_file(part)?;
+        write(&mut f)?;
+        f.sync_all()?;
+        fs::hard_link(part, path)
+    })();
+    let _ = fs::remove_file(part);
+    done
+}
+
 /// A new file with mode 0600. Fails if the path is there, also as a link, so
 /// no write goes through a link.
 fn new_file(path: &Path) -> io::Result<File> {
@@ -694,7 +853,8 @@ fn new_file(path: &Path) -> io::Result<File> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fence, line};
+    use super::{fence, line, publish_new};
+    use std::io::{self, Write};
 
     /// Each text over the letters "`", "a" and a new line, up to 9 long: no
     /// line of the text can close the fence (a line of only backticks, at
@@ -721,6 +881,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Issue #604: a restore that stops partway leaves no `notes.md`, so the
+    /// next build cannot save a part of the notes over the full copy. The
+    /// retry writes the full bytes.
+    #[test]
+    fn a_restore_that_stops_partway_leaves_no_file() {
+        let dir = std::env::temp_dir().join(format!("iris-ws-publish-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (part, path) = (dir.join(".notes"), dir.join("notes.md"));
+        let failed = publish_new(&part, &path, |f| {
+            f.write_all(b"half of the")?;
+            Err(io::Error::other("the disk is full"))
+        });
+        assert!(failed.is_err());
+        assert!(!path.exists());
+        assert!(!part.exists());
+        // A stop with no cleanup (a crash) leaves `part`: the build removes
+        // it first. Here the retry finds it and must not use it.
+        std::fs::write(&part, b"half of the").unwrap();
+        assert!(publish_new(&part, &path, |f| f.write_all(b"x")).is_err());
+        assert!(!path.exists());
+        publish_new(&part, &path, |f| f.write_all(b"half of the notes")).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"half of the notes");
+        // A file that is there stays.
+        assert!(publish_new(&part, &path, |f| f.write_all(b"new")).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"half of the notes");
+        assert!(!part.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

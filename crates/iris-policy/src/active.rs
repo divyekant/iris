@@ -114,6 +114,21 @@ pub(crate) fn check(conn: &Connection, data_dir: &std::path::Path) -> Result<Che
 /// Reads `policy.toml` in the data folder and compares it to the active
 /// policy. Changes nothing.
 pub fn file_state(store: &Store) -> Result<FileState> {
+    // A policy writer (`Store::write_policy`, with the backup lock) moves
+    // the old file aside, then links the new one: a read between the two
+    // sees no file (issue #141). For a missing file, wait for the backup
+    // lock, then read again: no writer is then in its write. The wait
+    // can be long during a backup, so call this off an async runtime
+    // thread. With no holder, the lock comes at once.
+    let state = file_state_now(store)?;
+    if state != FileState::Missing {
+        return Ok(state);
+    }
+    let _lock = store.backup_lock()?;
+    file_state_now(store)
+}
+
+fn file_state_now(store: &Store) -> Result<FileState> {
     store.read(|conn| {
         let loaded = match check(conn, store.dir())? {
             Checked::Missing => return Ok(FileState::Missing),
@@ -136,6 +151,9 @@ pub fn file_state(store: &Store) -> Result<FileState> {
 /// and the write are in one transaction, so a crash leaves the old policy or
 /// the new one.
 pub fn confirm(store: &Store, sha256: &str, now: i64) -> Result<Confirm> {
+    // The lock of each policy writer (a change and a discard take it too),
+    // so that the writers of two processes cannot interleave (issue 143).
+    let _lock = store.backup_lock()?;
     store.write(|tx| {
         let loaded = match check(tx, store.dir())? {
             Checked::Missing => return Ok(Confirm::Missing),
@@ -156,7 +174,7 @@ pub fn confirm(store: &Store, sha256: &str, now: i64) -> Result<Confirm> {
 /// Stores `text` as the newest version of the active policy, and records
 /// its rule IDs. A rule ID of the version before that `policy` does not have
 /// is removed, and never used again. Then writes the attention of each item
-/// again, in the same transaction.
+/// and the open rule proposals again, in the same transaction.
 pub(crate) fn record(
     tx: &Connection,
     text: &str,
@@ -189,6 +207,7 @@ pub(crate) fn record(
     }
     crate::attention::evaluate(tx, policy, now)?;
     crate::propose::accepted(tx, policy, now)?;
+    crate::propose::reconcile(tx, now)?;
     Ok(version)
 }
 

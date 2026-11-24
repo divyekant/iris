@@ -16,6 +16,21 @@ use rusqlite::{params, Connection, OptionalExtension};
 pub mod gate;
 /// The header parser of the sender rules. `iris-understand` reads the
 /// same headers with it, so both crates agree on each value.
+/// SQL that is true when the message with the alias `$m` is received mail:
+/// no label `SENT`, and not a draft or a sent copy
+/// (`iris_store::draft_or_copy!`). A copy is no evidence of a sender.
+macro_rules! received {
+    ($m:literal) => {
+        concat!(
+            "NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                      WHERE ml.message_id = ",
+            $m,
+            ".id AND l.provider_id = 'SENT') AND NOT ",
+            iris_store::draft_or_copy!($m)
+        )
+    };
+}
+
 pub mod head;
 use head::Head;
 
@@ -189,12 +204,13 @@ fn decide_message(
     ch: &mut Changes,
 ) -> rusqlite::Result<Decision> {
     let head = Head::parse(raw);
-    let (date, sha, account): (Option<i64>, Option<String>, String) = conn.query_row(
-        "SELECT m.internal_date, m.content_sha256, a.address FROM message m
+    let (date, sha, account, provider): (Option<i64>, Option<String>, String, String) = conn
+        .query_row(
+            "SELECT m.internal_date, m.content_sha256, a.address, a.provider FROM message m
            JOIN account a ON a.id = m.account_id WHERE m.id = ?1",
-        [message],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
+            [message],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
     let labels: Vec<String> = conn
         .prepare_cached(
             "SELECT l.provider_id FROM message_label ml JOIN label l ON l.id = ml.label_id
@@ -267,13 +283,23 @@ fn decide_message(
                     conn,
                     to,
                     None,
+                    false,
                     Kind::Hostile,
                     &format!("near copy of {k}"),
                     now_ms,
                 )
                 .map(drop)?,
                 None => {
-                    upsert(ch, conn, to, name_of(to), Kind::Person, "sent", now_ms)?;
+                    upsert(
+                        ch,
+                        conn,
+                        to,
+                        name_of(to),
+                        true,
+                        Kind::Person,
+                        "sent",
+                        now_ms,
+                    )?;
                     // A row that a person set keeps its kind: only a known
                     // sender adds its domain.
                     let kind: Option<String> =
@@ -295,7 +321,7 @@ fn decide_message(
                   WHERE m.thread_id = (SELECT thread_id FROM message WHERE id = ?1)
                     AND m.id != ?1 AND m.internal_date < ?2 AND m.gone_at IS NULL AND {}
                     AND h.from_addr IS NOT NULL AND h.from_addr != '' AND h.from_addr != lower(?3)",
-                received("m")
+                received!("m")
             ))?
             .query_map(params![message, date.unwrap_or(i64::MIN), account], |r| {
                 r.get(0)
@@ -327,7 +353,8 @@ fn decide_message(
     // The `service` rule: this message is automated mail with a Gmail DKIM
     // pass. The rule counts its earlier messages when it reads the row, so
     // an older message that is understood later counts too.
-    if head.automated() && head.dkim_pass(domain_of(&addr)) {
+    let authserv = head::trusted_authserv(&provider);
+    if head.automated() && head.dkim_pass(domain_of(&addr), authserv) {
         conn.prepare_cached(
             "INSERT OR IGNORE INTO sender_evidence(message_id, address, rule, content_sha256)
              VALUES (?1, ?2, 'service', ?3)",
@@ -362,7 +389,16 @@ fn decide_message(
     }
 
     let (kind, basis) = rules(conn, &addr)?;
-    let id = upsert(ch, conn, &addr, name.as_deref(), kind, &basis, now_ms)?;
+    let id = upsert(
+        ch,
+        conn,
+        &addr,
+        name.as_deref(),
+        false,
+        kind,
+        &basis,
+        now_ms,
+    )?;
     Ok(Decision {
         rerun: Vec::new(),
         kind,
@@ -395,15 +431,6 @@ const SENT_NOT_DRAFT: &str =
       AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                   WHERE ml.message_id = s.id AND l.provider_id = 'DRAFT'))";
 
-/// SQL that is true when the message with the alias `m` is received mail:
-/// no label `SENT` or `DRAFT`.
-fn received(m: &str) -> String {
-    format!(
-        "NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                      WHERE ml.message_id = {m}.id AND l.provider_id IN ('SENT', 'DRAFT'))"
-    )
-}
-
 /// SQL that is true when the header `h` names the address of parameter
 /// `?n` in `To` or `Cc`.
 fn to_addr(n: u8) -> String {
@@ -427,7 +454,7 @@ fn own(basis: &str) -> Decision {
 /// evidence in the store.
 fn recheck(conn: &Connection, addr: &str, now_ms: i64, ch: &mut Changes) -> rusqlite::Result<()> {
     let (kind, basis) = rules(conn, addr)?;
-    upsert(ch, conn, addr, None, kind, &basis, now_ms)?;
+    upsert(ch, conn, addr, None, false, kind, &basis, now_ms)?;
     Ok(())
 }
 
@@ -466,7 +493,7 @@ fn rules(conn: &Connection, addr: &str) -> rusqlite::Result<(Kind, String)> {
                  JOIN header h ON h.message_id = s.id
                 WHERE hm.from_addr = ?1 AND m.gone_at IS NULL AND {} AND {SENT_NOT_DRAFT}
                   AND (s.internal_date > m.internal_date OR {}))",
-            received("m"),
+            received!("m"),
             to_addr(1)
         ),
         [addr],
@@ -487,8 +514,8 @@ fn rules(conn: &Connection, addr: &str) -> rusqlite::Result<(Kind, String)> {
                 AND (SELECT count(*) FROM (SELECT 1 FROM header h JOIN message e ON e.id = h.message_id
                       WHERE h.from_addr = ?1 AND e.internal_date < q.internal_date
                         AND e.gone_at IS NULL AND {} LIMIT 2)) >= 2)",
-            received("q"),
-            received("e")
+            received!("q"),
+            received!("e")
         ),
         [addr],
         |r| r.get(0),
@@ -511,32 +538,48 @@ fn upsert(
     conn: &Connection,
     addr: &str,
     name: Option<&str>,
+    yours: bool,
     kind: Kind,
     basis: &str,
     now_ms: i64,
 ) -> rusqlite::Result<i64> {
-    let before: Option<Option<String>> = conn
-        .query_row("SELECT kind FROM sender WHERE address = ?1", [addr], |r| {
-            r.get(0)
-        })
+    let before: Option<(Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT kind, name FROM sender WHERE address = ?1",
+            [addr],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .optional()?;
+    // A name that you wrote in sent mail replaces a name from received
+    // mail: the spoof check compares later `From` names with it (#109).
+    // Received mail never replaces a name. A row that a person set keeps all.
     conn.prepare_cached(
         "INSERT INTO sender(address, name, kind, basis, decided_by, decided_at)
               VALUES (?1, ?2, ?3, ?4, 'engine', ?5)
          ON CONFLICT(address) DO UPDATE SET
-              name = coalesce(sender.name, excluded.name), kind = excluded.kind,
+              name = CASE WHEN ?6 THEN coalesce(excluded.name, sender.name)
+                          ELSE coalesce(sender.name, excluded.name) END,
+              kind = excluded.kind,
               basis = excluded.basis, decided_by = 'engine', decided_at = excluded.decided_at
          WHERE sender.decided_by IS NOT 'person'",
     )?
-    .execute(params![addr, name, kind.name(), basis, now_ms])?;
-    let (id, after): (i64, Option<String>) = conn.query_row(
-        "SELECT id, kind FROM sender WHERE address = ?1",
+    .execute(params![addr, name, kind.name(), basis, now_ms, yours])?;
+    let (id, after, after_name): (i64, Option<String>, Option<String>) = conn.query_row(
+        "SELECT id, kind, name FROM sender WHERE address = ?1",
         [addr],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let (before, before_name) = before.unwrap_or_default();
+    let old = (before.as_deref(), before_name.as_deref());
+    name_change(
+        conn,
+        ch,
+        addr,
+        old,
+        (after.as_deref(), after_name.as_deref()),
     )?;
     // A missing row or a NULL kind counts as not hostile.
     let hostile = |k: Option<&str>| k == Some(Kind::Hostile.name());
-    let before = before.flatten();
     if hostile(before.as_deref()) != hostile(after.as_deref()) {
         ch.rerun.push(id);
     }
@@ -548,6 +591,50 @@ fn upsert(
         }
     }
     Ok(id)
+}
+
+/// The spoof check (spec 1 section 6.7) compares the `From` name of a
+/// message with the names of the known persons. When the name of a known
+/// person of `addr` comes or goes (a new person, a new name, a person no
+/// more), add to `ch.rerun` each sender whose spoof result under the old or
+/// the new name can change, so that understanding checks the mark of its
+/// mail again (#111): each other sender with mail under that name, and
+/// `addr` itself if it has mail under that name and another known person
+/// has that name. `old` and `new` are (kind, name) of the row of `addr`.
+pub(crate) fn name_change(
+    conn: &Connection,
+    ch: &mut Changes,
+    addr: &str,
+    old: (Option<&str>, Option<&str>),
+    new: (Option<&str>, Option<&str>),
+) -> rusqlite::Result<()> {
+    let p = Kind::Person.name();
+    let was = (old.0 == Some(p)).then_some(old.1).flatten();
+    let is = (new.0 == Some(p)).then_some(new.1).flatten();
+    let same = match (was, is) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+        (a, b) => a.is_none() && b.is_none(),
+    };
+    if same {
+        return Ok(());
+    }
+    // shortcut: a scan of `header` for each change of a person name (no
+    // index on `from_name`), upgrade to an index if a large mailbox is slow.
+    let mut st = conn.prepare_cached(
+        "SELECT DISTINCT s.id FROM header h JOIN sender s ON s.address = h.from_addr
+          WHERE h.from_name = ?1 COLLATE NOCASE AND (h.from_addr != ?2 OR EXISTS (
+            SELECT 1 FROM sender o WHERE o.kind = 'person' AND o.address != ?2
+               AND o.name = ?1 COLLATE NOCASE))",
+    )?;
+    for name in [was, is].into_iter().flatten() {
+        for id in st.query_map(params![name, addr], |r| r.get::<_, i64>(0))? {
+            let id = id?;
+            if !ch.rerun.contains(&id) {
+                ch.rerun.push(id);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The domains of the known senders (kind `person` or `service`), except

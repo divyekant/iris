@@ -829,6 +829,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "imap-proto"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ccf963d57074747b455398a1763d174da80bcaba6f51e3671a82252b531a68b"
+dependencies = [
+ "nom",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -862,12 +871,17 @@ dependencies = [
  "iris-changeset",
  "iris-compose",
  "iris-fakegmail",
+ "iris-fakegraph",
+ "iris-fakeimap",
  "iris-gmail",
+ "iris-graph",
+ "iris-imap",
  "iris-job",
  "iris-matters",
  "iris-mcp",
  "iris-model",
  "iris-policy",
+ "iris-provider",
  "iris-service",
  "iris-session",
  "iris-spec",
@@ -879,6 +893,7 @@ dependencies = [
  "iris-voice",
  "iris-web",
  "iris-workspace",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",
@@ -924,9 +939,12 @@ dependencies = [
  "iris-changeset",
  "iris-compose",
  "iris-fakegmail",
+ "iris-fakegraph",
  "iris-gmail",
+ "iris-graph",
  "iris-job",
  "iris-policy",
+ "iris-provider",
  "iris-spec",
  "iris-store",
  "iris-sync",
@@ -1013,14 +1031,61 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-fakegraph"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "iris-synth",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "iris-fakeimap"
+version = "0.0.0"
+
+[[package]]
 name = "iris-gmail"
 version = "0.0.0"
 dependencies = [
  "iris-fakegmail",
+ "iris-provider",
  "iris-synth",
  "serde",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "iris-graph"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "iris-fakegraph",
+ "iris-provider",
+ "iris-synth",
+ "mail-parser",
+ "serde",
+ "serde_json",
+ "unicase",
+ "ureq",
+]
+
+[[package]]
+name = "iris-imap"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "imap-proto",
+ "iris-fakeimap",
+ "iris-provider",
+ "iris-store",
+ "iris-sync",
+ "iris-synth",
+ "mail-parser",
+ "rustls",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1038,6 +1103,7 @@ dependencies = [
 name = "iris-matters"
 version = "0.0.0"
 dependencies = [
+ "iris-eval",
  "iris-model",
  "iris-store",
  "iris-understand",
@@ -1073,13 +1139,10 @@ version = "0.0.0"
 dependencies = [
  "iris-fakegmail",
  "iris-gmail",
- "iris-spec",
  "iris-store",
  "iris-sync",
  "iris-synth",
  "rusqlite",
- "serde_json",
- "sha2",
 ]
 
 [[package]]
@@ -1108,6 +1171,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-provider"
+version = "0.0.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "iris-senders"
 version = "0.0.0"
 dependencies = [
@@ -1127,15 +1197,18 @@ version = "0.0.0"
 name = "iris-session"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "httparse",
  "iris-job",
  "iris-store",
  "iris-workspace",
  "libc",
+ "mach2",
  "rusqlite",
  "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "socket2",
  "toml",
 ]
@@ -1167,7 +1240,10 @@ name = "iris-sync"
 version = "0.0.0"
 dependencies = [
  "iris-fakegmail",
+ "iris-fakegraph",
  "iris-gmail",
+ "iris-graph",
+ "iris-provider",
  "iris-store",
  "iris-synth",
  "rusqlite",
@@ -1249,6 +1325,7 @@ dependencies = [
  "iris-spec",
  "iris-store",
  "iris-talk",
+ "libc",
  "rusqlite",
  "serde_json",
 ]
@@ -1363,6 +1440,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
+name = "mach2"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
+
+[[package]]
 name = "mail-builder"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1434,6 +1517,15 @@ name = "multiversion_no_op"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
+
+[[package]]
+name = "nom"
+version = "8.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df9761775871bdef83bee530e60050f7e54b1105350d6884eb0fb4f46c2f9405"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "num"

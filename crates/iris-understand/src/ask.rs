@@ -65,7 +65,9 @@ const ELIGIBLE: &str = concat!(
     " AND NOT EXISTS (SELECT 1 FROM sender s
                     WHERE s.address = h.from_addr COLLATE NOCASE AND s.kind = 'hostile')
     AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                    WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))"
+                    WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))
+    AND NOT ",
+    iris_store::draft_or_copy!("m")
 );
 
 /// Words that a search for them does not narrow (English only).
@@ -545,35 +547,38 @@ fn read_answer(json: &Value, docs: &[Doc]) -> Option<(Vec<Claim>, Vec<Source>)> 
 }
 
 /// True if `text` holds `quote` with no word cut: with any run of white
-/// space as one space, and no difference of case. A word is letters and
+/// space as one space, no difference of case, and typographic marks as
+/// their plain forms (`prompt::squash`). A word is letters and
 /// digits, also joined by one mark of [`JOIN`] (`1,234`, `07:40`, `e-mail`).
 /// Neither end of a match may fall inside a word of the text, whatever the
 /// quote starts or ends with.
 fn has(text: &str, quote: &str) -> bool {
-    let norm = |s: &str| {
-        s.split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase()
-    };
-    let (text, quote) = (norm(text), norm(quote));
+    // The same fold as the quote check of an item (#102). The word ends
+    // come from the marks of the mail, not from their plain forms.
+    let ((text, from), quote) = (crate::prompt::fold(text), crate::prompt::squash(quote));
     if quote.is_empty() {
         return false;
     }
-    let words = words(&text);
+    let words = words(&text, &from);
     let inside = |at: usize| words.iter().any(|&(s, e)| s < at && at < e);
     text.char_indices()
         .any(|(i, _)| text[i..].starts_with(&quote) && !inside(i) && !inside(i + quote.len()))
 }
 
 /// The byte spans of the words of `s`: runs of letters and digits, with one
-/// mark of [`JOIN`] between two of them inside the word.
-fn words(s: &str) -> Vec<(usize, usize)> {
+/// mark of [`JOIN`] between two of them inside the word. `from` gives the
+/// original mark of each plain mark of `prompt::fold`.
+fn words(s: &str, from: &[(usize, char)]) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut start: Option<usize> = None;
     let mut it = s.char_indices().peekable();
     while let Some((i, c)) = it.next() {
-        let joins = JOIN.contains(&c)
+        // A plain mark of the fold joins only if its original mark joins.
+        // `from` is in the order of the offsets.
+        let mark = from
+            .binary_search_by_key(&i, |&(at, _)| at)
+            .map_or(c, |k| from[k].1);
+        let joins = JOIN.contains(&mark)
             && start.is_some()
             && it.peek().is_some_and(|&(_, n)| n.is_alphanumeric());
         if c.is_alphanumeric() || joins {
@@ -741,6 +746,32 @@ mod tests {
             ("07:40.", true),
             ("12, then", true),
             ("  ", false),
+        ] {
+            assert_eq!(has(text, q), want, "{q:?}");
+        }
+        // #102: typographic marks match their plain forms, on either side.
+        let text = "Don\u{2019}t miss it - the \"Lisbon\" gate\u{2026}";
+        assert!(has(
+            text,
+            "don't miss it \u{2013} the \u{201C}lisbon\u{201D} gate..."
+        ));
+        assert!(!has(
+            text,
+            "don't miss it \u{2013} the \u{201C}porto\u{201D}"
+        ));
+        // The case fold reads the whole word, as before: a final sigma.
+        assert!(has("ΟΣ ΚΑΙ", "ος και"));
+        // The fold moves no word end: an em dash and an ellipsis do not
+        // join words, as before the fold; a curly apostrophe still joins.
+        let text = "Send by Friday\u{2014}please. Wait\u{2026}now. Don\u{2019}t go.";
+        for (q, want) in [
+            ("Friday", true),
+            ("please.", true),
+            ("by friday-please", true),
+            ("Wait", true),
+            ("now", true),
+            ("Don", false),
+            ("don't go", true),
         ] {
             assert_eq!(has(text, q), want, "{q:?}");
         }

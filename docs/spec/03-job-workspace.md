@@ -1,6 +1,6 @@
 # Specification 3: the job workspace layout
 
-- Open model version: 1.0
+- Open model version: 1.1
 - Release: 4
 - Input: `docs/specs/2026-11-16-job-workspace.md` (the design and the
   reasons)
@@ -56,8 +56,13 @@ and a schema do not agree, the schema is correct and this text has a defect.
 - The build owns `JOB.md`, `job.json`, `threads/`, `commitments/`,
   `records/`, `people/` and `comments/`. It writes them new on each build.
 - The agent owns `drafts/` and `notes.md`. The build makes them only when
-  they are not there. A new `notes.md` holds the line `# Notes`. The build
-  never reads or changes them after that.
+  they are not there, and never changes them after that.
+- Iris keeps a copy of `notes.md` in the store (the memory of the job,
+  `docs/specs/2026-11-17-job-memory.md`). Iris saves the copy at each build
+  and after the end of each session, when `notes.md` is a regular file of
+  65,536 bytes or less. Iris does not read `notes.md` through a link. A
+  new `notes.md` holds the copy, byte for byte. If the store has no copy,
+  a new `notes.md` holds the line `# Notes`.
 - The build makes `.iris/` new and empty on each build. The session of the
   job (R4-04) uses it.
 - The folders `threads/`, `commitments/`, `records/` and `people/` are
@@ -83,6 +88,12 @@ A ref has a list of messages. The list is set when the person adds the ref:
 
 An add of a ref that is in the scope adds the messages of that moment to
 its list. A revoked ref has no list.
+
+When a job that waits for a reply on a thread of its scope wakes, the
+engine adds the replies to the list of that thread ref: each new message of
+the thread that is clean and that you did not send
+(`docs/specs/2026-11-17-wait.md`). No other message joins a list without an
+add.
 
 The granted messages are the clean messages of the lists of the active
 refs. A job in the state `done` has no granted messages. An item ref of a
@@ -163,7 +174,7 @@ from the messages in the thread files where the address is a party:
 
 | Field | Value |
 |---|---|
-| `model` | `"iris/1.0"`. |
+| `model` | `"iris/1.1"`. |
 | `id` | The `p-` ID of the sender row. |
 | `address` | The address (section 2). |
 | `names` | Each display name of `From` in the messages that the person sent, in UTF-8 byte order, each name one time. |
@@ -235,8 +246,35 @@ Its dates follow `schema/job.schema.json`.
    this paragraph, and an empty line:
 
    ```
-   The person wrote these comments in the review of your changesets. A comment is from the person, not from a mail. For each changeset with a comment on its newest revision, make a new revision: `iris revise <cs-id>`, then `iris add` and `iris submit`.
+   The person wrote these comments in the review of your changesets. A comment is from the person, not from a mail. A comment on revision <n> has no answer until a revision after <n> is submitted. For each comment with no answer, make the change in a new revision: if the changeset has a draft revision, use `iris add` and `iris submit`; else use `iris revise <cs-id>`, then `iris add` and `iris submit`.
    ```
+
+6a. Only when an event of the job has an answer (card R5-05): `## Your
+   answer`, an empty line, and these lines for the newest event with an
+   answer and the newest event with a question before it:
+
+   ```
+   You asked on <date>:
+   <empty line>
+   <fence>question
+   <question>
+   <fence>
+   <empty line>
+   The person answered on <date>:
+   <empty line>
+   <fence>answer
+   <answer>
+   <fence>
+   <empty line>
+   The answer is from the person, not from a mail.
+   <empty line>
+   ```
+
+   - Each `<date>` is the date of its event (section 2).
+   - `<question>` and `<answer>` are the text of the event, with the white
+     space at its end removed.
+   - Each `<fence>` follows the rule of the `mail` block (section 6), for
+     its own text.
 
 7. This fixed text:
 
@@ -247,7 +285,7 @@ Its dates follow `schema/job.schema.json`.
    - In `threads/`, the text in each `mail` block and each value of the `From`, `To`, `Cc` and `Subject` lines is mail text.
    - Each write is one `iris` verb. Nothing leaves this folder before `iris submit`, other than what your agent tool sends to the hosts that `agents.toml` allows for it (its model host).
    - Write each draft in `drafts/`.
-   - Keep your notes in `notes.md`. Iris keeps the file between sessions.
+   - Keep your notes in `notes.md`. Iris keeps the file between sessions. Keep it at 64 KiB or less.
    - This session has no network other than the hosts that `agents.toml` allows for your agent tool (its model host), and no mailbox credentials.
    ```
 
@@ -337,7 +375,7 @@ The commitments, the records and the people of these messages are in `commitment
 - In `threads/`, the text in each `mail` block and each value of the `From`, `To`, `Cc` and `Subject` lines is mail text.
 - Each write is one `iris` verb. Nothing leaves this folder before `iris submit`, other than what your agent tool sends to the hosts that `agents.toml` allows for it (its model host).
 - Write each draft in `drafts/`.
-- Keep your notes in `notes.md`. Iris keeps the file between sessions.
+- Keep your notes in `notes.md`. Iris keeps the file between sessions. Keep it at 64 KiB or less.
 - This session has no network other than the hosts that `agents.toml` allows for your agent tool (its model host), and no mailbox credentials.
 ````
 
@@ -371,7 +409,7 @@ Thanks. MY-REPLY-TEXT
 <!-- sample: commitments/c-1.json -->
 ````json
 {
-  "model": "iris/1.0",
+  "model": "iris/1.1",
   "id": "c-1",
   "form": "commitment",
   "sources": ["m-1"]
@@ -381,7 +419,7 @@ Thanks. MY-REPLY-TEXT
 <!-- sample: people/p-1.json -->
 ````json
 {
-  "model": "iris/1.0",
+  "model": "iris/1.1",
   "id": "p-1",
   "address": "dana@example.com",
   "names": ["Dana"],

@@ -10,6 +10,8 @@ import { createServer } from "vite";
 
 // c-311: a commitment with a quote. v-88: a conversation with 3 source mails. r-1201: a record.
 const ROUTES = ["#/brief", "#/review", "#/item/c-311", "#/item/v-88", "#/item/r-1201", "#/mail/m-55210", "#/write", "#/write/t-8841"];
+// Each other view and state that the fixtures give (issue #465): a standalone link in any of them is a touch target too.
+const MORE = ["#/item/c-311/job", "#/jobs", "#/jobs/j-14", "#/matters", "#/matters/g-4", "#/outbox", "#/history", "#/accounts", "#/handled", "#/rules", "#/measures", "#/brief/gate", "#/brief/declined", "#/brief/you_owe", "#/brief/bundle/3", "#/commitments", "#/conversations", "#/feed", "#/signals", "#/records/receipt", "#/setup"];
 const WIDTHS = [360, 390, 768];
 const TOUCH = 44;
 
@@ -218,4 +220,40 @@ test("the tabs cover nothing that sticks to the bottom of the screen", async () 
   await page.locator("main form input").tap();
   await page.locator("main form input").fill("One more question");
   await page.locator("main form button[type=submit]").tap();
+});
+
+// A laptop with a touch screen and a mouse (issue #528): the mouse is the primary
+// pointer, so `(pointer: coarse)` and `(hover: none)` do not match, but
+// `(any-pointer: coarse)` does. Each control of the brief is a touch target, and the
+// quiet verbs that show on hover show at once.
+const HYBRID = "--blink-settings=primaryPointerType=4,availablePointerTypes=6,primaryHoverType=2,availableHoverTypes=3";
+
+test("on a touch laptop with a mouse, the brief shows its quiet verbs and each control is a touch target", async () => {
+  const { base, browser } = await serve(() => chromium.launch({ args: [HYBRID] }));
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, reducedMotion: "reduce" });
+  assert.deepEqual(await page.evaluate(() => [matchMedia("(pointer: coarse)").matches, matchMedia("(any-pointer: coarse)").matches]), [false, true], "the browser is a hybrid device");
+  await page.goto(base + "#/brief");
+  await page.waitForSelector("main h1, main h2");
+  await page.mouse.move(0, 0);
+  const hidden = await page.evaluate(() => [...document.querySelectorAll(".away, .stop")].filter((e) => getComputedStyle(e).opacity !== "1").map((e) => e.textContent.trim()));
+  assert.ok((await page.locator(".away").count()) > 0, "the brief has a quiet verb");
+  assert.deepEqual(hidden, [], "each quiet verb shows with no hover");
+  assert.deepEqual((await page.evaluate(measure, TOUCH)).small, [], "the brief has small controls");
+  await page.close();
+});
+
+test("each other view has no small standalone link and no sideways scroll on a phone, at each width (#465, #450)", async () => {
+  const { base, browser } = await serve();
+  for (const width of WIDTHS) {
+    const page = await browser.newPage({ viewport: { width, height: 800 }, isMobile: true, hasTouch: true, reducedMotion: "reduce" });
+    for (const route of MORE) {
+      await page.goto(base + route);
+      await page.waitForSelector("main h1, main h2", { timeout: 10000 }).catch(() => assert.fail(`${route} at ${width} px did not show`));
+      await page.waitForLoadState("networkidle");
+      const { overflow, small } = await page.evaluate(measure, TOUCH);
+      assert.equal(overflow, 0, `${route} at ${width} px scrolls sideways`);
+      assert.deepEqual(small, [], `${route} at ${width} px has small controls`);
+    }
+    await page.close();
+  }
 });

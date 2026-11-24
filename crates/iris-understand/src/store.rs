@@ -29,7 +29,9 @@ pub enum Error {
     /// The model call failed. The message stays not understood, with no
     /// added try. If `is_retryable()`, try again later. The `Vec` holds the
     /// sender rows of [`Outcome::rerun`]: write 1 committed their change.
-    Model(iris_model::Error, Vec<i64>),
+    /// [`Seen`] is what the call read: the state of the message, the
+    /// sender kind and the other inputs.
+    Model(iris_model::Error, Vec<i64>, Box<Seen>),
     /// The message is not in the store, or it has no content file.
     NoMessage(i64),
     /// A finished item is not valid: a defect of the engine. Nothing of
@@ -41,7 +43,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Store(e) => write!(f, "store: {e}"),
-            Error::Model(e, _) => write!(f, "model: {e}"),
+            Error::Model(e, _, _) => write!(f, "model: {e}"),
             Error::NoMessage(id) => write!(f, "message {id} is not in the store or has no content"),
             Error::Invalid(e) => write!(f, "item not valid: {e}"),
         }
@@ -77,7 +79,7 @@ pub struct Outcome {
     pub items: Vec<i64>,
     /// Hostile mail: no item, no model call (or a `phishing` answer).
     pub hostile: bool,
-    /// A draft (label `DRAFT`): no item.
+    /// A draft or a sent copy (`iris_store::DRAFT_OR_COPY`): no item.
     pub draft: bool,
     /// The message is gone: nothing changed.
     pub gone: bool,
@@ -105,6 +107,8 @@ struct Row {
     internal_date: Option<i64>,
     gone: bool,
     me: String,
+    /// The authserv-id that the account provider adds (`trusted_authserv`).
+    authserv: Option<&'static str>,
     labels: Vec<String>,
     tries: i64,
     retry_at: Option<i64>,
@@ -202,7 +206,7 @@ fn link_mark_of(store: &Store, id: i64) -> Option<(bool, Option<String>)> {
     let path = row.sha.as_deref().and_then(|s| store.content_path(s))?;
     let (raw, raw_cut, html_after) = read_raw(&path).ok()?;
     let c = iris_clean::clean_cut(&raw, raw_cut);
-    let head = crate::Head::parse(&raw);
+    let head = crate::Head::parse(&raw, row.authserv);
     let mark = crate::link_mark(&head, &c.links, c.links_cut || html_after);
     Some((mark, row.sha))
 }
@@ -248,8 +252,12 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         .ok_or(Error::NoMessage(message))?;
     let (raw, raw_cut, html_after) = read_raw(&path)?;
 
-    let draft = row.labels.iter().any(|l| l == "DRAFT");
-    let head = crate::Head::parse(&raw);
+    // A draft or a copy in a Sent folder is not received mail (IMAP spec section 4).
+    let draft = row
+        .labels
+        .iter()
+        .any(|l| iris_store::DRAFT_OR_COPY.contains(&l.as_str()));
+    let head = crate::Head::parse(&raw, row.authserv);
     // The spoof check needs this lookup: a read error stops understanding
     // before any model call.
     let (from_name, from_addr) = (head.from_name.clone(), head.from_addr.clone());
@@ -273,6 +281,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         me: &row.me,
         kind: Kind::Stranger,
         labels: &row.labels,
+        authserv: row.authserv,
         internal_date: row.internal_date,
         now_ms,
         known_person: &known,
@@ -361,6 +370,18 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
             ..Outcome::default()
         });
     };
+    // What the call reads.
+    let read = || Seen {
+        message,
+        state: seen.clone(),
+        kind: kind_read,
+        from: from.clone().filter(|_| !sent),
+        inputs: after.clone(),
+        thread: row.thread,
+        date: row.internal_date,
+        from_name: from_name.clone(),
+        from_addr: from_addr.clone(),
+    };
     // The engine does not understand a draft. It stays not understood, so
     // it runs when it is sent and loses the label DRAFT.
     if draft {
@@ -374,8 +395,8 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     // fixed rules always run. Only the model call waits for `retry_at` and
     // stops after MAX_TRIES failed tries.
     let held = row.tries >= MAX_TRIES || row.retry_at.is_some_and(|t| t > now_ms);
-    let d =
-        decide(&a, &cx, (!held).then_some(model)).map_err(|e| Error::Model(e, rerun.clone()))?;
+    let d = decide(&a, &cx, (!held).then_some(model))
+        .map_err(|e| Error::Model(e, rerun.clone(), Box::new(read())))?;
     if d.waiting {
         // No rule supports the old items now, and the model cannot run.
         let same = store.write(|tx| {
@@ -410,14 +431,11 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     // Write 3: step 8.
     let mut invalid = None;
     let mut changed = false;
+    let read = read();
     let written = store.write(|tx| {
-        let kind_now = match &from {
-            Some(f) if !sent => sender_kind_in(tx, f)?,
-            _ => kind_read,
-        };
         // The model saw `after`: each input must still be the same now, for
         // example with no later SPAM label on an earlier message.
-        if state(tx, message, true)? != seen || kind_now != kind_read || inputs_now(tx)? != after {
+        if !read.same(tx)? {
             changed = true;
             return Ok(Vec::new());
         }
@@ -481,6 +499,63 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
 /// gone state, the thread, the date and the labels. With `full`, also the hostile marks and
 /// `understood_at`, which a second run of the same message changes. The
 /// sender kind is checked apart.
+/// What one model call read (after write 1): the state of the message,
+/// the sender kind and the other store inputs. Each checked write after the
+/// call compares all of it with [`Seen::same`].
+#[derive(Debug)]
+pub struct Seen {
+    message: i64,
+    state: Option<String>,
+    kind: Kind,
+    /// The sender address whose kind the call read; `None` for your own mail.
+    from: Option<String>,
+    inputs: Inputs,
+    thread: i64,
+    date: Option<i64>,
+    from_name: Option<String>,
+    from_addr: Option<String>,
+}
+
+impl Seen {
+    /// True if each thing that the call read is the same now.
+    fn same(&self, c: &rusqlite::Connection) -> rusqlite::Result<bool> {
+        let kind_now = match &self.from {
+            Some(f) => sender_kind_in(c, f)?,
+            None => self.kind,
+        };
+        Ok(state(c, self.message, true)? == self.state
+            && kind_now == self.kind
+            && inputs(
+                c,
+                self.message,
+                self.thread,
+                self.date,
+                self.from_name.as_deref(),
+                self.from_addr.as_deref(),
+            )? == self.inputs)
+    }
+}
+
+/// Mark `message` as waiting for the model with `mark`, only if it is still
+/// in the state that the refused call read (issue #153). A write of another
+/// writer between the refusal and the mark changed an input: the message
+/// then gets no mark, and the next run reads it again.
+pub fn mark_waiting(
+    tx: &rusqlite::Transaction,
+    message: i64,
+    seen: &Seen,
+    mark: i64,
+) -> rusqlite::Result<bool> {
+    if seen.message != message || !seen.same(tx)? {
+        return Ok(false);
+    }
+    tx.execute(
+        "UPDATE message SET waits_model = ?2 WHERE id = ?1 AND understood_at IS NULL",
+        params![message, mark],
+    )?;
+    Ok(true)
+}
+
 fn state(c: &rusqlite::Connection, message: i64, full: bool) -> rusqlite::Result<Option<String>> {
     c.query_row(
         "SELECT coalesce(m.content_sha256, '') || '|' || (m.gone_at IS NOT NULL) || '|' ||
@@ -530,7 +605,8 @@ fn read_row(store: &Store, message: i64) -> Result<Row> {
             .query_row(
                 "SELECT m.account_id, m.thread_id, m.content_sha256, m.internal_date,
                         m.gone_at IS NOT NULL, a.address, m.tries, m.retry_at,
-                        EXISTS (SELECT 1 FROM json_each(coalesce(m.hostile, '[]')) WHERE value = 'phishing')
+                        EXISTS (SELECT 1 FROM json_each(coalesce(m.hostile, '[]')) WHERE value = 'phishing'),
+                        a.provider
                  FROM message m JOIN account a ON a.id = m.account_id WHERE m.id = ?1",
                 [message],
                 |r| {
@@ -541,6 +617,7 @@ fn read_row(store: &Store, message: i64) -> Result<Row> {
                         internal_date: r.get(3)?,
                         gone: r.get(4)?,
                         me: r.get::<_, String>(5)?.to_ascii_lowercase(),
+                        authserv: crate::head::trusted_authserv(&r.get::<_, String>(9)?),
                         labels: Vec::new(),
                         tries: r.get(6)?,
                         retry_at: r.get(7)?,
@@ -591,7 +668,7 @@ fn sender_kind_in(c: &rusqlite::Connection, from: &str) -> rusqlite::Result<Kind
 
 /// The store inputs of one run besides the state of the message. A run
 /// reads them with `inputs` only, and each checked write compares them.
-#[derive(Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Inputs {
     /// The known persons with the display name of the sender (spoof check).
     known: Vec<String>,
@@ -638,7 +715,10 @@ macro_rules! earlier_ok {
          AND m.internal_date < ?3 AND NOT ",
             iris_store::may_be_hostile!(),
             " AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                         WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'DRAFT'))
+                         WHERE ml.message_id = m.id AND l.provider_id = 'SPAM')
+         AND NOT ",
+            iris_store::draft_or_copy!("m"),
+            "
          AND NOT EXISTS (SELECT 1 FROM header hh JOIN sender s ON s.address = hh.from_addr
                          WHERE hh.message_id = m.id AND s.kind = 'hostile')"
         )
@@ -819,19 +899,16 @@ pub fn rerun_senders(tx: &Transaction, rows: &[i64], now_ms: i64) -> iris_store:
     let mut reset = 0;
     for &row in rows {
         tx.execute(
-            &format!(
-                "DELETE FROM item WHERE id IN (
-                   SELECT i.id FROM sender s
-                   JOIN header h ON h.from_addr = s.address
-                   JOIN message m ON m.id = h.message_id
-                   JOIN item_source src ON src.message_id = m.id
-                   JOIN item i ON i.id = src.item_id
-                   WHERE s.id = ?1 AND m.gone_at IS NULL AND {DROPPABLE})"
-            ),
+            "DELETE FROM item WHERE id IN (
+               SELECT d.item_id FROM sender s
+               JOIN header h ON h.from_addr = s.address
+               JOIN message m ON m.id = h.message_id
+               JOIN item_droppable d ON d.message_id = m.id
+               WHERE s.id = ?1 AND m.gone_at IS NULL)",
             [row],
         )?;
         reset += tx.execute(
-            "UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL
+            "UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL, waits_model = 0
              WHERE gone_at IS NULL AND id IN (
                SELECT h.message_id FROM sender s JOIN header h ON h.from_addr = s.address
                WHERE s.id = ?1)",
@@ -862,20 +939,32 @@ pub fn rerun_senders(tx: &Transaction, rows: &[i64], now_ms: i64) -> iris_store:
 /// Threads in one page of [`rerun_senders`].
 pub const RERUN_PAGE: i64 = 500;
 
-/// The items of an origin message `src` that a new run replaces: not the
-/// conversation, made by a rule or the model, and not pinned (`item_pin`: a
-/// correction, or an open changeset action that names the item).
-const DROPPABLE: &str = "src.role = 'origin' AND i.form <> 'conversation'
-  AND i.derived_by IN ('rule', 'model')
-  AND NOT EXISTS (SELECT 1 FROM item_pin p WHERE p.item_id = i.id)";
+/// Computes again the conversation of each thread that a change of a sender
+/// kind marked (`talk_due`, store migration 40, issue 106), in writes of
+/// [`RERUN_PAGE`] threads. Gives the count of threads. The understanding
+/// runner calls it after its sender refresh, and the engine at each turn of
+/// its attention thread, so a kind change of the stranger gate counts too.
+pub fn update_due_talks(store: &Store, now_ms: i64) -> iris_store::Result<usize> {
+    let mut done = 0;
+    loop {
+        let n = store.write(|tx| Ok(iris_talk::update_due(tx, now_ms, RERUN_PAGE)?))?;
+        if n == 0 {
+            return Ok(done);
+        }
+        done += n;
+    }
+}
 
+/// Deletes the items of `message` that a new run replaces: the rows of the
+/// view `item_droppable` (store migration 42). They are origin items of a
+/// message that is not gone, not
+/// the conversation, made by a rule or the model, and not pinned
+/// (`item_pin`: a correction, or an open changeset action that names the
+/// item). The label triggers of a draft or a copy read the same view.
 fn drop_old_items(tx: &Transaction, message: i64) -> rusqlite::Result<()> {
     tx.execute(
-        &format!(
-            "DELETE FROM item WHERE id IN (
-               SELECT i.id FROM item_source src JOIN item i ON i.id = src.item_id
-               WHERE src.message_id = ?1 AND {DROPPABLE})"
-        ),
+        "DELETE FROM item WHERE id IN
+           (SELECT item_id FROM item_droppable WHERE message_id = ?1)",
         [message],
     )?;
     Ok(())

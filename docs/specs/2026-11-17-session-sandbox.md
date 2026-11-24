@@ -55,8 +55,11 @@ session (`iris job run`) runs only on Linux. On macOS each other part of
 Iris runs, and `iris job run` stops with the reason of `system()`. No
 agent runs on the Mac with a sandbox that can let a process of a session
 outlive its reap. The owner decides on the decision card of this thread
-whether the Mac gets a weaker sandbox earlier. The `doneWhen` of R4-05m
-is the Linux acceptance of this spec, on macOS.
+whether the Mac gets a weaker sandbox earlier. The owner chose the macOS
+design of `docs/specs/2026-11-17-session-sandbox-macos.md` (2026-11-17).
+Its acceptance criteria are the `doneWhen` of R4-05m. They keep the file,
+network and socket criteria of this spec, and replace the lifetime rule
+with the exact `ended` and the reap rule of that spec.
 - Limits of CPU, memory or disk for a session.
 - A filter of the files that the agent sends to its own model host. The
   person chose that host (launcher spec, "Model egress").

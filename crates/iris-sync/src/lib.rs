@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use iris_gmail::{Change, Gmail, HistoryType, MAX_GETS};
+use iris_provider::{Change, Provider, MAX_GETS};
 use iris_store::{NewMessage, Store};
 use rusqlite::{params, OptionalExtension, Transaction};
 
@@ -61,7 +61,7 @@ const CHUNK: usize = 64;
 
 #[derive(Debug)]
 pub enum Error {
-    Gmail(iris_gmail::Error),
+    Provider(iris_provider::Error),
     Store(iris_store::Error),
     /// The account row does not exist.
     NoAccount,
@@ -78,7 +78,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Gmail(e) => write!(f, "Gmail: {e}"),
+            Error::Provider(e) => write!(f, "mail provider: {e}"),
             Error::Store(e) => write!(f, "store: {e}"),
             Error::NoAccount => write!(f, "the account does not exist"),
             Error::WrongMailbox => write!(f, "the access token is for another mailbox"),
@@ -90,9 +90,9 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-impl From<iris_gmail::Error> for Error {
-    fn from(e: iris_gmail::Error) -> Self {
-        Error::Gmail(e)
+impl From<iris_provider::Error> for Error {
+    fn from(e: iris_provider::Error) -> Self {
+        Error::Provider(e)
     }
 }
 
@@ -114,7 +114,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Done {
     /// `H0`: the history ID before the list. The incremental sync starts here.
-    pub history_start: u64,
+    pub history_start: String,
     /// The messages that this call fetched.
     pub fetched: u64,
     /// The messages that Gmail deleted after the list (HTTP 404), in this call.
@@ -128,7 +128,7 @@ pub struct Done {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Synced {
     /// The history ID of the mirror after the sync.
-    pub history_id: u64,
+    pub history_id: String,
     /// The messages that this call fetched.
     pub fetched: u64,
     /// The messages that this call marked as gone.
@@ -166,22 +166,34 @@ pub fn lock(store: &Store, account: i64) -> Result<SyncLock> {
 /// Sync `account` with Gmail: continue an unfinished first sync or full
 /// resync, then run one incremental sync (specification 1, section 4.3).
 /// A new account gets its first sync. `token` is the access token. On
-/// [`iris_gmail::Error::Unauthorized`], get a new token and call again: the
+/// [`iris_provider::Error::Unauthorized`], get a new token and call again: the
 /// sync continues where it stopped.
 ///
 /// If Gmail does not have the history of the saved history ID any more,
 /// the call starts a full resync (section 4.4) and runs it to the end.
-/// Each call adds one row to `sync_log`.
-pub fn sync(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result<Synced> {
+/// Each call adds one row to `sync_log` when it starts, with no result
+/// while it runs, and writes the result at its end.
+pub fn sync(store: &Store, mail: &dyn Provider, account: i64, token: &str) -> Result<Synced> {
     let _lock = lock(store, account)?;
-    sync_locked(store, gmail, account, token)
+    sync_locked(store, mail, account, token)
 }
 
 /// [`sync`] for a caller that holds the sync lock.
-fn sync_locked(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result<Synced> {
-    let started = now_ms();
-    let mut kind = "incremental";
-    let result = run(store, gmail, account, token, &mut kind);
+fn sync_locked(store: &Store, mail: &dyn Provider, account: i64, token: &str) -> Result<Synced> {
+    let s = state(store, account)?;
+    let kind = match (s.kind.as_deref(), &s.history_id) {
+        (Some(KIND_RESYNC), _) => KIND_RESYNC,
+        (None, Some(_)) => "incremental",
+        _ => KIND_FIRST,
+    };
+    // The row of a running sync is the newest row, so a reader of the log
+    // does not take the error row of an earlier call (for example a 401 of
+    // a token that ran out) as the state of this call.
+    let mut log = Running {
+        row: log_start(store, account, kind, now_ms())?,
+        kind,
+    };
+    let result = run(store, mail, account, token, &mut log);
     let text = match &result {
         Ok(s) => format!(
             "ok: history {}, fetched {}, gone {}, failed {}",
@@ -189,7 +201,7 @@ fn sync_locked(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Resul
         ),
         Err(e) => format!("error: {e}"),
     };
-    let logged = log(store, account, kind, started, &text);
+    let logged = log_end(store, log.row, log.kind, &text);
     let synced = result?;
     logged?;
     Ok(synced)
@@ -197,13 +209,13 @@ fn sync_locked(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Resul
 
 fn run(
     store: &Store,
-    gmail: &Gmail,
+    mail: &dyn Provider,
     account: i64,
     token: &str,
-    kind: &mut &'static str,
+    log: &mut Running,
 ) -> Result<Synced> {
     // On each call: history of another mailbox would change the mirror of this one.
-    let profile = gmail.profile(token)?;
+    let profile = mail.profile(token)?;
     let mut done = Done::default();
     let mut resync = false;
     // True after a resync of this call began from a new H1.
@@ -214,21 +226,21 @@ fn run(
             return Err(Error::WrongMailbox);
         }
         let from = match (s.kind.as_deref(), s.history_id.as_deref()) {
-            (None, Some(h)) => parse_history(h)?,
+            (None, Some(h)) => h.to_string(),
             (None, None) | (Some(KIND_FIRST), _) => {
-                *kind = KIND_FIRST;
-                first_steps(store, gmail, account, token, &s, &mut done)?
+                log.set(store, KIND_FIRST)?;
+                first_steps(store, mail, account, token, &s, &mut done)?
             }
             (Some(KIND_RESYNC), _) => {
-                *kind = KIND_RESYNC;
+                log.set(store, KIND_RESYNC)?;
                 resync = true;
                 fresh |= s.start.is_none();
-                resync_steps(store, gmail, account, token, &s, &mut done)?
+                resync_steps(store, mail, account, token, &s, &mut done)?
             }
             (Some(_), _) => return Err(Error::BadState("unknown sync kind")),
         };
-        match incremental(store, gmail, account, token, from, &mut done) {
-            Err(Error::Gmail(iris_gmail::Error::HistoryExpired)) => {
+        match incremental(store, mail, account, token, &from, &mut done) {
+            Err(Error::Provider(iris_provider::Error::HistoryExpired)) => {
                 // Section 4.4: the next turn of the loop, or the next call,
                 // starts a full resync from a new H1. A saved H1 can be too
                 // old after a long stop, so it does not stay.
@@ -242,7 +254,7 @@ fn run(
                 })?;
                 // A new H1 of this call is too old too: stop, do not loop.
                 if fresh {
-                    return Err(iris_gmail::Error::HistoryExpired.into());
+                    return Err(iris_provider::Error::HistoryExpired.into());
                 }
             }
             r => {
@@ -265,13 +277,13 @@ fn run(
 ///
 /// An account at [`STEP_INCREMENTAL`] or with a complete sync gives `Done`
 /// with zero counts and calls Gmail for nothing.
-pub fn first_sync(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result<Done> {
+pub fn first_sync(store: &Store, mail: &dyn Provider, account: i64, token: &str) -> Result<Done> {
     let _lock = lock(store, account)?;
     let s = state(store, account)?;
     match (s.kind.as_deref(), s.start.as_deref(), s.step) {
         (Some(KIND_FIRST), Some(h0), Some(STEP_INCREMENTAL)) => {
             return Ok(Done {
-                history_start: parse_history(h0)?,
+                history_start: h0.to_string(),
                 ..Done::default()
             })
         }
@@ -279,53 +291,53 @@ pub fn first_sync(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Re
         (Some(_), _, _) => return Err(Error::OtherSync),
         (None, _, _) if s.history_id.is_some() => {
             return Ok(Done {
-                history_start: parse_history(s.history_id.as_deref().unwrap_or_default())?,
+                history_start: s.history_id.clone().unwrap_or_default(),
                 ..Done::default()
             })
         }
         (None, _, _) => {}
     }
     let mut done = Done::default();
-    done.history_start = first_steps(store, gmail, account, token, &s, &mut done)?;
+    done.history_start = first_steps(store, mail, account, token, &s, &mut done)?;
     Ok(done)
 }
 
 /// Steps 1 to 4 of the first sync, from the saved step. Gives `H0`.
 fn first_steps(
     store: &Store,
-    gmail: &Gmail,
+    mail: &dyn Provider,
     account: i64,
     token: &str,
     s: &State,
     done: &mut Done,
-) -> Result<u64> {
+) -> Result<String> {
     // On each call, also a resume: a token of another mailbox gives 404 for
     // each fetch, and the sync would mark the messages of the account gone.
-    let profile = gmail.profile(token)?;
+    let profile = mail.profile(token)?;
     if !profile.email_address.eq_ignore_ascii_case(&s.address) {
         return Err(Error::WrongMailbox);
     }
     let start = match s.start.as_deref() {
-        Some(h0) => parse_history(h0)?,
+        Some(h0) => h0.to_string(),
         None => {
             // Step 1: H0 before the list, so that no change after it is lost.
-            begin(store, account, KIND_FIRST, profile.history_id, STEP_LIST)?;
-            profile.history_id
+            begin(store, account, KIND_FIRST, &profile.cursor, STEP_LIST)?;
+            profile.cursor
         }
     };
     let mut step = s.step.unwrap_or(STEP_LIST);
 
     // Step 2 on each call: a label made after the last call must be known
     // before a message that has it is saved.
-    save_labels(store, gmail, account, token, false)?;
+    save_labels(store, mail, account, token, false)?;
 
     if step == STEP_LIST {
-        list(store, gmail, account, token)?;
+        list(store, mail, account, token)?;
         set_step(store, account, STEP_FETCH)?;
         step = STEP_FETCH;
     }
     if step == STEP_FETCH {
-        fetch(store, gmail, account, token, done)?;
+        fetch(store, mail, account, token, done)?;
         set_step(store, account, STEP_INCREMENTAL)?;
     }
     Ok(start)
@@ -335,23 +347,23 @@ fn first_steps(
 /// saved step. Gives `H1`.
 fn resync_steps(
     store: &Store,
-    gmail: &Gmail,
+    mail: &dyn Provider,
     account: i64,
     token: &str,
     s: &State,
     done: &mut Done,
-) -> Result<u64> {
+) -> Result<String> {
     let (start, mut step) = match s.start.as_deref() {
-        Some(h1) => (parse_history(h1)?, s.step.unwrap_or(RESYNC_LIST)),
+        Some(h1) => (h1.to_string(), s.step.unwrap_or(RESYNC_LIST)),
         None => {
             // Step 1: H1 before the list, as H0 of the first sync.
-            let h1 = gmail.profile(token)?.history_id;
-            begin(store, account, KIND_RESYNC, h1, RESYNC_LIST)?;
+            let h1 = mail.profile(token)?.cursor;
+            begin(store, account, KIND_RESYNC, &h1, RESYNC_LIST)?;
             (h1, RESYNC_LIST)
         }
     };
     // Step 2 on each call, as in the first sync.
-    save_labels(store, gmail, account, token, true)?;
+    save_labels(store, mail, account, token, true)?;
 
     if step == RESYNC_LIST {
         // Step 3. A list that stopped starts again, so its marks go first.
@@ -359,19 +371,19 @@ fn resync_steps(
             tx.execute("DELETE FROM sync_seen WHERE account_id = ?1", [account])?;
             Ok(())
         })?;
-        list_pages(store, gmail, account, token, &[], Mark::KnownAndSeen)?;
+        list_pages(store, mail, account, token, None, Mark::KnownAndSeen)?;
         set_step(store, account, RESYNC_FETCH)?;
         step = RESYNC_FETCH;
     }
     if step == RESYNC_FETCH {
         come_back(store, account)?;
         // Step 4. A 404 marks the new row gone: the row stays as a tombstone.
-        fetch(store, gmail, account, token, done)?;
+        fetch(store, mail, account, token, done)?;
         set_step(store, account, RESYNC_GONE)?;
         step = RESYNC_GONE;
     }
     if step == RESYNC_GONE {
-        check_unlisted(store, gmail, account, token, done)?;
+        check_unlisted(store, mail, account, token, done)?;
         set_step(store, account, RESYNC_LABELS)?;
         step = RESYNC_LABELS;
     }
@@ -382,15 +394,25 @@ fn resync_steps(
             let rows = st.query_map([account], |r| r.get(0))?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })?;
-        label_sets(store, gmail, account, token, &labels)?;
+        label_sets(store, mail, account, token, &labels)?;
         store.write(|tx| {
             // Step 7: the label set of each listed message is the set of
             // the label lists that name it (section 4.10).
             let listed = "SELECT m.id FROM message m JOIN sync_seen s
                 ON s.account_id = m.account_id AND s.message_id = m.provider_id
                 WHERE m.account_id = ?1 AND m.gone_at IS NULL";
+            // Only the rows that differ change, so the triggers on
+            // message_label (SENT and DRAFT clear `understood_at`) see only
+            // real changes.
             tx.execute(
-                &format!("DELETE FROM message_label WHERE message_id IN ({listed})"),
+                &format!(
+                    "DELETE FROM message_label WHERE message_id IN ({listed})
+                       AND NOT EXISTS (SELECT 1 FROM message m
+                         JOIN sync_seen s ON s.account_id = m.account_id AND s.message_id = m.provider_id
+                         JOIN json_each(s.labels) j
+                         JOIN label l ON l.account_id = s.account_id AND l.provider_id = j.value
+                         WHERE m.id = message_label.message_id AND l.id = message_label.label_id)"
+                ),
                 [account],
             )?;
             tx.execute(
@@ -467,7 +489,7 @@ fn come_back(store: &Store, account: i64) -> Result<()> {
 /// come from the answer.
 fn check_unlisted(
     store: &Store,
-    gmail: &Gmail,
+    mail: &dyn Provider,
     account: i64,
     token: &str,
     done: &mut Done,
@@ -492,9 +514,9 @@ fn check_unlisted(
         };
         after = last.0;
         for (id, provider_id) in rows {
-            match gmail.minimal(token, &provider_id) {
+            match mail.minimal(token, &provider_id) {
                 Ok(m) => store.write(|tx| set_labels(tx, account, id, &m.label_ids, Op::Set))?,
-                Err(iris_gmail::Error::NotFound) => {
+                Err(iris_provider::Error::NotFound) => {
                     done.gone += mark_gone(store, account, &[provider_id])?;
                 }
                 Err(e) if per_message(&e) => {
@@ -512,7 +534,7 @@ fn check_unlisted(
 /// 4.10). A list that stopped starts again from no labels.
 fn label_sets(
     store: &Store,
-    gmail: &Gmail,
+    mail: &dyn Provider,
     account: i64,
     token: &str,
     labels: &[String],
@@ -525,7 +547,7 @@ fn label_sets(
         Ok(())
     })?;
     for label in labels {
-        list_pages(store, gmail, account, token, &[label], Mark::Label(label))?;
+        list_pages(store, mail, account, token, Some(label), Mark::Label(label))?;
     }
     Ok(())
 }
@@ -543,11 +565,11 @@ fn set_step(store: &Store, account: i64, step: i64) -> Result<()> {
 }
 
 /// Begin a first sync or a full resync from the history ID `start`.
-fn begin(store: &Store, account: i64, kind: &str, start: u64, step: i64) -> Result<()> {
+fn begin(store: &Store, account: i64, kind: &str, start: &str, step: i64) -> Result<()> {
     store.write(|tx| {
         tx.execute(
             "UPDATE account SET sync_kind = ?2, sync_start = ?3, sync_step = ?4 WHERE id = ?1",
-            params![account, kind, start.to_string(), step],
+            params![account, kind, start, step],
         )?;
         Ok(())
     })?;
@@ -559,12 +581,12 @@ fn begin(store: &Store, account: i64, kind: &str, start: u64, step: i64) -> Resu
 /// does not have (specification 1, section 4.3).
 fn save_labels(
     store: &Store,
-    gmail: &Gmail,
+    mail: &dyn Provider,
     account: i64,
     token: &str,
     delete: bool,
 ) -> Result<()> {
-    let labels = gmail.labels(token)?;
+    let labels = mail.labels(token)?;
     store.write(|tx| {
         let mut put = tx.prepare_cached(
             "INSERT INTO label(account_id, provider_id, name, kind) VALUES (?1, ?2, ?3, ?4)
@@ -603,22 +625,22 @@ fn save_labels(
 /// message sets its later state.
 fn incremental(
     store: &Store,
-    gmail: &Gmail,
+    mail: &dyn Provider,
     account: i64,
     token: &str,
-    from: u64,
+    from: &str,
     done: &mut Done,
-) -> Result<u64> {
+) -> Result<String> {
     let mut page_token: Option<String> = None;
     loop {
-        let page = gmail.history(token, from, &HistoryType::ALL, page_token.as_deref())?;
+        let page = mail.changes(token, from, page_token.as_deref())?;
         // After history.list: Gmail makes no history record for a new name
         // or a delete of a label. A label that a record of this page names
         // was made before this call.
-        save_labels(store, gmail, account, token, true)?;
+        save_labels(store, mail, account, token, true)?;
         for record in &page.history {
             for change in &record.changes {
-                apply(store, gmail, account, token, change, done)?;
+                apply(store, mail, account, token, change, done)?;
             }
         }
         match page.next_page_token {
@@ -631,12 +653,12 @@ fn incremental(
                            mirror_ready_at = coalesce(mirror_ready_at, ?3),
                            sync_kind = NULL, sync_start = NULL, sync_step = NULL
                          WHERE id = ?1",
-                        params![account, page.history_id.to_string(), now],
+                        params![account, page.cursor, now],
                     )?;
                     tx.execute("DELETE FROM sync_seen WHERE account_id = ?1", [account])?;
                     Ok(())
                 })?;
-                return Ok(page.history_id);
+                return Ok(page.cursor);
             }
         }
     }
@@ -652,7 +674,7 @@ enum Op {
 /// Apply one change of a history record.
 fn apply(
     store: &Store,
-    gmail: &Gmail,
+    mail: &dyn Provider,
     account: i64,
     token: &str,
     change: &Change,
@@ -679,9 +701,9 @@ fn apply(
     })?;
     let Some(row) = row else {
         // The mirror does not have the message: fetch it, with the labels of now.
-        return match fetch_one(store, gmail, token, &m.id, &m.thread_id)? {
+        return match fetch_one(store, mail, token, &m.id, &m.thread_id)? {
             Fetched::Message(msg) => {
-                save(store, gmail, token, account, vec![*msg], done)?;
+                save(store, mail, token, account, vec![*msg], done)?;
                 Ok(())
             }
             // Gmail deleted the message after the record. A known row of
@@ -710,8 +732,25 @@ fn set_labels(
     labels: &[String],
     op: Op,
 ) -> iris_store::Result<()> {
+    // Only the rows that differ change, so the triggers on message_label
+    // (SENT and DRAFT clear `understood_at`) see only real changes.
     if let Op::Set = op {
-        tx.execute("DELETE FROM message_label WHERE message_id = ?1", [message])?;
+        let have: Vec<(i64, String)> = {
+            let mut st = tx.prepare_cached(
+                "SELECT l.id, l.provider_id FROM message_label ml JOIN label l ON l.id = ml.label_id
+                 WHERE ml.message_id = ?1",
+            )?;
+            let rows = st.query_map([message], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for (label, provider_id) in have {
+            if !labels.contains(&provider_id) {
+                tx.execute(
+                    "DELETE FROM message_label WHERE message_id = ?1 AND label_id = ?2",
+                    params![message, label],
+                )?;
+            }
+        }
     }
     let sql = match op {
         Op::Set | Op::Add => {
@@ -782,10 +821,10 @@ fn insert_known(tx: &Transaction, account: i64, id: &str, thread: &str) -> iris_
 /// True for an error of one message that a new try of the same call does
 /// not fix: a bad answer, or a refusal of the request (HTTP 400). Other
 /// errors (network, sign-in, quota, the local disk) stop the sync.
-fn per_message(e: &iris_gmail::Error) -> bool {
+fn per_message(e: &iris_provider::Error) -> bool {
     match e {
-        iris_gmail::Error::Decode(_) => true,
-        iris_gmail::Error::Api { status, .. } => *status == 400,
+        iris_provider::Error::Decode(_) => true,
+        iris_provider::Error::Api { status, .. } => *status == 400,
         _ => false,
     }
 }
@@ -808,9 +847,52 @@ fn log(store: &Store, account: i64, kind: &str, started: i64, result: &str) -> R
     Ok(())
 }
 
-fn parse_history(text: &str) -> Result<u64> {
-    text.parse()
-        .map_err(|_| Error::BadState("the saved history ID is not a number"))
+/// The open `sync_log` row of a running call and its kind.
+struct Running {
+    row: i64,
+    kind: &'static str,
+}
+
+impl Running {
+    /// Set the kind of the call. The open row gets it at once, so a reader
+    /// of the log sees the kind of the running call (for example a full
+    /// resync that starts after an expired history ID).
+    fn set(&mut self, store: &Store, kind: &'static str) -> Result<()> {
+        if self.kind != kind {
+            store.write(|tx| {
+                tx.execute(
+                    "UPDATE sync_log SET kind = ?2 WHERE id = ?1",
+                    params![self.row, kind],
+                )?;
+                Ok(())
+            })?;
+            self.kind = kind;
+        }
+        Ok(())
+    }
+}
+
+/// Add the row of a sync that starts, with no end and no result. Gives its ID.
+fn log_start(store: &Store, account: i64, kind: &str, started: i64) -> Result<i64> {
+    Ok(store.write(|tx| {
+        tx.execute(
+            "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, ?2, ?3)",
+            params![account, kind, started],
+        )?;
+        Ok(tx.last_insert_rowid())
+    })?)
+}
+
+/// Write the kind, the end and the result of the sync row `row`.
+fn log_end(store: &Store, row: i64, kind: &str, result: &str) -> Result<()> {
+    store.write(|tx| {
+        tx.execute(
+            "UPDATE sync_log SET kind = ?2, ended_at = ?3, result = ?4 WHERE id = ?1",
+            params![row, kind, now_ms(), result],
+        )?;
+        Ok(())
+    })?;
+    Ok(())
 }
 
 fn state(store: &Store, account: i64) -> Result<State> {
@@ -844,7 +926,7 @@ fn state(store: &Store, account: i64) -> Result<State> {
 /// message is fetched yet, so the rows of the stopped list go first: new
 /// rows then follow the order of the new list, also for mail that came in
 /// a new thread after the stop.
-fn list(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result<()> {
+fn list(store: &Store, mail: &dyn Provider, account: i64, token: &str) -> Result<()> {
     store.write(|tx| {
         tx.execute(
             "DELETE FROM message WHERE account_id = ?1 AND fetched_at IS NULL AND gone_at IS NULL",
@@ -857,7 +939,7 @@ fn list(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result<()> {
         )?;
         Ok(())
     })?;
-    list_pages(store, gmail, account, token, &[], Mark::Known)?;
+    list_pages(store, mail, account, token, None, Mark::Known)?;
     Ok(())
 }
 
@@ -881,16 +963,16 @@ enum Mark<'a> {
 /// [`verify::THREAD_MARK`] + its ID.
 fn list_pages(
     store: &Store,
-    gmail: &Gmail,
+    mail: &dyn Provider,
     account: i64,
     token: &str,
-    labels: &[&str],
+    label: Option<&str>,
     mark: Mark,
 ) -> Result<()> {
     let mut page_token: Option<String> = None;
 
     loop {
-        let page = gmail.messages(token, labels, true, page_token.as_deref())?;
+        let page = mail.messages(token, label, page_token.as_deref())?;
         store.write(|tx| {
             let mut seen = tx.prepare_cached(
                 "INSERT INTO sync_seen(account_id, message_id, labels) VALUES (?1, ?2, '[]')
@@ -949,7 +1031,13 @@ enum Fetched {
 /// Step 4: fetch by thread, newest thread first. The thread row IDs keep
 /// the order in which the newest-first list named each thread first. A
 /// message that fails stays "known, not fetched": the loop goes on after it.
-fn fetch(store: &Store, gmail: &Gmail, account: i64, token: &str, done: &mut Done) -> Result<()> {
+fn fetch(
+    store: &Store,
+    mail: &dyn Provider,
+    account: i64,
+    token: &str,
+    done: &mut Done,
+) -> Result<()> {
     let mut after = (0i64, 0i64);
     loop {
         let ids: Vec<(i64, i64, String, String)> = store.read(|c| {
@@ -970,7 +1058,7 @@ fn fetch(store: &Store, gmail: &Gmail, account: i64, token: &str, done: &mut Don
         };
         after = (last.0, last.1);
         let ids: Vec<(String, String)> = ids.into_iter().map(|(_, _, m, t)| (m, t)).collect();
-        let (results, error) = fetch_chunk(store, gmail, token, &ids);
+        let (results, error) = fetch_chunk(store, mail, token, &ids);
         // Save the fetches of the chunk also when one of them failed.
         let mut messages = Vec::new();
         let mut gone = Vec::new();
@@ -982,7 +1070,7 @@ fn fetch(store: &Store, gmail: &Gmail, account: i64, token: &str, done: &mut Don
                 Fetched::Failed(id, e) => failed.push((id, e)),
             }
         }
-        save(store, gmail, token, account, messages, done)?;
+        save(store, mail, token, account, messages, done)?;
         done.gone += mark_gone(store, account, &gone)?;
         for (id, e) in &failed {
             record_failure(store, account, id, e)?;
@@ -999,7 +1087,7 @@ fn fetch(store: &Store, gmail: &Gmail, account: i64, token: &str, done: &mut Don
 /// starts. Gives the fetches that ended, and the first such error.
 fn fetch_chunk(
     store: &Store,
-    gmail: &Gmail,
+    mail: &dyn Provider,
     token: &str,
     ids: &[(String, String)],
 ) -> (Vec<Fetched>, Option<Error>) {
@@ -1015,7 +1103,7 @@ fn fetch_chunk(
                     let Some((id, thread)) = ids.get(i) else {
                         return;
                     };
-                    match fetch_one(store, gmail, token, id, thread) {
+                    match fetch_one(store, mail, token, id, thread) {
                         Ok(f) => results.lock().unwrap_or_else(|e| e.into_inner()).push(f),
                         Err(e) => {
                             stop.store(true, Ordering::Relaxed);
@@ -1037,12 +1125,18 @@ fn fetch_chunk(
 
 /// Stream one raw message to the content folder. The sync stores bytes and
 /// never parses them (specification 1, section 4.7).
-fn fetch_one(store: &Store, gmail: &Gmail, token: &str, id: &str, thread: &str) -> Result<Fetched> {
+fn fetch_one(
+    store: &Store,
+    mail: &dyn Provider,
+    token: &str,
+    id: &str,
+    thread: &str,
+) -> Result<Fetched> {
     // If the fetch fails, the writer drops and deletes its temporary file.
     let mut w = store.content_writer()?;
-    let raw = match gmail.raw(token, id, &mut w) {
+    let raw = match mail.raw(token, id, &mut w) {
         Ok(raw) => raw,
-        Err(iris_gmail::Error::NotFound) => return Ok(Fetched::Gone(id.to_string())),
+        Err(iris_provider::Error::NotFound) => return Ok(Fetched::Gone(id.to_string())),
         Err(e) if per_message(&e) => return Ok(Fetched::Failed(id.to_string(), e.into())),
         Err(e) => return Err(e.into()),
     };
@@ -1072,7 +1166,7 @@ fn fetch_one(store: &Store, gmail: &Gmail, token: &str, id: &str, thread: &str) 
 /// counts to `done`.
 fn save(
     store: &Store,
-    gmail: &Gmail,
+    mail: &dyn Provider,
     token: &str,
     account: i64,
     mut batch: Vec<NewMessage>,
@@ -1096,7 +1190,7 @@ fn save(
             .partition(|m| m.content_sha256.as_deref() == Some(sha.as_str()));
         batch = keep;
         for m in stale {
-            match fetch_one(store, gmail, token, &m.provider_id, &m.thread_provider_id)? {
+            match fetch_one(store, mail, token, &m.provider_id, &m.thread_provider_id)? {
                 Fetched::Message(new) => batch.push(*new),
                 Fetched::Gone(id) => done.gone += mark_gone(store, account, &[id])?,
                 Fetched::Failed(id, e) => {
@@ -1119,6 +1213,7 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use iris_fakegmail::FakeGmail;
+    use iris_gmail::Gmail;
     use iris_synth::Mailbox;
 
     #[test]

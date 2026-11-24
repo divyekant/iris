@@ -83,11 +83,93 @@ pub fn spawn(
     tx
 }
 
+/// The longest time since the last `app.notices` call of the Mac app, in
+/// which the app shows the notices and the engine does not
+/// (`docs/specs/2026-11-17-mac-app.md`). The app asks each 10 seconds.
+pub const APP_WAIT_MS: i64 = 30_000;
+
+/// The state of the Mac app in the engine (in memory only).
+struct App {
+    /// The time of the last `app.notices` call, in milliseconds since 1970.
+    /// 0 when no app asked.
+    asked_ms: i64,
+    /// The largest notice row ID that the app does not show: the `last` of
+    /// the call that started the app. `i64::MAX` when no app asked.
+    from: i64,
+}
+
+/// One lock for the call of the app and the choice of the engine: each
+/// notice has one owner, the app or the engine.
+static APP: std::sync::Mutex<App> = std::sync::Mutex::new(App {
+    asked_ms: 0,
+    from: i64::MAX,
+});
+
+fn app() -> std::sync::MutexGuard<'static, App> {
+    APP.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Run one `app.notices` call at `now_ms` under the lock of [`for_system`].
+/// `read` gets `true` when the app owns the notices after its start: its
+/// last call came [`APP_WAIT_MS`] or less before. With `false` (the first
+/// call, or a call after a gap), the call starts the app again. `read` gives
+/// the answer, its `last`, and `true` when the call started the app: the app
+/// shows only the notices after that `last`, and the engine shows all
+/// others. A notice that the engine shows before the lock is in the store
+/// before `read`, so its row ID is at or below that `last`.
+pub fn app_call<T, E>(
+    now_ms: i64,
+    read: impl FnOnce(bool) -> Result<(T, i64, bool), E>,
+) -> Result<T, E> {
+    let mut a = app();
+    let (answer, last, start) = read(app_live(a.asked_ms, now_ms))?;
+    if start {
+        a.from = last;
+    }
+    a.asked_ms = a.asked_ms.max(now_ms);
+    Ok(answer)
+}
+
+/// True when an app asked at `asked_ms`, [`APP_WAIT_MS`] or less before
+/// `now_ms`.
+fn app_live(asked_ms: i64, now_ms: i64) -> bool {
+    asked_ms > 0 && now_ms - asked_ms <= APP_WAIT_MS
+}
+
+/// True when the app shows notice `id`, so the engine does not: the app is
+/// live (its call at `asked_ms`) and `id` is after the start `from` of the
+/// app.
+pub fn app_shows(id: i64, from: i64, asked_ms: i64, now_ms: i64) -> bool {
+    app_live(asked_ms, now_ms) && id > from
+}
+
+/// [`app_shows`] with the state that the engine recorded, under the lock of
+/// [`app_call`].
+pub fn app_shows_now(id: i64, now_ms: i64) -> bool {
+    let a = app();
+    app_shows(id, a.from, a.asked_ms, now_ms)
+}
+
+/// The new notices (in the store) that the engine shows itself: each notice
+/// that the app does not show at `now_ms`. The engine decides here, before
+/// the queue of [`spawn`], so a long wait in the queue never changes the
+/// owner of a notice.
+pub fn for_system(
+    new: Vec<iris_policy::notice::Notice>,
+    now_ms: i64,
+) -> Vec<iris_policy::notice::Notice> {
+    let a = app();
+    new.into_iter()
+        .filter(|n| !app_shows(n.id, a.from, a.asked_ms, now_ms))
+        .collect()
+}
+
 /// True after the first failure, so that a server with no desktop writes
 /// one log line, not one for each notice.
 static FAILED: AtomicBool = AtomicBool::new(false);
 
-/// Shows one system notice for `n`. A failure writes one log line the first
+/// Shows one system notice for `n` ([`for_system`] chose it). A failure writes one log line the first
 /// time. The notice stays in the web client either way.
 pub fn show(n: &iris_policy::notice::Notice) {
     let title = format!("Iris: {}", n.rule_name);
@@ -155,6 +237,61 @@ mod tests {
             "{:?}",
             t.elapsed()
         );
+    }
+
+    #[test]
+    fn the_app_shows_the_notices_for_30_seconds_after_its_call() {
+        let t = 1_800_000_000_000;
+        let shows = |asked| app_shows(5, 4, asked, t);
+        assert!(!shows(0));
+        assert!(shows(t - 10_000));
+        assert!(shows(t - APP_WAIT_MS));
+        assert!(!shows(t - APP_WAIT_MS - 1));
+        assert!(!shows(t - 31_000));
+        // A notice at or before the start of the app: the engine shows it.
+        assert!(!app_shows(4, 4, t, t));
+        assert!(!app_shows(3, 4, t, t));
+        assert!(!app_shows(1, i64::MAX, t, t));
+    }
+
+    #[test]
+    fn each_notice_of_the_first_call_has_one_owner() {
+        // The only test of the state of the app in this binary.
+        let now = 1_800_000_000_000;
+        // Notice 5 comes while the first call reads the store, after the
+        // read: the engine choice waits for the call, then leaves notice 5
+        // to the app.
+        let engine = app_call(now, |live| {
+            assert!(!live, "no app asked before");
+            let engine = std::thread::spawn(move || app_shows_now(5, now));
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(!engine.is_finished(), "the choice waits for the call");
+            Ok::<_, ()>((engine, 4, true))
+        })
+        .unwrap();
+        assert!(engine.join().unwrap(), "the app shows notice 5");
+        // Notice 4 was in the store before the read: the app does not show
+        // it (its `last` is 4), so the engine does.
+        assert!(!app_shows_now(4, now));
+        // A later call of the live app keeps its start. The engine chooses
+        // before its queue: notice 5 goes to the app, notice 4 to the queue.
+        let next = now + 10_000;
+        assert!(app_call(next, |live| Ok::<_, ()>((live, 5, false))).unwrap());
+        let ids = |v: Vec<iris_policy::notice::Notice>| v.iter().map(|n| n.id).collect::<Vec<_>>();
+        assert_eq!(ids(for_system(vec![notice(4), notice(5)], next)), [4]);
+        // After a gap the engine shows the new notices, and the next call
+        // starts the app again after its new `last`, also after a new start
+        // of the app: a notice in the queue keeps its owner.
+        let gap = next + APP_WAIT_MS + 1;
+        assert_eq!(ids(for_system(vec![notice(6)], gap)), [6]);
+        assert!(!app_call(gap, |live| Ok::<_, ()>((live, 6, true))).unwrap());
+        assert!(!app_shows_now(6, gap));
+        assert!(app_shows_now(7, gap));
+        assert!(for_system(vec![notice(7)], gap).is_empty());
+        // A failed read records nothing.
+        let late = gap + APP_WAIT_MS + 1;
+        assert!(app_call(late, |_| Err::<((), i64, bool), _>(())).is_err());
+        assert!(!app_shows_now(7, late));
     }
 
     #[test]

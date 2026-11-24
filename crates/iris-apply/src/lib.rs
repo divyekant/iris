@@ -31,13 +31,18 @@
 mod send;
 mod state;
 mod step;
+mod stop;
 
-pub use send::{release, sending, set_sending, HOLD_MS, SENT_OTHER};
+pub use send::{release, sending, sent_by_iris, set_sending, HOLD_MS, SENT_OTHER, SENT_OTHER_END};
 pub use state::{apply_state, apply_states};
-pub use step::{step, step_clock, Step};
+pub use step::{recover_step, step, step_clock, Step};
+pub use stop::{
+    measure_now as stop_measure, resume, state as stop_state, stop, stop_wait, Stopped,
+    STOPPED_CALL,
+};
 
-use iris_gmail::{Gmail, BATCH_LIMIT};
 use iris_policy::Mode;
+use iris_provider::{Provider, BATCH_LIMIT};
 use iris_store::Store;
 use rusqlite::{params, Connection, OptionalExtension};
 use unicase::UniCase;
@@ -51,7 +56,7 @@ pub enum Error {
     /// A Gmail call failed before the first write call, and the action
     /// stays as it was: HTTP 401 with no new token, or a read that failed.
     /// An apply again does each check again.
-    Gmail(iris_gmail::Error),
+    Provider(iris_provider::Error),
     /// The action is not `approved`: it does not exist, or another write
     /// changed its state before its first provider call (for example a
     /// withdraw), or another apply of the action has the mark.
@@ -69,7 +74,7 @@ pub enum Error {
     /// The ledger entry has no undo now, with the reason ([`undo`]).
     Undo(String),
     /// A sent copy had other content than the approved content (ledger
-    /// error [`SENT_OTHER`]). Each release stops until the owner checks
+    /// error that ends with [`SENT_OTHER_END`]). Each release stops until the owner checks
     /// assumption 6 of the send spec. The action stays as it was.
     SendStopped,
 }
@@ -78,13 +83,16 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Store(e) => write!(f, "store: {e}"),
-            Error::Gmail(e) => write!(f, "Gmail: {e}"),
+            Error::Provider(e) => write!(f, "mail provider: {e}"),
             Error::NotApproved(a) => write!(f, "action {a} is not approved"),
             Error::Busy => write!(f, "another apply runs now"),
             Error::OtherMailbox => write!(f, "the token is of another mailbox"),
             Error::Verb(v) => write!(f, "the verb {v} has no Gmail apply"),
             Error::Undo(why) => write!(f, "no undo: {why}"),
-            Error::SendStopped => write!(f, "{SENT_OTHER}: each send stops until the owner checks"),
+            Error::SendStopped => write!(
+                f,
+                "a mail provider {SENT_OTHER_END}: each send stops until the owner checks"
+            ),
         }
     }
 }
@@ -143,10 +151,26 @@ pub enum Outcome {
     /// The send switch is off (`iris sending on` turns it on). The send
     /// stays `held`, and no call is made.
     SendingOff,
+    /// Iris is stopped (`iris resume` ends the stop). The action stays
+    /// `approved` or `held`, and no call is made.
+    Stopped,
     /// The result of a `drafts.create` or `drafts.send` call is not known
     /// yet. The ledger row stays in `writing`, and the recovery decides
     /// later. No call is made again.
     Pending,
+}
+
+/// True if the result of one action is a Gmail scope refusal
+/// ([`iris_provider::Error::is_scope_refusal`]): the account has read
+/// access only. A failed action keeps the error as text, so this reads
+/// [`iris_provider::SCOPE_REFUSAL`], the only text of that error.
+pub fn scope_refused(r: &Result<Outcome>) -> bool {
+    match r {
+        Ok(Outcome::Failed { error, .. }) => error.contains(iris_provider::SCOPE_REFUSAL),
+        Err(Error::Provider(e)) => e.is_scope_refusal(),
+        Err(e) => e.to_string().contains(iris_provider::SCOPE_REFUSAL),
+        Ok(_) => false,
+    }
 }
 
 /// The name of the `batchModify` call in `ops`.
@@ -188,6 +212,13 @@ impl Change {
     /// The static name of a provider call.
     fn call_of(call: &str) -> Option<&'static str> {
         [BATCH, "trash", "untrash"].into_iter().find(|c| *c == call)
+    }
+
+    /// A change of `INBOX`. On a provider that moves folders (Outlook) it
+    /// moves the message, so its folder label changes too, and `add` and
+    /// `remove` do not name that label.
+    fn moves(&self) -> bool {
+        self.add.iter().chain(&self.remove).any(|l| l == "INBOX")
     }
 
     /// One provider call for each message.
@@ -265,9 +296,9 @@ impl Change {
 /// (`unicase`, as `iris-changeset`). `Err` gives the reason of a denial:
 /// the name is the name or the ID of a system label.
 fn find_label<'l>(
-    labels: &'l [iris_gmail::Label],
+    labels: &'l [iris_provider::Label],
     name: &str,
-) -> std::result::Result<Option<&'l iris_gmail::Label>, String> {
+) -> std::result::Result<Option<&'l iris_provider::Label>, String> {
     let name = UniCase::new(name);
     let mut found = None;
     for l in labels {
@@ -286,8 +317,8 @@ fn find_label<'l>(
 }
 
 /// True if `token` is a token of the mailbox `address` (Gmail profile).
-fn owns(gmail: &Gmail, token: &str, address: &str) -> iris_gmail::Result<bool> {
-    Ok(gmail
+fn owns(mail: &dyn Provider, token: &str, address: &str) -> iris_provider::Result<bool> {
+    Ok(mail
         .profile(token)?
         .email_address
         .eq_ignore_ascii_case(address))
@@ -342,7 +373,7 @@ pub struct Token<'a> {
 /// recovery.
 pub fn apply(
     store: &Store,
-    gmail: &Gmail,
+    mail: &dyn Provider,
     token: &mut Token<'_>,
     account: i64,
     action: i64,
@@ -398,7 +429,7 @@ pub fn apply(
         if writing_account != Some(account) {
             return Err(Error::OtherMailbox);
         }
-        let mut run = Run::new(store, gmail, token, account)?;
+        let mut run = Run::new(store, mail, token, account)?;
         run.mailbox()?;
         return run.recover(ledger);
     }
@@ -406,7 +437,7 @@ pub fn apply(
     // action, also when this action waits or is refused (section 7.3).
     let mut run = None;
     if writing_rows(store, account)? {
-        let mut r = Run::new(store, gmail, token, account)?;
+        let mut r = Run::new(store, mail, token, account)?;
         r.mailbox()?;
         r.recover_account()?;
         run = Some(r);
@@ -421,7 +452,7 @@ pub fn apply(
     let mut run = match run {
         Some(r) => r,
         None => {
-            let mut r = Run::new(store, gmail, token, account)?;
+            let mut r = Run::new(store, mail, token, account)?;
             r.mailbox()?;
             r
         }
@@ -447,7 +478,7 @@ pub fn apply(
     if let Some(id) = undo_label {
         // A label that the person deleted at Gmail stays deleted: the undo
         // is denied, with no write call.
-        let labels = run.call(|g, t| g.labels(t)).map_err(Error::Gmail)?;
+        let labels = run.call(|g, t| g.labels(t)).map_err(Error::Provider)?;
         let Some(l) = labels.iter().find(|l| l.id == id) else {
             let reason = "The label of the entry is not at Gmail now.";
             decide(store, action, "denied", reason)?;
@@ -465,7 +496,7 @@ pub fn apply(
     // undo (section 7.2).
     let label = label.filter(|_| change.add.is_empty() && change.remove.is_empty());
     if let Some(name) = &label {
-        let labels = run.call(|g, t| g.labels(t)).map_err(Error::Gmail)?;
+        let labels = run.call(|g, t| g.labels(t)).map_err(Error::Provider)?;
         let id = match find_label(&labels, name) {
             Err(reason) => {
                 decide(store, action, "denied", &reason)?;
@@ -476,12 +507,19 @@ pub fn apply(
                 store.put_labels(account, &[(&l.id, &l.name, "user")])?;
                 Some(l.id.clone())
             }
-            Ok(None) if verb == "label" => match run.create_label(name)? {
-                Ok(id) => Some(id),
-                // The create was a write call: the action ends, with its
-                // ledger entry and no message (section 7.2, step 1).
-                Err(error) => return run.fail_unclaimed(action, &change, error),
-            },
+            Ok(None) if verb == "label" => {
+                // The reads before the create take time: check the action
+                // again just before the write call, as the claim does (#223).
+                if let Some(o) = run.recheck(action)? {
+                    return Ok(o);
+                }
+                match run.create_label(name)? {
+                    Ok(id) => Some(id),
+                    // The create was a write call: the action ends, with its
+                    // ledger entry and no message (section 7.2, step 1).
+                    Err(error) => return run.fail_unclaimed(action, &change, error),
+                }
+            }
             Ok(None) => None,
         };
         match (verb.as_str(), id) {
@@ -572,10 +610,10 @@ pub fn apply(
                     }
                     seen.push((id, m.label_ids));
                 }
-                Err(iris_gmail::Error::NotFound) => run.counts.gone.push(id),
+                Err(iris_provider::Error::NotFound) => run.counts.gone.push(id),
                 Err(e) => {
                     mirror(store, account, &seen);
-                    return Err(Error::Gmail(e));
+                    return Err(Error::Provider(e));
                 }
             }
         }
@@ -598,11 +636,34 @@ pub fn apply(
 
 /// The recovery of section 7.3 for each ledger row in `writing` of the
 /// account. The engine runs it at start. It holds the same locks as
-/// [`apply`].
-pub fn recover(store: &Store, gmail: &Gmail, token: &mut Token<'_>, account: i64) -> Result<()> {
+/// [`apply`]. Gives true if Gmail refused a call for a missing scope
+/// ([`scope_refused`]): the recovery stopped there.
+pub fn recover(
+    store: &Store,
+    mail: &dyn Provider,
+    token: &mut Token<'_>,
+    account: i64,
+) -> Result<bool> {
     let _lock = lock(store)?;
     let _sync = sync_lock(store, account)?;
-    let mut run = Run::new(store, gmail, token, account)?;
+    let mut run = Run::new(store, mail, token, account)?;
+    run.mailbox()?;
+    run.recover_account()
+}
+
+/// [`recover`] for an account with read access only: it reads each row in
+/// `writing` and ends what the reads decide, but starts no call that never
+/// started. Such a row stays in `writing` until a write sign-in.
+pub fn recover_read_only(
+    store: &Store,
+    mail: &dyn Provider,
+    token: &mut Token<'_>,
+    account: i64,
+) -> Result<bool> {
+    let _lock = lock(store)?;
+    let _sync = sync_lock(store, account)?;
+    let mut run = Run::new(store, mail, token, account)?;
+    run.read_only = true;
     run.mailbox()?;
     run.recover_account()
 }
@@ -619,7 +680,7 @@ fn sync_lock(store: &Store, account: i64) -> Result<iris_sync::SyncLock> {
 /// One apply in progress.
 struct Run<'a, 'b> {
     store: &'a Store,
-    gmail: &'a Gmail,
+    mail: &'a dyn Provider,
     token: &'a mut Token<'b>,
     renewed: bool,
     /// The address of the account: each token must be of this mailbox.
@@ -627,6 +688,9 @@ struct Run<'a, 'b> {
     account: i64,
     /// The messages of step 2 that have no ledger message row.
     counts: Counts,
+    /// The account has read access only (docs/specs/2026-11-18-gmail-write-access.md):
+    /// the run reads, and [`Run::calls`] makes no write call.
+    read_only: bool,
 }
 
 /// What the recovery learned of one message (section 7.3).
@@ -639,7 +703,7 @@ enum Found {
 impl<'a, 'b> Run<'a, 'b> {
     fn new(
         store: &'a Store,
-        gmail: &'a Gmail,
+        mail: &'a dyn Provider,
         token: &'a mut Token<'b>,
         account: i64,
     ) -> Result<Run<'a, 'b>> {
@@ -652,12 +716,13 @@ impl<'a, 'b> Run<'a, 'b> {
         })?;
         Ok(Run {
             store,
-            gmail,
+            mail,
             token,
             renewed: false,
             address,
             account,
             counts: Counts::default(),
+            read_only: false,
         })
     }
 
@@ -668,7 +733,7 @@ impl<'a, 'b> Run<'a, 'b> {
         match self.call(|g, t| owns(g, t, &address)) {
             Ok(true) => Ok(()),
             Ok(false) => Err(Error::OtherMailbox),
-            Err(e) => Err(Error::Gmail(e)),
+            Err(e) => Err(Error::Provider(e)),
         }
     }
 
@@ -676,25 +741,25 @@ impl<'a, 'b> Run<'a, 'b> {
     /// new token one time for the apply, and call one time again.
     fn call<T>(
         &mut self,
-        f: impl Fn(&Gmail, &str) -> iris_gmail::Result<T>,
-    ) -> iris_gmail::Result<T> {
-        let mut r = f(self.gmail, &self.token.token);
-        if matches!(r, Err(iris_gmail::Error::Unauthorized)) && !self.renewed {
+        f: impl Fn(&dyn Provider, &str) -> iris_provider::Result<T>,
+    ) -> iris_provider::Result<T> {
+        let mut r = f(self.mail, &self.token.token);
+        if matches!(r, Err(iris_provider::Error::Unauthorized)) && !self.renewed {
             self.renewed = true;
             r = match (self.token.renew)() {
                 // A token of another mailbox is no token for this one.
-                Some(t) => match owns(self.gmail, &t, &self.address) {
+                Some(t) => match owns(self.mail, &t, &self.address) {
                     Ok(true) => {
                         self.token.token = t;
-                        f(self.gmail, &self.token.token)
+                        f(self.mail, &self.token.token)
                     }
-                    Ok(false) => Err(iris_gmail::Error::Unauthorized),
+                    Ok(false) => Err(iris_provider::Error::Unauthorized),
                     Err(e) => Err(e),
                 },
-                None => Err(iris_gmail::Error::Unauthorized),
+                None => Err(iris_provider::Error::Unauthorized),
             };
         }
-        if matches!(r, Err(iris_gmail::Error::Unauthorized)) {
+        if matches!(r, Err(iris_provider::Error::Unauthorized)) {
             self.token.refused = true;
         }
         r
@@ -762,6 +827,12 @@ impl<'a, 'b> Run<'a, 'b> {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?)
         })?;
+        // A read-only run starts no call: the row stays in `writing`, and
+        // the calls continue after a write sign-in. A row with no call left
+        // ends as usual.
+        if self.read_only && from < last {
+            return Ok(Outcome::Pending);
+        }
         for k in from + 1..=last {
             let messages: Vec<(i64, Option<String>)> = self.store.read(|c| {
                 let mut st = c.prepare_cached(
@@ -778,8 +849,8 @@ impl<'a, 'b> Run<'a, 'b> {
                 .iter()
                 .filter_map(|(id, p)| p.clone().map(|p| (*id, p)))
                 .collect();
-            // The cutoff: a revoke that commits before this transaction
-            // stops the call and each later call of the action.
+            // The cutoff: a revoke or a stop that commits before this
+            // transaction stops the call and each later call of the action.
             let action = self.store.read(|c| {
                 Ok(c.query_row(
                     "SELECT action_id FROM ledger WHERE id = ?1",
@@ -788,6 +859,9 @@ impl<'a, 'b> Run<'a, 'b> {
                 )?)
             })?;
             let outside = self.store.write(|tx| {
+                if iris_store::stopped(tx)?.is_some() {
+                    return Ok(Some(STOPPED_CALL.to_string()));
+                }
                 if let Some(why) = outside_grant(tx, action)? {
                     return Ok(Some(why));
                 }
@@ -823,7 +897,7 @@ impl<'a, 'b> Run<'a, 'b> {
                 let ids: Vec<&str> = live.iter().map(|(_, p)| p.as_str()).collect();
                 let add: Vec<&str> = change.add.iter().map(String::as_str).collect();
                 let remove: Vec<&str> = change.remove.iter().map(String::as_str).collect();
-                self.call(|g, t| g.batch_modify(t, &ids, &add, &remove))
+                self.call(|g, t| g.modify(t, &ids, &add, &remove))
                     .map(|()| Vec::new())
             };
             match result {
@@ -838,8 +912,12 @@ impl<'a, 'b> Run<'a, 'b> {
                     if change.single() {
                         mirror(self.store, self.account, &labels);
                     } else {
-                        let ids: Vec<i64> = live.iter().map(|(id, _)| *id).collect();
-                        mirror_change(self.store, self.account, &ids, change);
+                        if change.moves() && self.mail.moves_folders() {
+                            self.mirror_read(&live);
+                        } else {
+                            let ids: Vec<i64> = live.iter().map(|(id, _)| *id).collect();
+                            mirror_change(self.store, self.account, &ids, change);
+                        }
                     }
                 }
                 // Gmail can have applied the call: read, never call again.
@@ -849,6 +927,22 @@ impl<'a, 'b> Run<'a, 'b> {
             }
         }
         self.end(ledger, None)
+    }
+
+    /// The mirror gets the labels that the provider gives now for each of
+    /// `messages`, after a successful move. The write is done, so a failed
+    /// read stops only these reads. A message with no read keeps its
+    /// complete labels from before the move (one folder label), and the
+    /// next sync writes the new labels.
+    fn mirror_read(&mut self, messages: &[(i64, String)]) {
+        let mut seen = Vec::with_capacity(messages.len());
+        for (id, provider_id) in messages {
+            match self.call(|g, t| g.minimal(t, provider_id)) {
+                Ok(m) => seen.push((*id, m.label_ids)),
+                Err(_) => break,
+            }
+        }
+        mirror(self.store, self.account, &seen);
     }
 
     /// Step 5: `applied` when no message is `unknown`, else `failed`. The
@@ -865,9 +959,7 @@ impl<'a, 'b> Run<'a, 'b> {
         })?;
         // The history ID is a note for the person: a failed read leaves it out.
         let history = if call > 0 {
-            self.call(|g, t| g.profile(t))
-                .ok()
-                .map(|p| p.history_id.to_string())
+            self.call(|g, t| g.profile(t)).ok().map(|p| p.cursor)
         } else {
             None
         };
@@ -1001,6 +1093,12 @@ impl<'a, 'b> Run<'a, 'b> {
             let mut failure = None;
             for (id, provider_id, message_call) in page {
                 let started = message_call <= call;
+                // A read-only run starts no call, so it does not read the
+                // messages of a call that never started: the recovery after
+                // a write sign-in reads them (Run::calls).
+                if self.read_only && !started {
+                    continue;
+                }
                 let Some(provider_id) = provider_id else {
                     found.push((id, Found::Listed("gone")));
                     continue;
@@ -1019,7 +1117,7 @@ impl<'a, 'b> Run<'a, 'b> {
                         ));
                         seen.push((id, m.label_ids));
                     }
-                    Err(iris_gmail::Error::NotFound) => found.push((id, Found::Listed("gone"))),
+                    Err(iris_provider::Error::NotFound) => found.push((id, Found::Listed("gone"))),
                     Err(e) => {
                         failure = Some(e);
                         break;
@@ -1051,14 +1149,15 @@ impl<'a, 'b> Run<'a, 'b> {
             })?;
             mirror(self.store, self.account, &seen);
             if let Some(e) = failure {
-                return Err(Error::Gmail(e));
+                return Err(Error::Provider(e));
             }
         }
         self.calls(ledger, &change)
     }
 
-    /// The recovery of each row of the account in `writing`.
-    fn recover_account(&mut self) -> Result<()> {
+    /// The recovery of each row of the account in `writing`. Gives true at
+    /// the first scope refusal, and recovers no other row then.
+    fn recover_account(&mut self) -> Result<bool> {
         let account = self.account;
         let rows: Vec<i64> = self.store.read(|c| {
             let mut st = c.prepare(
@@ -1068,13 +1167,35 @@ impl<'a, 'b> Run<'a, 'b> {
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })?;
         for ledger in rows {
-            self.recover(ledger)?;
+            let r = self.recover(ledger);
+            if scope_refused(&r) {
+                return Ok(true);
+            }
+            r?;
         }
-        Ok(())
+        Ok(false)
     }
 }
 
 impl Run<'_, '_> {
+    /// In one transaction: the stop, the expiry, the mode and the grant of
+    /// [`gate`], and the state `approved`. Gives the outcome if the action
+    /// does not apply now, and [`Error::NotApproved`] if it is not approved.
+    fn recheck(&mut self, action: i64) -> Result<Option<Outcome>> {
+        let checked = self.store.write(|tx| {
+            if let Some(o) = gate(tx, action)? {
+                return Ok(Some(Some(o)));
+            }
+            let approved: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM changeset_action WHERE id = ?1 AND state = 'approved')",
+                [action],
+                |r| r.get(0),
+            )?;
+            Ok(approved.then_some(None))
+        })?;
+        checked.ok_or(Error::NotApproved(action))
+    }
+
     /// Make the user label `name` at Gmail, and save it in the store.
     /// Gives its ID. After each error (for example HTTP 409: a label with
     /// the name exists now, or an unknown result), the apply reads the
@@ -1084,7 +1205,7 @@ impl Run<'_, '_> {
         let label = match self.call(|g, t| g.create_label(t, name)) {
             Ok(l) => l,
             Err(e) => {
-                let labels = self.call(|g, t| g.labels(t)).map_err(Error::Gmail)?;
+                let labels = self.call(|g, t| g.labels(t)).map_err(Error::Provider)?;
                 match find_label(&labels, name) {
                     Ok(Some(l)) => l.clone(),
                     _ => {
@@ -1235,6 +1356,10 @@ fn writing_rows(store: &Store, account: i64) -> Result<bool> {
 /// `observe` (section 5.4). Gives the outcome if the action does not apply
 /// now.
 fn gate(tx: &Connection, action: i64) -> iris_store::Result<Option<Outcome>> {
+    // The stop comes first: while stopped, nothing about the action changes.
+    if iris_store::stopped(tx)?.is_some() {
+        return Ok(Some(Outcome::Stopped));
+    }
     if expire(tx, action)? {
         return Ok(Some(Outcome::Expired));
     }

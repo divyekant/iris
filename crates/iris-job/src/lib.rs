@@ -200,13 +200,25 @@ struct Move<'a> {
     why: Option<&'a str>,
 }
 
+/// A move out of `needs_you` takes the time of the question if the clock is
+/// earlier: the time of a question can be 1 ms ahead of the clock
+/// ([`ask_in`]), and the answer or the end must not fail on the time.
 fn add_event(c: &Connection, job: i64, state: State, by: By, m: Move, now_ms: i64) -> Result<()> {
-    let found: Option<i64> = c
-        .query_row("SELECT 1 FROM job WHERE id = ?1", [job], |r| r.get(0))
+    let found: Option<(String, i64)> = c
+        .query_row(
+            "SELECT state, updated_at FROM job WHERE id = ?1",
+            [job],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .optional()?;
-    if found.is_none() {
+    let Some((current, updated)) = found else {
         return Err(Error::NotFound);
-    }
+    };
+    let now_ms = if current == State::NeedsYou.as_str() {
+        now_ms.max(updated)
+    } else {
+        now_ms
+    };
     c.execute(
         "INSERT INTO job_event
            (job_id, at, state, by, wait_thread, wait_until, question, answer, end_kind, why)
@@ -242,7 +254,90 @@ pub fn wait_in(c: &Connection, job: i64, w: Wait, why: Option<&str>, now_ms: i64
     add_event(c, job, State::Waiting, By::Agent, m, now_ms)
 }
 
-/// The agent asks the person one question.
+/// `iris wait` of the session `session` of `job` (docs/specs/2026-11-17-wait.md):
+/// one transaction checks that the session is open and, for a reply wait,
+/// that the thread is an active thread ref of the scope, then writes the
+/// wait. The move ends the session with `job_state`, so the start path of
+/// the wake finds it. A session that a revoke or a stop ended, or a thread
+/// outside the scope, is refused, and nothing changes.
+pub fn session_wait(
+    store: &Store,
+    session: i64,
+    job: i64,
+    w: Wait,
+    why: Option<&str>,
+    now_ms: i64,
+) -> Result<()> {
+    transaction(store, |c| {
+        open_in(c, session, job)?;
+        if let Some(t) = w.thread {
+            let scoped: bool = c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM job_scope
+                   WHERE job_id = ?1 AND thread_id = ?2 AND revoked_at IS NULL)",
+                params![job, t],
+                |r| r.get(0),
+            )?;
+            if !scoped {
+                return Err(Error::Refused(format!(
+                    "t-{t} is not a thread of the scope of the job"
+                )));
+            }
+        }
+        wait_in(c, job, w, why, now_ms)
+    })
+}
+
+/// The check of the text of a question (`max` 2000) or an answer (`max`
+/// 10000) as the agent or the person gave it: not only white space, at most
+/// `max` characters, and no NUL. The callers store the text as given, so
+/// the check and the store see the same text.
+pub fn check_text(text: &str, max: usize) -> std::result::Result<(), String> {
+    if text.trim().is_empty() || text.chars().count() > max || text.contains('\0') {
+        return Err(format!(
+            "the text must have 1 to {max} characters, not only white space, and no NUL character"
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses unless `session` is a session of `job` that did not end.
+fn open_in(c: &Connection, session: i64, job: i64) -> Result<()> {
+    let open: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM job_session
+           WHERE id = ?1 AND job_id = ?2 AND ended_at IS NULL)",
+        params![session, job],
+        |r| r.get(0),
+    )?;
+    if open {
+        Ok(())
+    } else {
+        Err(Error::Refused(format!(
+            "{} is not open",
+            format_session_id(session)
+        )))
+    }
+}
+
+/// `ask` of a session (card R5-05): in one write transaction, a check that
+/// `session` of `job` is still open, then the move to `needs_you`. The
+/// trigger of migration 21 ends the session with `job_state` in the same
+/// transaction. A session that a revoke or a stop ended is refused, and
+/// nothing changes.
+pub fn session_ask(
+    store: &Store,
+    session: i64,
+    job: i64,
+    question: &str,
+    now_ms: i64,
+) -> Result<()> {
+    transaction(store, |c| {
+        open_in(c, session, job)?;
+        ask_in(c, job, question, None, now_ms)
+    })
+}
+
+/// The agent asks the person one question. The time of the question is
+/// `now_ms`, or 1 ms after the newest event of the job if that is later.
 pub fn ask(store: &Store, job: i64, question: &str, why: Option<&str>, now_ms: i64) -> Result<()> {
     transaction(store, |c| ask_in(c, job, question, why, now_ms))
 }
@@ -254,12 +349,17 @@ pub fn ask_in(
     why: Option<&str>,
     now_ms: i64,
 ) -> Result<()> {
+    // A question is later than each earlier event of its job, so the
+    // `updated` time of a job in `needs_you` names one question: an answer
+    // binds to it ([`Asked`]), even when the clock gives the same
+    // millisecond twice.
+    let at = now_ms.max(get_in(c, job)?.updated_ms.saturating_add(1));
     let m = Move {
         question: Some(question),
         why,
         ..Move::default()
     };
-    add_event(c, job, State::NeedsYou, By::Agent, m, now_ms)
+    add_event(c, job, State::NeedsYou, By::Agent, m, at)
 }
 
 /// The engine (a reply or the end of the wait) or the person ends the wait.
@@ -275,12 +375,65 @@ pub fn wake_in(c: &Connection, job: i64, by: By, why: Option<&str>, now_ms: i64)
     add_event(c, job, State::Working, by, m, now_ms)
 }
 
-/// The person answers the question.
-pub fn answer(store: &Store, job: i64, text: &str, now_ms: i64) -> Result<()> {
-    transaction(store, |c| answer_in(c, job, text, now_ms))
+/// The jobs that wait for a new session after a wake by the engine or an
+/// answer of the person (card R5-05): the job is `working`, its newest
+/// event is a wake by the engine or has an answer, and the last session of
+/// the job ended with `job_state` (the move to `waiting` or `needs_you`). A
+/// wake by the person has no answer and starts no session. A
+/// session that starts after the wake becomes the last session, so the job
+/// leaves the list. The order is the order of the rows, not of the clock.
+/// Gives each job, its last session and the agent of that session.
+pub fn woken(store: &Store) -> Result<Vec<(i64, i64, String)>> {
+    Ok(store.read(|c| {
+        let mut st = c.prepare_cached(
+            "SELECT j.id, s.id, s.agent FROM job j
+             JOIN job_session s
+               ON s.id = (SELECT max(id) FROM job_session WHERE job_id = j.id)
+             WHERE j.state = 'working' AND s.end_reason = 'job_state'
+               AND (SELECT by = 'engine' OR answer IS NOT NULL FROM job_event
+                    WHERE job_id = j.id ORDER BY id DESC LIMIT 1)",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    })?)
 }
 
-pub fn answer_in(c: &Connection, job: i64, text: &str, now_ms: i64) -> Result<()> {
+/// The question that the person saw: its text and the `updated` of the job
+/// document (RFC 3339 with milliseconds) at that time.
+#[derive(Clone, Copy, Debug)]
+pub struct Asked<'a> {
+    pub question: &'a str,
+    pub updated: &'a str,
+}
+
+/// The person answers the question. With `asked`, the answer applies only
+/// if the job still asks that question: an answer to an older question
+/// gets [`Error::Refused`], in the same transaction as the move.
+pub fn answer(
+    store: &Store,
+    job: i64,
+    text: &str,
+    asked: Option<Asked>,
+    now_ms: i64,
+) -> Result<()> {
+    transaction(store, |c| answer_in(c, job, text, asked, now_ms))
+}
+
+pub fn answer_in(
+    c: &Connection,
+    job: i64,
+    text: &str,
+    asked: Option<Asked>,
+    now_ms: i64,
+) -> Result<()> {
+    if let Some(a) = asked {
+        let j = get_in(c, job)?;
+        if j.question.as_deref() != Some(a.question)
+            || iris_talk::rfc3339(j.updated_ms) != a.updated
+        {
+            return Err(Error::Refused("the job asks another question now".into()));
+        }
+    }
     let m = Move {
         answer: Some(text),
         ..Move::default()
@@ -495,7 +648,8 @@ fn event_json(e: &Event) -> Value {
 /// The events stream from the store, so no list of events is in memory.
 /// On an error of the store, nothing is written to `out`.
 pub fn write_document(store: &Store, job: i64, out: &mut impl Write) -> Result<()> {
-    read(store, |c| write_document_in(c, job, out))
+    // The spool keeps a slow reader of `out` from holding the store.
+    store.read_to(out, |c, w| write_document_in(c, job, w))
 }
 
 /// The fields of the job document without `events`: the summary of a job.
@@ -948,4 +1102,65 @@ pub fn live_sessions_in(c: &Connection) -> Result<Vec<Session>> {
         .query_map([], session_of)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(all)
+}
+
+/// The most bytes of the copy of `notes.md` of a job
+/// (docs/specs/2026-11-17-job-memory.md). The CHECK of `job_notes` has the
+/// same value.
+pub const NOTES_MAX: usize = 65_536;
+
+/// The copy of the notes of `job` in the store, if one was saved.
+pub fn notes(store: &Store, job: i64) -> Result<Option<Vec<u8>>> {
+    let mut out = None;
+    store.read(|c| {
+        out = c
+            .query_row("SELECT text FROM job_notes WHERE job_id = ?1", [job], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+/// Replace the copy of the notes of `job` with `text`, as it is. A text of
+/// more than [`NOTES_MAX`] bytes is refused, and the old copy stays. Gives
+/// false for a done job: it has no copy (migration 35).
+pub fn save_notes(store: &Store, job: i64, text: &[u8], now_ms: i64) -> Result<bool> {
+    transaction(store, |c| save_notes_in(c, job, text, now_ms))
+}
+
+pub fn save_notes_in(c: &Connection, job: i64, text: &[u8], now_ms: i64) -> Result<bool> {
+    if text.len() > NOTES_MAX {
+        return Err(Error::Refused(format!(
+            "the notes have {} bytes, more than {NOTES_MAX}",
+            text.len()
+        )));
+    }
+    get_in(c, job)?;
+    let n = c.execute(
+        "INSERT INTO job_notes (job_id, text, saved_ms) VALUES (?1, ?2, ?3)
+         ON CONFLICT(job_id) DO UPDATE SET text = excluded.text, saved_ms = excluded.saved_ms",
+        params![job, text, now_ms],
+    )?;
+    Ok(n == 1)
+}
+
+/// Reap `session` and, if `notes` is given, save it as the copy of the
+/// notes of its job, in one write transaction: no backup and no crash sees
+/// the reap without the save (docs/specs/2026-11-17-job-memory.md). Gives
+/// the result of the save (false: no notes, or a done job).
+pub fn reap_with_notes(
+    store: &Store,
+    session: i64,
+    notes: Option<&[u8]>,
+    now_ms: i64,
+) -> Result<bool> {
+    transaction(store, |c| {
+        reap_in(c, session, now_ms)?;
+        match notes {
+            Some(text) => save_notes_in(c, session_in(c, session)?.job_id, text, now_ms),
+            None => Ok(false),
+        }
+    })
 }

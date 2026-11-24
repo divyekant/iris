@@ -80,12 +80,14 @@ test("the state now in words", () => {
   assert.equal(j.now({ ...jobs["j-9"], end: "cancel" }), "Cancelled Fri 13 Nov.");
 });
 
-test("a due date has a tone near its day and after it, and an ended job has none", () => {
+test("a due date has a tone near its day and after it; an ended job keeps the date with no tone", () => {
   const job = { ...fx.jobs["j-12"], due: "2026-11-20T00:00:00.000Z" };
   assert.equal(j.due(job, new Date("2026-11-10T12:00:00Z")).tone, "");
   assert.equal(j.due(job, new Date("2026-11-18T12:00:00Z")).tone, "soon");
   assert.equal(j.due(job, new Date("2026-11-21T12:00:00Z")).tone, "late");
-  assert.equal(j.due({ ...job, state: "done" }), null);
+  for (const now of ["2026-11-10T12:00:00Z", "2026-11-21T12:00:00Z"]) {
+    assert.deepEqual(j.due({ ...job, state: "done" }, new Date(now)), { text: "Was due Fri 20 Nov", tone: "" });
+  }
   assert.equal(j.due(fx.jobs["j-15"]), null);
 });
 

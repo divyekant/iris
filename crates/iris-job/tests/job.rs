@@ -73,7 +73,7 @@ fn a_job_keeps_its_state_after_a_restart() {
         )
         .unwrap();
         ask(&store, job, "Can I accept section 4?", None, NOW + 1).unwrap();
-        answer(&store, job, "Yes.", NOW + 2).unwrap();
+        answer(&store, job, "Yes.", None, NOW + 2).unwrap();
         wait(&store, job, w, Some("Dana has the contract now."), NOW + 3).unwrap();
         (job, get(&store, job).unwrap(), events(&store, job).unwrap())
     };
@@ -211,7 +211,7 @@ fn the_api_moves_and_refusals() {
     };
     refused(wait(&store, job, w(NOW), None, NOW));
     // The person does not wait or ask, and the agent does not answer.
-    refused(answer(&store, job, "Yes.", NOW));
+    refused(answer(&store, job, "Yes.", None, NOW));
     wait(&store, job, w(NOW + DAY), None, NOW + 1).unwrap();
     // The agent does not wake or end a waiting job.
     refused(wake(&store, job, By::Agent, None, NOW + 2));
@@ -277,9 +277,13 @@ fn the_text_limits() {
     ));
     refused(create(&store, "G", Some(-1), NOW));
     refused(create(&store, "G", None, 253_402_300_800_000));
+    // The question is 1 ms after the create, which has the same time.
     ask(&store, job, "Which?", None, NOW).unwrap();
-    refused(answer(&store, job, &"a".repeat(10_001), NOW));
-    answer(&store, job, &"a".repeat(10_000), NOW).unwrap();
+    assert_eq!(get(&store, job).unwrap().updated_ms, NOW + 1);
+    // The answer of the person in the millisecond of the clock still applies.
+    refused(answer(&store, job, &"a".repeat(10_001), None, NOW));
+    answer(&store, job, &"a".repeat(10_000), None, NOW).unwrap();
+    assert_eq!(events(&store, job).unwrap().last().unwrap().at_ms, NOW + 1);
     agree(&store, job);
 }
 
@@ -397,7 +401,7 @@ fn the_document_of_each_state_passes_the_schema() {
     wake(&store, job, By::Engine, Some("reply"), NOW + 2).unwrap();
     ask(&store, job, "Accept section 4?", None, NOW + 3).unwrap();
     check(job, "needs_you");
-    answer(&store, job, "Yes.", NOW + 4).unwrap();
+    answer(&store, job, "Yes.", None, NOW + 4).unwrap();
     finish(
         &store,
         job,
@@ -750,4 +754,42 @@ fn an_add_takes_the_list_of_the_ref_now() {
             (None, Some(9), 6)
         ]
     );
+}
+
+/// The text check of R5-05 decides on the text as given: each text that it
+/// accepts is the same text that the store keeps, and the store accepts it.
+#[test]
+fn the_text_check_and_the_store_agree_on_the_text_as_given() {
+    let pads = ["", " ", "  ", "\n", "\t"];
+    let bodies = [
+        "a".to_string(),
+        "    indented".into(),
+        "x".repeat(1999),
+        "a\u{0}b".into(),
+        "é".repeat(2000),
+    ];
+    let dir = std::env::temp_dir().join(format!("iris-job-text-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = iris_store::Store::open(&dir).unwrap();
+    for lead in pads {
+        for end in pads {
+            for body in &bodies {
+                let text = format!("{lead}{body}{end}");
+                let n = text.chars().count();
+                let ok = iris_job::check_text(&text, 2000).is_ok();
+                let want = !text.trim().is_empty() && n <= 2000 && !text.contains('\0');
+                assert_eq!(ok, want, "{lead:?} {n} {end:?}");
+                if ok {
+                    let job = iris_job::create(&store, "Pay.", None, 1).unwrap();
+                    iris_job::ask(&store, job, &text, None, 2).unwrap();
+                    assert_eq!(
+                        iris_job::get(&store, job).unwrap().question.as_deref(),
+                        Some(text.as_str())
+                    );
+                }
+            }
+        }
+    }
+    assert!(iris_job::check_text(" \n\t ", 10).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
 }

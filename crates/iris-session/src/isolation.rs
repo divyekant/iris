@@ -1,6 +1,7 @@
 //! The isolation interface of a session (launcher spec "Isolation"). The
 //! sandbox of each system is in `docs/specs/2026-11-17-session-sandbox.md`:
-//! [`linux`] on Linux. On another system [`system`] gives none, and a run is
+//! [`linux`] on Linux, [`macos`] on macOS. On another system [`system`]
+//! gives none, and a run is
 //! refused.
 
 use std::ffi::OsString;
@@ -11,6 +12,16 @@ use std::process::Child;
 #[cfg(target_os = "linux")]
 #[path = "isolation_linux.rs"]
 pub mod linux;
+
+/// The macOS sandbox. Its logic builds on each system, so that CI tests it
+/// with a fake of the process facts.
+#[path = "isolation_macos.rs"]
+pub mod macos;
+
+/// The process facts of macOS for [`macos`].
+#[cfg(target_os = "macos")]
+#[path = "isolation_macos_sys.rs"]
+pub mod macos_sys;
 
 /// What the hold helper runs: a program and its arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,10 +34,15 @@ pub struct Command {
 /// engine socket, the socket of another session, or the network other than
 /// the egress port of the session.
 ///
-/// Lifetime rule: when the helper process ends for any reason, also
+/// Lifetime rule (Linux): when the helper process ends for any reason, also
 /// `SIGKILL`, each process in the isolation of the session ends, with no
 /// call from the engine. An isolation that cannot keep this rule must fail
 /// [`Isolation::check`].
+///
+/// macOS has no mechanism for this rule. There, [`Isolation::ended`] is
+/// exact, [`Isolation::stop`] can return an error while a process still
+/// runs, and the engine never reaps a session while `ended` is false
+/// (`docs/specs/2026-11-17-session-sandbox-macos.md`).
 pub trait Isolation: Send + Sync {
     /// Checks that the isolation works on this system. The error is the
     /// reason, for the person.
@@ -56,6 +72,13 @@ pub trait Isolation: Send + Sync {
     /// True only if the isolation holds no process of the session.
     fn ended(&self, session: i64) -> io::Result<bool>;
 
+    /// Removes the files that the isolation keeps for the session. The reap
+    /// check calls it only after `stop` gave `Ok` and `ended` gave true.
+    fn remove_files(&self, session: i64) -> io::Result<()> {
+        let _ = session;
+        Ok(())
+    }
+
     /// Starts the command that [`Isolation::command`] gave, in the hold
     /// helper. It returns when the agent can run. If it fails after a
     /// process started, it kills and reaps that process first, so no
@@ -75,7 +98,12 @@ pub fn system(data_dir: &Path) -> Result<Box<dyn Isolation>, String> {
     {
         linux::Bwrap::new(data_dir).map(|b| Box::new(b) as Box<dyn Isolation>)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let sys = Box::new(macos_sys::MacSys);
+        macos::Seatbelt::with(data_dir, sys).map(|b| Box::new(b) as Box<dyn Isolation>)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = data_dir;
         Err(
@@ -108,7 +136,7 @@ pub mod test {
         pub fail_stops: Mutex<u32>,
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn a_system_other_than_linux_has_no_isolation() {
         assert!(system(Path::new("/tmp")).is_err());

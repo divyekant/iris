@@ -58,7 +58,8 @@ test("for any answer, only a mark with a source becomes a link, and no other tex
 
 test("the cost is in cents, or in dollars from 1 dollar", () => {
   assert.equal(cost(null), "");
-  assert.equal(cost(0), "less than 0.1 cents");
+  assert.equal(cost(0), "", "a price of 0 costs nothing, so the view shows no cost");
+  assert.equal(cost(1), "less than 0.1 cents");
   assert.equal(cost(4_180), "0.4 cents");
   assert.equal(cost(10_000), "1 cent");
   assert.equal(cost(994_999), "99.5 cents");

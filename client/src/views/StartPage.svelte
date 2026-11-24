@@ -17,7 +17,7 @@
 <p class="eyebrow">New job</p>
 <h1>Give this to an agent</h1>
 <figure>
-  <p class="title"><a href={href.item(item.id)}>{item.title}</a></p>
+  <p class="title"><a class="touch" href={href.item(item.id)}>{item.title}</a></p>
   {#if quote}<blockquote>{quote}</blockquote>{/if}
 </figure>
 <Start {item} oncancel={() => (location.hash = href.item(item.id))} onitem={(next) => (item = next)} />

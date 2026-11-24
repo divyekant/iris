@@ -240,7 +240,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  @media (max-width: 600px), (pointer: coarse) {
+  @media (max-width: 600px), (any-pointer: coarse) {
     .what a {
       display: block;
       line-height: var(--size-touch);
@@ -307,7 +307,7 @@
     display: contents;
   }
   /* A touch screen: the label is a 44px target around the 20px box, with the same flow size (20px and 4px margins). */
-  @media (max-width: 600px), (pointer: coarse) {
+  @media (max-width: 600px), (any-pointer: coarse) {
     .hit {
       flex: none;
       display: grid;

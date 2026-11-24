@@ -2,7 +2,7 @@
 
 - Status: draft, for the approval of the maintainer
 - Applies to: release 1 ("See")
-- Open model version: 1.0
+- Open model version: 1.1
 - Related: [Specification 2](02-changeset-policy-ledger.md), the
   [schemas](schema/), the manifesto and the experience document "Iris: the
   ideal experience"
@@ -292,8 +292,15 @@ The exit criterion of release 1 is 0 differences each day for 7 days.
 
 - The person signs in with OAuth 2.0 in the browser. The engine uses the
   loopback redirect (`http://127.0.0.1:<port>/oauth/callback`) and PKCE.
-- Release 1 asks only for the scope `https://www.googleapis.com/auth/gmail.readonly`.
-  Release 2 asks for `gmail.modify` when the person turns on writes.
+- `iris account add` asks only for the scope
+  `https://www.googleapis.com/auth/gmail.readonly`.
+- `iris account add --write` asks only for
+  `https://www.googleapis.com/auth/gmail.modify`, which also allows read. An
+  account can write only if its sign-in asked for write access and Google
+  granted `gmail.modify`. A plain sign-in is read only, also when Google gives
+  an earlier `gmail.modify` grant. A read-only account syncs as before, makes no Gmail write, and has the
+  state `read_only`. Its approved actions wait for a write sign-in. See
+  `docs/specs/2026-11-18-gmail-write-access.md` (tracker item R2-17).
 - The engine stores the refresh token encrypted in the store (section 5.4),
   together with the OAuth client file that got it, in `account.token`. So each
   account has its own client, and a backup has a matching client and token.
@@ -377,12 +384,15 @@ New content files after step 2 are not in the backup, and the copy of
 `iris backup` does not copy `workspaces/`. A copy of the whole folder while
 the engine is stopped copies `workspaces/` too, with the files of the agent.
 The build makes the files of a
-workspace again from the store, before each session. The files of the agent
-(`drafts/` and `notes.md`) are not in a copy of `iris backup`: after a
-restore from it, the next build makes them empty. A draft that the agent submits is in the store
+workspace again from the store, before each session. The folder `drafts/` of the
+agent is not in a copy of `iris backup`: after a restore from it, the next
+build makes it empty. A draft that the agent submits is in the store
 (specification 2), so only work that the agent did not submit is lost. This
-is a known limit, with a GitHub issue, until the notes between sessions
-(R5-06) move into the store.
+is a known limit, with a GitHub issue. The store keeps a copy of `notes.md`
+of each open job (R5-06, `docs/specs/2026-11-17-job-memory.md`), so
+`iris.db` in the backup holds it: after a restore, the next build writes the
+copy. The copy holds the notes of the last save (the last reap or build),
+not a change that a running session made after it.
 
 ### 5.2 SQLite settings
 
@@ -444,9 +454,9 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `sync_seen` | `account_id`, `message_id`, `labels` TEXT (JSON), PK(`account_id`, `message_id`) | The messages that the lists of a full resync or a verify name, with their label sets. The engine clears it when a new run starts, not when an unfinished run continues after a crash. |
 | `label` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, `name` TEXT, `kind` TEXT (`system` or `user`), UNIQUE(`account_id`, `provider_id`) | Labels of the provider. |
 | `thread` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, `viewed_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | Threads of the provider. Gives the `t-` IDs. `viewed_at` is the last view of the thread in Iris. |
-| `message` | `id` INTEGER PK, `account_id`, `thread_id`, `provider_id` TEXT, `content_sha256` TEXT, `size` INTEGER, `internal_date` INTEGER, `fetched_at` INTEGER, `gone_at` INTEGER, `understood_at` INTEGER, `hostile` TEXT (JSON), `tries` INTEGER, `retry_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | One row for each message. Gives the `m-` IDs. `hostile` is the list of the hostile marks of the message (section 6.7). `tries` and `retry_at` hold the failed tries of the model (section 7.4). The store clears `understood_at` when the content hash changes, when a gone message comes back, and when the message gets or loses the label `SENT` or `DRAFT`. |
+| `message` | `id` INTEGER PK, `account_id`, `thread_id`, `provider_id` TEXT, `content_sha256` TEXT, `size` INTEGER, `internal_date` INTEGER, `fetched_at` INTEGER, `gone_at` INTEGER, `understood_at` INTEGER, `hostile` TEXT (JSON), `tries` INTEGER, `retry_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | One row for each message. Gives the `m-` IDs. `hostile` is the list of the hostile marks of the message (section 6.7). `tries` and `retry_at` hold the failed tries of the model (section 7.4). The store clears `understood_at` when the content hash changes, when a gone message comes back, and when the message gets or loses the label `SENT`, `DRAFT`, `UNSENT` or `SENT_COPY`. A message with `DRAFT`, `UNSENT` or `SENT_COPY` that is not gone keeps no item that a new understanding replaces: the triggers of store migration 42 delete such items when the label comes and when the message comes back. |
 | `message_label` | `message_id`, `label_id`, PK(`message_id`, `label_id`) | The label set of each message. |
-| `header` | `message_id` PK, `date` INTEGER, `from_addr` TEXT, `from_name` TEXT, `to_addrs` TEXT, `cc_addrs` TEXT, `subject` TEXT, `message_id_hdr` TEXT, `in_reply_to` TEXT, `list_id` TEXT, `auth` TEXT | Parsed headers that queries need. `auth` holds the SPF, DKIM and DMARC results from `Authentication-Results`. `to_addrs` and `cc_addrs` hold bare lowercase addresses joined by `,`. |
+| `header` | `message_id` PK, `date` INTEGER, `from_addr` TEXT, `from_name` TEXT, `to_addrs` TEXT, `cc_addrs` TEXT, `subject` TEXT, `message_id_hdr` TEXT, `in_reply_to` TEXT, `list_id` TEXT, `auth` TEXT | Parsed headers that queries need. `auth` holds the SPF, DKIM and DMARC results from `Authentication-Results`. `to_addrs` and `cc_addrs` hold bare lowercase addresses joined by `,`. `from_addr` is ASCII lowercase: the triggers of store migration 39 keep this form for each write. |
 | `body` | `message_id` INTEGER PK, `subject` TEXT, `sender` TEXT, `text` TEXT | The clean text of the message (section 7.2), with the subject and the sender name and address. `message_id` is the row ID. |
 | `message_fts` | FTS5 table on `subject`, `sender`, `text`, with `content='body'` and `content_rowid='message_id'` | Full-text search. Triggers on `body` keep it current. |
 | `sender` | `id` INTEGER PK, `address` TEXT UNIQUE, `name` TEXT, `kind` TEXT, `basis` TEXT, `decided_by` TEXT, `decided_at` INTEGER, `declined_at` INTEGER | The sender axis. Gives the `p-` IDs. `declined_at`: the time of a decline at the stranger gate (section 6.7), or NULL. |
@@ -523,7 +533,7 @@ Each item of each form has these fields:
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `model` | string, `"iris/1.0"` | yes | The version of the open model: `iris/<major>.<minor>` ([specification 4](04-open-model-versions.md)). |
+| `model` | string, `"iris/1.1"` (`"iris/1.0"` in older documents) | yes | The version of the open model: `iris/<major>.<minor>` ([specification 4](04-open-model-versions.md)). |
 | `id` | string, for example `"c-311"` | yes | The ID of the item (section 5.7). |
 | `form` | `commitment`, `conversation`, `record`, `feed` or `signal` | yes | The form. |
 | `status` | string, values for each form | yes | The state of the item. |
@@ -534,7 +544,8 @@ Each item of each form has these fields:
 | `derived` | object | yes | Who made the item: `by` is `rule`, `model` or `person`. `rule` names the rule. `model` names the model, and `prompt` names the prompt version. |
 | `confidence` | number from 0 to 1 | no | How sure the understanding step is. Not set when `derived.by` is `person`. |
 | `matter` | string or null | no | The `g-` ID of the confirmed matter of the item, or null (`docs/specs/2026-11-16-matters.md`). The engine sets it when it reads the item. |
-| `ready` | array of `"draft"`, at least 1, no repeats | no | What Iris prepared for the item (card R3-09). `"draft"`: the thread of the `origin` message has a reply draft that is not stale (`iris_voice::ready_sql`). The engine sets it only on the items of the brief lists and pages, when it reads them. A stored value is never shown, and a correction of it is refused. |
+| `account` | string, `a-` ID | no | Since `iris/1.1`. The account (the mailbox) of the item (card R6-02, `docs/specs/2026-11-17-accounts.md`). The engine sets it when it reads the item. |
+| `ready` | array of `"draft"`, at least 1, no repeats | no | What Iris prepared for the item (card R3-09). `"draft"`: the thread of the `origin` message has a reply draft that is not stale (`iris_voice::ready_item_sql`). A reply draft of the owner marks each item of its thread. A nudge (card R3-07, a draft with `ask`) marks only the commitment of its key, not the other items of its thread. The engine sets it only on the items of the brief lists and pages, when it reads them. A stored value is never shown, and a correction of it is refused. |
 | `attention` | object | no | Reserved for specification 2: `state` is `shown`, `bundled` or `hidden`, with the rule and the reason. |
 
 A source has these fields:
@@ -745,7 +756,7 @@ The `hostile` column of the message holds each mark that applies:
 |---|---|
 | `dmarc` | `Authentication-Results` reports a DMARC fail for the domain of `From`. |
 | `spoof` | The display name is the name of a known person, the address is not the address of that person, and DKIM or DMARC does not pass for the domain of the address. If DKIM and DMARC pass, the address is a new sender, with the kind `stranger`. |
-| `link` | An HTML link of the message (from `Clean.links`) shows a web address with the host `S` (text that starts with `http://`, `https://` or `www.`, or a first word that is a domain with a known public suffix, not a file name such as `report.pdf`), and its target is an `http` or `https` URL that a browser opens on another owner. Iris reads the target with the WHATWG URL standard. The owner of a host is its registrable domain by the public suffix list, with the hosts and the `From` domain in punycode (so `münchen.de` and `xn--mnchen-3ya.de` are one owner). The link is deceptive if one of these is true: the target host is an IP address or Iris cannot read it; the target has a user part, a backslash or a percent sign in front of its path; the target host has another owner than `S`. If DMARC passes for the domain of `From` and that domain has the owner of `S`, the link is not deceptive: the sender owns the shown domain and can link through any redirect. DMARC for another domain proves nothing about `S`. If `iris-clean` could not list each link (`links_cut`), or the part of the file past the read limit has a part header (after a delimiter of a declared boundary) with the type `text/html`, the message gets the mark. |
+| `link` | An HTML link of the message (from `Clean.links`) shows a web address with the host `S` (text that starts with `http://`, `https://` or `www.`, or a first word that is a domain with a known public suffix, not a file name such as `report.pdf`), and its target is an `http` or `https` URL that a browser opens on another owner. Iris reads the target with the WHATWG URL standard. The owner of a host is its registrable domain by the public suffix list, with the hosts and the `From` domain in punycode (so `münchen.de` and `xn--mnchen-3ya.de` are one owner). The link is deceptive if one of these is true: the target host is an IP address or Iris cannot read it; the target has a user part, a backslash or a percent sign in front of its path; the target host has another owner than `S`. If DMARC passes for the domain of `From` and that domain has the owner of `S`, a target host of another owner is not deceptive: the sender owns the shown domain and can link through a redirect. The first two conditions (an IP address or a target that Iris cannot read; a user part, a backslash or a percent sign) apply also to this sender. DMARC for another domain proves nothing about `S`. If `iris-clean` could not list each link (`links_cut`), or the part of the file past the read limit has a part header (after a delimiter of a declared boundary) with the type `text/html`, the message gets the mark. |
 | `spam` | The message has the label `SPAM`. |
 | `phishing` | The understanding step marks the message as phishing. |
 
@@ -1097,8 +1108,10 @@ is exact. An item whose stranger the person declined, with no other stranger,
 is in no section. The client uses the counts of the engine and does not remove
 duplicates between sections.
 
-The web client opens the brief with Due soon, after the live login codes
-(card R3-08). Due soon holds each item of You owe that is due in 2 days or
+After the live login codes, the web client shows these sections first, in
+this order: "A question for you" (card R5-05), only when an agent asks a
+question, with the job whose question is the newest (`updated` of the job)
+and a field for the answer; then Due soon (card R3-08). Due soon holds each item of You owe that is due in 2 days or
 less, or that is late, in the local day of the viewer. The engine does not
 know that day (it has no time zone of the owner), so the client makes this
 split from the You owe items, and the API keeps one You owe section. The
@@ -1144,12 +1157,9 @@ The triage proposal of release 1 (crate `iris-observe`) has these rules:
   status `expired`, feed items, and records. A message goes only to the first
   rule that matches it.
 - The engine reads the counts and the message IDs in one read transaction.
-- Because release 1 does not store the proposal, its ID is an exception to
-  the rule "unique in one install" of specification 2, section 5.1. The ID is
-  `cs-` and the first 63 bits of the SHA-256 of the account and the message
-  IDs of each rule. So the ID names the content: the same content gives the
-  same ID, also at a later time, and a different content gives a different
-  ID. A client must not use this ID as the ID of a stored changeset.
+- Release 1 did not store the proposal, and its ID was a hash of the
+  content. From release 2 no part of Iris writes that form: `iris-triage`
+  stores the proposal, and the store gives its ID (issues #72 and #212).
 
 From release 2, the crate `iris-triage` stores the same proposal as a
 changeset (specification 2, section 5.4):

@@ -217,8 +217,21 @@ test("the setup flow shows the copy progress and says that the mailbox does not 
   assert.match(t, /Nothing in your mailbox changes/);
 });
 
+test("a conversation item opens the reply form of its thread, unless the conversation is gone (R3-10)", async () => {
+  const html = await render("/src/views/Item.svelte", { item: item("v-88"), now: NOW });
+  assert.match(html, /<a class="reply[^"]*" href="#\/write\/t-9001">Reply</);
+  // Reply leads the row of the conversation verbs.
+  assert.match(text(html), /Reply Mute/);
+  // A muted conversation has no row of verbs: Reply still shows.
+  assert.match(await render("/src/views/Item.svelte", { item: { ...item("v-88"), status: "muted" }, now: NOW }), /href="#\/write\/t-9001">Reply</);
+  const gone = await render("/src/views/Item.svelte", { item: { ...item("v-88"), status: "gone" }, now: NOW });
+  assert.doesNotMatch(gone, /href="#\/write\//);
+  // Only a conversation has the reply: a commitment of the same thread does not.
+  assert.doesNotMatch(await render("/src/views/Item.svelte", { item: item("c-311"), now: NOW }), /href="#\/write\//);
+});
+
 test("the setup flow says mirror ready and that nothing changed", async () => {
-  const status = { ...fx.status, messages: { total: 84212, fetched: 84212, understood: 100, gone: 0 } };
+  const status = { ...fx.status, accounts: [fx.status.accounts[0]], messages: { total: 84212, fetched: 84212, understood: 100, gone: 0 } };
   const html = await render("/src/views/Setup.svelte", { status, poll: 0 });
   assert.match(text(html), /Mirror ready\. 84,212 messages\. Nothing in your mailbox changed\./);
   assert.match(text(html), /100 of 84,212 messages/);
@@ -787,7 +800,7 @@ test("each status answer sets the accounts that need sign-in, and the app shows 
   try {
     globalThis.fetch = async () => new Response(JSON.stringify({ ...fx.status, accounts: [account] }));
     await get("status");
-    assert.deepEqual(access.locked, [account.address]);
+    assert.deepEqual(access.locked, [{ address: account.address, provider: account.provider }]);
     // The views start API calls while they render. Keep them pending.
     globalThis.fetch = () => new Promise(() => {});
     for (const hash of ["", "#/setup", "#/brief", "#/mail/m-55210"]) {
@@ -801,6 +814,25 @@ test("each status answer sets the accounts that need sign-in, and the app shows 
     assert.deepEqual(access.locked, []);
     globalThis.fetch = () => new Promise(() => {});
     assert.doesNotMatch(text(await render("/src/App.svelte")), /stopped the sign-in/);
+    // An IMAP account: the mail server refused, and the notice gives the IMAP command, not the Gmail one.
+    const imap = { ...account, provider: "imap" };
+    globalThis.fetch = async () => new Response(JSON.stringify({ ...fx.status, accounts: [imap] }));
+    await get("status");
+    globalThis.fetch = () => new Promise(() => {});
+    const t = text(await render("/src/App.svelte"));
+    assert.match(t, /The mail server stopped the sign-in/);
+    assert.match(t, new RegExp(`iris account add-imap ${imap.address.replace(".", "\\.")} and give the new password`));
+    assert.doesNotMatch(t, /client\.json/);
+    // An Outlook account: Microsoft refused, and the notice gives the Outlook command.
+    const outlook = { ...account, provider: "outlook" };
+    globalThis.fetch = async () => new Response(JSON.stringify({ ...fx.status, accounts: [outlook] }));
+    await get("status");
+    globalThis.fetch = () => new Promise(() => {});
+    const o = text(await render("/src/App.svelte"));
+    assert.match(o, /Microsoft stopped the sign-in/);
+    assert.match(o, /iris account add-outlook (&lt;|<)client ID> with the application \(client\) ID/);
+    assert.match(o, /add --tenant with its directory \(tenant\) ID/);
+    assert.doesNotMatch(o, /client\.json/);
   } finally {
     globalThis.fetch = saved;
     delete globalThis.location;
@@ -876,7 +908,7 @@ test("the brief and setup say that the copy stopped for an account that needs si
   const brief = { ...fx.brief, oldest_fetched: "2026-09-01T00:00:00Z" };
   const b = text(await render("/src/views/Brief.svelte", { brief, status, now: NOW, poll: 0 }));
   assert.doesNotMatch(b, /still copies|copy continues/);
-  assert.match(b, /Iris copied 20,000 of 84,212 messages, then Google stopped the sign-in\. This brief covers the mail since/);
+  assert.match(b, /Iris copied 20,000 of 84,212 messages, then the sign-in stopped\. This brief covers the mail since/);
   const early = text(await render("/src/views/Brief.svelte", { brief: { ...brief, oldest_fetched: null }, status, now: NOW, poll: 0 }));
   assert.doesNotMatch(early, /copy continues/);
   const t = text(await render("/src/views/Setup.svelte", { status, poll: 0 }));

@@ -74,9 +74,21 @@ struct LocalUrl {
 /// on loopback adds nothing, and the run connects to an IP literal (see
 /// `pin_local_url`), which a certificate for `localhost` does not match.
 fn parse_local(url: &str) -> Result<LocalUrl, String> {
+    // No error holds the URL text: a user part, a query or a fragment can
+    // hold a secret, and the command prints the error.
     let refuse = || {
-        format!("`{url}` is not on this machine: use http:// with localhost, 127.0.0.1 or [::1]")
+        "the model URL is not on this machine: use http:// with localhost, 127.0.0.1 or [::1]"
+            .to_string()
     };
+    // The model client adds `/chat/completions` to the URL text, so a query
+    // or a fragment would change the request path (#135).
+    if url.contains(['?', '#']) {
+        return Err(
+            "the model URL has a query or a fragment: give the base URL only, \
+             for example http://localhost:8080/v1"
+                .to_string(),
+        );
+    }
     let uri: http::Uri = url.parse().map_err(|_| refuse())?;
     if uri.scheme_str() != Some("http") {
         return Err(refuse());
@@ -695,6 +707,9 @@ mod tests {
             "http://localhost:/v1",
             "http://localhost:99999/v1",
             "http://[::ffff:10.0.0.1]/v1",
+            "http://localhost:8080/v1?token=x",
+            "http://localhost:8080/v1?",
+            "http://localhost:8080/v1#x",
         ] {
             assert!(local_host(bad).is_err(), "{bad}");
         }
@@ -737,7 +752,8 @@ mod tests {
     }
 
     /// Property: a URL is local if and only if its scheme is `http`, it has
-    /// no user part, and its host is `localhost` or a loopback literal. A
+    /// no user part, no query and no fragment, and its host is `localhost`
+    /// or a loopback literal. A
     /// pinned URL keeps the port and the path and has a loopback IP host.
     #[test]
     fn property_local_urls() {
@@ -773,12 +789,15 @@ mod tests {
             let url = format!("{scheme}{user}{host}{port}{path}");
             let port_ok = !matches!(port, ":" | ":65536" | ":x");
             let scheme_ok = scheme.eq_ignore_ascii_case("http://");
-            let expect = loopback && scheme_ok && user.is_empty() && port_ok && !path.contains('#');
+            let plain = !path.contains(['?', '#']);
+            let expect = loopback && scheme_ok && user.is_empty() && port_ok && plain;
             let got = parse_local(&url);
-            if !path.contains('#') {
-                assert_eq!(got.is_ok(), expect, "{url}");
-            } else {
-                assert!(got.is_err() || loopback, "{url}");
+            assert_eq!(got.is_ok(), expect, "{url}");
+            if let Err(e) = &got {
+                // No secret of the URL goes to the error text.
+                for part in ["x=1", "#f", "a:b", "127.0.0.1@", "user@", "evil"] {
+                    assert!(!e.contains(part), "{url}: {e}");
+                }
             }
             if let Ok(u) = got {
                 let bare = u.host.trim_start_matches('[').trim_end_matches(']');

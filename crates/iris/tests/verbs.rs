@@ -61,6 +61,29 @@ fn status_json_is_the_api_status() {
     assert!(out.contains("Mode: observe"), "{out}");
 }
 
+/// A read-only account (R2-17): `iris status` names the state and the
+/// command that gives write access. A write account has no such line.
+#[test]
+fn status_names_a_read_only_account_and_the_fix() {
+    let (store, fake) = synced("status-read-only");
+    let (_, out, _) = iris(&store, &["status"]);
+    assert!(!out.contains("read only"), "{out}");
+    sign_in_as(
+        &store,
+        &gmail(fake.base_url()),
+        &client_json(),
+        REFRESH,
+        false,
+    );
+    let (ok, out, err) = iris(&store, &["status"]);
+    assert!(ok, "{err}");
+    assert!(out.contains(": read_only, "), "{out}");
+    assert!(
+        out.contains("iris account add <client.json> --write"),
+        "{out}"
+    );
+}
+
 #[test]
 fn search_json_is_the_api_search() {
     let (store, _fake) = synced("search");
@@ -293,4 +316,25 @@ fn matters_verbs_are_the_api_matters() {
     let (ok, out, err) = iris(&store, &["matters", "propose"]);
     assert!(ok, "{err}");
     assert!(out.contains("no model is set"), "{out}");
+}
+
+/// Card R5-05: `iris job answer` answers the question of a job once.
+#[test]
+fn job_answer_answers_the_question_once() {
+    let dir = std::env::temp_dir().join(format!("iris-verbs-answer-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    let job = iris_job::create(&store, "Pay the invoice.", None, 1).unwrap();
+    let id = iris_job::format_job_id(job);
+    let (ok, _, err) = iris(&store, &["job", "answer", &id, "The blue card."]);
+    assert!(!ok && err.contains("does not ask this question"), "{err}");
+    iris_job::ask(&store, job, "Which card?", None, 2).unwrap();
+    let (ok, _, err) = iris(&store, &["job", "answer", "j-999", "Yes."]);
+    assert!(!ok && err.contains("no job"), "{err}");
+    let (ok, out, err) = iris(&store, &["job", "answer", &id, "The blue card."]);
+    assert!(ok, "{err}");
+    assert!(out.contains("answered"), "{out}");
+    let last = iris_job::events(&store, job).unwrap().pop().unwrap();
+    assert_eq!(last.answer.as_deref(), Some("The blue card."));
+    let _ = std::fs::remove_dir_all(&dir);
 }

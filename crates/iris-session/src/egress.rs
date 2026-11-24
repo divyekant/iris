@@ -98,6 +98,67 @@ pub fn session_peer(session: i64) -> Option<Ipv4Addr> {
     Some(Ipv4Addr::from(SESSION_BASE + session as u32))
 }
 
+/// The proxy endpoint that the agent of a session gets: the port, and on
+/// macOS the token of the session (macOS sandbox spec, "Egress on macOS").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Endpoint {
+    pub port: u16,
+    pub token: Option<String>,
+}
+
+/// A new random token of 32 bytes, as 64 hex digits, from the random
+/// source of the system.
+pub fn new_token() -> io::Result<String> {
+    let mut b = [0u8; 32];
+    File::open("/dev/urandom")?.read_exact(&mut b)?;
+    Ok(b.iter().map(|x| format!("{x:02x}")).collect())
+}
+
+/// The token check of a request head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Auth {
+    /// The head is not complete yet.
+    Partial,
+    /// The head is complete, and no `Proxy-Authorization` header has the
+    /// value `Basic` + base64 of `iris:<token>`. A head that does not parse
+    /// is `Bad` too.
+    Bad,
+    Good,
+}
+
+/// Checks the token of `head`. The compare of a value takes the same time
+/// for each value of the same length.
+fn auth(head: &[u8], token: &str) -> Auth {
+    use base64::Engine;
+    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut req = httparse::Request::new(&mut headers);
+    match req.parse(head) {
+        Ok(httparse::Status::Complete(_)) => {}
+        Ok(httparse::Status::Partial) => return Auth::Partial,
+        Err(_) => return Auth::Bad,
+    }
+    let want = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(format!("iris:{token}"))
+    );
+    let mut found = false;
+    for h in req.headers.iter() {
+        if h.name.eq_ignore_ascii_case("proxy-authorization") {
+            found |= same(h.value, want.as_bytes());
+        }
+    }
+    if found {
+        Auth::Good
+    } else {
+        Auth::Bad
+    }
+}
+
+/// Compares `a` and `b` in a time that depends only on their lengths.
+fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+}
+
 /// Connects to `127.0.0.1:<port>` from the loopback address `from`, with
 /// `socket2` (bind before connect). `Socket::new` sets close-on-exec. Linux takes
 /// each address of `127.0.0.0/8` as a local address with no setup.
@@ -267,6 +328,8 @@ struct Shared {
     public_only: bool,
     /// The only client address that the proxy takes. None only in tests.
     peer: Option<Ipv4Addr>,
+    /// The token that each `CONNECT` must give (macOS only).
+    token: Option<String>,
     /// The live resolver workers of the process (one count for all proxies).
     /// A worker can outlive its connection and the proxy, so it holds only
     /// this count, the resolver and the name.
@@ -322,27 +385,41 @@ pub struct Proxy {
 impl Proxy {
     /// Starts the proxy on a free port of `127.0.0.1`. `log` is the egress
     /// log of the session, open for append. `peer` is the session address
-    /// ([`session_peer`]): the proxy refuses a client from another address.
+    /// ([`session_peer`]) on Linux and `127.0.0.1` on macOS: the proxy
+    /// refuses a client from another address. With a `token`, the proxy
+    /// answers each `CONNECT` that does not give it with `407`.
     pub fn start(
         allowed: Vec<String>,
         log: File,
         resolver: Box<dyn Resolve>,
         peer: Ipv4Addr,
+        token: Option<String>,
     ) -> io::Result<Proxy> {
         static WORKERS: OnceLock<Arc<AtomicUsize>> = OnceLock::new();
         let workers = WORKERS
             .get_or_init(|| Arc::new(AtomicUsize::new(0)))
             .clone();
-        Proxy::start_with(allowed, log, resolver, true, Some(peer), LOG_LIMIT, workers)
+        Proxy::start_with(
+            allowed,
+            log,
+            resolver,
+            true,
+            Some(peer),
+            token,
+            LOG_LIMIT,
+            workers,
+        )
     }
 
     /// `public_only` is false only in tests, which use a loopback server.
+    #[allow(clippy::too_many_arguments)]
     fn start_with(
         allowed: Vec<String>,
         file: File,
         resolver: Box<dyn Resolve>,
         public_only: bool,
         peer: Option<Ipv4Addr>,
+        token: Option<String>,
         log_limit: u64,
         workers: Arc<AtomicUsize>,
     ) -> io::Result<Proxy> {
@@ -354,6 +431,7 @@ impl Proxy {
             resolver: Arc::from(resolver),
             public_only,
             peer,
+            token,
             workers,
             log: Mutex::new(Log {
                 file,
@@ -392,6 +470,14 @@ impl Proxy {
     /// The port that the agent gets in `HTTPS_PROXY`.
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// The endpoint that the agent gets: the port and the token.
+    pub fn endpoint(&self) -> Endpoint {
+        Endpoint {
+            port: self.port,
+            token: self.shared.token.clone(),
+        }
     }
 
     /// Ends each open connection and each resolve in progress, and answers
@@ -594,6 +680,8 @@ struct Finish {
     answer: Option<(TcpStream, &'static [u8])>,
 }
 
+const AUTH_REQUIRED: &[u8] = b"HTTP/1.1 407 Proxy Authentication Required\r\n\
+Proxy-Authenticate: Basic realm=\"iris\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 const FORBIDDEN: &[u8] =
     b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 const BAD_GATEWAY: &[u8] =
@@ -684,10 +772,35 @@ fn handle(shared: &Shared, mut client: TcpStream, id: u64) -> Finish {
         }
     };
     let (host, len) = loop {
-        match check_head(&head, &shared.allowed) {
-            Ok(Some(found)) => break found,
-            Ok(None) => {}
-            Err(r) => return refuse(client, r),
+        // With a token, the token comes first: a client with no token gets
+        // 407 for each request, also for a host that is not allowed.
+        let ready = match &shared.token {
+            None => true,
+            Some(t) => match auth(&head, t) {
+                // A head that fills the limit and is still not complete
+                // gives no token.
+                Auth::Partial if head.len() < HEAD_MAX => false,
+                Auth::Partial => {
+                    return Finish {
+                        end: End::Refused(Reason::NotSession),
+                        answer: Some((client, AUTH_REQUIRED)),
+                    }
+                }
+                Auth::Good => true,
+                Auth::Bad => {
+                    return Finish {
+                        end: End::Refused(Reason::NotSession),
+                        answer: Some((client, AUTH_REQUIRED)),
+                    }
+                }
+            },
+        };
+        if ready {
+            match check_head(&head, &shared.allowed) {
+                Ok(Some(found)) => break found,
+                Ok(None) => {}
+                Err(r) => return refuse(client, r),
+            }
         }
         let left = end.saturating_duration_since(Instant::now());
         if left.is_zero() || client.set_read_timeout(Some(left)).is_err() {

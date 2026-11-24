@@ -295,8 +295,9 @@ pub fn status(store: &Store) -> Result<Status> {
         for a in &mut accounts {
             a.last_sync = c
                 .query_row(
+                    // A `fetch` row is the failure of one message, not a sync.
                     "SELECT kind, started_at, ended_at, result FROM sync_log
-                     WHERE account_id = ?1 ORDER BY id DESC LIMIT 1",
+                     WHERE account_id = ?1 AND kind <> 'fetch' ORDER BY id DESC LIMIT 1",
                     [a.id],
                     |r| {
                         Ok(SyncRun {
@@ -996,16 +997,19 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
 pub struct SectionPage {
     #[serde(flatten)]
     pub section: Section,
-    /// The `after` value of the next page (the ID of the last item), or
-    /// `None` on the last page.
+    /// The `after` value of the next page: an encoded cursor (see
+    /// `encode_cursor`) with the section name and the sort keys of the
+    /// last item, not an item ID. `None` on the last page.
     pub next: Option<String>,
 }
 
 /// One page of the list section `name` (one of [`SECTIONS`], or
 /// `bundle-<rule>` for the bundle of a rule) of the brief at the time `now`,
-/// with the same filter and order as [`brief`]. `after` is
-/// the ID of the last item of the page before. The page starts after the
-/// place of that item in the order, also when the item left the section.
+/// with the same filter and order as [`brief`]. `after` is the `next`
+/// value of the page before: an encoded cursor with the section name and
+/// the sort keys of its last item, not an item ID. The page starts after
+/// these keys in the order, also when that item left the section. An
+/// `after` that is not a cursor of section `name` gives [`Error::Query`].
 pub fn brief_section(
     store: &Store,
     now: i64,
@@ -1154,28 +1158,32 @@ fn empty_summary() -> MessageSummary {
     }
 }
 
-/// The column `matter` of an item row: the row ID of the confirmed matter
-/// that keeps the item, or NULL. The query must name the table `item`.
+/// The columns `matter` and `account` of an item row: the row ID of the
+/// confirmed matter that keeps the item, or NULL, and the row ID of the
+/// account of the item. The query must name the table `item`.
 pub(crate) const MATTER: &str = "(SELECT mi.matter_id FROM matter_item mi
       JOIN matter m ON m.id = mi.matter_id
-     WHERE mi.item_id = item.id AND mi.kept = 1 AND m.status = 'confirmed') AS matter";
+     WHERE mi.item_id = item.id AND mi.kept = 1 AND m.status = 'confirmed') AS matter,
+     item.account_id AS account";
 
 /// The column `ready_draft` of an item row: true when the thread of the
 /// mail that made the item has a reply draft that the person can use now
-/// (card R3-09, [`iris_voice::ready_sql`]).
+/// (card R3-09, [`iris_voice::ready_item_sql`]). A nudge (card R3-07)
+/// marks only its own commitment.
 fn ready_draft() -> String {
     format!(
         "{} AS ready_draft",
-        iris_voice::ready_sql(
+        iris_voice::ready_item_sql(
             "SELECT om.thread_id FROM item_source os JOIN message om ON om.id = os.message_id
-             WHERE os.item_id = item.id AND os.role = 'origin'"
+             WHERE os.item_id = item.id AND os.role = 'origin'",
+            "item.id"
         )
     )
 }
 
 /// The document of an item row (id, form, status, doc, and the column
-/// [`MATTER`] by name). The row is the true copy of the ID, the status and
-/// the matter, so they replace the values of the document. A stored `ready`
+/// [`MATTER`] by name). The row is the true copy of the ID, the status,
+/// the matter and the account, so they replace the values of the document. A stored `ready`
 /// is removed: only [`read_section`] sets it, from the store. Each output of
 /// an item (the API, the read verbs, the export) uses this function.
 pub(crate) fn doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
@@ -1202,6 +1210,10 @@ pub(crate) fn doc_at(r: &rusqlite::Row, at: usize) -> rusqlite::Result<Value> {
             "matter".into(),
             matter.map_or(Value::Null, |m| format_id(Kind::Matter, m).into()),
         );
+        let account: i64 = r.get("account")?;
+        map.insert("account".into(), format_id(Kind::Account, account).into());
+        // `account` is a field of model 1.1: the document claims that version.
+        map.insert("model".into(), iris_store::MODEL.into());
     }
     Ok(doc)
 }

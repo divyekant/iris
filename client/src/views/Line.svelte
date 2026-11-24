@@ -2,18 +2,23 @@
   One item on one line. The whole line opens the item. The envelope opens the
   source mail in one step. An unread dot marks a conversation that waits for you.
   A "Draft ready" pill marks an item with a reply that Iris prepared (card R3-09).
+  On a commitment owed to you, the pill says "Nudge ready" when the draft is a
+  reminder to a late person (card R3-07, option A: the pill only).
   With `ondone`, an open commitment starts with a round tick box: a click marks
   it done after the same Undo time as the item view, then calls `ondone`. The
   view that passes `ondone` calls `flushHolds` when the person leaves it. A feed
   item, a conversation or a signal gets its one quiet verb (Skip, Mute or
-  Dismiss) as a text button, with the same Undo time.
+  Dismiss) as a text button, with the same Undo time. `onheld` tells the view
+  when the line holds a click or shows a result, so the view can keep the
+  line across a refresh of its list.
 -->
 <script lang="ts">
   import type { Item } from "../api";
   import { due, initials, money, origin, other, party, timeLeft, when } from "../format";
   import { href } from "../route";
-  import { post } from "../api";
+  import { get, post, type ThreadDraft } from "../api";
   import { hold, HOLD, quiet, said, type Verb } from "../act";
+  import AccountPill from "./AccountPill.svelte";
 
   // `note`: one more muted line, for example the reason of a rule that hides the item.
   // `ondone`: shows the tick box on an open commitment. `delay`: the time for Undo, shorter in tests.
@@ -23,14 +28,36 @@
     twins = [],
     note = "",
     ondone,
+    onheld,
     delay = HOLD,
-  }: { item: Item; now?: Date; twins?: string[]; note?: string; ondone?: (id: string) => void; delay?: number } = $props();
+  }: { item: Item; now?: Date; twins?: string[]; note?: string; ondone?: (id: string) => void; onheld?: (item: Item, on: boolean) => void; delay?: number } = $props();
 
   let box = $derived(
     !!ondone && item.form === "commitment" && (item.status === "open" || item.status === "deferred"),
   );
   // A feed item, a conversation or a signal gets its one quiet verb (Skip, Mute, Dismiss).
   let away = $derived(ondone && !box ? quiet(item) : null);
+  // The reminder of a late person (R3-07). Only a line owed to you asks the
+  // engine, so a brief makes at most one request for each of these lines.
+  let nudge: ThreadDraft | null = $state(null);
+  $effect(() => {
+    nudge = null;
+    if (item.form !== "commitment" || item.direction !== "owed_to_you" || !item.ready?.includes("draft")) return;
+    const thread = (item.sources.find((s) => s.role === "origin") ?? item.sources[0])?.thread;
+    if (!thread) return;
+    let live = true;
+    // A failure or a 404 (the draft became stale) keeps "Draft ready".
+    get<ThreadDraft>(`threads/${encodeURIComponent(thread)}/draft`).then(
+      (d) => {
+        // A thread can hold two commitments: the nudge is for one of them only.
+        if (live && d.nudge && d.item === item.id) nudge = d;
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  });
   let verb: Verb = $state("close");
   type Phase = { at: "idle" } | { at: "held" } | { at: "sending" } | { at: "done" } | { at: "failed"; why: string; known: boolean };
   let phase: Phase = $state({ at: "idle" });
@@ -39,6 +66,7 @@
   function tick(v: Verb = "close") {
     verb = v;
     phase = { at: "held" };
+    onheld?.(item, true);
     pending = hold(send, delay);
   }
 
@@ -46,6 +74,7 @@
     pending?.cancel();
     pending = undefined;
     phase = { at: "idle" };
+    onheld?.(item, false);
   }
 
   async function send() {
@@ -54,6 +83,7 @@
     try {
       await post(`items/${encodeURIComponent(item.id)}/${verb}`, {});
       phase = { at: "done" };
+      onheld?.(item, false);
       ondone?.(item.id);
     } catch (error) {
       const status = (error as { status?: number }).status ?? 0;
@@ -95,7 +125,7 @@
       <span class="why">
         {phase.known ? `Iris did not record it: ${phase.why}` : "Iris does not know if it recorded the change. Reload the page to see."}
       </span>
-      {#if phase.known}<button class="undo" type="button" onclick={() => (phase = { at: "idle" })}>Close</button>{/if}
+      {#if phase.known}<button class="undo" type="button" onclick={() => ((phase = { at: "idle" }), onheld?.(item, false))}>Close</button>{/if}
     {:else}
       <svg class="tick" viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
         <circle cx="10" cy="10" r="9" />
@@ -128,11 +158,11 @@
     </p>
     {#if item.ready?.includes("draft")}
       <p class="prepared">
-        <span class="ready" title="Iris wrote a reply in your voice">
+        <span class="ready" title={nudge ? "Iris wrote a reminder in your voice. Nothing is sent." : "Iris wrote a reply in your voice"}>
           <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
             <path d="M10.5 2.5l3 3-7.5 7.5H3v-3z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
           </svg>
-          Draft ready
+          {nudge ? "Nudge ready" : "Draft ready"}
         </span>
       </p>
     {/if}
@@ -147,6 +177,7 @@
   {#if away}
     <button class="away" type="button" aria-label={`${away.label}: ${item.title}`} onclick={() => tick(away.verb)}>{away.label}</button>
   {/if}
+  <AccountPill {item} />
   <a class="source" href={href.mail(origin(item))} aria-label="Open the source mail" title="Open the source mail">
     <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
       <rect x="2.5" y="4.5" width="15" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.5" />
@@ -293,7 +324,7 @@
     box-shadow: 0 0 0 2px var(--color-primary);
   }
   /* A touch screen: the icon controls grow to the size of a finger tip. */
-  @media (max-width: 600px), (pointer: coarse) {
+  @media (max-width: 600px), (any-pointer: coarse) {
     .source,
     .box {
       width: var(--size-touch);
@@ -332,7 +363,7 @@
   .away:focus-visible {
     outline: 2px solid var(--color-primary);
   }
-  @media (hover: none) {
+  @media (hover: none), (any-pointer: coarse) {
     .away {
       opacity: 1;
     }

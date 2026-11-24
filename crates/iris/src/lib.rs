@@ -12,6 +12,7 @@ macro_rules! say {
 pub mod cost;
 pub mod engine;
 pub mod notify;
+pub mod nudge;
 pub mod reply;
 pub mod session_socket;
 pub mod sessions;
@@ -95,6 +96,27 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// In a job workspace: end the session, and wait for a reply on a thread
+    /// of the job or for a date. Iris starts a new session of the job when
+    /// the reply comes or the date passes. A verb of a session only.
+    Wait {
+        /// The end of the wait: the start of the day YYYY-MM-DD, UTC.
+        #[arg(long)]
+        until: String,
+        /// The thread (`t-8841`) whose reply ends the wait first.
+        #[arg(long)]
+        reply: Option<String>,
+        /// The reason of the wait, for the person.
+        #[arg(long)]
+        why: Option<String>,
+    },
+    /// In a job workspace: end the session, and ask the person one
+    /// question. Iris shows it in the brief, and starts a new session of
+    /// the job with the answer in `JOB.md`. A verb of a session only.
+    Ask {
+        /// The question, at most 2000 characters.
+        question: String,
+    },
     /// Copy the data folder to a new folder while the engine runs.
     Backup {
         /// The backup folder. It must not exist, or must be empty.
@@ -122,12 +144,21 @@ pub enum Command {
         #[arg(value_enum)]
         state: Option<Switch>,
     },
+    /// Stop all agent work: end each session of a job, and apply and send
+    /// nothing until `iris resume`. `--show` only shows the state.
+    Stop {
+        #[arg(long)]
+        show: bool,
+    },
+    /// End the stop. Actions apply again, and each held send waits a full
+    /// hold before it leaves.
+    Resume,
     /// Cancel the send of a draft (`d-4`) while it waits in the outbox.
     Cancel { id: String },
     /// Close a commitment (`c-7`) in a draft changeset. Needs the engine.
     Close {
         id: String,
-        /// The reason. The default is "Done.".
+        /// The reason, at most 500 characters. The default is "Done.".
         #[arg(long)]
         reason: Option<String>,
         #[command(flatten)]
@@ -136,7 +167,7 @@ pub enum Command {
     /// Decline a commitment in a draft changeset. Needs the engine.
     Decline {
         id: String,
-        /// The reason. The default is "Declined.".
+        /// The reason, at most 500 characters. The default is "Declined.".
         #[arg(long)]
         reason: Option<String>,
         #[command(flatten)]
@@ -209,6 +240,13 @@ pub enum Command {
     /// input and output, for an MCP client. The same verbs, author and
     /// policy as the command.
     Mcp,
+    /// Open the web client of the running engine in the browser, with a new
+    /// one-time sign-in address. Needs the engine.
+    Open {
+        /// Print the address and open nothing.
+        #[arg(long)]
+        print: bool,
+    },
     /// Show a changeset (`cs-12`), or list your drafts. Needs the engine.
     #[command(arg_required_else_help = true)]
     Changeset {
@@ -303,6 +341,13 @@ pub enum JobCommand {
     Stop { id: String },
     /// Show the last session of the job and its state.
     Session { id: String },
+    /// Answer the question of the job. Iris starts a new session of the
+    /// job with the answer in `JOB.md`.
+    Answer {
+        id: String,
+        /// The answer, at most 10000 characters.
+        text: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -484,6 +529,44 @@ pub enum AccountCommand {
         /// machine than the engine.
         #[arg(long)]
         paste: bool,
+        /// Ask Google for write access (`gmail.modify`), so that Iris can
+        /// apply the changes and sends that you approve. Without it, Iris
+        /// reads only.
+        #[arg(long)]
+        write: bool,
+    },
+    /// Sign in to an Outlook mailbox (Microsoft Graph) with your own app
+    /// registration in Microsoft Entra (docs/decisions/2026-11-microsoft-sign-in.md).
+    AddOutlook {
+        /// The application (client) ID of the app registration.
+        client_id: String,
+        /// `common`, or the directory (tenant) ID of a single-tenant
+        /// registration.
+        #[arg(long, default_value = "common")]
+        tenant: String,
+        /// Paste the address of the browser after the sign-in, in place of
+        /// the wait for the redirect.
+        #[arg(long)]
+        paste: bool,
+    },
+    /// Add an IMAP mailbox, or give a new password to one. The command reads
+    /// the password (an app password of the provider) from the terminal
+    /// with no echo, or one line of standard input, and signs in once to
+    /// check it.
+    AddImap {
+        /// The mail address of the mailbox.
+        address: String,
+        /// The IMAP server, for example imap.fastmail.com. TLS only. Leave
+        /// it out to give a new password to an IMAP account that exists:
+        /// the command then uses its saved server, port and user.
+        #[arg(long)]
+        host: Option<String>,
+        /// The IMAP port. The default is 993.
+        #[arg(long, requires = "host")]
+        port: Option<u16>,
+        /// The IMAP user name. The default is the address.
+        #[arg(long, requires = "host")]
+        user: Option<String>,
     },
 }
 
@@ -541,11 +624,16 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
         code: socket::code::ERROR,
         error: e.to_string(),
     });
+    if let Command::Open { print } = &cli.command {
+        return open_web(&data?, *print);
+    }
     let request = socket_request(&cli.command)?;
     if let Command::Job { command } = &cli.command {
         // A bad job ID is a usage error, before the engine or the store.
-        let (JobCommand::Run { id, .. } | JobCommand::Stop { id } | JobCommand::Session { id }) =
-            command;
+        let (JobCommand::Run { id, .. }
+        | JobCommand::Stop { id }
+        | JobCommand::Session { id }
+        | JobCommand::Answer { id, .. }) = command;
         if iris_job::parse_job_id(id).is_none() {
             return Err(socket::Failure {
                 code: socket::code::USAGE,
@@ -565,10 +653,10 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
             return r;
         }
     }
-    if let Command::List { .. } = &cli.command {
+    if let Command::List { .. } | Command::Wait { .. } | Command::Ask { .. } = &cli.command {
         return Err(socket::Failure {
             code: socket::code::USAGE,
-            error: "list is a verb of a session: run it in a job workspace".into(),
+            error: "this is a verb of a session: run it in a job workspace".into(),
         });
     }
     if let Some((verb, args, json)) = request {
@@ -672,6 +760,31 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
         return Err(denied(
             "a session cannot draft, send or nudge: a job has no grant of an account or a draft",
         ));
+    }
+    if let Command::Wait { until, reply, why } = c {
+        // The wait ends this session: after a lost answer, `iris status`
+        // in a new session, or the job page, shows the state of the job.
+        let args = serde_json::json!({ "until": until, "reply": reply, "why": why });
+        let r = socket::request_at(path, "wait", args, socket::ANSWER_WAIT, "iris status")
+            .map_err(unreachable)?;
+        println!(
+            "{} waits until {}",
+            verbs::field(r["job"].as_str().unwrap_or("-")),
+            verbs::field(r["until"].as_str().unwrap_or("-"))
+        );
+        return Ok(());
+    }
+    if let Command::Ask { question } = c {
+        // The ask ends this session: after a lost answer, `iris status` in
+        // a new session, or the job page, shows the state of the job.
+        let args = serde_json::json!({ "question": question });
+        let r = socket::request_at(path, "ask", args, socket::ANSWER_WAIT, "iris status")
+            .map_err(unreachable)?;
+        println!(
+            "{} asks the person and waits for the answer",
+            verbs::field(r["job"].as_str().unwrap_or("-"))
+        );
+        return Ok(());
     }
     // The read verbs of a session (R4-04f): only the grant of the job.
     let read = match c {
@@ -812,7 +925,7 @@ fn job_request(dir: &std::path::Path, c: &JobCommand) -> Option<Result<(), socke
             serde_json::json!({ "job": id, "agent": agent }),
         ),
         JobCommand::Stop { id } => ("job.stop", id, serde_json::json!({ "job": id })),
-        JobCommand::Session { .. } => return None,
+        JobCommand::Session { .. } | JobCommand::Answer { .. } => return None,
     };
     Some(
         match socket::request_with(
@@ -885,6 +998,123 @@ pub fn socket_verb(
     json: bool,
 ) -> Result<Printed, socket::Failure> {
     socket_verb_at(&dir.join(socket::SOCKET), verb, args, json)
+}
+
+/// `iris open`: a new sign-in address from the engine (the socket verb
+/// `sign-in`, `docs/specs/2026-11-17-mac-app.md`), printed or opened in the
+/// browser. The code never goes into the arguments of a process: another
+/// OS user can read them. The browser gets the path of a new page of [`open_page`].
+fn open_web(dir: &std::path::Path, print: bool) -> Result<(), socket::Failure> {
+    let r = socket::request_with(
+        dir,
+        "sign-in",
+        serde_json::json!({}),
+        socket::ANSWER_WAIT,
+        "iris open",
+    )?;
+    let url = r["url"].as_str().unwrap_or_default();
+    let error = |e: String| socket::Failure {
+        code: socket::code::ERROR,
+        error: e,
+    };
+    if print {
+        println!("{url}");
+        return Ok(());
+    }
+    let page = open_page(dir, url).map_err(|e| error(format!("open: {e}")))?;
+    let opened = opener(std::env::consts::OS, &page)
+        .is_some_and(|mut c| c.status().is_ok_and(|s| s.success()));
+    if !opened {
+        return Err(error(format!(
+            "open: no browser opened. Open {} or run iris open --print",
+            page.display()
+        )));
+    }
+    Ok(())
+}
+
+/// The redirect pages of `iris open` in the data folder:
+/// `open-<pid>-<ns>.html`, one page for each call.
+pub const OPEN_PAGE: (&str, &str) = ("open-", ".html");
+
+/// Write a new redirect page to `url` with mode `0600`. Each call gets its
+/// own file, so two calls never give the browser the same page. The file is
+/// new (`create_new`), so the command never writes through a file or a link
+/// that is there. Pages older than the life of a code are removed. Gives the
+/// path of the page.
+pub fn open_page(dir: &std::path::Path, url: &str) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    // The engine gives `http://<ip>:<port>/#code=<hex>`. Only these bytes,
+    // so the page needs no HTML escape.
+    let plain = url
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b":/.#=[]".contains(&b));
+    if !plain || !url.starts_with("http://") {
+        return Err(std::io::Error::other(
+            "the engine gave an address that is not valid",
+        ));
+    }
+    remove_old_pages(dir);
+    let ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let (start, end) = OPEN_PAGE;
+    let path = dir.join(format!("{start}{}-{ns}{end}", std::process::id()));
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    f.write_all(
+        format!(
+            "<!doctype html><meta charset=\"utf-8\"><title>Iris</title>\
+             <meta http-equiv=\"refresh\" content=\"0;url={url}\">\n"
+        )
+        .as_bytes(),
+    )?;
+    f.sync_all()?;
+    Ok(path)
+}
+
+/// Remove the redirect pages whose code ended: older than
+/// [`iris_api::CODE_LIFE`].
+fn remove_old_pages(dir: &std::path::Path) {
+    let (start, end) = OPEN_PAGE;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > iris_api::CODE_LIFE);
+        if name.starts_with(start) && name.ends_with(end) && old {
+            // A link is removed, not followed.
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// The command that opens `page` in the browser on the system `os`. Its
+/// only argument is the path.
+pub fn opener(os: &str, page: &std::path::Path) -> Option<std::process::Command> {
+    let program = match os {
+        "macos" => "/usr/bin/open",
+        "linux" => "xdg-open",
+        _ => return None,
+    };
+    let mut c = std::process::Command::new(program);
+    c.arg(page)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    Some(c)
 }
 
 /// [`socket_verb`] on the socket at `path`.
@@ -1112,8 +1342,46 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             serve(Arc::new(open()?), *addr).map_err(|e| e.to_string())
         }
         Command::Account {
-            command: AccountCommand::Add { client, paste },
-        } => account_add(&open()?, client, *paste),
+            command:
+                AccountCommand::Add {
+                    client,
+                    paste,
+                    write,
+                },
+        } => account_add(&open()?, client, *paste, *write),
+        Command::Account {
+            command:
+                AccountCommand::AddImap {
+                    address,
+                    host,
+                    port,
+                    user,
+                },
+        } => {
+            let store = open()?;
+            let server = match host {
+                Some(host) => engine::ImapServer {
+                    host: host.clone(),
+                    port: port.unwrap_or(993),
+                    user: user.clone().unwrap_or_else(|| address.clone()),
+                },
+                // A new password for an account that exists: the saved server.
+                None => engine::saved_imap(&store, address)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| {
+                        format!("no IMAP account has the address {address}: give --host")
+                    })?,
+            };
+            account_add_imap(&store, address, &server)
+        }
+        Command::Account {
+            command:
+                AccountCommand::AddOutlook {
+                    client_id,
+                    tenant,
+                    paste,
+                },
+        } => account_add_outlook(&open()?, client_id, tenant, *paste),
         Command::Mirror { command } => mirror(Arc::new(open()?), command),
         Command::Mcp => mcp(engine::data_dir(cli.data.clone()).map_err(|e| e.to_string())?),
         Command::Status { json } => print(verbs::status(&open()?, *json)),
@@ -1122,7 +1390,9 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
         // `run` refuses it in host mode, before the store.
-        Command::List { .. } => Err("list is a verb of a session".into()),
+        Command::List { .. } | Command::Wait { .. } | Command::Ask { .. } => {
+            Err("this is a verb of a session".into())
+        }
         Command::Watch { command } => print(verbs::watch(&open()?, command)),
         Command::Job {
             command: JobCommand::Session { id },
@@ -1141,6 +1411,19 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
                 }
                 None => Err(format!("{id} has no session")),
             }
+        }
+        Command::Job {
+            command: JobCommand::Answer { id, text },
+        } => {
+            let job = iris_job::parse_job_id(id).ok_or(format!("{id} is not a job ID"))?;
+            let store = open()?;
+            iris_api::job_row(&store, id)
+                .map_err(|e| e.to_string())?
+                .ok_or(format!("no job has the ID {id}"))?;
+            iris_api::answer_job(&store, job, text, None, engine::now_ms())
+                .map_err(|e| e.to_string())?;
+            println!("{id}: answered. Iris starts a new session of the job.");
+            Ok(())
         }
         Command::Job { .. } => Err("the engine socket runs this verb".into()),
         Command::Matters { command } => {
@@ -1212,6 +1495,34 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             );
             Ok(())
         }
+        Command::Stop { show } => {
+            let store = open()?;
+            if *show {
+                let now = iris_apply::stop_state(&store).map_err(|e| e.to_string())?;
+                println!("{}", stop_state(now.as_ref()));
+                return Ok(());
+            }
+            let s = iris_apply::stop(&store).map_err(|e| e.to_string())?;
+            let text = stop_text(&s);
+            if s.live > 0 || s.busy {
+                return Err(text);
+            }
+            println!("{text}");
+            Ok(())
+        }
+        Command::Resume => {
+            let store = open()?;
+            let resumed = iris_apply::resume(&store).map_err(|e| e.to_string())?;
+            println!(
+                "{}",
+                if resumed {
+                    "Iris runs again. Each held send waits a full hold before it leaves."
+                } else {
+                    "Iris was not stopped. Nothing changed."
+                }
+            );
+            Ok(())
+        }
         Command::Cancel { id } => {
             let store = open()?;
             println!("{}", cancel_send(&store, id, engine::now_ms())?);
@@ -1233,7 +1544,8 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         | Command::Label(_)
         | Command::Unlabel(_)
         | Command::Compose { .. }
-        | Command::Send { .. } => unreachable!("run() sends these verbs to the socket"),
+        | Command::Send { .. }
+        | Command::Open { .. } => unreachable!("run() sends these verbs to the socket"),
         Command::Understand {
             estimate,
             approve,
@@ -1340,9 +1652,17 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
             say!("iris: account {account}: {}", engine::Error::NeedsSignIn);
             continue;
         }
-        let mut worker = engine::Worker::new(
+        let mail = match engine::provider_for(&store, account, &config) {
+            Ok(m) => m,
+            Err(e) => {
+                failed = true;
+                say!("iris: account {account}: {e}");
+                continue;
+            }
+        };
+        let mut worker = engine::Worker::boxed(
             store.clone(),
-            iris_gmail::Gmail::new(config.clone()),
+            mail,
             account,
             std::env::var("IRIS_TEST_TOKEN_URI").ok(),
         );
@@ -1427,18 +1747,51 @@ fn print(out: verbs::Output) -> Result<(), String> {
 }
 
 /// `iris account add`: sign in, then save the client and the sealed refresh token.
-fn account_add(store: &Store, client_path: &std::path::Path, paste: bool) -> Result<(), String> {
+fn account_add(
+    store: &Store,
+    client_path: &std::path::Path,
+    paste: bool,
+    write: bool,
+) -> Result<(), String> {
     let json = std::fs::read(client_path).map_err(|e| format!("{}: {e}", client_path.display()))?;
     let client = test_token_uri(iris_auth::Client::from_json(&json).map_err(|e| e.to_string())?)?;
     // Check the Gmail settings before the sign-in, so a bad setting fails
     // before a token exists.
     let gmail = gmail()?;
-    let sign_in = client.sign_in().map_err(|e| e.to_string())?;
+    let sign_in = if write {
+        client.sign_in_write()
+    } else {
+        client.sign_in()
+    }
+    .map_err(|e| e.to_string())?;
+    let tokens = browser_sign_in(sign_in, paste)?;
+    let (_, address) =
+        engine::save_sign_in(store, &gmail, &json, &tokens).map_err(|e| e.to_string())?;
+    println!(
+        "iris: added {address}, {}",
+        if tokens.write {
+            "with write access"
+        } else {
+            "read only: run the command again with --write to let Iris change mail"
+        }
+    );
+    if tokens.refresh_expires_in.is_some() {
+        say!(
+            "iris: caution: the OAuth client is in the \"Testing\" status, so the sign-in \
+             ends after 7 days. Publish the app to \"In production\"."
+        );
+    }
+    Ok(())
+}
+
+/// The sign-in in a browser: the redirect to this machine, or with
+/// `paste` the address that the person pastes.
+fn browser_sign_in(sign_in: iris_auth::SignIn, paste: bool) -> Result<iris_auth::Tokens, String> {
     say!(
         "iris: open this address in a browser and sign in:\n{}",
         sign_in.url()
     );
-    let tokens = if paste {
+    if paste {
         say!("iris: then paste the address of the browser here:");
         let mut line = String::new();
         std::io::stdin()
@@ -1449,17 +1802,156 @@ fn account_add(store: &Store, client_path: &std::path::Path, paste: bool) -> Res
     } else {
         sign_in.wait(SIGN_IN_WAIT)
     }
-    .map_err(|e| e.to_string())?;
-    let (_, address) =
-        engine::save_sign_in(store, &gmail, &json, &tokens).map_err(|e| e.to_string())?;
-    println!("iris: added {address}");
-    if tokens.refresh_expires_in.is_some() {
-        say!(
-            "iris: caution: the OAuth client is in the \"Testing\" status, so the sign-in \
-             ends after 7 days. Publish the app to \"In production\"."
-        );
-    }
+    .map_err(|e| e.to_string())
+}
+
+/// `iris account add-outlook`: sign in to Microsoft, read the address of
+/// the mailbox, then save the account with the refresh token sealed.
+fn account_add_outlook(
+    store: &Store,
+    client_id: &str,
+    tenant: &str,
+    paste: bool,
+) -> Result<(), String> {
+    let client = test_token_uri(
+        iris_auth::Client::microsoft(client_id, tenant).map_err(|e| e.to_string())?,
+    )?;
+    // Check the Graph setting before the sign-in, so a bad setting fails
+    // before a token exists.
+    let mail = engine::outlook_provider(Vec::new()).map_err(|e| e.to_string())?;
+    let tokens = browser_sign_in(client.sign_in().map_err(|e| e.to_string())?, paste)?;
+    let address = mail
+        .profile(tokens.access.token.expose())
+        .map_err(|e| format!("Outlook: {e}"))?
+        .email_address;
+    let id = engine::save_outlook(store, &address, client_id, tenant, &tokens.refresh)
+        .map_err(|e| e.to_string())?;
+    println!("iris: added {address} (account {id})");
     Ok(())
+}
+
+/// `iris account add-imap`: read the password, sign in once to check it,
+/// then save the account with the password sealed. The password is never
+/// in a log or an error.
+fn account_add_imap(
+    store: &Store,
+    address: &str,
+    server: &engine::ImapServer,
+) -> Result<(), String> {
+    if !address.contains('@') || address.trim() != address {
+        return Err(format!("{address:?} is not a mail address"));
+    }
+    let password = read_password(&format!("iris: the password of {}: ", server.user))?;
+    let mail = engine::imap_provider(address, server).map_err(|e| e.to_string())?;
+    match mail.profile(password.expose()) {
+        Ok(_) => {}
+        Err(iris_provider::Error::Unauthorized) => {
+            return Err("the IMAP server refused the user or the password".into())
+        }
+        Err(e) => return Err(format!("the sign-in check failed: {e}")),
+    }
+    let id = engine::save_imap(store, address, server, &password).map_err(|e| e.to_string())?;
+    println!("iris: added {address} (account {id})");
+    Ok(())
+}
+
+/// One line of the password: from the terminal with no echo, else from
+/// standard input (a script or a test). The line end does not count.
+fn read_password(prompt: &str) -> Result<iris_auth::Secret, String> {
+    use std::io::{BufRead, IsTerminal};
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    if stdin.is_terminal() {
+        say!("{prompt}");
+        let _echo = no_echo::Guard::new().map_err(|e| format!("terminal: {e}"))?;
+        stdin
+            .lock()
+            .read_line(&mut line)
+            .map_err(|e| e.to_string())?;
+    } else {
+        stdin
+            .lock()
+            .read_line(&mut line)
+            .map_err(|e| e.to_string())?;
+    }
+    let password = line.trim_end_matches(['\r', '\n']).to_string();
+    if password.is_empty() {
+        return Err("no password".into());
+    }
+    Ok(iris_auth::Secret::new(password))
+}
+
+/// Terminal echo off while a guard lives (POSIX termios, macOS and Linux).
+/// A signal that ends the process (Ctrl-C and others) does not run `Drop`,
+/// so a handler puts the saved terminal state back first, then ends the
+/// process with the same signal.
+mod no_echo {
+    use std::sync::OnceLock;
+
+    /// The terminal state before the first guard. The handler reads it.
+    static SAVED: OnceLock<libc::termios> = OnceLock::new();
+    const SIGNALS: [libc::c_int; 4] = [libc::SIGINT, libc::SIGTERM, libc::SIGQUIT, libc::SIGHUP];
+
+    pub struct Guard {
+        old: libc::termios,
+        handlers: [libc::sighandler_t; 4],
+    }
+
+    extern "C" fn restore(sig: libc::c_int) {
+        // SAFETY: tcsetattr, signal and raise are async-signal-safe, and
+        // SAVED is set before the handler is installed.
+        unsafe {
+            if let Some(t) = SAVED.get() {
+                libc::tcsetattr(0, libc::TCSANOW, t);
+            }
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
+
+    impl Guard {
+        pub fn new() -> std::io::Result<Guard> {
+            // SAFETY: tcgetattr and tcsetattr write and read one termios
+            // value of this frame, for standard input (fd 0). signal
+            // installs `restore`, an extern "C" fn of one c_int.
+            unsafe {
+                let mut t: libc::termios = std::mem::zeroed();
+                if libc::tcgetattr(0, &mut t) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let old = t;
+                SAVED.get_or_init(|| old);
+                let handler = restore as extern "C" fn(libc::c_int) as libc::sighandler_t;
+                let handlers = SIGNALS.map(|sig| {
+                    let before = libc::signal(sig, handler);
+                    // A signal that the parent ignores stays ignored.
+                    if before == libc::SIG_IGN {
+                        libc::signal(sig, libc::SIG_IGN);
+                    }
+                    before
+                });
+                let guard = Guard { old, handlers };
+                t.c_lflag &= !libc::ECHO;
+                if libc::tcsetattr(0, libc::TCSANOW, &t) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(guard)
+            }
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            // SAFETY: as in `new`, with the values that `new` read.
+            unsafe {
+                libc::tcsetattr(0, libc::TCSANOW, &self.old);
+                for (sig, before) in SIGNALS.iter().zip(self.handlers) {
+                    libc::signal(*sig, before);
+                }
+            }
+            eprintln!();
+        }
+    }
 }
 
 /// The Gmail client. `IRIS_GMAIL_QUOTA` changes the quota units for each
@@ -1590,6 +2082,8 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
             std::future::pending::<()>().await
         };
         // The one-time code of the API sign-in (specification 2, section 8.6).
+        // `iris open` asks the socket for more codes.
+        let _ = socket::AUTH.set(auth.clone());
         if let Some(url) = auth.sign_in_url() {
             say!("iris: sign-in address of the local API: {url}");
         }
@@ -1672,6 +2166,57 @@ mod tests {
     }
 }
 
+/// The state of `iris stop --show`: only a complete stop says that no
+/// mail leaves, as in [`stop_text`].
+fn stop_state(now: Option<&iris_apply::Stopped>) -> String {
+    match now {
+        None => "Iris runs. `iris stop` stops all agent work.".into(),
+        Some(s) if s.live == 0 && !s.busy => format!(
+            "Stopped since {}. No action applies and no mail leaves until `iris resume`.",
+            iris_api::rfc3339(s.since)
+        ),
+        Some(s) => {
+            let text = stop_text(s);
+            format!(
+                "The stop switch is set since {}.\n{}",
+                iris_api::rfc3339(s.since),
+                text.split_once('\n')
+                    .map_or(text.as_str(), |(_, rest)| rest)
+            )
+        }
+    }
+}
+
+/// The answer of `iris stop`. The stop is complete only with no live
+/// session and no Gmail call in progress (docs/specs/2026-11-17-stop.md).
+/// Only a complete stop says that no mail leaves.
+fn stop_text(s: &iris_apply::Stopped) -> String {
+    if s.live == 0 && !s.busy {
+        return format!(
+            "Stopped. {} session(s) ended. No action applies and no mail leaves until `iris resume`.",
+            s.sessions
+        );
+    }
+    let mut text = format!(
+        "The stop is not complete. {} session(s) ended, and no new action or send starts.",
+        s.sessions
+    );
+    if s.busy {
+        text.push_str(
+            "\nA Gmail call was in progress, and it can still finish: one change or one send. \
+             The ledger shows its result.",
+        );
+    }
+    if s.live > 0 {
+        text.push_str(&format!(
+            "\n{} session(s) still stop. `iris job session <j-id>` shows each.",
+            s.live
+        ));
+    }
+    text.push_str("\nRun `iris stop` again.");
+    text
+}
+
 /// The confirmation of `iris sending on`: a terminal and a typed "yes". So
 /// a script with no terminal does not turn sending on by mistake.
 /// `terminal` is true when standard input is a terminal: a script or an
@@ -1734,6 +2279,32 @@ mod outbox_tests {
     }
 
     /// Only the typed word "yes" at a terminal turns sending on.
+    #[test]
+    fn stop_text_says_when_the_stop_is_not_complete() {
+        let mut s = iris_apply::Stopped {
+            since: 0,
+            sessions: 2,
+            live: 0,
+            busy: false,
+        };
+        assert!(stop_text(&s).contains("no mail leaves"));
+        s.live = 1;
+        let t = stop_text(&s);
+        assert!(
+            t.contains("not complete") && t.contains("1 session(s) still stop"),
+            "{t}"
+        );
+        assert!(!t.contains("no mail leaves"), "{t}");
+        s.live = 0;
+        s.busy = true;
+        let t = stop_text(&s);
+        assert!(
+            t.contains("not complete") && t.contains("can still finish"),
+            "{t}"
+        );
+        assert!(!t.contains("no mail leaves"), "{t}");
+    }
+
     #[test]
     fn only_yes_turns_sending_on() {
         assert_eq!(sending_on_confirm(true, &mut "yes\n".as_bytes()), Ok(()));

@@ -95,6 +95,10 @@ impl Content {
             return Err("a subject has no \"=?\"".into());
         }
         self.body = line_ends(&self.body);
+        // One rule for each path that makes a draft: no mail with no text leaves.
+        if self.body.trim().is_empty() {
+            return Err("a draft needs a body".into());
+        }
         if self.body.len() > MAX_BODY {
             return Err(format!("a body has at most {MAX_BODY} bytes"));
         }
@@ -305,10 +309,15 @@ const HEADERS: [&str; 11] = [
 /// [`read_sent`]. Each `Resent-` header is refused too.
 const ADDRESSING: [&str; 3] = ["bcc", "reply-to", "sender"];
 
+/// The transport header that Gmail adds to each draft at `drafts.create`
+/// (send spec, assumption 3). A draft read back ignores it, at any count.
+const TRANSPORT: &str = "received";
+
 /// Read a message back to its content (section 1). `None` if the message
 /// does not have exactly the form that Iris writes: one `text/plain` part,
 /// only the headers of [`HEADERS`], each at most one time, `From` equal to
-/// `account`, and a `Message-ID`. A draft that the person changed to HTML,
+/// `account`, and a `Message-ID`. A `Received` header is ignored, because
+/// Gmail adds one to each draft. A draft that the person changed to HTML,
 /// or gave a `Bcc`, a `Reply-To` or an attachment, does not read back, so
 /// its hash is never an approved hash.
 pub fn read(raw: &[u8], account: &str) -> Option<Read> {
@@ -331,7 +340,8 @@ fn read_with(raw: &[u8], account: &str, strict: bool) -> Option<Read> {
         let name = h.raw_name().to_ascii_lowercase();
         let known = HEADERS.contains(&name.as_str());
         let addressing = ADDRESSING.contains(&name.as_str()) || name.starts_with("resent-");
-        if addressing || (strict && !known) || (known && !names.insert(name)) {
+        let ignored = !strict || name == TRANSPORT;
+        if addressing || (!known && !ignored) || (known && !names.insert(name)) {
             return None;
         }
     }
