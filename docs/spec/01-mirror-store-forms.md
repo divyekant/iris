@@ -1142,8 +1142,8 @@ After the live login codes, the web client shows these sections first, in
 this order: "A question for you" (card R5-05), only when an agent asks a
 question, with the job whose question is the newest (`updated` of the job)
 and a field for the answer; then Due soon (card R3-08). Due soon holds each item of You owe that is due in 2 days or
-less, or that is late, in the local day of the viewer. The engine does not
-know that day (it has no time zone of the owner), so the client makes this
+less, or that is late, on the day of the owner: the day in the time zone of
+`/api/status` (`iris zone`, decision D1). The client makes this
 split from the You owe items, and the API keeps one You owe section. The
 client shows You owe with the rest of its items, and with the engine count
 less the Due soon items. The "All" link of You owe, and the link of Due soon,

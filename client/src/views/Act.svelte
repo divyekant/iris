@@ -41,7 +41,9 @@
   let soon = $derived(first(now, tz));
   let week = $derived(nextWeek(now, tz));
 
-  function openLater() {
+  async function openLater() {
+    // A direct link to an item: the days need the zone of the owner first.
+    if (!later && tz === undefined) await get("status").catch(() => {});
     now = clock();
     later = !later;
   }
@@ -70,7 +72,7 @@
 
   async function send(verb: Verb, date?: string) {
     pending = undefined;
-    // The day can start during the hold (issue #241). Send it as chosen: the
+    // The day can start during the hold (issue 241). Send it as chosen: the
     // engine records Later, and the item comes back on that day, now.
     phase = { at: "sending", verb, date };
     try {

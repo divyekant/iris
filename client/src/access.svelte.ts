@@ -10,6 +10,6 @@ export const access = $state({
   none: false,
   /** The short name of each account by its `a-` ID, from the last status answer. Empty with one account. */
   accounts: {} as Record<string, string>,
-  /** The time zone of the owner (an IANA name) from the last status answer, or null: then the zone of the browser. */
-  zone: null as string | null,
+  /** The time zone of the owner (an IANA name) from the last status answer. Null: the engine has none, so the zone of the browser. Undefined: no status answer yet. */
+  zone: undefined as string | null | undefined,
 });

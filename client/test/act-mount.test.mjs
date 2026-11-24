@@ -8,6 +8,8 @@ import { load, mount, until } from "./mount.mjs";
 
 const fx = await load("/dev/fixtures.ts");
 const act = await load("/src/act.ts");
+const { access } = await load("/src/access.svelte.ts");
+const format = await load("/src/format.ts");
 const NOW = new Date(2026, 10, 16, 9, 0); // A Monday.
 const commitment = (status = "open") => ({ ...fx.items.find((i) => i.form === "commitment"), status });
 const text = (el) => el.textContent.replace(/\s+/g, " ");
@@ -112,8 +114,43 @@ test("Later sends defer with the day, and leaving in the hold still sends", asyn
   button(view, "Next week").click();
   await until(() => button(view, "Undo"));
   view.destroy();
-  await until(() => asked.length === 1);
-  assert.deepEqual(asked, [["items/c-311/defer", { date: "2026-11-23" }]]);
+  await until(() => asked.some(([p]) => p !== "status"));
+  assert.deepEqual(asked.filter(([p]) => p !== "status"), [["items/c-311/defer", { date: "2026-11-23" }]]);
+});
+
+test("a direct link to an item gets the zone of the owner before Later offers days", async () => {
+  access.zone = undefined;
+  // 21:00 on 16 Nov in Los Angeles (the browser) is 14:00 on 17 Nov in Tokyo (the owner).
+  const evening = new Date(Date.UTC(2026, 10, 17, 5));
+  const asked = serve((path) => [200, path === "status" ? { ...fx.status, time_zone: "Asia/Tokyo" } : commitment()]);
+  const view = await mount("/src/views/Act.svelte", { item: commitment(), clock: () => evening, onchange: () => {} });
+  try {
+    button(view, "Later").click();
+    await until(() => button(view, "Tomorrow"));
+    assert.deepEqual(asked[0], ["status", undefined]);
+    assert.match(text(button(view, "Tomorrow")), /Wed 18 Nov/);
+  } finally {
+    view.destroy();
+    access.zone = null;
+  }
+});
+
+test("due words and Due soon count days in the time zone of the owner", () => {
+  // 17:00 UTC on 17 Nov: 18 Nov in Tokyo, 17 Nov in Los Angeles (the browser).
+  const now = new Date(Date.UTC(2026, 10, 17, 17));
+  const item = { ...commitment(), due: { date: "2026-11-20" } };
+  assert.equal(format.daysFrom("2026-11-20", now, "Asia/Tokyo"), 2);
+  assert.equal(format.daysFrom("2026-11-20", now, null), 3);
+  assert.deepEqual(format.dueSoon([item], now, "Asia/Tokyo"), [item]);
+  assert.deepEqual(format.dueSoon([item], now, null), []);
+  // A due instant: its day in the zone of the owner (01:00 on 18 Nov in Tokyo).
+  assert.equal(format.daysFrom("2026-11-17T16:00:00Z", now, "Asia/Tokyo"), 0);
+  assert.equal(format.daysFrom("2026-11-17T16:00:00Z", now, "America/Los_Angeles"), 0);
+  // The brief renders again at the first midnight: of the owner or of the browser.
+  const noon = new Date(Date.UTC(2026, 10, 17, 12)); // 21:00 in Tokyo, 04:00 in Los Angeles.
+  assert.equal(format.nextDay(noon, "Asia/Tokyo"), "2026-11-17T15:00:00.000Z");
+  assert.equal(format.nextDay(noon, null), "2026-11-18T08:00:00.000Z");
+  assert.equal(format.nextDay(now, "Asia/Tokyo"), "2026-11-18T08:00:00.000Z", "the midnight of the browser comes first");
 });
 
 test("the days of Later are in the time zone of the owner, not of the browser", async () => {
