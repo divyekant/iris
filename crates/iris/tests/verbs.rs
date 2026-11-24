@@ -362,3 +362,79 @@ fn job_finish_ends_the_job_once() {
     assert!(!ok && err.contains("done already"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A store with three commitments and one receipt, and no mail.
+fn items(name: &str) -> Arc<Store> {
+    let store = Arc::new(Store::open(&data_dir(name)).unwrap());
+    store
+        .write(|tx| {
+            tx.execute_batch(
+                r#"INSERT INTO account (id, provider, address) VALUES (1, 'gmail', 'me@example.com');
+INSERT INTO item (id, form, account_id, status, doc, created_at, updated_at) VALUES
+  (1, 'commitment', 1, 'open', '{"form": "commitment", "title": "Send the contract"}', 1, 1),
+  (2, 'commitment', 1, 'done', '{"form": "commitment", "title": "Pay Dana"}', 2, 2),
+  (3, 'commitment', 1, 'open', '{"form": "commitment", "title": "Book the room"}', 3, 3),
+  (4, 'record', 1, 'kept', '{"form": "record", "title": "Receipt", "type": "receipt"}', 4, 4);"#,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+/// `iris list` in host mode (issue #523) gives the page of `GET /api/items`.
+#[test]
+fn list_json_is_the_api_items() {
+    let store = items("list");
+    let all = iris_api::items(&store, &iris_api::Filter::default(), 50).unwrap();
+    assert_eq!(all.items.len(), 4);
+    let (ok, out, err) = iris(&store, &["list", "--json"]);
+    assert!(ok, "{err}");
+    let lines: Vec<Value> = out
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines, all.items);
+    // Each filter of the API.
+    let (ok, out, err) = iris(&store, &["list", "commitment", "--status", "open"]);
+    assert!(ok, "{err}");
+    assert_eq!(
+        out,
+        "c-3  commitment  open  Book the room\nc-1  commitment  open  Send the contract\n"
+    );
+    let (ok, out, err) = iris(&store, &["list", "record", "--type", "receipt", "--json"]);
+    assert!(ok, "{err}");
+    assert_eq!(out.lines().count(), 1, "{out}");
+    // A page and the next page.
+    let (ok, out, err) = iris(&store, &["list", "commitment", "--limit", "1"]);
+    assert!(ok, "{err}");
+    assert_eq!(
+        out,
+        "c-3  commitment  open  Book the room\nMore: add --before c-3\n"
+    );
+    let (ok, out, err) = iris(
+        &store,
+        &["list", "commitment", "--before", "c-3", "--limit", "1"],
+    );
+    assert!(ok, "{err}");
+    assert_eq!(
+        out,
+        "c-2  commitment  done  Pay Dana\nMore: add --before c-2\n"
+    );
+}
+
+#[test]
+fn a_bad_list_filter_is_an_error() {
+    let store = items("bad-list");
+    for args in [
+        &["list", "task"][..],
+        &["list", "--status", "nope"],
+        &["list", "--type", "receipt"],
+        &["list", "--limit", "0"],
+        &["list", "--before", "m-1"],
+    ] {
+        let (ok, _, err) = iris(&store, args);
+        assert!(!ok, "{args:?}");
+        assert!(err.starts_with("iris: "), "{args:?}: {err}");
+    }
+}

@@ -813,8 +813,9 @@ enum Phase {
     Apply,
 }
 
-/// The checks of one action against the grant of its job: no draft or
-/// send, each resolved message granted, each item an item of the workspace.
+/// The checks of one action against the grant of its job: no send, a
+/// draft only as a reply to a granted thread (decision D3), each resolved
+/// message granted, each item an item of the workspace.
 /// Invariant: an action of a session changes only granted rows, and a
 /// target that gives no row never passes. At submit, each declared target
 /// must also be in the grant, so a target that gives no row (each message
@@ -834,9 +835,12 @@ fn outside_grant(
         [action],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    if WRITE_VERBS.contains(&verb.as_str()) {
+    // A draft of a session is a reply: its thread is a target, and the
+    // checks below hold it to the grant. A new mail names an account, which
+    // no job grants. A send needs a person (decision D2).
+    if WRITE_VERBS.contains(&verb.as_str()) && verb != "draft" {
         return Ok(Some(format!(
-            "a session of {j} cannot {verb}: a job has no grant of an account or a draft"
+            "a session of {j} cannot {verb}: only a person sends mail"
         )));
     }
     let outside = || Ok(Some(format!("the targets are outside the grant of {j}")));
@@ -1476,13 +1480,15 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
             return Ok(Some(why));
         }
         // The flags come from the stored bytes (docs/specs/2026-11-17-send-checks.md).
-        if action_content(c, action)?.is_none() {
-            return Ok(Some(format!(
-                "{} has no content that Iris can check",
-                format_id(Kind::Draft, draft)
-            )));
+        match action_content(c, action)? {
+            None => {
+                return Ok(Some(format!(
+                    "{} has no content that Iris can check",
+                    format_id(Kind::Draft, draft)
+                )))
+            }
+            Some((_, content)) => return Ok(not_yet(&content)),
         }
-        return Ok(None);
     }
     let Ok(content) = serde_json::from_str::<iris_compose::Content>(args) else {
         return Ok(Some(
@@ -1490,6 +1496,9 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
                 .into(),
         ));
     };
+    if let Some(why) = not_yet(&content) {
+        return Ok(Some(why));
+    }
     let reply: bool = c.query_row(
         "SELECT json_type(targets, '$.threads') IS NOT NULL FROM changeset_action WHERE id = ?1",
         [action],
@@ -1516,6 +1525,16 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
         content
     };
     Ok(content.check().err())
+}
+
+/// The refusal of a content with `bcc` or attachments. They need the `Bcc`
+/// gate and the attachment folder of the send content spec
+/// (`docs/specs/2026-11-24-send-content.md`), which the next part builds.
+/// A draft at Gmail that the person gave a `Bcc` or a file reads back, so
+/// the send of it is refused too.
+fn not_yet(content: &iris_compose::Content) -> Option<String> {
+    (!content.bcc.is_empty() || !content.attachments.is_empty())
+        .then(|| "Iris cannot send Bcc or attachments yet".into())
 }
 
 /// Spec 2, section 6.5: an author other than the person writes no mail

@@ -379,11 +379,59 @@ fn a_revoke_or_the_end_of_the_job_empties_the_grant() {
     assert_eq!(e.0, code::USAGE, "{e:?}");
 }
 
+/// Decision D3: a session drafts a reply in a granted thread. A new mail,
+/// a thread outside the grant, a send and a nudge are refused.
 #[test]
-fn a_session_cannot_draft_send_or_nudge() {
+fn a_session_drafts_only_a_reply_in_a_granted_thread() {
+    let (store, job) = fixture("draft");
+    let me = session(job, "se-1");
+    let reply = json!({ "to": ["dana@example.com"], "body": "Signed." });
+    let r = add(&store, &me, "draft", &["t-1"], reply.clone()).unwrap();
+    let cs = r["changeset"].clone();
+    call(
+        &store,
+        &me,
+        "submit",
+        json!({ "changeset": cs, "why": "x" }),
+    )
+    .unwrap();
+    let state: String = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT state FROM changeset_action WHERE verb = 'draft'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(state, "proposed");
+    let mail = json!({ "to": ["dana@example.com"], "subject": "Hi", "body": "Hi." });
+    for (target, args) in [("t-2", reply), ("a-1", mail)] {
+        let r = add(&store, &me, "draft", &[target], args).unwrap();
+        let e = call(
+            &store,
+            &me,
+            "submit",
+            json!({ "changeset": r["changeset"], "why": "x" }),
+        )
+        .unwrap_err();
+        assert_eq!(e.0, code::DENIED, "{target}: {e:?}");
+        assert!(e.1.contains("outside the grant"), "{target}: {e:?}");
+        call(
+            &store,
+            &me,
+            "withdraw",
+            json!({ "changeset": r["changeset"] }),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn a_session_cannot_send_or_nudge() {
     let (store, job) = fixture("write");
     let me = session(job, "se-1");
-    for verb in ["draft", "send", "nudge"] {
+    for verb in ["send", "nudge"] {
         let e = add(&store, &me, verb, &["t-1"], json!({})).unwrap_err();
         assert_eq!(e.0, code::DENIED, "{verb}");
     }
@@ -400,7 +448,7 @@ fn a_session_cannot_draft_send_or_nudge() {
         .write(|tx| {
             tx.execute(
                 "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
-                 VALUES (?1, 1, 2, 'draft', '{\"threads\":[\"t-1\"]}', '{}')",
+                 VALUES (?1, 1, 2, 'send', '{\"drafts\":[\"d-1\"]}', '{}')",
                 [row],
             )?;
             Ok(())

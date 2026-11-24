@@ -43,7 +43,7 @@ must be fixable.
 
 ### Store: the edit of a job
 
-Migration 47 adds the table `job_edit`:
+Migration 49 adds the table `job_edit`:
 
 | Column | Type | Meaning |
 |---|---|---|
@@ -172,7 +172,7 @@ a second job on purpose is a second form.
 
 ## Impact
 
-- `crates/iris-store`: migration 47 (`job_edit`, `job_request`, the
+- `crates/iris-store`: migration 49 (`job_edit`, `job_request`, the
   trigger `job_row` again). The migration uses `IF NOT EXISTS`, because a
   test store that sets an older `user_version` runs it again.
 - `crates/iris-job`: `edit_in`, `edit`.

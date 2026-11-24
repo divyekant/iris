@@ -85,7 +85,22 @@ fn errors_name_the_line() {
         (
             "verbs = [\"archive\"]",
             "verbs = [\"send\"]",
-            "verb \"send\"",
+            "no rule can have the verb send",
+        ),
+        (
+            "verbs = [\"archive\"]",
+            "verbs = [\"post\"]",
+            "verb \"post\"",
+        ),
+        (
+            "when = { form = \"feed\" }",
+            "when = { recipients = \"thread\" }",
+            "only the verb draft",
+        ),
+        (
+            "when = { form = \"feed\" }",
+            "when = { recipients = \"all\" }",
+            "recipients \"all\"",
         ),
         ("verbs = [\"archive\"]", "verbs = []", "verbs is empty"),
         ("verbs = [\"archive\"]\n", "", "needs verbs"),
@@ -118,6 +133,62 @@ fn errors_name_the_line() {
             .position(|l| !to.is_empty() && l == *to)
             .map(|i| i + 1);
         assert!(e.line == 4 || Some(e.line) == field, "{to}: {e}");
+    }
+}
+
+/// Decision D2: a rule can name `draft`, never `send`. Decision D3: the
+/// condition `recipients` goes only with the verb `draft`.
+#[test]
+fn a_rule_can_allow_a_draft_to_the_thread() {
+    let rule = |effect: &str, verbs: &str, when: &str| {
+        let verbs = if verbs.is_empty() {
+            String::new()
+        } else {
+            format!("verbs = [{verbs}]\n")
+        };
+        format!("{HEAD}\n[[rule]]\nid = 1\nname = \"N\"\neffect = \"{effect}\"\n{verbs}when = {{ {when} }}\nby = \"person\"\nadded = 2026-11-10\n")
+    };
+    let p = parse(&rule(
+        "allow",
+        "\"draft\"",
+        "recipients = \"thread\", author = \"agent\"",
+    ))
+    .unwrap();
+    assert_eq!(p.rules[0].verbs, [Verb::Draft]);
+    assert_eq!(p.rules[0].when.recipients, Some(Recipients::Thread));
+    for effect in ["review", "deny"] {
+        assert!(parse(&rule(effect, "\"draft\"", "recipients = \"thread\"")).is_ok());
+    }
+    assert!(parse(&rule(
+        "allow",
+        "\"draft\", \"archive\"",
+        "sender_kind = \"person\""
+    ))
+    .is_ok());
+    assert!(err(&rule(
+        "allow",
+        "\"draft\", \"send\"",
+        "sender_kind = \"person\""
+    ))
+    .message
+    .contains("verb send"));
+    assert!(err(&rule(
+        "allow",
+        "\"draft\", \"archive\"",
+        "recipients = \"thread\""
+    ))
+    .message
+    .contains("only the verb draft"));
+    for effect in ["hide", "bundle", "notify"] {
+        let e = err(&rule(
+            effect,
+            "",
+            "recipients = \"thread\", form = \"feed\"",
+        ));
+        assert!(
+            e.message.contains("cannot have recipients"),
+            "{effect}: {e}"
+        );
     }
 }
 

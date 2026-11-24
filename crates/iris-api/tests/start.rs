@@ -464,7 +464,7 @@ async fn a_grant_writes_one_rule_for_an_open_job() {
             StatusCode::BAD_REQUEST,
         ),
         (
-            json!({"job": "j-1", "verbs": ["draft"], "version": version}),
+            json!({"job": "j-1", "verbs": ["draft", "archive"], "version": version}),
             StatusCode::BAD_REQUEST,
         ),
         (
@@ -701,4 +701,57 @@ async fn the_person_adds_a_thread_and_removes_a_ref() {
     .unwrap();
     let (code, _) = d.get("/api/jobs/j-2/scope/t-3").await;
     assert_eq!(code, StatusCode::CONFLICT);
+}
+
+/// Decision D26 (issue #558): a job that starts from an item can wait for a
+/// reply on the thread of the item, and a reply on that thread wakes it.
+#[tokio::test]
+async fn a_job_from_an_item_waits_for_a_reply_on_the_thread_of_the_item() {
+    let d = open("reply");
+    let (code, job) = d.start("c-1").await;
+    assert_eq!(code, StatusCode::CREATED, "{job}");
+    let job = iris_job::parse_job_id(job["id"].as_str().unwrap()).unwrap();
+    let session = iris_job::register(&d.1, job, "claude-code", NOW).unwrap();
+    let wait = |thread| iris_job::Wait {
+        thread: Some(thread),
+        until_ms: NOW + 86_400_000,
+    };
+    // Thread 3 holds no source of the item: not in the scope.
+    let r = iris_job::session_wait(&d.1, session, job, wait(3), None, NOW + 1);
+    assert!(matches!(r, Err(iris_job::Error::Refused(_))), "{r:?}");
+    // Thread 2 holds the update of commitment 1.
+    iris_job::session_wait(&d.1, session, job, wait(2), None, NOW + 1).unwrap();
+    assert!(iris_workspace::wake_due(&d.1, NOW + 2).unwrap().is_empty());
+    d.1.write(|tx| {
+        tx.execute_batch(
+            "INSERT INTO message (id, account_id, thread_id, provider_id, internal_date, understood_at)
+               VALUES (20, 1, 2, 'm20', 9000, 1);
+             INSERT INTO header (message_id, date, from_addr, subject)
+               VALUES (20, 9000, 'dana@example.com', 'Re: Section 4');",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(iris_workspace::wake_due(&d.1, NOW + 3).unwrap(), vec![job]);
+    let last = iris_job::events(&d.1, job).unwrap().pop().unwrap();
+    assert_eq!(last.why.as_deref(), Some("reply"));
+}
+
+/// Decision D3: a grant of `draft` alone allows drafts of the agent to the
+/// people in the thread.
+#[tokio::test]
+async fn a_draft_grant_allows_drafts_to_the_thread() {
+    let d = open("draftgrant");
+    d.start("c-1").await;
+    let (code, p) = d
+        .post(
+            "/api/policy/grant",
+            json!({"job": "j-1", "verbs": ["draft"], "version": null}),
+        )
+        .await;
+    assert_eq!(code, StatusCode::OK, "{p}");
+    let rule = &p["rules"][0];
+    assert_eq!(rule["verbs"], json!(["draft"]));
+    assert_eq!(rule["when"]["recipients"], json!("thread"));
+    assert_eq!(rule["when"]["author"], json!("agent"));
 }

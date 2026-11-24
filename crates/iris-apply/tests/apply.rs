@@ -956,35 +956,108 @@ fn observe_applies_nothing() {
     assert_eq!(b.fake.requests().len(), before);
 }
 
-/// Before the ledger, no rule approval applies: two actions of 300
-/// messages that a rule approved would go past the bulk limit of 500
-/// (section 5.4). Each goes to review, and a person approval applies.
+/// An active policy whose rule 1 allows each `archive` of an agent.
+const ALLOW_ARCHIVE: &str = "version = 0\nmode = \"apply\"\n\n[[rule]]\nid = 1\n\
+    name = \"Archive\"\neffect = \"allow\"\nverbs = [\"archive\"]\n\
+    when = { author = \"agent\" }\nby = \"person\"\nadded = 2026-11-10\n";
+
+/// The decision columns of an approval by rule 1 of policy version 1.
+const RULE: &str = "decided_by = 'rule', rule = 1, policy = 1, decided_at = 2";
+
+/// Add a policy version with `text`, which becomes the active policy.
+fn new_policy(b: &Box, text: &str) {
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES (?1, 'h2', 3)",
+                [text],
+            )?)
+        })
+        .unwrap();
+}
+
+/// Section 5.4 (issue #168): an action that a rule approved applies with
+/// no review by a person while the active policy still allows it.
 #[test]
-fn a_rule_approval_goes_to_review() {
-    let b = setup("rule", 40, Some(APPLY_POLICY));
+fn a_rule_approval_applies_while_the_policy_allows_it() {
+    let b = setup("rule-ok", 40, Some(ALLOW_ARCHIVE));
     let ms = b.messages(IN_INBOX, 2);
-    for policy in [1, 2] {
-        if policy == 2 {
-            b.store
-                .write(|tx| {
-                    Ok(tx.execute(
-                        "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES (?1, 'h2', 3)",
-                        [APPLY_POLICY],
-                    )?)
-                })
-                .unwrap();
+    let a = b.approved("archive", &ms, RULE);
+    applied(b.apply(a));
+    assert_eq!(b.state(a), ("applied".into(), "rule".into()));
+}
+
+/// A rule that the person removed, or that denies now, while the action
+/// waited, applies nothing: the action gets the new result, by `engine`,
+/// with no call to Gmail.
+#[test]
+fn a_changed_policy_stops_a_rule_approval() {
+    let deny = ALLOW_ARCHIVE.replace("effect = \"allow\"", "effect = \"deny\"");
+    for (text, want) in [(APPLY_POLICY, "in_review"), (deny.as_str(), "denied")] {
+        let b = setup(&format!("rule-gone-{want}"), 40, Some(ALLOW_ARCHIVE));
+        let ms = b.messages(IN_INBOX, 2);
+        let a = b.approved("archive", &ms, RULE);
+        new_policy(&b, text);
+        match b.apply(a).unwrap() {
+            Outcome::Review(_) if want == "in_review" => {}
+            Outcome::Denied(_) if want == "denied" => {}
+            other => panic!("{other:?}"),
         }
-        let a = b.approved(
-            "archive",
-            &ms,
-            &format!("decided_by = 'rule', rule = 1, policy = {policy}, decided_at = 2"),
-        );
-        assert!(matches!(b.apply(a), Ok(Outcome::Review(_))));
-        assert_eq!(b.state(a), ("in_review".into(), "engine".into()));
+        assert_eq!(b.state(a), (want.into(), "engine".into()));
+        assert_eq!(b.calls("messages"), 0);
     }
-    assert_eq!(b.calls("messages"), 0);
-    let ok = b.approved("archive", &ms, PERSON);
-    applied(b.apply(ok));
+}
+
+/// A rule approval of `label` with a name that Gmail does not have makes no
+/// label: the create is a write call before the claim, and a policy change
+/// during it cannot stop it. The action goes to review, and a label that
+/// exists applies by the rule.
+#[test]
+fn a_rule_approval_makes_no_new_label() {
+    let text = ALLOW_ARCHIVE.replace("verbs = [\"archive\"]", "verbs = [\"label\"]");
+    let b = setup("rule-label", 40, Some(&text));
+    let ms = b.messages(IN_INBOX, 2);
+    let args = serde_json::json!({ "label": "Rule new" }).to_string();
+    let a = b.approved_args("label", &args, &ms, RULE, now());
+    assert!(matches!(b.apply(a), Ok(Outcome::Review(_))));
+    assert_eq!(b.state(a), ("in_review".into(), "engine".into()));
+    assert_eq!(b.calls("labels"), 0);
+    // The person makes the label; a later rule approval applies.
+    applied(b.apply(b.labelled("label", "Rule new", &ms[..1])));
+    let again = b.approved_args("label", &args, &ms, RULE, now());
+    applied(b.apply(again));
+}
+
+/// Two changesets of one author, 300 messages each, that a rule approved
+/// before either applies: the first applies, and the second goes past 500
+/// messages in the last hour, gets `bulk` at apply and goes to review. A
+/// person approval does not count, and applies.
+#[test]
+fn rule_approvals_of_one_author_stop_at_the_bulk_limit() {
+    let b = setup("rule-bulk", 1500, Some(ALLOW_ARCHIVE));
+    let ms = b.messages(IN_INBOX, 900);
+    assert_eq!(ms.len(), 900);
+    let first = b.approved("archive", &ms[..300], RULE);
+    let second = b.approved("archive", &ms[300..600], RULE);
+    applied(b.apply(first));
+    assert!(matches!(b.apply(second), Ok(Outcome::Review(r)) if r.contains("bulk")));
+    assert_eq!(b.state(second), ("in_review".into(), "engine".into()));
+    let flags: String = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT flags FROM changeset_action WHERE id = ?1",
+                [second],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        flags, r#"["bulk"]"#,
+        "the flag of the apply stays on the action"
+    );
+    let person = b.approved("archive", &ms[600..], PERSON);
+    applied(b.apply(person));
 }
 
 /// The hash check, another account, a verb with no apply, and a state that

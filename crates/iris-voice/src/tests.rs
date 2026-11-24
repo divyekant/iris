@@ -1619,6 +1619,12 @@ fn a_promise_of_the_person_is_late_after_its_due_date() {
     // No due date: a promise is not late.
     assert!(late_threads(&b.store, 1_000_000_000).is_empty());
     set("UPDATE item SET doc = json_set(doc, '$.due', json_object('date', '1970-01-03'))");
+    // The day ends in the time zone of the owner: 8 hours after UTC in Los Angeles.
+    b.store.set_time_zone(Some("America/Los_Angeles")).unwrap();
+    let la = 3 * 86_400_000 + 8 * 3_600_000;
+    assert!(late_threads(&b.store, la - 1).is_empty());
+    assert_eq!(late_threads(&b.store, la).len(), 1);
+    b.store.set_time_zone(Some("UTC")).unwrap();
     // During the due day: not late. After it: late, to Ana.
     assert!(late_threads(&b.store, 3 * 86_400_000 - 1).is_empty());
     let l = one_late(&b.store, 3 * 86_400_000);

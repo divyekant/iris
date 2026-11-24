@@ -24,7 +24,8 @@ export const pageSize = (state: Job["state"]) => (state === "done" ? 20 : 50);
 export function due(job: Job, now = new Date()): { text: string; tone: "late" | "soon" | "" } | null {
   if (!job.due) return null;
   if (job.state === "done") return { text: `Was due ${day(job.due)}`, tone: "" };
-  const days = daysFrom(job.due, now);
+  // A job due date is a day of the browser (start.ts, issue #892), not of the owner zone.
+  const days = daysFrom(job.due, now, null);
   // The words say "late" each time the tone does, so color is not the only sign.
   if (Date.parse(job.due) <= now.getTime()) return { text: `Was due ${day(job.due)}, ${days < 0 ? relative.format(days, "day") : "earlier today"}`, tone: "late" };
   return { text: `Due ${day(job.due)}, ${relative.format(days, "day")}`, tone: days <= 2 ? "soon" : "" };
