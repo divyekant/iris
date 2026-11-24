@@ -1034,24 +1034,28 @@ impl Engine {
         Ok(started)
     }
 
-    /// Run [`Engine::tick`] each [`SYNC_EVERY`] until the process ends.
-    pub fn run(mut self) {
-        // A sync row that a stopped process left shows as `running` until
-        // it is closed (issue #710).
-        match self.store.read(|c| {
+    /// Close the sync rows that a stopped process left with no end, for each
+    /// account (issue #710). Such a row shows as `running` until it is
+    /// closed. `serve` calls it before it answers a request.
+    pub fn close_stopped_syncs(store: &Store) {
+        match store.read(|c| {
             let mut st = c.prepare("SELECT id FROM account ORDER BY id")?;
             let ids = st.query_map([], |r| r.get::<_, i64>(0))?;
             Ok(ids.collect::<rusqlite::Result<Vec<i64>>>()?)
         }) {
             Ok(ids) => {
                 for a in ids {
-                    if let Err(e) = iris_sync::close_stopped(&self.store, a) {
+                    if let Err(e) = iris_sync::close_stopped(store, a) {
                         say!("iris: sync log of account {a}: {e}");
                     }
                 }
             }
             Err(e) => say!("iris: sync log: {e}"),
         }
+    }
+
+    /// Run [`Engine::tick`] each [`SYNC_EVERY`] until the process ends.
+    pub fn run(mut self) {
         loop {
             if let Err(e) = self.tick() {
                 say!("iris: schedule: {e}");

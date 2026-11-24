@@ -83,3 +83,47 @@ fn serve_keeps_running_when_stderr_is_closed() {
     assert!(exited.is_none(), "iris serve ended: {exited:?}");
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
 }
+
+/// A sync row that a stopped engine left is closed before `iris serve`
+/// answers: the status never shows it as running (issue #710).
+#[test]
+fn serve_closes_a_stopped_sync_row_before_it_answers() {
+    let dir = std::env::temp_dir().join(format!("iris-serve-stopped-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = iris_store::Store::open(&dir).unwrap();
+    let account = store.add_account("gmail", "a@example.com").unwrap();
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'incremental', 1)",
+                [account],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_iris"))
+        .args(["serve", "--addr", "127.0.0.1:0", "--data"])
+        .arg(&dir)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stderr.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    // The address line comes after the HTTP listener binds.
+    let result: Option<String> = store
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT result FROM sync_log ORDER BY id LIMIT 1", [], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(line.contains("http://"), "{line}");
+    assert_eq!(result.as_deref(), Some(iris_sync::STOPPED));
+    let _ = std::fs::remove_dir_all(&dir);
+}

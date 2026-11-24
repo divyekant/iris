@@ -452,3 +452,35 @@ fn a_resync_that_starts_in_a_call_is_its_log_kind_while_it_runs() {
         Some(KIND_RESYNC)
     );
 }
+
+/// A sync that starts closes the row that a stopped process left with no
+/// end, and writes its own row (issue #710).
+#[test]
+fn a_sync_closes_the_row_of_a_stopped_sync() {
+    let (fake, store, account) = synced("stopped-row", 11, 20);
+    let stale = store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'incremental', 1)",
+                [account],
+            )?;
+            Ok(tx.last_insert_rowid())
+        })
+        .unwrap();
+    sync(&store, &client(fake.base_url()), account, TOKEN).unwrap();
+    let rows: Vec<(i64, Option<i64>, Option<String>)> = store
+        .read(|c| {
+            let mut st =
+                c.prepare("SELECT id, ended_at, result FROM sync_log WHERE id >= ?1 ORDER BY id")?;
+            let v = st
+                .query_map([stale], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(v)
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows[0].1.is_some());
+    assert_eq!(rows[0].2.as_deref(), Some(iris_sync::STOPPED));
+    assert!(rows[1].1.is_some(), "{rows:?}");
+    assert_ne!(rows[1].2.as_deref(), Some(iris_sync::STOPPED));
+}
