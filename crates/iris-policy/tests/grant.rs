@@ -97,6 +97,7 @@ fn a_grant_allows_only_the_agent_of_its_job() {
             bulk: false,
             warning: false,
             in_thread: false,
+            marked: false,
             now: NOW,
         };
         policy.decide(&a, [msg]).outcome
@@ -234,6 +235,7 @@ fn a_draft_grant_allows_only_drafts_to_the_thread() {
             bulk: false,
             warning: false,
             in_thread,
+            marked: false,
             now: NOW,
         };
         policy.decide(&a, [msg]).outcome
