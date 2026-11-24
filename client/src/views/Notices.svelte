@@ -3,7 +3,7 @@
   A notice comes only from a `notify` rule of the person. The card opens the mail.
 -->
 <script lang="ts">
-  import { own } from "../api";
+  import { wrote } from "../api";
   import { follow } from "../clock";
   import { when } from "../format";
   import { doneNotice, loadNotices, NOTICE_POLL, type Notice } from "../notices";
@@ -36,7 +36,7 @@
     } catch (e) {
       // A 404: the notice is gone already.
       if ((e as { status?: number }).status === 404) gone = new Set([...gone, n.id]);
-      else error = own(e) || "Iris could not close the notice. Try again.";
+      else error = wrote(e, "closed the notice", "Iris could not close the notice. Try again.");
     } finally {
       busy = "";
     }
