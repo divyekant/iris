@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::read::{
-    declined_sql, decode_cursor, doc_of, encode_cursor, head, row_of, section_sql, MATTER,
+    declined_list_sql, decode_cursor, doc_of, encode_cursor, head, row_of, section_sql, MATTER,
     MAX_LIMIT, SHOWN,
 };
 use crate::{Error, Result};
@@ -58,12 +58,15 @@ const AT: &str = "coalesce(
 
 /// The items and their senders of the list: the items of the `strangers`
 /// section and their stranger parties, or (with `declined`) the items of
-/// declined senders and these senders. Gives the common table expressions
+/// declined senders and these senders. A conversation of a declined sender
+/// with a known person is in Conversations and on the declined list. Gives the common table expressions
 /// `g(id, form, doc, at)` and `party(item, sender)`. Both are materialized:
 /// each query reads them more than one time.
 fn parties(now: i64, declined: bool) -> String {
     let base = if declined {
-        format!("{} AND {SHOWN}", head(&declined_sql()))
+        // A conversation with a known person is in Conversations too, so
+        // each declined sender with an item stays on the list.
+        format!("{} AND {SHOWN}", head(&declined_list_sql()))
     } else {
         section_sql(now)[5].0.clone()
     };

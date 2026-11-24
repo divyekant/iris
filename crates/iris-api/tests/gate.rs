@@ -414,14 +414,33 @@ async fn a_group_talk_with_a_known_person_and_a_declined_sender_stays_in_convers
     g.answer(&s.ana, "decline").await;
     let b = g.get("/api/brief").await;
     assert_eq!(ids(&b["conversations"]["items"]), vec![with_dee.clone()]);
-    // Not on the list of declined senders: one place for each item.
-    let declined = g.get("/api/gate/declined").await;
-    assert_eq!(
-        senders(&declined),
-        vec![(s.ana.clone(), 1, vec![s.ask.clone()])]
-    );
     // The talk with Bo, a stranger with no known person, still waits.
     assert!(ids(&b["strangers"]["items"]).contains(&s.group));
+
+    // A declined sender whose only item is such a talk stays on the list of
+    // declined senders, so "Accept" and "Ask again" still work.
+    let eve = g.sender("eve@far.example", Some("stranger"));
+    let only = g.item(
+        "conversation",
+        "active",
+        6,
+        talk(&[&eve, &s.dee], "1970-01-01T00:00:50Z"),
+    );
+    assert_eq!(g.answer(&eve, "decline").await.0, StatusCode::OK);
+    let b = g.get("/api/brief").await;
+    assert!(ids(&b["conversations"]["items"]).contains(&only));
+    let declined = g.get("/api/gate/declined").await;
+    let eve_row = senders(&declined)
+        .into_iter()
+        .find(|(id, _, _)| *id == eve)
+        .expect("eve is on the list of declined senders");
+    assert_eq!(eve_row.2, vec![only.clone()]);
+    let (code, v) = g.answer(&eve, "accept").await;
+    assert_eq!(
+        (code, v["kind"].as_str()),
+        (StatusCode::OK, Some("person")),
+        "{v}"
+    );
 }
 
 #[tokio::test]
@@ -623,14 +642,11 @@ async fn each_gate_item_is_in_one_place_after_any_answers() {
                 match state[i] {
                     State::Waiting if n > 0 => want_gate.push((id.clone(), n)),
                     State::Declined => {
-                        // A conversation with a known person stays in
-                        // Conversations (decision D30).
-                        let known = |s: &str, p: &Vec<usize>| {
-                            s == "conversations" && p.iter().any(|q| state[*q] == State::Known)
-                        };
+                        // A conversation with a known person is in
+                        // Conversations and on this list too (decision D30).
                         let n = items
                             .iter()
-                            .filter(|(_, s, p)| p.contains(&i) && !waits(p) && !known(s, p))
+                            .filter(|(_, _, p)| p.contains(&i) && !waits(p))
                             .count() as i64;
                         if n > 0 {
                             want_declined.push((id.clone(), n));

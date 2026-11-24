@@ -661,9 +661,21 @@ fn places(now: i64) -> Vec<String> {
 /// The filter of the items that would wait at the stranger gate, but whose
 /// strangers the person declined: an open commitment whose counterparty
 /// (you owe) or owner (owed to you) is declined, or an active conversation
-/// with a declined participant, no stranger that waits and no known person.
-/// These items are in no section of the brief (specification 1, section 6.7).
+/// with a declined participant and no stranger that waits. These items are
+/// the list of declined senders (specification 1, section 6.7), so each
+/// declined sender with an item keeps "Ask again" and "Accept".
+pub(crate) fn declined_list_sql() -> String {
+    declined_with("1")
+}
+
+/// The items of [`declined_list_sql`] that are in no section of the brief:
+/// a conversation with a known person is in Conversations (decision D30).
 pub(crate) fn declined_sql() -> String {
+    declined_with(&format!("NOT {}", participant_sql("= 'person'")))
+}
+
+/// [`declined_list_sql`] with the extra condition `talk` on a conversation.
+fn declined_with(talk: &str) -> String {
     let counter = kind_sql("doc", "$.counterparty.sender");
     let owner = kind_sql("doc", "$.owner.sender");
     format!(
@@ -671,10 +683,9 @@ pub(crate) fn declined_sql() -> String {
              (json_extract(doc, '$.direction') = 'you_owe' AND {counter} = 'declined')
           OR (json_extract(doc, '$.direction') = 'owed_to_you' AND {owner} = 'declined')))
           OR (form = 'conversation' AND status = 'active'
-              AND {} AND NOT {} AND NOT {}))",
+              AND {} AND NOT {} AND {talk}))",
         participant_sql("= 'declined'"),
         participant_sql("= 'stranger'"),
-        participant_sql("= 'person'")
     )
 }
 
