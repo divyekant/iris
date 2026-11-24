@@ -175,7 +175,8 @@ section 7).
 
 Each entry is `{"id", "verb", "args", "state", "at", "error", "messages",
 "changed", "items", "title", "changeset", "author", "decided_by", "rule",
-"policy", "reason", "why", "can_undo", "undo_open", "undone_by", "undo_of"}`:
+"policy", "reason", "why", "can_undo", "undo_open", "undone_by", "undo_of",
+"skipped"}`:
 
 - `args` holds only the short arguments that the words of a verb need: `label`, `until`, `date` and `field`. Each other argument (for example the body of a draft) stays out.
 - Each text has at most 2,000 characters, so a page stays small.
@@ -185,6 +186,7 @@ Each entry is `{"id", "verb", "args", "state", "at", "error", "messages",
 - `author` is `{"kind", "name", "job", "goal"}`: `goal` is the goal of the job of an agent.
 - `decided_by` is `rule` (with `rule` and `policy`) or `person`. `reason` is the reason of the decision, and `why` is the reason of the author.
 - `can_undo` is true when an undo can start now (the view `ledger_can_undo`). `undo_open` is true while an undo waits or applies. `undone_by` is the entry of the undo. `undo_of` is the entry that this entry undoes.
+- `skipped` counts the messages and items that an applied undo entry left as they were, because they changed again after the entry that it undoes, or are gone. It is 0 for each other entry. An undo with a `skipped` count and no change keeps that entry open (D18), so the person can undo it again later.
 
 ## Measures
 

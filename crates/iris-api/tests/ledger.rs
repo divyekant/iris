@@ -306,6 +306,9 @@ async fn the_entry_of_an_undo_names_its_entry() {
         })
         .unwrap();
     let (_, p) = call(&s, false, "/api/ledger").await;
+    // The undo changed no message: its one message counts as skipped.
+    assert_eq!(p["entries"][0]["skipped"], 1);
+    assert_eq!(p["entries"][1]["skipped"], 0);
     let first = &p["entries"][1];
     assert_eq!(first["id"], format!("l-{l}"));
     assert_eq!(first["state"], "undone");

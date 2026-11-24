@@ -155,6 +155,7 @@ const entry = (id: number, at: string, rest: Partial<LedgerEntry>): LedgerEntry 
   undo_open: false,
   undone_by: null,
   undo_of: null,
+  skipped: 0,
   ...rest,
 });
 export const ledger: LedgerPage = {
@@ -167,6 +168,9 @@ export const ledger: LedgerPage = {
     entry(27, "2026-11-16T18:20:00Z", { state: "failed", messages: 40, changed: 12, error: "Gmail refused one call.", why: "Old notices from Example Air.", can_undo: true }),
     entry(26, "2026-11-16T17:05:00Z", { verb: "close", items: 1, title: "Send the Q4 numbers to Priya", why: "Done." }),
     entry(25, "2026-11-16T08:02:00Z", { verb: "read", state: "undone", messages: 6, changed: 6, author: { kind: "triage", name: null, job: null, goal: null }, decided_by: "rule", rule: 5, policy: 3, why: "Receipts that need no reply.", undone_by: "l-32" }),
+    // An undo that changed nothing (decision D18): each message changed again after l-23, so l-23 keeps its Undo.
+    entry(24, "2026-11-15T10:20:00Z", { verb: "inbox", skipped: 4, why: "Undo of l-23", undo_of: "l-23" }),
+    entry(23, "2026-11-15T10:05:00Z", { messages: 4, changed: 4, why: "Shipping notices that arrived.", can_undo: true }),
   ],
 };
 

@@ -46,6 +46,10 @@ pub struct LedgerEntry {
     pub undone_by: Option<String>,
     /// The entry that this entry undoes.
     pub undo_of: Option<String>,
+    /// For an applied undo (step 1): the messages or items that it did not
+    /// change, because they changed again after the entry or are gone
+    /// (decision D18). 0 for each other entry.
+    pub skipped: i64,
 }
 
 /// The author of the changeset of an entry. `goal` is the goal of the job of
@@ -95,7 +99,16 @@ const ENTRY: &str = "SELECT l.id, a.verb, {args}, l.state, l.at, substr(l.error,
                 WHERE u.ledger_id = l.id
                   AND coalesce(o.state, 'proposed') IN ('proposed', 'in_review', 'approved')),
         l.undone_by,
-        (SELECT u.ledger_id FROM ledger_undo u WHERE u.action_id = a.id)
+        (SELECT u.ledger_id FROM ledger_undo u WHERE u.action_id = a.id),
+        CASE WHEN l.state = 'applied'
+                  AND EXISTS (SELECT 1 FROM ledger_undo u WHERE u.action_id = a.id AND u.step = 1)
+             THEN max(0, (SELECT count(*) FROM action_message am WHERE am.action_id = a.id
+                            AND NOT EXISTS (SELECT 1 FROM ledger_message lm
+                                            WHERE lm.ledger_id = l.id
+                                              AND lm.message_id = am.message_id AND lm.done = 1))
+                       + (SELECT count(*) FROM action_item ai WHERE ai.action_id = a.id)
+                       - (SELECT count(*) FROM json_each(coalesce(l.post, '{}'))))
+             ELSE 0 END
      FROM ledger l
      JOIN changeset_action a ON a.id = l.action_id
      JOIN changeset c ON c.id = a.changeset_id
@@ -139,6 +152,7 @@ fn entry(r: &rusqlite::Row) -> rusqlite::Result<LedgerEntry> {
         undo_open: r.get(21)?,
         undone_by: l(r.get(22)?),
         undo_of: l(r.get(23)?),
+        skipped: r.get(24)?,
     })
 }
 

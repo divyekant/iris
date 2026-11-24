@@ -56,6 +56,18 @@ test("a failed or a running entry says so; a done entry needs no words", () => {
   assert.equal(l.status(e({ state: "failed", messages: 0, items: 1, error: null })), "Failed.");
 });
 
+test("an undo that skipped messages says so, and the change keeps its Undo (D18)", () => {
+  const u = (x) => e({ verb: "inbox", undo_of: "l-23", state: "applied", error: null, ...x });
+  assert.equal(`${l.did(u({ messages: 0, skipped: 4 }))} ${l.what(u({ messages: 0, skipped: 4 }))}`, "Moved to the inbox 4 messages");
+  assert.equal(l.status(u({ messages: 0, changed: 0, skipped: 4 })), "Nothing changed. The messages changed again after that change, or are gone. That change keeps its Undo.");
+  assert.equal(l.status(u({ messages: 0, changed: 0, skipped: 1 })), "Nothing changed. The message changed again after that change, or is gone. That change keeps its Undo.");
+  assert.equal(l.status(u({ messages: 3, changed: 3, skipped: 2 })), "2 messages stayed as they were: changed again after that change, or gone.");
+  assert.equal(l.status(u({ verb: "restore", items: 1, messages: 0, skipped: 1 })), "Nothing changed. The item changed again after that change, or is gone. That change keeps its Undo.");
+  assert.equal(l.status(u({ messages: 3, changed: 3, skipped: 0 })), "");
+  // An entry that is no undo never counts skipped messages.
+  assert.equal(l.what(e({ undo_of: null, messages: 2, skipped: 5 })), "2 messages");
+});
+
 test("the entries group by the local day, in the order of the list", () => {
   const now = new Date(2026, 10, 17, 12, 0);
   const at = (d, h) => new Date(2026, 10, d, h, 0).toISOString();

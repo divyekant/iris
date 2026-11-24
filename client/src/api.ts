@@ -300,6 +300,8 @@ export type LedgerEntry = {
   undo_open: boolean;
   undone_by: string | null;
   undo_of: string | null;
+  /** For an applied undo: the messages or items that it did not change (they changed again, or are gone). */
+  skipped: number;
 };
 
 export type LedgerPage = { entries: LedgerEntry[]; next: string | null };
