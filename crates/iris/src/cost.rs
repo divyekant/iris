@@ -582,7 +582,10 @@ pub fn propose_matters(
         Some(Skip::Same) => "the candidates did not change since the last answer".into(),
         Some(Skip::Budget) => "the budget cannot pay the call; approve a budget to go on".into(),
         None if o.failed => "the model call failed; the step tries again after the wait".into(),
-        None => format!("{} new proposals, {} dropped", o.proposed, o.dropped),
+        None => format!(
+            "{} new proposals, {} additions, {} dropped",
+            o.proposed, o.added, o.dropped
+        ),
     };
     Ok(Some(format!(
         "Matters: {what}. {} proposals that were not valid now are gone.",

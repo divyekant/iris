@@ -166,7 +166,7 @@ fn a_good_answer_makes_a_proposal() {
     assert_eq!(
         col(
             &b,
-            "SELECT count(*) FROM understand_run WHERE prompt = 'matters/0.1'"
+            "SELECT count(*) FROM understand_run WHERE prompt = 'matters/0.2'"
         ),
         1
     );
@@ -571,4 +571,176 @@ fn no_item_of_hostile_mail_goes_to_the_model() {
         assert_eq!(run(&b, &f, Gate::Now, NOW + 1000).skip, None, "{clear}");
         assert!(f.data.borrow()[1].contains("Item 0"), "{clear}");
     }
+}
+
+/// Sets each signal item to `active` (the setup writes `open`).
+fn activate_signals(b: &Box) {
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE item SET status = 'active' WHERE form = 'signal'",
+                [],
+            )?)
+        })
+        .unwrap();
+}
+
+fn reset_fingerprint(b: &Box) {
+    b.store
+        .write(|tx| Ok(tx.execute("UPDATE matter_run SET candidates = NULL", [])?))
+        .unwrap();
+}
+
+/// D20 (docs/specs/2026-11-24-matters-edit.md): the call sends the
+/// confirmed matters, and an addition waits for the person. A refused
+/// addition does not come back. A signal is no candidate yet (#884).
+#[test]
+fn an_addition_waits_for_the_person() {
+    let b = setup(
+        "addition",
+        3,
+        &titles(4),
+        &["record", "conversation", "commitment", "signal"],
+    );
+    activate_signals(&b);
+    let m = iris_matters::create(
+        &b.store,
+        "Tokyo trip",
+        &[(1, "record"), (2, "conversation")],
+        NOW,
+    )
+    .unwrap();
+    let add = json!({"matters": [], "additions": [
+        {"matter": format!("g-{m}"), "items": ["c-3"]},
+        {"matter": format!("g-{m}"), "items": ["s-4"]},
+    ]});
+    let f = fake(vec![Ok(add.to_string()), Ok(add.to_string())]);
+    let o = run(&b, &f, Gate::Now, NOW);
+    assert_eq!((o.proposed, o.added, o.dropped), (0, 1, 1), "{o:?}");
+    let data = f.data.borrow()[0].clone();
+    assert!(data.contains(&format!("\"matter\":\"g-{m}\"")), "{data}");
+    assert!(data.contains("\"id\":\"c-3\""), "{data}");
+    assert!(!data.contains("\"id\":\"s-4\""), "{data}");
+    // The member titles go, the members are no candidates.
+    assert!(!data.contains("\"id\":\"r-1\""), "{data}");
+    assert_eq!(
+        col(&b, "SELECT count(*) FROM matter_add_live WHERE item_id = 3"),
+        1
+    );
+    assert_eq!(
+        col(&b, "SELECT count(*) FROM matter_add WHERE item_id = 4"),
+        0
+    );
+    // Not this: the person refuses it, so the same answer is dropped.
+    let e = iris_matters::Edit {
+        remove: vec![(3, "commitment")],
+        ..Default::default()
+    };
+    iris_matters::edit(&b.store, m, &e, NOW + 1).unwrap();
+    let o = run(&b, &f, Gate::Now, NOW + 2);
+    assert_eq!(o.added, 0, "{o:?}");
+    assert_eq!(col(&b, "SELECT count(*) FROM matter_add"), 0);
+}
+
+/// Random additions never write an addition outside the rules: the matter
+/// was sent and is confirmed, the item was sent with its prefix, it has no
+/// member row in the matter, and no item is in two places.
+#[test]
+fn random_additions_keep_the_rules() {
+    let mut x: u64 = 0x5DEE_CE66;
+    let mut next = |n: u64| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x % n
+    };
+    let forms = ["record", "conversation", "commitment", "signal", "feed"];
+    let mut total = 0;
+    for seed in 0..20 {
+        let b = setup(&format!("radd-{seed}"), 4, &titles(20), &forms);
+        activate_signals(&b);
+        // g-1 confirmed with items 1 and 2; g-2 confirmed, then deleted.
+        iris_matters::create(&b.store, "A", &[(1, "record"), (2, "conversation")], NOW).unwrap();
+        let g2 =
+            iris_matters::create(&b.store, "B", &[(3, "commitment"), (4, "signal")], NOW).unwrap();
+        // A refusal row of g-1: the commitment 8.
+        b.store
+            .write(|tx| {
+                Ok(tx.execute(
+                    "INSERT INTO matter_item(matter_id, item_id, kept) VALUES (1, 8, 0)",
+                    [],
+                )?)
+            })
+            .unwrap();
+        if next(2) == 0 {
+            iris_matters::delete(&b.store, g2, NOW + 1).unwrap();
+        }
+        let prefixes = ["r", "v", "c", "s", "f", "m"];
+        let adds: Vec<Value> = (0..1 + next(12))
+            .map(|_| {
+                let items: Vec<String> = (0..next(5))
+                    .map(|_| {
+                        let row = 1 + next(22);
+                        let p = if next(10) < 7 {
+                            prefixes[((row - 1) % 5) as usize]
+                        } else {
+                            prefixes[next(6) as usize]
+                        };
+                        format!("{p}-{row}")
+                    })
+                    .collect();
+                json!({"matter": format!("g-{}", 1 + next(4)), "items": items})
+            })
+            .collect();
+        let new = json!([{"title": "Trip", "items": ["r-6", "v-7"]}]);
+        let body =
+            json!({"matters": if next(2) == 0 { new } else { json!([]) }, "additions": adds});
+        let f = fake(vec![Ok(body.to_string())]);
+        let o = run(&b, &f, Gate::Now, NOW + 2);
+        total += o.added;
+        let sent = f.data.borrow()[0].clone();
+        let rows: Vec<(i64, i64, String)> = b
+            .store
+            .read(|c| {
+                let mut s = c.prepare(
+                    "SELECT a.matter_id, a.item_id, i.form FROM matter_add a
+                     JOIN item i ON i.id = a.item_id",
+                )?;
+                let v = s
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(v)
+            })
+            .unwrap();
+        for (matter, item, form) in rows {
+            let p = match form.as_str() {
+                "conversation" => "v",
+                f => &f[..1],
+            };
+            assert!(
+                sent.contains(&format!("\"matter\":\"g-{matter}\"")),
+                "seed {seed}"
+            );
+            assert!(
+                sent.contains(&format!("\"id\":\"{p}-{item}\"")),
+                "seed {seed}: {p}-{item}"
+            );
+            assert_ne!(form, "feed");
+            assert_ne!(item, 8, "seed {seed}: a refused item came back");
+            let status = col(
+                &b,
+                &format!("SELECT status = 'confirmed' FROM matter WHERE id = {matter}"),
+            );
+            assert_eq!(status, 1, "seed {seed}");
+            let elsewhere = col(
+                &b,
+                &format!("SELECT count(*) FROM matter_item WHERE item_id = {item} AND (kept = 1 OR matter_id = {matter})"),
+            );
+            assert_eq!(elsewhere, 0, "seed {seed}: {item}");
+        }
+    }
+    assert!(
+        total > 0,
+        "no random addition passed: the test proves nothing"
+    );
 }
