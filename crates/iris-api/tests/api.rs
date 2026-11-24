@@ -311,6 +311,11 @@ async fn status_with_no_account_and_with_a_sync() {
         "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'first', 0)",
         [acc],
     );
+    // The sync runs: it holds the run lock of its row (issue #710).
+    let row: i64 = store
+        .read(|c| Ok(c.query_row("SELECT max(id) FROM sync_log", [], |r| r.get(0))?))
+        .unwrap();
+    let _sync = store.sync_run_lock(row).unwrap().unwrap();
     let (_, v) = get(&store, "/api/status").await;
     let a = &v["accounts"][0];
     assert_eq!(a["address"], "owner@example.com");
