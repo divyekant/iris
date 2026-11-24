@@ -7,7 +7,8 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use iris_api::Auth;
 use iris_changeset::{
-    add_action, approve, create, decide, submit, ActionId, Author, AuthorKind, By, State, Verb,
+    add_action, approve, create, decide, revise, submit, ActionId, Author, AuthorKind, By, State,
+    Verb,
 };
 use iris_store::{NewMessage, Store};
 use rusqlite::params;
@@ -687,4 +688,106 @@ async fn approvals_and_undo_count_the_decisions_of_the_person() {
     .unwrap();
     let m = get(&s).await;
     assert_eq!(m["undo"], json!({"applied": 1, "undone": 1}));
+}
+
+/// One action, submitted, then revised (with a comment of the person on
+/// revision 1 if `comment`), and the action of revision 2 approved.
+fn approve_revision(s: &Store, account: i64, comment: bool) {
+    let msg = format!("g-rev-{comment}");
+    s.put_messages(
+        account,
+        &[NewMessage {
+            provider_id: msg.clone(),
+            thread_provider_id: msg,
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let target: String = s
+        .read(|c| Ok(c.query_row("SELECT 'm-' || max(id) FROM message", [], |r| r.get(0))?))
+        .unwrap();
+    let cs = create(s, &agent(), NOON).unwrap();
+    let act = |s: &Store| {
+        add_action(
+            s,
+            cs,
+            &agent(),
+            Verb::Archive,
+            &[target.as_str()],
+            &Map::new(),
+            Some("Old."),
+        )
+        .unwrap()
+    };
+    act(s);
+    submit(s, cs, &agent(), "Old mail.", NOON).unwrap();
+    if comment {
+        s.write(|tx| {
+            Ok(tx.execute(
+                "INSERT INTO changeset_comment (changeset_id, revision, text, key, at_ms)
+                 VALUES (?1, 1, 'Only the newsletters.', 'key-of-the-comment-1', ?2)",
+                params![cs, NOON],
+            )?)
+        })
+        .unwrap();
+    }
+    revise(s, cs, &agent()).unwrap();
+    act(s);
+    submit(s, cs, &agent(), "Old mail, again.", NOON).unwrap();
+    let hash: String = s
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT hash FROM changeset_action WHERE changeset_id = ?1 AND revision = 2",
+                [cs],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    let id = ActionId {
+        changeset: cs,
+        revision: 2,
+        n: 1,
+    };
+    approve(s, id, &hash, NOON).unwrap();
+}
+
+/// Invariant (#494): an approval counts as without an edit only if the
+/// person wrote no comment on an earlier revision of the changeset. A
+/// revision with no comment of the person still counts.
+#[tokio::test]
+async fn an_approval_after_a_comment_is_not_without_an_edit() {
+    let s = store("revised");
+    let a = s.add_account("gmail", "owner@example.com").unwrap();
+    approve_revision(&s, a, true);
+    approve_revision(&s, a, false);
+    assert_eq!(
+        get(&s).await["approvals"],
+        json!({"decided": 2, "approved": 1})
+    );
+}
+
+/// Migration 45 corrects an approval after a comment that an older store
+/// counted as without an edit.
+#[test]
+fn migration_45_corrects_an_approval_after_a_comment() {
+    let dir = std::env::temp_dir().join(format!(
+        "iris-api-measures-old-revised-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    {
+        let s = Store::open(&dir).unwrap();
+        let a = s.add_account("gmail", "owner@example.com").unwrap();
+        approve_revision(&s, a, true);
+        s.write(|tx| {
+            tx.execute_batch("UPDATE person_decision SET approved = 1; PRAGMA user_version = 44;")?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    let s = Store::open(&dir).unwrap();
+    let m = iris_api::measures::measures(&s, None).unwrap();
+    assert_eq!((m.approvals.decided, m.approvals.approved), (1, 0));
+    drop(s);
+    let _ = std::fs::remove_dir_all(&dir);
 }
