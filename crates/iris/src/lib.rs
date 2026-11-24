@@ -810,10 +810,11 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
         print!("{}", session_status_text(&r, *json));
         return Ok(());
     }
-    // A job has no grant of an account or a draft (docs/specs/2026-11-17-job-verbs.md).
-    if matches!(c, Command::Compose { .. } | Command::Send { .. }) {
+    // Only a person sends (decision D2). A session drafts a reply in a
+    // granted thread: submit checks the grant (docs/specs/2026-11-17-job-verbs.md).
+    if matches!(c, Command::Send { .. }) {
         return Err(denied(
-            "a session cannot draft, send or nudge: a job has no grant of an account or a draft",
+            "a session cannot send or nudge: only a person sends mail",
         ));
     }
     if matches!(

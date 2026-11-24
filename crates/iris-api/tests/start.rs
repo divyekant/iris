@@ -464,7 +464,7 @@ async fn a_grant_writes_one_rule_for_an_open_job() {
             StatusCode::BAD_REQUEST,
         ),
         (
-            json!({"job": "j-1", "verbs": ["draft"], "version": version}),
+            json!({"job": "j-1", "verbs": ["draft", "archive"], "version": version}),
             StatusCode::BAD_REQUEST,
         ),
         (
@@ -530,4 +530,23 @@ async fn an_item_that_closed_after_the_preview_starts_no_job() {
     assert_eq!(d.jobs(), 0);
     // A quiet conversation can start a job.
     assert_eq!(d.start("v-13").await.0, StatusCode::CREATED);
+}
+
+/// Decision D3: a grant of `draft` alone allows drafts of the agent to the
+/// people in the thread.
+#[tokio::test]
+async fn a_draft_grant_allows_drafts_to_the_thread() {
+    let d = open("draftgrant");
+    d.start("c-1").await;
+    let (code, p) = d
+        .post(
+            "/api/policy/grant",
+            json!({"job": "j-1", "verbs": ["draft"], "version": null}),
+        )
+        .await;
+    assert_eq!(code, StatusCode::OK, "{p}");
+    let rule = &p["rules"][0];
+    assert_eq!(rule["verbs"], json!(["draft"]));
+    assert_eq!(rule["when"]["recipients"], json!("thread"));
+    assert_eq!(rule["when"]["author"], json!("agent"));
 }

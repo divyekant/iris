@@ -1147,9 +1147,11 @@ engine checks each message that a target resolves to, at `submit` and again
 just before the apply. A message outside the grant at `submit` makes the
 submit fail with no change. A message that left the grant before the apply
 makes the action refused, with the reason. Each item target must be an item
-of the workspace now, by the same two checks. `iris draft`, `iris send` and `iris nudge` are
-refused in session mode until a card defines their grant, and `submit`
-refuses each draft or send action in a changeset of a session.
+of the workspace now, by the same two checks. `iris send` and `iris nudge` are
+refused in session mode, and `submit` refuses each send action in a
+changeset of a session. `iris draft` in session mode makes only a reply in a
+granted thread (decision D3): `submit` refuses a new mail and a reply whose
+parent message is not in the grant.
 
 ### 8.3 Output
 
