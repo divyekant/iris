@@ -4,12 +4,29 @@
   the wait at once. The backoff stays: a new error starts a longer wait.
 -->
 <script lang="ts">
-  import { post, type Status } from "../api";
+  import { get, post, type Status } from "../api";
   import { when } from "../format";
 
   let { at, onstatus }: { at: string; onstatus: (s: Status) => void } = $props();
   let busy = $state(false);
   let error = $state("");
+  // At `at` the wait is over: the note goes, and a fresh status tells if a new wait started.
+  let over = $state(false);
+  $effect(() => {
+    over = false;
+    const timer = setTimeout(
+      async () => {
+        over = true;
+        try {
+          onstatus(await get<Status>("status"));
+        } catch {
+          // The next poll of the page reads the status.
+        }
+      },
+      Math.max(0, Date.parse(at) - Date.now()),
+    );
+    return () => clearTimeout(timer);
+  });
 
   async function tryNow() {
     busy = true;
@@ -24,11 +41,11 @@
   }
 </script>
 
-<div class="model-wait" role="status">
+{#if !over}<div class="model-wait" role="status">
   <p>The model failed, so Iris waits before it reads more mail. It tries again at {when(at)}.</p>
   <button type="button" onclick={tryNow} disabled={busy}>{busy ? "Trying…" : "Try now"}</button>
   {#if error}<p class="error" role="alert">{error}</p>{/if}
-</div>
+</div>{/if}
 
 <style>
   .model-wait {

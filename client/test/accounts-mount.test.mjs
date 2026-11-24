@@ -174,6 +174,7 @@ test("remove asks one question in place, Keep changes nothing, and Remove posts 
     await tick();
     assert.match(text(view.target), new RegExp(`Remove ${one.address.replace(".", "\\.")}\\? Iris deletes its mail from this machine\\.`));
     assert.match(text(view.target), /The files of agents in its jobs go\. A backup and the notes of jobs keep their copy\./);
+    assert.match(text(view.target), /The record of what Iris and you did stays: drafts, the reasons of changes, job events and the titles of matters that you decided can hold text from this mail\./);
     press("Keep");
     await tick();
     assert.doesNotMatch(text(view.target), /Iris deletes its mail/);
@@ -186,6 +187,57 @@ test("remove asks one question in place, Keep changes nothing, and Remove posts 
     assert.deepEqual(asked, [[`/api/accounts/${one.id}/remove`, { address: one.address }]]);
     assert.match(text(view.target), new RegExp(`Removed ${one.address.replace(".", "\\.")}\\. Its mail is gone from Iris on this machine\\.`));
     assert.equal(view.target.querySelectorAll(".accounts li").length, 1);
+  } finally {
+    view.destroy();
+    globalThis.fetch = saved;
+  }
+});
+
+test("a remove whose answer is lost shows what a fresh status says, and an unknown result offers a check", async () => {
+  const saved = globalThis.fetch;
+  const [one, two] = fx.status.accounts;
+  const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  const settle = async () => {
+    for (let i = 0; i < 8; i++) await tick();
+  };
+  const press = (view, label) => [...view.target.querySelectorAll("button")].find((b) => b.textContent.trim() === label).click();
+  // The engine removed the account, but the answer was lost: the status has no line for it.
+  let status = { ok: true, body: { ...fx.status, accounts: [two] } };
+  globalThis.fetch = async (url, init) => {
+    if (init?.method === "POST") throw new TypeError("Failed to fetch");
+    if (!status.ok) throw new TypeError("Failed to fetch");
+    return json(status.body);
+  };
+  let view = await mount("/src/views/Accounts.svelte", { status: fx.status, poll: 0 });
+  try {
+    view.target.querySelector(`button[aria-label="Remove ${one.address}"]`).click();
+    await tick();
+    press(view, "Remove");
+    await settle();
+    assert.match(text(view.target), new RegExp(`Removed ${one.address.replace(".", "\\.")}\\.`));
+    assert.doesNotMatch(text(view.target), /Failed to fetch/);
+    assert.equal(view.target.querySelectorAll(".accounts li").length, 1);
+  } finally {
+    view.destroy();
+  }
+
+  // No status either: the result is unknown, and the question offers a check in place of Remove.
+  status = { ok: false };
+  view = await mount("/src/views/Accounts.svelte", { status: fx.status, poll: 0 });
+  try {
+    view.target.querySelector(`button[aria-label="Remove ${one.address}"]`).click();
+    await tick();
+    press(view, "Remove");
+    await settle();
+    assert.match(text(view.target), /Iris could not tell if the account is removed\. Check again before you remove it again\./);
+    assert.equal([...view.target.querySelectorAll(".ask button")].some((b) => b.textContent.trim() === "Remove"), false);
+    // The check reads a status where the engine still deletes: the question closes, the line says so.
+    status = { ok: true, body: { ...fx.status, accounts: [{ ...one, state: "removing" }, two] } };
+    press(view, "Check again");
+    await settle();
+    assert.equal(view.target.querySelector(".ask"), null);
+    assert.match(text(view.target.querySelector(".accounts li")), /Iris deletes the mail of this account from this machine\./);
   } finally {
     view.destroy();
     globalThis.fetch = saved;

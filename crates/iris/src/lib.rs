@@ -2508,7 +2508,9 @@ fn stop_text(s: &iris_apply::Stopped) -> String {
 /// What stays after a removal. The question says it before the removal,
 /// and the result says it again.
 const REMOVE_KEEPS: &str = "A backup copy that you made, the copies iris.db.v*.bak in the \
-     data folder and the notes of jobs still hold this mail.";
+     data folder and the notes of jobs still hold this mail. The record of what Iris and you \
+     did stays: drafts, the reasons of changes, job events and the titles of matters that you \
+     decided can hold text from this mail.";
 
 /// The question of `iris account remove`, before the removal.
 fn remove_question(address: &str) -> String {
@@ -2681,6 +2683,8 @@ mod outbox_tests {
             "notes of jobs",
             "files of agents",
             "provider does not change",
+            "record of what Iris and you did stays",
+            "titles of matters",
         ] {
             assert!(q.contains(word), "{word}: {q}");
         }

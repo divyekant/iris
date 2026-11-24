@@ -21,16 +21,49 @@
   let error = $state("");
   let removed = $state("");
 
+  // The removal can end at the engine although its answer is lost: then a fresh status tells.
+  let unknown = $state(false);
+  const UNKNOWN = "Iris could not tell if the account is removed. Check again before you remove it again.";
+
+  // Show the state that `next` gives for `a`. Gives false if `a` is in `next` and not in a removal.
+  function show(a: Account, next: Status): boolean {
+    status = next;
+    unknown = false;
+    const now = next.accounts.find((x) => x.id === a.id);
+    if (now && now.state !== "removing") return false;
+    // Gone: the delete ended. Removing: the engine ends the delete, and the line says so.
+    removed = now ? "" : a.address;
+    asking = null;
+    return true;
+  }
+
   async function remove(a: Account) {
     busy = true;
     error = "";
     try {
       // The engine answers after the delete of the mail, with the new status.
-      status = await post<Status>(`accounts/${a.id}/remove`, { address: a.address });
-      removed = status.accounts.some((x) => x.id === a.id) ? "" : a.address;
-      asking = null;
+      show(a, await post<Status>(`accounts/${a.id}/remove`, { address: a.address }));
     } catch (e) {
-      error = (e as Error).message;
+      // A refusal, a lost answer or a time-out: the status tells what happened.
+      const why = (e as Error).message;
+      try {
+        if (!show(a, await get<Status>("status"))) error = why;
+      } catch {
+        unknown = true;
+        error = UNKNOWN;
+      }
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function check(a: Account) {
+    busy = true;
+    error = "";
+    try {
+      show(a, await get<Status>("status"));
+    } catch {
+      error = UNKNOWN;
     } finally {
       busy = false;
     }
@@ -89,11 +122,16 @@
           <div class="ask" role="group" aria-label={`Remove ${a.address}`}>
             <p>
               Remove {a.address}? Iris deletes its mail from this machine. The mailbox at {a.provider === "gmail" ? "Gmail" : a.provider === "outlook" ? "Outlook" : "your provider"} does not
-              change, and you can add it again later. The files of agents in its jobs go. A backup and the notes of jobs keep their copy.
+              change, and you can add it again later. The files of agents in its jobs go. A backup and the notes of jobs keep their copy. The record of what Iris
+              and you did stays: drafts, the reasons of changes, job events and the titles of matters that you decided can hold text from this mail.
             </p>
             <p class="actions">
-              <button type="button" class="danger" onclick={() => remove(a)} disabled={busy}>{busy ? "Removing…" : "Remove"}</button>
-              <button type="button" class="quiet" onclick={() => ((asking = null), (error = ""))} disabled={busy}>Keep</button>
+              {#if unknown}
+                <button type="button" class="quiet" onclick={() => check(a)} disabled={busy}>{busy ? "Checking…" : "Check again"}</button>
+              {:else}
+                <button type="button" class="danger" onclick={() => remove(a)} disabled={busy}>{busy ? "Removing…" : "Remove"}</button>
+              {/if}
+              <button type="button" class="quiet" onclick={() => ((asking = null), (error = ""), (unknown = false))} disabled={busy}>Keep</button>
             </p>
             {#if error}<p class="error" role="alert">{error}</p>{/if}
           </div>

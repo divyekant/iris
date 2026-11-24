@@ -23,7 +23,8 @@ test("the brief shows the model wait only with a retry time, and Try now posts a
   } finally {
     none.destroy();
   }
-  const status = { ...fx.status, model_retry_at: "2026-11-16T09:20:00Z" };
+  // The wait ends one hour from the real clock: the note stays during the test.
+  const status = { ...fx.status, model_retry_at: new Date(Date.now() + 3_600_000).toISOString() };
   const view = await mount("/src/views/Brief.svelte", { brief: fx.brief, status, now: NOW, poll: 0 });
   try {
     const note = view.target.querySelector(".model-wait");
@@ -38,6 +39,28 @@ test("the brief shows the model wait only with a retry time, and Try now posts a
     for (let i = 0; i < 5; i++) await tick();
     assert.deepEqual(asked.filter(([u]) => u === "/api/model/try"), [["/api/model/try", {}], ["/api/model/try", {}]]);
     assert.equal(view.target.querySelector(".model-wait"), null);
+  } finally {
+    view.destroy();
+    globalThis.fetch = saved;
+  }
+});
+
+test("the model wait note goes when its time comes, and the brief reads the status again", async () => {
+  const saved = globalThis.fetch;
+  const asked = [];
+  globalThis.fetch = async (url) => {
+    asked.push(String(url));
+    const body = String(url) === "/api/status" ? { ...fx.status } : [];
+    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const at = new Date(Date.now() + 50).toISOString();
+  const view = await mount("/src/views/Brief.svelte", { brief: fx.brief, status: { ...fx.status, model_retry_at: at }, now: NOW, poll: 0 });
+  try {
+    assert.notEqual(view.target.querySelector(".model-wait"), null);
+    await new Promise((r) => setTimeout(r, 150));
+    for (let i = 0; i < 5; i++) await tick();
+    assert.equal(view.target.querySelector(".model-wait"), null);
+    assert.ok(asked.includes("/api/status"), String(asked));
   } finally {
     view.destroy();
     globalThis.fetch = saved;
