@@ -165,3 +165,54 @@ async fn each_day_is_counted_and_no_other_request_waits() {
     assert_eq!(days, vec![day(-1), day(0)]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A request of today counts the day and waits for the writer. A read of
+/// the measures of the same day must not pass that count: its answer has
+/// today, after the writer is free.
+#[tokio::test(flavor = "current_thread")]
+async fn a_read_of_the_measures_has_the_day_that_another_request_counts() {
+    let dir = std::env::temp_dir().join(format!("iris-api-runtime-read-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let s = Arc::new(Store::open(&dir).unwrap());
+    let auth = Arc::new(Auth::new("127.0.0.1:4800".parse().unwrap()).unwrap());
+    let router = iris_api::router(s.clone(), auth.clone());
+    let (held, wait) = mpsc::channel();
+    let holder = {
+        let s = s.clone();
+        std::thread::spawn(move || {
+            s.write(|_| {
+                held.send(()).unwrap();
+                std::thread::sleep(Duration::from_secs(4));
+                Ok(())
+            })
+            .unwrap();
+        })
+    };
+    wait.recv().unwrap();
+    let first = tokio::spawn(
+        router
+            .clone()
+            .oneshot(request(&auth, Method::GET, "/api/status")),
+    );
+    tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_secs(1)))
+        .await
+        .unwrap();
+    assert!(
+        !first.is_finished(),
+        "the count did not wait for the writer"
+    );
+    let res = router
+        .clone()
+        .oneshot(request(&auth, Method::GET, "/api/measures"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let m: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(m["days"], serde_json::json!([{"day": day(0), "opens": 0}]));
+    assert!(first.await.unwrap().is_ok());
+    holder.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

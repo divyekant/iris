@@ -345,19 +345,27 @@ pub async fn count(State(c): State<Counter>, req: Request, next: Next) -> Respon
         .flatten()
         .filter(|id| !id.contains('/'))
         .map(str::to_owned);
+    // A read of the measures always counts its own day, unless the store
+    // has that day already: it must not pass a count that another request
+    // has not written yet. The count is idempotent.
+    let reads_measures = req.uri().path() == "/api/measures";
     if let Some(day) = &day {
         // The lock is held only to read and change the state, never during
         // a store call (#700). One request counts each day that is not
         // counted yet. Another request of that day skips the count while
-        // the first one counts it; a request of another day counts its own.
-        let mine = {
+        // the first one counts it, and does not wait for the store. A
+        // request of another day counts its own.
+        let (first, mine) = {
             let mut d = c.day.lock().unwrap_or_else(|e| e.into_inner());
-            d.last != *day && d.counting.insert(day.clone())
+            let first = d.last != *day && d.counting.insert(day.clone());
+            (first, first || d.last != *day && reads_measures)
         };
         if mine {
             let ok = count_use(&c.store, day, None, crate::now_ms()).is_ok();
             let mut d = c.day.lock().unwrap_or_else(|e| e.into_inner());
-            d.counting.remove(day);
+            if first {
+                d.counting.remove(day);
+            }
             if ok {
                 d.last = day.clone();
             }
