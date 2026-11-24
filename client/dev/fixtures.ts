@@ -565,6 +565,13 @@ export const jobDetails: Record<string, JobDetail> = {
     changesets: [],
     threads: {},
   },
+  // A working job whose session ended with an error: no agent works on it (issue #742).
+  "j-15": {
+    job: { ...jobs["j-15"], events: [{ at: at(16, 11), state: "working", by: "person" }] },
+    changesets: [],
+    threads: {},
+    session: { id: "se-3", agent: "claude-code", state: "ended", end: "exit", exit: 1, ended: at(16, 11, 1) },
+  },
 };
 const jobPage = (state: string | null) => {
   const list = Object.values(jobs)
@@ -718,7 +725,9 @@ export function answerJob(id: string, body: { answer?: unknown; question?: unkno
   const asked = jobDetails[id]?.job.events ?? [];
   jobs[id] = { ...job, state: "working", question: undefined, updated: new Date().toISOString() };
   const events = [...asked, { at: jobs[id].updated, state: "working" as const, by: "person" as const, answer: said }];
-  jobDetails[id] = { job: { ...jobs[id], events }, changesets: jobDetails[id]?.changesets ?? [], threads: jobDetails[id]?.threads ?? {} };
+  // The engine starts a new session with the answer.
+  const session = { id: "se-4", agent: "claude-code", state: "starting" as const, end: null, exit: null, ended: null };
+  jobDetails[id] = { job: { ...jobs[id], events }, changesets: jobDetails[id]?.changesets ?? [], threads: jobDetails[id]?.threads ?? {}, session };
   return [200, jobDetails[id]];
 }
 /** POST /api/jobs: the fixture job j-12 stands for the new job. */
