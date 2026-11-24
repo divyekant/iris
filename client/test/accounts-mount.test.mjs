@@ -63,6 +63,22 @@ test("the accounts view lists each account with its state and how to add one", a
   }
 });
 
+test("a sync whose process stopped says so, for the first copy and for a later sync", async () => {
+  const stopped = { kind: "first", started: "2026-11-23T10:00:00Z", ended: null, result: "stopped: the process ended before the sync ended" };
+  const first = { ...fx.status.accounts[0], mirror_ready_at: null, sync: { kind: "first", step: 4 }, last_sync: stopped };
+  const later = { ...fx.status.accounts[1], state: "active", last_sync: { ...stopped, kind: "incremental" } };
+  const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [first, later] }, poll: 0 });
+  try {
+    const rows = [...view.target.querySelectorAll(".accounts li")].map(text);
+    assert.match(rows[0], /The last try of the first copy stopped before it ended\. Iris tries again each minute\./);
+    assert.match(rows[1], /The last sync stopped before it ended\. Iris tries again each minute\./);
+    for (const row of rows) assert.doesNotMatch(row, /copies this mailbox|Up to date/);
+    assert.equal(view.target.querySelectorAll(".tone.retry").length, 2);
+  } finally {
+    view.destroy();
+  }
+});
+
 test("a read-only account says that its approved changes wait, and names the command that gives write access", async () => {
   const reader = { ...fx.status.accounts[0], state: "read_only" };
   const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [reader] }, poll: 0 });

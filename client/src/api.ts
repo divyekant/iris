@@ -126,6 +126,10 @@ export type Status = {
   mode?: string;
   accounts: Account[];
   messages: { total: number; fetched: number; understood: number; gone: number };
+  /** False when no model is set: only the fixed rules read the mail. An older engine leaves it out. */
+  model?: boolean;
+  /** The live messages that wait for a model or a budget. Drafts and gone mail never count. An older engine leaves it out. */
+  waits_model?: number;
 };
 
 /** A rule of policy.toml (spec 2 section 6.2). `when` holds only the conditions that the rule sets. */

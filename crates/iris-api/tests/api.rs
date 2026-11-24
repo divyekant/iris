@@ -289,6 +289,16 @@ async fn status_with_no_account_and_with_a_sync() {
     assert_eq!(v["accounts"], json!([]));
     assert_eq!(v["mode"], "observe");
     assert_eq!(v["messages"]["total"], 0);
+    // No model is set: the client says how to set one (issue 740).
+    assert_eq!(v["model"], false);
+    exec(
+        &store,
+        "INSERT INTO model_setting(id, provider, base_url, model, version, max_tokens, timeout_s)
+         VALUES (1, 'local', 'http://127.0.0.1:1/v1', 'm', 1, 100, 5)",
+        [],
+    );
+    let (_, v) = get(&store, "/api/status").await;
+    assert_eq!(v["model"], true);
 
     let acc = store.add_account("gmail", "owner@example.com").unwrap();
     exec(
@@ -301,6 +311,11 @@ async fn status_with_no_account_and_with_a_sync() {
         "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'first', 0)",
         [acc],
     );
+    // The sync runs: it holds the run lock of its row (issue #710).
+    let row: i64 = store
+        .read(|c| Ok(c.query_row("SELECT max(id) FROM sync_log", [], |r| r.get(0))?))
+        .unwrap();
+    let _sync = store.sync_run_lock(row).unwrap().unwrap();
     let (_, v) = get(&store, "/api/status").await;
     let a = &v["accounts"][0];
     assert_eq!(a["address"], "owner@example.com");
@@ -1830,6 +1845,45 @@ async fn the_brief_shows_the_items_of_each_account() {
         .map(|a| a["address"].as_str().unwrap())
         .collect();
     assert_eq!(addresses, ["owner@example.com", "second@example.com"]);
+}
+
+/// Issue 740 (review of PR #786): `waits_model` counts only live mail that
+/// the understanding step marked as waiting for a model. A draft, gone mail
+/// and understood mail never count, so the client never says that mail
+/// waits for a model when none does.
+#[tokio::test]
+async fn status_counts_only_live_mail_that_waits_for_a_model() {
+    let dir = temp("waits-model");
+    let (store, _) = filled_n(&dir, 6);
+    let (_, v) = get(&store, "/api/status").await;
+    assert_eq!(v["waits_model"], 0, "no mark yet");
+
+    exec(&store, "UPDATE message SET waits_model = 1", []);
+    exec(&store, "UPDATE message SET gone_at = 1 WHERE id = 1", []);
+    exec(
+        &store,
+        "UPDATE message SET understood_at = 1 WHERE id = 2",
+        [],
+    );
+    exec(
+        &store,
+        "INSERT INTO label(account_id, provider_id, name, kind) VALUES (1, 'DRAFT', 'DRAFT', 'system')",
+        [],
+    );
+    exec(
+        &store,
+        "INSERT INTO message_label(message_id, label_id)
+         SELECT 3, id FROM label WHERE provider_id = 'DRAFT'",
+        [],
+    );
+    // The mark of a model error is not a missing model.
+    exec(
+        &store,
+        "UPDATE message SET waits_model = 2 WHERE id = 4",
+        [],
+    );
+    let (_, v) = get(&store, "/api/status").await;
+    assert_eq!(v["waits_model"], 2, "messages 5 and 6 only");
 }
 
 /// Issue 112: an item whose origin message is hostile mail (a hostile
