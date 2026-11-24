@@ -109,13 +109,19 @@ holds no sign-in and no sync state. Reasons:
 5. Write one row in the new table `removed_workspace(account_id, job_id)`
    for each job whose scope has mail of the account: a scope thread of the
    account, a scope item of the account, or a listed message
-   (`job_scope_message`) of the account. After step 6 and the delete, no
+   (`job_scope_message`) of the account. A scope row whose thread, item or
+   listed message is gone (an item that changed, a message that
+   `clean_gone` deleted) counts too, for each removal: the store keeps no
+   account for the gone row, and the workspace can still hold its mail.
+   After step 6 and the delete, no
    other row links the job to the account. So the delete and each build of
    the workspace read this table, also after a crash.
 6. Delete the items of the account (step "items" below), so the brief is
-   empty of the account at the commit.
+   empty of the account at the commit. The removal transaction runs with
+   `PRAGMA secure_delete = ON`, as each batch of the delete, so no free
+   page keeps the text of a deleted item (issue #882).
 
-Migration 46 adds triggers that refuse an insert into `message`, `thread`,
+Migration 48 adds triggers that refuse an insert into `message`, `thread`,
 `label`, `item` and `body` for an account in state `removing` or `removed`.
 So no writer can add mail or a derived row after the removal:
 
@@ -132,8 +138,13 @@ So no writer can add mail or a derived row after the removal:
 `removing`. It holds the sync lock of the account (`iris_sync::lock`), so no
 sync or apply of the account runs at the same time, in this process or in
 another. It holds the backup lock, as `clean_gone` does, so a backup does not
-copy a half state. If a lock is held, it does nothing and the next call
-tries again.
+copy a half state. The engine tick takes the backup lock, then the sync
+lock of each account, and skips a held lock: the next tick tries again.
+The waiting call of the command and the API takes the sync lock of its own
+account first, then the backup lock. So a wait for one account never holds
+the backup lock, and never holds up the delete of another account. No
+holder of the backup lock waits for a sync lock, so this order cannot
+deadlock.
 
 It runs with `PRAGMA secure_delete = ON`, so SQLite writes zeros over the
 deleted content. Steps, each in batches of 500 rows, one write transaction
@@ -150,8 +161,12 @@ for each batch:
    1. Save `notes.md` to the store (`save_notes`), as each build does. A
       save can fail (a file larger than 64 KiB, a link, a folder). Then
       the store keeps its last copy, and the file stays as it is.
-   2. Delete each entry of the folder other than `notes.md`.
-   3. Build as usual. The grant leaves out each message of an account in
+   2. Delete the entries that a stopped build can leave beside the
+      folder: the stage `.<name>.build` and the part file `.<name>.notes`
+      (`iris_workspace::clear_beside`). They can hold a copy of the mail.
+   3. Delete each entry of the folder other than `notes.md`, then the row
+      of the job in `removed_workspace`.
+   4. Build as usual. The grant leaves out each message of an account in
       state `removing` or `removed` (a condition in
       `iris_workspace::grant_in`). If `notes.md` is missing, it comes back
       from the store.
@@ -160,20 +175,25 @@ for each batch:
    account and the mail of other accounts in them. The next session of
    the job builds them again from its grant. Step 0 runs this build for
    each row of `removed_workspace` of the account whose workspace folder
-   exists. A build that runs holds the build lock, so this build waits for
+   exists. If the folder does not exist, step 0 runs only the clear of
+   item 2, under the build lock. A build that runs holds the build lock, so this build waits for
    its end. A job with a live session (`reaped_at IS NULL`) is skipped: step
    2 refused each live session of the job at the removal, so this session
    started after the removal. Its build saw the row and already deleted the
    files, and a build must not change the folder of a live session. No
    process that started before the removal can write to the folder after
-   this step. The rows go
-   in the last transaction (step 7). A crash before step 7 keeps the rows,
-   so the next delete builds again.
+   this step. A row goes only after the purge of its job: step 0 deletes
+   the row after its build, and the build of a session launch deletes the
+   row after its own purge. A session that registered after the removal
+   but did not build yet keeps its row, so the account stays `removing`
+   until that build (step 7). A crash before a purge keeps the row, so the
+   next delete builds again.
 
 1. **Items**: each item of the account, and each item that cites a message
    of the account. First the rows that refer to them with no cascade:
    `correction`, and `item.duplicate_of` (set to NULL). The cascades delete
-   `item_source`, `matter_item` and the rows that hang on them.
+   `item_source`, `matter_item`, `matter_add` (a pending addition of
+   migration 46) and the rows that hang on them.
 2. **Messages**: for each message: `header`, `body` (the trigger deletes the
    search text), `message_label`, `attention_due`, `link_check`,
    `sender_evidence`, `reply_draft`, `use_open`, and the `notice` rows of the
@@ -214,18 +234,22 @@ for each batch:
    old file of another account goes in the moment before its row insert,
    that insert finds the file missing and fails with `MissingContent`, as
    with `clean_gone`, and the next sync fetches the message again.
-7. **End**: `INSERT INTO message_fts(message_fts) VALUES ('optimize')`, and
-   delete the `removed_workspace` rows of the account. Commit. Then
-   `PRAGMA wal_checkpoint(TRUNCATE)`. Only if the checkpoint is not busy,
-   set `state = 'removed'`. The waiting call of the command and the API
+7. **End**: `INSERT INTO message_fts(message_fts) VALUES ('optimize')`.
+   Commit. Then `PRAGMA wal_checkpoint(TRUNCATE)`. Only if the checkpoint
+   is not busy and no `removed_workspace` row of the account is left, set
+   `state = 'removed'`. The waiting call of the command and the API
    tries the checkpoint again each 100 ms, for at most 10 seconds (a reader
    of the engine holds a read transaction for less). The tick tries once. A
    checkpoint that stays busy keeps the state `removing`, so the next call
    does step 7 and the checkpoint again. The write of the
    state adds only the page of the account row to the log.
 
-The engine calls `delete_removed` on each tick. The command and the API call
-it once at once after the removal. So the delete continues after a crash or
+The engine calls `delete_removed` on each tick, for each account in state
+`removing`, and skips a held lock. The command and the API call it once at
+once after the removal, for their own account only (`only = Some(id)`): the
+call waits for the locks of that account, and its counts are of that
+account. An account of an earlier removal that waits for its delete does
+not hold up a new removal. So the delete continues after a crash or
 a stop, with no new step by the person.
 
 ### What stays
@@ -304,7 +328,10 @@ engine tick ends the delete.
 
 - `POST /api/accounts/{id}/remove` with the JSON body
   `{"address": "<address>"}`. The address must match the account: this makes
-  a removal by a wrong ID impossible. The response comes after the delete
+  a removal by a wrong ID impossible. The removal checks the ID and the
+  address in its own write transaction (`remove_account_id`): if another
+  request removed the ID and the person added the address again (a new
+  ID), the removal is refused with 409 and the new account stays. The response comes after the delete
   (see "The call waits for the delete").
 - `/api/status` lists accounts in state `removing` with that state, and does
   not list `removed` accounts.
@@ -357,7 +384,7 @@ engine tick ends the delete.
 
 ## Impact
 
-- `crates/iris-store`: migration 46 (insert triggers, `removed_workspace`,
+- `crates/iris-store`: migration 48 (insert triggers, `removed_workspace`,
   `removed_sender`),
   `remove_account`, `delete_removed`, the change of `save_account_secret`.
 - `crates/iris-understand`: the batch query leaves out a removed account.

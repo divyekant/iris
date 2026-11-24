@@ -240,7 +240,9 @@ with these changes:
 - the set is not a subset of a declined matter.
 
 It writes a sealed proposal of the author `agent`, with no run row and no
-model call. The answer is the matter document. A refusal gives exit code
+model call. The answer is `{"matter": <the matter document>}`, with no
+member document: a member document can hold model text from mail outside
+the grant of a session. A refusal gives exit code
 2 (usage) with the reason, and writes nothing.
 
 In a job session, each item must also be in the grant of the job now
@@ -430,12 +432,13 @@ version gives one new proposal call at the next step.
 1. This spec.
 2. Store and writes: migration 46, `create`, `edit`, `delete`,
    `propose_by_agent`, signal members (D19, D21). The proposal step leaves
-   out signal candidates until step 4, because the local API of step 3
-   shows signal members.
+   out signal candidates until step 5.
 3. API routes, open model 1.2, the socket verb, the command and the MCP
-   tool (D19, D20, D22).
-4. Proposal step: signal candidates, additions (D20, D21).
-5. Client screens, after the owner picks a layout.
+   tool (D19, D20, D22). A request does not accept an `s-` ID until step
+   5, because the web client shows no signal member before it (#884).
+4. Proposal step: additions (D20).
+5. Client screens, after the owner picks a layout. This step accepts `s-`
+   IDs in requests and signal candidates in the proposal step (D21).
 
 ## Spec checks
 

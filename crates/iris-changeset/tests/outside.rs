@@ -29,8 +29,12 @@ impl Drop for TempDir {
 const OWNER: &str = "owner@example.com";
 const NOW: i64 = 1_763_283_422_000;
 
-/// The addresses of thread 1, in the headers of its messages.
-const THREAD: [&str; 3] = ["priya@example.com", "ben@example.org", "cara@example.net"];
+/// The addresses of thread 1: the From of a message, or in To or Cc of
+/// your sent message (decision D13).
+const THREAD: [&str; 2] = ["priya@example.com", "cara@example.net"];
+/// In Cc of a received message of thread 1 only: a stranger put it there,
+/// so it is not a thread address.
+const CC_ONLY: &str = "ben@example.org";
 /// Addresses that no message of the store names.
 const NEW: [&str; 2] = ["eve@evil.example", "x@example.org"];
 
@@ -188,9 +192,12 @@ fn a_reply_of_a_marked_author_outside_the_thread_has_the_flag() {
         &local,
         "t-1",
         &["Priya@Example.com"],
-        &["ben@example.org"],
+        &["cara@example.net"],
     );
     assert!(!f.contains(&"outside_thread".to_string()), "{f:?}");
+    // Ben is only in Cc of the mail of priya: not a thread address.
+    let (_, f) = draft(&s, &local, "t-1", &["priya@example.com"], &[CC_ONLY]);
+    assert!(f.contains(&"outside_thread".to_string()), "{f:?}");
     let (_, f) = draft(
         &s,
         &local,
@@ -252,13 +259,13 @@ fn a_bcc_outside_the_thread_has_the_flag() {
 fn a_gone_thread_message_gives_no_thread_address() {
     let dir = TempDir::new("gone");
     let s = store(&dir);
-    s.write(|tx| Ok(tx.execute("UPDATE message SET gone_at = 1 WHERE id = 1", [])?))
+    s.write(|tx| Ok(tx.execute("UPDATE message SET gone_at = 1 WHERE id = 2", [])?))
         .unwrap();
     let local = author(AuthorKind::Local, None);
-    // Ben is only in message 1, which is gone; priya is in message 2 too.
+    // Cara is only in message 2, which is gone; priya is the From of message 1.
     let (_, f) = draft(&s, &local, "t-1", &["priya@example.com"], &[]);
     assert!(!f.contains(&"outside_thread".to_string()), "{f:?}");
-    let (_, f) = draft(&s, &local, "t-1", &["ben@example.org"], &[]);
+    let (_, f) = draft(&s, &local, "t-1", &["cara@example.net"], &[]);
     assert!(f.contains(&"outside_thread".to_string()), "{f:?}");
 }
 
@@ -338,6 +345,7 @@ fn property_no_outside_send_of_a_marked_author_passes_without_review() {
     ];
     let mut pool: Vec<String> = THREAD.iter().chain(&NEW).map(|a| a.to_string()).collect();
     pool.push(OWNER.into());
+    pool.push(CC_ONLY.into());
     // A recipient of your sent mail in another thread: not yours.
     pool.push("dan@example.com".into());
     let mut rng = Rng(0x2545_f491_4f6c_dd1d);
@@ -373,7 +381,8 @@ fn property_no_outside_send_of_a_marked_author_passes_without_review() {
             })
             .unwrap();
         // The model: an address that is not yours (the owner is the only
-        // From of sent mail) and, for a reply, not in the headers of thread 1.
+        // From of sent mail) and, for a reply, not a From of thread 1 and
+        // not a recipient of your sent mail of thread 1.
         let outside = all.iter().any(|a| {
             let a = a.to_ascii_lowercase();
             a != OWNER && !(reply && THREAD.contains(&a.as_str()))
@@ -561,11 +570,13 @@ fn a_large_thread_gives_the_same_answer() {
     let batch: Vec<NewMessage> = (0..20)
         .map(|k| NewMessage {
             provider_id: format!("big{k}"),
+            // Your sent mail: its Cc are thread addresses (decision D13).
+            labels: vec!["SENT".into()],
             thread_provider_id: "gt1".into(),
             internal_date: Some(2),
             header: Header {
-                from_addr: Some("priya@example.com".into()),
-                to_addrs: Some(OWNER.into()),
+                from_addr: Some(OWNER.into()),
+                to_addrs: Some("priya@example.com".into()),
                 cc_addrs: Some(cc[k * 100..(k + 1) * 100].join(", ")),
                 message_id_hdr: Some(format!("<big{k}@x.org>")),
                 ..Default::default()
@@ -604,11 +615,12 @@ fn one_large_header_gives_the_same_answer() {
         1,
         &[NewMessage {
             provider_id: "wide".into(),
+            labels: vec!["SENT".into()],
             thread_provider_id: "gt1".into(),
             internal_date: Some(3),
             header: Header {
-                from_addr: Some("priya@example.com".into()),
-                to_addrs: Some(OWNER.into()),
+                from_addr: Some(OWNER.into()),
+                to_addrs: Some("priya@example.com".into()),
                 cc_addrs: Some(cc.join(", ")),
                 message_id_hdr: Some("<wide@x.org>".into()),
                 ..Default::default()
@@ -711,16 +723,17 @@ fn property_random_thread_headers_give_the_model_flag() {
                 *rng.pick(&['"', '<', '>', '(', ')', '\\', ':', ';', ',']),
             );
         }
-        // Message 1 gets the random headers; message 2 (your sent mail)
-        // keeps your From and has no other address.
+        // Message 2 (your sent mail, so each of its addresses is a thread
+        // address) gets the random headers; message 1 has only your address.
         s.write(|tx| {
             tx.execute(
                 "UPDATE header SET from_addr = ?1, to_addrs = ?2, cc_addrs = ?3
-                 WHERE message_id = 1",
+                 WHERE message_id = 2",
                 rusqlite::params![heads[0], heads[1], heads[2]],
             )?;
             tx.execute(
-                "UPDATE header SET to_addrs = ?1, cc_addrs = NULL WHERE message_id = 2",
+                "UPDATE header SET from_addr = ?1, to_addrs = ?1, cc_addrs = NULL
+                 WHERE message_id = 1",
                 [OWNER],
             )?;
             Ok(())

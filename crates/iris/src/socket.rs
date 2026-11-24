@@ -501,6 +501,62 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
                 json!({ "changeset": format_changeset_id(cs), "n": n }),
             ))
         }
+        // An agent proposes a matter (docs/specs/2026-11-24-matters-edit.md,
+        // D22). In a session each item must be in the grant of the job, in
+        // the transaction of the write.
+        Some("matters.propose") => {
+            only(&["title", "items"])?;
+            let title = text(args, "title")?.ok_or_else(|| usage("give the title"))?;
+            let ids: Vec<&str> = args["items"]
+                .as_array()
+                .and_then(|t| t.iter().map(Value::as_str).collect())
+                .ok_or_else(|| usage("items must be a list of IDs"))?;
+            let mut items = Vec::with_capacity(ids.len());
+            for id in &ids {
+                items.push(
+                    iris_matters::parse_ref(id)
+                        .ok_or_else(|| usage(format!("{id} is not an item ID of a matter")))?,
+                );
+            }
+            let job = me.job.as_deref().and_then(iris_job::parse_job_id);
+            if session && job.is_none() {
+                return Err(Failure::new(code::ERROR, "the session has no job"));
+            }
+            let now = crate::engine::now_ms();
+            let row = iris_matters::write(store, |tx| {
+                if let Some(job) = job {
+                    let g = iris_workspace::grant_in(tx, job)
+                        .map_err(|e| iris_matters::Error::Model(e.to_string()))?;
+                    for (id, (row, _)) in ids.iter().zip(&items) {
+                        let kind = iris_store::parse_id(id).map(|(k, _)| k);
+                        let granted = g
+                            .item(tx, *row)
+                            .map_err(|e| iris_matters::Error::Model(e.to_string()))?
+                            .is_some_and(|d| {
+                                kind.is_some_and(|k| d["id"] == iris_store::format_id(k, *row))
+                            });
+                        if !granted {
+                            return Err(iris_matters::Error::Denied(format!(
+                                "{id} is not in this job"
+                            )));
+                        }
+                    }
+                }
+                iris_matters::propose_by_agent(tx, title, &items, now)
+            })
+            .map_err(|e| match e {
+                iris_matters::Error::Bad(why) => usage(why),
+                iris_matters::Error::Denied(why) => Failure::new(code::DENIED, why),
+                e => Failure::new(code::ERROR, e.to_string()),
+            })?;
+            // The answer is the matter document only: the member documents
+            // can hold model text from mail outside the grant of a session.
+            let id = iris_store::format_id(Kind::Matter, row);
+            iris_api::matter(store, &id)
+                .map_err(|e| Failure::new(code::ERROR, e.to_string()))?
+                .map(|v| Done::Value(json!({ "matter": v["matter"] })))
+                .ok_or_else(|| Failure::new(code::ERROR, "the new matter is not visible"))
+        }
         Some("revise") => {
             only(&["changeset"])?;
             let cs = need()?;
@@ -1043,6 +1099,7 @@ pub fn parse_answer(verb: &str, line: &[u8]) -> Option<Result<Value, Failure>> {
                     .as_array()
                     .is_some_and(|a| a.iter().all(Value::is_string)),
                 "add" => r["changeset"].is_string() && r["n"].is_u64(),
+                "matters.propose" => r["matter"]["id"].is_string(),
                 "job.run" => session_id(r),
                 "job.stop" => session_id(r) && r["reaped"].is_boolean(),
                 "status" => {

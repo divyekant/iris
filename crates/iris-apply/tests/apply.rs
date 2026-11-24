@@ -2315,7 +2315,17 @@ fn a_later_entry_blocks_the_older_undo_after_a_failed_undo() {
         other => panic!("{other:?}"),
     }
     assert!(!b.gmail_labels(ms[0]).contains(&"INBOX".to_string()));
+    assert_eq!(b.mirror_labels(ms[0]), b.gmail_labels(ms[0]));
 
+    // Decision D18 (issue #463): an undo that changed no message keeps the
+    // entry open. After the undo of the later entry, the older entry can
+    // be undone again, and its undo puts the message back in the inbox.
+    assert_eq!(b.state(old).0, "applied");
+    b.undo(later);
+    assert_eq!(b.state(later).0, "undone");
+    b.undo(old);
+    assert_eq!(b.state(old).0, "undone");
+    assert!(b.gmail_labels(ms[0]).contains(&"INBOX".to_string()));
     assert_eq!(b.mirror_labels(ms[0]), b.gmail_labels(ms[0]));
 }
 
@@ -2422,7 +2432,15 @@ fn an_undo_in_any_order_changes_only_a_free_message() {
                     changed.push(m);
                 }
             }
-            entries[o].undone = true;
+            // An undo that changed no message keeps its entry open
+            // (decision D18, issue #463).
+            let undone = !changed.is_empty();
+            assert_eq!(
+                b.state(entries[o].action).0 == "undone",
+                undone,
+                "step {step}: the state of entry {o}"
+            );
+            entries[o].undone = undone;
             undos += 1;
             if entries[o].target.is_some() {
                 nested += 1;
@@ -2472,7 +2490,7 @@ fn an_undo_in_any_order_changes_only_a_free_message() {
 }
 
 /// The case of the review of PR #476: read A, archive B, inbox C, the undo
-/// of B (skipped, as C is later), then the undo of C. B is `undone`, but its
+/// of B (skipped, as C is later), then the undo of C. B stays open, and its
 /// archive stands again, so the undo of A skips the message.
 #[test]
 fn an_undo_that_skipped_a_message_keeps_its_entry_a_blocker() {
@@ -2488,7 +2506,8 @@ fn an_undo_that_skipped_a_message_keeps_its_entry_a_blocker() {
     applied(b.apply(c));
     b.undo(bb);
     b.undo(c);
-    assert_eq!(b.state(bb).0, "undone");
+    // The undo of B skipped the message, so B stays open (decision D18).
+    assert_eq!(b.state(bb).0, "applied");
     let labels = b.gmail_labels(ms[0]);
     assert!(!labels.contains(&"INBOX".to_string()));
     b.undo(a);

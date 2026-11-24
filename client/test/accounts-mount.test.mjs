@@ -157,3 +157,15 @@ test("a try that runs after a failed try says that the last try failed", async (
     view.destroy();
   }
 });
+
+test("an account in state removing says that Iris deletes its mail, not that it copies it", async () => {
+  const going = { ...fx.status.accounts[0], state: "removing", mirror_ready_at: null, sync: null };
+  const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [going] }, poll: 0 });
+  try {
+    const row = text(view.target.querySelector(".accounts li"));
+    assert.match(row, /Iris deletes the mail of this account from this machine\./);
+    assert.doesNotMatch(row, /copies this mailbox/);
+  } finally {
+    view.destroy();
+  }
+});

@@ -1,0 +1,21 @@
+{
+  "model": "iris/1.2",
+  "id": "g-10",
+  "title": "Office move",
+  "status": "proposed",
+  "items": [
+    "c-5",
+    "v-6"
+  ],
+  "counts": {
+    "commitment": 1,
+    "conversation": 1,
+    "record": 0,
+    "signal": 0
+  },
+  "created": "2026-11-24T09:00:00Z",
+  "updated": "2026-11-24T09:00:00Z",
+  "derived": {
+    "by": "agent"
+  }
+}

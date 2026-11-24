@@ -780,6 +780,28 @@ fn the_undo_of_a_state_entry_keeps_a_later_change() {
         Ok(Outcome::Failed { .. })
     ));
     assert!(iris_apply::undo(&b.store, b.ledger_of(failed), now()).is_err());
+    // Decision D18 (issue #463): the undo changed no item, so the entry
+    // stays open. The skipped undo is no change: the undo of the later
+    // close restores the deferred item, and then the undo of the defer
+    // applies.
+    assert_eq!(b.state(a), "applied");
+    let (_, outcome) = b.undo(later);
+    assert!(
+        matches!(outcome, Outcome::Applied(ref c) if (c.changed, c.unchanged) == (1, 0)),
+        "{outcome:?}"
+    );
+    assert_eq!(b.state(later), "undone");
+    assert_eq!(
+        b.one("SELECT status FROM item WHERE id = 1"),
+        json!("deferred")
+    );
+    let (_, outcome) = b.undo(a);
+    assert!(
+        matches!(outcome, Outcome::Applied(ref c) if (c.changed, c.unchanged) == (1, 0)),
+        "{outcome:?}"
+    );
+    assert_eq!(b.state(a), "undone");
+    assert_eq!(b.one("SELECT status FROM item WHERE id = 1"), json!("open"));
 }
 
 /// Only an undo makes `restore`: submit denies it from any other path.

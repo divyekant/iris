@@ -2,7 +2,7 @@
 
 - Status: draft, for the approval of the maintainer
 - Applies to: release 1 ("See")
-- Open model version: 1.1
+- Open model version: 1.2
 - Related: [Specification 2](02-changeset-policy-ledger.md), the
   [schemas](schema/), the manifesto and the experience document "Iris: the
   ideal experience"
@@ -557,7 +557,7 @@ Each item of each form has these fields:
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `model` | string, `"iris/1.1"` (`"iris/1.0"` in older documents) | yes | The version of the open model: `iris/<major>.<minor>` ([specification 4](04-open-model-versions.md)). |
+| `model` | string, `"iris/1.2"` (`"iris/1.0"` or `"iris/1.1"` in older documents) | yes | The version of the open model: `iris/<major>.<minor>` ([specification 4](04-open-model-versions.md)). |
 | `id` | string, for example `"c-311"` | yes | The ID of the item (section 5.7). |
 | `form` | `commitment`, `conversation`, `record`, `feed` or `signal` | yes | The form. |
 | `status` | string, values for each form | yes | The state of the item. |
@@ -779,7 +779,7 @@ The `hostile` column of the message holds each mark that applies:
 | Mark | Rule |
 |---|---|
 | `dmarc` | `Authentication-Results` reports a DMARC fail for the domain of `From`. |
-| `spoof` | The display name is the name of a known person, the address is not the address of that person, and DKIM or DMARC does not pass for the domain of the address. If DKIM and DMARC pass, the address is a new sender, with the kind `stranger`. |
+| `spoof` | The display name is the name of a known person, the address is not the address of that person, and DKIM or DMARC does not pass for the domain of the address. If DKIM and DMARC pass, the address is a new sender, with the kind `stranger`. Also: the display name holds an email address whose registrable domain is not the one of the `From` address, as in `"ceo@bank.example" <x@evil.example.net>` (decision D32). A DKIM or DMARC pass does not clear this case. A name with the word `via` is a list form (`"x@y.example via List" <list@lists.example>`) and does not get the mark. |
 | `link` | An HTML link of the message (from `Clean.links`) shows a web address with the host `S` (text that starts with `http://`, `https://` or `www.`, or a first word that is a domain with a known public suffix, not a file name such as `report.pdf`), and its target is an `http` or `https` URL that a browser opens on another owner. Iris reads the target with the WHATWG URL standard. The owner of a host is its registrable domain by the public suffix list, with the hosts and the `From` domain in punycode (so `münchen.de` and `xn--mnchen-3ya.de` are one owner). The link is deceptive if one of these is true: the target host is an IP address or Iris cannot read it; the target has a user part, a backslash or a percent sign in front of its path; the target host has another owner than `S`. If DMARC passes for the domain of `From` and that domain has the owner of `S`, a target host of another owner is not deceptive: the sender owns the shown domain and can link through a redirect. The first two conditions (an IP address or a target that Iris cannot read; a user part, a backslash or a percent sign) apply also to this sender. DMARC for another domain proves nothing about `S`. If `iris-clean` could not list each link (`links_cut`), or the part of the file past the read limit has a part header (after a delimiter of a declared boundary) with the type `text/html`, the message gets the mark. |
 | `spam` | The message has the label `SPAM`. |
 | `phishing` | The understanding step marks the message as phishing. |
