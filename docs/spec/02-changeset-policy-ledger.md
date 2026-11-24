@@ -508,7 +508,10 @@ An `allow` rule never matches an action with no message.
 ### 6.3 Who changes the file
 
 - Only the person changes the policy. The person edits the file, or uses the
-  web client.
+  web client. There is one exception: when a job is done, the engine removes
+  each rule whose `job` names that job (issue #385). Such a rule matches
+  nothing more, because a done job has no session. The removal is a normal
+  policy change with a new version, and it keeps the comments of the file.
 - The engine keeps the active policy in `iris.db`: the text of the last file
   that the person confirmed, and its SHA-256 hash. The engine evaluates only
   the active policy.

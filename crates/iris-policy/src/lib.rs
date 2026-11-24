@@ -18,7 +18,9 @@ pub mod propose;
 pub use active::{
     active, confirm, file_state, next_rule_id, version_text, Active, Confirm, FileState,
 };
-pub use edit::{change, discard, edit_text, grant_rule, Change, Discarded, Edited, DEFAULT_TEXT};
+pub use edit::{
+    change, discard, edit_text, end_grants, grant_rule, Change, Discarded, Edited, DEFAULT_TEXT,
+};
 pub use eval::{Action, Attention, Decision, Item, Message, Outcome};
 
 use serde::Deserialize;
