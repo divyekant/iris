@@ -507,6 +507,22 @@ pub fn apply(
                 Some(l.id.clone())
             }
             Ok(None) if verb == "label" => {
+                // The create is a write call before the claim. A policy change
+                // during that call cannot stop it, so only a person approval
+                // makes a new label (section 5.4).
+                let by_rule: bool = store.read(|c| {
+                    Ok(c.query_row(
+                        "SELECT decided_by = 'rule' FROM changeset_action WHERE id = ?1",
+                        [action],
+                        |r| r.get(0),
+                    )?)
+                })?;
+                if by_rule {
+                    let reason = "A rule does not make a new label at Gmail: approve the \
+                                  first use of the label.";
+                    decide(store, action, "in_review", reason)?;
+                    return Ok(Outcome::Review(reason.into()));
+                }
                 // The reads before the create take time: check the action
                 // again just before the write call, as the claim does (#223).
                 if let Some(o) = run.recheck(action)? {

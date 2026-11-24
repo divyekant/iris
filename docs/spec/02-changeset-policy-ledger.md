@@ -306,7 +306,11 @@ same author is the same author kind (`person`, `agent`, `triage` or
 `local`), as in the policy (section 6.4), so two jobs of agents share one
 count. If the result is not `allow`, the action gets the new result,
 `in_review` or `denied`, by `engine`, with the reason of the policy. A
-`bulk` from the count of the last hour is added to the flags of the action. So a rule that the
+`bulk` from the count of the last hour is added to the flags of the action.
+A rule approval of `label` whose label Gmail does not have goes to
+`in_review`: the create of the label is a write call before the claim, and a
+policy change during that call cannot stop it. Only a person approval makes
+a new label. So a rule that the
 person removed while the action waited applies nothing, and two changesets
 that a rule approved at the same time cannot together go past the limit of
 500 messages.

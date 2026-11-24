@@ -1008,6 +1008,26 @@ fn a_changed_policy_stops_a_rule_approval() {
     }
 }
 
+/// A rule approval of `label` with a name that Gmail does not have makes no
+/// label: the create is a write call before the claim, and a policy change
+/// during it cannot stop it. The action goes to review, and a label that
+/// exists applies by the rule.
+#[test]
+fn a_rule_approval_makes_no_new_label() {
+    let text = ALLOW_ARCHIVE.replace("verbs = [\"archive\"]", "verbs = [\"label\"]");
+    let b = setup("rule-label", 40, Some(&text));
+    let ms = b.messages(IN_INBOX, 2);
+    let args = serde_json::json!({ "label": "Rule new" }).to_string();
+    let a = b.approved_args("label", &args, &ms, RULE, now());
+    assert!(matches!(b.apply(a), Ok(Outcome::Review(_))));
+    assert_eq!(b.state(a), ("in_review".into(), "engine".into()));
+    assert_eq!(b.calls("labels"), 0);
+    // The person makes the label; a later rule approval applies.
+    applied(b.apply(b.labelled("label", "Rule new", &ms[..1])));
+    let again = b.approved_args("label", &args, &ms, RULE, now());
+    applied(b.apply(again));
+}
+
 /// Two changesets of one author, 300 messages each, that a rule approved
 /// before either applies: the first applies, and the second goes past 500
 /// messages in the last hour, gets `bulk` at apply and goes to review. A
