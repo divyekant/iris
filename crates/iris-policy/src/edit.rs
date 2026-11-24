@@ -122,13 +122,9 @@ pub fn end_grants(store: &Store, now: i64) -> Result<usize> {
             let mut done = c.prepare("SELECT 1 FROM job WHERE id = ?1 AND state = 'done'")?;
             let mut ended = None;
             for rule in &active.policy.rules {
-                let Some(job) = rule.job.as_deref() else {
-                    continue;
-                };
-                let id = job.strip_prefix("j-").and_then(|j| j.parse::<i64>().ok());
-                // Only the form that a job ID has ("j-12", not "j-012" or
-                // "j-+12") names the job: the session matches the same text.
-                if let Some(id) = id.filter(|id| format!("j-{id}") == job) {
+                // Only the form of a job ID ("j-12", not "j-012" or "j-+12")
+                // names a job: the session matches the same text.
+                if let Some(id) = rule.job.as_deref().and_then(iris_job::parse_job_id) {
                     if done.exists([id])? {
                         ended = Some(rule.id);
                         break;
