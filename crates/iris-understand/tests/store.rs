@@ -2358,3 +2358,95 @@ fn a_correction_of_the_expiry_of_a_signal_sets_its_status() {
     assert_eq!(doc["status"], "used");
     assert_eq!(status(&b), "used");
 }
+
+/// Decision D31 (issue 111): after a sender becomes or stops being a
+/// service, or a known name comes or goes, the fixed rules run again on the
+/// queued mail with no model call. Mail that the model read keeps its items
+/// while no fixed result changes.
+#[test]
+fn a_kind_or_name_change_runs_the_fixed_rules_again_with_no_model() {
+    use iris_understand::store::recheck_fixed;
+    let b = store("fixed-due");
+    let fake = Fake::default();
+    let code = "From: Bank <no-reply@bank.example.com>
+To: owner@example.com
+Subject: Your sign-in
+
+Your one-time code is 918273. It ends in 10 minutes.
+";
+    let m = b.add("1", code, &["INBOX"]);
+    understand(&b.store, m, &fake, NOW).unwrap();
+    assert_eq!(
+        fake.calls.borrow().len(),
+        1,
+        "a stranger: the model reads it"
+    );
+    let set = |addr: &str, kind: &str| {
+        b.store
+            .write(|tx| {
+                Ok(tx.execute(
+                    // A kind of the person: the engine rules do not change it.
+                    "UPDATE sender SET kind = ?2, decided_by = 'person' WHERE address = ?1",
+                    [addr, kind],
+                )?)
+            })
+            .unwrap();
+    };
+    let rule = |id: i64| {
+        b.col::<Option<String>>(
+            "SELECT max(json_extract(doc, '$.derived.rule')) FROM item i
+               JOIN item_source s ON s.item_id = i.id
+              WHERE s.message_id = ?1 AND i.form <> 'conversation'",
+            id,
+        )
+    };
+    let pending = |id: i64| {
+        b.col::<bool>(
+            "SELECT understood_at IS NULL FROM message WHERE id = ?1",
+            id,
+        )
+    };
+
+    // A service now: the code rule gives the signal, with no model.
+    set("no-reply@bank.example.com", "service");
+    assert_eq!(recheck_fixed(&b.store, NOW).unwrap(), 1);
+    assert_eq!(rule(m).as_deref(), Some("code"));
+    assert!(!pending(m));
+    // The queue is empty: a second check does nothing.
+    assert_eq!(recheck_fixed(&b.store, NOW).unwrap(), 0);
+    // Not a service: the rule item does not hold, the mail waits for the model.
+    set("no-reply@bank.example.com", "stranger");
+    assert_eq!(recheck_fixed(&b.store, NOW).unwrap(), 1);
+    assert!(pending(m));
+    assert_eq!(rule(m), None);
+    assert_eq!(fake.calls.borrow().len(), 1, "the check called no model");
+
+    // A known name: a forged From gets the spoof mark, with no model.
+    let forged = "From: Ana Lee <ana@evil.example.net>
+To: owner@example.com
+Subject: Hi
+
+Call me.
+";
+    let f = b.add("2", forged, &["INBOX"]);
+    understand(&b.store, f, &fake, NOW).unwrap();
+    let calls = fake.calls.borrow().len();
+    b.kind("ana@example.org", "Ana Lee", "person");
+    recheck_fixed(&b.store, NOW).unwrap();
+    assert_eq!(
+        b.col::<String>("SELECT hostile FROM message WHERE id = ?1", f),
+        r#"["spoof"]"#
+    );
+    assert!(!pending(f));
+    // The name goes: the mark goes, and the mail waits for the model.
+    b.store
+        .write(|tx| Ok(tx.execute("DELETE FROM sender WHERE address = 'ana@example.org'", [])?))
+        .unwrap();
+    recheck_fixed(&b.store, NOW).unwrap();
+    assert!(pending(f));
+    assert_eq!(
+        fake.calls.borrow().len(),
+        calls,
+        "the check called no model"
+    );
+}
