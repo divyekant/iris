@@ -91,7 +91,7 @@ pub struct Outcome {
     /// The sender is a stranger that the person declined at the gate
     /// (decision D29): no model call. The message is understood with no
     /// items, and its row in `model_declined` makes it pending again when
-    /// the decline stops applying (store migration 49).
+    /// the decline stops applying (store migration 52).
     pub declined: bool,
     /// The message changed in the store while the model worked (content,
     /// labels, sender kind or gone). Step 8 wrote nothing, and the message

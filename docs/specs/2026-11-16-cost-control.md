@@ -55,7 +55,12 @@ pending state that the store gives. Each one has an issue:
   after a failed store write of the run marks no mail (#156). The model
   row holds the wait (`model_setting.retry_failures` and `retry_at`,
   schema 5), so `iris serve` and each `iris mirror sync` command see the
-  same wait, and `iris model set` (a new row) ends it. Only evidence of the
+  same wait, and `iris model set` (a new row) ends it. "Try now" of the web
+  client (`POST /api/model/try`, decision D35) sets `retry_at` to now and
+  keeps `retry_failures`, and it opens the hourly gate of the matters
+  proposal step (matters spec): the next run calls the model, and a new failure
+  doubles the wait again. `/api/status` gives the end of a running wait as
+  `model_retry_at`. Only evidence of the
   model changes the wait: each run that can call the model updates it in
   its end write, under the run lock. A model failure doubles it, a run with
   a call and no model failure ends it and clears the marks, and a run with no call

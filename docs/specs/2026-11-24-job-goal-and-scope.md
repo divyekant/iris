@@ -2,7 +2,7 @@
 
 - Date: 2026-11-24
 - Card: P9-D25
-- Status: Draft
+- Status: Built (store and API); the web client follows
 
 ## Problem
 
@@ -43,8 +43,7 @@ must be fixable.
 
 ### Store: the edit of a job
 
-A new migration (the next free number at the build) adds the table
-`job_edit`:
+Migration 50 adds the table `job_edit`:
 
 | Column | Type | Meaning |
 |---|---|---|
@@ -55,6 +54,7 @@ A new migration (the next free number at the build) adds the table
 | `due_before` | INTEGER | The due date before the edit, or NULL |
 | `goal` | TEXT NOT NULL | The goal after the edit (the checks of `job.goal`) |
 | `due_at` | INTEGER | The due date after the edit, or NULL (the checks of `job.due_at`) |
+| `after_event` | INTEGER NOT NULL | The ID of the newest event of the job at the edit: the order of the edits and the events, also when the clock goes back |
 
 An edit holds the full values before and after the edit. So the first edit
 keeps the goal and the due date of the start, also for a job that existed
@@ -62,8 +62,9 @@ before the migration, and the newest edit is the truth. The triggers:
 
 - `job_edit_insert` (BEFORE INSERT) refuses an edit of a job that does not
   exist or is `done`, an edit with `at` before the newest edit of the job,
-  an edit whose before-values are not the values of the job row now, and
-  an edit that changes nothing.
+  an edit whose before-values are not the values of the job row now, an
+  edit whose `after_event` is not the newest event of the job, and an edit
+  that changes nothing.
 - `job_edit_apply` (AFTER INSERT) copies `goal` and `due_at` to the job
   row.
 - The trigger `job_row` of migration 14 is made again. It allows a change of
@@ -122,7 +123,16 @@ a second job on purpose is a second form.
   changes. Else `add_scope_in(job, Ref::Thread(t), By::Person, now)`.
 - `remove` calls `revoke_scope_in`. The revoke ends the open session of the
   job (existing behavior), so the agent cannot read the mail that the person
-  took out.
+  took out. A remove on a job in `done` is a 409: the route reads the state
+  in the same write transaction.
+- An item ID names its form (`c-3`). A later understanding can delete the
+  item row of an item ref. Migration 50 adds the table `job_scope_form`: the
+  form of the item of each item ref, at the grant (a trigger on the insert
+  of the ref). The scope list and `remove` read the form from the item row,
+  else from this table, so the ref keeps its ID and the person can remove
+  it. A ref from before migration 50 whose item row was gone at the
+  migration has no known form: its ID uses the record form (`r-<n>`), and
+  the remove takes any item ID with its row number.
 - The job page (`GET /api/jobs/{id}`) gets a `scope` list: each active ref
   with its ID, its kind and a label (the subject of the first message of a
   thread, the title of an item), and the count of granted messages.
@@ -167,14 +177,17 @@ a second job on purpose is a second form.
 | New mail in the thread after the preview | 409 "The mail changed", nothing changes | API test |
 | An add of a thread in the scope already | The add adds the messages of the thread now to its list (existing `add_scope_in`) | API test |
 | A remove of a ref that is not active in the scope | 404 | API test |
+| A remove of an item ref whose item row a later understanding deleted | The scope list keeps the ID of the ref, and the remove works | API test |
+| An item ref from before migration 50 whose item row was gone at the migration | The ID `r-<n>`; the remove takes any item ID with the row number | API test |
 | A remove while a session runs | The revoke ends the session (existing) | Existing test |
 | A typed start that the client sends again with the same request ID | 409 with the job of the first start, no second job | API test |
 | Two edits at the same time | One transaction each; the second edit is the newest | Store test |
 
 ## Impact
 
-- `crates/iris-store`: the new migration (`job_edit`, `job_request`, the
-  trigger `job_row` again).
+- `crates/iris-store`: migration 50 (`job_edit`, `job_request`,
+  `job_scope_form`, the trigger `job_row` again). The migration uses `IF NOT EXISTS`, because a
+  test store that sets an older `user_version` runs it again.
 - `crates/iris-job`: `edit_in`, `edit`.
 - `crates/iris-api`: the routes above, the `scope` list of the job page.
 - `client/`: the jobs page, the job page, a new add view.
@@ -186,9 +199,9 @@ a second job on purpose is a second form.
 
 - A job with no scope row can run a session. Evidence: the workspace
   build writes `JOB.md` and one file for each ref
-  (`crates/iris-workspace/src/lib.rs`); no code asks for a ref. pending a test
-  in the API PR. If the build refuses an empty scope, the API PR changes the
-  build.
+  (`crates/iris-workspace/src/lib.rs`), and `setup` of
+  `crates/iris-workspace/tests/notes.rs` builds the workspace of a job with
+  no scope.
 - `revoke_scope_in` ends the open session. Evidence: the session launcher
   spec, "A session that a revoke or a stop ended".
 - `GET /api/search` gives the thread of each message. Evidence: the
@@ -219,7 +232,7 @@ None.
 
 ```bash
 cargo test -p iris-job --test edit
-cargo test -p iris-api --test start --test scope
+cargo test -p iris-api --test start
 cd client && pnpm test
 ```
 

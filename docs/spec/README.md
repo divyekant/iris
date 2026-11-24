@@ -21,7 +21,8 @@ This folder holds the specifications of Iris and the open model.
 Version 1.2 of the open model is stable. Each JSON document that Iris
 writes has the `model` value `iris/1.2`. Version 1.1 adds the optional
 field `account` to each item. Version 1.2 adds signal members, the
-authors `agent` and `person`, and additions to the matter. Each document of
+authors `agent` and `person`, and additions to the matter, and the optional
+fields `withdrawn_by` and `comments` to each changeset. Each document of
 version 1.0 and 1.1 stays valid. The policy file (TOML) has no `model` value: its
 integer `version` is `1` (`0` has the same meaning). A minor version of version 1 only adds to the model, and
 a change that is not an addition is version 2. Specification 4 gives the

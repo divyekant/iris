@@ -10,7 +10,7 @@
 <nav><a href="../index.html">Iris</a> <a href="index.html">Guide</a> <a href="documents.html" aria-current="page">Documents</a> <a href="write.html">Write</a> <a href="read.html">Read</a> <a href="agents.html">Agents</a></nav>
 <main>
 <h1>The documents of the open model</h1>
-<p>This page gives each document of version 1.1: its purpose, its required
+<p>This page gives each document of version 1.2: its purpose, its required
 fields and one valid sample. The schema of each document is the normative
 copy. Each schema refuses a field that it does not name.</p>
 <p>Contents: <a href="#common">common fields</a>, <a href="#ids">IDs</a>,
@@ -344,7 +344,10 @@ the decision of each action. <code>author.kind</code> is <code>person</code>,
 <code>agent</code>, <code>triage</code> or <code>local</code>.
 <code>state</code> is <code>draft</code>, <code>open</code>,
 <code>closed</code> or <code>withdrawn</code>. Each action has a verb, its
-targets, its arguments and a decision. The <a href="agents.html#changeset">Agents</a>
+targets, its arguments and a decision. Since version 1.2, a withdrawn
+changeset can have <code>withdrawn_by</code>: <code>author</code> or
+<code>person</code>. Since version 1.2, <code>comments</code> lists the
+comments of the person, each with its revision, text and time. The <a href="agents.html#changeset">Agents</a>
 page tells how an agent makes a changeset.</p>
 <p>Required fields:</p>
 <ul class="fields" data-required="changeset"><li>model</li> <li>id</li> <li>revision</li> <li>author</li> <li>why</li> <li>created</li> <li>submitted</li> <li>state</li> <li>actions</li></ul>

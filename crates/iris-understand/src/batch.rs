@@ -658,6 +658,17 @@ pub fn retry_after(c: &Connection) -> rusqlite::Result<Option<i64>> {
     )
 }
 
+/// End the wait after model errors now ("Try now" of the web client,
+/// decision D35, issue #136): the next run calls the model, as at the end
+/// of the wait. The count of errors stays, so a new error doubles the wait
+/// again. Gives true if a wait was running at `now`.
+pub fn try_now(tx: &Transaction, now: i64) -> rusqlite::Result<bool> {
+    Ok(tx.execute(
+        "UPDATE model_setting SET retry_at = ?1 WHERE retry_at > ?1",
+        [now],
+    )? > 0)
+}
+
 /// The wait state after a run that could call the model, in the end write
 /// of the run (under its lock). Only evidence of the model changes it: a
 /// stop on `model` or `unknown`, or a model that cannot be made

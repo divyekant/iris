@@ -394,7 +394,7 @@ async fn first_brief_runs_to_the_first_brief_with_content() {
 /// 27, so what they add goes too.
 /// The undo of migration 46, so that a test store can run it again. Its
 /// triggers and its view go too: migration 46 makes them again.
-const UNDO_46: &str = "DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add;
+const UNDO_46: &str = "DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add;
      DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert;
      DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add;
      DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide;
