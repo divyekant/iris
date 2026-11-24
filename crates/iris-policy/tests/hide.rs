@@ -128,6 +128,21 @@ fn choices(store: &Store, verb: &str, form: &str, from: &str, n: i64) {
     }
 }
 
+/// An open of the source mail of item `i` (the measures page writes it).
+fn open(store: &Store, i: i64) {
+    store
+        .write(|tx| {
+            tx.execute_batch("INSERT OR IGNORE INTO use_day(day) VALUES ('2027-01-15')")?;
+            tx.execute(
+                "INSERT OR IGNORE INTO use_open(day, message_id)
+                 SELECT '2027-01-15', message_id FROM item_source WHERE item_id = ?1",
+                [i],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
 fn refresh(store: &Store) -> Vec<propose::Proposal> {
     let mut mark = None;
     propose::refresh(store, NOW, &mut mark).unwrap();
@@ -416,13 +431,13 @@ fn an_apply_after_a_pass_runs_the_pass_again() {
 /// refusal. Generated cases mix senders, forms, refusals and hostile mail.
 #[test]
 fn each_count_is_the_number_of_choices_that_its_rule_hides() {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     const KINDS: [(&str, &str, Form); 3] = [
         ("skip", "feed", Form::Feed),
         ("mute", "conversation", Form::Conversation),
         ("dismiss", "signal", Form::Signal),
     ];
-    const SENDERS: [&str; 2] = ["a@shop.example", "b@shop.example"];
+    const SENDERS: [&str; 3] = ["a@shop.example", "b@shop.example", "c@other.example"];
     let mut seed: u64 = 0x5eed;
     let mut next = |n: u64| {
         seed = seed
@@ -433,29 +448,60 @@ fn each_count_is_the_number_of_choices_that_its_rule_hides() {
     let mut proposed = 0;
     for case in 0..12 {
         let (_dir, store) = store(&format!("property-{case}"));
-        // Keyed by the sender and the form name: `Form` has no order.
-        let mut want: BTreeMap<(String, &str), (i64, i64)> = BTreeMap::new();
+        // Keyed by the `sender` value (an address or the domain) and the
+        // form name: `Form` has no order. The value is (choices, refusals,
+        // addresses of the choices).
+        type Want = BTreeMap<(String, &'static str), (i64, i64, BTreeSet<String>)>;
+        let mut want: Want = BTreeMap::new();
         for _ in 0..(20 + next(40)) {
             let (verb, form, f) = KINDS[next(3) as usize];
-            let sender = SENDERS[next(2) as usize];
+            let sender = SENDERS[next(SENDERS.len() as u64) as usize];
             let hostile = next(10) == 0;
-            let state = if next(15) == 0 { "undone" } else { "applied" };
+            let state = match next(30) {
+                0 | 1 => "undone",
+                2 => "open",
+                _ => "applied",
+            };
             let i = item(&store, form, sender, hostile, false);
-            chose(&store, verb, i, state);
+            if state == "open" {
+                open(&store, i);
+            } else {
+                chose(&store, verb, i, state);
+            }
             if !hostile {
-                let c = want.entry((sender.to_string(), f.name())).or_default();
-                if state == "applied" {
-                    c.0 += 1;
-                } else {
-                    c.1 += 1;
+                let domain = format!("@{}", sender.rsplit_once('@').unwrap().1);
+                for value in [sender.to_string(), domain] {
+                    let c = want.entry((value, f.name())).or_default();
+                    if state == "applied" {
+                        c.0 += 1;
+                        c.2.insert(sender.to_string());
+                    } else {
+                        c.1 += 1;
+                    }
                 }
             }
         }
-        let want: Vec<(String, &str, i64)> = want
+        let mut want: BTreeMap<(String, &str), i64> = want
             .into_iter()
-            .filter(|(_, (yes, no))| *no == 0 && *yes >= MIN_APPROVALS)
-            .map(|((s, f), (yes, _))| (s, f, yes))
+            .filter(|((s, _), (yes, no, from))| {
+                *no == 0 && *yes >= MIN_APPROVALS && (!s.starts_with('@') || from.len() >= 2)
+            })
+            .map(|(k, (yes, _, _))| (k, yes))
             .collect();
+        // A domain proposal covers the address proposals of its form.
+        let covered: Vec<(String, &str)> = want
+            .keys()
+            .filter(|(s, f)| {
+                !s.starts_with('@')
+                    && want.contains_key(&(format!("@{}", s.rsplit_once('@').unwrap().1), *f))
+            })
+            .cloned()
+            .collect();
+        for k in covered {
+            want.remove(&k);
+        }
+        let want: Vec<(String, &str, i64)> =
+            want.into_iter().map(|((s, f), n)| (s, f, n)).collect();
         let mut got: Vec<(String, &str, i64)> = hides(&refresh(&store))
             .into_iter()
             .map(|(s, f, n)| (s, f.name(), n))
@@ -465,4 +511,70 @@ fn each_count_is_the_number_of_choices_that_its_rule_hides() {
         proposed += want.len();
     }
     assert!(proposed > 0, "the cases give some proposals");
+}
+
+/// Decision D12: an open of the source mail of an item is a refusal of
+/// each `hide` proposal that would hide that item, and only of those.
+#[test]
+fn an_open_stops_the_hide_proposal_of_its_sender_and_form() {
+    let (_dir, store) = store("open");
+    choices(&store, "skip", "feed", "news@shop.example", MIN_APPROVALS);
+    choices(
+        &store,
+        "dismiss",
+        "signal",
+        "news@shop.example",
+        MIN_APPROVALS,
+    );
+    assert_eq!(hides(&refresh(&store)).len(), 2);
+    let i = item(&store, "feed", "news@shop.example", false, false);
+    open(&store, i);
+    assert_eq!(
+        hides(&refresh(&store)),
+        vec![("news@shop.example".to_string(), Form::Signal, MIN_APPROVALS)],
+        "the open stops the feed proposal only"
+    );
+    // An open of mail from another sender refuses nothing of this one.
+    let j = item(&store, "signal", "ann@friends.example", false, false);
+    open(&store, j);
+    assert_eq!(hides(&refresh(&store)).len(), 1);
+}
+
+/// Decision D11: choices on two addresses of one domain give one domain
+/// proposal. One address gives no domain proposal.
+#[test]
+fn two_addresses_of_one_domain_give_one_domain_proposal() {
+    let (_dir, store) = store("domain");
+    choices(&store, "skip", "feed", "a@shop.example", MIN_APPROVALS);
+    assert_eq!(
+        hides(&refresh(&store)),
+        vec![("a@shop.example".to_string(), Form::Feed, MIN_APPROVALS)]
+    );
+    choices(&store, "skip", "feed", "b@shop.example", 2);
+    let ps = refresh(&store);
+    assert_eq!(
+        hides(&ps),
+        vec![("@shop.example".to_string(), Form::Feed, MIN_APPROVALS + 2)],
+        "the domain covers the address"
+    );
+    assert!(propose::dismiss(&store, ps[0].id, NOW).unwrap());
+    assert_eq!(
+        hides(&refresh(&store)),
+        vec![("a@shop.example".to_string(), Form::Feed, MIN_APPROVALS)],
+        "a dismissed domain gives the address back"
+    );
+}
+
+/// A new open runs the pass again, with no new choice and no new hour.
+#[test]
+fn a_new_open_runs_the_pass_again() {
+    let (_dir, store) = store("open-mark");
+    choices(&store, "skip", "feed", "news@shop.example", MIN_APPROVALS);
+    let mut mark = None;
+    propose::refresh(&store, NOW, &mut mark).unwrap();
+    assert_eq!(hides(&store.read(propose::open).unwrap()).len(), 1);
+    let i = item(&store, "feed", "news@shop.example", false, false);
+    open(&store, i);
+    assert!(propose::refresh(&store, NOW, &mut mark).unwrap().is_some());
+    assert!(hides(&store.read(propose::open).unwrap()).is_empty());
 }

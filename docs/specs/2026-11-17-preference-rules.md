@@ -32,11 +32,13 @@ cannot tell which sender the person wants to see.
 
 ## Not in scope
 
-- Opens as a signal. The opens of R5-12 have no item and no sender. A
-  later card adds them when the store records the item of each open
-  (issue #433).
 - A proposal with a `sender_kind` condition. A `hide` rule for each
-  service hides too much mail. The proposal names one address.
+  service hides too much mail. The proposal names one address, or one
+  domain (decision D11, 2026-11-24).
+
+Decision D12 (2026-11-24) added opens as a signal after this card: an open
+of a source mail is a refusal of each `hide` proposal that would hide one
+of its items (spec 2 section 6.6, issue #433).
 - A `hide` rule for commitments or records. An obligation or a receipt
   that a learned rule hides is a loss that the person cannot see.
 - A verb of the `iris` command for skip, mute and dismiss. A changeset

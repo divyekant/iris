@@ -654,8 +654,9 @@ changes:
   refused (`denied` by the person, or `undone`). `label` and `unlabel` are
   not in the list, because a rule cannot name the label. The state verbs
   change items, not mail.
-- A candidate is one verb and one condition: the `sender` address or the
-  `sender_kind` that each message of one approved action has. An action on
+- A candidate is one verb and one condition: the `sender` address, the
+  `sender` domain (`@` and the domain of the address) or the `sender_kind`
+  that each message of one approved action has. An action on
   hostile mail (a hostile mark, or a sender of the kind `hostile`) gives no
   candidate and counts as no approval, and `hostile` is never a candidate.
 - The candidate rule is added to the active policy. An action counts for it
@@ -663,6 +664,11 @@ changes:
   (section 6.4), with the author, the job and the flag `bulk` of the
   action. The engine proposes the rule when 10 or more approvals count and
   no refusal counts.
+- A domain candidate also needs counted approvals on two or more
+  addresses. With one address, the address proposal covers it. When the
+  engine proposes a domain rule, it does not propose a rule of the same
+  verb (and form) for an address of that domain. If the person dismisses
+  the domain proposal, the address proposals come back.
 - A refusal that the engine cannot read again (a message row or its
   header is gone) stops each proposal of its verb.
 - The pass holds the facts of one action at a time, and one count for each
@@ -692,7 +698,8 @@ The pass also proposes a `hide` rule from the choices of the person
   `skip`, `mute` or `dismiss`, `applied` (a choice) or `undone` (a
   refusal).
 - A candidate is a `hide` rule with two conditions: the `sender` of the
-  origin message of the item, and the `form` of the item. Hostile mail
+  origin message of the item (the address, or its domain with the domain
+  rule above), and the `form` of the item. Hostile mail
   and an origin message from the person (sender kind `you`) give no
   candidate. A choice counts only when the rule, added to the
   active policy, changes the attention of its item from shown to hidden.
@@ -701,6 +708,14 @@ The pass also proposes a `hide` rule from the choices of the person
   `hide` proposal of its form.
 - An undone choice whose item, origin message, header or sender cannot
   be read again stops each `hide` proposal of its form.
+- An open of a source mail is a refusal too. The pass reads the newest
+  2,000 rows of `use_open` (the opens of the measures page, store
+  migration 27, on this machine only). For each item whose origin is the
+  opened mail, each candidate whose rule would change the attention of
+  the item from shown to hidden gets a refusal. An open of mail from the
+  person or of hostile mail refuses nothing, as such mail gives no
+  candidate. An open whose header is gone names no sender, so it refuses
+  nothing. A new open changes the mark of the pass.
 - The row has `verb = 'hide'` and the `form` (store migration 30). An
   `allow` row has the form `''`.
 
@@ -712,6 +727,8 @@ Failure list of the proposals:
 | A crash after the file write of an accept, before its commit | The file has the rule, and the row stays open | The file is a change of section 6.3. Each policy that becomes active (an accept, a confirmation) marks as accepted each open row whose rule it has with `by = "proposal"`. A discard leaves the row open. |
 | A failed commit of a pass | The pass is lost | The engine keeps the mark of a pass only after its commit, so the next tick runs it again. |
 | A message of a decided action that the cleanup changed | A refusal does not count | A refusal that the engine cannot read again stops each proposal of its verb. |
+| An open of a mail that the cleanup deleted | An open does not count | The open has no sender and no item, so no rule can come from it. It refuses nothing. A later open of another mail from the sender still refuses. |
+| Approvals on one address of a busy domain | A domain rule wider than the evidence | A domain proposal needs approvals on two or more addresses, and each refusal on any address of the domain stops it. |
 
 ## 7. The ledger
 
