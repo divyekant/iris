@@ -104,3 +104,40 @@ test("a slow poll that started before Try now does not bring the wait note back"
     globalThis.fetch = saved;
   }
 });
+
+test("the read at the end of a wait does not hide a newer wait that a later poll showed", async () => {
+  const saved = globalThis.fetch;
+  const later = new Date(Date.now() + 3_600_000).toISOString();
+  let release;
+  let reads = 0;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    if (u === "/api/status") {
+      reads += 1;
+      // The first read is the read at the end of the wait: it reads no wait, and answers last.
+      if (reads === 1) {
+        await new Promise((r) => (release = r));
+        return json({ ...fx.status });
+      }
+      // The poll after it: the model failed again, and a new wait runs.
+      return json({ ...fx.status, model_retry_at: later });
+    }
+    return json(u.startsWith("/api/brief") ? fx.brief : []);
+  };
+  const at = new Date(Date.now() + 20).toISOString();
+  const view = await mount("/src/views/Brief.svelte", { brief: fx.brief, status: { ...fx.status, model_retry_at: at }, now: NOW, poll: 10 });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  try {
+    for (let i = 0; i < 60 && reads < 2; i++) await wait(10);
+    assert.equal(reads, 2, "the poll read after the read at the end of the wait");
+    await wait(5);
+    assert.notEqual(view.target.querySelector(".model-wait"), null);
+    release();
+    await wait(5);
+    assert.notEqual(view.target.querySelector(".model-wait"), null, "the older read does not hide the newer wait");
+  } finally {
+    view.destroy();
+    globalThis.fetch = saved;
+  }
+});

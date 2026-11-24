@@ -4,7 +4,7 @@
   and links its full list. Read only in release 1.
 -->
 <script lang="ts">
-  import { get, loadBrief, newest, type Brief, type Item, type Job, type Status } from "../api";
+  import { get, loadBrief, newest, statusOrder, type Brief, type Item, type Job, type Status } from "../api";
   import { poll as every, watch } from "../clock";
   import NoModel from "./NoModel.svelte";
   import ModelWait from "./ModelWait.svelte";
@@ -69,10 +69,9 @@
   // Two loads of the brief can answer out of order (a poll, an answer at the gate):
   // each takes a ticket, and a brief shows only while its ticket is the newest.
   const briefTicket = newest();
-  // The status: a poll shows its answer only if it started after the shown status. An answer of
-  // "Try now" comes after its change, so it drops each poll that started before it.
-  let statusStarted = 0;
-  let statusShown = 0;
+  // Polls, the read at the end of a model wait and a Try now answer can arrive out of order: the
+  // newest status wins.
+  const order = statusOrder((s) => (status = s));
 
   // Load the brief again while it is open: every 5 seconds while the first sync
   // runs (spec 1 section 4.2), then every minute for new mail.
@@ -82,9 +81,9 @@
     return every(
       () => {
         const fresh = briefTicket();
-        return Promise.all([loadBrief(), get<Status>("status"), fresh, ++statusStarted] as const);
+        return Promise.all([loadBrief(), get<Status>("status"), fresh, order.begin()] as const);
       },
-      ([b, s, fresh, n]) => (fresh() && (brief = b), n > statusShown && ((statusShown = n), (status = s))),
+      ([b, s, fresh, put]) => (fresh() && (brief = b), put(s)),
       syncing ? poll : poll * 12,
     );
   });
@@ -252,7 +251,7 @@
 </div>
 
 {#if needsModel(status)}<NoModel />{/if}
-{#if status?.model_retry_at}<ModelWait at={status.model_retry_at} onstatus={(s) => ((statusShown = statusStarted), (status = s))} />{/if}
+{#if status?.model_retry_at}<ModelWait at={status.model_retry_at} ontry={order.after} onover={order.read} />{/if}
 
 {#if arrived.length}
   <div class="arrivals">

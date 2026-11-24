@@ -222,7 +222,7 @@ test("a remove whose answer is lost shows what a fresh status says, and an unkno
     view.destroy();
   }
 
-  // No status either: the result is unknown, and the question offers a check in place of Remove.
+  // No status either: the result is unknown. The line says so and offers a check, and no Remove.
   status = { ok: false };
   view = await mount("/src/views/Accounts.svelte", { status: fx.status, poll: 0 });
   try {
@@ -230,14 +230,22 @@ test("a remove whose answer is lost shows what a fresh status says, and an unkno
     await tick();
     press(view, "Remove");
     await settle();
-    assert.match(text(view.target), /Iris could not tell if the account is removed\. Check again before you remove it again\./);
-    assert.equal([...view.target.querySelectorAll(".ask button")].some((b) => b.textContent.trim() === "Remove"), false);
-    // The check reads a status where the engine still deletes: the question closes, the line says so.
+    const row = () => text(view.target.querySelector(".accounts li"));
+    assert.match(row(), /Iris could not tell if this account is removed\. The removal can still run\./);
+    assert.equal(view.target.querySelector(".ask"), null);
+    assert.equal(view.target.querySelector(`button[aria-label="Remove ${one.address}"]`), null);
+    // The engine still waits for a lock: the status gives the account as before. The doubt stays.
+    status = { ok: true, body: fx.status };
+    press(view, "Check again");
+    await settle();
+    assert.match(row(), /Iris could not tell if this account is removed\./);
+    assert.equal(view.target.querySelector(`button[aria-label="Remove ${one.address}"]`), null);
+    // The removal commits: the line says that Iris deletes the mail, then the account goes.
     status = { ok: true, body: { ...fx.status, accounts: [{ ...one, state: "removing" }, two] } };
     press(view, "Check again");
     await settle();
-    assert.equal(view.target.querySelector(".ask"), null);
-    assert.match(text(view.target.querySelector(".accounts li")), /Iris deletes the mail of this account from this machine\./);
+    assert.match(row(), /Iris deletes the mail of this account from this machine\./);
+    assert.doesNotMatch(row(), /could not tell/);
   } finally {
     view.destroy();
     globalThis.fetch = saved;

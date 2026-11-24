@@ -4,7 +4,7 @@
   accounts in one list.
 -->
 <script lang="ts">
-  import { get, post, type Account, type Status } from "../api";
+  import { get, post, statusOrder, type Account, type Status } from "../api";
   import { poll as every } from "../clock";
   import { accountNames, signIn, when } from "../format";
 
@@ -12,25 +12,9 @@
   // svelte-ignore state_referenced_locally
   let status = $state(initial);
 
-  // Each read of the status takes a number at its start, and only a read that started after the
-  // shown status replaces it. The answer of a removal comes after its commit, so it drops each read
-  // that started before it: a slow poll never puts back an account that the removal removed.
-  let started = 0;
-  let shown = 0;
-  async function read(): Promise<[number, Status]> {
-    const n = ++started;
-    return [n, await get<Status>("status")];
-  }
-  function take([n, next]: [number, Status]) {
-    if (n <= shown) return;
-    shown = n;
-    status = next;
-  }
-  function after(next: Status) {
-    shown = started;
-    status = next;
-  }
-  $effect(() => (poll ? every(read, take, poll) : undefined));
+  // Polls, checks and removal answers can arrive out of order: the newest status wins.
+  const order = statusOrder((s) => (status = s));
+  $effect(() => (poll ? every(async () => [order.begin(), await get<Status>("status")] as const, ([put, s]) => put(s), poll) : undefined));
 
   let names = $derived(accountNames(status.accounts));
 
@@ -39,53 +23,56 @@
   let busy = $state(false);
   let error = $state("");
   let removed = $state("");
-  // The accounts that the person removed and that the status still lists (in state removing).
-  let going: Account[] = $state([]);
+  // Each removal that the person asked for and whose end the page does not know yet. `sent`: the
+  // engine took it. `unsure`: the answer was lost, so the removal can still run at the engine, and
+  // only a status that shows the account in a removal or gone ends the doubt.
+  let removals: Record<number, { account: Account; outcome: "sent" | "unsure" }> = $state({});
 
-  // The removal can end at the engine although its answer is lost: then a fresh status tells.
-  let unknown = $state(false);
-  const UNKNOWN = "Iris could not tell if the account is removed. Check again before you remove it again.";
-
-  // In a removal: the account is gone from the status, or it is in state removing.
-  const inRemoval = (a: Account, s: Status) => {
-    const now = s.accounts.find((x) => x.id === a.id);
-    return !now || now.state === "removing";
-  };
-
-  // Each status, from an answer, a check or a poll. The question of an account in a removal closes,
-  // and the account joins `going`. An account of `going` that the status no longer lists is removed.
+  // Each status: an account that the status no longer lists while the person follows it (its
+  // removal, or its open question) is removed.
   $effect(() => {
     const a = asking;
-    if (a && inRemoval(a, status)) {
-      if (!going.some((g) => g.id === a.id)) going = [...going, a];
+    if (a && !removals[a.id] && !status.accounts.some((x) => x.id === a.id)) {
+      removed = a.address;
       asking = null;
-      unknown = false;
-      error = "";
     }
-    const gone = going.filter((g) => !status.accounts.some((x) => x.id === g.id));
-    if (gone.length) {
-      removed = gone.map((g) => g.address).join(", ");
-      going = going.filter((g) => !gone.includes(g));
-    }
+    const gone = Object.values(removals).filter((r) => !status.accounts.some((x) => x.id === r.account.id));
+    if (!gone.length) return;
+    removed = gone.map((r) => r.account.address).join(", ");
+    removals = Object.fromEntries(Object.entries(removals).filter(([, r]) => !gone.includes(r)));
   });
+
+  // In a removal: the account is gone from the status, or it is in state removing.
+  const inRemoval = (a: Account) => {
+    const now = status.accounts.find((x) => x.id === a.id);
+    return !now || now.state === "removing";
+  };
+  // The question and the Remove button show only for an account with no removal.
+  const removable = (a: Account) => a.state !== "removing" && !removals[a.id];
 
   async function remove(a: Account) {
     busy = true;
     error = "";
     try {
       // The engine answers after the delete of the mail, with the new status.
-      after(await post<Status>(`accounts/${a.id}/remove`, { address: a.address }));
-      unknown = false;
+      const next = await post<Status>(`accounts/${a.id}/remove`, { address: a.address });
+      removals = { ...removals, [a.id]: { account: a, outcome: "sent" } };
+      order.after(next);
+      asking = null;
     } catch (e) {
-      // A refusal, a lost answer or a time-out: the status tells what happened.
       const why = (e as Error).message;
-      try {
-        take(await read());
-        unknown = false;
-        if (!inRemoval(a, status)) error = why;
-      } catch {
-        unknown = true;
-        error = UNKNOWN;
+      if ((e as { status?: number }).status === undefined) {
+        // No answer: the removal can still run at the engine.
+        removals = { ...removals, [a.id]: { account: a, outcome: "unsure" } };
+        asking = null;
+        await order.read().catch(() => {});
+      } else {
+        // A definite answer. A conflict can mean that the account is in a removal already.
+        if ((e as { status?: number }).status === 409) await order.read().catch(() => {});
+        if (inRemoval(a)) {
+          removals = { ...removals, [a.id]: { account: a, outcome: "sent" } };
+          asking = null;
+        } else error = why;
       }
     } finally {
       busy = false;
@@ -94,12 +81,10 @@
 
   async function check() {
     busy = true;
-    error = "";
     try {
-      take(await read());
-      unknown = false;
+      await order.read();
     } catch {
-      error = UNKNOWN;
+      // The account keeps its note: the next poll or check tells.
     } finally {
       busy = false;
     }
@@ -154,7 +139,13 @@
           <p class="state">Iris can read this mailbox, but it cannot change it. Your approved changes wait.</p>
           <p class="state">To give write access, run <code>iris account add client.json --write</code> on the machine that runs Iris and sign in again.</p>
         {/if}
-        {#if asking?.id === a.id}
+        {#if removals[a.id]?.outcome === "unsure" && a.state !== "removing"}
+          <p class="state unsure" role="status">
+            Iris could not tell if this account is removed. The removal can still run.
+            <button type="button" class="quiet" onclick={check} disabled={busy}>{busy ? "Checking…" : "Check again"}</button>
+          </p>
+        {/if}
+        {#if asking?.id === a.id && removable(a)}
           <div class="ask" role="group" aria-label={`Remove ${a.address}`}>
             <p>
               Remove {a.address}? Iris deletes its mail from this machine. The mailbox at {a.provider === "gmail" ? "Gmail" : a.provider === "outlook" ? "Outlook" : "your provider"} does not
@@ -162,18 +153,14 @@
               and you did stays: drafts, the reasons of changes, job events and the titles of matters that you decided can hold text from this mail.
             </p>
             <p class="actions">
-              {#if unknown}
-                <button type="button" class="quiet" onclick={check} disabled={busy}>{busy ? "Checking…" : "Check again"}</button>
-              {:else}
-                <button type="button" class="danger" onclick={() => remove(a)} disabled={busy}>{busy ? "Removing…" : "Remove"}</button>
-              {/if}
-              <button type="button" class="quiet" onclick={() => ((asking = null), (error = ""), (unknown = false))} disabled={busy}>Keep</button>
+              <button type="button" class="danger" onclick={() => remove(a)} disabled={busy}>{busy ? "Removing…" : "Remove"}</button>
+              <button type="button" class="quiet" onclick={() => ((asking = null), (error = ""))} disabled={busy}>Keep</button>
             </p>
             {#if error}<p class="error" role="alert">{error}</p>{/if}
           </div>
         {/if}
       </div>
-      {#if a.state !== "removing" && asking?.id !== a.id}
+      {#if removable(a) && asking?.id !== a.id}
         <button type="button" class="quiet remove" onclick={() => ((asking = a), (removed = ""))} disabled={busy} aria-label={`Remove ${a.address}`}>Remove</button>
       {/if}
     </li>
@@ -298,6 +285,9 @@
   .error {
     margin-top: var(--space-2) !important;
     color: var(--color-error);
+  }
+  .unsure button {
+    margin-left: var(--space-2);
   }
   .done {
     margin: 0 0 var(--space-4);

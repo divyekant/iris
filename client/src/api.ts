@@ -547,6 +547,32 @@ export function newest(): () => () => boolean {
   };
 }
 
+/**
+ * The order of the status answers of a view. A read applies its answer only if no read that started
+ * after it applied first. The answer of a change (a removal, a try now) comes after its commit, so it
+ * applies at once and drops each read that started before it.
+ */
+export function statusOrder(apply: (s: Status) => void) {
+  let started = 0;
+  let shown = 0;
+  const begin = () => {
+    const mine = ++started;
+    return (s: Status) => {
+      if (mine <= shown) return;
+      shown = mine;
+      apply(s);
+    };
+  };
+  return {
+    begin,
+    read: async () => begin()(await get<Status>("status")),
+    after: (s: Status) => {
+      shown = started;
+      apply(s);
+    },
+  };
+}
+
 /** The browser limit of all keepalive bodies in flight is 64 KiB: keep a margin for others. */
 export const KEEPALIVE_MAX = 60 * 1024;
 export const keepable = (json: string) => new TextEncoder().encode(json).length <= KEEPALIVE_MAX;
