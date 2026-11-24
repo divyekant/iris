@@ -262,6 +262,12 @@ fn mirror_verify_during_a_first_copy_says_so_and_does_not_fail() {
     let store = Store::open(&dir).unwrap();
     let account = add_account(&store, &gmail(fake.base_url()));
     let held = iris_sync::lock(&store, account).unwrap();
+    // The token endpoint fails: the check comes before any token call.
+    tokens
+        .answers
+        .lock()
+        .unwrap()
+        .extend([(500, "{}".to_string()), (500, "{}".to_string())]);
     let (ok, out, err) = iris(&dir, &fake, &tokens, &["mirror", "verify"]);
     assert!(ok, "{err}");
     assert!(
@@ -270,6 +276,8 @@ fn mirror_verify_during_a_first_copy_says_so_and_does_not_fail() {
         )),
         "{out}"
     );
+    assert!(tokens.calls.lock().unwrap().is_empty(), "a token call");
+    tokens.answers.lock().unwrap().clear();
     drop(held);
     let (ok, _, err) = iris(&dir, &fake, &tokens, &["mirror", "sync"]);
     assert!(ok, "{err}");

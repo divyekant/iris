@@ -156,11 +156,26 @@ pub struct SyncLock(#[allow(dead_code)] iris_store::FileLock);
 /// Take the sync lock of `account`, or give [`Error::OtherSync`] if another
 /// sync holds it.
 pub fn lock(store: &Store, account: i64) -> Result<SyncLock> {
-    let path = store.dir().join(format!("sync-{account}.lock"));
-    match iris_store::FileLock::try_take(&path).map_err(iris_store::Error::Io)? {
+    match iris_store::FileLock::try_take(&lock_path(store, account))
+        .map_err(iris_store::Error::Io)?
+    {
         Some(l) => Ok(SyncLock(l)),
         None => Err(Error::OtherSync),
     }
+}
+
+fn lock_path(store: &Store, account: i64) -> std::path::PathBuf {
+    store.dir().join(format!("sync-{account}.lock"))
+}
+
+/// Another process holds the sync lock of `account` now. A shared probe
+/// that creates no file ([`iris_store::FileLock::probe`]). A sync that
+/// tries to take the lock in the same moment gets [`Error::OtherSync`]
+/// once, and the engine tries it again at its next sync turn.
+pub fn other_sync_runs(store: &Store, account: i64) -> Result<bool> {
+    let probe =
+        iris_store::FileLock::probe(&lock_path(store, account)).map_err(iris_store::Error::Io)?;
+    Ok(matches!(probe, iris_store::Probe::Held))
 }
 
 /// Sync `account` with Gmail: continue an unfinished first sync or full
