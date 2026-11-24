@@ -812,7 +812,7 @@ mail" is a message with a hostile mark, or a message from a `hostile` sender.
 | Each form | To `gone`, and back | The engine (section 4.5). |
 | Commitment | `open` to `done`, `declined`, `deferred` or `cancelled` | A person, through a changeset (release 2). Understanding sets `done` or `cancelled` when a later message of the thread says so. |
 | Commitment | `deferred` to `done`, `declined`, or `deferred` with a new date | A person, through a changeset (release 2): `close`, `decline` and `defer` (specification 2, section 4). |
-| Commitment | `deferred` to `open` | The engine, on the `deferred_until` date (UTC). The engine checks once each minute. |
+| Commitment | `deferred` to `open` | The engine, at the start of the `deferred_until` date in the time zone of the owner (`iris zone`; the default is the time zone of the computer). The engine checks once each minute. |
 | Conversation | `active` to `quiet`, and back | The engine: 14 days with no message, and the next message. |
 | Conversation | `active` or `quiet` to `muted` | A person, through a changeset (release 5): `mute` (`docs/specs/2026-11-17-preference-rules.md`). A new message keeps it `muted`. |
 | Record | `kept` to `corrected` | A correction (release 2). |
@@ -1144,8 +1144,8 @@ After the live login codes, the web client shows these sections first, in
 this order: "A question for you" (card R5-05), only when an agent asks a
 question, with the job whose question is the newest (`updated` of the job)
 and a field for the answer; then Due soon (card R3-08). Due soon holds each item of You owe that is due in 2 days or
-less, or that is late, in the local day of the viewer. The engine does not
-know that day (it has no time zone of the owner), so the client makes this
+less, or that is late, on the day of the owner: the day in the time zone of
+`/api/status` (`iris zone`, decision D1). The client makes this
 split from the You owe items, and the API keeps one You owe section. The
 client shows You owe with the rest of its items, and with the engine count
 less the Due soon items. The "All" link of You owe, and the link of Due soon,

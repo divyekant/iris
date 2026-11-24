@@ -131,6 +131,8 @@ export type Status = {
   model?: boolean;
   /** The live messages that wait for a model or a budget. Drafts and gone mail never count. An older engine leaves it out. */
   waits_model?: number;
+  /** The time zone of defer dates and due dates (an IANA name, `iris zone`). Null or left out: the zone of the browser. */
+  time_zone?: string | null;
 };
 
 /** A rule of policy.toml (spec 2 section 6.2). `when` holds only the conditions that the rule sets. */
@@ -578,6 +580,7 @@ export async function get<T>(path: string): Promise<T> {
     access.locked = accounts.filter((a) => a.state === "needs_sign_in").map(({ address, provider }) => ({ address, provider }));
     access.none = accounts.length === 0;
     access.accounts = accountNames(accounts);
+    access.zone = (body as Status).time_zone ?? null;
   }
   return body as T;
 }
