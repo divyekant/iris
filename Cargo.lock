@@ -1103,6 +1103,7 @@ dependencies = [
 name = "iris-matters"
 version = "0.0.0"
 dependencies = [
+ "iris-eval",
  "iris-model",
  "iris-store",
  "iris-understand",
@@ -1161,6 +1162,7 @@ dependencies = [
 name = "iris-policy"
 version = "0.0.0"
 dependencies = [
+ "iris-job",
  "iris-store",
  "rusqlite",
  "serde",

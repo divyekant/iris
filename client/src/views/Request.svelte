@@ -54,6 +54,20 @@
       ),
     );
   });
+  // The reason of each submitted revision (issue 189): an open change of an older revision
+  // shows the reason of its own revision, not the quote above, which is the reason of the newest.
+  let reasons: Record<number, string> = $state({});
+  let older = $derived(open.some((a) => a.revision < c.revision));
+  let askedReasons = false;
+  $effect(() => {
+    if (!older || askedReasons) return;
+    askedReasons = true;
+    get<{ revisions: { revision: number; why: string }[] }>(`changesets/${encodeURIComponent(c.id)}/revisions`).then(
+      (got) => (reasons = Object.fromEntries(got.revisions.map((r) => [r.revision, r.why]))),
+      // Without the reasons, each older change still says which revision it comes from.
+      () => {},
+    );
+  });
   let rows: Record<string, Row[]> = $state({});
   // The changes whose last load failed. They load again only with "Try again".
   let failed: Record<string, boolean> = $state({});
@@ -283,6 +297,7 @@
             <label class="what" for={id}><b>{verb(a)}</b> {mail(a) && d ? to(d) : target(a)}</label>
             {#if detail(a)}<p class="because">{detail(a)}</p>{/if}
             {#if a.why}<p class="because">{a.why}</p>{/if}
+            {#if a.revision < c.revision}<p class="because">From revision {a.revision}{reasons[a.revision] ? `, which asked: “${reasons[a.revision]}”` : "."}</p>{/if}
             {#each mail(a) ? unmarked(a, d) : a.flags.map((f) => FLAGS[f] ?? f) as words (words)}<p class="flag">{words}</p>{/each}
             {#if !approves(a)}<p class="denied">Iris will deny this change.</p>{/if}
             {#if d}{@render draft(d)}{/if}

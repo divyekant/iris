@@ -28,8 +28,12 @@ export type Measures = {
   days: { day: string; opens: number }[];
   /** `null` before the first brief. Each field is `null` when the store is older than the measure. */
   first_brief: { connect: string | null; brief: string | null; seconds: number | null } | null;
-  /** Each account. An account with no check has `checked: null` and `complete: false`. */
-  mirror: { account: string; checked: string | null; differences: number | null; complete: boolean }[];
+  /**
+   * Each account. An account with no check has `checked: null` and `complete: false`.
+   * `skipped`: the messages that changed during the check, so the check did not compare them.
+   * `stopped`: an error stopped the check.
+   */
+  mirror: { account: string; checked: string | null; differences: number | null; complete: boolean; skipped: number | null; stopped: boolean }[];
   memory: { rss_kib: number | null; messages: number };
   approvals: { decided: number; approved: number };
   undo: { applied: number; undone: number };
@@ -82,10 +86,13 @@ export function rows(m: Measures, now = new Date()): Row[] {
   const used = window.filter((b) => b.opens !== null).length;
   const brief = m.first_brief;
   // The target is met only when each account has a complete check with no difference.
-  const checks = m.mirror.filter((c) => c.checked !== null) as { checked: string; differences: number | null; complete: boolean }[];
+  const checks = m.mirror.filter((c) => c.checked !== null) as (Measures["mirror"][number] & { checked: string })[];
   const unchecked = m.mirror.length - checks.length;
   const differences = checks.reduce((a, c) => a + (c.differences ?? 0), 0);
-  const stopped = checks.some((c) => !c.complete || c.differences === null);
+  const skipped = checks.reduce((a, c) => a + (c.skipped ?? 0), 0);
+  const skippers = checks.filter((c) => c.skipped).length;
+  // A check that is not complete for a cause that the API does not name counts as stopped.
+  const stopped = checks.some((c) => c.stopped || c.differences === null || (!c.complete && !c.skipped));
   const oldest = checks.reduce((a, c) => (c.checked < a ? c.checked : a), checks[0]?.checked ?? "");
   const rss = m.memory.rss_kib;
   const { decided, approved } = m.approvals;
@@ -114,8 +121,8 @@ export function rows(m: Measures, now = new Date()): Row[] {
       : {
           name: "Differences from Gmail",
           value: num(differences),
-          detail: `${unchecked ? `${plural(unchecked, "account has", "accounts have")} no check yet. ` : ""}${stopped ? "A check stopped before its end. " : ""}${checks.length === 1 ? "Last check" : `Last checks of ${checks.length} accounts, the oldest`} on ${shortDay(oldest)}. Target: zero.`,
-          tone: differences > 0 ? "missed" : stopped || unchecked ? "flat" : "met",
+          detail: `${unchecked ? `${plural(unchecked, "account has", "accounts have")} no check yet. ` : ""}${stopped ? "A check stopped before its end. " : ""}${skipped ? `${skippers === 1 ? "A check" : `${skippers} checks`} skipped ${plural(skipped, "message", "messages")} that changed during the check. ` : ""}${checks.length === 1 ? "Last check" : `Last checks of ${checks.length} accounts, the oldest`} on ${shortDay(oldest)}. Target: zero.`,
+          tone: differences > 0 ? "missed" : stopped || skipped || unchecked ? "flat" : "met",
         },
     rss === null
       ? { name: "Memory of the engine", value: "Not known", detail: "The system did not give the memory of the engine. Target: 50 MB or less with 100,000 messages.", tone: "none" }

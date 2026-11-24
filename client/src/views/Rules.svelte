@@ -146,7 +146,7 @@
         </li>
       {/each}
       {#each file.removed as rule (rule.id)}
-        <li><span class="tag del">Removed</span><span>{@render change(rule)}</span></li>
+        <li><span class="tag del">Removed</span><span>{@render change(rule)} {@render sentence(rule)}</span></li>
       {/each}
       {#if empty}<li class="muted">Only comments or spaces changed.</li>{/if}
     </ul>

@@ -516,6 +516,28 @@ pub fn comments(store: &Store, changeset: i64) -> Result<Value> {
     Ok(serde_json::json!({ "comments": all.iter().map(comment_doc).collect::<Vec<_>>() }))
 }
 
+/// The reason of each submitted revision of `changeset`, oldest first
+/// (spec 2 section 5.6, issue 189). An open action of an older revision
+/// shows the reason of its own revision.
+pub fn revisions(store: &Store, changeset: i64) -> Result<Value> {
+    let all: Vec<Value> = store.read(|c| {
+        c.prepare(
+            "SELECT revision, why, submitted_at FROM changeset_revision
+             WHERE changeset_id = ?1 ORDER BY revision",
+        )?
+        .query_map([changeset], |r| {
+            Ok(json!({
+                "revision": r.get::<_, i64>(0)?,
+                "why": r.get::<_, String>(1)?,
+                "submitted": crate::rfc3339(r.get(2)?),
+            }))
+        })?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(Into::into)
+    })?;
+    Ok(json!({ "revisions": all }))
+}
+
 fn comment_doc(c: &iris_changeset::Comment) -> Value {
     serde_json::json!({
         "id": c.id,

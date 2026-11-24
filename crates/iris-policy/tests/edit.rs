@@ -363,3 +363,36 @@ fn a_discard_keeps_a_copy_and_writes_the_active_text() {
     assert_eq!(discard(&s).unwrap(), Discarded::Done { saved: None });
     assert_eq!(file_state(&s).unwrap(), FileState::Same);
 }
+
+/// Issue #141: a policy writer renames the old file aside, then links the
+/// new one in place, with the backup lock. A read in that gap sees no file.
+/// `file_state` must not report `Missing` while a writer holds the lock,
+/// for any length of the gap; with no writer, a missing file is `Missing`
+/// at once.
+#[test]
+fn a_read_during_a_policy_write_does_not_see_a_missing_file() {
+    let (_d, s) = store("gap");
+    let path = s.dir().join(FILE);
+    let text = format!("version = 0\nmode = \"apply\"\n{}", rule(1));
+    std::fs::write(&path, &text).unwrap();
+    assert!(matches!(file_state(&s).unwrap(), FileState::Changed(_)));
+    // The gap of a write: the lock is held and the file is away.
+    let lock = s.backup_lock().unwrap();
+    std::fs::rename(&path, s.dir().join("policy.toml.aside")).unwrap();
+    let writer = {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            // Longer than any short retry: the read must wait for the writer.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            std::fs::write(&path, text).unwrap();
+            drop(lock);
+        })
+    };
+    assert!(matches!(file_state(&s).unwrap(), FileState::Changed(_)));
+    writer.join().unwrap();
+    // No writer: a missing file is missing, with no wait.
+    std::fs::remove_file(&path).unwrap();
+    let start = std::time::Instant::now();
+    assert_eq!(file_state(&s).unwrap(), FileState::Missing);
+    assert!(start.elapsed() < std::time::Duration::from_millis(10));
+}

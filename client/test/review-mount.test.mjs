@@ -411,6 +411,7 @@ test("each flag of a draft shows as a tag on its words, on its own action only",
     const tags = [...send.querySelectorAll(".tag")].map((t) => [t.previousElementSibling.textContent, t.textContent]);
     assert.deepEqual(tags, [
       ["legal@acme-partners.example", "new address"],
+      ["new address", "not in the thread"],
       ["$48,000", "amount"],
       ["Friday, Dec 4", "date"],
       ["attached", "no file attached"],
@@ -437,7 +438,7 @@ test("a send waits for its draft before the decision, and a failed load can try 
     assert.match(alert.textContent, /The store is busy\./);
     assert.equal(view.target.querySelector("button.primary").disabled, true);
     // The flags show in words while the draft is not there.
-    assert.equal(view.target.querySelectorAll(".actions > li")[0].querySelectorAll(".flag").length, 5);
+    assert.equal(view.target.querySelectorAll(".actions > li")[0].querySelectorAll(".flag").length, 6);
     fail = false;
     alert.querySelector("button.more").click();
     await until(() => view.target.querySelector(".mail"));
@@ -454,7 +455,7 @@ test("a draft that Iris cannot read says so, and keeps each flag in words", asyn
   try {
     await until(() => text(view.target).includes("Iris cannot show the text of this draft"));
     const send = view.target.querySelectorAll(".actions > li")[0];
-    assert.equal(send.querySelectorAll(".flag").length, 5);
+    assert.equal(send.querySelectorAll(".flag").length, 6);
     assert.equal(send.querySelector(".mail"), null);
     // Spec 2 section 5.5: no approval without the final text. The person can only deny it.
     const box = send.querySelector("input[type=checkbox]");
@@ -512,6 +513,42 @@ test("a decided send names the mail, not a count of messages", async () => {
   try {
     const row = await until(() => [...view.target.querySelectorAll(".decided li")].find((li) => li.textContent.includes("Send")));
     assert.equal(text(row), "Send a mail You denied it");
+  } finally {
+    view.destroy();
+  }
+});
+
+// Issue 189: an open change of an older revision shows the reason of its own revision.
+test("an open change of an older revision shows the reason of its revision", async () => {
+  const c = { ...changeset([act({ n: 1, revision: 1 }), act({ n: 1, revision: 2, verb: "read", hash: "h2" })]), revision: 2, why: "Also mark the news as read." };
+  const asked = serve({ "changesets/cs-9/revisions": [200, { revisions: [{ revision: 1, why: "Tidy the inbox.", submitted: "2026-11-15T08:00:00Z" }, { revision: 2, why: "Also mark the news as read.", submitted: "2026-11-15T09:00:00Z" }] }] });
+  const view = await mount("/src/views/Request.svelte", { changeset: c });
+  try {
+    const rows = () => [...view.target.querySelectorAll(".actions > li")].map(text);
+    await until(() => /which asked/.test(rows().join()));
+    assert.match(rows()[0], /From revision 1, which asked: “Tidy the inbox\.”/);
+    assert.doesNotMatch(rows()[1], /From revision/, "a change of the newest revision has the quote above");
+    assert.ok(asked.includes("changesets/cs-9/revisions"));
+  } finally {
+    view.destroy();
+  }
+  // With no answer, the older change still names its revision.
+  serve({ "changesets/cs-9/revisions": () => { throw new TypeError("Failed to fetch"); } });
+  const lost = await mount("/src/views/Request.svelte", { changeset: c });
+  try {
+    await until(() => /From revision 1\./.test(text(lost.target)));
+  } finally {
+    lost.destroy();
+  }
+});
+
+test("a request with no older change does not ask for the revisions", async () => {
+  const asked = serve();
+  const view = await mount("/src/views/Request.svelte", { changeset: changeset([act({})]) });
+  try {
+    await until(() => view.target.querySelector(".actions"));
+    assert.ok(!asked.includes("changesets/cs-9/revisions"));
+    assert.doesNotMatch(text(view.target), /From revision/);
   } finally {
     view.destroy();
   }

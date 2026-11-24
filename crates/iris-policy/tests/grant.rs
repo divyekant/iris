@@ -134,3 +134,66 @@ fn a_grant_needs_the_version_that_the_person_saw() {
     );
     assert_eq!(std::fs::read_to_string(dir.0.join(FILE)).unwrap(), text);
 }
+
+/// Issue #385: the grant rules of a job go when the job ends. The rules of
+/// a job that still works, and the other rules, stay. A file with a change
+/// to confirm stops the removal, and a held backup lock waits.
+#[test]
+fn the_grants_of_an_ended_job_go() {
+    let (dir, store) = store("ended");
+    let ended = iris_job::create(&store, "Book the trip", None, NOW).unwrap();
+    let working = iris_job::create(&store, "Answer Dana", None, NOW).unwrap();
+    let id = |j: i64| format!("j-{j}");
+    change(&store, None, Change::Mode(Mode::Apply), NOW).unwrap();
+    for (job, verbs) in [
+        (id(ended), &[Verb::Archive][..]),
+        (id(working), &[Verb::Read][..]),
+        (id(ended), &[Verb::Label][..]),
+        // Not the form of a job ID: it names no job, so it stays.
+        (format!("j-0{ended}"), &[Verb::Unread][..]),
+        (format!("j-+{ended}"), &[Verb::Unread][..]),
+    ] {
+        let e = change(&store, version(&store), grant(&job, verbs), NOW).unwrap();
+        assert!(matches!(e, Edited::Done { .. }), "{e:?}");
+    }
+    // No job ended yet: nothing goes.
+    assert_eq!(end_grants(&store, NOW).unwrap(), 0);
+    iris_job::finish(
+        &store,
+        ended,
+        iris_job::By::Person,
+        iris_job::End::Complete,
+        None,
+        NOW,
+    )
+    .unwrap();
+    // A backup holds the lock: nothing goes now, no wait.
+    let lock = store.backup_lock().unwrap();
+    assert_eq!(end_grants(&store, NOW).unwrap(), 0);
+    drop(lock);
+    // The file has a change to confirm: nothing goes.
+    let path = dir.0.join(FILE);
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, format!("{text}\n# an edit\n")).unwrap();
+    assert_eq!(end_grants(&store, NOW).unwrap(), 0);
+    std::fs::write(&path, &text).unwrap();
+    // Both rules of the ended job go; the rule of the working job stays.
+    assert_eq!(end_grants(&store, NOW).unwrap(), 2);
+    let rules = store.read(active).unwrap().policy.rules;
+    let jobs: Vec<_> = rules.iter().map(|r| r.job.clone()).collect();
+    assert_eq!(
+        jobs,
+        [
+            Some(id(working)),
+            Some(format!("j-0{ended}")),
+            Some(format!("j-+{ended}"))
+        ]
+    );
+    assert_eq!(
+        parse(&std::fs::read_to_string(&path).unwrap())
+            .unwrap()
+            .rules,
+        rules
+    );
+    assert_eq!(end_grants(&store, NOW).unwrap(), 0);
+}

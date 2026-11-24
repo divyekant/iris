@@ -88,7 +88,7 @@ test("the routes of the write view", () => {
   assert.ok(route.NAV.some(([link]) => link === "#/write"));
 });
 
-test("a typed address becomes a chip, and Send waits for a valid one", async () => {
+test("a typed address becomes a chip, and Send waits for a valid one and for text", async () => {
   const net = serve(() => [500, {}]);
   const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS } });
   try {
@@ -100,6 +100,12 @@ test("a typed address becomes a chip, and Send waits for a valid one", async () 
     assert.deepEqual(chips.map((c) => c.firstChild.textContent.trim()), ["not-an-address", "sam@okafor.example"]);
     assert.ok(chips[0].classList.contains("bad"));
     type(app.target.querySelector("input.subject"), "Hi");
+    app.flushSync();
+    assert.equal(send().disabled, true, "no text: Send waits (issue 741)");
+    type(app.target.querySelector("textarea"), " \n\t");
+    app.flushSync();
+    assert.equal(send().disabled, true, "only white space: Send waits");
+    type(app.target.querySelector("textarea"), "Hello");
     app.flushSync();
     assert.equal(send().disabled, false);
     chips[1].querySelector("button").click();

@@ -403,6 +403,16 @@ export function own(error: unknown): string {
   return text === access.problem ? "" : text;
 }
 
+/**
+ * The text that a view shows for a failed write. When the engine gave no answer,
+ * the engine can have stored the write, so the text says that Iris does not know (issue 706).
+ * `what` completes "Iris does not know if it ...". `otherwise` is for an error with no words.
+ */
+export function wrote(error: unknown, what: string, otherwise: string): string {
+  if (error instanceof Error && error.message === UNREACHABLE) return `Iris does not know if it ${what}. Reload the page to see.`;
+  return own(error) || otherwise;
+}
+
 /** Set the access state that App.svelte shows above each view, and throw it. */
 // `status`: the HTTP status when the engine answered, so that a caller can tell a refusal from no answer.
 function fail(problem: string, status?: number): never {

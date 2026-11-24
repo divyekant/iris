@@ -403,7 +403,7 @@ export const changesets: Changeset[] = [
     submitted: "2026-11-17T08:02:31Z",
     state: "open",
     actions: [
-      action({ n: 1, verb: "send", targets: { drafts: ["d-21"] }, resolved: { messages: ["m-9002"] }, why: "Dana waits for the terms since Monday.", flags: ["new_recipient", "money", "date", "attachment", "untrusted_content"] }),
+      action({ n: 1, verb: "send", targets: { drafts: ["d-21"] }, resolved: { messages: ["m-9002"] }, why: "Dana waits for the terms since Monday.", flags: ["new_recipient", "outside_thread", "money", "date", "attachment", "untrusted_content"] }),
       action({ n: 2, verb: "label", targets: { threads: ["t-9001"] }, resolved: { messages: ["m-9001", "m-9002"] }, args: { label: "Renewals" }, why: "So you find the thread with the other renewals." }),
     ],
   },
@@ -424,7 +424,7 @@ export const drafts: Record<string, DraftView[]> = {
       thread: "t-9001",
       readable: true,
       to: [{ address: "dana@acme.example" }],
-      cc: [{ address: "legal@acme-partners.example", flags: ["new_recipient"] }],
+      cc: [{ address: "legal@acme-partners.example", flags: ["new_recipient", "outside_thread"] }],
       subject: [{ text: "Re: Renewal for 2027" }],
       body: [
         { text: "Hi Dana,\n\nThanks for the call. As we agreed, the renewal is " },
@@ -769,7 +769,7 @@ export const measures: Measures = {
     ["2026-11-09", 0], ["2026-11-08", 2], ["2026-11-07", 1], ["2026-11-05", 3], ["2026-11-04", 2], ["2026-11-03", 4],
   ].map(([day, opens]) => ({ day: day as string, opens: opens as number })),
   first_brief: { connect: "2026-11-03T08:00:00Z", brief: "2026-11-03T08:05:40Z", seconds: 340 },
-  mirror: [{ account: "owner@example.com", checked: "2026-11-16T07:12:00Z", differences: 0, complete: true }],
+  mirror: [{ account: "owner@example.com", checked: "2026-11-16T07:12:00Z", differences: 0, complete: true, skipped: 0, stopped: false }],
   memory: { rss_kib: 31_744, messages: 18_402 },
   approvals: { decided: 50, approved: 47 },
   undo: { applied: 48, undone: 1 },

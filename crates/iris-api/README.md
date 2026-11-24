@@ -155,6 +155,7 @@ The person decides the actions of one changeset in one request
 | `POST /api/changesets/{id}/decide` | Body `{"actions": [{"revision", "n", "approve", "hash"}]}`: 1 to 500 decisions, each action once. `approve` `true` approves the action and needs the `hash` that the review showed. `false` denies it, with the reason "The person denied it in the review.". The answer is the changeset document after the decision. |
 | `POST /api/changesets/{id}/withdraw` | No body. The person withdraws the changeset, in any state but `withdrawn` (section 5.5: "each changeset"): each open action and each draft action becomes `cancelled`, and applied and decided actions stay. A second withdraw is a 409. The withdraw of a write also withdraws the changeset of its send, so the mail does not leave; if the send left or is leaving now, the withdraw is a 409 and changes nothing. The answer is the changeset document after the withdraw. |
 | `POST /api/changesets/{id}/comments` | Body `{"revision", "text", "key"}`. The person comments on the newest revision of an open changeset of a job (`docs/specs/2026-11-17-review-comments.md`). `text` has 1 to 4,000 characters, not only white space, and no NUL. `key` has 16 to 64 characters of `A-Z`, `a-z`, `0-9`, `_` and `-`; the client makes a new key for each new comment. A retry with the same key and the same body gives the first comment and writes nothing. A comment on a `waiting` job wakes the job. The next session of the job reads the comment in `comments/cs-<id>.md`. The answer is the comment: `{"id", "changeset", "revision", "text", "at"}`. A bad body is a 400. A changeset with no job, not open, of a done job, or with a newer revision is a 409, and nothing is written. |
+| `GET /api/changesets/{id}/revisions` | `{"revisions": [{"revision", "why", "submitted"}]}`: the reason of each submitted revision of the changeset, oldest first (spec 2 section 5.6). A draft revision is not in the list. An unknown changeset is a 404. |
 | `GET /api/changesets/{id}/comments` | `{"comments": [...]}`: each comment of the changeset, oldest first, in the form of the `POST` answer. |
 
 The changeset must be open for each decision. Each action of a decision must wait for a person (`proposed` or `in_review`). The
@@ -208,11 +209,14 @@ engine computes them from the store. Nothing leaves the machine.
   27 that has an account has no record of the two times: each field is
   `null`, and the measure stays not known.
 - `mirror`: the newest mirror check (`iris mirror verify`) of each account,
-  each `{"account", "checked", "differences", "complete"}`. An account with
-  no check has `checked` and `differences` `null`, and `complete` `false`.
-  `differences` is `null` if the log has no count. `complete` is `false`
-  when an error stopped the check, or when the check skipped a message (a
-  message that changed during the check is not compared).
+  each `{"account", "checked", "differences", "complete", "skipped",
+  "stopped"}`. An account with no check has `checked`, `differences` and
+  `skipped` `null`, and `complete` and `stopped` `false`.
+  `differences` and `skipped` are `null` if the log has no count. `skipped`
+  counts the messages that changed during the check: the check does not
+  compare them. `stopped` is `true` when an error stopped the check.
+  `complete` is `false` when an error stopped the check, or when the check
+  skipped a message.
 - `memory`: `{"rss_kib", "messages"}`. `rss_kib` is the resident memory of
   the engine from `ps`, or `null`.
 - `approvals`: `{"decided", "approved"}`, the decisions of the person on the

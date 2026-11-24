@@ -1373,3 +1373,37 @@ fn two_accounts_sync_with_zero_differences() {
     assert_eq!((per_account(s.account), per_account(second)), (30, 29));
     verify_both();
 }
+
+/// Issue #385: the hourly pass of the tick removes the grant rules of a
+/// job that is done, and keeps the rules of a job that still works.
+#[test]
+fn a_tick_removes_the_grants_of_a_done_job() {
+    use iris_policy::{active, change, Change, Edited, Mode, Verb};
+    let store = Arc::new(Store::open(&data_dir("end-grants")).unwrap());
+    let done = iris_job::create(&store, "Book the trip", None, 0).unwrap();
+    let working = iris_job::create(&store, "Answer Dana", None, 0).unwrap();
+    change(&store, None, Change::Mode(Mode::Apply), 0).unwrap();
+    for job in [done, working] {
+        let seen = store.read(active).unwrap().version;
+        let grant = Change::Grant {
+            job: format!("j-{job}"),
+            verbs: vec![Verb::Archive],
+        };
+        let e = change(&store, seen, grant, 0).unwrap();
+        assert!(matches!(e, Edited::Done { .. }), "{e:?}");
+    }
+    let (by, end) = (iris_job::By::Person, iris_job::End::Complete);
+    iris_job::finish(&store, done, by, end, None, 0).unwrap();
+    // No token: the tick starts no sync worker.
+    let mut e = Engine::new(store.clone(), config("http://127.0.0.1:9".into()), None);
+    assert!(e.tick().unwrap().is_empty());
+    let jobs: Vec<_> = store
+        .read(active)
+        .unwrap()
+        .policy
+        .rules
+        .into_iter()
+        .map(|r| r.job)
+        .collect();
+    assert_eq!(jobs, [Some(format!("j-{working}"))]);
+}
