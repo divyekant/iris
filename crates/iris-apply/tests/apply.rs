@@ -1010,8 +1010,8 @@ fn a_changed_policy_stops_a_rule_approval() {
 
 /// A rule approval of `label` with a name that Gmail does not have makes no
 /// label: the create is a write call before the claim, and a policy change
-/// during it cannot stop it. The action goes to review, and a label that
-/// exists applies by the rule.
+/// during it cannot stop it. The action goes to review. The author is an
+/// agent with no job, so a label that exists also goes to review (D14).
 #[test]
 fn a_rule_approval_makes_no_new_label() {
     let text = ALLOW_ARCHIVE.replace("verbs = [\"archive\"]", "verbs = [\"label\"]");
@@ -1022,10 +1022,17 @@ fn a_rule_approval_makes_no_new_label() {
     assert!(matches!(b.apply(a), Ok(Outcome::Review(_))));
     assert_eq!(b.state(a), ("in_review".into(), "engine".into()));
     assert_eq!(b.calls("labels"), 0);
-    // The person makes the label; a later rule approval applies.
+    // The person makes the label. A later rule approval still goes to
+    // review: an agent with no job is marked, and a label of a marked author
+    // always needs a person (decision D14).
     applied(b.apply(b.labelled("label", "Rule new", &ms[..1])));
     let again = b.approved_args("label", &args, &ms, RULE, now());
-    applied(b.apply(again));
+    let r = b.apply(again);
+    assert!(
+        matches!(&r, Ok(Outcome::Review(why)) if why.contains(iris_policy::MARKED_REASON)),
+        "{r:?}"
+    );
+    assert_eq!(b.state(again), ("in_review".into(), "engine".into()));
 }
 
 /// Two changesets of one author, 300 messages each, that a rule approved

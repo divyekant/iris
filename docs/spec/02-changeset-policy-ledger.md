@@ -624,8 +624,9 @@ A `notify` rule does not change the attention of an item. It gives one
 notice for each new mail that it matches, in the web client and in the
 system (`docs/specs/2026-11-16-notices.md`). It matches with the reading of
 a `review` rule: an item condition matches when one or more items of the
-message have the value. With no `notify` rule that matches, no notice
-appears.
+message have the value. With no `notify` rule that matches, no mail notice
+appears. One system notice comes from no rule: the due date that the person
+gave to a job (decision D24, `docs/specs/2026-11-24-job-due-date.md`).
 
 The engine evaluates the attention of an item again at these times:
 
@@ -652,6 +653,7 @@ in the file.
 |---|---|
 | A `send` never goes at once. | It waits in the held outbox for the hold delay, after the approval (release 3). |
 | A `draft` or a `send` with the flag `new_recipient`, `outside_thread`, `money` or `date`. | Review, even if a rule allows it. Only a person approves it (store migration 25). The decision is by `limit`. |
+| A `trash` or a `label` of a marked author: an author that read mail that you did not send (`iris_changeset::marked_in`, decision D14, issue #437). | Review, even if a rule allows it. A deny rule still denies it. The decision is by `limit`. |
 | A `send`. | Review. No rule can allow a send (section 6.2). |
 | An action with the flag `bulk`. | Review, even if a rule allows it. |
 | An action by an author other than `person`, whose target has hostile mail: a message with a hostile mark, a message that waits for its link check (a `link_check` row), or a message from a `hostile` sender (specification 1, section 6.7). For a thread or a draft target, each message of the thread counts. | Only `archive`, `trash` and `label`. Other verbs are denied. |
