@@ -545,3 +545,36 @@ fn a_write_after_a_crash_never_truncates_the_policy_file() {
         assert!(files.iter().any(|(_, t)| t == b"edit"), "{files:?}");
     }
 }
+
+/// Send content spec, section 2: the backup copies each attachment file,
+/// also a file that no message names, and the cleanup never deletes one.
+#[test]
+fn the_backup_copies_each_attachment_file() {
+    let tmp = TempDir::new("attachments");
+    let store = Store::open(&tmp.0.join("data")).unwrap();
+    let sha = store.put_attachment(b"%PDF-1 the numbers").unwrap();
+    let path = store.attachment_path(&sha).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"%PDF-1 the numbers");
+    assert_eq!(store.put_attachment(b"%PDF-1 the numbers").unwrap(), sha);
+    // A temporary file of a writer is not a file of the folder.
+    fs::write(path.parent().unwrap().join(".tmp-x"), b"part").unwrap();
+    store.clean_gone(NOW).unwrap();
+    assert!(path.exists());
+    let dest = tmp.0.join("copy");
+    store.backup(&dest).unwrap();
+    let copy = Store::open(&dest).unwrap();
+    assert_eq!(
+        fs::read(copy.attachment_path(&sha).unwrap()).unwrap(),
+        b"%PDF-1 the numbers"
+    );
+    assert!(!copy
+        .attachment_path(&sha)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(".tmp-x")
+        .exists());
+    // A damaged file stops the backup: the copy would not be complete.
+    fs::write(&path, b"other").unwrap();
+    assert!(store.backup(&tmp.0.join("copy2")).is_err());
+}

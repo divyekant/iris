@@ -127,6 +127,14 @@ impl Store {
         drop(copy);
         sync_dir(&dest_content)?;
 
+        // Each attachment file (send content spec, section 2): a draft
+        // action can name a file that no message names. Nothing deletes
+        // one, so the copy takes each file whose name is its SHA-256.
+        copy_attachments(
+            &self.dir.join(crate::ATTACHMENTS),
+            &dest.join(crate::ATTACHMENTS),
+        )?;
+
         // Without the key, the copy cannot decrypt the secrets.
         copy_private(&self.dir.join("key"), &dest.join("key"))?;
         let policy = self.dir.join("policy.toml");
@@ -324,6 +332,47 @@ fn private_file(path: &Path, new: bool) -> io::Result<File> {
 }
 
 /// Copy `from` to a new file `to` with mode 0600, and write it to disk.
+/// Copy each file `<aa>/<sha256>` of the attachment folder `src` whose
+/// bytes have that SHA-256. A file with another name (a temporary file of
+/// a writer) is not copied. A file whose bytes do not agree with its name
+/// is an error: the copy would hold a damaged file.
+fn copy_attachments(src: &Path, dest: &Path) -> Result<()> {
+    use sha2::Digest as _;
+    let dirs = match fs::read_dir(src) {
+        Ok(d) => d,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    make_private_dir(dest)?;
+    for d in dirs {
+        let d = d?;
+        if !d.file_type()?.is_dir() {
+            continue;
+        }
+        for f in fs::read_dir(d.path())? {
+            let f = f?;
+            let name = f.file_name();
+            let Some(sha) = name.to_str() else { continue };
+            let Some(to) = content::file_path(dest, sha, "") else {
+                continue;
+            };
+            let bytes = fs::read(f.path())?;
+            if content::hex(&sha2::Sha256::digest(&bytes)) != sha {
+                return Err(Error::Io(io::Error::other(format!(
+                    "the attachment file {sha} does not have its SHA-256"
+                ))));
+            }
+            let dir = to.parent().expect("the path has a folder");
+            make_private_dir(dir)?;
+            fs::write(&to, &bytes)?;
+            sync_file(&to)?;
+            sync_dir(dir)?;
+        }
+    }
+    sync_dir(dest)?;
+    Ok(())
+}
+
 fn copy_private(from: &Path, to: &Path) -> io::Result<()> {
     let mut src = File::open(from)?;
     let mut dst = private_file(to, false)?;
