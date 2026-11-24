@@ -1277,6 +1277,7 @@ name = "iris-triage"
 version = "0.0.0"
 dependencies = [
  "iris-changeset",
+ "iris-compose",
  "iris-observe",
  "iris-policy",
  "iris-store",

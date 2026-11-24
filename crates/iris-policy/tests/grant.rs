@@ -95,6 +95,8 @@ fn a_grant_allows_only_the_agent_of_its_job() {
             author,
             job,
             bulk: false,
+            warning: false,
+            in_thread: false,
             now: NOW,
         };
         policy.decide(&a, [msg]).outcome
@@ -196,4 +198,46 @@ fn the_grants_of_an_ended_job_go() {
         rules
     );
     assert_eq!(end_grants(&store, NOW).unwrap(), 0);
+}
+
+/// Decision D3: a grant of `draft` allows only drafts of the agent of the job
+/// to the people in the thread, and the file reads back the same rule.
+#[test]
+fn a_draft_grant_allows_only_drafts_to_the_thread() {
+    let (dir, store) = store("draft");
+    let edited = change(&store, None, grant("j-4", &[Verb::Draft]), NOW).unwrap();
+    let Edited::Done { policy, .. } = edited else {
+        panic!("grant: {edited:?}")
+    };
+    let r = &policy.rules[0];
+    assert_eq!(r.when.recipients, Some(Recipients::Thread));
+    assert_eq!(r.when.author, Some(Author::Agent));
+    assert_eq!(
+        r.name,
+        "In job j-4, allow drafts to the people in the thread without review"
+    );
+    let text = std::fs::read_to_string(dir.0.join(FILE)).unwrap();
+    assert_eq!(parse(&text).unwrap(), policy);
+    let msg = Message {
+        sender: "dana@example.com",
+        sender_kind: SenderKind::Person,
+        hostile: false,
+        labels: &[],
+        date: NOW - 86_400,
+        items: &[],
+    };
+    let decide = |in_thread| {
+        let a = Action {
+            verb: Verb::Draft,
+            author: Author::Agent,
+            job: Some("j-4"),
+            bulk: false,
+            warning: false,
+            in_thread,
+            now: NOW,
+        };
+        policy.decide(&a, [msg]).outcome
+    };
+    assert_eq!(decide(true), Outcome::Allow);
+    assert_eq!(decide(false), Outcome::Review);
 }

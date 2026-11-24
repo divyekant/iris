@@ -394,6 +394,55 @@ async fn decline_takes_the_items_out_of_the_brief() {
     assert_eq!(b["gate"]["count"], 1);
 }
 
+/// Decision D30 (issue 264): a decline of one sender does not hide the
+/// thread of a known person.
+#[tokio::test]
+async fn a_group_talk_with_a_known_person_and_a_declined_sender_stays_in_conversations() {
+    let g = Gate::new("d30");
+    let s = sample(&g);
+    let with_dee = g.item(
+        "conversation",
+        "active",
+        5,
+        talk(&[&s.ana, &s.dee], "1970-01-01T00:00:40Z"),
+    );
+    // Ana waits at the gate: the talk is under Strangers only.
+    let b = g.get("/api/brief").await;
+    assert!(ids(&b["strangers"]["items"]).contains(&with_dee));
+    assert!(!ids(&b["conversations"]["items"]).contains(&with_dee));
+
+    g.answer(&s.ana, "decline").await;
+    let b = g.get("/api/brief").await;
+    assert_eq!(ids(&b["conversations"]["items"]), vec![with_dee.clone()]);
+    // The talk with Bo, a stranger with no known person, still waits.
+    assert!(ids(&b["strangers"]["items"]).contains(&s.group));
+
+    // A declined sender whose only item is such a talk stays on the list of
+    // declined senders, so "Accept" and "Ask again" still work.
+    let eve = g.sender("eve@far.example", Some("stranger"));
+    let only = g.item(
+        "conversation",
+        "active",
+        6,
+        talk(&[&eve, &s.dee], "1970-01-01T00:00:50Z"),
+    );
+    assert_eq!(g.answer(&eve, "decline").await.0, StatusCode::OK);
+    let b = g.get("/api/brief").await;
+    assert!(ids(&b["conversations"]["items"]).contains(&only));
+    let declined = g.get("/api/gate/declined").await;
+    let eve_row = senders(&declined)
+        .into_iter()
+        .find(|(id, _, _)| *id == eve)
+        .expect("eve is on the list of declined senders");
+    assert_eq!(eve_row.2, vec![only.clone()]);
+    let (code, v) = g.answer(&eve, "accept").await;
+    assert_eq!(
+        (code, v["kind"].as_str()),
+        (StatusCode::OK, Some("person")),
+        "{v}"
+    );
+}
+
 #[tokio::test]
 async fn the_gate_refuses_what_is_not_a_stranger() {
     let g = Gate::new("refuse");
@@ -593,6 +642,8 @@ async fn each_gate_item_is_in_one_place_after_any_answers() {
                 match state[i] {
                     State::Waiting if n > 0 => want_gate.push((id.clone(), n)),
                     State::Declined => {
+                        // A conversation with a known person is in
+                        // Conversations and on this list too (decision D30).
                         let n = items
                             .iter()
                             .filter(|(_, _, p)| p.contains(&i) && !waits(p))
@@ -626,7 +677,9 @@ async fn each_gate_item_is_in_one_place_after_any_answers() {
                 let has = |s: State| people.iter().any(|p| state[*p] == s);
                 let place = if has(State::Waiting) {
                     Some("strangers")
-                } else if has(State::Declined) {
+                } else if has(State::Declined)
+                    && !(*section == "conversations" && has(State::Known))
+                {
                     None
                 } else if *section == "conversations"
                     || people.iter().all(|p| state[*p] == State::Known)

@@ -128,8 +128,21 @@ const ADDED: Field = (
 const JOB: Field = ("job", &["", "\"j-1\""], &["\" \"", "1"]);
 const ACTION: Field = (
     "verbs",
-    &["[\"archive\"]", "[\"archive\", \"read\", \"close\"]"],
-    &["[]", "[\"untrash\"]", "[\"send\"]", "\"archive\"", ""],
+    &[
+        "[\"archive\"]",
+        "[\"archive\", \"read\", \"close\"]",
+        "[\"draft\"]",
+        "[\"draft\"]",
+        "[\"draft\", \"archive\"]",
+    ],
+    &[
+        "[]",
+        "[\"untrash\"]",
+        "[\"send\"]",
+        "[\"draft\", \"send\"]",
+        "\"archive\"",
+        "",
+    ],
 );
 /// Conditions of `when`. The bad values hold the cases of the parser.
 const WHEN: [Field; 8] = [
@@ -207,6 +220,7 @@ fn policy(r: &mut Rng) -> String {
             "unknown-when",
             "item-verbs",
             "item-author",
+            "recipients",
         ]);
         let field = |r: &mut Rng, f: Field| {
             let v = r.pick(if bad == f.0 { f.2 } else { f.1 });
@@ -229,8 +243,11 @@ fn policy(r: &mut Rng) -> String {
         } else {
             format!("effect = {}\n", s(effect))
         };
+        let mut draft_only = false;
         if action {
-            t += &field(r, ACTION);
+            let verbs = field(r, ACTION);
+            draft_only = verbs == "verbs = [\"draft\"]\n";
+            t += &verbs;
         } else if bad == "item-verbs" {
             t += "verbs = [\"archive\"]\n";
         }
@@ -250,6 +267,18 @@ fn policy(r: &mut Rng) -> String {
                 f.1
             });
             when.push(format!("{} = {v}", f.0));
+        }
+        // `recipients` is valid only with the verbs ["draft"]: the defect
+        // puts it on any rule, or gives a value that is not known.
+        let recipients = if bad == "recipients" {
+            r.pick(&["\"thread\"", "\"all\""])
+        } else if draft_only {
+            r.pick(&["", "\"thread\""])
+        } else {
+            ""
+        };
+        if !recipients.is_empty() {
+            when.push(format!("recipients = {recipients}"));
         }
         if bad == "unknown-when" {
             when.push("subject = \"x\"".into());
