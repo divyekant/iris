@@ -245,28 +245,41 @@ address got the mail, or if the copy of a `To` address shows the `Bcc`
 header. So each provider gets a `Bcc` gate of its own, apart from the
 send switch:
 
-- A new table holds the providers whose owner check of `Bcc` passed
-  (migration: the next free number on `develop` at the build):
+- A new table holds the `Bcc` gate of each provider (migration: the
+  next free number on `develop` at the build):
 
   ```sql
   CREATE TABLE bcc_check (
     provider TEXT PRIMARY KEY,   -- 'gmail' or 'outlook'
-    checked_at INTEGER NOT NULL  -- milliseconds since the Unix epoch
+    test_to TEXT NOT NULL,       -- the To address of the test send
+    test_bcc TEXT NOT NULL,      -- the Bcc address of the test send
+    checked_at INTEGER           -- NULL until the owner opens the gate
   );
   ```
 
   The migration adds no row. So a store whose send switch is already on
   still has no `Bcc` gate open.
-- The owner check (issue #302 for Gmail, issue #649 for Outlook): send
-  one mail from the provider with a `To` test address and a `Bcc` test
-  address, from Gmail or Outlook itself. Confirm that the `Bcc` address
-  got the mail and that the copy of the `To` address has no `Bcc`
-  header. Then run `iris sending bcc <gmail|outlook>`. As
-  `iris sending on`, it needs a terminal and a typed `yes`, and it opens
-  the store directly. It inserts the row of the provider.
+- The owner check (issue #302 for Gmail, issue #649 for Outlook) sends
+  mail made by Iris through the API path of the provider, because a
+  test from the Gmail or Outlook app does not test that path:
+  1. Run `iris sending bcc-test <gmail|outlook> <to> <bcc>`, with two
+     addresses that the owner reads, at other mailboxes than the
+     account (so that the provider does not merge the copies). The
+     command writes the row with `checked_at` NULL. A new test replaces
+     the addresses of a row that is not open.
+  2. Write and approve a send in Iris with exactly `To` = `<to>`, no
+     `Cc`, and `Bcc` = `<bcc>`, from an account of the provider. While
+     the gate is closed, only a send with exactly these recipients
+     passes it.
+  3. Confirm that the `<bcc>` mailbox got the mail, and that the copy in
+     the `<to>` mailbox has no `Bcc` header and does not name `<bcc>`.
+  4. Run `iris sending bcc <gmail|outlook>`. It sets `checked_at`.
+  Both commands need a terminal and a typed `yes`, as `iris sending on`,
+  and open the store directly.
 - The release of a send whose draft content has `bcc` reads the row of
-  the provider of the account, in the transaction of the claim. With no
-  row, the claim does not happen: the send stays `held`, the release
+  the provider of the account, in the transaction of the claim. If the
+  row has no `checked_at`, and the send is not the test send of step 2,
+  the claim does not happen: the send stays `held`, the release
   gives the outcome "waits for the Bcc check", and the outbox card says
   "Waits for the Bcc check of Gmail." (or Outlook). A held send expires
   14 days after its submit, as each held send does. A send with no `bcc`
@@ -325,7 +338,8 @@ the drafts that the person changes at Gmail.
 | A crash after the claim of a draft with attachments | Recovery makes the same bytes from the post and the files | crash test |
 | A backup, then a restore, with a draft action that names a file | The restore has the file; the apply sends | backup test |
 | Two presses with the same key, the second with another `bcc` or file | 409 "This key belongs to another mail." | API test |
-| A send with `bcc` while the provider has no `bcc_check` row, also with the send switch on | The send stays `held`; the outbox says it waits for the Bcc check | release test |
+| A send with `bcc` while the provider has no open `bcc_check` row, also with the send switch on | The send stays `held`; the outbox says it waits for the Bcc check | release test |
+| The test send of step 2, and a send with one more or one other recipient | The test send leaves; the other stays `held` | release test |
 | A draft whose size bound is over the limit of the provider | Submit denies it ("the mail is too large ...") | unit test; property test that compose never passes the bound |
 | The sent copy has no `Bcc` header | The ledger note "The sent copy shows no Bcc. Iris cannot confirm the blind copies." | unit test |
 | A request body over 4 MiB to `POST /api/attachments` | HTTP 413, and no file | API test |
