@@ -703,6 +703,21 @@ fn status(store: &Store, me: &Author) -> Result<Value, Failure> {
     }))
 }
 
+/// The end of a wait in milliseconds: a day `YYYY-MM-DD` (its start, UTC),
+/// or an RFC 3339 time with its offset, for example
+/// `2026-11-18T09:30:00-08:00` (issue #556). The parser of the time is
+/// `chrono`.
+pub fn until_ms(text: &str) -> Result<i64, String> {
+    if text.len() == 10 {
+        return iris_store::day_ms(text).map_err(|e| e.to_string());
+    }
+    chrono::DateTime::parse_from_rfc3339(text)
+        .map(|t| t.timestamp_millis())
+        .map_err(|_| {
+            format!("{text} is not a day YYYY-MM-DD or an RFC 3339 time (2026-11-18T09:30:00Z)")
+        })
+}
+
 /// `wait` of a session (docs/specs/2026-11-17-wait.md): the job moves to
 /// `waiting`, and the same transaction ends the session with `job_state`.
 /// The reap thread sends this answer before the agent gets a signal.
@@ -717,12 +732,12 @@ fn wait(
         .and_then(iris_job::parse_job_id)
         .ok_or_else(|| Failure::new(code::ERROR, "the session has no job"))?;
     let until = text(args, "until")?
-        .ok_or_else(|| usage("give the end of the wait: --until YYYY-MM-DD"))?;
-    let until_ms = iris_store::day_ms(until).map_err(|e| usage(e.to_string()))?;
+        .ok_or_else(|| usage("give the end of the wait: --until YYYY-MM-DD or an RFC 3339 time"))?;
+    let until_ms = until_ms(until).map_err(usage)?;
     let now = crate::engine::now_ms();
     if until_ms <= now {
         return Err(usage(format!(
-            "{until} is not in the future (the day starts at 00:00 UTC)"
+            "{until} is not in the future (a day starts at 00:00 UTC)"
         )));
     }
     let thread = match text(args, "reply")? {

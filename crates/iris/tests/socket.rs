@@ -1370,3 +1370,57 @@ fn skip_mute_and_dismiss_add_the_state_verb() {
     let request = iris::add_request(&cli.command).unwrap().unwrap();
     assert_eq!(request["changeset"], json!("cs-4"));
 }
+
+/// `--until` of `iris wait`: a day gives its start in UTC, and an RFC 3339
+/// time with any offset gives its instant (issue #556). Property: each
+/// instant, written with any offset of -14:00 to +14:00, reads back to the
+/// same millisecond. Other text is an error, never a panic.
+#[test]
+fn the_end_of_a_wait_is_a_day_or_an_rfc3339_time() {
+    use chrono::{FixedOffset, TimeZone};
+    assert_eq!(socket::until_ms("2026-11-18"), Ok(1_794_960_000_000));
+    assert_eq!(
+        socket::until_ms("2026-11-18T00:00:00Z"),
+        Ok(1_794_960_000_000)
+    );
+    assert_eq!(
+        socket::until_ms("2026-11-18T09:30:00-08:00"),
+        Ok(1_794_960_000_000 + (17 * 60 + 30) * 60_000)
+    );
+    let mut x = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    for _ in 0..2_000 {
+        // 1970 to about 2100, in milliseconds.
+        let ms = (next() % 4_102_444_800_000) as i64;
+        let offset = (next() % (28 * 60 + 1)) as i32 - 14 * 60;
+        let zone = FixedOffset::east_opt(offset * 60).unwrap();
+        let t = zone.timestamp_millis_opt(ms).unwrap();
+        let text = t.to_rfc3339_opts(chrono::SecondsFormat::Millis, offset == 0);
+        assert_eq!(socket::until_ms(&text), Ok(ms), "{text}");
+    }
+    for bad in [
+        "",
+        "2026-11",
+        "2026-13-01",
+        "2026-11-18 09:30",
+        "2026-11-18T09:30",
+        "2026-11-18T25:00:00Z",
+        "tomorrow",
+        "2026-11-18T09:30:00+15:00x",
+        "\u{0662}026-11-18",
+        "2026-11-18T09:30:00",
+    ] {
+        assert!(socket::until_ms(bad).is_err(), "{bad:?}");
+    }
+    for _ in 0..2_000 {
+        let s: String = (0..(next() % 30))
+            .map(|_| b"0123456789-:TZ+. x"[(next() % 18) as usize] as char)
+            .collect();
+        let _ = socket::until_ms(&s);
+    }
+}
