@@ -606,18 +606,17 @@ pub fn release(
     let _lock = lock(store)?;
     let _sync = sync_lock(store, account)?;
     #[allow(clippy::type_complexity)]
-    let head: Option<(String, Option<String>, String, i64, Option<i64>)> = store.read(|c| {
+    let head: Option<(String, Option<String>, i64, Option<i64>)> = store.read(|c| {
         Ok(c.query_row(
-            "SELECT a.verb, a.hash, a.decided_by, a.decided_at,
+            "SELECT a.verb, a.hash, a.decided_at,
                     (SELECT id FROM ledger WHERE action_id = a.id AND state = 'writing')
              FROM changeset_action a WHERE a.id = ?1 AND a.state = 'held'",
             [action],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?)
     })?;
-    let (verb, approved_hash, decided_by, decided_at, writing) =
-        head.ok_or(Error::NotApproved(action))?;
+    let (verb, approved_hash, decided_at, writing) = head.ok_or(Error::NotApproved(action))?;
     if verb != "send" {
         return Err(Error::Verb(verb));
     }
@@ -675,7 +674,7 @@ pub fn release(
     if now() < until {
         return Ok(Outcome::Hold(until));
     }
-    if let Some(o) = check(store, account, action, &decided_by, approved_hash)? {
+    if let Some(o) = check(store, account, action, approved_hash)? {
         return Ok(o);
     }
     if d.sent || d.foreign {
