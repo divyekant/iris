@@ -26,15 +26,53 @@
   let empty = $derived(GROUPS.every(([state]) => pages[state].jobs.length === 0));
 
   // One request ID for each open form: a retry of the same start gives the same job (decision D25).
-  let request = $state<string | null>(null);
+  // The ID and the draft stay in the storage of this tab until the start ends, so a retry after a
+  // lost answer and a reload sends the same ID.
+  const DRAFT = "iris.newJob";
+  type Draft = { request: string; goal: string; day: string };
+  function storage(): Storage | undefined {
+    try {
+      return globalThis.sessionStorage;
+    } catch {
+      return undefined;
+    }
+  }
+  function restore(): Draft | null {
+    try {
+      const v = JSON.parse(storage()?.getItem(DRAFT) ?? "null");
+      return v && typeof v.request === "string" && v.request && typeof v.goal === "string" && typeof v.day === "string" ? v : null;
+    } catch {
+      return null;
+    }
+  }
+  function keep(d: Draft | null) {
+    try {
+      if (d) storage()?.setItem(DRAFT, JSON.stringify(d));
+      else storage()?.removeItem(DRAFT);
+    } catch {
+      // A blocked storage keeps the ID only in this page.
+    }
+  }
+  const kept = restore();
+  let request = $state<string | null>(kept?.request ?? null);
+  function begin() {
+    request = globalThis.crypto.randomUUID();
+    keep({ request, goal: "", day: "" });
+  }
+  function end() {
+    request = null;
+    keep(null);
+  }
   async function start(goal: string, dueAt: string | null): Promise<string> {
     try {
       const job = await startJob(goal, dueAt, request!);
+      end();
       location.hash = href.job(job.id);
       return "";
     } catch (e) {
       const err = e as Error & { status?: number; body?: { job?: string } };
       if (err.status === 409 && err.body?.job) {
+        end();
         location.hash = href.job(err.body.job);
         return "";
       }
@@ -72,12 +110,19 @@
 
 <div class="top">
   <h1>Jobs</h1>
-  {#if !request}<button type="button" onclick={() => (request = globalThis.crypto.randomUUID())}>New job</button>{/if}
+  {#if !request}<button type="button" onclick={begin}>New job</button>{/if}
 </div>
 <p class="lead">The goals that you gave to your agents. Each job keeps each step, so you can see what the agent did and why.</p>
 
 {#if request}
-  <JobForm action="Start the job" save={start} oncancel={() => (request = null)} />
+  <JobForm
+    action="Start the job"
+    goal={kept?.request === request ? kept.goal : ""}
+    day={kept?.request === request ? kept.day : ""}
+    save={start}
+    oncancel={end}
+    ondraft={(goal, day) => request && keep({ request, goal, day })}
+  />
 {/if}
 
 {#if empty && !request}

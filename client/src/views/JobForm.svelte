@@ -10,15 +10,28 @@
   let {
     goal: first = "",
     due: old,
+    day,
     action,
     save,
     oncancel,
-  }: { goal?: string; due?: string; action: string; save: (goal: string, due: string | null) => Promise<string>; oncancel: () => void } = $props();
+    ondraft,
+  }: {
+    goal?: string;
+    due?: string;
+    /** The day of the date field of a kept draft, as `YYYY-MM-DD`. */
+    day?: string;
+    action: string;
+    save: (goal: string, due: string | null) => Promise<string>;
+    oncancel: () => void;
+    /** Gets the goal and the day of the date field after each change. */
+    ondraft?: (goal: string, day: string) => void;
+  } = $props();
 
   // svelte-ignore state_referenced_locally
   let goal = $state(first);
   // svelte-ignore state_referenced_locally
-  let due = $state(old ? ymd(new Date(old)) : "");
+  let due = $state(day ?? (old ? ymd(new Date(old)) : ""));
+  $effect(() => ondraft?.(goal, due));
   let note = $state("");
   let sending = $state(false);
   let ready = $derived(goal.trim().length > 0 && !sending);

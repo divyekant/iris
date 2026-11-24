@@ -190,7 +190,17 @@ export function startJob(goal: string, due: string | null, request: string): Pro
 /** Change the goal and the due date of an open job (decision D25). The answer is the job page again. */
 export async function editJob(id: string, goal: string, due: string | null): Promise<JobDetail> {
   await post<Job>(`jobs/${encodeURIComponent(id)}/edit`, { goal, due });
+  return loadJob(id);
+}
+
+/** The job page of `id`, read again: for example after a change whose answer did not come. */
+export function loadJob(id: string): Promise<JobDetail> {
   return get<JobDetail>(`jobs/${encodeURIComponent(id)}`);
+}
+
+/** True when two due dates name the same instant, or both are empty. */
+export function sameDue(a: string | null | undefined, b: string | null | undefined): boolean {
+  return a && b ? Date.parse(a) === Date.parse(b) : !a && !b;
 }
 
 /** Add a thread to the scope of a job. `messages` are the IDs of the preview that the person saw: a change gives 409. */

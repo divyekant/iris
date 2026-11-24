@@ -39,6 +39,9 @@ test("the card shows the goal, the question as text, and sends the answer once",
   try {
     assert.match(text(view.target), /A question for you, from the job Pay the Q4 invoice from Brightline\./);
     assert.equal(view.target.querySelector("a").getAttribute("href"), "#/jobs/j-14");
+    // The words fit a question of Iris on a job with no agent session too (decision D24).
+    assert.match(text(view.target), /The job goes on with your answer\./);
+    assert.doesNotMatch(text(view.target), /new session/);
     // The question of the agent is text, never markup.
     assert.equal(view.target.querySelector("b"), null);
     assert.match(text(view.target), /<b>Pay<\/b> the full amount\?/);
@@ -154,7 +157,7 @@ test("after an answer, the brief says so and shows the next question at once", a
     await type(view, "Ask Brightline first.");
     button(view).click();
     await until(() => /Which photo\?/.test(text(view.target)));
-    assert.match(text(view.target), /Sent\. The agent of “Pay the Q4 invoice from Brightline\.” continues with your answer\./);
+    assert.match(text(view.target), /Sent\. The job “Pay the Q4 invoice from Brightline\.” goes on with your answer\./);
     assert.match(text(view.target), /A question for you 1/);
     assert.equal(view.target.querySelector("textarea").value, "");
     assert.ok(asked.some(([m, p]) => m === "GET" && p.startsWith("jobs?state=needs_you")));

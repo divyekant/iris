@@ -1,8 +1,9 @@
 <!--
-  The question of an agent in the brief (card R5-05): the goal of the job, the
-  question, and one field for your answer. The answer starts a new session of
-  the job: the brief then says so and loads the questions again. The question
-  is text of the agent: it shows as text only.
+  The question of a job in the brief (card R5-05; from the agent, or from Iris
+  on the due date): the goal of the job, the question, and one field for your
+  answer. The job goes on with the answer: a job that had a session gets a new
+  one, and a job with no session starts none. The brief then says so and loads
+  the questions again. The question is text of the agent: it shows as text only.
 -->
 <script lang="ts">
   import { own, type Job } from "../api";
@@ -65,7 +66,7 @@
     <textarea id={`answer-${job.id}`} bind:value={text} oninput={(e) => ondraft(e.currentTarget.value)} onkeydown={keys} rows="2" placeholder="Your answer" disabled={busy}></textarea>
     <div class="row">
       <button type="submit" disabled={empty || busy}>{busy ? "Sending" : "Answer"}</button>
-      <span class="hint">The agent reads it in a new session.</span>
+      <span class="hint">The job goes on with your answer.</span>
     </div>
   </form>
   {#if error}<p class="error" role="alert">{error}</p>{/if}

@@ -279,7 +279,7 @@
 {#snippet sentLine(job: Job)}
   <p class="sent" role="status">
     <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3 8.5l3 3 7-7" fill="none" stroke="var(--color-primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
-    Sent. The agent of “{job.goal}” continues with your answer.
+    Sent. The job “{job.goal}” goes on with your answer.
   </p>
 {/snippet}
 {#if shown}

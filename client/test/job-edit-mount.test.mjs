@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { load, mount, until } from "./mount.mjs";
 
 globalThis.location = window.location;
+Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: window.sessionStorage });
 const fx = await load("/dev/fixtures.ts");
 const s = await load("/src/start.ts");
 const text = (el) => el.textContent.replace(/\s+/g, " ");
@@ -141,6 +142,93 @@ test("the scope shows each ref; Remove and Add send the ref and the IDs of the p
   button(view, "Remove").click();
   await until(() => /No mail\./.test(text(view.target)));
   assert.deepEqual(asked.at(-1), ["POST", "jobs/j-12/scope/remove", { ref: "t-8841" }]);
+  view.destroy();
+});
+
+test("a lost answer of a start keeps the draft and its request ID across a reload", async () => {
+  window.sessionStorage.clear();
+  // The first start reaches the engine, but its answer is lost.
+  let lost = true;
+  const asked = [];
+  globalThis.fetch = async (url, init) => {
+    asked.push(JSON.parse(init.body));
+    if (lost) {
+      lost = false;
+      throw new TypeError("Failed to fetch");
+    }
+    return new Response(JSON.stringify({ error: "This start made a job already.", job: "j-40" }), { status: 409, headers: { "content-type": "application/json" } });
+  };
+  const pages = { needs_you: empty, working: empty, waiting: empty, done: empty };
+  const first = await mount("/src/views/Jobs.svelte", { pages });
+  button(first, "New job").click();
+  first.flushSync();
+  fill(first, "textarea", "Renew the passport.");
+  submit(first);
+  await until(() => first.target.querySelector("[role=alert]"));
+  first.destroy();
+  // The reload shows the form with the draft, and the retry sends the same ID.
+  const again = await mount("/src/views/Jobs.svelte", { pages });
+  assert.equal(again.target.querySelector("textarea")?.value, "Renew the passport.");
+  submit(again);
+  await until(() => location.hash === "#/jobs/j-40");
+  assert.equal(asked.length, 2);
+  assert.equal(asked[1].request, asked[0].request);
+  assert.equal(globalThis.sessionStorage.getItem("iris.newJob"), null);
+  again.destroy();
+});
+
+test("an edit or a remove with no answer shows the job as the engine has it", async () => {
+  const d = structuredClone(fx.jobDetails["j-12"]);
+  const saved = { ...d, job: { ...d.job, goal: "New goal" } };
+  // The edit arrives; the read after it fails once, then the page reads the job again.
+  let reads = 0;
+  serve((method) => (method === "POST" ? [200, saved.job] : ++reads === 1 ? [500, { error: "The engine answered 500." }] : [200, saved]));
+  const view = await mount("/src/views/Job.svelte", { detail: d });
+  button(view, "Edit").click();
+  view.flushSync();
+  fill(view, "textarea", "New goal");
+  submit(view, "form.job-form");
+  await until(() => view.target.querySelector("h1")?.textContent === "New goal");
+  assert.equal(view.target.querySelector("[role=alert]"), null);
+  view.destroy();
+  // The remove arrives, but its answer is lost: the ref goes, with no error.
+  const gone = { ...d, scope: [] };
+  globalThis.fetch = async (url, init) => {
+    if ((init?.method ?? "GET") === "POST") throw new TypeError("Failed to fetch");
+    const path = String(url).replace(/^\/api\//, "");
+    const out = path === "policy" ? fx.answer("/policy") : gone;
+    return new Response(JSON.stringify(out), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const page = await mount("/src/views/Job.svelte", { detail: d });
+  button(page, "Remove").click();
+  await until(() => /No mail\./.test(text(page.target)));
+  assert.equal(page.target.querySelector(".refs"), null);
+  assert.equal(page.target.querySelector("[role=alert]"), null);
+  page.destroy();
+});
+
+test("a search that fills its page offers more results, up to the limit of the API", async () => {
+  const d = structuredClone(fx.jobDetails["j-12"]);
+  const m = (i) => ({ id: `m-${i}`, thread: i < 60 ? "t-1" : `t-${i}`, subject: `S${i}`, date: null, from: {}, labels: [] });
+  const asked = serve((method, path) => {
+    const n = Number(new URLSearchParams(path.split("?")[1]).get("limit"));
+    return [200, { messages: Array.from({ length: n }, (_, i) => m(i)) }];
+  });
+  const view = await mount("/src/views/Job.svelte", { detail: d });
+  button(view, "Add mail").click();
+  view.flushSync();
+  fill(view, "input[type=search]", "invoice");
+  submit(view, "form.search");
+  // The first 50 matches are all of one thread: More results reaches the others.
+  await until(() => button(view, "More results"));
+  assert.equal(view.target.querySelectorAll("button.hit").length, 1);
+  button(view, "More results").click();
+  await until(() => view.target.querySelectorAll("button.hit").length > 1);
+  assert.equal(asked.at(-1)[1], "search?q=invoice&limit=150");
+  button(view, "More results").click();
+  await until(() => /newest 200 matches/.test(text(view.target)));
+  assert.equal(asked.at(-1)[1], "search?q=invoice&limit=200");
+  assert.ok(!button(view, "More results"));
   view.destroy();
 });
 

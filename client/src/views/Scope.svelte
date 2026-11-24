@@ -8,7 +8,7 @@
 <script lang="ts">
   import { get, own, type JobDetail, type Summary } from "../api";
   import { when } from "../format";
-  import { addThread, removeRef } from "../jobs";
+  import { addThread, loadJob, removeRef } from "../jobs";
   import { byThread, reads, subjectOf, threadsOf, type Preview } from "../start";
 
   let { detail, onchange }: { detail: JobDetail; onchange: (d: JobDetail) => void } = $props();
@@ -35,13 +35,28 @@
     }
   }
 
+  // The search gives the newest matches first. "More results" asks for more, up to the limit of the API.
+  const STEP = 50;
+  const MOST = 200;
+  let limit = $state(STEP);
+  let full = $state(false);
+  let searched = "";
+
   async function search(event: SubmitEvent) {
     event.preventDefault();
     const q = query.trim();
     if (!q) return;
+    await find(q, STEP);
+  }
+
+  async function find(q: string, n: number) {
     picked = null;
-    const page = await run(() => get<{ messages: Summary[] }>(`search?q=${encodeURIComponent(q)}&limit=50`));
-    if (page) hits = threadsOf(page.messages);
+    const page = await run(() => get<{ messages: Summary[] }>(`search?q=${encodeURIComponent(q)}&limit=${n}`));
+    if (!page) return;
+    searched = q;
+    limit = n;
+    full = page.messages.length >= n;
+    hits = threadsOf(page.messages);
   }
 
   async function pick(thread: string) {
@@ -58,6 +73,13 @@
       close();
       return;
     }
+    // The add can have arrived with no answer: when the job has the thread now, it worked.
+    const fresh = await refresh();
+    if (fresh?.scope?.some((r) => r.id === thread)) {
+      note = "";
+      close();
+      return;
+    }
     // The mail changed after the preview: show the thread as it is now, and keep the note.
     const kept = note;
     await pick(thread);
@@ -66,7 +88,17 @@
 
   async function remove(ref: string) {
     const d = await run(() => removeRef(job.id, ref));
-    if (d) onchange(d);
+    if (d) return onchange(d);
+    // The remove can have arrived with no answer: when the ref is gone now, it worked.
+    const fresh = await refresh();
+    if (fresh && !fresh.scope?.some((r) => r.id === ref)) note = "";
+  }
+
+  /** Read the job again after a change whose result is not known, and show it. */
+  async function refresh(): Promise<JobDetail | null> {
+    const fresh = await loadJob(job.id).catch(() => null);
+    if (fresh) onchange(fresh);
+    return fresh;
   }
 
   function close() {
@@ -140,6 +172,11 @@
               <li><button class="hit" type="button" disabled={busy} onclick={() => pick(h.thread)}>{h.subject}</button></li>
             {/each}
           </ul>
+          {#if full && limit < MOST}
+            <button class="quiet" type="button" disabled={busy} onclick={() => find(searched, Math.min(limit + STEP * 2, MOST))}>More results</button>
+          {:else if full}
+            <p class="empty">These are the threads of the newest {MOST} matches. Add words to the search to find an older thread.</p>
+          {/if}
         {/if}
       {/if}
     </div>

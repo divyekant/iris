@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { get, own, type JobDetail } from "../api";
-  import { agent, asker, clock, day, due, editJob, now, steps, waitMail } from "../jobs";
+  import { agent, asker, clock, day, due, editJob, loadJob, now, sameDue, steps, waitMail } from "../jobs";
   import Grants from "./Grants.svelte";
   import JobForm from "./JobForm.svelte";
   import Scope from "./Scope.svelte";
@@ -55,6 +55,15 @@
       editing = false;
       return "";
     } catch (e) {
+      // The edit can have arrived (a lost answer, or a failed read after it): show the job as the engine has it.
+      const fresh = await loadJob(job.id).catch(() => null);
+      if (fresh) {
+        detail = fresh;
+        if (fresh.job.goal === goal && sameDue(fresh.job.due, dueAt)) {
+          editing = false;
+          return "";
+        }
+      }
       return own(e) || (e as Error).message;
     }
   }
