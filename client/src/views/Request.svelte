@@ -8,6 +8,7 @@
 -->
 <script lang="ts">
   import { href } from "../route";
+  import { fileLine } from "../format";
   import { get, post, type Changeset, type DraftView, type Item, type Part, type Recipient, type Target, type Would } from "../api";
   import Comments from "./Comments.svelte";
   import { author, detail, FLAGS, itemRow, mail, TAGS, to, unmarked, key, messageRow, outcome, pages, plan, short, shown, target, targets, verb, waits, would, type Row } from "../review";
@@ -239,7 +240,10 @@
 {#snippet draft(d: DraftView)}
   {#if d.readable}
     <div class="mail">
-      <dl>{@render people("To", d.to)}{@render people("Cc", d.cc)}</dl>
+      <dl>
+        {@render people("To", d.to)}{@render people("Cc", d.cc)}{@render people("Bcc", d.bcc ?? [])}
+        {#if d.attachments?.length}<dt>Files</dt><dd>{fileLine(d.attachments)}</dd>{/if}
+      </dl>
       <p class="subject-line">{@render text(d.subject)}</p>
       <p class="text">{@render text(d.body)}</p>
     </div>

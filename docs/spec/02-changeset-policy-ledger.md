@@ -259,7 +259,7 @@ The engine adds flags. An author cannot remove a flag.
 | `outside_thread` | A `draft` or a `send` goes to an address that is not in the thread, and its author read mail that you did not send (`docs/specs/2026-11-17-hostile-input-limits.md`). |
 | `money` | The text of a draft names an amount of money (`docs/specs/2026-11-17-send-checks.md`). |
 | `date` | The text of a draft names a date (`docs/specs/2026-11-17-send-checks.md`). |
-| `attachment` | The text refers to an attachment, and none is attached, or an attachment is attached. |
+| `attachment` | The text refers to an attachment, and the draft has no attached file. |
 | `first_contact` | The target thread is with a `stranger`. |
 | `untrusted_content` | The text of the draft contains text from an external message. |
 | `bulk` | The action changes more than 500 messages. Or the changeset changes more than 500 messages in all. Or, with this action, more than 500 messages of the same author applied without a review by a person in the last hour. |

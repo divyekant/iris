@@ -228,6 +228,8 @@ export type Action = {
 export type Part = { text: string; flags?: string[]; source?: string };
 /** A recipient of a draft, with the flag `new_recipient` if the owner never wrote to the address. */
 export type Recipient = { address: string; flags?: string[] };
+/** A file of a draft, as the review and the outbox show it. */
+export type FileView = { name: string; type: string; size: number };
 /**
  * GET /api/changesets/{id}/drafts: the draft of each `draft` and `send`
  * action that waits, as the review shows it. Each part of the text carries
@@ -235,7 +237,7 @@ export type Recipient = { address: string; flags?: string[] };
  * cannot read has `readable: false` and no text.
  */
 export type DraftView = { revision: number; n: number; draft: string | null; thread: string | null } & (
-  | { readable: true; to: Recipient[]; cc: Recipient[]; subject: Part[]; body: Part[] }
+  | { readable: true; to: Recipient[]; cc: Recipient[]; bcc?: Recipient[]; attachments?: FileView[]; subject: Part[]; body: Part[] }
   | { readable: false }
 );
 
@@ -318,7 +320,11 @@ export type OutboxSend = {
   readable: boolean;
   to?: string[];
   cc?: string[];
+  bcc?: string[];
+  attachments?: FileView[];
   subject?: string;
+  /** The provider ("gmail" or "outlook") whose Bcc check keeps the send held, or null. An older engine leaves it out. */
+  bcc_check?: string | null;
 };
 /** GET /api/outbox: the send switch and each send that waits. Only `iris sending on|off` changes the switch. */
 export type Outbox = { sending: { on: boolean; since: string | null }; count: number; sends: OutboxSend[]; next: string | null };

@@ -9,6 +9,7 @@
   import { onDestroy } from "svelte";
   import { loadOutbox, own, post, type Outbox, type OutboxSend } from "../api";
   import { FLAGS } from "../review";
+  import { fileLine } from "../format";
 
   // `every`: the ms between two reads of the outbox (a prop for the tests).
   let { first, every = 5000 }: { first: Outbox; every?: number } = $props();
@@ -80,8 +81,11 @@
     return Math.min(1, Math.max(0, (now - start) / 60_000));
   }
 
+  const PROVIDER: Record<string, string> = { gmail: "Gmail", outlook: "Outlook" };
   function when(s: OutboxSend): string {
     if (!box.sending.on) return "Waits until sending is on";
+    // The Bcc gate of the provider is closed (send content spec, section 6.2).
+    if (s.bcc_check) return `Waits for the Bcc check of ${PROVIDER[s.bcc_check] ?? s.bcc_check}`;
     const t = left(s);
     return t ? `Leaves in ${t}` : "Leaves now";
   }
@@ -125,14 +129,16 @@
     {#each box.sends as s (s.draft)}
       <li class="card">
         <p class="to">To {s.readable ? to(s).join(", ") : "recipients that Iris cannot read"}</p>
+        {#if s.readable && s.bcc?.length}<p class="to">Bcc {s.bcc.join(", ")}</p>{/if}
         <p class="subject">{s.readable ? s.subject || "(no subject)" : "Iris cannot read this draft"}</p>
+        {#if s.readable && s.attachments?.length}<p class="files">{fileLine(s.attachments)}</p>{/if}
         {#if s.flags.length > 0}
           <ul class="flags">{#each s.flags as f (f)}<li>{FLAGS[f] ?? f}</li>{/each}</ul>
         {/if}
         <div class="foot">
           <div class="time">
-            <span class="left" class:paused={!box.sending.on}>{when(s)}</span>
-            {#if box.sending.on}<span class="bar" aria-hidden="true"><span style:width="{gone(s) * 100}%"></span></span>{/if}
+            <span class="left" class:paused={!box.sending.on || !!s.bcc_check}>{when(s)}</span>
+            {#if box.sending.on && !s.bcc_check}<span class="bar" aria-hidden="true"><span style:width="{gone(s) * 100}%"></span></span>{/if}
           </div>
           <button type="button" class="pill" onclick={() => cancel(s)} disabled={off(s)}>{posting === s.draft || pending.some((p) => p.draft === s.draft) ? "Cancelling" : "Cancel"}</button>
         </div>
@@ -185,7 +191,8 @@
   p {
     margin: 0;
   }
-  .to {
+  .to,
+  .files {
     color: var(--color-text-muted);
     font-size: var(--font-size--1);
     overflow-wrap: anywhere;

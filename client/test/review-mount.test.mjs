@@ -634,3 +634,22 @@ test("a refresh of the same revision reads again what a rule would decide, and d
     view.destroy();
   }
 });
+
+test("a draft shows its Bcc and its files (send content spec)", async () => {
+  const d = structuredClone(fx.answer("/changesets/cs-79/drafts"));
+  d.drafts[0].bcc = [{ address: "lee@example.org", flags: ["new_recipient"] }];
+  d.drafts[0].attachments = [{ name: "quote.pdf", type: "application/pdf", size: 2_516_582 }];
+  serve({ "changesets/cs-79/drafts": [200, d] });
+  const cs = fx.changesets.find((c) => c.id === "cs-79");
+  const view = await mount("/src/views/Request.svelte", { changeset: structuredClone(cs) });
+  try {
+    const mail = await until(() => view.target.querySelector(".mail"));
+    const rows = [...mail.querySelectorAll("dt")].map((dt) => [dt.textContent, text(dt.nextElementSibling)]);
+    assert.deepEqual(rows.slice(2), [
+      ["Bcc", "lee@example.orgnew address"],
+      ["Files", "quote.pdf (2.4 MB)"],
+    ]);
+  } finally {
+    view.destroy();
+  }
+});
