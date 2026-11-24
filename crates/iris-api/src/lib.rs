@@ -1163,7 +1163,7 @@ async fn post_model_try(State(s): State<Arc<Store>>, _: NoBody) -> Result<Respon
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64);
-    s.write(|tx| Ok(iris_understand::batch::try_now(tx, now)?))?;
+    s.write(|tx| Ok(iris_matters::propose::try_now(tx, now)?))?;
     Ok(Json(read::status(&s)?).into_response())
 }
 

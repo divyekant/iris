@@ -27,6 +27,19 @@ pub const MAX_MATTERS: usize = 10;
 /// The gate of `iris serve`: one call each hour at most.
 pub const HOUR_MS: i64 = 3_600_000;
 
+/// "Try now" of the web client (decision D35): end the wait after model
+/// errors, with `batch::try_now`. If a wait ran, the hourly gate of this
+/// step opens too, so that the next turn of `iris serve` also tries a
+/// failed proposal call. The fingerprint check stays, and a new failure
+/// starts the wait again. Gives true if a wait ran at `now`.
+pub fn try_now(tx: &Transaction, now: i64) -> rusqlite::Result<bool> {
+    let waited = batch::try_now(tx, now)?;
+    if waited {
+        tx.execute("UPDATE matter_run SET tried_at = NULL WHERE id = 1", [])?;
+    }
+    Ok(waited)
+}
+
 /// Who starts the step (spec, "There are two entry points").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gate {
