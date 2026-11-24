@@ -37,7 +37,7 @@ test("the card shows the goal, the question as text, and sends the answer once",
   let answered = null;
   const view = await mount("/src/views/Question.svelte", { job: q, onanswered: (j) => (answered = j.id), onchanged: () => {} });
   try {
-    assert.match(text(view.target), /An agent asks you, for the job Pay the Q4 invoice from Brightline\./);
+    assert.match(text(view.target), /A question for you, from the job Pay the Q4 invoice from Brightline\./);
     assert.equal(view.target.querySelector("a").getAttribute("href"), "#/jobs/j-14");
     // The question of the agent is text, never markup.
     assert.equal(view.target.querySelector("b"), null);

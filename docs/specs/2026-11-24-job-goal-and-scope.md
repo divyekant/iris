@@ -2,7 +2,7 @@
 
 - Date: 2026-11-24
 - Card: P9-D25
-- Status: Built (store and API); the web client follows
+- Status: Built
 
 ## Problem
 

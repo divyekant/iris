@@ -5,9 +5,11 @@
   shows as text only.
 -->
 <script lang="ts">
-  import { get, type JobDetail } from "../api";
-  import { agent, clock, day, due, now, steps, waitMail } from "../jobs";
+  import { get, own, type JobDetail } from "../api";
+  import { agent, asker, clock, day, due, editJob, now, steps, waitMail } from "../jobs";
   import Grants from "./Grants.svelte";
+  import JobForm from "./JobForm.svelte";
+  import Scope from "./Scope.svelte";
 
   // `every`: the ms between two reads of a job whose session can still change (a prop for the tests).
   let { detail: first, every = 5000 }: { detail: JobDetail; every?: number } = $props();
@@ -45,18 +47,34 @@
   let idle = $derived(agent(detail));
   // The day shows above the first step of each day.
   const newDay = (i: number) => i === 0 || day(list[i - 1].at) !== day(list[i].at);
+
+  let editing = $state(false);
+  async function save(goal: string, dueAt: string | null): Promise<string> {
+    try {
+      detail = await editJob(job.id, goal, dueAt);
+      editing = false;
+      return "";
+    } catch (e) {
+      return own(e) || (e as Error).message;
+    }
+  }
 </script>
 
 <p class="eyebrow">Job</p>
-<h1>{job.goal}</h1>
-<p class="limits">
-  {#if limit}<span class={limit.tone}>{limit.text}{#if limit.tone}<span class="dot" aria-hidden="true"></span>{/if}</span>{/if}
-  <span>Started {day(job.created)}</span>
-</p>
+{#if editing}
+  <JobForm goal={job.goal} due={job.due} action="Save" {save} oncancel={() => (editing = false)} />
+{:else}
+  <h1>{job.goal}</h1>
+  <p class="limits">
+    {#if limit}<span class={limit.tone}>{limit.text}{#if limit.tone}<span class="dot" aria-hidden="true"></span>{/if}</span>{/if}
+    <span>Started {day(job.created)}</span>
+    {#if job.state !== "done"}<button class="edit" type="button" onclick={() => (editing = true)}>Edit</button>{/if}
+  </p>
+{/if}
 
 <section class="now {job.state}" class:idle aria-label="Now">
   {#if job.state === "needs_you"}
-    <p class="label">The agent asks you</p>
+    <p class="label">{asker(job)} asks you</p>
     <p class="question">{job.question}</p>
   {:else}
     <p class="said">{idle ? idle.said : now(job)}</p>
@@ -69,6 +87,8 @@
     {#if mail}<p class="mail"><a class="touch" href={mail.link}>{mail.subject}</a></p>{/if}
   {/if}
 </section>
+
+<Scope {detail} onchange={(d) => (detail = d)} />
 
 <Grants {job} />
 
@@ -110,6 +130,21 @@
     margin: 0 0 var(--space-8);
     color: var(--color-text-muted);
     font-size: var(--font-size--1);
+  }
+  .edit {
+    font: inherit;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--color-primary);
+    cursor: pointer;
+  }
+  .edit:hover {
+    text-decoration: underline;
+  }
+  .edit:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
   .dot {
     display: inline-block;

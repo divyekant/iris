@@ -539,6 +539,7 @@ export const jobs: Record<string, Job> = {
     question: "The invoice says 2,400 EUR, but the quote said 2,150 EUR. Pay the full amount, or ask Brightline about the difference first?",
   },
   "j-15": { id: "j-15", goal: "Book a dentist appointment for next week, in the morning.", created: at(16, 11), updated: at(16, 11), state: "working" },
+  "j-16": { id: "j-16", goal: "Renew the passport before the trip.", due: at(16, 0), created: at(10, 9), updated: at(16, 0), state: "needs_you", question: "The due date passed. Answer to go on, or end the job." },
   "j-9": { id: "j-9", goal: "Cancel the gym membership.", created: at(12, 9), updated: at(13, 15), state: "done", end: "complete" },
 };
 export const jobDetails: Record<string, JobDetail> = {
@@ -559,11 +560,19 @@ export const jobDetails: Record<string, JobDetail> = {
       { id: "cs-34", at: at(16, 18, 38), state: "open", why: "Reply to Dana: accept clause 7 and ask for the signature.", actions: { in_review: 1 } },
     ],
     threads: { "t-8841": { id: "m-90211", thread: "t-8841", date: at(16, 16, 2), from: dana, subject: "Re: Northwind contract, final version", labels: ["INBOX"], gone: false } },
+    scope: [{ id: "t-8841", kind: "thread", label: "Northwind contract, final version", messages: 4 }],
   },
   "j-14": {
     job: { ...jobs["j-14"], events: [{ at: at(16, 8), state: "working", by: "person" }, { at: at(16, 10, 2), state: "needs_you", by: "agent", question: jobs["j-14"].question, why: "The amounts do not agree." }] },
     changesets: [],
     threads: {},
+  },
+  // The engine moved the job on its due date (decision D24).
+  "j-16": {
+    job: { ...jobs["j-16"], events: [{ at: at(10, 9), state: "working", by: "person" }, { at: at(16, 0), state: "needs_you", by: "engine", question: jobs["j-16"].question, why: "due" }] },
+    changesets: [],
+    threads: {},
+    scope: [],
   },
   // A working job whose session ended with an error: no agent works on it (issue #742).
   "j-15": {
@@ -629,7 +638,8 @@ export function answer(path: string): unknown {
   if (name === "changesets" && id && url.pathname.endsWith("/drafts")) return drafts[id] ? { drafts: drafts[id] } : undefined;
   if (name === "changesets" && id) return changesets.find((c) => c.id === id);
   if (name === "changesets") return { changesets };
-  if (name === "search") return { messages: [] };
+  if (name === "search") return { messages: q.get("q") ? ["m-55210", "m-55211", "m-55380"].map(summaryOf) : [] };
+  if (name === "jobs" && id && url.pathname.includes("/scope/")) return jobDetails[id] && scopePreview(decodeURIComponent(url.pathname.split("/").pop()!));
   if (name === "policy") return policy;
   if (name === "watches") return watches;
   if (name === "matters" && id) return matterViews[id];
@@ -729,6 +739,31 @@ export function answerJob(id: string, body: { answer?: unknown; question?: unkno
   const session = { id: "se-4", agent: "claude-code", state: "starting" as const, end: null, exit: null, ended: null };
   jobDetails[id] = { job: { ...jobs[id], events }, changesets: jobDetails[id]?.changesets ?? [], threads: jobDetails[id]?.threads ?? {}, session };
   return [200, jobDetails[id]];
+}
+/** GET /api/jobs/<id>/scope/<thread>: the messages of a fixture thread, with one that the agent cannot read yet. */
+function scopePreview(thread: string) {
+  const ids = Object.values(START).flat().filter(([m]) => (summaryOf(m) as Summary).thread === thread);
+  return ids.length ? { messages: ids.map(([m, readable], i) => ({ ...(summaryOf(m) as Summary), date: at(15, 9 + 3 * i, 12), readable })) } : undefined;
+}
+/** POST /api/jobs/<id>/edit, /scope and /scope/remove (decision D25), on the fixture jobs. */
+export function jobPost(path: string, body: { goal?: string; due?: string | null; thread?: string; messages?: string[]; ref?: string }): [number, unknown] {
+  const [, , id, verb, sub] = path.split("/");
+  const d = jobDetails[id];
+  if (!d) return [404, { error: "Not found." }];
+  if (d.job.state === "done") return [409, { error: "the job is done" }];
+  if (verb === "edit") {
+    jobs[id] = { ...jobs[id], goal: body.goal ?? jobs[id].goal, due: body.due ?? undefined };
+    d.job = { ...d.job, goal: jobs[id].goal, due: jobs[id].due };
+    return [200, jobs[id]];
+  }
+  if (verb === "scope" && sub === "remove") d.scope = (d.scope ?? []).filter((r) => r.id !== body.ref);
+  else if (verb === "scope" && body.thread) {
+    const preview = scopePreview(body.thread);
+    if (!preview) return [404, { error: "Not found." }];
+    const subject = preview.messages[0].subject;
+    d.scope = [...(d.scope ?? []).filter((r) => r.id !== body.thread), { id: body.thread, kind: "thread", label: subject, messages: preview.messages.filter((m) => m.readable).length }];
+  } else return [404, { error: "Not found." }];
+  return [200, d];
 }
 /** POST /api/jobs: the fixture job j-12 stands for the new job. */
 export function startJob(): [number, unknown] {

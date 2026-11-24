@@ -6,8 +6,9 @@
 -->
 <script lang="ts">
   import { get, own, type Job, type JobPage, type JobState } from "../api";
-  import { due, now, pageSize } from "../jobs";
+  import { due, now, pageSize, startJob } from "../jobs";
   import { href } from "../route";
+  import JobForm from "./JobForm.svelte";
 
   let { pages: first }: { pages: Record<JobState, JobPage> } = $props();
 
@@ -23,6 +24,23 @@
   let busy = $state("");
   let error = $state("");
   let empty = $derived(GROUPS.every(([state]) => pages[state].jobs.length === 0));
+
+  // One request ID for each open form: a retry of the same start gives the same job (decision D25).
+  let request = $state<string | null>(null);
+  async function start(goal: string, dueAt: string | null): Promise<string> {
+    try {
+      const job = await startJob(goal, dueAt, request!);
+      location.hash = href.job(job.id);
+      return "";
+    } catch (e) {
+      const err = e as Error & { status?: number; body?: { job?: string } };
+      if (err.status === 409 && err.body?.job) {
+        location.hash = href.job(err.body.job);
+        return "";
+      }
+      return own(e) || err.message;
+    }
+  }
 
   async function more(state: JobState) {
     busy = state;
@@ -52,10 +70,17 @@
   </li>
 {/snippet}
 
-<h1>Jobs</h1>
+<div class="top">
+  <h1>Jobs</h1>
+  {#if !request}<button type="button" onclick={() => (request = globalThis.crypto.randomUUID())}>New job</button>{/if}
+</div>
 <p class="lead">The goals that you gave to your agents. Each job keeps each step, so you can see what the agent did and why.</p>
 
-{#if empty}
+{#if request}
+  <JobForm action="Start the job" save={start} oncancel={() => (request = null)} />
+{/if}
+
+{#if empty && !request}
   <p class="empty">No job yet. A job is a goal with limits, for example “Get the signed contract from Dana before 20 Nov.”</p>
 {/if}
 
@@ -72,6 +97,12 @@
 {#if error}<p role="alert">{error}</p>{/if}
 
 <style>
+  .top {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-4);
+  }
   h1 {
     font-size: var(--font-size-3);
     font-weight: 500;

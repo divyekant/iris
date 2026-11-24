@@ -57,8 +57,8 @@
   const keys = (e: KeyboardEvent) => e.key === "Enter" && (e.metaKey || e.ctrlKey) && (e.preventDefault(), send());
 </script>
 
-<article class="question" aria-label="An agent asks you">
-  <p class="for"><span class="mark" aria-hidden="true"></span>An agent asks you, for the job <a href={href.job(job.id)}>{job.goal}</a></p>
+<article class="question" aria-label="A question for you">
+  <p class="for"><span class="mark" aria-hidden="true"></span>A question for you, from the job <a href={href.job(job.id)}>{job.goal}</a></p>
   <p class="text">{job.question}</p>
   <form onsubmit={send}>
     <label class="hidden" for={`answer-${job.id}`}>Your answer</label>
