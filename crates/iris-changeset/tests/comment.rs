@@ -128,7 +128,7 @@ fn each_refusal_writes_nothing() {
 }
 
 #[test]
-fn only_an_open_changeset_of_an_open_job_takes_a_comment() {
+fn only_an_open_changeset_and_an_open_job_take_a_comment() {
     let dir = TempDir::new("job");
     let (s, cs, who) = setup(&dir);
     // A changeset with no job.
@@ -140,7 +140,6 @@ fn only_an_open_changeset_of_an_open_job_takes_a_comment() {
     let other = create(&s, &host, NOW).unwrap();
     add_action(&s, other, &host, Verb::Archive, &["m-1"], &Map::new(), None).unwrap();
     submit(&s, other, &host, "Archive.", NOW).unwrap();
-    refused(put(&s, other, 1, "ok", KEY));
     // A withdrawn changeset.
     withdraw(&s, other, Some(&host)).unwrap();
     refused(put(&s, other, 1, "ok", KEY));
@@ -229,4 +228,47 @@ fn a_comment_is_pending_until_a_session_starts_after_its_build() {
     // A comment after that build is pending again.
     put(&s, cs, 1, "two", "k-1123456789abcdef").unwrap();
     assert!(pending());
+}
+
+/// Decision D15 (issue #538): an agent with no job (the MCP host) and a
+/// local author take a comment, and read it in the changeset document.
+/// Triage and the person take none.
+#[test]
+fn an_author_with_no_job_takes_a_comment_and_reads_it_in_the_document() {
+    let dir = TempDir::new("nojob");
+    let (s, _, _) = setup(&dir);
+    let kinds = [
+        (AuthorKind::Agent, true),
+        (AuthorKind::Local, true),
+        (AuthorKind::Triage, false),
+        (AuthorKind::Person, false),
+    ];
+    for (i, (kind, takes)) in kinds.into_iter().enumerate() {
+        let author = Author {
+            kind,
+            name: (kind != AuthorKind::Person).then(|| "host".into()),
+            session: Some(format!("se-{i}")),
+            job: None,
+        };
+        let cs = create(&s, &author, NOW).unwrap();
+        add_action(&s, cs, &author, Verb::Archive, &["m-1"], &Map::new(), None).unwrap();
+        submit(&s, cs, &author, "Archive.", NOW).unwrap();
+        let key = format!("{KEY}-{i}");
+        let r = put(&s, cs, 1, "Keep the mail of Dana.", &key);
+        let mut doc = Vec::new();
+        iris_changeset::write_document(&s, cs, &mut doc).unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(&doc).unwrap();
+        if takes {
+            r.unwrap();
+            assert_eq!(
+                doc["comments"][0]["text"], "Keep the mail of Dana.",
+                "{kind:?}"
+            );
+            assert_eq!(doc["comments"][0]["revision"], 1);
+            assert!(doc["comments"][0]["at"].is_string());
+        } else {
+            refused(r);
+            assert!(doc.get("comments").is_none(), "{doc}");
+        }
+    }
 }

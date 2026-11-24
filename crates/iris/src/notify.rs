@@ -70,13 +70,41 @@ pub fn run(mut c: Command, wait: Duration) -> Result<(), String> {
 /// the web client still shows them.
 pub const QUEUE: usize = 100;
 
+/// The words of one system notice: the title and the text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shown {
+    pub title: String,
+    pub text: String,
+}
+
+/// The most characters of the text of a job notice.
+pub const JOB_TEXT_MAX: usize = 200;
+
+impl Shown {
+    /// A notice by rule (R5-08).
+    pub fn rule(n: &iris_policy::notice::Notice) -> Shown {
+        Shown {
+            title: format!("Iris: {}", n.rule_name),
+            text: format!("{}: {}", n.title, n.text),
+        }
+    }
+
+    /// A job that passed its due date (decision D24): the job ID and the
+    /// goal, which is the words of the person, cut on a character boundary.
+    pub fn job_due(d: &iris_job::Due) -> Shown {
+        let text = format!("{}: {}", iris_job::format_job_id(d.id), d.goal);
+        Shown {
+            title: "Iris: Job due".into(),
+            text: text.chars().take(JOB_TEXT_MAX).collect(),
+        }
+    }
+}
+
 /// Starts the thread that shows each notice that it gets with `show`, one
 /// at a time. The sender never waits: a slow command must not hold the
 /// attention thread (spec: the pass runs each 10 seconds).
-pub fn spawn(
-    show: fn(&iris_policy::notice::Notice),
-) -> std::sync::mpsc::SyncSender<iris_policy::notice::Notice> {
-    let (tx, rx) = std::sync::mpsc::sync_channel::<iris_policy::notice::Notice>(QUEUE);
+pub fn spawn(show: fn(&Shown)) -> std::sync::mpsc::SyncSender<Shown> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Shown>(QUEUE);
     let _ = std::thread::Builder::new()
         .name("notices".into())
         .spawn(move || rx.iter().for_each(|n| show(&n)));
@@ -169,12 +197,11 @@ pub fn for_system(
 /// one log line, not one for each notice.
 static FAILED: AtomicBool = AtomicBool::new(false);
 
-/// Shows one system notice for `n` ([`for_system`] chose it). A failure writes one log line the first
-/// time. The notice stays in the web client either way.
-pub fn show(n: &iris_policy::notice::Notice) {
-    let title = format!("Iris: {}", n.rule_name);
-    let text = format!("{}: {}", n.title, n.text);
-    let result = match command(std::env::consts::OS, &title, &text) {
+/// Shows one system notice `n` (for a notice by rule, [`for_system`] chose
+/// it). A failure writes one log line the first time. The web client shows
+/// the notice by rule, and the jobs page the job, either way.
+pub fn show(n: &Shown) {
+    let result = match command(std::env::consts::OS, &n.title, &n.text) {
         Some(c) => run(c, WAIT),
         None => Err("this system has no notice command".into()),
     };
@@ -225,12 +252,24 @@ mod tests {
     }
 
     #[test]
+    fn a_job_notice_names_the_job_and_cuts_the_goal() {
+        let d = iris_job::Due {
+            id: 7,
+            goal: "é".repeat(300),
+        };
+        let n = Shown::job_due(&d);
+        assert_eq!(n.title, "Iris: Job due");
+        assert!(n.text.starts_with("j-7: éé"));
+        assert_eq!(n.text.chars().count(), JOB_TEXT_MAX);
+    }
+
+    #[test]
     fn slow_system_notices_never_hold_the_sender() {
         // Each notice takes 1 second to show. The sends still end at once.
         let tx = spawn(|_| std::thread::sleep(Duration::from_secs(1)));
         let t = Instant::now();
         for id in 0..(QUEUE as i64 + 20) {
-            let _ = tx.try_send(notice(id));
+            let _ = tx.try_send(Shown::rule(&notice(id)));
         }
         assert!(
             t.elapsed() < Duration::from_millis(500),

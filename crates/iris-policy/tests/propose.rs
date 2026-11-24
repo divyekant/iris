@@ -329,6 +329,7 @@ fn each_proposal_agrees_with_the_decisions() {
                     bulk: false,
                     warning: false,
                     in_thread: false,
+                    marked: false,
                     now: NOW,
                 };
                 let d = policy.decide(&action, fs.iter().map(Facts::message));

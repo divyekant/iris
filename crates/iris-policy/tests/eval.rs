@@ -48,6 +48,7 @@ fn action(verb: Verb, author: Author) -> Action<'static> {
         bulk: false,
         warning: false,
         in_thread: false,
+        marked: false,
         now: NOW,
     }
 }
@@ -435,6 +436,7 @@ fn random_case(rng: &mut Rng) -> Case {
         bulk: rng.next().is_multiple_of(5),
         warning: false,
         in_thread: false,
+        marked: false,
         now: NOW,
     };
     Case { msgs, act }
@@ -574,6 +576,7 @@ fn a_draft_rule_reads_the_recipients_and_the_warning_flags() {
         p.decide(
             &Action {
                 in_thread: true,
+                marked: false,
                 ..action(Verb::Archive, Author::Agent)
             },
             m()
@@ -589,4 +592,33 @@ fn a_draft_rule_reads_the_recipients_and_the_warning_flags() {
     h.hostile = true;
     let p = policy(&rule(1, "allow", "\"draft\"", "author = \"agent\""));
     assert_eq!(p.decide(&draft(true, false), [h]).outcome, Outcome::Deny);
+}
+
+/// Decision D14 (issue #437): a `trash` or a `label` of a marked author
+/// goes to review by the limit, even if a rule allows it. Each other verb
+/// keeps the decision of the rule, and a deny rule stays stricter.
+#[test]
+fn hard_limit_marked_trash_and_label() {
+    let all: Vec<String> = Verb::ALL
+        .iter()
+        .map(|v| format!("\"{}\"", v.name()))
+        .collect();
+    let allow = policy(&rule(1, "allow", &all.join(", "), "form = \"feed\""));
+    let deny = policy(&rule(1, "deny", &all.join(", "), "form = \"feed\""));
+    let m = [msg("a@x.example", SenderKind::Service, &[FEED])];
+    for verb in Verb::ALL {
+        for author in [Author::Agent, Author::Triage, Author::Local, Author::Person] {
+            let mut act = action(verb, author);
+            let before = allow.decide(&act, m);
+            act.marked = true;
+            let d = allow.decide(&act, m);
+            if matches!(verb, Verb::Trash | Verb::Label) {
+                assert_eq!((d.outcome, d.rule), (Outcome::Review, None), "{verb:?}");
+                assert_eq!(d.reason, MARKED_REASON);
+            } else {
+                assert_eq!(d, before, "{verb:?} {author:?}");
+            }
+            assert_eq!(deny.decide(&act, m).outcome, Outcome::Deny, "{verb:?}");
+        }
+    }
 }

@@ -193,6 +193,8 @@ pub struct Evaluation {
     pub bulk: bool,
     /// A flag that only a person approves (store migration 25).
     pub warning: bool,
+    /// A `trash` or a `label` of a marked author (decision D14).
+    pub marked: bool,
 }
 
 /// Evaluates action row `action` with `policy` (spec 2, section 6.4), from
@@ -209,10 +211,10 @@ pub fn evaluate(
     bulk: bool,
     now: i64,
 ) -> Result<Evaluation, Error> {
-    let (verb, flags): (String, String) = c.query_row(
-        "SELECT verb, flags FROM changeset_action WHERE id = ?1",
+    let (verb, flags, changeset): (String, String, i64) = c.query_row(
+        "SELECT verb, flags, changeset_id FROM changeset_action WHERE id = ?1",
         [action],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
     let flags = serde_json::from_str::<Vec<String>>(&flags)
         .map_err(|e| Error::Refused(format!("flags: {e}")))?;
@@ -223,6 +225,7 @@ pub fn evaluate(
             decision: None,
             bulk,
             warning,
+            marked: false,
         });
     };
     // At most CHUNK messages: the action holds their facts.
@@ -239,6 +242,10 @@ pub fn evaluate(
             Some((_, content)) => iris_changeset::outside_marks(c, action, &content)?.is_empty(),
             None => false,
         };
+    // The mark reads the job scope, so read it only for the verbs that
+    // it limits (decision D14).
+    let marked = matches!(verb, iris_policy::Verb::Trash | iris_policy::Verb::Label)
+        && iris_changeset::marked_in(c, changeset)?;
     for m in ids {
         facts.extend(iris_policy::facts(c, m, now)?);
     }
@@ -250,6 +257,7 @@ pub fn evaluate(
             bulk,
             warning,
             in_thread,
+            marked,
             now,
         },
         facts.iter().map(Facts::message),
@@ -258,6 +266,7 @@ pub fn evaluate(
         decision: Some(decision),
         bulk,
         warning,
+        marked,
     })
 }
 
@@ -302,7 +311,7 @@ pub fn decide_submitted(
             n,
         };
         let e = evaluate(c, &active.policy, id, author, job.as_deref(), false, now)?;
-        let (bulk, warning) = (e.bulk, e.warning);
+        let (bulk, warning, marked) = (e.bulk, e.warning, e.marked);
         // No rule decides a verb that the policy does not know: `send`
         // (decision D2, issue #239). It goes to a person, in the mode
         // `apply`; in the mode `observe` it stays proposed, as other actions.
@@ -336,12 +345,119 @@ pub fn decide_submitted(
             // A rule decision needs the confirmed version (spec 2, 5.1).
             (Some(_), None) => return Err(Error::Refused("a rule with no policy version".into())),
             // No rule: a hard limit (spec 2, section 6.5) or the default review.
-            (None, _) if bulk || warning || to == State::Denied => By::Limit,
+            (None, _) if bulk || warning || marked || to == State::Denied => By::Limit,
             (None, _) => By::Policy,
         };
         decide_in(c, id_n, to, by, Some(&d.reason), now_ms)?;
     }
     Ok(())
+}
+
+/// What a rule of the active policy would decide (decision D10, issue
+/// #193). In the mode `observe`, each `proposed` action of the changeset
+/// stays `proposed` and stores no decision (spec 2, section 5.4). The
+/// review reads this to show the person which actions a rule would approve
+/// before the person turns on the mode `apply`. Computed at each read, so
+/// it always follows the active policy of now. Empty in the mode `apply`,
+/// and with no confirmed policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Would {
+    pub revision: i64,
+    pub n: i64,
+    pub outcome: Policy,
+    /// The rule ID and the policy version of the decision.
+    pub rule: u32,
+    pub policy: i64,
+    pub reason: String,
+}
+
+/// The policy and the author that [`would_next`] reads, from
+/// [`would_start`]. Read once for each review read: the parse of the policy
+/// is not repeated for each action.
+pub struct WouldPass {
+    policy: iris_policy::Policy,
+    version: i64,
+    author: iris_policy::Author,
+    job: Option<String>,
+}
+
+/// The start of a [`Would`] read of `changeset`, or `None` when no rule
+/// can decide: the mode `apply`, no confirmed policy, a policy text that
+/// is not valid now, or no such changeset.
+pub fn would_start(c: &Connection, changeset: i64) -> Result<Option<WouldPass>, Error> {
+    let active = iris_policy::active(c)?;
+    let (Mode::Observe, Some(version), None) = (active.policy.mode, active.version, &active.error)
+    else {
+        return Ok(None);
+    };
+    let Some((author, job)) = c
+        .query_row(
+            "SELECT author_kind, author_job FROM changeset WHERE id = ?1",
+            [changeset],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    Ok(
+        iris_policy::Author::from_name(&author).map(|author| WouldPass {
+            policy: active.policy,
+            version,
+            author,
+            job,
+        }),
+    )
+}
+
+/// The first `proposed` action of `changeset` with a row ID after `after`:
+/// its row ID, and its [`Would`] when a rule decides it. `None` after the
+/// last one. The caller reads one action at a time, each in its own read,
+/// so memory holds the facts of one action and no list of results.
+pub fn would_next(
+    c: &Connection,
+    pass: &WouldPass,
+    changeset: i64,
+    after: i64,
+    now_ms: i64,
+) -> Result<Option<(i64, Option<Would>)>, Error> {
+    let Some((id, revision, n)) = c
+        .query_row(
+            "SELECT id, revision, n FROM changeset_action
+             WHERE changeset_id = ?1 AND state = 'proposed' AND id > ?2
+             ORDER BY id LIMIT 1",
+            params![changeset, after],
+            |r| Ok((r.get::<_, i64>(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    // The same evaluation as the submit in the mode `apply`. No rule
+    // decides a verb that the policy does not know (issue #239).
+    let e = evaluate(
+        c,
+        &pass.policy,
+        id,
+        pass.author,
+        pass.job.as_deref(),
+        false,
+        now_ms.div_euclid(1000),
+    )?;
+    let Some(d) = e.decision else {
+        return Ok(Some((id, None)));
+    };
+    Ok(Some((
+        id,
+        d.rule.map(|rule| Would {
+            revision,
+            n,
+            outcome: d.outcome,
+            rule,
+            policy: pass.version,
+            reason: d.reason,
+        }),
+    )))
 }
 
 /// Call `f` for each action of the proposal, in order: each rule, in groups

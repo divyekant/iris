@@ -481,17 +481,22 @@ pub fn withdraw_in(c: &Connection, changeset: i64, author: Option<&Author>) -> R
             "the mail left or is leaving now, so it cannot be stopped".into(),
         ));
     }
+    // Who withdrew (decision D16): the author, or you. A send of the write
+    // view has the same author as its draft (the person).
+    let by = if author.is_some() { "author" } else { "person" };
     let changed = c.execute(
-        "UPDATE changeset SET state = 'withdrawn' WHERE id = ?1 AND state <> 'withdrawn'",
-        [changeset],
+        "UPDATE changeset SET state = 'withdrawn', withdrawn_by = ?2
+         WHERE id = ?1 AND state <> 'withdrawn'",
+        params![changeset, by],
     )?;
     if changed == 0 {
         return Err(refused("the changeset is withdrawn".into()));
     }
     for (send, _) in sends {
         c.execute(
-            "UPDATE changeset SET state = 'withdrawn' WHERE id = ?1 AND state <> 'withdrawn'",
-            [send],
+            "UPDATE changeset SET state = 'withdrawn', withdrawn_by = ?2
+             WHERE id = ?1 AND state <> 'withdrawn'",
+            params![send, by],
         )?;
     }
     Ok(())
@@ -953,10 +958,13 @@ pub fn marked_in(c: &Connection, changeset: i64) -> Result<bool> {
 }
 
 /// The marks of the flag `outside_thread` (spec R4-06): each address of
-/// `to` and `cc` of `content` that is not in From, To or Cc of a live
-/// message of the threads of `action`, and is not one of your addresses. A
-/// new mail has no thread. Submit gives the flag to a marked author when
-/// this list is not empty.
+/// `to` and `cc` of `content` that is not in the thread of `action`, and is
+/// not one of your addresses. An address is in the thread only if it is the
+/// From of a live thread message, or in To or Cc of a live thread message
+/// that you sent (decision D13, issue #435). So a stranger cannot widen
+/// the thread with an address in Cc of its own message. A new mail has no
+/// thread. Submit gives the flag to a marked author when this list is not
+/// empty.
 pub fn outside_marks(
     c: &Connection,
     action: i64,
@@ -977,9 +985,14 @@ pub fn outside_marks(
     })?;
     if !open.is_empty() {
         let mut st = c.prepare(&format!(
-            "SELECT h.from_addr, h.to_addrs, h.cc_addrs
+            "SELECT h.from_addr, s.to_addrs, s.cc_addrs
              FROM changeset_action a, message t JOIN header h ON h.message_id = t.id
-             WHERE a.id = ?1 AND t.gone_at IS NULL AND t.thread_id IN ({ACTION_THREADS})"
+             LEFT JOIN header s ON s.message_id = t.id
+               AND EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                           WHERE ml.message_id = t.id AND l.provider_id = 'SENT')
+               AND NOT {copy}
+             WHERE a.id = ?1 AND t.gone_at IS NULL AND t.thread_id IN ({ACTION_THREADS})",
+            copy = iris_store::draft_or_copy!("t")
         ))?;
         let mut rows = st.query([action])?;
         while let (false, Some(r)) = (open.is_empty(), rows.next()?) {
@@ -1915,11 +1928,12 @@ fn document(c: &Connection, changeset: i64, out: &mut impl Write) -> Result<()> 
         i64,
         Option<i64>,
         String,
+        Option<String>,
     );
     let head: Option<Head> = c
         .query_row(
             "SELECT revision, author_kind, author_name, author_session, author_job, why,
-                    created_at, submitted_at, state
+                    created_at, submitted_at, state, withdrawn_by
              FROM changeset WHERE id = ?1",
             [changeset],
             |r| {
@@ -1933,11 +1947,12 @@ fn document(c: &Connection, changeset: i64, out: &mut impl Write) -> Result<()> 
                     r.get(6)?,
                     r.get(7)?,
                     r.get(8)?,
+                    r.get(9)?,
                 ))
             },
         )
         .optional()?;
-    let (revision, kind, name, session, job, why, created, submitted, state) =
+    let (revision, kind, name, session, job, why, created, submitted, state, withdrawn_by) =
         head.ok_or(Error::NotFound)?;
     let mut author = Map::new();
     author.insert("kind".into(), kind.into());
@@ -1949,12 +1964,14 @@ fn document(c: &Connection, changeset: i64, out: &mut impl Write) -> Result<()> 
     let time = |ms: Option<i64>| ms.map_or(Value::Null, |ms| iris_talk::rfc3339(ms).into());
     write!(
         out,
-        r#"{{"model":"{model}","id":"{}","revision":{revision},"author":{},"why":{},"created":{},"submitted":{},"state":"{state}","actions":["#,
+        r#"{{"model":"{model}","id":"{}","revision":{revision},"author":{},"why":{},"created":{},"submitted":{},"state":"{state}",{}"actions":["#,
         format_changeset_id(changeset),
         Value::Object(author),
         why.map_or(Value::Null, Value::String),
         time(Some(created)),
         time(submitted),
+        // Since iris/1.2: who withdrew (decision D16), when it is known.
+        withdrawn_by.map_or(String::new(), |b| format!(r#""withdrawn_by":"{b}","#)),
         model = iris_store::MODEL,
     )?;
     let mut st = c.prepare(
@@ -2029,7 +2046,29 @@ fn document(c: &Connection, changeset: i64, out: &mut impl Write) -> Result<()> 
             ledger.map_or(String::new(), |l| format!(r#","ledger":"l-{l}""#)),
         )?;
     }
-    out.write_all(b"]}")?;
+    out.write_all(b"]")?;
+    // Since iris/1.2: the review comments of the person, oldest first, so an
+    // author with no job workspace can read them too (decision D15).
+    // One comment at a time, so memory holds one comment.
+    let mut st = c.prepare_cached(
+        "SELECT revision, text, at_ms FROM changeset_comment WHERE changeset_id = ?1 ORDER BY id",
+    )?;
+    let mut rows = st.query([changeset])?;
+    let mut first = true;
+    while let Some(r) = rows.next()? {
+        out.write_all(if first { br#","comments":["# } else { b"," })?;
+        first = false;
+        let k = serde_json::json!({
+            "revision": r.get::<_, i64>(0)?,
+            "text": r.get::<_, String>(1)?,
+            "at": time(Some(r.get(2)?)),
+        });
+        write!(out, "{k}")?;
+    }
+    if !first {
+        out.write_all(b"]")?;
+    }
+    out.write_all(b"}")?;
     Ok(())
 }
 

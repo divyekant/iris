@@ -587,6 +587,76 @@ fn apply_mode_decides_skip_with_the_rules_and_the_hard_limits() {
     assert_eq!(d[1].0, "denied", "{d:?}");
 }
 
+/// Decision D10 (issue #193): in the mode `observe`, `would` gives for each
+/// proposed action exactly the rule decision that the mode `apply` gives to
+/// the same proposal, and the actions stay `proposed`. In the mode `apply`,
+/// `would` is empty.
+#[test]
+fn observe_mode_shows_what_the_rules_would_decide() {
+    const RULES: &str = "[[rule]]\nid = 1\nname = \"Archive the feed\"\neffect = \"allow\"\n\
+         verbs = [\"archive\"]\nwhen = { form = \"feed\" }\nby = \"person\"\nadded = 2026-11-10\n\
+         [[rule]]\nid = 2\nname = \"Keep records\"\neffect = \"deny\"\n\
+         verbs = [\"archive\"]\nwhen = { form = \"record\" }\nby = \"person\"\nadded = 2026-11-10\n";
+    let mut got = Vec::new();
+    for mode in ["observe", "apply"] {
+        let dir = TempDir::new(&format!("would-{mode}"));
+        let (s, a) = store(&dir);
+        item(&s, a, "feed", "g1");
+        item(&s, a, "record", "g2");
+        item(&s, a, "conversation", "g3");
+        let text = format!("version = 0\nmode = \"{mode}\"\n{RULES}");
+        fs::write(dir.0.join(iris_policy::FILE), &text).unwrap();
+        iris_policy::confirm(&s, &iris_policy::sha256_hex(&text), 0).unwrap();
+        let Outcome::Submitted { changeset, .. } = run(&s, a, NOW).unwrap() else {
+            panic!("a proposal");
+        };
+        let would = s
+            .read(|c| {
+                let mut out = Vec::new();
+                if let Some(pass) = iris_triage::would_start(c, changeset).unwrap() {
+                    let mut after = 0;
+                    while let Some((id, w)) =
+                        iris_triage::would_next(c, &pass, changeset, after, NOW).unwrap()
+                    {
+                        after = id;
+                        out.extend(w);
+                    }
+                }
+                Ok(out)
+            })
+            .unwrap();
+        if mode == "observe" {
+            let rows = actions(&s, changeset);
+            assert!(
+                rows.iter().all(|r| r.4.as_deref() == Some("proposed")),
+                "{rows:?}"
+            );
+            got = would
+                .iter()
+                .map(|w| {
+                    let state = match w.outcome {
+                        iris_policy::Outcome::Allow => "approved",
+                        iris_policy::Outcome::Review => "in_review",
+                        iris_policy::Outcome::Deny => "denied",
+                    };
+                    (w.n, state.to_string(), i64::from(w.rule), w.reason.clone())
+                })
+                .collect();
+            assert_eq!(got.len(), 2, "{would:?}");
+            assert!(would.iter().all(|w| w.policy == 1 && w.revision == 1));
+        } else {
+            assert!(would.is_empty(), "{would:?}");
+            let want: Vec<_> = decisions(&s, changeset)
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.1 == "rule")
+                .map(|(i, r)| (i as i64 + 1, r.0.clone(), r.2.unwrap(), r.3.clone()))
+                .collect();
+            assert_eq!(got, want);
+        }
+    }
+}
+
 /// Decisions D2 and D3: a rule allows a reply draft whose recipients are in
 /// its thread. A draft with a warning flag still goes to a person.
 #[test]
@@ -727,4 +797,65 @@ fn apply_mode_sends_a_send_to_a_person_by_its_flags() {
         "{d:?}"
     );
     assert!(d[1].3.contains("No rule can allow a send"), "{d:?}");
+}
+
+/// Decision D14 (issue #437): a rule allows archive, trash and label, but a
+/// trash or a label of a marked author (an agent with no job) goes to a
+/// person, by the limit. The person is not marked, so the rule allows it.
+#[test]
+fn apply_mode_sends_trash_and_label_of_a_marked_author_to_a_person() {
+    use iris_changeset::{add_action, create, submit, Author, AuthorKind, Verb};
+    let dir = TempDir::new("applymarked");
+    let (s, a) = store(&dir);
+    item(&s, a, "feed", "g1");
+    apply_policy(
+        &s,
+        &dir,
+        "[[rule]]\nid = 1\nname = \"Feed\"\neffect = \"allow\"\n\
+         verbs = [\"archive\", \"trash\", \"label\"]\nwhen = { form = \"feed\" }\n\
+         by = \"person\"\nadded = 2026-11-10\n",
+    );
+    let agent = Author {
+        kind: AuthorKind::Agent,
+        name: Some("t".into()),
+        session: None,
+        job: None,
+    };
+    let person = Author {
+        kind: AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    let mut label = serde_json::Map::new();
+    label.insert("label".into(), "Feeds".into());
+    let none = serde_json::Map::new();
+    for (who, author, marked) in [
+        (&agent, iris_policy::Author::Agent, true),
+        (&person, iris_policy::Author::Person, false),
+    ] {
+        let cs = create(&s, who, NOW).unwrap();
+        add_action(&s, cs, who, Verb::Archive, &["m-1"], &none, None).unwrap();
+        add_action(&s, cs, who, Verb::Trash, &["m-1"], &none, None).unwrap();
+        add_action(&s, cs, who, Verb::Label, &["m-1"], &label, None).unwrap();
+        submit(&s, cs, who, "Tidy.", NOW).unwrap();
+        s.write(|c| {
+            iris_triage::decide_submitted(c, cs, 1, author, NOW)
+                .map_err(|e| iris_store::Error::Io(std::io::Error::other(e.to_string())))
+        })
+        .unwrap();
+        let d = decisions(&s, cs);
+        assert_eq!((d[0].0.as_str(), d[0].2), ("approved", Some(1)), "{d:?}");
+        for x in &d[1..] {
+            if marked {
+                assert_eq!(
+                    (x.0.as_str(), x.1.as_str(), x.2),
+                    ("in_review", "limit", None)
+                );
+                assert_eq!(x.3, iris_policy::MARKED_REASON);
+            } else {
+                assert_eq!((x.0.as_str(), x.2), ("approved", Some(1)), "{d:?}");
+            }
+        }
+    }
 }

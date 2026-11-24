@@ -36,6 +36,9 @@ const NO_DATE: i64 = -9_223_372_036_854_775_807;
 const BASE: &str = concat!(
     "m.gone_at IS NULL AND m.understood_at IS NULL
   AND m.content_sha256 IS NOT NULL AND m.waits_model = 0
+  AND NOT ",
+    iris_store::removed_account!("m"),
+    "
   AND m.tries < :max_tries AND (m.retry_at IS NULL OR m.retry_at <= :now)
   AND NOT ",
     iris_store::draft_or_copy!("m"),
@@ -647,6 +650,17 @@ pub fn retry_after(c: &Connection) -> rusqlite::Result<Option<i64>> {
             .optional()?
             .flatten(),
     )
+}
+
+/// End the wait after model errors now ("Try now" of the web client,
+/// decision D35, issue #136): the next run calls the model, as at the end
+/// of the wait. The count of errors stays, so a new error doubles the wait
+/// again. Gives true if a wait was running at `now`.
+pub fn try_now(tx: &Transaction, now: i64) -> rusqlite::Result<bool> {
+    Ok(tx.execute(
+        "UPDATE model_setting SET retry_at = ?1 WHERE retry_at > ?1",
+        [now],
+    )? > 0)
 }
 
 /// The wait state after a run that could call the model, in the end write

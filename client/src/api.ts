@@ -252,6 +252,12 @@ export type Changeset = {
   actions: Action[];
 };
 
+/**
+ * GET /api/changesets/{id}/would: in observe mode, the decision that a rule of the active policy
+ * would give to each proposed action in apply mode (decision D10). Empty in apply mode.
+ */
+export type Would = { revision: number; n: number; outcome: "approved" | "in_review" | "denied"; rule: number; policy: number; reason: string };
+
 /** GET /api/handled: one action that an `allow` rule approved, with the reason. */
 export type HandledAction = {
   changeset: string;
@@ -296,6 +302,12 @@ export type LedgerEntry = {
   undo_open: boolean;
   undone_by: string | null;
   undo_of: string | null;
+  /** For an applied undo: the messages or items that it did not change (they changed again, or are gone). */
+  skipped: number;
+  /** For an undo: the targets that it tries to restore, also a gone message. 0 for each other entry. */
+  tried: number;
+  /** For an undo: true when the change that it undoes can be undone now. */
+  retry: boolean;
 };
 
 export type LedgerPage = { entries: LedgerEntry[]; next: string | null };

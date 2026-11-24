@@ -41,9 +41,10 @@ to review: the property test of "Acceptance criteria" passes.
 
 - A session field. The mark is a read of the job scope, so no migration of
   `job_session` is necessary, and `crates/iris-session` does not change.
-- Other verbs of a marked author (`trash`, `label`, the state verbs). The
-  hostile hard limit (spec 2, section 6.5) covers mail with a hostile mark.
-  A limit issue records the rest.
+- Other verbs of a marked author (the state verbs, `archive`, `unlabel`).
+  The hostile hard limit (spec 2, section 6.5) covers mail with a hostile
+  mark. Decision D14 (issue #437) later sent each `trash` and `label` of a
+  marked author to review (spec 2, section 6.5).
 - New words for the flag itself. The review screen already shows
   `outside_thread` as "Goes to an address that is not in the thread"
   (`client/src/review.ts`). The tag on each address came later (issue
@@ -82,10 +83,13 @@ the job is the mark of each of its sessions.
 
 ### 2. Outside the thread
 
-The **thread addresses** of an action are the addresses in `From`, `To`
-and `Cc` of each live message (`gone_at IS NULL`) of the action threads (the SQL `ACTION_THREADS`
-of `iris-changeset`: the threads of its messages and the thread of its
-draft), parsed with `iris_senders::head::addresses`. The mirror keeps the
+The **thread addresses** of an action are the addresses in `From` of each
+live message (`gone_at IS NULL`) of the action threads (the SQL
+`ACTION_THREADS` of `iris-changeset`: the threads of its messages and the
+thread of its draft), and the addresses in `To` and `Cc` of each live
+message of these threads that you sent (label `SENT`, and not a draft or a
+copy). A `To` or `Cc` of a received message does not count (decision D13,
+issue #435). The parse is `iris_senders::head::addresses`. The mirror keeps the
 header of a gone message for 30 days, but the read skips it: a gone message
 gives no thread address. A new mail (target
 `accounts`) has no thread, so it has no thread addresses.
@@ -104,7 +108,13 @@ stored raw bytes of the draft of a `send`.
 Submit (`iris_changeset::submit_in`) adds `outside_thread` to a `draft` or a
 `send` action when the changeset author is marked
 (`iris_changeset::marked_in`) and the content has an outside address
-(`iris_changeset::outside_marks` is not empty). The drafts API of the
+(`iris_changeset::outside_marks` is not empty). An address is in the
+thread only if it is the From of a live thread message, or it is in To or
+Cc of a live thread message that you sent (label `SENT`, and not a draft or a copy:
+`iris_store::draft_or_copy!`).
+Your own addresses are never outside. An address that a stranger put in
+To or Cc of its own message is not in the thread (decision D13, issue
+#435). The drafts API of the
 review (`GET /api/changesets/{id}/drafts`) marks each outside address of
 `to` and `cc` with the flag `outside_thread`, by the same rule
 (`outside_marks`). The review screen shows the tag "not in the thread"
@@ -159,8 +169,8 @@ the thread messages in the store, the scope rows of the job.
 | Input or event | Result | Test |
 |---|---|---|
 | A thread message with no header row, or a gone message | It gives no thread address, so more addresses are outside. | `outside.rs`, gone thread message |
-| A `From`, `To` or `Cc` header in the thread with display names, quoted pairs, comments and groups (RFC 5322) | The parser gives the address of each entry and no address of a name or a comment. The flag agrees with a model of the entries. | property test (`property_random_thread_headers_give_the_model_flag`) |
-| A malformed `From`, `To` or `Cc` header in the thread (a stray `"`, `<`, `>`, `(`, `)`, `\`, `:`, `;` or `,`) | No list is the right one. An address that the header text does not name is always outside. A stray sign can make an address of a name or a comment a thread address. This gives the sender no new power: a sender can put any address in `Cc` (limit #435). | property test (same test) |
+| A `From` header in the thread, or a `To` or `Cc` header of your sent mail in the thread, with display names, quoted pairs, comments and groups (RFC 5322) | The parser gives the address of each entry and no address of a name or a comment. The flag agrees with a model of the entries. | property test (`property_random_thread_headers_give_the_model_flag`) |
+| A malformed `From` header in the thread, or a malformed `To` or `Cc` header of your sent mail (a stray `"`, `<`, `>`, `(`, `)`, `\`, `:`, `;` or `,`) | No list is the right one. An address that the header text does not name is always outside. A stray sign in a `From` can make an address of a name or a comment a thread address. This gives a sender little power: one `From` header gives the addresses of its text only. The `To` and `Cc` of a received message never count (decision D13). | property test (same test) |
 | An address in another case (`Ana@X.org`) | Same address after ASCII lowercase. | property test |
 | An IDN domain in Unicode and in punycode | Two addresses: outside (fail closed). | Known limit issue |
 | A scope message that is not in the store | The job is marked. | `outside.rs` |
@@ -170,7 +180,7 @@ the thread messages in the store, the scope rows of the job.
 | A store error in the mark read or the address read | Submit fails, and no revision is submitted. | by construction (one transaction) |
 | A rule or engine approval of a flagged `draft` or `send`, from any code path | The trigger aborts the update. | property test |
 | A warning flag added to a `draft` or `send` that a rule approved | The trigger aborts the update. | `outside.rs` |
-| An external address that a stranger put in `Cc` of a thread message | It is a thread address, so no `outside_thread`. `new_recipient` still flags it if you never sent to it. | Known limit issue |
+| An external address that a stranger put in `Cc` of a thread message | It is not a thread address, so it gets `outside_thread` (decision D13, issue #435). | `outside.rs` |
 
 ## Impact
 

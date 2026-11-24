@@ -39,7 +39,9 @@ fn inverse(verb: &str) -> Option<Verb> {
 /// The target of each action is the entry (`{"ledger": ["l-N"]}`): submit
 /// resolves the messages with `done` that are not gone. The apply
 /// reads the labels at Gmail again, and skips each message that changed
-/// after the entry. When step 1 applies, the entry becomes `undone`.
+/// after the entry. When each action of the undo applies and the undo
+/// changed one or more messages or items, the entry becomes `undone`. An
+/// undo that changed nothing keeps the entry open (decision D18).
 ///
 /// Gives [`Error::Undo`] if the entry has no undo now: it is in `writing`,
 /// final or undone, it changed no message, or an undo of it is open.
