@@ -220,7 +220,7 @@ pub fn create_for_request_in(
 }
 
 /// The person changes the goal and the due date of an open job (decision
-/// D25). Migration 49 keeps the values before and after in `job_edit`, and
+/// D25). Migration 50 keeps the values before and after in `job_edit`, and
 /// refuses an edit of a done job or an edit that changes nothing. An edit
 /// is not a move: the state, `updated` and the sessions do not change.
 pub fn edit(store: &Store, job: i64, goal: &str, due_ms: Option<i64>, now_ms: i64) -> Result<()> {

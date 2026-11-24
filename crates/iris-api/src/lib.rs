@@ -46,7 +46,9 @@ pub use drafts::write_drafts;
 pub use export::{export, Exported};
 pub use jobs::*;
 pub use ledger::{ledger, undo_entry, LedgerEntry, LedgerPage};
-pub use matters::{confirm_matter, decline_matter, matter, matters};
+pub use matters::{
+    confirm_matter, create_matter, decline_matter, delete_matter, edit_matter, matter, matters,
+};
 pub use notice::*;
 pub use outbox::{cancel_send, outbox, Cancelled, MAX_SENDS};
 pub use read::*;
@@ -186,6 +188,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/notices/{id}/done", post(post_notice_done))
         .route("/api/watches", get(get_watches).post(post_watch))
         .route("/api/watches/{id}/remove", post(post_watch_remove))
+        .route("/api/accounts/{id}/remove", post(post_account_remove))
         .route("/api/stop", get(get_stop).post(post_stop))
         .route("/api/resume", post(post_resume))
         .route("/api/outbox", get(get_outbox))
@@ -194,10 +197,12 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/write/{id}", get(get_write))
         .route("/api/threads/{id}/reply", get(get_reply))
         .route("/api/threads/{id}/draft", get(get_draft))
-        .route("/api/matters", get(get_matters))
+        .route("/api/matters", get(get_matters).post(post_matter_create))
         .route("/api/matters/{id}", get(get_matter))
         .route("/api/matters/{id}/confirm", post(post_matter_confirm))
         .route("/api/matters/{id}/decline", post(post_matter_decline))
+        .route("/api/matters/{id}/edit", post(post_matter_edit))
+        .route("/api/matters/{id}/delete", post(post_matter_delete))
         // No fallback: `iris_web::router()` has the fallback of the server.
         .route("/api", any(|| async { not_found() }))
         .route("/api/{*rest}", any(|| async { not_found() }))
@@ -1116,6 +1121,99 @@ fn stop_answer(s: &Store, since: Option<i64>) -> Result<serde_json::Value> {
     }))
 }
 
+/// Delete the mail of each removed account (`Store::delete_removed`,
+/// docs/specs/2026-11-24-remove-account.md), for the engine tick, the
+/// command and the API call. Step 0 builds the workspace of each job with
+/// mail of the account again (a job with no folder has nothing to delete).
+/// Step 5 derives the sender kinds again from the evidence that stays, and
+/// runs understanding again on the mail of a sender whose hostile kind
+/// changed, as the understanding batch does. With `only`, the delete of
+/// that one account, which waits for its locks. With no `only` (the engine
+/// tick): `None` while a backup runs, and an account whose sync lock is
+/// held waits for a later call.
+pub fn delete_removed(
+    store: &Store,
+    only: Option<i64>,
+) -> iris_store::Result<Option<iris_store::Deleted>> {
+    store.delete_removed(
+        only,
+        &mut |job| {
+            let dir = iris_workspace::default_dir(store.dir(), job);
+            let out = if dir.exists() {
+                iris_workspace::build(store, job, &dir).map(|_| ())
+            } else {
+                // No workspace, but a stopped build can leave mail beside it.
+                iris_workspace::clear_beside(&dir).map(|_| ())
+            };
+            out.map_err(|e| std::io::Error::other(e.to_string()))
+        },
+        &mut |tx| {
+            let now = now_ms();
+            let rows = iris_senders::refresh(tx, now)?;
+            iris_understand::store::rerun_senders(tx, &rows, now)?;
+            Ok(())
+        },
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountRemoveBody {
+    address: String,
+}
+
+/// `POST /api/accounts/{id}/remove` (decision D34,
+/// docs/specs/2026-11-24-remove-account.md): remove the account and delete
+/// its mail from Iris. Nothing changes at the provider. The address must be
+/// the address of the account `a-<id>`, so a stale page cannot remove
+/// another account. The delete waits for the locks of a sync and a backup,
+/// on a blocking thread. The answer is the status: the account is gone from
+/// it when the delete ended, or it has the state `removing`.
+async fn post_account_remove(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<AccountRemoveBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let row = id
+        .strip_prefix("a-")
+        .unwrap_or(&id)
+        .parse::<i64>()
+        .map_err(|_| Error::Query(format!("not an account ID: {id}")))?;
+    let address: Option<String> = s.read(|c| {
+        Ok(
+            c.query_row("SELECT address FROM account WHERE id = ?1", [row], |r| {
+                r.get(0)
+            })
+            .map_or_else(
+                |e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    e => Err(e),
+                },
+                |a| Ok(Some(a)),
+            )?,
+        )
+    })?;
+    if address.as_deref() != Some(b.address.as_str()) {
+        return Err(Error::Query(
+            "The address is not the address of this account.".into(),
+        ));
+    }
+    let task = s.clone();
+    tokio::task::spawn_blocking(move || {
+        let id = task
+            .remove_account_id(row, &b.address, now_ms())
+            .map_err(|e| match e {
+                iris_store::Error::Account(why) => Error::Conflict(why.into()),
+                e => e.into(),
+            })?;
+        Ok::<_, Error>(delete_removed(&task, Some(id))?)
+    })
+    .await
+    .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;
+    Ok(Json(read::status(&s)?).into_response())
+}
+
 /// `POST /api/stop`: Stop all agent work. The answer adds `sessions` (the
 /// sessions that this stop ended), `live` (the sessions that are not reaped
 /// yet) and `busy` (a Gmail call still ran). The stop is complete only when
@@ -1305,6 +1403,51 @@ async fn post_matter_decline(
     _: NoBody,
 ) -> Result<Response> {
     Ok(decline_matter(&s, &id, now_ms())?.map_or_else(not_found, |d| Json(d).into_response()))
+}
+
+/// The person makes a matter by hand.
+async fn post_matter_create(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<MatterConfirm>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let view = create_matter(&s, &b.title, &b.items, now_ms())?;
+    Ok((StatusCode::CREATED, Json(view)).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MatterEdit {
+    title: Option<String>,
+    #[serde(default)]
+    add: Vec<String>,
+    #[serde(default)]
+    remove: Vec<String>,
+}
+
+/// The person edits a confirmed matter: title, items to add, items to
+/// remove (a member, or an addition that the person refuses).
+async fn post_matter_edit(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<MatterEdit>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    Ok(edit_matter(&s, &id, b.title, &b.add, &b.remove, now_ms())?
+        .map_or_else(not_found, |d| Json(d).into_response()))
+}
+
+/// The person deletes a confirmed matter. 204 with no body.
+async fn post_matter_delete(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    _: NoBody,
+) -> Result<Response> {
+    Ok(if delete_matter(&s, &id, now_ms())? {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        not_found()
+    })
 }
 
 fn now_s() -> i64 {

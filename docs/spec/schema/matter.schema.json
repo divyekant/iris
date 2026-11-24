@@ -2,49 +2,326 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:iris:model:1:matter",
   "title": "Iris open model 1: matter",
-  "description": "A title and the items that belong together: a trip, a contract, a hire. Iris proposes a matter and the person confirms it. See docs/specs/2026-11-16-matters.md.",
+  "description": "A title and the items that belong together: a trip, a contract, a hire. Iris or an agent proposes a matter and the person confirms it; the person can also make and edit one. See docs/specs/2026-11-16-matters.md and docs/specs/2026-11-24-matters-edit.md.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["model", "id", "title", "status", "items", "counts", "created", "updated", "derived"],
+  "required": [
+    "model",
+    "id",
+    "title",
+    "status",
+    "items",
+    "counts",
+    "created",
+    "updated",
+    "derived"
+  ],
   "properties": {
-    "model": { "type": "string", "pattern": "^iris/1\\.(0|[1-9][0-9]*)$" },
-    "id": { "type": "string", "pattern": "^g-[1-9][0-9]*$" },
-    "title": { "type": "string", "minLength": 1, "maxLength": 80 },
-    "status": { "enum": ["proposed", "confirmed", "declined"] },
+    "model": {
+      "type": "string",
+      "pattern": "^iris/1\\.(0|[1-9][0-9]*)$"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^g-[1-9][0-9]*$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "status": {
+      "enum": [
+        "proposed",
+        "confirmed",
+        "declined"
+      ]
+    },
     "items": {
       "type": "array",
       "minItems": 1,
       "maxItems": 50,
       "uniqueItems": true,
-      "items": { "type": "string", "pattern": "^[cvr]-[1-9][0-9]*$" }
+      "items": {
+        "type": "string",
+        "pattern": "^[cvrs]-[1-9][0-9]*$",
+        "description": "The s- prefix (a signal) since iris/1.2."
+      }
     },
     "counts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["commitment", "conversation", "record"],
+      "required": [
+        "commitment",
+        "conversation",
+        "record"
+      ],
       "properties": {
-        "commitment": { "type": "integer", "minimum": 0 },
-        "conversation": { "type": "integer", "minimum": 0 },
-        "record": { "type": "integer", "minimum": 0 }
+        "commitment": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "conversation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "record": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "signal": {
+          "description": "Since iris/1.2.",
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
-    "created": { "$ref": "urn:iris:model:1:common#/$defs/dateTime" },
-    "updated": { "$ref": "urn:iris:model:1:common#/$defs/dateTime" },
-    "decided": { "$ref": "urn:iris:model:1:common#/$defs/dateTime" },
+    "created": {
+      "$ref": "urn:iris:model:1:common#/$defs/dateTime"
+    },
+    "updated": {
+      "$ref": "urn:iris:model:1:common#/$defs/dateTime"
+    },
+    "decided": {
+      "$ref": "urn:iris:model:1:common#/$defs/dateTime"
+    },
     "derived": {
-      "allOf": [{ "$ref": "urn:iris:model:1:common#/$defs/derived" }],
-      "properties": { "by": { "const": "model" } }
+      "description": "Who made the matter. by agent and by person since iris/1.2; model and prompt only for by model.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "by"
+      ],
+      "properties": {
+        "by": {
+          "enum": [
+            "model",
+            "agent",
+            "person"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rule": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Allowed with by model, as in iris/1.0 and iris/1.1 (the common derived schema)."
+        }
+      },
+      "if": {
+        "properties": {
+          "by": {
+            "const": "model"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "model",
+          "prompt"
+        ]
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "model"
+              ]
+            },
+            {
+              "required": [
+                "prompt"
+              ]
+            },
+            {
+              "required": [
+                "rule"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "additions": {
+      "description": "Since iris/1.2. The item IDs that Iris proposes to add to a confirmed matter. The person adds or refuses each one. See docs/specs/2026-11-24-matters-edit.md.",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[cvrs]-[1-9][0-9]*$"
+      }
     }
   },
   "allOf": [
     {
-      "if": { "properties": { "status": { "const": "proposed" } } },
-      "then": { "not": { "required": ["decided"] } },
-      "else": { "required": ["decided"] }
+      "if": {
+        "properties": {
+          "status": {
+            "const": "proposed"
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "decided"
+          ]
+        }
+      },
+      "else": {
+        "required": [
+          "decided"
+        ]
+      }
     },
     {
-      "if": { "properties": { "status": { "enum": ["proposed", "declined"] } } },
-      "then": { "properties": { "items": { "minItems": 2 } } }
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "proposed",
+              "declined"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "items": {
+            "minItems": 2
+          }
+        }
+      }
+    },
+    {
+      "description": "A field or a value of a minor version is refused in a document that claims an older minor version (specification 4, rule 2.8). Since 1.2: counts.signal, additions, s- members, derived.by agent and person.",
+      "if": {
+        "properties": {
+          "model": {
+            "enum": [
+              "iris/1.0",
+              "iris/1.1"
+            ]
+          }
+        },
+        "required": [
+          "model"
+        ]
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "additions"
+              ]
+            },
+            {
+              "properties": {
+                "counts": {
+                  "required": [
+                    "signal"
+                  ]
+                }
+              },
+              "required": [
+                "counts"
+              ]
+            },
+            {
+              "properties": {
+                "items": {
+                  "contains": {
+                    "pattern": "^s-"
+                  }
+                }
+              },
+              "required": [
+                "items"
+              ]
+            },
+            {
+              "properties": {
+                "derived": {
+                  "properties": {
+                    "by": {
+                      "enum": [
+                        "agent",
+                        "person"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "by"
+                  ]
+                }
+              },
+              "required": [
+                "derived"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "description": "Only a confirmed matter has additions.",
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "proposed",
+              "declined"
+            ]
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "additions"
+          ]
+        }
+      }
+    },
+    {
+      "description": "The person makes a confirmed matter only.",
+      "if": {
+        "properties": {
+          "derived": {
+            "properties": {
+              "by": {
+                "const": "person"
+              }
+            },
+            "required": [
+              "by"
+            ]
+          }
+        },
+        "required": [
+          "derived"
+        ]
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "enum": [
+              "confirmed",
+              "declined"
+            ]
+          }
+        }
+      }
     }
   ]
 }

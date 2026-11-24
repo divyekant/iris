@@ -1010,8 +1010,8 @@ fn a_changed_policy_stops_a_rule_approval() {
 
 /// A rule approval of `label` with a name that Gmail does not have makes no
 /// label: the create is a write call before the claim, and a policy change
-/// during it cannot stop it. The action goes to review, and a label that
-/// exists applies by the rule.
+/// during it cannot stop it. The action goes to review. The author is an
+/// agent with no job, so a label that exists also goes to review (D14).
 #[test]
 fn a_rule_approval_makes_no_new_label() {
     let text = ALLOW_ARCHIVE.replace("verbs = [\"archive\"]", "verbs = [\"label\"]");
@@ -1022,10 +1022,17 @@ fn a_rule_approval_makes_no_new_label() {
     assert!(matches!(b.apply(a), Ok(Outcome::Review(_))));
     assert_eq!(b.state(a), ("in_review".into(), "engine".into()));
     assert_eq!(b.calls("labels"), 0);
-    // The person makes the label; a later rule approval applies.
+    // The person makes the label. A later rule approval still goes to
+    // review: an agent with no job is marked, and a label of a marked author
+    // always needs a person (decision D14).
     applied(b.apply(b.labelled("label", "Rule new", &ms[..1])));
     let again = b.approved_args("label", &args, &ms, RULE, now());
-    applied(b.apply(again));
+    let r = b.apply(again);
+    assert!(
+        matches!(&r, Ok(Outcome::Review(why)) if why.contains(iris_policy::MARKED_REASON)),
+        "{r:?}"
+    );
+    assert_eq!(b.state(again), ("in_review".into(), "engine".into()));
 }
 
 /// Two changesets of one author, 300 messages each, that a rule approved
@@ -2315,7 +2322,17 @@ fn a_later_entry_blocks_the_older_undo_after_a_failed_undo() {
         other => panic!("{other:?}"),
     }
     assert!(!b.gmail_labels(ms[0]).contains(&"INBOX".to_string()));
+    assert_eq!(b.mirror_labels(ms[0]), b.gmail_labels(ms[0]));
 
+    // Decision D18 (issue #463): an undo that changed no message keeps the
+    // entry open. After the undo of the later entry, the older entry can
+    // be undone again, and its undo puts the message back in the inbox.
+    assert_eq!(b.state(old).0, "applied");
+    b.undo(later);
+    assert_eq!(b.state(later).0, "undone");
+    b.undo(old);
+    assert_eq!(b.state(old).0, "undone");
+    assert!(b.gmail_labels(ms[0]).contains(&"INBOX".to_string()));
     assert_eq!(b.mirror_labels(ms[0]), b.gmail_labels(ms[0]));
 }
 
@@ -2422,7 +2439,15 @@ fn an_undo_in_any_order_changes_only_a_free_message() {
                     changed.push(m);
                 }
             }
-            entries[o].undone = true;
+            // An undo that changed no message keeps its entry open
+            // (decision D18, issue #463).
+            let undone = !changed.is_empty();
+            assert_eq!(
+                b.state(entries[o].action).0 == "undone",
+                undone,
+                "step {step}: the state of entry {o}"
+            );
+            entries[o].undone = undone;
             undos += 1;
             if entries[o].target.is_some() {
                 nested += 1;
@@ -2472,7 +2497,7 @@ fn an_undo_in_any_order_changes_only_a_free_message() {
 }
 
 /// The case of the review of PR #476: read A, archive B, inbox C, the undo
-/// of B (skipped, as C is later), then the undo of C. B is `undone`, but its
+/// of B (skipped, as C is later), then the undo of C. B stays open, and its
 /// archive stands again, so the undo of A skips the message.
 #[test]
 fn an_undo_that_skipped_a_message_keeps_its_entry_a_blocker() {
@@ -2488,7 +2513,8 @@ fn an_undo_that_skipped_a_message_keeps_its_entry_a_blocker() {
     applied(b.apply(c));
     b.undo(bb);
     b.undo(c);
-    assert_eq!(b.state(bb).0, "undone");
+    // The undo of B skipped the message, so B stays open (decision D18).
+    assert_eq!(b.state(bb).0, "applied");
     let labels = b.gmail_labels(ms[0]);
     assert!(!labels.contains(&"INBOX".to_string()));
     b.undo(a);
