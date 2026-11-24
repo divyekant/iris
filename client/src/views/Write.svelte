@@ -18,7 +18,7 @@
 -->
 <script lang="ts">
   import { onDestroy, untrack } from "svelte";
-  import { get, own, post, type Account, type ReplyStart, type WriteState } from "../api";
+  import { get, own, post, type Account, type ReplyStart, type ThreadDraft, type WriteState } from "../api";
   import { chips, unique } from "../chips";
   import { initials, when } from "../format";
   import { FLAGS } from "../review";
@@ -172,6 +172,7 @@
   let draftNote = $state("");
   async function draftIt() {
     if (!thread || drafting) return;
+    asked = true;
     drafting = true;
     draftNote = "";
     try {
@@ -184,6 +185,30 @@
       draftNote = own(e);
     }
     drafting = false;
+  }
+
+  // A draft that Iris wrote for this thread before (`iris write`, R3-05) fills an
+  // empty new form (issue 743). Only a reply to the mail that the form shows: a
+  // nudge goes to another person, and the brief offers it.
+  // A saved form that still holds the start values of the reply (no text, no intent,
+  // the same recipients) is a form that the person did not start. After a press of
+  // "Write it for me", only that answer fills the form. The form must still be
+  // untouched when the read answers.
+  const same = (a: string[], b: string[]) => a.length === b.length && unique(a).every((x) => b.includes(x));
+  const untouched = (f: Pick<Saved, "to" | "cc" | "body" | "intent" | "toText" | "ccText"> | null) =>
+    !f || (!f.body.trim() && !f.intent?.trim() && !f.toText?.trim() && !f.ccText?.trim() && same(f.to, reply?.to ?? []) && same(f.cc, reply?.cc ?? []));
+  let filled = $state(false);
+  let asked = false;
+  if (thread && reply && untouched(saved) && !taken()) {
+    get<ThreadDraft>(`threads/${encodeURIComponent(thread)}/draft`).then(
+      (d) => {
+        if (alive && !write && !asked && !d.nudge && d.based_on === reply.parent.id && untouched({ to, cc, body, intent, toText, ccText })) {
+          body = d.body;
+          filled = true;
+        }
+      },
+      () => {},
+    );
   }
 
   // After the engine took the mail: the write `cs-N` and its state.
@@ -444,6 +469,7 @@
         <button type="button" class="pill" onclick={draftIt}>{drafting ? "Writing" : "Write it for me"}</button>
       </div>
       {#if draftNote}<p class="note" role="alert">{draftNote}</p>{/if}
+      {#if filled && !draftNote}<p class="saved">Iris wrote this draft for you before. Read it and change it before you send.</p>{/if}
     {/if}
     <textarea class="body" aria-label={reply ? "Reply text" : "Mail text"} placeholder={reply ? "Write your reply" : "Write your mail"} bind:value={body}></textarea>
 
@@ -699,6 +725,11 @@
   }
   .intent input:focus {
     outline: none;
+  }
+  .saved {
+    margin: var(--space-2) 0 0;
+    color: var(--color-text-muted);
+    font-size: var(--font-size--1);
   }
   .note {
     margin: var(--space-2) 0 0;
