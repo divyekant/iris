@@ -583,3 +583,28 @@ test("a request with no proposed change does not ask what a rule would decide", 
     view.destroy();
   }
 });
+
+test("a new revision of the request reads again what a rule would decide, and drops the old lines", async () => {
+  const proposed = { state: "proposed" };
+  const before = changeset([act({ decision: proposed, resolved: { messages: ["m-1"] } })]);
+  const after = { ...before, revision: 2, actions: [{ ...before.actions[0], decision: { state: "replaced", by: "author" } }, act({ revision: 2, hash: "h2", decision: proposed, resolved: { messages: ["m-1"] } })] };
+  let answer = { would: [{ revision: 1, n: 1, outcome: "approved", rule: 3, policy: 1, reason: "r" }] };
+  const asked = serve({
+    "changesets/cs-9/would": () => [200, answer],
+    "changesets/cs-9/decide": () => [409, { error: "the hash changed" }],
+    "changesets/cs-9": [200, after],
+  });
+  const view = await mount("/src/views/Review.svelte", { changesets: [before] });
+  try {
+    await until(() => view.target.querySelector(".would"));
+    assert.match(view.target.querySelector(".would").textContent, /rule 3 would approve/);
+    answer = { would: [{ revision: 2, n: 1, outcome: "denied", rule: 4, policy: 2, reason: "r" }] };
+    await until(() => !view.target.querySelector("button.primary").disabled);
+    view.target.querySelector("button.primary").click();
+    await until(() => view.target.querySelector(".would")?.textContent.includes("rule 4"));
+    assert.equal(view.target.querySelector(".would").textContent, "In apply mode, rule 4 would deny this change.");
+    assert.equal(asked.filter((p) => p === "changesets/cs-9/would").length, 2);
+  } finally {
+    view.destroy();
+  }
+});
