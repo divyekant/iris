@@ -451,6 +451,7 @@ pub(crate) fn pass(conn: &Connection, now: i64) -> Result<Found> {
             bulk: false,
             warning: false,
             in_thread: false,
+            marked: false,
             now,
         };
         let base = allows(&policy, &action, &messages);

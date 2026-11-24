@@ -727,3 +727,64 @@ fn apply_mode_sends_a_send_to_a_person_by_its_flags() {
     );
     assert!(d[1].3.contains("No rule can allow a send"), "{d:?}");
 }
+
+/// Decision D14 (issue #437): a rule allows archive, trash and label, but a
+/// trash or a label of a marked author (an agent with no job) goes to a
+/// person, by the limit. The person is not marked, so the rule allows it.
+#[test]
+fn apply_mode_sends_trash_and_label_of_a_marked_author_to_a_person() {
+    use iris_changeset::{add_action, create, submit, Author, AuthorKind, Verb};
+    let dir = TempDir::new("applymarked");
+    let (s, a) = store(&dir);
+    item(&s, a, "feed", "g1");
+    apply_policy(
+        &s,
+        &dir,
+        "[[rule]]\nid = 1\nname = \"Feed\"\neffect = \"allow\"\n\
+         verbs = [\"archive\", \"trash\", \"label\"]\nwhen = { form = \"feed\" }\n\
+         by = \"person\"\nadded = 2026-11-10\n",
+    );
+    let agent = Author {
+        kind: AuthorKind::Agent,
+        name: Some("t".into()),
+        session: None,
+        job: None,
+    };
+    let person = Author {
+        kind: AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    let mut label = serde_json::Map::new();
+    label.insert("label".into(), "Feeds".into());
+    let none = serde_json::Map::new();
+    for (who, author, marked) in [
+        (&agent, iris_policy::Author::Agent, true),
+        (&person, iris_policy::Author::Person, false),
+    ] {
+        let cs = create(&s, who, NOW).unwrap();
+        add_action(&s, cs, who, Verb::Archive, &["m-1"], &none, None).unwrap();
+        add_action(&s, cs, who, Verb::Trash, &["m-1"], &none, None).unwrap();
+        add_action(&s, cs, who, Verb::Label, &["m-1"], &label, None).unwrap();
+        submit(&s, cs, who, "Tidy.", NOW).unwrap();
+        s.write(|c| {
+            iris_triage::decide_submitted(c, cs, 1, author, NOW)
+                .map_err(|e| iris_store::Error::Io(std::io::Error::other(e.to_string())))
+        })
+        .unwrap();
+        let d = decisions(&s, cs);
+        assert_eq!((d[0].0.as_str(), d[0].2), ("approved", Some(1)), "{d:?}");
+        for x in &d[1..] {
+            if marked {
+                assert_eq!(
+                    (x.0.as_str(), x.1.as_str(), x.2),
+                    ("in_review", "limit", None)
+                );
+                assert_eq!(x.3, iris_policy::MARKED_REASON);
+            } else {
+                assert_eq!((x.0.as_str(), x.2), ("approved", Some(1)), "{d:?}");
+            }
+        }
+    }
+}
