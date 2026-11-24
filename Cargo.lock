@@ -951,6 +951,7 @@ dependencies = [
  "iris-sync",
  "iris-synth",
  "iris-talk",
+ "iris-triage",
  "iris-understand",
  "rusqlite",
  "serde",
