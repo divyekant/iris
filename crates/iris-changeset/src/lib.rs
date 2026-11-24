@@ -1476,13 +1476,15 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
             return Ok(Some(why));
         }
         // The flags come from the stored bytes (docs/specs/2026-11-17-send-checks.md).
-        if action_content(c, action)?.is_none() {
-            return Ok(Some(format!(
-                "{} has no content that Iris can check",
-                format_id(Kind::Draft, draft)
-            )));
+        match action_content(c, action)? {
+            None => {
+                return Ok(Some(format!(
+                    "{} has no content that Iris can check",
+                    format_id(Kind::Draft, draft)
+                )))
+            }
+            Some((_, content)) => return Ok(not_yet(&content)),
         }
-        return Ok(None);
     }
     let Ok(content) = serde_json::from_str::<iris_compose::Content>(args) else {
         return Ok(Some(
@@ -1490,6 +1492,9 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
                 .into(),
         ));
     };
+    if let Some(why) = not_yet(&content) {
+        return Ok(Some(why));
+    }
     let reply: bool = c.query_row(
         "SELECT json_type(targets, '$.threads') IS NOT NULL FROM changeset_action WHERE id = ?1",
         [action],
@@ -1516,6 +1521,16 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
         content
     };
     Ok(content.check().err())
+}
+
+/// The refusal of a content with `bcc` or attachments. They need the `Bcc`
+/// gate and the attachment folder of the send content spec
+/// (`docs/specs/2026-11-24-send-content.md`), which the next part builds.
+/// A draft at Gmail that the person gave a `Bcc` or a file reads back, so
+/// the send of it is refused too.
+fn not_yet(content: &iris_compose::Content) -> Option<String> {
+    (!content.bcc.is_empty() || !content.attachments.is_empty())
+        .then(|| "Iris cannot send Bcc or attachments yet".into())
 }
 
 /// Spec 2, section 6.5: an author other than the person writes no mail

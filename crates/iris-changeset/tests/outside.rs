@@ -448,6 +448,7 @@ fn the_store_limit_holds_for_a_send() {
             cc: Vec::new(),
             subject: "Plan".into(),
             body: "See you.".into(),
+            ..Default::default()
         }
         .check()
         .unwrap();

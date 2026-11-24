@@ -480,7 +480,10 @@ fn a_rate_limit_of_the_send_is_one_request_and_pending() {
 }
 
 /// Acceptance 3: a change at Gmail after the approval, also a new Bcc
-/// only, denies the send, and no `drafts/send` request goes out.
+/// only, denies the send, and no `drafts/send` request goes out. A Bcc
+/// reads back (send content spec, section 4): the row gets it, and a new
+/// send of it is refused until the Bcc gate exists. A `Reply-To` does not
+/// read back: the row becomes foreign.
 #[test]
 fn a_draft_changed_at_gmail_is_not_sent() {
     let b = setup("changed");
@@ -495,9 +498,79 @@ fn a_draft_changed_at_gmail_is_not_sent() {
         other => panic!("{other:?}"),
     }
     assert_eq!(b.sends(), 0);
+    let content: String = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT content FROM draft WHERE foreign_at IS NULL",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(content.contains("spy@x.org"), "{content}");
+    let (d, _) = b.draft(
+        b.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT action_id FROM draft WHERE foreign_at IS NULL",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap(),
+    );
+    let who = Author {
+        kind: AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    let cs = create(&b.store, &who, now()).unwrap();
+    add_action(
+        &b.store,
+        cs,
+        &who,
+        Verb::Send,
+        &[d.as_str()],
+        &Map::new(),
+        None,
+    )
+    .unwrap();
+    submit(&b.store, cs, &who, "Send.", now()).unwrap();
+    let st: String = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT state FROM changeset_action WHERE changeset_id = ?1",
+                [cs],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(st, "denied", "a send with Bcc waits for the Bcc gate");
+
+    let (s, provider) = b.new_mail(AGED);
+    let raw = String::from_utf8(b.gmail.draft_raw(TOKEN, &provider).unwrap().raw.unwrap()).unwrap();
+    assert!(b.fake.edit_draft(
+        &provider,
+        raw.replacen("To: ", "Reply-To: spy@x.org\r\nTo: ", 1)
+            .as_bytes()
+    ));
+    match b.release(s) {
+        Ok(Outcome::Denied(why)) => assert!(why.contains("changed at Gmail"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.sends(), 0);
     let foreign: bool = b
         .store
-        .read(|c| Ok(c.query_row("SELECT foreign_at IS NOT NULL FROM draft", [], |r| r.get(0))?))
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT foreign_at IS NOT NULL FROM draft WHERE provider_id = ?1",
+                [&provider],
+                |r| r.get(0),
+            )?)
+        })
         .unwrap();
     assert!(foreign);
 

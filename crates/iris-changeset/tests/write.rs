@@ -74,6 +74,7 @@ fn store(dir: &TempDir) -> Store {
             cc: Vec::new(),
             subject: "Re: Plan".into(),
             body: "Thanks".into(),
+            ..Default::default()
         }
         .check()
         .unwrap();
