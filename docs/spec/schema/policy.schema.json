@@ -30,7 +30,7 @@
   },
   "$defs": {
     "verb": {
-      "$comment": "The verbs of release 2 (section 4). untrash is not a verb of a rule: only an undo makes it. skip, mute and dismiss are of release 5 (docs/specs/2026-11-17-preference-rules.md).",
+      "$comment": "The verbs of release 2 (section 4). untrash is not a verb of a rule: only an undo makes it. draft is of release 3: a rule can allow a draft, never a send (decision D2). skip, mute and dismiss are of release 5 (docs/specs/2026-11-17-preference-rules.md).",
       "enum": [
         "archive",
         "inbox",
@@ -45,7 +45,8 @@
         "correct",
         "skip",
         "mute",
-        "dismiss"
+        "dismiss",
+        "draft"
       ]
     },
     "rule": {
@@ -128,6 +129,39 @@
           "verbs"
         ]
       },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "when"
+            ],
+            "properties": {
+              "when": {
+                "required": [
+                  "recipients"
+                ]
+              }
+            }
+          },
+          "then": {
+            "$comment": "Only a draft has recipients, so a rule with recipients is an action rule with only the verb draft.",
+            "properties": {
+              "effect": {
+                "enum": [
+                  "allow",
+                  "review",
+                  "deny"
+                ]
+              },
+              "verbs": {
+                "items": {
+                  "const": "draft"
+                }
+              }
+            }
+          }
+        }
+      ],
       "else": {
         "$comment": "An item has no verb, no author and no job, so a hide, a bundle or a notify rule with one could never match.",
         "properties": {
@@ -206,6 +240,12 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 4294967295
+        },
+        "recipients": {
+          "$comment": "thread: each address in To and Cc of the draft is in its thread (decision D3).",
+          "enum": [
+            "thread"
+          ]
         }
       }
     },

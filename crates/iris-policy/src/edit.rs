@@ -5,7 +5,8 @@
 
 use crate::active::{active, check, record, Checked};
 use crate::{
-    line_of, parse, sha256_hex, Author, By, Effect, Error, Mode, Policy, Rule, Verb, When,
+    line_of, parse, sha256_hex, Author, By, Effect, Error, Mode, Policy, Recipients, Rule, Verb,
+    When,
 };
 use iris_store::{BackupLock, PolicyExpect, Result, Store};
 use std::path::PathBuf;
@@ -40,19 +41,30 @@ pub enum Change {
 }
 
 /// The rule of a grant inside `job`, with the ID `id`, added on `added`.
+///
+/// A grant of `draft` allows only a reply to the addresses of its thread
+/// (decision D3), so `verbs` with `draft` must be `[Verb::Draft]`: a rule
+/// with `recipients` has only the verb `draft`.
 pub fn grant_rule(id: u32, job: &str, verbs: &[Verb], added: &str) -> Rule {
     let names: Vec<&str> = verbs.iter().map(|v| v.name()).collect();
     let list = match names.split_last() {
         Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
         _ => names.join(""),
     };
+    let draft = verbs.contains(&Verb::Draft);
+    let name = if draft {
+        format!("In job {job}, allow drafts to the people in the thread without review")
+    } else {
+        format!("In job {job}, allow {list} without review")
+    };
     Rule {
         id,
-        name: format!("In job {job}, allow {list} without review"),
+        name,
         effect: Effect::Allow,
         verbs: verbs.to_vec(),
         when: When {
             author: Some(Author::Agent),
+            recipients: draft.then_some(Recipients::Thread),
             ..When::default()
         },
         by: By::Person,
@@ -385,6 +397,7 @@ fn add_rule(text: &str, rule: &crate::Rule, why: &str) -> std::result::Result<St
             w.commitment_kind.map(|c| c.name().to_string()),
         ),
         ("author", w.author.map(|a| a.name().to_string())),
+        ("recipients", w.recipients.map(|r| r.name().to_string())),
     ];
     for (key, value) in texts {
         if let Some(v) = value {

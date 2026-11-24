@@ -73,16 +73,12 @@ struct Sent {
 /// The eligibility of step 1, for one item `i` with its origin message
 /// `msg`. One text for the read of step 1 and the check of step 6.
 const ELIGIBLE: &str = concat!(
-    "NOT ",
-    iris_store::from_hostile_mail!("i"),
-    " AND i.form IN ('commitment', 'conversation', 'record')
-    AND i.status NOT IN ('gone', 'cancelled', 'declined')
-    AND i.duplicate_of IS NULL
-    AND coalesce(json_extract(i.doc, '$.attention.state'), 'shown') <> 'hidden'
-    AND i.updated_at >= ?1
-    AND NOT EXISTS (
-      SELECT 1 FROM matter_item mi JOIN matter m ON m.id = mi.matter_id
-      WHERE mi.item_id = i.id AND mi.kept = 1 AND m.status IN ('proposed', 'confirmed'))"
+    crate::live_item!(),
+    // shortcut: no signal candidates until the local API shows signal
+    // members; the proposal-step PR of the matters-edit spec removes it.
+    " AND i.form <> 'signal'",
+    " AND i.updated_at >= ?1 AND ",
+    crate::free_item!()
 );
 
 pub const INSTRUCTION: &str = "You group the items of one person's mail into matters. \
@@ -399,24 +395,14 @@ fn check(
     if threads.len() < 2 {
         return Ok(None);
     }
+    if declined_subset(tx, &items)? {
+        return Ok(None);
+    }
     let list = items
         .iter()
         .map(i64::to_string)
         .collect::<Vec<_>>()
         .join(",");
-    // A subset of a declined matter. The IDs are i64 values.
-    let declined: bool = tx.query_row(
-        &format!(
-            "SELECT EXISTS (SELECT 1 FROM matter m WHERE m.status = 'declined'
-               AND (SELECT count(*) FROM matter_item mi
-                    WHERE mi.matter_id = m.id AND mi.item_id IN ({list})) = ?1)"
-        ),
-        [items.len() as i64],
-        |r| r.get(0),
-    )?;
-    if declined {
-        return Ok(None);
-    }
     // Step 6: each member is still a candidate now.
     let live: i64 = tx.query_row(
         &format!(
@@ -430,10 +416,30 @@ fn check(
     Ok((live == items.len() as i64).then_some((title, items)))
 }
 
-fn kind_of(form: &str) -> Kind {
+/// True when `items` is a subset of the members of a declined matter (a
+/// decline, or the delete of a confirmed matter). The IDs are i64 values.
+pub(crate) fn declined_subset(tx: &Transaction, items: &[i64]) -> Result<bool> {
+    let list = items
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok(tx.query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM matter m WHERE m.status = 'declined'
+               AND (SELECT count(*) FROM matter_item mi
+                    WHERE mi.matter_id = m.id AND mi.item_id IN ({list})) = ?1)"
+        ),
+        [items.len() as i64],
+        |r| r.get(0),
+    )?)
+}
+
+pub(crate) fn kind_of(form: &str) -> Kind {
     match form {
         "commitment" => Kind::Commitment,
         "conversation" => Kind::Conversation,
+        "signal" => Kind::Signal,
         _ => Kind::Record,
     }
 }

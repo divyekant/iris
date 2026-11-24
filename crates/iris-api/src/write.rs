@@ -376,6 +376,7 @@ fn valid_address(a: &str) -> bool {
             cc: vec![],
             subject: "s".into(),
             body: "b".into(),
+            ..Default::default()
         }
         .check()
         .is_ok()

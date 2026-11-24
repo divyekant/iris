@@ -1998,3 +1998,17 @@ async fn hostile_reads(
         brief["hostile"].clone(),
     )
 }
+
+/// Decision D1: the status gives the time zone of the owner, so the client
+/// offers the days of Later in that zone.
+#[tokio::test]
+async fn status_gives_the_time_zone_of_the_owner() {
+    let dir = temp("time-zone");
+    let (store, _) = filled_n(&dir, 1);
+    let (_, v) = get(&store, "/api/status").await;
+    let computer = jiff::tz::TimeZone::system();
+    assert_eq!(v["time_zone"], serde_json::json!(computer.iana_name()));
+    store.set_time_zone(Some("Asia/Kolkata")).unwrap();
+    let (_, v) = get(&store, "/api/status").await;
+    assert_eq!(v["time_zone"], "Asia/Kolkata");
+}
