@@ -834,3 +834,44 @@ test("a saved form with a changed intent or recipient does not get the saved dra
     }
   }
 });
+
+test("a change to the intent or a recipient while the saved draft loads keeps the draft out (issue 743)", async () => {
+  const saved = { thread: "t-2", based_on: "m-9", nudge: false, to: null, item: null, body: "Hi Priya,\n\nYes, Friday at 10." };
+  for (const [name, change] of [
+    ["an intent", (app) => type(app.target.querySelector(".intent input"), "no, Monday")],
+    ["a recipient", (app) => {
+      [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Change").click();
+      app.flushSync();
+      type(app.target.querySelector("#write-to"), "sam@example.com ");
+    }],
+    ["open address text", (app) => {
+      [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Change").click();
+      app.flushSync();
+      type(app.target.querySelector("#write-to"), "sam@exa");
+    }],
+  ]) {
+    window.sessionStorage.clear();
+    let release;
+    const held = new Promise((r) => (release = r));
+    const net = serve((path, method) => (method === "GET" && path === "threads/t-2/draft" ? [200, saved] : [404, { error: "Not found." }]));
+    const fetch = globalThis.fetch;
+    globalThis.fetch = async (...a) => {
+      if (String(a[0]).endsWith("/draft")) await held;
+      return fetch(...a);
+    };
+    const app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+    try {
+      change(app);
+      app.flushSync();
+      release();
+      await new Promise((r) => setTimeout(r, 30));
+      app.flushSync();
+      assert.equal(app.target.querySelector("textarea").value, "", name);
+      assert.equal(app.target.querySelector(".saved"), null, name);
+    } finally {
+      globalThis.fetch = fetch;
+      app.destroy();
+      net.restore();
+    }
+  }
+});
