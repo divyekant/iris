@@ -47,7 +47,7 @@ macro_rules! free_item {
 
 pub mod edit;
 pub mod propose;
-pub use edit::{create, delete, edit, propose_by_agent, Edit};
+pub use edit::{create, delete, edit, parse_ref, propose_by_agent, Edit};
 pub use propose::{propose, Gate, Outcome, Skip};
 
 use iris_store::Store;
@@ -74,8 +74,11 @@ pub enum Error {
     Bad(&'static str),
     /// Understanding, or another proposal step, holds the run lock.
     Busy,
-    /// The program could not make the model from the model row.
+    /// The program could not make the model from the model row, or
+    /// another part of the program failed.
     Model(String),
+    /// The caller may not use an item (a job session and its grant).
+    Denied(String),
 }
 
 impl fmt::Display for Error {
@@ -86,6 +89,7 @@ impl fmt::Display for Error {
             Error::Conflict(why) | Error::Bad(why) => f.write_str(why),
             Error::Busy => f.write_str("a run is in progress"),
             Error::Model(e) => write!(f, "model: {e}"),
+            Error::Denied(why) => f.write_str(why),
         }
     }
 }

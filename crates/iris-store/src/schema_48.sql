@@ -1,21 +1,55 @@
--- Migration 48: who withdrew a changeset (decision D16, issue #221).
--- 'author': the author of the changeset withdrew it. 'person': you withdrew
--- it. NULL on a changeset that is not withdrawn, and on a changeset that a
--- version before migration 48 withdrew (the actor is not known).
-ALTER TABLE changeset ADD COLUMN withdrawn_by TEXT
-  CHECK (withdrawn_by IN ('author', 'person'));
+-- Migration 48 (decision D34, issue #626, docs/specs/2026-11-24-remove-account.md):
+-- IF NOT EXISTS: a test that sets an older user_version runs this again.
+-- an account in state `removing` or `removed` gets no new mail. A sync that
+-- started before the removal fails at its next write, so it cannot add mail
+-- after the removal. The states need no column: `account.state` is TEXT.
 
--- Each new withdraw names who withdrew, in the same update as the state.
-CREATE TRIGGER changeset_withdraw_by BEFORE UPDATE OF state ON changeset
-WHEN new.state = 'withdrawn' AND old.state <> 'withdrawn' AND new.withdrawn_by IS NULL
+CREATE TRIGGER IF NOT EXISTS removed_account_message BEFORE INSERT ON message
+  WHEN (SELECT state FROM account WHERE id = NEW.account_id) IN ('removing', 'removed')
 BEGIN
-  SELECT RAISE(ABORT, 'iris: a withdraw names who withdrew');
+  SELECT RAISE(ABORT, 'iris: the account is removed');
 END;
 
--- withdrawn_by is set only with the withdraw, and does not change after.
-CREATE TRIGGER changeset_withdrawn_by BEFORE UPDATE OF withdrawn_by ON changeset
-WHEN new.withdrawn_by IS NOT old.withdrawn_by
-  AND (old.state = 'withdrawn' OR new.state IS NOT 'withdrawn')
+CREATE TRIGGER IF NOT EXISTS removed_account_thread BEFORE INSERT ON thread
+  WHEN (SELECT state FROM account WHERE id = NEW.account_id) IN ('removing', 'removed')
 BEGIN
-  SELECT RAISE(ABORT, 'iris: withdrawn_by is set only with the withdraw');
+  SELECT RAISE(ABORT, 'iris: the account is removed');
 END;
+
+CREATE TRIGGER IF NOT EXISTS removed_account_label BEFORE INSERT ON label
+  WHEN (SELECT state FROM account WHERE id = NEW.account_id) IN ('removing', 'removed')
+BEGIN
+  SELECT RAISE(ABORT, 'iris: the account is removed');
+END;
+
+CREATE TRIGGER IF NOT EXISTS removed_account_item BEFORE INSERT ON item
+  WHEN (SELECT state FROM account WHERE id = NEW.account_id) IN ('removing', 'removed')
+BEGIN
+  SELECT RAISE(ABORT, 'iris: the account is removed');
+END;
+
+CREATE TRIGGER IF NOT EXISTS removed_account_body BEFORE INSERT ON body
+  WHEN (SELECT a.state FROM message m JOIN account a ON a.id = m.account_id
+        WHERE m.id = NEW.message_id) IN ('removing', 'removed')
+BEGIN
+  SELECT RAISE(ABORT, 'iris: the account is removed');
+END;
+
+-- The jobs whose workspace can hold mail of a removed account. The removal
+-- writes them before it deletes the items, because after that no other
+-- row links a job to the account. The delete builds each workspace again
+-- from an empty folder (other than notes.md), then deletes the row.
+CREATE TABLE IF NOT EXISTS removed_workspace (
+  account_id INTEGER NOT NULL REFERENCES account(id),
+  job_id INTEGER NOT NULL,
+  PRIMARY KEY (account_id, job_id)
+) WITHOUT ROWID;
+
+-- The sender addresses of the deleted messages of a removed account. Each
+-- batch of the delete writes them before it deletes the headers, so the
+-- last batch deletes only the senders of this account, also after a crash.
+CREATE TABLE IF NOT EXISTS removed_sender (
+  account_id INTEGER NOT NULL REFERENCES account(id),
+  address TEXT NOT NULL,
+  PRIMARY KEY (account_id, address)
+) WITHOUT ROWID;

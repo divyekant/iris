@@ -2,7 +2,7 @@
 
 - Status: draft, for the approval of the maintainer
 - Applies to: release 2 ("Apply"). Parts for releases 3 to 5 are marked.
-- Open model version: 1.1
+- Open model version: 1.2
 - Related: [Specification 1](01-mirror-store-forms.md), the manifesto and the
   experience document "Iris: the ideal experience"
 
@@ -627,8 +627,9 @@ A `notify` rule does not change the attention of an item. It gives one
 notice for each new mail that it matches, in the web client and in the
 system (`docs/specs/2026-11-16-notices.md`). It matches with the reading of
 a `review` rule: an item condition matches when one or more items of the
-message have the value. With no `notify` rule that matches, no notice
-appears.
+message have the value. With no `notify` rule that matches, no mail notice
+appears. One system notice comes from no rule: the due date that the person
+gave to a job (decision D24, `docs/specs/2026-11-24-job-due-date.md`).
 
 The engine evaluates the attention of an item again at these times:
 
@@ -655,6 +656,7 @@ in the file.
 |---|---|
 | A `send` never goes at once. | It waits in the held outbox for the hold delay, after the approval (release 3). |
 | A `draft` or a `send` with the flag `new_recipient`, `outside_thread`, `money` or `date`. | Review, even if a rule allows it. Only a person approves it (store migration 25). The decision is by `limit`. |
+| A `trash` or a `label` of a marked author: an author that read mail that you did not send (`iris_changeset::marked_in`, decision D14, issue #437). | Review, even if a rule allows it. A deny rule still denies it. The decision is by `limit`. |
 | A `send`. | Review. No rule can allow a send (section 6.2). |
 | An action with the flag `bulk`. | Review, even if a rule allows it. |
 | An action by an author other than `person`, whose target has hostile mail: a message with a hostile mark, a message that waits for its link check (a `link_check` row), or a message from a `hostile` sender (specification 1, section 6.7). For a thread or a draft target, each message of the thread counts. | Only `archive`, `trash` and `label`. Other verbs are denied. |
@@ -1241,13 +1243,15 @@ agent that does not work in a folder. The rules for the MCP interface:
 - One MCP tool for each verb of the command, with the same name and the same
   arguments. A verb with subcommands gives one tool for each subcommand,
   with an underscore (`watch_add`, `watch_list`, `watch_remove`,
-  `matters_list`, `matters_show`). `iris changeset --drafts` is the tool
+  `matters_list`, `matters_show`, `matters_propose`). `iris changeset --drafts` is the tool
   `drafts`, and the file of `iris draft` is the object `draft`. MCP gives no
   verb that the command does not have. It gives no verb of the person
   (`sending`, `cancel`), no verb of the host (`serve`, `account`,
   `mirror`, `backup`, `export`, `service`, `model`, `understand`, `mcp`),
-  and not `matters propose` or `write` (the draft in your voice, R3-05),
-  which spend model budget. A test checks
+  and not `write` (the draft in your voice, R3-05) or `matters propose`
+  with no title, which spend model budget. `matters_propose` takes a title
+  and items only: it proposes a matter of these items for the person
+  (docs/specs/2026-11-24-matters-edit.md). A test checks
   that each verb is a tool or is in this list.
 - Each tool call takes the path of its verb in the same mode, so MCP adds
   no power. In host mode, these are the paths:
@@ -1271,8 +1275,8 @@ agent that does not work in a folder. The rules for the MCP interface:
   | `watch_add`, `watch_remove` | The text of the verb (`w-1: Iris tells you ...`, `w-1 removed.`), because the verb has no `--json`. The line starts with the watch ID. |
   | Each tool that adds an action | The JSON of the engine answer (`{"changeset": ..., "n": ...}`). The verb prints `<cs-id> <n>` and has no `--json`. |
 
-  `matters_list` and `matters_show` give JSON, because the verb always
-  prints JSON. A verb that ends with a code that is not 0 gives an error
+  `matters_list`, `matters_show` and `matters_propose` give JSON, because
+  the verb always prints JSON. A verb that ends with a code that is not 0 gives an error
   result: the printed text, then the error line of standard error
   (`iris: <error>`), then `exit code N` (section 8.4).
 

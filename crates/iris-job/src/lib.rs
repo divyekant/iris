@@ -393,6 +393,95 @@ pub fn wake_in(c: &Connection, job: i64, by: By, why: Option<&str>, now_ms: i64)
     add_event(c, job, State::Working, by, m, now_ms)
 }
 
+/// The question of the move on the due date (decision D24). Fixed engine
+/// text: no mail text and no goal goes into it.
+pub const DUE_QUESTION: &str = "The due date passed. Answer to go on, or end the job.";
+
+/// A job that [`move_due`] moved to `needs_you`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Due {
+    pub id: i64,
+    pub goal: String,
+}
+
+/// The rule of docs/specs/2026-11-24-job-due-date.md, as SQL on the job
+/// row `j`: an open job that does not wait for the person, at or after its
+/// due date (`?1` is now), with no move to `needs_you` and no move by the
+/// person at or after the due date. So the move happens once for each due
+/// date. The first event (the start, by the person) is not a move: a job
+/// that starts after its due date also moves.
+const DUE_SQL: &str = "j.state IN ('working', 'waiting') AND j.due_at <= ?1
+     AND NOT EXISTS (SELECT 1 FROM job_event e WHERE e.job_id = j.id
+                     AND e.id > (SELECT min(f.id) FROM job_event f WHERE f.job_id = j.id)
+                     AND e.at >= j.due_at AND (e.state = 'needs_you' OR e.by = 'person'))";
+
+/// The result of [`move_due`]: the moved jobs, and each job whose move
+/// failed, with its error.
+#[derive(Debug, Default)]
+pub struct DueTurn {
+    pub moved: Vec<Due>,
+    pub failed: Vec<(i64, Error)>,
+}
+
+/// Moves each job that is due at `now_ms` to `needs_you` ([`due_jobs`],
+/// then [`move_due_one`] for each). The failure of one job does not stop
+/// the others, and a move that committed stays in `moved`.
+pub fn move_due(store: &Store, now_ms: i64) -> Result<DueTurn> {
+    let mut turn = DueTurn::default();
+    for id in due_jobs(store, now_ms)? {
+        match move_due_one(store, id, now_ms) {
+            Ok(m) => turn.moved.extend(m),
+            Err(e) => turn.failed.push((id, e)),
+        }
+    }
+    Ok(turn)
+}
+
+/// The IDs of the jobs that are due at `now_ms`, in a read (no write lock).
+pub fn due_jobs(store: &Store, now_ms: i64) -> Result<Vec<i64>> {
+    Ok(store.read(|c| {
+        let mut st = c.prepare_cached(&format!(
+            "SELECT j.id FROM job j WHERE {DUE_SQL} ORDER BY j.id"
+        ))?;
+        let rows = st.query_map([now_ms], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    })?)
+}
+
+/// Moves `job` to `needs_you`, by the engine, with [`DUE_QUESTION`] and
+/// the reason `due`, if it is due at `now_ms`. One write transaction reads
+/// the rule again, so a move of the person or of the agent after
+/// [`due_jobs`] wins, and this gives `None`.
+pub fn move_due_one(store: &Store, job: i64, now_ms: i64) -> Result<Option<Due>> {
+    transaction(store, |c| {
+        // A goal that is not UTF-8 fails here, before the move: each reader
+        // of the job refuses it, so the job must not ask a question.
+        let still: Option<String> = c
+            .query_row(
+                &format!("SELECT j.goal FROM job j WHERE j.id = ?2 AND {DUE_SQL}"),
+                params![now_ms, job],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(goal) = still else {
+            return Ok(None);
+        };
+        let m = Move {
+            question: Some(DUE_QUESTION),
+            why: Some("due"),
+            ..Move::default()
+        };
+        // Not before the newest event: a clock that goes back must not fail
+        // the move (as [`finish_in`]).
+        let updated: i64 = c.query_row("SELECT updated_at FROM job WHERE id = ?1", [job], |r| {
+            r.get(0)
+        })?;
+        let at = now_ms.max(updated);
+        add_event(c, job, State::NeedsYou, By::Engine, m, at)?;
+        Ok(Some(Due { id: job, goal }))
+    })
+}
+
 /// The jobs that wait for a new session after a wake by the engine or an
 /// answer of the person (card R5-05): the job is `working`, its newest
 /// event is a wake by the engine or has an answer, and the last session of

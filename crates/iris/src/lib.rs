@@ -423,9 +423,17 @@ pub enum MattersCommand {
     List,
     /// One matter (`g-4`) with its members, by form.
     Show { id: String },
-    /// Ask the model for new proposals now: at most one call, after the
-    /// wait of a model error, and only for a new set of candidates.
-    Propose,
+    /// With no title and no items: ask the model for new proposals now (at
+    /// most one call, after the wait of a model error, and only for a new
+    /// set of candidates). With `--title` and 2 or more item IDs: propose a
+    /// matter of these items; the person confirms it in the web client.
+    Propose {
+        /// The title of the matter, 1 to 80 characters.
+        #[arg(long)]
+        title: Option<String>,
+        /// The item IDs, for example `c-1 r-4 s-9`.
+        items: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -623,6 +631,15 @@ pub enum AccountCommand {
         #[arg(long)]
         paste: bool,
     },
+    /// Remove an account and its mail from Iris. The mailbox at the
+    /// provider does not change. Backups keep the mail.
+    Remove {
+        /// The mail address of the account.
+        address: String,
+        /// Do not ask for the address again.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Add an IMAP mailbox, or give a new password to one. The command reads
     /// the password (an app password of the provider) from the terminal
     /// with no echo, or one line of standard input, and signs in once to
@@ -771,6 +788,21 @@ fn socket_request(
         Command::Revise { id, json } => {
             Some(("revise", serde_json::json!({ "changeset": id }), *json))
         }
+        Command::Matters {
+            command: Some(MattersCommand::Propose { title, items }),
+        } if title.is_some() || !items.is_empty() => {
+            let Some(title) = title else {
+                return Err(socket::Failure {
+                    code: socket::code::USAGE,
+                    error: "give the title with --title".into(),
+                });
+            };
+            Some((
+                "matters.propose",
+                serde_json::json!({ "title": title, "items": items }),
+                true,
+            ))
+        }
         c => add_request(c)?.map(|r| ("add", r, false)),
     })
 }
@@ -912,7 +944,14 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
     }
     // Only the write verbs of a session (R4-03): `drafts`, for example, is
     // a host verb of the socket.
-    const SESSION_VERBS: [&str; 5] = ["add", "submit", "show", "withdraw", "revise"];
+    const SESSION_VERBS: [&str; 6] = [
+        "add",
+        "submit",
+        "show",
+        "withdraw",
+        "revise",
+        "matters.propose",
+    ];
     let request = socket_request(c)?.filter(|(verb, ..)| SESSION_VERBS.contains(verb));
     let Some((verb, args, json)) = request else {
         return Err(denied("this verb is not a verb of a session"));
@@ -1247,6 +1286,8 @@ fn socket_verb_at(
             r["n"]
         ),
         "drafts" => drafts_text(&r, json),
+        // The matter view, as `iris matters show` prints it.
+        "matters.propose" => format!("{r}\n"),
         "submit" => {
             let code = submit_code(&r);
             if code != 0 {
@@ -1518,6 +1559,16 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
                     paste,
                 },
         } => account_add_outlook(&open()?, client_id, tenant, *paste),
+        Command::Account {
+            command: AccountCommand::Remove { address, yes },
+        } => {
+            let store = open()?;
+            if !yes {
+                let stdin = std::io::stdin();
+                remove_confirm(address, &mut stdin.lock())?;
+            }
+            print(account_remove(&store, address))
+        }
         Command::Mirror { command } => mirror(Arc::new(open()?), command),
         Command::Mcp => mcp(engine::data_dir(cli.data.clone()).map_err(|e| e.to_string())?),
         Command::Status { json } => print(verbs::status(&open()?, *json)),
@@ -1601,7 +1652,7 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         Command::Matters { command } => {
             let store = open()?;
             let text = match command.as_ref().unwrap_or(&MattersCommand::List) {
-                MattersCommand::Propose => {
+                MattersCommand::Propose { title: None, items } if items.is_empty() => {
                     cost::propose_matters(&store, iris_matters::Gate::Now, engine::now_ms())?
                         .ok_or("an understanding run holds the lock; try again later")?
                 }
@@ -2492,6 +2543,60 @@ fn stop_text(s: &iris_apply::Stopped) -> String {
     text
 }
 
+/// What stays after a removal. The question says it before the removal,
+/// and the result says it again.
+const REMOVE_KEEPS: &str = "A backup copy that you made, the copies iris.db.v*.bak in the \
+     data folder and the notes of jobs still hold this mail.";
+
+/// The question of `iris account remove`, before the removal.
+fn remove_question(address: &str) -> String {
+    format!(
+        "This removes {address} and its mail from Iris on this machine. \
+         The mailbox at the provider does not change. The files of agents in the \
+         workspaces of its jobs go. {REMOVE_KEEPS} Type the address to remove it: "
+    )
+}
+
+/// Ask for the address of the account again before a removal. A wrong
+/// answer refuses the removal.
+fn remove_confirm(address: &str, input: &mut impl BufRead) -> Result<(), String> {
+    eprint!("{}", remove_question(address));
+    let mut line = String::new();
+    input.read_line(&mut line).map_err(|e| e.to_string())?;
+    if line.trim() != address {
+        return Err("The account stays.".into());
+    }
+    Ok(())
+}
+
+/// `iris account remove`: the removal, then the delete of the mail. The
+/// delete waits for a sync or a backup that holds its lock.
+fn account_remove(store: &Store, address: &str) -> Result<String, String> {
+    let id = store
+        .remove_account(address, engine::now_ms())
+        .map_err(|e| e.to_string())?;
+    let done = engine::delete_removed(store, Some(id)).map_err(|e| e.to_string())?;
+    let state: Option<String> = store
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT state FROM account WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .map_err(|e| e.to_string())?;
+    let first = if state.as_deref() == Some(iris_store::STATE_REMOVED) {
+        format!(
+            "iris: removed {address} and its mail ({} messages).",
+            done.map_or(0, |d| d.messages)
+        )
+    } else {
+        // A busy checkpoint: the next engine tick ends the delete.
+        format!("iris: removed {address}. `iris serve` ends the delete of its mail.")
+    };
+    Ok(format!("{first}\niris: {REMOVE_KEEPS}\n"))
+}
+
 /// The confirmation of `iris sending on`: a terminal and a typed "yes". So
 /// a script with no terminal does not turn sending on by mistake.
 /// `terminal` is true when standard input is a terminal: a script or an
@@ -2593,6 +2698,30 @@ mod outbox_tests {
         }
         let r = sending_on_confirm(false, &mut "yes\n".as_bytes());
         assert!(r.unwrap_err().contains("needs a terminal"));
+    }
+
+    #[test]
+    fn only_the_address_removes_an_account() {
+        let a = "a@example.org";
+        assert_eq!(remove_confirm(a, &mut "a@example.org\n".as_bytes()), Ok(()));
+        for answer in ["yes\n", "\n", "", "b@example.org\n", "A@example.org\n"] {
+            assert_eq!(
+                remove_confirm(a, &mut answer.as_bytes()),
+                Err("The account stays.".to_string()),
+                "{answer:?}"
+            );
+        }
+        // The question says what stays before the removal (spec, "Command").
+        let q = remove_question(a);
+        for word in [
+            "backup copy",
+            "iris.db.v*.bak",
+            "notes of jobs",
+            "files of agents",
+            "provider does not change",
+        ] {
+            assert!(q.contains(word), "{word}: {q}");
+        }
     }
 
     /// A store with account 1 and draft d-1 (a new mail that the apply

@@ -16,6 +16,22 @@ use crate::{check_title, insert_by, status, write, Error, Result, MAX_ITEMS};
 /// (`c-` is a commitment). A row of another form is not the item.
 pub type Ref<'a> = (i64, &'a str);
 
+/// The row and the form of a member ID that a request can name (`c-`, `v-`
+/// or `r-`). `None` for another kind or a text that is no ID.
+pub fn parse_ref(id: &str) -> Option<Ref<'static>> {
+    use iris_store::Kind;
+    let (kind, row) = iris_store::parse_id(id)?;
+    let form = match kind {
+        Kind::Commitment => "commitment",
+        Kind::Conversation => "conversation",
+        Kind::Record => "record",
+        // shortcut: no signal from a request until the web client shows
+        // signal members (#884); the client PR of the matters-edit spec adds `s-`.
+        _ => return None,
+    };
+    Some((row, form))
+}
+
 /// An edit of a confirmed matter: a new title, items to add, and items to
 /// remove (a kept member, or a pending addition that the person refuses).
 #[derive(Clone, Debug, Default)]
