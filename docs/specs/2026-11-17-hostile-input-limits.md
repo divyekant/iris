@@ -93,7 +93,7 @@ gives no thread address. A new mail (target
 **Your addresses** are `iris_talk::your_addresses`: each account address and
 the From of each message that you sent.
 
-An address of `to` or `cc` of the draft content is **outside** when it is
+An address of `to`, `cc` or `bcc` of the draft content is **outside** when it is
 not a thread address and not one of your addresses. The compare is on the
 address in ASCII lowercase. The content is the content of the flags
 (`iris_changeset::action_content`): the arguments of a `draft`, and the
@@ -106,7 +106,7 @@ Submit (`iris_changeset::submit_in`) adds `outside_thread` to a `draft` or a
 (`iris_changeset::marked_in`) and the content has an outside address
 (`iris_changeset::outside_marks` is not empty). The drafts API of the
 review (`GET /api/changesets/{id}/drafts`) marks each outside address of
-`to` and `cc` with the flag `outside_thread`, by the same rule
+`to`, `cc` and `bcc` with the flag `outside_thread`, by the same rule
 (`outside_marks`). The review screen shows the tag "not in the thread"
 beside each marked address (issue 462). If no address has the mark (for
 example, the thread changed after the submit), the API lists the flag in

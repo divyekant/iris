@@ -953,7 +953,7 @@ pub fn marked_in(c: &Connection, changeset: i64) -> Result<bool> {
 }
 
 /// The marks of the flag `outside_thread` (spec R4-06): each address of
-/// `to` and `cc` of `content` that is not in From, To or Cc of a live
+/// `to`, `cc` and `bcc` of `content` that is not in From, To or Cc of a live
 /// message of the threads of `action`, and is not one of your addresses. A
 /// new mail has no thread. Submit gives the flag to a marked author when
 /// this list is not empty.
@@ -965,11 +965,8 @@ pub fn outside_marks(
     // Memory holds the recipients that no row names yet (at most the
     // recipients of the draft) and one header row, never a list of the
     // addresses of the thread or of one header.
-    let mut open: HashSet<String> = content
-        .to
-        .iter()
-        .chain(&content.cc)
-        .map(|a| a.trim().to_ascii_lowercase())
+    let mut open: HashSet<String> = flags::recipients(content)
+        .map(|(_, a)| a.trim().to_ascii_lowercase())
         .collect();
     iris_talk::each_your_address(c, |a| {
         open.remove(&a);
@@ -992,24 +989,7 @@ pub fn outside_marks(
             }
         }
     }
-    let to = content
-        .to
-        .iter()
-        .enumerate()
-        .map(|(i, a)| (Field::To(i), a));
-    let cc = content
-        .cc
-        .iter()
-        .enumerate()
-        .map(|(i, a)| (Field::Cc(i), a));
-    let bcc = content
-        .bcc
-        .iter()
-        .enumerate()
-        .map(|(i, a)| (Field::Bcc(i), a));
-    Ok(to
-        .chain(cc)
-        .chain(bcc)
+    Ok(flags::recipients(content)
         .filter(|(_, a)| open.contains(&a.trim().to_ascii_lowercase()))
         .map(|(field, a)| Mark {
             flag: "outside_thread",

@@ -210,6 +210,44 @@ fn a_reply_of_a_marked_author_outside_the_thread_has_the_flag() {
     assert!(!f.contains(&"outside_thread".to_string()), "{f:?}");
 }
 
+/// Each recipient field counts, Bcc too: a known Bcc address outside the
+/// thread gets `outside_thread`, so the store limit still needs a person.
+#[test]
+fn a_bcc_outside_the_thread_has_the_flag() {
+    let dir = TempDir::new("bcc");
+    let s = store(&dir);
+    s.write(|tx| {
+        tx.execute_batch(
+            "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES ('', '', 0);
+             INSERT INTO policy_rule_id(id) VALUES (1);
+             INSERT INTO sender_evidence(message_id, address, rule) VALUES (2, 'priya@example.com', 'sent');
+             INSERT INTO sender_evidence(message_id, address, rule) VALUES (2, 'eve@evil.example', 'sent');",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let local = author(AuthorKind::Local, None);
+    let cs = create(&s, &local, NOW).unwrap();
+    let mut m = mail(true, &["priya@example.com"], &[]);
+    m.insert("bcc".into(), json!(["eve@evil.example"]));
+    let n = add_action(&s, cs, &local, Verb::Draft, &["t-1"], &m, None).unwrap();
+    submit(&s, cs, &local, "Answer", NOW).unwrap();
+    let (a, f): (i64, String) = s
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT id, flags FROM changeset_action WHERE changeset_id = ?1 AND n = ?2",
+                [cs, n],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert!(f.contains("outside_thread"), "{f}");
+    assert!(!f.contains("new_recipient"), "{f}");
+    assert!(rule_approve(&s, a)
+        .unwrap_err()
+        .contains("only a person approves"));
+}
+
 #[test]
 fn a_gone_thread_message_gives_no_thread_address() {
     let dir = TempDir::new("gone");

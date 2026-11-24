@@ -347,6 +347,27 @@ pub enum Field {
     Body,
 }
 
+/// Each recipient of `content`, in `to`, `cc` and `bcc`, with its field.
+/// Each recipient check reads this list, so no check misses a field.
+pub fn recipients(content: &iris_compose::Content) -> impl Iterator<Item = (Field, &String)> {
+    let to = content
+        .to
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (Field::To(i), a));
+    let cc = content
+        .cc
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (Field::Cc(i), a));
+    let bcc = content
+        .bcc
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (Field::Bcc(i), a));
+    to.chain(cc).chain(bcc)
+}
+
 /// One part of a draft that gave a draft flag (card R4-07): the review
 /// shows the flag on this part.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -392,25 +413,7 @@ fn scan(c: &Connection, account: &str, content: &Content, all: bool) -> Result<V
         range,
         source,
     };
-    let addresses = content
-        .to
-        .iter()
-        .enumerate()
-        .map(|(i, a)| (Field::To(i), a))
-        .chain(
-            content
-                .cc
-                .iter()
-                .enumerate()
-                .map(|(i, a)| (Field::Cc(i), a)),
-        )
-        .chain(
-            content
-                .bcc
-                .iter()
-                .enumerate()
-                .map(|(i, a)| (Field::Bcc(i), a)),
-        );
+    let addresses = recipients(content);
     for (field, a) in addresses {
         if a.eq_ignore_ascii_case(account) {
             continue;
