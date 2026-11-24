@@ -553,3 +553,25 @@ test("a request with no older change does not ask for the revisions", async () =
     view.destroy();
   }
 });
+
+// Decision D16: a withdrawn request names who withdrew it. A store from before the change does not know.
+test("a withdrawn request names who withdrew it", async () => {
+  const before = three();
+  for (const [by, words] of [
+    ["author", "Claude Code withdrew this request."],
+    ["person", "You withdrew this request."],
+    [undefined, "This request is withdrawn."],
+  ]) {
+    const gone = { ...before, state: "withdrawn", withdrawn_by: by, actions: before.actions.map((a) => ({ ...a, decision: { state: "cancelled", by: "author" } })) };
+    serve({ "changesets/cs-9/withdraw": () => [409, { error: "the changeset is withdrawn" }], "changesets/cs-9": [200, gone] });
+    const view = await mount("/src/views/Review.svelte", { changesets: [before] });
+    try {
+      view.target.querySelector("button.end").click();
+      view.flushSync();
+      view.target.querySelector(".question button.outline").click();
+      await until(() => text(view.target).includes(words));
+    } finally {
+      view.destroy();
+    }
+  }
+});

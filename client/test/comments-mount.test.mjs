@@ -101,12 +101,22 @@ test("a refused comment loads the request again and says why", async () => {
   }
 });
 
-test("a changeset with no job has no comment box", async () => {
+// Decision D15: an agent with no job and a local author take a comment; they read it with the request.
+test("an agent with no job and a local author have a comment box; triage and you have none", async () => {
   serve(() => [500, {}]);
-  for (const author of [{ kind: "agent", name: "Claude Code" }, { kind: "triage" }]) {
+  for (const [author, box] of [
+    [{ kind: "agent", name: "Claude Code" }, true],
+    [{ kind: "local", name: "Claude Code" }, true],
+    [{ kind: "triage" }, false],
+    [{ kind: "person" }, false],
+  ]) {
     const view = await mount("/src/views/Request.svelte", { changeset: changeset(author) });
     try {
-      assert.equal(view.target.querySelector(".comments"), null);
+      if (box) {
+        const area = await open(view);
+        assert.ok(area, author.kind);
+        assert.match(view.target.querySelector(".comments label").textContent, /Claude Code reads it the next time it looks at this request\./);
+      } else assert.equal(view.target.querySelector(".comments"), null, author.kind);
     } finally {
       view.destroy();
     }

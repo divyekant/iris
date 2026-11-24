@@ -36,6 +36,14 @@
   // with an unknown result, or a 409, until the request loads again.
   let stale = $state(false);
   let who = $derived(author(c));
+  // Who withdrew the request (decision D16). A store from before the change does not know.
+  let withdrawn = $derived(
+    c.withdrawn_by === "person" || (c.withdrawn_by === "author" && c.author.kind === "person")
+      ? "You withdrew this request."
+      : c.withdrawn_by === "author"
+        ? `${who} withdrew this request.`
+        : "This request is withdrawn.",
+  );
   let mark = $derived(who.split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase()).join(""));
 
   // The targets of each action, loaded in pages: messages by their summaries, items one by one.
@@ -246,9 +254,9 @@
   {/if}
 {/snippet}
 
-<!-- Only a changeset of a job takes a comment: its agent reads the comment in the next session. -->
+<!-- An agent or a local author takes a comment (decision D15). A job agent reads it in its next session; another author reads it with the request. -->
 {#snippet comments()}
-  {#if c.author.job}<Comments changeset={c} agent={who} refused={refresh} />{/if}
+  {#if c.author.kind === "agent" || c.author.kind === "local"}<Comments changeset={c} agent={who} job={!!c.author.job} refused={refresh} />{/if}
 {/snippet}
 
 <!-- Withdraw ends the whole request, so it sits at the end of the decision row (option B, the owner's pick). -->
@@ -324,7 +332,7 @@
     {/if}
   {/if}
   {#if asking}{@render question()}{/if}
-  {#if c.state === "withdrawn" && !saved}<p class="saved">This request is withdrawn.</p>{/if}
+  {#if c.state === "withdrawn" && !saved}<p class="saved">{withdrawn}</p>{/if}
   {#if problem}
     <p role="alert">
       {problem}
