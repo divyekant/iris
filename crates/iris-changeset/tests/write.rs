@@ -74,6 +74,7 @@ fn store(dir: &TempDir) -> Store {
             cc: Vec::new(),
             subject: "Re: Plan".into(),
             body: "Thanks".into(),
+            ..Default::default()
         }
         .check()
         .unwrap();
@@ -165,7 +166,7 @@ fn submit_denies_a_draft_that_is_not_valid() {
         ),
         (
             &["a-1"],
-            json!({"to": ["p@x.org"], "subject": "s", "body": "x", "bcc": []}),
+            json!({"to": ["p@x.org"], "subject": "s", "body": "x", "reply_to": []}),
             "draft takes",
         ),
         (

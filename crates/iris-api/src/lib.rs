@@ -155,6 +155,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/changesets/{id}", get(get_changeset))
         .route("/api/changesets/{id}/drafts", get(get_drafts))
         .route("/api/changesets/{id}/revisions", get(get_revisions))
+        .route("/api/changesets/{id}/would", get(get_would))
         .route("/api/changesets/{id}/decide", post(post_decide))
         .route("/api/changesets/{id}/withdraw", post(post_withdraw))
         .route(
@@ -296,6 +297,15 @@ async fn get_revisions(State(s): State<Arc<Store>>, Path(id): Path<String>) -> R
         return Ok(not_found());
     };
     Ok(Json(review::revisions(&s, row)?).into_response())
+}
+
+/// What a rule would decide for each proposed action, in the mode
+/// `observe` (decision D10, issue #193).
+async fn get_would(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    let Some(row) = changeset_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    Ok(stream(move |w| review::write_would(&s, row, now_ms(), w)).await)
 }
 
 #[derive(Deserialize)]

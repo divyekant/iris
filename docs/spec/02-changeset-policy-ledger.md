@@ -148,14 +148,20 @@ tick applies the approved action.
 The undo of the action is one action with the verb `restore` (section 7.4).
 Its apply sets the old values, sets the sender ID of each party from its
 address again, and deletes the correction rows of the entry (their IDs are in
-`ops`), in one transaction, with its own ledger row (the undo `none`), and
-the first entry becomes `undone`. The undo changes nothing on an item, and
-lists the item, if one of these is true:
+`ops`), in one transaction, with its own ledger row (the undo `none`). If
+the undo changed one or more items, the first entry becomes `undone`. If it
+changed no item, the first entry keeps its state, and the person can undo it
+again later (decision D18, issue #463). The undo changes nothing on an item,
+and lists the item, if one of these is true:
 
 - The current value is not the `post` value of the entry.
 - The item is gone.
-- A later state entry that did not fail names the item, also with the same
-  values. After the undo of a `correct` on a record with no
+- A later change of Iris on the item stands: an entry after this entry that
+  did not fail and names the item, also with the same values. A state verb
+  entry stands unless an undo of it restored the item. A `restore` is a
+  change only if it restored the item and undoes an entry before this
+  entry. So a `restore` that changed no item, or the undo of the later
+  entry, does not block a new undo of this entry. After the undo of a `correct` on a record with no
 correction left, the status of the record goes back to `kept`.
 
 `correct` cannot change `status`, a common field of section 6.1 of
@@ -283,7 +289,13 @@ content of the draft (section 7.5).
 If the policy mode is `observe`, the rules do not run in step 5, and each
 action stays `proposed`, except an action that a hard limit denies (section
 6.5): it gets `denied` by `limit` in both modes. A `proposed` action has no decision columns (section 5.6), so the
-engine does not store what the policy would do. The triage changeset of
+engine does not store what the policy would do. The review computes it
+at each read (decision D10, `GET /api/changesets/{id}/would`): for each
+`proposed` action, the decision that a rule of the active policy gives
+in the mode `apply`, with the same facts, flags and author. It is empty
+in the mode `apply` and with no confirmed policy. A read never changes an
+action, and it always follows the active policy of now, so a changed
+rule changes the answer at the next read. The triage changeset of
 release 2 follows the mode of the active policy, as each other changeset does
 (specification 1, section 8). Release 1 computes the triage proposal and does
 not store it (specification 1, section 8).
@@ -484,7 +496,7 @@ Conditions in `when`:
 | `commitment_kind` | The kind of a commitment. |
 | `author` | `person`, `agent`, `triage` or `local`. Each value matches only that author. |
 | `older_than_days` | The age of the message in days. |
-| `recipients` | `thread`: the action is a reply `draft`, and each address in To and Cc of the draft is in From, To or Cc of a live message of its thread, or is one of your addresses. A new mail has no thread, so it never matches. A rule with `recipients` has only the verb `draft` (decision D3, issue #386). |
+| `recipients` | `thread`: the action is a reply `draft`, and each address in To and Cc of the draft is in its thread, or is one of your addresses. An address is in the thread only if it is the From of a live message of the thread, or in To or Cc of a live message of the thread that you sent (decision D13, issue #435). A new mail has no thread, so it never matches. A rule with `recipients` has only the verb `draft` (decision D3, issue #386). |
 
 Version 1 has no other condition, and no expression language. A new condition
 needs a change to this specification.
@@ -963,13 +975,17 @@ applies it.
    two actions, action 2 is still `approved`, and it applies after the start
    (section 7.2, step 2 reads the labels again).
 5. Each action of the undo gets its own ledger entry. When the last action
-   of the undo becomes `applied`, and each action of the undo is
-   `applied`, the same transaction sets `undone_by` of the first entry to
-   the entry of action 1, and the trigger `ledger_state` moves its action
-   to `undone`. If an action of the undo fails, the first entry keeps its
+   of the undo becomes `applied`, each action of the undo is `applied`,
+   and the undo changed one or more messages (a `done` message in an entry
+   of the undo), the same transaction sets `undone_by` of the first entry
+   to the entry of action 1, and the trigger `ledger_state` moves its
+   action to `undone`. If an action of the undo fails, or the undo skipped
+   each message (decision D18, issue #463), the first entry keeps its
    state, and the person can undo it again: the next undo skips each
    message that is back, and its action 2 archives each message that an
-   earlier `untrash` changed.
+   earlier `untrash` changed. The result of the undo counts the skipped
+   messages as unchanged. The same rule applies to `restore`: a `restore`
+   that changed no item keeps the state entry open.
 
 An undo of an undo is a new action, not a delete of the record.
 
@@ -977,8 +993,8 @@ An undo of an undo is a new action, not a delete of the record.
 
 | Input or event | Failure mode | Safe result |
 |---|---|---|
-| The undo of a state entry whose item changed after the entry (a later action, also with the same values, understanding, the tick of a deferred item, or a gone item) | The undo reverses the later change | The apply of `restore` changes only an item that is not gone, that no later state entry names, and whose fields have the `post` values of the entry. It counts each other item as unchanged. It deletes only the correction rows whose IDs the entry holds, so another action of the same changeset keeps its rows. |
-| The undo of a `correct` of an array element (`fields.items.0`) | The undo changes nothing and still marks the entry `undone` | The apply sets each field with the path rule of a correction (`iris_talk::set_field`), with array indices. If a path does not fit the item, the item stays as it is and counts as unchanged. |
+| The undo of a state entry whose item changed after the entry (a later action, also with the same values, understanding, the tick of a deferred item, or a gone item) | The undo reverses the later change | The apply of `restore` changes only an item that is not gone, on which no later change of Iris stands (section 4), and whose fields have the `post` values of the entry. It counts each other item as unchanged. A `restore` that changed no item keeps the entry open (decision D18), and is no change that blocks a later undo. It deletes only the correction rows whose IDs the entry holds, so another action of the same changeset keeps its rows. |
+| The undo of a `correct` of an array element (`fields.items.0`) | The undo changes nothing and still marks the entry `undone` | The apply sets each field with the path rule of a correction (`iris_talk::set_field`), with array indices. If a path does not fit the item, the item stays as it is and counts as unchanged. If no item changed, the entry keeps its state (decision D18). |
 | The undo of a `correct` of a field whose parent was missing (`due.date` with no `due`) | The undo leaves an empty parent, and the item is not valid | The apply removes each parent object that becomes empty, and checks the restored item against the schemas. An item that is not valid stays as it is and counts as unchanged. |
 | The undo of a `correct` that changes more than its field (an address of the owner makes the whole party `self`) | The undo sets only the field back, and the party stays `self` | The entry holds the top-level value of the field, and the undo sets the whole value back. |
 | The undo of a `correct` of a party address | The party keeps the sender ID of the corrected address | The apply of `restore` sets the sender ID of each party from its address, with the rule of a correction. Migration 26 links `restore` with no arguments only to a state entry, as step 1. |
@@ -986,12 +1002,13 @@ An undo of an undo is a new action, not a delete of the record.
 | A second undo while an undo of the entry is open | Two undos change the same messages, or a one-action undo ends the entry while action 2 of another undo waits | `undo` refuses it until each action of the open undo ended. The trigger refuses a link while an action of another undo changeset of the entry is open, and a second link of the same step in one changeset. Action 2 of a `trash` undo applies also after a failed action 1, so the undo ends. |
 | A link of an action whose target is not the whole entry (`{"ledger": ["l-N"]}`), whose verb is not the inverse of the entry, with other arguments, a step 2 of an entry that is not `trash`, or a step 2 with no step 1 of the same entry in the same changeset | A link lets an action skip the mode, or makes `untrash` for an entry that is not a trash | The trigger `ledger_undo_insert` refuses the link. The end of a ledger entry records an undo only when the entry of step 1 exists, so it never fails on the link. The trigger `ledger_undo_action` refuses a change of the verb, the targets or the arguments of a linked action, also in a draft. Submit denies a linked action with another target, and also denies `untrash` unless the action is step 1 of the undo of a `trash` entry. The apply changes only the messages that the entry changed, whatever the targets. |
 | An entry with no message with `done`, or each such message gone | An undo that changes nothing | `undo` refuses it. Nothing is written. |
+| An undo that skips each message (a later entry of Iris changed it, or it changed at Gmail) | The undo uses up the undo of the entry, and a later undo of the blocker cannot reach the entry again | The undo action is `applied` with 0 changed messages, and the entry keeps its state (decision D18, issue #463). The person can undo the entry again later. |
 | A message that changed at Gmail after the entry | The undo reverses a change of the person | The apply reads the labels at Gmail, and skips the message if it does not have the `post` state. A change outside Iris that ends in the `post` state is not detected (issue #225). |
 | A message that a later entry of Iris changed (for example `archive`, `inbox`, `archive`, then the undo of the first `archive`) | The undo reverses the later action | The apply skips each message on which a later change of Iris stands, by the rule of step 3. The check reads only the ledger rows and undo links of that message. So an undo of the newest entry, then an undo of the entry before it, returns each message to its first state (card R2-13). |
 | A gone message, or HTTP 404 | A call on a message that does not exist | `undo` leaves a gone message out of the targets. The apply lists a message that Gmail does not have as gone. |
 | The mode `observe` | The person cannot reverse a change while Iris observes | The mode does not hold an undo. The apply checks the link of migration 23. |
 | Action 2 of the undo of `trash` before action 1 ends | An `archive` of a message that is still in the trash, or that `untrash` did not change | The apply of action 2 waits. Action 2 changes only the messages with `done` in the entry of action 1. |
-| A failed undo, or an unknown result, in action 1 or action 2 | Some messages are back, others are not, and the entry shows `undone` | The undo entry is `failed`, with its recovery. The first entry becomes `undone` only when each action of the undo is `applied`. Else it keeps its state, and a new undo skips each message that is back. |
+| A failed undo, or an unknown result, in action 1 or action 2 | Some messages are back, others are not, and the entry shows `undone` | The undo entry is `failed`, with its recovery. The first entry becomes `undone` only when each action of the undo is `applied` and the undo changed one or more messages. Else it keeps its state, and a new undo skips each message that is back. |
 | A write of `undone_by` with an entry that is not its undo | The ledger shows a wrong undo | The trigger `ledger_undone_by` refuses it: only the entry of action 1 of its own undo makes an entry `undone`. |
 | An undo of `label` or `unlabel` whose label Gmail deleted after the entry | The undo makes again a label that the person deleted, or Gmail refuses the call | Before step 2, the apply reads `labels.list`. If the label ID of the entry is not there, the engine denies the undo action, by `engine`, with no write call. The entry keeps its state. |
 
@@ -1076,11 +1093,8 @@ Release 1 has no verb that adds an action, so no request can skip the policy.
 The socket comes with the first verb that adds an action (release 2). Then
 each verb that adds, submits or withdraws an action goes through the socket
 (`docs/specs/2026-11-16-engine-socket.md`). In host mode, the read verbs
-(`status`, `search`, `show` and `brief`) keep the exception of
-release 1: they change nothing, so they cannot skip the policy. A host
-`list` is not built yet (issue #523): until its card, `iris list` in host
-mode gets exit code 2, and when it comes it reads the store directly under
-the same exception. In session
+(`status`, `search`, `show`, `list` and `brief`) keep the exception of
+release 1: they change nothing, so they cannot skip the policy. In session
 mode (release 4), each read verb goes through the session socket, and the
 engine applies the current grant of the job of the session
 (`docs/specs/2026-11-16-job-workspace.md`). A session never opens the store
@@ -1145,13 +1159,14 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris mirror verify` | Compares the mirror with Gmail (specification 1, section 4.8). | host | 1 |
 | `iris rebuild [--since-prompt <v>]` | Runs understanding again. | host | 1 |
 | `iris model set`, `iris model show` | Sets the model of understanding and its key (read from standard input), or shows the settings without the key (`docs/specs/2026-11-16-cost-control.md`). | host | 1 |
+| `iris zone [<name>]`, `iris zone --computer` | Shows or sets the time zone of defer dates and due dates: an IANA name, for example `Europe/Berlin`. `--computer` uses the time zone of the computer again (the default). Decision D1. | host | 1 |
 | `iris understand --estimate`, `iris understand --approve <code> --budget <usd>`, `iris understand [--max-cost <usd>] [--max-messages <n>]` | Shows the estimate and its approval code, approves a budget for paid runs after the estimate, and runs understanding on the pending messages. | host | 1 |
 | `iris backup <path>` | Copies the data folder while the engine runs. | host | 1 |
 | `iris export <path>` | Writes each item as JSON Lines, and copies the raw messages. | host | 1 |
 | `iris brief` | Shows the brief. | host | 1 |
 | `iris search <query>` | Full-text search (specification 1, section 5.6). In session mode, it searches only the messages that the job grants (`docs/specs/2026-11-16-job-workspace.md`), and it adds nothing to the workspace. | both | 1 |
 | `iris show <id>` | Shows one item or message. Release 1 has no read path for a thread or a sender, so a thread and a sender come in a later release. In session mode, only an item or a message that the job grants, and an item is a job item (`id`, `form` and `sources`, with no text of the model and no status). | both | 1 |
-| `iris list [<form>]` | Lists items, of one form if given. In session mode, only the items of the workspace, with the fields of `show` (card R4-04f). Host mode and the filters come in a later card (issue #523): until then, `iris list` in host mode gets exit code 2. | session | 1 |
+| `iris list [<form>] [--status <s>] [--type <t>] [--before <id>] [--limit <n>]` | Lists items, newest first, of one form if given. In host mode, the filters and the page of `GET /api/items` (issue #523): `--type` needs the form `record`, `--before` takes the last ID of the page before, and `--limit` is 1 to 200 (default 50). The text form ends with the `--before` value of the next page. In session mode, only the items of the workspace, with the fields of `show` (card R4-04f), and only the form: a filter is a usage error. | both | 1 |
 | `iris archive`, `inbox`, `label`, `unlabel`, `read`, `unread`, `trash` `<ids> [--changeset <cs-id>]` | Adds an action to a draft changeset. | both | 2 |
 | `iris close`, `defer`, `decline`, `correct` `<id> [--changeset <cs-id>]` | Adds a state action to a draft changeset. | both | 2 |
 | `iris skip`, `mute`, `dismiss` `<id> [--changeset <cs-id>]` | Adds a state action to a draft changeset. A session gets code 3: a job grants no feed, conversation or signal item. | host | 5 |
@@ -1179,9 +1194,11 @@ engine checks each message that a target resolves to, at `submit` and again
 just before the apply. A message outside the grant at `submit` makes the
 submit fail with no change. A message that left the grant before the apply
 makes the action refused, with the reason. Each item target must be an item
-of the workspace now, by the same two checks. `iris draft`, `iris send` and `iris nudge` are
-refused in session mode until a card defines their grant, and `submit`
-refuses each draft or send action in a changeset of a session.
+of the workspace now, by the same two checks. `iris send` and `iris nudge` are
+refused in session mode, and `submit` refuses each send action in a
+changeset of a session. `iris draft` in session mode makes only a reply in a
+granted thread (decision D3): `submit` refuses a new mail and a reply whose
+parent message is not in the grant.
 
 ### 8.3 Output
 
@@ -1237,7 +1254,7 @@ agent that does not work in a folder. The rules for the MCP interface:
 
   | Tools | Path |
   |---|---|
-  | `status`, `search`, `show`, `matters_list`, `matters_show` | Read the store directly (section 8.1). |
+  | `status`, `search`, `show`, `list`, `matters_list`, `matters_show` | Read the store directly (section 8.1). |
   | `watch_add`, `watch_list`, `watch_remove` | Read and write the watch rows of the store directly, as `iris watch` does. A watch changes no mailbox, so it does not go through the policy. |
   | All other tools | A request on `iris.sock`, with the author `local`. |
 

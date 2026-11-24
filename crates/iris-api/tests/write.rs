@@ -103,6 +103,7 @@ fn made(s: &Store) {
             cc: vec![],
             subject: "Q4".into(),
             body: "Hi.\n".into(),
+            ..Default::default()
         }
         .check()
         .unwrap();
@@ -587,6 +588,7 @@ async fn property_each_start_address_is_valid() {
                 cc: vec![],
                 subject: "s".into(),
                 body: "b".into(),
+                ..Default::default()
             };
             assert!(c.check().is_ok(), "{text:?} gave {a:?}");
         }

@@ -266,22 +266,25 @@ pub const LATE_AFTER_MS: i64 = 2 * 86_400_000;
 ///   the person (its `From`), not `SENT`, and the commitment has a due
 ///   date.
 ///
-/// With `now` (an SQL expression of milliseconds), the time rules apply
-/// too: the due date passed (a `due.at` at its instant, a `due.date` at the
-/// end of that day in UTC), and an ask is at least [`LATE_AFTER_MS`] old,
+/// With `now` (SQL expressions of the time in milliseconds and of the day
+/// `YYYY-MM-DD` of that time in the zone of the owner, [`iris_store::today`]),
+/// the time rules apply too: the due date passed (a `due.at` at its instant,
+/// a `due.date` at the end of that day in the time zone of the owner), and an ask is at least [`LATE_AFTER_MS`] old,
 /// so a nudge that the owner sent starts the wait again. With no `now`,
 /// they do not count: what passed stays passed.
 ///
 /// One thread has one nudge, so a second commitment waits for the first.
 /// A change of the commitment, its person or the newest message changes
 /// the key or makes it NULL, so a saved nudge with the old key is stale.
-pub fn nudge_key_sql(thread: &str, now: Option<&str>) -> String {
+pub fn nudge_key_sql(thread: &str, now: Option<(&str, &str)>) -> String {
     let in_thread = in_thread!("om.thread_id");
-    let due_at = "coalesce(unixepoch(json_extract(ki.doc, '$.due.at'), 'subsec'),
-                           unixepoch(json_extract(ki.doc, '$.due.date'), '+1 day'))";
-    let (due, wait) = now.map_or((String::new(), String::new()), |now| {
+    let at = "unixepoch(json_extract(ki.doc, '$.due.at'), 'subsec')";
+    let date = "date(json_extract(ki.doc, '$.due.date'))";
+    let due_at = format!("coalesce({at}, {date})");
+    let (due, wait) = now.map_or((String::new(), String::new()), |(now, today)| {
         (
-            format!("AND coalesce({due_at}, 0) * 1000 <= {now}"),
+            // No valid due date: no time rule of the due date.
+            format!("AND coalesce({at} * 1000 <= {now}, {date} < {today}, 1)"),
             format!("AND coalesce(km.internal_date, 0) <= {now} - {LATE_AFTER_MS}"),
         )
     });
@@ -344,7 +347,7 @@ pub fn late(
 ) -> rusqlite::Result<Vec<Late>> {
     let newest = in_thread!("t.thread");
     let all = in_thread!("k.thread");
-    let key = nudge_key_sql("n.thread", Some("?1"));
+    let key = nudge_key_sql("n.thread", Some(("?1", "?4")));
     let ready = ready_sql("SELECT k.thread");
     let mut st = c.prepare_cached(&format!(
         "WITH t(thread) AS (
@@ -369,7 +372,8 @@ pub fn late(
           ORDER BY coalesce(nt.tried_at, 0), k.newest
           LIMIT ?3"
     ))?;
-    let rows = st.query_map(params![now_ms, thread, limit as i64], |r| {
+    let today = iris_store::today(c, now_ms)?;
+    let rows = st.query_map(params![now_ms, thread, limit as i64, today], |r| {
         Ok(Late {
             thread: r.get(0)?,
             newest: r.get(1)?,

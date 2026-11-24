@@ -755,3 +755,83 @@ async fn gives_the_reason_of_each_submitted_revision() {
         StatusCode::NOT_FOUND
     );
 }
+
+/// Decision D10 (issue #193): in the mode `observe`, the review reads what
+/// a rule would decide for each proposed action. In the mode `apply`, the
+/// list is empty.
+#[tokio::test]
+async fn gives_what_a_rule_would_decide_in_observe_mode() {
+    let dir = temp("would");
+    let s = store(&dir);
+    let cs = changeset(&s, "Old mail.", &[&["m-1"], &["m-3"]], 1_000);
+    let uri = format!("/api/changesets/cs-{cs}/would");
+    // No confirmed policy: no rule decides.
+    assert_eq!(get(&s, &uri).await, (StatusCode::OK, json!({"would": []})));
+    let confirm = |mode: &str| {
+        let text = format!(
+            "version = 0\nmode = \"{mode}\"\n[[rule]]\nid = 1\nname = \"Archive Priya\"\n\
+             effect = \"allow\"\nverbs = [\"archive\"]\nwhen = {{ sender = \"priya@example.com\" }}\n\
+             by = \"person\"\nadded = 2026-11-10\n"
+        );
+        std::fs::write(dir.0.join(iris_policy::FILE), &text).unwrap();
+        iris_policy::confirm(&s, &iris_policy::sha256_hex(&text), 0).unwrap();
+    };
+    confirm("observe");
+    let (status, body) = get(&s, &uri).await;
+    assert_eq!(status, StatusCode::OK);
+    let would = body["would"].as_array().unwrap();
+    assert_eq!(would.len(), 2, "{body}");
+    for (w, n) in would.iter().zip([1, 2]) {
+        assert_eq!(
+            (
+                &w["revision"],
+                &w["n"],
+                &w["outcome"],
+                &w["rule"],
+                &w["policy"]
+            ),
+            (
+                &json!(1),
+                &json!(n),
+                &json!("approved"),
+                &json!(1),
+                &json!(1)
+            )
+        );
+        assert!(w["reason"].as_str().unwrap().contains("Rule 1"), "{w}");
+    }
+    confirm("apply");
+    assert_eq!(get(&s, &uri).await, (StatusCode::OK, json!({"would": []})));
+    assert_eq!(
+        get(&s, "/api/changesets/cs-99/would").await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+/// The would read streams one action at a time: a changeset of many
+/// actions gives one entry for each action that a rule decides.
+#[tokio::test]
+async fn the_would_read_gives_each_action_of_a_large_changeset() {
+    let dir = temp("would-many");
+    let s = store(&dir);
+    let targets: Vec<&[&str]> = (0..250)
+        .map(|i| {
+            if i % 2 == 0 {
+                &["m-1"][..]
+            } else {
+                &["m-3"][..]
+            }
+        })
+        .collect();
+    let cs = changeset(&s, "Old mail.", &targets, 1_000);
+    let text = "version = 0\nmode = \"observe\"\n[[rule]]\nid = 1\nname = \"Archive Priya\"\n\
+         effect = \"allow\"\nverbs = [\"archive\"]\nwhen = { sender = \"priya@example.com\" }\n\
+         by = \"person\"\nadded = 2026-11-10\n";
+    std::fs::write(dir.0.join(iris_policy::FILE), text).unwrap();
+    iris_policy::confirm(&s, &iris_policy::sha256_hex(text), 0).unwrap();
+    let (status, body) = get(&s, &format!("/api/changesets/cs-{cs}/would")).await;
+    assert_eq!(status, StatusCode::OK);
+    let would = body["would"].as_array().unwrap();
+    assert_eq!(would.len(), 250);
+    assert_eq!(would[249]["n"], 250);
+}

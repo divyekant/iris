@@ -818,8 +818,9 @@ enum Phase {
     Apply,
 }
 
-/// The checks of one action against the grant of its job: no draft or
-/// send, each resolved message granted, each item an item of the workspace.
+/// The checks of one action against the grant of its job: no send, a
+/// draft only as a reply to a granted thread (decision D3), each resolved
+/// message granted, each item an item of the workspace.
 /// Invariant: an action of a session changes only granted rows, and a
 /// target that gives no row never passes. At submit, each declared target
 /// must also be in the grant, so a target that gives no row (each message
@@ -839,9 +840,12 @@ fn outside_grant(
         [action],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    if WRITE_VERBS.contains(&verb.as_str()) {
+    // A draft of a session is a reply: its thread is a target, and the
+    // checks below hold it to the grant. A new mail names an account, which
+    // no job grants. A send needs a person (decision D2).
+    if WRITE_VERBS.contains(&verb.as_str()) && verb != "draft" {
         return Ok(Some(format!(
-            "a session of {j} cannot {verb}: a job has no grant of an account or a draft"
+            "a session of {j} cannot {verb}: only a person sends mail"
         )));
     }
     let outside = || Ok(Some(format!("the targets are outside the grant of {j}")));
@@ -954,10 +958,13 @@ pub fn marked_in(c: &Connection, changeset: i64) -> Result<bool> {
 }
 
 /// The marks of the flag `outside_thread` (spec R4-06): each address of
-/// `to` and `cc` of `content` that is not in From, To or Cc of a live
-/// message of the threads of `action`, and is not one of your addresses. A
-/// new mail has no thread. Submit gives the flag to a marked author when
-/// this list is not empty.
+/// `to` and `cc` of `content` that is not in the thread of `action`, and is
+/// not one of your addresses. An address is in the thread only if it is the
+/// From of a live thread message, or in To or Cc of a live thread message
+/// that you sent (decision D13, issue #435). So a stranger cannot widen
+/// the thread with an address in Cc of its own message. A new mail has no
+/// thread. Submit gives the flag to a marked author when this list is not
+/// empty.
 pub fn outside_marks(
     c: &Connection,
     action: i64,
@@ -978,9 +985,14 @@ pub fn outside_marks(
     })?;
     if !open.is_empty() {
         let mut st = c.prepare(&format!(
-            "SELECT h.from_addr, h.to_addrs, h.cc_addrs
+            "SELECT h.from_addr, s.to_addrs, s.cc_addrs
              FROM changeset_action a, message t JOIN header h ON h.message_id = t.id
-             WHERE a.id = ?1 AND t.gone_at IS NULL AND t.thread_id IN ({ACTION_THREADS})"
+             LEFT JOIN header s ON s.message_id = t.id
+               AND EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                           WHERE ml.message_id = t.id AND l.provider_id = 'SENT')
+               AND NOT {copy}
+             WHERE a.id = ?1 AND t.gone_at IS NULL AND t.thread_id IN ({ACTION_THREADS})",
+            copy = iris_store::draft_or_copy!("t")
         ))?;
         let mut rows = st.query([action])?;
         while let (false, Some(r)) = (open.is_empty(), rows.next()?) {
@@ -1481,13 +1493,15 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
             return Ok(Some(why));
         }
         // The flags come from the stored bytes (docs/specs/2026-11-17-send-checks.md).
-        if action_content(c, action)?.is_none() {
-            return Ok(Some(format!(
-                "{} has no content that Iris can check",
-                format_id(Kind::Draft, draft)
-            )));
+        match action_content(c, action)? {
+            None => {
+                return Ok(Some(format!(
+                    "{} has no content that Iris can check",
+                    format_id(Kind::Draft, draft)
+                )))
+            }
+            Some((_, content)) => return Ok(not_yet(&content)),
         }
-        return Ok(None);
     }
     let Ok(content) = serde_json::from_str::<iris_compose::Content>(args) else {
         return Ok(Some(
@@ -1495,6 +1509,9 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
                 .into(),
         ));
     };
+    if let Some(why) = not_yet(&content) {
+        return Ok(Some(why));
+    }
     let reply: bool = c.query_row(
         "SELECT json_type(targets, '$.threads') IS NOT NULL FROM changeset_action WHERE id = ?1",
         [action],
@@ -1521,6 +1538,16 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
         content
     };
     Ok(content.check().err())
+}
+
+/// The refusal of a content with `bcc` or attachments. They need the `Bcc`
+/// gate and the attachment folder of the send content spec
+/// (`docs/specs/2026-11-24-send-content.md`), which the next part builds.
+/// A draft at Gmail that the person gave a `Bcc` or a file reads back, so
+/// the send of it is refused too.
+fn not_yet(content: &iris_compose::Content) -> Option<String> {
+    (!content.bcc.is_empty() || !content.attachments.is_empty())
+        .then(|| "Iris cannot send Bcc or attachments yet".into())
 }
 
 /// Spec 2, section 6.5: an author other than the person writes no mail

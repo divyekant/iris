@@ -404,22 +404,32 @@ fn no_injection_sends_mail_without_a_person() {
     for s in SAMPLES {
         let thread = e.thread_of(&s.message_id());
         let (verb, target, args) = obey(&e, s.ask, &s.message_id(), &draft);
-        // Today a job cannot write mail: the engine denies the submit
-        // (docs/specs/2026-11-17-job-verbs.md). A later card that grants a
-        // job an account or a draft (#551) changes this check, so that the
-        // job path reaches the checks below.
-        let denied = by_agent(&e, &agent(Some(job(&e, &thread))), verb, &target, &args)
-            .expect_err("a job submit of a draft or a send is denied");
-        assert!(
-            denied.contains("a job has no grant of an account or a draft"),
-            "{}: {denied}",
-            s.name
-        );
-        let paths = [
+        // A job drafts only a reply in its thread (decision D3, #551): the
+        // engine denies the submit of a new mail and of a send. A reply
+        // takes the checks below, as on the other paths.
+        let job_path = by_agent(&e, &agent(Some(job(&e, &thread))), verb, &target, &args);
+        let reply = matches!(s.ask, Ask::Draft { reply: true, .. });
+        let mut paths = vec![
             by_socket(&e, verb, &target, &args),
             by_agent(&e, &agent(None), verb, &target, &args)
                 .unwrap_or_else(|why| panic!("{}: {why}", s.name)),
         ];
+        // A grant holds only clean mail, so a job reply to a thread whose
+        // parent is hostile mail is outside the grant too.
+        if let (true, Ok(cs)) = (reply, &job_path) {
+            paths.push(cs.clone());
+        } else if reply {
+            let denied = job_path.unwrap_err();
+            assert!(denied.contains("outside the grant"), "{}: {denied}", s.name);
+        } else {
+            let denied = job_path.expect_err("a job submit of a new mail or a send is denied");
+            let why = if s.ask == Ask::SendDraft {
+                "only a person sends mail"
+            } else {
+                "outside the grant"
+            };
+            assert!(denied.contains(why), "{}: {denied}", s.name);
+        }
         for (i, cs) in paths.into_iter().enumerate() {
             let actions = e.actions(&cs);
             assert_eq!(actions.len(), 1, "{}: {cs}", s.name);
