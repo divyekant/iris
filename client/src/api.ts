@@ -57,19 +57,28 @@ export type Item = {
 
 // A matter: mail that belongs together, as Iris proposes it and the person decides it
 // (docs/spec/schema/matter.schema.json).
-export type MatterForm = "commitment" | "conversation" | "record";
+export type MatterForm = "commitment" | "conversation" | "record" | "signal";
 export type Matter = {
   id: string;
   title: string;
   status: "proposed" | "confirmed" | "declined";
   items: string[];
-  counts: Record<MatterForm, number>;
+  /** `signal` since open model 1.2: an older engine leaves it out. */
+  counts: Record<Exclude<MatterForm, "signal">, number> & { signal?: number };
   created: string;
   updated: string;
   decided?: string;
+  /** The items that Iris proposes to add to a confirmed matter (open model 1.2). */
+  additions?: string[];
+  derived?: { by: "model" | "agent" | "person"; model?: string; prompt?: string };
 };
 export type MatterList = { proposed: Matter[]; confirmed: Matter[] };
-export type MatterView = { matter: Matter; items: Record<MatterForm, Item[]> };
+export type MatterView = {
+  matter: Matter;
+  items: Record<Exclude<MatterForm, "signal">, Item[]> & { signal?: Item[] };
+  /** The documents of the additions of a confirmed matter, newest first. */
+  additions?: Item[];
+};
 
 // `duplicates` maps an item ID to newer items that can be the same thing (spec 1
 // section 7.5). The newer items are not in `items`: the client shows a pair as one line.
@@ -247,6 +256,8 @@ export type Changeset = {
   id: string;
   revision: number;
   author: { kind: "person" | "agent" | "triage" | "local"; name?: string; session?: string; job?: string };
+  /** Since open model 1.2: who withdrew the changeset (decision D16). Absent when it is not known. */
+  withdrawn_by?: "author" | "person";
   why: string | null;
   created: string;
   submitted: string | null;
@@ -425,7 +436,9 @@ export type JobSession = {
   exit: number | null;
   ended: string | null;
 };
-export type JobDetail = { job: Job & { events: JobEvent[] }; changesets: JobChangeset[]; threads: Record<string, Target>; session?: JobSession | null };
+/** One thread or item in the scope of a job (decision D25): the mail that the agent reads. `id` is null for a row that the page cannot name. */
+export type ScopeRef = { id: string | null; kind: "thread" | "item"; label: string | null; messages: number };
+export type JobDetail = { job: Job & { events: JobEvent[] }; changesets: JobChangeset[]; threads: Record<string, Target>; scope?: ScopeRef[]; session?: JobSession | null };
 
 export const SIGN_IN = "Sign in: run iris open in Terminal.";
 export const SIGN_IN_FAILED = "This sign-in address was used, ended or is not valid. Run iris open in Terminal for a new address.";

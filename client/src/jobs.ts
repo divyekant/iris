@@ -47,7 +47,8 @@ export function now(job: Job): string {
     case "working":
       return "The agent works on it.";
     case "needs_you":
-      return "The agent asks you a question.";
+      // The engine also asks, on the due date (decision D24): a job page knows who, a list line does not.
+      return "It asks you a question.";
     case "waiting": {
       const until = job.wait ? `, until ${day(job.wait.until)}` : "";
       return job.wait?.thread ? `Waits for a reply${until}.` : `Waits${until}.`;
@@ -134,6 +135,7 @@ function eventStep(e: JobEvent, before: JobEvent | undefined, i: number, threads
       return { at, key, who: "agent", text, quote: why, mail: mail ?? undefined };
     }
     case "needs_you":
+      if (e.by === "engine") return { at, key, who: "iris", text: "Iris asked you:", quote: e.question, tone: "ask" };
       return { at, key, who: "agent", text: "The agent asked you:", quote: e.question, tone: "ask" };
     case "working":
       if (e.answer !== undefined) return { at, key, who: "you", text: "You answered:", quote: e.answer };
@@ -172,6 +174,43 @@ export function steps(d: JobDetail): Step[] {
     out.push(e);
   }
   return [...out, ...changes.slice(c)];
+}
+
+/** Who asks the open question of a job: the engine on the due date (decision D24), else the agent. */
+export function asker(job: Pick<JobDetail["job"], "state" | "events">): "Iris" | "The agent" {
+  const last = job.events[job.events.length - 1];
+  return job.state === "needs_you" && last?.by === "engine" ? "Iris" : "The agent";
+}
+
+/** Start a job from a typed goal, with no mail (decision D25). `request` makes a retry safe: a second start with it gives 409 and the job. */
+export function startJob(goal: string, due: string | null, request: string): Promise<Job> {
+  return post<Job>("jobs", { goal, due, request });
+}
+
+/** Change the goal and the due date of an open job (decision D25). The answer is the job page again. */
+export async function editJob(id: string, goal: string, due: string | null): Promise<JobDetail> {
+  await post<Job>(`jobs/${encodeURIComponent(id)}/edit`, { goal, due });
+  return loadJob(id);
+}
+
+/** The job page of `id`, read again: for example after a change whose answer did not come. */
+export function loadJob(id: string): Promise<JobDetail> {
+  return get<JobDetail>(`jobs/${encodeURIComponent(id)}`);
+}
+
+/** True when two due dates name the same instant, or both are empty. */
+export function sameDue(a: string | null | undefined, b: string | null | undefined): boolean {
+  return a && b ? Date.parse(a) === Date.parse(b) : !a && !b;
+}
+
+/** Add a thread to the scope of a job. `messages` are the IDs of the preview that the person saw: a change gives 409. */
+export function addThread(id: string, thread: string, messages: string[]): Promise<JobDetail> {
+  return post<JobDetail>(`jobs/${encodeURIComponent(id)}/scope`, { thread, messages });
+}
+
+/** Take a thread or an item out of the scope of a job. The engine ends the open session of the job. */
+export function removeRef(id: string, ref: string): Promise<JobDetail> {
+  return post<JobDetail>(`jobs/${encodeURIComponent(id)}/scope/remove`, { ref });
 }
 
 /** The jobs whose agent asks you a question now (card R5-05), the newest question first (`updated` of the job, not its ID). */

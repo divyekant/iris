@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { load, mount, until } from "./mount.mjs";
 
 const fx = await load("/dev/fixtures.ts");
-const { loadProposed } = await load("/src/matters.ts");
+const { loadGrowing, loadProposed } = await load("/src/matters.ts");
 const text = (el) => el.textContent.replace(/\s+/g, " ");
 const g5 = fx.matterViews["g-5"];
 const as = (id, status = "proposed") => ({ ...g5, matter: { ...g5.matter, id, status } });
@@ -75,4 +75,11 @@ test("the brief loads the proposal by itself, and a later load removes it", asyn
   } finally {
     view.destroy();
   }
+});
+
+test("the brief line of additions lists only the confirmed matters with an addition (D20)", async () => {
+  const asked = script([["matters", 200, fx.matters]]);
+  const growing = await loadGrowing();
+  assert.deepEqual(asked, ["matters"]);
+  assert.deepEqual(growing.map((m) => m.id), ["g-4"]);
 });

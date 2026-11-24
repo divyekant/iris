@@ -14,7 +14,8 @@ function serve(routes = {}) {
   globalThis.fetch = async (url, init) => {
     const path = String(url).replace(/^\/api\//, "");
     asked.push(init?.body ? [path, JSON.parse(init.body)] : path);
-    const route = routes[path];
+    // The comment box of an agent author loads its comments (decision D15).
+    const route = routes[path] ?? (path.endsWith("/comments") ? [200, { comments: [] }] : undefined);
     // A function route can wait, throw (no answer) or answer with the request body.
     const [status, body] = typeof route === "function" ? await route(init?.body ? JSON.parse(init.body) : undefined) : (route ?? [200, fx.answer(`/${path}`)]);
     return new Response(JSON.stringify(body ?? { error: "Not found." }), { status: body === undefined ? 404 : status, headers: { "content-type": "application/json" } });
@@ -551,6 +552,28 @@ test("a request with no older change does not ask for the revisions", async () =
     assert.doesNotMatch(text(view.target), /From revision/);
   } finally {
     view.destroy();
+  }
+});
+
+// Decision D16: a withdrawn request names who withdrew it. A store from before the change does not know.
+test("a withdrawn request names who withdrew it", async () => {
+  const before = three();
+  for (const [by, words] of [
+    ["author", "Claude Code withdrew this request."],
+    ["person", "You withdrew this request."],
+    [undefined, "This request is withdrawn."],
+  ]) {
+    const gone = { ...before, state: "withdrawn", withdrawn_by: by, actions: before.actions.map((a) => ({ ...a, decision: { state: "cancelled", by: "author" } })) };
+    serve({ "changesets/cs-9/withdraw": () => [409, { error: "the changeset is withdrawn" }], "changesets/cs-9": [200, gone] });
+    const view = await mount("/src/views/Review.svelte", { changesets: [before] });
+    try {
+      view.target.querySelector("button.end").click();
+      view.flushSync();
+      view.target.querySelector(".question button.outline").click();
+      await until(() => text(view.target).includes(words));
+    } finally {
+      view.destroy();
+    }
   }
 });
 

@@ -1,6 +1,8 @@
 //! Review comments (docs/specs/2026-11-17-review-comments.md, card R4-08):
-//! the person comments on a revision of a changeset of a job, and the next
-//! build of the job workspace gives the comment to the agent.
+//! the person comments on a revision of a changeset of an agent or a local
+//! author. The next build of the job workspace gives the comment to a job
+//! agent, and the changeset document (`iris show cs-<id>`) gives it to each
+//! author (decision D15).
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -44,14 +46,14 @@ pub fn comment_in(
     key: &str,
     now_ms: i64,
 ) -> Result<Comment> {
-    let row: Option<(i64, Option<String>, String)> = c
+    let row: Option<(i64, Option<String>, String, String)> = c
         .query_row(
-            "SELECT revision, author_job, state FROM changeset WHERE id = ?1",
+            "SELECT revision, author_job, state, author_kind FROM changeset WHERE id = ?1",
             [changeset],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let (newest, job, state) = row.ok_or(Error::NotFound)?;
+    let (newest, job, state, kind) = row.ok_or(Error::NotFound)?;
     let earlier: Option<i64> = c
         .query_row(
             "SELECT id FROM changeset_comment WHERE changeset_id = ?1 AND key = ?2",
@@ -66,7 +68,13 @@ pub fn comment_in(
         }
         return Ok(first);
     }
-    let job = job.ok_or_else(|| refused("only a changeset of a job takes a comment".into()))?;
+    // An agent or a local author reads the comments in the changeset
+    // document (decision D15). Triage and the person do not read them.
+    if !matches!(kind.as_str(), "agent" | "local") {
+        return Err(refused(
+            "only a changeset of an agent or a local author takes a comment".into(),
+        ));
+    }
     // The review screen shows only open changesets: a draft has a revision
     // that the person cannot see yet.
     match state.as_str() {
@@ -77,12 +85,20 @@ pub fn comment_in(
     if revision != newest {
         return Err(refused("the changeset has a newer revision".into()));
     }
-    let job = iris_job::parse_job_id(&job)
-        .ok_or_else(|| refused("the changeset names no valid job".into()))?;
-    let j = iris_job::get_in(c, job).map_err(|e| refused(e.to_string()))?;
-    if j.state == iris_job::State::Done {
-        return Err(refused("the job is done".into()));
-    }
+    // A changeset of a job: the job must not be done, and the comment wakes
+    // a waiting job.
+    let job = match job {
+        Some(job) => {
+            let job = iris_job::parse_job_id(&job)
+                .ok_or_else(|| refused("the changeset names no valid job".into()))?;
+            let j = iris_job::get_in(c, job).map_err(|e| refused(e.to_string()))?;
+            if j.state == iris_job::State::Done {
+                return Err(refused("the job is done".into()));
+            }
+            Some((job, j.state))
+        }
+        None => None,
+    };
     if let Some(why) = check_comment(text, key) {
         return Err(refused(why));
     }
@@ -93,7 +109,7 @@ pub fn comment_in(
     )?;
     let id = c.last_insert_rowid();
     // So a session can start for the comment (spec, section 2, step 9).
-    if j.state == iris_job::State::Waiting {
+    if let Some((job, iris_job::State::Waiting)) = job {
         iris_job::wake_in(c, job, iris_job::By::Person, Some("comment"), now_ms)
             .map_err(|e| refused(e.to_string()))?;
     }

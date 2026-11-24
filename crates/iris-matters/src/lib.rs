@@ -47,7 +47,7 @@ macro_rules! free_item {
 
 pub mod edit;
 pub mod propose;
-pub use edit::{create, delete, edit, parse_ref, propose_by_agent, Edit};
+pub use edit::{create, delete, edit, joinable, parse_ref, propose_by_agent, Edit};
 pub use propose::{propose, Gate, Outcome, Skip};
 
 use iris_store::Store;

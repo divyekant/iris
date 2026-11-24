@@ -695,10 +695,11 @@ async fn the_person_comments_on_a_changeset_of_a_job() {
     assert_eq!(post(&s, &uri, &bad).await.0, StatusCode::BAD_REQUEST);
     let old = json!({"revision": 2, "text": "x", "key": "k-2123456789abcdef"}).to_string();
     assert_eq!(post(&s, &uri, &old).await.0, StatusCode::CONFLICT);
+    // An agent with no job takes a comment too (decision D15).
     let host = changeset(&s, "Archive.", &[&["m-3"]], NOW);
     let other = format!("/api/changesets/cs-{host}/comments");
     let ok = json!({"revision": 1, "text": "x", "key": "k-3123456789abcdef"}).to_string();
-    assert_eq!(post(&s, &other, &ok).await.0, StatusCode::CONFLICT);
+    assert_eq!(post(&s, &other, &ok).await.0, StatusCode::OK);
     assert_eq!(
         post(&s, "/api/changesets/cs-99/comments", &ok).await.0,
         StatusCode::NOT_FOUND
@@ -708,9 +709,10 @@ async fn the_person_comments_on_a_changeset_of_a_job() {
         get(&s, &uri).await,
         (StatusCode::OK, json!({"comments": [first]}))
     );
+    let (code, v) = get(&s, &other).await;
     assert_eq!(
-        get(&s, &other).await,
-        (StatusCode::OK, json!({"comments": []}))
+        (code, &v["comments"][0]["text"]),
+        (StatusCode::OK, &json!("x"))
     );
 }
 

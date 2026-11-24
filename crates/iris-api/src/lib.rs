@@ -151,6 +151,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/items", get(get_items))
         .route("/api/items/{id}", get(get_item))
         .route("/api/items/{id}/job", get(get_start))
+        .route("/api/items/{id}/joinable", get(get_joinable))
         .route("/api/items/{id}/{verb}", post(post_verb))
         .route("/api/search", get(get_search))
         .route("/api/changesets", get(get_changesets))
@@ -1418,6 +1419,11 @@ async fn post_watch_remove(
     Ok(Json(serde_json::json!({ "removed": id })).into_response())
 }
 
+/// `{"joinable": bool}`: the item can join a matter now.
+async fn get_joinable(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    Ok(Json(serde_json::json!({ "joinable": matters::joinable(&s, &id)? })).into_response())
+}
+
 /// The valid proposals and the confirmed matters.
 async fn get_matters(State(s): State<Arc<Store>>) -> Result<Response> {
     Ok(Json(matters(&s)?).into_response())
@@ -1455,9 +1461,17 @@ async fn post_matter_decline(
 }
 
 /// The person makes a matter by hand.
+/// The body of a matter by hand: a title and its items, nothing else (#909).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MatterCreate {
+    title: String,
+    items: Vec<String>,
+}
+
 async fn post_matter_create(
     State(s): State<Arc<Store>>,
-    b: std::result::Result<Json<MatterConfirm>, JsonRejection>,
+    b: std::result::Result<Json<MatterCreate>, JsonRejection>,
 ) -> Result<Response> {
     let b = body(b)?;
     let view = create_matter(&s, &b.title, &b.items, now_ms())?;

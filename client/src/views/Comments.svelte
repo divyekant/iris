@@ -1,8 +1,9 @@
 <!--
-  The comments of the person on a changeset of a job (card R4-08, spec
-  docs/specs/2026-11-17-review-comments.md). A comment goes to the agent of
-  the job: its next session reads the comment and submits a new revision.
-  Only an open changeset takes a comment. The list stays for each changeset of a job.
+  The comments of the person on a changeset of an agent or a local author
+  (card R4-08, spec docs/specs/2026-11-17-review-comments.md, decision D15).
+  A job agent reads the comment in its next session and submits a new
+  revision. Another author reads it in the changeset document. Only an open
+  changeset takes a comment. The list stays.
 -->
 <script lang="ts">
   import { get, post, type Changeset } from "../api";
@@ -11,9 +12,13 @@
   type Comment = { id: number; changeset: string; revision: number; text: string; at: string };
 
   // `refused` loads the request again after a 409: the request changed after the page loaded it.
-  let { changeset: c, agent, refused = () => {} }: { changeset: Changeset; agent: string; refused?: (why: string) => unknown } = $props();
+  // `job`: a job agent reads the comment in its next session; another author reads it with the request (decision D15).
+  let { changeset: c, agent, job = true, refused = () => {} }: { changeset: Changeset; agent: string; job?: boolean; refused?: (why: string) => unknown } = $props();
   // The box opens from one quiet button (option B, the owner's pick).
   let writing = $state(false);
+
+  // When the author reads a comment: each line of copy uses this one text.
+  let reads = $derived(job ? "The agent reads it in its next session and sends a new revision." : `${agent} reads it the next time it looks at this request.`);
 
   // The engine keeps 1 to 4,000 characters (spec section 3).
   const MAX = 4000;
@@ -63,7 +68,7 @@
       const got = await post<Comment>(path, { revision: c.revision, text: body, key });
       keep([got]);
       text = keyed = "";
-      saved = `Iris gave your comment to ${agent}. The agent reads it in its next session and sends a new revision.`;
+      saved = `Iris gave your comment to ${agent}. ${reads}`;
     } catch (err) {
       const status = (err as { status?: number }).status;
       if (status === 409) {
@@ -84,6 +89,8 @@
   }
 </script>
 
+<!-- A request that takes no new comment shows the part only when it has comments. -->
+{#if list.length || problem || c.state === "open"}
 <section class="comments" aria-labelledby={`${c.id}-comments`}>
   <h3 id={`${c.id}-comments`}>Comments to {agent}</h3>
   {#if list.length}
@@ -100,7 +107,7 @@
     <button type="button" class="quiet" onclick={() => (writing = true)}>Ask {agent} for a change</button>
   {:else if c.state === "open"}
     <form onsubmit={send}>
-      <label class="hint" for={`${c.id}-comment`}>Tell {agent} what to change. The agent sends a new revision of this request.</label>
+      <label class="hint" for={`${c.id}-comment`}>Tell {agent} what to change. {job ? "The agent sends a new revision of this request." : reads}</label>
       <textarea id={`${c.id}-comment`} rows="3" bind:value={text} disabled={busy}></textarea>
       <div class="row">
         <button type="submit" class="outline" disabled={!ready}>Send to {agent}</button>
@@ -111,6 +118,7 @@
   {#if problem}<p role="alert">{problem}</p>{/if}
   {#if saved}<p class="saved" role="status">{saved}</p>{/if}
 </section>
+{/if}
 
 <style>
   .comments {
