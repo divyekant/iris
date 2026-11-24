@@ -162,9 +162,9 @@ export const count = (n: number, one: string, many: string) => `${WORDS[n] ?? n.
 export const capital = (s: string) => s[0].toUpperCase() + s.slice(1);
 
 /** The members of a matter by form: "Two records, one conversation". */
-export function matterCounts(counts: Record<MatterForm, number>): string {
-  const forms: MatterForm[] = ["record", "conversation", "commitment"];
-  const text = forms.filter((f) => counts[f] > 0).map((f) => count(counts[f], f, `${f}s`)).join(", ");
+export function matterCounts(counts: Partial<Record<MatterForm, number>>): string {
+  const forms: MatterForm[] = ["record", "conversation", "commitment", "signal"];
+  const text = forms.filter((f) => (counts[f] ?? 0) > 0).map((f) => count(counts[f] ?? 0, f, `${f}s`)).join(", ");
   return text ? capital(text) : "No items now";
 }
 

@@ -19,7 +19,7 @@
     delay = HOLD,
   }: { view: MatterView; ondecided?: (answer: MatterView | null) => void; all?: boolean; delay?: number } = $props();
   let matter = $derived(view.matter);
-  let members = $derived([...view.items.record, ...view.items.conversation, ...view.items.commitment]);
+  let members = $derived([...view.items.record, ...view.items.conversation, ...view.items.commitment, ...(view.items.signal ?? [])]);
   const SHOWN = 5;
 
   type Choice = "confirm" | "decline";

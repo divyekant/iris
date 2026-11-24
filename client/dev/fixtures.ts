@@ -12,6 +12,7 @@ import feed from "../../docs/spec/schema/examples/feed.json" with { type: "json"
 import signal from "../../docs/spec/schema/examples/signal-code.json" with { type: "json" };
 import matterConfirmed from "../../docs/spec/schema/examples/matter-confirmed.json" with { type: "json" };
 import matterProposed from "../../docs/spec/schema/examples/matter-proposed.json" with { type: "json" };
+import matterByHand from "../../docs/spec/schema/examples/matter-by-hand.json" with { type: "json" };
 
 // Two accounts (card R6-02): the work mailbox has the conversation and the commitment owed to you.
 const work = new Set(["commitment-owed-to-you", "conversation"]);
@@ -625,6 +626,10 @@ export function answer(path: string): unknown {
   }
   if (name === "brief") return briefNow();
   if (name === "items" && id && url.pathname.endsWith("/job")) return startPreview(id);
+  if (name === "items" && id && url.pathname.endsWith("/joinable")) {
+    const item = items.find((i) => i.id === id);
+    return { joinable: !!item && !item.matter && ["commitment", "conversation", "record", "signal"].includes(item.form) };
+  }
   if (name === "items" && id) return [...items, ...hidden, ...strangers].find((i) => i.id === id);
   if (name === "items") {
     return { items: items.filter((i) => (!q.get("form") || i.form === q.get("form")) && (!q.get("type") || i.type === q.get("type"))), next: null };
@@ -666,17 +671,21 @@ const replyStart: ReplyStart = {
 };
 
 // Matters: the two examples, with members from the item examples above.
-const members = (base: object, list: Item[]): MatterView => {
+// g-4 has a signal member and one item that Iris proposes to add (D20, D21).
+const members = (base: object, list: Item[], added: Item[] = []): MatterView => {
   const by = (form: string) => list.filter((i) => i.form === form);
-  const items = { commitment: by("commitment"), conversation: by("conversation"), record: by("record") };
-  const counts = { commitment: items.commitment.length, conversation: items.conversation.length, record: items.record.length };
-  return { matter: { ...(base as Matter), items: list.map((i) => i.id), counts }, items };
+  const items = { commitment: by("commitment"), conversation: by("conversation"), record: by("record"), signal: by("signal") };
+  const counts = { commitment: items.commitment.length, conversation: items.conversation.length, record: items.record.length, signal: items.signal.length };
+  const { additions: _, ...rest } = base as Matter;
+  const extra = added.length ? { additions: added.map((i) => i.id) } : {};
+  return { matter: { ...rest, items: list.map((i) => i.id), counts, ...extra }, items, ...(added.length ? { additions: added } : {}) };
 };
 export const matterViews: Record<string, MatterView> = {
-  "g-4": members(matterConfirmed, [youOwe, conversation, booking] as unknown as Item[]),
+  "g-4": members(matterConfirmed, [youOwe, conversation, booking, signal] as unknown as Item[], [payment] as unknown as Item[]),
   "g-5": members(matterProposed, [receipt, owedToYou] as unknown as Item[]),
+  [matterByHand.id]: members({ ...matterByHand, title: "Kitchen remodel" }, [owedToYou] as unknown as Item[]),
 };
-export const matters: MatterList = { proposed: [matterViews["g-5"].matter], confirmed: [matterViews["g-4"].matter] };
+export const matters: MatterList = { proposed: [matterViews["g-5"].matter], confirmed: [matterViews["g-4"].matter, matterViews[matterByHand.id].matter] };
 
 /** POST /api/senders/<id>/<answer> in the fixture state: the sender row after the answer. */
 // The answers at the gate in the dev server: the state of each sender, from the fixtures.

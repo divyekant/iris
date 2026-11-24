@@ -17,9 +17,11 @@
   import MatterCard from "./MatterCard.svelte";
   import Question from "./Question.svelte";
   import { loadQuestions } from "../jobs";
-  import { loadProposed, type Proposed } from "../matters";
+  import { loadGrowing, loadProposed, type Proposed } from "../matters";
+  import type { Matter } from "../api";
   import { arrivedLine, loadWatches, type Watch } from "../watches";
   import { flushHolds, HOLD } from "../act";
+  import { href } from "../route";
 
   let {
     brief: firstBrief,
@@ -95,11 +97,13 @@
   // svelte-ignore state_referenced_locally
   let proposed = $state(firstProposed ?? null);
   const proposedTicket = newest();
+  // The confirmed matters with additions (D20): one line each, that opens the matter.
+  let growing = $state<Matter[]>([]);
   async function reloadProposed() {
     const fresh = proposedTicket();
     try {
-      const p = await loadProposed();
-      if (fresh()) proposed = p;
+      const [p, g] = await Promise.all([loadProposed(), loadGrowing()]);
+      if (fresh()) [proposed, growing] = [p, g];
     } catch {
       // The next poll tries again.
     }
@@ -315,6 +319,18 @@
     <h2 id="matter"><span>{proposed.count === 1 ? "A matter to confirm" : "Matters to confirm"}</span> <span class="count">{proposed.count}</span></h2>
     {#key proposed.view.matter.id}<MatterCard view={proposed.view} ondecided={() => (done(), reloadProposed())} delay={hold} />{/key}
     {#if proposed.count > 1}<a class="all touch" href="#/matters">All {proposed.count} that Iris proposes</a>{/if}
+  </section>
+{/if}
+
+<!-- Items that Iris proposes to add to a confirmed matter (D20): one line for each matter. -->
+{#if growing.length}
+  <section aria-labelledby="growing">
+    <h2 id="growing"><span>Your matters</span> <span class="count">{growing.length}</span></h2>
+    <ul class="growing">
+      {#each growing as m (m.id)}
+        <li><a class="touch" href={href.matter(m.id)}>Add {m.additions?.length === 1 ? "1 item" : `${m.additions?.length} items`} to {m.title}?</a></li>
+      {/each}
+    </ul>
   </section>
 {/if}
 
