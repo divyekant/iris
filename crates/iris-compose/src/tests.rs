@@ -337,7 +337,7 @@ fn a_sent_copy_reads_back_with_transport_headers() {
         String::from_utf8(compose(ME, "iris.4@example.com", &c, None, 1_800_000_000)).unwrap();
     let sent = format!("Received: by 10.0.0.1; Mon, 1 Jan 2027\r\nX-Gm-Spam: 0\r\n{raw}");
     assert!(read(sent.as_bytes(), ME).is_none());
-    let back = read_sent(sent.as_bytes(), ME).unwrap();
+    let back = read_sent(sent.as_bytes(), ME, &[]).unwrap();
     assert_eq!(hash(&back.content, None), hash(&c, None));
     // A second To, another part or another From still gives no content.
     for (from, to) in [
@@ -350,7 +350,10 @@ fn a_sent_copy_reads_back_with_transport_headers() {
     ] {
         let changed = sent.replacen(from, to, 1);
         assert_ne!(changed, sent);
-        assert!(read_sent(changed.as_bytes(), ME).is_none(), "{changed}");
+        assert!(
+            read_sent(changed.as_bytes(), ME, &[]).is_none(),
+            "{changed}"
+        );
     }
     // A Bcc of the sent copy is in its content; with no Bcc header the
     // caller takes the approved bcc (send content spec, section 4).
@@ -358,11 +361,33 @@ fn a_sent_copy_reads_back_with_transport_headers() {
         sent.replacen("To: ", "Bcc: spy@x.org\r\nTo: ", 1)
             .as_bytes(),
         ME,
+        &[],
     )
     .unwrap();
     assert!(bcc.bcc_header);
     assert_eq!(bcc.content.bcc, ["spy@x.org"]);
     assert!(!back.bcc_header);
+    // The approved bcc: a copy with no Bcc header takes it, and a copy
+    // whose Bcc header names other addresses keeps its own.
+    let approved = vec!["sam@x.org".to_string()];
+    let with = Content {
+        bcc: approved.clone(),
+        ..c.clone()
+    }
+    .check()
+    .unwrap();
+    let omitted = read_sent(sent.as_bytes(), ME, &approved).unwrap();
+    assert!(!omitted.bcc_header);
+    assert_eq!(hash(&omitted.content, None), hash(&with, None));
+    let other = read_sent(
+        sent.replacen("To: ", "Bcc: spy@x.org\r\nTo: ", 1)
+            .as_bytes(),
+        ME,
+        &approved,
+    )
+    .unwrap();
+    assert_eq!(other.content.bcc, ["spy@x.org"]);
+    assert_ne!(hash(&other.content, None), hash(&with, None));
 }
 
 /// A read back of any changed message does not panic. If it gives a
@@ -582,7 +607,7 @@ fn a_changed_draft_keeps_the_limits() {
     );
     assert_ne!(crowded, raw);
     assert!(read(crowded.as_bytes(), ME).is_none());
-    assert!(read_sent(crowded.as_bytes(), ME).is_none());
+    assert!(read_sent(crowded.as_bytes(), ME, &[]).is_none());
     let large = format!("{raw}{}\r\n", "x".repeat(MAX_BODY));
     assert!(read(large.as_bytes(), ME).is_none());
     // A duplicate or upper case address that the check would erase.
@@ -597,7 +622,10 @@ fn a_changed_draft_keeps_the_limits() {
         let changed = raw.replacen(from, to, 1).replacen("Body", "Other", 1);
         assert_ne!(changed, raw);
         assert!(read(changed.as_bytes(), ME).is_none(), "{changed}");
-        assert!(read_sent(changed.as_bytes(), ME).is_none(), "{changed}");
+        assert!(
+            read_sent(changed.as_bytes(), ME, &[]).is_none(),
+            "{changed}"
+        );
     }
     assert!(read(raw.as_bytes(), ME).is_some());
 }
@@ -613,7 +641,7 @@ fn a_subject_with_changed_spaces_does_not_read_back() {
     let changed = raw.replacen("Subject: Hi there", "Subject: Hi  there", 1);
     assert_ne!(changed, raw);
     assert!(read(changed.as_bytes(), ME).is_none());
-    assert!(read_sent(changed.as_bytes(), ME).is_none());
+    assert!(read_sent(changed.as_bytes(), ME, &[]).is_none());
 }
 
 /// Spec section 1: `From` is checked by address only, because Gmail can
@@ -631,7 +659,10 @@ fn a_display_name_on_from_reads_back_on_both_paths() {
     );
     assert_ne!(named, raw);
     let sent = format!("Received: by 10.0.0.1; Mon, 1 Jan 2027\r\n{named}");
-    for back in [read(named.as_bytes(), ME), read_sent(sent.as_bytes(), ME)] {
+    for back in [
+        read(named.as_bytes(), ME),
+        read_sent(sent.as_bytes(), ME, &[]),
+    ] {
         assert_eq!(hash(&back.unwrap().content, None), hash(&c, None));
     }
     let other = named.replacen("<owner@example.com>", "<other@example.com>", 1);
@@ -804,6 +835,25 @@ fn a_display_name_goes_on_from_and_reads_back_by_address() {
     assert_eq!(from_name("  Dana Diaz "), Some("Dana Diaz".into()));
     assert_eq!(from_name(""), None);
     assert_eq!(from_name("a\r\nBcc: x@y.z"), None);
+    // A control character at any place of a name is refused: the trim of
+    // the ends takes spaces only (send content spec, sections 2 and 3).
+    let ok = Attachment::of("a.pdf", "application/pdf", b"x");
+    for c in ['\r', '\n', '\t', '\u{0}', '\u{7f}', '\u{85}', '\u{1b}'] {
+        for name in [
+            format!("{c}a.pdf"),
+            format!("a{c}.pdf"),
+            format!("a.pdf{c}"),
+            format!(" {c} a.pdf "),
+        ] {
+            assert_eq!(from_name(&name), None, "{name:?}");
+            let mut m = content(&["p@x.org"], "Hi", "Body");
+            m.attachments = vec![Attachment {
+                name: name.clone(),
+                ..ok.clone()
+            }];
+            assert!(m.check().is_err(), "{name:?}");
+        }
+    }
     assert_eq!(from_name(&"x".repeat(MAX_NAME + 1)), None);
     let c = content(&["p@x.org"], "Hi", "Body").check().unwrap();
     let raw = compose_with(

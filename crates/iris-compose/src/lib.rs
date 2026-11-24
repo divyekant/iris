@@ -189,7 +189,9 @@ impl Content {
             return Err(format!("a draft has at most {MAX_ATTACHMENTS} attachments"));
         }
         for a in &mut self.attachments {
-            a.name = a.name.trim().to_string();
+            // Only spaces: a control character at an end stays, and the
+            // check refuses it.
+            a.name = a.name.trim_matches(' ').to_string();
             a.mime = a.mime.to_ascii_lowercase();
             check_attachment(a)?;
         }
@@ -278,7 +280,7 @@ fn check_attachment(a: &Attachment) -> Result<(), String> {
 /// at most [`MAX_NAME`] characters, with no space at the ends. `None` for
 /// an empty name (send content spec, section 3).
 pub fn from_name(name: &str) -> Option<String> {
-    let n = name.trim();
+    let n = name.trim_matches(' ');
     (!n.is_empty() && n.chars().count() <= MAX_NAME && !n.chars().any(char::is_control))
         .then(|| n.to_string())
 }
@@ -590,9 +592,15 @@ pub fn read(raw: &[u8], account: &str) -> Option<Read> {
 /// each header that is not in [`HEADERS`] is ignored, because Gmail can
 /// add transport headers to the sent copy. A header of `ADDRESSING`
 /// still gives `None`. The fields of the hash, the one `text/plain` part
-/// and `From` are checked as in [`read`].
-pub fn read_sent(raw: &[u8], account: &str) -> Option<Read> {
-    read_with(raw, account, false)
+/// and `From` are checked as in [`read`]. A copy with no `Bcc` header
+/// takes `approved_bcc` (send content spec, section 4): a provider can
+/// drop the header from the copy of the sender. `bcc_header` tells which.
+pub fn read_sent(raw: &[u8], account: &str, approved_bcc: &[String]) -> Option<Read> {
+    let mut r = read_with(raw, account, false)?;
+    if !r.bcc_header {
+        r.content.bcc = approved_bcc.to_vec();
+    }
+    Some(r)
 }
 
 fn read_with(raw: &[u8], account: &str, strict: bool) -> Option<Read> {

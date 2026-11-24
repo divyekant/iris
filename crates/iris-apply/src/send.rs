@@ -29,12 +29,16 @@ const UNKNOWN_MS: i64 = 24 * 60 * 60 * 1000;
 /// The error of a Gmail send whose sent copy differs.
 pub const SENT_OTHER: &str = "Gmail sent other content than the approved content";
 
-/// The end of each "sent other content" error, after the name of the
-/// provider (for example "Outlook sent other content ..."). Each such
-/// error stops the later releases.
+/// The note of a sent copy with no `Bcc` header (send content spec,
+/// section 6.2).
+pub const NO_BCC: &str = "The sent copy shows no Bcc. Iris cannot confirm the blind copies.";
+
 /// The start of the note of a good send whose draft stays on the server.
 pub const KEPT_DRAFT_START: &str = "Sent. The draft stays in";
 
+/// The end of each "sent other content" error, after the name of the
+/// provider (for example "Outlook sent other content ..."). Each such
+/// error stops the later releases.
 pub const SENT_OTHER_END: &str = "sent other content than the approved content";
 
 /// The content of a `draft` row and the `post` of a create: the content
@@ -501,20 +505,39 @@ fn complete(
         Ok(r) => r,
         Err(_) => return Ok(Outcome::Pending),
     };
-    let same = iris_compose::read_sent(&raw, &run.address)
-        .is_some_and(|r| iris_compose::hash(&r.content, r.reply.as_ref()) == approved);
-    let error = if !same {
-        Some(format!("{} {SENT_OTHER_END}", run.mail.name()))
-    } else if run.mail.keeps_sent_draft() {
-        // The send is good. The note stays with the ledger row, where the
-        // history shows it (limit #634).
-        Some(format!(
-            "{KEPT_DRAFT_START} {}: delete it there.",
-            run.mail.name()
-        ))
+    // The approved `bcc`: a sent copy with no `Bcc` header takes it (send
+    // content spec, section 4), and the ledger entry gets a note.
+    let approved_bcc: Vec<String> = run.store.read(|c| {
+        let content: String =
+            c.query_row("SELECT content FROM draft WHERE id = ?1", [draft], |r| {
+                r.get(0)
+            })?;
+        Ok(serde_json::from_str::<Stored>(&content)
+            .map(|s| s.content.bcc)
+            .unwrap_or_default())
+    })?;
+    let read = iris_compose::read_sent(&raw, &run.address, &approved_bcc);
+    let no_bcc = read
+        .as_ref()
+        .is_some_and(|r| !r.bcc_header && !approved_bcc.is_empty());
+    let same = read.is_some_and(|r| iris_compose::hash(&r.content, r.reply.as_ref()) == approved);
+    let mut notes = Vec::new();
+    if !same {
+        notes.push(format!("{} {SENT_OTHER_END}", run.mail.name()));
     } else {
-        None
-    };
+        if run.mail.keeps_sent_draft() {
+            // The send is good. The note stays with the ledger row, where
+            // the history shows it (limit #634).
+            notes.push(format!(
+                "{KEPT_DRAFT_START} {}: delete it there.",
+                run.mail.name()
+            ));
+        }
+        if no_bcc {
+            notes.push(NO_BCC.to_string());
+        }
+    }
+    let error = (!notes.is_empty()).then(|| notes.join(" "));
     run.store.write(|tx| {
         let t = now();
         tx.execute(
