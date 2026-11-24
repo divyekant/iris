@@ -251,7 +251,7 @@ same request.
 |---|---|
 | `POST /api/items/{id}/close` | Body `{}` or `{"reason"}`. Sets the status `done`. The default reason is "Done.". |
 | `POST /api/items/{id}/decline` | Body `{}` or `{"reason"}`. Sets the status `declined`. The default reason is "Declined.". |
-| `POST /api/items/{id}/defer` | Body `{"date": "YYYY-MM-DD"}`, with an optional `reason`. Sets the status `deferred` and `deferred_until`. The commitment opens again on that date (UTC). |
+| `POST /api/items/{id}/defer` | Body `{"date": "YYYY-MM-DD"}`, with an optional `reason`. Sets the status `deferred` and `deferred_until`. The commitment opens again at the start of that date in the time zone of the owner (`iris zone`; the default is the time zone of the computer). |
 
 A `reason` is 1 to 500 characters and not blank. The answer is the item
 after the change. The verb changes only a commitment with the status `open`

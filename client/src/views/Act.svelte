@@ -41,9 +41,15 @@
   let soon = $derived(first(now, tz));
   let week = $derived(nextWeek(now, tz));
 
+  // True when the status, and so the zone of the owner, did not load.
+  let noZone = $state(false);
+
   async function openLater() {
     // A direct link to an item: the days need the zone of the owner first.
+    // With no zone, offer no day: a day of the browser can open the item again at once.
     if (!later && tz === undefined) await get("status").catch(() => {});
+    noZone = !later && tz === undefined;
+    if (noZone) return;
     now = clock();
     later = !later;
   }
@@ -142,6 +148,9 @@
       <button class="quiet" type="button" onclick={() => choose("decline")}>Decline</button>
       {@render more?.()}
     </div>
+    {#if noZone}
+      <p class="error">Iris cannot get your time zone, so it cannot offer the days. Try Later again.</p>
+    {/if}
     {#if later}
       <div class="when">
         <button class="chip" type="button" onclick={() => defer(soon)}>Tomorrow <span>{day(soon)}</span></button>

@@ -135,6 +135,26 @@ test("a direct link to an item gets the zone of the owner before Later offers da
   }
 });
 
+test("a direct link with no status offers no day of Later, and a second try loads it", async () => {
+  access.zone = undefined;
+  let up = false;
+  serve((path) => (path === "status" ? (up ? [200, { ...fx.status, time_zone: "Asia/Tokyo" }] : [503, { error: "down" }]) : [200, commitment()]));
+  const view = await mount("/src/views/Act.svelte", { item: commitment(), clock: () => NOW, onchange: () => {} });
+  try {
+    button(view, "Later").click();
+    await until(() => view.target.querySelector(".error"));
+    assert.match(text(view.target), /cannot get your time zone/);
+    assert.equal(button(view, "Tomorrow"), undefined);
+    up = true;
+    button(view, "Later").click();
+    await until(() => button(view, "Tomorrow"));
+    assert.equal(view.target.querySelector(".error"), null);
+  } finally {
+    view.destroy();
+    access.zone = null;
+  }
+});
+
 test("due words and Due soon count days in the time zone of the owner", () => {
   // 17:00 UTC on 17 Nov: 18 Nov in Tokyo, 17 Nov in Los Angeles (the browser).
   const now = new Date(Date.UTC(2026, 10, 17, 17));

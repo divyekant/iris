@@ -5,6 +5,7 @@ import { load, render } from "./render.mjs";
 
 const fx = await load("/dev/fixtures.ts");
 const j = await load("/src/jobs.ts");
+const { access } = await load("/src/access.svelte.ts");
 const { parse, href, NAV, JOB_ID } = await load("/src/route.ts");
 const text = (html) => html.replace(/<!--[^>]*-->/g, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
 
@@ -181,4 +182,20 @@ test("an old job that asks you shows first, also behind a full page of newer wor
   const html = text(await render("/src/views/Jobs.svelte", { pages: pages({ working }) }));
   assert.ok(html.indexOf("Pay the Q4 invoice") < html.indexOf("Goal 0."));
   assert.ok(html.includes("Show more"));
+});
+
+test("a job due date counts days in the browser, also when the owner zone differs (issue #892)", () => {
+  // The day of the browser, as the start page picked it: the end of 17 Nov here.
+  const end = new Date(2026, 10, 17, 23, 59);
+  const job = { ...fx.jobs["j-12"], due: end.toISOString() };
+  const now = new Date(2026, 10, 17, 0, 0);
+  const browser = j.due(job, now).text;
+  assert.match(browser, /today$/);
+  const offset = -now.getTimezoneOffset() / 60;
+  access.zone = offset >= 0 ? "Pacific/Kiritimati" : "Etc/GMT+12"; // A zone far from the browser.
+  try {
+    assert.equal(j.due(job, now).text, browser);
+  } finally {
+    access.zone = undefined;
+  }
 });
