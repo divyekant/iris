@@ -452,7 +452,7 @@ added = 2026-11-10
 | `id` | yes | A positive integer, unique in the file. |
 | `name` | yes | One line that the brief and the ledger show. |
 | `effect` | yes | `allow`, `review` or `deny` (actions); `hide`, `bundle` or `notify` (attention). |
-| `verbs` | for `allow`, `review` and `deny` | The verbs of section 4, except `send`. A rule with `send` is refused: a send has no undo, so a person approves each send (decision D2, issue #239). A rule can allow `draft`: the draft goes to the held outbox, and its send still needs a person. |
+| `verbs` | for `allow`, `review` and `deny` | The verbs of section 4, except `send`. A rule with `send` is refused: a send has no undo, so a person approves each send (decision D2, issue #239). A rule can allow `draft`: after the apply gate, the engine makes the draft at the provider. Only a `send` enters the held outbox, and a person approves each send. |
 | `when` | yes | The conditions. Each condition must match. |
 | `by` | yes | `person` (written by the person) or `proposal` (proposed by Iris and accepted by the person). |
 | `added` | yes | The date. |

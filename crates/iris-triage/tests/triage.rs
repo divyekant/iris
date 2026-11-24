@@ -500,7 +500,7 @@ fn apply_mode_deny_rule() {
 /// A draft with a warning flag goes to a person in the mode `apply`, and
 /// the decision does not panic.
 #[test]
-fn apply_mode_sends_a_draft_and_a_send_to_a_person() {
+fn apply_mode_sends_a_flagged_draft_to_a_person() {
     use iris_changeset::{add_action, create, submit, Author, AuthorKind, Verb};
     let dir = TempDir::new("applywrite");
     let (s, a) = store(&dir);
@@ -647,4 +647,83 @@ fn apply_mode_lets_a_rule_allow_a_draft_to_the_thread() {
         ("in_review", "limit", None),
         "{d:?}"
     );
+}
+
+/// Spec 2 section 6.5: a send with a warning flag goes to review by
+/// `limit`, as a draft does. A send with no warning flag goes to review by
+/// `policy`: no rule can allow a send (decision D2).
+#[test]
+fn apply_mode_sends_a_send_to_a_person_by_its_flags() {
+    use iris_changeset::{add_action, create, submit, Author, AuthorKind, Verb};
+    let dir = TempDir::new("applysend");
+    let (s, _) = store(&dir);
+    apply_policy(&s, &dir, "");
+    // d-1 is a new mail to a new address (new_recipient); d-2 is to you.
+    s.write(|tx| {
+        tx.execute(
+            "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0)",
+            [],
+        )?;
+        for (n, to) in [(1, "p@x.org"), (2, "owner@example.com")] {
+            tx.execute(
+                "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+                 VALUES (1, 1, ?1, 'draft', '{\"accounts\":[\"a-1\"]}', '{}')",
+                [n],
+            )?;
+            let action = tx.last_insert_rowid();
+            let c = iris_compose::Content {
+                to: vec![to.into()],
+                cc: vec![],
+                subject: "Hi".into(),
+                body: "Thanks.".into(),
+            }
+            .check()
+            .unwrap();
+            let id = format!("iris.{n}@example.com");
+            let raw = iris_compose::compose("owner@example.com", &id, &c, None, 1);
+            tx.execute(
+                "INSERT INTO draft(account_id, provider_id, message_id_hdr, content, hash, raw,
+                                   action_id, created_at, updated_at)
+                 VALUES (1, ?1, ?2, '{}', ?3, ?4, ?5, 0, 0)",
+                rusqlite::params![
+                    format!("r{n}"),
+                    id,
+                    iris_compose::hash(&c, None),
+                    raw,
+                    action
+                ],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let who = Author {
+        kind: AuthorKind::Local,
+        name: Some("t".into()),
+        session: None,
+        job: None,
+    };
+    let cs = create(&s, &who, NOW).unwrap();
+    for d in ["d-1", "d-2"] {
+        add_action(&s, cs, &who, Verb::Send, &[d], &Default::default(), None).unwrap();
+    }
+    submit(&s, cs, &who, "Send.", NOW).unwrap();
+    s.write(|c| {
+        iris_triage::decide_submitted(c, cs, 1, iris_policy::Author::Local, NOW)
+            .map_err(|e| iris_store::Error::Io(std::io::Error::other(e.to_string())))
+    })
+    .unwrap();
+    let d = decisions(&s, cs);
+    assert_eq!(
+        (d[0].0.as_str(), d[0].1.as_str()),
+        ("in_review", "limit"),
+        "{d:?}"
+    );
+    assert_eq!(d[0].3, iris_policy::WARNING_REASON);
+    assert_eq!(
+        (d[1].0.as_str(), d[1].1.as_str()),
+        ("in_review", "policy"),
+        "{d:?}"
+    );
+    assert!(d[1].3.contains("No rule can allow a send"), "{d:?}");
 }

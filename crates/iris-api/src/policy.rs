@@ -228,6 +228,11 @@ pub fn grant(
     let mut list: Vec<iris_policy::Verb> = Vec::new();
     for v in verbs {
         match iris_policy::Verb::from_name(v) {
+            // shortcut: a job session cannot draft yet, so a draft grant would
+            // allow nothing; the card that lets a job draft (#551) allows it.
+            Some(iris_policy::Verb::Draft) => {
+                return Err(Error::Query("a job cannot write a draft yet".into()))
+            }
             Some(v) if !list.contains(&v) => list.push(v),
             Some(_) => return Err(Error::Query(format!("the verb {v:?} is in the list twice"))),
             None => {
