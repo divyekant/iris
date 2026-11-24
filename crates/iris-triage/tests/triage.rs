@@ -611,8 +611,19 @@ fn observe_mode_shows_what_the_rules_would_decide() {
             panic!("a proposal");
         };
         let would = s
-            .read(|c| Ok(iris_triage::would(c, changeset, NOW)))
-            .unwrap()
+            .read(|c| {
+                let mut out = Vec::new();
+                if let Some(pass) = iris_triage::would_start(c, changeset).unwrap() {
+                    let mut after = 0;
+                    while let Some((id, w)) =
+                        iris_triage::would_next(c, &pass, changeset, after, NOW).unwrap()
+                    {
+                        after = id;
+                        out.extend(w);
+                    }
+                }
+                Ok(out)
+            })
             .unwrap();
         if mode == "observe" {
             let rows = actions(&s, changeset);

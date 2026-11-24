@@ -305,7 +305,7 @@ async fn get_would(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
     let Some(row) = changeset_row(&s, &id)? else {
         return Ok(not_found());
     };
-    Ok(Json(blocking(move || review::would(&s, row, now_ms())).await?).into_response())
+    Ok(stream(move |w| review::write_would(&s, row, now_ms(), w)).await)
 }
 
 #[derive(Deserialize)]

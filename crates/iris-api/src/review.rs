@@ -521,16 +521,27 @@ pub fn comments(store: &Store, changeset: i64) -> Result<Value> {
 /// shows the reason of its own revision.
 /// `{"would": [{"revision", "n", "outcome", "rule", "policy", "reason"}]}`:
 /// what a rule of the active policy would decide for each `proposed`
-/// action, in the mode `observe` only (`iris_triage::would`). `outcome` is
-/// `approved`, `in_review` or `denied`. An empty list in the mode `apply`.
-pub fn would(store: &Store, changeset: i64, now_ms: i64) -> Result<Value> {
-    let list: Vec<iris_triage::Would> = store
-        .read(|c| Ok(iris_triage::would(c, changeset, now_ms)))?
+/// action, in the mode `observe` only (`iris_triage::would_next`).
+/// `outcome` is `approved`, `in_review` or `denied`. An empty list in the
+/// mode `apply`. Streamed, one action for each read.
+pub fn write_would(store: &Store, changeset: i64, now_ms: i64, out: &mut impl Write) -> Result<()> {
+    out.write_all(b"{\"would\":[").map_err(io)?;
+    let pass = store
+        .read(|c| Ok(iris_triage::would_start(c, changeset)))?
         .map_err(changeset_error)?;
-    Ok(json!({
-        "would": list
-            .into_iter()
-            .map(|w| json!({
+    if let Some(pass) = pass {
+        let (mut after, mut first) = (0, true);
+        while let Some((id, w)) = store
+            .read(|c| Ok(iris_triage::would_next(c, &pass, changeset, after, now_ms)))?
+            .map_err(changeset_error)?
+        {
+            after = id;
+            let Some(w) = w else { continue };
+            if !first {
+                out.write_all(b",").map_err(io)?;
+            }
+            first = false;
+            let v = json!({
                 "revision": w.revision,
                 "n": w.n,
                 "outcome": match w.outcome {
@@ -541,9 +552,11 @@ pub fn would(store: &Store, changeset: i64, now_ms: i64) -> Result<Value> {
                 "rule": w.rule,
                 "policy": w.policy,
                 "reason": w.reason,
-            }))
-            .collect::<Vec<_>>(),
-    }))
+            });
+            serde_json::to_writer(&mut *out, &v).map_err(|e| io(e.into()))?;
+        }
+    }
+    out.write_all(b"]}").map_err(io)
 }
 
 pub fn revisions(store: &Store, changeset: i64) -> Result<Value> {
