@@ -172,9 +172,9 @@ cargo test -p iris --lib notify
 ## Known limits
 
 - The move has no row in the notice list of the web client and of the Mac
-  app. The system notice and the jobs page show it.
+  app. The system notice and the jobs page show it (issue #844).
 - A crash between the commit of the move and the system notice loses the
-  notice. The job stays in `needs_you`.
+  notice. The job stays in `needs_you` (issue #845).
 
 ## Rollout
 
