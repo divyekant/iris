@@ -1261,6 +1261,45 @@ fn each_draft_or_copy_label_change_marks_the_conversation() {
     }
 }
 
+/// A gone message keeps its items. When it comes back with a draft or copy
+/// label, by the sync (`put_messages`) or by any other write of `gone_at`,
+/// its items go (#677).
+#[test]
+fn a_draft_that_comes_back_loses_its_items() {
+    for back in ["sync", "sql"] {
+        let b = store("back");
+        let m = b.add("1", ASK, &["INBOX"]);
+        understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW).unwrap();
+        // The message goes, then gets UNSENT while it is gone.
+        b.store
+            .write(|tx| {
+                tx.execute("UPDATE message SET gone_at = 1 WHERE id = ?1", [m])?;
+                tx.execute(
+                    "INSERT INTO message_label(message_id, label_id)
+                     SELECT ?1, id FROM label WHERE provider_id = 'UNSENT'",
+                    [m],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(b.items().len(), 1, "{back}: a gone origin keeps its item");
+        if back == "sync" {
+            // The upsert of `put_messages` clears `gone_at`.
+            b.add("1", ASK, &["INBOX", "UNSENT"]);
+        } else {
+            b.store
+                .write(|tx| {
+                    tx.execute("UPDATE message SET gone_at = NULL WHERE id = ?1", [m])?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let gone: Option<i64> = b.col("SELECT gone_at FROM message WHERE id = ?1", m);
+        assert!(gone.is_none(), "{back}");
+        assert!(b.items().is_empty(), "{back}");
+    }
+}
+
 /// A store from before migration 42 can hold items of a message that got
 /// `UNSENT` in place. The migration drops them.
 #[test]
@@ -1273,7 +1312,7 @@ fn the_upgrade_drops_the_items_of_a_draft_or_copy() {
     // The store of version 41: no view and no item trigger.
     b.store
         .write(|tx| {
-            tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP VIEW item_droppable;")?;
+            tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;")?;
             Ok(())
         })
         .unwrap();

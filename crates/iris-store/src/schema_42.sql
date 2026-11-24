@@ -50,6 +50,21 @@ BEGIN
     (SELECT item_id FROM item_droppable WHERE message_id = NEW.message_id);
 END;
 
+-- A gone message keeps its items (spec 1, section 7.5). When it comes back
+-- (`gone_at` to NULL, by each return path of the sync and the store) with a
+-- DRAFT, UNSENT or SENT_COPY label, the same rule holds again: its
+-- droppable items go, and its thread is computed again.
+CREATE TRIGGER draft_or_copy_back_drops_items AFTER UPDATE OF gone_at ON message
+  WHEN OLD.gone_at IS NOT NULL AND NEW.gone_at IS NULL
+  AND EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+    WHERE ml.message_id = NEW.id AND l.provider_id IN ('DRAFT', 'UNSENT', 'SENT_COPY'))
+BEGIN
+  DELETE FROM item WHERE id IN
+    (SELECT item_id FROM item_droppable WHERE message_id = NEW.id);
+  INSERT INTO talk_due(thread_id) SELECT NEW.thread_id
+    WHERE NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = NEW.thread_id);
+END;
+
 -- The conversation of a thread leaves out drafts and copies, so each new or
 -- removed DRAFT, UNSENT or SENT_COPY label puts the thread in `talk_due`
 -- (migration 40), also when the message had no droppable item.
