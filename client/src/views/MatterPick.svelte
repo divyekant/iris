@@ -10,8 +10,13 @@
 
   let { item, onchange }: { item: Item; onchange: (matter: string) => void } = $props();
 
+  // The status part of the live rule of `matter_live` (migration 46): only a
+  // live item can join, and a signal is live only while it is active.
   const MEMBERS = ["commitment", "conversation", "record", "signal"];
-  let can = $derived(MEMBERS.includes(item.form) && item.status !== "gone");
+  const ENDED = ["gone", "cancelled", "declined"];
+  let can = $derived(
+    MEMBERS.includes(item.form) && !ENDED.includes(item.status) && (item.form !== "signal" || item.status === "active"),
+  );
 
   let name = $state("");
   $effect(() => {
@@ -48,7 +53,18 @@
       open = false;
       onchange(v.matter.id);
     } catch (e) {
-      error = `Iris did not add it: ${own(e)}`;
+      // A lost answer or a retry (409, already a member) can hide a write that
+      // committed. Read the item again before the page says what happened.
+      const status = (e as { status?: number }).status;
+      const fresh = await get<Item>(`items/${encodeURIComponent(item.id)}`).catch(() => null);
+      if (fresh?.matter) {
+        open = false;
+        onchange(fresh.matter);
+      } else if (status && status >= 400 && status < 500) {
+        error = `Iris did not add it: ${own(e)}`;
+      } else {
+        error = "Iris does not know if it added the item. Reload the page to see.";
+      }
     } finally {
       busy = false;
     }

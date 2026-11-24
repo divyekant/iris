@@ -144,3 +144,58 @@ test("a feed item has no picker", async () => {
     v.destroy();
   }
 });
+
+test("an ended signal, a cancelled item and a gone item have no picker; an active signal has one", async () => {
+  const signal = fx.items.find((i) => i.form === "signal" && !i.matter) ?? { ...fx.items.find((i) => i.form === "signal"), matter: undefined };
+  const commitment = fx.items.find((i) => i.form === "commitment" && !i.matter);
+  const cases = [
+    [{ ...signal, status: "active" }, true],
+    [{ ...signal, status: "used" }, false],
+    [{ ...signal, status: "dismissed" }, false],
+    [{ ...signal, status: "expired" }, false],
+    [{ ...commitment, status: "cancelled" }, false],
+    [{ ...commitment, status: "gone" }, false],
+  ];
+  for (const [item, shown] of cases) {
+    const v = await mount("/src/views/MatterPick.svelte", { item, onchange: () => {} });
+    try {
+      assert.equal(Boolean(button(v, "Add to a matter")), shown, `${item.form} ${item.status}`);
+    } finally {
+      v.destroy();
+    }
+  }
+});
+
+test("a lost answer of a write that committed shows the matter; a refusal says that Iris did not add it", async () => {
+  const item = fx.items.find((i) => i.form === "commitment" && !i.matter);
+  for (const [committed, answer, says] of [
+    [true, 502, null],
+    [true, 409, null],
+    [false, 400, /Iris did not add it/],
+    [false, 503, /does not know if it added/],
+  ]) {
+    serve((path, method) => {
+      if (path === "matters" && method === "GET") return [200, fx.matters];
+      if (method === "POST") return [answer, { error: "no" }];
+      return [200, { ...item, matter: committed ? "g-4" : undefined }];
+    });
+    let joined = null;
+    const v = await mount("/src/views/MatterPick.svelte", { item, onchange: (m) => (joined = m) });
+    try {
+      button(v, "Add to a matter").click();
+      await until(() => button(v, "Tokyo trip"));
+      button(v, "Tokyo trip").click();
+      if (says) {
+        await until(() => v.target.querySelector("[role=alert]"));
+        assert.match(text(v.target.querySelector("[role=alert]")), says);
+        assert.equal(joined, null);
+      } else {
+        await until(() => joined);
+        assert.equal(joined, "g-4", `answer ${answer}`);
+        assert.equal(v.target.querySelector("[role=alert]"), null);
+      }
+    } finally {
+      v.destroy();
+    }
+  }
+});

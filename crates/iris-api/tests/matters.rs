@@ -718,3 +718,68 @@ async fn the_person_makes_edits_and_deletes_a_matter() {
     assert_eq!(code, StatusCode::BAD_REQUEST);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// D21 through the request boundary: an active signal (`s-`) joins a matter
+/// by hand and by an edit; an ended signal is refused.
+#[tokio::test]
+async fn a_signal_id_joins_a_matter_through_the_api() {
+    let (dir, s) = setup("signal");
+    let (code, _) = call(&s, Method::POST, "/api/matters/g-2/decline", "").await;
+    assert_eq!(code, StatusCode::OK);
+    // Items 4 and 5 are free: 4 becomes an active signal, 5 an expired one.
+    s.write(|tx| {
+        tx.execute(
+            "UPDATE item SET form = 'signal', status = 'active' WHERE id = 4",
+            [],
+        )?;
+        tx.execute(
+            "UPDATE item SET form = 'signal', status = 'expired' WHERE id = 5",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let (code, v) = call(
+        &s,
+        Method::POST,
+        "/api/matters",
+        r#"{"title":"Lease","items":["s-4"]}"#,
+    )
+    .await;
+    assert_eq!(code, StatusCode::CREATED, "{v}");
+    assert!(iris_spec::validator("matter").is_valid(&v["matter"]), "{v}");
+    assert_eq!(v["matter"]["counts"]["signal"], 1, "{v}");
+    assert_eq!(v["items"]["signal"][0]["id"], "s-4", "{v}");
+    let id = v["matter"]["id"].as_str().unwrap().to_string();
+    let (code, v) = call(
+        &s,
+        Method::POST,
+        "/api/matters",
+        r#"{"title":"Old","items":["s-5"]}"#,
+    )
+    .await;
+    assert!(code.is_client_error(), "{code}: {v}");
+    let edit = format!("/api/matters/{id}/edit");
+    let (code, v) = call(&s, Method::POST, &edit, r#"{"add":["s-5"]}"#).await;
+    assert!(code.is_client_error(), "{code}: {v}");
+    let (code, v) = call(
+        &s,
+        Method::POST,
+        &edit,
+        r#"{"remove":["s-4"],"add":["c-5"]}"#,
+    )
+    .await;
+    assert!(
+        code.is_client_error(),
+        "c-5 is a signal now, not a commitment: {code}: {v}"
+    );
+    s.write(|tx| {
+        tx.execute("UPDATE item SET status = 'active' WHERE id = 5", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let (code, v) = call(&s, Method::POST, &edit, r#"{"add":["s-5"]}"#).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["matter"]["counts"]["signal"], 2, "{v}");
+    let _ = std::fs::remove_dir_all(dir);
+}

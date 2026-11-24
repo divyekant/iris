@@ -884,6 +884,35 @@ fn an_agent_proposes_a_matter_of_its_grant_only() {
     );
 }
 
+/// D21 and D22: the host may propose an active signal (`s-`) as a member.
+/// An ended signal is refused, with no write.
+#[test]
+fn an_agent_proposes_a_matter_with_a_signal() {
+    let (store, _job) = fixture("matters-propose-signal");
+    store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE item SET form = 'signal', status = 'expired' WHERE id = 4",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let args = json!({ "title": "Contract", "items": ["c-1", "s-4"] });
+    let r = call(&store, &socket::local(), "matters.propose", args.clone());
+    assert_eq!(r.unwrap_err().0, code::USAGE);
+    assert_eq!(count(&store, "SELECT count(*) FROM matter"), 0);
+    store
+        .write(|tx| {
+            tx.execute("UPDATE item SET status = 'active' WHERE id = 4", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let v = call(&store, &socket::local(), "matters.propose", args).unwrap();
+    assert_eq!(v["matter"]["items"], json!(["c-1", "s-4"]), "{v}");
+    assert_eq!(v["matter"]["counts"]["signal"], 1, "{v}");
+}
+
 /// D22: the answer of a session proposal is the matter document only. A
 /// member document can hold model text from mail outside the grant, so a
 /// marker in it never comes back.
