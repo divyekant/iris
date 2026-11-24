@@ -2054,9 +2054,6 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
     let gmail = gmail_config().map_err(std::io::Error::other)?;
     // The engine lock and the socket come first: a second engine stops here.
     let bound = socket::bind(store.dir())?;
-    // Before the socket and the HTTP listener answer: the status must not
-    // show a sync of a stopped process as running.
-    engine::Engine::close_stopped_syncs(&store);
     let api_store = store.clone();
     start_sessions(store.clone())?;
     let sync = engine::Engine::new(store, gmail, std::env::var("IRIS_TEST_TOKEN_URI").ok());

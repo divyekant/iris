@@ -84,11 +84,12 @@ fn serve_keeps_running_when_stderr_is_closed() {
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
 }
 
-/// A sync row that a stopped engine left is closed before `iris serve`
-/// answers: the status never shows it as running (issue #710).
+/// A sync row that a stopped process left shows as stopped in `iris
+/// status`, with no engine and no new sync. The row of a sync that runs
+/// (its account lock is held) stays running (issue #710).
 #[test]
-fn serve_closes_a_stopped_sync_row_before_it_answers() {
-    let dir = std::env::temp_dir().join(format!("iris-serve-stopped-{}", std::process::id()));
+fn status_shows_a_stopped_sync_row_as_stopped() {
+    let dir = std::env::temp_dir().join(format!("iris-status-stopped-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let store = iris_store::Store::open(&dir).unwrap();
     let account = store.add_account("gmail", "a@example.com").unwrap();
@@ -101,29 +102,22 @@ fn serve_closes_a_stopped_sync_row_before_it_answers() {
             Ok(())
         })
         .unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_iris"))
-        .args(["serve", "--addr", "127.0.0.1:0", "--data"])
-        .arg(&dir)
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut line = String::new();
-    BufReader::new(child.stderr.take().unwrap())
-        .read_line(&mut line)
-        .unwrap();
-    // The address line comes after the HTTP listener binds.
-    let result: Option<String> = store
-        .read(|c| {
-            Ok(
-                c.query_row("SELECT result FROM sync_log ORDER BY id LIMIT 1", [], |r| {
-                    r.get(0)
-                })?,
-            )
-        })
-        .unwrap();
-    child.kill().unwrap();
-    child.wait().unwrap();
-    assert!(line.contains("http://"), "{line}");
-    assert_eq!(result.as_deref(), Some(iris_sync::STOPPED));
+    let status = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_iris"))
+            .arg("--data")
+            .arg(&dir)
+            .arg("status")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let held = iris_sync::lock(&store, account).unwrap();
+    let running = status();
+    drop(held);
+    let stopped = status();
     let _ = std::fs::remove_dir_all(&dir);
+    assert!(running.contains(": running"), "{running}");
+    assert!(stopped.contains(iris_sync::STOPPED), "{stopped}");
+    assert!(!stopped.contains(": running"), "{stopped}");
 }
