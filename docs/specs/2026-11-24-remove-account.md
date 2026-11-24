@@ -31,12 +31,21 @@ what stays, and what happens after a crash during the delete.
 
 ## Not in scope
 
+Each item below has a `limit` issue (see the PR).
+
 - A delete at the provider. Iris never deletes a mailbox.
 - Backups. A backup copy that the person made (`iris backup`) and the
   migration copies `iris.db.v<N>.<time>-<hex>.bak` keep the mail of the
   account. The command and the button say so. (Limit issue to file with the
   code PR.)
-- The record of actions (see "What stays").
+- The record of actions (see "What stays"). It can hold text that the
+  person or an agent wrote, and the titles of decided matters.
+- An action in review (`in_review`) of the account. Only the person can
+  decide it (the trigger `action_state`). It stays in review until the
+  person decides it or it expires after 14 days. An approval applies
+  nothing, because the account has no sync.
+- The recovery of an apply step whose provider result is unknown at the
+  removal. The ledger entry stays `writing`.
 
 ## Design
 
@@ -80,13 +89,25 @@ holds no sign-in and no sync state. Reasons:
    `state = 'denied'`, `decided_by = 'engine'`, reason "the account was
    removed". An action with a ledger entry in state `writing` keeps its
    state, as `iris_changeset::expire` does.
-5. Delete the items of the account (step "items" below), so the brief is
+5. Write one row in the new table `removed_workspace(account_id, job_id)`
+   for each job whose scope has mail of the account: a scope thread of the
+   account, a scope item of the account, or a listed message
+   (`job_scope_message`) of the account. After step 6 and the delete, no
+   other row links the job to the account. So the delete reads this table,
+   also after a crash.
+6. Delete the items of the account (step "items" below), so the brief is
    empty of the account at the commit.
 
-A migration adds triggers that refuse an insert into `message`, `thread` and
-`label` for an account in state `removing` or `removed`. A sync that started
-before the removal and holds a token in memory then fails at its next write.
-It cannot add mail after the removal.
+Migration 46 adds triggers that refuse an insert into `message`, `thread`,
+`label`, `item` and `body` for an account in state `removing` or `removed`.
+So no writer can add mail or a derived row after the removal:
+
+- A sync that started before the removal and holds a token in memory fails
+  at its next write.
+- An understanding run that read a message before the removal fails at its
+  write of an item or a clean text. Its transaction rolls back. The batch
+  query of understanding also leaves out the messages of such an account,
+  so the next run does not try them again.
 
 ### The delete
 
@@ -100,6 +121,16 @@ tries again.
 It runs with `PRAGMA secure_delete = ON`, so SQLite writes zeros over the
 deleted content. Steps, each in batches of 500 rows, one write transaction
 for each batch:
+
+0. **Workspaces**: for each row of `removed_workspace` of the account,
+   delete the workspace folder of the job and its stage folder
+   (`<folder>.build`), while it holds the build lock of the workspace
+   (`<folder>.lock`). A build that runs holds the same lock, so the delete
+   waits for its end and then deletes what it published. A build after the
+   removal leaves out each message of an account in state `removing` or
+   `removed` (a condition in `iris_workspace::grant_in`). So no build can
+   publish mail of the account after this step. The row goes in the last
+   transaction (step 7).
 
 1. **Items**: each item of the account, and each item that cites a message
    of the account. First the rows that refer to them with no cascade:
@@ -119,12 +150,20 @@ for each batch:
    still in the store, and that the person did not decide
    (`decided_by IS NOT 'person'`). A decision of the person about an address
    is a rule of the person, not mail.
-6. **Workspaces**: the workspace folder (`workspaces/j-<id>`) of each job
-   whose scope has a thread or an item of the account. The next session of
-   the job builds the folder again from the store, with no mail of the
-   account.
-7. **End**: `INSERT INTO message_fts(message_fts) VALUES ('optimize')`, set
-   `state = 'removed'`, then `PRAGMA wal_checkpoint(TRUNCATE)`.
+6. **Orphan files**: each raw message file that no message row refers to
+   and whose time of change is before the start of this delete. A sync of
+   the account can write a raw file and then fail at the insert of its row
+   (the trigger). The delete holds the sync lock, so such a sync ended
+   before this step. A young file of a sync of another account stays. If an
+   old file of another account goes in the moment before its row insert,
+   that insert finds the file missing and fails with `MissingContent`, as
+   with `clean_gone`, and the next sync fetches the message again.
+7. **End**: `INSERT INTO message_fts(message_fts) VALUES ('optimize')`, and
+   delete the `removed_workspace` rows of the account. Commit. Then
+   `PRAGMA wal_checkpoint(TRUNCATE)`. Only if the checkpoint is not busy,
+   set `state = 'removed'`. A busy checkpoint keeps the state `removing`, so
+   the next call does step 7 and the checkpoint again. The write of the
+   state adds only the page of the account row to the log.
 
 The engine calls `delete_removed` on each tick. The command and the API call
 it once at once after the removal. So the delete continues after a crash or
@@ -133,10 +172,14 @@ a stop, with no new step by the person.
 ### What stays
 
 The record of what Iris and the person did stays: changesets and their
-actions, comments, the ledger, drafts, jobs, job events, job notes and the
-job scope rows. These tables keep each row by design (their delete triggers
+actions, comments, the ledger, drafts, jobs, job events, job notes, the
+job scope rows and the matters that the person decided (`confirmed` or
+`declined`). These tables keep each row by design (their delete triggers
 refuse). They hold IDs of messages and threads that no longer exist, and text
-that the person or an agent wrote: a draft, a reason, a note. A reader of
+that the person or an agent wrote: a draft, a reason, a note. A decided matter keeps
+its title, which the model wrote from the mail, and loses the members of the
+account (the cascade of `matter_item`). A proposed matter with no member
+left goes (the trigger `matter_item_lost`). A reader of
 these rows must accept an ID with no row (the build checks the ledger view,
 the review view and the job page).
 
@@ -194,6 +237,11 @@ and the delete, and prints the counts and the backup warning.
 | API body address that does not match the ID | HTTP 400, nothing changes. | API test |
 | A job session with scope in the account runs | Refused with "stop the job first". | store test |
 | A sync of the account runs at the removal | Its next insert fails on the trigger. The delete waits for the sync lock. No message of the account stays. | store test with an insert after the removal |
+| That sync wrote a raw file before its insert failed | Step 6 deletes the file. | store test with a file and no row |
+| An understanding run writes after the removal | The trigger on `item` or `body` refuses the write. The batch query leaves the account out. | store test |
+| A workspace build runs at the delete | Step 0 waits for the build lock, then deletes the folder. A later build leaves the account out. | workspace test |
+| A crash after the removal, after the items went | `removed_workspace` still names the jobs. | store test |
+| A reader keeps the log busy at the checkpoint | The state stays `removing`. The next call checkpoints again. | store test with an open read transaction |
 | An apply step of the account runs at the removal | It holds the sync lock, so the delete waits. Its ledger entry stays. An unknown result of that step stays unknown (no recovery runs for a removed account). | limit issue |
 | A crash after the removal, before the delete | State `removing`. The brief is empty of the account. The next tick deletes. | store test: removal, no delete, open again, delete |
 | A crash in a batch of the delete | The transaction rolls back. A file deleted before the rollback is missing for a row that the next batch deletes. The next tick continues. | store test: delete in two calls |
@@ -205,8 +253,11 @@ and the delete, and prints the counts and the backup warning.
 
 ## Impact
 
-- `crates/iris-store`: migration (states, insert triggers), `remove_account`,
-  `delete_removed`, the change of `save_account_secret`.
+- `crates/iris-store`: migration 46 (insert triggers, `removed_workspace`),
+  `remove_account`, `delete_removed`, the change of `save_account_secret`.
+- `crates/iris-understand`: the batch query leaves out a removed account.
+- `crates/iris-workspace`: the grant leaves out a removed account, and a
+  remove of a workspace under its build lock.
 - `crates/iris`: `iris account remove`, the engine tick.
 - `crates/iris-api`: the route, the status filter.
 - `client/`: the Accounts page.
