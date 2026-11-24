@@ -555,7 +555,9 @@ fn a_subject_with_an_encoded_word_reads_back_the_same() {
         "a =? b",
         &format!("=?{}日本😀", "x".repeat(MAX_SUBJECT - 10)),
     ] {
-        let c = content(&["a@example.com"], subject, "Body").check().unwrap();
+        let c = content(&["a@example.com"], subject, "Body")
+            .check()
+            .unwrap();
         let raw = compose(
             "me@example.com",
             "id.1@example.com",
