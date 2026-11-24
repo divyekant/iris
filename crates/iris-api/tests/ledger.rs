@@ -84,6 +84,31 @@ fn archived_args(
     why: Option<&str>,
     args: &str,
 ) -> i64 {
+    applied(
+        s,
+        "archive",
+        "[\"INBOX\"]",
+        author,
+        messages,
+        decision,
+        why,
+        args,
+    )
+}
+
+/// An entry of `verb` in the state `applied`, with `pre` as the labels of
+/// each message before it. Gives the ledger row ID.
+#[allow(clippy::too_many_arguments)]
+fn applied(
+    s: &Store,
+    verb: &str,
+    pre: &str,
+    author: &str,
+    messages: &[i64],
+    decision: &str,
+    why: Option<&str>,
+    args: &str,
+) -> i64 {
     s.write(|tx| {
         let job = (author == "agent").then_some("j-1");
         tx.execute(
@@ -94,8 +119,8 @@ fn archived_args(
         let ids: Vec<String> = messages.iter().map(|m| format!("\"m-{m}\"")).collect();
         tx.execute(
             "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args, why)
-             VALUES (?1, 1, 1, 'archive', ?2, ?4, ?3)",
-            params![cs, format!("{{\"messages\":[{}]}}", ids.join(",")), why, args],
+             VALUES (?1, 1, 1, ?5, ?2, ?4, ?3)",
+            params![cs, format!("{{\"messages\":[{}]}}", ids.join(",")), why, args, verb],
         )?;
         let a = tx.last_insert_rowid();
         for m in messages {
@@ -124,8 +149,8 @@ fn archived_args(
         for m in messages {
             tx.execute(
                 "INSERT INTO ledger_message(ledger_id, message_id, call, pre, post)
-                 VALUES (?1, ?2, 1, '[\"INBOX\"]', '[]')",
-                params![l, m],
+                 VALUES (?1, ?2, 1, ?3, '[]')",
+                params![l, m, pre],
             )?;
         }
         tx.execute("UPDATE ledger SET call = 1 WHERE id = ?1", [l])?;
@@ -321,10 +346,15 @@ async fn the_entry_of_an_undo_names_its_entry() {
 /// The entry of an applied undo, with its id. `rows` are the message,
 /// `done` and `listed` values of its ledger messages.
 fn undo_applied(s: &Store, l: i64, rows: &[(i64, bool, Option<&str>)]) -> i64 {
+    undo_step_applied(s, l, 1, rows)
+}
+
+/// As `undo_applied`, for step `step` of the undo.
+fn undo_step_applied(s: &Store, l: i64, step: i64, rows: &[(i64, bool, Option<&str>)]) -> i64 {
     s.write(|tx| {
         let a: i64 = tx.query_row(
-            "SELECT action_id FROM ledger_undo WHERE ledger_id = ?1 AND step = 1",
-            [l],
+            "SELECT action_id FROM ledger_undo WHERE ledger_id = ?1 AND step = ?2",
+            [l, step],
             |r| r.get(0),
         )?;
         tx.execute(
@@ -421,6 +451,48 @@ async fn an_undo_counts_each_target_of_its_entry() {
     );
     assert_eq!(e["retry"], false);
     assert_eq!(entry(&p, l)["can_undo"], false);
+}
+
+/// Each step of the undo of `trash` counts its own targets: step 2
+/// (`archive`) has the messages with no `INBOX` before the trash, and a
+/// message that it skips counts as skipped (decision D18).
+#[tokio::test]
+async fn each_step_of_a_trash_undo_counts_its_targets() {
+    let dir = temp("undo-trash");
+    let s = store(&dir);
+    let l = applied(
+        &s,
+        "trash",
+        "[]",
+        "person",
+        &[1, 2],
+        PERSON,
+        Some("Old mail."),
+        "{}",
+    );
+    let (code, v) = call(&s, true, &format!("/api/ledger/l-{l}/undo")).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    let u1 = undo_step_applied(&s, l, 1, &[(1, true, None), (2, true, None)]);
+    let u2 = undo_step_applied(&s, l, 2, &[(1, true, None), (2, false, Some("skipped"))]);
+    let (_, p) = call(&s, false, "/api/ledger").await;
+    let e = |id: i64| {
+        p["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == format!("l-{id}"))
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        (e(u1)["tried"].clone(), e(u1)["skipped"].clone()),
+        (json!(2), json!(0))
+    );
+    assert_eq!(
+        (e(u2)["tried"].clone(), e(u2)["skipped"].clone()),
+        (json!(2), json!(1))
+    );
+    assert_eq!(e(u2)["undo_of"], format!("l-{l}"));
 }
 
 /// Each value of an entry is bounded: a large argument (the body of a

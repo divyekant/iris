@@ -78,15 +78,18 @@ export function status(e: LedgerEntry): string {
     const part = e.messages > 0 ? ` ${e.changed.toLocaleString("en-US")} of ${count(e.messages, "message", "messages")} changed.` : "";
     return `Failed.${part}${e.error ? ` ${e.error}` : ""}`;
   }
-  // An undo that skipped messages or items: they changed again after the change, or are gone (decision D18).
+  // An undo that skipped messages or items: an earlier undo restored them, they changed again
+  // after the change, or they are gone (decision D18).
   if (e.undo_of && e.state === "applied" && e.skipped > 0) {
     const unit = e.items > 0 ? ["item", "items"] : ["message", "messages"];
+    const why = "already changed back, changed again after that change, or";
     if (e.skipped >= e.tried) {
-      const subject = e.tried === 1 ? `The ${unit[0]} changed` : `The ${unit[1]} changed`;
+      const one = e.tried === 1;
+      const subject = one ? `The ${unit[0]} was ${why} is gone.` : `The ${unit[1]} were ${why} are gone.`;
       // Promise the Undo only when the change has one now: a gone message cannot change back.
-      return `Nothing changed. ${subject} again after that change, or ${e.tried === 1 ? "is" : "are"} gone.${e.retry ? " That change keeps its Undo." : ""}`;
+      return `Nothing changed. ${subject}${e.retry ? " That change keeps its Undo." : ""}`;
     }
-    return `${count(e.skipped, unit[0], unit[1])} stayed as ${e.skipped === 1 ? "it was" : "they were"}: changed again after that change, or gone.`;
+    return `${count(e.skipped, unit[0], unit[1])} stayed as ${e.skipped === 1 ? "it was" : "they were"}: ${why} gone.`;
   }
   // A done change can carry a note, for example an Outlook send whose draft stays in Outlook.
   return e.error ?? "";

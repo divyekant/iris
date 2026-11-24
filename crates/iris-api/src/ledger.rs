@@ -46,15 +46,17 @@ pub struct LedgerEntry {
     pub undone_by: Option<String>,
     /// The entry that this entry undoes.
     pub undo_of: Option<String>,
-    /// For an applied undo (step 1): the targets of `tried` that it did not
-    /// change, because they changed again after the entry or are gone
-    /// (decision D18). 0 for each other entry.
+    /// For an applied undo: the targets of `tried` that it did not
+    /// change, because they changed again after the entry, an earlier undo
+    /// restored them, or they are gone (decision D18). 0 for each other entry.
     pub skipped: i64,
-    /// For an undo (step 1): the targets that it tries to restore, that is
+    /// For an undo: the targets that this step tries to restore, that is
     /// each message that the undone entry changed (also a gone one) and each
-    /// item of a state entry. 0 for each other entry.
+    /// item of a state entry. Step 2 of the undo of `trash` (`archive`) has
+    /// only the messages with no `INBOX` before the entry. 0 for each other
+    /// entry.
     pub tried: i64,
-    /// For an undo (step 1): true when an undo of the undone entry can
+    /// For an undo: true when an undo of the undone entry can
     /// start now (`ledger_can_undo`). False for each other entry.
     pub retry: bool,
 }
@@ -86,19 +88,22 @@ const ARGS: &str = "json_patch('{}', json_object(
           'date', CASE WHEN json_type(a.args, '$.date') = 'text' THEN substr(json_extract(a.args, '$.date'), 1, 2000) END,
           'field', CASE WHEN json_type(a.args, '$.field') = 'text' THEN substr(json_extract(a.args, '$.field'), 1, 2000) END))";
 
-/// The entry that step 1 of an undo undoes, or NULL for an entry that is
-/// no undo. Step 2 of the undo of `trash` restores no other target.
-const UNDONE: &str =
-    "(SELECT u.ledger_id FROM ledger_undo u WHERE u.action_id = a.id AND u.step = 1)";
+/// The entry that an undo undoes, or NULL for an entry that is no undo.
+const UNDONE: &str = "(SELECT u.ledger_id FROM ledger_undo u WHERE u.action_id = a.id)";
 
-/// The targets that an undo tries to restore: each message that the
-/// undone entry changed (also one that is gone now, because submit leaves
-/// it out of the undo), and each item of a state entry. NULL for an entry
-/// that is no undo. `{undone}` is [`UNDONE`].
-const TRIED: &str =
-    "(SELECT (SELECT count(*) FROM ledger_message lm WHERE lm.ledger_id = le.id AND lm.done = 1)
-               + (SELECT count(*) FROM action_item ai WHERE ai.action_id = le.action_id)
-         FROM ledger le WHERE le.id = {undone})";
+/// The targets that one step of an undo tries to restore. Step 1: each
+/// message that the undone entry changed (also one that is gone now,
+/// because submit leaves it out of the undo), and each item of a state
+/// entry. Step 2 (the `archive` of the undo of `trash`): each such message
+/// that had no `INBOX` before the entry. NULL for an entry that is no undo.
+const TRIED: &str = "(SELECT (SELECT count(*) FROM ledger_message lm
+                WHERE lm.ledger_id = u.ledger_id AND lm.done = 1
+                  AND (u.step = 1 OR NOT EXISTS (SELECT 1 FROM json_each(lm.pre) WHERE value = 'INBOX')))
+               + CASE WHEN u.step = 1
+                      THEN (SELECT count(*) FROM action_item ai JOIN ledger le ON le.id = u.ledger_id
+                            WHERE ai.action_id = le.action_id)
+                      ELSE 0 END
+         FROM ledger_undo u WHERE u.action_id = a.id)";
 
 /// The entry query. `{args}` is [`ARGS`]. Each text has at most 2,000
 /// characters (`substr(x, 1, 2000)`), so a page of 200 entries stays small
