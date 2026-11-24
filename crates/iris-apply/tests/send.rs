@@ -1311,3 +1311,80 @@ fn resume_after_a_wait_gets_a_full_hold() {
     }
     assert_eq!(b.sends(), 0);
 }
+
+/// Until the Bcc gate and the attachment folder exist, submit denies a
+/// draft with `bcc` or with a file, and a send of a Gmail draft that the
+/// person gave a file, before any call to Gmail.
+#[test]
+fn bcc_and_files_are_denied_at_submit_for_now() {
+    let b = setup("notyet");
+    let who = Author {
+        kind: AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    let state_of = |verb: Verb, target: &str, args: Value| -> String {
+        let cs = create(&b.store, &who, now()).unwrap();
+        let args = args.as_object().unwrap().clone();
+        add_action(&b.store, cs, &who, verb, &[target], &args, None).unwrap();
+        submit(&b.store, cs, &who, "Write.", now()).unwrap();
+        b.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT state FROM changeset_action WHERE changeset_id = ?1",
+                    [cs],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    let mut with_bcc = mail();
+    with_bcc["bcc"] = json!(["b@example.org"]);
+    let mut with_file = mail();
+    with_file["attachments"] =
+        json!([{"name": "a.pdf", "type": "application/pdf", "sha256": "ab".repeat(32), "size": 3}]);
+    assert_eq!(state_of(Verb::Draft, "a-1", with_bcc), "denied");
+    assert_eq!(state_of(Verb::Draft, "a-1", with_file), "denied");
+
+    // A file that the person adds at Gmail reads back: the row gets it,
+    // and a send of it is denied.
+    let (s, provider) = b.new_mail(AGED);
+    let raw = String::from_utf8(b.gmail.draft_raw(TOKEN, &provider).unwrap().raw.unwrap()).unwrap();
+    let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+    let head = head
+        .lines()
+        .filter(|l| !l.starts_with("Content-Type") && !l.starts_with("Content-Transfer-Encoding"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    let multi = format!(
+        "{head}\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n--b\r\n\
+         Content-Type: text/plain; charset=\"utf-8\"\r\n\r\n{body}\r\n--b\r\n\
+         Content-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"a.pdf\"\r\n\r\nxx\r\n--b--\r\n"
+    );
+    assert!(b.fake.edit_draft(&provider, multi.as_bytes()));
+    assert!(matches!(b.release(s), Ok(Outcome::Denied(_))));
+    let content: String = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT content FROM draft WHERE provider_id = ?1",
+                [&provider],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(content.contains("a.pdf"), "{content}");
+    let d: String = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT 'd-' || id FROM draft WHERE provider_id = ?1",
+                [&provider],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(state_of(Verb::Send, &d, json!({})), "denied");
+    assert_eq!(b.sends(), 0);
+}
