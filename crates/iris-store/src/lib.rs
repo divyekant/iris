@@ -60,7 +60,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 
 pub use backup::{BackupLock, Cleaned, PolicyExpect, PolicyWrite, GONE_KEEP_MS};
 pub use content::ContentWriter;
-pub use file_lock::FileLock;
+pub use file_lock::{FileLock, Probe};
 
 /// The result of a `sync_log` row whose process ended before the sync
 /// ended (issue #710).
@@ -434,13 +434,19 @@ impl Store {
         })
     }
 
-    /// Take the run lock of the `sync_log` row `row`. The sync of the row
-    /// holds it from before its row is visible until after its result is
-    /// written, and no other writer takes it. `None`: the sync runs. A free
+    /// Take the run lock of the `sync_log` row `row`, and create its file.
+    /// Only the sync of the row calls it. The sync holds it from before its
+    /// row is visible until after its result is written. `None`: the sync runs. A free
     /// lock on a row with no end: the process of the sync stopped
     /// (issue #710).
     pub fn sync_run_lock(&self, row: i64) -> Result<Option<FileLock>> {
         FileLock::try_take(&self.sync_run_path(row)).map_err(Error::Io)
+    }
+
+    /// Probe the run lock of the `sync_log` row `row` with no new file. A
+    /// reader uses it (issue #710).
+    pub fn sync_run_probe(&self, row: i64) -> Result<Probe> {
+        FileLock::probe(&self.sync_run_path(row)).map_err(Error::Io)
     }
 
     /// The file of the run lock of the `sync_log` row `row`.

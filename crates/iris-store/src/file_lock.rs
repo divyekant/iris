@@ -14,6 +14,16 @@ use std::path::Path;
 /// releases the lock for all copies.
 pub struct FileLock(File);
 
+/// The result of [`FileLock::probe`].
+pub enum Probe {
+    /// The lock file does not exist.
+    Missing,
+    /// Another holder has the lock.
+    Held,
+    /// The lock was free. The probe holds it now.
+    Free(FileLock),
+}
+
 fn open(path: &Path) -> io::Result<File> {
     OpenOptions::new()
         .read(true)
@@ -30,6 +40,21 @@ impl FileLock {
         match f.try_lock() {
             Ok(()) => Ok(Some(FileLock(f))),
             Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(e)) => Err(e),
+        }
+    }
+
+    /// Probes the lock on `path` and creates no file. [`Probe::Free`] holds
+    /// the lock until its drop.
+    pub fn probe(path: &Path) -> io::Result<Probe> {
+        let f = match OpenOptions::new().read(true).write(true).open(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Probe::Missing),
+            Err(e) => return Err(e),
+        };
+        match f.try_lock() {
+            Ok(()) => Ok(Probe::Free(FileLock(f))),
+            Err(TryLockError::WouldBlock) => Ok(Probe::Held),
             Err(TryLockError::Error(e)) => Err(e),
         }
     }

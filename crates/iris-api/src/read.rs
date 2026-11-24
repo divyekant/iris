@@ -337,8 +337,8 @@ pub fn status(store: &Store) -> Result<Status> {
 /// result `SYNC_STOPPED` (issue #710). Only the sync of a row takes its run
 /// lock, so this probe never stops a sync. The newest row is read again
 /// while the probe holds the lock, so a sync that ended in between shows its
-/// own end. The read writes nothing to the store; the next sync of the
-/// account closes the row.
+/// own end. The read writes nothing: no store row and no file. The next
+/// sync of the account closes the row.
 fn settle_runs(store: &Store, accounts: &mut [Account]) -> Result<()> {
     for a in accounts {
         if a.last_sync.as_ref().is_none_or(|r| r.ended.is_some()) {
@@ -365,23 +365,38 @@ fn settle_runs(store: &Store, accounts: &mut [Account]) -> Result<()> {
                 )?)
             })?)
         };
-        let (row, run) = newest()?;
-        let run = if run.ended.is_some() {
-            run
-        } else {
-            let Some(_probe) = store.sync_run_lock(row)? else {
-                continue; // The sync runs.
-            };
-            let (again, mut run) = newest()?;
-            if again != row {
-                continue; // A newer sync started: it holds its own lock.
+        // A sync can start or end at each step: follow the newest row until
+        // the probe and the read agree. Three tries are enough for each
+        // case except a new sync at each step; then the snapshot stays.
+        for _ in 0..3 {
+            let (row, mut run) = newest()?;
+            if run.ended.is_some() {
+                a.last_sync = Some(run);
+                break;
             }
+            // A visible row with no end and no lock file: its sync stopped
+            // before this program had run locks, or the data folder came
+            // from a backup. The sync of a row creates the file before the
+            // row is visible.
+            let _probe = match store.sync_run_probe(row)? {
+                iris_store::Probe::Held => {
+                    a.last_sync = Some(run);
+                    break;
+                }
+                iris_store::Probe::Missing => None,
+                iris_store::Probe::Free(l) => Some(l),
+            };
+            let (again, again_run) = newest()?;
+            if again != row {
+                continue;
+            }
+            run = again_run;
             if run.ended.is_none() {
                 run.result = Some(iris_store::SYNC_STOPPED.into());
             }
-            run
-        };
-        a.last_sync = Some(run);
+            a.last_sync = Some(run);
+            break;
+        }
     }
     Ok(())
 }
@@ -1317,6 +1332,68 @@ pub fn rfc3339(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A new sync that starts between the snapshot and the settle shows as
+    /// the running sync, not the row that it closed (issue #710).
+    #[test]
+    fn a_sync_that_starts_after_the_snapshot_shows_as_running() {
+        let dir = std::env::temp_dir().join(format!("iris-settle-new-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let account = store.add_account("gmail", "a@example.com").unwrap();
+        let open_row = |started: i64| {
+            store
+                .write(|tx| {
+                    tx.execute(
+                        "UPDATE sync_log SET ended_at = ?2, result = ?3
+                         WHERE account_id = ?1 AND ended_at IS NULL",
+                        rusqlite::params![account, started, iris_store::SYNC_STOPPED],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'incremental', ?2)",
+                        rusqlite::params![account, started],
+                    )?;
+                    Ok(tx.last_insert_rowid())
+                })
+                .unwrap()
+        };
+        let stale = open_row(1_000);
+        let _held_stale = store.sync_run_lock(stale).unwrap().unwrap();
+        let mut snapshot = status(&store).unwrap().accounts;
+        drop(_held_stale);
+        // The new sync closes the stale row and holds the lock of its own.
+        let new = open_row(2_000);
+        let _live = store.sync_run_lock(new).unwrap().unwrap();
+        settle_runs(&store, &mut snapshot).unwrap();
+        let run = snapshot[0].last_sync.as_ref().unwrap();
+        assert_eq!(run.started, rfc3339(2_000));
+        assert_eq!((run.ended.as_deref(), run.result.as_deref()), (None, None));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A row with no end and no lock file, as in a restored backup, shows
+    /// as stopped, and the status creates no file (issue #710).
+    #[test]
+    fn a_row_with_no_lock_file_shows_as_stopped_and_gets_no_file() {
+        let dir = std::env::temp_dir().join(format!("iris-settle-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let account = store.add_account("gmail", "a@example.com").unwrap();
+        let row = store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'incremental', 1)",
+                    [account],
+                )?;
+                Ok(tx.last_insert_rowid())
+            })
+            .unwrap();
+        let s = status(&store).unwrap();
+        let run = s.accounts[0].last_sync.as_ref().unwrap();
+        assert_eq!(run.result.as_deref(), Some(iris_store::SYNC_STOPPED));
+        assert!(!store.sync_run_path(row).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A sync that ends between the snapshot and the probe of its run lock
     /// shows its own end, not the stopped result (issue #710).
