@@ -190,11 +190,15 @@
   // A draft that Iris wrote for this thread before (`iris write`, R3-05) fills an
   // empty new form (issue 743). Only a reply to the mail that the form shows: a
   // nudge goes to another person, and the brief offers it.
-  // A saved form with no text is a form that the person did not start. After a press
-  // of "Write it for me", only that answer fills the form.
+  // A saved form that still holds the start values of the reply (no text, no intent,
+  // the same recipients) is a form that the person did not start. After a press of
+  // "Write it for me", only that answer fills the form.
+  const same = (a: string[], b: string[]) => a.length === b.length && unique(a).every((x) => b.includes(x));
+  const untouched = (f: Saved | null) =>
+    !f || (!f.body.trim() && !f.intent?.trim() && !f.toText?.trim() && !f.ccText?.trim() && same(f.to, reply?.to ?? []) && same(f.cc, reply?.cc ?? []));
   let filled = $state(false);
   let asked = false;
-  if (thread && reply && !saved?.body.trim() && !taken()) {
+  if (thread && reply && untouched(saved) && !taken()) {
     get<ThreadDraft>(`threads/${encodeURIComponent(thread)}/draft`).then(
       (d) => {
         if (alive && !write && !asked && !d.nudge && d.based_on === reply.parent.id && body === "") {

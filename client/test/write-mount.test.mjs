@@ -801,3 +801,36 @@ test("an untouched saved form still gets the saved draft, and a late read does n
     net.restore();
   }
 });
+
+test("a saved form with a changed intent or recipient does not get the saved draft (issue 743)", async () => {
+  const saved = { thread: "t-2", based_on: "m-9", nudge: false, to: null, item: null, body: "Hi Priya,\n\nYes, Friday at 10." };
+  for (const [name, change] of [
+    ["an intent", (app) => type(app.target.querySelector(".intent input"), "no, Monday")],
+    ["a recipient", (app) => {
+      [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Change").click();
+      app.flushSync();
+      type(app.target.querySelector("#write-to"), "sam@example.com ");
+    }],
+  ]) {
+    window.sessionStorage.clear();
+    let net = serve(() => [404, { error: "Not found." }]);
+    const first = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+    // The first view reads the draft too: let that read end before the next engine.
+    await new Promise((r) => setTimeout(r, 20));
+    change(first);
+    first.flushSync();
+    first.destroy();
+    net.restore();
+    net = serve((path, method) => (method === "GET" && path === "threads/t-2/draft" ? [200, saved] : [404, { error: "Not found." }]));
+    const app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+    try {
+      await new Promise((r) => setTimeout(r, 40));
+      app.flushSync();
+      assert.equal(app.target.querySelector("textarea").value, "", name);
+      assert.equal(net.asked.filter((a) => a.path === "threads/t-2/draft").length, 0, `${name}: no read`);
+    } finally {
+      app.destroy();
+      net.restore();
+    }
+  }
+});
