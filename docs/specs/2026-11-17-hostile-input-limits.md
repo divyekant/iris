@@ -16,7 +16,7 @@ it (section 6.5), for release 4. No code sets the flag. Today three
 separate guards stop an agent send:
 
 1. The session socket refuses `draft` and `send` (`crates/iris/src/socket.rs`).
-2. No rule decides a `draft` or a `send` (`iris_triage::decide_submitted`).
+2. No rule decides a `send` (`iris_triage::decide_submitted`).
 3. The apply evaluates each rule approval again, and sends a verb that no
    rule decides to review (`iris_apply::recheck_rule`). Only a person
    releases a send (`iris_apply::release`).

@@ -1387,30 +1387,32 @@ fn gate(tx: &Connection, action: i64) -> iris_store::Result<Option<Outcome>> {
 /// the new result, by `engine`, and the outcome tells the caller. An action
 /// with a ledger row in `writing` continues to its end (section 7.3).
 pub(crate) fn recheck_rule(tx: &Connection, action: i64) -> iris_store::Result<Option<Outcome>> {
-    let row: Option<(String, Option<String>, String, String)> = tx
+    let row: Option<(String, Option<String>, String)> = tx
         .query_row(
-            "SELECT c.author_kind, c.author_job, a.flags, a.verb FROM changeset_action a
+            "SELECT c.author_kind, c.author_job, a.verb FROM changeset_action a
              JOIN changeset c ON c.id = a.changeset_id
              WHERE a.id = ?1 AND a.state = 'approved' AND a.decided_by = 'rule'
                AND NOT EXISTS (SELECT 1 FROM ledger WHERE action_id = ?1 AND state = 'writing')",
             [action],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let Some((kind, job, flags, verb)) = row else {
+    let Some((kind, job, verb)) = row else {
         return Ok(None);
     };
     let author = iris_policy::Author::from_name(&kind).expect("the CHECK of the table");
     let now = now();
-    // The flag of submit, or more than BULK messages of the same author that
-    // a rule approved in the last hour, with this action (section 5.3). An
-    // entry that an undo reversed later still changed its messages. A state
-    // verb changes no message, so it has no `bulk`, as at submit.
-    let mailbox = !iris_changeset::STATE_VERBS.contains(&verb.as_str()) && verb != "restore";
-    let bulk = flags.contains("\"bulk\"")
-        || mailbox
-            && tx.query_row(
-                "SELECT EXISTS (SELECT 1 FROM action_message WHERE action_id = ?1)
+    // More than BULK messages of the same author kind that a rule approved
+    // in the last hour, with this action (section 5.3). An entry that an
+    // undo reversed later still changed its messages. Only a verb that
+    // changes messages gets `bulk`, as at submit: not a state verb, a
+    // `restore`, a draft or a send.
+    let mailbox = !iris_changeset::STATE_VERBS.contains(&verb.as_str())
+        && !iris_changeset::WRITE_VERBS.contains(&verb.as_str())
+        && verb != "restore";
+    let hour_bulk = mailbox
+        && tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM action_message WHERE action_id = ?1)
                AND (SELECT count(*) FROM action_message WHERE action_id = ?1)
                  + (SELECT count(*) FROM ledger l
                     JOIN ledger_message lm ON lm.ledger_id = l.id
@@ -1418,19 +1420,24 @@ pub(crate) fn recheck_rule(tx: &Connection, action: i64) -> iris_store::Result<O
                     JOIN changeset c ON c.id = a.changeset_id
                     WHERE l.at > ?2 AND l.action_id <> ?1 AND a.decided_by = 'rule'
                       AND c.author_kind = ?3) > ?4",
-                params![action, now - HOUR_MS, kind, iris_changeset::BULK],
-                |r| r.get::<_, bool>(0),
-            )?;
+            params![action, now - HOUR_MS, kind, iris_changeset::BULK],
+            |r| r.get::<_, bool>(0),
+        )?;
     let active = iris_policy::active(tx)?;
-    let decision = iris_policy::decide_action(
+    let decision = iris_triage::evaluate(
         tx,
         &active.policy,
         action,
         author,
         job.as_deref(),
-        bulk,
+        hour_bulk,
         now.div_euclid(1000),
-    )?;
+    )
+    .map_err(|e| match e {
+        iris_changeset::Error::Store(e) => e,
+        other => iris_store::Error::Query(other.to_string()),
+    })?
+    .decision;
     let (state, reason) = match decision {
         Some(d) if d.outcome == iris_policy::Outcome::Allow && d.rule.is_some() => return Ok(None),
         Some(d) if d.outcome == iris_policy::Outcome::Deny => ("denied", d.reason),
@@ -1445,7 +1452,7 @@ pub(crate) fn recheck_rule(tx: &Connection, action: i64) -> iris_store::Result<O
     // (section 5.3), so the review shows why it came back.
     // Before the move: the trigger action_flags allows a new flag only on
     // an open action.
-    if bulk {
+    if hour_bulk {
         tx.execute(
             "UPDATE changeset_action SET flags = json_insert(flags, '$[#]', 'bulk')
              WHERE id = ?1 AND state = 'approved'

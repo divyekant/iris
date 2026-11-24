@@ -27,7 +27,7 @@ use iris_changeset::{
     AuthorKind, By, Error, State, Verb,
 };
 use iris_observe::Rule;
-use iris_policy::{Mode, Outcome as Policy};
+use iris_policy::{Facts, Mode, Outcome as Policy};
 use iris_store::{format_id, Kind, Store};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
@@ -182,6 +182,85 @@ fn run_in(c: &Connection, account: i64, now_ms: i64) -> Result<Outcome, Error> {
     })
 }
 
+/// The draft flags that only a person approves (spec 2, section 6.5).
+const WARNINGS: [&str; 4] = ["new_recipient", "outside_thread", "money", "date"];
+
+/// The evaluation of one action row by a policy.
+pub struct Evaluation {
+    /// `None` for a verb that no rule decides (`send`, `untrash`, `restore`).
+    pub decision: Option<iris_policy::Decision>,
+    /// The flag `bulk` of the action, or of the caller.
+    pub bulk: bool,
+    /// A flag that only a person approves (store migration 25).
+    pub warning: bool,
+}
+
+/// Evaluates action row `action` with `policy` (spec 2, section 6.4), from
+/// its flags and the facts of its messages at the time `now` (seconds since
+/// 1970-01-01 UTC). `bulk` adds the flag `bulk` (the count of the last hour
+/// at apply). The submit and the apply of a rule approval (section 5.4) both
+/// call this function, so the two evaluations cannot differ.
+pub fn evaluate(
+    c: &Connection,
+    policy: &iris_policy::Policy,
+    action: i64,
+    author: iris_policy::Author,
+    job: Option<&str>,
+    bulk: bool,
+    now: i64,
+) -> Result<Evaluation, Error> {
+    let (verb, flags): (String, String) = c.query_row(
+        "SELECT verb, flags FROM changeset_action WHERE id = ?1",
+        [action],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let flags = serde_json::from_str::<Vec<String>>(&flags)
+        .map_err(|e| Error::Refused(format!("flags: {e}")))?;
+    let bulk = bulk || flags.iter().any(|f| f == "bulk");
+    let warning = flags.iter().any(|f| WARNINGS.contains(&f.as_str()));
+    let Some(verb) = iris_policy::Verb::from_name(&verb) else {
+        return Ok(Evaluation {
+            decision: None,
+            bulk,
+            warning,
+        });
+    };
+    // At most CHUNK messages: the action holds their facts.
+    let mut facts: Vec<Facts> = Vec::new();
+    let ids: Vec<i64> = c
+        .prepare_cached("SELECT message_id FROM action_message WHERE action_id = ?1 ORDER BY 1")?
+        .query_map([action], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    // A reply has its parent message; a new mail has none, so it is in
+    // no thread.
+    let in_thread = verb == iris_policy::Verb::Draft
+        && !ids.is_empty()
+        && match iris_changeset::action_content(c, action)? {
+            Some((_, content)) => iris_changeset::outside_marks(c, action, &content)?.is_empty(),
+            None => false,
+        };
+    for m in ids {
+        facts.extend(iris_policy::facts(c, m, now)?);
+    }
+    let decision = policy.decide(
+        &iris_policy::Action {
+            verb,
+            author,
+            job,
+            bulk,
+            warning,
+            in_thread,
+            now,
+        },
+        facts.iter().map(Facts::message),
+    );
+    Ok(Evaluation {
+        decision: Some(decision),
+        bulk,
+        warning,
+    })
+}
+
 /// Spec 2 section 5.4, step 5, for each author: in the mode `apply`, the
 /// active policy decides each `proposed` action of the revision, with its
 /// reason. In the mode `observe`, a hard limit that denies (section 6.5)
@@ -206,19 +285,13 @@ pub fn decide_submitted(
     )?;
     // One action at a time, by its number, so memory holds one action.
     let mut last = 0i64;
-    while let Some((id, n, flags)) = c
+    while let Some((id, n)) = c
         .query_row(
-            "SELECT id, n, flags FROM changeset_action
+            "SELECT id, n FROM changeset_action
              WHERE changeset_id = ?1 AND revision = ?2 AND state = 'proposed' AND n > ?3
              ORDER BY n LIMIT 1",
             params![changeset, revision, last],
-            |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            },
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
         )
         .optional()?
     {
@@ -228,25 +301,21 @@ pub fn decide_submitted(
             revision,
             n,
         };
-        let bulk = serde_json::from_str::<Vec<String>>(&flags)
-            .map_err(|e| Error::Refused(format!("flags: {e}")))?
-            .iter()
-            .any(|f| f == "bulk");
-        let d =
-            iris_policy::decide_action(c, &active.policy, id, author, job.as_deref(), bulk, now)?;
-        // No rule decides a verb that the policy does not know: `draft` and
-        // `send` (spec R3-01, issue #239). Each goes to a person, in the mode
+        let e = evaluate(c, &active.policy, id, author, job.as_deref(), false, now)?;
+        let (bulk, warning) = (e.bulk, e.warning);
+        // No rule decides a verb that the policy does not know: `send`
+        // (decision D2, issue #239). It goes to a person, in the mode
         // `apply`; in the mode `observe` it stays proposed, as other actions.
-        let Some(d) = d else {
+        // A warning flag is a hard limit first (spec 2, section 6.5), so the
+        // decision is by `limit` for a draft and a send alike.
+        let Some(d) = e.decision else {
             if apply {
-                decide_in(
-                    c,
-                    id_n,
-                    State::InReview,
-                    By::Policy,
-                    Some("No rule can allow a draft or a send: a person decides."),
-                    now_ms,
-                )?;
+                let (by, why) = if warning {
+                    (By::Limit, iris_policy::WARNING_REASON)
+                } else {
+                    (By::Policy, "No rule can allow a send: a person decides.")
+                };
+                decide_in(c, id_n, State::InReview, by, Some(why), now_ms)?;
             }
             continue;
         };
@@ -267,7 +336,7 @@ pub fn decide_submitted(
             // A rule decision needs the confirmed version (spec 2, 5.1).
             (Some(_), None) => return Err(Error::Refused("a rule with no policy version".into())),
             // No rule: a hard limit (spec 2, section 6.5) or the default review.
-            (None, _) if bulk || to == State::Denied => By::Limit,
+            (None, _) if bulk || warning || to == State::Denied => By::Limit,
             (None, _) => By::Policy,
         };
         decide_in(c, id_n, to, by, Some(&d.reason), now_ms)?;

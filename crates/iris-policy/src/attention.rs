@@ -5,10 +5,7 @@
 //! items of each message in `attention_due` when a fact of that message
 //! changes (store migration 8).
 
-use crate::{
-    Action, Author, CommitmentKind, Decision, Form, Item, Message, Policy, RecordType, SenderKind,
-    Verb,
-};
+use crate::{CommitmentKind, Form, Item, Message, Policy, RecordType, SenderKind};
 use iris_store::{Result, Store};
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -269,48 +266,4 @@ fn field(policy: &Policy, a: crate::Attention) -> (&'static str, Option<u32>, Op
         reason = reason.chars().take(REASON_MAX - 3).collect::<String>() + "...";
     }
     (state, Some(rule), Some(reason))
-}
-
-/// Decides action row `action` with `policy` (spec 2, section 6.4), from the
-/// facts of its messages at the time `now` (seconds since 1970-01-01 UTC).
-/// `bulk` is the flag `bulk` of the action. Gives `None` for a verb that no
-/// rule decides (`draft`, `send`, `untrash`, `restore`). The submit and the
-/// apply of a rule approval (section 5.4) both decide with this function, so
-/// the two evaluations cannot differ.
-pub fn decide_action(
-    tx: &Connection,
-    policy: &Policy,
-    action: i64,
-    author: Author,
-    job: Option<&str>,
-    bulk: bool,
-    now: i64,
-) -> Result<Option<Decision>> {
-    let verb: String = tx.query_row(
-        "SELECT verb FROM changeset_action WHERE id = ?1",
-        [action],
-        |r| r.get(0),
-    )?;
-    let Some(verb) = Verb::from_name(&verb) else {
-        return Ok(None);
-    };
-    // At most one action of messages: the action holds their facts.
-    let ids: Vec<i64> = tx
-        .prepare_cached("SELECT message_id FROM action_message WHERE action_id = ?1 ORDER BY 1")?
-        .query_map([action], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    let mut facts = Vec::with_capacity(ids.len());
-    for m in ids {
-        facts.extend(self::facts(tx, m, now)?);
-    }
-    Ok(Some(policy.decide(
-        &Action {
-            verb,
-            author,
-            job,
-            bulk,
-            now,
-        },
-        facts.iter().map(Facts::message),
-    )))
 }
