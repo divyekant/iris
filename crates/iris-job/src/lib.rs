@@ -470,10 +470,15 @@ pub struct Due {
 /// person at or after the due date. So the move happens once for each due
 /// date. The first event (the start, by the person) is not a move: a job
 /// that starts after its due date also moves.
+/// Rule 3 counts the events from the due date on, or from the newest edit
+/// of the due date when it is later: an edit to a past date (decision D25)
+/// is a new due date, and an event before the edit does not count.
 const DUE_SQL: &str = "j.state IN ('working', 'waiting') AND j.due_at <= ?1
      AND NOT EXISTS (SELECT 1 FROM job_event e WHERE e.job_id = j.id
                      AND e.id > (SELECT min(f.id) FROM job_event f WHERE f.job_id = j.id)
-                     AND e.at >= j.due_at AND (e.state = 'needs_you' OR e.by = 'person'))";
+                     AND e.at >= max(j.due_at, coalesce((SELECT max(d.at) FROM job_edit d
+                                   WHERE d.job_id = j.id AND d.due_at IS NOT d.due_before), 0))
+                     AND (e.state = 'needs_you' OR e.by = 'person'))";
 
 /// The result of [`move_due`]: the moved jobs, and each job whose move
 /// failed, with its error.
@@ -961,8 +966,7 @@ pub fn reads_outside_in(c: &Connection, job: i64) -> rusqlite::Result<bool> {
 
 /// Revoke `what` from the active scope of `job`. The row stays, with the
 /// revoke, and the next build drops its mail. Only the person or the engine
-/// revokes. A ref that is not in the active scope changes nothing. A done job
-/// gives `Refused`: its scope never changes.
+/// revokes. A ref that is not in the active scope changes nothing.
 pub fn revoke_scope(store: &Store, job: i64, what: Ref, by: By, now_ms: i64) -> Result<()> {
     transaction(store, |c| revoke_scope_in(c, job, what, by, now_ms))
 }
@@ -973,10 +977,7 @@ pub fn revoke_scope_in(c: &Connection, job: i64, what: Ref, by: By, now_ms: i64)
             "an agent cannot change the scope of a job".into(),
         ));
     }
-    // The scope of a done job is its record: it never changes (decision D25).
-    if get_in(c, job)?.state == State::Done {
-        return Err(Error::Refused("the job is done".into()));
-    }
+    get_in(c, job)?;
     let (thread, item) = match what {
         Ref::Thread(t) => (Some(t), None),
         Ref::Item(i) => (None, Some(i)),

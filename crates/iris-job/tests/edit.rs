@@ -162,3 +162,25 @@ fn a_typed_start_with_the_same_request_makes_one_job() {
     let (other, made) = start("r-2");
     assert!(made && other != job);
 }
+
+/// Decision D25 with D24: an edit to a past due date after an answer is a
+/// new due date. The job moves on the next step, once.
+#[test]
+fn an_edit_to_a_past_due_date_after_an_answer_moves_the_job_again() {
+    let f = fixture("past-due");
+    let s = &f.store;
+    let job = iris_job::create(s, "Book the dentist.", Some(NOW + 100), NOW).unwrap();
+    assert_eq!(iris_job::move_due(s, NOW + 100).unwrap().moved.len(), 1);
+    iris_job::answer(s, job, "Go on.", None, NOW + 110).unwrap();
+    assert!(iris_job::move_due(s, NOW + 115).unwrap().moved.is_empty());
+    iris_job::edit(s, job, "Book the dentist.", Some(NOW + 105), NOW + 120).unwrap();
+    assert_eq!(iris_job::move_due(s, NOW + 121).unwrap().moved.len(), 1);
+    assert_eq!(
+        iris_job::get(s, job).unwrap().state,
+        iris_job::State::NeedsYou
+    );
+    // An edit of the goal only is not a new due date.
+    iris_job::answer(s, job, "Go on.", None, NOW + 130).unwrap();
+    iris_job::edit(s, job, "Book the dentist soon.", Some(NOW + 105), NOW + 140).unwrap();
+    assert!(iris_job::move_due(s, NOW + 141).unwrap().moved.is_empty());
+}

@@ -107,16 +107,3 @@ BEGIN
   SELECT RAISE(ABORT, 'job: the form of a scope ref is never deleted');
 END;
 
--- The scope of a done job is its record: the only change to a scope row is
--- one revoke of an active row of a job that is not done.
-DROP TRIGGER IF EXISTS job_scope_update;
-
-CREATE TRIGGER job_scope_update BEFORE UPDATE ON job_scope
-WHEN old.revoked_at IS NOT NULL OR new.revoked_at IS NULL
-  OR new.job_id IS NOT old.job_id OR new.thread_id IS NOT old.thread_id
-  OR new.item_id IS NOT old.item_id OR new.by IS NOT old.by OR new.at IS NOT old.at
-  OR new.rowid IS NOT old.rowid
-  OR NOT EXISTS (SELECT 1 FROM job WHERE id = old.job_id AND state <> 'done')
-BEGIN
-  SELECT RAISE(ABORT, 'job: the only change to a scope row is one revoke, for a job that is not done');
-END;

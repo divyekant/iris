@@ -752,7 +752,7 @@ fn scope_list(c: &Connection, job: i64) -> rusqlite::Result<Value> {
     let mut q = c.prepare_cached(
         "SELECT s.thread_id, coalesce(i.form, sf.form), s.item_id,
            CASE WHEN s.thread_id IS NOT NULL THEN
-             (SELECT h.subject FROM message m JOIN header h ON h.message_id = m.id
+             (SELECT h.subject FROM message m LEFT JOIN header h ON h.message_id = m.id
               WHERE m.thread_id = s.thread_id
               ORDER BY coalesce(h.date, m.internal_date, 0), m.id LIMIT 1)
            ELSE json_extract(i.doc, '$.title') END,

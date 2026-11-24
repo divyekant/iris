@@ -121,8 +121,8 @@ a second job on purpose is a second form.
   changes. Else `add_scope_in(job, Ref::Thread(t), By::Person, now)`.
 - `remove` calls `revoke_scope_in`. The revoke ends the open session of the
   job (existing behavior), so the agent cannot read the mail that the person
-  took out. `revoke_scope_in` and the trigger `job_scope_update` refuse a
-  revoke for a job in `done`: the scope of a done job is its record.
+  took out. A remove on a job in `done` is a 409: the route reads the state
+  in the same write transaction.
 - An item ID names its form (`c-3`). A later understanding can delete the
   item row of an item ref. Migration 50 adds the table `job_scope_form`: the
   form of the item of each item ref, at the grant (a trigger on the insert
@@ -177,7 +177,6 @@ a second job on purpose is a second form.
 | A remove of a ref that is not active in the scope | 404 | API test |
 | A remove of an item ref whose item row a later understanding deleted | The scope list keeps the ID of the ref, and the remove works | API test |
 | An item ref from before migration 50 whose item row was gone at the migration | The ID `r-<n>`; the remove takes any item ID with the row number | API test |
-| A revoke by SQL for a `done` job | The trigger refuses it | API test |
 | A remove while a session runs | The revoke ends the session (existing) | Existing test |
 | A typed start that the client sends again with the same request ID | 409 with the job of the first start, no second job | API test |
 | Two edits at the same time | One transaction each; the second edit is the newest | Store test |
@@ -185,7 +184,7 @@ a second job on purpose is a second form.
 ## Impact
 
 - `crates/iris-store`: migration 50 (`job_edit`, `job_request`,
-  `job_scope_form`, the triggers `job_row` and `job_scope_update` again). The migration uses `IF NOT EXISTS`, because a
+  `job_scope_form`, the trigger `job_row` again). The migration uses `IF NOT EXISTS`, because a
   test store that sets an older `user_version` runs it again.
 - `crates/iris-job`: `edit_in`, `edit`.
 - `crates/iris-api`: the routes above, the `scope` list of the job page.
