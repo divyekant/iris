@@ -1312,22 +1312,119 @@ fn resume_after_a_wait_gets_a_full_hold() {
     assert_eq!(b.sends(), 0);
 }
 
-/// Until the Bcc gate and the attachment folder exist, submit denies a
-/// draft with `bcc` or with a file, and a send of a Gmail draft that the
-/// person gave a file, before any call to Gmail.
+/// Send content spec, sections 2 and 4: a draft with a file from the
+/// attachment folder goes to Gmail with the file, reads back with the
+/// approved hash, and the release sends it.
 #[test]
-fn bcc_and_files_are_denied_at_submit_for_now() {
-    let b = setup("notyet");
+fn a_draft_with_a_file_is_created_and_sent() {
+    let b = setup("file");
+    let file = b"%PDF-1 the numbers".as_slice();
+    let sha = b.store.put_attachment(file).unwrap();
+    let mut m = mail();
+    m["attachments"] =
+        json!([{"name": "q4.pdf", "type": "application/pdf", "sha256": sha, "size": file.len()}]);
+    let a = b.approved(Verb::Draft, "a-1", m, 0);
+    assert!(matches!(b.apply(a), Ok(Outcome::Applied(_))));
+    let (d, provider) = b.draft(a);
+    let raw = b.gmail.draft_raw(TOKEN, &provider).unwrap().raw.unwrap();
+    let back = iris_compose::read(&raw, OWNER).unwrap();
+    assert_eq!(back.files, [file.to_vec()]);
+    assert_eq!(back.content.attachments[0].name, "q4.pdf");
+    let s = b.approved(Verb::Send, &d, json!({}), AGED);
+    assert!(
+        matches!(b.release(s), Ok(Outcome::Applied(_))),
+        "{:?}",
+        b.state(s)
+    );
+    assert_eq!(b.sends(), 1);
+}
+
+/// A file that is missing or changed in the attachment folder denies the
+/// apply, and no `drafts.create` goes out.
+#[test]
+fn a_missing_or_changed_file_denies_the_draft() {
+    let b = setup("nofile");
+    let file = b"the file".as_slice();
+    let sha = b.store.put_attachment(file).unwrap();
+    for (sha, size) in [("ab".repeat(32), file.len()), (sha.clone(), file.len() + 1)] {
+        let mut m = mail();
+        m["attachments"] =
+            json!([{"name": "a.txt", "type": "text/plain", "sha256": sha, "size": size}]);
+        let a = b.approved(Verb::Draft, "a-1", m, 0);
+        match b.apply(a) {
+            Ok(Outcome::Denied(why)) => assert!(why.contains("attachment file"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(b.posts("/drafts"), 0);
+}
+
+/// Send content spec, section 3: the From of a Gmail draft has the name of
+/// the newest sent message of the owner; a name with a control character
+/// is not used.
+#[test]
+fn a_gmail_draft_has_the_display_name_of_the_owner() {
+    let b = setup("name");
+    let from = |a: i64| {
+        let (_, provider) = b.draft(a);
+        let raw = b.gmail.draft_raw(TOKEN, &provider).unwrap().raw.unwrap();
+        let raw = String::from_utf8(raw).unwrap();
+        raw.lines()
+            .find(|l| l.starts_with("From:"))
+            .unwrap()
+            .to_string()
+    };
+    let set_name = |name: &str| {
+        b.store
+            .write(|tx| {
+                // The newest message of the mirror becomes a sent message of the owner.
+                let m: i64 = tx.query_row(
+                    "SELECT id FROM message WHERE gone_at IS NULL ORDER BY internal_date DESC LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO label(account_id, provider_id, name, kind) VALUES (?1, 'SENT', 'SENT', 'system')",
+                    [b.account],
+                )?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO message_label(message_id, label_id)
+                     SELECT ?1, id FROM label WHERE provider_id = 'SENT' AND account_id = ?2",
+                    params![m, b.account],
+                )?;
+                tx.execute(
+                    "UPDATE header SET from_addr = ?2, from_name = ?3 WHERE message_id = ?1",
+                    params![m, OWNER, name],
+                )?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    set_name("Dana Owner");
+    let a = b.approved(Verb::Draft, "a-1", mail(), 0);
+    assert!(matches!(b.apply(a), Ok(Outcome::Applied(_))));
+    assert_eq!(from(a), "From: \"Dana Owner\" <owner@example.com>");
+    set_name("Dana\r\nBcc: spy@x.org");
+    let a = b.approved(Verb::Draft, "a-1", mail(), 0);
+    assert!(matches!(b.apply(a), Ok(Outcome::Applied(_))));
+    assert_eq!(from(a), "From: <owner@example.com>");
+}
+
+/// Send content spec, section 5: the submit denies a draft whose size
+/// bound is over the limit of the provider of the account.
+#[test]
+fn the_size_limit_is_the_limit_of_the_provider() {
+    let b = setup("size");
     let who = Author {
         kind: AuthorKind::Person,
         name: None,
         session: None,
         job: None,
     };
-    let state_of = |verb: Verb, target: &str, args: Value| -> String {
+    let state_of = |args: Value| -> String {
         let cs = create(&b.store, &who, now()).unwrap();
         let args = args.as_object().unwrap().clone();
-        add_action(&b.store, cs, &who, verb, &[target], &args, None).unwrap();
+        add_action(&b.store, cs, &who, Verb::Draft, &["a-1"], &args, None).unwrap();
         submit(&b.store, cs, &who, "Write.", now()).unwrap();
         b.store
             .read(|c| {
@@ -1339,52 +1436,16 @@ fn bcc_and_files_are_denied_at_submit_for_now() {
             })
             .unwrap()
     };
+    // About 3 MB with base64: more than Outlook takes, less than Gmail.
+    let mut m = mail();
+    m["attachments"] = json!([{"name": "big.bin", "type": "application/octet-stream", "sha256": "ab".repeat(32), "size": 2_200_000}]);
+    assert_ne!(state_of(m.clone()), "denied");
+    b.store
+        .write(|tx| Ok(tx.execute("UPDATE account SET provider = 'outlook'", [])?))
+        .unwrap();
+    assert_eq!(state_of(m), "denied");
+    // Until the Bcc gate exists, submit denies a draft with `bcc`.
     let mut with_bcc = mail();
     with_bcc["bcc"] = json!(["b@example.org"]);
-    let mut with_file = mail();
-    with_file["attachments"] =
-        json!([{"name": "a.pdf", "type": "application/pdf", "sha256": "ab".repeat(32), "size": 3}]);
-    assert_eq!(state_of(Verb::Draft, "a-1", with_bcc), "denied");
-    assert_eq!(state_of(Verb::Draft, "a-1", with_file), "denied");
-
-    // A file that the person adds at Gmail reads back: the row gets it,
-    // and a send of it is denied.
-    let (s, provider) = b.new_mail(AGED);
-    let raw = String::from_utf8(b.gmail.draft_raw(TOKEN, &provider).unwrap().raw.unwrap()).unwrap();
-    let (head, body) = raw.split_once("\r\n\r\n").unwrap();
-    let head = head
-        .lines()
-        .filter(|l| !l.starts_with("Content-Type") && !l.starts_with("Content-Transfer-Encoding"))
-        .collect::<Vec<_>>()
-        .join("\r\n");
-    let multi = format!(
-        "{head}\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n--b\r\n\
-         Content-Type: text/plain; charset=\"utf-8\"\r\n\r\n{body}\r\n--b\r\n\
-         Content-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"a.pdf\"\r\n\r\nxx\r\n--b--\r\n"
-    );
-    assert!(b.fake.edit_draft(&provider, multi.as_bytes()));
-    assert!(matches!(b.release(s), Ok(Outcome::Denied(_))));
-    let content: String = b
-        .store
-        .read(|c| {
-            Ok(c.query_row(
-                "SELECT content FROM draft WHERE provider_id = ?1",
-                [&provider],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
-    assert!(content.contains("a.pdf"), "{content}");
-    let d: String = b
-        .store
-        .read(|c| {
-            Ok(c.query_row(
-                "SELECT 'd-' || id FROM draft WHERE provider_id = ?1",
-                [&provider],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
-    assert_eq!(state_of(Verb::Send, &d, json!({})), "denied");
-    assert_eq!(b.sends(), 0);
+    assert_eq!(state_of(with_bcc), "denied");
 }
