@@ -341,6 +341,8 @@ pub enum Field {
     To(usize),
     /// The address with this index in `cc`.
     Cc(usize),
+    /// The address with this index in `bcc`.
+    Bcc(usize),
     Subject,
     Body,
 }
@@ -401,6 +403,13 @@ fn scan(c: &Connection, account: &str, content: &Content, all: bool) -> Result<V
                 .iter()
                 .enumerate()
                 .map(|(i, a)| (Field::Cc(i), a)),
+        )
+        .chain(
+            content
+                .bcc
+                .iter()
+                .enumerate()
+                .map(|(i, a)| (Field::Bcc(i), a)),
         );
     for (field, a) in addresses {
         if a.eq_ignore_ascii_case(account) {
@@ -417,11 +426,17 @@ fn scan(c: &Connection, account: &str, content: &Content, all: bool) -> Result<V
         (Field::Subject, content.subject.as_str()),
         (Field::Body, content.body.as_str()),
     ];
+    // "No file attached" only when the draft has no file (send content
+    // spec, section 6).
+    let no_file = content.attachments.is_empty();
     for (flag, find) in [
         ("money", money_spans as fn(&str) -> Vec<Range<usize>>),
         ("date", date_spans),
         ("attachment", attachment_spans),
     ] {
+        if flag == "attachment" && !no_file {
+            continue;
+        }
         for (field, text) in texts {
             marks.extend(find(text).into_iter().map(|r| mark(flag, field, r, None)));
         }

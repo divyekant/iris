@@ -445,6 +445,7 @@ fn marked<'a>(c: &'a Content, m: &Mark) -> &'a str {
     match m.field {
         Field::To(i) => &c.to[i][m.range.clone()],
         Field::Cc(i) => &c.cc[i][m.range.clone()],
+        Field::Bcc(i) => &c.bcc[i][m.range.clone()],
         Field::Subject => &c.subject[m.range.clone()],
         Field::Body => &c.body[m.range.clone()],
     }
@@ -494,6 +495,20 @@ fn each_mark_of_the_test_set_is_on_its_words() {
         names(&marks),
         s.read(|x| Ok(draft_flags(x, OWNER, &c).unwrap())).unwrap()
     );
+
+    // Send content spec, section 6: a new Bcc address is marked, and a
+    // draft with a file has no "no file attached" mark.
+    c.bcc = vec!["spy@new.example".into()];
+    c.attachments = vec![iris_compose::Attachment::of(
+        "q4.pdf",
+        "application/pdf",
+        b"x",
+    )];
+    let marks = s.read(|x| Ok(draft_marks(x, OWNER, &c).unwrap())).unwrap();
+    assert!(marks
+        .iter()
+        .any(|m| m.flag == "new_recipient" && m.field == Field::Bcc(0)));
+    assert!(!marks.iter().any(|m| m.flag == "attachment"), "{marks:?}");
 }
 
 /// The amounts and dates that a mark covers, from the neighbors of the sign

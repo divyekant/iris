@@ -1002,8 +1002,14 @@ pub fn outside_marks(
         .iter()
         .enumerate()
         .map(|(i, a)| (Field::Cc(i), a));
+    let bcc = content
+        .bcc
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (Field::Bcc(i), a));
     Ok(to
         .chain(cc)
+        .chain(bcc)
         .filter(|(_, a)| open.contains(&a.trim().to_ascii_lowercase()))
         .map(|(field, a)| Mark {
             flag: "outside_thread",
@@ -1524,17 +1530,35 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
     } else {
         content
     };
-    Ok(content.check().err())
+    let content = match content.check() {
+        Ok(c) => c,
+        Err(why) => return Ok(Some(why)),
+    };
+    // The size of the whole message has the limit of the provider of the
+    // account (send content spec, section 5).
+    let provider: Option<String> = c
+        .query_row(
+            "SELECT a.provider FROM account a WHERE 'a-' || a.id IN
+               (SELECT value FROM json_each(
+                  (SELECT targets FROM changeset_action WHERE id = ?1), '$.accounts'))
+             UNION ALL
+             SELECT a.provider FROM action_message am JOIN message m ON m.id = am.message_id
+               JOIN account a ON a.id = m.account_id WHERE am.action_id = ?1
+             LIMIT 1",
+            [action],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let limit = iris_compose::max_message(provider.as_deref().unwrap_or(""));
+    Ok(content.check_size(limit).err())
 }
 
-/// The refusal of a content with `bcc` or attachments. They need the `Bcc`
-/// gate and the attachment folder of the send content spec
-/// (`docs/specs/2026-11-24-send-content.md`), which the next part builds.
-/// A draft at Gmail that the person gave a `Bcc` or a file reads back, so
-/// the send of it is refused too.
+/// The refusal of a content with `bcc`. It needs the `Bcc` gate of the
+/// send content spec (`docs/specs/2026-11-24-send-content.md`, section
+/// 6.2), which the next part builds. A draft at Gmail that the person gave
+/// a `Bcc` reads back, so the send of it is refused too.
 fn not_yet(content: &iris_compose::Content) -> Option<String> {
-    (!content.bcc.is_empty() || !content.attachments.is_empty())
-        .then(|| "Iris cannot send Bcc or attachments yet".into())
+    (!content.bcc.is_empty()).then(|| "Iris cannot send Bcc yet".into())
 }
 
 /// Spec 2, section 6.5: an author other than the person writes no mail

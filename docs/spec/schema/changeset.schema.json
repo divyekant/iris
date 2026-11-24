@@ -1124,6 +1124,46 @@
                       "type": "string"
                     }
                   },
+                  "bcc": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "attachments": {
+                    "$comment": "Send content spec (docs/specs/2026-11-24-send-content.md), section 1: the file is in the attachment folder of the store, at its SHA-256.",
+                    "type": "array",
+                    "maxItems": 10,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "name",
+                        "type",
+                        "sha256",
+                        "size"
+                      ],
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 255
+                        },
+                        "type": {
+                          "type": "string",
+                          "pattern": "^[^/]+/[^/]+$"
+                        },
+                        "sha256": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "size": {
+                          "type": "integer",
+                          "minimum": 1
+                        }
+                      }
+                    }
+                  },
                   "subject": {
                     "type": "string"
                   },
