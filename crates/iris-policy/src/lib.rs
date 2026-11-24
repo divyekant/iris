@@ -9,7 +9,7 @@
 
 mod active;
 mod attention;
-pub use attention::{facts, refresh as refresh_attention, Facts, PASS_EVERY};
+pub use attention::{decide_action, facts, refresh as refresh_attention, Facts, PASS_EVERY};
 mod edit;
 mod eval;
 pub mod notice;

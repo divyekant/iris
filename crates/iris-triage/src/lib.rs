@@ -27,7 +27,7 @@ use iris_changeset::{
     AuthorKind, By, Error, State, Verb,
 };
 use iris_observe::Rule;
-use iris_policy::{Facts, Mode, Outcome as Policy};
+use iris_policy::{Mode, Outcome as Policy};
 use iris_store::{format_id, Kind, Store};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
@@ -206,9 +206,9 @@ pub fn decide_submitted(
     )?;
     // One action at a time, by its number, so memory holds one action.
     let mut last = 0i64;
-    while let Some((id, n, verb, flags)) = c
+    while let Some((id, n, flags)) = c
         .query_row(
-            "SELECT id, n, verb, flags FROM changeset_action
+            "SELECT id, n, flags FROM changeset_action
              WHERE changeset_id = ?1 AND revision = ?2 AND state = 'proposed' AND n > ?3
              ORDER BY n LIMIT 1",
             params![changeset, revision, last],
@@ -217,7 +217,6 @@ pub fn decide_submitted(
                     r.get::<_, i64>(0)?,
                     r.get::<_, i64>(1)?,
                     r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
                 ))
             },
         )
@@ -229,10 +228,16 @@ pub fn decide_submitted(
             revision,
             n,
         };
+        let bulk = serde_json::from_str::<Vec<String>>(&flags)
+            .map_err(|e| Error::Refused(format!("flags: {e}")))?
+            .iter()
+            .any(|f| f == "bulk");
+        let d =
+            iris_policy::decide_action(c, &active.policy, id, author, job.as_deref(), bulk, now)?;
         // No rule decides a verb that the policy does not know: `draft` and
         // `send` (spec R3-01, issue #239). Each goes to a person, in the mode
         // `apply`; in the mode `observe` it stays proposed, as other actions.
-        let Some(verb) = iris_policy::Verb::from_name(&verb) else {
+        let Some(d) = d else {
             if apply {
                 decide_in(
                     c,
@@ -245,29 +250,6 @@ pub fn decide_submitted(
             }
             continue;
         };
-        let bulk = serde_json::from_str::<Vec<String>>(&flags)
-            .map_err(|e| Error::Refused(format!("flags: {e}")))?
-            .iter()
-            .any(|f| f == "bulk");
-        // At most CHUNK messages: the action holds their facts.
-        let mut facts: Vec<Facts> = Vec::new();
-        let ids: Vec<i64> = c
-            .prepare("SELECT message_id FROM action_message WHERE action_id = ?1 ORDER BY 1")?
-            .query_map([id], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        for m in ids {
-            facts.extend(iris_policy::facts(c, m, now)?);
-        }
-        let d = active.policy.decide(
-            &iris_policy::Action {
-                verb,
-                author,
-                job: job.as_deref(),
-                bulk,
-                now,
-            },
-            facts.iter().map(Facts::message),
-        );
         // A hard limit: a denial with no rule (spec 2 section 6.5).
         if !apply && !(d.outcome == Policy::Deny && d.rule.is_none()) {
             continue;
