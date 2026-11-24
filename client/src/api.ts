@@ -428,7 +428,9 @@ export type JobSession = {
   exit: number | null;
   ended: string | null;
 };
-export type JobDetail = { job: Job & { events: JobEvent[] }; changesets: JobChangeset[]; threads: Record<string, Target>; session?: JobSession | null };
+/** One thread or item in the scope of a job (decision D25): the mail that the agent reads. `id` is null for a row that the page cannot name. */
+export type ScopeRef = { id: string | null; kind: "thread" | "item"; label: string | null; messages: number };
+export type JobDetail = { job: Job & { events: JobEvent[] }; changesets: JobChangeset[]; threads: Record<string, Target>; scope?: ScopeRef[]; session?: JobSession | null };
 
 export const SIGN_IN = "Sign in: run iris open in Terminal.";
 export const SIGN_IN_FAILED = "This sign-in address was used, ended or is not valid. Run iris open in Terminal for a new address.";
