@@ -21,7 +21,8 @@ what stays, and what happens after a crash during the delete.
    one account.
 2. After the removal, Iris holds no mail of the account: no message, header,
    clean text, search text, raw message file, thread, label, item or job
-   workspace file.
+   workspace file. One exception: the notes of a job (`notes.md`) are part
+   of the record (see "What stays"), and a workspace gets them back.
 3. Iris writes nothing to the provider. The mailbox at the provider does not
    change.
 4. A crash at any point leaves a state that the engine completes, with no
@@ -39,7 +40,10 @@ Each item below has a `limit` issue (see the PR).
   account. The command and the button say so. (Limit issue to file with the
   code PR.)
 - The record of actions (see "What stays"). It can hold text that the
-  person or an agent wrote, and the titles of decided matters.
+  person or an agent wrote, and the titles of decided matters. The notes
+  of a job are part of the record: an agent can quote mail in them, and
+  the workspace of the job gets them back at each build. The command and
+  the button say so.
 - An action in review (`in_review`) of the account. Only the person can
   decide it (the trigger `action_state`). It stays in review until the
   person decides it or it expires after 14 days. An approval applies
@@ -98,8 +102,8 @@ holds no sign-in and no sync state. Reasons:
    for each job whose scope has mail of the account: a scope thread of the
    account, a scope item of the account, or a listed message
    (`job_scope_message`) of the account. After step 6 and the delete, no
-   other row links the job to the account. So the delete reads this table,
-   also after a crash.
+   other row links the job to the account. So the delete and each build of
+   the workspace read this table, also after a crash.
 6. Delete the items of the account (step "items" below), so the brief is
    empty of the account at the commit.
 
@@ -127,18 +131,28 @@ It runs with `PRAGMA secure_delete = ON`, so SQLite writes zeros over the
 deleted content. Steps, each in batches of 500 rows, one write transaction
 for each batch:
 
-0. **Workspaces**: for each row of `removed_workspace` of the account
-   whose workspace folder exists, build the workspace again
-   (`iris_workspace::build`). A build after the removal leaves out each
-   message of an account in state `removing` or `removed` (a condition in
-   `iris_workspace::grant_in`), and replaces the mail files of the folder.
-   So the folder loses the mail of the account, and keeps the mail of other
-   accounts and the files of the agent (for example `drafts/`), as each
-   build does. A build that runs holds the build lock of the workspace, so
-   this build waits for its end. A job whose session runs is skipped: that
-   session started after the removal, so its build already left the
-   account out, and a build must not change the folder of a running
-   session. The row goes in the last transaction (step 7).
+0. **Workspaces**: an agent can copy granted mail into each file of its
+   workspace: a draft, a scratch file, a file with no known name. Iris
+   cannot tell which file holds a copy. So the rule is one rule for the
+   whole folder: a build of the workspace of a job with a row in
+   `removed_workspace` deletes the whole folder and builds it again from
+   an empty folder. Order, under the build lock of the workspace:
+   1. Save `notes.md` to the store (`save_notes`), as each build does.
+   2. Delete the folder and make it again, empty.
+   3. Build as usual. The grant leaves out each message of an account in
+      state `removing` or `removed` (a condition in
+      `iris_workspace::grant_in`). `notes.md` comes back from the store.
+
+   The files of the agent go, also the files that hold no mail of the
+   account and the mail of other accounts in them. The next session of
+   the job builds them again from its grant. Step 0 runs this build for
+   each row of `removed_workspace` of the account whose workspace folder
+   exists. A build that runs holds the build lock, so this build waits for
+   its end. A job whose session runs is skipped: that session started after
+   the removal, so its build saw the row and already deleted the folder,
+   and a build must not change the folder of a running session. The rows go
+   in the last transaction (step 7). A crash before step 7 keeps the rows,
+   so the next delete builds again.
 
 1. **Items**: each item of the account, and each item that cites a message
    of the account. First the rows that refer to them with no cascade:
@@ -189,8 +203,12 @@ job scope rows and the matters that the person decided (`confirmed` or
 refuse). They hold IDs of messages and threads that no longer exist, and text
 that the person or an agent wrote: a draft, a reason, a note. A decided matter keeps
 its title, which the model wrote from the mail, and loses the members of the
-account (the cascade of `matter_item`). A proposed matter with no member
-left goes (the trigger `matter_item_lost`). A reader of
+account (the cascade of `matter_item`). A proposed matter goes when one of
+its members goes (the trigger `matter_item_lost`), also when other members
+are items of another account. A proposal is a suggestion of the engine,
+not mail and not a decision of the person: the items of the other account
+stay, and a later run of the proposal step can propose a matter from them.
+A reader of
 these rows must accept an ID with no row (the build checks the ledger view,
 the review view and the job page).
 
@@ -221,7 +239,10 @@ iris account remove <address> [--yes]
 
 With no `--yes`, the command prints what it removes and asks for the address
 again on the terminal. It refuses a wrong answer. Then it does the removal
-and the delete, and prints the counts and the backup warning.
+and the delete, and prints the counts and the warning: backups and the
+notes of jobs keep their copy. The question of the command and the button
+say the same before the removal: the files of the agents in the workspaces
+of jobs with mail of the account go.
 
 ### The call waits for the delete
 
@@ -279,7 +300,9 @@ engine tick ends the delete.
 | That sync wrote a raw file before its insert failed | Step 6 deletes the file. | store test with a file and no row |
 | An understanding run writes after the removal | The trigger on `item` or `body` refuses the write. The batch query leaves the account out. | store test |
 | A workspace build runs at the delete | Step 0 waits for the build lock, then builds again with no mail of the account. | workspace test |
-| A job has scope in two accounts | The build of step 0 keeps the mail of the other account and `drafts/`. | workspace test |
+| An agent copied mail of the account into a draft or another file | The build of step 0 deletes the whole folder first. Only `notes.md` comes back, from the record. | workspace test |
+| A job has scope in two accounts | The build of step 0 builds the mail of the other account again. The files of the agent go. | workspace test |
+| A proposed matter has members in two accounts | The proposal goes (trigger `matter_item_lost`). The items of the other account stay. | store test |
 | A crash after the removal, after the items went | `removed_workspace` still names the jobs. | store test |
 | A reader keeps the log busy at the checkpoint | The waiting call tries for 10 seconds. If it stays busy, the state stays `removing`, the result says so, and the next call checkpoints again. | store test with an open read transaction |
 | An apply step of the account runs at the removal | It holds the sync lock, so the delete waits. Its ledger entry stays. An unknown result of that step stays unknown (no recovery runs for a removed account). | limit issue |
@@ -298,7 +321,8 @@ engine tick ends the delete.
 - `crates/iris-store`: migration 46 (insert triggers, `removed_workspace`),
   `remove_account`, `delete_removed`, the change of `save_account_secret`.
 - `crates/iris-understand`: the batch query leaves out a removed account.
-- `crates/iris-workspace`: the grant leaves out a removed account.
+- `crates/iris-workspace`: the grant leaves out a removed account. A build
+  of a job with a row in `removed_workspace` starts from an empty folder.
 - `crates/iris`: `iris account remove`, the engine tick.
 - `crates/iris-api`: the route, the status filter.
 - `client/`: the Accounts page.
@@ -329,6 +353,8 @@ None. The removal and the delete change only the data folder.
   table keeps a row.
 - The other account keeps all its mail (verify: zero differences). Red if
   the delete touches the other account.
+- After the delete, no file of a workspace of the account holds text of
+  its mail, other than `notes.md`. Red if a draft of the agent keeps it.
 - The ledger and the changesets keep each row. Red if a count goes down.
 - A removal with a crash before the delete ends with the same state after the
   next tick.
