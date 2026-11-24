@@ -47,6 +47,10 @@ pub const SENT_OTHER_END: &str = "sent other content than the approved content";
 struct Stored {
     content: Content,
     reply: Option<Reply>,
+    /// The display name of `From` (send content spec, section 3). Not in
+    /// the hash. In the post, so recovery makes the same bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
 }
 
 /// The `ops` of a ledger row of a write verb.
@@ -191,6 +195,9 @@ pub(crate) fn draft(run: &mut Run<'_, '_>, action: i64) -> Result<Outcome> {
     if grown(store, action, &run.address, &content)? {
         return Ok(Outcome::Denied(GROWN.into()));
     }
+    let Some(files) = files(store, &content)? else {
+        return deny("an attachment file is missing or changed");
+    };
     let hash = iris_compose::hash(&content, reply.as_ref());
     let message_id = random_id(&run.address)?;
     let ops = Ops::Create {
@@ -199,8 +206,25 @@ pub(crate) fn draft(run: &mut Run<'_, '_>, action: i64) -> Result<Outcome> {
         hash,
         thread: thread.clone(),
     };
-    let post = Stored { content, reply };
-    let raw = compose(&run.address, &ops, &post);
+    let name = owner_name(store, run.account, &run.address)?;
+    let post = Stored {
+        content,
+        reply,
+        name,
+    };
+    let raw = compose(&run.address, &ops, &post, &files);
+    // The reply headers come from the parent: the size bound of the submit
+    // does not cover them (send content spec, section 5).
+    let provider: String = store.read(|c| {
+        Ok(c.query_row(
+            "SELECT provider FROM account WHERE id = ?1",
+            [run.account],
+            |r| r.get(0),
+        )?)
+    })?;
+    if raw.len() as u64 > iris_compose::max_message(&provider) {
+        return deny("the mail is too large: remove a file");
+    }
     let Some(ledger) = claim(run, action, &ops, Some(&post), None)? else {
         return Err(Error::NotApproved(action));
     };
@@ -215,22 +239,79 @@ pub(crate) fn draft(run: &mut Run<'_, '_>, action: i64) -> Result<Outcome> {
     }
 }
 
-/// The message of a create, from its ops and its post: the same input
-/// gives the same bytes (section 4, step 2).
-fn compose(address: &str, ops: &Ops, post: &Stored) -> Vec<u8> {
+/// The message of a create, from its ops, its post and the files of its
+/// attachments: the same input gives the same bytes (section 4, step 2).
+fn compose(address: &str, ops: &Ops, post: &Stored, files: &[Vec<u8>]) -> Vec<u8> {
     let Ops::Create {
         message_id, date, ..
     } = ops
     else {
         unreachable!("compose of a create")
     };
-    iris_compose::compose(
+    compose_as(address, message_id, *date, post, files)
+}
+
+fn compose_as(
+    address: &str,
+    message_id: &str,
+    date: i64,
+    post: &Stored,
+    files: &[Vec<u8>],
+) -> Vec<u8> {
+    let files: Vec<&[u8]> = files.iter().map(Vec::as_slice).collect();
+    iris_compose::compose_with(
         address,
+        post.name.as_deref(),
         message_id,
         &post.content,
         post.reply.as_ref(),
-        *date,
+        date,
+        &files,
     )
+}
+
+/// The file of each attachment of `content`, from the attachment folder
+/// (send content spec, section 2). `None` if a file is missing, or its
+/// SHA-256 or its size is not the value of its entry.
+fn files(store: &Store, content: &Content) -> Result<Option<Vec<Vec<u8>>>> {
+    let mut out = Vec::with_capacity(content.attachments.len());
+    for a in &content.attachments {
+        let Some(path) = store.attachment_path(&a.sha256) else {
+            return Ok(None);
+        };
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(Error::Store(iris_store::Error::Io(e))),
+        };
+        if !a.is_file(&bytes) {
+            return Ok(None);
+        }
+        out.push(bytes);
+    }
+    Ok(Some(out))
+}
+
+/// The display name of the owner for `From` (send content spec, section
+/// 3): the `From` name of the newest message of a Gmail account from its
+/// own address with the label `SENT`. `None` for another provider, or a
+/// name that [`iris_compose::from_name`] refuses.
+fn owner_name(store: &Store, account: i64, address: &str) -> Result<Option<String>> {
+    let name: Option<Option<String>> = store.read(|c| {
+        Ok(c.query_row(
+            "SELECT h.from_name FROM message m JOIN header h ON h.message_id = m.id
+             JOIN account a ON a.id = m.account_id
+             WHERE m.account_id = ?1 AND a.provider = 'gmail' AND h.from_addr = ?2
+               AND m.gone_at IS NULL
+               AND EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                           WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
+             ORDER BY m.internal_date DESC, m.id DESC LIMIT 1",
+            params![account, address.to_ascii_lowercase()],
+            |r| r.get(0),
+        )
+        .optional()?)
+    })?;
+    Ok(name.flatten().as_deref().and_then(iris_compose::from_name))
 }
 
 /// The claim: in one transaction, the ledger row in `writing` with its
@@ -258,10 +339,13 @@ fn claim(
         // The hold too: a stop and a resume (or sending off and on) during
         // the read of the draft move `on_at`, and the send waits a full hold
         // again (docs/specs/2026-11-17-stop.md, section 3).
-        if draft.is_some() {
+        if let Some(d) = draft {
             let Some(on_at) = switch_on(tx)? else {
                 return Ok(Some(Err(Outcome::SendingOff)));
             };
+            if bcc_waits(tx, d)?.is_some() {
+                return Ok(Some(Err(Outcome::BccUnchecked)));
+            }
             let decided_at: i64 = tx.query_row(
                 "SELECT coalesce(decided_at, 0) FROM changeset_action WHERE id = ?1",
                 [action],
@@ -337,13 +421,14 @@ fn created(
         None
     };
     let message_id = gmail_id.as_ref().unwrap_or(message_id);
-    let raw = iris_compose::compose(
-        &run.address,
-        message_id,
-        &post.content,
-        post.reply.as_ref(),
-        *date,
-    );
+    // Nothing deletes an attachment file, and the apply read each file
+    // before the claim (send content spec, section 2).
+    let files = files(run.store, &post.content)?.ok_or_else(|| {
+        Error::Store(iris_store::Error::Query(
+            "an attachment file of a created draft is missing or changed".into(),
+        ))
+    })?;
+    let raw = compose_as(&run.address, message_id, *date, &post, &files);
     let account = run.account;
     let content = serde_json::to_string(&post).expect("plain data");
     run.store.write(|tx| {
@@ -731,6 +816,11 @@ pub fn release(
     if grown(store, action, &run.address, content)? {
         return Ok(Outcome::Denied(GROWN.into()));
     }
+    // After the read of the draft, so that a closed gate does not hide a
+    // change at the provider. The claim checks the gate again.
+    if store.read(|c| Ok(bcc_waits(c, d.id)?))?.is_some() {
+        return Ok(Outcome::BccUnchecked);
+    }
     // Step 3: the claim.
     let ops = Ops::Send {
         draft: d.id,
@@ -777,6 +867,7 @@ fn changed_at_gmail(
             let stored = Stored {
                 content: r.content,
                 reply: r.reply,
+                name: None,
             };
             (
                 serde_json::to_string(&stored).expect("plain data"),
@@ -818,6 +909,41 @@ pub(crate) fn changeset_error(e: iris_changeset::Error) -> iris_store::Error {
         iris_changeset::Error::Store(e) => e,
         other => iris_store::Error::Query(other.to_string()),
     }
+}
+
+/// The provider whose `Bcc` gate keeps the send of the draft `draft` held
+/// (send content spec, section 6.2), or `None` if the send can leave: the
+/// draft has no `bcc`, the gate of its provider is open, or the send is
+/// the test send of the owner check (exactly `To` = `test_to`, no `Cc`,
+/// `Bcc` = `test_bcc`). A draft row whose content does not read gives
+/// `None`: the release check of its bytes decides.
+pub fn bcc_waits(c: &rusqlite::Connection, draft: i64) -> rusqlite::Result<Option<String>> {
+    let (content, provider): (String, String) = c.query_row(
+        "SELECT d.content, a.provider FROM draft d JOIN account a ON a.id = d.account_id
+         WHERE d.id = ?1",
+        [draft],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let Ok(stored) = serde_json::from_str::<Stored>(&content) else {
+        return Ok(None);
+    };
+    let c_ = &stored.content;
+    if c_.bcc.is_empty() {
+        return Ok(None);
+    }
+    let gate: Option<(String, String, Option<i64>)> = c
+        .query_row(
+            "SELECT test_to, test_bcc, checked_at FROM bcc_check WHERE provider = ?1",
+            [&provider],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let open = match gate {
+        Some((_, _, Some(_))) => true,
+        Some((to, bcc, None)) => c_.to == [to] && c_.cc.is_empty() && c_.bcc == [bcc],
+        None => false,
+    };
+    Ok((!open).then_some(provider))
 }
 
 /// The time the send switch went on, or `None` while it is off.
@@ -872,4 +998,54 @@ pub fn set_sending(store: &Store, on: bool) -> Result<()> {
         Ok(())
     })?;
     Ok(())
+}
+
+/// `iris sending bcc-test`: write the test addresses of the `Bcc` gate of
+/// `provider`, with the gate closed (send content spec, section 6.2). A
+/// new test replaces the addresses of a closed gate. Gives false, and
+/// changes nothing, if the gate is open. Refuses, with
+/// [`Error::BccTest`], an address that a draft cannot have, two equal
+/// addresses, and an address of an account of `provider`: the test needs
+/// two other mailboxes, so that the provider cannot merge the copies.
+pub fn bcc_test(store: &Store, provider: &str, to: &str, bcc: &str) -> Result<bool> {
+    let (to, bcc) = (to.to_ascii_lowercase(), bcc.to_ascii_lowercase());
+    for a in [&to, &bcc] {
+        iris_compose::check_address(a).map_err(Error::BccTest)?;
+    }
+    if to == bcc {
+        return Err(Error::BccTest("use two different addresses".into()));
+    }
+    let own: bool = store.read(|c| {
+        Ok(c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM account WHERE provider = ?1
+               AND lower(address) IN (?2, ?3))",
+            params![provider, to, bcc],
+            |r| r.get(0),
+        )?)
+    })?;
+    if own {
+        return Err(Error::BccTest(format!(
+            "use two addresses that are not an account of {provider} in Iris"
+        )));
+    }
+    Ok(store.write(|tx| {
+        Ok(tx.execute(
+            "INSERT INTO bcc_check (provider, test_to, test_bcc) VALUES (?1, ?2, ?3)
+             ON CONFLICT (provider) DO UPDATE SET test_to = ?2, test_bcc = ?3
+             WHERE checked_at IS NULL",
+            params![provider, to, bcc],
+        )? == 1)
+    })?)
+}
+
+/// `iris sending bcc`: open the `Bcc` gate of `provider`. Gives false if
+/// no test was written first.
+pub fn bcc_open(store: &Store, provider: &str) -> Result<bool> {
+    Ok(store.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE bcc_check SET checked_at = coalesce(checked_at,
+               CAST(unixepoch('subsec') * 1000 AS INTEGER)) WHERE provider = ?1",
+            [provider],
+        )? == 1)
+    })?)
 }

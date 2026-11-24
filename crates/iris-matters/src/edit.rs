@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 use iris_store::Store;
-use rusqlite::{params, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::{check_title, insert_by, status, write, Error, Result, MAX_ITEMS};
 
@@ -16,8 +16,8 @@ use crate::{check_title, insert_by, status, write, Error, Result, MAX_ITEMS};
 /// (`c-` is a commitment). A row of another form is not the item.
 pub type Ref<'a> = (i64, &'a str);
 
-/// The row and the form of a member ID that a request can name (`c-`, `v-`
-/// or `r-`). `None` for another kind or a text that is no ID.
+/// The row and the form of a member ID (`c-`, `v-`, `r-` or `s-`). `None`
+/// for another kind or a text that is no ID.
 pub fn parse_ref(id: &str) -> Option<Ref<'static>> {
     use iris_store::Kind;
     let (kind, row) = iris_store::parse_id(id)?;
@@ -25,8 +25,7 @@ pub fn parse_ref(id: &str) -> Option<Ref<'static>> {
         Kind::Commitment => "commitment",
         Kind::Conversation => "conversation",
         Kind::Record => "record",
-        // shortcut: no signal from a request until the web client shows
-        // signal members (#884); the client PR of the matters-edit spec adds `s-`.
+        Kind::Signal => "signal",
         _ => return None,
     };
     Some((row, form))
@@ -59,7 +58,7 @@ fn title(t: &str) -> Result<String> {
 
 /// True when the item `row` of the form `form` is live: a member form, not
 /// ended, not a duplicate, not hidden, and no hostile mail.
-fn live(tx: &Transaction, (row, form): Ref) -> Result<bool> {
+fn live(tx: &Connection, (row, form): Ref) -> Result<bool> {
     Ok(tx.query_row(
         concat!(
             "SELECT EXISTS (SELECT 1 FROM item i WHERE i.id = ?1 AND i.form = ?2 AND ",
@@ -73,7 +72,7 @@ fn live(tx: &Transaction, (row, form): Ref) -> Result<bool> {
 
 /// The open matter (`proposed` or `confirmed`) that has `row` as a kept
 /// member, if one has.
-fn open_matter(tx: &Transaction, row: i64) -> Result<Option<i64>> {
+fn open_matter(tx: &Connection, row: i64) -> Result<Option<i64>> {
     Ok(tx
         .query_row(
             "SELECT mi.matter_id FROM matter_item mi JOIN matter m ON m.id = mi.matter_id
@@ -82,6 +81,16 @@ fn open_matter(tx: &Transaction, row: i64) -> Result<Option<i64>> {
             |r| r.get(0),
         )
         .optional()?)
+}
+
+/// True when the person can put `item` in a matter now: the item is live
+/// and in no open matter. [`create`] and [`edit`] make the same checks, so
+/// the web client offers the picker only for an item that they accept.
+pub fn joinable(store: &Store, item: Ref) -> Result<bool> {
+    let check = |c: &Connection| -> Result<bool> {
+        Ok(live(c, item)? && open_matter(c, item.0)?.is_none())
+    };
+    store.read(|c| Ok(check(c)))?
 }
 
 /// The person makes a matter by hand, with `title` and 1 to 50 live items

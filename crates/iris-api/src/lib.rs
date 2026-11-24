@@ -12,7 +12,7 @@ use axum::{
     body::{Body, Bytes},
     extract::{
         rejection::{JsonRejection, QueryRejection},
-        Path, Query, State,
+        DefaultBodyLimit, Path, Query, State,
     },
     http::{header, StatusCode},
     middleware,
@@ -151,6 +151,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/items", get(get_items))
         .route("/api/items/{id}", get(get_item))
         .route("/api/items/{id}/job", get(get_start))
+        .route("/api/items/{id}/joinable", get(get_joinable))
         .route("/api/items/{id}/{verb}", post(post_verb))
         .route("/api/search", get(get_search))
         .route("/api/changesets", get(get_changesets))
@@ -195,6 +196,10 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/outbox", get(get_outbox))
         .route("/api/outbox/{draft}/cancel", post(post_outbox_cancel))
         .route("/api/write", post(post_write))
+        .route(
+            "/api/attachments",
+            post(post_attachment).layer(DefaultBodyLimit::max(ATTACHMENT_LIMIT)),
+        )
         .route("/api/write/{id}", get(get_write))
         .route("/api/threads/{id}/reply", get(get_reply))
         .route("/api/threads/{id}/draft", get(get_draft))
@@ -1295,6 +1300,26 @@ async fn post_outbox_cancel(
     })
 }
 
+/// The most bytes of a request to `POST /api/attachments`: the limit of
+/// the largest message (send content spec, section 5). A larger body gets
+/// 413.
+pub const ATTACHMENT_LIMIT: usize = iris_compose::MAX_MESSAGE as usize;
+
+/// One file for a draft (send content spec, section 2): the request body
+/// is the file. 201 with `{"sha256", "size"}`. The client puts the entry,
+/// with the name and the type, into the draft.
+async fn post_attachment(State(s): State<Arc<Store>>, body: Bytes) -> Result<Response> {
+    if body.is_empty() {
+        return Err(Error::Query("a file has 1 or more bytes".into()));
+    }
+    let sha = s.put_attachment(&body)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "sha256": sha, "size": body.len() })),
+    )
+        .into_response())
+}
+
 /// The press of Send in the write view (docs/specs/2026-11-17-write.md,
 /// section 2): 201 for a new write, 200 for an earlier try of the same
 /// press, 409 with `flags` for warnings that the person did not see.
@@ -1394,6 +1419,11 @@ async fn post_watch_remove(
     Ok(Json(serde_json::json!({ "removed": id })).into_response())
 }
 
+/// `{"joinable": bool}`: the item can join a matter now.
+async fn get_joinable(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    Ok(Json(serde_json::json!({ "joinable": matters::joinable(&s, &id)? })).into_response())
+}
+
 /// The valid proposals and the confirmed matters.
 async fn get_matters(State(s): State<Arc<Store>>) -> Result<Response> {
     Ok(Json(matters(&s)?).into_response())
@@ -1431,9 +1461,17 @@ async fn post_matter_decline(
 }
 
 /// The person makes a matter by hand.
+/// The body of a matter by hand: a title and its items, nothing else (#909).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MatterCreate {
+    title: String,
+    items: Vec<String>,
+}
+
 async fn post_matter_create(
     State(s): State<Arc<Store>>,
-    b: std::result::Result<Json<MatterConfirm>, JsonRejection>,
+    b: std::result::Result<Json<MatterCreate>, JsonRejection>,
 ) -> Result<Response> {
     let b = body(b)?;
     let view = create_matter(&s, &b.title, &b.items, now_ms())?;

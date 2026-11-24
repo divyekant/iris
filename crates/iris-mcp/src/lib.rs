@@ -148,7 +148,7 @@ const SPECS: &[Spec] = &[
         about: "Write a reply to a thread (t-3) or a new mail from an account (a-1) in a draft changeset.",
         args: &[
             arg("target", Kind::Text, "The thread (t-3) or the account (a-1)."),
-            arg("draft", Kind::Object, "The mail: to, cc, subject (not for a reply) and body."),
+            arg("draft", Kind::Object, "The mail: to, cc, bcc, subject (not for a reply) and body. An agent cannot attach a file."),
         ],
         adds: true,
     },
@@ -307,11 +307,11 @@ const SPECS: &[Spec] = &[
         adds: false,
     },    Spec {
         name: "matters_propose",
-        about: "Propose a matter: a title and 2 to 50 items (commitments, conversations \
-                or records) from 2 or more threads. The person confirms it.",
+        about: "Propose a matter: a title and 2 to 50 items (commitments, conversations, \
+                records or signals) from 2 or more threads. The person confirms it.",
         args: &[
             arg("title", Kind::Text, "The title, 1 to 80 characters, for example Tokyo trip."),
-            arg("items", Kind::Ids, "Item IDs, for example c-1, r-4."),
+            arg("items", Kind::Ids, "Item IDs, for example c-1, r-4, s-9."),
         ],
         adds: false,
     },

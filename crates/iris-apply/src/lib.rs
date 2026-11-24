@@ -35,7 +35,8 @@ mod step;
 mod stop;
 
 pub use send::{
-    release, sending, sent_by_iris, set_sending, HOLD_MS, NO_BCC, SENT_OTHER, SENT_OTHER_END,
+    bcc_open, bcc_test, bcc_waits, release, sending, sent_by_iris, set_sending, HOLD_MS, NO_BCC,
+    SENT_OTHER, SENT_OTHER_END,
 };
 pub use state::{apply_state, apply_states};
 pub use step::{recover_step, step, step_clock, Step};
@@ -80,6 +81,9 @@ pub enum Error {
     /// error that ends with [`SENT_OTHER_END`]). Each release stops until the owner checks
     /// assumption 6 of the send spec. The action stays as it was.
     SendStopped,
+    /// The test addresses of the `Bcc` gate cannot test it, with the
+    /// reason ([`bcc_test`]). Nothing changed.
+    BccTest(String),
 }
 
 impl std::fmt::Display for Error {
@@ -92,6 +96,7 @@ impl std::fmt::Display for Error {
             Error::OtherMailbox => write!(f, "the token is of another mailbox"),
             Error::Verb(v) => write!(f, "the verb {v} has no Gmail apply"),
             Error::Undo(why) => write!(f, "no undo: {why}"),
+            Error::BccTest(why) => write!(f, "{why}"),
             Error::SendStopped => write!(
                 f,
                 "a mail provider {SENT_OTHER_END}: each send stops until the owner checks"
@@ -154,6 +159,10 @@ pub enum Outcome {
     /// The send switch is off (`iris sending on` turns it on). The send
     /// stays `held`, and no call is made.
     SendingOff,
+    /// The draft has `bcc`, and the `Bcc` gate of the provider is closed
+    /// (send content spec, section 6.2). The send stays `held`, and no
+    /// call is made.
+    BccUnchecked,
     /// Iris is stopped (`iris resume` ends the stop). The action stays
     /// `approved` or `held`, and no call is made.
     Stopped,

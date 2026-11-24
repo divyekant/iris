@@ -12,11 +12,17 @@ use crate::Result;
 /// The path of a content file, or `None` if `sha256` is not 64 lowercase
 /// hexadecimal characters. The check keeps a bad value out of the path.
 pub(crate) fn path(root: &Path, sha256: &str) -> Option<PathBuf> {
+    file_path(root, sha256, ".eml")
+}
+
+/// The path `<root>/<aa>/<sha256><ext>`, or `None` if `sha256` is not 64
+/// lowercase hexadecimal characters.
+pub(crate) fn file_path(root: &Path, sha256: &str, ext: &str) -> Option<PathBuf> {
     let ok = sha256.len() == 64
         && sha256
             .bytes()
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-    ok.then(|| root.join(&sha256[..2]).join(format!("{sha256}.eml")))
+    ok.then(|| root.join(&sha256[..2]).join(format!("{sha256}{ext}")))
 }
 
 /// Streams one raw message to a temporary file and hashes it on the way, so
@@ -25,6 +31,9 @@ pub(crate) fn path(root: &Path, sha256: &str) -> Option<PathBuf> {
 /// deletes the temporary file.
 pub struct ContentWriter {
     root: PathBuf,
+    /// The end of the file name: `.eml` in the content folder, none in the
+    /// attachment folder.
+    ext: &'static str,
     tmp: PathBuf,
     file: Option<File>,
     hash: Sha256,
@@ -32,6 +41,10 @@ pub struct ContentWriter {
 
 impl ContentWriter {
     pub(crate) fn new(root: &Path) -> Result<ContentWriter> {
+        ContentWriter::with_ext(root, ".eml")
+    }
+
+    pub(crate) fn with_ext(root: &Path, ext: &'static str) -> Result<ContentWriter> {
         let mut rand = [0u8; 8];
         getrandom::fill(&mut rand).map_err(|e| io::Error::other(e.to_string()))?;
         // The temporary file is in the content folder, on the same file
@@ -43,6 +56,7 @@ impl ContentWriter {
             .open(&tmp)?;
         Ok(ContentWriter {
             root: root.to_path_buf(),
+            ext,
             tmp,
             file: Some(file),
             hash: Sha256::new(),
@@ -57,7 +71,7 @@ impl ContentWriter {
         file.sync_all()?;
         drop(file);
         let sha = hex(&std::mem::take(&mut self.hash).finalize());
-        let dest = path(&self.root, &sha).expect("a SHA-256 in hexadecimal");
+        let dest = file_path(&self.root, &sha, self.ext).expect("a SHA-256 in hexadecimal");
         let dir = dest.parent().expect("the path has a folder");
         crate::make_private_dir(dir)?;
         fs::rename(&self.tmp, &dest)?;
