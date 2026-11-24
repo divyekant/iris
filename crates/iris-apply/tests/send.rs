@@ -482,7 +482,7 @@ fn a_rate_limit_of_the_send_is_one_request_and_pending() {
 /// Acceptance 3: a change at Gmail after the approval, also a new Bcc
 /// only, denies the send, and no `drafts/send` request goes out. A Bcc
 /// reads back (send content spec, section 4): the row gets it, and a new
-/// send of it is refused until the Bcc gate exists. A `Reply-To` does not
+/// send of it waits for the Bcc gate (section 6.2). A `Reply-To` does not
 /// read back: the row becomes foreign.
 #[test]
 fn a_draft_changed_at_gmail_is_not_sent() {
@@ -548,7 +548,21 @@ fn a_draft_changed_at_gmail_is_not_sent() {
             )?)
         })
         .unwrap();
-    assert_eq!(st, "denied", "a send with Bcc waits for the Bcc gate");
+    assert_eq!(st, "proposed");
+    // Approved, the new send waits for the Bcc gate of Gmail.
+    let id: i64 = b
+        .store
+        .write(|tx| {
+            Ok(tx.query_row(
+                "UPDATE changeset_action SET state = 'approved', decided_by = 'person',
+                   decided_at = ?2 WHERE changeset_id = ?1 RETURNING id",
+                params![cs, now() - AGED],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(b.release(id).unwrap(), Outcome::BccUnchecked);
+    assert_eq!(b.sends(), 0);
 
     let (s, provider) = b.new_mail(AGED);
     let raw = String::from_utf8(b.gmail.draft_raw(TOKEN, &provider).unwrap().raw.unwrap()).unwrap();
@@ -1444,8 +1458,73 @@ fn the_size_limit_is_the_limit_of_the_provider() {
         .write(|tx| Ok(tx.execute("UPDATE account SET provider = 'outlook'", [])?))
         .unwrap();
     assert_eq!(state_of(m), "denied");
-    // Until the Bcc gate exists, submit denies a draft with `bcc`.
-    let mut with_bcc = mail();
-    with_bcc["bcc"] = json!(["b@example.org"]);
-    assert_eq!(state_of(with_bcc), "denied");
+}
+
+/// Send content spec, section 6.2: the `Bcc` gate of each provider.
+fn bcc_mail(cc: &[&str]) -> Value {
+    json!({"to": ["priya@example.com"], "cc": cc, "bcc": ["sam@example.org"],
+           "subject": "Q4 numbers", "body": "Hi Priya,\n\nHere.\n"})
+}
+
+impl Box {
+    /// The send of a new mail with `args`, approved `age` milliseconds ago.
+    fn send_of(&self, args: Value, age: i64) -> i64 {
+        let a = self.approved(Verb::Draft, "a-1", args, 0);
+        assert!(matches!(self.apply(a), Ok(Outcome::Applied(_))));
+        let (d, _) = self.draft(a);
+        self.approved(Verb::Send, &d, json!({}), age)
+    }
+
+    fn ledger_note(&self, action: i64) -> Option<String> {
+        self.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT error FROM ledger WHERE action_id = ?1",
+                    [action],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    }
+}
+
+#[test]
+fn a_send_with_bcc_waits_for_the_bcc_gate() {
+    let b = setup("bcc-gate");
+    let s = b.send_of(bcc_mail(&[]), AGED);
+    assert_eq!(b.release(s).unwrap(), Outcome::BccUnchecked);
+    assert_eq!((b.state(s).as_str(), b.sends()), ("held", 0));
+    // No test yet: the gate does not open.
+    assert!(!iris_apply::bcc_open(&b.store, "outlook").unwrap());
+    // A send with no bcc does not read the gate.
+    let (plain, _) = b.new_mail(AGED);
+    assert!(matches!(b.release(plain), Ok(Outcome::Applied(_))));
+    // The owner check: only the test send passes the closed gate.
+    assert!(
+        iris_apply::bcc_test(&b.store, "gmail", "Priya@Example.com", "sam@example.org").unwrap()
+    );
+    let other = b.send_of(bcc_mail(&["lee@example.org"]), AGED);
+    assert_eq!(b.release(other).unwrap(), Outcome::BccUnchecked);
+    assert!(matches!(b.release(s), Ok(Outcome::Applied(_))));
+    assert_eq!(b.ledger_note(s), None);
+    // The gate of Outlook stays closed. An open gate takes no new test.
+    assert!(iris_apply::bcc_open(&b.store, "gmail").unwrap());
+    assert!(!iris_apply::bcc_test(&b.store, "gmail", "a@example.org", "b@example.org").unwrap());
+    assert!(matches!(b.release(other), Ok(Outcome::Applied(_))));
+    assert_eq!(b.sends(), 3);
+}
+
+#[test]
+fn a_sent_copy_with_no_bcc_takes_the_approved_bcc_with_a_note() {
+    let b = setup("bcc-note");
+    assert!(iris_apply::bcc_test(&b.store, "gmail", "x@example.org", "y@example.org").unwrap());
+    assert!(iris_apply::bcc_open(&b.store, "gmail").unwrap());
+    b.fake.drop_sent_bcc();
+    let s = b.send_of(bcc_mail(&[]), AGED);
+    assert!(matches!(b.release(s), Ok(Outcome::Applied(_))));
+    assert_eq!(b.ledger_note(s).as_deref(), Some(iris_apply::NO_BCC));
+    // The send stops no later release: the copy is the approved content.
+    let (plain, _) = b.new_mail(AGED);
+    assert!(matches!(b.release(plain), Ok(Outcome::Applied(_))));
+    assert_eq!(b.ledger_note(plain), None);
 }

@@ -147,6 +147,8 @@ struct Store {
     /// A draft edit that the next `drafts.get` of the draft starts, after
     /// its answer: the person edits the draft between a read and a send.
     edit_after_get: Option<(String, Vec<u8>)>,
+    /// True: the sent copy of `drafts.send` has no `Bcc` header.
+    drop_sent_bcc: bool,
     /// Each request: method, path and query.
     log: Vec<String>,
     /// The drafts: (draft id, message index). A sent or deleted draft
@@ -218,6 +220,7 @@ impl Store {
             before_matching: None,
             page_limit: usize::MAX,
             edit_after_get: None,
+            drop_sent_bcc: false,
             log: Vec::new(),
             drafts: Vec::new(),
             next_draft: 1,
@@ -559,6 +562,12 @@ impl FakeGmail {
     /// of it answers, as a person who edits the draft at that moment.
     pub fn edit_draft_after_get(&self, id: &str, raw: &[u8]) {
         self.store.lock().unwrap().edit_after_get = Some((id.to_string(), raw.to_vec()));
+    }
+
+    /// The sent copy of each later `drafts.send` has no `Bcc` header, as
+    /// a provider that drops it from the copy of the sender.
+    pub fn drop_sent_bcc(&self) {
+        self.store.lock().unwrap().drop_sent_bcc = true;
     }
 
     /// Delete a draft, as the person does in Gmail. Returns false if there
@@ -1385,6 +1394,28 @@ struct SendDraftBody {
 /// message with the label `SENT` in the thread of the draft. A `message`
 /// in the request replaces the text of the draft first, and its `threadId`
 /// (or none: a new thread) is the thread of the sent message.
+/// `raw` with no `Bcc` header field (and no folded line of it) in the
+/// header block.
+fn without_bcc(raw: &[u8]) -> Vec<u8> {
+    let end = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map_or(raw.len(), |p| p + 2);
+    let mut out = Vec::with_capacity(raw.len());
+    let mut skip = false;
+    for line in raw[..end].split_inclusive(|b| *b == b'\n') {
+        let folded = line.first().is_some_and(|b| *b == b' ' || *b == b'\t');
+        if !folded {
+            skip = line.len() >= 4 && line[..4].eq_ignore_ascii_case(b"bcc:");
+        }
+        if !skip {
+            out.extend_from_slice(line);
+        }
+    }
+    out.extend_from_slice(&raw[end..]);
+    out
+}
+
 async fn send_draft(
     State(s): State<Shared>,
     Path(user): Path<String>,
@@ -1418,7 +1449,10 @@ async fn send_draft(
         Some(m) => m.thread_id.clone(),
         None => Some(s.msgs[old].thread.clone()),
     };
-    let raw = s.raw(old);
+    let mut raw = s.raw(old);
+    if s.drop_sent_bcc {
+        raw = without_bcc(&raw);
+    }
     s.msgs[old].deleted = true;
     s.record(old, Kind::Deleted, Vec::new());
     let i = s.add(raw, thread, BTreeSet::from(["SENT".to_string()]));

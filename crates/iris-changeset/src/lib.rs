@@ -1493,7 +1493,7 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
                     format_id(Kind::Draft, draft)
                 )))
             }
-            Some((_, content)) => return Ok(not_yet(&content)),
+            Some(_) => return Ok(None),
         }
     }
     let Ok(content) = serde_json::from_str::<iris_compose::Content>(args) else {
@@ -1502,9 +1502,6 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
                 .into(),
         ));
     };
-    if let Some(why) = not_yet(&content) {
-        return Ok(Some(why));
-    }
     let reply: bool = c.query_row(
         "SELECT json_type(targets, '$.threads') IS NOT NULL FROM changeset_action WHERE id = ?1",
         [action],
@@ -1551,14 +1548,6 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
         .optional()?;
     let limit = iris_compose::max_message(provider.as_deref().unwrap_or(""));
     Ok(content.check_size(limit).err())
-}
-
-/// The refusal of a content with `bcc`. It needs the `Bcc` gate of the
-/// send content spec (`docs/specs/2026-11-24-send-content.md`, section
-/// 6.2), which the next part builds. A draft at Gmail that the person gave
-/// a `Bcc` reads back, so the send of it is refused too.
-fn not_yet(content: &iris_compose::Content) -> Option<String> {
-    (!content.bcc.is_empty()).then(|| "Iris cannot send Bcc yet".into())
 }
 
 /// Spec 2, section 6.5: an author other than the person writes no mail

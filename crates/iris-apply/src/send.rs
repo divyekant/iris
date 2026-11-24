@@ -339,10 +339,13 @@ fn claim(
         // The hold too: a stop and a resume (or sending off and on) during
         // the read of the draft move `on_at`, and the send waits a full hold
         // again (docs/specs/2026-11-17-stop.md, section 3).
-        if draft.is_some() {
+        if let Some(d) = draft {
             let Some(on_at) = switch_on(tx)? else {
                 return Ok(Some(Err(Outcome::SendingOff)));
             };
+            if bcc_waits(tx, d)?.is_some() {
+                return Ok(Some(Err(Outcome::BccUnchecked)));
+            }
             let decided_at: i64 = tx.query_row(
                 "SELECT coalesce(decided_at, 0) FROM changeset_action WHERE id = ?1",
                 [action],
@@ -775,6 +778,9 @@ pub fn release(
     let Some(on_at) = store.read(switch_on)? else {
         return Ok(Outcome::SendingOff);
     };
+    if store.read(|c| bcc_waits(c, d.id))?.is_some() {
+        return Ok(Outcome::BccUnchecked);
+    }
     let until = decided_at.max(on_at) + HOLD_MS;
     if now() < until {
         return Ok(Outcome::Hold(until));
@@ -903,6 +909,41 @@ pub(crate) fn changeset_error(e: iris_changeset::Error) -> iris_store::Error {
     }
 }
 
+/// The provider whose `Bcc` gate keeps the send of the draft `draft` held
+/// (send content spec, section 6.2), or `None` if the send can leave: the
+/// draft has no `bcc`, the gate of its provider is open, or the send is
+/// the test send of the owner check (exactly `To` = `test_to`, no `Cc`,
+/// `Bcc` = `test_bcc`). A draft row whose content does not read gives
+/// `None`: the release check of its bytes decides.
+pub fn bcc_waits(c: &rusqlite::Connection, draft: i64) -> iris_store::Result<Option<String>> {
+    let (content, provider): (String, String) = c.query_row(
+        "SELECT d.content, a.provider FROM draft d JOIN account a ON a.id = d.account_id
+         WHERE d.id = ?1",
+        [draft],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let Ok(stored) = serde_json::from_str::<Stored>(&content) else {
+        return Ok(None);
+    };
+    let c_ = &stored.content;
+    if c_.bcc.is_empty() {
+        return Ok(None);
+    }
+    let gate: Option<(String, String, Option<i64>)> = c
+        .query_row(
+            "SELECT test_to, test_bcc, checked_at FROM bcc_check WHERE provider = ?1",
+            [&provider],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let open = match gate {
+        Some((_, _, Some(_))) => true,
+        Some((to, bcc, None)) => c_.to == [to] && c_.cc.is_empty() && c_.bcc == [bcc],
+        None => false,
+    };
+    Ok((!open).then_some(provider))
+}
+
 /// The time the send switch went on, or `None` while it is off.
 fn switch_on(c: &rusqlite::Connection) -> iris_store::Result<Option<i64>> {
     Ok(
@@ -955,4 +996,32 @@ pub fn set_sending(store: &Store, on: bool) -> Result<()> {
         Ok(())
     })?;
     Ok(())
+}
+
+/// `iris sending bcc-test`: write the test addresses of the `Bcc` gate of
+/// `provider`, with the gate closed (send content spec, section 6.2). A
+/// new test replaces the addresses of a closed gate. Gives false, and
+/// changes nothing, if the gate is open.
+pub fn bcc_test(store: &Store, provider: &str, to: &str, bcc: &str) -> Result<bool> {
+    let (to, bcc) = (to.to_ascii_lowercase(), bcc.to_ascii_lowercase());
+    Ok(store.write(|tx| {
+        Ok(tx.execute(
+            "INSERT INTO bcc_check (provider, test_to, test_bcc) VALUES (?1, ?2, ?3)
+             ON CONFLICT (provider) DO UPDATE SET test_to = ?2, test_bcc = ?3
+             WHERE checked_at IS NULL",
+            params![provider, to, bcc],
+        )? == 1)
+    })?)
+}
+
+/// `iris sending bcc`: open the `Bcc` gate of `provider`. Gives false if
+/// no test was written first.
+pub fn bcc_open(store: &Store, provider: &str) -> Result<bool> {
+    Ok(store.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE bcc_check SET checked_at = coalesce(checked_at,
+               CAST(unixepoch('subsec') * 1000 AS INTEGER)) WHERE provider = ?1",
+            [provider],
+        )? == 1)
+    })?)
 }

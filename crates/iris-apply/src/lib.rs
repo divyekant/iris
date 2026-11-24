@@ -35,7 +35,8 @@ mod step;
 mod stop;
 
 pub use send::{
-    release, sending, sent_by_iris, set_sending, HOLD_MS, NO_BCC, SENT_OTHER, SENT_OTHER_END,
+    bcc_open, bcc_test, bcc_waits, release, sending, sent_by_iris, set_sending, HOLD_MS, NO_BCC,
+    SENT_OTHER, SENT_OTHER_END,
 };
 pub use state::{apply_state, apply_states};
 pub use step::{recover_step, step, step_clock, Step};
@@ -154,6 +155,10 @@ pub enum Outcome {
     /// The send switch is off (`iris sending on` turns it on). The send
     /// stays `held`, and no call is made.
     SendingOff,
+    /// The draft has `bcc`, and the `Bcc` gate of the provider is closed
+    /// (send content spec, section 6.2). The send stays `held`, and no
+    /// call is made.
+    BccUnchecked,
     /// Iris is stopped (`iris resume` ends the stop). The action stays
     /// `approved` or `held`, and no call is made.
     Stopped,
