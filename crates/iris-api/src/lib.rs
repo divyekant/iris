@@ -203,12 +203,23 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
             measures::Counter::new(store),
             measures::count,
         ))
+        // Outside each layer that uses the store, so no store call runs on
+        // the runtime thread.
+        .layer(middleware::from_fn(off_runtime))
         .layer(middleware::from_fn_with_state(auth, auth::guard))
 }
 
-// shortcut: the handlers read SQLite on the runtime thread (searches take
-// up to about 50 ms at 100k messages); move them to spawn_blocking if the
-// API gets more than one client at a time.
+/// Runs the rest of the request (the measure count and the handler) on a
+/// blocking thread. `iris serve` has one runtime thread, which also answers
+/// the command socket: a handler that waits for a store connection there
+/// stops each other request (#700). The runtime thread keeps the drivers of
+/// I/O and time, so the handler can still await them.
+async fn off_runtime(req: axum::extract::Request, next: middleware::Next) -> Response {
+    let rt = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || rt.block_on(next.run(req)))
+        .await
+        .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "the request failed"))
+}
 
 async fn get_status(State(s): State<Arc<Store>>) -> Result<Response> {
     Ok(Json(status(&s)?).into_response())
