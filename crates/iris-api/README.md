@@ -208,11 +208,14 @@ engine computes them from the store. Nothing leaves the machine.
   27 that has an account has no record of the two times: each field is
   `null`, and the measure stays not known.
 - `mirror`: the newest mirror check (`iris mirror verify`) of each account,
-  each `{"account", "checked", "differences", "complete"}`. An account with
-  no check has `checked` and `differences` `null`, and `complete` `false`.
-  `differences` is `null` if the log has no count. `complete` is `false`
-  when an error stopped the check, or when the check skipped a message (a
-  message that changed during the check is not compared).
+  each `{"account", "checked", "differences", "complete", "skipped",
+  "stopped"}`. An account with no check has `checked`, `differences` and
+  `skipped` `null`, and `complete` and `stopped` `false`.
+  `differences` and `skipped` are `null` if the log has no count. `skipped`
+  counts the messages that changed during the check: the check does not
+  compare them. `stopped` is `true` when an error stopped the check.
+  `complete` is `false` when an error stopped the check, or when the check
+  skipped a message.
 - `memory`: `{"rss_kib", "messages"}`. `rss_kib` is the resident memory of
   the engine from `ps`, or `null`.
 - `approvals`: `{"decided", "approved"}`, the decisions of the person on the

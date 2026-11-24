@@ -534,9 +534,9 @@ async fn mirror_gives_the_newest_verify_of_each_account() {
         m["mirror"],
         json!([
             // Two skipped messages were not compared: not complete.
-            {"account": "a@example.com", "checked": "2026-11-16T12:00:01Z", "differences": 0, "complete": false},
-            {"account": "b@example.com", "checked": "2026-11-16T12:00:00Z", "differences": 1, "complete": false},
-            {"account": "c@example.com", "checked": null, "differences": null, "complete": false},
+            {"account": "a@example.com", "checked": "2026-11-16T12:00:01Z", "differences": 0, "complete": false, "skipped": 2, "stopped": false},
+            {"account": "b@example.com", "checked": "2026-11-16T12:00:00Z", "differences": 1, "complete": false, "skipped": 0, "stopped": true},
+            {"account": "c@example.com", "checked": null, "differences": null, "complete": false, "skipped": null, "stopped": false},
         ])
     );
 }
