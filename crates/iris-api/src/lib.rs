@@ -187,6 +187,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/accounts/{id}/remove", post(post_account_remove))
         .route("/api/stop", get(get_stop).post(post_stop))
         .route("/api/resume", post(post_resume))
+        .route("/api/model/try", post(post_model_try))
         .route("/api/outbox", get(get_outbox))
         .route("/api/outbox/{draft}/cancel", post(post_outbox_cancel))
         .route("/api/write", post(post_write))
@@ -1152,6 +1153,18 @@ async fn post_resume(State(s): State<Arc<Store>>, _: NoBody) -> Result<Response>
     let mut v = stop_answer(&s, None)?;
     v["resumed"] = resumed.into();
     Ok(Json(v).into_response())
+}
+
+/// "Try now" (decision D35, issue #136): end the wait after model errors,
+/// so the next understanding turn (within 10 seconds) calls the model. The
+/// backoff stays: a new error starts a longer wait. The answer is the
+/// status.
+async fn post_model_try(State(s): State<Arc<Store>>, _: NoBody) -> Result<Response> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    s.write(|tx| Ok(iris_understand::batch::try_now(tx, now)?))?;
+    Ok(Json(read::status(&s)?).into_response())
 }
 
 fn apply_error(e: iris_apply::Error) -> Error {
