@@ -464,7 +464,7 @@ async fn a_grant_writes_one_rule_for_an_open_job() {
             StatusCode::BAD_REQUEST,
         ),
         (
-            json!({"job": "j-1", "verbs": ["draft", "archive"], "version": version}),
+            json!({"job": "j-1", "verbs": ["draft"], "version": version}),
             StatusCode::BAD_REQUEST,
         ),
         (
