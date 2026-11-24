@@ -713,3 +713,43 @@ async fn the_person_comments_on_a_changeset_of_a_job() {
         (StatusCode::OK, json!({"comments": []}))
     );
 }
+
+/// Each submitted revision keeps its own reason (spec 2 section 5.6, issue 189).
+#[tokio::test]
+async fn gives_the_reason_of_each_submitted_revision() {
+    let dir = temp("revisions");
+    let s = store(&dir);
+    let cs = changeset(&s, "Old newsletters.", &[&["m-1"]], 1_000);
+    revise(&s, cs, &agent()).unwrap();
+    add_action(
+        &s,
+        cs,
+        &agent(),
+        Verb::Archive,
+        &["m-2"],
+        &Map::new(),
+        Some("Old mail."),
+    )
+    .unwrap();
+    let uri = format!("/api/changesets/cs-{cs}/revisions");
+    // The draft revision 2 has no reason yet.
+    assert_eq!(
+        get(&s, &uri).await,
+        (
+            StatusCode::OK,
+            json!({"revisions": [{"revision": 1, "why": "Old newsletters.", "submitted": "1970-01-01T00:00:01Z"}]})
+        )
+    );
+    submit(&s, cs, &agent(), "Also the thread of Q4.", 2_000).unwrap();
+    assert_eq!(
+        get(&s, &uri).await.1["revisions"],
+        json!([
+            {"revision": 1, "why": "Old newsletters.", "submitted": "1970-01-01T00:00:01Z"},
+            {"revision": 2, "why": "Also the thread of Q4.", "submitted": "1970-01-01T00:00:02Z"},
+        ])
+    );
+    assert_eq!(
+        get(&s, "/api/changesets/cs-99/revisions").await.0,
+        StatusCode::NOT_FOUND
+    );
+}
