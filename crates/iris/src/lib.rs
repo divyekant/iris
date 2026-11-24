@@ -87,11 +87,25 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// In a job workspace: list the items of the job, of one form if given.
-    /// A verb of a session only.
+    /// List the items, newest first, with the filters of the web client.
+    /// In a job workspace: only the items of the job, of one form if given.
     List {
         /// commitment, conversation, record, feed or signal.
         form: Option<String>,
+        /// Only the items with this status, for example open. Host mode only.
+        #[arg(long)]
+        status: Option<String>,
+        /// Only the records of this type, for example receipt. Needs the form
+        /// record. Host mode only.
+        #[arg(long = "type")]
+        kind: Option<String>,
+        /// Only the items older than this item ID: the last ID of the page
+        /// before. Host mode only.
+        #[arg(long)]
+        before: Option<String>,
+        /// The most items to show, 1 to 200. The default is 50. Host mode only.
+        #[arg(long)]
+        limit: Option<u32>,
         /// Print one JSON line for each item.
         #[arg(long)]
         json: bool,
@@ -704,11 +718,7 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
             return r;
         }
     }
-    if let Command::List { .. }
-    | Command::Wait { .. }
-    | Command::Ask { .. }
-    | Command::Done { .. } = &cli.command
-    {
+    if let Command::Wait { .. } | Command::Ask { .. } | Command::Done { .. } = &cli.command {
         return Err(socket::Failure {
             code: socket::code::USAGE,
             error: "this is a verb of a session: run it in a job workspace".into(),
@@ -866,7 +876,20 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
             *json,
         )),
         Command::Show { id, json } => Some(("show", serde_json::json!({ "id": id }), *json)),
-        Command::List { form, json } => Some(("list", serde_json::json!({ "form": form }), *json)),
+        Command::List {
+            form,
+            status: None,
+            kind: None,
+            before: None,
+            limit: None,
+            json,
+        } => Some(("list", serde_json::json!({ "form": form }), *json)),
+        Command::List { .. } => {
+            return Err(socket::Failure {
+                code: socket::code::USAGE,
+                error: "in a job workspace, iris list takes only a form".into(),
+            })
+        }
         _ => None,
     };
     if let Some((verb, args, json)) = read {
@@ -1258,6 +1281,21 @@ fn mcp(dir: PathBuf) -> Result<(), String> {
                 read(open().and_then(|s| verbs::search(&s, &text, limit, true)))
             }
             Call::Show { id } => read(open().and_then(|s| verbs::show(&s, &id, true))),
+            Call::List {
+                form,
+                status,
+                kind,
+                before,
+                limit,
+            } => {
+                let filter = iris_api::Filter {
+                    form: form.as_deref(),
+                    status: status.as_deref(),
+                    kind: kind.as_deref(),
+                    before: before.as_deref(),
+                };
+                read(open().and_then(|s| verbs::list(&s, &filter, limit, true)))
+            }
             Call::WatchAdd { text } => watch(WatchCommand::Add { text }),
             Call::WatchList => watch(WatchCommand::List { json: true }),
             Call::WatchRemove { id } => watch(WatchCommand::Remove { id }),
@@ -1463,11 +1501,26 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             print(verbs::search(&open()?, text, *limit, *json))
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
+        Command::List {
+            form,
+            status,
+            kind,
+            before,
+            limit,
+            json,
+        } => {
+            let filter = iris_api::Filter {
+                form: form.as_deref(),
+                status: status.as_deref(),
+                kind: kind.as_deref(),
+                before: before.as_deref(),
+            };
+            print(verbs::list(&open()?, &filter, limit.unwrap_or(50), *json))
+        }
         // `run` refuses it in host mode, before the store.
-        Command::List { .. }
-        | Command::Wait { .. }
-        | Command::Ask { .. }
-        | Command::Done { .. } => Err("this is a verb of a session".into()),
+        Command::Wait { .. } | Command::Ask { .. } | Command::Done { .. } => {
+            Err("this is a verb of a session".into())
+        }
         Command::Watch { command } => print(verbs::watch(&open()?, command)),
         Command::Job {
             command: JobCommand::Session { id },

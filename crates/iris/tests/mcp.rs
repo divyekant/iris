@@ -169,7 +169,7 @@ fn a_client_reads_the_mail_and_submits_a_changeset() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     for verb in [
-        "status", "search", "show", "archive", "draft", "send", "submit", "withdraw",
+        "status", "search", "show", "list", "archive", "draft", "send", "submit", "withdraw",
     ] {
         assert!(names.contains(&verb), "{verb} not in {names:?}");
     }
@@ -329,6 +329,19 @@ fn each_tool_gives_the_output_and_the_code_of_its_verb() {
             json!({ "text": "label:INBOX", "limit": 3 }),
         ),
         (vec!["show", &m, "--json"], "show", json!({ "id": m })),
+        (vec!["list", "--json"], "list", json!({})),
+        (
+            vec![
+                "list", "record", "--type", "receipt", "--limit", "2", "--json",
+            ],
+            "list",
+            json!({ "form": "record", "type": "receipt", "limit": 2 }),
+        ),
+        (
+            vec!["list", "--status", "nope", "--json"],
+            "list",
+            json!({ "status": "nope" }),
+        ),
         (
             vec!["show", "m-999999", "--json"],
             "show",
@@ -557,7 +570,6 @@ const NOT_TOOLS: &[&str] = &[
     "write",
     "job",
     // The verbs of a job session only: `iris mcp` serves the host.
-    "list",
     "wait",
     "ask",
     "done",
