@@ -13,10 +13,13 @@
   let { detail: first, every = 5000 }: { detail: JobDetail; every?: number } = $props();
   // svelte-ignore state_referenced_locally
   let detail = $state(first);
-  // While a session starts, runs or stops, its state can change: read the job again (issue 742).
+  // A failed read counts here, so the next read is planned again.
+  let misses = $state(0);
+  // While the job works, its session can start, fail or end at any time, also
+  // from `iris job run` at the terminal: read the job again (issue 742).
   $effect(() => {
-    const s = detail.session;
-    if (detail.job.state !== "working" || !s || s.state === "ended") return;
+    void misses;
+    if (detail.job.state !== "working") return;
     const id = detail.job.id;
     let live = true;
     const timer = setTimeout(() => {
@@ -24,7 +27,9 @@
         (d) => {
           if (live) detail = d;
         },
-        () => {},
+        () => {
+          if (live) misses++;
+        },
       );
     }, every);
     return () => {

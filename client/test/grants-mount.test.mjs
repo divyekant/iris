@@ -158,22 +158,31 @@ test("a change with a lost answer, then a failed read: the switches hide, and th
   view.destroy();
 });
 
-test("the job page reads the job again while its session can change, and stops when it ended (issue 742)", async () => {
-  const running = { ...fx.jobDetails["j-15"], session: { ...fx.jobDetails["j-15"].session, state: "running", end: null, exit: null, ended: null } };
+test("a working job page reads the job again: a session started at the terminal, a failed read, then a session that ended (issue 742)", async () => {
+  const none = { ...fx.jobDetails["j-15"], session: null };
+  const running = { ...none, session: { ...fx.jobDetails["j-15"].session, state: "running", end: null, exit: null, ended: null } };
   const ending = { ...running, session: { ...running.session, state: "ending", end: "exit", exit: 1 } };
-  const ended = fx.jobDetails["j-15"];
-  let next = ending;
-  const asked = serve((path) => (path === "jobs/j-15" ? [200, next] : [200, policy([])]));
-  const view = await mount("/src/views/Job.svelte", { detail: running, every: 10 });
-  const reads = () => asked.filter(([p]) => p === "jobs/j-15").length;
-  assert.match(text(view.target), /The agent works on it\./);
+  let next = [200, running];
+  serve((path) => (path === "jobs/j-15" ? next : [200, policy([])]));
+  const view = await mount("/src/views/Job.svelte", { detail: none, every: 10 });
+  assert.match(text(view.target), /No agent works on it now\./);
+  await until(() => /The agent works on it\./.test(text(view.target)));
+  next = [500, { error: "The store is busy." }];
+  await new Promise((r) => setTimeout(r, 40));
+  assert.match(text(view.target), /The agent works on it\./, "a failed read keeps the page");
+  next = [200, ending];
   await until(() => /stops now/.test(text(view.target)));
   assert.doesNotMatch(text(view.target), /iris job run/, "an ending session gives no start step");
-  next = ended;
+  next = [200, fx.jobDetails["j-15"]];
   await until(() => /ended with exit code 1\./.test(text(view.target)));
   assert.match(text(view.target), /iris job run --agent claude-code j-15/);
-  const after = reads();
+  view.destroy();
+});
+
+test("a job page that does not work makes no read", async () => {
+  const asked = serve(() => [200, policy([])]);
+  const view = await mount("/src/views/Job.svelte", { detail: fx.jobDetails["j-12"], every: 10 });
   await new Promise((r) => setTimeout(r, 60));
-  assert.equal(reads(), after, "an ended session is not read again");
+  assert.equal(asked.filter(([p]) => p.startsWith("jobs/")).length, 0);
   view.destroy();
 });
