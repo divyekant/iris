@@ -496,6 +496,33 @@ fn a_failed_build_of_a_done_workspace_is_tried_again_later() {
     });
 }
 
+/// A reap of an open job queues a check that finds no build due. A later
+/// finish of the job with no live session still gets its build at the
+/// next wake.
+fn a_done_build_after_a_check_of_the_open_job_still_runs() {
+    let f = fixture("donebuild-open", "sleep 30");
+    let s = sessions(&f);
+    let id = s.run(f.job, "script").unwrap();
+    until(&s, &f, id, |r| r.started_ms.is_some());
+    let _ = s.stop(f.job).unwrap();
+    until(&s, &f, id, |r| r.reaped_ms.is_some());
+    // Let the build thread end the check of the open job.
+    std::thread::sleep(Duration::from_millis(500));
+    let marker = workspace(&f).join(".iris/marker");
+    fs::write(&marker, "x").unwrap();
+    iris_job::finish(
+        &f.store,
+        f.job,
+        By::Person,
+        iris_job::End::Cancel,
+        None,
+        now(),
+    )
+    .unwrap();
+    s.wake(now());
+    gone(&marker);
+}
+
 /// After one failed build: no try 59 s after it, a try 61 s after it.
 /// `fix` removes the cause of the failure before the second try.
 fn retried(s: &Arc<Sessions>, marker: &Path, fix: impl FnOnce()) {
@@ -1740,6 +1767,10 @@ fn main() {
         (
             "a_failed_build_of_a_done_workspace_is_tried_again_later",
             a_failed_build_of_a_done_workspace_is_tried_again_later,
+        ),
+        (
+            "a_done_build_after_a_check_of_the_open_job_still_runs",
+            a_done_build_after_a_check_of_the_open_job_still_runs,
         ),
         (
             "a_failed_start_after_a_comment_wake_is_tried_once",
