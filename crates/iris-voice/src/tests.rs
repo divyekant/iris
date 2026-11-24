@@ -635,6 +635,43 @@ fn a_long_thread_gives_a_bounded_snapshot() {
     assert_eq!(texts, ["N994", "N995", "N996", "N997", "N998", "N999"]);
 }
 
+/// Only the newest message of a snapshot holds its sent evidence (#833):
+/// the memory of the evidence does not grow with the sent mail of a thread.
+#[test]
+fn only_the_newest_message_holds_its_sent_evidence() {
+    let (b, t) = mailbox("evidence");
+    let batch: Vec<NewMessage> = (0..6)
+        .map(|i| {
+            msg(
+                &format!("s{i}"),
+                "t1",
+                2000 + i,
+                "SENT",
+                "me@example.com",
+                "ana@example.org",
+                Some("Hi Ana"),
+            )
+        })
+        .collect();
+    b.store.put_messages(1, &batch).unwrap();
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sender_evidence(message_id, address, rule, content_sha256)
+                 SELECT id, 'ana@example.org', 'sent', content_sha256 FROM message
+                  WHERE provider_id LIKE 's%'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let s = b.store.read(|c| Ok(snapshot(c, t)?)).unwrap();
+    let (last, rest) = s.newest.split_last().unwrap();
+    assert!(last.sent);
+    assert_eq!(last.sent_to, ["ana@example.org"]);
+    assert!(rest.iter().all(|m| m.sent_to.is_empty()), "{rest:?}");
+}
+
 /// A sample that turns hostile after the read fails the last check.
 #[test]
 fn a_sample_marked_spam_after_the_read_fails_the_last_check() {
