@@ -16,7 +16,7 @@
   let names = $derived(accountNames(status.accounts));
 
   // The remove of an account (decision D34): one question in place, as the remove of a rule.
-  let asking: number | null = $state(null);
+  let asking: Account | null = $state(null);
   let busy = $state(false);
   let error = $state("");
   let removed = $state("");
@@ -25,16 +25,25 @@
   let unknown = $state(false);
   const UNKNOWN = "Iris could not tell if the account is removed. Check again before you remove it again.";
 
-  // Show the state that `next` gives for `a`. Gives false if `a` is in `next` and not in a removal.
+  // Each status, from an answer, a check or a poll: the question of an account that is gone or in
+  // a removal closes. Gone: the delete ended. Removing: the engine ends the delete, and the line says so.
+  $effect(() => {
+    const a = asking;
+    if (!a) return;
+    const now = status.accounts.find((x) => x.id === a.id);
+    if (now && now.state !== "removing") return;
+    removed = now ? "" : a.address;
+    asking = null;
+    unknown = false;
+    error = "";
+  });
+
+  // Take `next` as the status. Gives false if `a` is in `next` and not in a removal.
   function show(a: Account, next: Status): boolean {
     status = next;
     unknown = false;
     const now = next.accounts.find((x) => x.id === a.id);
-    if (now && now.state !== "removing") return false;
-    // Gone: the delete ended. Removing: the engine ends the delete, and the line says so.
-    removed = now ? "" : a.address;
-    asking = null;
-    return true;
+    return !now || now.state === "removing";
   }
 
   async function remove(a: Account) {
@@ -118,7 +127,7 @@
           <p class="state">Iris can read this mailbox, but it cannot change it. Your approved changes wait.</p>
           <p class="state">To give write access, run <code>iris account add client.json --write</code> on the machine that runs Iris and sign in again.</p>
         {/if}
-        {#if asking === a.id}
+        {#if asking?.id === a.id}
           <div class="ask" role="group" aria-label={`Remove ${a.address}`}>
             <p>
               Remove {a.address}? Iris deletes its mail from this machine. The mailbox at {a.provider === "gmail" ? "Gmail" : a.provider === "outlook" ? "Outlook" : "your provider"} does not
@@ -137,8 +146,8 @@
           </div>
         {/if}
       </div>
-      {#if a.state !== "removing" && asking !== a.id}
-        <button type="button" class="quiet remove" onclick={() => ((asking = a.id), (removed = ""))} disabled={busy} aria-label={`Remove ${a.address}`}>Remove</button>
+      {#if a.state !== "removing" && asking?.id !== a.id}
+        <button type="button" class="quiet remove" onclick={() => ((asking = a), (removed = ""))} disabled={busy} aria-label={`Remove ${a.address}`}>Remove</button>
       {/if}
     </li>
   {:else}

@@ -244,6 +244,41 @@ test("a remove whose answer is lost shows what a fresh status says, and an unkno
   }
 });
 
+test("a polled status closes the question of an account in a removal, and shows a removed account", async () => {
+  const saved = globalThis.fetch;
+  const [one, two] = fx.status.accounts;
+  let next = fx.status;
+  globalThis.fetch = async () => new Response(JSON.stringify(next), { status: 200, headers: { "content-type": "application/json" } });
+  const view = await mount("/src/views/Accounts.svelte", { status: fx.status, poll: 20 });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  try {
+    view.target.querySelector(`button[aria-label="Remove ${one.address}"]`).click();
+    await wait(0);
+    assert.notEqual(view.target.querySelector(".ask"), null);
+    // The command removes the account: the poll gives it in state removing.
+    next = { ...fx.status, accounts: [{ ...one, state: "removing" }, two] };
+    await wait(80);
+    assert.equal(view.target.querySelector(".ask"), null);
+    assert.equal([...view.target.querySelectorAll("button")].some((b) => b.textContent.trim() === "Remove"), true, "the other account keeps its Remove");
+    assert.equal(view.target.querySelector(`button[aria-label="Remove ${one.address}"]`), null);
+
+    // The question of the other account, then the delete of the first ends: the other question stays.
+    view.target.querySelector(`button[aria-label="Remove ${two.address}"]`).click();
+    await wait(0);
+    next = { ...fx.status, accounts: [two] };
+    await wait(80);
+    assert.notEqual(view.target.querySelector(".ask"), null);
+    // The second account goes while its question is open: the page says that it is removed.
+    next = { ...fx.status, accounts: [] };
+    await wait(80);
+    assert.equal(view.target.querySelector(".ask"), null);
+    assert.match(text(view.target), new RegExp(`Removed ${two.address.replace(".", "\\.")}\\.`));
+  } finally {
+    view.destroy();
+    globalThis.fetch = saved;
+  }
+});
+
 test("an account in state removing says that Iris deletes its mail and offers no remove", async () => {
   const going = { ...fx.status.accounts[0], state: "removing", mirror_ready_at: null, sync: null };
   const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [going] }, poll: 0 });
