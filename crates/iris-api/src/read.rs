@@ -1332,7 +1332,7 @@ pub(crate) fn doc_at(r: &rusqlite::Row, at: usize) -> rusqlite::Result<Value> {
     Ok(doc)
 }
 
-fn item_id(row: i64, form: &str) -> Option<String> {
+pub(crate) fn item_id(row: i64, form: &str) -> Option<String> {
     FORMS
         .iter()
         .find(|(f, _)| *f == form)

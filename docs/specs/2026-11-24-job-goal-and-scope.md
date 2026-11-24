@@ -2,7 +2,7 @@
 
 - Date: 2026-11-24
 - Card: P9-D25
-- Status: Draft
+- Status: Built (store and API); the web client follows
 
 ## Problem
 
@@ -43,8 +43,7 @@ must be fixable.
 
 ### Store: the edit of a job
 
-A new migration (the next free number at the build) adds the table
-`job_edit`:
+Migration 47 adds the table `job_edit`:
 
 | Column | Type | Meaning |
 |---|---|---|
@@ -173,8 +172,9 @@ a second job on purpose is a second form.
 
 ## Impact
 
-- `crates/iris-store`: the new migration (`job_edit`, `job_request`, the
-  trigger `job_row` again).
+- `crates/iris-store`: migration 47 (`job_edit`, `job_request`, the
+  trigger `job_row` again). The migration uses `IF NOT EXISTS`, because a
+  test store that sets an older `user_version` runs it again.
 - `crates/iris-job`: `edit_in`, `edit`.
 - `crates/iris-api`: the routes above, the `scope` list of the job page.
 - `client/`: the jobs page, the job page, a new add view.
@@ -186,9 +186,9 @@ a second job on purpose is a second form.
 
 - A job with no scope row can run a session. Evidence: the workspace
   build writes `JOB.md` and one file for each ref
-  (`crates/iris-workspace/src/lib.rs`); no code asks for a ref. pending a test
-  in the API PR. If the build refuses an empty scope, the API PR changes the
-  build.
+  (`crates/iris-workspace/src/lib.rs`), and `setup` of
+  `crates/iris-workspace/tests/notes.rs` builds the workspace of a job with
+  no scope.
 - `revoke_scope_in` ends the open session. Evidence: the session launcher
   spec, "A session that a revoke or a stop ended".
 - `GET /api/search` gives the thread of each message. Evidence: the
@@ -219,7 +219,7 @@ None.
 
 ```bash
 cargo test -p iris-job --test edit
-cargo test -p iris-api --test start --test scope
+cargo test -p iris-api --test start
 cd client && pnpm test
 ```
 
