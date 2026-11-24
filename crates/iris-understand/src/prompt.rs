@@ -391,20 +391,31 @@ fn in_mail(quote: &str, a: &Analysis) -> bool {
 /// is the same on both sides and changes no letter or digit, so a made-up
 /// quote still fails.
 pub(crate) fn squash(s: &str) -> String {
-    fold(s).0
+    fold(s).text
 }
 
-/// [`squash`], and the byte offset in the result of each plain mark that
-/// replaced a typographic mark, with that original mark. A caller that
-/// finds word ends reads the original mark, so the fold moves no word end
-/// (`ask::has`). Invisible characters (a soft hyphen, zero-width
-/// characters) are not text: they go out.
-pub(crate) fn fold(s: &str) -> (String, Vec<(usize, char)>) {
+/// The result of [`fold`].
+pub(crate) struct Fold {
+    pub text: String,
+    /// The byte offset in `text` of each plain mark that replaced a
+    /// typographic mark, with that original mark, in order.
+    pub from: Vec<(usize, char)>,
+    /// The byte offset in `text` of each place where the fold removed an
+    /// invisible character, in order.
+    pub cut: Vec<usize>,
+}
+
+/// [`squash`], with the places of its changes. A caller that finds word
+/// ends reads the original mark of each plain mark, and ends a word where an
+/// invisible character (a soft hyphen, a zero-width character) went out, so
+/// the fold moves no word end (`ask::has`, #808).
+pub(crate) fn fold(s: &str) -> Fold {
     // Lowercase the whole text first, as before the fold: a final sigma
     // needs the context of the word. The marks and white space have no case.
     let s = s.to_lowercase();
     let mut out = String::with_capacity(s.len());
     let mut from = Vec::new();
+    let mut cut: Vec<usize> = Vec::new();
     let mut space = false;
     for c in s.chars() {
         let plain = match c {
@@ -413,7 +424,12 @@ pub(crate) fn fold(s: &str) -> (String, Vec<(usize, char)>) {
             | '\u{00BB}' => "\"",
             '\u{2010}'..='\u{2015}' | '\u{2212}' => "-",
             '\u{2026}' => "...",
-            '\u{00AD}' | '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}' => continue,
+            '\u{00AD}' | '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}' => {
+                if cut.last() != Some(&out.len()) {
+                    cut.push(out.len());
+                }
+                continue;
+            }
             c if c.is_whitespace() => {
                 space = true;
                 continue;
@@ -433,7 +449,11 @@ pub(crate) fn fold(s: &str) -> (String, Vec<(usize, char)>) {
             }
         }
     }
-    (out, from)
+    Fold {
+        text: out,
+        from,
+        cut,
+    }
 }
 
 /// Make each model party a party of the open model: an owner address (`me`)

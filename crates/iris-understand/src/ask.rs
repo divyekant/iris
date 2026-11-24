@@ -555,11 +555,12 @@ fn read_answer(json: &Value, docs: &[Doc]) -> Option<(Vec<Claim>, Vec<Source>)> 
 fn has(text: &str, quote: &str) -> bool {
     // The same fold as the quote check of an item (#102). The word ends
     // come from the marks of the mail, not from their plain forms.
-    let ((text, from), quote) = (crate::prompt::fold(text), crate::prompt::squash(quote));
+    let (fold, quote) = (crate::prompt::fold(text), crate::prompt::squash(quote));
+    let text = &fold.text;
     if quote.is_empty() {
         return false;
     }
-    let words = words(&text, &from);
+    let words = words(&fold);
     let inside = |at: usize| words.iter().any(|&(s, e)| s < at && at < e);
     text.char_indices()
         .any(|(i, _)| text[i..].starts_with(&quote) && !inside(i) && !inside(i + quote.len()))
@@ -567,12 +568,20 @@ fn has(text: &str, quote: &str) -> bool {
 
 /// The byte spans of the words of `s`: runs of letters and digits, with one
 /// mark of [`JOIN`] between two of them inside the word. `from` gives the
-/// original mark of each plain mark of `prompt::fold`.
-fn words(s: &str, from: &[(usize, char)]) -> Vec<(usize, usize)> {
+/// original mark of each plain mark of `prompt::fold`. A word also ends
+/// where the fold removed an invisible character, as before the fold.
+fn words(f: &crate::prompt::Fold) -> Vec<(usize, usize)> {
+    let (s, from) = (f.text.as_str(), f.from.as_slice());
+    let cut = |at: usize| f.cut.binary_search(&at).is_ok();
     let mut out = Vec::new();
     let mut start: Option<usize> = None;
     let mut it = s.char_indices().peekable();
     while let Some((i, c)) = it.next() {
+        if cut(i) {
+            if let Some(st) = start.take() {
+                out.push((st, i));
+            }
+        }
         // A plain mark of the fold joins only if its original mark joins.
         // `from` is in the order of the offsets.
         let mark = from
@@ -580,7 +589,9 @@ fn words(s: &str, from: &[(usize, char)]) -> Vec<(usize, usize)> {
             .map_or(c, |k| from[k].1);
         let joins = JOIN.contains(&mark)
             && start.is_some()
-            && it.peek().is_some_and(|&(_, n)| n.is_alphanumeric());
+            && it
+                .peek()
+                .is_some_and(|&(at, n)| n.is_alphanumeric() && !cut(at));
         if c.is_alphanumeric() || joins {
             start.get_or_insert(i);
         } else if let Some(st) = start.take() {
@@ -759,6 +770,18 @@ mod tests {
             text,
             "don't miss it \u{2013} the \u{201C}porto\u{201D}"
         ));
+        // #808: a removed invisible character still ends a word, as before.
+        let text = "Send by Friday-\u{200B}please. Fri\u{00AD}day.";
+        for (q, want) in [
+            ("Friday", true),
+            ("please", true),
+            ("friday-please", true),
+            ("fri", true),
+            ("friday.", true),
+            ("frid", false),
+        ] {
+            assert_eq!(has(text, q), want, "{q:?}");
+        }
         // The case fold reads the whole word, as before: a final sigma.
         assert!(has("ΟΣ ΚΑΙ", "ος και"));
         // The fold moves no word end: an em dash and an ellipsis do not
