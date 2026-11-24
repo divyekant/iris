@@ -795,6 +795,14 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
             "a session cannot draft, send or nudge: a job has no grant of an account or a draft",
         ));
     }
+    if matches!(
+        c,
+        Command::Skip { .. } | Command::Mute { .. } | Command::Dismiss { .. }
+    ) {
+        return Err(denied(
+            "a session cannot skip, mute or dismiss: a job grants no feed, conversation or signal item",
+        ));
+    }
     if let Command::Wait { until, reply, why } = c {
         // The wait ends this session: after a lost answer, `iris status`
         // in a new session, or the job page, shows the state of the job.
