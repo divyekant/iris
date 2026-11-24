@@ -14,7 +14,7 @@
 -- writer of the sender row: the sender axis, the stranger gate and a direct
 -- SQL write. A row with no kind is a stranger, as no row is.
 -- shortcut: the name triggers read `header` with no index on `from_name`;
--- add an index if a large mailbox makes a name change slow.
+-- add an index if a large mailbox makes a name change slow (issue 812).
 
 CREATE TABLE IF NOT EXISTS fixed_due (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
