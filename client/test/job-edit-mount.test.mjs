@@ -207,6 +207,31 @@ test("an edit or a remove with no answer shows the job as the engine has it", as
   page.destroy();
 });
 
+test("a refused add of a thread in the scope already keeps the error and shows the thread again", async () => {
+  const d = structuredClone(fx.jobDetails["j-12"]);
+  const ref = d.scope.find((r) => r.kind === "thread");
+  const preview = { messages: [{ ...fx.answer("/items/c-311/job").messages[0], thread: ref.id }] };
+  const asked = serve((method, path) => {
+    if (path.startsWith("search")) return [200, { messages: preview.messages }];
+    if (path.startsWith("jobs/j-12/scope/") && method === "GET") return [200, preview];
+    if (path === "jobs/j-12/scope") return [409, { error: "The mail changed. Look at it again." }];
+    if (path === "jobs/j-12") return [200, d];
+    return [404, {}];
+  });
+  const view = await mount("/src/views/Job.svelte", { detail: d });
+  button(view, "Add mail").click();
+  view.flushSync();
+  fill(view, "input[type=search]", "contract");
+  submit(view, "form.search");
+  (await until(() => view.target.querySelector("button.hit"))).click();
+  await until(() => button(view, "Add this thread"));
+  button(view, "Add this thread").click();
+  await until(() => asked.filter(([m, p]) => m === "GET" && p.includes("/scope/")).length === 2);
+  await until(() => button(view, "Add this thread"));
+  assert.match(text(view.target), /The mail changed/);
+  view.destroy();
+});
+
 test("a search that fills its page offers more results, up to the limit of the API", async () => {
   const d = structuredClone(fx.jobDetails["j-12"]);
   const m = (i) => ({ id: `m-${i}`, thread: i < 60 ? "t-1" : `t-${i}`, subject: `S${i}`, date: null, from: {}, labels: [] });

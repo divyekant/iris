@@ -23,13 +23,17 @@
   let busy = $state(false);
   let note = $state("");
 
+  // True when the last failure had no answer of the engine: the change can have arrived.
+  let unknown = false;
   async function run<T>(work: () => Promise<T>): Promise<T | undefined> {
     busy = true;
     note = "";
+    unknown = false;
     try {
       return await work();
     } catch (e) {
       note = own(e) || (e as Error).message;
+      unknown = (e as { status?: number }).status === undefined;
     } finally {
       busy = false;
     }
@@ -67,15 +71,18 @@
   async function add() {
     if (!picked) return;
     const { thread, preview } = picked;
+    const before = scope.some((r) => r.id === thread);
     const d = await run(() => addThread(job.id, thread, preview.messages.map((m) => m.id)));
     if (d) {
       onchange(d);
       close();
       return;
     }
-    // The add can have arrived with no answer: when the job has the thread now, it worked.
+    // With no answer, the add can have arrived. Only a new ref proves it: a thread that was in
+    // the scope before can miss the new mail, so its add stays not done.
+    const lost = unknown;
     const fresh = await refresh();
-    if (fresh?.scope?.some((r) => r.id === thread)) {
+    if (lost && !before && fresh?.scope?.some((r) => r.id === thread)) {
       note = "";
       close();
       return;
