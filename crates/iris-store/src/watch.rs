@@ -17,10 +17,11 @@ pub const WAIT_MAX: i64 = 100;
 /// match. Old mail that a first sync or a full resync adds cannot.
 pub const SINCE_MARGIN_MS: i64 = 3_600_000;
 
-/// The SQL condition "the watch `watch` has a match that is not hostile
-/// mail now". A match that became hostile mail after the check (a model
-/// `phishing` mark, a `hostile` sender, the label `SPAM`) gives no notice:
-/// the watch waits again, and a later safe arrival can match (decision D33).
+/// The SQL condition "the watch `watch` has a match that is still a safe
+/// arrival": not hostile mail now, and not a draft or a copy. A match that
+/// became hostile mail after the check (a model `phishing` mark, a `hostile`
+/// sender, the label `SPAM`) gives no notice: the watch waits again, and a
+/// later safe arrival can match (decision D33).
 macro_rules! safe_match {
     () => {
         concat!(
@@ -29,6 +30,8 @@ macro_rules! safe_match {
             crate::hostile_mail!(),
             " OR ",
             crate::may_be_hostile!(),
+            " OR ",
+            crate::draft_or_copy!("m"),
             ")))"
         )
     };
