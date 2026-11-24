@@ -977,3 +977,121 @@ fn a_person_with_only_pre_1970_mail_gets_the_real_last_date() {
     assert!(first.starts_with("1969-12-20"), "first {first}");
     assert!(first < last, "first {first}, last {last}");
 }
+
+/// docs/specs/2026-11-24-remove-account.md: a build after the removal of
+/// an account leaves out its mail, keeps the mail of another account, and
+/// keeps the files of the agent.
+#[test]
+fn a_removed_account_gives_no_mail_to_a_workspace() {
+    let tmp = TempDir::new("removed");
+    let store = store(&tmp.0.join("data"));
+    let job = job(&store);
+    // Thread 3 (the source of the scope item) moves to a second account.
+    store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO account (id, provider, address) VALUES (2, 'gmail', 'two@example.com');
+                 UPDATE thread SET account_id = 2 WHERE id = 3;
+                 UPDATE message SET account_id = 2 WHERE thread_id = 3;
+                 UPDATE item SET account_id = 2 WHERE id = 3;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let ws = default_dir(&tmp.0.join("data"), job);
+    build(&store, job, &ws).unwrap();
+    assert!(walk(&ws).1.contains("DANA-TEXT"));
+    // The agent copies granted mail into its own files (spec, "Agent files").
+    fs::write(ws.join("drafts/reply.md"), "AGENT-DRAFT DANA-TEXT").unwrap();
+    fs::write(ws.join("scratch.txt"), "DANA-TEXT").unwrap();
+    fs::write(ws.join("notes.md"), "AGENT-NOTE").unwrap();
+    // A build that stopped left its stage and a notes part beside the
+    // workspace, with a copy of the mail.
+    let name = ws.file_name().unwrap().to_str().unwrap().to_owned();
+    let stage = ws.with_file_name(format!(".{name}.build"));
+    let part = ws.with_file_name(format!(".{name}.notes"));
+    fs::create_dir_all(stage.join("threads")).unwrap();
+    fs::write(stage.join("threads/t-3.md"), "DANA-TEXT").unwrap();
+    fs::write(&part, "DANA-TEXT").unwrap();
+    store
+        .write(|tx| {
+            tx.execute("UPDATE account SET state = 'removing' WHERE id = 1", [])?;
+            tx.execute(
+                "INSERT INTO removed_workspace (account_id, job_id) VALUES (1, ?1)",
+                [job],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let built = build(&store, job, &ws).unwrap();
+    assert_eq!(built.messages, 1);
+    let text = walk(&ws).1;
+    for gone in ["DANA-TEXT", "MY-REPLY-TEXT", "AGENT-DRAFT"] {
+        assert!(!text.contains(gone), "{gone} is in the workspace");
+    }
+    assert!(text.contains("SECTION-TEXT"));
+    assert!(!stage.exists() && !part.exists());
+    assert!(!ws.join("drafts/reply.md").exists());
+    assert!(!ws.join("scratch.txt").exists());
+    assert!(ws.join("drafts").is_dir());
+    // The notes are the record: the build saved them first, then wrote the
+    // copy of the store back.
+    assert_eq!(
+        fs::read_to_string(ws.join("notes.md")).unwrap(),
+        "AGENT-NOTE"
+    );
+
+    // The purge deleted the row of the job: a later build is a normal build.
+    let rows: i64 = store
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM removed_workspace", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(rows, 0);
+    store
+        .write(|tx| {
+            Ok(tx.execute(
+                "INSERT INTO removed_workspace (account_id, job_id) VALUES (1, ?1)",
+                [job],
+            )?)
+        })
+        .unwrap();
+    // A notes file that the save refuses (too large) stays, with its text.
+    let big = format!("BIG-NOTE {}", "x".repeat(70_000));
+    fs::write(ws.join("notes.md"), &big).unwrap();
+    fs::write(ws.join("drafts/reply.md"), "AGENT-DRAFT").unwrap();
+    build(&store, job, &ws).unwrap();
+    assert_eq!(fs::read_to_string(ws.join("notes.md")).unwrap(), big);
+    assert!(!ws.join("drafts/reply.md").exists());
+    fs::write(ws.join("notes.md"), "AGENT-NOTE").unwrap();
+
+    // With no row in `removed_workspace`, a build keeps the files of the agent.
+    fs::write(ws.join("drafts/reply.md"), "AGENT-DRAFT").unwrap();
+    store
+        .write(|tx| Ok(tx.execute("DELETE FROM removed_workspace", [])?))
+        .unwrap();
+    build(&store, job, &ws).unwrap();
+    assert_eq!(
+        fs::read_to_string(ws.join("drafts/reply.md")).unwrap(),
+        "AGENT-DRAFT"
+    );
+}
+
+/// docs/specs/2026-11-24-remove-account.md: with no workspace folder, the
+/// delete of an account clears the stage that a stopped build left beside
+/// it, before the purge record goes.
+#[test]
+fn the_clear_removes_a_stage_left_beside_a_missing_workspace() {
+    let tmp = TempDir::new("beside");
+    let store = store(&tmp.0.join("data"));
+    let job = job(&store);
+    let ws = default_dir(&tmp.0.join("data"), job);
+    build(&store, job, &ws).unwrap();
+    fs::remove_dir_all(&ws).unwrap();
+    let name = ws.file_name().unwrap().to_str().unwrap().to_owned();
+    let stage = ws.with_file_name(format!(".{name}.build"));
+    fs::create_dir_all(&stage).unwrap();
+    fs::write(stage.join("t-3.md"), "DANA-TEXT").unwrap();
+    iris_workspace::clear_beside(&ws).unwrap();
+    assert!(!stage.exists());
+    // A job that never had a build has nothing to clear.
+    iris_workspace::clear_beside(&default_dir(&tmp.0.join("data"), job + 1)).unwrap();
+}

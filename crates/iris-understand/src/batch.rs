@@ -36,6 +36,9 @@ const NO_DATE: i64 = -9_223_372_036_854_775_807;
 const BASE: &str = concat!(
     "m.gone_at IS NULL AND m.understood_at IS NULL
   AND m.content_sha256 IS NOT NULL AND m.waits_model = 0
+  AND NOT ",
+    iris_store::removed_account!("m"),
+    "
   AND m.tries < :max_tries AND (m.retry_at IS NULL OR m.retry_at <= :now)
   AND NOT ",
     iris_store::draft_or_copy!("m"),
