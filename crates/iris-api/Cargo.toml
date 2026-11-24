@@ -28,6 +28,7 @@ serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["rt", "sync"] }
 
 [dev-dependencies]
+jiff = { version = "=1.0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo", "tzdb-concatenated"] }
 iris-model = { version = "0.0.0", path = "../iris-model" }
 iris-spec = { version = "0.0.0", path = "../iris-spec" }
 iris-observe = { version = "0.0.0", path = "../iris-observe" }
