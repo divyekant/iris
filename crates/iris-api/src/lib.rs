@@ -1317,9 +1317,17 @@ async fn post_matter_decline(
 }
 
 /// The person makes a matter by hand.
+/// The body of a matter by hand: a title and its items, nothing else (#909).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MatterCreate {
+    title: String,
+    items: Vec<String>,
+}
+
 async fn post_matter_create(
     State(s): State<Arc<Store>>,
-    b: std::result::Result<Json<MatterConfirm>, JsonRejection>,
+    b: std::result::Result<Json<MatterCreate>, JsonRejection>,
 ) -> Result<Response> {
     let b = body(b)?;
     let view = create_matter(&s, &b.title, &b.items, now_ms())?;

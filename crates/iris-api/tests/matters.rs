@@ -623,6 +623,18 @@ async fn the_person_makes_edits_and_deletes_a_matter() {
     let (code, _) = call(&s, Method::POST, "/api/matters/g-2/decline", "").await;
     assert_eq!(code, StatusCode::OK);
 
+    // An unknown field: refused, and no matter is written (#909).
+    let (code, v) = call(
+        &s,
+        Method::POST,
+        "/api/matters",
+        r#"{"title":"Lease","items":["r-4"],"unexpected":true}"#,
+    )
+    .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{v}");
+    let (_, list) = call(&s, Method::GET, "/api/matters", "").await;
+    assert!(!list.to_string().contains("Lease"), "{list}");
+
     let (code, v) = call(
         &s,
         Method::POST,
@@ -641,8 +653,6 @@ async fn the_person_makes_edits_and_deletes_a_matter() {
     for (body, want) in [
         (r#"{"add":["r-1"]}"#, StatusCode::CONFLICT),
         (r#"{"add":["f-1"]}"#, StatusCode::BAD_REQUEST),
-        // No signal member until the web client shows signals (#884).
-        (r#"{"add":["s-1"]}"#, StatusCode::BAD_REQUEST),
         (r#"{"remove":["r-4"]}"#, StatusCode::CONFLICT),
         (r#"{}"#, StatusCode::BAD_REQUEST),
         (r#"{"title":"x","other":1}"#, StatusCode::BAD_REQUEST),

@@ -591,9 +591,10 @@ fn reset_fingerprint(b: &Box) {
         .unwrap();
 }
 
-/// D20 (docs/specs/2026-11-24-matters-edit.md): the call sends the
-/// confirmed matters, and an addition waits for the person. A refused
-/// addition does not come back. A signal is no candidate yet (#884).
+/// D20 and D21 (docs/specs/2026-11-24-matters-edit.md): the call sends the
+/// confirmed matters, an active signal is a candidate, and an addition
+/// waits for the person. A refused addition does not come back. An expired
+/// signal is no candidate.
 #[test]
 fn an_addition_waits_for_the_person() {
     let b = setup(
@@ -616,11 +617,11 @@ fn an_addition_waits_for_the_person() {
     ]});
     let f = fake(vec![Ok(add.to_string()), Ok(add.to_string())]);
     let o = run(&b, &f, Gate::Now, NOW);
-    assert_eq!((o.proposed, o.added, o.dropped), (0, 1, 1), "{o:?}");
+    assert_eq!((o.proposed, o.added, o.dropped), (0, 2, 0), "{o:?}");
     let data = f.data.borrow()[0].clone();
     assert!(data.contains(&format!("\"matter\":\"g-{m}\"")), "{data}");
     assert!(data.contains("\"id\":\"c-3\""), "{data}");
-    assert!(!data.contains("\"id\":\"s-4\""), "{data}");
+    assert!(data.contains("\"id\":\"s-4\""), "{data}");
     // The member titles go, the members are no candidates.
     assert!(!data.contains("\"id\":\"r-1\""), "{data}");
     assert_eq!(
@@ -628,8 +629,8 @@ fn an_addition_waits_for_the_person() {
         1
     );
     assert_eq!(
-        col(&b, "SELECT count(*) FROM matter_add WHERE item_id = 4"),
-        0
+        col(&b, "SELECT count(*) FROM matter_add_live WHERE item_id = 4"),
+        1
     );
     // Not this: the person refuses it, so the same answer is dropped.
     let e = iris_matters::Edit {
@@ -639,6 +640,18 @@ fn an_addition_waits_for_the_person() {
     iris_matters::edit(&b.store, m, &e, NOW + 1).unwrap();
     let o = run(&b, &f, Gate::Now, NOW + 2);
     assert_eq!(o.added, 0, "{o:?}");
+    assert_eq!(
+        col(&b, "SELECT count(*) FROM matter_add WHERE item_id = 3"),
+        0
+    );
+    // An expired signal is no candidate, and its addition ends.
+    b.store
+        .write(|tx| Ok(tx.execute("UPDATE item SET status = 'expired' WHERE id = 4", [])?))
+        .unwrap();
+    reset_fingerprint(&b);
+    let f = fake(vec![]);
+    run(&b, &f, Gate::Now, NOW + 3);
+    assert!(!f.data.borrow()[0].contains("\"id\":\"s-4\""));
     assert_eq!(col(&b, "SELECT count(*) FROM matter_add"), 0);
 }
 
