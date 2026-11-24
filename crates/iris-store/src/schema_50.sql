@@ -77,3 +77,46 @@ CREATE TABLE IF NOT EXISTS job_request (
   request TEXT PRIMARY KEY CHECK (typeof(request) = 'text' AND length(request) BETWEEN 1 AND 64),
   job_id INTEGER NOT NULL UNIQUE REFERENCES job(id)
 ) WITHOUT ROWID;
+
+-- The form of the item of each item ref of a scope, at the grant. A later
+-- understanding can delete the item row, and the ID of an item names its
+-- form (`c-3`). With this row the job page keeps the ID of the ref, and the
+-- person can still remove it.
+CREATE TABLE IF NOT EXISTS job_scope_form (
+  scope_id INTEGER PRIMARY KEY REFERENCES job_scope(id),
+  form TEXT NOT NULL
+);
+
+INSERT OR IGNORE INTO job_scope_form (scope_id, form)
+  SELECT s.id, i.form FROM job_scope s JOIN item i ON i.id = s.item_id;
+
+CREATE TRIGGER IF NOT EXISTS job_scope_form_insert AFTER INSERT ON job_scope
+WHEN new.item_id IS NOT NULL
+BEGIN
+  INSERT INTO job_scope_form (scope_id, form)
+    SELECT new.id, form FROM item WHERE id = new.item_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS job_scope_form_update BEFORE UPDATE ON job_scope_form
+BEGIN
+  SELECT RAISE(ABORT, 'job: the form of a scope ref does not change');
+END;
+
+CREATE TRIGGER IF NOT EXISTS job_scope_form_delete BEFORE DELETE ON job_scope_form
+BEGIN
+  SELECT RAISE(ABORT, 'job: the form of a scope ref is never deleted');
+END;
+
+-- The scope of a done job is its record: the only change to a scope row is
+-- one revoke of an active row of a job that is not done.
+DROP TRIGGER IF EXISTS job_scope_update;
+
+CREATE TRIGGER job_scope_update BEFORE UPDATE ON job_scope
+WHEN old.revoked_at IS NOT NULL OR new.revoked_at IS NULL
+  OR new.job_id IS NOT old.job_id OR new.thread_id IS NOT old.thread_id
+  OR new.item_id IS NOT old.item_id OR new.by IS NOT old.by OR new.at IS NOT old.at
+  OR new.rowid IS NOT old.rowid
+  OR NOT EXISTS (SELECT 1 FROM job WHERE id = old.job_id AND state <> 'done')
+BEGIN
+  SELECT RAISE(ABORT, 'job: the only change to a scope row is one revoke, for a job that is not done');
+END;

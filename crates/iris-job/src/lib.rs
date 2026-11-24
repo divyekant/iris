@@ -961,7 +961,8 @@ pub fn reads_outside_in(c: &Connection, job: i64) -> rusqlite::Result<bool> {
 
 /// Revoke `what` from the active scope of `job`. The row stays, with the
 /// revoke, and the next build drops its mail. Only the person or the engine
-/// revokes. A ref that is not in the active scope changes nothing.
+/// revokes. A ref that is not in the active scope changes nothing. A done job
+/// gives `Refused`: its scope never changes.
 pub fn revoke_scope(store: &Store, job: i64, what: Ref, by: By, now_ms: i64) -> Result<()> {
     transaction(store, |c| revoke_scope_in(c, job, what, by, now_ms))
 }
@@ -972,7 +973,10 @@ pub fn revoke_scope_in(c: &Connection, job: i64, what: Ref, by: By, now_ms: i64)
             "an agent cannot change the scope of a job".into(),
         ));
     }
-    get_in(c, job)?;
+    // The scope of a done job is its record: it never changes (decision D25).
+    if get_in(c, job)?.state == State::Done {
+        return Err(Error::Refused("the job is done".into()));
+    }
     let (thread, item) = match what {
         Ref::Thread(t) => (Some(t), None),
         Ref::Item(i) => (None, Some(i)),

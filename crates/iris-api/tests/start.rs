@@ -703,6 +703,73 @@ async fn the_person_adds_a_thread_and_removes_a_ref() {
     assert_eq!(code, StatusCode::CONFLICT);
 }
 
+/// Decision D25: the scope of a done job never changes, and an item ref
+/// keeps its ID after a later understanding deletes the item row.
+#[tokio::test]
+async fn a_done_job_keeps_its_scope_and_a_gone_item_keeps_its_id() {
+    let d = open("scope-done");
+    let (code, _) = d.start("c-1").await;
+    assert_eq!(code, StatusCode::CREATED);
+    let before = d.scope("j-1");
+    assert!(before.contains(&Ref::Item(1)), "{before:?}");
+    // The understanding deletes the item row: the ref keeps the ID `c-1`.
+    d.1.write(|tx| Ok(tx.execute("DELETE FROM item WHERE id = 1", [])?))
+        .unwrap();
+    let (code, page) = d.get("/api/jobs/j-1").await;
+    assert_eq!(code, StatusCode::OK, "{page}");
+    let ids: Vec<&Value> = page["scope"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| &r["id"])
+        .collect();
+    assert!(ids.contains(&&json!("c-1")), "{page}");
+    assert!(!ids.contains(&&Value::Null), "{page}");
+    // The ID of another form does not name it.
+    let (code, _) = d
+        .post("/api/jobs/j-1/scope/remove", json!({"ref": "r-1"}))
+        .await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    let (code, page) = d
+        .post("/api/jobs/j-1/scope/remove", json!({"ref": "c-1"}))
+        .await;
+    assert_eq!(code, StatusCode::OK, "{page}");
+    assert!(!d.scope("j-1").contains(&Ref::Item(1)));
+    // A done job: a remove is 409, and the scope stays.
+    let scope = d.scope("j-1");
+    assert!(!scope.is_empty());
+    iris_job::finish(
+        &d.1,
+        1,
+        iris_job::By::Person,
+        iris_job::End::Cancel,
+        None,
+        NOW,
+    )
+    .unwrap();
+    for r in &scope {
+        let id = match r {
+            Ref::Thread(t) => format!("t-{t}"),
+            Ref::Item(i) => format!("c-{i}"),
+        };
+        let (code, v) = d
+            .post("/api/jobs/j-1/scope/remove", json!({"ref": id}))
+            .await;
+        assert_eq!(code, StatusCode::CONFLICT, "{id}: {v}");
+    }
+    assert_eq!(d.scope("j-1"), scope);
+    // The store refuses a revoke of a done job too.
+    let r = iris_job::revoke_scope(&d.1, 1, scope[0], iris_job::By::Person, NOW + 1);
+    assert!(matches!(r, Err(iris_job::Error::Refused(_))), "{r:?}");
+    let raw = d.1.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE job_scope SET revoked_by = 'person', revoked_at = 1 WHERE job_id = 1 AND revoked_at IS NULL",
+            [],
+        )?)
+    });
+    assert!(raw.is_err(), "{raw:?}");
+}
+
 /// Decision D26 (issue #558): a job that starts from an item can wait for a
 /// reply on the thread of the item, and a reply on that thread wakes it.
 #[tokio::test]
