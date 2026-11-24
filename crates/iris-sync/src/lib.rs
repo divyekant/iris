@@ -872,9 +872,38 @@ impl Running {
     }
 }
 
-/// Add the row of a sync that starts, with no end and no result. Gives its ID.
+/// The result of a sync row whose process ended before the sync ended.
+pub const STOPPED: &str = "stopped: the process ended before the sync ended";
+
+/// Close each row of `account` with no end: a crash or a stop of its
+/// process left it (issue #710). Call it only with the sync lock of the
+/// account held, so no sync of the account runs.
+fn close_stopped_in(tx: &rusqlite::Connection, account: i64, now: i64) -> rusqlite::Result<usize> {
+    tx.execute(
+        "UPDATE sync_log SET ended_at = ?2, result = ?3 WHERE account_id = ?1 AND ended_at IS NULL",
+        params![account, now, STOPPED],
+    )
+}
+
+/// Close the sync rows of `account` that a process left with no end. If
+/// another sync of the account runs, it does nothing and gives 0. The
+/// engine calls it at its start, so the status does not show a sync that
+/// does not run.
+pub fn close_stopped(store: &Store, account: i64) -> Result<usize> {
+    let _lock = match lock(store, account) {
+        Ok(l) => l,
+        Err(Error::OtherSync) => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    Ok(store.write(|tx| Ok(close_stopped_in(tx, account, now_ms())?))?)
+}
+
+/// Add the row of a sync that starts, with no end and no result. Gives its
+/// ID. The caller holds the sync lock, so a row with no end is of a process
+/// that stopped: it gets [`STOPPED`] first.
 fn log_start(store: &Store, account: i64, kind: &str, started: i64) -> Result<i64> {
     Ok(store.write(|tx| {
+        close_stopped_in(tx, account, started)?;
         tx.execute(
             "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, ?2, ?3)",
             params![account, kind, started],
