@@ -130,6 +130,10 @@ struct Msg {
     subject: String,
     text: Option<String>,
     sent: bool,
+    /// The `sent` evidence of iris-senders for the current content: each
+    /// recipient as the raw message names it, in lower case. The stored
+    /// lists lose the bounds of an address with a comma (#276).
+    sent_to: Vec<String>,
 }
 
 /// The state of a thread that a draft depends on, in memory that does not
@@ -500,7 +504,10 @@ fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
         "SELECT m.id, h.from_addr, h.from_name, h.to_addrs, h.cc_addrs, b.subject,
            substr(ltrim(b.text, char(32, 9, 10, 13)), 1, ?3),
            EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                   WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
+                   WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
+           (SELECT group_concat(se.address, char(10)) FROM sender_evidence se
+             WHERE se.message_id = m.id AND se.rule = 'sent'
+               AND se.content_sha256 IS m.content_sha256)
          {IN_THREAD}
          {ANSWERABLE}
          {NEWEST}
@@ -519,6 +526,10 @@ fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
                 subject: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
                 text: r.get(6)?,
                 sent: r.get(7)?,
+                sent_to: r
+                    .get::<_, Option<String>>(8)?
+                    .map(|l| l.lines().map(str::to_string).collect())
+                    .unwrap_or_default(),
             })
         },
     )?;
@@ -555,28 +566,31 @@ fn recipient(msgs: &[Msg], me: &str) -> Option<String> {
             .map(|a| a.trim().to_lowercase())
             .filter(|a| !a.is_empty());
     }
-    let owners = [Some(me), last.from_addr.as_deref()];
-    first_other(
-        &[last.to_addrs.as_deref(), last.cc_addrs.as_deref()],
-        &owners,
-    )
+    let owner = |a: &str| {
+        [Some(me), last.from_addr.as_deref()]
+            .iter()
+            .flatten()
+            .any(|o| o.trim().eq_ignore_ascii_case(a))
+    };
+    // A message with evidence rows takes its target only from an entry
+    // with evidence. A `Bcc` address has evidence but is in no list.
+    let evidence =
+        |a: &str| last.sent_to.is_empty() || last.sent_to.iter().any(|e| e.eq_ignore_ascii_case(a));
+    [last.to_addrs.as_deref(), last.cc_addrs.as_deref()]
+        .into_iter()
+        .flatten()
+        .flat_map(entries)
+        .find(|a| !owner(a) && evidence(a))
 }
 
-/// The first address of the comma lists that is not empty and not one of
-/// `owners`, in lower case.
-fn first_other(lists: &[Option<&str>], owners: &[Option<&str>]) -> Option<String> {
-    lists
-        .iter()
-        .flatten()
-        .flat_map(|l| l.split(','))
-        .map(|a| a.trim().to_lowercase())
-        .find(|a| {
-            !a.is_empty()
-                && !owners
-                    .iter()
-                    .flatten()
-                    .any(|o| o.trim().eq_ignore_ascii_case(a))
-        })
+/// The entries of a stored address list, through the parser that wrote the
+/// list (`iris_understand::head::addresses`): a `,` inside a quoted local
+/// part (`"a, b"@example.org`) does not split.
+fn entries(list: &str) -> Vec<String> {
+    iris_understand::head::addresses(list)
+        .into_iter()
+        .map(|(a, _)| a)
+        .collect()
 }
 
 /// A sent message that shows the voice of the owner.
