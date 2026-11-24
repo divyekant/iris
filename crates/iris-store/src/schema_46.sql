@@ -17,12 +17,12 @@ CREATE TABLE matter_add (
 );
 CREATE INDEX matter_add_matter ON matter_add(matter_id);
 
-DROP TRIGGER matter_insert;
-DROP TRIGGER matter_update;
-DROP TRIGGER matter_decide;
-DROP TRIGGER matter_item_insert;
-DROP TRIGGER matter_item_update;
-DROP TRIGGER matter_delete;
+DROP TRIGGER IF EXISTS matter_insert;
+DROP TRIGGER IF EXISTS matter_update;
+DROP TRIGGER IF EXISTS matter_decide;
+DROP TRIGGER IF EXISTS matter_item_insert;
+DROP TRIGGER IF EXISTS matter_item_update;
+DROP TRIGGER IF EXISTS matter_delete;
 
 -- Rule 1: a proposal can be deleted as a row, and a confirmed matter with
 -- fewer than 2 member rows (the delete of a matter by hand with one item:

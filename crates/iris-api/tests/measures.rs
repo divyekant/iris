@@ -392,8 +392,19 @@ async fn first_brief_runs_to_the_first_brief_with_content() {
 /// Make the store a store of migration 26 again. The later migrations (28
 /// the write view, 32 the review comments, 33 the nudges) run again after
 /// 27, so what they add goes too.
+/// The undo of migration 46, so that a test store can run it again. Its
+/// triggers and its view go too: migration 46 makes them again.
+const UNDO_46: &str = "DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add;
+     DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert;
+     DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add;
+     DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide;
+     DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update;
+     DROP TRIGGER matter_delete;
+     ALTER TABLE matter DROP COLUMN author;";
+
 fn downgrade(s: &Store) {
     s.write(|tx| {
+        tx.execute_batch(UNDO_46)?;
         tx.execute_batch(
             "DROP TRIGGER measure_connect;
              DROP TRIGGER person_decision; DROP TABLE person_decision;
@@ -780,6 +791,7 @@ fn migration_45_corrects_an_approval_after_a_comment() {
         let a = s.add_account("gmail", "owner@example.com").unwrap();
         approve_revision(&s, a, true);
         s.write(|tx| {
+            tx.execute_batch(UNDO_46)?;
             tx.execute_batch("UPDATE person_decision SET approved = 1; PRAGMA user_version = 44;")?;
             Ok(())
         })
