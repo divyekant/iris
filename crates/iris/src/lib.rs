@@ -1465,6 +1465,19 @@ pub fn changeset_text(doc: &serde_json::Value, json: bool) -> String {
         out.push_str(&line);
         out.push('\n');
     }
+    // Since open model 1.2: who withdrew (D16), and the review comments of
+    // the person (D15), so an author with no job workspace reads them.
+    if let Some(by) = doc["withdrawn_by"].as_str() {
+        out.push_str(&format!("Withdrawn by: {by}\n"));
+    }
+    for k in doc["comments"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "Comment on revision {} at {}: {}\n",
+            k["revision"],
+            s(&k["at"]),
+            verbs::field(&s(&k["text"]))
+        ));
+    }
     out
 }
 
@@ -2376,6 +2389,31 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Decisions D15 and D16: the text form of a changeset names who
+    /// withdrew it and gives each review comment, oldest first.
+    #[test]
+    fn the_changeset_text_shows_who_withdrew_and_the_comments() {
+        let doc = serde_json::json!({
+            "id": "cs-4", "state": "withdrawn", "revision": 2, "why": null, "actions": [],
+            "withdrawn_by": "person",
+            "comments": [
+                {"revision": 1, "text": "Keep the mail of Dana.", "at": "2026-11-20T10:00:00Z"},
+                {"revision": 2, "text": "Not\nthis one.", "at": "2026-11-21T10:00:00Z"}
+            ]
+        });
+        let t = changeset_text(&doc, false);
+        assert!(t.contains("Withdrawn by: person\n"), "{t}");
+        let one = t.find("Comment on revision 1 at 2026-11-20T10:00:00Z: Keep the mail of Dana.\n");
+        let two = t.find("Comment on revision 2 at 2026-11-21T10:00:00Z: ");
+        assert!(one.is_some() && two.is_some() && one < two, "{t}");
+        // A line break in a comment does not start a new line of the output.
+        assert_eq!(
+            t.lines().filter(|l| l.starts_with("Comment")).count(),
+            2,
+            "{t}"
+        );
+    }
 
     #[test]
     fn version_line_names_the_program() {

@@ -63,9 +63,54 @@
       "items": {
         "$ref": "#/$defs/action"
       }
+    },
+    "withdrawn_by": {
+      "description": "Since iris/1.2. Who withdrew the changeset: its author, or the person (decision D16). Absent when the changeset is not withdrawn, or when a version before 1.2 withdrew it.",
+      "enum": [
+        "author",
+        "person"
+      ]
+    },
+    "comments": {
+      "description": "Since iris/1.2. The review comments of the person, oldest first (docs/specs/2026-11-17-review-comments.md, decision D15). Absent when there is none.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "revision",
+          "text",
+          "at"
+        ],
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "at": {
+            "$ref": "urn:iris:model:1:common#/$defs/dateTime"
+          }
+        }
+      }
     }
   },
   "allOf": [
+    {
+      "$comment": "A field of a minor version is refused in a document that claims an older minor version (specification 4, rule 2.8). withdrawn_by and comments: since 1.2.",
+      "if": { "properties": { "model": { "enum": ["iris/1.0", "iris/1.1"] } }, "required": ["model"] },
+      "then": { "allOf": [ { "not": { "required": ["withdrawn_by"] } }, { "not": { "required": ["comments"] } } ] }
+    },
+    {
+      "$comment": "Only a withdrawn changeset names who withdrew it (decision D16).",
+      "if": { "required": ["withdrawn_by"] },
+      "then": { "properties": { "state": { "const": "withdrawn" } } }
+    },
     {
       "$comment": "The state is draft while the newest revision is not submitted (section 5.1).",
       "if": {

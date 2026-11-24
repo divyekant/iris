@@ -199,7 +199,10 @@ fn only_the_moves_of_section_5_2() {
                 };
                 // A withdraw cancels the action in the same write, or leaves it.
                 if to == "cancelled" {
-                    tx.execute("UPDATE changeset SET state = 'withdrawn'", [])?;
+                    tx.execute(
+                        "UPDATE changeset SET state = 'withdrawn', withdrawn_by = 'person'",
+                        [],
+                    )?;
                     return Ok(from != Some("cancelled") && now(tx)?.as_deref() == Some(to));
                 }
                 // The submit of a newer revision replaces the action, or
@@ -408,11 +411,16 @@ fn a_submitted_revision_stays_submitted() {
     fails(
         &s,
         "UPDATE changeset_action SET hash = 'h' WHERE revision = 2;
-         UPDATE changeset SET state = 'withdrawn', why = 'w', submitted_at = 123;",
+         UPDATE changeset SET state = 'withdrawn', withdrawn_by = 'person', why = 'w', submitted_at = 123;",
     );
     // A withdrawn changeset does not change.
-    s.write(|tx| Ok(tx.execute("UPDATE changeset SET state = 'withdrawn'", [])?))
-        .unwrap();
+    s.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE changeset SET state = 'withdrawn', withdrawn_by = 'person'",
+            [],
+        )?)
+    })
+    .unwrap();
     fails(&s, "UPDATE changeset SET submitted_at = 0, why = 'w'");
     fails(&s, &insert(2));
 }
@@ -429,7 +437,10 @@ fn a_withdraw_cancels_the_open_actions() {
             "UPDATE changeset_action SET state = 'approved', decided_by = 'person'",
             [],
         )?;
-        Ok(tx.execute("UPDATE changeset SET state = 'withdrawn'", [])?)
+        Ok(tx.execute(
+            "UPDATE changeset SET state = 'withdrawn', withdrawn_by = 'person'",
+            [],
+        )?)
     })
     .unwrap();
     let row: (String, String) = s
@@ -699,7 +710,10 @@ fn the_changeset_state_comes_from_its_actions() {
         fails(&s, &format!("UPDATE changeset SET state = '{state}'"));
     }
     works(&s, "UPDATE changeset SET state = 'open'");
-    works(&s, "UPDATE changeset SET state = 'withdrawn'");
+    works(
+        &s,
+        "UPDATE changeset SET state = 'withdrawn', withdrawn_by = 'person'",
+    );
 }
 
 /// A rule decision names a rule ID of the active policy.
@@ -905,7 +919,7 @@ fn the_ledger_moves_the_action() {
         works(
             &s,
             &format!(
-                "{CLAIM} UPDATE changeset SET state = 'withdrawn';
+                "{CLAIM} UPDATE changeset SET state = 'withdrawn', withdrawn_by = 'person';
                  UPDATE ledger SET state = '{to}'"
             ),
         );
