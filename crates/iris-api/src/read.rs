@@ -661,8 +661,8 @@ fn places(now: i64) -> Vec<String> {
 /// The filter of the items that would wait at the stranger gate, but whose
 /// strangers the person declined: an open commitment whose counterparty
 /// (you owe) or owner (owed to you) is declined, or an active conversation
-/// with a declined participant and no stranger that waits. These items are
-/// in no section of the brief (specification 1, section 6.7).
+/// with a declined participant, no stranger that waits and no known person.
+/// These items are in no section of the brief (specification 1, section 6.7).
 pub(crate) fn declined_sql() -> String {
     let counter = kind_sql("doc", "$.counterparty.sender");
     let owner = kind_sql("doc", "$.owner.sender");
@@ -671,9 +671,10 @@ pub(crate) fn declined_sql() -> String {
              (json_extract(doc, '$.direction') = 'you_owe' AND {counter} = 'declined')
           OR (json_extract(doc, '$.direction') = 'owed_to_you' AND {owner} = 'declined')))
           OR (form = 'conversation' AND status = 'active'
-              AND {} AND NOT {}))",
+              AND {} AND NOT {} AND NOT {}))",
         participant_sql("= 'declined'"),
-        participant_sql("= 'stranger'")
+        participant_sql("= 'stranger'"),
+        participant_sql("= 'person'")
     )
 }
 
@@ -775,13 +776,15 @@ fn sections_of(now: i64) -> [(String, String); 6] {
         "created_at, id".to_string(),
     );
     let conversations = (
-        // A conversation with a stranger is only in `strangers` (dk, 2026-11-16),
-        // and a conversation with a declined stranger is in no section.
+        // A conversation with a stranger is only in `strangers` (dk, 2026-11-16).
+        // A conversation with a declined stranger is in no section, unless a
+        // known person is in it too (decision D30, issue 264).
         format!(
             "form = 'conversation' AND status = 'active'
              AND (json_extract(doc, '$.new') > 0 OR json_extract(doc, '$.your_turn') = 1)
-             AND NOT {}",
-            participant_sql("IN ('stranger', 'declined')")
+             AND NOT {stranger_participant} AND NOT ({} AND NOT {})",
+            participant_sql("= 'declined'"),
+            participant_sql("= 'person'")
         ),
         "unixepoch(json_extract(doc, '$.latest.at'), 'subsec') DESC, id DESC".to_string(),
     );

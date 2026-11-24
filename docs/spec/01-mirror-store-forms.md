@@ -717,7 +717,7 @@ The person gives one answer for each sender:
 | Answer | Effect |
 |---|---|
 | Accept | The kind becomes `person`, with `decided_by` `person` and the `basis` "accepted at the gate". The items go to their sections ("You owe", "Owed to you", "Conversations"). |
-| Decline | The engine sets `declined_at` on the sender row. The kind stays with the engine, so a declined sender can still become `hostile`, or known (for example after a reply of the person). The decline applies only while the kind is `stranger`: the items of a declined stranger are in no section of the brief, and the web client lists the declined senders. |
+| Decline | The engine sets `declined_at` on the sender row. The kind stays with the engine, so a declined sender can still become `hostile`, or known (for example after a reply of the person). The decline applies only while the kind is `stranger`: the items of a declined stranger are in no section of the brief, and the web client lists the declined senders. A conversation with a known person stays in "Conversations" (decision D30). |
 | Reopen | Removes the accept or the decline of the gate. After an accept, the engine decides the kind again from the evidence in the store. A kind that a person set for another reason (for example, a correction) stays. |
 
 The web client shows the gate in the brief: one row for each sender, with
@@ -1124,7 +1124,7 @@ with the original, whatever its own attention.
 |---|---|
 | You owe | Commitments with `direction` `you_owe` and `status` `open`, where the counterparty is a `person` or a `service`. Order by `due`, then by `created`. |
 | Owed to you | Commitments with `direction` `owed_to_you` and `status` `open`, where the owner is a `person` or a `service`. Order by age. |
-| Conversations | Conversations with `status` `active`, and `new` greater than 0 or `your_turn` true, with no `stranger` participant and no declined participant. |
+| Conversations | Conversations with `status` `active`, and `new` greater than 0 or `your_turn` true, with no `stranger` participant. A conversation with a declined participant shows here only if a `person` participant is in it too. |
 | Records | Count for each record type. |
 | Feed | Feed items with `status` `new`, by publisher. |
 | Signals | Signals with `status` `active` and an `expires` time later than now. The engine sets `expired` at `expires`, so this also covers the time before the engine changes the status. |
@@ -1135,7 +1135,9 @@ with the original, whatever its own attention.
 The sections do not overlap. A conversation with a `stranger` participant
 shows only under Strangers, so each item shows one time and each section count
 is exact. An item whose stranger the person declined, with no other stranger,
-is in no section. The client uses the counts of the engine and does not remove
+is in no section. The exception is a conversation with a known person: it
+stays in Conversations, so a decline of one sender does not hide the thread of
+a known person. The client uses the counts of the engine and does not remove
 duplicates between sections.
 
 After the live login codes, the web client shows these sections first, in
