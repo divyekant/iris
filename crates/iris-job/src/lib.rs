@@ -220,7 +220,7 @@ pub fn create_for_request_in(
 }
 
 /// The person changes the goal and the due date of an open job (decision
-/// D25). Migration 49 keeps the values before and after in `job_edit`, and
+/// D25). Migration 50 keeps the values before and after in `job_edit`, and
 /// refuses an edit of a done job or an edit that changes nothing. An edit
 /// is not a move: the state, `updated` and the sessions do not change.
 pub fn edit(store: &Store, job: i64, goal: &str, due_ms: Option<i64>, now_ms: i64) -> Result<()> {
@@ -243,8 +243,8 @@ pub fn edit_in(
     )?;
     let at = last.map_or(now_ms, |l| now_ms.max(l));
     c.execute(
-        "INSERT INTO job_edit (job_id, at, goal_before, due_before, goal, due_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO job_edit (job_id, at, goal_before, due_before, goal, due_at, after_event)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, (SELECT max(id) FROM job_event WHERE job_id = ?1))",
         params![job, at, j.goal, j.due_ms, goal, due_ms],
     )?;
     Ok(())
@@ -470,9 +470,16 @@ pub struct Due {
 /// person at or after the due date. So the move happens once for each due
 /// date. The first event (the start, by the person) is not a move: a job
 /// that starts after its due date also moves.
+/// Rule 3 counts the events at or after the due date, and after the newest
+/// edit of the due date: an edit to a past date (decision D25) is a new due
+/// date, and an event before the edit does not count. The edit keeps the ID
+/// of the newest event (`after_event`), so the order holds also when the
+/// clock goes back.
 const DUE_SQL: &str = "j.state IN ('working', 'waiting') AND j.due_at <= ?1
      AND NOT EXISTS (SELECT 1 FROM job_event e WHERE e.job_id = j.id
-                     AND e.id > (SELECT min(f.id) FROM job_event f WHERE f.job_id = j.id)
+                     AND e.id > max((SELECT min(f.id) FROM job_event f WHERE f.job_id = j.id),
+                                    coalesce((SELECT max(d.after_event) FROM job_edit d
+                                              WHERE d.job_id = j.id AND d.due_at IS NOT d.due_before), 0))
                      AND e.at >= j.due_at AND (e.state = 'needs_you' OR e.by = 'person'))";
 
 /// The result of [`move_due`]: the moved jobs, and each job whose move

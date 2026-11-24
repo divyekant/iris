@@ -708,16 +708,31 @@ pub fn remove_ref(store: &Store, id: &str, what: &str, now_ms: i64) -> Result<bo
         return Ok(false);
     };
     iris_job::transaction(store, |c| {
-        // An item ID names the row and its form: `c-3` is not record 3.
+        match job_state(c, job)?.as_deref() {
+            None => return Ok(false),
+            Some("done") => return Err(iris_job::Error::Refused("the job is done".into())),
+            Some(_) => {}
+        }
+        // An item ID names the row and its form: `c-3` is not record 3. The
+        // form of the grant (`job_scope_form`) holds when the item row is
+        // gone. A ref from before migration 50 whose item row is gone has
+        // no known form: any item ID with its row number names it.
         let form_ok = match (r, form) {
-            (Ref::Item(i), Some(f)) => c
+            (Ref::Item(i), Some(f)) => match c
                 .query_row(
-                    "SELECT form = ?2 FROM item WHERE id = ?1",
-                    rusqlite::params![i, f],
-                    |r| r.get(0),
+                    "SELECT coalesce(i.form, sf.form) FROM job_scope s
+                     LEFT JOIN item i ON i.id = s.item_id
+                     LEFT JOIN job_scope_form sf ON sf.scope_id = s.id
+                     WHERE s.job_id = ?1 AND s.item_id = ?2 AND s.revoked_at IS NULL",
+                    rusqlite::params![job, i],
+                    |r| r.get::<_, Option<String>>(0),
                 )
                 .optional()?
-                .unwrap_or(false),
+            {
+                Some(Some(known)) => known == f,
+                Some(None) => true,
+                None => false,
+            },
             _ => true,
         };
         let active = form_ok && iris_job::scope_in(c, job)?.contains(&r);
@@ -735,14 +750,15 @@ pub fn remove_ref(store: &Store, id: &str, what: &str, now_ms: i64) -> Result<bo
 /// of an item) and the count of the granted messages.
 fn scope_list(c: &Connection, job: i64) -> rusqlite::Result<Value> {
     let mut q = c.prepare_cached(
-        "SELECT s.thread_id, i.form, s.item_id,
+        "SELECT s.thread_id, coalesce(i.form, sf.form), s.item_id,
            CASE WHEN s.thread_id IS NOT NULL THEN
-             (SELECT h.subject FROM message m JOIN header h ON h.message_id = m.id
+             (SELECT h.subject FROM message m LEFT JOIN header h ON h.message_id = m.id
               WHERE m.thread_id = s.thread_id
               ORDER BY coalesce(h.date, m.internal_date, 0), m.id LIMIT 1)
            ELSE json_extract(i.doc, '$.title') END,
            (SELECT count(*) FROM job_scope_message sm WHERE sm.scope_id = s.id)
          FROM job_scope s LEFT JOIN item i ON i.id = s.item_id
+           LEFT JOIN job_scope_form sf ON sf.scope_id = s.id
          WHERE s.job_id = ?1 AND s.revoked_at IS NULL ORDER BY s.id",
     )?;
     let rows = q.query_map([job], |r| {
@@ -752,6 +768,10 @@ fn scope_list(c: &Connection, job: i64) -> rusqlite::Result<Value> {
         let id = match (thread, form.as_deref(), item) {
             (Some(t), _, _) => Some(format_id(Kind::Thread, t)),
             (None, Some(f), Some(i)) => crate::read::item_id(i, f),
+            // No known form (a ref from before migration 50 whose item row
+            // is gone): the record form. The remove takes any item ID with
+            // this row number.
+            (None, None, Some(i)) => Some(format_id(Kind::Record, i)),
             _ => None,
         };
         Ok(json!({

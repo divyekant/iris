@@ -126,16 +126,24 @@ fn only_an_edit_changes_the_goal_or_the_due_date() {
     assert!(!sql(
         s,
         &format!(
-            "INSERT INTO job_edit (job_id, at, goal_before, due_before, goal, due_at)
-             VALUES ({job}, {NOW}, 'Z.', NULL, 'B.', NULL)"
+            "INSERT INTO job_edit (job_id, at, goal_before, due_before, goal, due_at, after_event)
+             VALUES ({job}, {NOW}, 'Z.', NULL, 'B.', NULL, (SELECT max(id) FROM job_event WHERE job_id = {job}))"
         )
     ));
     edit(s, job, "B.", None, NOW + 10).unwrap();
     assert!(!sql(
         s,
         &format!(
-            "INSERT INTO job_edit (job_id, at, goal_before, due_before, goal, due_at)
-             VALUES ({job}, {NOW}, 'B.', NULL, 'C.', NULL)"
+            "INSERT INTO job_edit (job_id, at, goal_before, due_before, goal, due_at, after_event)
+             VALUES ({job}, {NOW}, 'B.', NULL, 'C.', NULL, (SELECT max(id) FROM job_event WHERE job_id = {job}))"
+        )
+    ));
+    // An edit row must name the newest event of the job.
+    assert!(!sql(
+        s,
+        &format!(
+            "INSERT INTO job_edit (job_id, at, goal_before, due_before, goal, due_at, after_event)
+             VALUES ({job}, {NOW} + 20, 'B.', NULL, 'C.', NULL, 0)"
         )
     ));
     // An edit row never changes and is never deleted.
@@ -161,4 +169,40 @@ fn a_typed_start_with_the_same_request_makes_one_job() {
     assert_eq!(start("r-1"), (job, false));
     let (other, made) = start("r-2");
     assert!(made && other != job);
+}
+
+/// Decision D25 with D24: an edit to a past due date after an answer is a
+/// new due date. The job moves on the next step, once.
+#[test]
+fn an_edit_to_a_past_due_date_after_an_answer_moves_the_job_again() {
+    let f = fixture("past-due");
+    let s = &f.store;
+    let job = iris_job::create(s, "Book the dentist.", Some(NOW + 100), NOW).unwrap();
+    assert_eq!(iris_job::move_due(s, NOW + 100).unwrap().moved.len(), 1);
+    iris_job::answer(s, job, "Go on.", None, NOW + 110).unwrap();
+    assert!(iris_job::move_due(s, NOW + 115).unwrap().moved.is_empty());
+    iris_job::edit(s, job, "Book the dentist.", Some(NOW + 105), NOW + 120).unwrap();
+    assert_eq!(iris_job::move_due(s, NOW + 121).unwrap().moved.len(), 1);
+    assert_eq!(
+        iris_job::get(s, job).unwrap().state,
+        iris_job::State::NeedsYou
+    );
+    // An edit of the goal only is not a new due date.
+    iris_job::answer(s, job, "Go on.", None, NOW + 130).unwrap();
+    iris_job::edit(s, job, "Book the dentist soon.", Some(NOW + 105), NOW + 140).unwrap();
+    assert!(iris_job::move_due(s, NOW + 141).unwrap().moved.is_empty());
+}
+
+/// The order of a due edit and the events of a job holds when the clock
+/// goes back: an answer at 120, then an edit at 115 to a past date.
+#[test]
+fn a_due_edit_after_an_answer_counts_also_when_the_clock_goes_back() {
+    let f = fixture("clock-back");
+    let s = &f.store;
+    let job = iris_job::create(s, "Book the dentist.", Some(NOW + 100), NOW).unwrap();
+    assert_eq!(iris_job::move_due(s, NOW + 100).unwrap().moved.len(), 1);
+    iris_job::answer(s, job, "Go on.", None, NOW + 120).unwrap();
+    iris_job::edit(s, job, "Book the dentist.", Some(NOW + 108), NOW + 115).unwrap();
+    assert_eq!(iris_job::move_due(s, NOW + 116).unwrap().moved.len(), 1);
+    assert!(iris_job::move_due(s, NOW + 117).unwrap().moved.is_empty());
 }

@@ -949,6 +949,12 @@ pub fn attention_turn(
     system
 }
 
+/// Delete the mail of each removed account, with the workspaces of its
+/// jobs: [`iris_api::delete_removed`].
+pub fn delete_removed(store: &Store, only: Option<i64>) -> Result<Option<iris_store::Deleted>> {
+    Ok(iris_api::delete_removed(store, only)?)
+}
+
 /// The schedule: one sync thread for each account, so a long first sync of
 /// one account does not stop the syncs of the other accounts.
 pub struct Engine {
@@ -1027,6 +1033,11 @@ impl Engine {
                 .spawn(move || attention_loop(store))
                 .map_err(iris_store::Error::Io)?;
             self.attention = Some(handle);
+        }
+        // The delete of a removed account continues after a crash or a
+        // held lock.
+        if let Err(e) = delete_removed(&self.store, None) {
+            say!("iris: delete of a removed account: {e}");
         }
         if let Err(e) = self.store.reopen_deferred(now_ms()) {
             say!("iris: deferred commitments: {e}");

@@ -74,6 +74,10 @@ pub struct Status {
     /// (`iris zone`, decision D1). `None` when the time zone of the computer
     /// has no IANA name: then a client uses its own.
     pub time_zone: Option<String>,
+    /// The end of the wait after model errors (RFC 3339), while it runs.
+    /// No model call runs before it, unless the person asks for a try now
+    /// (`POST /api/model/try`, issue #136).
+    pub model_retry_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -315,8 +319,10 @@ pub struct Filter<'a> {
 pub fn status(store: &Store) -> Result<Status> {
     let mut status = store.read(|c| {
         let mut st = c.prepare(
+            // A removed account is a tombstone: not an account of the person.
+            // A removing one shows until its mail is gone.
             "SELECT id, address, provider, state, mirror_ready_at, sync_kind, sync_step
-             FROM account ORDER BY id",
+             FROM account WHERE state IS NOT 'removed' ORDER BY id",
         )?;
         let rows = st.query_map([], |r| {
             let kind: Option<String> = r.get(5)?;
@@ -365,6 +371,12 @@ pub fn status(store: &Store) -> Result<Status> {
             [iris_understand::batch::WAITS_INPUT],
             |r| r.get(0),
         )?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        let model_retry_at = iris_understand::batch::retry_after(c)?
+            .filter(|&t| t > now)
+            .map(rfc3339);
         Ok(Status {
             mode: iris_policy::active(c)?.policy.mode.name(),
             accounts,
@@ -372,6 +384,7 @@ pub fn status(store: &Store) -> Result<Status> {
             model,
             waits_model,
             time_zone: iris_store::time_zone(c)?.iana_name().map(str::to_string),
+            model_retry_at,
         })
     })?;
     settle_runs(store, &mut status.accounts)?;

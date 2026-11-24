@@ -1407,3 +1407,71 @@ fn a_tick_removes_the_grants_of_a_done_job() {
         .collect();
     assert_eq!(jobs, [Some(format!("j-{working}"))]);
 }
+
+/// docs/specs/2026-11-24-remove-account.md: the removal and the delete take
+/// only the mail of one account, a worker of the removed account syncs
+/// nothing more, and the address added again gets a full new copy.
+#[test]
+fn remove_one_account_and_add_it_again() {
+    let s = setup("remove-account", 30);
+    let other = FakeGmail::start(Mailbox::new(7, 30)).unwrap();
+    other.set_address("second@example.com");
+    let second = sign_in(
+        &s.store,
+        &gmail(other.base_url()),
+        &client_json(),
+        "refresh-two",
+    );
+    let worker_of = |account: i64, fake: &FakeGmail| {
+        Worker::new(
+            s.store.clone(),
+            gmail(fake.base_url()),
+            account,
+            Some(s.tokens.uri.clone()),
+        )
+    };
+    worker_of(s.account, &s.fake).sync().unwrap();
+    worker_of(second, &other).sync().unwrap();
+    let per_account = |account: i64| {
+        count(
+            &s.store,
+            &format!("SELECT count(*) FROM message WHERE account_id = {account}"),
+        )
+    };
+    // A worker that got its token before the removal.
+    let mut late = worker_of(second, &other);
+    late.sync().unwrap();
+
+    s.store
+        .remove_account("second@example.com", iris::engine::now_ms())
+        .unwrap();
+    assert!(!iris::engine::sync_accounts(&s.store)
+        .unwrap()
+        .contains(&second));
+    let done = iris::engine::delete_removed(&s.store, Some(second))
+        .unwrap()
+        .unwrap();
+    assert_eq!(done.accounts, 1);
+    assert_eq!((per_account(s.account), per_account(second)), (30, 0));
+    // The late worker writes nothing for the removed account.
+    other.modify_labels(&FakeGmail::id_of(1), &["STARRED"], &[]);
+    assert!(late.sync().is_err());
+    assert_eq!(per_account(second), 0);
+    assert_eq!(worker_of(s.account, &s.fake).verify().unwrap().total, 0);
+
+    // The same address again: a new account and a full first copy. The
+    // tombstone keeps the old ID.
+    let again = sign_in(
+        &s.store,
+        &gmail(other.base_url()),
+        &client_json(),
+        "refresh-three",
+    );
+    assert_ne!(again, second);
+    worker_of(again, &other).sync().unwrap();
+    assert_eq!((per_account(again), per_account(second)), (30, 0));
+    assert_eq!(worker_of(again, &other).verify().unwrap().total, 0);
+    assert!(!iris::engine::sync_accounts(&s.store)
+        .unwrap()
+        .contains(&second));
+}
