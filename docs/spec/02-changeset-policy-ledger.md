@@ -1115,6 +1115,7 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris list [<form>]` | Lists items, of one form if given. In session mode, only the items of the workspace, with the fields of `show` (card R4-04f). Host mode and the filters come in a later card (issue #523): until then, `iris list` in host mode gets exit code 2. | session | 1 |
 | `iris archive`, `inbox`, `label`, `unlabel`, `read`, `unread`, `trash` `<ids> [--changeset <cs-id>]` | Adds an action to a draft changeset. | both | 2 |
 | `iris close`, `defer`, `decline`, `correct` `<id> [--changeset <cs-id>]` | Adds a state action to a draft changeset. | both | 2 |
+| `iris skip`, `mute`, `dismiss` `<id> [--changeset <cs-id>]` | Adds a state action to a draft changeset. A session gets code 3: a job grants no feed, conversation or signal item. | host | 5 |
 | `iris changeset <cs-id>` | Shows a changeset. | both | 2 |
 | `iris revise <cs-id>` | Starts a new draft revision of a submitted changeset of the same author, after a review comment (section 5.5). | both | 4 |
 | `iris submit <cs-id> --why <text>` | Submits a draft changeset, and prints one result for each action. | both | 2 |

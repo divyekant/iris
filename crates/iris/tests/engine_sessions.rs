@@ -355,8 +355,101 @@ fn a_done_job_gets_its_workspace_again_after_the_reap() {
         now(),
     )
     .unwrap();
+    // Before the reap, no wake builds the workspace: the agent can still
+    // run (#356).
+    for _ in 0..3 {
+        s.wake(now());
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(marker.exists(), "the build ran before the reap");
+    }
     let row = until(&s, &f, id, |r| r.reaped_ms.is_some());
     assert_eq!(row.end, Some(EndReason::JobState));
+    gone(&marker);
+    appears(&workspace(&f).join("JOB.md"));
+}
+
+fn done_of_the_agent_ends_the_session_and_the_mail_files() {
+    let f = fixture("agentdone", "sleep 30");
+    let s = sessions(&f);
+    let id = s.run(f.job, "script").unwrap();
+    until(&s, &f, id, |r| r.started_ms.is_some());
+    let marker = workspace(&f).join(".iris/marker");
+    fs::write(&marker, "x").unwrap();
+    let v = ask(&f, "done", serde_json::json!({ "why": 7 })).unwrap();
+    assert_eq!(v["code"], 2, "{v}");
+    let v = ask(
+        &f,
+        "done",
+        serde_json::json!({ "why": "Sent the contract." }),
+    )
+    .unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["result"]["state"], "done", "{v}");
+    let job = iris_job::get(&f.store, f.job).unwrap();
+    assert_eq!(job.state, iris_job::State::Done);
+    assert_eq!(job.end, Some(iris_job::End::Complete));
+    let row = until(&s, &f, id, |r| r.reaped_ms.is_some());
+    assert_eq!(row.end, Some(EndReason::JobState));
+    gone(&marker);
+    appears(&workspace(&f).join("JOB.md"));
+}
+
+/// A launch that the finish of the person refuses before the register
+/// leaves no session to reap: the mail files go all the same (#356).
+fn a_launch_refused_for_a_done_job_removes_the_mail_files() {
+    let f = fixture("launchdone", "true");
+    let s = sessions(&f);
+    let marker = workspace(&f).join(".iris/marker");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "x").unwrap();
+    s.wake(now());
+    iris_job::finish(
+        &f.store,
+        f.job,
+        By::Person,
+        iris_job::End::Cancel,
+        None,
+        now(),
+    )
+    .unwrap();
+    assert!(s.run(f.job, "script").is_err());
+    gone(&marker);
+}
+
+/// The command `iris done` of the agent, in its workspace, completes the
+/// job through the session socket (#356).
+fn the_done_command_of_the_agent_completes_the_job() {
+    let script = format!("{} done --why 'Sent it.'", env!("CARGO_BIN_EXE_iris"));
+    let f = fixture("donecmd", &script);
+    let s = sessions(&f);
+    let id = s.run(f.job, "script").unwrap();
+    let row = until(&s, &f, id, |r| r.reaped_ms.is_some());
+    assert_eq!(row.end, Some(EndReason::JobState), "{row:?}");
+    let job = iris_job::get(&f.store, f.job).unwrap();
+    assert_eq!(job.state, iris_job::State::Done);
+    assert_eq!(job.end, Some(iris_job::End::Complete));
+    let last = iris_job::events(&f.store, f.job).unwrap().pop().unwrap();
+    assert_eq!(last.why.as_deref(), Some("Sent it."));
+}
+
+fn a_job_the_person_ends_with_no_session_gets_its_workspace_again() {
+    let f = fixture("persondone", "true");
+    let s = sessions(&f);
+    let marker = workspace(&f).join(".iris/marker");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "x").unwrap();
+    s.wake(now());
+    assert!(marker.exists(), "a working job keeps its workspace");
+    iris_job::finish(
+        &f.store,
+        f.job,
+        By::Person,
+        iris_job::End::Cancel,
+        None,
+        now(),
+    )
+    .unwrap();
+    s.wake(now());
     gone(&marker);
     appears(&workspace(&f).join("JOB.md"));
 }
@@ -1457,6 +1550,22 @@ fn main() {
         (
             "the_engine_log_names_bad_notes_at_the_launch_and_the_done_rebuild",
             the_engine_log_names_bad_notes_at_the_launch_and_the_done_rebuild,
+        ),
+        (
+            "done_of_the_agent_ends_the_session_and_the_mail_files",
+            done_of_the_agent_ends_the_session_and_the_mail_files,
+        ),
+        (
+            "the_done_command_of_the_agent_completes_the_job",
+            the_done_command_of_the_agent_completes_the_job,
+        ),
+        (
+            "a_launch_refused_for_a_done_job_removes_the_mail_files",
+            a_launch_refused_for_a_done_job_removes_the_mail_files,
+        ),
+        (
+            "a_job_the_person_ends_with_no_session_gets_its_workspace_again",
+            a_job_the_person_ends_with_no_session_gets_its_workspace_again,
         ),
         (
             "a_comment_during_a_session_starts_one_session_after_it",

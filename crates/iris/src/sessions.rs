@@ -75,6 +75,10 @@ pub struct Sessions {
     /// build can wait for the workspace lock without a limit, so no
     /// supervisor turn and no stop waits for it.
     builds: mpsc::Sender<i64>,
+    /// The done jobs that this engine sent to the build thread. A done job
+    /// gets one build at the first wake with no live session and no launch
+    /// of the job; a reap also builds it.
+    done_seen: Mutex<HashSet<i64>>,
     /// The egress proxies that the stop thread stops. A stop joins the
     /// threads of the proxy, so no supervisor turn and no stop or run
     /// waits for it.
@@ -165,6 +169,7 @@ impl Sessions {
             tried: Mutex::default(),
             comment_tried: Mutex::default(),
             builds,
+            done_seen: Mutex::default(),
             releases,
         });
         let live: HashSet<i64> = iris_job::live_sessions(&s.store)
@@ -172,11 +177,14 @@ impl Sessions {
             .iter()
             .map(|l| l.job_id)
             .collect();
+        let mut seen = s.done_seen.lock().unwrap_or_else(|e| e.into_inner());
         for job in iris_job::list(&s.store, iris_job::State::Done).map_err(|e| e.to_string())? {
+            seen.insert(job.id);
             if !live.contains(&job.id) {
                 let _ = s.builds.send(job.id);
             }
         }
+        drop(seen);
         s.remove_old_logs();
         Ok(s)
     }
@@ -264,6 +272,10 @@ impl Sessions {
             Ok(b) => b,
             Err(e) => {
                 self.launch_over(job);
+                // No session: no reap builds a job that moved to done
+                // during the launch (#356). The build checks the live
+                // sessions again.
+                let _ = self.builds.send(job);
                 return Err(e);
             }
         };
@@ -708,6 +720,7 @@ impl Sessions {
             say!("iris: the wake of the waiting jobs failed: {e}");
         }
         self.comment_wake(now);
+        self.done_builds();
         let Ok(woken) = iris_job::woken(&self.store) else {
             return;
         };
@@ -728,6 +741,37 @@ impl Sessions {
                     "iris: {}: the session after the wake did not start: {e}",
                     iris_job::format_job_id(job)
                 );
+            }
+        }
+    }
+
+    /// One build for each done job that this engine did not build yet and
+    /// that has no live session or launch now: the mail files of its
+    /// workspace go (docs/specs/2026-11-16-job-workspace.md). A job with a
+    /// live session or a launch waits for a later wake.
+    fn done_builds(&self) {
+        // Only the IDs: the index `job_state` covers the read.
+        let Ok(done) = self.store.read(|c| {
+            let mut q = c.prepare_cached("SELECT id FROM job WHERE state = 'done'")?;
+            let ids = q.query_map([], |r| r.get::<_, i64>(0))?;
+            Ok(ids.collect::<rusqlite::Result<Vec<i64>>>()?)
+        }) else {
+            return;
+        };
+        // A failed read builds nothing: the next wake reads again.
+        let Ok(live) = iris_job::live_sessions(&self.store) else {
+            return;
+        };
+        let mut seen = self.done_seen.lock().unwrap_or_else(|e| e.into_inner());
+        for job in done {
+            if seen.contains(&job) {
+                continue;
+            }
+            // A job with a live session or a launch stays for a later wake:
+            // a launch can end with no session, so no reap builds it.
+            if live.iter().all(|s| s.job_id != job) && !self.state().launching.contains(&job) {
+                seen.insert(job);
+                let _ = self.builds.send(job);
             }
         }
     }
@@ -809,12 +853,16 @@ impl Sessions {
 
 /// Builds the workspace of `job` again if the job is done and its
 /// workspace folder exists: the mail files go, and the files of the agent
-/// stay. The caller sends only a job with no live session; a done job
-/// gets no new session.
+/// stay. A done job gets no new session. The build waits for the reap: with
+/// a live session of the job, or when the read of the live sessions fails,
+/// nothing changes, and the reap of the session sends the job again.
 fn build_done(store: &Store, job: i64) {
     let dir = iris_workspace::default_dir(store.dir(), job);
     let done = iris_job::get(store, job).is_ok_and(|j| j.state == iris_job::State::Done);
     if !done || std::fs::symlink_metadata(&dir).is_err() {
+        return;
+    }
+    if !iris_job::live_sessions(store).is_ok_and(|l| l.iter().all(|s| s.job_id != job)) {
         return;
     }
     match iris_workspace::build(store, job, &dir) {

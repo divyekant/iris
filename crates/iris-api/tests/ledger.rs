@@ -401,6 +401,17 @@ async fn a_state_verb_names_its_item() {
     assert_eq!(e["state"], "applied");
     assert_eq!(e["items"], 1);
     assert_eq!(e["title"], doc["title"]);
+    // The title of an item of hostile mail is not shown, and comes back
+    // when the state clears.
+    s.put_labels(1, &[("SPAM", "SPAM", "system")]).unwrap();
+    for (set, clear) in HOSTILE {
+        s.write(|tx| Ok(tx.execute_batch(set)?)).unwrap();
+        let (_, p) = call(&s, false, "/api/ledger").await;
+        assert_eq!(p["entries"][0]["title"], Value::Null, "{set}");
+        s.write(|tx| Ok(tx.execute_batch(clear)?)).unwrap();
+        let (_, p) = call(&s, false, "/api/ledger").await;
+        assert_eq!(p["entries"][0]["title"], doc["title"], "{clear}");
+    }
     assert_eq!(e["messages"], 0);
     assert_eq!(e["can_undo"], true);
     let undo = format!("/api/ledger/{}/undo", e["id"].as_str().unwrap());
@@ -455,3 +466,24 @@ async fn an_entry_keeps_the_reason_of_its_revision() {
     let (_, p) = call(&s, false, "/api/ledger").await;
     assert_eq!(p["entries"][0]["why"], "Tidy up.");
 }
+
+/// The three states of hostile mail of message 1 (issue 112): the SQL that
+/// sets each one, and the SQL that clears it.
+const HOSTILE: [(&str, &str); 3] = [
+    (
+        "UPDATE message SET hostile = '[\"lookalike\"]' WHERE id = 1",
+        "UPDATE message SET hostile = '[]' WHERE id = 1",
+    ),
+    (
+        "INSERT INTO message_label(message_id, label_id)
+           SELECT 1, id FROM label WHERE provider_id = 'SPAM'",
+        "DELETE FROM message_label WHERE message_id = 1
+           AND label_id IN (SELECT id FROM label WHERE provider_id = 'SPAM')",
+    ),
+    (
+        "UPDATE header SET from_addr = 'bad@example.com' WHERE message_id = 1;
+         INSERT INTO sender(address, kind) VALUES ('bad@example.com', 'hostile')
+           ON CONFLICT(address) DO UPDATE SET kind = 'hostile'",
+        "UPDATE sender SET kind = 'person' WHERE address = 'bad@example.com'",
+    ),
+];

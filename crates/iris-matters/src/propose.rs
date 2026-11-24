@@ -72,14 +72,18 @@ struct Sent {
 
 /// The eligibility of step 1, for one item `i` with its origin message
 /// `msg`. One text for the read of step 1 and the check of step 6.
-const ELIGIBLE: &str = "i.form IN ('commitment', 'conversation', 'record')
+const ELIGIBLE: &str = concat!(
+    "NOT ",
+    iris_store::from_hostile_mail!("i"),
+    " AND i.form IN ('commitment', 'conversation', 'record')
     AND i.status NOT IN ('gone', 'cancelled', 'declined')
     AND i.duplicate_of IS NULL
     AND coalesce(json_extract(i.doc, '$.attention.state'), 'shown') <> 'hidden'
     AND i.updated_at >= ?1
     AND NOT EXISTS (
       SELECT 1 FROM matter_item mi JOIN matter m ON m.id = mi.matter_id
-      WHERE mi.item_id = i.id AND mi.kept = 1 AND m.status IN ('proposed', 'confirmed'))";
+      WHERE mi.item_id = i.id AND mi.kept = 1 AND m.status IN ('proposed', 'confirmed'))"
+);
 
 pub const INSTRUCTION: &str = "You group the items of one person's mail into matters. \
 A matter is a part of the person's life that spans several items from different threads: \

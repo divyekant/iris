@@ -387,6 +387,11 @@ fn a_session_cannot_draft_send_or_nudge() {
         let e = add(&store, &me, verb, &["t-1"], json!({})).unwrap_err();
         assert_eq!(e.0, code::DENIED, "{verb}");
     }
+    // A job grants no feed, conversation or signal item (issue #441).
+    for (verb, item) in [("skip", "f-1"), ("mute", "v-1"), ("dismiss", "s-1")] {
+        let e = add(&store, &me, verb, &[item], json!({ "reason": "x" })).unwrap_err();
+        assert_eq!(e.0, code::DENIED, "{verb}");
+    }
     assert_eq!(count(&store, "SELECT count(*) FROM changeset"), 0);
     // A draft action that another path wrote into a session changeset.
     let cs = add(&store, &me, "archive", &["t-1"], json!({})).unwrap();

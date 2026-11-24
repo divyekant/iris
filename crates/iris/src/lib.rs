@@ -117,6 +117,13 @@ pub enum Command {
         /// The question, at most 2000 characters.
         question: String,
     },
+    /// In a job workspace: the job is complete. The session ends, and Iris
+    /// removes the mail files of the workspace. A verb of a session only.
+    Done {
+        /// What the agent did, for the person. At most 2000 characters.
+        #[arg(long)]
+        why: Option<String>,
+    },
     /// Copy the data folder to a new folder while the engine runs.
     Backup {
         /// The backup folder. It must not exist, or must be empty.
@@ -168,6 +175,33 @@ pub enum Command {
     Decline {
         id: String,
         /// The reason, at most 500 characters. The default is "Declined.".
+        #[arg(long)]
+        reason: Option<String>,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Skip a feed item (`f-3`) in a draft changeset. Needs the engine.
+    Skip {
+        id: String,
+        /// The reason, at most 500 characters. The default is "Skipped.".
+        #[arg(long)]
+        reason: Option<String>,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Mute a conversation item in a draft changeset. Needs the engine.
+    Mute {
+        id: String,
+        /// The reason, at most 500 characters. The default is "Muted.".
+        #[arg(long)]
+        reason: Option<String>,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Dismiss a signal item in a draft changeset. Needs the engine.
+    Dismiss {
+        id: String,
+        /// The reason, at most 500 characters. The default is "Dismissed.".
         #[arg(long)]
         reason: Option<String>,
         #[command(flatten)]
@@ -348,6 +382,13 @@ pub enum JobCommand {
         /// The answer, at most 10000 characters.
         text: String,
     },
+    /// End the job as complete, or with `--cancel` as cancelled. A session
+    /// of the job ends, and Iris removes the mail files of its workspace.
+    Finish {
+        id: String,
+        #[arg(long)]
+        cancel: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -434,6 +475,13 @@ fn action(c: &Command) -> Result<Option<Action<'_>>, socket::Failure> {
         Command::Close { id, reason: r, to } => ("close", vec![id.clone()], reason(r, "Done."), to),
         Command::Decline { id, reason: r, to } => {
             ("decline", vec![id.clone()], reason(r, "Declined."), to)
+        }
+        Command::Skip { id, reason: r, to } => {
+            ("skip", vec![id.clone()], reason(r, "Skipped."), to)
+        }
+        Command::Mute { id, reason: r, to } => ("mute", vec![id.clone()], reason(r, "Muted."), to),
+        Command::Dismiss { id, reason: r, to } => {
+            ("dismiss", vec![id.clone()], reason(r, "Dismissed."), to)
         }
         Command::Defer { id, date, to } => ("defer", vec![id.clone()], json!({ "date": date }), to),
         Command::Correct {
@@ -633,7 +681,8 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
         let (JobCommand::Run { id, .. }
         | JobCommand::Stop { id }
         | JobCommand::Session { id }
-        | JobCommand::Answer { id, .. }) = command;
+        | JobCommand::Answer { id, .. }
+        | JobCommand::Finish { id, .. }) = command;
         if iris_job::parse_job_id(id).is_none() {
             return Err(socket::Failure {
                 code: socket::code::USAGE,
@@ -653,7 +702,11 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
             return r;
         }
     }
-    if let Command::List { .. } | Command::Wait { .. } | Command::Ask { .. } = &cli.command {
+    if let Command::List { .. }
+    | Command::Wait { .. }
+    | Command::Ask { .. }
+    | Command::Done { .. } = &cli.command
+    {
         return Err(socket::Failure {
             code: socket::code::USAGE,
             error: "this is a verb of a session: run it in a job workspace".into(),
@@ -761,6 +814,14 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
             "a session cannot draft, send or nudge: a job has no grant of an account or a draft",
         ));
     }
+    if matches!(
+        c,
+        Command::Skip { .. } | Command::Mute { .. } | Command::Dismiss { .. }
+    ) {
+        return Err(denied(
+            "a session cannot skip, mute or dismiss: a job grants no feed, conversation or signal item",
+        ));
+    }
     if let Command::Wait { until, reply, why } = c {
         // The wait ends this session: after a lost answer, `iris status`
         // in a new session, or the job page, shows the state of the job.
@@ -784,6 +845,15 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
             "{} asks the person and waits for the answer",
             verbs::field(r["job"].as_str().unwrap_or("-"))
         );
+        return Ok(());
+    }
+    if let Command::Done { why } = c {
+        // The done ends this session: after a lost answer, the job page
+        // shows the state of the job.
+        let args = serde_json::json!({ "why": why });
+        let r = socket::request_at(path, "done", args, socket::ANSWER_WAIT, "the job page")
+            .map_err(unreachable)?;
+        println!("{} is done", verbs::field(r["job"].as_str().unwrap_or("-")));
         return Ok(());
     }
     // The read verbs of a session (R4-04f): only the grant of the job.
@@ -925,7 +995,9 @@ fn job_request(dir: &std::path::Path, c: &JobCommand) -> Option<Result<(), socke
             serde_json::json!({ "job": id, "agent": agent }),
         ),
         JobCommand::Stop { id } => ("job.stop", id, serde_json::json!({ "job": id })),
-        JobCommand::Session { .. } | JobCommand::Answer { .. } => return None,
+        JobCommand::Session { .. } | JobCommand::Answer { .. } | JobCommand::Finish { .. } => {
+            return None
+        }
     };
     Some(
         match socket::request_with(
@@ -1390,9 +1462,10 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
         // `run` refuses it in host mode, before the store.
-        Command::List { .. } | Command::Wait { .. } | Command::Ask { .. } => {
-            Err("this is a verb of a session".into())
-        }
+        Command::List { .. }
+        | Command::Wait { .. }
+        | Command::Ask { .. }
+        | Command::Done { .. } => Err("this is a verb of a session".into()),
         Command::Watch { command } => print(verbs::watch(&open()?, command)),
         Command::Job {
             command: JobCommand::Session { id },
@@ -1423,6 +1496,26 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             iris_api::answer_job(&store, job, text, None, engine::now_ms())
                 .map_err(|e| e.to_string())?;
             println!("{id}: answered. Iris starts a new session of the job.");
+            Ok(())
+        }
+        Command::Job {
+            command: JobCommand::Finish { id, cancel },
+        } => {
+            let job = iris_job::parse_job_id(id).ok_or(format!("{id} is not a job ID"))?;
+            let store = open()?;
+            iris_api::job_row(&store, id)
+                .map_err(|e| e.to_string())?
+                .ok_or(format!("no job has the ID {id}"))?;
+            let end = if *cancel {
+                iris_job::End::Cancel
+            } else {
+                iris_job::End::Complete
+            };
+            iris_api::finish_job(&store, job, end, engine::now_ms()).map_err(|e| e.to_string())?;
+            println!(
+                "{id}: done. The engine removes the mail files of its workspace when no \
+                 session of the job runs, or at its next start."
+            );
             Ok(())
         }
         Command::Job { .. } => Err("the engine socket runs this verb".into()),
@@ -1534,6 +1627,9 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         | Command::Submit { .. }
         | Command::Close { .. }
         | Command::Decline { .. }
+        | Command::Skip { .. }
+        | Command::Mute { .. }
+        | Command::Dismiss { .. }
         | Command::Defer { .. }
         | Command::Correct { .. }
         | Command::Archive(_)
