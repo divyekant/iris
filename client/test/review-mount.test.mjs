@@ -14,7 +14,8 @@ function serve(routes = {}) {
   globalThis.fetch = async (url, init) => {
     const path = String(url).replace(/^\/api\//, "");
     asked.push(init?.body ? [path, JSON.parse(init.body)] : path);
-    const route = routes[path];
+    // The comment box of an agent author loads its comments (decision D15).
+    const route = routes[path] ?? (path.endsWith("/comments") ? [200, { comments: [] }] : undefined);
     // A function route can wait, throw (no answer) or answer with the request body.
     const [status, body] = typeof route === "function" ? await route(init?.body ? JSON.parse(init.body) : undefined) : (route ?? [200, fx.answer(`/${path}`)]);
     return new Response(JSON.stringify(body ?? { error: "Not found." }), { status: body === undefined ? 404 : status, headers: { "content-type": "application/json" } });
