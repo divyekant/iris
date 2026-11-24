@@ -450,11 +450,12 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
         Some("add") => {
             only(&["verb", "targets", "args", "why", "changeset"])?;
             let verb = text(args, "verb")?;
-            if session && matches!(verb, Some("draft" | "send" | "nudge")) {
+            // A session drafts only a reply in a granted thread (decision
+            // D3): submit checks the grant. Only a person sends.
+            if session && matches!(verb, Some("send" | "nudge")) {
                 return Err(Failure::new(
                     code::DENIED,
-                    "a session cannot draft, send or nudge: a job has no grant of an \
-                     account or a draft",
+                    "a session cannot send or nudge: only a person sends mail",
                 ));
             }
             // A job grants only commitments and records

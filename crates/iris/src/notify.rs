@@ -239,10 +239,15 @@ mod tests {
         assert!(command("windows", "t", "x").is_none());
     }
 
-    fn notice(id: i64) -> Shown {
-        Shown {
-            title: format!("t{id}"),
+    fn notice(id: i64) -> iris_policy::notice::Notice {
+        iris_policy::notice::Notice {
+            id,
+            message_id: id,
+            rule: 1,
+            rule_name: "r".into(),
+            title: "t".into(),
             text: "x".into(),
+            created_at: 0,
         }
     }
 
@@ -264,7 +269,7 @@ mod tests {
         let tx = spawn(|_| std::thread::sleep(Duration::from_secs(1)));
         let t = Instant::now();
         for id in 0..(QUEUE as i64 + 20) {
-            let _ = tx.try_send(notice(id));
+            let _ = tx.try_send(Shown::rule(&notice(id)));
         }
         assert!(
             t.elapsed() < Duration::from_millis(500),

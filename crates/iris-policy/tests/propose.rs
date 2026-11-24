@@ -327,6 +327,8 @@ fn each_proposal_agrees_with_the_decisions() {
                     author: Author::Agent,
                     job: None,
                     bulk: false,
+                    warning: false,
+                    in_thread: false,
                     now: NOW,
                 };
                 let d = policy.decide(&action, fs.iter().map(Facts::message));
@@ -469,4 +471,60 @@ fn a_confirmed_file_with_the_rule_accepts_the_proposal() {
         Edited::Done { .. }
     ));
     assert!(find(&refresh(&store), "deals@shop.example").is_none());
+}
+
+/// Decision D11: approvals on two addresses of one domain give one
+/// proposal for the domain, and one address gives none.
+#[test]
+fn two_addresses_of_one_domain_give_one_domain_proposal() {
+    let (_dir, store) = store("domain");
+    for _ in 0..MIN_APPROVALS {
+        let m = message(&store, "deals@shop.example", false);
+        decided(&store, "trash", &[m], "approved");
+    }
+    let ps = refresh(&store);
+    assert!(find(&ps, "deals@shop.example").is_some(), "{ps:?}");
+    assert!(find(&ps, "@shop.example").is_none(), "one address: {ps:?}");
+    let m = message(&store, "news@shop.example", false);
+    decided(&store, "trash", &[m], "approved");
+    let ps = refresh(&store);
+    let d = find(&ps, "@shop.example").expect("a domain proposal");
+    assert_eq!(d.approvals, MIN_APPROVALS + 1);
+    assert_eq!(
+        d.rule(7, "2027-01-15").name,
+        "Trash mail from anyone at shop.example"
+    );
+    assert!(
+        find(&ps, "deals@shop.example").is_none(),
+        "the domain covers it"
+    );
+    // The accept writes the domain rule, and the rule matches both addresses.
+    let id = d.id;
+    let Edited::Done { policy, .. } = change(&store, None, Change::Accept(id), NOW).unwrap() else {
+        panic!("accept")
+    };
+    let rule = policy.rules.last().unwrap();
+    assert_eq!(rule.when.sender.as_deref(), Some("@shop.example"));
+    assert!(refresh(&store).iter().all(|p| p.verb != Some(Verb::Trash)));
+}
+
+/// A refusal for one address of a domain stops the domain proposal.
+#[test]
+fn a_refusal_for_one_address_stops_the_domain() {
+    let (_dir, store) = store("domain-refusal");
+    for from in ["deals@shop.example", "news@shop.example"] {
+        for _ in 0..MIN_APPROVALS {
+            let m = message(&store, from, false);
+            decided(&store, "archive", &[m], "approved");
+        }
+    }
+    assert!(find(&refresh(&store), "@shop.example").is_some());
+    let m = message(&store, "news@shop.example", false);
+    decided(&store, "archive", &[m], "denied");
+    let ps = refresh(&store);
+    assert!(find(&ps, "@shop.example").is_none(), "{ps:?}");
+    assert!(
+        find(&ps, "deals@shop.example").is_some(),
+        "the other address keeps its proposal: {ps:?}"
+    );
 }

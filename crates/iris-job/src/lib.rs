@@ -220,7 +220,7 @@ pub fn create_for_request_in(
 }
 
 /// The person changes the goal and the due date of an open job (decision
-/// D25). Migration 47 keeps the values before and after in `job_edit`, and
+/// D25). Migration 49 keeps the values before and after in `job_edit`, and
 /// refuses an edit of a done job or an edit that changes nothing. An edit
 /// is not a move: the state, `updated` and the sessions do not change.
 pub fn edit(store: &Store, job: i64, goal: &str, due_ms: Option<i64>, now_ms: i64) -> Result<()> {
@@ -468,19 +468,33 @@ pub struct Due {
 /// row `j`: an open job that does not wait for the person, at or after its
 /// due date (`?1` is now), with no move to `needs_you` and no move by the
 /// person at or after the due date. So the move happens once for each due
-/// date.
+/// date. The first event (the start, by the person) is not a move: a job
+/// that starts after its due date also moves.
 const DUE_SQL: &str = "j.state IN ('working', 'waiting') AND j.due_at <= ?1
      AND NOT EXISTS (SELECT 1 FROM job_event e WHERE e.job_id = j.id
+                     AND e.id > (SELECT min(f.id) FROM job_event f WHERE f.job_id = j.id)
                      AND e.at >= j.due_at AND (e.state = 'needs_you' OR e.by = 'person'))";
 
+/// The result of [`move_due`]: the moved jobs, and each job whose move
+/// failed, with its error.
+#[derive(Debug, Default)]
+pub struct DueTurn {
+    pub moved: Vec<Due>,
+    pub failed: Vec<(i64, Error)>,
+}
+
 /// Moves each job that is due at `now_ms` to `needs_you` ([`due_jobs`],
-/// then [`move_due_one`] for each). Gives the moved jobs.
-pub fn move_due(store: &Store, now_ms: i64) -> Result<Vec<Due>> {
-    let mut moved = Vec::new();
+/// then [`move_due_one`] for each). The failure of one job does not stop
+/// the others, and a move that committed stays in `moved`.
+pub fn move_due(store: &Store, now_ms: i64) -> Result<DueTurn> {
+    let mut turn = DueTurn::default();
     for id in due_jobs(store, now_ms)? {
-        moved.extend(move_due_one(store, id, now_ms)?);
+        match move_due_one(store, id, now_ms) {
+            Ok(m) => turn.moved.extend(m),
+            Err(e) => turn.failed.push((id, e)),
+        }
     }
-    Ok(moved)
+    Ok(turn)
 }
 
 /// The IDs of the jobs that are due at `now_ms`, in a read (no write lock).
@@ -500,6 +514,8 @@ pub fn due_jobs(store: &Store, now_ms: i64) -> Result<Vec<i64>> {
 /// [`due_jobs`] wins, and this gives `None`.
 pub fn move_due_one(store: &Store, job: i64, now_ms: i64) -> Result<Option<Due>> {
     transaction(store, |c| {
+        // A goal that is not UTF-8 fails here, before the move: each reader
+        // of the job refuses it, so the job must not ask a question.
         let still: Option<String> = c
             .query_row(
                 &format!("SELECT j.goal FROM job j WHERE j.id = ?2 AND {DUE_SQL}"),
@@ -517,7 +533,10 @@ pub fn move_due_one(store: &Store, job: i64, now_ms: i64) -> Result<Option<Due>>
         };
         // Not before the newest event: a clock that goes back must not fail
         // the move (as [`finish_in`]).
-        let at = now_ms.max(get_in(c, job)?.updated_ms);
+        let updated: i64 = c.query_row("SELECT updated_at FROM job WHERE id = ?1", [job], |r| {
+            r.get(0)
+        })?;
+        let at = now_ms.max(updated);
         add_event(c, job, State::NeedsYou, By::Engine, m, at)?;
         Ok(Some(Due { id: job, goal }))
     })

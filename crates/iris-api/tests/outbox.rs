@@ -50,6 +50,7 @@ fn store(dir: &TempDir) -> Arc<Store> {
             cc: vec!["dana@example.com".into()],
             subject: "Q4 plan".into(),
             body: "Hello".into(),
+            ..Default::default()
         }
         .check()
         .unwrap();
