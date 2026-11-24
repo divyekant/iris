@@ -82,7 +82,7 @@ fn open_makes_the_data_folder() {
     }
     store
         .read(|c| {
-            assert_eq!(iris_store::schema_version(c)?, 42);
+            assert_eq!(iris_store::schema_version(c)?, 43);
             let journal: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
             assert_eq!(journal, "wal");
             let cache: i64 = c.query_row("PRAGMA cache_size", [], |r| r.get(0))?;
@@ -832,6 +832,31 @@ fn a_sender_lookup_without_case_uses_an_index() {
     assert!(
         plan.iter()
             .any(|p| p.contains("USING INDEX sender_address_nocase")),
+        "{plan:?}"
+    );
+}
+
+#[test]
+fn the_changesets_of_one_job_use_an_index() {
+    // Issue 311: the job page finds the changesets of a job by
+    // `author_job` with an index search, not a scan of each changeset.
+    let dir = std::env::temp_dir().join(format!("iris-store-author-job-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    let plan: Vec<String> = store
+        .read(|c| {
+            Ok(
+                c.prepare("EXPLAIN QUERY PLAN SELECT id FROM changeset c WHERE c.author_job = ?1")?
+                    .query_map(["j-1"], |r| r.get(3))?
+                    .collect::<rusqlite::Result<_>>()?,
+            )
+        })
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        plan.iter()
+            .any(|p| p.contains("USING INDEX changeset_author_job")
+                || p.contains("USING COVERING INDEX changeset_author_job")),
         "{plan:?}"
     );
 }
