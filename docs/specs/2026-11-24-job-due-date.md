@@ -194,9 +194,14 @@ The new migration runs at the next start of the engine.
 ## Risks
 
 A wrong rule 3 can move a job again and again. The unit tests cover each
-case of rule 3. Rollback: revert the PR. The migration only makes a trigger
-again; an old engine on a new store allows the `due` move but never makes
-it.
+case of rule 3.
+
+Rollback: an old engine refuses a store with a newer schema version
+(`Error::UnknownSchema`), so a revert of the code alone does not open the
+store. Fix forward with a new PR, or stop the engine and restore the backup
+that the migration made (`iris.db.v<n>.<time>-<random>.bak` in the data
+folder, specification 1, section 5.5). A restore loses the changes after the
+migration.
 
 ## Plan
 
