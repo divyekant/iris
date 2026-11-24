@@ -23,6 +23,11 @@ pub struct WriteBody {
     pub parent: Option<String>,
     pub to: Vec<String>,
     pub cc: Vec<String>,
+    /// Send content spec, section 6.1: can be absent.
+    #[serde(default)]
+    pub bcc: Vec<String>,
+    #[serde(default)]
+    pub attachments: Vec<iris_compose::Attachment>,
     pub subject: Option<String>,
     pub body: String,
     pub key: String,
@@ -63,6 +68,14 @@ pub fn write(store: &Store, b: &WriteBody, now_ms: i64) -> Result<Pressed> {
     args.insert("to".into(), json!(b.to));
     args.insert("cc".into(), json!(b.cc));
     args.insert("body".into(), json!(b.body));
+    // Only a field that is not empty: the args (and the request hash) of a
+    // mail with no Bcc and no file stay as before.
+    if !b.bcc.is_empty() {
+        args.insert("bcc".into(), json!(b.bcc));
+    }
+    if !b.attachments.is_empty() {
+        args.insert("attachments".into(), json!(b.attachments));
+    }
     let mail = match (&b.account, &b.thread) {
         (Some(account), None) => {
             if b.parent.is_some() {

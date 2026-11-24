@@ -651,3 +651,70 @@ async fn an_old_write_is_stopped() {
     let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
     assert_eq!(st, old);
 }
+
+/// One raw request body, with no JSON.
+async fn upload(store: &Arc<Store>, bytes: Vec<u8>) -> (StatusCode, Value) {
+    let auth = Arc::new(Auth::new("127.0.0.1:4800".parse().unwrap()).unwrap());
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/attachments")
+        .header("host", "127.0.0.1:4800")
+        .header("authorization", auth.bearer())
+        .header("content-type", "application/octet-stream")
+        .body(Body::from(bytes))
+        .unwrap();
+    let res = iris_api::router(store.clone(), auth)
+        .oneshot(req)
+        .await
+        .unwrap();
+    let code = res.status();
+    let body = to_bytes(res.into_body(), 1 << 20).await.unwrap();
+    (code, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+/// Send content spec, sections 2 and 6.1: an upload writes the file to
+/// the attachment folder; a file over the limit gets 413; the press of
+/// Send takes the entry, and the same key with another file gets 409.
+#[tokio::test]
+async fn a_file_goes_into_the_folder_and_into_the_press() {
+    let dir = temp("file");
+    let s = store(&dir);
+    let (code, v) = upload(&s, b"%PDF-1 numbers".to_vec()).await;
+    assert_eq!(code, StatusCode::CREATED, "{v}");
+    let sha = v["sha256"].as_str().unwrap().to_string();
+    assert_eq!(v["size"], 14);
+    assert_eq!(
+        std::fs::read(s.attachment_path(&sha).unwrap()).unwrap(),
+        b"%PDF-1 numbers"
+    );
+    let (code, _) = upload(&s, Vec::new()).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let (code, _) = upload(&s, vec![b'x'; iris_api::ATTACHMENT_LIMIT + 1]).await;
+    assert_eq!(code, StatusCode::PAYLOAD_TOO_LARGE);
+
+    let mut body = new_mail(KEY, json!(["new_recipient", "attachment"]));
+    body["body"] = json!("The numbers are attached.\n");
+    body["attachments"] =
+        json!([{"name": "q4.pdf", "type": "application/pdf", "sha256": sha, "size": 14}]);
+    let (code, v) = call(&s, "POST", "/api/write", Some(body.clone())).await;
+    // A draft with a file has no "no file attached" warning.
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["flags"], json!(["new_recipient"]));
+    body["flags"] = v["flags"].clone();
+    let (code, v) = call(&s, "POST", "/api/write", Some(body.clone())).await;
+    assert_eq!(code, StatusCode::CREATED, "{v}");
+    let args: String = s
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT args FROM changeset_action WHERE verb = 'draft'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(args.contains("q4.pdf"), "{args}");
+    body["attachments"][0]["name"] = json!("other.pdf");
+    let (code, v) = call(&s, "POST", "/api/write", Some(body)).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert_eq!(v["error"], "This key belongs to another mail.");
+}

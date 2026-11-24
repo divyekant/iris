@@ -107,7 +107,9 @@ fn send(
             v["readable"] = true.into();
             v["to"] = content.to.into();
             v["cc"] = content.cc.into();
+            v["bcc"] = content.bcc.into();
             v["subject"] = content.subject.into();
+            v["attachments"] = crate::drafts::files(&content.attachments).into();
         }
         None => v["readable"] = false.into(),
     }
