@@ -66,9 +66,17 @@ The terms of `docs/specs/2026-11-16-matters.md` apply. New terms:
 The member forms are `commitment`, `conversation`, `record` and `signal`.
 The ID prefix of a signal member is `s-`. The view `matter_live`, the
 eligibility of step 1 of the proposal step, the member insert trigger and
-the local API use the four forms. A signal has the same live rule as the
-other forms: status not `gone`, `cancelled` or `declined`, no
-`duplicate_of`, attention not `hidden`, and no hostile origin mail.
+the local API use the four forms. A live signal has the status `active`
+only. A signal that is `used`, `dismissed`, `expired` or `gone` stops to
+matter (spec 1, section 6.6), so it is not a candidate, not an addition and
+not a live member. The engine sets `expired` at `expires`, so the views need
+no clock. The other forms keep the live rule of R6-01: status not `gone`,
+`cancelled` or `declined`, no `duplicate_of`, attention not `hidden`, and no
+hostile origin mail.
+
+A signal member of a confirmed matter that stops to be `active` stays a
+kept member, as an ended commitment does. The matter view shows it with
+its status. The person can remove it.
 
 The data block line of a signal has the fields of every line (ID, form,
 title, thread, date, names). The prompt version is `matters/0.2`, so the
@@ -103,7 +111,8 @@ and 44 that it changes. The rules after the migration:
 1. **Status.** A matter starts as an unsealed proposal (as now). The
    status moves from `proposed` to `confirmed` or `declined`, and from
    `confirmed` to `declined` (the delete). No other move. Only a
-   `proposed` matter can be deleted as a row.
+   `proposed` matter, or a `confirmed` matter with fewer than 2 member
+   rows, can be deleted as a row.
 2. **Decision.** A decision on a proposal of the author `model` or
    `agent` needs a valid proposal (`matter_valid`), as now. A confirm
    of the author `person` (a matter by hand) needs no `matter_valid`: it
@@ -131,8 +140,10 @@ and 44 that it changes. The rules after the migration:
    now).
 9. **Additions.** A `matter_add` row goes in only for a `confirmed`
    matter, for an item that has no member row in that matter and is not
-   a kept member of an open matter. When an item becomes a kept member of
-   any matter, a trigger deletes its `matter_add` row. When a matter
+   a kept member of an open matter. When a member row goes in for the item
+   of an addition (an add, or a refusal of the same matter), or the item
+   becomes a kept member of any matter, a trigger deletes its `matter_add`
+   row in the same statement. So a refused addition never stays visible. When a matter
    leaves `confirmed`, a trigger deletes its `matter_add` rows. A
    `matter_add` row does not change.
 
@@ -157,7 +168,7 @@ rules for each other path.
 |---|---|---|
 | `create(store, title, items, now)` | Inserts a proposal of the author `person`, inserts the members, then seals and confirms it in one `UPDATE` with `keep` = all items. Gives the new matter ID. | 400: a bad title, 0 or more than 50 items, an item two times. 409: an item that is not live, or that is a kept member of an open matter. |
 | `edit(store, matter, edit, now)` | `edit` has an optional `title`, a list `add` and a list `remove`. The title changes. Each `add` item becomes a kept member: a new row, or `kept` from 0 to 1. Each `remove` item gets `kept` = 0: a kept member, or a pending addition (a new refusal row). `updated_at` = `now`. | 400: a bad title, an item in `add` and `remove`, an item two times, an empty edit. 404: no such matter. 409: the matter is not `confirmed`, an `add` item that is not live or is a kept member of an open matter, a `remove` item that is not a kept member or a pending addition, 0 or more than 50 kept members after the edit. |
-| `delete(store, matter, now)` | Moves a confirmed matter to `declined`. | 404: no such matter. 409: the matter is not `confirmed`. |
+| `delete(store, matter, now)` | A confirmed matter with 2 or more member rows (kept or not) moves to `declined`. A confirmed matter with 1 member row is deleted as a row: a grouping of one item needs no decline memory (the model never proposes one item), and a `declined` document needs 2 or more items (the schema). | 404: no such matter. 409: the matter is not `confirmed`. |
 
 An item to add by hand needs no 90-day window: the window only limits
 the candidates of the model. A kept member of a proposal cannot be added
@@ -264,7 +275,7 @@ or `additions` is not valid (rule 2.8). `iris_store::MODEL` becomes
 |---|---|---|
 | `POST /api/matters` | `{"title": "...", "items": ["c-1", ...]}` | `create`. 201 with the matter view. |
 | `POST /api/matters/{id}/edit` | `{"title"?: "...", "add"?: [...], "remove"?: [...]}` | `edit`. The matter view. |
-| `POST /api/matters/{id}/delete` | none | `delete`. The matter view (status `declined`). |
+| `POST /api/matters/{id}/delete` | none | `delete`. 204 with no body: the matter is no longer in the list. |
 
 The matter view (`GET /api/matters/{id}`) gets the key `additions`: the
 documents of the live additions of a confirmed matter, newest first. The
@@ -279,7 +290,8 @@ decides.
 ### Screens
 
 - The matter view of a confirmed matter: Rename, Remove on each member,
-  Delete matter (with Undo), and a part "Iris thinks these belong here"
+  Delete matter (with a confirm step: Delete, or Keep; there is no Undo
+  after the delete, because a declined matter does not change), and a part "Iris thinks these belong here"
   with Add and Not this for each addition.
 - The brief: a confirmed matter with additions shows one line, "Add 1 item
   to Tokyo trip?", that opens the matter view.
@@ -325,6 +337,9 @@ of an agent, and the request body of the web client.
 | A direct SQL write that breaks a rule of the migration | Refused by a trigger. | a test of each trigger |
 | An item to add that is hostile mail, hidden, gone or a duplicate | 409. | unit |
 | The delete of a matter while an addition waits | The trigger deletes the addition. | unit |
+| The person refuses an addition | The refusal row goes in and the trigger deletes the `matter_add` row in the same statement. The addition is not in the list. | unit |
+| The delete of a matter with 1 member row | The row goes, with its member row; the item is a candidate again. | unit |
+| A signal that expires, is used or is dismissed | Not a candidate, not an addition, not live. A kept signal member of a confirmed matter stays. | unit |
 | A rebuild of the item of an addition | The cascade deletes the addition; the next step can propose the new item. | unit |
 | A rebuild of the item of a refusal (`kept` = 0) | The cascade deletes the refusal row: the model can propose the new item again. Same limit as a member that the person did not keep at the confirm (R6-01). | none (known limit) |
 
