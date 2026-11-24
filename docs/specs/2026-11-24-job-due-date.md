@@ -53,7 +53,14 @@ supervisor then stops the processes of the session.
 
 The question is fixed engine text, not mail text:
 
-> The due date passed. Answer to let the agent go on, or end the job.
+> The due date passed. Answer to go on, or end the job.
+
+The answer moves the job to `working`, as each answer does. If the job had
+a session, the answer starts a new session with the agent of the last
+session (`iris_job::woken`). A job with no session (the person never ran an
+agent on it) starts no session: the job page shows the command to run an
+agent, as for each job in `working` with no session. So the question does
+not promise that an agent goes on.
 
 ### When the move is due
 
@@ -118,6 +125,7 @@ one queue.
 | A move of the person or agent between the read and the write | The write sees it and makes no move | Unit test (move inside the gap) |
 | A `due` move by the agent or the person, with no due date, before `due_at`, or with another `why` | The trigger refuses it | Unit test |
 | A crash after the commit of the move and before the notice | The job stays in `needs_you`. No notice is shown. The jobs page shows it | Known limit |
+| The queue of system notices is full | The notice is dropped. The jobs page shows the job | Known limit |
 | No notice command on the system | One log line. The jobs page shows the job | Existing behavior of `notify::show` |
 
 ## Impact
@@ -159,7 +167,10 @@ None.
    answer of the person. Red if rule 3 is missing.
 3. The engine gives one system notice for each move. Red if the step gives
    no notice.
-4. The trigger refuses a `due` move that the move table does not allow. Red
+4. After the answer, a job with a session gets a new session, and a job
+   with no session stays in `working` with no session. Red if the answer
+   of a due job with no session fails or starts a session with no agent.
+5. The trigger refuses a `due` move that the move table does not allow. Red
    if the trigger is not changed.
 
 ## Verify
@@ -174,7 +185,7 @@ cargo test -p iris --lib notify
 - The move has no row in the notice list of the web client and of the Mac
   app. The system notice and the jobs page show it (issue #844).
 - A crash between the commit of the move and the system notice loses the
-  notice. The job stays in `needs_you` (issue #845).
+  notice. A full queue of system notices (100) drops it too. The job stays in `needs_you` (issue #845).
 
 ## Rollout
 
