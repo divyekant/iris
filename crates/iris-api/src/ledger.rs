@@ -95,7 +95,8 @@ const UNDONE: &str =
 /// undone entry changed (also one that is gone now, because submit leaves
 /// it out of the undo), and each item of a state entry. NULL for an entry
 /// that is no undo. `{undone}` is [`UNDONE`].
-const TRIED: &str = "(SELECT (SELECT count(*) FROM ledger_message lm WHERE lm.ledger_id = le.id AND lm.done = 1)
+const TRIED: &str =
+    "(SELECT (SELECT count(*) FROM ledger_message lm WHERE lm.ledger_id = le.id AND lm.done = 1)
                + (SELECT count(*) FROM action_item ai WHERE ai.action_id = le.action_id)
          FROM ledger le WHERE le.id = {undone})";
 

@@ -333,7 +333,7 @@ fn undo_applied(s: &Store, l: i64, rows: &[(i64, bool, Option<&str>)]) -> i64 {
             params![a, NOW + 1],
         )?;
         let u = tx.last_insert_rowid();
-        for (m, done, listed) in rows {
+        for (m, _, _) in rows {
             tx.execute(
                 "INSERT INTO ledger_message(ledger_id, message_id, call, pre, post)
                  VALUES (?1, ?2, 1, '[]', '[\"INBOX\"]')",
@@ -392,7 +392,14 @@ async fn an_undo_counts_each_target_of_its_entry() {
     let u = undo_applied(&s, l, &[(1, true, None)]);
     let (_, p) = call(&s, false, "/api/ledger").await;
     let e = entry(&p, u);
-    assert_eq!((e["changed"].clone(), e["tried"].clone(), e["skipped"].clone()), (json!(1), json!(2), json!(1)));
+    assert_eq!(
+        (
+            e["changed"].clone(),
+            e["tried"].clone(),
+            e["skipped"].clone()
+        ),
+        (json!(1), json!(2), json!(1))
+    );
     assert_eq!(entry(&p, l)["tried"], 0);
     assert_eq!(entry(&p, l)["skipped"], 0);
 
@@ -404,7 +411,14 @@ async fn an_undo_counts_each_target_of_its_entry() {
     let u = undo_applied(&s, l, &[(3, false, Some("gone"))]);
     let (_, p) = call(&s, false, "/api/ledger").await;
     let e = entry(&p, u);
-    assert_eq!((e["changed"].clone(), e["tried"].clone(), e["skipped"].clone()), (json!(0), json!(1), json!(1)));
+    assert_eq!(
+        (
+            e["changed"].clone(),
+            e["tried"].clone(),
+            e["skipped"].clone()
+        ),
+        (json!(0), json!(1), json!(1))
+    );
     assert_eq!(e["retry"], false);
     assert_eq!(entry(&p, l)["can_undo"], false);
 }
