@@ -2358,3 +2358,83 @@ fn a_correction_of_the_expiry_of_a_signal_sets_its_status() {
     assert_eq!(doc["status"], "used");
     assert_eq!(status(&b), "used");
 }
+
+/// Decision D29 (issue 263): mail from a declined sender gets no model call.
+/// The fixed steps still run. When the decline ends (a reopen, or a kind
+/// other than `stranger`), the mail is pending again for the model.
+#[test]
+fn a_declined_sender_gets_no_model_call_until_the_decline_ends() {
+    let b = store("declined");
+    let mail = |n: u32| {
+        format!(
+            "From: Far <x@far.example>\nTo: owner@example.com\nSubject: Offer {n}\n\nCan you send the price list?\n"
+        )
+    };
+    let fake = Fake::default();
+    let m1 = b.add("1", &mail(1), &["INBOX"]);
+    understand(&b.store, m1, &fake, NOW).unwrap();
+    assert_eq!(fake.calls.borrow().len(), 1);
+    let sender: i64 = b.col(
+        "SELECT id FROM sender WHERE address = 'x@far.example' AND ?1",
+        1,
+    );
+    let answer = b
+        .store
+        .write(|tx| Ok(iris_senders::gate::decline(tx, sender, NOW, true)?))
+        .unwrap();
+    assert!(matches!(answer, iris_senders::gate::Answer::Done { .. }));
+
+    let pending = |id: i64| {
+        b.col::<bool>(
+            "SELECT understood_at IS NULL FROM message WHERE id = ?1",
+            id,
+        )
+    };
+    let skipped = |id: i64| {
+        b.col::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM model_declined WHERE message_id = ?1)",
+            id,
+        )
+    };
+    let m2 = b.add("2", &mail(2), &["INBOX"]);
+    let out = understand(&b.store, m2, &fake, NOW).unwrap();
+    assert!(out.declined && out.items.is_empty());
+    assert_eq!(fake.calls.borrow().len(), 1, "no model call");
+    assert!(!pending(m2) && skipped(m2));
+    // The fixed steps ran: the header, the clean text and the marks.
+    assert_eq!(
+        b.col::<String>("SELECT subject FROM header WHERE message_id = ?1", m2),
+        "Offer 2"
+    );
+    assert_eq!(
+        b.col::<String>("SELECT hostile FROM message WHERE id = ?1", m2),
+        "[]"
+    );
+
+    // A reopen ends the decline: the mail waits for the model again.
+    b.store
+        .write(|tx| Ok(iris_senders::gate::reopen(tx, sender, NOW)?))
+        .unwrap();
+    assert!(pending(m2) && !skipped(m2));
+    let due: i64 = b.col(
+        "SELECT count(*) FROM talk_due WHERE thread_id = (SELECT thread_id FROM message WHERE id = ?1)",
+        m2,
+    );
+    assert_eq!(due, 1, "the conversation is computed again");
+    let out = understand(&b.store, m2, &fake, NOW).unwrap();
+    assert!(!out.declined);
+    assert_eq!(fake.calls.borrow().len(), 2);
+
+    // A kind other than `stranger` ends the decline too, by any writer.
+    b.store
+        .write(|tx| Ok(iris_senders::gate::decline(tx, sender, NOW, true)?))
+        .unwrap();
+    let m3 = b.add("3", &mail(3), &["INBOX"]);
+    assert!(understand(&b.store, m3, &fake, NOW).unwrap().declined);
+    b.store
+        .write(|tx| Ok(tx.execute("UPDATE sender SET kind = 'person' WHERE id = ?1", [sender])?))
+        .unwrap();
+    assert!(pending(m3) && !skipped(m3));
+    // The first message, understood with the model before the decline, keeps its state.
+    assert!(!pending(m1));
+}
