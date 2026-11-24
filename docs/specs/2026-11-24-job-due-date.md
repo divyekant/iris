@@ -84,13 +84,19 @@ the job does not move again.
 
 ### The engine step
 
-`iris_job::move_due(store, now_ms) -> Result<Vec<Due>>` reads the due jobs
+`iris_job::move_due(store, now_ms) -> Result<DueTurn>` reads the due jobs
 (`due_jobs`, index `job_state`), then makes each move in its own write
 transaction that checks rules 1 to 3 again (`move_due_one`). A move between
 the read and the write that makes a rule false wins, and the step makes no
 move: a finish, an ask, or a move of the person. A wait of the agent after
 the due date keeps the rules true, so the job still moves: the due date
 passed, and the person decides. `Due` holds the job ID and its goal.
+
+`DueTurn` has two fields. `moved` holds the `Due` of each committed move.
+`failed` holds the ID and the error of each job whose move failed. A
+failure of one job does not stop the moves of the others. The read of the
+due jobs is the only error of the whole step. The engine gives one notice
+for each entry of `moved`, and one log line for each entry of `failed`.
 
 The attention loop of the engine (`crates/iris/src/engine.rs`, each 10
 seconds) runs the step, then gives one system notice for each moved job to
@@ -140,7 +146,7 @@ one queue.
 
 - `crates/iris-store/src/schema_<n>.sql` (the next free number): the trigger `job_event_move` again,
   with the `due` row.
-- `crates/iris-job`: `move_due` and `Due`.
+- `crates/iris-job`: `move_due`, `Due` and `DueTurn`.
 - `crates/iris/src/engine.rs`, `crates/iris/src/notify.rs`: the step in the
   attention loop, and a plain queue of system notices.
 - `docs/specs/2026-11-16-job-store.md`: the move table and the paragraph on
