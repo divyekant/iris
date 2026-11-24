@@ -525,3 +525,50 @@ fn a_failed_count_write_starts_no_wait() {
         0
     );
 }
+
+/// Issue 112: no item of hostile mail goes to the model, also when the
+/// item stays in the store, for each of the three states. The item is a
+/// candidate again when the state clears.
+#[test]
+fn no_item_of_hostile_mail_goes_to_the_model() {
+    let states: [(&str, &str); 3] = [
+        (
+            "UPDATE message SET hostile = '[\"lookalike\"]' WHERE id = 1",
+            "UPDATE message SET hostile = '[]' WHERE id = 1",
+        ),
+        (
+            "INSERT INTO message_label(message_id, label_id)
+               SELECT 1, id FROM label WHERE provider_id = 'SPAM'",
+            "DELETE FROM message_label WHERE message_id = 1
+               AND label_id IN (SELECT id FROM label WHERE provider_id = 'SPAM')",
+        ),
+        (
+            "UPDATE header SET from_addr = 'bad@example.com' WHERE message_id = 1;
+             INSERT INTO sender(address, kind) VALUES ('bad@example.com', 'hostile')
+               ON CONFLICT(address) DO UPDATE SET kind = 'hostile'",
+            "UPDATE sender SET kind = 'person' WHERE address = 'bad@example.com'",
+        ),
+    ];
+    for (n, (set, clear)) in states.into_iter().enumerate() {
+        let b = setup(&format!("hostile-{n}"), 4, &titles(4), &["record"]);
+        b.store
+            .put_labels(1, &[("SPAM", "SPAM", "system")])
+            .unwrap();
+        b.store.write(|tx| Ok(tx.execute_batch(set)?)).unwrap();
+        let f = fake(vec![]);
+        assert_eq!(run(&b, &f, Gate::Now, NOW).skip, None, "{set}");
+        {
+            let data = f.data.borrow();
+            assert_eq!(data.len(), 1, "{set}");
+            assert!(!data[0].contains("Item 0"), "{set}: {}", data[0]);
+            assert!(
+                data[0].contains("Item 1") && data[0].contains("Item 3"),
+                "{}",
+                data[0]
+            );
+        }
+        b.store.write(|tx| Ok(tx.execute_batch(clear)?)).unwrap();
+        assert_eq!(run(&b, &f, Gate::Now, NOW + 1000).skip, None, "{clear}");
+        assert!(f.data.borrow()[1].contains("Item 0"), "{clear}");
+    }
+}

@@ -19,6 +19,41 @@ macro_rules! may_be_hostile {
     };
 }
 
+/// The SQL condition "message `m` is hostile mail": a hostile mark, the
+/// label `SPAM`, or a `hostile` sender (specification 1, section 6.7).
+/// Understanding deletes the unpinned items of such a message. Each read
+/// that shows items to the person or to the model leaves out an item whose
+/// origin is such a message, so a pinned item is hidden too (issue 112).
+/// A message that only waits for its link check is not hostile mail here:
+/// a gate of mail uses [`may_be_hostile!`].
+#[macro_export]
+macro_rules! hostile_mail {
+    () => {
+        "((m.hostile IS NOT NULL AND m.hostile NOT IN ('', '[]'))
+          OR EXISTS (SELECT 1 FROM message_label hml JOIN label hl ON hl.id = hml.label_id
+               WHERE hml.message_id = m.id AND hl.provider_id = 'SPAM')
+          OR EXISTS (SELECT 1 FROM header hh JOIN sender hs
+               ON hs.address = hh.from_addr COLLATE NOCASE
+               WHERE hh.message_id = m.id AND hs.kind = 'hostile'))"
+    };
+}
+
+/// The SQL condition "item `$i` comes from hostile mail": its origin
+/// message is [`hostile_mail!`].
+#[macro_export]
+macro_rules! from_hostile_mail {
+    ($i:literal) => {
+        concat!(
+            "EXISTS (SELECT 1 FROM item_source hos JOIN message m ON m.id = hos.message_id
+               WHERE hos.item_id = ",
+            $i,
+            ".id AND hos.role = 'origin' AND ",
+            $crate::hostile_mail!(),
+            ")"
+        )
+    };
+}
+
 /// The SQL condition "message `$m` is not received mail": it has the label
 /// `DRAFT`, `UNSENT` or `SENT_COPY` (docs/specs/2026-11-17-imap-provider.md,
 /// section 4). The understanding, the watches, the people, the conversations,
@@ -111,6 +146,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_41.sql"),
     include_str!("schema_42.sql"),
     include_str!("schema_43.sql"),
+    include_str!("schema_44.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
