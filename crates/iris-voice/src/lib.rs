@@ -876,12 +876,21 @@ fn write_when(
         return Err(Error::Changed);
     }
 
-    let reply = match nudge {
-        Some(_) => model.ask(&nudge_instruction(), &data),
-        None => model.ask(INSTRUCTION, &data),
-    }
-    .map_err(Error::Model)?;
-    let body = read_answer(&reply)?;
+    let instruction = match nudge {
+        Some(_) => nudge_instruction(),
+        None => INSTRUCTION.to_string(),
+    };
+    let ask = || model.ask(&instruction, &data).map_err(Error::Model);
+    let reply = ask()?;
+    // An answer that is not a valid draft gets one more call with the same
+    // data (decision D7, issue #278). A refusal gets none: the same data
+    // gets the same refusal. The second call pays through the same budget.
+    let body = match read_answer(&reply) {
+        Err(Error::BadAnswer(_)) if reply.stop != iris_model::Stop::Refused => {
+            read_answer(&ask()?)?
+        }
+        r => r?,
+    };
 
     store
         .write(|tx| {

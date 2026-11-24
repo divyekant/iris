@@ -335,17 +335,17 @@ mod tests {
         assert_eq!(step(&store, &connect, late), Ok(0));
         assert_eq!(calls.get(), 1, "no call during the wait");
         calls.set(0);
-        // An invalid answer after the wait: one call, then no call again
-        // for the same newest message.
+        // An invalid answer after the wait: one call and its one retry
+        // (decision D7), then no call again for the same newest message.
         let late = wait;
         answer.set("not json");
         assert_eq!(step(&store, &connect, late), Ok(0));
         assert_eq!(step(&store, &connect, late), Ok(0));
-        assert_eq!((calls.get(), blocked(&store)), (1, 1));
+        assert_eq!((calls.get(), blocked(&store)), (2, 1));
         // A store that the engine opens again keeps the try: no new call.
         let again = Store::open(&dir).unwrap();
         assert_eq!(step(&again, &connect, late), Ok(0));
-        assert_eq!(calls.get(), 1);
+        assert_eq!(calls.get(), 2);
         store
             .write(|tx| {
                 tx.execute("DELETE FROM nudge_try", [])?;
@@ -354,7 +354,7 @@ mod tests {
             .unwrap();
         answer.set(r#"{"body": "Hi Ana, any news on the slides? D"}"#);
         assert_eq!(step(&store, &connect, late), Ok(1));
-        assert_eq!(calls.get(), 2);
+        assert_eq!(calls.get(), 3);
         assert_eq!(
             count(
                 &store,
@@ -374,7 +374,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(step(&store, &connect, late + 60_000), Ok(0));
-        assert_eq!(calls.get(), 2);
+        assert_eq!(calls.get(), 3);
 
         // The lock is held: no call.
         store
@@ -386,7 +386,7 @@ mod tests {
         let lock = batch::lock(&store).unwrap();
         assert_eq!(step(&store, &connect, late), Ok(0));
         drop(lock);
-        assert_eq!(calls.get(), 2);
+        assert_eq!(calls.get(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -408,11 +408,11 @@ mod tests {
         };
         let late = 1_000 + iris_voice::LATE_AFTER_MS;
         // The big thread comes first and is refused; the small one gets its
-        // call. The answer is not valid: no draft.
+        // call and its retry. The answer is not valid: no draft.
         assert_eq!(step(&store, &connect, late), Ok(0));
-        assert_eq!((calls.get(), blocked(&store)), (1, 1));
+        assert_eq!((calls.get(), blocked(&store)), (2, 1));
         assert_eq!(step(&store, &connect, late), Ok(0));
-        assert_eq!(calls.get(), 1, "one call for one model version");
+        assert_eq!(calls.get(), 2, "one try for one model version");
         // A new model version: the small thread gets a new call.
         store
             .write(|tx| {
@@ -422,7 +422,7 @@ mod tests {
             .unwrap();
         answer.set(r#"{"body": "Hi Ana, any news? D"}"#);
         assert_eq!(step(&store, &connect, late), Ok(1));
-        assert_eq!(calls.get(), 2);
+        assert_eq!(calls.get(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
