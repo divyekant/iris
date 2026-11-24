@@ -2254,6 +2254,20 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_an_imap_address_that_starts_with_a_dash_after_the_end_of_options() {
+        // The web client shows this command for such an address (issue 694).
+        let cli =
+            Cli::try_parse_from(["iris", "account", "add-imap", "--", "-x@example.org"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Account {
+                command: AccountCommand::AddImap { address, .. }
+            } if address == "-x@example.org"
+        ));
+        assert!(Cli::try_parse_from(["iris", "account", "add-imap", "-x@example.org"]).is_err());
+    }
+
+    #[test]
     fn cli_parses_the_data_folder_after_the_command() {
         let cli = Cli::try_parse_from(["iris", "backup", "/tmp/b", "--data", "/tmp/d"]).unwrap();
         assert_eq!(cli.data, Some(PathBuf::from("/tmp/d")));
