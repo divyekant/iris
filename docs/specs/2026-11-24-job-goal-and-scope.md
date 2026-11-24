@@ -51,15 +51,19 @@ A new migration (the next free number at the build) adds the table
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | The order of the edits |
 | `job_id` | INTEGER NOT NULL REFERENCES job(id) | The job |
 | `at` | INTEGER NOT NULL | Milliseconds since 1970 |
+| `goal_before` | TEXT NOT NULL | The goal before the edit |
+| `due_before` | INTEGER | The due date before the edit, or NULL |
 | `goal` | TEXT NOT NULL | The goal after the edit (the checks of `job.goal`) |
 | `due_at` | INTEGER | The due date after the edit, or NULL (the checks of `job.due_at`) |
 
-An edit holds the full values after the edit, so the newest edit is the
-truth. The triggers:
+An edit holds the full values before and after the edit. So the first edit
+keeps the goal and the due date of the start, also for a job that existed
+before the migration, and the newest edit is the truth. The triggers:
 
 - `job_edit_insert` (BEFORE INSERT) refuses an edit of a job that does not
   exist or is `done`, an edit with `at` before the newest edit of the job,
-  and an edit that changes nothing.
+  an edit whose before-values are not the values of the job row now, and
+  an edit that changes nothing.
 - `job_edit_apply` (AFTER INSERT) copies `goal` and `due_at` to the job
   row.
 - The trigger `job_row` of migration 14 is made again. It allows a change of
@@ -84,21 +88,31 @@ person only (no `By` argument: only the API of the person calls it).
 `iris_job::create_in` is not changed: a job with no scope row is valid now.
 The workspace of such a job has `JOB.md` and no mail files.
 
+A typed start has no item that makes it idempotent. So the client makes one
+random request ID (a UUID) when it opens the form, and sends it with each
+try of that form. The migration adds the table `job_request`
+(`request TEXT PRIMARY KEY` with 1 to 64 characters, `job_id INTEGER NOT
+NULL UNIQUE REFERENCES job(id)`). The start writes the job and the request
+row in one transaction. A start with a request ID that has a row makes no
+job and answers with the job of the row. A new form is a new request ID, so
+a second job on purpose is a second form.
+
 ### API
 
 | Route | Body | Answer |
 |---|---|---|
-| `POST /api/jobs` | `{"goal", "due"?}` (no `item`, no `messages`) | 201 and the job document |
+| `POST /api/jobs` | `{"goal", "due"?, "request"}` (no `item`, no `messages`) | 201 and the job document; 409 with `job` for a request ID that has a job |
 | `POST /api/jobs/{id}/edit` | `{"goal", "due"}` (`due` null for no due date) | 200 and the job document |
 | `GET /api/jobs/{id}/scope/{thread}` | none | `{"messages": [...]}`: the preview of the add, each summary with `readable` |
 | `POST /api/jobs/{id}/scope` | `{"thread", "messages"}` | 200 and the job page |
 | `POST /api/jobs/{id}/scope/remove` | `{"ref"}` (`t-<n>` or the item ID) | 200 and the job page |
 
 - `POST /api/jobs` with `item` keeps its behavior. With no `item`, a
-  `messages` field is a 400. The goal and the due date have the checks of the
-  start with an item. Two starts with the same goal make two jobs: a typed
-  goal has no item that makes the start idempotent. The client sends one
-  start for each press and turns the button off while it sends.
+  `messages` field is a 400, and a missing or empty `request` is a 400. The
+  goal and the due date have the checks of the start with an item. A retry
+  with the same request ID (after a lost answer, a time-out or a reload of
+  the form with its draft) gets 409 and `job`, the same answer as a second
+  start from an item, and the client opens that job.
 - `edit`: the same checks of the goal and the due date as the start. A job
   in `done` is a 409.
 - The preview of an add lists each message of the thread now, in the order
@@ -154,11 +168,13 @@ The workspace of such a job has `JOB.md` and no mail files.
 | An add of a thread in the scope already | The add adds the messages of the thread now to its list (existing `add_scope_in`) | API test |
 | A remove of a ref that is not active in the scope | 404 | API test |
 | A remove while a session runs | The revoke ends the session (existing) | Existing test |
+| A typed start that the client sends again with the same request ID | 409 with the job of the first start, no second job | API test |
 | Two edits at the same time | One transaction each; the second edit is the newest | Store test |
 
 ## Impact
 
-- `crates/iris-store`: the new migration.
+- `crates/iris-store`: the new migration (`job_edit`, `job_request`, the
+  trigger `job_row` again).
 - `crates/iris-job`: `edit_in`, `edit`.
 - `crates/iris-api`: the routes above, the `scope` list of the job page.
 - `client/`: the jobs page, the job page, a new add view.
@@ -191,7 +207,7 @@ None.
 1. `POST /api/jobs` with a goal and no item makes a job with no scope. Red
    if the route still needs an item.
 2. An edit changes the goal and the due date of the job document, keeps the
-   old values in `job_edit`, and does not change `updated_at`. Red if the
+   values before and after in `job_edit`, and does not change `updated_at`. Red if the
    trigger refuses the edit, or if a direct `UPDATE` of `goal` passes.
 3. An add grants the messages that the person saw, and refuses when the
    thread changed. Red if the add skips the comparison.
@@ -221,9 +237,14 @@ The migration runs at the next start of the engine.
 ## Risks
 
 A wrong `job_row` trigger can allow a change of the goal with no history.
-The store tests cover the direct `UPDATE`. Rollback: revert the PRs. The
-migration adds one table and makes a trigger again; an old engine reads the
-job row as before.
+The store tests cover the direct `UPDATE`.
+
+Rollback: an old engine refuses a store with a newer schema version
+(`Error::UnknownSchema`), so a revert of the code alone does not open the
+store. Fix forward with a new PR, or stop the engine and restore the backup
+that the migration made (`iris.db.v<n>.<time>-<random>.bak` in the data
+folder, specification 1, section 5.5). A restore loses the changes after the
+migration.
 
 ## Plan
 
