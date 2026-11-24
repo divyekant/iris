@@ -103,7 +103,8 @@ Submit (`iris_changeset::submit_in`) adds `outside_thread` to a `draft` or a
 (`iris_changeset::marked_in`) and the content has an outside address
 (`iris_changeset::outside_marks` is not empty). An address is in the
 thread only if it is the From of a live thread message, or it is in To or
-Cc of a live thread message that you sent (label `SENT`, not `DRAFT`).
+Cc of a live thread message that you sent (label `SENT`, and not a draft or a copy:
+`iris_store::draft_or_copy!`).
 Your own addresses are never outside. An address that a stranger put in
 To or Cc of its own message is not in the thread (decision D13, issue
 #435). The drafts API of the

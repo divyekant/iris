@@ -981,9 +981,9 @@ pub fn outside_marks(
              LEFT JOIN header s ON s.message_id = t.id
                AND EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                            WHERE ml.message_id = t.id AND l.provider_id = 'SENT')
-               AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                               WHERE ml.message_id = t.id AND l.provider_id = 'DRAFT')
-             WHERE a.id = ?1 AND t.gone_at IS NULL AND t.thread_id IN ({ACTION_THREADS})"
+               AND NOT {copy}
+             WHERE a.id = ?1 AND t.gone_at IS NULL AND t.thread_id IN ({ACTION_THREADS})",
+            copy = iris_store::draft_or_copy!("t")
         ))?;
         let mut rows = st.query([action])?;
         while let (false, Some(r)) = (open.is_empty(), rows.next()?) {
