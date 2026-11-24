@@ -280,6 +280,32 @@ fn the_removal_refuses_an_unknown_or_removed_account() {
     assert!(store.remove_account("a@example.org", NOW).is_err());
 }
 
+/// The removal by ID removes only the account that has the ID and the
+/// address: an account that a person added again with the same address,
+/// after a removal of the old ID, stays.
+#[test]
+fn a_removal_by_a_stale_id_does_not_remove_the_account_added_again() {
+    let dir = TempDir::new("stale");
+    let store = Store::open(&dir.0).unwrap();
+    let (a, _) = two(&store);
+    store.remove_account_id(a, "a@example.org", NOW).unwrap();
+    store
+        .delete_removed(Some(a), &mut none, &mut |_| Ok(()))
+        .unwrap();
+    let again = store
+        .save_account_secret("gmail", "a@example.org", None, b"sealed", "ok")
+        .unwrap();
+    assert_ne!(again, a);
+    assert!(store.remove_account_id(a, "a@example.org", NOW).is_err());
+    assert_eq!(state(&store, again).as_deref(), Some("ok"));
+    assert_eq!(
+        store
+            .remove_account_id(again, "a@example.org", NOW)
+            .unwrap(),
+        again
+    );
+}
+
 #[test]
 fn the_delete_waits_for_the_sync_lock_and_continues_after_a_restart() {
     let dir = TempDir::new("lock");

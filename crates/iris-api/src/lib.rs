@@ -1098,7 +1098,7 @@ async fn post_account_remove(
     let task = s.clone();
     tokio::task::spawn_blocking(move || {
         let id = task
-            .remove_account(&b.address, now_ms())
+            .remove_account_id(row, &b.address, now_ms())
             .map_err(|e| match e {
                 iris_store::Error::Account(why) => Error::Conflict(why.into()),
                 e => e.into(),

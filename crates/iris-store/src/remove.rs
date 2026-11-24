@@ -66,24 +66,37 @@ impl Store {
     /// there or is removed, and an account with mail in the scope of a job
     /// whose session runs. Gives the account ID.
     pub fn remove_account(&self, address: &str, now: i64) -> Result<i64> {
+        self.remove(address, None, now)
+    }
+
+    /// Mark the account `id` as removed, as [`Store::remove_account`] does,
+    /// only if it has the address `address`. The check of the ID and the
+    /// address is in the transaction of the removal: an account that a
+    /// person added again with the same address after a removal of `id`
+    /// stays.
+    pub fn remove_account_id(&self, id: i64, address: &str, now: i64) -> Result<i64> {
+        self.remove(address, Some(id), now)
+    }
+
+    fn remove(&self, address: &str, id: Option<i64>, now: i64) -> Result<i64> {
         // The removal deletes the items of the account, so it runs with
         // secure_delete, as each batch of the delete: SQLite writes zeros
         // over the deleted rows, and no free page keeps their text.
         let mut conn = lock(&self.writer);
         conn.pragma_update(None, "secure_delete", true)?;
-        let out = Self::removal(&mut conn, address, now);
+        let out = Self::removal(&mut conn, address, id, now);
         conn.pragma_update(None, "secure_delete", false)?;
         out
     }
 
-    fn removal(conn: &mut Connection, address: &str, now: i64) -> Result<i64> {
+    fn removal(conn: &mut Connection, address: &str, only: Option<i64>, now: i64) -> Result<i64> {
         let tx = conn.transaction()?;
         let id = (|| -> Result<i64> {
             let tx = &tx;
             let row: Option<(i64, Option<String>)> = tx
                 .query_row(
-                    "SELECT id, state FROM account WHERE address = ?1",
-                    [address],
+                    "SELECT id, state FROM account WHERE address = ?1 AND (?2 IS NULL OR id = ?2)",
+                    rusqlite::params![address, only],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()?;
