@@ -456,6 +456,13 @@ fn each_add_tool_sends_the_request_of_its_verb() {
             json!({ "id": "c-1", "reason": "Sent." }),
         ),
         (vec!["decline", "c-1"], "decline", json!({ "id": "c-1" })),
+        (vec!["skip", "f-1"], "skip", json!({ "id": "f-1" })),
+        (
+            vec!["mute", "v-1", "--reason", "Quiet."],
+            "mute",
+            json!({ "id": "v-1", "reason": "Quiet." }),
+        ),
+        (vec!["dismiss", "s-1"], "dismiss", json!({ "id": "s-1" })),
         (
             vec!["defer", "c-1", "--date", "2026-12-01"],
             "defer",
