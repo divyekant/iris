@@ -43,7 +43,8 @@ Each item below has a `limit` issue (see the PR).
 - An action in review (`in_review`) of the account. Only the person can
   decide it (the trigger `action_state`). It stays in review until the
   person decides it or it expires after 14 days. An approval applies
-  nothing, because the account has no sync.
+  nothing: the tombstone never gets a sign-in again (see "Add the address
+  again"), and the messages and items of its targets are gone.
 - The recovery of an apply step whose provider result is unknown at the
   removal. The ledger entry stays `writing`.
 
@@ -72,6 +73,8 @@ holds no sign-in and no sync state. Reasons:
 - `account.id` has no `AUTOINCREMENT`. A deleted row lets SQLite give its ID
   to a new account, and the old ledger entries would then name the wrong
   mailbox.
+- The tombstone never gets a sign-in again. So no action of the account,
+  also one that stays in review, can ever apply.
 
 ### The removal (one write transaction)
 
@@ -84,10 +87,12 @@ holds no sign-in and no sync state. Reasons:
    `mirror_ready_at`, `sync_kind`, `sync_start` and `sync_step` to NULL. With
    no token, `sync_accounts` drops the account, so no new sync or apply
    starts.
-4. Deny each open action (`proposed`, `in_review`, `approved`, `held`) that
+4. Deny each open action (`proposed`, `approved`, `held`) that
    targets a message, an item or a draft of the account:
    `state = 'denied'`, `decided_by = 'engine'`, reason "the account was
-   removed". An action with a ledger entry in state `writing` keeps its
+   removed". An action in review keeps its state: only the person can
+   decide it (trigger `action_state`, see "Not in scope"). An action with a
+   ledger entry in state `writing` keeps its
    state, as `iris_changeset::expire` does.
 5. Write one row in the new table `removed_workspace(account_id, job_id)`
    for each job whose scope has mail of the account: a scope thread of the
@@ -183,18 +188,24 @@ left goes (the trigger `matter_item_lost`). A reader of
 these rows must accept an ID with no row (the build checks the ledger view,
 the review view and the job page).
 
-The address of the tombstone stays in the account table. The conversation
+The address of the tombstone stays in the account table until the person
+adds the address again. The conversation
 rule (`iris-talk`) reads each account address as an address of the owner,
 so mail to that address from another account still counts as mail to the
 owner.
 
 ### Add the address again
 
-`save_account_secret` with the address of a tombstone (`removed`) uses the
-same row: it sets the provider, the server fields, the token and the state.
-The sync state is empty, so the next sync is a first sync. An address in
-state `removing` is refused: "Iris still deletes the mail of this account.
-Try again in a minute."
+`save_account_secret` with the address of a tombstone (`removed`) makes a
+new account row with a new ID, in one transaction. First it changes the
+address of the tombstone to `removed:<id>:<address>`, because
+`account.address` is unique. This text is not a mail address, so it never
+matches a real address. The tombstone keeps its ID and provider, so each
+ledger entry and draft of the old account still names the old mailbox, and
+no action of the old account can apply to the new one. The new account has
+no sync state, so its first sync is a full copy. An address in state
+`removing` is refused: "Iris still deletes the mail of this account. Try
+again in a minute."
 
 ### Command
 
@@ -206,12 +217,27 @@ With no `--yes`, the command prints what it removes and asks for the address
 again on the terminal. It refuses a wrong answer. Then it does the removal
 and the delete, and prints the counts and the backup warning.
 
+### The call waits for the delete
+
+The command and the API call do the removal, then the delete of that
+account, and return only when the delete ended. For this call the delete
+waits for the locks: the sync lock (a sync of the account fails at its next
+insert, so it ends soon) and the backup lock (a backup ends by itself). The
+engine tick uses no wait: it skips an account whose lock is held.
+
+So when the person sees "removed", no view shows the mail of the account.
+During the call, the brief already has no item of the account, but another
+view (search, a message by ID) can still show its mail until its batch
+goes. After a crash during the call, the state stays `removing`, the
+Accounts page says "Iris deletes the mail of this account", and the next
+engine tick ends the delete.
+
 ### API and web client
 
 - `POST /api/accounts/{id}/remove` with the JSON body
   `{"address": "<address>"}`. The address must match the account: this makes
-  a removal by a wrong ID impossible. The response is the new status. The
-  delete then runs on a thread of the engine.
+  a removal by a wrong ID impossible. The response comes after the delete
+  (see "The call waits for the delete").
 - `/api/status` lists accounts in state `removing` with that state, and does
   not list `removed` accounts.
 - The Accounts page gets a "Remove" control for each account, with a confirm
@@ -249,7 +275,9 @@ and the delete, and prints the counts and the backup warning.
 | A backup runs | The delete waits for the backup lock. | as `clean_gone` |
 | Two deletes at the same time (engine and command) | The sync lock lets one run. The other does nothing. | store test |
 | Add the address while `removing` | Refused. | store test |
-| Add the address after `removed` | The same row, a first sync, zero differences. | engine test |
+| Add the address after `removed` | A new row with a new ID, a first sync, zero differences. The tombstone keeps the old ID. | engine test |
+| An action of the old account in review, approved after the address comes back | It applies nothing: no sign-in has the old ID, and its targets are gone. | store test (new ID) |
+| The call waits for a held sync lock | It returns after the lock goes and the delete ends. | store test with a thread |
 
 ## Impact
 
