@@ -478,7 +478,8 @@ person or a sender can set. Two existing rules read such data as proof:
   mirror and the verify agree. A sync can copy the sent message before
   the send completes. The completion then reads the labels of that mirror
   message again. Each change of `SENT` or `DRAFT` clears `understood_at`
-  through the triggers of migration 37, so the message gets a new
+  through the triggers of migration 37 (migration 42 adds `UNSENT` and
+  `SENT_COPY`), so the message gets a new
   understanding with the new sender decision. Each other message in
   `sentitems` gets the label `Folders/Sent Items`, and the sender axis
   decides it from its headers as any received mail. Known limit with its
