@@ -285,6 +285,15 @@ const SPECS: &[Spec] = &[
         about: "One matter (g-4) with its members, by form.",
         args: &[arg("id", Kind::Text, "The matter ID, for example g-4.")],
         adds: false,
+    },    Spec {
+        name: "matters_propose",
+        about: "Propose a matter: a title and 2 to 50 items (commitments, conversations, \
+                records or signals) from 2 or more threads. The person confirms it.",
+        args: &[
+            arg("title", Kind::Text, "The title, 1 to 80 characters, for example Tokyo trip."),
+            arg("items", Kind::Ids, "Item IDs, for example c-1, r-4, s-9."),
+        ],
+        adds: false,
     },
 ];
 
@@ -421,6 +430,10 @@ fn request(spec: &Spec, args: &Map<String, Value>) -> Call {
         "watch_remove" => Call::WatchRemove {
             id: text("id").unwrap_or_default(),
         },
+        "matters_propose" => socket(
+            "matters.propose",
+            json!({ "title": text("title"), "items": args.get("items") }),
+        ),
         "matters_list" => Call::MattersList,
         "matters_show" => Call::MattersShow {
             id: text("id").unwrap_or_default(),

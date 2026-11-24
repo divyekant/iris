@@ -792,3 +792,45 @@ fn a_read_sees_the_grant_and_the_text_of_one_snapshot() {
         }
     });
 }
+
+/// D22 (docs/specs/2026-11-24-matters-edit.md): an agent proposes a matter.
+/// A session may name only items of its grant; the host may name any
+/// live item. The proposal waits for the person.
+#[test]
+fn an_agent_proposes_a_matter_of_its_grant_only() {
+    let (store, job) = fixture("matters-propose");
+    let me = session(job, "se-1");
+    let args = json!({ "title": "Contract", "items": ["c-1", "c-4"] });
+    let (code, why) = call(&store, &me, "matters.propose", args.clone()).unwrap_err();
+    assert_eq!(code, code::DENIED, "{why}");
+    assert!(why.contains("c-4 is not in this job"), "{why}");
+    assert_eq!(count(&store, "SELECT count(*) FROM matter"), 0);
+    // A wrong form, a feed kind, one item: usage, no write.
+    for items in [json!(["r-1", "c-4"]), json!(["f-1", "c-4"]), json!(["c-1"])] {
+        let r = call(
+            &store,
+            &socket::local(),
+            "matters.propose",
+            json!({ "title": "Contract", "items": items }),
+        );
+        assert_eq!(r.unwrap_err().0, code::USAGE, "{items}");
+    }
+    let v = call(&store, &socket::local(), "matters.propose", args).unwrap();
+    assert_eq!(v["matter"]["status"], "proposed", "{v}");
+    assert_eq!(v["matter"]["derived"], json!({ "by": "agent" }));
+    assert_eq!(v["matter"]["items"], json!(["c-1", "c-4"]));
+    assert!(socket::parse_answer(
+        "matters.propose",
+        json!({ "ok": true, "result": v }).to_string().as_bytes()
+    )
+    .unwrap()
+    .is_ok());
+    // The same items again: they are in an open matter now.
+    let again = json!({ "title": "Again", "items": ["c-1", "c-4"] });
+    assert_eq!(
+        call(&store, &socket::local(), "matters.propose", again)
+            .unwrap_err()
+            .0,
+        code::USAGE
+    );
+}

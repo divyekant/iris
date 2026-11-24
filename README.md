@@ -235,8 +235,8 @@ use a terminal. Each tool has the name and the arguments of its verb:
 `status`, `search`, `show`, `draft`, `send`, `close`, `decline`, `skip`,
 `mute`, `dismiss`, `defer`, `correct`, `archive`, `inbox`, `read`, `unread`, `trash`, `label`,
 `unlabel`, `submit`, `changeset`, `drafts`, `withdraw`, `revise`,
-`watch_add`, `watch_list`, `watch_remove`, `matters_list` and
-`matters_show`. The result is what the verb prints with `--json`, or its
+`watch_add`, `watch_list`, `watch_remove`, `matters_list`,
+`matters_show` and `matters_propose`. The result is what the verb prints with `--json`, or its
 text where the verb has no `--json` (`watch_add` and `watch_remove`). A tool
 that adds an action gives the JSON `{"changeset": ..., "n": ...}`.
 

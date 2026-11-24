@@ -46,7 +46,9 @@ pub use drafts::write_drafts;
 pub use export::{export, Exported};
 pub use jobs::*;
 pub use ledger::{ledger, undo_entry, LedgerEntry, LedgerPage};
-pub use matters::{confirm_matter, decline_matter, matter, matters};
+pub use matters::{
+    confirm_matter, create_matter, decline_matter, delete_matter, edit_matter, matter, matters,
+};
 pub use notice::*;
 pub use outbox::{cancel_send, outbox, Cancelled, MAX_SENDS};
 pub use read::*;
@@ -189,10 +191,12 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/write/{id}", get(get_write))
         .route("/api/threads/{id}/reply", get(get_reply))
         .route("/api/threads/{id}/draft", get(get_draft))
-        .route("/api/matters", get(get_matters))
+        .route("/api/matters", get(get_matters).post(post_matter_create))
         .route("/api/matters/{id}", get(get_matter))
         .route("/api/matters/{id}/confirm", post(post_matter_confirm))
         .route("/api/matters/{id}/decline", post(post_matter_decline))
+        .route("/api/matters/{id}/edit", post(post_matter_edit))
+        .route("/api/matters/{id}/delete", post(post_matter_delete))
         // No fallback: `iris_web::router()` has the fallback of the server.
         .route("/api", any(|| async { not_found() }))
         .route("/api/{*rest}", any(|| async { not_found() }))
@@ -1206,6 +1210,51 @@ async fn post_matter_decline(
     _: NoBody,
 ) -> Result<Response> {
     Ok(decline_matter(&s, &id, now_ms())?.map_or_else(not_found, |d| Json(d).into_response()))
+}
+
+/// The person makes a matter by hand.
+async fn post_matter_create(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<MatterConfirm>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let view = create_matter(&s, &b.title, &b.items, now_ms())?;
+    Ok((StatusCode::CREATED, Json(view)).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MatterEdit {
+    title: Option<String>,
+    #[serde(default)]
+    add: Vec<String>,
+    #[serde(default)]
+    remove: Vec<String>,
+}
+
+/// The person edits a confirmed matter: title, items to add, items to
+/// remove (a member, or an addition that the person refuses).
+async fn post_matter_edit(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<MatterEdit>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    Ok(edit_matter(&s, &id, b.title, &b.add, &b.remove, now_ms())?
+        .map_or_else(not_found, |d| Json(d).into_response()))
+}
+
+/// The person deletes a confirmed matter. 204 with no body.
+async fn post_matter_delete(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    _: NoBody,
+) -> Result<Response> {
+    Ok(if delete_matter(&s, &id, now_ms())? {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        not_found()
+    })
 }
 
 fn now_s() -> i64 {
