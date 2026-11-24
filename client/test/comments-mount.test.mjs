@@ -263,3 +263,17 @@ test("an ended request with no comments has no Comments part", async () => {
     }
   }
 });
+
+// A failed load of the comments on an ended request shows the problem: the person must know that earlier comments may exist.
+test("an ended request shows a failed load of its comments", async () => {
+  for (const state of ["closed", "withdrawn"]) {
+    serve(() => [200, {}], async () => [500, { error: "The store is busy." }]);
+    const view = await mount("/src/views/Request.svelte", { changeset: { ...changeset(job), state } });
+    try {
+      const alert = await until(() => view.target.querySelector(".comments [role=alert]"));
+      assert.match(alert.textContent, /could not load the comments/, state);
+    } finally {
+      view.destroy();
+    }
+  }
+});

@@ -90,7 +90,7 @@
 </script>
 
 <!-- A request that takes no new comment shows the part only when it has comments. -->
-{#if list.length || c.state === "open"}
+{#if list.length || problem || c.state === "open"}
 <section class="comments" aria-labelledby={`${c.id}-comments`}>
   <h3 id={`${c.id}-comments`}>Comments to {agent}</h3>
   {#if list.length}
