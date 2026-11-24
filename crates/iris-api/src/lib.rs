@@ -1024,15 +1024,16 @@ fn stop_answer(s: &Store, since: Option<i64>) -> Result<serde_json::Value> {
 /// mail of the account again (a job with no folder has nothing to delete).
 /// Step 5 derives the sender kinds again from the evidence that stays, and
 /// runs understanding again on the mail of a sender whose hostile kind
-/// changed, as the understanding batch does. With no `wait`: `None` while a
-/// backup runs, and an account whose sync lock is held waits for a later
-/// call.
+/// changed, as the understanding batch does. With `only`, the delete of
+/// that one account, which waits for its locks. With no `only` (the engine
+/// tick): `None` while a backup runs, and an account whose sync lock is
+/// held waits for a later call.
 pub fn delete_removed(
     store: &Store,
-    wait: bool,
+    only: Option<i64>,
 ) -> iris_store::Result<Option<iris_store::Deleted>> {
     store.delete_removed(
-        wait,
+        only,
         &mut |job| {
             let dir = iris_workspace::default_dir(store.dir(), job);
             if !dir.exists() {
@@ -1096,12 +1097,12 @@ async fn post_account_remove(
     }
     let task = s.clone();
     tokio::task::spawn_blocking(move || {
-        task.remove_account(&b.address, now_ms())
+        let id = task.remove_account(&b.address, now_ms())
             .map_err(|e| match e {
                 iris_store::Error::Account(why) => Error::Conflict(why.into()),
                 e => e.into(),
             })?;
-        Ok::<_, Error>(delete_removed(&task, true)?)
+        Ok::<_, Error>(delete_removed(&task, Some(id))?)
     })
     .await
     .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;

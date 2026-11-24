@@ -2383,18 +2383,24 @@ fn stop_text(s: &iris_apply::Stopped) -> String {
     text
 }
 
-/// The confirmation of `iris sending on`: a terminal and a typed "yes". So
-/// a script with no terminal does not turn sending on by mistake.
-/// `terminal` is true when standard input is a terminal: a script or an
-/// agent without a terminal cannot turn sending on.
+/// What stays after a removal. The question says it before the removal,
+/// and the result says it again.
+const REMOVE_KEEPS: &str = "A backup copy that you made, the copies iris.db.v*.bak in the \
+     data folder and the notes of jobs still hold this mail.";
+
+/// The question of `iris account remove`, before the removal.
+fn remove_question(address: &str) -> String {
+    format!(
+        "This removes {address} and its mail from Iris on this machine. \
+         The mailbox at the provider does not change. The files of agents in the \
+         workspaces of its jobs go. {REMOVE_KEEPS} Type the address to remove it: "
+    )
+}
+
 /// Ask for the address of the account again before a removal. A wrong
 /// answer refuses the removal.
 fn remove_confirm(address: &str, input: &mut impl BufRead) -> Result<(), String> {
-    eprint!(
-        "This removes {address} and its mail from Iris on this machine. \
-         The mailbox at the provider does not change. The files of agents in the \
-         workspaces of its jobs go. Type the address to remove it: "
-    );
+    eprint!("{}", remove_question(address));
     let mut line = String::new();
     input.read_line(&mut line).map_err(|e| e.to_string())?;
     if line.trim() != address {
@@ -2409,7 +2415,7 @@ fn account_remove(store: &Store, address: &str) -> Result<String, String> {
     let id = store
         .remove_account(address, engine::now_ms())
         .map_err(|e| e.to_string())?;
-    let done = engine::delete_removed(store, true).map_err(|e| e.to_string())?;
+    let done = engine::delete_removed(store, Some(id)).map_err(|e| e.to_string())?;
     let state: Option<String> = store
         .read(|c| Ok(c.query_row("SELECT state FROM account WHERE id = ?1", [id], |r| r.get(0))?))
         .map_err(|e| e.to_string())?;
@@ -2422,11 +2428,13 @@ fn account_remove(store: &Store, address: &str) -> Result<String, String> {
         // A busy checkpoint: the next engine tick ends the delete.
         format!("iris: removed {address}. `iris serve` ends the delete of its mail.")
     };
-    Ok(format!(
-        "{first}\niris: a backup copy that you made, the copies iris.db.v*.bak in the data \
-         folder and the notes of jobs still hold this mail.\n"
-    ))
+    Ok(format!("{first}\niris: {REMOVE_KEEPS}\n"))
 }
+
+/// The confirmation of `iris sending on`: a terminal and a typed "yes". So
+/// a script with no terminal does not turn sending on by mistake.
+/// `terminal` is true when standard input is a terminal: a script or an
+/// agent without a terminal cannot turn sending on.
 
 fn sending_on_confirm(terminal: bool, input: &mut impl BufRead) -> Result<(), String> {
     if !terminal {
@@ -2537,6 +2545,11 @@ mod outbox_tests {
                 Err("The account stays.".to_string()),
                 "{answer:?}"
             );
+        }
+        // The question says what stays before the removal (spec, "Command").
+        let q = remove_question(a);
+        for word in ["backup copy", "iris.db.v*.bak", "notes of jobs", "files of agents", "provider does not change"] {
+            assert!(q.contains(word), "{word}: {q}");
         }
     }
 

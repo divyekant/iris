@@ -38,13 +38,19 @@ const ITEMS: &str = "item.account_id = ?1 OR item.id IN (
     SELECT s.item_id FROM item_source s JOIN message m ON m.id = s.message_id
     WHERE m.account_id = ?1)";
 
-/// The jobs whose scope has mail of `account` (`?1`): a thread of the
-/// account, or a listed message of the account.
+/// The jobs whose workspace can hold mail of `account` (`?1`): a scope
+/// thread, item or listed message of the account, and each scope row whose
+/// thread, item or message is gone. The store keeps no account for a gone
+/// row (an item that changed, a message that `clean_gone` deleted), but the
+/// workspace can still hold a copy of its mail, so such a job counts for
+/// each removal.
 const JOBS: &str = "SELECT DISTINCT s.job_id FROM job_scope s
     WHERE s.thread_id IN (SELECT id FROM thread WHERE account_id = ?1)
        OR s.item_id IN (SELECT id FROM item WHERE account_id = ?1)
-       OR EXISTS (SELECT 1 FROM job_scope_message l JOIN message m ON m.id = l.message_id
-                  WHERE l.scope_id = s.id AND m.account_id = ?1)";
+       OR (s.thread_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM thread t WHERE t.id = s.thread_id))
+       OR (s.item_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM item i WHERE i.id = s.item_id))
+       OR EXISTS (SELECT 1 FROM job_scope_message l LEFT JOIN message m ON m.id = l.message_id
+                  WHERE l.scope_id = s.id AND (m.id IS NULL OR m.account_id = ?1))";
 
 impl Store {
     /// The file of the sync lock of `account`. Each sync and each apply of
@@ -162,15 +168,20 @@ impl Store {
     /// continues. An account whose sync lock is held waits for the next
     /// call. Gives `None` and changes nothing if a backup holds the lock.
     ///
-    /// With `wait`, the call waits for each lock in place of a skip: the
+    /// With `only`, the call deletes that one account, if it is in state
+    /// [`STATE_REMOVING`], and waits for each lock in place of a skip: the
     /// command and the API call of a removal return only after the delete
-    /// (spec, "The call waits for the delete").
+    /// of their own account (spec, "The call waits for the delete"). The
+    /// counts are of that account only. With no `only` (the engine tick),
+    /// the call deletes each account in state [`STATE_REMOVING`] and skips a
+    /// held lock.
     pub fn delete_removed(
         &self,
-        wait: bool,
+        only: Option<i64>,
         workspace: &mut dyn FnMut(i64) -> io::Result<()>,
         senders: &mut dyn FnMut(&rusqlite::Transaction) -> Result<()>,
     ) -> Result<Option<Deleted>> {
+        let wait = only.is_some();
         let _backup = if wait {
             self.backup_lock()?
         } else {
@@ -180,9 +191,11 @@ impl Store {
             }
         };
         let accounts: Vec<i64> = self.read(|c| {
-            let mut q = c.prepare("SELECT id FROM account WHERE state = ?1 ORDER BY id")?;
+            let mut q = c.prepare(
+                "SELECT id FROM account WHERE state = ?1 AND (?2 IS NULL OR id = ?2) ORDER BY id",
+            )?;
             let ids = q
-                .query_map([STATE_REMOVING], |r| r.get(0))?
+                .query_map(params![STATE_REMOVING, only], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
             Ok(ids)
         })?;

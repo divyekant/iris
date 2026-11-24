@@ -1431,7 +1431,7 @@ fn remove_one_account_and_add_it_again() {
 
     s.store.remove_account("second@example.com", iris::engine::now_ms()).unwrap();
     assert!(!iris::engine::sync_accounts(&s.store).unwrap().contains(&second));
-    let done = iris::engine::delete_removed(&s.store, true).unwrap().unwrap();
+    let done = iris::engine::delete_removed(&s.store, Some(second)).unwrap().unwrap();
     assert_eq!(done.accounts, 1);
     assert_eq!((per_account(s.account), per_account(second)), (30, 0));
     // The late worker writes nothing for the removed account.

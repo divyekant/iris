@@ -160,7 +160,7 @@ fn the_delete_removes_the_mail_of_one_account_and_keeps_the_other() {
     // The brief has no item of the account at once.
     assert_eq!(n(&store, "SELECT count(*) FROM item WHERE account_id = ?1", a), 0);
 
-    let done = store.delete_removed(false, &mut none, &mut |_| Ok(())).unwrap().unwrap();
+    let done = store.delete_removed(None, &mut none, &mut |_| Ok(())).unwrap().unwrap();
     assert_eq!(done, Deleted { accounts: 1, messages: 2, files: 1 });
     assert_eq!(state(&store, a).as_deref(), Some(STATE_REMOVED));
     assert_eq!(rows(&store, a), 0);
@@ -204,7 +204,7 @@ fn the_delete_removes_the_mail_of_one_account_and_keeps_the_other() {
     assert_eq!(senders, ["kiwi@example.com", "pear@example.com", "plum@example.com"]);
     assert_eq!(n(&store, "SELECT count(*) FROM removed_sender WHERE account_id = ?1", a), 0);
     // A second call has nothing to do.
-    assert_eq!(store.delete_removed(false, &mut none, &mut |_| Ok(())).unwrap().unwrap(), Deleted::default());
+    assert_eq!(store.delete_removed(None, &mut none, &mut |_| Ok(())).unwrap().unwrap(), Deleted::default());
 }
 
 #[test]
@@ -216,7 +216,7 @@ fn a_removed_account_gets_no_new_mail() {
     // A sync that started before the removal fails at its next write.
     assert!(store.put_messages(a, &[msg(&store, "3", b"late", "late")]).is_err());
     assert!(store.put_labels(a, &[("X", "X", "user")]).is_err());
-    store.delete_removed(false, &mut none, &mut |_| Ok(())).unwrap();
+    store.delete_removed(None, &mut none, &mut |_| Ok(())).unwrap();
     assert!(store.put_messages(a, &[msg(&store, "3", b"late", "late")]).is_err());
     assert_eq!(rows(&store, a), 0);
 }
@@ -229,7 +229,7 @@ fn the_removal_refuses_an_unknown_or_removed_account() {
     assert!(store.remove_account("x@example.org", NOW).is_err());
     store.remove_account("a@example.org", NOW).unwrap();
     assert!(store.remove_account("a@example.org", NOW).is_err());
-    store.delete_removed(false, &mut none, &mut |_| Ok(())).unwrap();
+    store.delete_removed(None, &mut none, &mut |_| Ok(())).unwrap();
     assert!(store.remove_account("a@example.org", NOW).is_err());
 }
 
@@ -246,14 +246,14 @@ fn the_delete_waits_for_the_sync_lock_and_continues_after_a_restart() {
     let store = Store::open(&dir.0).unwrap();
     assert_eq!(state(&store, a).as_deref(), Some(STATE_REMOVING));
     let held = FileLock::try_take(&store.sync_lock_path(a)).unwrap().unwrap();
-    assert_eq!(store.delete_removed(false, &mut none, &mut |_| Ok(())).unwrap().unwrap(), Deleted::default());
+    assert_eq!(store.delete_removed(None, &mut none, &mut |_| Ok(())).unwrap().unwrap(), Deleted::default());
     assert_eq!(state(&store, a).as_deref(), Some(STATE_REMOVING));
     drop(held);
     // A held backup lock stops the delete too.
     let backup = store.backup_lock().unwrap();
-    assert_eq!(store.delete_removed(false, &mut none, &mut |_| Ok(())).unwrap(), None);
+    assert_eq!(store.delete_removed(None, &mut none, &mut |_| Ok(())).unwrap(), None);
     drop(backup);
-    store.delete_removed(false, &mut none, &mut |_| Ok(())).unwrap().unwrap();
+    store.delete_removed(None, &mut none, &mut |_| Ok(())).unwrap().unwrap();
     assert_eq!(state(&store, a).as_deref(), Some(STATE_REMOVED));
     assert_eq!(rows(&store, a), 0);
     assert!(rows(&store, b) > 0);
@@ -268,7 +268,7 @@ fn the_address_comes_back_only_after_the_delete() {
     assert!(store
         .save_account_secret("gmail", "a@example.org", None, b"sealed", "ok")
         .is_err());
-    store.delete_removed(false, &mut none, &mut |_| Ok(())).unwrap();
+    store.delete_removed(None, &mut none, &mut |_| Ok(())).unwrap();
     // The address comes back as a new account, also of another provider.
     let id = store
         .save_account_secret("outlook", "a@example.org", None, b"sealed", "ok")
@@ -314,6 +314,17 @@ fn the_delete_removes_the_workspace_of_each_job_with_mail_of_the_account() {
                 };
                 tx.execute(sql, [job, acc])?;
             }
+            // Job 5 had an item and a listed message that are gone now (an
+            // item that changed, a message that clean_gone deleted). Its
+            // workspace can still hold their mail, of any account.
+            tx.execute_batch(&format!(
+                "INSERT INTO job(id, goal, created_at, state, updated_at) VALUES (5, 'g', 0, 'working', 0);
+                 INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                   VALUES ('record', {b}, 'open', '{{}}', 0, 0);
+                 INSERT INTO job_scope(job_id, item_id, by, at)
+                   VALUES (5, last_insert_rowid(), 'person', 0);
+                 DELETE FROM item WHERE id = (SELECT item_id FROM job_scope WHERE job_id = 5);"
+            ))?;
             Ok(())
         })
         .unwrap();
@@ -355,7 +366,7 @@ fn the_delete_removes_the_workspace_of_each_job_with_mail_of_the_account() {
     let mut gone = Vec::new();
     store
         .delete_removed(
-            false,
+            None,
             &mut |job| {
                 gone.push(job);
                 Ok(())
@@ -364,7 +375,7 @@ fn the_delete_removes_the_workspace_of_each_job_with_mail_of_the_account() {
         )
         .unwrap();
     gone.sort();
-    assert_eq!(gone, [1, 3]);
+    assert_eq!(gone, [1, 3, 5]);
     assert_eq!(n(&store, "SELECT count(*) FROM removed_workspace WHERE account_id = ?1", a), 0);
 }
 
@@ -415,7 +426,7 @@ fn the_delete_removes_a_raw_file_whose_row_insert_failed() {
     assert!(store.put_messages(a, &[late]).is_err());
     assert!(store.content_path(&sha).unwrap().exists());
     std::thread::sleep(std::time::Duration::from_millis(20));
-    store.delete_removed(false, &mut none, &mut |_| Ok(())).unwrap();
+    store.delete_removed(None, &mut none, &mut |_| Ok(())).unwrap();
     assert!(!store.content_path(&sha).unwrap().exists());
     // The files of the other account stay.
     assert!(store.content_path(&store.put_content(b"shared").unwrap()).unwrap().exists());
@@ -450,12 +461,12 @@ fn a_busy_checkpoint_keeps_the_state_until_a_later_call() {
     // A reader with an open snapshot keeps the log busy.
     let reader = Connection::open(dir.0.join("iris.db")).unwrap();
     reader.execute_batch("BEGIN; SELECT count(*) FROM message;").unwrap();
-    store.delete_removed(false, &mut none, &mut |_| Ok(())).unwrap();
+    store.delete_removed(None, &mut none, &mut |_| Ok(())).unwrap();
     assert_eq!(state(&store, a).as_deref(), Some(STATE_REMOVING));
     assert_eq!(rows(&store, a), 0);
     reader.execute_batch("COMMIT").unwrap();
     drop(reader);
-    store.delete_removed(false, &mut none, &mut |_| Ok(())).unwrap();
+    store.delete_removed(None, &mut none, &mut |_| Ok(())).unwrap();
     assert_eq!(state(&store, a).as_deref(), Some(STATE_REMOVED));
 }
 
@@ -469,7 +480,7 @@ fn a_waiting_delete_ends_after_the_sync_lock_goes() {
     let (send, done) = std::sync::mpsc::channel();
     let s2 = store.clone();
     let worker = std::thread::spawn(move || {
-        send.send(s2.delete_removed(true, &mut none, &mut |_| Ok(())).unwrap().unwrap()).unwrap()
+        send.send(s2.delete_removed(Some(a), &mut none, &mut |_| Ok(())).unwrap().unwrap()).unwrap()
     });
     assert!(done.recv_timeout(std::time::Duration::from_millis(300)).is_err());
     drop(held);
@@ -492,7 +503,7 @@ fn a_waiting_delete_tries_a_busy_checkpoint_again() {
         c.execute_batch("COMMIT").unwrap();
     });
     std::thread::sleep(std::time::Duration::from_millis(100));
-    store.delete_removed(true, &mut none, &mut |_| Ok(())).unwrap();
+    store.delete_removed(Some(a), &mut none, &mut |_| Ok(())).unwrap();
     assert_eq!(state(&store, a).as_deref(), Some(STATE_REMOVED));
     reader.join().unwrap();
 }
@@ -552,6 +563,6 @@ fn no_page_of_the_database_keeps_the_text_of_a_removed_item() {
     };
     assert!(has(&dir.0), "the marker is in the file before the removal");
     store.remove_account("a@example.org", NOW).unwrap();
-    store.delete_removed(true, &mut none, &mut |_| Ok(())).unwrap().unwrap();
+    store.delete_removed(Some(a), &mut none, &mut |_| Ok(())).unwrap().unwrap();
     assert!(!has(&dir.0), "a page keeps the text of a removed item");
 }

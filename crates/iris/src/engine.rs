@@ -937,8 +937,8 @@ pub fn attention_turn(
 
 /// Delete the mail of each removed account, with the workspaces of its
 /// jobs: [`iris_api::delete_removed`].
-pub fn delete_removed(store: &Store, wait: bool) -> Result<Option<iris_store::Deleted>> {
-    Ok(iris_api::delete_removed(store, wait)?)
+pub fn delete_removed(store: &Store, only: Option<i64>) -> Result<Option<iris_store::Deleted>> {
+    Ok(iris_api::delete_removed(store, only)?)
 }
 
 /// The schedule: one sync thread for each account, so a long first sync of
@@ -1022,7 +1022,7 @@ impl Engine {
         }
         // The delete of a removed account continues after a crash or a
         // held lock.
-        if let Err(e) = delete_removed(&self.store, false) {
+        if let Err(e) = delete_removed(&self.store, None) {
             say!("iris: delete of a removed account: {e}");
         }
         if let Err(e) = self.store.reopen_deferred(now_ms()) {

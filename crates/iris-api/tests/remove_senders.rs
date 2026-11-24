@@ -76,7 +76,7 @@ fn the_delete_keeps_each_sender_kind_that_the_evidence_of_another_account_suppor
     assert!(before.contains(&("eve@example.com".into(), "person".into())), "{before:?}");
 
     store.remove_account("a@example.org", NOW).unwrap();
-    iris_api::delete_removed(&store, true).unwrap().unwrap();
+    iris_api::delete_removed(&store, Some(a)).unwrap().unwrap();
     let after = senders(&store);
     // Dana stays a person: account b sent mail to Dana. Eve was known only
     // through the mail of account a, so the row goes.
