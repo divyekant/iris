@@ -8,7 +8,7 @@
 //! `users.messages.list` (paging, `labelIds`, `includeSpamTrash`, and `q`
 //! only as `rfc822msgid:<id>`), `users.messages.get` (`raw`, `metadata`,
 //! `minimal`), `users.messages.send`, `users.drafts.create`,
-//! `.get` (`raw`), `.list` (`q` as above) and `.send`,
+//! `.get` (`raw`), `.list` (`q` as above), `.update` and `.send`,
 //! `users.messages.batchModify`, `users.messages.trash`,
 //! `users.messages.untrash`, `users.labels.create` and
 //! `users.history.list` (paging, `historyTypes`). The JSON has the shape
@@ -623,7 +623,10 @@ fn router(store: Shared) -> Router {
             get(list_drafts).post(create_draft),
         )
         .route("/gmail/v1/users/{user}/drafts/send", post(send_draft))
-        .route("/gmail/v1/users/{user}/drafts/{id}", get(get_draft))
+        .route(
+            "/gmail/v1/users/{user}/drafts/{id}",
+            get(get_draft).put(update_draft),
+        )
         .layer(middleware::from_fn_with_state(store.clone(), log_and_fail))
         .with_state(store)
 }
@@ -1271,6 +1274,47 @@ async fn create_draft(
     s.next_draft += 1;
     s.drafts.push((id.clone(), i));
     Json(s.draft_json(&id, i)).into_response()
+}
+
+/// `PUT drafts/{id}` (`drafts.update`): the draft keeps its ID and gets a
+/// new message, in the Gmail form of a new draft. The body must name the
+/// same draft ID, as Gmail asks.
+async fn update_draft(
+    State(s): State<Shared>,
+    Path((user, id)): Path<(String, String)>,
+    h: HeaderMap,
+    body: Result<Json<UpdateBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(e) = check(&h, &user) {
+        return e;
+    }
+    let Ok(Json(body)) = body else {
+        return error(StatusCode::BAD_REQUEST, "Invalid JSON payload received.");
+    };
+    if body.id.as_deref().is_some_and(|b| b != id) {
+        return error(StatusCode::BAD_REQUEST, "The draft ID of the body is not the ID of the path.");
+    }
+    let raw = match draft_raw(&DraftBody {
+        message: body.message,
+    }) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let mut s = s.lock().unwrap();
+    if s.draft(&id).is_none() {
+        return error(StatusCode::NOT_FOUND, "Requested entity was not found.");
+    }
+    let n = s.next_draft;
+    s.next_draft += 1;
+    s.replace_draft(&id, gmail_draft_form(&raw, n));
+    let i = s.draft(&id).expect("replaced");
+    Json(s.draft_json(&id, i)).into_response()
+}
+
+#[derive(Deserialize)]
+struct UpdateBody {
+    id: Option<String>,
+    message: DraftMessage,
 }
 
 /// The message of a new draft as real Gmail keeps it (send check of issue
