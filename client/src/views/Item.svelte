@@ -1,9 +1,11 @@
 <!--
   One item. The words of the mail that made it come first, so that a person
-  seldom needs the mail itself. Each source opens its mail in one step.
+  seldom needs the mail itself. Each source opens its mail in one step. For a
+  long thread of an item that needs you, a summary of Iris comes first, under
+  the title (issue 478).
 -->
 <script lang="ts">
-  import type { Item } from "../api";
+  import { get, type Item, type ItemSummary } from "../api";
   import { watch } from "../clock";
   import { due, field, money, party, RECORD_FIELDS, when } from "../format";
   import { href } from "../route";
@@ -67,6 +69,22 @@
     r.push(["State", item.status]);
     return r;
   });
+  // The summary of the long thread (issue 478). A 404 or a failure shows nothing.
+  let summary: ItemSummary | null = $state(null);
+  $effect(() => {
+    const id = item.id;
+    let live = true;
+    summary = null;
+    get<ItemSummary>(`items/${encodeURIComponent(id)}/summary`).then(
+      (s) => {
+        if (live) summary = s;
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  });
   // "Handle this" (R4-10): the start of a job, on its own page.
   let startable = $derived(canStart(item));
   // "Reply" (R3-10): the write view of the thread. A gone conversation has no mail to answer.
@@ -79,6 +97,14 @@
 <article>
   <p class="form">{FORMS[item.form]}{item.form === "record" && item.type ? `: ${item.type}` : ""}</p>
   <h1>{item.title}</h1>
+
+  {#if summary}
+    <section class="summary" aria-label="Summary by Iris">
+      <p class="by">Summary by Iris</p>
+      <p class="text">{summary.text}</p>
+      <p class="limit">From the mail up to {when(summary.created)}. Read the mail for the exact words.</p>
+    </section>
+  {/if}
 
   {#snippet handle()}
     {#if startable}<a class="handle" href={href.start(item.id)}>Handle this</a>{/if}
@@ -150,6 +176,31 @@
     letter-spacing: -0.01em;
     line-height: 1.25;
     margin: 0 0 var(--space-6);
+  }
+  .summary {
+    margin: 0 0 var(--space-6);
+    padding: var(--space-4) var(--space-6);
+    border: 1px solid var(--color-border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--color-background-elevated);
+  }
+  .summary p {
+    margin: 0;
+  }
+  .summary .by {
+    color: var(--color-text-muted);
+    font-size: var(--font-size--1);
+    margin-bottom: var(--space-2);
+  }
+  .summary .text {
+    line-height: 1.5;
+    white-space: pre-line;
+    overflow-wrap: anywhere;
+  }
+  .summary .limit {
+    color: var(--color-text-faint);
+    font-size: var(--font-size--1);
+    margin-top: var(--space-3);
   }
   .handle {
     display: inline-flex;
