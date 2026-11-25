@@ -941,8 +941,12 @@ fn state(store: &Store, account: i64) -> Result<State> {
     store
         .read(|c| {
             Ok(c.query_row(
+                // A tombstone is no account to sync (issue 910): the sync
+                // stops before any provider call. The triggers of migration
+                // 56 refuse a write of a sync that read the state before.
                 "SELECT address, history_id, sync_kind, sync_start, sync_step
-                 FROM account WHERE id = ?1",
+                 FROM account WHERE id = ?1
+                   AND (state IS NULL OR state NOT IN ('removing', 'removed'))",
                 [account],
                 |r| {
                     Ok(State {
