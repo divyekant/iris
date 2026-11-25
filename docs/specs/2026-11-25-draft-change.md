@@ -82,6 +82,7 @@ The submit denies a change, with the reason, when one of these is true:
 | The account of the draft has another provider than `gmail` | "Iris cannot change a draft of this account." |
 | The draft is sent (`sent_at` is set) | "The draft is sent." |
 | The draft has `foreign_at` | "The draft has a form that Iris does not write. Change it in Gmail." |
+| An attachment of the content of the draft row has no file in the attachment folder with its SHA-256 and size (for example, a file that the person added in Gmail, send content spec) | "A file of the draft is not in Iris. Change it in Gmail." |
 | A `send` action of the draft is `proposed`, `in_review`, `approved` or `held`, or a `ledger_send` row claims it | "The draft waits to send. Cancel it first." |
 | Another `draft` action that names the same draft is `approved` or `held`, or has a ledger row in `writing` | "Iris changes this draft now. Try again in a minute." |
 
@@ -194,9 +195,13 @@ differences:
   `undone_by` and the state `undone`.
 - Only the newest ledger entry of the draft (a change, a send or an
   undo, by row ID) can be undone. An entry with a later entry of the
-  same draft is final. A no-op entry (section 2, step 3: no provider
-  call and no `pre`) does not count, so the change A to B stays the
-  newest entry after a press of Send with B again. So for the changes A to B, B to C and C to B, the
+  same draft that counts is final. A later entry counts when it is in
+  `writing`, when it is `applied` or `undone` and made a provider call,
+  or when it is a `failed` send whose `ledger_send` claim stays (its
+  result is not known). A no-op entry (section 2, step 3) and a
+  definitely rejected entry do not count. So the change A to B stays
+  the newest entry after a press of Send with B again, and after a send
+  that Gmail refused. So for the changes A to B, B to C and C to B, the
   first entry cannot undo the last B. The hash check alone cannot show
   this, so the rule reads the ledger, not the hash.
 
@@ -212,13 +217,14 @@ A ledger row of a change in `writing` after a crash or a lost answer:
 2. Its hash is the new `hash` of `ops`: the call applied. Do step 6 of
    section 2. The new hash is never the `pre_hash` (section 2, step 3),
    so this result cannot come from a call that did not apply.
-3. Its hash is the `pre_hash` of `ops`: the call did not apply. Call
-   `drafts.update` again with the same bytes (compose gives the same
-   bytes from `ops` and `post`). A full replace with the same bytes has
-   the same result, so a second call is safe.
-4. Not found, another hash, or a read that fails for 24 hours: the row is
-   `failed` with "Iris does not know if the draft changed. Look at it in
-   Gmail.". The draft row does not change. A later send reads the draft
+3. Any other result (the `pre_hash`, another hash, not found, or a read
+   that fails for 24 hours): the row is `failed` with "Iris does not know
+   if the draft changed. Look at it in Gmail.", and the draft row
+   refreshes from Gmail (`changed_at_gmail`) when the read succeeded.
+   Recovery never calls `drafts.update` again. The `pre_hash` at Gmail
+   can be a call that did not apply, or a call that applied and then an
+   edit of the person back to the old text. Iris cannot tell the two
+   apart, so it does not write. A later send reads the draft
    at Gmail again before the release, so a send cannot go with content
    that the person did not approve.
 
@@ -310,7 +316,8 @@ This is the same class of risk that spec 2 accepts for a label change
 | A send of the draft waits in the outbox, or a send is claimed | Submit and apply deny the change. The undo is a 409 | Changeset test, apply test |
 | Two changes of one draft at the same time | The second submit is denied (section 1). The one write connection orders the two submits | Changeset test |
 | A change and a send release at the same time | The release needs an approved send, which section 1 refuses while a change is open. The apply and the release run on the one apply lock | Apply test |
-| A crash after the claim and before the call | Recovery finds `pre_hash` at Gmail and calls again | Crash test |
+| A crash after the claim and before the call | Recovery finds `pre_hash` at Gmail: `failed`, no second call. The send of the write is denied at the release (hash) | Crash test |
+| A lost answer after the call applied, then the person changes the text back to the old text in Gmail | Recovery finds `pre_hash`: `failed`, no call, the text of the person stays | Crash test |
 | A lost answer after the call applied | Recovery finds the new hash and completes | Crash test |
 | A lost answer, then the person changes the draft in Gmail | Recovery finds another hash: `failed`, no call | Crash test |
 | An undo after the person changed the draft in Gmail | Denied, the text of the person stays | Fake server test |
@@ -357,8 +364,8 @@ for Gmail) during one change. A create holds one copy.
 
 | Call | Success | Definite rejection | Unknown result | Retry |
 |---|---|---|---|---|
-| `drafts.update` (change) | The read back has the new hash: the row is `applied`, the draft row has the new content. Another hash: `failed` (section 7) | The row is `failed`, the draft row does not change | Recovery (section 4) reads the draft | Only from recovery, only when Gmail has `pre_hash` |
-| `drafts.update` (undo) | The change entry is `undone`, the draft row has the old content | The undo row is `failed`, the change entry stays `applied` | Recovery as section 4, with the hashes swapped | As for a change |
+| `drafts.update` (change) | The read back has the new hash: the row is `applied`, the draft row has the new content. Another hash: `failed` (section 7) | The row is `failed`, the draft row does not change | Recovery (section 4) reads the draft: the new hash completes, each other result is `failed` | Never. A new press of the person makes a new action |
+| `drafts.update` (undo) | The change entry is `undone`, the draft row has the old content | The undo row is `failed`, the change entry stays `applied` | Recovery as section 4, with the hashes swapped | Never. The person can press Undo again |
 
 ## Open questions
 
@@ -382,7 +389,11 @@ for Gmail) during one change. A create holds one copy.
    if the write view hides the control for Outlook.
 6. The changes A to B, B to C, C to B of one draft: the undo of the
    first entry is a 409. Red if the undo writes A.
-7. The change A to B, then a press of Send with B again: the undo of the
-   change A to B is still possible. Red if the no-op entry blocks it.
+7. The change A to B, then a press of Send with B again, then a send
+   that Gmail refuses: the undo of the change A to B is still possible.
+   Red if the no-op entry or the refused send blocks it.
+9. A crash test: the update applied, the answer was lost, and the text
+   at Gmail is the old text again. Recovery makes no call. Red if it
+   calls `drafts.update`.
 8. A change of a reply in a thread with two messages binds the newest
    message as its parent. Red if the write gets a 409 with no new mail.

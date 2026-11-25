@@ -922,8 +922,10 @@ applies it.
 1. The person selects undo on a ledger entry, in the web client. The entry
    must be `applied` or `failed`, with the undo `inverse`, and with one or
    more messages with `done` that are not gone (a state entry: one or more
-   items in `post` that are in the store). No other undo of the entry is
-   open.
+   items in `post` that are in the store; a draft change entry: a `pre`
+   content and a draft that passes the checks of
+   `docs/specs/2026-11-25-draft-change.md` section 3). No other undo of
+   the entry is open.
 2. The engine (`iris_apply::undo`) makes a changeset with author `person`
    and one action: the inverse of the entry (`archive` and `inbox`, `read`
    and `unread`, `label` and `unlabel` of the same name, `trash` and
@@ -933,7 +935,9 @@ applies it.
    resolves the messages with `done` that are not gone, in SQL, so no list
    of message IDs is in memory (section 9). For `restore`, submit resolves
    the items of the entry instead (`action_item`), and the apply runs with
-   the state verbs (section 4). Only an action with the link
+   the state verbs (section 4). For a draft change entry, submit resolves
+   the draft of the entry (`ops`), and the apply is the change apply of
+   the draft change spec. Only an action with the link
    of migration 23 to that entry can target an entry. The undo of `label`
    or `unlabel` changes the label of the entry by its ID (from `ops`), so a
    rename of the label at Gmail after the entry does not change the undo.
