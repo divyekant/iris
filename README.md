@@ -411,7 +411,7 @@ iris export <empty-folder>
 | File | Content |
 |---|---|
 | `items.jsonl` | One item on each line, as the open model gives it |
-| `messages.jsonl` | One message on each line, as `iris show <id> --json` gives it, with `file`: the path of its raw message |
+| `messages.jsonl` | One message on each line, as `iris show <id> --json` gives it, with `file`: the path of its raw message, and `hostile_mail`: `true` for hostile mail (a hostile mark, the label SPAM or a hostile sender) |
 | `mail/<id>.eml` | The raw message. A mail program can open it. |
 
 The export holds no secret: no key, no sign-in and no model key.
