@@ -1027,3 +1027,25 @@ test("the change of a send waits, as each decision does, until every row of the 
     delete globalThis.location;
   }
 });
+
+test("a send whose draft cannot change after its deny offers no change, and a newer mail says why (issue 1104)", async () => {
+  const cs = fx.changesets.find((c) => c.id === "cs-79");
+  const [first] = fx.answer("/changesets/cs-79/drafts").drafts;
+  for (const [entry, why] of [
+    [{ ...first, change: null, newer_mail: true }, /A new mail came into this thread after this reply was written\./],
+    [{ ...first, change: null }, null],
+    [{ ...first, change: undefined }, null],
+  ]) {
+    serve({ "changesets/cs-79/drafts": [200, { drafts: [entry] }] });
+    const view = await mount("/src/views/Request.svelte", { changeset: structuredClone(cs) });
+    try {
+      await until(() => /Hi Dana/.test(text(view.target)));
+      view.flushSync();
+      assert.equal(view.target.querySelector("button.change"), null, JSON.stringify(entry.change));
+      if (why) assert.match(text(view.target), why);
+      else assert.doesNotMatch(text(view.target), /A new mail came into this thread/);
+    } finally {
+      view.destroy();
+    }
+  }
+});

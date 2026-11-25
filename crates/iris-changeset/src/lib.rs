@@ -1769,14 +1769,22 @@ pub fn change_denied(
     draft: i64,
     now_ms: i64,
 ) -> Result<Option<String>> {
-    denied(c, action, draft, now_ms, false)
+    denied(c, action, draft, now_ms, false, 0)
 }
 
 /// The checks of [`change_denied`] with no action and for each provider:
 /// the reason why the person cannot change the draft `draft` now, or
 /// `None`. The write view offers "Change and send" only with `None`.
-pub fn change_blocked(c: &Connection, draft: i64, now_ms: i64) -> Result<Option<String>> {
-    denied(c, 0, draft, now_ms, true)
+/// `after_deny` is a waiting send action of the draft that the checks
+/// count as denied, or 0: the review offers to deny that send and change
+/// the draft only with `None` (issue 1104).
+pub fn change_blocked(
+    c: &Connection,
+    draft: i64,
+    after_deny: i64,
+    now_ms: i64,
+) -> Result<Option<String>> {
+    denied(c, 0, draft, now_ms, true, after_deny)
 }
 
 /// The message that the reply draft `draft` answers: the parent that the
@@ -1798,6 +1806,7 @@ fn denied(
     draft: i64,
     now_ms: i64,
     any_provider: bool,
+    after_deny: i64,
 ) -> Result<Option<String>> {
     let row: Option<(bool, String, bool, bool, bool)> = c
         .query_row(
@@ -1837,7 +1846,7 @@ fn denied(
         &format!(
             "SELECT EXISTS (SELECT 1 FROM ledger_send WHERE draft_id = ?2)
                  OR EXISTS (SELECT 1 FROM action_draft o JOIN changeset_action b ON b.id = o.action_id
-                            WHERE o.draft_id = ?2 AND b.verb = 'send'
+                            WHERE o.draft_id = ?2 AND b.verb = 'send' AND b.id <> ?4
                               AND b.state IN ('proposed', 'in_review', 'approved', 'held'))
                  OR EXISTS (SELECT 1 FROM write_send w
                             JOIN changeset_action b ON b.id = w.action_id
@@ -1851,7 +1860,7 @@ fn denied(
                                               WHERE o.action_id = b.id AND o.draft_id = ?2)))",
             mark = written::MARK_MS,
         ),
-        params![action, draft, now_ms],
+        params![action, draft, now_ms, after_deny],
         |r| r.get(0),
     )?;
     if waits {
