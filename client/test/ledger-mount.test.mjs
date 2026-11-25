@@ -247,3 +247,30 @@ test("a failed read of the messages to check keeps a button to try again", async
     net.restore();
   }
 });
+
+test("a recovery that lists one more message starts the list of messages to check again", async () => {
+  const e = { ...fx.ledger.entries[0], id: "l-43", state: "writing", unknown: 1, can_undo: false, undo_open: false };
+  const msg = (id, subject) => ({ id, thread: "t-1", from: { name: "Dana", address: "dana@example.com" }, to: [], subject, snippet: "", date: "2026-11-15T09:00:00Z", labels: [], unread: false, gone: false });
+  let listed = [msg("m-5", "Invoice 5")];
+  let entry = e;
+  const net = serve({
+    "GET ledger/l-43/unknown?limit=50": () => [200, { messages: listed, next: null }],
+    "GET ledger?limit=200": () => [200, { entries: [entry], next: null }],
+  });
+  const app = await mount("/src/views/Ledger.svelte", { page: { entries: [e], next: null }, wait: 20 });
+  try {
+    const button = () => app.target.querySelector("button.check");
+    button().click();
+    await until(() => button() === null && /Invoice 5/.test(text(app.target)));
+    // The recovery lists a message with an earlier ID, and the next read of the list shows the new count.
+    listed = [msg("m-2", "Invoice 2"), msg("m-5", "Invoice 5")];
+    entry = { ...e, unknown: 2 };
+    await until(() => button() !== null);
+    button().click();
+    await until(() => /Invoice 2/.test(text(app.target)));
+    assert.equal(app.target.querySelectorAll("ul.unknown a").length, 2);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});

@@ -85,14 +85,18 @@
 
   // Spec 2 section 7.3: the messages of an entry that Iris could not confirm, so that you can check
   // each one in your mailbox. A page at a time, by entry ID.
-  let unknown = $state<Record<string, { rows: Row[]; next: string | null; loading: boolean; failed: boolean; problem: string }>>({});
+  // `count` is the count of the entry when the list started: while a recovery waits, it can list more
+  // messages, and a new count starts the list again from the first page.
+  let unknown = $state<Record<string, { count: number; rows: Row[]; next: string | null; loading: boolean; failed: boolean; problem: string }>>({});
+  const listOf = (e: LedgerEntry) => (unknown[e.id]?.count === e.unknown ? unknown[e.id] : undefined);
   async function showUnknown(e: LedgerEntry) {
-    const was = unknown[e.id];
-    unknown[e.id] = { rows: was?.rows ?? [], next: was?.next ?? null, loading: true, failed: false, problem: "" };
+    const was = listOf(e);
+    const count = e.unknown ?? 0;
+    unknown[e.id] = { count, rows: was?.rows ?? [], next: was?.next ?? null, loading: true, failed: false, problem: "" };
     try {
       const after = was?.next ? `&after=${encodeURIComponent(was.next)}` : "";
       const p = await get<{ messages: Target[]; next: string | null }>(`ledger/${e.id}/unknown?limit=50${after}`);
-      unknown[e.id] = { rows: [...(was?.rows ?? []), ...p.messages.map(messageRow)], next: p.next, loading: false, failed: false, problem: "" };
+      unknown[e.id] = { count, rows: [...(was?.rows ?? []), ...p.messages.map(messageRow)], next: p.next, loading: false, failed: false, problem: "" };
     } catch (err) {
       // `own` gives "" when the engine is out of reach (the page says so): the read still failed.
       unknown[e.id] = { ...unknown[e.id], loading: false, failed: true, problem: own(err) };
@@ -175,7 +179,7 @@
           {#if why(e)}<p class="why">{why(e)}</p>{/if}
           {#if s}<p class="why state"><span class="dot" class:warn={e.state === "failed"}></span>{s}</p>{/if}
           {#if (e.unknown ?? 0) > 0}
-            {@const u = unknown[e.id]}
+            {@const u = listOf(e)}
             {#if u?.rows.length}
               <ul class="unknown" aria-label="Messages to check">
                 {#each u.rows as m (m.id)}
