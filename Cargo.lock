@@ -887,6 +887,7 @@ dependencies = [
  "iris-session",
  "iris-spec",
  "iris-store",
+ "iris-summary",
  "iris-sync",
  "iris-synth",
  "iris-triage",

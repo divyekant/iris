@@ -17,6 +17,7 @@ pub mod reply;
 pub mod session_socket;
 pub mod sessions;
 pub mod socket;
+pub mod summary;
 pub mod verbs;
 
 use std::io::BufRead;
