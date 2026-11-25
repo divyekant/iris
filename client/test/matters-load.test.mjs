@@ -83,3 +83,30 @@ test("the brief line of additions lists only the confirmed matters with an addit
   assert.deepEqual(asked, ["matters"]);
   assert.deepEqual(growing.map((m) => m.id), ["g-4"]);
 });
+
+test("a new proposal during the Undo time keeps the card and its hold (issue 345)", async () => {
+  let proposed = list("g-5");
+  const posts = [];
+  globalThis.fetch = async (url, init) => {
+    const path = String(url).replace(/^\/api\//, "");
+    if (init?.method === "POST") return posts.push(path), new Response(JSON.stringify(as("g-5", "declined")), { status: 200 });
+    const body = path === "matters" ? proposed : path.startsWith("matters/") ? as(path.slice(8)) : path === "brief" ? fx.brief : path === "status" ? fx.answer("status") : [];
+    return new Response(JSON.stringify(body), { status: 200 });
+  };
+  const view = await mount("/src/views/Brief.svelte", { brief: fx.brief, watches: [], now: new Date("2026-11-16T09:05:00Z"), poll: 5, hold: 400 });
+  const press = (name) => [...view.target.querySelectorAll("button")].find((b) => text(b).trim() === name).click();
+  try {
+    await until(() => /Iris sees a matter/.test(text(view.target)));
+    press("Not a matter");
+    await until(() => [...view.target.querySelectorAll("button")].some((b) => text(b).trim() === "Undo"));
+    // A newer proposal arrives while the decision waits: the card stays, and nothing is sent.
+    proposed = list("g-7", "g-5");
+    await new Promise((r) => setTimeout(r, 150));
+    assert.deepEqual(posts, [], "the held decision waits for its time");
+    press("Undo");
+    // After the hold, the brief takes the newest proposal again.
+    await until(() => posts.length === 0 && !/Undo/.test(text(view.target)));
+  } finally {
+    view.destroy();
+  }
+});

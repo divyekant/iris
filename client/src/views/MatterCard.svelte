@@ -15,9 +15,17 @@
   let {
     view,
     ondecided,
+    onheld,
     all = false,
     delay = HOLD,
-  }: { view: MatterView; ondecided?: (answer: MatterView | null) => void; all?: boolean; delay?: number } = $props();
+  }: {
+    view: MatterView;
+    ondecided?: (answer: MatterView | null) => void;
+    /** True while a decision waits for its Undo time or its answer, so the view keeps this card (issue 345). */
+    onheld?: (on: boolean) => void;
+    all?: boolean;
+    delay?: number;
+  } = $props();
   let matter = $derived(view.matter);
   let members = $derived([...view.items.record, ...view.items.conversation, ...view.items.commitment, ...(view.items.signal ?? [])]);
   const SHOWN = 5;
@@ -55,6 +63,7 @@
     // The decision takes the matter as the person left it at the click.
     const id = matter.id;
     const body = choice === "confirm" ? { title: title.trim(), items: keep } : {};
+    onheld?.(true);
     pending = hold(() => send(id, choice, body), delay);
   }
 
@@ -72,6 +81,7 @@
     pending?.cancel();
     pending = undefined;
     phase = { at: "idle" };
+    onheld?.(false);
   }
 
   async function send(id: string, choice: Choice, body: object) {
@@ -80,8 +90,10 @@
     try {
       // Not `ondecided?.(await post(...))`: with no `ondecided`, that skips the request.
       const answer = await post<MatterView>(`matters/${encodeURIComponent(id)}/${choice}`, body);
+      onheld?.(false);
       ondecided?.(answer);
     } catch (error) {
+      onheld?.(false);
       const status = (error as { status?: number }).status ?? 0;
       // A 4xx answer wrote nothing. With no answer, or a 5xx, Iris cannot say.
       phase = { at: "failed", why: (error as Error).message, known: status >= 400 && status < 500 };

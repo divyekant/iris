@@ -103,11 +103,15 @@
   const proposedTicket = newest();
   // The confirmed matters with additions (D20): one line each, that opens the matter.
   let growing = $state<Matter[]>([]);
+  // True while the card holds a decision for Undo or for its answer: a poll keeps the card, so the hold keeps its time (issue 345).
+  let matterHeld = false;
   async function reloadProposed() {
     const fresh = proposedTicket();
     try {
       const [p, g] = await Promise.all([loadProposed(), loadGrowing()]);
-      if (fresh()) [proposed, growing] = [p, g];
+      if (!fresh()) return;
+      growing = g;
+      if (!matterHeld) proposed = p;
     } catch {
       // The next poll tries again.
     }
@@ -322,7 +326,12 @@
 {#if proposed}
   <section aria-labelledby="matter">
     <h2 id="matter"><span>{proposed.count === 1 ? "A matter to confirm" : "Matters to confirm"}</span> <span class="count">{proposed.count}</span></h2>
-    {#key proposed.view.matter.id}<MatterCard view={proposed.view} ondecided={() => (done(), reloadProposed())} delay={hold} />{/key}
+    {#key proposed.view.matter.id}<MatterCard
+        view={proposed.view}
+        ondecided={() => (done(), reloadProposed())}
+        onheld={(on) => (matterHeld = on)}
+        delay={hold}
+      />{/key}
     {#if proposed.count > 1}<a class="all touch" href="#/matters">All {proposed.count} that Iris proposes</a>{/if}
   </section>
 {/if}
