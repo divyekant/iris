@@ -249,8 +249,10 @@ fn a_short_thread_is_no_candidate_and_a_long_text_makes_a_long_thread() {
     let long = "word ".repeat(MIN_CHARS as usize / 5);
     add(&b.store, "t2", "t2-0", 1000, &long);
     commitment(&b, "t2-0");
+    assert!(cands(&b).is_empty(), "one long mail alone is not a thread");
+    add(&b.store, "t2", "t2-1", 2000, "Thanks.");
     let c = cands(&b);
-    assert_eq!(c.len(), 1, "one message of {MIN_CHARS} characters");
+    assert_eq!(c.len(), 1, "two messages with {MIN_CHARS} characters");
     assert_eq!(c[0].thread, thread_of(&b.store, "t2"));
 }
 
@@ -494,7 +496,7 @@ fn the_oldest_try_comes_first() {
 
 #[test]
 fn an_older_message_of_the_snapshot_that_goes_away_or_changes_makes_the_summary_stale() {
-    for how in ["gone", "content", "trash"] {
+    for how in ["gone", "trash", "sent", "date", "text"] {
         let b = open(&format!("older-{how}"));
         let t = thread(&b, "t1", 6, 1000);
         let c = cands(&b).remove(0);
@@ -510,6 +512,22 @@ fn an_older_message_of_the_snapshot_that_goes_away_or_changes_makes_the_summary_
                     )?,
                     "content" => tx.execute(
                         "UPDATE message SET content_sha256 = 'other' WHERE provider_id = 't1-1'",
+                        [],
+                    )?,
+                    "date" => tx.execute(
+                        "UPDATE message SET internal_date = 1500 WHERE provider_id = 't1-1'",
+                        [],
+                    )?,
+                    "text" => tx.execute(
+                        "UPDATE body SET text = 'Message 1 about the other venue.'
+                          WHERE message_id = (SELECT id FROM message WHERE provider_id = 't1-1')",
+                        [],
+                    )?,
+                    // Ana's message gets the SENT label: by_owner changes.
+                    "sent" => tx.execute(
+                        "INSERT INTO message_label(message_id, label_id)
+                         SELECT m.id, l.id FROM message m, label l
+                          WHERE m.provider_id = 't1-2' AND l.provider_id = 'SENT'",
                         [],
                     )?,
                     _ => tx.execute(
@@ -559,4 +577,33 @@ fn an_older_message_of_the_snapshot_that_goes_away_or_changes_makes_the_summary_
         );
         assert_eq!(fake.count(), 0, "{how}");
     }
+}
+
+#[test]
+fn a_new_content_hash_with_the_same_model_inputs_keeps_the_summary() {
+    let b = open("same-inputs");
+    let t = thread(&b, "t1", 5, 1000);
+    let c = cands(&b).remove(0);
+    summarize(&b.store, &c, &Fake::new(&[GOOD]), 50_000).unwrap();
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET content_sha256 = 'other' WHERE provider_id = 't1-1'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    // It waits for understanding and the link check again: not ready.
+    assert_eq!(ready_of(&b, t), None);
+    understood(&b.store);
+    b.store
+        .write(|tx| {
+            tx.execute("DELETE FROM link_check", [])?;
+            Ok(())
+        })
+        .unwrap();
+    // The text, the sender, the date and the labels are the same.
+    assert!(ready_of(&b, t).is_some());
+    assert!(cands(&b).is_empty());
 }

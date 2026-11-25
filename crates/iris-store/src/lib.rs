@@ -966,6 +966,23 @@ pub(crate) fn settings(conn: &Connection) -> Result<()> {
             })
         },
     )?;
+    // `iris_sha256(text)`: the SHA-256 of the UTF-8 text, as lower-case hex,
+    // or NULL for NULL. The basis of a thread summary reads it (issue 478).
+    conn.create_scalar_function(
+        "iris_sha256",
+        1,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            use sha2::Digest;
+            Ok(ctx.get::<Option<String>>(0)?.map(|t| {
+                sha2::Sha256::digest(t.as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            }))
+        },
+    )?;
     Ok(())
 }
 

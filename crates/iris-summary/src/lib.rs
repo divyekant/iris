@@ -118,17 +118,35 @@ pub struct Candidate {
     pub basis: String,
 }
 
-/// SQL of the basis of the thread `thread` (an SQL expression): each message
-/// of the snapshot (the newest [`MESSAGES`] answerable messages), newest
-/// first, as `id:content_sha256`, joined with `,`. A summary is ready only
-/// while its basis is the basis of its thread, so a message of the snapshot
-/// that goes away, leaves the thread or gets new content makes it stale.
+/// The columns of one message of the snapshot: each input of the model
+/// call (row ID, `from`, subject, date, clean text as the data cuts it, and
+/// the `SENT` label). The snapshot of the call and [`basis_sql`] read this
+/// one list, so the basis covers each input of the call.
+const SNAPSHOT_COLUMNS: &str = "m.id, h.from_addr, h.from_name, b.subject,
+    strftime('%Y-%m-%dT%H:%M:%SZ', m.internal_date / 1000, 'unixepoch'),
+    substr(ltrim(b.text, char(32, 9, 10, 13)), 1, {CHARS}),
+    EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+            WHERE ml.message_id = m.id AND l.provider_id = 'SENT')";
+
+/// [`SNAPSHOT_COLUMNS`] with the cut of the text: one character more than
+/// [`cut`] keeps, so `cut` still marks a cut.
+fn columns() -> String {
+    SNAPSHOT_COLUMNS.replace("{CHARS}", &(MESSAGE_CHARS + 1).to_string())
+}
+
+/// SQL of the basis of the thread `thread` (an SQL expression): the SHA-256
+/// (`iris_sha256` of the store) of each input of the model call from the
+/// snapshot (the newest [`MESSAGES`] answerable messages, newest first,
+/// [`SNAPSHOT_COLUMNS`]). A summary is ready only while its basis is the
+/// basis of its thread, so a change of any message of the snapshot (it goes
+/// away, leaves the thread, or gets a new text, label or date) makes it
+/// stale.
 pub fn basis_sql(thread: &str) -> String {
     format!(
-        "(SELECT group_concat(x.k, ',' ORDER BY x.n) FROM
-           (SELECT m.id || ':' || coalesce(m.content_sha256, '') AS k,
-                   row_number() OVER ({NEWEST}) AS n
+        "(SELECT iris_sha256(group_concat(x.k, char(10) ORDER BY x.n)) FROM
+           (SELECT json_array({}) AS k, row_number() OVER ({NEWEST}) AS n
               {} {ANSWERABLE} {NEWEST} LIMIT {MESSAGES}) x)",
+        columns(),
         messages_sql(thread)
     )
 }
@@ -191,8 +209,9 @@ pub fn ready(c: &Connection, thread: i64) -> rusqlite::Result<Option<Summary>> {
 /// sections You owe, Owed to you and Conversations). A thread is a
 /// candidate when:
 /// - it is the thread of the origin message of such an item;
-/// - it is long: [`MIN_MESSAGES`] answerable messages or more, or
-///   [`MIN_CHARS`] characters of clean text or more in them;
+/// - it is long: [`MIN_MESSAGES`] answerable messages or more, or 2 or
+///   more with [`MIN_CHARS`] characters of clean text or more in them (one
+///   long mail alone is not a thread, issue #1020);
 /// - no message that counts is hostile or waits for understanding;
 /// - it has no summary of its basis now ([`basis_sql`]);
 /// - its last try is not invalid for the same basis and model version.
@@ -220,7 +239,7 @@ pub fn candidates(c: &Connection, items: &str, limit: usize) -> rusqlite::Result
          SELECT n.thread, n.newest, n.basis FROM n
            LEFT JOIN thread_summary_try st ON st.thread_id = n.thread
           WHERE n.newest IS NOT NULL
-            AND (n.count >= {MIN_MESSAGES} OR n.chars >= {MIN_CHARS})
+            AND (n.count >= {MIN_MESSAGES} OR (n.count >= 2 AND n.chars >= {MIN_CHARS}))
             AND NOT EXISTS (SELECT 1 {all}
                              AND ({HOSTILE} OR b.message_id IS NULL OR m.understood_at IS NULL))
             AND NOT EXISTS (SELECT 1 FROM thread_summary s
@@ -317,18 +336,14 @@ fn snapshot(c: &Connection, thread: i64) -> Result<Snapshot> {
         .prepare_cached(&format!("SELECT {}", basis_sql("?1")))?
         .query_row([thread], |r| r.get(0))?;
     let mut st = c.prepare_cached(&format!(
-        "SELECT m.id, h.from_addr, h.from_name, b.subject,
-           strftime('%Y-%m-%dT%H:%M:%SZ', m.internal_date / 1000, 'unixepoch'),
-           substr(ltrim(b.text, char(32, 9, 10, 13)), 1, ?3),
-           EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                   WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
+        "SELECT {}
          {msgs}
          {ANSWERABLE}
          {NEWEST}
-         LIMIT ?2"
+         LIMIT ?2",
+        columns()
     ))?;
-    // One character more than the cut keeps, so `cut` still marks a cut.
-    let rows = st.query_map([thread, MESSAGES as i64, MESSAGE_CHARS as i64 + 1], |r| {
+    let rows = st.query_map([thread, MESSAGES as i64], |r| {
         Ok(Msg {
             id: r.get(0)?,
             from_addr: r.get(1)?,
