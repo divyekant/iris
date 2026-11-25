@@ -16,7 +16,7 @@ const READS: [&str; 4] = ["m.hostile", "(hostile", "SET hostile", "FROM link_che
 
 /// Each place that may read them, the count of matches of [`READS`] (one
 /// condition on the marks gives two), and why.
-const ALLOWED: [(&str, usize, &str); 9] = [
+const ALLOWED: [(&str, usize, &str); 10] = [
     (
         "iris-store/src/lib.rs",
         5,
@@ -53,6 +53,11 @@ const ALLOWED: [(&str, usize, &str); 9] = [
         "iris-voice/src/tests.rs",
         4,
         "the tests of the draft gate, of the ready rule and of the late rule write hostile marks",
+    ),
+    (
+        "iris-summary/src/tests.rs",
+        1,
+        "the test of a message with new content ends its link check, as the check does",
     ),
 ];
 
