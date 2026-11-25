@@ -324,23 +324,16 @@ fn fixed_differs(store: &Store, id: i64, now_ms: i64) -> Result<bool> {
             [id],
             |r| r.get(0),
         )?;
-        let mut rules = Vec::new();
-        let mut model = false;
-        let mut st = c.prepare_cached(
-            "SELECT i.derived_by, json_extract(i.doc, '$.derived.rule') FROM item_droppable d
-               JOIN item i ON i.id = d.item_id WHERE d.message_id = ?1",
-        )?;
-        for r in st.query_map([id], |r| {
-            Ok((
-                r.get::<_, Option<String>>(0)?,
-                r.get::<_, Option<String>>(1)?,
-            ))
-        })? {
-            match r? {
-                (Some(by), Some(rule)) if by == "rule" => rules.push(rule),
-                _ => model = true,
-            }
-        }
+        // The rules that completed the last understanding (migration 55),
+        // also of pinned items; `None` when the model made an item.
+        let rules: Option<String> =
+            c.query_row("SELECT fixed_rules FROM message WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })?;
+        let rules: Option<Vec<String>> =
+            rules.map(|r| serde_json::from_str(&r).unwrap_or_default());
+        let model = rules.is_none();
+        let rules = rules.unwrap_or_default();
         Ok(((now, kind), marks, rules, model))
     })?;
     let (inputs_now, kind) = now;
@@ -391,6 +384,20 @@ fn fixed_differs(store: &Store, id: i64, now_ms: i64) -> Result<bool> {
         now.sort();
         model_items || now != stored_rules
     })
+}
+
+/// The record of `message.fixed_rules` for the drafts of one
+/// understanding: `None` when the model made a draft, else the rule of each
+/// draft as a JSON array.
+fn fixed_rules(drafts: &[crate::Draft]) -> Option<String> {
+    let rules: Option<Vec<String>> = drafts
+        .iter()
+        .map(|x| match x.by {
+            crate::By::Rule(r) => Some(r.to_string()),
+            crate::By::Model => None,
+        })
+        .collect();
+    rules.map(|r| serde_json::to_string(&r).expect("strings serialize"))
 }
 
 /// For the received message `id`: true when it has a deceptive link, with
@@ -680,8 +687,9 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         }
         keep_choices(tx, message)?;
         tx.execute(
-            "UPDATE message SET understood_at = ?2, retry_at = NULL WHERE id = ?1",
-            params![message, now_ms],
+            "UPDATE message SET understood_at = ?2, retry_at = NULL, fixed_rules = ?3
+             WHERE id = ?1",
+            params![message, now_ms, fixed_rules(&d.drafts)],
         )?;
         if skip {
             tx.execute(

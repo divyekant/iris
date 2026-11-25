@@ -1329,7 +1329,7 @@ fn the_upgrade_drops_the_items_of_a_draft_or_copy() {
     assert_eq!(b.items().len(), 2);
     b.store
         .write(|tx| {
-            tx.execute_batch("DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; PRAGMA user_version = 41;")?;
+            tx.execute_batch("DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; ALTER TABLE message DROP COLUMN fixed_rules; PRAGMA user_version = 41;")?;
             Ok(())
         })
         .unwrap();
@@ -2647,4 +2647,65 @@ fn a_declined_sender_gets_no_model_call_until_the_decline_ends() {
     assert!(pending(m3) && !skipped(m3));
     // The first message, understood with the model before the decline, keeps its state.
     assert!(!pending(m1));
+}
+
+/// Issue #946: a code signal of the fixed code rule that a person pinned
+/// (a correction) stays, and the mail waits for the model when the rule
+/// stops applying, as for an item that is not pinned.
+#[test]
+fn a_pinned_rule_item_whose_rule_stops_applying_makes_the_mail_wait() {
+    use iris_understand::store::recheck_fixed;
+    let b = store("fixed-pinned");
+    let fake = Fake::default();
+    let code = "From: Bank <no-reply@bank.example.com>
+To: owner@example.com
+Subject: Your sign-in
+
+Your one-time code is 918273. It ends in 10 minutes.
+";
+    let m = b.add("1", code, &["INBOX"]);
+    understand(&b.store, m, &fake, NOW).unwrap();
+    let set = |kind: &str| {
+        b.store
+            .write(|tx| {
+                Ok(tx.execute(
+                    "UPDATE sender SET kind = ?1, decided_by = 'person'
+                     WHERE address = 'no-reply@bank.example.com'",
+                    [kind],
+                )?)
+            })
+            .unwrap();
+    };
+    set("service");
+    assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
+    let row: i64 = b.col(
+        "SELECT i.id FROM item i JOIN item_source s ON s.item_id = i.id
+          WHERE s.message_id = ?1 AND json_extract(i.doc, '$.derived.rule') = 'code'",
+        m,
+    );
+    correct(
+        &b.store,
+        &format!("s-{row}"),
+        "expires",
+        json!("2026-02-01T00:00:00Z"),
+        NOW,
+    )
+    .unwrap();
+    set("stranger");
+    assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
+    assert!(
+        b.col::<bool>("SELECT understood_at IS NULL FROM message WHERE id = ?1", m),
+        "the mail waits for the model"
+    );
+    assert!(
+        b.col::<bool>("SELECT EXISTS (SELECT 1 FROM item WHERE id = ?1)", row),
+        "the pinned item stays"
+    );
+    // The model reads it, and a later check finds no change.
+    understand(&b.store, m, &fake, NOW).unwrap();
+    assert!(!b.col::<bool>("SELECT understood_at IS NULL FROM message WHERE id = ?1", m));
+    b.store
+        .write(|tx| Ok(tx.execute("INSERT INTO fixed_due(message_id) VALUES (?1)", [m])?))
+        .unwrap();
+    assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 0, "no loop");
 }
