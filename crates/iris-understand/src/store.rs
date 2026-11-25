@@ -583,7 +583,6 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         date: row.internal_date,
         from_name: from_name.clone(),
         from_addr: from_addr.clone(),
-        declined,
     };
     // The engine does not understand a draft. It stays not understood, so
     // it runs when it is sent and loses the label DRAFT.
@@ -645,7 +644,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         // example with no later SPAM label on an earlier message.
         // A decline, or the end of a decline, after write 1 changes the
         // model step: save nothing, so the next run decides again.
-        if !read.same(tx)? {
+        if !read.same(tx)? || declined_now(tx, from_addr.as_deref())? != declined {
             changed = true;
             return Ok(Vec::new());
         }
@@ -730,9 +729,6 @@ pub struct Seen {
     date: Option<i64>,
     from_name: Option<String>,
     from_addr: Option<String>,
-    /// The decline of the sender at the gate (decision D29). A decline or a
-    /// reopen during the call is a changed input (#934).
-    declined: bool,
 }
 
 impl Seen {
@@ -744,7 +740,6 @@ impl Seen {
         };
         Ok(state(c, self.message, true)? == self.state
             && kind_now == self.kind
-            && declined_now(c, self.from_addr.as_deref())? == self.declined
             && inputs(
                 c,
                 self.message,
