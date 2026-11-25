@@ -497,8 +497,10 @@ machine.
 
 An isolation runs the agent so that it cannot reach the data folder, the
 engine socket `iris.sock`, the socket of another session, or the network.
-The one exception is the egress port of the session (see
-[Model egress](#model-egress)).
+The exceptions are the egress port of the session (see
+[Model egress](#model-egress)) and the local port that the person lists in
+`allow_local` of an `agents.toml` adapter
+(`docs/specs/2026-11-25-agents-read-paths-local-port.md`).
 It shows the agent only the workspace (read and write), a private empty
 home and `/tmp` (read and write), and the programs and system files of the
 sandbox spec (read only), and the read paths that the person lists for an
@@ -512,7 +514,8 @@ below).
 `iris_session::Isolation` is the interface. It gives:
 
 - the program and the arguments that run the adapter command inside the
-  isolation, with the egress port as the only network that it permits;
+  isolation, with the egress port and the local port as the only network
+  that it permits;
 - a check that the isolation works on this system;
 - `name(session)`: the durable identity of the isolation of one session,
   for example a cgroup path on Linux. It depends only on the session ID,

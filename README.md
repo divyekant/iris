@@ -339,6 +339,24 @@ logins or mail.
 - The built-in agents get no read paths. They sign in only with their
   variables.
 
+If the agent uses a model server on this machine (for example a local
+model on port 11434), give its port in `allow_local`:
+
+```toml
+[agent.my-agent]
+command = ["/usr/local/bin/my-agent"]
+allow_local = 11434
+```
+
+CAUTION: The agent can send the files of the job to the program on this
+port. Give only the port of a model server. Do not give the port of a
+service that runs commands or holds data (for example a Docker API or a
+database).
+
+- The session can connect to `127.0.0.1:<allow_local>` over TCP, and to
+  no other local port. The agent gets the port in `IRIS_LOCAL_PORT`.
+- One port from 1 to 65535 for each agent. The built-in agents get none.
+
 On Linux, the sandbox needs `bwrap`. [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 gives the prerequisites of the sandbox on Linux and on macOS.
 
