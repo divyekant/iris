@@ -1223,6 +1223,12 @@ test("a draft link keeps its own form: the unfinished new mail stays, and a relo
     await until(() => net.posts().length === 1);
     assert.equal(net.posts()[0].body.draft, undefined, "a new draft");
     app.destroy();
+    // The person cancels that send in the Outbox and follows the new link: the form shows, not the old write.
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: { ...DRAFT, change: "update" } }, every: 20 });
+    app.flushSync();
+    assert.ok(app.target.querySelector("form"), "the form of the draft");
+    assert.match(text(app.target), /This is the draft that you cancelled\./);
+    app.destroy();
     // Back to the new mail: it is still there.
     app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
     app.flushSync();

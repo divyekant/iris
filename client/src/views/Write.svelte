@@ -113,6 +113,9 @@
     account: d.account, to: d.to, cc: d.cc, bcc: d.bcc, files: d.attachments, subject: d.subject, body: d.body,
     key: "", sig: "", flags: [], draft: d.change === "update" ? { draft: d.draft, account: d.account } : null,
   });
+  // A draft link opens only for a draft that can change now, so no send of it
+  // waits: a kept write of this place has ended. The form shows, not that write.
+  if (opened) keep(null);
   let changeNote = $state(opened ? "This is the draft that you cancelled. Change it, then press Send." : "");
   // A draft link (only for a draft that can change now) opens its own saved
   // form after a reload, else the draft. The next press changes the draft
