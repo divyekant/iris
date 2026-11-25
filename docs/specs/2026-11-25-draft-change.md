@@ -85,6 +85,18 @@ The submit denies a change, with the reason, when one of these is true:
 | A `send` action of the draft is `proposed`, `in_review`, `approved` or `held`, or a `ledger_send` row claims it | "The draft waits to send. Cancel it first." |
 | Another `draft` action that names the same draft is `approved` or `held`, or has a ledger row in `writing` | "Iris changes this draft now. Try again in a minute." |
 
+The parent of a change of a reply: the submit resolves the target `d-N`
+to the messages of the thread of the draft, for the hostile check and
+the flags, as a thread target does. The parent is the one message that
+the rule of a thread target gives on that thread
+(`iris_changeset::parent`: the newest eligible message). The submit
+stores it as the parent row of the action, so the approval hash binds
+it, as for a create. The write check (section 5) compares this parent
+with `parent` of the request. The apply denies the change, with "A new
+mail came into this thread. Write a new reply.", when the parent is not
+the message whose `Message-ID` is the `In-Reply-To` of the draft row: a
+change keeps the reply headers, so it cannot answer another message.
+
 The same checks run again in the apply (section 2, step 1), and a third
 time in the claim transaction (section 2, step 4), because the state can
 change between the submit and the apply. The flags of the change (R3-03)
@@ -155,9 +167,22 @@ write of a change to its `waiting` state.
 ### 3. The undo of a change
 
 `POST /api/ledger/{id}/undo` of an `applied` change makes an approved
-changeset of the person with one `draft` action on the same draft
-(`iris_apply::undo`). Its args are the `pre` content of the entry. Its
-apply is section 2, with these differences:
+changeset of the person with one `draft` action (`iris_apply::undo`).
+As each undo of spec 2 section 7.4, its target is the entry
+(`{"ledger": ["l-N"]}`), the link of migration 23 (`ledger_undo`) ties
+it to the entry, and its args are the `pre` content of the entry. Spec 2
+section 7.4 gets this case in its list of inverses. These parts accept a
+`draft` action with a `ledger` target only with that link, and only for
+an entry whose `ops` is `drafts.update`:
+
+- the submit resolver (`iris_changeset`), which resolves the entry to
+  the draft of its `ops` and runs the checks of section 1 on that draft;
+- the undo link checks of the store (the trigger `ledger_undo_insert`);
+- the undo creation path (`iris_apply::undo`).
+
+A `draft` action with a `ledger` target and no link is denied, as an
+`untrash` with no link is. Its apply is section 2, with these
+differences:
 
 - Step 2 composes the message from `pre`, with the `Date` of `pre`. The
   attachment files must still be in the attachment folder. If one is
@@ -169,7 +194,9 @@ apply is section 2, with these differences:
   `undone_by` and the state `undone`.
 - Only the newest ledger entry of the draft (a change, a send or an
   undo, by row ID) can be undone. An entry with a later entry of the
-  same draft is final. So for the changes A to B, B to C and C to B, the
+  same draft is final. A no-op entry (section 2, step 3: no provider
+  call and no `pre`) does not count, so the change A to B stays the
+  newest entry after a press of Send with B again. So for the changes A to B, B to C and C to B, the
   first entry cannot undo the last B. The hash check alone cannot show
   this, so the rule reads the ledger, not the hash.
 
@@ -355,3 +382,7 @@ for Gmail) during one change. A create holds one copy.
    if the write view hides the control for Outlook.
 6. The changes A to B, B to C, C to B of one draft: the undo of the
    first entry is a 409. Red if the undo writes A.
+7. The change A to B, then a press of Send with B again: the undo of the
+   change A to B is still possible. Red if the no-op entry blocks it.
+8. A change of a reply in a thread with two messages binds the newest
+   message as its parent. Red if the write gets a 409 with no new mail.

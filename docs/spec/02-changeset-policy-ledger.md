@@ -927,8 +927,9 @@ applies it.
 2. The engine (`iris_apply::undo`) makes a changeset with author `person`
    and one action: the inverse of the entry (`archive` and `inbox`, `read`
    and `unread`, `label` and `unlabel` of the same name, `trash` and
-   `untrash`, and `restore` for a `close`, `decline`, `defer`, `correct`, `skip`, `mute` or `dismiss`
-   entry). Its target is the entry (`{"ledger": ["l-N"]}`), and submit
+   `untrash`, `restore` for a `close`, `decline`, `defer`, `correct`, `skip`, `mute` or `dismiss`
+   entry, and `draft` with the old content for a draft change entry,
+   `docs/specs/2026-11-25-draft-change.md` section 3). Its target is the entry (`{"ledger": ["l-N"]}`), and submit
    resolves the messages with `done` that are not gone, in SQL, so no list
    of message IDs is in memory (section 9). For `restore`, submit resolves
    the items of the entry instead (`action_item`), and the apply runs with
