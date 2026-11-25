@@ -21,4 +21,9 @@ pub mod isolation;
 pub mod launch;
 pub mod macos_job;
 pub mod peer;
+pub mod read_paths;
 pub mod reap;
+
+/// The variable of a session with its local port (`allow_local` of
+/// `agents.toml`).
+pub const LOCAL_PORT_VAR: &str = "IRIS_LOCAL_PORT";

@@ -480,6 +480,70 @@ fn the_snapshot_holds_the_newest_twelve_messages_each_cut() {
     );
 }
 
+/// The invariant of the cut mark: the text of a message in the data ends
+/// with the mark exactly when its stored text, without leading and trailing
+/// spaces, tabs and line ends, has more than [`MESSAGE_CHARS`] characters.
+/// 400 texts near the limit, from a fixed seed, with whitespace and
+/// multi-byte characters at the cut.
+#[test]
+fn a_message_ends_with_the_cut_mark_exactly_when_the_store_left_out_text() {
+    let b = open("cut-mark");
+    let t = thread(&b, "t1", 3, 1000);
+    let newest: i64 = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT max(id) FROM message WHERE thread_id = ?1",
+                [t],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    let parts = ["a", "é", " ", "\n", "\t", "\u{a0}", "\r\n"];
+    let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = |n: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % n as u64) as usize
+    };
+    for _ in 0..400 {
+        let lead: String = (0..next(3)).map(|_| [" ", "\n", "\t"][next(3)]).collect();
+        let len = MESSAGE_CHARS - 3 + next(8);
+        // A letter at each end, so the length of the body is its trimmed length.
+        let body: String = std::iter::once("a")
+            .chain((2..len).map(|_| parts[next(parts.len())]))
+            .chain(["a"])
+            .collect();
+        let tail: String = (0..next(3)).map(|_| [" ", "\n", "\t"][next(3)]).collect();
+        let text = format!("{lead}{body}{tail}");
+        let longer = body.chars().count() > MESSAGE_CHARS;
+        let data = b
+            .store
+            .write(|tx| {
+                tx.execute(
+                    "UPDATE body SET text = ?1 WHERE message_id = ?2",
+                    rusqlite::params![text, newest],
+                )?;
+                Ok(snapshot(tx, t).map(|s| data(&s)))
+            })
+            .unwrap()
+            .unwrap();
+        let v: Value = serde_json::from_str(&data).unwrap();
+        let sent = v["thread"].as_array().unwrap().last().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            sent.ends_with(CUT_MARK),
+            longer,
+            "{} characters: {:?}",
+            body.chars().count(),
+            body.chars().rev().take(20).collect::<String>()
+        );
+    }
+}
+
 #[test]
 fn the_oldest_try_comes_first() {
     let b = open("order");

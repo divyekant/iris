@@ -279,6 +279,10 @@ fn analysis(raw: &[u8], raw_cut: bool, html_after: bool, cx: &Context, phishing:
     a
 }
 
+/// The record of `message.fixed_rules` that the backfill of migration 58
+/// writes when it cannot tell how the last run completed the message.
+const UNKNOWN_RULES: &str = "unknown";
+
 /// True when the fixed result of the understood received message `id` now
 /// (its hostile marks, or the rules of its rule items) is not the stored
 /// one. False for mail that is gone or your own. For mail that is not
@@ -306,7 +310,7 @@ fn fixed_differs(store: &Store, id: i64, now_ms: i64) -> Result<bool> {
         .ok_or(Error::NoMessage(id))?;
     let (raw, raw_cut, html_after) = read_raw(&path)?;
     let head = crate::Head::parse(&raw, row.authserv);
-    let (now, stored_marks, stored_rules, model_items) = store.read(|c| {
+    let (now, stored_marks, (stored_rules, unknown), model_items) = store.read(|c| {
         let now = inputs(
             c,
             id,
@@ -324,24 +328,20 @@ fn fixed_differs(store: &Store, id: i64, now_ms: i64) -> Result<bool> {
             [id],
             |r| r.get(0),
         )?;
-        let mut rules = Vec::new();
-        let mut model = false;
-        let mut st = c.prepare_cached(
-            "SELECT i.derived_by, json_extract(i.doc, '$.derived.rule') FROM item_droppable d
-               JOIN item i ON i.id = d.item_id WHERE d.message_id = ?1",
-        )?;
-        for r in st.query_map([id], |r| {
-            Ok((
-                r.get::<_, Option<String>>(0)?,
-                r.get::<_, Option<String>>(1)?,
-            ))
-        })? {
-            match r? {
-                (Some(by), Some(rule)) if by == "rule" => rules.push(rule),
-                _ => model = true,
-            }
-        }
-        Ok(((now, kind), marks, rules, model))
+        // The rules that completed the last understanding (migration 58),
+        // also of pinned items; `None` when the model made an item.
+        let rules: Option<String> =
+            c.query_row("SELECT fixed_rules FROM message WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })?;
+        // `unknown`: the backfill of migration 58 could not tell how the
+        // last run completed the message; the check runs it again.
+        let unknown = rules.as_deref() == Some(UNKNOWN_RULES);
+        let rules: Option<Vec<String>> =
+            rules.map(|r| serde_json::from_str(&r).unwrap_or_default());
+        let model = rules.is_none();
+        let rules = rules.unwrap_or_default();
+        Ok(((now, kind), marks, (rules, unknown), model))
     })?;
     let (inputs_now, kind) = now;
     let known = |_: &str| inputs_now.known.clone();
@@ -367,6 +367,9 @@ fn fixed_differs(store: &Store, id: i64, now_ms: i64) -> Result<bool> {
     if marks_json(&a.marks, false) != stored_marks {
         return Ok(true);
     }
+    if unknown {
+        return Ok(true);
+    }
     // With no model, `decide` makes no call and gives no error.
     let Ok(d) = decide(&a, &cx, None) else {
         return Ok(true);
@@ -380,17 +383,22 @@ fn fixed_differs(store: &Store, id: i64, now_ms: i64) -> Result<bool> {
         // The model reads the mail: a rule item does not hold now.
         !stored_rules.is_empty()
     } else {
-        let mut now: Vec<String> = d
-            .drafts
-            .iter()
-            .filter_map(|x| match x.by {
-                crate::By::Rule(r) => Some(r.to_string()),
-                crate::By::Model => None,
-            })
-            .collect();
+        let mut now: Vec<String> = d.rules.iter().map(|r| r.to_string()).collect();
         now.sort();
         model_items || now != stored_rules
     })
+}
+
+/// The record of `message.fixed_rules` for one decision: `None` when the
+/// model made a draft, else the rules that the fixed rules matched
+/// ([`crate::Decision::rules`]), also of a draft that a pinned item holds.
+fn fixed_rules(d: &crate::Decision) -> Option<String> {
+    if d.drafts.iter().any(|x| matches!(x.by, crate::By::Model)) {
+        return None;
+    }
+    let mut rules = d.rules.clone();
+    rules.sort();
+    Some(serde_json::to_string(&rules).expect("strings serialize"))
 }
 
 /// For the received message `id`: true when it has a deceptive link, with
@@ -510,6 +518,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     };
     let mut decided = None;
     let mut declined = false;
+    let mut gate_read = (false, None);
     let mut after = Inputs::default();
     let seen = store.write(|tx| {
         // Steps 1 and 2 used the state of the message and `first`.
@@ -523,7 +532,8 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         rerun_senders(tx, &d.rerun, now_ms)?;
         decided = Some(d);
         // After the kind of this message: a decline applies only to a stranger.
-        declined = declined_now(tx, from_addr.as_deref())?;
+        gate_read = gate(tx, from_addr.as_deref())?;
+        declined = gate_read.0;
         tx.execute(
             "DELETE FROM model_declined WHERE message_id = ?1",
             [message],
@@ -583,6 +593,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         date: row.internal_date,
         from_name: from_name.clone(),
         from_addr: from_addr.clone(),
+        gate: gate_read,
     };
     // The engine does not understand a draft. It stays not understood, so
     // it runs when it is sent and loses the label DRAFT.
@@ -644,7 +655,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         // example with no later SPAM label on an earlier message.
         // A decline, or the end of a decline, after write 1 changes the
         // model step: save nothing, so the next run decides again.
-        if !read.same(tx)? || declined_now(tx, from_addr.as_deref())? != declined {
+        if !read.same(tx)? {
             changed = true;
             return Ok(Vec::new());
         }
@@ -680,8 +691,9 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         }
         keep_choices(tx, message)?;
         tx.execute(
-            "UPDATE message SET understood_at = ?2, retry_at = NULL WHERE id = ?1",
-            params![message, now_ms],
+            "UPDATE message SET understood_at = ?2, retry_at = NULL, fixed_rules = ?3
+             WHERE id = ?1",
+            params![message, now_ms, fixed_rules(&d)],
         )?;
         if skip {
             tx.execute(
@@ -729,6 +741,10 @@ pub struct Seen {
     date: Option<i64>,
     from_name: Option<String>,
     from_addr: Option<String>,
+    /// The gate of the sender (decision D29): its decline, and the row ID
+    /// and `gate_rev` of its row (migration 58). Each decline or reopen
+    /// during the call is a changed input (#934).
+    gate: (bool, Option<(i64, i64)>),
 }
 
 impl Seen {
@@ -740,6 +756,7 @@ impl Seen {
         };
         Ok(state(c, self.message, true)? == self.state
             && kind_now == self.kind
+            && gate(c, self.from_addr.as_deref())? == self.gate
             && inputs(
                 c,
                 self.message,
@@ -875,6 +892,25 @@ fn pinned(c: &rusqlite::Connection, message: i64) -> rusqlite::Result<Vec<Value>
 /// True when `from` is a stranger that the person declined at the gate:
 /// `declined_at` is set and the kind is `stranger` or not set yet (the rule
 /// of `kind_sql` in `iris-api`).
+/// The gate state of `from` for [`Seen`]: [`declined_now`], and the row ID
+/// and `gate_rev` of the sender row.
+fn gate(
+    c: &rusqlite::Connection,
+    from: Option<&str>,
+) -> rusqlite::Result<(bool, Option<(i64, i64)>)> {
+    let row = match from {
+        Some(f) => c
+            .query_row(
+                "SELECT id, gate_rev FROM sender WHERE address = ?1",
+                [f],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?,
+        None => None,
+    };
+    Ok((declined_now(c, from)?, row))
+}
+
 fn declined_now(c: &rusqlite::Connection, from: Option<&str>) -> rusqlite::Result<bool> {
     let Some(from) = from else {
         return Ok(false);

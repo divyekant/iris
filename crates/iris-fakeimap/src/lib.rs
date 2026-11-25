@@ -120,6 +120,9 @@ struct State {
     /// A folder that gets a new `UIDVALIDITY` at the Nth `SELECT` from now,
     /// before the answer (for the race tests of `modify`).
     renew_at: Option<(String, usize)>,
+    /// A command name (for example `LIST`): the Nth such command from now
+    /// closes the connection with no answer (for the transport tests).
+    close_at: Option<(String, usize)>,
 }
 
 /// A running fake server. The thread lives until the process ends.
@@ -144,6 +147,7 @@ impl FakeImap {
             validity: 1000,
             commands: Vec::new(),
             renew_at: None,
+            close_at: None,
         }));
         let fake = FakeImap { addr, state };
         fake.create("INBOX", None);
@@ -275,6 +279,13 @@ impl FakeImap {
     /// from 1.
     pub fn renew(&self, folder: &str) {
         self.lock().renew(folder);
+    }
+
+    /// Close the connection with no answer at the `n`th command `cmd` from
+    /// now (1 is the next one), before the server runs it.
+    pub fn close_at(&self, cmd: &str, n: usize) {
+        assert!(n > 0, "n counts from 1");
+        self.lock().close_at = Some((cmd.to_ascii_uppercase(), n));
     }
 
     /// Give `folder` a new `UIDVALIDITY` at the `n`th `SELECT` from now
@@ -474,6 +485,14 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
             _ => text.to_owned(),
         };
         lock().commands.push(logged);
+        {
+            let mut s = lock();
+            match s.close_at.take() {
+                Some((c, 1)) if c == cmd => return Ok(()),
+                Some((c, n)) if c == cmd => s.close_at = Some((c, n - 1)),
+                other => s.close_at = other,
+            }
+        }
         let mut reply = String::new();
         let done = match cmd.as_str() {
             "CAPABILITY" => {

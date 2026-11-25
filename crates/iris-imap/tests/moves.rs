@@ -304,6 +304,21 @@ fn move_uidvalidity() {
     assert_eq!(fake.uids("Archive").len(), 1);
 }
 
+/// The target renews between two source folders: the first new IDs are
+/// stale, so the result is unknown (#1024).
+#[test]
+fn move_target_uidvalidity() {
+    let fake = server();
+    let mail = provider(&fake);
+    let a = add(&fake, "INBOX", 1);
+    let b = add(&fake, "Archive", 2);
+    // The second SELECT (Archive) renews Trash before the second move.
+    fake.renew_at_select("Trash", 2);
+    let r = mail.relocate(PASSWORD, &[&a, &b], Move::Trash);
+    assert!(matches!(&r, Err(e) if e.write_result_unknown()), "{r:?}");
+    assert_eq!(moves_sent(&fake), 2);
+}
+
 /// An answer that does not name each moved UID is unknown.
 #[test]
 fn move_partial_copyuid() {

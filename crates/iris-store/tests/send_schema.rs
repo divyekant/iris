@@ -89,7 +89,7 @@ fn an_old_store_gets_the_new_verbs() {
     }
     let s = Store::open(&dir.0).unwrap();
     s.write(|tx| {
-        assert_eq!(iris_store::schema_version(tx)?, 57);
+        assert_eq!(iris_store::schema_version(tx)?, 60);
         let n: i64 = tx.query_row(
             "SELECT count(*) FROM changeset_action WHERE verb = 'archive'",
             [],

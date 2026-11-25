@@ -156,14 +156,18 @@ type Mark = (
 fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Value>> {
     let mark: Option<Mark> = c
         .query_row(
-            "SELECT a.state, coalesce(a.reason, l.error), w.send_action_id, d.id,
+            concat!(
+                "SELECT a.state, coalesce(a.reason, l.error), w.send_action_id, d.id,
                     d.foreign_at IS NOT NULL, d.sent_at IS NOT NULL, c.state, w.created_at
              FROM write_send w
              JOIN changeset_action a ON a.id = w.action_id
              JOIN changeset c ON c.id = a.changeset_id
-             LEFT JOIN draft d ON d.action_id = a.id
+             LEFT JOIN draft d ON ",
+                iris_changeset::draft_of_action!(),
+                "
              LEFT JOIN ledger l ON l.action_id = a.id
-             WHERE a.changeset_id = ?1",
+             WHERE a.changeset_id = ?1"
+            ),
             [cs],
             |r| {
                 Ok((
