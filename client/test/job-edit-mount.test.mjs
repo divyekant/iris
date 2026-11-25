@@ -303,3 +303,29 @@ test("the due field of an edit follows the owner zone that comes after the form 
     access.zone = keep;
   }
 });
+
+test("End closes the add-mail form with its picked thread, so a done job offers no add (issue 992)", async () => {
+  const d = structuredClone(fx.jobDetails["j-12"]);
+  const preview = { messages: [{ ...fx.answer("/items/c-311/job").messages[0] }] };
+  const ended = { ...d, job: { ...d.job, state: "done", end: "cancel", wait: undefined } };
+  serve((method, path) => {
+    if (path.startsWith("search")) return [200, { messages: preview.messages }];
+    if (path.startsWith("jobs/j-12/scope/") && method === "GET") return [200, preview];
+    if (path === "jobs/j-12/cancel" || path === "jobs/j-12/finish") return [200, ended];
+    return [200, ended];
+  });
+  const view = await mount("/src/views/Job.svelte", { detail: d, every: 60_000 });
+  button(view, "Add mail").click();
+  view.flushSync();
+  fill(view, "input[type=search]", "contract");
+  submit(view, "form.search");
+  (await until(() => view.target.querySelector("button.hit"))).click();
+  await until(() => button(view, "Add this thread"));
+  button(view, "End").click();
+  view.flushSync();
+  button(view, "Cancel the job").click();
+  await until(() => (view.flushSync(), !button(view, "End")));
+  for (const name of ["Add this thread", "Search", "Add mail"]) assert.ok(!button(view, name), name);
+  assert.equal(view.target.querySelector("#scope-search"), null);
+  view.destroy();
+});

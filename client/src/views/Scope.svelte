@@ -31,6 +31,10 @@
   let picked = $state<{ thread: string; preview: Preview } | null>(null);
   let busy = $state(false);
   let note = $state("");
+  // A done job takes no add (issue 992): an end while the form shows closes it.
+  $effect(() => {
+    if (!open) close();
+  });
 
   // True when the last failure had no answer of the engine: the change can have arrived.
   let unknown = false;
