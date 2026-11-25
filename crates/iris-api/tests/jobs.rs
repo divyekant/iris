@@ -562,3 +562,45 @@ async fn one_job_names_its_newest_session() {
     assert_eq!(v["session"]["end"], "launch_failed");
     assert_eq!(v["session"]["exit"], Value::Null);
 }
+
+/// Issue 791: the list gives the newest session of each working job of the
+/// page, by job ID, so that it can say when no agent works on a job. A
+/// working job with no session has null. A job in another state has no
+/// entry, and each job document stays as the schema gives it.
+#[tokio::test]
+async fn the_list_names_the_newest_session_of_each_working_job() {
+    let dir = temp("list-sessions");
+    let s = store(&dir);
+    let failed = iris_job::create(&s, "Get the contract.", None, NOW).unwrap();
+    let none = iris_job::create(&s, "Book the room.", None, NOW).unwrap();
+    let asks = iris_job::create(&s, "Pay the bill.", None, NOW).unwrap();
+    let session = iris_job::register(&s, failed, "codex", NOW + 1).unwrap();
+    iris_job::end(
+        &s,
+        session,
+        iris_job::EndReason::LaunchFailed,
+        None,
+        NOW + 2,
+    )
+    .unwrap();
+    iris_job::ask(&s, asks, "Which card?", None, NOW + 3).unwrap();
+
+    let (code, v) = get(&s, "/api/jobs").await;
+    assert_eq!(code, StatusCode::OK);
+    let id = iris_job::format_job_id;
+    let sessions = v["sessions"].as_object().unwrap();
+    assert_eq!(sessions.len(), 2, "only the working jobs: {sessions:?}");
+    assert_eq!(
+        sessions[&id(failed)]["id"],
+        iris_job::format_session_id(session)
+    );
+    assert_eq!(sessions[&id(failed)]["end"], "launch_failed");
+    assert_eq!(sessions[&id(none)], Value::Null);
+    assert!(!sessions.contains_key(&id(asks)));
+    for j in v["jobs"].as_array().unwrap() {
+        assert!(
+            j.get("session").is_none(),
+            "the job document keeps its schema"
+        );
+    }
+}

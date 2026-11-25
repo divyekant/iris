@@ -21,6 +21,11 @@ pub struct JobPage {
     pub jobs: Vec<Value>,
     /// The `after` value of the next page, or `None` on the last page.
     pub next: Option<String>,
+    /// The newest session of each `working` job of the page, by job ID
+    /// (issue 791), so that the list can say when no agent works on a job.
+    /// A working job with no session has `null`. The job document itself
+    /// stays as the schema gives it.
+    pub sessions: Map<String, Value>,
 }
 
 fn job_error(e: iris_job::Error) -> Error {
@@ -55,9 +60,21 @@ pub fn jobs(store: &Store, state: &str, limit: u32, after: Option<&str>) -> Resu
     } else {
         None
     };
+    let sessions = store.read(|c| {
+        let mut out = Map::new();
+        for j in jobs.iter().filter(|j| j.state == JobState::Working) {
+            let s = newest_session(c, j.id).map_err(|e| match e {
+                Error::Store(e) => e,
+                other => iris_store::Error::Query(other.to_string()),
+            })?;
+            out.insert(iris_job::format_job_id(j.id), s);
+        }
+        Ok(out)
+    })?;
     Ok(JobPage {
         jobs: jobs.iter().map(iris_job::job_json).collect(),
         next,
+        sessions,
     })
 }
 
