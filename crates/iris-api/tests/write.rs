@@ -1001,11 +1001,19 @@ async fn a_stopped_write_says_how_its_draft_can_change() {
     let change = |s: Arc<Store>, cs: String| async move {
         call(&s, "GET", &format!("/api/write/{cs}"), None).await.1["change"].clone()
     };
-    s.write(|tx| Ok(tx.execute("UPDATE draft SET sent_at = 1, sent_message = 's1' WHERE id = 1", [])?))
-        .unwrap();
+    s.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE draft SET sent_at = 1, sent_message = 's1' WHERE id = 1",
+            [],
+        )?)
+    })
+    .unwrap();
     assert_eq!(change(s.clone(), cs.clone()).await, Value::Null);
     s.write(|tx| {
-        tx.execute("UPDATE draft SET sent_at = NULL, sent_message = NULL WHERE id = 1", [])?;
+        tx.execute(
+            "UPDATE draft SET sent_at = NULL, sent_message = NULL WHERE id = 1",
+            [],
+        )?;
         Ok(tx.execute("UPDATE account SET provider = 'outlook' WHERE id = 1", [])?)
     })
     .unwrap();
