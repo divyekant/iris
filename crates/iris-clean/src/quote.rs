@@ -56,7 +56,7 @@ pub fn strip_quotes(text: &str, is_reply: bool) -> String {
             end = i;
             break;
         }
-        if let Some(n) = attribution(&lines[i..]) {
+        if let Some((n, verb)) = attribution(&lines[i..]) {
             let next = lines[i + n..].iter().find(|l| !l.trim().is_empty());
             // "Here is what I wrote:" is not history. A cut needs a quote
             // after the line, or (in a reply) the start of a client line.
@@ -64,7 +64,7 @@ pub fn strip_quotes(text: &str, is_reply: bool) -> String {
             // and an address too.
             let quoted = next.is_some_and(|l| l.trim_start().starts_with('>'));
             let client = ATTRIBUTION_START.iter().any(|p| t.starts_with(p));
-            if quoted || (is_reply && client) {
+            if quoted || (is_reply && client && verb) {
                 end = i;
                 break;
             }
@@ -98,27 +98,30 @@ pub fn strip_quotes(text: &str, is_reply: bool) -> String {
     kept.join("\n")
 }
 
-/// The count of lines (1 or 2) of an "On ... wrote:" line at the start.
-fn attribution(lines: &[&str]) -> Option<usize> {
-    let ends = |s: &str| {
+/// An "On ... wrote:" line at the start: the count of its lines (1 or 2),
+/// and true if it ends with a verb of [`WROTE`] (false for the client form
+/// of [`dated`] alone).
+fn attribution(lines: &[&str]) -> Option<(usize, bool)> {
+    let verb = |s: &str| {
         let l = s.trim().to_lowercase();
-        (l.len() < 400 && WROTE.iter().any(|w| l.ends_with(w))) || dated(s)
+        l.len() < 400 && WROTE.iter().any(|w| l.ends_with(w))
     };
-    if ends(lines[0]) {
-        return Some(1);
+    if verb(lines[0]) || dated(lines[0]) {
+        return Some((1, verb(lines[0])));
     }
     let first = lines[0].trim();
     let second = lines.get(1)?.trim();
-    if first.len() + second.len() >= 400 {
+    // Clients wrap a long "On ... wrote:" line. An own sentence never joins
+    // the next line.
+    if second.is_empty() || first.len() + second.len() >= 400 || first.ends_with(['.', '!', '?']) {
         return None;
     }
-    // Clients wrap a long "On ... wrote:" line.
     let joined = format!("{first} {second}");
-    // A wrap of the client form: the first line ends with no sentence mark,
-    // and the second line alone is not the client form.
-    let dated_wrap = dated(&joined) && !first.ends_with(['.', '!', '?']) && !dated(second);
-    let wrapped = ATTRIBUTION_START.iter().any(|p| first.starts_with(p)) || dated_wrap;
-    (wrapped && !second.is_empty() && ends(&joined)).then_some(2)
+    if ATTRIBUTION_START.iter().any(|p| first.starts_with(p)) && verb(&joined) {
+        return Some((2, true));
+    }
+    // A wrap of the client form: the second line alone is not the form.
+    (dated(&joined) && !dated(second)).then_some((2, false))
 }
 
 /// The form of the attribution line of a client in any language: a time
@@ -270,9 +273,8 @@ mod tests {
                 "{l}"
             );
         }
-        // In a reply without a quote, a client start is enough.
-        let t =
-            "Ja.\n\nAm Mo., 3. Feb. 2025 um 10:00 Uhr schrieb Ana Bel <ana@example.org>:\nFrage?";
+        // In a reply, a listed first word with a verb is enough.
+        let t = "Ja.\n\nOn Mon, 3 Feb 2025 at 10:00, Ana Bel <ana@example.org> wrote:\nFrage?";
         assert_eq!(strip_quotes(t, true), "Ja.");
     }
 
@@ -344,6 +346,15 @@ mod tests {
         assert_eq!(strip_quotes(t, true), t);
         let t = "Call at 10:00 with Ana <ana@example.org>:\nthe plan.";
         assert_eq!(strip_quotes(t, true), t);
+        // A listed first word does not make the client form history.
+        let t = "On Tuesday at 10:00 meet Ana <ana@example.org>:\nPlease discuss the budget.";
+        assert_eq!(strip_quotes(t, true), t);
+        // An own sentence does not join the next line.
+        let t = "On Tuesday at 10:00.\nAna <ana@example.org>:\n> example";
+        assert_eq!(
+            strip_quotes(t, true),
+            "On Tuesday at 10:00.\nAna <ana@example.org>:"
+        );
     }
 
     #[test]
