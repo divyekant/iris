@@ -189,6 +189,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/jobs/{id}", get(get_job))
         .route("/api/jobs/{id}/answer", post(post_job_answer))
         .route("/api/jobs/{id}/finish", post(post_job_finish))
+        .route("/api/jobs/{id}/wake", post(post_job_wake))
         .route("/api/jobs/{id}/edit", post(post_job_edit))
         .route("/api/jobs/{id}/scope", post(post_scope_add))
         .route("/api/jobs/{id}/scope/remove", post(post_scope_remove))
@@ -1201,6 +1202,28 @@ async fn post_job_finish(
         return Ok(not_found());
     };
     finish_job(&s, row, end, now_ms())?;
+    Ok(stream(move |w| write_job(&s, row, w)).await)
+}
+
+#[derive(Deserialize)]
+struct JobWakeBody {
+    /// The `updated` of the job when the person saw its wait. A wake of
+    /// another wait, or of a job that does not wait, gets 409.
+    updated: String,
+}
+
+/// The person ends the wait of a job early (issue #959). The answer is the
+/// job document.
+async fn post_job_wake(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<JobWakeBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let Some(row) = job_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    wake_job(&s, row, &b.updated, now_ms())?;
     Ok(stream(move |w| write_job(&s, row, w)).await)
 }
 
