@@ -860,6 +860,28 @@ fn mail_with_the_label_spam_is_left_out() {
     assert!(store.read(|c| Ok(readable(c, 1)?)).unwrap());
 }
 
+#[test]
+fn your_sent_mail_stays_when_your_address_has_a_hostile_sender_row() {
+    // The hostile-sender rule applies only to mail that you did not send
+    // (`iris_talk::Mail::for_reader`). The SPAM check of issue 821 must not
+    // bring the sender rule back for your sent reply 9.
+    let tmp = TempDir::new("sent-hostile");
+    let store = store(&tmp.0.join("data"));
+    store
+        .write(|tx| {
+            Ok(tx.execute(
+                "INSERT INTO sender (address, name, kind) VALUES ('me@example.com', 'Me', 'hostile')",
+                [],
+            )?)
+        })
+        .unwrap();
+    let job = job(&store);
+    let ws = default_dir(&tmp.0.join("data"), job);
+    build(&store, job, &ws).unwrap();
+    assert!(walk(&ws).1.contains("MY-REPLY-TEXT"));
+    assert!(store.read(|c| Ok(readable(c, 9)?)).unwrap());
+}
+
 /// The files follow the published layout of the open model
 /// (docs/spec/03-job-workspace.md): the Markdown files byte for byte, and
 /// each JSON file against its schema.
