@@ -1031,6 +1031,10 @@ async fn a_stopped_write_says_how_its_draft_can_change() {
     assert_eq!(change(&s, &cs).await, Value::Null);
 }
 
+async fn newer_mail(s: &Arc<Store>, cs: &str) -> Value {
+    call(s, "GET", &format!("/api/write/{cs}"), None).await.1["newer_mail"].clone()
+}
+
 async fn change(s: &Arc<Store>, cs: &str) -> Value {
     call(s, "GET", &format!("/api/write/{cs}"), None).await.1["change"].clone()
 }
@@ -1055,16 +1059,25 @@ async fn a_stopped_reply_changes_only_for_its_parent() {
     let (code, _) = call(&s, "POST", &format!("/api/changesets/{cs}/withdraw"), None).await;
     assert_eq!(code, StatusCode::OK);
     assert_eq!(change(&s, &cs).await, "update");
+    assert_eq!(newer_mail(&s, &cs).await, Value::Null);
     set("UPDATE account SET provider = 'outlook' WHERE id = 1");
     assert_eq!(change(&s, &cs).await, "new");
+    // A gone parent with an older message left is no new mail (#1077).
+    set("UPDATE message SET gone_at = 1 WHERE id = 2");
+    assert_eq!(change(&s, &cs).await, Value::Null);
+    assert_eq!(newer_mail(&s, &cs).await, Value::Null);
+    set("UPDATE message SET gone_at = NULL WHERE id = 2");
     set("UPDATE account SET provider = 'gmail' WHERE id = 1;
          INSERT INTO message(account_id, thread_id, provider_id, internal_date)
            VALUES (1, 1, 'p3', 3000);
          INSERT INTO header(message_id, from_addr, to_addrs, subject, message_id_hdr)
            VALUES (3, 'priya@example.com', 'owner@example.com', 'Q4', '<m3@example.com>');");
     assert_eq!(change(&s, &cs).await, Value::Null);
+    // The state says why: a newer mail came into the thread (#1077).
+    assert_eq!(newer_mail(&s, &cs).await, true);
     set("UPDATE account SET provider = 'outlook' WHERE id = 1");
     assert_eq!(change(&s, &cs).await, Value::Null);
+    assert_eq!(newer_mail(&s, &cs).await, true);
     set("UPDATE account SET provider = 'gmail' WHERE id = 1");
     let before = count(&s, "SELECT count(*) FROM changeset");
     let press = json!({"thread": "t-1", "parent": "m-3", "to": ["priya@example.com"],

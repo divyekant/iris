@@ -520,6 +520,7 @@
     {:else}
       <h2 class="stop">This mail did not leave</h2>
       <p class="muted">{ws.reason}</p>
+      {#if ws.newer_mail}<p class="muted">A new mail came into this thread. Write a new reply.</p>{/if}
       <div class="row">
         {#if ws.change && ws.draft}<button type="button" class="pill" onclick={changeIt} disabled={busy}>Change and send</button>{/if}
         <!-- While the draft loads, Write another waits: the draft fills only its own form. -->

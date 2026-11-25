@@ -201,14 +201,18 @@ fn state_in(
         Some(d) => iris_apply::bcc_waits(c, d)?,
         None => None,
     };
-    let change = match draft {
+    let (change, newer_mail) = match draft {
         Some(d) => change(store, c, d, now_ms)?,
-        None => None,
+        None => (None, false),
     };
     let draft = draft.map(|d| format_id(Kind::Draft, d));
     // A stopped write with a draft says how the next press of Send writes
     // it (draft change spec, section 5).
+    // `newer_mail` says why a reply has no change: a newer mail came into
+    // its thread (issue #1077).
     let stopped = |why: &str| match &draft {
+        Some(_) if newer_mail => json!({"state": "stopped", "reason": why, "draft": draft,
+                                         "change": change, "newer_mail": true}),
         Some(_) => json!({"state": "stopped", "reason": why, "draft": draft, "change": change}),
         None => json!({"state": "stopped", "reason": why, "draft": draft}),
     };
@@ -263,12 +267,14 @@ fn state_in(
 /// "Change and send". The value is the outcome that the apply of the next
 /// press gives: the checks of a change in place for Gmail (section 1, the
 /// files included), and the checks of a create for another provider.
+/// The second value is true when only a newer mail in the thread of a
+/// reply stops the change.
 fn change(
     store: &Store,
     c: &Connection,
     draft: i64,
     now_ms: i64,
-) -> rusqlite::Result<Option<&'static str>> {
+) -> rusqlite::Result<(Option<&'static str>, bool)> {
     let row: Option<(String, Option<i64>, String)> = c
         .query_row(
             "SELECT a.provider, d.thread_id, d.content FROM draft d
@@ -278,7 +284,7 @@ fn change(
         )
         .optional()?;
     let Some((provider, thread, content)) = row else {
-        return Ok(None);
+        return Ok((None, false));
     };
     let db = |e| match e {
         iris_changeset::Error::Store(iris_store::Error::Db(e)) => e,
@@ -288,20 +294,34 @@ fn change(
         .map_err(db)?
         .is_some()
     {
-        return Ok(None);
+        return Ok((None, false));
     }
     // A reply: the newest eligible message of the thread is still the
     // message that the draft answers.
     if let Some(thread) = thread {
         let answers = iris_changeset::draft_parent(c, draft).map_err(db)?;
-        if answers.is_none() || answers != iris_changeset::reply_parent(c, thread)? {
-            return Ok(None);
+        if answers.is_none() {
+            return Ok((None, false));
+        }
+        let newest = iris_changeset::reply_parent(c, thread)?;
+        if answers != newest {
+            // Only a message that sorts after the parent is a new mail: a
+            // gone parent with an older message left is not.
+            let newer = c.query_row(
+                "SELECT (coalesce(n.internal_date, 0), n.id) > (coalesce(p.internal_date, 0), p.id)
+                 FROM message n, message p WHERE n.id = ?1 AND p.id = ?2",
+                rusqlite::params![newest, answers],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+            return Ok((None, newer));
         }
     }
     if provider != "gmail" {
         // The next press makes a new draft from the form: the apply of a
         // create does not read the files of the old draft.
-        return Ok(Some("new"));
+        return Ok((Some("new"), false));
     }
     // The next press changes the draft in place: its apply denies the
     // change when a file of the old draft is gone (section 1).
@@ -313,7 +333,7 @@ fn change(
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.to_string().into()))?,
         None => false,
     };
-    Ok(files.then_some("update"))
+    Ok((files.then_some("update"), false))
 }
 
 /// The content of the draft `d-N` for the form of a change (draft change
