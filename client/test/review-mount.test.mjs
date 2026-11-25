@@ -676,3 +676,28 @@ test("a draft shows its Bcc and its files (send content spec)", async () => {
     view.destroy();
   }
 });
+
+test("a request that comes while the review is open shows after Show, and the open requests keep their state (issue 184)", async () => {
+  const first = changeset([act({ resolved: { messages: [] } })]);
+  const second = { ...changeset([act({ resolved: { messages: [] } })]), id: "cs-10", author: { kind: "agent", name: "Codex" } };
+  let open = [first];
+  serve({ changesets: () => [200, { changesets: open }] });
+  const view = await mount("/src/views/Review.svelte", { changesets: [first], every: 20 });
+  try {
+    const shown = () => [...view.target.querySelectorAll("[data-changeset]")].map((el) => el.dataset.changeset);
+    assert.deepEqual(shown(), ["cs-9"]);
+    const before = view.target.querySelector("[data-changeset=cs-9]");
+    // The agent submits a request while the person reads: a quiet line says so, and the list does not move.
+    open = [second, first];
+    await until(() => (view.flushSync(), /1 new request/.test(text(view.target))));
+    assert.deepEqual(shown(), ["cs-9"]);
+    [...view.target.querySelectorAll("button")].find((b) => text(b).trim() === "Show").click();
+    view.flushSync();
+    assert.deepEqual(shown(), ["cs-10", "cs-9"]);
+    assert.equal(view.target.querySelector("[data-changeset=cs-9]"), before, "the open request keeps its part, and so its ticks and pages");
+    assert.doesNotMatch(text(view.target), /new request/);
+    assert.match(text(view.target), /2 requests ask for 2 changes\./);
+  } finally {
+    view.destroy();
+  }
+});
