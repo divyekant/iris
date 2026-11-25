@@ -2,7 +2,8 @@
 //!
 //! On macOS the service is a launchd agent in `~/Library/LaunchAgents`. On
 //! Linux it is a systemd user unit in `~/.config/systemd/user`. Both run
-//! `iris serve` when the user logs in, and again after a crash.
+//! `iris serve --data <folder>` when the user logs in, and again after a
+//! crash. The folder is the data folder of the install (issue #243).
 //!
 //! [`launchd_plist`] and [`systemd_unit`] make the file text and do no I/O.
 //! [`install`] and [`remove`] write or delete the file and tell the service
@@ -52,21 +53,22 @@ impl System {
         }
     }
 
-    /// The text of the service file that runs `<program> serve`.
-    pub fn text(self, program: &Path, home: &Path) -> io::Result<String> {
+    /// The text of the service file that runs `<program> serve --data <data>`.
+    pub fn text(self, program: &Path, data: &Path, home: &Path) -> io::Result<String> {
         match self {
-            System::Launchd => launchd_plist(program, &home.join("Library/Logs/iris.log")),
-            System::Systemd => systemd_unit(program),
+            System::Launchd => launchd_plist(program, data, &home.join("Library/Logs/iris.log")),
+            System::Systemd => systemd_unit(program, data),
         }
     }
 }
 
-/// The text of the launchd agent that runs `<program> serve`.
+/// The text of the launchd agent that runs `<program> serve --data <data>`.
 ///
 /// launchd starts the agent at login and starts it again if it stops with an
 /// error. Its output goes to `log`.
-pub fn launchd_plist(program: &Path, log: &Path) -> io::Result<String> {
+pub fn launchd_plist(program: &Path, data: &Path, log: &Path) -> io::Result<String> {
     let program = xml(checked(program)?);
+    let data = xml(checked(data)?);
     let log = xml(checked(log)?);
     Ok(format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -79,6 +81,8 @@ pub fn launchd_plist(program: &Path, log: &Path) -> io::Result<String> {
 	<array>
 		<string>{program}</string>
 		<string>serve</string>
+		<string>--data</string>
+		<string>{data}</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
@@ -99,26 +103,29 @@ pub fn launchd_plist(program: &Path, log: &Path) -> io::Result<String> {
     ))
 }
 
-/// The text of the systemd user unit that runs `<program> serve`.
+/// The text of the systemd user unit that runs `<program> serve --data <data>`.
 ///
 /// systemd starts the unit at login (or at boot, if lingering is on for the
 /// user) and starts it again if it stops with an error. The output goes to
 /// the journal.
-pub fn systemd_unit(program: &Path) -> io::Result<String> {
-    let program = checked(program)?;
+pub fn systemd_unit(program: &Path, data: &Path) -> io::Result<String> {
     // systemd reads `%` as a specifier and `$` as a variable, and a quoted
     // word takes C escapes.
-    let mut quoted = String::from('"');
-    for c in program.chars() {
-        match c {
-            '"' => quoted.push_str("\\\""),
-            '\\' => quoted.push_str("\\\\"),
-            '%' => quoted.push_str("%%"),
-            '$' => quoted.push_str("$$"),
-            c => quoted.push(c),
+    let quote = |path: &Path| -> io::Result<String> {
+        let mut quoted = String::from('"');
+        for c in checked(path)?.chars() {
+            match c {
+                '"' => quoted.push_str("\\\""),
+                '\\' => quoted.push_str("\\\\"),
+                '%' => quoted.push_str("%%"),
+                '$' => quoted.push_str("$$"),
+                c => quoted.push(c),
+            }
         }
-    }
-    quoted.push('"');
+        quoted.push('"');
+        Ok(quoted)
+    };
+    let (quoted, data) = (quote(program)?, quote(data)?);
     Ok(format!(
         "[Unit]
 Description=Iris mail engine
@@ -126,7 +133,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart={quoted} serve
+ExecStart={quoted} serve --data {data}
 Restart=on-failure
 RestartSec=10
 
@@ -167,8 +174,14 @@ fn xml(text: &str) -> String {
 
 /// Write the service file for `program` under `home` and `config`, with its
 /// folder. Return its path. This does not tell the service manager.
-pub fn write(system: System, program: &Path, home: &Path, config: &Path) -> io::Result<PathBuf> {
-    let text = system.text(program, home)?;
+pub fn write(
+    system: System,
+    program: &Path,
+    data: &Path,
+    home: &Path,
+    config: &Path,
+) -> io::Result<PathBuf> {
+    let text = system.text(program, data, home)?;
     let file = system.file(home, config);
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir)?;
@@ -190,16 +203,16 @@ pub fn write(system: System, program: &Path, home: &Path, config: &Path) -> io::
 }
 
 /// Install the service for `program` (an absolute path to the iris program)
-/// and start it now. A second install replaces the first. Return the path of
+/// with the data folder `data` (an absolute path), and start it now. A second install replaces the first. Return the path of
 /// the service file.
 ///
 /// If a call to the service manager fails, the service file stays and the
 /// error comes back. The state of the service manager is then not known: run
 /// `install` again to finish, or [`remove`] to undo. Both are safe to repeat.
-pub fn install(program: &Path) -> io::Result<PathBuf> {
+pub fn install(program: &Path, data: &Path) -> io::Result<PathBuf> {
     let system = unsupported(System::current())?;
     let (home, config) = folders()?;
-    let file = write(system, program, &home, &config)?;
+    let file = write(system, program, data, &home, &config)?;
     activate(system, &file)?;
     Ok(file)
 }
@@ -356,11 +369,12 @@ mod tests {
     fn plist_runs_serve_and_escapes_the_path() {
         let text = launchd_plist(
             Path::new("/Users/a&b/<x>/iris"),
+            Path::new("/Volumes/d&<x>/iris"),
             Path::new("/Users/a/Library/Logs/iris.log"),
         )
         .unwrap();
         assert!(text.contains(
-            "<string>/Users/a&amp;b/&lt;x&gt;/iris</string>\n\t\t<string>serve</string>"
+            "<string>/Users/a&amp;b/&lt;x&gt;/iris</string>\n\t\t<string>serve</string>\n\t\t<string>--data</string>\n\t\t<string>/Volumes/d&amp;&lt;x&gt;/iris</string>\n\t</array>"
         ));
         assert!(text.contains(&format!("<string>{LABEL}</string>")));
         assert!(text.contains("<key>RunAtLoad</key>\n\t<true/>"));
@@ -371,9 +385,13 @@ mod tests {
 
     #[test]
     fn unit_runs_serve_and_quotes_the_path() {
-        let text = systemd_unit(Path::new("/home/a b/50%/$x/\"q\"\\/iris")).unwrap();
+        let text = systemd_unit(
+            Path::new("/home/a b/50%/$x/\"q\"\\/iris"),
+            Path::new("/srv/50%/$d"),
+        )
+        .unwrap();
         assert!(
-            text.contains("\nExecStart=\"/home/a b/50%%/$$x/\\\"q\\\"\\\\/iris\" serve\n"),
+            text.contains("\nExecStart=\"/home/a b/50%%/$$x/\\\"q\\\"\\\\/iris\" serve --data \"/srv/50%%/$$d\"\n"),
             "{text}"
         );
         assert!(text.contains("\nRestart=on-failure\n"));
@@ -387,11 +405,14 @@ mod tests {
             "/home/a\nExecStartPre=/bin/evil/iris",
             "/home/a\r/iris",
         ] {
-            assert!(systemd_unit(Path::new(bad)).is_err(), "{bad:?}");
-            assert!(
-                launchd_plist(Path::new(bad), Path::new("/l")).is_err(),
-                "{bad:?}"
-            );
+            let (bad, ok) = (Path::new(bad), Path::new("/ok"));
+            for (program, data) in [(bad, ok), (ok, bad)] {
+                assert!(systemd_unit(program, data).is_err(), "{bad:?}");
+                assert!(
+                    launchd_plist(program, data, Path::new("/l")).is_err(),
+                    "{bad:?}"
+                );
+            }
         }
     }
 
@@ -497,7 +518,7 @@ mod tests {
                 let (home, config) = (home.clone(), config.clone());
                 std::thread::spawn(move || {
                     let program = PathBuf::from(format!("/opt/iris{i}"));
-                    write(System::Systemd, &program, &home, &config)
+                    write(System::Systemd, &program, Path::new("/d"), &home, &config)
                 })
             })
             .collect();
@@ -506,8 +527,9 @@ mod tests {
         }
         let file = System::Systemd.file(&home, &config);
         let text = std::fs::read_to_string(&file).unwrap();
-        let whole =
-            (0..8).any(|i| text == systemd_unit(Path::new(&format!("/opt/iris{i}"))).unwrap());
+        let whole = (0..8).any(|i| {
+            text == systemd_unit(Path::new(&format!("/opt/iris{i}")), Path::new("/d")).unwrap()
+        });
         assert!(whole, "{text}");
         assert_eq!(
             std::fs::read_dir(file.parent().unwrap()).unwrap().count(),
@@ -535,8 +557,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let (home, config) = (dir.join("home"), dir.join("config"));
         for system in [System::Launchd, System::Systemd] {
-            let first = write(system, Path::new("/old/iris"), &home, &config).unwrap();
-            let file = write(system, Path::new("/new/iris"), &home, &config).unwrap();
+            let first = write(
+                system,
+                Path::new("/old/iris"),
+                Path::new("/d"),
+                &home,
+                &config,
+            )
+            .unwrap();
+            let file = write(
+                system,
+                Path::new("/new/iris"),
+                Path::new("/d"),
+                &home,
+                &config,
+            )
+            .unwrap();
             assert_eq!(first, file);
             let text = std::fs::read_to_string(&file).unwrap();
             assert!(text.contains("/new/iris") && !text.contains("/old/iris"));

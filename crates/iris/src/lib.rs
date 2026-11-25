@@ -17,6 +17,7 @@ pub mod reply;
 pub mod session_socket;
 pub mod sessions;
 pub mod socket;
+pub mod summary;
 pub mod verbs;
 
 use std::io::BufRead;
@@ -682,15 +683,20 @@ pub enum ServiceAction {
 
 /// Run `iris service install` or `iris service remove`. Return the message
 /// for the user.
-pub fn service(action: ServiceAction) -> std::io::Result<String> {
+/// The service runs with the data folder of this command (`--data`, else
+/// `IRIS_DATA`, else the folder of the system), as an absolute path
+/// (issue #243).
+pub fn service(action: ServiceAction, data: Option<PathBuf>) -> std::io::Result<String> {
     match action {
         ServiceAction::Install => {
             // The service file holds this path, so give the real file, not a link.
             let program = std::env::current_exe()?.canonicalize()?;
-            let file = iris_service::install(&program)?;
+            let data = std::path::absolute(engine::data_dir(data)?)?;
+            let file = iris_service::install(&program, &data)?;
             Ok(format!(
-                "iris: installed and started the service ({})",
-                file.display()
+                "iris: installed and started the service ({}) with the data folder {}",
+                file.display(),
+                data.display()
             ))
         }
         ServiceAction::Remove => Ok(match iris_service::remove()? {
@@ -1734,7 +1740,10 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             Ok(())
         }
         Command::Service { action } => {
-            println!("{}", service(*action).map_err(|e| e.to_string())?);
+            println!(
+                "{}",
+                service(*action, cli.data.clone()).map_err(|e| e.to_string())?
+            );
             Ok(())
         }
         Command::Model { command } => {

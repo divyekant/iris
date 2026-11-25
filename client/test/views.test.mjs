@@ -68,7 +68,7 @@ test("the brief lists what you owe, what is owed to you, and conversations, each
 test("what you owe in 2 days or less, or late, leads the brief, and You owe lists the rest", async () => {
   const t = text(await render("/src/views/Brief.svelte", { brief: fx.brief, now: NOW }));
   // The due section comes before the review and before You owe.
-  assert.match(t, /Due soon 1 Review contract section 4 Dana Whitfield ?, due tomorrow Draft ready Waits for your review/);
+  assert.match(t, /Due soon 1 Review contract section 4 Dana Whitfield ?, due tomorrow Draft ready Summary ready Waits for your review/);
   assert.match(t, /You owe 1 Pay invoice .* All 2 Owed to you/);
   // A late thing is due soon too; a thing due in 3 days is not.
   const at = (date) => ({ ...item("c-311"), due: { date } });
@@ -532,7 +532,7 @@ test("the measures page opens with a sentence, the bars of 14 days and one line 
   assert.match(t, /Memory of the engine 31 MB With 18,402 messages/);
   assert.match(t, /Changes you approved as proposed 47 of 50 94%/);
   assert.match(t, /Changes that you undid 1 of 48 2%/);
-  assert.match(t, /Sends without review after hostile mail Not yet Iris has sent no mail yet/);
+  assert.match(t, /Sends without review after hostile mail Not yet No send that Iris checked for hostile mail yet/);
   assert.match(t, /1\.8 a day on the 12 days that you used Iris/);
   const html = await render("/src/views/Measures.svelte", { measures: fx.measures, now });
   // 14 bars: 12 days of use and 2 dotted days with no use. Today is the primary bar.
@@ -548,8 +548,11 @@ test("each measure says when it has no data, and the sentence names a missed tar
   assert.deepEqual(rows(empty, now).map((r) => r.tone), ["none", "none", "none", "none", "none", "none", "none"]);
   // Issue 472: sends after hostile mail meet the target only at zero.
   const sends = (sent, unreviewed_after_hostile) => rows({ ...empty, sends: { sent, unreviewed_after_hostile } }, now)[6];
-  assert.deepEqual(sends(4, 0), { name: "Sends without review after hostile mail", value: "0", detail: "Of 4 sends. Target: zero.", tone: "met" });
-  assert.deepEqual([sends(1, 1).value, sends(1, 1).detail, sends(1, 1).tone], ["1", "Of 1 send. Target: zero.", "missed"]);
+  assert.deepEqual(sends(4, 0), { name: "Sends without review after hostile mail", value: "0", detail: "Of 4 sends that Iris checked for hostile mail. Target: zero.", tone: "met" });
+  assert.deepEqual([sends(1, 1).value, sends(1, 1).detail, sends(1, 1).tone], ["1", "Of 1 send that Iris checked for hostile mail. Target: zero.", "missed"]);
+  // Issue 1059: a store with only sends from before migration 59 gives sent 0. The row does not say that
+  // Iris sent no mail.
+  assert.deepEqual([sends(0, 0).value, sends(0, 0).detail], ["Not yet", "No send that Iris checked for hostile mail yet. Target: zero."]);
   assert.deepEqual(lead(empty, now), { opens: 0, text: "" });
   assert.equal(localDay(now), "2026-11-16");
   assert.equal(bars(empty, now)[0].day, "2026-11-03");

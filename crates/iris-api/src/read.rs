@@ -624,7 +624,7 @@ pub fn items(store: &Store, filter: &Filter, limit: u32) -> Result<Page> {
                AND (?4 IS NULL OR ({outer}, id) <
                     (SELECT {inner}, i.id FROM item i WHERE i.id = ?4))
              ORDER BY {outer} DESC, id DESC LIMIT ?5",
-            ready = ready_draft(c)?
+            ready = ready_columns(c)?
         ))?;
         let rows = st.query_map(
             params![filter.form, filter.status, filter.kind, before, limit + 1],
@@ -684,6 +684,17 @@ const RECORD: &str = concat!(
     "form = 'record' AND status != 'gone' AND NOT ",
     iris_store::from_hostile_mail!("item")
 );
+
+/// The filter of the items that need the person at the time `now`: the
+/// items that the brief shows in You owe, Owed to you and Conversations
+/// ([`section_sql`]: the head of each pair, attention `shown`, from no
+/// hostile mail, and no item at the stranger gate). The thread summary
+/// (issue 478) reads it for its candidates and for `ready`, so the two use
+/// one rule.
+pub fn needs_you_sql(now: i64) -> String {
+    let [you_owe, owed, conversations, ..] = section_sql(now);
+    format!("(({}) OR ({}) OR ({}))", you_owe.0, owed.0, conversations.0)
+}
 
 /// The filter of the head of each pair in the place `filter`: an item of the
 /// place that is not a possible duplicate of an item of the same place
@@ -1006,7 +1017,7 @@ fn read_section(
         "SELECT id, form, status, doc, {list}, {MATTER}, {} FROM item
          WHERE ({shown}) AND ({seek})
          ORDER BY {order} LIMIT {limit}",
-        ready_draft(c)?
+        ready_columns(c)?
     ))?;
     let (items, page_keys): (Vec<_>, Vec<_>) = st
         .query_map(rusqlite::params_from_iter(after.unwrap_or_default()), |r| {
@@ -1390,36 +1401,86 @@ pub(crate) const MATTER: &str = "(SELECT mi.matter_id FROM matter_item mi
      WHERE mi.item_id = item.id AND mi.kept = 1 AND m.status = 'confirmed') AS matter,
      item.account_id AS account";
 
-/// The column `ready_draft` of an item row: true when the thread of the
-/// mail that made the item has a reply draft that the person can use now
-/// (card R3-09, [`iris_voice::ready_item_sql`]). A nudge (card R3-07)
-/// marks only the commitments of its key, at the time of this read.
-pub(crate) fn ready_draft(c: &Connection) -> iris_store::Result<String> {
+/// The SQL of the thread of the origin message of the outer `item` row.
+const ORIGIN_THREAD: &str =
+    "SELECT om.thread_id FROM item_source os JOIN message om ON om.id = os.message_id
+     WHERE os.item_id = item.id AND os.role = 'origin'";
+
+/// The columns `ready_draft` and `ready_summary` of an item row.
+/// `ready_draft` is true when the thread of the mail that made the item has
+/// a reply draft that the person can use now (card R3-09,
+/// [`iris_voice::ready_item_sql`]). A nudge (card R3-07) marks only the
+/// commitments of its key, at the time of this read. `ready_summary` is
+/// true when the item needs the person ([`needs_you_sql`]) and the thread
+/// of its origin has a summary that is ready (issue 478,
+/// [`iris_summary::ready_sql`]). So an item at the stranger gate never
+/// shows a summary.
+pub(crate) fn ready_columns(c: &Connection) -> iris_store::Result<String> {
     let now = crate::now_ms();
     // `today` gives `YYYY-MM-DD`, so the quoted literal is safe.
     let today = format!("'{}'", iris_store::today(c, now)?);
     Ok(format!(
-        "{} AS ready_draft",
-        iris_voice::ready_item_sql(
-            "SELECT om.thread_id FROM item_source os JOIN message om ON om.id = os.message_id
-             WHERE os.item_id = item.id AND os.role = 'origin'",
-            "item.id",
-            (&now.to_string(), &today)
-        )
+        "{} AS ready_draft, {} AS ready_summary",
+        iris_voice::ready_item_sql(ORIGIN_THREAD, "item.id", (&now.to_string(), &today)),
+        summary_sql(now)
     ))
 }
 
-/// As [`doc_of`], with `ready` from the column [`ready_draft`] of the row.
-/// Each list whose items show as brief lines (the sections and the gate)
-/// reads its items with this function, so a prepared draft shows on each.
-/// The lists: the sections and bundles of the brief, the gate, and the
-/// lists of one form (`/api/items`).
+/// The condition of a ready summary on the outer `item` row at the time
+/// `now`. The inner `item` of the subquery hides the outer one, so the
+/// filter of [`needs_you_sql`] reads the same row by its ID, with no
+/// ambiguous column in a join.
+fn summary_sql(now: i64) -> String {
+    format!(
+        "(item.id IN (SELECT id FROM item WHERE {}) AND {})",
+        needs_you_sql(now),
+        iris_summary::ready_sql(ORIGIN_THREAD)
+    )
+}
+
+/// As [`doc_of`], with `ready` from the columns [`ready_columns`] of the
+/// row. Each list whose items show as brief lines (the sections and the
+/// gate) reads its items with this function, so a prepared draft or summary
+/// shows on each. The lists: the sections and bundles of the brief, the
+/// gate, and the lists of one form (`/api/items`).
 pub(crate) fn ready_doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     let mut doc = doc_of(r)?;
-    if r.get::<_, bool>("ready_draft")? {
-        doc["ready"] = Value::from(vec!["draft"]);
+    let ready: Vec<&str> = [("ready_draft", "draft"), ("ready_summary", "summary")]
+        .into_iter()
+        .filter_map(|(col, name)| r.get::<_, bool>(col).map(|b| b.then_some(name)).transpose())
+        .collect::<rusqlite::Result<_>>()?;
+    if !ready.is_empty() {
+        doc["ready"] = Value::from(ready);
     }
     Ok(doc)
+}
+
+/// The summary of the thread of the origin of the item `id` that is ready,
+/// with the same two conditions as `ready` ([`ready_columns`]). `None` for
+/// an unknown item, an item that does not need the person, or no ready
+/// summary.
+pub fn summary(store: &Store, id: &str, now: i64) -> Result<Option<Value>> {
+    let (kind, row) = parse_id(id).ok_or_else(|| bad_id(id))?;
+    let Some(form) = FORMS.iter().find(|(_, k)| *k == kind).map(|(f, _)| *f) else {
+        return Err(bad_id(id));
+    };
+    // One statement reads the item and the summary: one snapshot.
+    let threads = format!(
+        "SELECT ({ORIGIN_THREAD}) FROM item WHERE id = ?1 AND form = ?2 AND {}",
+        summary_sql(now)
+    );
+    Ok(store.read(|c| {
+        Ok(
+            iris_summary::ready_in(c, &threads, params![row, form])?.map(|s| {
+                serde_json::json!({
+                    "text": s.text,
+                    "based_on": iris_store::format_id(iris_store::Kind::Message, s.based_on),
+                    "created": rfc3339(s.created_at),
+                    "model": s.model,
+                })
+            }),
+        )
+    })?)
 }
 
 /// The document of an item row (id, form, status, doc, and the column

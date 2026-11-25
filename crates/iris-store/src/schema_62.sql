@@ -1,28 +1,33 @@
--- Migration 62 (issues 369, 373 and 374): the person can release one
--- message from quarantine. `message.released` holds the hostile marks that
--- the person released (a JSON array of `dmarc`, `spoof` and `link`), for
--- the current content of the message. NULL: no release.
---
--- The understanding step leaves a released mark out of the marks that it
--- computes for the message, so each gate that reads `message.hostile` sees
--- the message as the person decided. The marks `spam` and `phishing` and a
--- `hostile` sender are not released here.
-ALTER TABLE message ADD COLUMN released TEXT;
+-- Migration 62 (issue 478): the summary of a long thread ("Summary ready",
+-- docs/specs/2026-11-25-thread-summary.md). One summary for each thread: a
+-- new summary replaces the old one. The summary is ready only while
+-- `based_on` is the newest answerable message of the thread, no message of
+-- the thread is hostile or waits for understanding (the ready rule of a
+-- reply draft), and `basis` is the basis of the thread now: the SHA-256 of
+-- each input of the model call (iris_summary::basis_sql). So a change of the
+-- mail that the summary read makes it stale with no write.
 
--- A release or the end of a release queues the fixed check
--- (`iris_understand::store::recheck_fixed`), which understands the message
--- again with no model when its marks change. The trigger deletes the old
--- row and inserts a new one, as the triggers of migration 54 do.
-CREATE TRIGGER IF NOT EXISTS fixed_due_release AFTER UPDATE OF released ON message
-  WHEN OLD.released IS NOT NEW.released AND NEW.gone_at IS NULL
-BEGIN
-  DELETE FROM fixed_due WHERE message_id = NEW.id;
-  INSERT INTO fixed_due(message_id) VALUES (NEW.id);
-END;
+CREATE TABLE IF NOT EXISTS thread_summary (
+  thread_id INTEGER PRIMARY KEY REFERENCES thread(id) ON DELETE CASCADE,
+  -- The newest answerable message that the summary covers.
+  based_on INTEGER NOT NULL REFERENCES message(id) ON DELETE CASCADE,
+  -- The SHA-256 of each input of the model call (iris_summary::basis_sql).
+  basis TEXT NOT NULL,
+  text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 1500),
+  model TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
 
--- A release is for one content: new content of the message ends it.
-CREATE TRIGGER IF NOT EXISTS message_release_content AFTER UPDATE OF content_sha256 ON message
-  WHEN OLD.content_sha256 IS NOT NEW.content_sha256 AND NEW.released IS NOT NULL
-BEGIN
-  UPDATE message SET released = NULL WHERE id = NEW.id;
-END;
+-- The last try of each thread. `invalid` = 1: the model gave no valid
+-- summary twice, so the same basis and model version get no call.
+-- The order of the candidates reads `at`: a thread that the budget cannot
+-- pay moves to the end.
+CREATE TABLE IF NOT EXISTS thread_summary_try (
+  thread_id INTEGER PRIMARY KEY REFERENCES thread(id) ON DELETE CASCADE,
+  based_on INTEGER NOT NULL,
+  basis TEXT NOT NULL,
+  model_version INTEGER NOT NULL,
+  invalid INTEGER NOT NULL CHECK (invalid IN (0, 1)),
+  at INTEGER NOT NULL
+);

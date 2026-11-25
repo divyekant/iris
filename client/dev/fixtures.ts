@@ -1,6 +1,6 @@
 // Answers of the local API, made from the examples of docs/spec/schema/examples.
 // The dev server (`pnpm dev --mode fixtures`) and the tests use them. They are not in the build.
-import type { Outbox, Action, AskAnswer, DraftView, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, LedgerEntry, LedgerPage, Job, JobDetail, Matter, MatterList, MatterView, Message, Policy, ReplyStart, Rule, Status, Summary, Target } from "../src/api";
+import type { Outbox, Action, AskAnswer, DraftView, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, ItemSummary, LedgerEntry, LedgerPage, Job, JobDetail, Matter, MatterList, MatterView, Message, Policy, ReplyStart, Rule, Status, Summary, Target } from "../src/api";
 import type { Measures } from "../src/measures";
 import youOwe from "../../docs/spec/schema/examples/commitment-you-owe.json" with { type: "json" };
 import owedToYou from "../../docs/spec/schema/examples/commitment-owed-to-you.json" with { type: "json" };
@@ -83,8 +83,8 @@ export const ignored: GatePage = {
 const alexNotes = { ...(owedToYou as unknown as Item), id: "c-208", title: "Release notes", model: "iris/1.1", account: "a-2", ready: ["draft"], sources: [{ message: "m-54001", thread: "t-8700", role: "origin", quote: "I will also send the release notes." }] } as unknown as Item;
 
 export const brief: Brief = {
-  // Iris prepared a reply for the first item (card R3-09).
-  you_owe: of(byForm("commitment").filter((i) => i.direction === "you_owe").map((i, n) => (n ? i : { ...i, ready: ["draft"] }))),
+  // Iris prepared a reply for the first item (card R3-09), and a summary of its long thread (issue 478).
+  you_owe: of(byForm("commitment").filter((i) => i.direction === "you_owe").map((i, n) => (n ? i : { ...i, ready: ["draft", "summary"] }))),
   // Alex is late: Iris prepared a nudge (card R3-07).
   owed_to_you: of([...byForm("commitment").filter((i) => i.direction === "owed_to_you").map((i, n): Item => (n ? i : { ...i, ready: ["draft"] })), alexNotes]),
   conversations: of(byForm("conversation")),
@@ -655,6 +655,7 @@ export function answer(path: string): unknown {
   }
   if (name === "brief") return briefNow();
   if (name === "items" && id && url.pathname.endsWith("/job")) return startPreview(id);
+  if (name === "items" && id && url.pathname.endsWith("/summary")) return summaries[id];
   if (name === "items" && id && url.pathname.endsWith("/joinable")) {
     const item = items.find((i) => i.id === id);
     return { joinable: !!item && !item.matter && ["commitment", "conversation", "record", "signal"].includes(item.form) };
@@ -683,6 +684,16 @@ export function answer(path: string): unknown {
   if (name === "threads" && id === "t-8700" && url.pathname.endsWith("/draft")) return nudgeDraft;
   return undefined;
 }
+
+/** GET /api/items/{id}/summary: the summary of the long thread of an item (issue 478). */
+export const summaries: Record<string, ItemSummary> = {
+  "c-311": {
+    text: "Dana sent version 3 of the contract and asked you to review section 4 by Tuesday. Legal changed the notice period from 30 to 60 days. Dana waits for your answer before she signs.",
+    based_on: "m-55210",
+    created: "2026-11-16T09:30:00Z",
+    model: "example-model-1",
+  },
+};
 
 /** GET /api/threads/t-8841/reply: the start values of a reply, with the conversation (R3-04). */
 const replyStart: ReplyStart = {

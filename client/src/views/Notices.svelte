@@ -1,6 +1,7 @@
 <!--
-  Notices by rule (card R5-08): each notice that is not done, above every view.
-  A notice comes only from a `notify` rule of the person. The card opens the mail.
+  Notices (card R5-08): each notice that is open, above every view. A notice comes
+  from a `notify` rule of the person (the card opens the mail), or from a job that
+  needs the person (the card opens the job, docs/specs/2026-11-25-job-notices.md).
   On a phone, the notices fold to one line with a count, so each view starts at the
   top. A tap on the line opens them (decision D38, issue 452).
 -->
@@ -49,10 +50,10 @@
 <svelte:window onhashchange={() => (open = false)} />
 
 {#if list.length}
-  <section class="notices" class:folded={!open} aria-label="Notices by your rules">
+  <section class="notices" class:folded={!open} aria-label="Notices">
     <button class="line" type="button" aria-expanded="false" onclick={() => (open = true)}>
       <span class="dot" aria-hidden="true"></span>
-      <span class="count">{list.length} {list.length === 1 ? "notice" : "notices"} by your rules</span>
+      <span class="count">{list.length} {list.length === 1 ? "notice" : "notices"}</span>
       <span class="show">Show</span>
     </button>
     {#each shown as n (n.id)}
@@ -60,12 +61,14 @@
         <span class="dot" aria-hidden="true"></span>
         <div class="body">
           <p class="rule">{n.rule_name || `Rule ${n.rule}`}</p>
-          {#if n.message}
+          {#if n.job}
+            <a class="title" href={href.job(n.job)}>{n.title}: {n.text}</a>
+          {:else if n.message}
             <a class="title" href={href.mail(n.message.id)}>{n.title}: {n.text}</a>
           {:else}
             <p class="title">{n.title}: {n.text}</p>
           {/if}
-          <p class="detail">{when(n.created)}{n.message ? "" : ". The mail left your mailbox."}</p>
+          <p class="detail">{when(n.created)}{n.message || n.job ? "" : ". The mail left your mailbox."}</p>
         </div>
         <button type="button" onclick={() => done(n)} disabled={busy === n.id}>Done</button>
       </article>

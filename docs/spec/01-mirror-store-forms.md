@@ -2,7 +2,7 @@
 
 - Status: draft, for the approval of the maintainer
 - Applies to: release 1 ("See")
-- Open model version: 1.3
+- Open model version: 1.4
 - Related: [Specification 2](02-changeset-policy-ledger.md), the
   [schemas](schema/), the manifesto and the experience document "Iris: the
   ideal experience"
@@ -502,7 +502,7 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `sync_seen` | `account_id`, `message_id`, `labels` TEXT (JSON), PK(`account_id`, `message_id`) | The messages that the lists of a full resync or a verify name, with their label sets. The engine clears it when a new run starts, not when an unfinished run continues after a crash. |
 | `label` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, `name` TEXT, `kind` TEXT (`system` or `user`), UNIQUE(`account_id`, `provider_id`) | Labels of the provider. |
 | `thread` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, `viewed_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | Threads of the provider. Gives the `t-` IDs. `viewed_at` is the last view of the thread in Iris. |
-| `message` | `id` INTEGER PK, `account_id`, `thread_id`, `provider_id` TEXT, `content_sha256` TEXT, `size` INTEGER, `internal_date` INTEGER, `fetched_at` INTEGER, `gone_at` INTEGER, `understood_at` INTEGER, `hostile` TEXT (JSON), `tries` INTEGER, `retry_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | One row for each message. Gives the `m-` IDs. `hostile` is the list of the hostile marks of the message (section 6.7). `tries` and `retry_at` hold the failed tries of the model (section 7.4). `fixed_rules` TEXT (migration 58) records how the last understanding completed the message, for the fixed check: NULL when the model made an item, a JSON array of the rule of each rule item when the fixed rules completed it (a rule item that a pinned item holds counts too), or `unknown` after the backfill of a store that could not show it; the fixed check runs such a message again. `released` TEXT (migration 62): the hostile marks that the person released for the current content (a JSON array of `dmarc`, `spoof` and `link`), or NULL (section 6.7). A trigger sets it to NULL when the content hash changes, and a trigger queues the fixed check at each change of it. The store clears `understood_at` when the content hash changes, when a gone message comes back, and when the message gets or loses the label `SENT`, `DRAFT`, `UNSENT` or `SENT_COPY`. A message with `DRAFT`, `UNSENT` or `SENT_COPY` that is not gone keeps no item that a new understanding replaces: the triggers of store migration 42 delete such items when the label comes and when the message comes back. |
+| `message` | `id` INTEGER PK, `account_id`, `thread_id`, `provider_id` TEXT, `content_sha256` TEXT, `size` INTEGER, `internal_date` INTEGER, `fetched_at` INTEGER, `gone_at` INTEGER, `understood_at` INTEGER, `hostile` TEXT (JSON), `tries` INTEGER, `retry_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | One row for each message. Gives the `m-` IDs. `hostile` is the list of the hostile marks of the message (section 6.7). `tries` and `retry_at` hold the failed tries of the model (section 7.4). `fixed_rules` TEXT (migration 58) records how the last understanding completed the message, for the fixed check: NULL when the model made an item, a JSON array of the rule of each rule item when the fixed rules completed it (a rule item that a pinned item holds counts too), or `unknown` after the backfill of a store that could not show it; the fixed check runs such a message again. `released` TEXT (migration 64): the hostile marks that the person released for the current content (a JSON array of `dmarc`, `spoof` and `link`), or NULL (section 6.7). A trigger sets it to NULL when the content hash changes, and a trigger queues the fixed check at each change of it. The store clears `understood_at` when the content hash changes, when a gone message comes back, and when the message gets or loses the label `SENT`, `DRAFT`, `UNSENT` or `SENT_COPY`. A message with `DRAFT`, `UNSENT` or `SENT_COPY` that is not gone keeps no item that a new understanding replaces: the triggers of store migration 42 delete such items when the label comes and when the message comes back. |
 | `message_label` | `message_id`, `label_id`, PK(`message_id`, `label_id`) | The label set of each message. |
 | `header` | `message_id` PK, `date` INTEGER, `from_addr` TEXT, `from_name` TEXT, `to_addrs` TEXT, `cc_addrs` TEXT, `subject` TEXT, `message_id_hdr` TEXT, `in_reply_to` TEXT, `list_id` TEXT, `auth` TEXT | Parsed headers that queries need. `auth` holds the SPF, DKIM and DMARC results from `Authentication-Results`. `to_addrs` and `cc_addrs` hold bare lowercase addresses joined by `,`. `from_addr` is ASCII lowercase: the triggers of store migration 39 keep this form for each write. |
 | `body` | `message_id` INTEGER PK, `subject` TEXT, `sender` TEXT, `text` TEXT | The clean text of the message (section 7.2), with the subject and the sender name and address. `message_id` is the row ID. |
@@ -583,7 +583,7 @@ Each item of each form has these fields:
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `model` | string, `"iris/1.3"` (`"iris/1.0"`, `"iris/1.1"` or `"iris/1.2"` in older documents) | yes | The version of the open model: `iris/<major>.<minor>` ([specification 4](04-open-model-versions.md)). |
+| `model` | string, `"iris/1.4"` (`"iris/1.0"`, `"iris/1.1"`, `"iris/1.2"` or `"iris/1.3"` in older documents) | yes | The version of the open model: `iris/<major>.<minor>` ([specification 4](04-open-model-versions.md)). |
 | `id` | string, for example `"c-311"` | yes | The ID of the item (section 5.7). |
 | `form` | `commitment`, `conversation`, `record`, `feed` or `signal` | yes | The form. |
 | `status` | string, values for each form | yes | The state of the item. |
@@ -595,7 +595,7 @@ Each item of each form has these fields:
 | `confidence` | number from 0 to 1 | no | How sure the understanding step is. Not set when `derived.by` is `person`. |
 | `matter` | string or null | no | The `g-` ID of the confirmed matter of the item, or null (`docs/specs/2026-11-16-matters.md`). The engine sets it when it reads the item. |
 | `account` | string, `a-` ID | no | Since `iris/1.1`. The account (the mailbox) of the item (card R6-02, `docs/specs/2026-11-17-accounts.md`). The engine sets it when it reads the item. |
-| `ready` | array of `"draft"`, at least 1, no repeats | no | What Iris prepared for the item (card R3-09). `"draft"`: the thread of the `origin` message has a reply draft that is not stale (`iris_voice::ready_item_sql`). A reply draft of the owner marks each item of its thread. A nudge (card R3-07, a draft with `ask`) marks each commitment of its key (decision D8), not the other items of its thread. The key is the key at the time of the read, so a commitment that becomes late later makes the nudge stale. The engine sets it only on the items of these lists, when it reads them: the sections, bundles and pages of the brief (`/api/brief`, `/api/brief/{section}`), the gate (`/api/gate`, `/api/gate/declined` and the gate of `/api/brief`), and the item lists (`/api/items` and `iris list --json`). Other outputs of an item (one item, the read verbs other than `list`, the export) never have it. A stored value is never shown, and a correction of it is refused. |
+| `ready` | array of `"draft"` and `"summary"` (since `iris/1.4`), at least 1, no repeats | no | What Iris prepared for the item (card R3-09). `"draft"`: the thread of the `origin` message has a reply draft that is not stale (`iris_voice::ready_item_sql`). A reply draft of the owner marks each item of its thread. A nudge (card R3-07, a draft with `ask`) marks each commitment of its key (decision D8), not the other items of its thread. The key is the key at the time of the read, so a commitment that becomes late later makes the nudge stale. `"summary"`: the item needs the person (the brief shows it in You owe, Owed to you or Conversations), and the thread of the `origin` message has a summary that is not stale (`iris_summary::ready_sql`, `docs/specs/2026-11-25-thread-summary.md`). An item at the stranger gate never has it. The engine sets it only on the items of these lists, when it reads them: the sections, bundles and pages of the brief (`/api/brief`, `/api/brief/{section}`), the gate (`/api/gate`, `/api/gate/declined` and the gate of `/api/brief`), and the item lists (`/api/items` and `iris list --json`). Other outputs of an item (one item, the read verbs other than `list`, the export) never have it. `GET /api/items/{id}/summary` gives the text of a summary. A stored value is never shown, and a correction of it is refused. |
 | `attention` | object | no | Reserved for specification 2: `state` is `shown`, `bundled` or `hidden`, with the rule and the reason. |
 
 A source has these fields:
@@ -847,13 +847,19 @@ from quarantine (`POST /api/messages/{id}/release`):
   `spam` (a label of the provider) and `phishing` (the answer of the model),
   and a `hostile` sender (it has Trust, below), stay. A message with no mark
   that a release covers, or a gone message, gets no release (HTTP 409).
-- The understanding step and the link check leave a released mark out. A
-  trigger queues the fixed check, which understands the message again with
-  no model. If no other mark stays, the message waits for the model as new
-  mail does, and its items show.
+- The understanding step and the link check leave a released mark out. The
+  release clears `understood_at`, so the next run understands the message
+  again on the one path, whatever check runs first. If no other mark stays,
+  the model reads it as new mail, and its items show. A second release
+  before that run gives 409, as for content that Iris did not read yet.
 - A release is for one content: new content of the message ends it.
-- `POST /api/messages/{id}/unrelease` ends the release. The fixed check
-  gives the marks back, and the items of the message go.
+- `POST /api/messages/{id}/unrelease` ends the release. In the same write,
+  the released marks go back into `message.hostile`, so each gate holds the
+  message at once, and `understood_at` is cleared. The next run then
+  understands the message as hostile mail, with no model call: its items
+  go and its conversation changes (section 7.3).
+- A release sets the model tries of the message to 0, as a rerun does, so
+  a message that used its tries before a mark held it can get its items.
 - A release names only marks of the current content. While the message
   waits for its next understanding (`understood_at` is NULL, for example
   after new content), the marks can be from old content, so a release
@@ -873,6 +879,18 @@ list of the name-address part of the mark `spoof` (decision D32):
   (U+FF20, U+FE6B) counts as `@`.
 - An address in the name is a word with one `@`, a local part that is not
   empty, and a domain with a dot and no empty label. Other words are text.
+- The domain of an address is read as the owner check reads it: each
+  character gets the UTS 46 mapping of the URL host parser, one character
+  at a time (so U+FF0D is `-`, and U+3002, U+FF0E and U+FF61 are `.`). A
+  character that UTS 46 disallows becomes U+FFFD and stays. The mapped
+  domain ends at the first ASCII character that a domain cannot hold (as
+  `/` in `a@bank.example/help`), and at the first Unicode punctuation
+  character of the classes Pd, Po, Ps, Pe, Pi and Pf (as the em dash in
+  `a@bank.example—help`), except the punctuation that IDNA2008 allows in a
+  label: the exceptions of RFC 5892 section 2.6 (U+00B7, U+05F3, U+05F4,
+  U+0F0B and U+30FB, as in `a@company.jp・日本.com`). All other characters
+  stay in the domain (letters, marks and format characters such as
+  U+202E), so a mixed-script, reversed or longer domain has another owner.
 - The owner of an address is its registrable domain, in punycode: the
   public suffix and one label more. The public suffix is the longer of the
   suffix of the public suffix list (with its private part, as `github.io`)

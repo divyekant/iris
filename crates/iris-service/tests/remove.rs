@@ -45,7 +45,7 @@ fn failed_service_manager_calls_leave_a_file_state_that_a_retry_can_fix() {
     // a second install or a remove can finish the work.
     let unit = home.join(".config/systemd/user/iris.service");
     fake(&bin, "echo 'Failed to connect to bus' >&2; exit 1");
-    let err = iris_service::install(Path::new("/opt/iris")).unwrap_err();
+    let err = iris_service::install(Path::new("/opt/iris"), Path::new("/srv/iris")).unwrap_err();
     assert!(
         err.to_string().contains("Failed to connect to bus"),
         "{err}"
@@ -70,6 +70,7 @@ fn failed_service_manager_calls_leave_a_file_state_that_a_retry_can_fix() {
     let file = iris_service::write(
         iris_service::System::Systemd,
         Path::new("/opt/iris"),
+        Path::new("/srv/iris"),
         &home,
         &home.join(".config"),
     )

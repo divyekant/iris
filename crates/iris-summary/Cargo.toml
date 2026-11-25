@@ -1,0 +1,17 @@
+[package]
+name = "iris-summary"
+description = "The summary of a long thread: what the thread says now, from the model, for an item that needs you."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+iris-model = { version = "0.0.0", path = "../iris-model" }
+iris-store = { version = "0.0.0", path = "../iris-store" }
+iris-understand = { version = "0.0.0", path = "../iris-understand" }
+iris-voice = { version = "0.0.0", path = "../iris-voice" }
+# Same version as iris-store, so the program has one copy of SQLite.
+rusqlite = "=0.43.0"
+serde_json = "1"

@@ -1833,7 +1833,22 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
     assert_eq!(hostile(&b), r#"["link"]"#);
     assert_eq!((b.script.calls(), items(&b)), (0, 0));
 
-    // The release: the next run reads the mail with the model.
+    // The release: the next run reads the mail with the model, also when
+    // the model used each try of the message before the mark held it.
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE message SET tries = 3 WHERE id = ?1", [m])?;
+            Ok(())
+        })
+        .unwrap();
+    // A link check waits at the time of the release: it cannot take the
+    // place of the understanding.
+    b.store
+        .write(|tx| {
+            tx.execute("INSERT INTO link_check(message_id) VALUES (?1)", [m])?;
+            Ok(())
+        })
+        .unwrap();
     let r = b.store.write(|tx| release(tx, m)).unwrap();
     assert_eq!(
         r,
@@ -1842,10 +1857,10 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
             kept: vec![]
         }
     );
-    // A second release has nothing more to release.
+    // A second release before the run: Iris reads the mail again now.
     assert_eq!(
         b.store.write(|tx| release(tx, m)).unwrap(),
-        Release::Nothing
+        Release::Reading
     );
     let feed = || {
         Ok((
@@ -1859,9 +1874,28 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
     b.run(&Limits::default()).unwrap();
     assert_eq!(hostile(&b), "[]");
     assert_eq!((b.script.calls(), items(&b)), (1, 1));
+    // The released message is in the conversation of its thread.
+    let talk = |b: &Box_| {
+        b.col(&format!(
+            "SELECT count(*) FROM item_source s JOIN item i ON i.id = s.item_id
+             WHERE s.message_id = {m} AND i.form = 'conversation' AND i.status <> 'gone'"
+        ))
+        .unwrap()
+    };
+    assert!(talk(&b) > 0);
     // The link check of the same content keeps the release.
     iris_understand::store::recheck_links(&b.store, NOW, None).unwrap();
     assert_eq!(hostile(&b), "[]");
+
+    // A link check reads the release, and the undo comes before its write.
+    b.store
+        .write(|tx| {
+            tx.execute("INSERT INTO link_check(message_id) VALUES (?1)", [m])?;
+            Ok(())
+        })
+        .unwrap();
+    let read = iris_understand::store::link_read(&b.store, m).unwrap();
+    assert!(!read.mark);
 
     // The end of the release: the mark comes back with no model call.
     assert!(matches!(
@@ -1872,9 +1906,36 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
         b.store.write(|tx| unrelease(tx, m)).unwrap(),
         Release::Nothing
     );
+    // The undo holds the mail at once, before the fixed check runs: each
+    // gate reads `message.hostile`.
+    assert_eq!(hostile(&b), r#"["link"]"#);
+    // The write of that link check keeps its queue row and the mark.
+    let row = b
+        .col(&format!("SELECT id FROM link_check WHERE message_id = {m}"))
+        .unwrap();
+    assert!(!b
+        .store
+        .write(|tx| iris_understand::store::link_check_done(tx, row, m, &read))
+        .unwrap());
+    assert_eq!(hostile(&b), r#"["link"]"#);
+    assert_eq!(
+        b.col(&format!(
+            "SELECT count(*) FROM link_check WHERE message_id = {m}"
+        )),
+        Some(1)
+    );
+    assert_eq!(
+        b.col(&format!(
+            "SELECT count(*) FROM message m WHERE m.id = {m} AND {}",
+            iris_store::may_be_hostile!()
+        )),
+        Some(1)
+    );
     b.run(&Limits::default()).unwrap();
     assert_eq!(hostile(&b), r#"["link"]"#);
     assert_eq!((b.script.calls(), items(&b)), (1, 0));
+    // The undo takes the message out of the conversation (section 7.3).
+    assert_eq!(talk(&b), 0);
 
     // New content ends a release.
     b.store.write(|tx| release(tx, m)).unwrap();

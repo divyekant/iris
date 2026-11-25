@@ -1,9 +1,11 @@
 <!--
   One item. The words of the mail that made it come first, so that a person
-  seldom needs the mail itself. Each source opens its mail in one step.
+  seldom needs the mail itself. Each source opens its mail in one step. For a
+  long thread of an item that needs you, a summary of Iris comes first, under
+  the title (issue 478).
 -->
 <script lang="ts">
-  import type { Item } from "../api";
+  import { get, type Item, type ItemSummary, type Target } from "../api";
   import { watch } from "../clock";
   import { due, field, money, party, RECORD_FIELDS, when } from "../format";
   import { href } from "../route";
@@ -67,6 +69,37 @@
     r.push(["State", item.status]);
     return r;
   });
+  // The summary of the long thread (issue 478). A 404 or a failure shows nothing.
+  // Each new state of the item (Done, Decline, a matter) is a new `item`, so the
+  // effect reads the summary again, and only the read of the item as it is now
+  // applies (`live`): an item that stops needing
+  // the person loses the summary. `upTo` is the date of the newest mail that the
+  // summary read (`based_on`), not the time when Iris wrote it.
+  let summary: ItemSummary | null = $state(null);
+  let upTo: string | null = $state(null);
+  $effect(() => {
+    const id = item.id;
+    let live = true;
+    summary = null;
+    upTo = null;
+    get<ItemSummary>(`items/${encodeURIComponent(id)}/summary`).then(
+      (s) => {
+        if (!live) return;
+        summary = s;
+        get<{ messages: Target[] }>(`messages?ids=${encodeURIComponent(s.based_on)}`).then(
+          (m) => {
+            const first = m?.messages?.[0];
+            if (live && first && !first.gone) upTo = first.date;
+          },
+          () => {},
+        );
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  });
   // "Handle this" (R4-10): the start of a job, on its own page.
   let startable = $derived(canStart(item));
   // "Reply" (R3-10): the write view of the thread. A gone conversation has no mail to answer.
@@ -79,6 +112,14 @@
 <article>
   <p class="form">{FORMS[item.form]}{item.form === "record" && item.type ? `: ${item.type}` : ""}</p>
   <h1>{item.title}</h1>
+
+  {#if summary}
+    <section class="summary" aria-label="Summary by Iris">
+      <p class="by">Summary by Iris</p>
+      <p class="text">{summary.text}</p>
+      <p class="limit">{upTo ? `From the mail up to ${when(upTo)}.` : "From the newest mail of the thread."} Read the mail for the exact words.</p>
+    </section>
+  {/if}
 
   {#snippet handle()}
     {#if startable}<a class="handle" href={href.start(item.id)}>Handle this</a>{/if}
@@ -150,6 +191,31 @@
     letter-spacing: -0.01em;
     line-height: 1.25;
     margin: 0 0 var(--space-6);
+  }
+  .summary {
+    margin: 0 0 var(--space-6);
+    padding: var(--space-4) var(--space-6);
+    border: 1px solid var(--color-border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--color-background-elevated);
+  }
+  .summary p {
+    margin: 0;
+  }
+  .summary .by {
+    color: var(--color-text-muted);
+    font-size: var(--font-size--1);
+    margin-bottom: var(--space-2);
+  }
+  .summary .text {
+    line-height: 1.5;
+    white-space: pre-line;
+    overflow-wrap: anywhere;
+  }
+  .summary .limit {
+    color: var(--color-text-faint);
+    font-size: var(--font-size--1);
+    margin-top: var(--space-3);
   }
   .handle {
     display: inline-flex;

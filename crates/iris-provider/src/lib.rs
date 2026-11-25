@@ -353,6 +353,14 @@ pub trait Provider: Send + Sync {
         let _ = id;
     }
 
+    /// The display name of the mailbox for `From`, from the provider (send
+    /// content spec, section 3). The default is `None`: then Iris takes the
+    /// name from the sent mail of the mirror (Gmail).
+    fn display_name(&self, token: &str) -> Result<Option<String>> {
+        let _ = token;
+        Ok(None)
+    }
+
     /// The mailbox of `token` and the cursor of now.
     fn profile(&self, token: &str) -> Result<Profile>;
     /// Each label of the mailbox.

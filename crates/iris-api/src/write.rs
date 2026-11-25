@@ -32,6 +32,10 @@ pub struct WriteBody {
     pub body: String,
     pub key: String,
     pub flags: Vec<String>,
+    /// The draft (`d-N`) that the press changes (draft change spec,
+    /// section 5). Its account and thread must be `account` or `thread`.
+    #[serde(default)]
+    pub draft: Option<String>,
 }
 
 /// The answer of a press.
@@ -108,6 +112,7 @@ pub fn write(store: &Store, b: &WriteBody, now_ms: i64) -> Result<Pressed> {
         args: &args,
         key: &b.key,
         flags: &b.flags,
+        draft: b.draft.as_deref(),
     };
     let cs = iris_changeset::format_changeset_id;
     // A refusal of the store is a refusal of the input of the press (for
@@ -136,7 +141,7 @@ pub fn state(store: &Store, cs: i64, now_ms: i64) -> Result<Option<Value>> {
     Ok(store.read(|conn| {
         // One snapshot: the engine moves the write at the same time.
         let tx = conn.unchecked_transaction()?;
-        let v = state_in(&tx, cs, now_ms)?;
+        let v = state_in(store, &tx, cs, now_ms)?;
         tx.finish()?;
         Ok(v)
     })?)
@@ -153,7 +158,12 @@ type Mark = (
     i64,
 );
 
-fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Value>> {
+fn state_in(
+    store: &Store,
+    c: &Connection,
+    cs: i64,
+    now_ms: i64,
+) -> rusqlite::Result<Option<Value>> {
     let mark: Option<Mark> = c
         .query_row(
             concat!(
@@ -191,8 +201,17 @@ fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Val
         Some(d) => iris_apply::bcc_waits(c, d)?,
         None => None,
     };
+    let change = match draft {
+        Some(d) => change(store, c, d, now_ms)?,
+        None => None,
+    };
     let draft = draft.map(|d| format_id(Kind::Draft, d));
-    let stopped = |why: &str| json!({"state": "stopped", "reason": why, "draft": draft});
+    // A stopped write with a draft says how the next press of Send writes
+    // it (draft change spec, section 5).
+    let stopped = |why: &str| match &draft {
+        Some(_) => json!({"state": "stopped", "reason": why, "draft": draft, "change": change}),
+        None => json!({"state": "stopped", "reason": why, "draft": draft}),
+    };
     if let Some(send) = send {
         let (s, why, decided_at): (String, Option<String>, Option<i64>) = c.query_row(
             "SELECT a.state, coalesce(a.reason, l.error), a.decided_at FROM changeset_action a
@@ -238,6 +257,119 @@ fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Val
     }))
 }
 
+/// How the next press of Send writes the draft `draft` of a stopped write
+/// (draft change spec, section 5): `update` changes it in place, `new`
+/// makes a new draft (an account that is not Gmail), `None` offers no
+/// "Change and send". The value is the outcome that the apply of the next
+/// press gives: the checks of a change in place for Gmail (section 1, the
+/// files included), and the checks of a create for another provider.
+fn change(
+    store: &Store,
+    c: &Connection,
+    draft: i64,
+    now_ms: i64,
+) -> rusqlite::Result<Option<&'static str>> {
+    let row: Option<(String, Option<i64>, String)> = c
+        .query_row(
+            "SELECT a.provider, d.thread_id, d.content FROM draft d
+             JOIN account a ON a.id = d.account_id WHERE d.id = ?1",
+            [draft],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((provider, thread, content)) = row else {
+        return Ok(None);
+    };
+    let db = |e| match e {
+        iris_changeset::Error::Store(iris_store::Error::Db(e)) => e,
+        e => rusqlite::Error::ToSqlConversionFailure(e.to_string().into()),
+    };
+    if iris_changeset::change_blocked(c, draft, now_ms)
+        .map_err(db)?
+        .is_some()
+    {
+        return Ok(None);
+    }
+    // A reply: the newest eligible message of the thread is still the
+    // message that the draft answers.
+    if let Some(thread) = thread {
+        let answers = iris_changeset::draft_parent(c, draft).map_err(db)?;
+        if answers.is_none() || answers != iris_changeset::reply_parent(c, thread)? {
+            return Ok(None);
+        }
+    }
+    if provider != "gmail" {
+        // The next press makes a new draft from the form: the apply of a
+        // create does not read the files of the old draft.
+        return Ok(Some("new"));
+    }
+    // The next press changes the draft in place: its apply denies the
+    // change when a file of the old draft is gone (section 1).
+    let files = match serde_json::from_str::<Value>(&content)
+        .ok()
+        .and_then(|v| serde_json::from_value::<iris_compose::Content>(v["content"].clone()).ok())
+    {
+        Some(content) => iris_apply::has_files(store, &content)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.to_string().into()))?,
+        None => false,
+    };
+    Ok(files.then_some("update"))
+}
+
+/// The content of the draft `d-N` for the form of a change (draft change
+/// spec, section 5): `to`, `cc`, `bcc`, `subject`, `body`, `attachments`,
+/// the account and the thread, and `change`: how the next press of Send
+/// writes the draft, the same value as the state of a stopped write. The
+/// Outbox reads it after a cancel (issue 941). `None` for a draft that does
+/// not exist, of an account that Iris removes, or with content that Iris
+/// does not write.
+pub fn draft_content(store: &Store, id: &str, now_ms: i64) -> Result<Option<Value>> {
+    let Some((Kind::Draft, row)) = parse_id(id) else {
+        return Ok(None);
+    };
+    type Found = (i64, Option<i64>, String, Option<&'static str>);
+    let found: Option<Found> = store.read(|c| {
+        let tx = c.unchecked_transaction()?;
+        let found = tx
+            .query_row(
+                "SELECT d.account_id, d.thread_id, d.content FROM draft d
+             JOIN account a ON a.id = d.account_id
+             WHERE d.id = ?1 AND d.foreign_at IS NULL AND (a.state IS NULL OR a.state NOT IN ('removing', 'removed'))",
+                [row],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        Ok(match found {
+            Some((account, thread, content)) => {
+                Some((account, thread, content, change(store, &tx, row, now_ms)?))
+            }
+            None => None,
+        })
+    })?;
+    let Some((account, thread, content, change)) = found else {
+        return Ok(None);
+    };
+    let Some(m) = serde_json::from_str::<Value>(&content)
+        .ok()
+        .and_then(|v| serde_json::from_value::<iris_compose::Content>(v["content"].clone()).ok())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(json!({
+        "draft": format_id(Kind::Draft, row),
+        "account": format_id(Kind::Account, account),
+        "thread": thread.map(|t| format_id(Kind::Thread, t)),
+        "to": m.to,
+        "cc": m.cc,
+        "bcc": m.bcc,
+        "subject": m.subject,
+        "body": m.body,
+        "attachments": m.attachments,
+        "change": change,
+    })))
+}
+
+/// A Message-ID with no angle brackets, in lower case.
 /// The most characters of the parent text in the reply form.
 pub const PARENT_TEXT: usize = 600;
 

@@ -979,3 +979,95 @@ test("a file that the engine refuses names its reason and does not join the mail
     net.restore();
   }
 });
+
+test("Change and send opens the form with the draft and a new key; update sends the draft, new does not (draft change spec, section 5)", async () => {
+  for (const change of ["update", "new", null]) {
+    window.sessionStorage.clear();
+    let n = 0;
+    const net = serve((path, method) => {
+      if (method === "POST" && path === "write") return [201, { write: `cs-${++n}` }];
+      if (path === "write/cs-1") return [200, { state: "stopped", reason: "You stopped this mail.", draft: "d-1", change }];
+      if (path === "write/cs-2") return [200, { state: "saving" }];
+      if (path === "drafts/d-1")
+        return [200, { draft: "d-1", account: "a-1", thread: null, to: ["sam@okafor.example"], cc: ["kim@example.com"], bcc: [],
+                       subject: "Dinner on Saturday?", body: "Hi Sam,\n\nAre you free?\n", attachments: [] }];
+      return [404, { error: "Not found." }];
+    });
+    const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+    try {
+      await fill(app);
+      press(app);
+      await until(() => text(app.target).includes("This mail did not leave"));
+      const button = () => [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Change and send");
+      if (change === null) {
+        assert.equal(button(), undefined, "no change: no button");
+        continue;
+      }
+      button().click();
+      await until(() => app.target.querySelector("form"));
+      app.flushSync();
+      assert.equal(app.target.querySelector("input.subject").value, "Dinner on Saturday?");
+      assert.equal(app.target.querySelector("textarea").value, "Hi Sam,\n\nAre you free?\n");
+      // The same content as the stopped write: the press is a new write, with a new key.
+      press(app);
+      await until(() => net.posts().filter((p) => p.path === "write").length === 2);
+      const [first, second] = net.posts().filter((p) => p.path === "write").map((p) => p.body);
+      assert.deepEqual(second.to, ["sam@okafor.example"]);
+      assert.deepEqual(second.cc, ["kim@example.com"]);
+      assert.equal(second.body, first.body);
+      assert.equal(second.draft, change === "update" ? "d-1" : undefined);
+      assert.notEqual(second.key, first.key, "a new write gets a new key");
+    } finally {
+      app.destroy();
+      net.restore();
+    }
+  }
+});
+
+test("Write another waits while the draft loads, and a draft holds only for its own account", async () => {
+  const TWO = [...ACCOUNTS, { ...ACCOUNTS[0], id: 2, address: "dk@work.example" }];
+  let release;
+  const slow = new Promise((r) => (release = r));
+  let n = 0;
+  const net = serve((path, method) => {
+    if (method === "POST" && path === "write") return [201, { write: `cs-${++n}` }];
+    if (path === "write/cs-1") return [200, { state: "stopped", reason: "You stopped this mail.", draft: "d-1", change: "update" }];
+    if (path === "write/cs-2") return [200, { state: "saving" }];
+    if (path === "drafts/d-1")
+      return [200, { draft: "d-1", account: "a-1", thread: null, to: ["sam@okafor.example"], cc: [], bcc: [],
+                     subject: "Dinner on Saturday?", body: "Hi Sam,\n", attachments: [] }];
+    return [404, { error: "Not found." }];
+  });
+  // The draft read waits until the test releases it.
+  const fast = globalThis.fetch;
+  globalThis.fetch = async (url, init) => (String(url).includes("drafts/d-1") ? (await slow, fast(url, init)) : fast(url, init));
+  const app = await mount("/src/views/Write.svelte", { start: { accounts: TWO }, every: 20 });
+  try {
+    await fill(app);
+    press(app);
+    await until(() => text(app.target).includes("This mail did not leave"));
+    const button = (t) => [...app.target.querySelectorAll("button")].find((b) => b.textContent === t);
+    button("Change and send").click();
+    app.flushSync();
+    assert.equal(button("Write another").disabled, true, "Write another waits for the draft");
+    release();
+    await until(() => app.target.querySelector("form"));
+    app.flushSync();
+    const from = app.target.querySelector("select");
+    // happy-dom has no `:checked` for an option, and Svelte reads the choice with it.
+    const query = from.querySelector.bind(from);
+    from.querySelector = (q) => (q === ":checked" ? from.options[1] : query(q));
+    from.value = "a-2";
+    from.dispatchEvent(new window.Event("change", { bubbles: true }));
+    app.flushSync();
+    press(app);
+    await until(() => net.posts().filter((p) => p.path === "write").length === 2);
+    const second = net.posts().filter((p) => p.path === "write")[1].body;
+    assert.equal(second.account, "a-2");
+    assert.equal(second.draft, undefined, "a draft of a-1 does not go with a mail from a-2");
+  } finally {
+    app.destroy();
+    globalThis.fetch = fast;
+    net.restore();
+  }
+});

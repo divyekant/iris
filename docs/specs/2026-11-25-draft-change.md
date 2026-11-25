@@ -52,9 +52,6 @@ as spec 2 section 7.5 says."
   `person`, through `POST /api/write`, can change a draft in this
   version. Submit denies a change from another author. A limit issue
   records this.
-- A change from the Outbox view. The cancelled card of the Outbox does
-  not get a "Change and send" link in this version. The write view of the
-  stopped mail has it. A limit issue records this.
 - A change of the thread or the parent of a reply. A change keeps the
   thread and the reply headers of the draft.
 - A change of a draft that the person made in Gmail. Iris changes only a
@@ -279,12 +276,22 @@ A ledger row of a change in `writing` after a crash or a lost answer:
 | Value | When | Next press of Send |
 |---|---|---|
 | `"update"` | A Gmail account, each check of section 1 passes for the draft now, and for a reply, the newest eligible message of the thread is still the parent of the draft (its `Message-ID` is the `In-Reply-To` of the draft row) | Sends `draft`: the same draft changes |
-| `"new"` | An Outlook or IMAP account, the draft is not sent, and its account is still an account of Iris | No `draft`: a new draft, as today |
-| `null` | All other cases (sent, `foreign_at`, a send waits, or a reply whose thread has a newer eligible message) | No "Change and send". For a reply with a newer message, the view says "A new mail came into this thread. Write a new reply." |
+| `"new"` | An Outlook or IMAP account, each check of section 1 passes for the draft now but the provider check and the attachment check, and for a reply, the newest eligible message of the thread is still the parent of the draft. The create of a new draft does not read the files of the old draft, so a missing file does not stop it: the form shows the attachment, and the person can remove it | No `draft`: a new draft, as today |
+| `null` | All other cases (sent, `foreign_at`, a send waits, a missing file of a Gmail draft, or a reply whose thread has a newer eligible message) | No "Change and send". For a reply with a newer message, the view says "A new mail came into this thread. Write a new reply." |
 
 The client reads the content of the draft from `GET /api/drafts/{d-N}`
 (a new read route: `to`, `cc`, `bcc`, `subject`, `body`, `attachments`,
-and the account and the thread).
+and the account and the thread). The route also gives `change`, with the
+values of the table above for the draft now. The engine computes both
+values with one function, so the draft answer and the write state never
+disagree (issue 941).
+
+A cancel in the Outbox makes a stopped mail too. After a cancel, the
+Outbox reads `GET /api/drafts/{d-N}`. If `change` is not `null`, the
+cancelled card shows "Change and send". The link opens the write view of
+the draft (`#/write/d-N`), with the content of the draft in the form, as
+after "Change and send" in the write view. For a reply, the form is under
+the conversation of its thread.
 
 The write view, in the state `stopped` with `change` not `null`, shows
 "Change and send". The press opens the form with the content of the

@@ -371,10 +371,22 @@ impl Store {
 fn end(c: &Connection, account: i64) -> Result<()> {
     // A thread that a draft refers to stays as a bare row: the draft is a
     // part of the record of actions.
-    c.execute(
-        "DELETE FROM talk_due WHERE thread_id IN (SELECT id FROM thread WHERE account_id = ?1)",
-        [account],
-    )?;
+    // The rows of a thread that hold mail data go also from a bare thread:
+    // a summary and the tries of a summary or a nudge (their keys name the
+    // messages and the commitments of the mail).
+    for table in [
+        "talk_due",
+        "thread_summary",
+        "thread_summary_try",
+        "nudge_try",
+    ] {
+        c.execute(
+            &format!(
+                "DELETE FROM {table} WHERE thread_id IN (SELECT id FROM thread WHERE account_id = ?1)"
+            ),
+            [account],
+        )?;
+    }
     c.execute(
         "DELETE FROM thread WHERE account_id = ?1
            AND NOT EXISTS (SELECT 1 FROM draft d WHERE d.thread_id = thread.id)",

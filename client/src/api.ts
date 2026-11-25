@@ -39,8 +39,8 @@ export type Item = {
   new?: number;
   your_turn?: boolean;
   summary?: string;
-  /** What Iris prepared for the item (card R3-09): "draft" is a reply draft that is not stale. Only in the lists of items: the brief sections and pages, the gate and /api/items. */
-  ready?: "draft"[];
+  /** What Iris prepared for the item (card R3-09): "draft" is a reply draft that is not stale, "summary" a summary of its long thread for an item that needs the person (issue 478). Only in the lists of items: the brief sections and pages, the gate and /api/items. */
+  ready?: ("draft" | "summary")[];
   type?: string;
   issuer?: Party;
   fields?: Record<string, unknown>;
@@ -380,6 +380,9 @@ export async function loadOutbox(): Promise<Outbox> {
 /** GET /api/threads/{t}/draft: the ready draft of a thread (R3-09). `nudge` is true for a reminder to a late person (R3-07), with `to` and each late commitment that it names in `items`. */
 export type ThreadDraft = { thread: string; based_on: string; nudge: boolean; to: string | null; items: string[]; body: string };
 
+/** GET /api/items/{id}/summary: the summary of the long thread of an item that needs you (issue 478). `created` is the time that Iris wrote it. 404 when there is none, or when it is stale. */
+export type ItemSummary = { text: string; based_on: string; created: string; model: string };
+
 /** GET /api/threads/{t}/reply: the start values of a reply (write spec, section 5). */
 export type ReplyStart = {
   account: string;
@@ -410,7 +413,23 @@ export type WriteState =
   | { state: "waiting"; draft: string; sending: boolean; bcc_check?: string | null; leaves_at: string | null }
   | { state: "review"; draft: string; reason: string | null }
   | { state: "sent"; draft: string }
-  | { state: "stopped"; reason: string; draft: string | null };
+  | { state: "stopped"; reason: string; draft: string | null; change?: "update" | "new" | null };
+
+/**
+ * GET /api/drafts/{id}: the content of a draft, for the form of "Change and
+ * send" (draft change spec, section 5).
+ */
+export type DraftContent = {
+  draft: string;
+  account: string;
+  thread: string | null;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  body: string;
+  attachments: Attachment[];
+};
 
 /** A message summary, or only the ID of a message that is not in the mirror any more. */
 export type Target = (Summary & { gone?: false }) | { id: string; gone: true };

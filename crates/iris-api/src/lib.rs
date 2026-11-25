@@ -151,6 +151,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/items", get(get_items))
         .route("/api/items/{id}", get(get_item))
         .route("/api/items/{id}/job", get(get_start))
+        .route("/api/items/{id}/summary", get(get_summary))
         .route("/api/items/{id}/joinable", get(get_joinable))
         .route("/api/items/{id}/{verb}", post(post_verb))
         .route("/api/search", get(get_search))
@@ -204,6 +205,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
             post(post_attachment).layer(DefaultBodyLimit::max(ATTACHMENT_LIMIT)),
         )
         .route("/api/write/{id}", get(get_write))
+        .route("/api/drafts/{id}", get(get_draft_content))
         .route("/api/threads/{id}/reply", get(get_reply))
         .route("/api/threads/{id}/draft", get(get_draft))
         .route("/api/matters", get(get_matters).post(post_matter_create))
@@ -653,6 +655,13 @@ async fn get_items(
 
 async fn get_item(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
     Ok(item(&s, &id)?.map_or_else(not_found, |d| Json(d).into_response()))
+}
+
+/// The ready summary of the thread of the item (issue 478): text, the
+/// newest message that it reads, the time and the model. 404 when the item
+/// does not need the person, or its thread has no summary that is ready.
+async fn get_summary(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    Ok(read::summary(&s, &id, now_ms())?.map_or_else(not_found, |d| Json(d).into_response()))
 }
 
 /// A state verb of the person on one item: `close`, `decline`, `defer`,
@@ -1441,6 +1450,18 @@ async fn get_write(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
         return Ok(not_found());
     };
     Ok(match write::state(&s, row, now_ms())? {
+        Some(v) => Json(v).into_response(),
+        None => not_found(),
+    })
+}
+
+/// The content of a draft (`d-N`) for the form of a change (draft change
+/// spec, section 5). 404 when Iris cannot give it.
+async fn get_draft_content(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+) -> Result<Response> {
+    Ok(match write::draft_content(&s, &id, now_ms())? {
         Some(v) => Json(v).into_response(),
         None => not_found(),
     })

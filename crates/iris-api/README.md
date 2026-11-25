@@ -47,6 +47,7 @@ UTC. IDs have the format of specification 1, section 5.7 (`m-42`).
 | `/api/messages/{id}` | One message: the summary, and `to`, `cc`, `text` (the clean text, or `null`), `gone`, `hostile` (the hostile marks, for example `["dmarc"]`), `sender_kind` (the kind of the sender row of the `From` address: `person`, `service`, `stranger` or `hostile`; a sender with no row or no kind is a `stranger`; if two rows have the address in a different case, the first kind of `hostile`, `stranger`, `service`, `person` is used, and a row with no kind counts as `stranger`) `released` (the hostile marks that the person released, below) and `items` (the IDs of the items that are not gone and that have the message as a source). |
 | `/api/messages/{id}/raw` | The raw source (RFC 5322) of the message, as a download (`message/rfc822`, `Content-Disposition: attachment`). |
 | `/api/jobs?state=&limit=&after=` | `{"jobs": [...], "next", "sessions"}`: the jobs of the agents (card R4-09), newest first. `sessions` maps the ID of each `working` job of the page to its newest session, in the form of `session` of `/api/jobs/{id}`, or to null when the job has no session (issue 791). A job in another state has no entry. `state` is `open` (the default: `working`, `waiting` and `needs_you`) or one state: `working`, `waiting`, `needs_you` or `done`. Each job is the job document of `docs/spec/schema/job.schema.json` without `events`. `limit` is 1 to 200, default 50. `after` is the `next` value of the page before (a job ID, `j-12`); the page holds the jobs with a lower ID. Another `state`, or an `after` that is not a job ID, is a 400. |
+| `/api/items/{id}/summary` | `{"text", "based_on", "created", "model"}`: the summary of the thread of the origin message of the item (issue 478). `based_on` is the newest message that the summary read. The conditions are those of `"summary"` in `ready`: the item needs the person, and the summary is not stale. Else the answer is a 404. An ID that is not an item ID is a 400. Iris makes the summary in the background. This route only reads it. |
 | `/api/items/{id}/joinable` | `{"joinable": bool}`: true when the item (`c-`, `v-`, `r-` or `s-`) can join a matter now. The item is live (the rule of `matter_live`) and in no open matter. Another kind of ID is a 400. |
 | `/api/items/{id}/job` | The mail that a start of a job from the commitment or conversation `id` grants now: `{"messages": [...]}`. Each entry is the summary of a message (`id`, `thread`, `date`, `from`, `subject`) with `readable`: true when the message can go into a workspace now. The list holds each source message of the item and each message of the thread of each source, in the order of the thread and then the date. The checks and the error codes are those of `POST /api/jobs`. |
 | `POST /api/jobs` | Body `{"item", "goal", "due", "messages"}`: starts a job from one commitment (`c-4`) or conversation (`v-2`) for the person ("Handle this", `docs/specs/2026-11-17-start-job.md`). `goal` is 1 to 2,000 characters after the trim. `due` is an RFC 3339 time, or null. `messages` is the list of message IDs of `/api/items/{id}/job` that the person saw; if it is not the grant of now as a set, the answer is a 409 and no job starts. The scope of the job is the item and the thread of each source message of the item. The answer is 201 with the job document. Another kind of ID, a goal or a due date that is not valid, or another field is a 400. An ID that no item of that form has is a 404. A gone item, an item with no source, or a source that an agent cannot read (hostile mail, a draft, gone, not understood, the source of a signal) is a 409. If a job that is not done has the item in its scope, the answer is a 409 `{"error", "job"}` with that job ID, and no job starts. |
@@ -96,8 +97,13 @@ has `"ready": ["draft"]` when Iris prepared a reply for it (card R3-09): the
 thread of the mail that made the item has a reply draft of `iris write`, and
 the draft is not stale. A draft is stale when the thread has a newer message
 than the one that the draft answers, when its newest message is gone, or when
-a message of the thread is hostile or waits for understanding. With nothing
-ready, the item has no `ready` field.
+a message of the thread is hostile or waits for understanding. `ready` holds
+`"summary"` when the item needs the person (You owe, Owed to you or
+Conversations) and the thread of the mail that made the item has a summary
+that is not stale (issue 478). A summary is stale for the same reasons as a
+draft, and also when a message that it read gets a new text, label or date,
+or goes away. An item at the stranger gate never has `"summary"`. With
+nothing ready, the item has no `ready` field.
 
 The attention of an item (specification 2, section 6.4) decides where it
 shows. Each item that a list field or `records` would have is in exactly one
@@ -230,10 +236,11 @@ engine computes them from the store. Nothing leaves the machine.
 - `undo`: `{"applied", "undone"}`. `applied` counts the applied actions, and
   not an undo. `undone` counts the actions of them that an undo reversed.
 - `sends`: `{"sent", "unreviewed_after_hostile"}` (issue 472). `sent` counts
-  the applied sends. `unreviewed_after_hostile` counts the applied sends
+  the applied sends with a hostile record. `unreviewed_after_hostile` counts the applied sends
   that no person decided and whose draft thread had hostile evidence at the
   claim of the send (`ledger.hostile_before`, migration 59). A send from
-  before migration 59 has no record and does not count. The target is zero.
+  before migration 59 has no record and counts in neither field (issue
+  1059). The target is zero.
 
 Each request of the web client while the person is active (an input of the
 person in the last 5 minutes) has the header `x-iris-day: YYYY-MM-DD`, the
@@ -292,9 +299,10 @@ then the send. The send leaves after the hold, and only while sending is on.
 
 | Endpoint | Does |
 |---|---|
-| `POST /api/write` | The body is `account` (`a-N`, a new mail) or `thread` (`t-N`) with `parent` (`m-N`, a reply), and `to`, `cc`, the optional `bcc` and `attachments` (entries of `POST /api/attachments`, with `name` and `type`), `subject` (a new mail only), `body`, `key` (16 to 64 letters, digits or hyphens) and `flags` (the warnings that the person saw). In one transaction: the changeset of the author `person`, the `draft` action, its submit, the approval and the send mark. A new write is a 201 `{"write": "cs-N"}`. A second try with the same key and the same mail is a 200 with the same `cs-N`, and writes nothing. A 409 `{"error", "flags"}` writes nothing: the warnings are not the warnings that the person saw (`flags` holds the new warnings), a new mail came into the thread, or the key belongs to another mail. A body that is not valid (a target that is not an ID of its kind too), or a mail that the submit denies, is a 400. |
+| `POST /api/write` | The body is `account` (`a-N`, a new mail) or `thread` (`t-N`) with `parent` (`m-N`, a reply), and `to`, `cc`, the optional `bcc` and `attachments` (entries of `POST /api/attachments`, with `name` and `type`), `subject` (a new mail only), `body`, `key` (16 to 64 letters, digits or hyphens) `flags` (the warnings that the person saw), and the optional `draft` (`d-N`, a change of that draft in place: it must be a draft of `account` or `thread`, else a 400; a draft of an account that is not Gmail is ignored, and the press makes a new draft). The request hash includes `draft`. In one transaction: the changeset of the author `person`, the `draft` action, its submit, the approval and the send mark. A new write is a 201 `{"write": "cs-N"}`. A second try with the same key and the same mail is a 200 with the same `cs-N`, and writes nothing. A 409 `{"error", "flags"}` writes nothing: the warnings are not the warnings that the person saw (`flags` holds the new warnings), a new mail came into the thread, or the key belongs to another mail. A body that is not valid (a target that is not an ID of its kind too), or a mail that the submit denies, is a 400. |
 | `POST /api/attachments` | The body is the bytes of one file, at most 4 MiB. Writes the file to the attachment folder of the data folder and gives a 201 `{"sha256", "size"}`. A larger body is a 413, an empty body a 400. Nothing deletes a file of the folder (`docs/specs/2026-11-24-send-content.md`, section 2). |
-| `GET /api/write/{cs-N}` | The state of the write: `saving`, `waiting` (`draft`, `sending`, `leaves_at`), `review` (`reason`), `sent` or `stopped` (`reason`, `draft`). A write that got no send in 24 hours after the press is `stopped`: the engine makes no send for it. One answer is one snapshot of the store. A changeset that is not a write is a 404. |
+| `GET /api/write/{cs-N}` | The state of the write: `saving`, `waiting` (`draft`, `sending`, `leaves_at`), `review` (`reason`), `sent` or `stopped` (`reason`, `draft`, and with a draft `change`: `update` when the next press can change the draft in place, `new` when it makes a new draft (an account that is not Gmail), or null). A write that got no send in 24 hours after the press is `stopped`: the engine makes no send for it. One answer is one snapshot of the store. A changeset that is not a write is a 404. |
+| `GET /api/drafts/{d-N}` | The content of a draft for the form of a change: `draft`, `account`, `thread` (null for a new mail), `to`, `cc`, `bcc`, `subject`, `body`, `attachments`, and `change`: how the next press of Send writes the draft, with the values and the checks of `change` in `GET /api/write/{cs}`. A draft that does not exist, of an account that Iris removes, or with content that Iris does not write is a 404. |
 | `GET /api/threads/{t-N}/draft` | The draft of the thread that the person can use now: `thread`, `based_on` (the newest mail when Iris wrote it), `nudge` (true for a reminder that Iris prepared because a person is late on an ask, card R3-07), `to` (for a nudge, the address of the person that owes, else null), `items` (for a nudge, each late commitment `c-N` that it names, at most 10, else an empty list) and `body`. One nudge goes to one person and names each late commitment of that person in the thread (decision D8). On the brief, a nudge marks only its commitments as `ready`, not the other items of its thread. A draft is stale after a newer mail or a hostile mark. A nudge is also stale when its commitment is done, hidden, changed or not late. A stale draft is a 404. A thread with no draft is a 404. Nothing is sent. |
 | `GET /api/threads/{t-N}/reply` | The start values of a reply: `account`, `parent` (`id`, `from`, `date`, and `text` cut to 600 characters), `to`, `cc`, `subject`, `topic` (the subject of the parent), `conversation` and `earlier`. `conversation` is the newest 20 mails of the thread that a reply can answer, oldest first, with the parent last: `id`, `from`, `date`, `to`, `you` (the mail has the label `SENT`), `hostile` (a hostile mark, a link check that waits, or a hostile sender), `text` (cut to 4,000 characters) and `cut`. `earlier` is the count of the older mails. The parent is the newest mail of the thread that is not spam, trash or a draft. If the person wrote it (it has the label `SENT`), the reply goes to its recipients. Otherwise it goes to its sender, also when its `From` is the address of the person. A thread with no mail to reply to is a 409. A thread that does not exist is a 404. |
 | `POST /api/threads/{t-N}/draft` | A draft of the reply in the voice of the person (R3-04 intent path, `iris_voice::draft`). Body `{"intent": "...", "parent": "m-N"}`; the intent can be empty, and `parent` is the mail that the form shows (409 before the call if the reply parent is another mail now). One model call through the budget of understanding, and one more call if the answer is not a valid draft (not a refusal). The draft is saved in `reply_draft` and comes back as `body`, with `based_on`, `samples`, `unknown_cost` and `overrun`. It writes nothing to Gmail. 404 for a thread that does not exist; 400 for an intent over 2,000 characters; 409 for a thread with hostile mail, with mail that understanding did not read, or that changed during the call; 503 with no model, no budget, or while an understanding run holds the lock; 502 if the model fails. |
@@ -310,7 +318,8 @@ section, so a rule decides before the gate asks the person.
 the list. Each sender is `{"id", "address", "name", "count", "items"}`:
 `count` is the count of its items in the list, and `items` holds its newest 3
 items. An item has `ready` as in the brief (`["draft"]` when its thread has a
-reply draft that the person can use now, issue 478). The newest sender comes first, by the time of its newest item: the
+reply draft that the person can use now, issue 478). A gate item never has
+`"summary"`. The newest sender comes first, by the time of its newest item: the
 `latest.at` of a conversation, else the date of the origin message. `limit`
 is 1 to 200, default 50. `after` is the `next` value of the page before of
 the same list. Another `after` is a 400.
@@ -340,7 +349,7 @@ written. A `p-` ID that no sender has, or another answer, is a 404.
 | Endpoint | Does |
 |---|---|
 | `POST /api/messages/{id}/release` | Releases each mark `dmarc`, `spoof` and `link` that the message has now (issues 369, 373 and 374). Iris reads the message again without these marks. The marks `spam` and `phishing` and a `hostile` sender stay. |
-| `POST /api/messages/{id}/unrelease` | Ends the release. Iris reads the message again with its marks. |
+| `POST /api/messages/{id}/unrelease` | Ends the release. The released marks are back in `hostile` at once. Iris then reads the message again as hostile mail: its items go, and its conversation changes. |
 
 There is no body. The answer is the message, as `GET /api/messages/{id}`
 gives it. The column `hostile` changes when the engine reads the message
