@@ -341,3 +341,17 @@ test("a wake that waits in the queue sends the job of the press, not a newer wai
     view.destroy();
   }
 });
+
+test("a refused wake says why also when the job now asks a question (issue 1132)", async () => {
+  const d = structuredClone(Object.values(fx.jobDetails).find((x) => x.job.state === "waiting"));
+  const asks = { ...d, job: { ...d.job, state: "needs_you", wait: undefined, question: "The due date passed. Answer to go on, or end the job.", events: [...d.job.events, { at: "2026-11-20T00:00:00Z", state: "needs_you", by: "engine", question: "The due date passed. Answer to go on, or end the job." }] } };
+  serve((method) => (method === "POST" ? [409, { error: "The job does not wait now, or its wait changed." }] : [200, asks]));
+  const view = await mount("/src/views/Job.svelte", { detail: d, every: 60_000 });
+  try {
+    button(view, "Wake now").click();
+    await until(() => (view.flushSync(), /Iris asks you/.test(text(view.target))));
+    assert.match(text(view.target.querySelector("[aria-label=Now] [role=alert]")), /its wait changed/);
+  } finally {
+    view.destroy();
+  }
+});

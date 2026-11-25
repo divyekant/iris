@@ -184,8 +184,9 @@
     {#if job.state === "waiting"}
       <p class="wake"><button class="edit" type="button" onclick={wake} disabled={wakeBusy}>Wake now</button></p>
     {/if}
-    {#if wakeError}<p class="error" role="alert">{wakeError}</p>{/if}
   {/if}
+  <!-- In each state: a refused wake can find the job asking a question now (issue 1132). -->
+  {#if wakeError}<p class="error" role="alert">{wakeError}</p>{/if}
 </section>
 
 <!-- The queue shows the job of each scope request, so `onchange` has nothing to do here. -->
