@@ -1138,7 +1138,8 @@ The conversation rule runs for each message that is not hostile mail:
   `Cc` headers of the messages of the thread up to the current message, in
   the order of the runs (date, then row ID). A later message does not add
   a person, so later mail does not change the data of an earlier run
-  (issue #1049). The data holds the first parties that fit the budget.
+  (issue #1049). The list is in the order of the address, and the data
+  holds the first ones of it that fit the budget.
   An item can have `same_as`: the ID of an existing item that the engine gave
   to the model (section 7.5).
 - The engine adds the missing fields, and puts the `p-` ID of the sender row
