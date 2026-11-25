@@ -323,25 +323,33 @@ impl Store {
     }
 }
 
+/// The most files that one batch of [`Store::clean_attachments`] checks
+/// and deletes under the write lock.
+pub const ATTACH_BATCH: usize = 200;
+
 impl Store {
     /// Delete each file of the attachment folder that is [`GONE_KEEP_MS`] or
     /// more old at `now` and that no live reference names (attachment
     /// cleanup spec `docs/specs/2026-11-25-attachment-cleanup.md`). Gives
     /// the number of deleted files, or `None` when a backup holds the lock.
     pub fn clean_attachments(&self, now: i64) -> Result<Option<u64>> {
+        self.clean_attachments_with(now, ATTACH_BATCH, |_| {})
+    }
+
+    /// [`Store::clean_attachments`] with this batch size, and a call of
+    /// `before_batch` with the old files of each batch before the batch
+    /// takes the write lock. For tests.
+    #[doc(hidden)]
+    pub fn clean_attachments_with(
+        &self,
+        now: i64,
+        batch: usize,
+        mut before_batch: impl FnMut(&[String]),
+    ) -> Result<Option<u64>> {
         let Some(_lock) = self.try_backup_lock()? else {
             return Ok(None);
         };
         let root = self.dir.join(crate::ATTACHMENTS);
-        let mut conn = lock(&self.writer);
-        // The write lock stays held from the read of the references to the
-        // last delete. put_attachment renames under the same lock, so an
-        // upload makes a file new before the check or after the delete.
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let live: std::collections::HashSet<String> = tx
-            .prepare(LIVE_ATTACHMENTS)?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
         let cutoff = now - GONE_KEEP_MS;
         let mut deleted = 0;
         let dirs = match fs::read_dir(&root) {
@@ -357,6 +365,9 @@ impl Store {
             if aa.len() != 2 || !dir.file_type()?.is_dir() {
                 continue;
             }
+            // The scan of one folder holds no lock: it only finds the old
+            // files. Each batch checks them again under the lock.
+            let mut old = Vec::new();
             for file in fs::read_dir(dir.path())? {
                 let file = file?;
                 let Some(sha) = file.file_name().to_str().map(str::to_owned) else {
@@ -364,30 +375,68 @@ impl Store {
                 };
                 // Only `<aa>/<sha256>`: a temporary file or any other name
                 // stays.
-                if content::file_path(&root, &sha, "").as_deref() != Some(&*file.path())
-                    || !file.file_type()?.is_file()
-                    || live.contains(&sha)
+                if content::file_path(&root, &sha, "").as_deref() == Some(&*file.path())
+                    && is_old(&file.path(), cutoff)?
                 {
-                    continue;
+                    old.push(sha);
                 }
-                let modified = file.metadata()?.modified()?;
-                let ms = match modified.duration_since(std::time::UNIX_EPOCH) {
-                    Ok(d) => i64::try_from(d.as_millis()).unwrap_or(i64::MAX),
-                    Err(_) => i64::MIN,
-                };
-                if ms > cutoff {
-                    continue;
-                }
-                match fs::remove_file(file.path()) {
-                    Ok(()) => deleted += 1,
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e.into()),
-                }
+            }
+            for part in old.chunks(batch.max(1)) {
+                before_batch(part);
+                deleted += self.delete_old(&root, part, cutoff)?;
+            }
+        }
+        Ok(Some(deleted))
+    }
+
+    /// Delete each file of `part` that no live reference names and that is
+    /// still old. The write lock of the store and the SQLite write lock
+    /// (`IMMEDIATE`) stay held from the read of the references to the last
+    /// delete. put_attachment renames under the same locks, in the same
+    /// order, so an upload makes a file new before the check or after the
+    /// delete.
+    fn delete_old(&self, root: &Path, part: &[String], cutoff: i64) -> Result<u64> {
+        let mut conn = lock(&self.writer);
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let live: std::collections::HashSet<String> = tx
+            .prepare(LIVE_ATTACHMENTS)?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut deleted = 0;
+        for sha in part {
+            let Some(path) = content::file_path(root, sha, "") else {
+                continue;
+            };
+            if live.contains(sha) || !is_old(&path, cutoff)? {
+                continue;
+            }
+            match fs::remove_file(&path) {
+                Ok(()) => deleted += 1,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
             }
         }
         tx.commit()?;
-        Ok(Some(deleted))
+        Ok(deleted)
     }
+}
+
+/// True if `path` is a file (not a link) whose modification time is at or
+/// before `cutoff`. A missing file is not old.
+fn is_old(path: &Path, cutoff: i64) -> Result<bool> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    if !meta.is_file() {
+        return Ok(false);
+    }
+    let ms = match meta.modified()?.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_millis()).unwrap_or(i64::MAX),
+        Err(_) => i64::MIN,
+    };
+    Ok(ms <= cutoff)
 }
 
 /// The SHA-256 of each attachment file that a live reference names (spec

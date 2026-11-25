@@ -80,15 +80,21 @@ names a file decides before the file is old.
 
 1. Take the backup lock (as `clean_gone`). If a backup runs, do nothing
    in this tick.
-2. List the files of the attachment folder. Skip each name that is not
-   `<aa>/<64 hex>` and each temporary file.
-3. Start one transaction with the write lock of the store
-   (`Immediate`), and read the live references (section 1).
-4. In the same transaction, for each file:
-   1. If a live reference names its SHA-256, keep the file.
-   2. If its modification time is not old, keep the file.
-   3. Delete the file.
-5. Give the number of deleted files.
+2. For each folder `<aa>`, list its files with no lock. Skip each name
+   that is not `<aa>/<64 hex>`, each temporary file, each link, and each
+   file that is not old. The rest are the old files of the folder.
+3. For each batch of at most `ATTACH_BATCH` (200) old files:
+   1. Start one transaction with the write lock of the store
+      (`Immediate`), and read the live references (section 1).
+   2. For each file of the batch: if a live reference names its SHA-256,
+      keep it. If it is not old now (an upload since the scan), keep it.
+      Else delete it.
+   3. Commit. The locks end here.
+4. Give the number of deleted files.
+
+So the SQLite write lock is held only for one batch: a read of the
+references and at most 200 checks and deletes. A writer of another
+`Store` waits for one batch at most, not for the scan of the folder.
 
 The engine runs the cleanup each `CLEAN_EVERY` (one hour), in the tick,
 after `clean_gone`. An error is logged, and the next run tries again.
@@ -99,10 +105,10 @@ after `clean_gone`. An error is logged, and the next run tries again.
 holds the write lock of the store and an `IMMEDIATE` transaction, in the
 same order as the cleanup. The `IMMEDIATE` transaction takes the SQLite
 write lock of the data folder, which each `Store` shares, also a `Store`
-of another process (the `iris` command). So an upload and step 3 of the
-cleanup do not overlap:
+of another process (the `iris` command). So an upload and a batch (step 3) of
+the cleanup do not overlap:
 
-- If the upload renames first, the file is new, and step 4.2 keeps it.
+- If the upload renames first, the file is new, and step 3.2 keeps it.
 - If the cleanup deletes first, the rename then makes a new file.
 
 A submit writes the action in a write transaction. So step 3 sees

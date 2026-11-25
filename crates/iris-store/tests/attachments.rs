@@ -556,3 +556,72 @@ fn an_upload_of_another_store_waits_for_the_cleanup_lock() {
     assert_eq!(upload.join().unwrap(), sha);
     assert_ne!(modified(), old, "the upload makes the file new");
 }
+
+/// The real time in milliseconds. An upload gets the real time, so a test
+/// with an upload during the cleanup uses it in place of `NOW`.
+fn real_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+/// Issue #853, pre-review: the scan holds no lock, and each batch checks
+/// the references and the age again under the lock. Between the scan and
+/// a batch, another Store writes at once (no wait for a lock), a new
+/// action names one old file, and an upload makes another old file new.
+/// Both stay; the other old files go, in batches of 2.
+#[test]
+fn each_batch_checks_again_under_the_lock() {
+    let dir = TempDir::new("batches");
+    let s = Store::open(&dir.0).unwrap();
+    let other = Store::open(&dir.0).unwrap();
+    let now = real_now();
+    let shas: Vec<String> = (0..6)
+        .map(|n| {
+            let sha = s.put_attachment(format!("file {n}").as_bytes()).unwrap();
+            age(&s, &sha, NOW - now + OLD);
+            sha
+        })
+        .collect();
+    let (named, uploaded) = (shas[0].clone(), shas[1].clone());
+    let mut batches = Vec::new();
+    let got = s
+        .clean_attachments_with(now, 2, |part| {
+            batches.push(part.len());
+            let t = std::time::Instant::now();
+            other
+                .write(|tx| {
+                    tx.execute(
+                        "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0)",
+                        [],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(
+                t.elapsed() < Duration::from_secs(1),
+                "no lock between batches"
+            );
+            if part.contains(&named) {
+                other
+                    .write(|tx| {
+                        action(tx, &content(&named), None)?;
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            if part.contains(&uploaded) {
+                assert_eq!(other.put_attachment(b"file 1").unwrap(), uploaded);
+            }
+        })
+        .unwrap();
+    assert_eq!(got, Some(4));
+    assert!(exists(&s, &named), "named after the scan");
+    assert!(exists(&s, &uploaded), "uploaded after the scan");
+    for sha in &shas[2..] {
+        assert!(!exists(&s, sha));
+    }
+    assert!(batches.iter().all(|&n| n <= 2), "{batches:?}");
+    assert_eq!(batches.iter().sum::<usize>(), 6);
+}
