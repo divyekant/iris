@@ -234,6 +234,8 @@ pub struct Session<S: Read + Write> {
     tag: u32,
     caps: Vec<String>,
     qresync: bool,
+    /// [`Session::run`] gives the code of a tagged `OK` to the callback too.
+    tagged_code: bool,
 }
 
 /// Put `s` in a quoted string, or give [`Error::Name`].
@@ -316,6 +318,7 @@ impl<S: Read + Write> Session<S> {
             tag: 0,
             caps: Vec::new(),
             qresync: false,
+            tagged_code: false,
         };
         let greeting = s.read_response(None)?;
         if bad_outcome(&greeting) {
@@ -739,6 +742,32 @@ impl<S: Read + Write> Session<S> {
         })
     }
 
+    /// `UID MOVE` (RFC 6851) of `uids` from the folder that
+    /// [`Session::select`] opened to `target`. Gives the `COPYUID` of the
+    /// answer (RFC 4315): the `UIDVALIDITY` of `target` and each pair of
+    /// source UID and new UID. `None`: the answer had no `COPYUID` that
+    /// parses. Each pair has an asked source UID, and no UID is in two pairs.
+    pub fn move_uids(&mut self, uids: &[u32], target: &str) -> Result<Option<CopyUid>> {
+        if uids.is_empty() {
+            return Ok(None);
+        }
+        let set: Vec<String> = uids.iter().map(u32::to_string).collect();
+        let cmd = format!("UID MOVE {} {}", set.join(","), quote(target)?);
+        let mut found = None;
+        self.tagged_code = true;
+        let r = self.run(&cmd, None, |r, _| {
+            if let Response::Data { outcome, .. } = r {
+                if let Some(c) = outcome.code.as_ref().and_then(|c| copy_uid(c, uids)) {
+                    found = Some(c);
+                }
+            }
+            Ok(())
+        });
+        self.tagged_code = false;
+        r?;
+        Ok(found)
+    }
+
     /// The UIDs of the open folder that match `key`.
     /// With `seqs`, only the messages with a sequence number in that range
     /// (at most `EXISTS`), so the answer has at most that many UIDs.
@@ -801,9 +830,17 @@ impl<S: Read + Write> Session<S> {
                 Response::Done {
                     tag: t,
                     status,
-                    outcome: _,
+                    outcome,
                 } if t.0 == tag => {
                     return match status {
+                        // RFC 6851 section 4.3: `COPYUID` can be in the tagged `OK`.
+                        Status::Ok if self.tagged_code => on(
+                            Response::Data {
+                                status: Status::Ok,
+                                outcome,
+                            },
+                            &buf,
+                        ),
                         Status::Ok => Ok(()),
                         // Only the command word: a LOGIN command holds the password.
                         _ => Err(Error::Refused(
@@ -918,6 +955,55 @@ fn entry(attrs: &[AttributeValue<'_>]) -> Option<Entry> {
     })
 }
 
+/// The `COPYUID` of a `UID MOVE` (RFC 4315 section 3): the `UIDVALIDITY`
+/// of the target folder, and each source UID with its new UID.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CopyUid {
+    pub validity: u32,
+    pub pairs: Vec<(u32, u32)>,
+}
+
+/// The `COPYUID` of `code`, if its two sets have the same size, and each
+/// source UID is one of `asked`, at most once. A set larger than `asked`
+/// gives `None` before it is expanded, so a hostile range costs no memory.
+fn copy_uid(code: &ResponseCode<'_>, asked: &[u32]) -> Option<CopyUid> {
+    use imap_proto::rfc4315::UidSetMember;
+    let ResponseCode::CopyUid(validity, from, to) = code else {
+        return None;
+    };
+    let expand = |set: &[UidSetMember]| -> Option<Vec<u32>> {
+        let mut out: Vec<u32> = Vec::new();
+        for m in set {
+            let (a, b) = match m {
+                UidSetMember::Uid(u) => (*u, *u),
+                UidSetMember::UidRange(r) => (*r.start().min(r.end()), *r.start().max(r.end())),
+            };
+            // out.len() <= asked.len() holds: each step checks it first.
+            if u64::from(b - a) + 1 > (asked.len() - out.len()) as u64 {
+                return None;
+            }
+            out.extend(a..=b);
+        }
+        Some(out)
+    };
+    let (from, to) = (expand(from)?, expand(to)?);
+    if from.len() != to.len() || from.is_empty() {
+        return None;
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    if !from.iter().all(|u| asked.contains(u) && seen.insert(*u)) {
+        return None;
+    }
+    let mut new = std::collections::BTreeSet::new();
+    if !to.iter().all(|u| *u > 0 && new.insert(*u)) {
+        return None;
+    }
+    Some(CopyUid {
+        validity: *validity,
+        pairs: from.into_iter().zip(to).collect(),
+    })
+}
+
 /// An IMAP atom with no `\\`: a keyword that the client can send as it is.
 pub fn is_atom(s: &str) -> bool {
     !s.is_empty()
@@ -928,6 +1014,71 @@ pub fn is_atom(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn code(line: &str) -> Option<CopyUid> {
+        let (_, r) = Response::parse(line.as_bytes()).expect("parse");
+        let Response::Data { outcome, .. } = r else {
+            panic!("not data")
+        };
+        copy_uid(outcome.code.as_ref()?, &[3, 4, 5])
+    }
+
+    #[test]
+    fn copy_uid_rules() {
+        let ok = code("* OK [COPYUID 9 3:5 10:12] x\r\n").unwrap();
+        assert_eq!(ok.validity, 9);
+        assert_eq!(ok.pairs, [(3, 10), (4, 11), (5, 12)]);
+        assert_eq!(
+            code("* OK [COPYUID 9 5,3 20,21] x\r\n").unwrap().pairs,
+            [(5, 20), (3, 21)]
+        );
+        for bad in [
+            "* OK [COPYUID 9 1:4294967295 1:4294967295] x\r\n", // larger than asked
+            "* OK [COPYUID 9 3,3 10,11] x\r\n",                 // a source two times
+            "* OK [COPYUID 9 3,4 10,10] x\r\n",                 // a target two times
+            "* OK [COPYUID 9 3,7 10,11] x\r\n",                 // a UID not asked
+            "* OK [COPYUID 9 3:4 10] x\r\n",                    // sizes differ
+        ] {
+            assert_eq!(code(bad), None, "{bad}");
+        }
+    }
+
+    /// Property: random sets never give a pair with a source that was not
+    /// asked, and never expand past the asked count.
+    #[test]
+    fn copy_uid_random() {
+        let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = |m: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % m
+        };
+        for _ in 0..3000 {
+            let set = |next: &mut dyn FnMut(u64) -> u64| {
+                (0..1 + next(3))
+                    .map(|_| {
+                        let a = 1 + next(8);
+                        if next(2) == 0 {
+                            a.to_string()
+                        } else {
+                            format!("{a}:{}", 1 + next(4_000_000_000))
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            let line = format!(
+                "* OK [COPYUID 7 {} {}] x\r\n",
+                set(&mut next),
+                set(&mut next)
+            );
+            if let Some(c) = code(&line) {
+                assert!(c.pairs.len() <= 3, "{line}");
+                assert!(c.pairs.iter().all(|(s, _)| [3, 4, 5].contains(s)), "{line}");
+            }
+        }
+    }
 
     #[test]
     fn quote_escapes_and_refuses() {

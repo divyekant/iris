@@ -394,6 +394,7 @@ mirror does not have.
 | `modify` with any other label | `Api` 400 `notSupported`, before any write |
 | `create_label(name)` | `Api` 400 `notSupported`, also with the flag writes (limit issue #652). IMAP has no call that makes a keyword with no message: if the targets of the action are gone before the apply, a created label would have no `STORE` behind it, and the next `labels` would not list it. A label action can use a keyword that a folder lists in `FLAGS` or `PERMANENTFLAGS` (section 4). Its ID is the lowercase `kw:` ID, so the ledger and the undo use the same ID as `labels`, `minimal` and `changes` |
 | `trash`, `untrash` | `Api` 400 `notSupported` |
+| `move_plan`, `relocate` (`location_ids` is true) | `archive`, `inbox`, `trash` and `untrash` with `UID MOVE` and `COPYUID`, on a server with `MOVE` and `UIDPLUS`: `docs/specs/2026-11-25-imap-moves.md`. `modify`, `trash` and `untrash` keep their refusal of each move |
 | drafts and send | `Api` 400 `notSupported` |
 
 A `modify` checks all IDs and labels before the first write. It then

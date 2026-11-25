@@ -40,6 +40,8 @@ pub struct Caps {
     pub uidnext: bool,
     /// `X-GM-EXT-1`: the fake says that it is Gmail. Off in [`Caps::ALL`].
     pub gmail: bool,
+    /// `MOVE` (RFC 6851) and `UIDPLUS` (RFC 4315): `UID MOVE` with `COPYUID`.
+    pub moves: bool,
 }
 
 impl Caps {
@@ -50,6 +52,7 @@ impl Caps {
         plain: true,
         uidnext: true,
         gmail: false,
+        moves: true,
     };
 }
 
@@ -84,8 +87,24 @@ pub enum Store {
     UidOnly,
 }
 
+/// How the fake answers a `UID MOVE` (for the failure tests).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Moving {
+    /// Move each UID, with an untagged `OK [COPYUID ...]`.
+    Normal,
+    /// Move each UID, with `COPYUID` in the tagged `OK`.
+    Tagged,
+    /// Move each UID, and send no `COPYUID`.
+    NoCopyuid,
+    /// Move the first UID only, then answer `NO`.
+    RefuseAfterOne,
+    /// Move each UID, then close the connection with no answer.
+    Close,
+}
+
 struct State {
     caps: Caps,
+    moving: Moving,
     /// The `PERMANENTFLAGS` of a `SELECT`; `None` sends none.
     permanent: Option<String>,
     store: Store,
@@ -112,6 +131,7 @@ impl FakeImap {
         let addr = listener.local_addr().expect("addr");
         let state = Arc::new(Mutex::new(State {
             caps,
+            moving: Moving::Normal,
             permanent: Some("\\Seen \\Flagged \\Draft \\*".to_owned()),
             store: Store::Normal,
             folders: BTreeMap::new(),
@@ -205,6 +225,20 @@ impl FakeImap {
     /// `None` sends no `PERMANENTFLAGS`.
     pub fn set_permanent(&self, flags: Option<&str>) {
         self.lock().permanent = flags.map(str::to_owned);
+    }
+
+    /// How the next `UID MOVE` commands answer.
+    pub fn set_moving(&self, moving: Moving) {
+        self.lock().moving = moving;
+    }
+
+    /// The UIDs of a folder.
+    pub fn uids(&self, folder: &str) -> Vec<u32> {
+        self.lock().folders[folder]
+            .messages
+            .keys()
+            .copied()
+            .collect()
     }
 
     /// How the next `UID STORE` commands answer.
@@ -399,6 +433,7 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
             (c.condstore, " CONDSTORE"),
             (c.qresync, " QRESYNC"),
             (c.gmail, " X-GM-EXT-1"),
+            (c.moves, " MOVE UIDPLUS"),
         ] {
             if on {
                 s.push_str(name);
@@ -627,6 +662,69 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                         }
                     }
                     _ => "BAD no folder or bad store".to_owned(),
+                }
+            }
+            // `UID MOVE <set> <folder>` (RFC 6851), in a selected folder.
+            "UID"
+                if lock().caps.moves
+                    && w.get(2).is_some_and(|x| x.eq_ignore_ascii_case("MOVE")) =>
+            {
+                let mut s = lock();
+                let mode = s.moving;
+                let set = w.get(3).cloned().unwrap_or_default();
+                let to = w.get(4).cloned().unwrap_or_default();
+                match conn.folder.clone() {
+                    Some(n) if s.folders.contains_key(&n) && s.folders.contains_key(&to) => {
+                        let ranges = uid_set(&set, u32::MAX);
+                        let picked: Vec<u32> = s.folders[&n]
+                            .messages
+                            .keys()
+                            .copied()
+                            .filter(|u| ranges.iter().any(|(a, b)| (*a..=*b).contains(u)))
+                            .collect();
+                        let mut pairs = Vec::new();
+                        for uid in picked {
+                            if mode == Moving::RefuseAfterOne && pairs.len() == 1 {
+                                break;
+                            }
+                            let gone = s.next_modseq();
+                            let src = s.folders.get_mut(&n).expect("folder");
+                            let mut m = src.messages.remove(&uid).expect("uid");
+                            src.gone.push((uid, gone));
+                            m.modseq = s.next_modseq();
+                            let dst = s.folders.get_mut(&to).expect("folder");
+                            let new = dst.uidnext;
+                            dst.uidnext += 1;
+                            dst.messages.insert(new, m);
+                            pairs.push((uid, new));
+                        }
+                        let list = |i: usize| {
+                            pairs
+                                .iter()
+                                .map(|p| [p.0, p.1][i].to_string())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        };
+                        let code = format!(
+                            "[COPYUID {} {} {}]",
+                            s.folders[&to].uidvalidity,
+                            list(0),
+                            list(1)
+                        );
+                        match mode {
+                            Moving::Close => return Ok(()),
+                            Moving::RefuseAfterOne => "NO move failed".to_owned(),
+                            _ if pairs.is_empty() => "OK nothing moved".to_owned(),
+                            Moving::Tagged => format!("OK {code} done"),
+                            Moving::NoCopyuid => "OK done".to_owned(),
+                            Moving::Normal => {
+                                reply.push_str(&format!("* OK {code} moved\r\n"));
+                                "OK done".to_owned()
+                            }
+                        }
+                    }
+                    Some(_) => "NO [TRYCREATE] no such folder".to_owned(),
+                    None => "BAD no folder".to_owned(),
                 }
             }
             "UID" if w.get(2).is_some_and(|x| x.eq_ignore_ascii_case("SEARCH")) => {
