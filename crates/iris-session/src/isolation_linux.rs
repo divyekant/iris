@@ -6,7 +6,7 @@
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
@@ -34,6 +34,11 @@ const PROBE_WAIT: Duration = Duration::from_secs(5);
 const INFO_MAX: usize = 4096;
 /// The longest wait of `stop` for the end of the namespace.
 const STOP_WAIT: Duration = Duration::from_secs(5);
+/// The first file descriptor of a read path in `bwrap` (`--ro-bind-fd`).
+/// The helper puts the open read paths there, in order.
+const READ_FD: RawFd = 5;
+/// The option of `bwrap` that binds the object of a descriptor.
+const RO_BIND_FD: &str = "--ro-bind-fd";
 /// The most open connections of the relay, as in the egress proxy.
 pub(crate) const RELAY_MAX: usize = 8;
 /// The system files of `/etc` that programs read at the start, shown
@@ -103,8 +108,16 @@ impl Bwrap {
     }
 
     /// The options of the namespaces and of the file view. `home` gets an
-    /// empty `tmpfs`; `reads` are extra read-only paths.
-    fn view(&self, home: Option<&Path>, reads: &[PathBuf], workspace: &Path) -> Vec<OsString> {
+    /// empty `tmpfs`; `reads` are extra read-only paths (the program
+    /// files); `bound` are the read paths of the adapter, which the helper
+    /// binds by descriptor ([`READ_FD`] on).
+    fn view(
+        &self,
+        home: Option<&Path>,
+        reads: &[PathBuf],
+        bound: &[PathBuf],
+        workspace: &Path,
+    ) -> Vec<OsString> {
         let mut a: Vec<OsString> = Vec::new();
         let mut push = |items: &[&OsStr]| a.extend(items.iter().map(|s| s.to_os_string()));
         push(&[
@@ -164,6 +177,10 @@ impl Bwrap {
         for r in reads {
             push(&["--ro-bind".as_ref(), r.as_os_str(), r.as_os_str()]);
         }
+        for (i, r) in bound.iter().enumerate() {
+            let fd = OsString::from((READ_FD + i as RawFd).to_string());
+            push(&[RO_BIND_FD.as_ref(), fd.as_os_str(), r.as_os_str()]);
+        }
         // The data folder is empty in the view, also when it is inside a
         // system folder or a read path. Then the workspace comes back.
         push(&[
@@ -191,7 +208,7 @@ impl Bwrap {
     fn probe(&self) -> Result<(), String> {
         // The data folder in the place of a workspace: each mount of a real
         // view happens. The probe runs only `true`.
-        let mut args = self.view(None, &[], &self.data_dir);
+        let mut args = self.view(None, &[], &[], &self.data_dir);
         args.push("--".into());
         args.push("true".into());
         let mut child = std::process::Command::new(&self.bwrap)
@@ -233,18 +250,32 @@ impl Bwrap {
         command: &mut std::process::Command,
         egress_port: Option<u16>,
     ) -> io::Result<Child> {
+        // The read paths of the command: each one is opened and checked
+        // again here, just before bwrap starts, and bwrap binds the object
+        // of the descriptor, not a path (read paths spec, "Linux").
+        let opened = self.open_reads(command)?;
+        let local_port = local_port_of(command);
+        let read_fds: Vec<RawFd> = opened.iter().map(|f| f.as_raw_fd()).collect();
         let (info_r, info_w) = pipe()?;
         let (block_r, block_w) = pipe()?;
         let (iw, br) = (info_w.as_raw_fd(), block_r.as_raw_fd());
         // SAFETY: the closure runs in the child between fork and exec. It
-        // calls only dup2, which is async-signal-safe. dup2 clears
-        // FD_CLOEXEC on the new descriptor, so bwrap gets fds 3 and 4.
+        // calls only fcntl and dup2, which are async-signal-safe, and reads
+        // `read_fds` with no allocation. dup2 clears FD_CLOEXEC on the new
+        // descriptor, so bwrap gets fds 3, 4 and the read paths.
         unsafe {
             command.pre_exec(move || {
-                // Move both out of the target range first, so one dup2
-                // cannot close the other.
-                let iw2 = libc::fcntl(iw, libc::F_DUPFD_CLOEXEC, 10);
-                let br2 = libc::fcntl(br, libc::F_DUPFD_CLOEXEC, 10);
+                // Move each source out of the target range first (3 to
+                // 4 + the read paths), so one dup2 cannot close another.
+                let iw2 = libc::fcntl(iw, libc::F_DUPFD_CLOEXEC, 64);
+                let br2 = libc::fcntl(br, libc::F_DUPFD_CLOEXEC, 64);
+                let mut high = [0 as RawFd; crate::read_paths::MAX_READS];
+                for (i, fd) in read_fds.iter().enumerate() {
+                    high[i] = libc::fcntl(*fd, libc::F_DUPFD_CLOEXEC, 64);
+                    if high[i] < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
                 if iw2 < 0
                     || br2 < 0
                     || libc::dup2(iw2, INFO_FD) < 0
@@ -252,12 +283,19 @@ impl Bwrap {
                 {
                     return Err(io::Error::last_os_error());
                 }
+                // Each read path to its number.
+                for (i, fd) in high.iter().take(read_fds.len()).enumerate() {
+                    if libc::dup2(*fd, READ_FD + i as RawFd) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
                 Ok(())
             });
         }
         // The engine: the relay connects only while it runs.
         // SAFETY: getppid has no memory effects.
         let engine = pidfd_open(unsafe { libc::getppid() })?;
+        let engine_local = engine.try_clone()?;
         let mut child = command.spawn()?;
         drop(info_w);
         drop(block_r);
@@ -276,6 +314,12 @@ impl Bwrap {
                 let listener = listen_in(info.pid, port, deadline)?;
                 start_relay(listener, port, from, engine)?;
             }
+            if let Some(port) = local_port {
+                // The server on the port is a program of the person, not
+                // an Iris proxy: the relay connects from 127.0.0.1.
+                let listener = listen_in(info.pid, port, deadline)?;
+                start_relay(listener, port, Ipv4Addr::LOCALHOST, engine_local)?;
+            }
             // bwrap runs the program of the adapter after this byte.
             (&File::from(block_w)).write_all(b"x")
         })();
@@ -292,6 +336,45 @@ impl Bwrap {
             return Err(e);
         }
         Ok(child)
+    }
+
+    /// Opens and checks each read path of `command` (the pairs
+    /// `--ro-bind-fd <n> <path>`, in order from [`READ_FD`]). The helper
+    /// runs the checks of the launch again on the object that it binds,
+    /// with no link in the path: a change after the launch fails here.
+    fn open_reads(&self, command: &std::process::Command) -> io::Result<Vec<OwnedFd>> {
+        let args: Vec<&OsStr> = command.get_args().collect();
+        let home = std::env::var_os("HOME");
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == RO_BIND_FD {
+                let (Some(n), Some(path)) = (args.get(i + 1), args.get(i + 2)) else {
+                    return Err(io::Error::other("a read path option has no path"));
+                };
+                if out.len() >= crate::read_paths::MAX_READS
+                    || n.to_str() != Some(&(READ_FD + out.len() as RawFd).to_string())
+                {
+                    return Err(io::Error::other("the read path options are out of order"));
+                }
+                let path = Path::new(path);
+                let c = crate::read_paths::check(path, &self.data_dir, home.as_deref())
+                    .map_err(io::Error::other)?;
+                if c.real != path {
+                    return Err(io::Error::other(format!(
+                        "the read path {} changed after the launch",
+                        path.display()
+                    )));
+                }
+                out.push(c.fd);
+                i += 3;
+            } else if args[i] == "--" {
+                break;
+            } else {
+                i += 1;
+            }
+        }
+        Ok(out)
     }
 
     fn write_record(&self, session: i64, info: &Info) -> io::Result<()> {
@@ -377,6 +460,8 @@ impl Isolation for Bwrap {
         _egress_port: Option<u16>,
         program: &Path,
         args: &[String],
+        bound: &[PathBuf],
+        local_port: Option<u16>,
     ) -> Command {
         // The real path of the program, so that a link in the home of the
         // person is not necessary.
@@ -392,7 +477,16 @@ impl Isolation for Bwrap {
         // resolve a link in a destination.
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let workspace = fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-        let mut a = self.view(home.as_deref(), &reads, &workspace);
+        let mut a = self.view(home.as_deref(), &reads, bound, &workspace);
+        // The helper reads the local port from this pair, and the agent
+        // learns it too.
+        if let Some(port) = local_port {
+            a.extend([
+                "--setenv".into(),
+                crate::LOCAL_PORT_VAR.into(),
+                port.to_string().into(),
+            ]);
+        }
         if let Some(dir) = iris.as_deref().and_then(Path::parent) {
             let mut path = dir.as_os_str().to_os_string();
             if let Some(p) = std::env::var_os("PATH") {
@@ -443,6 +537,17 @@ impl Isolation for Bwrap {
             .and_then(|v| v.strip_prefix("http://127.0.0.1:")?.parse::<u16>().ok());
         self.spawn_with(session, command, port)
     }
+}
+
+/// The local port of `command`: the value of the pair
+/// `--setenv IRIS_LOCAL_PORT <port>` that [`Isolation::command`] writes.
+fn local_port_of(command: &std::process::Command) -> Option<u16> {
+    // Only the options of bwrap: the arguments after `--` are the
+    // program's.
+    let args: Vec<&OsStr> = command.get_args().take_while(|a| *a != "--").collect();
+    args.windows(3)
+        .find(|w| w[0] == "--setenv" && w[1] == crate::LOCAL_PORT_VAR)
+        .and_then(|w| w[2].to_str()?.parse().ok())
 }
 
 fn find_bwrap(path: Option<&OsStr>) -> Option<PathBuf> {
@@ -799,7 +904,7 @@ fn recv_fd(sock: &std::os::unix::net::UnixStream, wait: Duration) -> io::Result<
 pub(crate) fn start_relay(
     listener: TcpListener,
     port: u16,
-    from: std::net::Ipv4Addr,
+    from: Ipv4Addr,
     engine: OwnedFd,
 ) -> io::Result<()> {
     let open = Arc::new(AtomicUsize::new(0));

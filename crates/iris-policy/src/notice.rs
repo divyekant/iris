@@ -13,6 +13,13 @@ pub const WINDOW_MS: i64 = 3_600_000;
 /// after its fetch. After that, the interrupt comes too late to help.
 pub const LATE_MS: i64 = 24 * WINDOW_MS;
 
+/// When a model is set, a mail waits up to this time after its fetch for
+/// understanding, so that a `phishing` mark that only the model finds can
+/// stop the notice first (issue #321). After that time, the notice does not
+/// wait more: a model that is slow, out of budget or failing does not hold
+/// each notice.
+pub const MODEL_WAIT_MS: i64 = 5 * 60_000;
+
 /// The most characters of the title and of the text of a notice.
 pub const WORDS_MAX: usize = 200;
 
@@ -41,7 +48,9 @@ pub struct Notice {
 /// waits for the model, up to [`LATE_MS`] after the fetch. Its date must be at most [`WINDOW_MS`] before the
 /// fetch, so that the old mail of a sync gives no notice. A mail with no `body` row waits: the
 /// hostile check writes with the body. A mail with a `link_check` row waits
-/// too: its link check did not run yet (migration 20). Each guard reads the store in the
+/// too: its link check did not run yet (migration 20). When a model is set,
+/// a mail that understanding did not read yet waits up to [`MODEL_WAIT_MS`]
+/// after its fetch, for a model `phishing` mark. Each guard reads the store in the
 /// transaction that writes the notice. A notice keeps the rule and the
 /// policy version of its time.
 pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
@@ -71,9 +80,15 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
                    AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                        WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))
                    AND NOT ", iris_store::draft_or_copy!("m"), "
+                   AND (m.understood_at IS NOT NULL
+                        OR NOT EXISTS (SELECT 1 FROM model_setting)
+                        OR m.fetched_at <= ?4)
                  ORDER BY m.id",
             ))?
-            .query_map(params![now_ms - WINDOW_MS, WINDOW_MS, now_ms - LATE_MS], |r| r.get(0))?
+            .query_map(
+                params![now_ms - WINDOW_MS, WINDOW_MS, now_ms - LATE_MS, now_ms - MODEL_WAIT_MS],
+                |r| r.get(0),
+            )?
             .collect::<rusqlite::Result<_>>()?;
         let now = now_ms.div_euclid(1000);
         let mut out = Vec::new();

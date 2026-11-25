@@ -26,7 +26,9 @@ stops these actions when the agent follows such a message.
    not supported. On macOS and each other system it gives the reason (see
    [macOS](#macos)).
 2. A process of a session cannot open a network connection, other than to
-   the egress port of its own session.
+   the egress port of its own session, and to the local port that the
+   person lists in `allow_local` of an `agents.toml` adapter
+   (`docs/specs/2026-11-25-agents-read-paths-local-port.md`).
 3. A process of a session cannot read or write the data folder, other than
    the workspace of its own job. So it cannot read the store key, the
    database, the engine socket `iris.sock` or the socket of another
@@ -312,9 +314,11 @@ each adapter program is.
   such as the home of the person, or `~/.local/bin`, can hold credentials
   and other files of the person. So an adapter program that needs other
   files outside the system folders (for example a Node.js program of
-  `nvm` in the home folder) does not run in a session. Known limit, with
-  an issue: a later card can add a list of read paths to `agents.toml`,
-  which the person sets.
+  `nvm` in the home folder) runs in a session only if the person lists
+  its folders in `read_paths` of `agents.toml`
+  (`docs/specs/2026-11-25-agents-read-paths-local-port.md`). Each read
+  path is read only, and the checks of that spec keep the data folder,
+  the home folders and the folders of system state out.
 - Each mount point of the view is a real path. `bwrap` mounts at a path
   as it is given, and does not resolve a link in it. So `system()`
   resolves the data folder (`canonicalize`) and fails if it cannot, and
@@ -426,7 +430,8 @@ before the agent runs, or `ended` is false.
   sandbox, and the agent (`bwrap` on Linux) is its child.
 - `docs/spec/03-job-workspace.md` and the fixed text of `JOB.md` in
   `crates/iris-workspace`: the session has no network other than the hosts
-  that `agents.toml` allows for the agent tool (its model host), and the
+  and the local port that `agents.toml` allows for the agent tool (its
+  model host), and the
   agent tool can send the folder to those hosts before `iris submit`
   (launcher spec, "Model egress").
 - `starter.json`: `bubblewrap` in the system packages of the `engine` area,

@@ -49,7 +49,7 @@ Each one has a test or a measure.
 |---|---|---|
 | M1 | The mirror matches Gmail with zero differences. | `iris mirror verify` reports 0 differences each day for 7 days on a real mailbox (exit criterion of release 1). |
 | M2 | Release 1 sends no write request to Gmail. | The OAuth scope is `gmail.readonly`. A test of the provider client fails if a code path calls a write endpoint. |
-| M3 | The engine stays inside the memory budget. | 50 MB resident memory with 100,000 messages (`crates/iris/tests/budget.rs`). |
+| M3 | The engine stays inside the memory budget. | 50 MB resident memory with 100,000 messages in a release build (the real-mailbox checks). The test `crates/iris/tests/budget.rs` checks the memory that a debug build allocates: 20 MiB of anonymous memory on Linux (the pages of the debug program file are about 33 MB, issue #1011), and 50 MB RSS on macOS. |
 | M4 | The first brief appears in 10 minutes or less. | Time from the connect step to the first brief, with the synthetic mailbox and the fake Gmail server. On the machine of the person, the measures page shows the time from the first account to the first brief with content (migration 27, table `measure_time`). The engine checks the brief every 10 seconds in `iris serve`, after `iris mirror` and `iris understand`, and at each `/api/brief`. |
 | M5 | Mail text is data. | No text from a message can start an action. The understanding step has no tools and returns only schema-valid JSON. |
 | M6 | Each item points to its source mail. | Each item has one or more sources. The schemas require the `sources` field. |
@@ -479,12 +479,12 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `sync_seen` | `account_id`, `message_id`, `labels` TEXT (JSON), PK(`account_id`, `message_id`) | The messages that the lists of a full resync or a verify name, with their label sets. The engine clears it when a new run starts, not when an unfinished run continues after a crash. |
 | `label` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, `name` TEXT, `kind` TEXT (`system` or `user`), UNIQUE(`account_id`, `provider_id`) | Labels of the provider. |
 | `thread` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, `viewed_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | Threads of the provider. Gives the `t-` IDs. `viewed_at` is the last view of the thread in Iris. |
-| `message` | `id` INTEGER PK, `account_id`, `thread_id`, `provider_id` TEXT, `content_sha256` TEXT, `size` INTEGER, `internal_date` INTEGER, `fetched_at` INTEGER, `gone_at` INTEGER, `understood_at` INTEGER, `hostile` TEXT (JSON), `tries` INTEGER, `retry_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | One row for each message. Gives the `m-` IDs. `hostile` is the list of the hostile marks of the message (section 6.7). `tries` and `retry_at` hold the failed tries of the model (section 7.4). The store clears `understood_at` when the content hash changes, when a gone message comes back, and when the message gets or loses the label `SENT`, `DRAFT`, `UNSENT` or `SENT_COPY`. A message with `DRAFT`, `UNSENT` or `SENT_COPY` that is not gone keeps no item that a new understanding replaces: the triggers of store migration 42 delete such items when the label comes and when the message comes back. |
+| `message` | `id` INTEGER PK, `account_id`, `thread_id`, `provider_id` TEXT, `content_sha256` TEXT, `size` INTEGER, `internal_date` INTEGER, `fetched_at` INTEGER, `gone_at` INTEGER, `understood_at` INTEGER, `hostile` TEXT (JSON), `tries` INTEGER, `retry_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | One row for each message. Gives the `m-` IDs. `hostile` is the list of the hostile marks of the message (section 6.7). `tries` and `retry_at` hold the failed tries of the model (section 7.4). `fixed_rules` TEXT (migration 58) records how the last understanding completed the message, for the fixed check: NULL when the model made an item, a JSON array of the rule of each rule item when the fixed rules completed it (a rule item that a pinned item holds counts too), or `unknown` after the backfill of a store that could not show it; the fixed check runs such a message again. The store clears `understood_at` when the content hash changes, when a gone message comes back, and when the message gets or loses the label `SENT`, `DRAFT`, `UNSENT` or `SENT_COPY`. A message with `DRAFT`, `UNSENT` or `SENT_COPY` that is not gone keeps no item that a new understanding replaces: the triggers of store migration 42 delete such items when the label comes and when the message comes back. |
 | `message_label` | `message_id`, `label_id`, PK(`message_id`, `label_id`) | The label set of each message. |
 | `header` | `message_id` PK, `date` INTEGER, `from_addr` TEXT, `from_name` TEXT, `to_addrs` TEXT, `cc_addrs` TEXT, `subject` TEXT, `message_id_hdr` TEXT, `in_reply_to` TEXT, `list_id` TEXT, `auth` TEXT | Parsed headers that queries need. `auth` holds the SPF, DKIM and DMARC results from `Authentication-Results`. `to_addrs` and `cc_addrs` hold bare lowercase addresses joined by `,`. `from_addr` is ASCII lowercase: the triggers of store migration 39 keep this form for each write. |
 | `body` | `message_id` INTEGER PK, `subject` TEXT, `sender` TEXT, `text` TEXT | The clean text of the message (section 7.2), with the subject and the sender name and address. `message_id` is the row ID. |
 | `message_fts` | FTS5 table on `subject`, `sender`, `text`, with `content='body'` and `content_rowid='message_id'` | Full-text search. Triggers on `body` keep it current. |
-| `sender` | `id` INTEGER PK, `address` TEXT UNIQUE, `name` TEXT, `kind` TEXT, `basis` TEXT, `decided_by` TEXT, `decided_at` INTEGER, `declined_at` INTEGER | The sender axis. Gives the `p-` IDs. `declined_at`: the time of a decline at the stranger gate (section 6.7), or NULL. |
+| `sender` | `id` INTEGER PK, `address` TEXT UNIQUE, `name` TEXT, `kind` TEXT, `basis` TEXT, `decided_by` TEXT, `decided_at` INTEGER, `declined_at` INTEGER | The sender axis. Gives the `p-` IDs. `declined_at`: the time of a decline at the stranger gate (section 6.7), or NULL. `gate_rev` INTEGER (migration 58): a trigger adds one at each change of `declined_at`, `kind` or `address`, so a model call can see each change of the gate during the call, also a change that is undone before the call ends. |
 | `model_declined` | `message_id` INTEGER PK, FK to `message` | Migration 53: each message that understanding saved with no model call because its sender was a declined stranger (section 6.7). A trigger on `sender` makes these messages pending again when the decline stops applying, and marks their threads in `talk_due`. |
 | `fixed_due` | `id` INTEGER PK AUTOINCREMENT, `message_id` INTEGER, FK to `message` | Migration 54: the mail whose fixed result a change of the sender axis can change (section 6.7, decision D31). Triggers on `sender` add a row for the mail from an address that becomes or stops being a `service`, and for the mail under the old or the new name of a known person. Each trigger gives the message a new row. The fixed check removes only the row that it read. |
 | `sender_evidence` | `message_id` FK, `address` TEXT, `rule` TEXT (`sent`, `replied` or `service`), `content_sha256` TEXT; PK (`address`, `rule`, `message_id`) | The messages that prove a `person` or `service` kind (section 6.7). The sender step writes the rows. A `sent` row: the sent message names the address in `To`, `Cc` or `Bcc`. A `replied` row: the sent message comes after a message from the address in its thread. A `service` row: the message from the address is automated mail with a Gmail DKIM pass; the rule counts its 2 earlier messages when it reads the row. A row counts only while its message is not gone and has the same content hash. |
@@ -721,7 +721,14 @@ The person gives one answer for each sender:
 |---|---|
 | Accept | The kind becomes `person`, with `decided_by` `person` and the `basis` "accepted at the gate". The items go to their sections ("You owe", "Owed to you", "Conversations"). |
 | Decline | The engine sets `declined_at` on the sender row. The kind stays with the engine, so a declined sender can still become `hostile`, or known (for example after a reply of the person). The decline applies only while the kind is `stranger`: the items of a declined stranger are in no section of the brief, and the web client lists the declined senders. A conversation with a known person stays in "Conversations" (decision D30). It also stays on the list of declined senders, so the person can still accept the sender or ask again. New mail of a declined stranger gets no model call (decision D29): understanding runs the fixed steps (header, clean text, hostile marks, sender kind, fixed rules) and saves the message as understood with no model items. The conversation rule still runs, as for each message: a conversation item of a thread of the declined stranger alone is in no section while the decline applies. No model wait holds such mail (a budget refusal, a retry time, the try limit), and it does not wait for an older message of its thread: the batch reads the decline at each run. A decline that starts or ends during a model call saves nothing, and the next run decides again. The table `model_declined` (migration 53) holds each such message. When the decline stops applying (a reopen, an accept, a kind other than `stranger`), a trigger makes these messages pending again, so the next run understands them with the model. |
-| Reopen | Removes the accept or the decline of the gate. After an accept, the engine decides the kind again from the evidence in the store. A kind that a person set for another reason (for example, a correction) stays. |
+| Reopen | Removes the accept, the trust or the decline of the gate. After an accept or a trust, the engine decides the kind again from the evidence in the store. A kind that a person set for another reason (for example, a correction) stays. |
+| Trust | Only for a sender that the near-copy rule marks `hostile` (the stored kind is `hostile`, decided by the engine). The kind becomes `person`, with `decided_by` `person` and the `basis` "trusted after a near-copy mark", and its mail is understood again (issue #49). The domain of a trusted sender is no reference of the near-copy rule, so the real domain that it looks like does not become a near copy of it. The hostile marks of each message (`dmarc`, `spoof`, `link`, `spam`, `phishing`) do not change. The web client offers Trust in the hostile warning of a message whose sender only the near-copy rule marks, and Undo (Reopen) on each message of a trusted sender. |
+
+A sender at the gate whose display name is the name of a known person (the
+same name with no case, on a `person` row of another address) is a stranger,
+not hostile: a person can move to a new address. The gate shows the address of
+that known person, and the web client shows a warning before the person
+accepts the sender (issue #370).
 
 The web client shows the gate in the brief: one row for each sender, with
 the newest 3 items, "Ignore" and "Accept". After an answer, the row keeps
@@ -806,6 +813,39 @@ The `hostile` column of the message holds each mark that applies:
 
 A message with the label `SENT` is your mail. It never gets the marks `dmarc`,
 `spoof` and `link`, because these marks test mail that you receive.
+
+The display name is input that Iris does not control. This is the failure
+list of the name-address part of the mark `spoof` (decision D32):
+
+- Supported input: a display name, decoded from RFC 2047, of any length and
+  any characters. The check splits the name into words at white space and at
+  the signs `"` `'` `<` `>` `(` `)` `[` `]` `,` `;` `:` and backtick. It
+  removes `.`, `!` and `?` at the ends of each word. A full-width at sign
+  (U+FF20, U+FE6B) counts as `@`.
+- An address in the name is a word with one `@`, a local part that is not
+  empty, and a domain with a dot and no empty label. Other words are text.
+- The owner of an address is its registrable domain, in punycode: the
+  public suffix and one label more. The public suffix is the longer of the
+  suffix of the public suffix list (with its private part, as `github.io`)
+  and a hosting suffix of the `HOSTED` list of `iris-senders` (as
+  `wordpress.com`). So `alice.wordpress.com` and `bob.wordpress.com` have
+  two owners. A domain with a suffix that the two lists do not know has its
+  last label as the suffix. A domain that is only a public suffix (as
+  `co.uk`) is its own owner.
+- Failure modes and their results:
+
+| Input | Result |
+|---|---|
+| No word of the name is an address (for example `ceo at bank dot example`, `a@b`, `@bank.example`) | No mark from this rule. |
+| Each address in the name has the owner of the `From` address | No mark from this rule. |
+| At least one address in the name has another owner than the `From` address, also when other addresses in the name have the same owner | The mark `spoof`, unless the name has the word `via`. |
+| A word has two `@` (`a@b@c.example`) | Not an address. No mark from this word. |
+| A name with the word `via`, in any case | No mark from this rule, also when the name holds an address of another owner. |
+| No `From` address that Iris can read | No display name, so no mark from this rule. |
+| A `From` address with an empty domain (`x@`) | Each address in the name has another owner: the mark `spoof`. |
+
+- Safe result for all other input: no mark from this rule. The other rules
+  of the mark `spoof`, and the marks `dmarc` and `link`, still apply.
 
 The engine computes the marks `dmarc`, `spoof`, `link` and `spam` again at each change
 of the label set of the message. The mark `phishing` stays until a rebuild.
@@ -1061,7 +1101,7 @@ no item, and the message stays not understood.
 | `phishing` is true | The mail tries a trick | The hostile mark `phishing`, no item. |
 | No JSON, a cut answer, no `phishing`, more than 20 items, a quote not in the mail, a party with no address, an item that fails the schemas | An answer that is not valid | One more try. A second answer that is not valid: no item, 1 more try in `tries`, `retry_at` 1 day later, a stop after 3 tries. |
 | The model refuses to answer | A new try gets the same refusal | No item and no second call. The try counts as above. |
-| The server refuses the call for this data (HTTP 400, 413, 422 and other 4xx, but not 401, 403 or 429) | A new call fails the same way | No item and no second call. The try counts as above. |
+| The server refuses the call for this data (HTTP 400, 413, 422 and other 4xx, but not 401, 403 or 429) | A new call fails the same way | No item and no second call. The try counts as above. One exception: an HTTP 400 or 413 for data larger than the small budget (24,000 bytes) gets one more call with the small budget. The headers take at most half of that budget, and the current message text gets the rest first. The answer of that call counts as the answer of the first call. If it fails too, the try counts as above. A priced model makes no second call, because the run stops after a call with no known charge: the first refusal counts as above. |
 | A time-out, a lost response, HTTP 429 or 5xx, a refused key (401, 403) | The result is not known, or no call can work now | No item. No try counts. The message stays not understood, and a later run reads it again. A refused key stops the batch. |
 | Data larger than the budget | A local model refuses a long message | The budget cuts the data (above). |
 | All other answers | | Not valid, as above. |
@@ -1163,7 +1203,11 @@ duplicates between sections.
 After the live login codes, the web client shows these sections first, in
 this order: "A question for you" (card R5-05), only when an agent asks a
 question, with the job whose question is the newest (`updated` of the job)
-and a field for the answer; then Due soon (card R3-08). Due soon holds each item of You owe that is due in 2 days or
+and a field for the answer; then "No agent works on this job" (issue 791),
+only when a working job has no agent session that runs (none started, or
+the newest one ended): one link for each such job, with why its newest
+session ended, for at most 7 jobs, and an "All N jobs" link to the job list
+when there are more; then Due soon (card R3-08). Due soon holds each item of You owe that is due in 2 days or
 less, or that is late, on the day of the owner: the day in the time zone of
 `/api/status` (`iris zone`, decision D1). The client makes this
 split from the You owe items, and the API keeps one You owe section. The

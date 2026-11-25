@@ -17,7 +17,7 @@
   import Watches from "./Watches.svelte";
   import MatterCard from "./MatterCard.svelte";
   import Question from "./Question.svelte";
-  import { loadQuestions } from "../jobs";
+  import { loadIdle, loadQuestions, type Idle } from "../jobs";
   import { loadGrowing, loadProposed, type Proposed } from "../matters";
   import type { Matter } from "../api";
   import { arrivedLine, loadWatches, type Watch } from "../watches";
@@ -30,10 +30,11 @@
     watches: firstWatches,
     proposed: firstProposed,
     questions: firstQuestions,
+    idle: firstIdle,
     now: start = new Date(),
     poll = 5000,
     hold = HOLD,
-  }: { brief: Brief; status?: Status | null; watches?: Watch[]; proposed?: Proposed | null; questions?: Job[]; now?: Date; poll?: number; hold?: number } = $props();
+  }: { brief: Brief; status?: Status | null; watches?: Watch[]; proposed?: Proposed | null; questions?: Job[]; idle?: Idle[]; now?: Date; poll?: number; hold?: number } = $props();
 
   // The API puts a conversation with a stranger only under Strangers, with exact counts (dk, 2026-11-16).
   // svelte-ignore state_referenced_locally
@@ -157,6 +158,22 @@
     questions = questions.filter((q) => q.id !== job.id);
     reloadQuestions();
   };
+  // The working jobs that no agent works on (issue 791): the person must start an agent, or the job waits for nothing.
+  // They load apart from the brief, with their own ticket. A failed load keeps the last list.
+  // svelte-ignore state_referenced_locally
+  let idle = $state<Idle[]>(firstIdle ?? []);
+  const idleTicket = newest();
+  async function reloadIdle() {
+    const fresh = idleTicket();
+    try {
+      const list = await loadIdle();
+      if (fresh()) idle = list;
+    } catch {
+      // The next poll tries again.
+    }
+  }
+  // svelte-ignore state_referenced_locally
+  if (firstIdle === undefined) reloadIdle();
   // The watches load apart from the brief, so a slow or failed watch load never holds the brief.
   // svelte-ignore state_referenced_locally
   if (firstWatches === undefined) reloadWatches();
@@ -164,7 +181,7 @@
   if (firstProposed === undefined) reloadProposed();
   $effect(() => {
     if (!poll) return;
-    const timer = setInterval(() => (reloadWatches(), reloadProposed(), reloadQuestions()), poll * 12);
+    const timer = setInterval(() => (reloadWatches(), reloadProposed(), reloadQuestions(), reloadIdle()), poll * 12);
     return () => clearInterval(timer);
   });
 
@@ -317,6 +334,19 @@
   </section>
 {:else if sent}
   <div class="alone">{@render sentLine(sent)}</div>
+{/if}
+
+<!-- A job with no agent (issue 791): its page tells how the last session ended and how to start one. -->
+{#if idle.length}
+  <section aria-labelledby="idle">
+    <h2 id="idle"><span>No agent works on {idle.length === 1 ? "this job" : "these jobs"}</span> <span class="count">{idle.length}</span></h2>
+    <ul class="idle">
+      {#each idle.slice(0, SHOWN) as i (i.job.id)}
+        <li><a class="touch" href={href.job(i.job.id)}>{i.job.goal}</a><span class="why">{i.ended ?? "No agent started on it yet."}</span></li>
+      {/each}
+    </ul>
+    {#if idle.length > SHOWN}<a class="all touch" href="#/jobs">All {idle.length} jobs</a>{/if}
+  </section>
 {/if}
 
 {#if soon.length || holds("soon")}
@@ -536,6 +566,32 @@
   }
   .alone {
     margin-bottom: var(--space-12);
+  }
+  ul.idle {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .idle li {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-3) 0;
+    border-bottom: 1px solid var(--color-border);
+    overflow-wrap: anywhere;
+  }
+  .idle a {
+    color: var(--color-text);
+    font-weight: 500;
+    text-decoration: none;
+  }
+  .idle a:hover,
+  .idle a:focus-visible {
+    text-decoration: underline;
+  }
+  .idle .why {
+    color: var(--color-text-muted);
+    font-size: var(--font-size--1);
   }
   .sent {
     display: flex;

@@ -178,7 +178,7 @@ section 7).
 Each entry is `{"id", "verb", "args", "state", "at", "error", "messages",
 "changed", "items", "title", "changeset", "author", "decided_by", "rule",
 "policy", "reason", "why", "can_undo", "undo_open", "undone_by", "undo_of",
-"skipped", "tried", "retry"}`:
+"skipped", "tried", "retry", "mail"}`:
 
 - `args` holds only the short arguments that the words of a verb need: `label`, `until`, `date` and `field`. Each other argument (for example the body of a draft) stays out.
 - Each text has at most 2,000 characters, so a page stays small.
@@ -188,6 +188,7 @@ Each entry is `{"id", "verb", "args", "state", "at", "error", "messages",
 - `author` is `{"kind", "name", "job", "goal"}`: `goal` is the goal of the job of an agent.
 - `decided_by` is `rule` (with `rule` and `policy`) or `person`. `reason` is the reason of the decision, and `why` is the reason of the author.
 - `can_undo` is true when an undo can start now (the view `ledger_can_undo`). `undo_open` is true while an undo waits or applies. `undone_by` is the entry of the undo. `undo_of` is the entry that this entry undoes.
+- `mail` is `{"subject", "to", "recipients"}` for a `send` or a `draft` entry (issue 490): the subject of the draft (at most 200 characters), its first `to` address, and the count of all its recipients (to, cc and bcc). The words are the mail as it was at that entry: a create or a change of a draft gives the content that it wrote (its `post`). A send gives the content with the hash that it sent: the post of a ledger row with that hash, or else the stored bytes of its draft, only while they have that hash. A later change of the draft never changes the words of an older entry. `mail` is null for each other entry, and for a mail whose content Iris cannot read.
 - `tried` counts the targets that an undo entry tries to restore: each message that the undone entry changed (also a message that is gone now) and each item of a state entry. Step 2 of the undo of `trash` (`archive`) tries only the messages that had no `INBOX` before the trash. `skipped` counts the targets of `tried` that an applied undo entry left as they were, because an earlier undo restored them, they changed again after the undone entry, or they are gone. `retry` is true when an undo of the undone entry can start now. For each other entry, `tried` and `skipped` are 0 and `retry` is false. An undo that changed nothing keeps the undone entry open (D18).
 
 ## Measures
@@ -197,7 +198,7 @@ engine computes them from the store. Nothing leaves the machine.
 
 | Endpoint | Does |
 |---|---|
-| `GET /api/measures` | `{"days", "first_brief", "mirror", "memory", "approvals", "undo"}`. See below. |
+| `GET /api/measures` | `{"days", "first_brief", "mirror", "memory", "approvals", "undo", "sends"}`. See below. |
 
 - `days`: the newest 28 days of use, the newest first, each
   `{"day", "opens"}`. `opens` counts the different source mails that the
@@ -228,6 +229,11 @@ engine computes them from the store. Nothing leaves the machine.
   the count.
 - `undo`: `{"applied", "undone"}`. `applied` counts the applied actions, and
   not an undo. `undone` counts the actions of them that an undo reversed.
+- `sends`: `{"sent", "unreviewed_after_hostile"}` (issue 472). `sent` counts
+  the applied sends. `unreviewed_after_hostile` counts the applied sends
+  that no person decided and whose draft thread had hostile evidence at the
+  claim of the send (`ledger.hostile_before`, migration 59). A send from
+  before migration 59 has no record and does not count. The target is zero.
 
 Each request of the web client while the person is active (an input of the
 person in the last 5 minutes) has the header `x-iris-day: YYYY-MM-DD`, the
