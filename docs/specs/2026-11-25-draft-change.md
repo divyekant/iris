@@ -271,9 +271,9 @@ A ledger row of a change in `writing` after a crash or a lost answer:
 
 | Value | When | Next press of Send |
 |---|---|---|
-| `"update"` | A Gmail account, and each check of section 1 passes for the draft now | Sends `draft`: the same draft changes |
+| `"update"` | A Gmail account, each check of section 1 passes for the draft now, and for a reply, the newest eligible message of the thread is still the parent of the draft (its `Message-ID` is the `In-Reply-To` of the draft row) | Sends `draft`: the same draft changes |
 | `"new"` | An Outlook or IMAP account, the draft is not sent, and its account is still an account of Iris | No `draft`: a new draft, as today |
-| `null` | All other cases (sent, `foreign_at`, a send waits) | No "Change and send" |
+| `null` | All other cases (sent, `foreign_at`, a send waits, or a reply whose thread has a newer eligible message) | No "Change and send". For a reply with a newer message, the view says "A new mail came into this thread. Write a new reply." |
 
 The client reads the content of the draft from `GET /api/drafts/{d-N}`
 (a new read route: `to`, `cc`, `bcc`, `subject`, `body`, `attachments`,
@@ -365,8 +365,8 @@ This is the same class of risk that spec 2 accepts for a label change
 | `crates/iris-apply`, `crates/iris-api` | The rule "the draft of an action" (section 2) in `send_written` and in the state of a write |
 
 Memory: the apply holds two copies of one message (the old read back and
-the new bytes), at most 2 times `iris_compose::max_message` (about 50 MB
-for Gmail) during one change. A create holds one copy.
+the new bytes), at most 2 times `iris_compose::max_message` (4 MiB, so
+about 8 MiB) during one change. A create holds one copy.
 
 ## Assumptions
 
