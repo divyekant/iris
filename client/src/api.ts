@@ -470,6 +470,8 @@ export type ReplyStart = {
   parent: { id: string; from: Address; date: string | null; text: string | null };
   to: string[];
   cc: string[];
+  /** The other people of the parent for reply all (issue #455): not in `to`, never the account. An older engine sends none. */
+  all?: string[];
   subject: string;
   /** The subject of the parent as it is. The view shows it with no leading "Re:" as its title. */
   topic: string;
