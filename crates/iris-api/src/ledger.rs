@@ -82,21 +82,79 @@ pub struct Mail {
 /// The longest subject that an entry gives, in characters.
 const SUBJECT: usize = 200;
 
-/// Read the mail of a `send` or a `draft` entry. The content comes from the
-/// same reader as the review and the outbox ([`iris_changeset::action_content`]):
-/// a send reads the stored bytes of its draft, only if they hash to the
-/// approved hash. An entry whose content Iris cannot read keeps no mail.
+/// Read the mail of a `send` or a `draft` entry, as it was at that entry
+/// (issue 490). A later change of the draft, at Gmail or in Iris, never
+/// changes the words of an older entry. An entry whose content Iris cannot
+/// read keeps no mail.
 fn with_mail(c: &Connection, mut e: LedgerEntry) -> LedgerEntry {
     if e.verb == "send" || e.verb == "draft" {
-        if let Ok(Some((_, m))) = iris_changeset::action_content(c, e.action) {
-            e.mail = Some(Mail {
-                subject: m.subject.chars().take(SUBJECT).collect(),
-                to: m.to.first().cloned(),
-                recipients: m.to.len() + m.cc.len() + m.bcc.len(),
-            });
-        }
+        e.mail = entry_content(c, e.action).ok().flatten().map(|m| Mail {
+            subject: m.subject.chars().take(SUBJECT).collect(),
+            to: m.to.first().cloned(),
+            recipients: m.to.len() + m.cc.len() + m.bcc.len(),
+        });
     }
     e
+}
+
+/// The `post` of a ledger row of a draft create or change: the content
+/// that the row wrote (`iris-apply`, `Stored`).
+#[derive(serde::Deserialize)]
+struct Post {
+    content: iris_compose::Content,
+}
+
+/// The content of the mail of the ledger entry of `action`. A create or a
+/// change of a draft keeps its content in `post`. A send keeps only the
+/// hash of the content that it sent (`ops.hash`). Each row with the same
+/// hash in its ops wrote the same content, so the post of such a row
+/// gives it. With no such row, the stored draft gives it only while its
+/// content has that hash.
+fn entry_content(c: &Connection, action: i64) -> rusqlite::Result<Option<iris_compose::Content>> {
+    let from_post = |p: &str| serde_json::from_str::<Post>(p).ok().map(|p| p.content);
+    let Some((ops, post)) = c
+        .query_row(
+            "SELECT ops, post FROM ledger WHERE action_id = ?1",
+            [action],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    if let Some(post) = post {
+        return Ok(from_post(&post));
+    }
+    let Some(hash) = serde_json::from_str::<Value>(&ops)
+        .ok()
+        .and_then(|o| o["hash"].as_str().map(String::from))
+    else {
+        return Ok(None);
+    };
+    let post: Option<String> = c
+        .query_row(
+            "SELECT post FROM ledger
+              WHERE post IS NOT NULL AND json_valid(ops) AND json_extract(ops, '$.hash') = ?1
+              ORDER BY id DESC LIMIT 1",
+            [&hash],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(post) = post {
+        return Ok(from_post(&post));
+    }
+    let draft: Option<(String, Vec<u8>)> = c
+        .query_row(
+            "SELECT a.address, d.raw FROM action_draft ad JOIN draft d ON d.id = ad.draft_id
+               JOIN account a ON a.id = d.account_id WHERE ad.action_id = ?1",
+            [action],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(draft.and_then(|(address, raw)| {
+        let read = iris_compose::read(&raw, &address)?;
+        (iris_compose::hash(&read.content, read.reply.as_ref()) == hash).then_some(read.content)
+    }))
 }
 
 /// The author of the changeset of an entry. `goal` is the goal of the job of

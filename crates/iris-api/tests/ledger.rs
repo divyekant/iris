@@ -671,15 +671,13 @@ const HOSTILE: [(&str, &str); 3] = [
 
 /// A `draft` action of account 1 with `content` as its arguments, its
 /// draft row, and a `send` action of that draft, each with an applied
-/// ledger entry. `tamper` changes the stored bytes of the draft after the
-/// hash, as another writer could. Gives the ledger row IDs (draft, send).
-fn mailed(s: &Store, content: &iris_compose::Content, tamper: bool) -> (i64, i64) {
+/// ledger entry as `iris-apply` writes it: the create keeps the content in
+/// its `post` (only with `post`), and the send keeps only the hash in its
+/// ops. Gives the ledger row IDs (draft, send) and the draft row ID.
+fn mailed(s: &Store, content: &iris_compose::Content, post: bool) -> (i64, i64, i64) {
     let c = content.clone().check().unwrap();
-    let mut raw = iris_compose::compose("owner@example.com", "iris.1@example.com", &c, None, 1);
+    let raw = iris_compose::compose("owner@example.com", "iris.1@example.com", &c, None, 1);
     let hash = iris_compose::hash(&c, None);
-    if tamper {
-        raw.extend_from_slice(b"\r\nmore");
-    }
     s.write(|tx| {
         tx.execute("INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0)", [])?;
         let cs = tx.last_insert_rowid();
@@ -714,73 +712,115 @@ fn mailed(s: &Store, content: &iris_compose::Content, tamper: bool) -> (i64, i64
             "UPDATE changeset SET why = 'Write to Dana.', submitted_at = ?2 WHERE id = ?1",
             params![cs, NOW],
         )?;
+        let create = json!({"call": "drafts.create", "message_id": "iris.1@example.com",
+                            "date": 1, "hash": hash, "thread": null});
+        let stored = post.then(|| json!({"content": c, "reply": null}).to_string());
+        let send = json!({"call": "drafts.send", "draft": draft, "provider_id": "r1",
+                          "message_id": "iris.1@example.com", "hash": hash});
         let mut ids = vec![];
-        for a in [draft_action, send_action] {
+        for (a, ops, post) in [(draft_action, create, stored), (send_action, send, None)] {
             tx.execute(
                 "UPDATE changeset_action SET state = 'approved', decided_by = 'person', decided_at = 1
                  WHERE id = ?1",
                 [a],
             )?;
             tx.execute(
-                "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
-                 VALUES (?1, 1, '{\"call\":\"drafts.create\",\"calls\":1}', 'writing', 'none', ?2)",
-                params![a, NOW],
+                "INSERT INTO ledger(action_id, account_id, ops, post, state, undo, at)
+                 VALUES (?1, 1, ?2, ?3, 'writing', 'none', ?4)",
+                params![a, ops.to_string(), post, NOW],
             )?;
             let l = tx.last_insert_rowid();
             tx.execute("UPDATE ledger SET state = 'applied' WHERE id = ?1", [l])?;
             ids.push(l);
         }
-        Ok((ids[0], ids[1]))
+        Ok((ids[0], ids[1], draft))
     })
     .unwrap()
 }
 
+/// Write `content` into the draft row `draft`, as a refresh of a draft that
+/// the person changed at Gmail does (`changed_at_gmail`): new bytes, and
+/// with `rehash` also the new hash.
+fn rewrite(s: &Store, draft: i64, content: &iris_compose::Content, rehash: bool) {
+    let c = content.clone().check().unwrap();
+    let raw = iris_compose::compose("owner@example.com", "iris.1@example.com", &c, None, 1);
+    let hash = iris_compose::hash(&c, None);
+    s.write(|tx| {
+        tx.execute(
+            "UPDATE draft SET raw = ?2 WHERE id = ?1",
+            params![draft, raw],
+        )?;
+        if rehash {
+            tx.execute(
+                "UPDATE draft SET hash = ?2 WHERE id = ?1",
+                params![draft, hash],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+}
+
 /// A send and a draft entry name the subject and the recipients of their
-/// mail (issue 490). The subject is bounded, the first recipient comes
-/// from to, the count covers to, cc and bcc, and a send whose stored bytes do not match
-/// the approved hash names no mail. Each other entry has no mail.
+/// mail as it was at that entry (issue 490). The subject is bounded, the
+/// first recipient comes from to, and the count covers to, cc and bcc. A
+/// later change of the draft, with or without a new hash, never changes
+/// the words of an older entry. Each other entry has no mail.
 #[tokio::test]
 async fn a_send_names_its_subject_and_recipients() {
     let dir = temp("mail");
     let s = store(&dir);
     let archive = archived(&s, "person", &[1], PERSON);
     let long = "A".repeat(250);
-    let (draft, send) = mailed(
+    let mail = |to: &str, subject: &str| iris_compose::Content {
+        to: vec![to.into()],
+        subject: subject.into(),
+        body: "Hello".into(),
+        ..Default::default()
+    };
+    let (draft, send, row) = mailed(
         &s,
         &iris_compose::Content {
-            to: vec!["dana@example.com".into()],
             cc: vec!["lee@example.com".into()],
             bcc: vec!["sam@example.com".into()],
-            subject: long.clone(),
-            body: "Hello".into(),
-            ..Default::default()
-        },
-        false,
-    );
-    let (_, tampered) = mailed(
-        &s,
-        &iris_compose::Content {
-            to: vec!["priya@example.com".into()],
-            subject: "Q4 plan".into(),
-            body: "Hello".into(),
-            ..Default::default()
+            ..mail("dana@example.com", &long)
         },
         true,
     );
-    let (code, p) = call(&s, false, "/api/ledger").await;
-    assert_eq!(code, StatusCode::OK);
-    let by = |l: i64| {
-        p["entries"]
-            .as_array()
-            .unwrap()
-            .iter()
+    // A send whose draft Iris did not create keeps no post: only its draft row.
+    let (_, kept, kept_row) = mailed(&s, &mail("priya@example.com", "Q4 plan"), false);
+    let (_, lost, lost_row) = mailed(&s, &mail("kim@example.com", "Lunch"), false);
+    let entries = |p: &Value| p["entries"].as_array().unwrap().clone();
+    let by = |p: &Value, l: i64| {
+        entries(p)
+            .into_iter()
             .find(|e| e["id"] == format!("l-{l}"))
-            .cloned()
-            .unwrap()
+            .unwrap()["mail"]
+            .clone()
     };
     let want = json!({ "subject": "A".repeat(200), "to": "dana@example.com", "recipients": 3 });
-    assert_eq!(by(draft)["mail"], want);
-    assert_eq!(by(send)["mail"], want);
-    assert_eq!(by(tampered)["mail"], Value::Null);
-    assert_eq!(by(archive)["mail"], Value::Null);
+    let q4 = json!({ "subject": "Q4 plan", "to": "priya@example.com", "recipients": 1 });
+    let lunch = json!({ "subject": "Lunch", "to": "kim@example.com", "recipients": 1 });
+    let (code, p) = call(&s, false, "/api/ledger").await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(by(&p, draft), want);
+    assert_eq!(by(&p, send), want);
+    assert_eq!(by(&p, kept), q4);
+    assert_eq!(by(&p, lost), lunch);
+    assert_eq!(by(&p, archive), Value::Null);
+
+    // The person changes each draft at Gmail after the send: new bytes and a
+    // new hash, or new bytes only. The entries keep the mail that they wrote
+    // or sent, or name none. They never name the later mail.
+    rewrite(&s, row, &mail("eve@example.com", "Later"), true);
+    rewrite(&s, kept_row, &mail("eve@example.com", "Later"), true);
+    rewrite(&s, lost_row, &mail("eve@example.com", "Later"), false);
+    let (_, p) = call(&s, false, "/api/ledger").await;
+    assert_eq!(by(&p, draft), want);
+    assert_eq!(by(&p, send), want);
+    assert_eq!(by(&p, kept), Value::Null);
+    assert_eq!(by(&p, lost), Value::Null);
+    for e in entries(&p) {
+        assert_ne!(e["mail"]["subject"], "Later", "{e}");
+    }
 }
