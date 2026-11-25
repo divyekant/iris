@@ -1377,7 +1377,7 @@ fn a_thread_is_late_only_while_each_rule_holds() {
             "a stale nudge with a key",
             "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
                created_at, ask)
-             SELECT ?1, min(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'p', 0, 1, '{}'
+             SELECT ?1, min(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'nudge/0.4', 0, 1, '{}'
                FROM message",
             at,
             true,
@@ -1386,7 +1386,7 @@ fn a_thread_is_late_only_while_each_rule_holds() {
             "a ready nudge of another commitment",
             "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
                created_at, ask)
-             SELECT ?1, max(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'p', 0, 1, '{}'
+             SELECT ?1, max(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'nudge/0.4', 0, 1, '{}'
                FROM message WHERE thread_id = ?1",
             at,
             true,
@@ -1530,6 +1530,18 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
     assert_eq!(prompt, NUDGE_PROMPT);
     let to = ready_to(&b.store, t);
     assert_eq!(to.as_deref(), Some("ana@example.org"));
+    // A nudge of an older build (#1075: its body did not have to name the
+    // commitment) is not ready, and the thread is late again.
+    let set_prompt = |p: &str| {
+        b.store
+            .write(|tx| Ok(tx.execute("UPDATE reply_draft SET prompt = ?1", [p])?))
+            .unwrap()
+    };
+    set_prompt("nudge/0.3");
+    assert_eq!(ready_to(&b.store, t), None);
+    assert_eq!(late_threads(&b.store, now), [t]);
+    set_prompt(NUDGE_PROMPT);
+    assert_eq!(ready_to(&b.store, t).as_deref(), Some("ana@example.org"));
 
     // A correction of the commitment after the save: the nudge is stale,
     // and the thread is late again for the new commitment. A close: stale.
@@ -2270,6 +2282,10 @@ fn a_body_names_a_commitment_only_with_its_words() {
     ] {
         assert_eq!(names(body, &ask), ok, "{body}");
     }
+    // An amount is an object: its values are words, its field names are not.
+    let pay = serde_json::json!({"title": "Pay it", "amount": {"value": 312.77, "currency": "USD"}});
+    assert!(!names("Can you confirm the value and the currency?", &pay));
+    assert!(names("Hi Bo, the 312.77? D", &pay));
     // A commitment with no key word passes any body.
     assert!(names(
         "Hi",

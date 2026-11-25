@@ -271,7 +271,7 @@ fn ready_of(threads: &str, item: Option<&str>, now: (&str, &str)) -> String {
         "EXISTS (SELECT 1 FROM reply_draft d WHERE d.thread_id IN ({threads})
            AND {fresh}
            AND ({seen}) = d.seen
-           AND (d.ask IS NULL OR d.ask = {key}) {mine})"
+           AND (d.ask IS NULL OR (d.ask = {key} AND d.prompt = '{NUDGE_PROMPT}')) {mine})"
     )
 }
 
@@ -283,7 +283,11 @@ Ask when they can do them. Do not repeat all of the mail.";
 
 /// The version of the prompt of a nudge: [`INSTRUCTION`] with one more
 /// line for the field `commitments` ([`nudge_instruction`]).
-pub const NUDGE_PROMPT: &str = "nudge/0.3";
+///
+/// A nudge of another version is not ready, so a change of the rules of a
+/// nudge (as the words check of #1075) makes each older nudge stale, and
+/// the late thread gets a new one.
+pub const NUDGE_PROMPT: &str = "nudge/0.4";
 
 /// The instruction of a nudge.
 fn nudge_instruction() -> String {
@@ -834,12 +838,22 @@ const COMMON: &[&str] = &[
 /// or more (an amount, a date).
 fn key_words(ask: &Value) -> Vec<String> {
     let mut out = vec![];
+    // The text of the scalar values only: an amount is an object, and its
+    // field names ("value", "currency") are no words of the commitment.
+    fn texts(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::String(s) => out.push(s.clone()),
+            Value::Number(n) => out.push(n.to_string()),
+            Value::Array(a) => a.iter().for_each(|v| texts(v, out)),
+            Value::Object(o) => o.values().for_each(|v| texts(v, out)),
+            Value::Null | Value::Bool(_) => {}
+        }
+    }
+    let mut all = vec![];
     for field in ["title", "quote", "amount"] {
-        let text = match &ask[field] {
-            Value::String(s) => s.clone(),
-            Value::Null => continue,
-            v => v.to_string(),
-        };
+        texts(&ask[field], &mut all);
+    }
+    for text in all {
         for w in text.split(|c: char| !c.is_alphanumeric()) {
             let w = w.to_lowercase();
             let n = w.chars().count();
