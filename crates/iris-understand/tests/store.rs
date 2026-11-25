@@ -2834,12 +2834,14 @@ Your one-time code is 918273. It ends in 10 minutes.
     );
 }
 
-/// Issue #946, the backfill of migration 57: a pinned code item, then a
-/// model run as a stranger with no item. The queued fixed check after the
-/// upgrade finds no rule that applies now: the message keeps the result of
-/// the model, with no new model call.
+/// Issue #946, the backfill of migration 57: a pinned code item, and a
+/// later run as a stranger, before the upgrade. The store cannot show if
+/// the model read the message (a model run with no item) or not (the bug
+/// of #946). With no rule that applies now, the queued fixed check makes
+/// the mail wait for the model: at most one model call, never a missed
+/// read.
 #[test]
-fn the_backfill_keeps_a_model_result_next_to_a_pinned_rule_item() {
+fn an_unknown_last_run_next_to_a_pinned_rule_item_waits_for_the_model() {
     use iris_understand::store::recheck_fixed;
     let b = store("fixed-backfill-model");
     let fake = Fake::default();
@@ -2903,11 +2905,19 @@ Your one-time code is 918273. It ends in 10 minutes.
     let calls = fake.calls.borrow().len();
     assert_eq!(
         recheck_fixed(&b.store, NOW, None).unwrap(),
-        0,
+        1,
         "no rule applies now"
     );
-    assert!(!b.col::<bool>("SELECT understood_at IS NULL FROM message WHERE id = ?1", m));
-    assert_eq!(fake.calls.borrow().len(), calls);
+    assert!(
+        b.col::<bool>("SELECT understood_at IS NULL FROM message WHERE id = ?1", m),
+        "the mail waits for the model"
+    );
+    assert!(b.col::<bool>("SELECT EXISTS (SELECT 1 FROM item WHERE id = ?1)", row));
+    assert_eq!(
+        fake.calls.borrow().len(),
+        calls,
+        "the check called no model"
+    );
     assert_eq!(
         b.col::<i64>("SELECT count(*) FROM fixed_due WHERE message_id = ?1", m),
         0

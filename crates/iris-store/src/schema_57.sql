@@ -17,11 +17,12 @@ ALTER TABLE message ADD COLUMN fixed_rules TEXT;
 -- - a model item that is not pinned: the model completed it (NULL);
 -- - a rule item that is not pinned: the rules completed it (the rule of
 --   each rule item, pinned or not);
--- - else, with a pinned rule item: not known. The last run can be a rule
---   whose draft the pinned item holds, or a model run with no item. The
---   record is NULL, and the message goes to the fixed check
---   (`fixed_due`), which runs the fixed rules again with no model call and
---   writes the record when a rule applies now;
+-- - else, with a pinned rule item: not known (`'unknown'`). The last run
+--   can be a rule whose draft the pinned item holds, or a model run with no
+--   item. The message goes to the fixed check (`fixed_due`). The check runs
+--   it again with no model: a rule that applies now writes the record, and
+--   with no rule the mail waits for the model, the safe result (issue
+--   946: at most one model call for each such message);
 -- - else: no item of a rule or the model (`[]`).
 UPDATE message SET fixed_rules = CASE
   WHEN EXISTS (SELECT 1 FROM item_droppable d JOIN item i ON i.id = d.item_id
@@ -34,15 +35,12 @@ UPDATE message SET fixed_rules = CASE
              AND r.form <> 'conversation' AND r.derived_by = 'rule')
   WHEN EXISTS (SELECT 1 FROM item_source rs JOIN item r ON r.id = rs.item_id
                WHERE rs.message_id = message.id AND rs.role = 'origin'
-                 AND r.form <> 'conversation' AND r.derived_by = 'rule') THEN NULL
+                 AND r.form <> 'conversation' AND r.derived_by = 'rule') THEN 'unknown'
   ELSE '[]' END
 WHERE understood_at IS NOT NULL;
 
 INSERT INTO fixed_due(message_id)
-  SELECT m.id FROM message m
-  WHERE m.understood_at IS NOT NULL AND m.fixed_rules IS NULL
-    AND NOT EXISTS (SELECT 1 FROM item_droppable d JOIN item i ON i.id = d.item_id
-                    WHERE d.message_id = m.id AND i.derived_by = 'model');
+  SELECT id FROM message WHERE fixed_rules = 'unknown';
 
 -- The revision of the gate of each sender (issue 934). Each change of
 -- `declined_at` adds one, so a decline and a reopen during one model call

@@ -279,6 +279,10 @@ fn analysis(raw: &[u8], raw_cut: bool, html_after: bool, cx: &Context, phishing:
     a
 }
 
+/// The record of `message.fixed_rules` that the backfill of migration 57
+/// writes when it cannot tell how the last run completed the message.
+const UNKNOWN_RULES: &str = "unknown";
+
 /// True when the fixed result of the understood received message `id` now
 /// (its hostile marks, or the rules of its rule items) is not the stored
 /// one. False for mail that is gone or your own. For mail that is not
@@ -306,7 +310,7 @@ fn fixed_differs(store: &Store, id: i64, now_ms: i64) -> Result<bool> {
         .ok_or(Error::NoMessage(id))?;
     let (raw, raw_cut, html_after) = read_raw(&path)?;
     let head = crate::Head::parse(&raw, row.authserv);
-    let (now, stored_marks, stored_rules, model_items) = store.read(|c| {
+    let (now, stored_marks, (stored_rules, unknown), model_items) = store.read(|c| {
         let now = inputs(
             c,
             id,
@@ -330,11 +334,14 @@ fn fixed_differs(store: &Store, id: i64, now_ms: i64) -> Result<bool> {
             c.query_row("SELECT fixed_rules FROM message WHERE id = ?1", [id], |r| {
                 r.get(0)
             })?;
+        // `unknown`: the backfill of migration 57 could not tell how the
+        // last run completed the message; the check runs it again.
+        let unknown = rules.as_deref() == Some(UNKNOWN_RULES);
         let rules: Option<Vec<String>> =
             rules.map(|r| serde_json::from_str(&r).unwrap_or_default());
         let model = rules.is_none();
         let rules = rules.unwrap_or_default();
-        Ok(((now, kind), marks, rules, model))
+        Ok(((now, kind), marks, (rules, unknown), model))
     })?;
     let (inputs_now, kind) = now;
     let known = |_: &str| inputs_now.known.clone();
@@ -358,6 +365,9 @@ fn fixed_differs(store: &Store, id: i64, now_ms: i64) -> Result<bool> {
         return Ok(decide(&a, &cx, None).is_ok_and(|d| d.hostile || !d.waiting));
     }
     if marks_json(&a.marks, false) != stored_marks {
+        return Ok(true);
+    }
+    if unknown {
         return Ok(true);
     }
     // With no model, `decide` makes no call and gives no error.
