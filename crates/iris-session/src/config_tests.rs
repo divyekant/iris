@@ -273,9 +273,7 @@ fn the_built_in_adapters_give_their_lines() {
             PROMPT
         ]
     );
-    // A ChatGPT sign-in in `CODEX_HOME` calls chatgpt.com (codex-cli 0.166.0,
-    // issue 404); an API key calls api.openai.com.
-    assert_eq!(x.allow_hosts, ["api.openai.com", "chatgpt.com"]);
+    assert_eq!(x.allow_hosts, ["api.openai.com"]);
 }
 
 #[test]
