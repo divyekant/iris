@@ -2,7 +2,9 @@
   One item on one line. The whole line opens the item. The envelope opens the
   source mail in one step. An unread dot marks a conversation that waits for you.
   A "Draft ready" pill marks an item with a reply that Iris prepared (card R3-09),
-  and opens the reply form with it. A conversation has a Reply icon (issue 582).
+  and opens the reply form with it. A "Summary ready" pill marks an item whose
+  long thread has a summary of Iris (issue 478), and opens the item page, where
+  the summary shows. A conversation has a Reply icon (issue 582).
   On a commitment owed to you, the pill says "Nudge ready" when the draft is a
   reminder to a late person (card R3-07, option A: the pill only).
   With `ondone`, an open commitment starts with a round tick box: a click marks
@@ -168,8 +170,9 @@
     <p class="detail">
       {detail}{#if date}<span class="due {date.tone}">, {date.text}</span>{/if}
     </p>
-    {#if item.ready?.includes("draft")}
+    {#if item.ready?.includes("draft") || item.ready?.includes("summary")}
       <p class="prepared">
+        {#if item.ready?.includes("draft")}
         {#snippet pill()}
           <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
             <path d="M10.5 2.5l3 3-7.5 7.5H3v-3z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
@@ -180,6 +183,15 @@
           <a class="ready" href={href.reply(drafted)} title="Open the reply that Iris wrote in your voice. Nothing is sent.">{@render pill()}</a>
         {:else}
           <span class="ready" title={nudge ? "Iris wrote a reminder in your voice. Nothing is sent." : "Iris wrote a reply in your voice"}>{@render pill()}</span>
+        {/if}
+        {/if}
+        {#if item.ready?.includes("summary")}
+          <a class="ready summary" href={href.item(item.id)} title="Open the item. Iris wrote a short summary of its long thread.">
+            <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+              <path d="M3 4h10M3 8h10M3 12h6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+            </svg>
+            Summary ready
+          </a>
         {/if}
       </p>
     {/if}
@@ -299,6 +311,9 @@
   }
   /* What Iris prepared: quiet pills under the detail. A draft pill opens the reply; a nudge pill is no control, so a click opens the item. */
   .prepared {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
     margin: var(--space-1) 0 0;
   }
   .ready {

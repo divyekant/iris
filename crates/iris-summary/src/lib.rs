@@ -186,13 +186,25 @@ fn fresh(row: &str) -> String {
 
 /// The summary of `thread` that is ready ([`ready_sql`]), or `None`.
 pub fn ready(c: &Connection, thread: i64) -> rusqlite::Result<Option<Summary>> {
+    ready_in(c, "?1", [thread])
+}
+
+/// The ready summary ([`ready_sql`]) of the first thread that the SQL query
+/// `threads` gives with `params`, or `None`. One statement reads the
+/// threads and the summary, so both come from one snapshot of the store.
+pub fn ready_in(
+    c: &Connection,
+    threads: &str,
+    params: impl rusqlite::Params,
+) -> rusqlite::Result<Option<Summary>> {
     c.query_row(
         &format!(
             "SELECT s.thread_id, s.based_on, s.text, s.model, s.created_at
-               FROM thread_summary s WHERE s.thread_id = ?1 AND {}",
+               FROM thread_summary s WHERE s.thread_id IN ({threads}) AND {}
+              ORDER BY s.thread_id LIMIT 1",
             fresh("s")
         ),
-        [thread],
+        params,
         |r| {
             Ok(Summary {
                 thread: r.get(0)?,

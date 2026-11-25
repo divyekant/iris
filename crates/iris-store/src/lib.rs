@@ -298,7 +298,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// document. Same value as `iris_clean::TEXT_LIMIT`.
 /// The `model` value of each open model document that Iris writes
 /// (spec 4, rule 2.1).
-pub const MODEL: &str = "iris/1.3";
+pub const MODEL: &str = "iris/1.4";
 
 /// The `$id` of the common definitions of the open model.
 pub const COMMON_SCHEMA_ID: &str = "urn:iris:model:1:common";
