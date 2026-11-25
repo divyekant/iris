@@ -979,3 +979,48 @@ test("a file that the engine refuses names its reason and does not join the mail
     net.restore();
   }
 });
+
+test("Change and send opens the form with the draft; update sends the draft, new does not (draft change spec, section 5)", async () => {
+  for (const change of ["update", "new", null]) {
+    window.sessionStorage.clear();
+    let n = 0;
+    const net = serve((path, method) => {
+      if (method === "POST" && path === "write") return [201, { write: `cs-${++n}` }];
+      if (path === "write/cs-1") return [200, { state: "stopped", reason: "You stopped this mail.", draft: "d-1", change }];
+      if (path === "write/cs-2") return [200, { state: "saving" }];
+      if (path === "drafts/d-1")
+        return [200, { draft: "d-1", account: "a-1", thread: null, to: ["sam@okafor.example"], cc: ["kim@example.com"], bcc: [],
+                       subject: "Dinner on Saturday?", body: "Hi Sam,\n\nAre you free?\n", attachments: [] }];
+      return [404, { error: "Not found." }];
+    });
+    const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+    try {
+      await fill(app);
+      press(app);
+      await until(() => text(app.target).includes("This mail did not leave"));
+      const button = () => [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Change and send");
+      if (change === null) {
+        assert.equal(button(), undefined, "no change: no button");
+        continue;
+      }
+      button().click();
+      await until(() => app.target.querySelector("form"));
+      app.flushSync();
+      assert.equal(app.target.querySelector("input.subject").value, "Dinner on Saturday?");
+      assert.equal(app.target.querySelector("textarea").value, "Hi Sam,\n\nAre you free?\n");
+      type(app.target.querySelector("textarea"), "Hi Sam,\n\nAre you free on Sunday?\n");
+      app.flushSync();
+      press(app);
+      await until(() => net.posts().filter((p) => p.path === "write").length === 2);
+      const [first, second] = net.posts().filter((p) => p.path === "write").map((p) => p.body);
+      assert.deepEqual(second.to, ["sam@okafor.example"]);
+      assert.deepEqual(second.cc, ["kim@example.com"]);
+      assert.equal(second.body, "Hi Sam,\n\nAre you free on Sunday?\n");
+      assert.equal(second.draft, change === "update" ? "d-1" : undefined);
+      assert.notEqual(second.key, first.key, "a new content gets a new key");
+    } finally {
+      app.destroy();
+      net.restore();
+    }
+  }
+});

@@ -18,7 +18,7 @@
 -->
 <script lang="ts">
   import { onDestroy, untrack } from "svelte";
-  import { get, own, post, upload, type Account, type Attachment, type ReplyStart, type ThreadDraft, type WriteState } from "../api";
+  import { get, own, post, upload, type Account, type Attachment, type DraftContent, type ReplyStart, type ThreadDraft, type WriteState } from "../api";
   import { chips, unique } from "../chips";
   import { bytes, initials, PROVIDER, when } from "../format";
   import { FLAGS } from "../review";
@@ -51,6 +51,8 @@
     ccText?: string;
     bccText?: string;
     intent?: string;
+    /** The draft that the next press changes in place (`d-N`). */
+    draft?: string | null;
   };
   function storage(): Storage | undefined {
     try {
@@ -124,9 +126,11 @@
   let problem = $state("");
   let unknown = $state(false);
   let busy = $state(false);
+  // The Gmail draft that the next press changes in place, after "Change and send".
+  let changing = $state<string | null>(saved?.draft ?? null);
 
   // The parent is part of the content: a reply to a new parent is a new mail.
-  let content = $derived(JSON.stringify([thread ? [thread, reply?.parent.id] : account, to, cc, bcc, files.map((f) => [f.sha256, f.name, f.type]), thread ? "" : subject, body]));
+  let content = $derived(JSON.stringify([thread ? [thread, reply?.parent.id] : account, to, cc, bcc, files.map((f) => [f.sha256, f.name, f.type]), thread ? "" : subject, body, changing]));
   // One key for one content: a new content gets a new key. Send calls it too,
   // after it ends the open address text, so each press sends the key of its own content.
   function rekey() {
@@ -145,7 +149,7 @@
   // Save each part of the form that a reload must keep: the text of an address
   // not yet a chip, and the warnings that the next press sends, too.
   $effect(() => {
-    const form: Saved = { account, to, cc, bcc, files, subject, body, key, sig, flags, toText, ccText, bccText, intent };
+    const form: Saved = { account, to, cc, bcc, files, subject, body, key, sig, flags, toText, ccText, bccText, intent, draft: changing };
     if (write) return;
     try {
       storage()?.setItem(place, JSON.stringify(form));
@@ -274,7 +278,11 @@
     const target = thread ? { thread, parent: reply?.parent.id } : { account, subject };
     const sent = key;
     // Bcc and files go only when the mail has them, as an older engine takes no such field.
-    const extra = { ...(bcc.length ? { bcc: [...bcc] } : {}), ...(files.length ? { attachments: files.map((f) => ({ ...f })) } : {}) };
+    const extra = {
+      ...(bcc.length ? { bcc: [...bcc] } : {}),
+      ...(files.length ? { attachments: files.map((f) => ({ ...f })) } : {}),
+      ...(changing ? { draft: changing } : {}),
+    };
     const mail = { ...target, to: [...to], cc: [...cc], ...extra, body, key, flags: [...flags] };
     try {
       const v = await post<{ write: string }>("write", mail);
@@ -286,6 +294,7 @@
       sentTo = mail.to;
       sent_ = { subject: thread ? "" : subject, body: mail.body };
       unknown = false;
+      changing = null;
       write = v.write;
       follow();
     } catch (e) {
@@ -367,8 +376,35 @@
     busy = false;
   }
 
+  // "Change and send" (draft change spec, section 5): the form opens with the
+  // content of the draft. For `update`, the next press changes the same draft.
+  async function changeIt() {
+    if (ws.state !== "stopped" || !ws.draft || !ws.change) return;
+    const draft = ws.draft;
+    const update = ws.change === "update";
+    busy = true;
+    note = "";
+    try {
+      const d = await get<DraftContent>(`drafts/${encodeURIComponent(draft)}`);
+      if (!alive) return;
+      keep(null, write);
+      clearTimeout(timer);
+      [to, cc, bcc, files, body, toText, ccText, bccText] = [unique(d.to), unique(d.cc), unique(d.bcc), d.attachments, d.body, "", "", ""];
+      if (!thread) [account, subject] = [d.account, d.subject];
+      copy = cc.length > 0;
+      blind = bcc.length > 0;
+      changing = update ? draft : null;
+      write = "";
+      ws = { state: "saving" };
+    } catch (e) {
+      note = own(e);
+    }
+    busy = false;
+  }
+
   function again() {
     keep(null, write);
+    changing = null;
     if (thread) return void (location.hash = "#/write");
     clearTimeout(timer);
     [write, to, cc, bcc, files, subject, body, note, toText, ccText, bccText] = ["", [], [], [], [], "", "", "", "", "", ""];
@@ -476,7 +512,10 @@
     {:else}
       <h2 class="stop">This mail did not leave</h2>
       <p class="muted">{ws.reason}</p>
-      <div class="row"><button type="button" class="quiet" onclick={again}>Write another</button></div>
+      <div class="row">
+        {#if ws.change && ws.draft}<button type="button" class="pill" onclick={changeIt} disabled={busy}>Change and send</button>{/if}
+        <button type="button" class="quiet" onclick={again}>Write another</button>
+      </div>
     {/if}
     {#if note}<p role="alert">{note}</p>{/if}
   </section>
