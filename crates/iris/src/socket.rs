@@ -439,10 +439,17 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
             })
             .map(Done::Value)
         }
-        Some("drafts") if session => Err(Failure::new(
-            code::DENIED,
-            "drafts is a host verb: a session cannot run it",
-        )),
+        // A session sees only the draft of its job: after a lost `add`
+        // answer, it finds the changeset again (issue #440).
+        Some("drafts") if session => {
+            only(&[])?;
+            let draft = store
+                .read(|c| Ok(session_draft(c, me)))
+                .map_err(|e| Failure::new(code::ERROR, format!("store: {e}")))?
+                .map_err(|e| failure(e, 0))?;
+            let ids: Vec<String> = draft.into_iter().map(format_changeset_id).collect();
+            Ok(Done::Value(json!({ "changesets": ids })))
+        }
         Some("drafts") => {
             only(&[])?;
             drafts(store).map(Done::Value)

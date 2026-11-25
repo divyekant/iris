@@ -514,11 +514,13 @@ fn a_session_sees_only_the_changesets_of_its_job() {
     )
     .unwrap_err();
     assert_eq!(e.0, code::USAGE);
-    // `drafts` is a host verb: code 3 in a session (issue #522).
-    assert_eq!(
-        call(&store, &mine, "drafts", json!({})).unwrap_err().0,
-        code::DENIED
-    );
+    // `drafts` gives only the draft of the job of the session: none of the
+    // host and none of another job (issues #522 and #440).
+    let drafts = |s| call(&store, s, "drafts", json!({})).unwrap()["changesets"].clone();
+    assert_eq!(drafts(&mine), json!([]));
+    assert_eq!(drafts(&theirs), json!([cs]));
+    let r = add(&store, &mine, "archive", &["t-1"], json!({})).unwrap();
+    assert_eq!(drafts(&mine), json!([r["changeset"]]));
     assert!(call(&store, &theirs, "show", json!({ "changeset": cs })).is_ok());
 }
 
@@ -769,10 +771,11 @@ fn the_read_verbs_give_only_the_grant() {
         ["m-1"]
     );
     assert_eq!(search("label:INBOX").unwrap_err().0, code::USAGE);
-    // A session has no drafts verb of the host (issue #522).
+    // A session has no drafts verb of the host (issue #522): it sees only
+    // the draft of its job.
     assert_eq!(
-        call(&store, &me, "drafts", json!({})).unwrap_err().0,
-        code::DENIED
+        call(&store, &me, "drafts", json!({})).unwrap()["changesets"],
+        json!([])
     );
 
     // A revoke empties each read at once.

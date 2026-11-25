@@ -49,7 +49,13 @@ struct Client {
 
 impl Client {
     fn start(dir: &Path) -> Client {
+        Client::start_in(dir, Path::new("."))
+    }
+
+    /// [`Client::start`] with the current folder `cwd`.
+    fn start_in(dir: &Path, cwd: &Path) -> Client {
         let mut child = Command::new(env!("CARGO_BIN_EXE_iris"))
+            .current_dir(cwd)
             .arg("--data")
             .arg(dir)
             .arg("mcp")
@@ -617,4 +623,76 @@ fn each_verb_of_the_command_is_a_tool_or_named_as_not_a_tool() {
     for t in tools {
         assert!(t == "drafts" || verbs.iter().any(|v| v == t), "{t}");
     }
+}
+
+/// Issue #440: in a job workspace (a folder below `.iris/`), each tool takes
+/// the path of its command in session mode: the session socket, the read
+/// and write verbs of a session only, and never the data folder.
+#[test]
+fn in_a_job_workspace_the_tools_use_the_session_socket() {
+    let root = data_dir("mcp-session");
+    let work = root.join("workspace");
+    std::fs::create_dir_all(work.join(".iris")).unwrap();
+    let data = root.join("data");
+    let listener = std::os::unix::net::UnixListener::bind(work.join(".iris/socket")).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut verbs = Vec::new();
+        for _ in 0..6 {
+            let (s, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&s).read_line(&mut line).unwrap();
+            let v: Value = serde_json::from_str(&line).unwrap();
+            let verb = v["verb"].as_str().unwrap().to_string();
+            verbs.push(verb.clone());
+            let result = match verb.as_str() {
+                // The engine accepts the add, and the answer is lost.
+                "add" => continue,
+                "drafts" => json!({"changesets": ["cs-7"]}),
+                "list" => json!({"items": []}),
+                "search" => json!({"messages": [{"id": "m-1", "thread": "t-1",
+                    "date": "2025-11-16T08:57:02Z", "from": "dana@example.com",
+                    "from_name": "Dana", "subject": "Contract"}]}),
+                "withdraw" => json!({"id": "cs-1", "state": "withdrawn", "actions": []}),
+                _ => json!({"job": "j-4", "session": "se-9", "goal": "Get it.",
+                    "state": "working", "threads": 1, "messages": 2, "items": 0}),
+            };
+            let answer = json!({"ok": true, "result": result});
+            (&s).write_all(format!("{answer}\n").as_bytes()).unwrap();
+        }
+        verbs
+    });
+    let mut c = Client::start_in(&data, &work);
+    assert_eq!(c.ok("status", json!({}))["job"], json!("j-4"));
+    let (text, code) = c.run("search", json!({"text": "contract"}));
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("m-1"), "{text}");
+    // A host tool and a host verb of the socket: code 3, and nothing
+    // reaches the socket.
+    for (tool, args) in [
+        ("watch_list", json!({})),
+        ("send", json!({"id": "d-1"})),
+        ("mute", json!({"id": "c-1"})),
+    ] {
+        c.error(tool, args, 3);
+    }
+    // A filter of the host list is a usage error in a session, also an
+    // explicit limit. With no filter, list goes to the socket.
+    c.error("list", json!({"status": "open"}), 2);
+    c.error("list", json!({"limit": 20}), 2);
+    assert_eq!(c.run("list", json!({})).1, 0);
+    // A lost add answer: the error names `drafts`, and drafts gives the
+    // draft of the job.
+    let e = c.error("archive", json!({"ids": ["t-1"]}), 1);
+    assert!(e.contains("iris changeset --drafts"), "{e}");
+    let (text, code) = c.run("drafts", json!({}));
+    assert_eq!(code, 0);
+    assert!(text.contains("cs-7"), "{text}");
+    let (text, code, error) = c.run3("withdraw", json!({"changeset": "cs-1"}));
+    assert_eq!(code, 0, "{text}{error}");
+    c.stop();
+    assert_eq!(
+        server.join().unwrap(),
+        ["status", "search", "list", "add", "drafts", "withdraw"]
+    );
+    assert!(!data.exists(), "the tools never open the data folder");
 }

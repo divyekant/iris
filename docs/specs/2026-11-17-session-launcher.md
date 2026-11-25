@@ -777,9 +777,12 @@ exit code 3.
   each verb that is not a session verb with exit code 3, and sends
   nothing. The session verbs are `status`, the read verbs `search`,
   `show` and `list` (R4-04f), the write verbs `add`, `submit`, `show`
-  of a changeset, `withdraw` and `revise` (R4-03), and the job verbs
-  `wait` (R5-04), `ask` (R5-05) and `done` (#356). So
-  `iris changeset --drafts` gets code 3. In host mode, `iris list` lists
+  of a changeset, `withdraw` and `revise` (R4-03), `drafts`, and the job
+  verbs `wait` (R5-04), `ask` (R5-05) and `done` (#356). In a session,
+  `iris changeset --drafts` gives only the draft of the job of the session
+  (issue #440), so after a lost `add` answer the session finds its
+  changeset again. It gives no draft of the host or of another job
+  (issue #522). In host mode, `iris list` lists
   all items with filters (issue #523).
 
 ## Options not chosen

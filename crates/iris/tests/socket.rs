@@ -1022,7 +1022,7 @@ fn session_mode_uses_only_the_session_socket() {
     let listener = std::os::unix::net::UnixListener::bind(work.join(".iris/socket")).unwrap();
     let server = std::thread::spawn(move || {
         let mut verbs = Vec::new();
-        for _ in 0..7 {
+        for _ in 0..8 {
             let (s, _) = listener.accept().unwrap();
             let mut line = String::new();
             std::io::BufReader::new(&s).read_line(&mut line).unwrap();
@@ -1035,6 +1035,7 @@ fn session_mode_uses_only_the_session_socket() {
                     "date": "2025-11-16T08:57:02Z", "from": "dana@example.com",
                     "from_name": "Dana", "subject": "Contract"}]}),
                 "list" => json!({"items": [item]}),
+                "drafts" => json!({"changesets": []}),
                 "show" => json!({"item": item}),
                 "wait" => json!({"job": "j-4", "state": "waiting",
                     "until": "2030-01-02T00:00:00Z", "reply": "t-5"}),
@@ -1054,11 +1055,14 @@ fn session_mode_uses_only_the_session_socket() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("j-4 (working)"));
     // A store verb and a host verb of the socket: code 3, and nothing
     // reaches the socket.
-    for args in [&["export", "out"][..], &["changeset", "--drafts"], &draft] {
+    for args in [&["export", "out"][..], &draft] {
         let out = iris(args);
         assert_eq!(out.status.code(), Some(3), "{args:?}: {out:?}");
     }
     let out = iris(&["status", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    // `changeset --drafts` asks the socket for the draft of the job (issue #440).
+    let out = iris(&["changeset", "--drafts"]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     // The read verbs of a session go to the socket (card R4-04f).
     let out = iris(&["search", "contract", "--limit", "5"]);
@@ -1119,6 +1123,7 @@ fn session_mode_uses_only_the_session_socket() {
         [
             "status {}",
             "status {}",
+            "drafts {}",
             r#"search {"limit":5,"text":"contract"}"#,
             r#"show {"id":"c-1"}"#,
             r#"list {"form":"commitment"}"#,
