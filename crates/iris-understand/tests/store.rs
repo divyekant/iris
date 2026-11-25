@@ -2756,3 +2756,76 @@ Your one-time code is 918273. It ends in 10 minutes.
         );
     }
 }
+
+/// Issue #946, the backfill of migration 57: a pinned model item from an
+/// earlier run and a code-rule item from the last run. The record says
+/// that the rule completed the message, so a change to `stranger` makes
+/// the mail wait for the model.
+#[test]
+fn the_backfill_keeps_the_rule_of_the_last_run_next_to_a_pinned_model_item() {
+    use iris_understand::store::recheck_fixed;
+    let b = store("fixed-backfill-mixed");
+    let code = "From: Bank <no-reply@bank.example.com>
+To: owner@example.com
+Subject: Your sign-in
+
+Your one-time code is 918273. It ends in 10 minutes.
+";
+    let signal = r#"{"items": [{"form": "signal", "title": "Code", "quote": "Your one-time code is 918273.",
+      "kind": "code", "code": "918273"}], "phishing": false}"#;
+    let m = b.add("1", code, &["INBOX"]);
+    let model = understand(&b.store, m, &Fake::with(&[signal]), NOW)
+        .unwrap()
+        .items[0];
+    correct(
+        &b.store,
+        &format!("s-{model}"),
+        "expires",
+        json!("2026-02-01T00:00:00Z"),
+        NOW,
+    )
+    .unwrap();
+    let set = |b: &Box_, kind: &str| {
+        b.store
+            .write(|tx| {
+                Ok(tx.execute(
+                    "UPDATE sender SET kind = ?1, decided_by = 'person'
+                     WHERE address = 'no-reply@bank.example.com'",
+                    [kind],
+                )?)
+            })
+            .unwrap();
+    };
+    set(&b, "service");
+    assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
+    assert!(b.col::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM item i JOIN item_source s ON s.item_id = i.id
+          WHERE s.message_id = ?1 AND json_extract(i.doc, '$.derived.rule') = 'code')",
+        m
+    ));
+    b.store
+        .write(|tx| {
+            Ok(tx.execute_batch(
+                "ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                 ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 56;",
+            )?)
+        })
+        .unwrap();
+    let Box_ {
+        _dir,
+        store,
+        account,
+    } = b;
+    drop(store);
+    let b = Box_ {
+        store: Store::open(&_dir.0).unwrap(),
+        _dir,
+        account,
+    };
+    set(&b, "stranger");
+    assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
+    assert!(
+        b.col::<bool>("SELECT understood_at IS NULL FROM message WHERE id = ?1", m),
+        "the mail waits for the model"
+    );
+}
