@@ -24,10 +24,20 @@ use crate::{Error, Result};
 /// flag of the thread or the author (`first_contact`), or a draft flag
 /// whose evidence changed after the submit. A changeset that is not open
 /// (a new revision is a draft) gives no entries.
-pub fn write_drafts(store: &Store, changeset: i64, out: &mut impl Write) -> Result<()> {
+///
+/// A readable `send` of a draft also has `change`: the value that
+/// `GET /api/drafts/{d-N}` gives after the person denies this send only,
+/// and `newer_mail` with the same rule (issue 1104). The review offers
+/// "Deny this send and change it yourself" only with a `change`.
+pub fn write_drafts(
+    store: &Store,
+    changeset: i64,
+    now_ms: i64,
+    out: &mut impl Write,
+) -> Result<()> {
     out.write_all(b"{\"drafts\":[").map_err(io)?;
     let mut after = (0, 0);
-    while let Some((at, v)) = store.read(|c| next_draft(c, changeset, after))? {
+    while let Some((at, v)) = store.read(|c| next_draft(store, c, changeset, after, now_ms))? {
         if after != (0, 0) {
             out.write_all(b",").map_err(io)?;
         }
@@ -44,16 +54,18 @@ fn io(e: std::io::Error) -> Error {
 /// The first waiting `draft` or `send` action after `(revision, n)`, as
 /// its entry of [`write_drafts`].
 fn next_draft(
+    store: &Store,
     c: &Connection,
     changeset: i64,
     (revision, n): (i64, i64),
+    now_ms: i64,
 ) -> iris_store::Result<Option<((i64, i64), Value)>> {
     let row = c
         .query_row(
             // Only an open changeset: the review list and the decisions
             // read the same condition.
             &format!(
-                "SELECT a.id, a.revision, a.n, a.flags FROM changeset_action a
+                "SELECT a.id, a.revision, a.n, a.flags, a.verb FROM changeset_action a
                  JOIN changeset c ON c.id = a.changeset_id
                  WHERE a.changeset_id = ?1 AND {OPEN}
                    AND a.verb IN ('draft', 'send')
@@ -68,17 +80,23 @@ fn next_draft(
                     r.get::<_, i64>(1)?,
                     r.get::<_, i64>(2)?,
                     r.get::<_, Option<String>>(3)?,
+                    r.get::<_, String>(4)?,
                 ))
             },
         )
         .optional()?;
-    let Some((action, revision, n, flags)) = row else {
+    let Some((action, revision, n, flags, verb)) = row else {
         return Ok(None);
     };
     let flags: Vec<String> =
         serde_json::from_str(flags.as_deref().unwrap_or("[]")).unwrap_or_default();
     let (draft, thread) = ids(c, action)?;
-    let mut v = json!({"revision": revision, "n": n, "draft": draft, "thread": thread});
+    let mut v = json!({
+        "revision": revision,
+        "n": n,
+        "draft": draft.map(|d| format_id(Kind::Draft, d)),
+        "thread": thread.map(|t| format_id(Kind::Thread, t)),
+    });
     // Only the flags that the action has: the person decides on these.
     let marks: Vec<Mark> = match action_content(c, action).map_err(store_error)? {
         None => {
@@ -114,6 +132,13 @@ fn next_draft(
                     .collect()
             };
             v["readable"] = true.into();
+            if let (Some(draft), "send") = (draft, verb.as_str()) {
+                let (change, newer_mail) = crate::write::change(store, c, draft, action, now_ms)?;
+                v["change"] = change.into();
+                if newer_mail {
+                    v["newer_mail"] = true.into();
+                }
+            }
             v["to"] = people(&content.to, Field::To).into();
             v["cc"] = people(&content.cc, Field::Cc).into();
             v["bcc"] = people(&content.bcc, Field::Bcc).into();
@@ -147,9 +172,9 @@ fn store_error(e: iris_changeset::Error) -> iris_store::Error {
     }
 }
 
-/// The draft of a `send` (`d-N`) and the thread of the mail: the thread
-/// of the draft row, or of the parent of a reply. `null` for a new mail.
-fn ids(c: &Connection, action: i64) -> rusqlite::Result<(Option<String>, Option<String>)> {
+/// The draft row of a `send` and the thread row of the mail: the thread
+/// of the draft row, or of the parent of a reply. `None` for a new mail.
+fn ids(c: &Connection, action: i64) -> rusqlite::Result<(Option<i64>, Option<i64>)> {
     let (draft, thread): (Option<i64>, Option<i64>) = c
         .query_row(
             "SELECT d.id, coalesce(d.thread_id,
@@ -164,10 +189,7 @@ fn ids(c: &Connection, action: i64) -> rusqlite::Result<(Option<String>, Option<
         )
         .optional()?
         .unwrap_or_default();
-    Ok((
-        draft.map(|d| format_id(Kind::Draft, d)),
-        thread.map(|t| format_id(Kind::Thread, t)),
-    ))
+    Ok((draft, thread))
 }
 
 /// The text cut at each end of a mark of `field`: each part with the flags

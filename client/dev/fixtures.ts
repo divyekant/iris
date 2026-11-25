@@ -336,12 +336,12 @@ function askMail(id: string): Message | undefined {
 
 /** POST /api/ask: a fixed answer for each kind of question, with no model. */
 export function askAnswer(question: string): AskAnswer {
-  const source = (n: number, id: string, quote: string | null) => ({ n, quote, message: summaryOf(id) as Summary });
+  const source = (n: number, id: string, quote: string | null, stranger = false) => ({ n, quote, message: summaryOf(id) as Summary, stranger });
   if (/weather|lottery/i.test(question)) return { answer: null, sources: [], read: 0, cost_micro_usd: null };
   if (/flight|tokyo|trip/i.test(question)) {
     return {
       answer: "Your flight to Tokyo leaves on 10 December at 11:05 [1]. The booking reference is QX7K2P [1].",
-      sources: [source(1, "m-53500", "Booking reference QX7K2P")],
+      sources: [source(1, "m-53500", "Booking reference QX7K2P", true)],
       read: 6,
       cost_micro_usd: 3_120,
     };
@@ -438,6 +438,7 @@ export const drafts: Record<string, DraftView[]> = {
       draft: "d-21",
       thread: "t-9001",
       readable: true,
+      change: "update",
       to: [{ address: "dana@acme.example" }],
       cc: [{ address: "legal@acme-partners.example", flags: ["new_recipient", "outside_thread"] }],
       subject: [{ text: "Re: Renewal for 2027" }],

@@ -13,6 +13,8 @@
 
   const from = (s: AskSource) => s.message.from.name || s.message.from.address || "Unknown sender";
   const label = (s: AskSource) => `${from(s)}: ${s.message.subject || "No subject"}`;
+  // A stranger's mail can try to mislead the answer (issue 255): the source says so.
+  const named = (s: AskSource) => (s.stranger ? `${label(s)} (from a stranger)` : label(s));
 
   // ask() gives the question back to the box after an error.
   async function submit(event: SubmitEvent) {
@@ -63,13 +65,13 @@
               {@const sources = turn.answer.sources}
               <p class="text">
                 {#each parts(turn.answer.answer, sources) as part, k (k)}
-                  {#if "text" in part}{part.text}{:else}<a class="cite" href={href.mail(part.source.message.id)} aria-label={`Source ${part.source.n}: ${label(part.source)}`}>{part.source.n}</a>{/if}
+                  {#if "text" in part}{part.text}{:else}<a class="cite" href={href.mail(part.source.message.id)} aria-label={`Source ${part.source.n}: ${named(part.source)}`}>{part.source.n}</a>{/if}
                 {/each}
               </p>
               <ul class="sources" aria-label="Sources">
                 {#each sources as s (s.n)}
                   <li>
-                    <a class="chip touch" href={href.mail(s.message.id)}><span class="n" aria-hidden="true">{s.n}</span><span class="label">{label(s)}</span></a>
+                    <a class="chip touch" href={href.mail(s.message.id)}><span class="n" aria-hidden="true">{s.n}</span><span class="label">{label(s)}</span>{#if s.stranger}<span class="stranger">Stranger</span>{/if}</a>
                   </li>
                 {/each}
               </ul>
@@ -247,6 +249,10 @@
     color: var(--color-primary);
     font-size: var(--font-size--2);
     font-weight: 600;
+  }
+  .stranger {
+    flex: none;
+    color: var(--color-text-faint);
   }
   .label {
     overflow: hidden;

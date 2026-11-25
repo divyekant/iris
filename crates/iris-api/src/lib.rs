@@ -411,7 +411,7 @@ async fn get_drafts(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resu
     let Some(row) = changeset_row(&s, &id)? else {
         return Ok(not_found());
     };
-    Ok(stream(move |w| drafts::write_drafts(&s, row, w)).await)
+    Ok(stream(move |w| drafts::write_drafts(&s, row, now_ms(), w)).await)
 }
 
 /// The reason of each submitted revision (issue 189).

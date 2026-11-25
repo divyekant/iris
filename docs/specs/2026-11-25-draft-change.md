@@ -300,9 +300,23 @@ press sends `draft` only when `change` is `"update"` now. A write that
 the engine took from a draft link stays in that place until it ends: a
 reload or a new link of the same draft shows the state of that write,
 not the form, while it can still leave (for `"new"`, the old draft can
-still change). When the write ends (sent or stopped), the form shows.
+still change). This is also true when the send of that write stops the
+change of the draft (`change` is `null`, issue 1098), and after "Write
+another" (issue 1101): only the end of the write (sent or stopped) ends
+the record. The write needs only its own record: it shows also when
+the draft of the link is gone (404, for example it has a form that Iris
+does not write) or the thread of a reply has no mail to reply to now
+(409, its parent is in Trash). Then it shows with no conversation and no
+form. Another error of these reads shows, and the next open reads again. When the write ends, the form shows if the draft could change
+when the link opened. Else the view shows the end of the write.
 
-If `change` is `null` when the link opens, the view shows no form. It
+"Change and send" in a draft link view opens the form in place only for
+the draft of the link. For another draft (the new draft of a `"new"`
+change), it opens the link of that draft, so each form stays in the place
+of its own draft (issue 1102).
+
+If `change` is `null` when the link opens and no write of the link can
+still leave, the view shows no form. It
 says why and links to a new write: "A new mail came into this thread.
 Write a new reply." with a link to the reply of the thread when
 `newer_mail` is true, else "This draft cannot change now." with a link
@@ -312,10 +326,18 @@ If the draft read of the Outbox fails after a cancel, each later poll of
 the Outbox tries it again, until the engine answers.
 
 A send of a request in the review (spec 2 section 5.5, issue 208) whose
-draft Iris can read shows "Deny this send and change it yourself". The
-press denies that send only, with the hash that the review showed, then
-opens the write view of its draft (`#/write/d-N`). The engine gives
-`change` for the draft after the deny. The next press of Send there is a
+draft Iris can read has `change` and `newer_mail` in
+`GET /api/changesets/{id}/drafts` (issue 1104). The values are the values
+of `GET /api/drafts/{d-N}` after the person denies this send only: the
+checks of this section count this one send as denied. The send shows
+"Deny this send and change it yourself" only when `change` is not `null`.
+When `newer_mail` is true, the send shows "A new mail came into this
+thread after this reply was written. To answer it, deny this send and
+write a new reply." and no button. The press denies that send only, with
+the hash that the review showed, then opens the write view of its draft
+(`#/write/d-N`). If the draft cannot change when the write view opens
+(the state changed after the review loaded), the view shows no form and
+says why, as for each draft link. The next press of Send there is a
 new write of the person, with the hold of the Outbox. If the decision is
 refused (409) or has no answer, the review loads the request again and the
 view does not move. A `draft` action that waits has no Gmail draft yet,

@@ -202,7 +202,7 @@ fn state_in(
         None => None,
     };
     let (change, newer_mail) = match draft {
-        Some(d) => change(store, c, d, now_ms)?,
+        Some(d) => change(store, c, d, 0, now_ms)?,
         None => (None, false),
     };
     let draft = draft.map(|d| format_id(Kind::Draft, d));
@@ -268,11 +268,14 @@ fn state_in(
 /// press gives: the checks of a change in place for Gmail (section 1, the
 /// files included), and the checks of a create for another provider.
 /// The second value is true when only a newer mail in the thread of a
-/// reply stops the change.
-fn change(
+/// reply stops the change. `after_deny` is a waiting send of the draft
+/// that counts as denied, or 0 (issue 1104, see
+/// [`iris_changeset::change_blocked`]).
+pub(crate) fn change(
     store: &Store,
     c: &Connection,
     draft: i64,
+    after_deny: i64,
     now_ms: i64,
 ) -> rusqlite::Result<(Option<&'static str>, bool)> {
     let row: Option<(String, Option<i64>, String)> = c
@@ -290,7 +293,7 @@ fn change(
         iris_changeset::Error::Store(iris_store::Error::Db(e)) => e,
         e => rusqlite::Error::ToSqlConversionFailure(e.to_string().into()),
     };
-    if iris_changeset::change_blocked(c, draft, now_ms)
+    if iris_changeset::change_blocked(c, draft, after_deny, now_ms)
         .map_err(db)?
         .is_some()
     {
@@ -364,7 +367,7 @@ pub fn draft_content(store: &Store, id: &str, now_ms: i64) -> Result<Option<Valu
             .optional()?;
         Ok(match found {
             Some((account, thread, content)) => {
-                Some((account, thread, content, change(store, &tx, row, now_ms)?))
+                Some((account, thread, content, change(store, &tx, row, 0, now_ms)?))
             }
             None => None,
         })

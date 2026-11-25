@@ -2130,3 +2130,117 @@ fn a_snapshot_reads_one_state_of_the_thread() {
     let next = b.store.read(|c| Ok(snapshot(c, t)?)).unwrap();
     assert_eq!(next.count, s.count + 1);
 }
+
+/// The set of messages that a reply can answer is the set of the save
+/// (#479). A late sync of an older message, a message that leaves the
+/// trash, a message that moves into the thread and a message that goes to
+/// the trash each make the draft stale, also with the same newest message
+/// and each message understood. A draft of an older build (no `seen`)
+/// keeps the rules of `based_on`.
+#[test]
+fn a_change_of_the_answerable_set_makes_the_draft_stale() {
+    let sql = |b: &Box_, q: &str| b.store.write(|tx| Ok(tx.execute_batch(q)?)).unwrap();
+    let add = |b: &Box_, id: &str, thread: &str, label: &str| {
+        let m = msg(
+            id,
+            thread,
+            150,
+            label,
+            "ana@example.org",
+            "me@example.com",
+            Some("Old"),
+        );
+        b.store.put_messages(1, &[m]).unwrap();
+        sql(b, "UPDATE message SET understood_at = 1");
+    };
+    let trash = |ids: &str| {
+        format!(
+            "INSERT INTO message_label(message_id, label_id)
+               SELECT m.id, l.id FROM message m, label l
+               WHERE m.provider_id IN ({ids}) AND l.provider_id = 'TRASH'"
+        )
+    };
+    let untrash = |ids: &str| {
+        format!(
+            "DELETE FROM message_label
+               WHERE label_id IN (SELECT id FROM label WHERE provider_id = 'TRASH')
+                 AND message_id IN (SELECT id FROM message WHERE provider_id IN ({ids}))"
+        )
+    };
+    type Change<'a> = &'a dyn Fn(&Box_, i64);
+    let cases: &[(&str, Change)] = &[
+        ("late older", &|b, _| add(b, "late-old", "t1", "INBOX")),
+        ("out of the trash", &|b, _| {
+            sql(b, &untrash("'trashed-old'"))
+        }),
+        ("moved in", &|b, t| {
+            sql(
+                b,
+                &format!("UPDATE message SET thread_id = {t} WHERE provider_id = 'other'"),
+            )
+        }),
+        ("to the trash", &|b, _| sql(b, &trash("'older-in'"))),
+        // w1 and w4 leave the set, w2 and w3 come in: the count and the sum
+        // of the row IDs stay the same, the set does not.
+        ("same count and sum", &|b, _| {
+            sql(b, &trash("'w1', 'w4'"));
+            sql(b, &untrash("'w2', 'w3'"));
+        }),
+    ];
+    let setup = |name: &str| {
+        let (b, t) = mailbox(name);
+        // An older message in the trash, one in the inbox, and one in another thread.
+        add(&b, "trashed-old", "t1", "TRASH");
+        add(&b, "other", "t-other", "INBOX");
+        add(&b, "older-in", "t1", "INBOX");
+        for (w, label) in [
+            ("w1", "INBOX"),
+            ("w2", "TRASH"),
+            ("w3", "TRASH"),
+            ("w4", "INBOX"),
+        ] {
+            add(&b, w, "t1", label);
+        }
+        // Six newer messages: the changed ones are not in the six newest
+        // texts that go to the model.
+        for n in 0..6 {
+            let m = msg(
+                &format!("fill{n}"),
+                "t1",
+                160,
+                "INBOX",
+                "ana@example.org",
+                "me@example.com",
+                Some("Fill"),
+            );
+            b.store.put_messages(1, &[m]).unwrap();
+        }
+        sql(&b, "UPDATE message SET understood_at = 1");
+        (b, t)
+    };
+    for (name, change) in cases {
+        // A change after the save: the draft is not ready.
+        let (b, t) = setup(&format!("set-{}", name.replace(' ', "-")));
+        write(&b.store, t, None, &Fake::new(r#"{"body": "ok"}"#), 1).unwrap();
+        assert!(ready(&b.store, t), "{name}: a new draft");
+        change(&b, t);
+        assert!(
+            checks_pass_on(&b.store, t),
+            "{name}: the newest message is the same"
+        );
+        assert!(!ready(&b.store, t), "{name}");
+        sql(&b, "UPDATE reply_draft SET seen = NULL");
+        assert!(ready(&b.store, t), "{name}: an older draft");
+
+        // A change during the model call: no draft.
+        let (b, t) = setup(&format!("call-{}", name.replace(' ', "-")));
+        let bb = &b;
+        let mut fake = Fake::new(r#"{"body": "ok"}"#);
+        fake.during = Some(Box::new(move || change(bb, t)));
+        assert!(
+            matches!(write(&b.store, t, None, &fake, 1), Err(Error::Changed)),
+            "{name}: during the call"
+        );
+        assert_eq!(saved(&b.store, t), None, "{name}: during the call");
+    }
+}
