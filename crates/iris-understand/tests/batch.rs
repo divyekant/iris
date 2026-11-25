@@ -338,7 +338,7 @@ fn migration_40_marks_each_understood_thread() {
             tx.execute_batch(
                 "DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender;
                  DROP TRIGGER talk_due_sender_remove; DROP TRIGGER model_declined_end; DROP TRIGGER model_declined_end_remove; DROP TABLE model_declined; DROP TABLE talk_due; DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
-                 DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; PRAGMA user_version = 39;",
+                 DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 39;",
             )?;
             Ok(())
         })
@@ -1057,7 +1057,7 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                  ALTER TABLE account DROP COLUMN categories_off_at;
                  DROP TRIGGER understand_owner_label_add; DROP TRIGGER understand_owner_label_remove;
                  DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower; DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender; DROP TRIGGER talk_due_sender_remove; DROP TRIGGER model_declined_end; DROP TRIGGER model_declined_end_remove; DROP TABLE model_declined; DROP TABLE talk_due; DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
-                 DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; PRAGMA user_version = 19;",
+                 DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 19;",
             )?;
             Ok(())
         })
@@ -1413,6 +1413,88 @@ fn a_decline_during_a_refused_call_does_not_hold_the_mail() {
     b.run(&Limits::default()).unwrap();
     assert_eq!(b.script.calls(), 1, "no second call");
     assert!(b.understood(m));
+}
+
+/// A decline and a reopen around a refused call (#934): each change of
+/// the gate during the call is a changed input, also a decline and a
+/// reopen that both end before the call returns. The refusal writes no
+/// mark, and the next run calls the model.
+#[test]
+fn a_decline_and_a_reopen_around_a_refused_call_leave_no_mark() {
+    for reopen_in_call in [false, true] {
+        let b = store(if reopen_in_call {
+            "refusal-reopen-in"
+        } else {
+            "refusal-reopen-after"
+        });
+        b.model(false, None);
+        let m = b.add("1", "a", 1, &["INBOX"]);
+        let db = b._dir.0.join("iris.db");
+        b.script.push(Err(ModelError::Budget("refused".into())));
+        *b.script.during.borrow_mut() = Some(std::boxed::Box::new(move || {
+            let c = rusqlite::Connection::open(&db).unwrap();
+            c.execute(
+                "INSERT INTO sender(address, kind, decided_by, declined_at)
+                 VALUES ('ana@example.org', 'stranger', 'engine', 1)
+                 ON CONFLICT(address) DO UPDATE SET declined_at = 1, kind = 'stranger'",
+                [],
+            )
+            .unwrap();
+            if reopen_in_call {
+                c.execute("UPDATE sender SET declined_at = NULL", [])
+                    .unwrap();
+            }
+        }));
+        b.run(&Limits::default()).unwrap();
+        assert_eq!(b.script.calls(), 1);
+        assert_eq!(
+            b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
+            Some(0),
+            "the gate changed during the call (reopen in call: {reopen_in_call})"
+        );
+        b.store
+            .write(|tx| {
+                tx.execute("UPDATE sender SET declined_at = NULL", [])?;
+                Ok(())
+            })
+            .unwrap();
+        b.run(&Limits::default()).unwrap();
+        assert_eq!(b.script.calls(), 2, "after the reopen the model reads it");
+    }
+}
+
+/// A kind change and its undo during a refused call, for a sender with a
+/// decline (#934): the decline applied for a moment, so the gate changed.
+/// The refusal writes no mark.
+#[test]
+fn a_kind_change_and_its_undo_around_a_refused_call_leave_no_mark() {
+    let b = store("refusal-kind-flip");
+    b.model(false, None);
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    let db = b._dir.0.join("iris.db");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO sender(address, kind, decided_by, declined_at)
+             VALUES ('ana@example.org', 'person', 'person', 1)
+             ON CONFLICT(address) DO UPDATE SET declined_at = 1, kind = 'person',
+               decided_by = 'person'",
+            [],
+        )
+        .unwrap();
+    b.script.push(Err(ModelError::Budget("refused".into())));
+    *b.script.during.borrow_mut() = Some(std::boxed::Box::new(move || {
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.execute("UPDATE sender SET kind = 'stranger'", [])
+            .unwrap();
+        c.execute("UPDATE sender SET kind = 'person'", []).unwrap();
+    }));
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.script.calls(), 1);
+    assert_eq!(
+        b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
+        Some(0)
+    );
 }
 
 /// A change of the thread context during a refused call (a SPAM label on

@@ -519,6 +519,10 @@ pub struct Decision {
     /// No rule matched and the retry state holds the model call: nothing
     /// to save.
     pub waiting: bool,
+    /// The rule of each draft that the fixed rules made, before a draft
+    /// that a pinned item already holds is left out (#946). Empty when no
+    /// fixed rule completed the message.
+    pub rules: Vec<&'static str>,
     pub calls: u32,
     pub usage: Usage,
 }
@@ -542,6 +546,13 @@ pub fn decide(
         return Ok(d);
     }
     if let Some(mut drafts) = rules::apply(a, cx) {
+        d.rules = drafts
+            .iter()
+            .filter_map(|x| match x.by {
+                By::Rule(r) => Some(r),
+                By::Model => None,
+            })
+            .collect();
         // A rule finds an existing item again by its form and its rule.
         drafts.retain(|x| {
             let By::Rule(rule) = x.by else { return true };
