@@ -25,6 +25,8 @@
 --    `understand_come_back` and `understand_new_content`). The content
 --    cleanup sets `content_sha256` to NULL on gone mail; that is not new
 --    content.
+--    Each reset trigger also puts the thread in `talk_due`, also for a
+--    message whose `understood_at` is NULL already.
 -- 3. Each reset of an understood message (`understood_at` goes to NULL, and
 --    `tries` does not grow) clears `tries` and `retry_at` and puts its thread
 --    in `talk_due`, so the conversation is computed again. This covers each
@@ -38,6 +40,10 @@ CREATE TRIGGER understand_owner_label_add AFTER INSERT ON message_label
   WHEN (SELECT provider_id FROM label WHERE id = NEW.label_id)
     IN ('SENT', 'DRAFT', 'UNSENT', 'SENT_COPY', 'SPAM')
 BEGIN
+  INSERT INTO talk_due(thread_id) SELECT m.thread_id FROM message m
+    WHERE m.id = NEW.message_id AND m.thread_id IS NOT NULL
+      AND (m.understood_at IS NOT NULL OR m.tries <> 0 OR m.retry_at IS NOT NULL)
+      AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = m.thread_id);
   UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL
     WHERE id = NEW.message_id
       AND (understood_at IS NOT NULL OR tries <> 0 OR retry_at IS NOT NULL);
@@ -47,6 +53,10 @@ CREATE TRIGGER understand_owner_label_remove AFTER DELETE ON message_label
   WHEN (SELECT provider_id FROM label WHERE id = OLD.label_id)
     IN ('SENT', 'DRAFT', 'UNSENT', 'SENT_COPY', 'SPAM')
 BEGIN
+  INSERT INTO talk_due(thread_id) SELECT m.thread_id FROM message m
+    WHERE m.id = OLD.message_id AND m.thread_id IS NOT NULL
+      AND (m.understood_at IS NOT NULL OR m.tries <> 0 OR m.retry_at IS NOT NULL)
+      AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = m.thread_id);
   UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL
     WHERE id = OLD.message_id
       AND (understood_at IS NOT NULL OR tries <> 0 OR retry_at IS NOT NULL);
@@ -70,6 +80,9 @@ CREATE TRIGGER understand_new_content AFTER UPDATE OF content_sha256 ON message
   WHEN OLD.content_sha256 IS NOT NEW.content_sha256 AND NEW.content_sha256 IS NOT NULL
    AND (NEW.understood_at IS NOT NULL OR NEW.tries <> 0 OR NEW.retry_at IS NOT NULL)
 BEGIN
+  INSERT INTO talk_due(thread_id) SELECT NEW.thread_id
+    WHERE NEW.thread_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = NEW.thread_id);
   UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL WHERE id = NEW.id;
 END;
 
@@ -79,6 +92,9 @@ CREATE TRIGGER understand_come_back AFTER UPDATE OF gone_at ON message
   WHEN OLD.gone_at IS NOT NULL AND NEW.gone_at IS NULL
    AND (NEW.understood_at IS NOT NULL OR NEW.tries <> 0 OR NEW.retry_at IS NOT NULL)
 BEGIN
+  INSERT INTO talk_due(thread_id) SELECT NEW.thread_id
+    WHERE NEW.thread_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = NEW.thread_id);
   UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL WHERE id = NEW.id;
 END;
 

@@ -1382,13 +1382,15 @@ fn each_reset_change_gives_each_state_a_new_budget() {
             .write(|tx| Ok(tx.execute_batch(&sql.replace("?id", &id.to_string()))?))
             .unwrap();
     };
-    let state = || -> (Option<i64>, i64, Option<i64>) {
+    let state = || -> (Option<i64>, i64, Option<i64>, i64) {
         store
             .read(|c| {
                 Ok(c.query_row(
-                    "SELECT understood_at, tries, retry_at FROM message WHERE id = ?1",
+                    "SELECT understood_at, tries, retry_at,
+                       (SELECT count(*) FROM talk_due d WHERE d.thread_id = m.thread_id)
+                     FROM message m WHERE id = ?1",
                     [id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )?)
             })
             .unwrap()
@@ -1443,15 +1445,17 @@ fn each_reset_change_gives_each_state_a_new_budget() {
                  UPDATE message SET gone_at = NULL WHERE id = ?id;");
             set(before);
             set(start_sql);
+            set("DELETE FROM talk_due;");
             set(sql);
-            assert_eq!(state(), (None, 0, None), "{change} from {start}");
+            assert_eq!(state(), (None, 0, None, 1), "{change} from {start}");
         }
     }
     // A user label is not a reset: the failed state stays.
     set(starts[0].1);
+    set("DELETE FROM talk_due;");
     set(&label("Work", true));
     set(&label("Work", false));
-    assert_eq!(state(), (None, 3, Some(9)));
+    assert_eq!(state(), (None, 3, Some(9), 0));
 }
 
 /// Issue #110: when SPAM comes, the droppable items of the message go at
