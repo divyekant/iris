@@ -797,9 +797,7 @@ pub fn write_reply(
     model: &dyn Model,
     now_ms: i64,
 ) -> Result<Saved> {
-    write_when(store, thread, form, None, model, now_ms, &|_| {
-        Ok(true)
-    })
+    write_when(store, thread, form, None, model, now_ms, &|_| Ok(true))
 }
 
 /// [`write`], with one more condition `still` that must be true before the
