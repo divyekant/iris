@@ -8,10 +8,13 @@
 //! dictionaries of object streams and the `ToUnicode` code maps. The fonts of
 //! a page often come after its content, so the strings wait in one bounded
 //! buffer. At the end, each string goes through the code map of its font. A
-//! string of a font without a map reads as Windows-1252, the encoding of the
-//! standard PDF fonts. A CID font (`/Type0`) without a map gives no text.
+//! string of a simple font without a map reads through its `/Encoding`:
+//! Windows-1252 (the default), `/StandardEncoding` or `/MacRomanEncoding`,
+//! with its `/Differences`. A CID font (`/Type0`) without a map gives no text.
 
 use std::collections::{BTreeMap, HashMap};
+
+use crate::glyphs::GLYPHS;
 
 /// The most bytes of one decompressed stream.
 const STREAM_LIMIT: usize = 4 * 1024 * 1024;
@@ -27,6 +30,9 @@ const OBJ_BUDGET: usize = 4 * 1024 * 1024;
 const MAP_BUDGET: usize = 1024 * 1024;
 /// The most fonts (a content stream and a font name) for one PDF.
 const FONT_LIMIT: usize = 4096;
+/// The most encoding tables (1 KiB each) for one PDF. The fonts past the
+/// limit read as Windows-1252.
+const TABLE_LIMIT: usize = 256;
 
 // The tags of the string buffer. A byte from 1 to `CHUNK` is the count of
 // string bytes that come after it.
@@ -111,6 +117,13 @@ pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
             data[..data.len().min(cap)].into()
         };
         total += decoded.len();
+        // A PNG predictor comes off after the inflate. Another predictor
+        // (TIFF) is not read.
+        let decoded = match doc.predictor(dict) {
+            Predictor::None => decoded,
+            Predictor::Png(p) => unpredict(&decoded, p).into(),
+            Predictor::Other => continue,
+        };
         if objects {
             doc.object_stream(dict, &decoded);
         } else if is_cmap(&decoded) {
@@ -402,6 +415,71 @@ fn only_flate(dict: &[u8]) -> bool {
     names == [b"FlateDecode"]
 }
 
+/// The predictor of a stream.
+enum Predictor {
+    None,
+    Png(Png),
+    /// A predictor that the reader does not apply: the stream is not read.
+    Other,
+}
+
+/// The row form of a PNG predictor: the bytes of a pixel and of a row.
+#[derive(Clone, Copy)]
+struct Png {
+    bpp: usize,
+    row: usize,
+}
+
+/// Take the PNG predictor (RFC 2083 section 6) off the rows of `data`. Each
+/// row has a filter byte, then `row` bytes. A short last row and the rows
+/// after a bad filter byte go out. The output is never longer than `data`.
+fn unpredict(data: &[u8], p: Png) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::with_capacity(data.len());
+    let mut rows = data.chunks_exact(p.row + 1);
+    let mut prev_at = None;
+    for r in rows.by_ref() {
+        let at = out.len();
+        for (i, &x) in r[1..].iter().enumerate() {
+            let a = if i >= p.bpp { out[at + i - p.bpp] } else { 0 };
+            let b = prev_at.map_or(0, |q: usize| out[q + i]);
+            let c = match prev_at {
+                Some(q) if i >= p.bpp => out[q + i - p.bpp],
+                _ => 0,
+            };
+            let v = match r[0] {
+                0 => x,
+                1 => x.wrapping_add(a),
+                2 => x.wrapping_add(b),
+                3 => x.wrapping_add(((a as u16 + b as u16) / 2) as u8),
+                4 => x.wrapping_add(paeth(a, b, c)),
+                _ => {
+                    out.truncate(at);
+                    return out;
+                }
+            };
+            out.push(v);
+        }
+        prev_at = Some(at);
+    }
+    out
+}
+
+fn paeth(a: u8, b: u8, c: u8) -> u8 {
+    let p = a as i16 + b as i16 - c as i16;
+    let (pa, pb, pc) = (
+        (p - a as i16).abs(),
+        (p - b as i16).abs(),
+        (p - c as i16).abs(),
+    );
+    if pa <= pb && pa <= pc {
+        a
+    } else if pb <= pc {
+        b
+    } else {
+        c
+    }
+}
+
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
@@ -607,6 +685,46 @@ impl Doc {
         }
     }
 
+    /// The `/DecodeParms` predictor of a stream dictionary.
+    fn predictor(&self, dict: &[u8]) -> Predictor {
+        // An array holds the parameters of each filter: one filter here.
+        let parms = match get(dict, b"/DecodeParms") {
+            Some(Val::Array(a)) => Some(a),
+            Some(v) => self.deref(v),
+            None => None,
+        };
+        let Some(parms) = parms else {
+            return Predictor::None;
+        };
+        let int_of = |k: &[u8], default: i64| match get(parms, k) {
+            Some(Val::Int(n)) => n,
+            _ => default,
+        };
+        match int_of(b"/Predictor", 1) {
+            1 => Predictor::None,
+            10..=15 => {
+                let (colors, bits, columns) = (
+                    int_of(b"/Colors", 1),
+                    int_of(b"/BitsPerComponent", 8),
+                    int_of(b"/Columns", 1),
+                );
+                let ok = (1..=32).contains(&colors)
+                    && [1, 2, 4, 8, 16].contains(&bits)
+                    && (1..=1 << 24).contains(&columns);
+                if !ok {
+                    return Predictor::Other;
+                }
+                // At most 32 * 16 / 8 = 64 bytes for each pixel.
+                let pixel = (colors * bits) as usize;
+                Predictor::Png(Png {
+                    bpp: pixel.div_ceil(8),
+                    row: (columns as usize * pixel).div_ceil(8),
+                })
+            }
+            _ => Predictor::Other,
+        }
+    }
+
     /// Keep the objects of one decoded object stream.
     fn object_stream(&mut self, dict: &[u8], data: &[u8]) {
         let (Some(Val::Int(n)), Some(Val::Int(first))) = (get(dict, b"/N"), get(dict, b"/First"))
@@ -725,10 +843,12 @@ impl Doc {
             fonts[id as usize] = (*num, name.as_slice());
         }
         let mut memo = HashMap::new();
+        let mut tables = Tables::default();
         let decs: Vec<Dec> = fonts
             .iter()
-            .map(|&(num, name)| self.decoder(&pages, &mut memo, num, name))
+            .map(|&(num, name)| self.decoder(&pages, &mut memo, &mut tables, num, name))
             .collect();
+        let tables = &tables.list;
         let mut out = String::new();
         let mut dec = &Dec::Latin;
         let mut codes = Vec::new();
@@ -750,7 +870,7 @@ impl Doc {
                     }
                 }
                 END => {
-                    clipped |= decode(dec, &codes, &mut out, limit);
+                    clipped |= decode(dec, tables, &codes, &mut out, limit);
                     codes.clear();
                 }
                 FONT => {
@@ -768,7 +888,7 @@ impl Doc {
             }
         }
         // The buffer can end inside the strings of one operator.
-        clipped |= decode(dec, &codes, &mut out, limit);
+        clipped |= decode(dec, tables, &codes, &mut out, limit);
         let full = clipped || out.len() >= limit;
         (out, full)
     }
@@ -858,6 +978,7 @@ impl Doc {
         &'a self,
         pages: &BTreeMap<u32, u32>,
         memo: &mut HashMap<u32, Option<&'a [u8]>>,
+        tables: &mut Tables,
         num: Option<u32>,
         name: &[u8],
     ) -> Dec<'a> {
@@ -874,11 +995,80 @@ impl Doc {
             Some(Val::Ref(n)) => self.maps.get(&n).map(|m| &m.0),
             _ => None,
         };
+        let table = if two { None } else { self.table(font, tables) };
         match map {
-            Some(m) => Dec::Map(m, two),
+            Some(m) => Dec::Map(m, two, table),
             None if two => Dec::Skip,
-            None => Dec::Latin,
+            None => table.map_or(Dec::Latin, Dec::Table),
         }
+    }
+
+    /// The encoding table of a simple font: its index in `tables`, or `None`
+    /// for Windows-1252. One font object gets one table.
+    fn table(&self, font: &[u8], tables: &mut Tables) -> Option<usize> {
+        let key = font.as_ptr() as usize;
+        if let Some(&t) = tables.of.get(&key) {
+            return t;
+        }
+        let t = self.new_table(font, tables);
+        tables.of.insert(key, t);
+        t
+    }
+
+    fn new_table(&self, font: &[u8], tables: &mut Tables) -> Option<usize> {
+        let (base, diffs) = match get(font, b"/Encoding")? {
+            Val::Name(n) => (Some(n), None),
+            v => {
+                let d = self.deref(v)?;
+                let base = match get(d, b"/BaseEncoding") {
+                    Some(Val::Name(n)) => Some(n),
+                    _ => None,
+                };
+                let diffs = match get(d, b"/Differences") {
+                    Some(Val::Array(a)) => Some(a),
+                    Some(Val::Ref(n)) => self.objs.get(&n).map(Vec::as_slice),
+                    _ => None,
+                };
+                (base, diffs)
+            }
+        };
+        let column: fn(&(&str, char, u8, u8)) -> u8 = match base {
+            Some(b"/StandardEncoding") => |g| g.2,
+            Some(b"/MacRomanEncoding") => |g| g.3,
+            _ if diffs.is_none() => return None,
+            _ => |_| 0,
+        };
+        if tables.list.len() >= TABLE_LIMIT {
+            return None;
+        }
+        let mut t: Table =
+            std::array::from_fn(|b| latin(&[b as u8]).chars().next().unwrap_or('\0'));
+        for g in &GLYPHS {
+            let code = column(g);
+            if code != 0 {
+                t[code as usize] = g.1;
+            }
+        }
+        if let Some(a) = diffs {
+            let mut lx = Lexer::new(a);
+            lx.next();
+            let mut code: Option<usize> = None;
+            while let Some(v) = value(&mut lx) {
+                match v {
+                    Val::Int(n) => code = usize::try_from(n).ok().filter(|&n| n < 256),
+                    Val::Name(n) => {
+                        if let Some(c) = code {
+                            // A name that the list does not know gives no character.
+                            t[c] = glyph(&n[1..]).unwrap_or('\0');
+                            code = Some(c + 1).filter(|&n| n < 256);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        tables.list.push(t);
+        Some(tables.list.len() - 1)
     }
 }
 
@@ -888,8 +1078,46 @@ enum Dec<'a> {
     Latin,
     /// A CID font without a code map: its codes are glyph numbers.
     Skip,
-    /// The code map, and true for a CID font (two-byte codes by default).
-    Map(&'a CMap, bool),
+    /// The encoding table of a simple font (an index in the tables).
+    Table(usize),
+    /// The code map, true for a CID font (two-byte codes by default), and
+    /// the encoding table of a simple font for the codes without an entry.
+    Map(&'a CMap, bool, Option<usize>),
+}
+
+/// The character of each code of a simple font. `\0` gives no character.
+type Table = [char; 256];
+
+/// The encoding tables of one PDF, and the table of each font object.
+#[derive(Default)]
+struct Tables {
+    list: Vec<Table>,
+    of: HashMap<usize, Option<usize>>,
+}
+
+/// The character of a glyph name: a name of the list, `uniXXXX` or
+/// `uXXXX` to `uXXXXXX` (hexadecimal).
+fn glyph(name: &[u8]) -> Option<char> {
+    let name = std::str::from_utf8(name).ok()?;
+    if let Ok(i) = GLYPHS.binary_search_by(|g| g.0.cmp(name)) {
+        return Some(GLYPHS[i].1);
+    }
+    let hex = |h: &str| {
+        (h.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| u32::from_str_radix(h, 16).ok().and_then(char::from_u32))
+            .flatten()
+    };
+    match name.strip_prefix("uni") {
+        Some(h) if h.len() == 4 => hex(h),
+        _ => name
+            .strip_prefix('u')
+            .filter(|h| (4..=6).contains(&h.len()))
+            .and_then(hex),
+    }
+}
+
+fn table_text(t: &Table, codes: &[u8], out: &mut String) {
+    out.extend(codes.iter().map(|&c| t[c as usize]).filter(|&c| c != '\0'));
 }
 
 fn latin(b: &[u8]) -> std::borrow::Cow<'_, str> {
@@ -898,19 +1126,28 @@ fn latin(b: &[u8]) -> std::borrow::Cow<'_, str> {
 
 /// Add the text of `codes` to `out`, which never grows past `limit` bytes.
 /// True if the limit cut off some of the text.
-fn decode(dec: &Dec, codes: &[u8], out: &mut String, limit: usize) -> bool {
+fn decode(dec: &Dec, tables: &[Table], codes: &[u8], out: &mut String, limit: usize) -> bool {
     let room = limit.saturating_sub(out.len());
     let t = match dec {
         Dec::Latin => latin(codes),
         Dec::Skip => return false,
-        Dec::Map(m, two) => {
+        Dec::Table(n) => {
+            let mut t = String::new();
+            table_text(&tables[*n], codes, &mut t);
+            t.into()
+        }
+        Dec::Map(m, two, table) => {
             let mut t = String::new();
             let mut i = 0;
             while i < codes.len() && t.len() <= room {
                 let e = (i + m.code_len(&codes[i..], if *two { 2 } else { 1 })).min(codes.len());
-                // A simple font reads a code without an entry as Windows-1252.
+                // A simple font reads a code without an entry through its
+                // encoding table, or as Windows-1252.
                 if !m.lookup(e - i, be(&codes[i..e]), &mut t) && !*two {
-                    t.push_str(&latin(&codes[i..e]));
+                    match table {
+                        Some(n) => table_text(&tables[*n], &codes[i..e], &mut t),
+                        None => t.push_str(&latin(&codes[i..e])),
+                    }
                 }
                 i = e;
             }
@@ -1798,6 +2035,139 @@ mod tests {
             (6, "<< >>", Some(cmap)),
         ]);
         assert_eq!(text(&pdf, 1000).as_deref(), Some("Paijd"));
+    }
+
+    /// A page with one content stream and the font `F1` (object 5).
+    fn one_font(font: &str, content: &[u8]) -> Option<String> {
+        let pdf = doc(&[
+            (
+                2,
+                "<< /Type /Page /Contents 3 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+                None,
+            ),
+            (3, "<< >>", Some(content)),
+            (5, font, None),
+        ]);
+        text(&pdf, 1000)
+    }
+
+    #[test]
+    fn mac_roman_and_standard_encodings() {
+        // 0x8E is é in MacRoman and Ž in Windows-1252.
+        let mac = "<< /Type /Font /Subtype /Type1 /Encoding /MacRomanEncoding >>";
+        assert_eq!(
+            one_font(mac, b"BT /F1 9 Tf (Caf\\216 cr\\216me) Tj ET").as_deref(),
+            Some("Café créme")
+        );
+        // 0x27 is quoteright in StandardEncoding.
+        let std = "<< /Type /Font /Subtype /Type1 /Encoding /StandardEncoding >>";
+        assert_eq!(
+            one_font(std, b"BT /F1 9 Tf (It's done) Tj ET").as_deref(),
+            Some("It\u{2019}s done")
+        );
+    }
+
+    #[test]
+    fn differences_change_codes() {
+        // Codes 1 to 5: f i, a ligature, the euro (uniXXXX), an unknown name
+        // (no character), and u1F600. The base is Windows-1252.
+        let font = "<< /Type /Font /Subtype /Type1 /Encoding 8 0 R >>";
+        let pdf = doc(&[
+            (
+                2,
+                "<< /Type /Page /Contents 3 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+                None,
+            ),
+            (3, "<< >>", Some(b"BT /F1 9 Tf <0102030405> Tj (Total 9) Tj ET")),
+            (5, font, None),
+            (
+                8,
+                "<< /Type /Encoding /BaseEncoding /WinAnsiEncoding /Differences [1 /f /i 3 /uni20AC /g77 /u1F600 300 /a] >>",
+                None,
+            ),
+        ]);
+        assert_eq!(text(&pdf, 1000).as_deref(), Some("fi€\u{1F600}Total 9"));
+    }
+
+    #[test]
+    fn a_map_falls_back_to_the_encoding_table() {
+        let cmap = b"begincmap 1 begincodespacerange <00> <FF> endcodespacerange \
+            1 beginbfchar <01> <0050> endbfchar endcmap";
+        let pdf = doc(&[
+            (
+                2,
+                "<< /Type /Page /Contents 3 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+                None,
+            ),
+            (3, "<< >>", Some(b"BT /F1 9 Tf <01> Tj (ar\\216) Tj ET")),
+            (
+                5,
+                "<< /Type /Font /Subtype /TrueType /Encoding /MacRomanEncoding /ToUnicode 6 0 R >>",
+                None,
+            ),
+            (6, "<< >>", Some(cmap)),
+        ]);
+        assert_eq!(text(&pdf, 1000).as_deref(), Some("Paré"));
+    }
+
+    /// The PNG `Up` filter (2) on rows of `columns` bytes.
+    fn png_up(data: &[u8], columns: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut prev = vec![0u8; columns];
+        for row in data.chunks(columns) {
+            let mut row = row.to_vec();
+            row.resize(columns, b' ');
+            out.push(2);
+            out.extend(row.iter().zip(&prev).map(|(x, p)| x.wrapping_sub(*p)));
+            prev = row;
+        }
+        out
+    }
+
+    #[test]
+    fn an_object_stream_with_a_png_predictor() {
+        let page = "<< /Type /Page /Contents 3 0 R /Resources << /Font << /F1 5 0 R >> >> >>";
+        let head = format!("2 0 5 {} ", page.len() + 1);
+        let body = format!("{head}{page}\n{TYPE0}");
+        let dict = format!(
+            "<< /Type /ObjStm /N 2 /First {} /DecodeParms << /Predictor 12 /Columns 7 >> >>",
+            head.len()
+        );
+        let pdf = doc(&[
+            (3, "<< >>", Some(CODES)),
+            (10, &dict, Some(&png_up(body.as_bytes(), 7))),
+            (6, "<< >>", Some(CMAP)),
+        ]);
+        assert_eq!(text(&pdf, 1000).as_deref(), Some("Hello World"));
+        // A TIFF predictor is not read: the objects are missing.
+        let dict = dict.replace("/Predictor 12", "/Predictor 2");
+        let pdf = doc(&[
+            (3, "<< >>", Some(CODES)),
+            (10, &dict, Some(&png_up(body.as_bytes(), 7))),
+            (6, "<< >>", Some(CMAP)),
+        ]);
+        assert_eq!(text(&pdf, 1000), None);
+    }
+
+    #[test]
+    fn unpredict_of_random_rows_stays_bounded() {
+        let mut rng = Rng(0x0DEC_0DE5_2025_1125);
+        for _ in 0..5_000 {
+            let len = rng.below(300);
+            let data: Vec<u8> = (0..len).map(|_| (rng.next() % 6) as u8).collect();
+            let p = Png {
+                bpp: 1 + rng.below(8),
+                row: 1 + rng.below(40),
+            };
+            let out = unpredict(&data, p);
+            assert!(out.len() <= data.len());
+            assert_eq!(out.len() % p.row, 0);
+        }
+        // Filter 0 gives the rows back.
+        assert_eq!(
+            unpredict(&[0, 1, 2, 0, 3, 4, 9], Png { bpp: 1, row: 2 }),
+            [1, 2, 3, 4]
+        );
     }
 
     #[test]
