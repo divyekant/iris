@@ -31,9 +31,12 @@ as spec 2 section 7.5 says."
 3. In the write view, after the person stops a mail, "Change and send"
    opens the form with the content of the draft. The next press changes
    the same draft and sends it.
-4. A change never overwrites text that the person wrote in Gmail. If the
-   draft at Gmail is not the draft that Iris wrote, the change and the
-   undo are refused.
+4. A change does not overwrite text that the person wrote in Gmail
+   before the read of the apply. If the draft at Gmail is not the draft
+   that Iris wrote, the change and the undo are refused. Gmail has no
+   conditional update, so an edit in Gmail in the time of one provider
+   call (between the read and `drafts.update`) can be lost. Version 1
+   accepts this risk (section 7).
 5. Each rule of the send spec stays true: the approval binds to the hash
    of the content, the read back before the release, the hold, the send
    switch and the checks before the send.
@@ -82,9 +85,19 @@ The submit denies a change, with the reason, when one of these is true:
 | A `send` action of the draft is `proposed`, `in_review`, `approved` or `held`, or a `ledger_send` row claims it | "The draft waits to send. Cancel it first." |
 | Another `draft` action that names the same draft is `approved` or `held`, or has a ledger row in `writing` | "Iris changes this draft now. Try again in a minute." |
 
-The same checks run again in the apply (section 2, step 1), because the
-state can change between the submit and the apply. The flags of the
-change (R3-03) come from the new content, as for a create.
+The same checks run again in the apply (section 2, step 1), and a third
+time in the claim transaction (section 2, step 4), because the state can
+change between the submit and the apply. The flags of the change (R3-03)
+come from the new content, as for a create.
+
+The submit of a `send` gets the mirror check: it denies a send of a
+draft that has a `draft` change action that is `approved` or `held`, or
+that has a ledger row in `writing`, with "Iris changes this draft now.
+Try again in a minute.". The one write connection of the store runs
+each submit and each claim, so of a change and a send of one draft, the
+first transaction that commits wins, and the other is denied. In the
+write view, one press makes the change and then its send (section 5),
+so the two never race there.
 
 ### 2. The apply of a change
 
@@ -104,7 +117,15 @@ The apply module (`crates/iris-apply/src/send.rs`) gets a branch for a
    - Another hash, or a form that Iris does not write: do the steps of
      `changed_at_gmail` for the row (refresh, or `foreign_at`), and deny
      with "The draft changed at Gmail. Iris did not change it.".
-4. Claim the ledger row in `writing`, in one transaction. `ops` is
+   - The new content hash is the `hash` of the draft row (the person
+     sent the same content again): no provider call. In one transaction,
+     the action becomes `applied` with a ledger row `applied`, `undo`
+     `none` and no `pre`. The send of the write then goes as in the write
+     spec. So a claim with a call always has a new hash that is not the
+     old hash, and recovery can tell the two apart (section 4).
+4. Claim the ledger row in `writing`, in one transaction that runs the
+   checks of section 1 again (a check that fails denies the action and
+   writes no ledger row). `ops` is
    `{"drafts.update": {"draft", "provider_id", "message_id", "date",
    "pre_hash", "hash", "thread"}}`. `pre` is the stored content of the
    draft row before the change (its `content` JSON and its `Date` in
@@ -123,6 +144,14 @@ A change keeps the `id` and the `provider_id` of the draft row. The
 `action_id` column keeps the action that made the draft. A send after
 the change binds to the new `hash` (write spec, section 3).
 
+The draft of an action is one rule, used by the send step of a write
+(`send_written`, write spec section 3, step 2a) and by the state of a
+write (`GET /api/write/{cs}`): the `draft` row whose `action_id` is the
+action (a create), or the `draft` row that the `drafts` target of the
+action names, once the action is `applied` (a change). Each query that
+joins `draft.action_id` to a send mark uses this rule. A test runs the
+write of a change to its `waiting` state.
+
 ### 3. The undo of a change
 
 `POST /api/ledger/{id}/undo` of an `applied` change makes an approved
@@ -138,6 +167,11 @@ apply is section 2, with these differences:
   different, and the undo is denied. The text of the person stays.
 - The entry of the undo has `undo` `none`. The entry of the change gets
   `undone_by` and the state `undone`.
+- Only the newest ledger entry of the draft (a change, a send or an
+  undo, by row ID) can be undone. An entry with a later entry of the
+  same draft is final. So for the changes A to B, B to C and C to B, the
+  first entry cannot undo the last B. The hash check alone cannot show
+  this, so the rule reads the ledger, not the hash.
 
 The undo is not possible (409 with the reason, nothing written) while a
 check of section 1 fails for the draft: for example while a send of the
@@ -149,7 +183,8 @@ A ledger row of a change in `writing` after a crash or a lost answer:
 
 1. Read the draft at Gmail and read it back.
 2. Its hash is the new `hash` of `ops`: the call applied. Do step 6 of
-   section 2.
+   section 2. The new hash is never the `pre_hash` (section 2, step 3),
+   so this result cannot come from a call that did not apply.
 3. Its hash is the `pre_hash` of `ops`: the call did not apply. Call
    `drafts.update` again with the same bytes (compose gives the same
    bytes from `ops` and `post`). A full replace with the same bytes has
@@ -174,23 +209,50 @@ A ledger row of a change in `writing` after a crash or a lost answer:
 - The send mark, the flags check and the key work as in the write spec.
   The request hash includes `draft`.
 
-`GET /api/write/{cs}` in the state `stopped` gets the field `change`:
-true when a check of section 1 passes for the draft now. The client
-reads the content of the draft from `GET /api/drafts/{d-N}` (a new read
-route: `to`, `cc`, `bcc`, `subject`, `body`, `attachments`, and the
-account and the thread).
+`GET /api/write/{cs}` in the state `stopped` with a draft gets the field
+`change`:
 
-The write view, in the state `stopped` with `change` true, shows
+| Value | When | Next press of Send |
+|---|---|---|
+| `"update"` | A Gmail account, and each check of section 1 passes for the draft now | Sends `draft`: the same draft changes |
+| `"new"` | An Outlook or IMAP account, the draft is not sent, and its account is still an account of Iris | No `draft`: a new draft, as today |
+| `null` | All other cases (sent, `foreign_at`, a send waits) | No "Change and send" |
+
+The client reads the content of the draft from `GET /api/drafts/{d-N}`
+(a new read route: `to`, `cc`, `bcc`, `subject`, `body`, `attachments`,
+and the account and the thread).
+
+The write view, in the state `stopped` with `change` not `null`, shows
 "Change and send". The press opens the form with the content of the
-draft and keeps `d-N`. The next press of Send sends `draft`. The layout
-of the button needs a before/after page and the pick of the owner.
+draft. For `"update"`, it keeps `d-N`, and the next press of Send sends
+`draft`. The layout of the button needs a before/after page and the pick
+of the owner.
 
 ### 6. The ledger view
 
 A change entry shows "Changed a draft" with the subject of the draft,
 and Undo while `can_undo` is true (the checks of section 3). The undo
 entry shows "Restored a draft". `ledger_can_undo` lists a change entry
-only while its draft passes the checks of section 1.
+only while its draft passes the checks of section 1 and the entry is
+the newest entry of its draft.
+
+### 7. The window between the read and the update
+
+Gmail `drafts.update` has no precondition (no ETag and no `If-Match`),
+so no call can say "change only if the draft is still X". The design
+makes the window small and keeps the evidence:
+
+- The read (step 3) and the update (step 5) are the two calls next to
+  each other, with no other provider call between them.
+- After the update, the apply reads the draft back once more. If its
+  hash is not the new hash, the row is `failed` with "The draft changed
+  at Gmail during the change. Look at it in Gmail.", and the draft row
+  refreshes from Gmail (`changed_at_gmail`).
+- The ledger keeps the content of Iris before the change (`pre`). The
+  text of the person in the window is not in the ledger.
+
+This is the same class of risk that spec 2 accepts for a label change
+(spec 2, Assumptions, first entry). A limit issue records it.
 
 ## Options not chosen
 
@@ -211,6 +273,11 @@ only while its draft passes the checks of section 1.
 | Input or event | Result | Test |
 |---|---|---|
 | Supported input: a `draft` action of the person on a Gmail draft of Iris that passes the checks of section 1 | The draft changes in place, with an undo | Apply test at the fake Gmail server |
+| The person edits the draft in Gmail between the read and the update | The edit can be lost (section 7, an accepted risk). The read back after the update fails the row if the hash is not the new hash | Fake server test of the read back |
+| The person presses Send with the same content again | No provider call, an entry with no undo, the send goes | Apply test |
+| A send submit and a change claim of one draft at the same time | The first transaction that commits wins. The other is denied | Changeset test |
+| The undo of a change that has a later entry of its draft | 409, nothing written | API test |
+| The write of a change | Its send step finds the draft by the target and reaches `waiting` | Apply and API test |
 | The person changed the draft in Gmail before the apply | Denied, the row refreshes or gets `foreign_at`, Gmail keeps the text of the person | Fake server test |
 | The draft is gone at Gmail (deleted or sent outside Iris) | Denied, nothing written at Gmail | Fake server test |
 | A send of the draft waits in the outbox, or a send is claimed | Submit and apply deny the change. The undo is a 409 | Changeset test, apply test |
@@ -235,7 +302,8 @@ only while its draft passes the checks of section 1.
 | `crates/iris-api` | `draft` in `POST /api/write`, `change` in `GET /api/write/{cs}`, `GET /api/drafts/{d-N}`, the ledger texts |
 | `client/` | "Change and send" in the write view, the ledger texts. A before/after page |
 | `docs/spec/02-changeset-policy-ledger.md` | The `draft` row of section 4, and section 7.5 |
-| Store | No migration is planned: `ops`, `pre` and `post` are JSON, and the `draft` row has each column. If a CHECK of the store refuses the new ops, the build adds a migration. |
+| Store | One migration. It changes the view `ledger_can_undo` so that it lists an `applied` draft change entry that is the newest entry of its draft and whose draft passes the checks of section 1. It changes the trigger `ledger_undo_insert` so that the undo of a draft change can be a `draft` action on the same draft. The view and the trigger keep each rule for the entries of the other verbs, so each existing entry keeps its state and its undo. `ops`, `pre` and `post` are JSON, and the `draft` row has each column, so no table changes. |
+| `crates/iris-apply`, `crates/iris-api` | The rule "the draft of an action" (section 2) in `send_written` and in the state of a write |
 
 Memory: the apply holds two copies of one message (the old read back and
 the new bytes), at most 2 times `iris_compose::max_message` (about 50 MB
@@ -262,7 +330,7 @@ for Gmail) during one change. A create holds one copy.
 
 | Call | Success | Definite rejection | Unknown result | Retry |
 |---|---|---|---|---|
-| `drafts.update` (change) | The row is `applied`, the draft row has the new content | The row is `failed`, the draft row does not change | Recovery (section 4) reads the draft | Only from recovery, only when Gmail has `pre_hash` |
+| `drafts.update` (change) | The read back has the new hash: the row is `applied`, the draft row has the new content. Another hash: `failed` (section 7) | The row is `failed`, the draft row does not change | Recovery (section 4) reads the draft | Only from recovery, only when Gmail has `pre_hash` |
 | `drafts.update` (undo) | The change entry is `undone`, the draft row has the old content | The undo row is `failed`, the change entry stays `applied` | Recovery as section 4, with the hashes swapped | As for a change |
 
 ## Open questions
@@ -282,5 +350,8 @@ for Gmail) during one change. A create holds one copy.
    the text at the server stays. Red if the undo writes.
 4. A crash test for each case of section 4. Red if a case writes twice or
    loses the change.
-5. An Outlook account still makes a new draft for "Change and send". Red
-   if the engine calls a change on Outlook.
+5. An Outlook account still makes a new draft for "Change and send"
+   (`change` is `"new"`). Red if the engine calls a change on Outlook, or
+   if the write view hides the control for Outlook.
+6. The changes A to B, B to C, C to B of one draft: the undo of the
+   first entry is a 409. Red if the undo writes A.
