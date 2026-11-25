@@ -734,3 +734,99 @@ async fn each_gate_item_is_in_one_place_after_any_answers() {
 fn ids_of(list: &Value) -> Vec<String> {
     ids(list)
 }
+
+#[tokio::test]
+async fn a_gate_sender_with_the_name_of_a_known_person_says_so() {
+    // Issue #370: a new address under the name of a known person.
+    let g = Gate::new("known-name");
+    let s = sample(&g);
+    g.exec(
+        "UPDATE sender SET name = 'Dee Ray' WHERE address = 'dee@contoso.example'",
+        [],
+    );
+    g.exec(
+        "UPDATE sender SET name = 'dee RAY' WHERE address = 'ana@paypal.com'",
+        [],
+    );
+    g.exec(
+        "UPDATE sender SET name = '' WHERE address = 'bo@later.example'",
+        [],
+    );
+    // A stranger with the same name is not a known person.
+    g.sender("eve@other.example", Some("stranger"));
+    g.exec(
+        "UPDATE sender SET name = '' WHERE address = 'eve@other.example'",
+        [],
+    );
+    let gate = g.get("/api/gate").await;
+    let of = |id: &str| {
+        gate["senders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == id)
+            .unwrap()["known_as"]
+            .clone()
+    };
+    assert_eq!(of(&s.ana), "dee@contoso.example");
+    assert_eq!(of(&s.bo), Value::Null);
+}
+
+#[tokio::test]
+async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
+    // Issue #49.
+    let g = Gate::new("trust");
+    let s = sample(&g);
+    // Alice has no evidence rows: a person set her kind, so a refresh keeps it.
+    g.sender("alice@paypal.com", Some("person"));
+    g.exec(
+        "UPDATE sender SET decided_by = 'person' WHERE address = 'alice@paypal.com'",
+        [],
+    );
+    let look = g.sender("alerts@paypa1.com", Some("hostile"));
+    g.exec(
+        "UPDATE sender SET basis = 'near copy of paypal.com' WHERE address = 'alerts@paypa1.com'",
+        [],
+    );
+    // Message 5 is from the look-alike: it can be trusted.
+    let m = g.get("/api/messages/m-5").await;
+    assert_eq!(m["sender_kind"], "hostile");
+    assert_eq!(m["near_copy"], json!({"sender": look, "of": "paypal.com"}));
+    assert_eq!(g.get("/api/messages/m-1").await["near_copy"], Value::Null);
+
+    let (code, v) = g.answer(&look, "trust").await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(
+        (v["kind"].as_str(), v["decided_by"].as_str()),
+        (Some("person"), Some("person"))
+    );
+    assert_eq!(
+        g.one::<Option<i64>>("SELECT understood_at FROM message WHERE id = 5"),
+        None
+    );
+    let m = g.get("/api/messages/m-5").await;
+    assert_eq!(
+        (m["sender_kind"].as_str(), &m["near_copy"]),
+        (Some("person"), &Value::Null)
+    );
+
+    // The trusted look-alike is no reference of the near-copy rule: the
+    // real domain does not become a near copy of it.
+    assert_eq!(
+        g.one::<String>("SELECT kind FROM sender WHERE address = 'ana@paypal.com'"),
+        "stranger"
+    );
+        // A sender that is not an engine near copy: no trust, no write.
+    let (code, v) = g.answer(&s.ana, "trust").await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert!(v["error"].as_str().unwrap().contains("near copy"), "{v}");
+    assert_eq!(g.answer("p-999", "trust").await.0, StatusCode::NOT_FOUND);
+
+    // Reopen: the engine decides again, and the mark comes back.
+    let (code, _) = g.answer(&look, "reopen").await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(
+        g.one::<String>("SELECT kind FROM sender WHERE address = 'alerts@paypa1.com'"),
+        "hostile"
+    );
+}
