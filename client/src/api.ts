@@ -413,7 +413,7 @@ export type WriteState =
   | { state: "waiting"; draft: string; sending: boolean; bcc_check?: string | null; leaves_at: string | null }
   | { state: "review"; draft: string; reason: string | null }
   | { state: "sent"; draft: string }
-  | { state: "stopped"; reason: string; draft: string | null; change?: "update" | "new" | null };
+  | { state: "stopped"; reason: string; draft: string | null; change?: "update" | "new" | null; newer_mail?: boolean };
 
 /**
  * GET /api/drafts/{id}: the content of a draft, for the form of "Change and

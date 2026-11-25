@@ -1024,6 +1024,29 @@ test("Change and send opens the form with the draft and a new key; update sends 
   }
 });
 
+test("A stopped reply with a newer mail says why it cannot change (draft change spec, section 5, #1077)", async () => {
+  for (const newer of [true, undefined]) {
+    window.sessionStorage.clear();
+    const net = serve((path, method) => {
+      if (method === "POST" && path === "write") return [201, { write: "cs-1" }];
+      if (path === "write/cs-1")
+        return [200, { state: "stopped", reason: "You stopped this mail.", draft: "d-1", change: null, newer_mail: newer }];
+      return [404, { error: "Not found." }];
+    });
+    const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+    try {
+      await fill(app);
+      press(app);
+      await until(() => text(app.target).includes("This mail did not leave"));
+      const why = text(app.target).includes("A new mail came into this thread. Write a new reply.");
+      assert.equal(why, newer === true);
+    } finally {
+      app.destroy();
+      net.restore();
+    }
+  }
+});
+
 test("Write another waits while the draft loads, and a draft holds only for its own account", async () => {
   const TWO = [...ACCOUNTS, { ...ACCOUNTS[0], id: 2, address: "dk@work.example" }];
   let release;
