@@ -497,3 +497,85 @@ fn a_link_with_an_unknown_named_reference_cuts_the_links() {
         assert!(!clean(&html(body)).links_cut, "{body}");
     }
 }
+
+/// A message with `inner` as an attached `message/rfc822` part.
+fn with_attached(inner: &str) -> Vec<u8> {
+    format!(
+        "From: a@example.com\r\nSubject: x\r\nContent-Type: multipart/mixed; boundary=o\r\n\r\n\
+--o\r\nContent-Type: text/plain\r\n\r\nSee the mail below.\r\n\
+--o\r\nContent-Type: message/rfc822\r\n\r\n{inner}\r\n--o--\r\n"
+    )
+    .into_bytes()
+}
+
+/// The links of an attached message, also of a message attached to it, are
+/// in `attached_links`, not in `links` (issue #372).
+#[test]
+fn the_links_of_an_attached_message_are_listed() {
+    let inner = "From: b@bank.example.com\r\nSubject: y\r\nContent-Type: text/html\r\n\r\n\
+<a href=\"https://evil.example.net/\">bank.example.com</a>";
+    let c = clean(&with_attached(inner));
+    assert!(c.links.is_empty());
+    assert_eq!(
+        c.attached_links,
+        vec![link("bank.example.com", "https://evil.example.net/")]
+    );
+    assert!(!c.links_cut);
+    // One level deeper.
+    let deep = format!(
+        "From: c@example.org\r\nSubject: z\r\nContent-Type: multipart/mixed; boundary=i\r\n\r\n\
+--i\r\nContent-Type: text/plain\r\n\r\nFwd.\r\n\
+--i\r\nContent-Type: message/rfc822\r\n\r\n{inner}\r\n--i--"
+    );
+    let c = clean(&with_attached(&deep));
+    assert_eq!(
+        c.attached_links,
+        vec![link("bank.example.com", "https://evil.example.net/")]
+    );
+}
+
+/// An attached message past the read limit with an HTML part after the
+/// limit cuts the link list. Plain text after the limit does not.
+#[test]
+fn an_html_part_past_the_limit_of_an_attached_message_cuts_the_links() {
+    let pad = "a".repeat(iris_clean::INNER_LIMIT);
+    let html = format!(
+        "From: b@example.com\r\nSubject: y\r\nContent-Type: multipart/mixed; boundary=i\r\n\r\n\
+--i\r\nContent-Type: application/octet-stream\r\n\r\n{pad}\r\n\
+--i\r\nContent-Type: text/html\r\n\r\n<a href=\"https://evil.example.net/\">bank.example.com</a>\r\n--i--"
+    );
+    assert!(clean(&with_attached(&html)).links_cut);
+    let plain = html.replace("text/html", "text/plain");
+    assert!(!clean(&with_attached(&plain)).links_cut);
+}
+
+/// Each link of an attached message that Iris does not read sets
+/// `links_cut` (issue #372): a nested message past the read limit of an
+/// attached message, a cut of the raw message inside an attached message,
+/// and an attached message past the cut.
+#[test]
+fn an_unread_attached_message_cuts_the_links() {
+    let pad = "a".repeat(iris_clean::INNER_LIMIT);
+    let nested = format!(
+        "From: b@example.com\r\nSubject: y\r\nContent-Type: multipart/mixed; boundary=i\r\n\r\n\
+--i\r\nContent-Type: application/octet-stream\r\n\r\n{pad}\r\n\
+--i\r\nContent-Type: message/rfc822\r\n\r\n\
+From: c@example.com\r\nSubject: z\r\nContent-Type: text/plain\r\n\r\nHi.\r\n--i--"
+    );
+    assert!(clean(&with_attached(&nested)).links_cut);
+
+    let inner = "From: b@bank.example.com\r\nSubject: y\r\nContent-Type: text/html\r\n\r\n\
+<p>Hello</p><a href=\"https://evil.example.net/\">bank.example.com</a>";
+    let raw = with_attached(inner);
+    let at = raw.windows(5).position(|w| w == b"Hello").unwrap();
+    // The cut is inside the attached message.
+    assert!(clean_cut(&raw[..at], true).links_cut);
+    assert!(!clean_cut(&raw, false).links_cut);
+    // The attached message starts past the cut.
+    let start = raw
+        .windows(14)
+        .position(|w| w == b"message/rfc822")
+        .unwrap()
+        - 14;
+    assert!(html_part_in(&raw[..start], &raw[start..]).unwrap());
+}
