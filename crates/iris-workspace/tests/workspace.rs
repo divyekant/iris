@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use iris_job::{add_scope, create, By, Error, Ref};
 use iris_store::Store;
-use iris_workspace::{build, default_dir};
+use iris_workspace::{build, default_dir, readable};
 
 /// A new empty folder for one test, removed at the end.
 struct TempDir(PathBuf);
@@ -817,6 +817,47 @@ fn mail_that_waits_for_its_link_check_is_left_out() {
         .unwrap();
     build(&store, job, &ws).unwrap();
     assert!(walk(&ws).1.contains("DANA-TEXT"));
+}
+
+#[test]
+fn mail_with_the_label_spam_is_left_out() {
+    // Issue 821: the label SPAM alone (no hostile mark, no hostile sender)
+    // makes hostile mail (`iris_store::hostile_mail!()`), so no workspace
+    // gets its text or the file of an item from it, and a session cannot
+    // read it.
+    let tmp = TempDir::new("spam");
+    let store = store(&tmp.0.join("data"));
+    let spam = |on: bool| {
+        store
+            .write(|tx| {
+                tx.execute_batch(if on {
+                    "INSERT INTO label (id, account_id, provider_id, name, kind)
+                       VALUES (9, 1, 'SPAM', 'SPAM', 'system');
+                     INSERT INTO message_label (message_id, label_id) VALUES (1, 9);"
+                } else {
+                    "DELETE FROM message_label WHERE label_id = 9;"
+                })?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    let job = job(&store);
+    let ws = default_dir(&tmp.0.join("data"), job);
+    build(&store, job, &ws).unwrap();
+    assert!(ws.join("commitments/c-1.json").exists());
+    spam(true);
+    build(&store, job, &ws).unwrap();
+    let (paths, text) = walk(&ws);
+    assert!(!text.contains("DANA-TEXT"), "{text}");
+    assert!(!paths.contains("commitments/c-1.json"), "{paths:?}");
+    assert!(text.contains("MY-REPLY-TEXT"), "{text}");
+    assert!(!store.read(|c| Ok(readable(c, 1)?)).unwrap());
+    // When the label goes, the next build has the message again.
+    spam(false);
+    build(&store, job, &ws).unwrap();
+    assert!(walk(&ws).1.contains("DANA-TEXT"));
+    assert!(ws.join("commitments/c-1.json").exists());
+    assert!(store.read(|c| Ok(readable(c, 1)?)).unwrap());
 }
 
 /// The files follow the published layout of the open model
