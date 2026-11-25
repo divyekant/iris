@@ -824,16 +824,18 @@ list of the name-address part of the mark `spoof` (decision D32):
   (U+FF20, U+FE6B) counts as `@`.
 - An address in the name is a word with one `@`, a local part that is not
   empty, and a domain with a dot and no empty label. Other words are text.
-- The domain of an address ends at the first ASCII character that a domain
-  cannot hold (as `/` in `a@bank.example/help`), and at the first Unicode
-  punctuation character of the classes Pd, Po, Ps, Pe, Pi and Pf (as the em
-  dash in `a@bank.example—help`). The punctuation that a domain can hold
-  does not end it: the exceptions of RFC 5892 section 2.6 (U+00B7, U+05F3,
-  U+05F4, U+0F0B and U+30FB, as in `a@company.jp・日本.com`), and the dots
-  U+3002, U+FF0E and U+FF61, which IDNA reads as `.`. IDNA2008 disallows
-  each other punctuation character in a label. All other characters stay in
-  the domain (letters, marks and format characters such as U+202E), so a
-  mixed-script, reversed or longer domain has another owner.
+- The domain of an address is read as the owner check reads it: each
+  character gets the UTS 46 mapping of the URL host parser, one character
+  at a time (so U+FF0D is `-`, and U+3002, U+FF0E and U+FF61 are `.`). A
+  character that UTS 46 disallows becomes U+FFFD and stays. The mapped
+  domain ends at the first ASCII character that a domain cannot hold (as
+  `/` in `a@bank.example/help`), and at the first Unicode punctuation
+  character of the classes Pd, Po, Ps, Pe, Pi and Pf (as the em dash in
+  `a@bank.example—help`), except the punctuation that IDNA2008 allows in a
+  label: the exceptions of RFC 5892 section 2.6 (U+00B7, U+05F3, U+05F4,
+  U+0F0B and U+30FB, as in `a@company.jp・日本.com`). All other characters
+  stay in the domain (letters, marks and format characters such as
+  U+202E), so a mixed-script, reversed or longer domain has another owner.
 - The owner of an address is its registrable domain, in punycode: the
   public suffix and one label more. The public suffix is the longer of the
   suffix of the public suffix list (with its private part, as `github.io`)
