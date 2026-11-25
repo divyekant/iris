@@ -137,10 +137,8 @@ pub fn verify_held(
     // After an error, the differences found before it are still true: save
     // them and their resync too.
     let result = compare(store, mail, account, token, &v, &mut report);
-    let mut text = format!("{} differences, {} skipped", report.total, report.skipped);
-    if let Err(e) = &result {
-        text.push_str(&format!(", then error: {e}"));
-    }
+    let error = result.as_ref().err().map(|e| e.to_string());
+    let mut text = iris_store::verify_log::line(report.total, report.skipped, error.as_deref());
     for d in report.differences.iter().take(100) {
         text.push_str(&format!("\n{d}"));
     }

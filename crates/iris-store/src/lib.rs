@@ -117,6 +117,7 @@ mod id;
 mod remove;
 mod search;
 mod secret;
+pub mod verify_log;
 mod watch;
 
 use std::borrow::Cow;
