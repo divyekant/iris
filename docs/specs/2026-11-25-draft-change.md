@@ -297,7 +297,10 @@ after "Change and send" in the write view. For a reply, the form is under
 the conversation of its thread. If `change` is `null` when the link
 opens, the form is empty, and the view says why: the message of the table
 when `newer` is true, else "This draft cannot change now. Write a new
-mail here.". The form never shows a saved form of another mail.
+mail here.". The form never shows a saved form of another mail, and
+never an automatic draft of the thread. If the thread of such a reply
+draft has no mail to answer now (its parent is in Trash, for example),
+the link opens the form of a new mail, and `newer` is false.
 
 The write view, in the state `stopped` with `change` not `null`, shows
 "Change and send". The press opens the form with the content of the

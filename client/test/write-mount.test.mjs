@@ -1125,6 +1125,8 @@ test("a reply draft with a newer mail in its thread says so, from the draft link
   const net = serve((path, method) => {
     if (method === "POST" && path === "write") return [201, { write: "cs-1" }];
     if (path === "write/cs-1") return [200, { state: "stopped", reason: "You stopped this mail.", draft: "d-7", change: null, newer: true }];
+    // An automatic draft for the parent of the thread: a draft link does not take it.
+    if (method === "GET" && path === "threads/t-2/draft") return [200, { body: "Hi Priya,\n\nYes.", based_on: "m-9", nudge: false }];
     return [404, { error: "Not found." }];
   });
   const DRAFT = { draft: "d-7", account: "a-1", thread: "t-2", to: ["old@example.com"], cc: [], bcc: [],
@@ -1134,7 +1136,9 @@ test("a reply draft with a newer mail in its thread says so, from the draft link
     app.flushSync();
     assert.match(text(app.target), /A new mail came into this thread\. Write a new reply\./);
     assert.doesNotMatch(text(app.target), /This draft cannot change now/);
-    assert.equal(app.target.querySelector("textarea").value, "", "a fresh reply, not the old text");
+    await new Promise((r) => setTimeout(r, 60));
+    app.flushSync();
+    assert.equal(app.target.querySelector("textarea").value, "", "a fresh reply: not the old text, not an automatic draft");
   } finally {
     app.destroy();
   }
@@ -1149,5 +1153,32 @@ test("a reply draft with a newer mail in its thread says so, from the draft link
   } finally {
     app.destroy();
     net.restore();
+  }
+});
+
+test("loadChange: a reply draft that cannot change opens a new mail when its thread has no mail to answer (issue 941)", async () => {
+  const api = await load("/src/api.ts");
+  const DRAFT = { draft: "d-7", account: "a-1", thread: "t-2", to: ["priya@example.com"], cc: [], bcc: [],
+                  subject: "Re: Q4", body: "Old.\n", attachments: [], newer: false };
+  for (const change of [null, "update"]) {
+    const net = serve((path) => {
+      if (path === "drafts/d-7") return [200, { ...DRAFT, change }];
+      if (path === "threads/t-2/reply") return [409, { error: "This thread has no mail to answer." }];
+      if (path === "status") return [200, { accounts: ACCOUNTS }];
+      return [404, { error: "Not found." }];
+    });
+    try {
+      if (change === null) {
+        const start = await api.loadChange("d-7");
+        assert.equal(start.thread, undefined, "a new mail, not a reply");
+        assert.deepEqual(start.accounts, ACCOUNTS);
+        assert.equal(start.change.change, null);
+      } else {
+        // A draft that can change needs its thread: the error shows.
+        await assert.rejects(api.loadChange("d-7"));
+      }
+    } finally {
+      net.restore();
+    }
   }
 });

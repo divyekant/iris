@@ -269,7 +269,8 @@
       same(f.cc, reply?.cc ?? []));
   let filled = $state(false);
   let asked = false;
-  if (thread && reply && untouched(saved) && !taken()) {
+  // A draft link fills the form only from its own draft (draft change spec, section 5).
+  if (!opened && thread && reply && untouched(saved) && !taken()) {
     get<ThreadDraft>(`threads/${encodeURIComponent(thread)}/draft`).then(
       (d) => {
         if (alive && !write && !asked && !d.nudge && d.based_on === reply.parent.id && untouched({ to, cc, bcc, files, body, intent, toText, ccText, bccText })) {

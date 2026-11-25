@@ -304,10 +304,13 @@ fn change(store: &Store, c: &Connection, draft: i64, now_ms: i64) -> rusqlite::R
     // message that the draft answers.
     if let Some(thread) = thread {
         let answers = iris_changeset::draft_parent(c, draft).map_err(db)?;
-        if answers.is_none() {
+        let now = iris_changeset::reply_parent(c, thread)?;
+        if answers.is_none() || now.is_none() {
+            // No mail to answer now (the parent is in Trash, for example):
+            // no newer mail either.
             return Ok(CANNOT);
         }
-        if answers != iris_changeset::reply_parent(c, thread)? {
+        if answers != now {
             return Ok(Can {
                 change: None,
                 newer: true,

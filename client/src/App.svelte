@@ -1,6 +1,6 @@
 <script lang="ts">
   import { access } from "./access.svelte.ts";
-  import { followSignIn, get, loadBrief, loadOutbox, own, type Changeset, type GatePage, type HandledPage, type LedgerPage, type JobDetail, type JobPage, type MatterList, type MatterView, type Item as ItemData, type Message as MessageData, type Page, type Policy, type ReplyStart, type Status, type DraftContent } from "./api";
+  import { followSignIn, get, loadBrief, loadChange, loadOutbox, own, type Changeset, type GatePage, type HandledPage, type LedgerPage, type JobDetail, type JobPage, type MatterList, type MatterView, type Item as ItemData, type Message as MessageData, type Page, type Policy, type ReplyStart, type Status } from "./api";
   import { home } from "./format";
   import { pageSize } from "./jobs";
   import type { Measures as MeasuresData } from "./measures";
@@ -77,12 +77,6 @@
   let moreOpen = $state(false);
   const back = () => (history.length > 1 ? history.back() : (location.hash = "#/brief"));
 
-  // #/write/d-9 (issue 941): the form of the draft d-9, under its thread for a reply.
-  async function loadChange(id: string) {
-    const change = await get<DraftContent>(`drafts/${encodeURIComponent(id)}`);
-    if (change.thread) return { thread: change.thread, reply: await get<ReplyStart>(`threads/${encodeURIComponent(change.thread)}/reply`), change };
-    return { accounts: (await get<Status>("status")).accounts, change };
-  }
 </script>
 
 <!-- The Mac app drags its window by the empty part of this bar and of its

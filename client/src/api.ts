@@ -363,6 +363,25 @@ export type OutboxSend = {
 export type Outbox = { sending: { on: boolean; since: string | null }; count: number; sends: OutboxSend[]; next: string | null };
 
 /** The whole outbox: each page of GET /api/outbox, so no send that can leave is hidden. */
+/**
+ * The start of #/write/d-N (issue 941): the draft, under its thread for a
+ * reply. A reply draft that cannot change opens a new mail when its thread
+ * has no mail to answer now, so the person can still write.
+ */
+export async function loadChange(
+  id: string,
+): Promise<{ change: DraftContent } & ({ thread: string; reply: ReplyStart } | { accounts: Status["accounts"] })> {
+  const change = await get<DraftContent>(`drafts/${encodeURIComponent(id)}`);
+  if (change.thread) {
+    try {
+      return { thread: change.thread, reply: await get<ReplyStart>(`threads/${encodeURIComponent(change.thread)}/reply`), change };
+    } catch (e) {
+      if (change.change !== null) throw e;
+    }
+  }
+  return { accounts: (await get<Status>("status")).accounts, change };
+}
+
 export async function loadOutbox(): Promise<Outbox> {
   const first = await get<Outbox>("outbox");
   const sends = [...first.sends];

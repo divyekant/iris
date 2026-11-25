@@ -1080,6 +1080,16 @@ async fn a_stopped_reply_changes_only_for_its_parent() {
         (&json!(true), &json!(true)),
         "{st} {d}"
     );
+    // With no mail to answer in the thread, no mail is newer either.
+    set("UPDATE message SET gone_at = 1 WHERE thread_id = 1");
+    let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    let (_, d) = call(&s, "GET", "/api/drafts/d-1", None).await;
+    assert_eq!(
+        (&st["newer"], &d["newer"], &d["change"]),
+        (&json!(false), &json!(false), &Value::Null),
+        "{st} {d}"
+    );
+    set("UPDATE message SET gone_at = NULL WHERE thread_id = 1");
     set("UPDATE account SET provider = 'outlook' WHERE id = 1");
     assert_eq!(change(&s, &cs).await, Value::Null);
     set("UPDATE account SET provider = 'gmail' WHERE id = 1");
