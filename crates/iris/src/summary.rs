@@ -238,7 +238,10 @@ mod tests {
         assert_eq!(
             count(
                 &store,
-                "SELECT count(*) FROM understand_run WHERE prompt = 'summary/0.1'"
+                &format!(
+                    "SELECT count(*) FROM understand_run WHERE prompt = '{}'",
+                    iris_summary::PROMPT
+                )
             ),
             1
         );
