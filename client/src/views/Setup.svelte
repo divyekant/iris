@@ -3,7 +3,7 @@
   brief. The page says at each step that nothing changes in the mailbox.
 -->
 <script lang="ts">
-  import { get, type Status } from "../api";
+  import { readStatus, type Status } from "../api";
   import { poll as every } from "../clock";
   import { across, copying, needsModel, unfinished } from "../format";
   import NoModel from "./NoModel.svelte";
@@ -13,7 +13,8 @@
   let status = $state(initial);
 
   // Ask the local engine for progress while this page is open.
-  $effect(() => (poll ? every(() => get<Status>("status"), (s) => (status = s), poll) : undefined));
+  // Only the newest status shows (api.ts): an older answer gives null.
+  $effect(() => (poll ? every(readStatus, (s) => s && (status = s), poll) : undefined));
 
   // The account that still copies comes first: with two accounts, one can be ready while the other copies.
   let account = $derived(copying(status)[0] ?? unfinished(status)[0] ?? status.accounts[0]);

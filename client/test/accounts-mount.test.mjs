@@ -158,13 +158,211 @@ test("a try that runs after a failed try says that the last try failed", async (
   }
 });
 
-test("an account in state removing says that Iris deletes its mail, not that it copies it", async () => {
+test("remove asks one question in place, Keep changes nothing, and Remove posts the address", async () => {
+  const saved = globalThis.fetch;
+  const asked = [];
+  const [one, two] = fx.status.accounts;
+  globalThis.fetch = async (url, init) => {
+    asked.push([String(url), JSON.parse(init.body)]);
+    return new Response(JSON.stringify({ ...fx.status, accounts: [two] }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const view = await mount("/src/views/Accounts.svelte", { status: fx.status, poll: 0 });
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  const press = (label) => [...view.target.querySelectorAll("button")].find((b) => b.textContent.trim() === label).click();
+  try {
+    view.target.querySelector(`button[aria-label="Remove ${one.address}"]`).click();
+    await tick();
+    assert.match(text(view.target), new RegExp(`Remove ${one.address.replace(".", "\\.")}\\? Iris deletes its mail from this machine\\.`));
+    assert.match(text(view.target), /The files of agents in its jobs go\. A backup and the notes of jobs keep their copy\./);
+    assert.match(text(view.target), /The record of what Iris and you did stays: drafts, the reasons of changes, job events and the titles of matters that you decided can hold text from this mail\./);
+    press("Keep");
+    await tick();
+    assert.doesNotMatch(text(view.target), /Iris deletes its mail/);
+    assert.equal(asked.length, 0);
+
+    view.target.querySelector(`button[aria-label="Remove ${one.address}"]`).click();
+    await tick();
+    press("Remove");
+    for (let i = 0; i < 5; i++) await tick();
+    assert.deepEqual(asked, [[`/api/accounts/${one.id}/remove`, { address: one.address }]]);
+    assert.match(text(view.target), new RegExp(`Removed ${one.address.replace(".", "\\.")}\\. Its mail is gone from Iris on this machine\\.`));
+    assert.equal(view.target.querySelectorAll(".accounts li").length, 1);
+  } finally {
+    view.destroy();
+    globalThis.fetch = saved;
+  }
+});
+
+test("a remove whose answer is lost shows what a fresh status says, and an unknown result offers a check", async () => {
+  const saved = globalThis.fetch;
+  const [one, two] = fx.status.accounts;
+  const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  const settle = async () => {
+    for (let i = 0; i < 8; i++) await tick();
+  };
+  const press = (view, label) => [...view.target.querySelectorAll("button")].find((b) => b.textContent.trim() === label).click();
+  // The engine removed the account, but the answer was lost: the status has no line for it.
+  let status = { ok: true, body: { ...fx.status, accounts: [two] } };
+  globalThis.fetch = async (url, init) => {
+    if (init?.method === "POST") throw new TypeError("Failed to fetch");
+    if (!status.ok) throw new TypeError("Failed to fetch");
+    return json(status.body);
+  };
+  let view = await mount("/src/views/Accounts.svelte", { status: fx.status, poll: 0 });
+  try {
+    view.target.querySelector(`button[aria-label="Remove ${one.address}"]`).click();
+    await tick();
+    press(view, "Remove");
+    await settle();
+    assert.match(text(view.target), new RegExp(`Removed ${one.address.replace(".", "\\.")}\\.`));
+    assert.doesNotMatch(text(view.target), /Failed to fetch/);
+    assert.equal(view.target.querySelectorAll(".accounts li").length, 1);
+  } finally {
+    view.destroy();
+  }
+
+  // No status either: the result is unknown. The line says so and offers a check, and no Remove.
+  status = { ok: false };
+  view = await mount("/src/views/Accounts.svelte", { status: fx.status, poll: 0 });
+  try {
+    view.target.querySelector(`button[aria-label="Remove ${one.address}"]`).click();
+    await tick();
+    press(view, "Remove");
+    await settle();
+    const row = () => text(view.target.querySelector(".accounts li"));
+    assert.match(row(), /Iris could not tell if this account is removed\. The removal can still run\./);
+    assert.equal(view.target.querySelector(".ask"), null);
+    assert.equal(view.target.querySelector(`button[aria-label="Remove ${one.address}"]`), null);
+    // The engine still waits for a lock: the status gives the account as before. The doubt stays.
+    status = { ok: true, body: fx.status };
+    press(view, "Check again");
+    await settle();
+    assert.match(row(), /Iris could not tell if this account is removed\./);
+    assert.equal(view.target.querySelector(`button[aria-label="Remove ${one.address}"]`), null);
+    // The removal commits: the line says that Iris deletes the mail, then the account goes.
+    status = { ok: true, body: { ...fx.status, accounts: [{ ...one, state: "removing" }, two] } };
+    press(view, "Check again");
+    await settle();
+    assert.match(row(), /Iris deletes the mail of this account from this machine\./);
+    assert.doesNotMatch(row(), /could not tell/);
+  } finally {
+    view.destroy();
+    globalThis.fetch = saved;
+  }
+});
+
+test("a polled status closes the question of an account in a removal, and shows a removed account", async () => {
+  const saved = globalThis.fetch;
+  const [one, two] = fx.status.accounts;
+  let next = fx.status;
+  globalThis.fetch = async () => new Response(JSON.stringify(next), { status: 200, headers: { "content-type": "application/json" } });
+  const view = await mount("/src/views/Accounts.svelte", { status: fx.status, poll: 20 });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  try {
+    view.target.querySelector(`button[aria-label="Remove ${one.address}"]`).click();
+    await wait(0);
+    assert.notEqual(view.target.querySelector(".ask"), null);
+    // The command removes the account: the poll gives it in state removing.
+    next = { ...fx.status, accounts: [{ ...one, state: "removing" }, two] };
+    await wait(80);
+    assert.equal(view.target.querySelector(".ask"), null);
+    assert.equal([...view.target.querySelectorAll("button")].some((b) => b.textContent.trim() === "Remove"), true, "the other account keeps its Remove");
+    assert.equal(view.target.querySelector(`button[aria-label="Remove ${one.address}"]`), null);
+
+    // The question of the other account, then the delete of the first ends: the other question stays.
+    view.target.querySelector(`button[aria-label="Remove ${two.address}"]`).click();
+    await wait(0);
+    next = { ...fx.status, accounts: [two] };
+    await wait(80);
+    assert.notEqual(view.target.querySelector(".ask"), null);
+    // The second account goes while its question is open: the page says that it is removed.
+    next = { ...fx.status, accounts: [] };
+    await wait(80);
+    assert.equal(view.target.querySelector(".ask"), null);
+    assert.match(text(view.target), new RegExp(`Removed ${two.address.replace(".", "\\.")}\\.`));
+  } finally {
+    view.destroy();
+    globalThis.fetch = saved;
+  }
+});
+
+test("a removal that answers removing shows the removed line when a later status no longer lists the account", async () => {
+  const saved = globalThis.fetch;
+  const [one, two] = fx.status.accounts;
+  const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  let polled = fx.status;
+  globalThis.fetch = async (url, init) =>
+    init?.method === "POST" ? json({ ...fx.status, accounts: [{ ...one, state: "removing" }, two] }) : json(polled);
+  const view = await mount("/src/views/Accounts.svelte", { status: fx.status, poll: 20 });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const press = (label) => [...view.target.querySelectorAll("button")].find((b) => b.textContent.trim() === label).click();
+  try {
+    polled = { ...fx.status, accounts: [{ ...one, state: "removing" }, two] };
+    view.target.querySelector(`button[aria-label="Remove ${one.address}"]`).click();
+    await wait(0);
+    press("Remove");
+    await wait(10);
+    assert.equal(view.target.querySelector(".ask"), null);
+    assert.match(text(view.target.querySelector(".accounts li")), /Iris deletes the mail of this account from this machine\./);
+    assert.doesNotMatch(text(view.target), /Removed /);
+    // The engine ends the delete: the next poll no longer lists the account.
+    polled = { ...fx.status, accounts: [two] };
+    await wait(80);
+    assert.match(text(view.target), new RegExp(`Removed ${one.address.replace(".", "\\.")}\\.`));
+  } finally {
+    view.destroy();
+    globalThis.fetch = saved;
+  }
+});
+
+test("a slow poll that started before a removal does not put the removed account back", async () => {
+  const saved = globalThis.fetch;
+  const [one, two] = fx.status.accounts;
+  const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  let release;
+  let polls = 0;
+  globalThis.fetch = async (url, init) => {
+    if (init?.method === "POST") return json({ ...fx.status, accounts: [two] });
+    polls += 1;
+    // The first poll reads the old status and answers only after the removal.
+    if (polls === 1) {
+      await new Promise((r) => (release = r));
+      return json(fx.status);
+    }
+    return json({ ...fx.status, accounts: [two] });
+  };
+  const view = await mount("/src/views/Accounts.svelte", { status: fx.status, poll: 10 });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const press = (label) => [...view.target.querySelectorAll("button")].find((b) => b.textContent.trim() === label).click();
+  try {
+    await wait(30);
+    assert.equal(polls, 1, "the first poll waits");
+    view.target.querySelector(`button[aria-label="Remove ${one.address}"]`).click();
+    await wait(0);
+    press("Remove");
+    await wait(10);
+    assert.match(text(view.target), new RegExp(`Removed ${one.address.replace(".", "\\.")}\\.`));
+    release();
+    await wait(5);
+    assert.equal(view.target.querySelectorAll(".accounts li").length, 1);
+    assert.equal(view.target.querySelector(`button[aria-label="Remove ${one.address}"]`), null);
+    // The shared access state (the account pills, the sign-in notice) does not take the old answer either.
+    assert.equal(`a-${one.id}` in access.accounts, false, JSON.stringify(access.accounts));
+  } finally {
+    view.destroy();
+    globalThis.fetch = saved;
+  }
+});
+
+test("an account in state removing says that Iris deletes its mail and offers no remove", async () => {
   const going = { ...fx.status.accounts[0], state: "removing", mirror_ready_at: null, sync: null };
   const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [going] }, poll: 0 });
   try {
     const row = text(view.target.querySelector(".accounts li"));
     assert.match(row, /Iris deletes the mail of this account from this machine\./);
     assert.doesNotMatch(row, /copies this mailbox/);
+    assert.equal(view.target.querySelector("button.remove"), null);
   } finally {
     view.destroy();
   }

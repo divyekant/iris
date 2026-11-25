@@ -299,7 +299,7 @@ impl Store {
                     "DELETE FROM message_label WHERE message_id = ?1",
                     "DELETE FROM use_open WHERE message_id = ?1",
                     "DELETE FROM notice WHERE message_id = ?1",
-                    // The cascades delete attention_due, link_check,
+                    // The cascades delete attention_due, link_check, model_declined,
                     // sender_evidence and reply_draft.
                     "DELETE FROM message WHERE id = ?1",
                 ] {

@@ -32,14 +32,34 @@ const PAGE: i64 = 500;
 /// The sort value of a message with no `internal_date`: the oldest.
 const NO_DATE: i64 = -9_223_372_036_854_775_807;
 
-/// The pending conditions other than the thread rule, on message `m`.
+/// The SQL condition "the `From` sender of message `m` is a stranger that
+/// the person declined at the gate". Such mail makes no model call (decision
+/// D29), so no model wait holds it.
+/// The refusal mark condition in [`BASE`], which the estimate leaves out.
+const REFUSAL_MARK: &str = "m.waits_model = 0\n           AND ";
+
+macro_rules! declined {
+    () => {
+        "EXISTS (SELECT 1 FROM header dh JOIN sender ds ON ds.address = dh.from_addr
+           WHERE dh.message_id = m.id AND ds.declined_at IS NOT NULL
+             AND coalesce(ds.kind, 'stranger') = 'stranger')"
+    };
+}
+
+/// The pending conditions other than the thread rule, on message `m`. The
+/// model wait (a refusal mark, the try limit, a retry time) holds only mail
+/// that can call the model: not the mail of a declined stranger.
 const BASE: &str = concat!(
     "m.gone_at IS NULL AND m.understood_at IS NULL
-  AND m.content_sha256 IS NOT NULL AND m.waits_model = 0
+  AND m.content_sha256 IS NOT NULL
   AND NOT ",
     iris_store::removed_account!("m"),
     "
-  AND m.tries < :max_tries AND (m.retry_at IS NULL OR m.retry_at <= :now)
+  AND (",
+    declined!(),
+    "
+       OR (m.waits_model = 0
+           AND m.tries < :max_tries AND (m.retry_at IS NULL OR m.retry_at <= :now)))
   AND NOT ",
     iris_store::draft_or_copy!("m"),
     "
@@ -518,16 +538,18 @@ fn threads_after(
     cursor: (i64, i64, i64),
     now_ms: i64,
 ) -> rusqlite::Result<Vec<((i64, i64, i64), i64)>> {
-    let mut st = c.prepare_cached(
+    let mut st = c.prepare_cached(concat!(
         "SELECT grp, newest, thread_id FROM (
            SELECT m.thread_id, coalesce(max(m.internal_date), :no_date) AS newest,
                   CASE WHEN max(m.internal_date) >= :recent THEN 0 ELSE 1 END AS grp
            FROM message m WHERE m.gone_at IS NULL GROUP BY m.thread_id
            HAVING max(m.understood_at IS NULL AND m.content_sha256 IS NOT NULL
-                      AND m.waits_model = 0) = 1)
+                      AND (m.waits_model = 0 OR ",
+        declined!(),
+        ")) = 1)
          WHERE (grp, -newest, -thread_id) > (:g, -:n, -:t)
-         ORDER BY grp, newest DESC, thread_id DESC LIMIT :page",
-    )?;
+         ORDER BY grp, newest DESC, thread_id DESC LIMIT :page"
+    ))?;
     let rows = st.query_map(
         rusqlite::named_params! {
             ":no_date": NO_DATE,
@@ -546,8 +568,9 @@ fn threads_after(
 }
 
 /// The oldest pending message of `thread` that is not in `skip`. A message
-/// that the thread rule holds still runs when it is hostile mail: `SPAM`,
-/// or a `From` sender of the kind `hostile`. Sync saves no header row, so
+/// that the thread rule holds still runs when it is hostile mail (`SPAM`,
+/// or a `From` sender of the kind `hostile`), or when its `From` sender is
+/// a declined stranger. Sync saves no header row, so
 /// the `From` address of such a message comes from the head of its content
 /// file (fixed rules, no model).
 fn next_pending(
@@ -585,12 +608,17 @@ fn next_pending(
                 .and_then(|path| from_of(&path)),
         };
         if let Some(from) = from {
-            let kind: Option<String> = c
-                .prepare_cached("SELECT kind FROM sender WHERE address = ?1")?
-                .query_row([&from], |r| r.get(0))
-                .optional()?
-                .flatten();
-            if kind.as_deref() == Some("hostile") {
+            // Hostile mail gets its marks with no model call. The mail of a
+            // declined stranger gets no model call (decision D29). So
+            // neither waits for an older message.
+            let free: bool = c
+                .prepare_cached(
+                    "SELECT EXISTS (SELECT 1 FROM sender WHERE address = ?1
+                       AND (kind = 'hostile' OR (declined_at IS NOT NULL
+                            AND coalesce(kind, 'stranger') = 'stranger')))",
+                )?
+                .query_row([&from], |r| r.get(0))?;
+            if free {
                 return Ok(Some(id));
             }
         }
@@ -752,12 +780,15 @@ fn estimate_in(tx: &Transaction, now_ms: i64) -> iris_store::Result<Estimate> {
         "SELECT (SELECT max(t.internal_date) FROM message t
                  WHERE t.thread_id = m.thread_id AND t.gone_at IS NULL) >= :recent,
                 EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                        WHERE ml.message_id = m.id AND l.provider_id = 'SPAM'),
+                        WHERE ml.message_id = m.id AND l.provider_id = 'SPAM')
+                  OR {},
                 min(coalesce(m.size, :max_data), :max_data)
          FROM message m WHERE {}",
+        declined!(),
         // Mail that waits for a model is the work that an approval pays for.
-        BASE.replace(" AND m.waits_model = 0", "")
+        BASE.replace(REFUSAL_MARK, "")
     );
+    debug_assert!(BASE.contains(REFUSAL_MARK));
     let mut st = tx.prepare(&sql)?;
     let mut rows = st.query(rusqlite::named_params! {
         ":now": now_ms,
@@ -774,6 +805,7 @@ fn estimate_in(tx: &Transaction, now_ms: i64) -> iris_store::Result<Estimate> {
         let (recent, spam, size): (Option<bool>, bool, i64) = (r.get(0)?, r.get(1)?, r.get(2)?);
         e.messages += 1;
         e.recent += u64::from(recent == Some(true));
+        // `SPAM` and the mail of a declined stranger make no call.
         if spam {
             continue;
         }
@@ -804,6 +836,8 @@ mod tests {
             "CREATE TABLE message(id INTEGER PRIMARY KEY, thread_id INTEGER,
                internal_date INTEGER, gone_at INTEGER, understood_at INTEGER,
                content_sha256 BLOB, waits_model INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE header(message_id INTEGER, from_addr TEXT);
+             CREATE TABLE sender(address TEXT, kind TEXT, declined_at INTEGER);
              INSERT INTO message VALUES (1, 10, 5, NULL, NULL, x'00', 1);
              INSERT INTO message VALUES (2, 10, 6, NULL, 7, x'00', 0);
              INSERT INTO message VALUES (3, 20, 5, NULL, NULL, x'00', 1);
