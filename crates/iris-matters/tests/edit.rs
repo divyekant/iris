@@ -3,7 +3,8 @@
 //! (`docs/specs/2026-11-24-matters-edit.md`).
 
 use iris_matters::{
-    confirm, create, decline, delete, edit, insert_proposal, propose_by_agent, write, Edit, Error,
+    confirm, create, decline, delete, edit, insert_proposal, joinable, propose_by_agent, write,
+    Edit, Error,
 };
 use iris_store::{NewMessage, Store};
 use rusqlite::params;
@@ -375,6 +376,29 @@ fn an_addition_waits_for_the_person() {
 /// A signal past its `expires` time is not live, also while the stored
 /// status is still `active` (issue #927): no matter by hand, no addition,
 /// no agent proposal.
+/// Each read of the live rule (the views and `joinable`) treats a signal
+/// past its `expires` time as not live at once, with no write and no
+/// engine tick (issue #972).
+#[test]
+fn a_read_sees_the_expiry_at_once() {
+    let past =
+        "UPDATE item SET doc = json_set(doc, '$.expires', '1970-01-01T00:00:01Z') WHERE id = 6";
+    let b = setup("expired-read", 4, &FORMS);
+    assert!(joinable(&b.store, r(6)).unwrap());
+    sql(&b, past).unwrap();
+    assert!(!joinable(&b.store, r(6)).unwrap());
+    let b = setup("expired-view", 4, &FORMS);
+    let m = create(&b.store, "T", &[r(1), r(6)], 1).unwrap();
+    let live = format!("SELECT count(*) FROM matter_live WHERE matter_id = {m}");
+    assert_eq!(q::<i64>(&b, &live), 2);
+    sql(&b, past).unwrap();
+    assert_eq!(q::<i64>(&b, &live), 1);
+    assert_eq!(
+        q::<String>(&b, "SELECT status FROM item WHERE id = 6"),
+        "active"
+    );
+}
+
 #[test]
 fn a_signal_past_its_time_is_not_live() {
     let b = setup("expired", 4, &FORMS);
