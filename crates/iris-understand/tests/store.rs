@@ -1312,7 +1312,7 @@ fn the_upgrade_drops_the_items_of_a_draft_or_copy() {
     // The store of version 41: no view and no item trigger.
     b.store
         .write(|tx| {
-            tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER IF EXISTS spam_drops_items; DROP TRIGGER IF EXISTS spam_back_drops_items; DROP VIEW item_droppable;")?;
+            tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER IF EXISTS spam_drops_items; DROP TRIGGER IF EXISTS spam_back_drops_items; DROP VIEW item_droppable;")?;
             Ok(())
         })
         .unwrap();
@@ -2708,7 +2708,7 @@ Your one-time code is 918273. It ends in 10 minutes.
             "upgrade" => {
                 sql(
                     &b,
-                    "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                    "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                      ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
                 );
                 let Box_ {
@@ -2810,7 +2810,7 @@ Your one-time code is 918273. It ends in 10 minutes.
     b.store
         .write(|tx| {
             Ok(tx.execute_batch(
-                "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                  ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
             )?)
         })
@@ -2886,7 +2886,7 @@ Your one-time code is 918273. It ends in 10 minutes.
     b.store
         .write(|tx| {
             Ok(tx.execute_batch(
-                "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                  ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
             )?)
         })
@@ -3105,11 +3105,10 @@ fn a_message_with_no_recorded_context_gets_one_and_does_not_run_again() {
     understand(&b.store, m1, &fake, NOW).unwrap();
     understand(&b.store, m2, &fake, NOW).unwrap();
     let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m2);
-    let sha: String = b.col(
-        "SELECT substr(content_sha256, 1, 16) FROM message WHERE id = ?1",
-        m1,
+    assert!(
+        recorded.starts_with(&format!("t:{m1}:")) && recorded.ends_with(";s:"),
+        "{recorded}"
     );
-    assert_eq!(recorded, format!("t:{m1}@{sha};s:"));
     b.store
         .write(|tx| {
             tx.execute("UPDATE message SET context = NULL", [])?;
@@ -3124,11 +3123,10 @@ fn a_message_with_no_recorded_context_gets_one_and_does_not_run_again() {
     let understood: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m2);
     assert!(understood.is_some());
     let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m2);
-    let sha: String = b.col(
-        "SELECT substr(content_sha256, 1, 16) FROM message WHERE id = ?1",
-        m1,
+    assert!(
+        recorded.starts_with(&format!("t:{m1}:")) && recorded.ends_with(";s:"),
+        "{recorded}"
     );
-    assert_eq!(recorded, format!("t:{m1}@{sha};s:"));
     assert_eq!(fake.calls.borrow().len(), 2);
 }
 
@@ -3268,7 +3266,7 @@ fn a_new_sender_of_an_earlier_message_runs_the_later_mail_of_the_old_sender_agai
     let mut last = std::collections::HashMap::new();
     drain(&b, &fake, &mut last);
     let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m6);
-    assert!(recorded.contains(&format!(";s:{m1}@")), "{recorded}");
+    assert!(recorded.contains(&format!(";s:{m1}:")), "{recorded}");
     let calls = fake.calls.borrow().len();
     new_content(
         &b,
@@ -3280,4 +3278,47 @@ fn a_new_sender_of_an_earlier_message_runs_the_later_mail_of_the_old_sender_agai
     assert!(recorded.ends_with(";s:"), "{recorded}");
     // m1 and m6 ran again; m2 to m5 too, because m1 is in their context.
     assert!(fake.calls.borrow().len() >= calls + 2);
+}
+
+/// Issue 1049, pre-review: a new clean text of an earlier message (the
+/// same row and content) runs the later message again.
+#[test]
+fn a_new_clean_text_of_an_earlier_message_runs_the_later_one_again() {
+    let b = store("context-body");
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    b.store
+        .put_body(
+            m1,
+            &iris_store::Body {
+                subject: "S".into(),
+                sender: "x1".into(),
+                text: "Other clean words.".into(),
+            },
+        )
+        .unwrap();
+    drain(&b, &fake, &mut last);
+    assert!(last[&m2].contains("Other clean words."), "{}", last[&m2]);
+}
+
+/// Issue 1049, pre-review: sync moves an understood earlier message to
+/// another thread with the same content. The later message of the old
+/// thread runs again without it.
+#[test]
+fn a_message_that_moves_to_another_thread_leaves_the_context_of_the_old_one() {
+    let b = store("context-move");
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    assert!(last[&m2].contains("Words k1k."));
+    // The same provider message, in another thread.
+    let moved = b.add_in("1", "other", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    assert_eq!(moved, m1);
+    drain(&b, &fake, &mut last);
+    assert!(!last[&m2].contains("Words k1k."), "{}", last[&m2]);
 }

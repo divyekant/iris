@@ -4,8 +4,8 @@
 --
 -- 1. `message.context`: the row IDs of the context of the last successful
 --    run, as text (`iris_understand::store::context_key`): "t:7@..,4@..;s:4@..",
---    each entry a row ID and the start of its content SHA-256, so that new
---    content of the same row changes the record,
+--    each entry a row ID and a hash of the texts that a run reads of it
+--    (`body`), so that a new text of the same row changes the record,
 --    with `t` the newest 3 earlier messages of the thread and `s` the
 --    earlier messages of the same sender. "t!:" marks a run whose model
 --    data held only the listed thread messages (the budget cut the others,
@@ -23,7 +23,9 @@
 --    later messages too, so it puts its thread in `talk_due`
 --    (`context_gone`). So does the start and the end of a link check
 --    (`link_check`, migration 20): while it waits, a message may be
---    hostile, and it is not context (`may_be_hostile!`).
+--    hostile, and it is not context (`may_be_hostile!`). So does a new
+--    or changed clean text (`body`), and a message that sync moves to
+--    another thread or another date (both threads).
 ALTER TABLE message ADD COLUMN context TEXT;
 
 CREATE TRIGGER context_gone AFTER UPDATE OF gone_at ON message
@@ -45,4 +47,38 @@ BEGIN
   INSERT INTO talk_due(thread_id) SELECT m.thread_id FROM message m
     WHERE m.id = OLD.message_id AND m.thread_id IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = m.thread_id);
+END;
+
+CREATE TRIGGER context_body_add AFTER INSERT ON body
+BEGIN
+  INSERT INTO talk_due(thread_id) SELECT m.thread_id FROM message m
+    WHERE m.id = NEW.message_id AND m.thread_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = m.thread_id);
+END;
+
+CREATE TRIGGER context_body AFTER UPDATE ON body
+  WHEN OLD.text IS NOT NEW.text OR OLD.sender IS NOT NEW.sender
+    OR OLD.subject IS NOT NEW.subject OR OLD.message_id IS NOT NEW.message_id
+BEGIN
+  INSERT INTO talk_due(thread_id) SELECT m.thread_id FROM message m
+    WHERE m.id IN (OLD.message_id, NEW.message_id) AND m.thread_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = m.thread_id);
+END;
+
+CREATE TRIGGER context_body_remove AFTER DELETE ON body
+BEGIN
+  INSERT INTO talk_due(thread_id) SELECT m.thread_id FROM message m
+    WHERE m.id = OLD.message_id AND m.thread_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = m.thread_id);
+END;
+
+CREATE TRIGGER context_move AFTER UPDATE OF thread_id, internal_date ON message
+  WHEN OLD.thread_id IS NOT NEW.thread_id OR OLD.internal_date IS NOT NEW.internal_date
+BEGIN
+  INSERT INTO talk_due(thread_id) SELECT OLD.thread_id
+    WHERE OLD.thread_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = OLD.thread_id);
+  INSERT INTO talk_due(thread_id) SELECT NEW.thread_id
+    WHERE NEW.thread_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = NEW.thread_id);
 END;

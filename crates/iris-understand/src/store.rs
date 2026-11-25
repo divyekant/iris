@@ -1111,18 +1111,33 @@ macro_rules! thread_context_from {
     };
 }
 
-/// One entry of a context key: the row ID and the start of the content
-/// SHA-256 of message `m` ("7@3fa9c0d1e2b4a6f8"), so that new content of
-/// the same row changes the key too.
+/// The columns of one entry of a context key: the row ID and the texts
+/// that a run reads of message `m` (its clean text, sender and subject), so
+/// that a new text of the same row changes the key too.
 macro_rules! context_entry {
     () => {
-        "m.id || '@' || substr(coalesce(m.content_sha256, '-'), 1, 16)"
+        "m.id, b.sender, b.subject, b.text"
     };
 }
 
+/// One entry of a context key: "7:" and the FNV-1a 64 hash of the texts of
+/// the row (a stable hash: a new build gives the same key).
+fn entry(r: &rusqlite::Row) -> rusqlite::Result<String> {
+    let id: i64 = r.get(0)?;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for i in 1..=3 {
+        let text: String = r.get(i)?;
+        for b in text.bytes().chain([0xff]) {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    Ok(format!("{id}:{h:016x}"))
+}
+
 /// The context of a run of `message` now (store migration 68, issue
-/// 1049), as text ("t:7@..,4@..;s:4@.."): `t` the entries (row ID and
-/// content, [`context_entry!`]) of the newest
+/// 1049), as text ("t:7:<hash>,4:<hash>;s:4:<hash>"): `t` the entries
+/// ([`entry`]: the row ID and a hash of its texts) of the newest
 /// [`THREAD_MESSAGES`] earlier messages of the thread, newest first, and
 /// `s` the row IDs of the earlier messages of the same sender, which shape
 /// the clean text of each run. With `kept`, the data of the model call held
@@ -1160,9 +1175,7 @@ fn context_key(
                 " ",
                 thread_context_from!(waiting)
             ))?
-            .query_map(params![thread, message, date, kept, MAX_TRIES], |r| {
-                r.get(0)
-            })?
+            .query_map(params![thread, message, date, kept, MAX_TRIES], entry)?
             .collect::<rusqlite::Result<_>>()?
         } else {
             c.prepare_cached(concat!(
@@ -1171,7 +1184,7 @@ fn context_key(
                 " ",
                 thread_context_from!()
             ))?
-            .query_map(params![thread, message, date, kept], |r| r.get(0))?
+            .query_map(params![thread, message, date, kept], entry)?
             .collect::<rusqlite::Result<_>>()?
         };
         if let Some(from) = &from {
@@ -1184,7 +1197,7 @@ fn context_key(
                 ))?
                 .query_map(
                     params![thread, message, date, from, SAME_SENDER_MESSAGES],
-                    |r| r.get(0),
+                    entry,
                 )?
                 .collect::<rusqlite::Result<_>>()?;
         }
