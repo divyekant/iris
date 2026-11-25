@@ -1194,12 +1194,12 @@ pub enum Release {
     Reading,
 }
 
-/// The marks and the release of message `message`, when it is not gone.
-/// `understood` is false while the stored marks can be from old content.
-fn release_row(
-    tx: &Transaction,
-    message: i64,
-) -> iris_store::Result<Option<(Vec<String>, Vec<String>, bool)>> {
+/// The marks, the released marks and `understood_at IS NOT NULL` of a
+/// message. `understood` is false while the marks can be from old content.
+type ReleaseRow = (Vec<String>, Vec<String>, bool);
+
+/// The [`ReleaseRow`] of message `message`, when it is not gone.
+fn release_row(tx: &Transaction, message: i64) -> iris_store::Result<Option<ReleaseRow>> {
     let row: Option<(String, Option<String>, bool)> = tx
         .query_row(
             "SELECT coalesce(hostile, '[]'), released, understood_at IS NOT NULL
