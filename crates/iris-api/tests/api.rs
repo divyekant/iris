@@ -2119,3 +2119,47 @@ async fn the_person_sets_the_time_zone_from_the_web_client() {
         serde_json::json!({ "time_zone": computer, "time_zone_set": false })
     );
 }
+
+/// Issue 891 review: the status reads the time zone and `time_zone_set`
+/// from one read, so a change of the zone at the same time never gives a
+/// mixed pair (the old zone with the new flag, or the reverse).
+#[test]
+fn the_time_zone_and_its_flag_always_agree_while_the_zone_changes() {
+    let dir = temp("zone-pair");
+    let (store, _) = filled_n(&dir, 1);
+    let computer = jiff::tz::TimeZone::system().iana_name().map(str::to_string);
+    // A zone that is not the zone of the computer, so the two states differ.
+    let zone = ["Asia/Kolkata", "Pacific/Chatham"]
+        .into_iter()
+        .find(|z| computer.as_deref() != Some(*z))
+        .unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer = {
+        let (store, stop) = (store.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut on = false;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                on = !on;
+                store.set_time_zone(on.then_some(zone)).unwrap();
+            }
+        })
+    };
+    for _ in 0..300 {
+        let s = iris_api::status(&store).unwrap();
+        let want = if s.time_zone_set {
+            Some(zone.to_string())
+        } else {
+            computer.clone()
+        };
+        assert_eq!(s.time_zone, want, "set = {}", s.time_zone_set);
+        let z = iris_api::zone(&store).unwrap();
+        let want = if z["time_zone_set"] == true {
+            serde_json::json!(zone)
+        } else {
+            serde_json::json!(computer)
+        };
+        assert_eq!(z["time_zone"], want, "{z}");
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    writer.join().unwrap();
+}

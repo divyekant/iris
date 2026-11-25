@@ -380,14 +380,15 @@ pub fn status(store: &Store) -> Result<Status> {
         let model_retry_at = iris_understand::batch::retry_after(c)?
             .filter(|&t| t > now)
             .map(rfc3339);
+        let (time_zone, time_zone_set) = zone_of(c)?;
         Ok(Status {
             mode: iris_policy::active(c)?.policy.mode.name(),
             accounts,
             messages,
             model,
             waits_model,
-            time_zone: iris_store::time_zone(c)?.iana_name().map(str::to_string),
-            time_zone_set: zone_set(c)?,
+            time_zone,
+            time_zone_set,
             model_retry_at,
         })
     })?;
@@ -1411,22 +1412,20 @@ pub fn rfc3339(ms: i64) -> String {
     )
 }
 
-/// True when the owner set a time zone that the computer knows (decision
-/// D1). A saved name that the computer no longer knows gives the zone of
-/// the computer, as [`iris_store::time_zone`] does, so it counts as not set.
-fn zone_set(c: &Connection) -> rusqlite::Result<bool> {
-    Ok(iris_store::owner_time_zone(c)?.is_some())
+/// The time zone of the owner and if the owner set it (decision D1), from
+/// one read of `owner_setting`, so the two values always agree. A saved
+/// name that the computer no longer knows gives the zone of the computer,
+/// as [`iris_store::time_zone`] does, so it counts as not set.
+fn zone_of(c: &Connection) -> rusqlite::Result<(Option<String>, bool)> {
+    let (zone, set) = iris_store::time_zone_and_set(c)?;
+    Ok((zone.iana_name().map(str::to_string), set))
 }
 
 /// The time zone of the owner after a change from the web client (issue
 /// 891): `{"time_zone", "time_zone_set"}`, as in the status.
 pub fn zone(store: &Store) -> Result<serde_json::Value> {
-    Ok(store.read(|c| {
-        Ok(serde_json::json!({
-            "time_zone": iris_store::time_zone(c)?.iana_name(),
-            "time_zone_set": zone_set(c)?,
-        }))
-    })?)
+    let (time_zone, time_zone_set) = store.read(|c| Ok(zone_of(c)?))?;
+    Ok(serde_json::json!({ "time_zone": time_zone, "time_zone_set": time_zone_set }))
 }
 
 #[cfg(test)]

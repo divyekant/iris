@@ -1059,7 +1059,16 @@ fn migrate(conn: &mut Connection, db: &Path) -> Result<()> {
 /// else the time zone of the computer. A saved name that the computer no
 /// longer knows gives the time zone of the computer too.
 pub fn time_zone(c: &Connection) -> rusqlite::Result<jiff::tz::TimeZone> {
-    Ok(owner_time_zone(c)?.unwrap_or_else(jiff::tz::TimeZone::system))
+    Ok(time_zone_and_set(c)?.0)
+}
+
+/// [`time_zone`], and true when it is the zone that the owner set, from one
+/// read of `owner_setting`, so the two values always agree (issue 891).
+pub fn time_zone_and_set(c: &Connection) -> rusqlite::Result<(jiff::tz::TimeZone, bool)> {
+    Ok(match owner_time_zone(c)? {
+        Some(zone) => (zone, true),
+        None => (jiff::tz::TimeZone::system(), false),
+    })
 }
 
 /// The time zone that the owner set (`owner_setting`), or `None` when the
