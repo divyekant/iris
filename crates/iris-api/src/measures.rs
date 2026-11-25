@@ -38,6 +38,9 @@ pub struct Measures {
     pub approvals: Approvals,
     /// The applied actions, and the actions of them that an undo reversed.
     pub undo: Undo,
+    /// The sent mail, and the sends of them that no person approved after
+    /// hostile mail came in the thread (issue #472).
+    pub sends: Sends,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -96,6 +99,15 @@ pub struct Undo {
     pub undone: i64,
 }
 
+#[derive(Debug, Serialize, PartialEq)]
+pub struct Sends {
+    /// The applied sends.
+    pub sent: i64,
+    /// The applied sends that a rule approved, not a person, in a thread
+    /// with hostile mail that came before the send. The target is zero.
+    pub unreviewed_after_hostile: i64,
+}
+
 /// The measures now. `rss_kib` is the resident memory of the engine.
 pub fn measures(store: &Store, rss_kib: Option<i64>) -> Result<Measures> {
     Ok(store.read(|c| {
@@ -137,8 +149,10 @@ pub fn measures(store: &Store, rss_kib: Option<i64>) -> Result<Measures> {
             .query_map([], |r| {
                 let checked: Option<i64> = r.get(1)?;
                 let v = match checked {
-                    Some(_) => verify_result(&r.get::<_, Option<String>>(2)?.unwrap_or_default()),
-                    None => Verify {
+                    Some(_) => iris_store::verify_log::read(
+                        &r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    ),
+                    None => iris_store::verify_log::Verify {
                         differences: None,
                         skipped: None,
                         stopped: false,
@@ -180,6 +194,28 @@ pub fn measures(store: &Store, rss_kib: Option<i64>) -> Result<Measures> {
                 })
             },
         )?;
+        // A send without review: no person decided it. Hostile mail before
+        // it: a message of the thread of its draft that is hostile mail and
+        // came before the send.
+        let sends = c.query_row(
+            concat!(
+                "SELECT count(*), coalesce(sum(a.decided_by IS NOT 'person' AND EXISTS (
+                   SELECT 1 FROM action_draft ad JOIN draft d ON d.id = ad.draft_id
+                     JOIN message m ON m.thread_id = d.thread_id
+                   WHERE ad.action_id = a.id AND m.internal_date <= l.at AND ",
+                iris_store::hostile_mail!(),
+                ")), 0)
+                 FROM ledger l JOIN changeset_action a ON a.id = l.action_id
+                 WHERE a.verb = 'send' AND l.state = 'applied'"
+            ),
+            [],
+            |r| {
+                Ok(Sends {
+                    sent: r.get(0)?,
+                    unreviewed_after_hostile: r.get(1)?,
+                })
+            },
+        )?;
         Ok(Measures {
             days,
             first_brief,
@@ -187,6 +223,7 @@ pub fn measures(store: &Store, rss_kib: Option<i64>) -> Result<Measures> {
             memory: Memory { rss_kib, messages },
             approvals,
             undo,
+            sends,
         })
     })?)
 }
@@ -249,36 +286,6 @@ pub fn mark_brief(store: &Store, brief: &crate::Brief, now_ms: i64) -> Result<()
 /// the target must not show as met.
 fn brief_seconds(ms: i64) -> i64 {
     (ms.max(0) + 999) / 1000
-}
-
-/// The count and the end of the text that `iris_sync::verify` writes to
-/// `sync_log.result`: "N differences, M skipped", then ", then error: ..."
-/// when an error stopped the check. The check is complete only with no
-/// error and 0 skipped messages: a skipped message was not compared.
-fn verify_result(text: &str) -> Verify {
-    let first = text.lines().next().unwrap_or("");
-    let differences = first
-        .split_once(" differences")
-        .and_then(|(n, _)| n.parse().ok());
-    let skipped = first
-        .split_once(" skipped")
-        .and_then(|(n, _)| n.rsplit(' ').next()?.parse::<i64>().ok());
-    let none_skipped = skipped == Some(0) || !first.contains(" skipped");
-    let stopped = first.contains(", then error");
-    Verify {
-        differences,
-        skipped,
-        stopped,
-        complete: none_skipped && !stopped,
-    }
-}
-
-#[derive(Debug, PartialEq)]
-struct Verify {
-    differences: Option<i64>,
-    skipped: Option<i64>,
-    stopped: bool,
-    complete: bool,
 }
 
 /// Count one use of the web client on `day` (the local date of the person,
@@ -424,44 +431,6 @@ pub fn rss_kib() -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn verify_result_reads_the_text_of_the_verify() {
-        let v = |differences, skipped, stopped, complete| Verify {
-            differences,
-            skipped,
-            stopped,
-            complete,
-        };
-        assert_eq!(
-            verify_result("0 differences, 0 skipped"),
-            v(Some(0), Some(0), false, true)
-        );
-        // A skipped message was not compared: the check is not complete.
-        assert_eq!(
-            verify_result("0 differences, 2 skipped"),
-            v(Some(0), Some(2), false, false)
-        );
-        assert_eq!(
-            verify_result("3 differences, 1 skipped\nmessage a: other labels"),
-            v(Some(3), Some(1), false, false)
-        );
-        assert_eq!(
-            verify_result("0 differences, x skipped"),
-            v(Some(0), None, false, false)
-        );
-        assert_eq!(
-            verify_result("2 differences, 0 skipped, then error: HTTP 401"),
-            v(Some(2), Some(0), true, false)
-        );
-        // An error and skipped messages: the measure names both.
-        assert_eq!(
-            verify_result("0 differences, 4 skipped, then error: HTTP 401"),
-            v(Some(0), Some(4), true, false)
-        );
-        assert_eq!(verify_result(""), v(None, None, false, true));
-        assert_eq!(verify_result("x differences"), v(None, None, false, true));
-    }
 
     /// Property: the shown seconds are never under the real time, so a
     /// time over the target never shows as met.

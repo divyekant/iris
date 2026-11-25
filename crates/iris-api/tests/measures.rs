@@ -93,6 +93,10 @@ async fn an_empty_store_has_empty_measures() {
     assert_eq!(m["mirror"], json!([]));
     assert_eq!(m["approvals"], json!({"decided": 0, "approved": 0}));
     assert_eq!(m["undo"], json!({"applied": 0, "undone": 0}));
+    assert_eq!(
+        m["sends"],
+        json!({"sent": 0, "unreviewed_after_hostile": 0})
+    );
     assert_eq!(m["memory"]["messages"], 0);
     assert!(m["memory"]["rss_kib"].as_i64().unwrap() > 1000, "{m}");
 }
@@ -803,4 +807,57 @@ fn migration_45_corrects_an_approval_after_a_comment() {
     assert_eq!((m.approvals.decided, m.approvals.approved), (1, 0));
     drop(s);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Issue 472: a send counts as without review after hostile mail only if
+/// no person decided it, and hostile mail came in the thread of its draft
+/// before the send.
+#[tokio::test]
+async fn sends_after_hostile_mail_count_only_without_a_person() {
+    let s = store("hostile-sends");
+    let a = s.add_account("gmail", "owner@example.com").unwrap();
+    s.write(|tx| {
+        // Test rows past the triggers: the measure reads only these columns.
+        let triggers: Vec<String> = tx
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for t in triggers {
+            tx.execute_batch(&format!("DROP TRIGGER \"{t}\""))?;
+        }
+        tx.execute_batch(&format!(
+            "INSERT INTO thread(id, account_id, provider_id) VALUES (1, {a}, 't1'), (2, {a}, 't2');
+             -- Thread 1: hostile mail at 100, before the sends at 200.
+             -- Thread 2: hostile mail at 300, after its send at 200.
+             INSERT INTO message(account_id, thread_id, provider_id, internal_date, hostile)
+               VALUES ({a}, 1, 'm1', 100, '[\"dmarc\"]'), ({a}, 2, 'm2', 300, '[\"dmarc\"]'),
+                      ({a}, 2, 'm3', 50, '[]');
+             INSERT INTO changeset(id, author_kind, created_at) VALUES (1, 'agent', 0);
+             INSERT INTO changeset_action(id, changeset_id, revision, n, verb, targets, args,
+                                          state, decided_by, rule, policy)
+               VALUES (1, 1, 1, 1, 'draft', '{{}}', '{{}}', 'applied', 'person', NULL, NULL),
+                      (2, 1, 1, 2, 'draft', '{{}}', '{{}}', 'applied', 'person', NULL, NULL),
+                      (3, 1, 1, 3, 'send', '{{}}', '{{}}', 'applied', 'engine', NULL, NULL),
+                      (4, 1, 1, 4, 'send', '{{}}', '{{}}', 'applied', 'person', NULL, NULL),
+                      (5, 1, 1, 5, 'send', '{{}}', '{{}}', 'applied', 'engine', NULL, NULL),
+                      (6, 1, 1, 6, 'send', '{{}}', '{{}}', 'failed', 'engine', NULL, NULL);
+             INSERT INTO draft(id, account_id, thread_id, provider_id, message_id_hdr, content,
+                               hash, raw, action_id, created_at, updated_at)
+               VALUES (1, {a}, 1, 'r1', 'x1@example.com', '{{}}', 'h', x'00', 1, 0, 0),
+                      (2, {a}, 2, 'r2', 'x2@example.com', '{{}}', 'h', x'00', 2, 0, 0);
+             INSERT INTO action_draft(action_id, draft_id) VALUES (3, 1), (4, 1), (5, 2), (6, 1);
+             INSERT INTO ledger(action_id, ops, state, undo, at)
+               VALUES (3, '{{}}', 'applied', 'none', 200), (4, '{{}}', 'applied', 'none', 200),
+                      (5, '{{}}', 'applied', 'none', 200), (6, '{{}}', 'failed', 'none', 200);"
+        ))?;
+        Ok(())
+    })
+    .unwrap();
+    let m = get(&s).await;
+    // Send 3: no person decided it, after hostile mail. Send 4: the person. Send 5:
+    // the hostile mail came after it. Send 6 failed.
+    assert_eq!(
+        m["sends"],
+        json!({"sent": 3, "unreviewed_after_hostile": 1})
+    );
 }
