@@ -140,7 +140,9 @@ fn call(
     let made = store
         .write(|tx| {
             let r = batch::report(tx, run)?;
-            if refused && r.calls == 0 {
+            // A call with unknown usage went out too (#947).
+            let made = r.calls + r.unknown_calls;
+            if refused && made == 0 {
                 tx.execute("DELETE FROM understand_run WHERE id = ?1", [run])?;
                 return Ok(0);
             }
@@ -149,8 +151,8 @@ fn call(
                 "UPDATE understand_run SET ended_at = ?2, stop = ?3 WHERE id = ?1",
                 params![run, ended, stop],
             )?;
-            batch::update_wait(tx, failed, r.calls > 0, ended)?;
-            Ok(r.calls.max(0) as usize)
+            batch::update_wait(tx, failed, made > 0, ended)?;
+            Ok(made.max(0) as usize)
         })
         .map_err(|e| e.to_string())?;
     if let Some(e) = budgeted.take_error() {
@@ -202,13 +204,18 @@ mod tests {
             if self.1 == "fail" {
                 return Err(iris_model::Error::Server(500));
             }
+            // "unknown:" gives the rest of the text with unknown usage.
+            let (text, known) = match self.1.strip_prefix("unknown:") {
+                Some(t) => (t, false),
+                None => (self.1, true),
+            };
             Ok(Reply {
-                text: self.1.into(),
+                text: text.into(),
                 usage: Usage {
                     input_tokens: 100,
                     output_tokens: 10,
                     cost_micro_usd: None,
-                    known: true,
+                    known,
                 },
                 stop: Stop::End,
             })
@@ -486,6 +493,39 @@ mod tests {
         assert_eq!(
             count(&store, "SELECT coalesce(sum(calls), 0) FROM understand_run"),
             MAX_PER_TURN as i64
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn calls_of_unknown_usage_count_toward_the_turn() {
+        let (store, dir) = open("unknown-turn");
+        for t in ["t-a", "t-b", "t-c", "t-d"] {
+            ask(&store, t, "Ana, can you send the deck?");
+        }
+        // A local model is free, and its server gives no usage.
+        store
+            .write(|tx| {
+                tx.execute(
+                    "UPDATE model_setting SET provider = 'local',
+                       base_url = 'http://127.0.0.1:1/v1', price_in = NULL, price_out = NULL",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+            Ok(Box::new(Fake(calls.clone(), "unknown:not json")))
+        };
+        let late = 1_000 + iris_voice::LATE_AFTER_MS;
+        // The first thread makes its call and its retry. The next thread
+        // waits, because the turn has less room than two calls (#947).
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!(calls.get(), 2);
+        assert_eq!(
+            count(&store, "SELECT coalesce(sum(unknown_calls), 0) FROM understand_run"),
+            2
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
