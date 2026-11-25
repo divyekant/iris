@@ -124,7 +124,7 @@ A new crate `iris-summary` (no provider client, as `iris-voice`):
   that the SQL filter `items` selects, the oldest try first, as
   `iris_voice::late` orders the nudges. The crate does not depend on
   `iris-api`: the caller gives the filter.
-- `summarize(store, thread, model, now)`: reads a snapshot of the thread (the
+- `summarize(store, candidate, model, now)`: reads a snapshot of the thread (the
   newest 12 answerable messages, oldest first, each cut to 4,000
   characters, with `from`, `by_owner` and `date`), makes one call, checks the
   answer, and saves it in one transaction only if the snapshot is the same
