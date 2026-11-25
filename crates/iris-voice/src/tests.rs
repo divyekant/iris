@@ -597,6 +597,67 @@ fn read_answer_accepts_only_a_valid_body() {
     assert!(accepted > 100, "too few valid answers: {accepted}");
 }
 
+/// Issue #950: for any count of commitments and any "named" value, an
+/// answer is accepted only when "named" is an array that holds each number
+/// from 1 to the count. Other entries do not matter.
+#[test]
+fn read_answer_needs_each_commitment_number() {
+    const PIECES: [&str; 9] = ["0", "1", "2", "3", "4", "-1", "1.5", "\"1\"", "null"];
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    let (mut accepted, mut refused) = (0, 0);
+    for i in 0..20_000 {
+        let need = (next() % 5) as usize;
+        let entries: Vec<&str> = (0..next() % 6)
+            .map(|_| PIECES[(next() % PIECES.len() as u64) as usize])
+            .collect();
+        let named = match i % 10 {
+            0 => String::new(),
+            1 => r#", "named": 1"#.to_string(),
+            2 => r#", "named": null"#.to_string(),
+            _ => format!(r#", "named": [{}]"#, entries.join(", ")),
+        };
+        let text = format!(r#"{{"body": "Hi Ana"{named}}}"#);
+        let reply = Reply {
+            text: text.clone(),
+            usage: Usage::default(),
+            stop: Stop::End,
+        };
+        let v: Value = serde_json::from_str(&text).unwrap();
+        let has: Vec<u64> = v["named"]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_u64).collect())
+            .unwrap_or_default();
+        let expect = (1..=need as u64).all(|n| has.contains(&n));
+        match read_answer(&reply, need) {
+            Ok(body) => {
+                accepted += 1;
+                assert!(expect, "{need} {text}");
+                assert_eq!(body, "Hi Ana");
+            }
+            Err(Error::BadAnswer(_)) => {
+                refused += 1;
+                assert!(!expect, "{need} {text}");
+            }
+            Err(e) => panic!("{text}: {e}"),
+        }
+    }
+    assert!(accepted > 1_000 && refused > 1_000, "{accepted} {refused}");
+    // A two-commitment answer that names only the first is refused.
+    let one = Reply {
+        text: r#"{"body": "Hi Ana", "named": [1]}"#.into(),
+        usage: Usage::default(),
+        stop: Stop::End,
+    };
+    assert!(matches!(read_answer(&one, 2), Err(Error::BadAnswer(_))));
+    assert!(read_answer(&one, 1).is_ok());
+}
+
 #[test]
 fn the_newest_message_names_the_recipient_and_only_six_texts_go_in() {
     let (b, t) = mailbox("newest");

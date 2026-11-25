@@ -1039,7 +1039,11 @@ sends nothing. The person sends it as a reply (`draft` and `send`, through
 the held outbox). One nudge goes to one person: the person of the late
 commitment with the lowest row ID. It names each late commitment of that
 person in the thread, at most 10. A late commitment of another person
-waits for the next nudge. The owner decided that the nudge stays a
+waits for the next nudge. The data numbers each commitment (`n`).
+The answer of the model must list each number in `named`, or Iris asks
+one more time and then saves no draft (issue #950). `named` is the report
+of the model: Iris does not check the words of the body against each
+commitment (known limit #1075). The person reads each nudge before a send. The owner decided that the nudge stays a
 prepared reply (decision D8, `docs/decisions.md` entry D12). So the verb
 `nudge` and `iris nudge <c-id>` are not built.
 
