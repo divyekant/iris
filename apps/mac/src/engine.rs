@@ -121,9 +121,6 @@ pub fn checked_url(url: &str) -> Option<&str> {
     (port_ok && code_ok).then_some(url)
 }
 
-/// The most characters of the body of a system notice.
-pub const BODY_MAX: usize = 200;
-
 /// One notice to show.
 #[derive(Debug, PartialEq)]
 pub struct Notice {
@@ -229,14 +226,11 @@ fn notice(v: &Value) -> Option<Notice> {
         (_, Some(id)) if plain_id(id) => format!("#/mail/{id}"),
         _ => "#/brief".to_string(),
     };
-    // A system notice has at most 200 characters (the engine cuts too).
-    let body: String = format!("{}: {}", s("title")?, s("text")?)
-        .chars()
-        .take(BODY_MAX)
-        .collect();
+    // The engine cuts the text of a job notice for the system notice; the
+    // body of a rule notice stays whole (`docs/specs/2026-11-16-notices.md`).
     Some(Notice {
         title: s("rule_name")?.to_string(),
-        body,
+        body: format!("{}: {}", s("title")?, s("text")?),
         route,
     })
 }
@@ -597,9 +591,13 @@ mod tests {
             )
             .unwrap()
         };
-        let n = job(json!("j-7"));
-        assert_eq!(n.route, "#/jobs/j-7");
-        assert_eq!(n.body.chars().count(), BODY_MAX);
+        assert_eq!(job(json!("j-7")).route, "#/jobs/j-7");
+        // A rule notice keeps its whole body.
+        let long = "s".repeat(200);
+        let rule = notice(&json!({ "rule_name": "r", "title": "Ann", "text": long,
+            "message": null, "job": null }))
+        .unwrap();
+        assert_eq!(rule.body, format!("Ann: {long}"));
         for odd in ["j-", "j-7/../x", "m-7", "J-7"] {
             assert_eq!(job(json!(odd)).route, "#/brief", "{odd}");
         }
