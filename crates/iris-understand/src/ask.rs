@@ -462,10 +462,12 @@ fn card<E>(
 /// reads, for the context of the match.
 const LEAD: usize = 200;
 
-/// The characters of a long text that [`near`] looks at for matches.
-/// shortcut: a match after this point is not found, change it if long
-/// messages miss answers past it. It keeps the token list of one call small.
+/// The characters of one chunk of a long text that [`near`] gives to the
+/// tokenizer at a time. It keeps the token list of one call small.
 const SCAN: usize = 64 * MAX_TEXT;
+
+/// A match: its start and end as character offsets, and as byte offsets.
+type Hit = (usize, usize, usize, usize);
 
 /// The part of `text` that the model reads (issue #272): all of a text of
 /// up to [`MAX_TEXT`] characters. Of a longer text, the [`MAX_TEXT`]
@@ -477,48 +479,59 @@ fn near(c: &Connection, text: &str, stems: &[String]) -> iris_store::Result<Stri
     if text.chars().nth(MAX_TEXT).is_none() {
         return Ok(text.to_string());
     }
-    let scan = &text[..text.char_indices().nth(SCAN).map_or(text.len(), |(i, _)| i)];
-    // Each match, in order: its start and end as character offsets, and
-    // as byte offsets.
-    let mut hits: Vec<(usize, usize, usize, usize)> = Vec::new();
-    let (mut n, mut last) = (0, 0);
-    for t in iris_store::index_tokens(c, scan)? {
-        if stems.iter().any(|s| t.word.starts_with(s.as_str())) {
-            n += scan[last..t.range.start].chars().count();
-            last = t.range.start;
-            let len = scan[t.range.clone()].chars().count();
-            hits.push((n, n + len, t.range.start, t.range.end));
+    // The whole text goes to the tokenizer in chunks of about SCAN
+    // characters (issue #1076). A chunk ends before white space or ASCII
+    // punctuation, which the tokenizer never puts in a token.
+    // `window` holds the matches that fit whole in one part with the newest
+    // match, so only the matches of one part stay in memory. `run` is the
+    // first and the last match of the run with the most matches, and its
+    // count: the run that ends first if two have the same count.
+    let mut window: std::collections::VecDeque<Hit> = std::collections::VecDeque::new();
+    let mut run: Option<(Hit, Hit, usize)> = None;
+    let (mut n, mut last, mut from) = (0, 0, 0);
+    while from < text.len() {
+        let rest = &text[from..];
+        let cut = rest
+            .char_indices()
+            .skip(SCAN)
+            .find(|(_, ch)| ch.is_whitespace() || ch.is_ascii_punctuation())
+            .map_or(rest.len(), |(i, _)| i);
+        for t in iris_store::index_tokens(c, &rest[..cut])? {
+            if !stems.iter().any(|s| t.word.starts_with(s.as_str())) {
+                continue;
+            }
+            let (b0, b1) = (from + t.range.start, from + t.range.end);
+            n += text[last..b0].chars().count();
+            last = b0;
+            let hit = (n, n + text[b0..b1].chars().count(), b0, b1);
+            while window.front().is_some_and(|f| hit.1 - f.0 > MAX_TEXT) {
+                window.pop_front();
+            }
+            // A match longer than one part empties the window: it is in no run.
+            if hit.1 - hit.0 <= MAX_TEXT {
+                window.push_back(hit);
+                if run.is_none_or(|(.., k)| window.len() > k) {
+                    run = Some((window[0], hit, window.len()));
+                }
+            }
         }
-    }
-    // The most matches that fit whole in one part: two moving indexes, so
-    // linear in the count of matches. `run` is the first and the last
-    // match of the best run, the first run if two have the same count.
-    let mut run: Option<(usize, usize)> = None;
-    let mut j = 0;
-    for i in 0..hits.len() {
-        j = j.max(i);
-        while j < hits.len() && hits[j].1 - hits[i].0 <= MAX_TEXT {
-            j += 1;
-        }
-        if j > i && run.is_none_or(|(a, b)| j - i > b + 1 - a) {
-            run = Some((i, j - 1));
-        }
+        from += cut;
     }
     let total = text.chars().count();
     // The part starts LEAD characters before its first match where it can,
     // and always holds its last match whole.
     let start = match run {
-        Some((a, b)) => hits[a]
-            .0
-            .saturating_sub(LEAD)
-            .max(hits[b].1.saturating_sub(MAX_TEXT))
-            .min(total - MAX_TEXT),
+        Some((a, b, _)) => {
+            a.0.saturating_sub(LEAD)
+                .max(b.1.saturating_sub(MAX_TEXT))
+                .min(total - MAX_TEXT)
+        }
         None => 0,
     };
     let at = |k: usize| text.char_indices().nth(k).map_or(text.len(), |(i, _)| i);
     let (mut from, mut to) = (at(start), at(start + MAX_TEXT));
     // The cuts go to a space, but never into a match of the run.
-    let (keep_from, keep_to) = run.map_or((to, from), |(a, b)| (hits[a].2, hits[b].3));
+    let (keep_from, keep_to) = run.map_or((to, from), |(a, b, _)| (a.2, b.3));
     if from > 0 {
         from = text[from..keep_from.max(from)]
             .find(char::is_whitespace)
@@ -1040,6 +1053,25 @@ mod tests {
     }
 
     /// Many matches: the choice is linear in the count of matches.
+    #[test]
+    fn a_match_after_many_chunks_is_found() {
+        let c = Connection::open_in_memory().unwrap();
+        let stems = vec!["zebra".to_string()];
+        // Issue #1076: a match past 64 parts of text is found, also when a
+        // chunk ends next to it.
+        for pad in [0, 1, 2, 7] {
+            let text = "x ".repeat(SCAN) + &"y".repeat(pad) + " zebra." + &" x".repeat(100);
+            let part = near(&c, &text, &stems).unwrap();
+            assert!(part.contains("zebra"), "{pad}");
+        }
+        let text = "x ".repeat(3 * SCAN) + "zebra" + &" x".repeat(100);
+        assert!(near(&c, &text, &stems).unwrap().contains("zebra"));
+        // Character SCAN is inside the match: the chunk ends after it.
+        let text = "a".repeat(SCAN - 2) + " zebra x" + &" x".repeat(2 * MAX_TEXT);
+        let part = near(&c, &text, &stems).unwrap();
+        assert!(part.contains(" zebra x"), "{part}");
+    }
+
     #[test]
     fn many_matches_are_fast() {
         let c = Connection::open_in_memory().unwrap();
