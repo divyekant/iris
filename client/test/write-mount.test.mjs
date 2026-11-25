@@ -980,7 +980,7 @@ test("a file that the engine refuses names its reason and does not join the mail
   }
 });
 
-test("Change and send opens the form with the draft; update sends the draft, new does not (draft change spec, section 5)", async () => {
+test("Change and send opens the form with the draft and a new key; update sends the draft, new does not (draft change spec, section 5)", async () => {
   for (const change of ["update", "new", null]) {
     window.sessionStorage.clear();
     let n = 0;
@@ -1008,16 +1008,15 @@ test("Change and send opens the form with the draft; update sends the draft, new
       app.flushSync();
       assert.equal(app.target.querySelector("input.subject").value, "Dinner on Saturday?");
       assert.equal(app.target.querySelector("textarea").value, "Hi Sam,\n\nAre you free?\n");
-      type(app.target.querySelector("textarea"), "Hi Sam,\n\nAre you free on Sunday?\n");
-      app.flushSync();
+      // The same content as the stopped write: the press is a new write, with a new key.
       press(app);
       await until(() => net.posts().filter((p) => p.path === "write").length === 2);
       const [first, second] = net.posts().filter((p) => p.path === "write").map((p) => p.body);
       assert.deepEqual(second.to, ["sam@okafor.example"]);
       assert.deepEqual(second.cc, ["kim@example.com"]);
-      assert.equal(second.body, "Hi Sam,\n\nAre you free on Sunday?\n");
+      assert.equal(second.body, first.body);
       assert.equal(second.draft, change === "update" ? "d-1" : undefined);
-      assert.notEqual(second.key, first.key, "a new content gets a new key");
+      assert.notEqual(second.key, first.key, "a new write gets a new key");
     } finally {
       app.destroy();
       net.restore();

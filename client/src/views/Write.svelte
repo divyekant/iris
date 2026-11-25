@@ -399,6 +399,9 @@
       copy = cc.length > 0;
       blind = bcc.length > 0;
       changing = update ? { draft, account: d.account } : null;
+      // A new write: a new key, also when the content is the same as the stopped one.
+      sig = "";
+      rekey();
       write = "";
       ws = { state: "saving" };
     } catch (e) {
