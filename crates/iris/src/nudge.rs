@@ -524,7 +524,10 @@ mod tests {
         assert_eq!(step(&store, &connect, late), Ok(0));
         assert_eq!(calls.get(), 2);
         assert_eq!(
-            count(&store, "SELECT coalesce(sum(unknown_calls), 0) FROM understand_run"),
+            count(
+                &store,
+                "SELECT coalesce(sum(unknown_calls), 0) FROM understand_run"
+            ),
             2
         );
         let _ = std::fs::remove_dir_all(&dir);

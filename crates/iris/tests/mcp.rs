@@ -398,7 +398,10 @@ fn each_tool_gives_the_output_and_the_code_of_its_verb() {
     // A bad filter of `list` is a wrong argument: code 2 on both paths
     // (issue #899). A bad form, status, limit and cursor.
     for (argv, args) in [
-        (vec!["list", "--status", "nope"], json!({ "status": "nope" })),
+        (
+            vec!["list", "--status", "nope"],
+            json!({ "status": "nope" }),
+        ),
         (vec!["list", "nope"], json!({ "form": "nope" })),
         (vec!["list", "--limit", "0"], json!({ "limit": 0 })),
         (vec!["list", "--before", "zz"], json!({ "before": "zz" })),
