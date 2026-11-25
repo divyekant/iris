@@ -118,6 +118,9 @@ struct Row {
     tries: i64,
     retry_at: Option<i64>,
     phishing: bool,
+    /// The hostile marks that the person released for the current content
+    /// (`message.released`, migration 64).
+    released: Vec<String>,
 }
 
 /// Rows of `link_check` in one read of [`recheck_links`].
@@ -153,9 +156,10 @@ pub fn recheck_links(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Resu
         for (row, id) in rows {
             // The row ID first: a trigger that queues the message again
             // after this read gives it a new row, which this check keeps.
-            let Some((mark, sha)) = link_mark_of(store, id) else {
+            let Some(read) = link_read(store, id) else {
                 continue;
             };
+            let mark = read.mark;
             if mark && max_marks.is_some_and(|n| marked >= n) {
                 // The message limit of the run: the rest waits.
                 return Ok(marked);
@@ -165,34 +169,7 @@ pub fn recheck_links(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Resu
                 // error leaves the row for the next run.
                 let _ = understand(store, id, &crate::budget::NoModel, now_ms);
             }
-            // The row goes only for the state that the check read (the same
-            // row, the same content), and, for a deceptive link, only when
-            // the message has the mark.
-            let done = store.write(|tx| {
-                let n = tx.execute(
-                    "DELETE FROM link_check WHERE id = ?1 AND EXISTS (
-                       SELECT 1 FROM message m WHERE m.id = ?2
-                         AND (m.content_sha256 IS ?3 OR m.gone_at IS NOT NULL)
-                         AND (NOT ?4 OR EXISTS (
-                           SELECT 1 FROM json_each(coalesce(m.hostile, '[]'))
-                           WHERE value = 'link')))",
-                    params![row, id, sha, mark],
-                )?;
-                if n > 0 && !mark {
-                    // A mark of earlier content goes: the check of this
-                    // content found no deceptive link.
-                    tx.execute(
-                        "UPDATE message SET hostile = (
-                           SELECT json_group_array(value) FROM json_each(hostile)
-                           WHERE value <> 'link')
-                         WHERE id = ?1 AND content_sha256 IS ?2 AND EXISTS (
-                           SELECT 1 FROM json_each(coalesce(hostile, '[]'))
-                           WHERE value = 'link')",
-                        params![id, sha],
-                    )?;
-                }
-                Ok(n > 0)
-            })?;
+            let done = store.write(|tx| link_check_done(tx, row, id, &read))?;
             marked += u64::from(mark && done);
         }
     }
@@ -269,11 +246,14 @@ pub fn recheck_fixed(store: &Store, now_ms: i64, max: Option<u64>) -> Result<u64
 
 /// Steps 1 to 3 for a message read from the store: one rule for
 /// [`understand`] and the fixed check. Mail past the read limit counts as
-/// cut text, and the mark `phishing` stays until a rebuild (section 6.7).
-fn analysis(raw: &[u8], raw_cut: bool, html_after: bool, cx: &Context, phishing: bool) -> Analysis {
+/// cut text, the mark `phishing` stays until a rebuild, and a mark that the
+/// person released is left out (section 6.7).
+fn analysis(raw: &[u8], raw_cut: bool, html_after: bool, cx: &Context, row: &Row) -> Analysis {
     let mut a = analyze_cut(raw, raw_cut, html_after, cx);
     a.text.cut |= raw_cut;
-    if phishing {
+    a.marks
+        .retain(|m| !row.released.iter().any(|r| r == m.name()));
+    if row.phishing {
         a.marks.push(Mark::Phishing);
     }
     a
@@ -358,7 +338,7 @@ fn fixed_differs(store: &Store, id: i64, now_ms: i64) -> Result<bool> {
         same_sender: &inputs_now.same,
         known: &inputs_now.parties,
     };
-    let a = analysis(&raw, raw_cut, html_after, &cx, row.phishing);
+    let a = analysis(&raw, raw_cut, html_after, &cx, &row);
     if !understood {
         // Pending mail, or mail that a model try limit or a refusal holds:
         // understood again only when the fixed steps alone complete it now.
@@ -401,22 +381,85 @@ fn fixed_rules(d: &crate::Decision) -> Option<String> {
     Some(serde_json::to_string(&rules).expect("strings serialize"))
 }
 
-/// For the received message `id`: true when it has a deceptive link, with
-/// the content hash that the check read. False when it has none, is gone,
-/// is your own mail or has no content. `None` when Iris cannot read the
-/// row or the file now.
-fn link_mark_of(store: &Store, id: i64) -> Option<(bool, Option<String>)> {
+/// What the link check read of one message: the mark, and the state that
+/// the mark depends on (the content and the release). The write of the
+/// check ([`link_check_done`]) needs the same state.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct LinkRead {
+    pub mark: bool,
+    sha: Option<String>,
+    released: String,
+}
+
+/// The link mark of message `id` (its row ID) for the link check, or None
+/// when Iris cannot read the message now. Sent mail, drafts and gone mail
+/// get no mark.
+#[doc(hidden)]
+pub fn link_read(store: &Store, id: i64) -> Option<LinkRead> {
     let row = read_row(store, id).ok()?;
+    // As `release` writes it: a sorted JSON array; NULL reads as `[]`.
+    let released = serde_json::to_string(&row.released).expect("strings serialize");
     let own = row.labels.iter().any(|l| l == "SENT" || l == "DRAFT");
     if row.gone || own || row.sha.is_none() {
-        return Some((false, row.sha));
+        return Some(LinkRead {
+            mark: false,
+            sha: row.sha,
+            released,
+        });
     }
     let path = row.sha.as_deref().and_then(|s| store.content_path(s))?;
     let (raw, raw_cut, html_after) = read_raw(&path).ok()?;
     let c = iris_clean::clean_cut(&raw, raw_cut);
     let head = crate::Head::parse(&raw, row.authserv);
-    let mark = crate::link_mark(&head, &c.links, c.links_cut || html_after);
-    Some((mark, row.sha))
+    // A released `link` mark is no mark (section 6.7).
+    let mark = crate::link_mark(&head, &c.links, c.links_cut || html_after)
+        && !row.released.iter().any(|r| r == "link");
+    Some(LinkRead {
+        mark,
+        sha: row.sha,
+        released,
+    })
+}
+
+/// The write of the link check of queue row `row` for message `id`, from
+/// `read`. The row goes only for the state that the check read: the same
+/// row, the same content and the same release (an undo after the read
+/// keeps the row and the restored mark). For a deceptive link, the row goes
+/// only when the message has the mark. With no deceptive link, a `link`
+/// mark of earlier content goes. True when the row went.
+#[doc(hidden)]
+pub fn link_check_done(
+    tx: &Transaction,
+    row: i64,
+    id: i64,
+    read: &LinkRead,
+) -> iris_store::Result<bool> {
+    let n = tx.execute(
+        "DELETE FROM link_check WHERE id = ?1 AND EXISTS (
+           SELECT 1 FROM message m WHERE m.id = ?2
+             AND (m.gone_at IS NOT NULL OR (m.content_sha256 IS ?3
+                  AND coalesce(m.released, '[]') = ?5))
+             AND (NOT ?4 OR EXISTS (
+               SELECT 1 FROM json_each(coalesce(m.hostile, '[]'))
+               WHERE value = 'link')))",
+        params![row, id, read.sha, read.mark, read.released],
+    )?;
+    if n > 0 && !read.mark {
+        // A mark of earlier content goes: the check of this content found
+        // no deceptive link, or the person released it.
+        tx.execute(
+            "UPDATE message SET hostile = (
+               SELECT json_group_array(value) FROM json_each(hostile)
+               WHERE value <> 'link')
+             WHERE id = ?1 AND content_sha256 IS ?2 AND coalesce(released, '[]') = ?3
+               AND EXISTS (
+               SELECT 1 FROM json_each(coalesce(hostile, '[]'))
+               WHERE value = 'link')",
+            params![id, read.sha, read.released],
+        )?;
+    }
+    Ok(n > 0)
 }
 
 /// Run understanding on message `message` (its row ID): steps 1 to 8. Run
@@ -498,7 +541,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         same_sender: &first.same,
         known: &[],
     };
-    let a = analysis(&raw, raw_cut, html_after, &cx, row.phishing);
+    let a = analysis(&raw, raw_cut, html_after, &cx, &row);
     // A draft is not understood and is not hostile mail (section 6.7).
     let marks = if draft { Vec::new() } else { a.marks.clone() };
 
@@ -796,6 +839,7 @@ fn state(c: &rusqlite::Connection, message: i64, full: bool) -> rusqlite::Result
               SELECT l.provider_id FROM message_label ml JOIN label l ON l.id = ml.label_id
               WHERE ml.message_id = m.id ORDER BY l.provider_id)), '') ||
            CASE WHEN ?2 THEN '|' || coalesce(m.hostile, '') || '|' ||
+                coalesce(m.released, '') || '|' ||
                 coalesce(m.understood_at, '') || '|' || m.tries || '|' ||
                 coalesce(m.retry_at, '') ELSE '' END
          FROM message m WHERE m.id = ?1",
@@ -838,7 +882,7 @@ fn read_row(store: &Store, message: i64) -> Result<Row> {
                 "SELECT m.account_id, m.thread_id, m.content_sha256, m.internal_date,
                         m.gone_at IS NOT NULL, a.address, m.tries, m.retry_at,
                         EXISTS (SELECT 1 FROM json_each(coalesce(m.hostile, '[]')) WHERE value = 'phishing'),
-                        a.provider
+                        a.provider, m.released
                  FROM message m JOIN account a ON a.id = m.account_id WHERE m.id = ?1",
                 [message],
                 |r| {
@@ -854,6 +898,10 @@ fn read_row(store: &Store, message: i64) -> Result<Row> {
                         tries: r.get(6)?,
                         retry_at: r.get(7)?,
                         phishing: r.get(8)?,
+                        released: r
+                            .get::<_, Option<String>>(10)?
+                            .and_then(|j| serde_json::from_str(&j).ok())
+                            .unwrap_or_default(),
                     })
                 },
             )
@@ -1158,6 +1206,133 @@ fn put_header(tx: &Transaction, message: i64, a: &Analysis) -> rusqlite::Result<
 /// conversation of each thread again, so no conversation shows reset mail.
 /// Call it in the transaction that changed the kinds.
 ///
+/// The hostile marks that the person can release: the marks of the fixed
+/// checks. `spam` (a label of the provider), `phishing` (the answer of the
+/// model) and a `hostile` sender (it has the trust of the gate) stay.
+pub const RELEASABLE: [&str; 3] = ["dmarc", "spoof", "link"];
+
+/// The result of [`release`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum Release {
+    /// The marks that the person released now, and the marks that stay.
+    Done {
+        released: Vec<String>,
+        kept: Vec<String>,
+    },
+    /// No message has the row ID, or it is gone.
+    NoMessage,
+    /// The message has no mark that the person can release, or (for
+    /// [`unrelease`]) no release.
+    Nothing,
+    /// Iris did not understand the current content yet, so its marks are
+    /// not known. A release names only marks of the current content.
+    Reading,
+}
+
+/// The marks, the released marks and `understood_at IS NOT NULL` of a
+/// message. `understood` is false while the marks can be from old content.
+type ReleaseRow = (Vec<String>, Vec<String>, bool);
+
+/// The [`ReleaseRow`] of message `message`, when it is not gone.
+fn release_row(tx: &Transaction, message: i64) -> iris_store::Result<Option<ReleaseRow>> {
+    let row: Option<(String, Option<String>, bool)> = tx
+        .query_row(
+            "SELECT coalesce(hostile, '[]'), released, understood_at IS NOT NULL
+               FROM message WHERE id = ?1 AND gone_at IS NULL",
+            [message],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    Ok(row.map(|(marks, released, understood)| {
+        let list = |j: &str| serde_json::from_str::<Vec<String>>(j).unwrap_or_default();
+        (
+            list(&marks),
+            released.as_deref().map(list).unwrap_or_default(),
+            understood,
+        )
+    }))
+}
+
+/// The person releases received message `message` from quarantine (issues
+/// 369, 373 and 374): each mark of [`RELEASABLE`] that it has now goes to
+/// `message.released`, with the marks that the person released before. The
+/// write clears `understood_at`, so the next run understands the message
+/// again without these marks: with the model, as new mail, if no other mark
+/// stays. New content of the message ends the release.
+pub fn release(tx: &Transaction, message: i64) -> iris_store::Result<Release> {
+    let Some((marks, mut all, understood)) = release_row(tx, message)? else {
+        return Ok(Release::NoMessage);
+    };
+    // The sync clears `understood_at` when the content changes and keeps
+    // the old marks until the next understanding: never release those.
+    if !understood {
+        return Ok(Release::Reading);
+    }
+    let now: Vec<String> = marks
+        .iter()
+        .filter(|m| RELEASABLE.contains(&m.as_str()) && !all.contains(m))
+        .cloned()
+        .collect();
+    if now.is_empty() {
+        return Ok(Release::Nothing);
+    }
+    all.extend(now.iter().cloned());
+    all.sort();
+    tx.execute(
+        // A release is a new decision of the person: the model gets new
+        // tries, as after a rerun (`rerun_senders`). A message that used
+        // its tries before a mark held it can then get its items.
+        // The release also clears `understood_at`: the next run
+        // understands the message again on the one path, without the
+        // released marks, whatever other check runs first.
+        "UPDATE message SET released = ?2, understood_at = NULL,
+           tries = 0, retry_at = NULL, waits_model = 0
+         WHERE id = ?1",
+        params![
+            message,
+            serde_json::to_string(&all).expect("strings serialize")
+        ],
+    )?;
+    let kept = marks.into_iter().filter(|m| !now.contains(m)).collect();
+    Ok(Release::Done {
+        released: now,
+        kept,
+    })
+}
+
+/// The person ends the release of message `message`. The released marks go
+/// back into `message.hostile` in the same write, so each gate that reads
+/// the marks holds the message at once. The write also clears
+/// `understood_at`, so the next run understands the message again on the
+/// one path of hostile mail: it drops the items and updates the
+/// conversation (section 7.3), with no model call. A gone message keeps its
+/// row as it is.
+pub fn unrelease(tx: &Transaction, message: i64) -> iris_store::Result<Release> {
+    let Some((mut hostile, released, _)) = release_row(tx, message)? else {
+        return Ok(Release::NoMessage);
+    };
+    if released.is_empty() {
+        return Ok(Release::Nothing);
+    }
+    for m in released {
+        if !hostile.contains(&m) {
+            hostile.push(m);
+        }
+    }
+    hostile.sort();
+    tx.execute(
+        "UPDATE message SET released = NULL, hostile = ?2, understood_at = NULL WHERE id = ?1",
+        params![
+            message,
+            serde_json::to_string(&hostile).expect("strings serialize")
+        ],
+    )?;
+    Ok(Release::Done {
+        released: Vec::new(),
+        kept: hostile,
+    })
+}
+
 /// Set-based writes and thread pages of [`RERUN_PAGE`], so the work is
 /// linear in the mail of the sender and the memory is bounded. Gives the
 /// count of reset messages.

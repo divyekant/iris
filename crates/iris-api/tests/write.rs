@@ -930,7 +930,8 @@ async fn a_stopped_write_changes_its_draft() {
     assert_eq!(
         d,
         json!({"draft": "d-1", "account": "a-1", "thread": null, "to": ["priya@example.com"],
-               "cc": [], "bcc": [], "subject": "Q4", "body": "Hi.\n", "attachments": []})
+               "cc": [], "bcc": [], "subject": "Q4", "body": "Hi.\n", "attachments": [],
+               "change": "update"})
     );
     let mut body = new_mail("0123456789abcdef-2", json!(["new_recipient"]));
     body["body"] = json!("Changed.\n");
@@ -951,6 +952,11 @@ async fn a_stopped_write_changes_its_draft() {
     // The draft waits for the change now: the first write offers none.
     let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
     assert_eq!(st["change"], Value::Null, "{st}");
+    let (_, d) = call(&s, "GET", "/api/drafts/d-1", None).await;
+    assert_eq!(
+        d["change"], st["change"],
+        "the draft and the write agree: {d}"
+    );
     // A draft that the person changed into a form that Iris does not write
     // has no content to show.
     s.write(|tx| Ok(tx.execute("UPDATE draft SET foreign_at = 1 WHERE id = 1", [])?))

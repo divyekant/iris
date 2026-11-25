@@ -52,9 +52,6 @@ as spec 2 section 7.5 says."
   `person`, through `POST /api/write`, can change a draft in this
   version. Submit denies a change from another author. A limit issue
   records this.
-- A change from the Outbox view. The cancelled card of the Outbox does
-  not get a "Change and send" link in this version. The write view of the
-  stopped mail has it. A limit issue records this.
 - A change of the thread or the parent of a reply. A change keeps the
   thread and the reply headers of the draft.
 - A change of a draft that the person made in Gmail. Iris changes only a
@@ -284,7 +281,17 @@ A ledger row of a change in `writing` after a crash or a lost answer:
 
 The client reads the content of the draft from `GET /api/drafts/{d-N}`
 (a new read route: `to`, `cc`, `bcc`, `subject`, `body`, `attachments`,
-and the account and the thread).
+and the account and the thread). The route also gives `change`, with the
+values of the table above for the draft now. The engine computes both
+values with one function, so the draft answer and the write state never
+disagree (issue 941).
+
+A cancel in the Outbox makes a stopped mail too. After a cancel, the
+Outbox reads `GET /api/drafts/{d-N}`. If `change` is not `null`, the
+cancelled card shows "Change and send". The link opens the write view of
+the draft (`#/write/d-N`), with the content of the draft in the form, as
+after "Change and send" in the write view. For a reply, the form is under
+the conversation of its thread.
 
 The write view, in the state `stopped` with `change` not `null`, shows
 "Change and send". The press opens the form with the content of the

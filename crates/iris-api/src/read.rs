@@ -185,6 +185,11 @@ pub struct Message {
     /// near-copy rule makes it hostile, so the person can trust it (`POST
     /// /api/senders/{id}/trust`, issue #49). `None` for each other sender.
     pub near_copy: Option<NearCopy>,
+    /// The hostile marks that the person released for the current content
+    /// (`POST /api/messages/{id}/release`, issues 369, 373 and 374). Each
+    /// leaves `hostile` after the fixed check reads the message again.
+    /// `POST /api/messages/{id}/unrelease` ends the release.
+    pub released: Vec<String>,
     /// The Undo of a trust: the `p-` ID of a sender row of the `From`
     /// address, in any case, that the person trusted, so the person can
     /// undo the trust (`reopen`, issue #1043). Rows can differ only in
@@ -1320,12 +1325,14 @@ pub(crate) fn message_row(
     let found = c
         .query_row(
             "SELECT m.thread_id, coalesce(h.date, m.internal_date), h.from_name, h.from_addr,
-                    h.subject, h.to_addrs, h.cc_addrs, b.text, m.gone_at IS NOT NULL, m.hostile
+                    h.subject, h.to_addrs, h.cc_addrs, b.text, m.gone_at IS NOT NULL, m.hostile,
+                    m.released
              FROM message m LEFT JOIN header h ON h.message_id = m.id
              LEFT JOIN body b ON b.message_id = m.id WHERE m.id = ?1",
             [row],
             |r| {
                 let hostile: Option<String> = r.get(9)?;
+                let released: Option<String> = r.get(10)?;
                 Ok((
                     MessageSummary {
                         id: format_id(Kind::Message, row),
@@ -1349,6 +1356,9 @@ pub(crate) fn message_row(
                             .unwrap_or_default(),
                         sender_kind: String::new(),
                         near_copy: None,
+                        released: released
+                            .and_then(|h| serde_json::from_str(&h).ok())
+                            .unwrap_or_default(),
                         trusted_sender: None,
                         items: Vec::new(),
                     },

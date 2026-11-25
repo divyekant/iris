@@ -169,6 +169,8 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/messages", get(get_messages))
         .route("/api/messages/{id}", get(get_message))
         .route("/api/messages/{id}/raw", get(get_raw))
+        .route("/api/messages/{id}/release", post(post_release))
+        .route("/api/messages/{id}/unrelease", post(post_unrelease))
         .route("/api/measures", get(get_measures))
         .route("/api/policy", get(get_policy))
         .route("/api/policy/confirm", post(post_confirm))
@@ -721,6 +723,22 @@ async fn post_answer(
 ) -> Result<Response> {
     Ok(gate::answer(&s, &id, &answer, now_ms())?
         .map_or_else(not_found, |d| Json(d).into_response()))
+}
+
+async fn post_release(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    _: NoBody,
+) -> Result<Response> {
+    Ok(gate::release(&s, &id, true)?.map_or_else(not_found, |m| Json(m).into_response()))
+}
+
+async fn post_unrelease(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    _: NoBody,
+) -> Result<Response> {
+    Ok(gate::release(&s, &id, false)?.map_or_else(not_found, |m| Json(m).into_response()))
 }
 
 #[derive(Deserialize)]
@@ -1443,7 +1461,7 @@ async fn get_draft_content(
     State(s): State<Arc<Store>>,
     Path(id): Path<String>,
 ) -> Result<Response> {
-    Ok(match write::draft_content(&s, &id)? {
+    Ok(match write::draft_content(&s, &id, now_ms())? {
         Some(v) => Json(v).into_response(),
         None => not_found(),
     })
