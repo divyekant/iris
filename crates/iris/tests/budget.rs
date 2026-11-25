@@ -61,15 +61,23 @@ fn memory_kib(pid: u32) -> (u64, u64) {
     if !cfg!(target_os = "linux") {
         return (rss_kib(pid), MAX_RSS_KIB);
     }
-    let read = |file: &str, key: &str| {
-        let text = std::fs::read_to_string(format!("/proc/{pid}/{file}")).ok()?;
-        Some(kib_line(&text, key).unwrap_or_else(|| panic!("no {key} line in {file}:\n{text}")))
-    };
-    let anon = read("smaps_rollup", "Anonymous:")
-        .or_else(|| read("status", "RssAnon:"))
-        .expect("measure not available: no /proc/<pid>/smaps_rollup and no /proc/<pid>/status");
+    let anon = linux_anon_kib(|file| std::fs::read_to_string(format!("/proc/{pid}/{file}")).ok())
+        .unwrap_or_else(|e| panic!("{e}"));
     eprintln!("RSS {} KiB, anonymous {anon} KiB", rss_kib(pid));
     (anon, MAX_ANON_KIB)
+}
+
+/// The anonymous memory in KiB from the `/proc` files of one process, which
+/// `read` gives by name (`None`: no such file): `Anonymous` of
+/// `smaps_rollup`, else `RssAnon` of `status`. An error if a file has no
+/// such line, or if neither file is there.
+fn linux_anon_kib(read: impl Fn(&str) -> Option<String>) -> Result<u64, String> {
+    for (file, key) in [("smaps_rollup", "Anonymous:"), ("status", "RssAnon:")] {
+        if let Some(text) = read(file) {
+            return kib_line(&text, key).ok_or_else(|| format!("no {key} line in {file}:\n{text}"));
+        }
+    }
+    Err("measure not available: no /proc/<pid>/smaps_rollup and no /proc/<pid>/status".into())
 }
 
 /// The value of the line `<key> <n> kB` of a `/proc` file, for example
@@ -349,4 +357,38 @@ fn serve_stays_inside_the_memory_budget_after_a_first_sync() {
     );
     assert_eq!(fetched, SYNC_MESSAGES as i64);
     check(mem, Duration::ZERO, limit, MAX_START).unwrap();
+}
+
+/// Issue #1035: the choice of the file. With no `smaps_rollup`, the value
+/// is `RssAnon` of `status`, with the anonymous limit. With neither file,
+/// the measure fails: Linux never falls back to the RSS.
+#[test]
+fn linux_anon_kib_falls_back_to_status_and_fails_with_no_file() {
+    let files = |smaps: Option<&str>, status: Option<&str>| {
+        let (smaps, status) = (smaps.map(str::to_string), status.map(str::to_string));
+        move |f: &str| match f {
+            "smaps_rollup" => smaps.clone(),
+            "status" => status.clone(),
+            _ => None,
+        }
+    };
+    let status = "VmRSS:\t 48000 kB\nRssAnon:\t 16100 kB\n";
+    assert_eq!(
+        linux_anon_kib(files(Some("Anonymous: 15900 kB\n"), Some(status))),
+        Ok(15_900)
+    );
+    assert_eq!(linux_anon_kib(files(None, Some(status))), Ok(16_100));
+    assert!(linux_anon_kib(files(None, None))
+        .unwrap_err()
+        .contains("measure not available"));
+    // A file with no line of its key fails; it does not try the next file.
+    assert!(linux_anon_kib(files(Some("Rss: 1 kB\n"), Some(status))).is_err());
+    assert!(linux_anon_kib(files(None, Some("VmRSS: 1 kB\n"))).is_err());
+    // The value of status is checked against the anonymous limit.
+    let (kib, limit) = (
+        linux_anon_kib(files(None, Some(status))).unwrap(),
+        MAX_ANON_KIB,
+    );
+    assert!(check(kib, MAX_START, limit, MAX_START).is_ok());
+    assert!(check(MAX_ANON_KIB + 1, MAX_START, limit, MAX_START).is_err());
 }
