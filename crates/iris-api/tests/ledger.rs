@@ -1023,7 +1023,7 @@ async fn the_brief_shows_unconfirmed_messages_until_dismissed() {
     assert_eq!(code, StatusCode::OK);
     assert_eq!(
         brief["unconfirmed"],
-        json!({"messages": 2, "entries": [format!("l-{first}")]})
+        json!({"messages": 2, "entries": [format!("l-{first}")], "more": 0})
     );
 
     // The line showed `first`. A later failure comes before the dismissal.
@@ -1037,7 +1037,7 @@ async fn the_brief_shows_unconfirmed_messages_until_dismissed() {
     let (_, brief) = call(&s, false, "/api/brief").await;
     assert_eq!(
         brief["unconfirmed"],
-        json!({"messages": 1, "entries": [format!("l-{second}")]})
+        json!({"messages": 1, "entries": [format!("l-{second}")], "more": 0})
     );
     // A second dismissal of the same entry changes nothing.
     let (_, b) = dismiss(&s, json!({"entries": [format!("l-{first}")]})).await;
@@ -1054,5 +1054,56 @@ async fn the_brief_shows_unconfirmed_messages_until_dismissed() {
     let (_, b) = dismiss(&s, json!({"entries": [format!("l-{second}")]})).await;
     assert_eq!(b, json!({"dismissed": 1}));
     let (_, brief) = call(&s, false, "/api/brief").await;
-    assert_eq!(brief["unconfirmed"], json!({"messages": 0, "entries": []}));
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 0, "entries": [], "more": 0})
+    );
+}
+
+/// Issue #216, review: the line is the entries that it lists. With more
+/// entries than `MAX_LIMIT`, the count covers only the listed entries, so
+/// one dismissal of them ends the line; the older entries then show in the
+/// next line.
+#[tokio::test]
+async fn one_dismissal_ends_a_full_line() {
+    let dir = temp("unconfirmed-full");
+    let s = store(&dir);
+    let max = iris_api::MAX_LIMIT as usize;
+    let ids: Vec<i64> = (0..=max).map(|_| unconfirmed(&s, &[1, 2], &[])).collect();
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    let line = &brief["unconfirmed"];
+    let shown: Vec<Value> = line["entries"].as_array().unwrap().clone();
+    assert_eq!(shown.len(), max);
+    assert_eq!(line["messages"], 2 * max as i64);
+    assert_eq!(line["more"], 1);
+    assert_eq!(shown[0], format!("l-{}", ids[max]));
+    let (code, b) = dismiss(&s, json!({ "entries": shown })).await;
+    assert_eq!((code, b), (StatusCode::OK, json!({"dismissed": max})));
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 2, "entries": [format!("l-{}", ids[0])], "more": 0})
+    );
+}
+
+/// Issue #216, review: the brief shows nothing of an account in
+/// `removing` or `removed`, also no unconfirmed line.
+#[tokio::test]
+async fn a_removed_account_has_no_unconfirmed_line() {
+    for state in ["removing", "removed"] {
+        let dir = temp(&format!("unconfirmed-{state}"));
+        let s = store(&dir);
+        unconfirmed(&s, &[1], &[]);
+        s.write(|tx| {
+            tx.execute("UPDATE account SET state = ?1 WHERE id = 1", [state])?;
+            Ok(())
+        })
+        .unwrap();
+        let (_, brief) = call(&s, false, "/api/brief").await;
+        assert_eq!(
+            brief["unconfirmed"],
+            json!({"messages": 0, "entries": [], "more": 0}),
+            "{state}"
+        );
+    }
 }

@@ -387,29 +387,48 @@ pub fn dismiss_unconfirmed(store: &Store, ids: &[String], now: i64) -> Result<us
     })?)
 }
 
-/// The line of the brief (specification 2, section 7.3): the entries with
-/// messages that the recovery cannot confirm, that the person did not
-/// dismiss, newest first, and the count of their messages.
+/// The line of the brief (specification 2, section 7.3): the newest
+/// [`crate::MAX_LIMIT`] entries with messages that the recovery cannot
+/// confirm, that the person did not dismiss, of an account that is not
+/// removed. `messages` counts the messages of these entries only, so the
+/// line is the entries that it lists, and one dismissal of them covers
+/// the line. `more` counts the other such entries: they show in the next
+/// line.
 #[derive(Debug, Default, Serialize, PartialEq)]
 pub struct Unconfirmed {
     pub messages: i64,
-    /// At most [`crate::MAX_LIMIT`] entries, as `l-<n>`.
+    /// At most [`crate::MAX_LIMIT`] entries, as `l-<n>`, newest first.
     pub entries: Vec<String>,
+    pub more: i64,
 }
 
 pub(crate) fn unconfirmed(c: &Connection) -> rusqlite::Result<Unconfirmed> {
-    const OPEN: &str = "FROM ledger_message lm WHERE lm.listed = 'unknown'
-        AND NOT EXISTS (SELECT 1 FROM ledger_unknown_seen s WHERE s.ledger_id = lm.ledger_id)";
-    let messages = c.query_row(&format!("SELECT count(*) {OPEN}"), [], |r| r.get(0))?;
-    let entries = c
+    // The brief shows nothing of an account in `removing` or `removed`
+    // (remove account spec).
+    const OPEN: &str = "FROM ledger_message lm
+           JOIN ledger l ON l.id = lm.ledger_id
+           JOIN account a ON a.id = l.account_id
+         WHERE lm.listed = 'unknown'
+           AND (a.state IS NULL OR a.state NOT IN ('removing', 'removed'))
+           AND NOT EXISTS (SELECT 1 FROM ledger_unknown_seen s
+                           WHERE s.ledger_id = lm.ledger_id)";
+    let rows: Vec<(i64, i64)> = c
         .prepare(&format!(
-            "SELECT DISTINCT lm.ledger_id {OPEN} ORDER BY lm.ledger_id DESC LIMIT ?1"
+            "SELECT lm.ledger_id, count(*) {OPEN}
+             GROUP BY lm.ledger_id ORDER BY lm.ledger_id DESC LIMIT ?1"
         ))?
-        .query_map([crate::MAX_LIMIT], |r| {
-            Ok(format!("l-{}", r.get::<_, i64>(0)?))
-        })?
+        .query_map([crate::MAX_LIMIT], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    Ok(Unconfirmed { messages, entries })
+    let all: i64 = c.query_row(
+        &format!("SELECT count(DISTINCT lm.ledger_id) {OPEN}"),
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(Unconfirmed {
+        messages: rows.iter().map(|r| r.1).sum(),
+        more: all - rows.len() as i64,
+        entries: rows.iter().map(|r| format!("l-{}", r.0)).collect(),
+    })
 }
 
 #[cfg(test)]
