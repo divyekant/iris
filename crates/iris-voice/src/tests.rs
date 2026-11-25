@@ -2131,32 +2131,63 @@ fn a_snapshot_reads_one_state_of_the_thread() {
     assert_eq!(next.count, s.count + 1);
 }
 
-/// A message with an older date that comes after the draft (a late sync)
-/// makes the draft stale, also after understanding reads it (#479). A
-/// draft of an older build (no `seen`) keeps the rules of `based_on`.
+/// The set of messages that a reply can answer is the set of the save
+/// (#479). A late sync of an older message, a message that leaves the
+/// trash, a message that moves into the thread and a message that goes to
+/// the trash each make the draft stale, also with the same newest message
+/// and each message understood. A draft of an older build (no `seen`)
+/// keeps the rules of `based_on`.
 #[test]
-fn a_late_older_message_makes_the_draft_stale() {
-    let (b, t) = mailbox("late-older");
-    write(&b.store, t, None, &Fake::new(r#"{"body": "ok"}"#), 1).unwrap();
-    assert!(ready(&b.store, t));
-    let old = msg(
-        "late-old",
-        "t1",
-        150,
-        "INBOX",
-        "ana@example.org",
-        "me@example.com",
-        Some("Old"),
-    );
-    b.store.put_messages(1, &[old]).unwrap();
-    b.store
-        .write(|tx| Ok(tx.execute("UPDATE message SET understood_at = 1", [])?))
-        .unwrap();
-    // The newest message is the same, and each message is understood.
-    assert!(checks_pass_on(&b.store, t));
-    assert!(!ready(&b.store, t));
-    b.store
-        .write(|tx| Ok(tx.execute("UPDATE reply_draft SET seen = NULL", [])?))
-        .unwrap();
-    assert!(ready(&b.store, t));
+fn a_change_of_the_answerable_set_makes_the_draft_stale() {
+    let sql = |b: &Box_, q: &str| b.store.write(|tx| Ok(tx.execute_batch(q)?)).unwrap();
+    let add = |b: &Box_, id: &str, thread: &str, label: &str| {
+        let m = msg(
+            id,
+            thread,
+            150,
+            label,
+            "ana@example.org",
+            "me@example.com",
+            Some("Old"),
+        );
+        b.store.put_messages(1, &[m]).unwrap();
+        sql(b, "UPDATE message SET understood_at = 1");
+    };
+    let cases: &[(&str, &dyn Fn(&Box_, i64))] = &[
+        ("late older", &|b, _| add(b, "late-old", "t1", "INBOX")),
+        ("out of the trash", &|b, _| {
+            sql(b, "DELETE FROM message_label WHERE label_id IN (SELECT id FROM label WHERE provider_id = 'TRASH')")
+        }),
+        ("moved in", &|b, t| {
+            sql(
+                b,
+                &format!("UPDATE message SET thread_id = {t} WHERE provider_id = 'other'"),
+            )
+        }),
+        ("to the trash", &|b, _| {
+            sql(
+                b,
+                "INSERT INTO message_label(message_id, label_id)
+                    SELECT m.id, l.id FROM message m, label l
+                    WHERE m.provider_id = 'older-in' AND l.provider_id = 'TRASH'",
+            )
+        }),
+    ];
+    for (name, change) in cases {
+        let (b, t) = mailbox(&format!("set-{}", name.replace(' ', "-")));
+        // An older message in the trash, one in the inbox, and one in another thread.
+        add(&b, "trashed-old", "t1", "TRASH");
+        add(&b, "other", "t-other", "INBOX");
+        add(&b, "older-in", "t1", "INBOX");
+        write(&b.store, t, None, &Fake::new(r#"{"body": "ok"}"#), 1).unwrap();
+        assert!(ready(&b.store, t), "{name}: a new draft");
+        change(&b, t);
+        assert!(
+            checks_pass_on(&b.store, t),
+            "{name}: the newest message is the same"
+        );
+        assert!(!ready(&b.store, t), "{name}");
+        sql(&b, "UPDATE reply_draft SET seen = NULL, seen_sum = NULL");
+        assert!(ready(&b.store, t), "{name}: an older draft");
+    }
 }

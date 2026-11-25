@@ -251,14 +251,17 @@ fn ready_of(threads: &str, item: Option<&str>, now: (&str, &str)) -> String {
                                            WHERE json_extract(e.value, '$.item') = {i}))"
         )
     });
-    // No message that a reply can answer came after the draft, also not
-    // one with an older date (a late sync): `seen` is the highest message
-    // row ID of the thread at the save (#479).
+    // The messages that a reply can answer are the set of the save (#479):
+    // the same count and the same sum of row IDs. A late sync of an older
+    // message, a message back from the trash or spam, or a message that
+    // moves into the thread changes the set. A row of an older build
+    // (NULL) keeps only the rules of `based_on`.
     let in_thread = messages_sql("d.thread_id");
     format!(
         "EXISTS (SELECT 1 FROM reply_draft d WHERE d.thread_id IN ({threads})
            AND {fresh}
-           AND NOT EXISTS (SELECT 1 {in_thread} {ANSWERABLE} AND m.id > d.seen)
+           AND (d.seen IS NULL OR (SELECT count(*) = d.seen AND coalesce(sum(m.id), 0) = d.seen_sum
+                                   {in_thread} {ANSWERABLE}))
            AND (d.ask IS NULL OR d.ask = {key}) {mine})"
     )
 }
@@ -1000,12 +1003,15 @@ fn write_when(
             }
             tx.execute(
                 &format!("INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
-               created_at, ask, seen)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, (SELECT max(m.id) {IN_THREAD}))
+               created_at, ask, seen, seen_sum)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                     (SELECT count(*) {IN_THREAD} {ANSWERABLE}),
+                     (SELECT coalesce(sum(m.id), 0) {IN_THREAD} {ANSWERABLE}))
              ON CONFLICT(thread_id) DO UPDATE SET
                based_on = excluded.based_on, intent = excluded.intent, body = excluded.body,
                model = excluded.model, prompt = excluded.prompt, samples = excluded.samples,
-               created_at = excluded.created_at, ask = excluded.ask, seen = excluded.seen"),
+               created_at = excluded.created_at, ask = excluded.ask, seen = excluded.seen,
+               seen_sum = excluded.seen_sum"),
                 params![
                     thread,
                     based_on,
