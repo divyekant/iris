@@ -856,6 +856,36 @@ test("a saved form with a changed intent or recipient does not get the saved dra
   }
 });
 
+test("a saved form whose recipients changed order does not get the saved draft (issue 831)", async () => {
+  // The voice draft greets the first recipient: a form with the same people in another order is a form that the person changed.
+  const two = { ...REPLY, to: ["priya@example.com", "sam@example.com"] };
+  const saved = { thread: "t-2", based_on: "m-9", nudge: false, to: null, item: null, body: "Hi Priya,\n\nYes, Friday at 10." };
+  for (const [name, order, want] of [
+    ["the same order", (to) => to, saved.body],
+    ["another order", (to) => [...to].reverse(), ""],
+  ]) {
+    window.sessionStorage.clear();
+    let net = serve(() => [404, { error: "Not found." }]);
+    const first = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: two }, every: 20 });
+    await new Promise((r) => setTimeout(r, 20));
+    first.flushSync();
+    first.destroy();
+    net.restore();
+    const form = JSON.parse(window.sessionStorage.getItem("iris.write.t-2"));
+    window.sessionStorage.setItem("iris.write.t-2", JSON.stringify({ ...form, to: order(form.to) }));
+    net = serve((path, method) => (method === "GET" && path === "threads/t-2/draft" ? [200, saved] : [404, { error: "Not found." }]));
+    const app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: two }, every: 20 });
+    try {
+      await new Promise((r) => setTimeout(r, 40));
+      app.flushSync();
+      assert.equal(app.target.querySelector("textarea").value, want, name);
+    } finally {
+      app.destroy();
+      net.restore();
+    }
+  }
+});
+
 test("a change to the intent or a recipient while the saved draft loads keeps the draft out (issue 743)", async () => {
   const saved = { thread: "t-2", based_on: "m-9", nudge: false, to: null, item: null, body: "Hi Priya,\n\nYes, Friday at 10." };
   for (const [name, change] of [

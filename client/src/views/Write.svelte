@@ -229,8 +229,9 @@
   // A saved form that still holds the start values of the reply (no text, no intent,
   // the same recipients) is a form that the person did not start. After a press of
   // "Write it for me", only that answer fills the form. The form must still be
-  // untouched when the read answers.
-  const same = (a: string[], b: string[]) => a.length === b.length && unique(a).every((x) => b.includes(x));
+  // untouched when the read answers. The order counts: the draft greets the
+  // first recipient (issue 831).
+  const same = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
   const untouched = (f: Pick<Saved, "to" | "cc" | "bcc" | "files" | "body" | "intent" | "toText" | "ccText" | "bccText"> | null) =>
     !f ||
     (!f.body.trim() &&
