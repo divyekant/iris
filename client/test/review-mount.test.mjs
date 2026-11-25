@@ -997,3 +997,33 @@ test("a send with a draft offers its change: the press denies only that send, th
     delete globalThis.location;
   }
 });
+
+test("the change of a send waits, as each decision does, until every row of the request shows (issue 208)", async () => {
+  const cs = fx.changesets.find((c) => c.id === "cs-79");
+  const asked = serve({ "changesets/cs-79/decide": () => [200, structuredClone(cs)] });
+  // The rows of the messages do not answer yet.
+  let release;
+  const held = new Promise((r) => (release = r));
+  const fast = globalThis.fetch;
+  globalThis.fetch = async (url, init) => (String(url).includes("/api/messages?") ? (await held, fast(url, init)) : fast(url, init));
+  globalThis.location = window.location;
+  location.hash = "#/review";
+  const view = await mount("/src/views/Request.svelte", { changeset: structuredClone(cs) });
+  try {
+    const change = () => view.target.querySelector("button.change");
+    await until(() => change());
+    assert.equal(change().disabled, true, "no deny while the rows load");
+    change().click();
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(asked.filter((x) => Array.isArray(x) && x[0] === "changesets/cs-79/decide").length, 0);
+    assert.equal(location.hash, "#/review");
+    release();
+    await until(() => !change().disabled);
+    change().click();
+    await until(() => location.hash === "#/write/d-21");
+  } finally {
+    view.destroy();
+    globalThis.fetch = fast;
+    delete globalThis.location;
+  }
+});

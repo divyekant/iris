@@ -178,7 +178,8 @@
   // send only, then the write view opens its draft (#/write/d-N), as "Change and send" of the
   // Outbox. The next press of Send there is a new write of the person, with its own hold.
   async function changeSend(a: (typeof actions)[number], draft: string) {
-    if (busy || stale) return;
+    // A deny is a decision too: only after each row of each waiting change shows (spec 2 section 5.5).
+    if (!ready) return;
     busy = true;
     problem = saved = "";
     try {
@@ -364,7 +365,7 @@
             {#if d}{@render draft(d)}{/if}
             {#if a.verb === "send" && d?.readable && d.draft}
               {@const id = d.draft}
-              <button type="button" class="quiet change" disabled={busy || stale} onclick={() => changeSend(a, id)}>Deny this send and change it yourself</button>
+              <button type="button" class="quiet change" disabled={!ready} onclick={() => changeSend(a, id)}>Deny this send and change it yourself</button>
             {/if}
             {@render lines(a)}
           </div>
