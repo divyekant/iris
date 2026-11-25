@@ -128,15 +128,17 @@ fn trailer(pdf: &[u8]) -> Option<&[u8]> {
 }
 
 /// The dictionary of the last object `n g obj` of the file, with any white
-/// space between the tokens. Each step reads back from the last match, so
-/// the search reads each byte of the file at most a bounded count of times.
+/// space between the tokens. Each step reads back from the last match, and
+/// [`header_before`] reads only white space and digits, which no `obj`
+/// token holds. So the bytes that each step reads do not overlap, and the
+/// search reads each byte of the file a bounded count of times.
 fn object_dict(pdf: &[u8], n: u32, g: u32) -> Option<&[u8]> {
     let mut end = pdf.len();
     let at = loop {
         let at = rfind(&pdf[..end], b"obj")?;
         end = at;
         let after = pdf.get(at + 3);
-        if after.is_some_and(|b| !b.is_ascii_whitespace() && !b"<[(/%".contains(b)) {
+        if after.is_some_and(|&b| !is_space(b) && !b"<[(/%".contains(&b)) {
             continue;
         }
         if header_before(&pdf[..at]) == Some((n, g)) {
@@ -150,21 +152,19 @@ fn object_dict(pdf: &[u8], n: u32, g: u32) -> Option<&[u8]> {
     }
 }
 
-/// The most white space bytes between two tokens of an object header.
-const HEADER_SPACE: usize = 32;
+/// PDF white space (ISO 32000 section 7.2.2): NUL, tab, line feed, form
+/// feed, carriage return and space.
+fn is_space(c: u8) -> bool {
+    c == 0 || c.is_ascii_whitespace()
+}
 
 /// The object number and generation of `<n> <g> ` at the end of `b`, the
 /// bytes before an `obj` token.
 fn header_before(b: &[u8]) -> Option<(u32, u32)> {
     let mut i = b.len();
     let mut back = |need_space: bool| -> Option<u32> {
-        let ws = b[..i]
-            .iter()
-            .rev()
-            .take(HEADER_SPACE + 1)
-            .take_while(|c| c.is_ascii_whitespace())
-            .count();
-        if ws > HEADER_SPACE || (need_space && ws == 0) {
+        let ws = b[..i].iter().rev().take_while(|&&c| is_space(c)).count();
+        if need_space && ws == 0 {
             return None;
         }
         i -= ws;
@@ -183,7 +183,7 @@ fn header_before(b: &[u8]) -> Option<(u32, u32)> {
     let g = back(true)?;
     let n = back(true)?;
     // The number starts a token.
-    (i == 0 || b[i - 1].is_ascii_whitespace()).then_some((n, g))
+    (i == 0 || is_space(b[i - 1])).then_some((n, g))
 }
 
 fn rfind(hay: &[u8], needle: &[u8]) -> Option<usize> {
@@ -512,11 +512,12 @@ mod tests {
             [&out[..sx], tail.as_bytes()].concat()
         };
         for gen in ["0", "1", "7", "65535"] {
-            for sep in [" ", "\n", "  \r\n"] {
+            let long = format!("\0\x0c{}\t", " ".repeat(10_000));
+            for sep in [" ", "\n", "  \r\n", long.as_str()] {
                 let head = format!("6{sep}{gen}{sep}obj");
                 let pdf = swap(base, "6 0 obj", &head);
                 let pdf = swap(&pdf, "/Encrypt 6 0 R", &format!("/Encrypt 6 {gen} R"));
-                assert!(matches!(setup(&pdf), Setup::Open(_)), "{gen} {sep:?}");
+                assert!(matches!(setup(&pdf), Setup::Open(_)), "{gen} {}", sep.len());
                 // A reference with another generation does not resolve.
                 let other = if gen == "0" { "2" } else { "0" };
                 let pdf = swap(
@@ -524,7 +525,7 @@ mod tests {
                     &format!("/Encrypt 6 {gen} R"),
                     &format!("/Encrypt 6 {other} R"),
                 );
-                assert!(matches!(setup(&pdf), Setup::Locked), "{gen} {sep:?}");
+                assert!(matches!(setup(&pdf), Setup::Locked), "{gen} {}", sep.len());
             }
         }
         // `16 0 obj` is not `6 0 obj`.
