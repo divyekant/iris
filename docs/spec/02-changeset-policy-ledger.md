@@ -1324,7 +1324,7 @@ control):
 | A line that is not JSON, or a line over 2 MiB | The server drops the line, answers nothing and reads the next line. No request goes to the engine. |
 | A tool that does not exist | An error of the protocol (`invalid params`). No request goes to the engine. |
 | A missing, unknown or wrong argument | An error result with code 2. No request goes to the engine. |
-| Calls at the same time | At most 4 calls run at the same time. The others wait. Each call is one request on the socket, and the engine orders the writes. Each add with no `changeset` makes its own draft. |
+| Calls at the same time | At most 4 calls run at the same time. The others wait. Each call is one request on the socket, and the engine orders the writes. On the host, each add with no `changeset` makes its own draft. In a session, an add with no `changeset` uses the one draft of the job, so two such adds go to the same draft. |
 | The answer of the engine is lost (time-out, the engine stops) | Code 1, "the result is not known", as for the command. The client reads the state with `changeset` or `drafts`. |
 | The client stops or closes standard input during a call | The server stops after the running calls end (at most the answer wait of 30 seconds). The answer of a running call is lost. The client reads the state with `changeset` or `drafts`. |
 | A retry of `submit` after a lost answer | The engine refuses a changeset that is not a draft (code 2) and changes nothing. `changeset` gives the state. |
