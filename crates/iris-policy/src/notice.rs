@@ -1,7 +1,9 @@
 //! Notices by rule (card R5-08, `docs/specs/2026-11-16-notices.md`): one
 //! notice for each new mail that a `notify` rule of the active policy
-//! matches. The engine shows each new notice in the system, and the web
-//! client shows each notice that is not done.
+//! matches. Job notices (`docs/specs/2026-11-25-job-notices.md`): one
+//! notice for each move of a job to `needs_you`, which a trigger of the
+//! store adds in the transaction of the move. The engine shows each new
+//! notice in the system, and the web client shows each notice that is open.
 
 use iris_store::{Result, Store};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -26,16 +28,21 @@ pub const WORDS_MAX: usize = 200;
 /// The most notices that [`list`] gives.
 pub const LIST_MAX: i64 = 50;
 
-/// One notice.
+/// One notice: a rule notice (a mail and a rule) or a job notice (a job).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Notice {
     pub id: i64,
-    pub message_id: i64,
-    pub rule: u32,
+    /// The mail of a rule notice.
+    pub message_id: Option<i64>,
+    /// The rule of a rule notice.
+    pub rule: Option<u32>,
+    /// The job of a job notice.
+    pub job_id: Option<i64>,
+    /// The name of the rule, or `Job due` or `Job question`.
     pub rule_name: String,
-    /// The sender, one line.
+    /// The sender, or `j-<n>`, one line.
     pub title: String,
-    /// The subject, one line.
+    /// The subject, or the goal of the job, one line.
     pub text: String,
     /// Milliseconds since 1970-01-01 UTC.
     pub created_at: i64,
@@ -114,8 +121,9 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
             if added > 0 {
                 out.push(Notice {
                     id: tx.last_insert_rowid(),
-                    message_id: id,
-                    rule,
+                    message_id: Some(id),
+                    rule: Some(rule),
+                    job_id: None,
                     rule_name,
                     title,
                     text,
@@ -150,11 +158,7 @@ fn words(tx: &Connection, id: i64) -> Result<(String, String)> {
 /// One line of at most [`WORDS_MAX`] characters: each control character and
 /// each run of white space becomes one space.
 pub fn line(s: &str) -> String {
-    let one: String = s
-        .split(|c: char| c.is_whitespace() || c.is_control())
-        .filter(|w| !w.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let one = one_line(s);
     if one.chars().count() <= WORDS_MAX {
         one
     } else {
@@ -162,8 +166,18 @@ pub fn line(s: &str) -> String {
     }
 }
 
-/// The SQL condition "the notice is open": not done, and its mail is not
-/// hostile mail now. A mark that came after the notice (a model `phishing`
+/// One line with no cut: each control character and each run of white
+/// space becomes one space.
+pub fn one_line(s: &str) -> String {
+    s.split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The SQL condition "the notice is open": not done, its mail is not
+/// hostile mail now, and a job notice is for the newest event of its job (an
+/// answer, a wait or an end closes it with no write). A mark that came after the notice (a model `phishing`
 /// mark, a `hostile` sender, the label `SPAM`, a pending link check) hides
 /// the notice, so a notice never points to phishing (decision D33). The
 /// content cleanup of gone mail marks such a notice done before it deletes
@@ -174,8 +188,18 @@ const OPEN: &str = concat!(
     iris_store::hostile_mail!(),
     " OR ",
     iris_store::may_be_hostile!(),
-    "))"
+    ")) AND (notice.job_event_id IS NULL OR notice.job_event_id = \
+     (SELECT max(e.id) FROM job_event e WHERE e.job_id = notice.job_id))"
 );
+
+/// The SQL condition "the notice interrupts": a rule notice, or a job
+/// notice of a move by the engine (`Job due`). A question of an agent
+/// (`Job question`) waits in the list with no system notice: Iris interrupts
+/// only by a rule of the person or on the due date of a job (`PRODUCT.md`).
+/// The term reads `by` of the event, not the name, because a rule name is
+/// text of the person.
+const INTERRUPTS: &str = "(notice.job_event_id IS NULL OR EXISTS (SELECT 1 FROM job_event e \
+     WHERE e.id = notice.job_event_id AND e.by = 'engine'))";
 
 /// True while notice `id` is open ([`OPEN`]). The engine checks it again
 /// just before it shows a system notice, because a notice can wait in the
@@ -197,13 +221,27 @@ pub fn list(conn: &Connection) -> Result<Vec<Notice>> {
     )
 }
 
-/// The notices that are open with a row ID larger than `after`, oldest
-/// first, at most `limit` (the Mac app, `docs/specs/2026-11-17-mac-app.md`).
+/// The notices that are open and interrupt ([`INTERRUPTS`]) with a row ID
+/// larger than `after`, oldest first, at most `limit` (the system notices of
+/// the Mac app, `docs/specs/2026-11-17-mac-app.md`).
 pub fn after(conn: &Connection, after: i64, limit: i64) -> Result<Vec<Notice>> {
     select(
         conn,
-        &format!("WHERE {OPEN} AND id > ?1 ORDER BY id LIMIT ?2"),
+        &format!("WHERE {OPEN} AND {INTERRUPTS} AND id > ?1 ORDER BY id LIMIT ?2"),
         params![after, limit],
+    )
+}
+
+/// The open job notices that interrupt (`Job due`) with a row ID larger
+/// than `after`, oldest first, at most [`LIST_MAX`]: the engine reads the new
+/// ones each turn for the system notice.
+pub fn jobs_after(conn: &Connection, after: i64) -> Result<Vec<Notice>> {
+    select(
+        conn,
+        &format!(
+            "WHERE {OPEN} AND {INTERRUPTS} AND job_event_id IS NOT NULL AND id > ?1 ORDER BY id LIMIT ?2"
+        ),
+        params![after, LIST_MAX],
     )
 }
 
@@ -220,17 +258,23 @@ pub fn counts(conn: &Connection) -> Result<(i64, i64)> {
 fn select(conn: &Connection, rest: &str, p: impl rusqlite::Params) -> Result<Vec<Notice>> {
     let rows = conn
         .prepare(&format!(
-            "SELECT id, message_id, rule, rule_name, title, text, created_at FROM notice {rest}"
+            "SELECT id, message_id, rule, job_id, rule_name, title, text, created_at FROM notice {rest}"
         ))?
         .query_map(p, |r| {
+            let job_id: Option<i64> = r.get(3)?;
+            // The goal of a job is the words of the person: one line here,
+            // with no cut (the store keeps at most 2,000 characters). The
+            // system notice cuts its own text.
+            let one = |s: String| if job_id.is_some() { one_line(&s) } else { s };
             Ok(Notice {
                 id: r.get(0)?,
                 message_id: r.get(1)?,
                 rule: r.get(2)?,
-                rule_name: r.get(3)?,
-                title: r.get(4)?,
-                text: r.get(5)?,
-                created_at: r.get(6)?,
+                job_id,
+                rule_name: r.get(4)?,
+                title: one(r.get(5)?),
+                text: one(r.get(6)?),
+                created_at: r.get(7)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
