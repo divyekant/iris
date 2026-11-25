@@ -809,6 +809,10 @@ fn a_domain_literal_is_an_address() {
     // A bare IPv6 literal outside `<>` is an address too (issue #83).
     assert_eq!(
         found,
-        ["bo@[192.0.2.1]", "c@[ipv6:2001:db8::2]", "user@[ipv6:2001:db8::1]"]
+        [
+            "bo@[192.0.2.1]",
+            "c@[ipv6:2001:db8::2]",
+            "user@[ipv6:2001:db8::1]"
+        ]
     );
 }
