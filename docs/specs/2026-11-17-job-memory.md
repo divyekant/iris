@@ -13,8 +13,9 @@ finds its notes at the wake.
 
 The file lives only in the workspace folder, `<data dir>/workspaces/j-<id>`.
 The backup of the data folder (`Store::backup`, specification 1, section 5.1)
-copies `iris.db`, the content files, the key and `policy.toml`. It does not
-copy the workspaces (issue #350). So these events lose the memory of each job:
+copies `iris.db`, the content files, the key and `policy.toml`. Of the
+workspaces, it copies only `drafts/` (issue #350), not `notes.md`. So these
+events lose the memory of each job:
 
 - A restore from a backup.
 - A move of the data folder to a new computer with the backup.
