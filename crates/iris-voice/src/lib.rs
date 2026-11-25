@@ -151,7 +151,17 @@ struct Snapshot {
     /// model last, so only a finished message passed each hostile check.
     not_ready: i64,
     hostile: i64,
+    /// The row IDs of the messages that a reply can answer, in order, as
+    /// text (`seen_sql`). The draft keeps it (#479).
+    seen: String,
     newest: Vec<Msg>,
+}
+
+/// SQL that gives the row IDs of the messages of `in_thread` that a reply
+/// can answer, in the order of the IDs, as one text: "4,7,9", or "" for
+/// none. The same text means the same set (#479).
+fn seen_sql(in_thread: &str) -> String {
+    format!("SELECT coalesce(group_concat(m.id, ',' ORDER BY m.id), '') {in_thread} {ANSWERABLE}")
 }
 
 /// SQL that is true when the message `m`, with the header `h`, is hostile
@@ -251,17 +261,15 @@ fn ready_of(threads: &str, item: Option<&str>, now: (&str, &str)) -> String {
                                            WHERE json_extract(e.value, '$.item') = {i}))"
         )
     });
-    // The messages that a reply can answer are the set of the save (#479):
-    // the same count and the same sum of row IDs. A late sync of an older
-    // message, a message back from the trash or spam, or a message that
-    // moves into the thread changes the set. A row of an older build
-    // (NULL) keeps only the rules of `based_on`.
-    let in_thread = messages_sql("d.thread_id");
+    // The messages that a reply can answer are the set of the save (#479).
+    // A late sync of an older message, a message back from the trash or
+    // spam, or a message that moves into or out of the thread changes the
+    // set. A row of an older build (NULL) keeps only the rules of `based_on`.
+    let seen = seen_sql(&messages_sql("d.thread_id"));
     format!(
         "EXISTS (SELECT 1 FROM reply_draft d WHERE d.thread_id IN ({threads})
            AND {fresh}
-           AND (d.seen IS NULL OR (SELECT count(*) = d.seen AND coalesce(sum(m.id), 0) = d.seen_sum
-                                   {in_thread} {ANSWERABLE}))
+           AND (d.seen IS NULL OR ({seen}) = d.seen)
            AND (d.ask IS NULL OR d.ask = {key}) {mine})"
     )
 }
@@ -590,6 +598,9 @@ fn snapshot_in(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
         .query_row([thread], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     #[cfg(test)]
     BETWEEN.with(|b| b.borrow_mut().as_mut().map(|f| f()));
+    let seen = c
+        .prepare_cached(&seen_sql(IN_THREAD))?
+        .query_row([thread], |r| r.get(0))?;
     let mut st = c.prepare_cached(&format!(
         "SELECT m.id, h.from_addr, h.from_name, h.to_addrs, h.cc_addrs, b.subject,
            substr(ltrim(b.text, char(32, 9, 10, 13)), 1, ?3),
@@ -636,6 +647,7 @@ fn snapshot_in(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
         count,
         not_ready,
         hostile,
+        seen,
         newest,
     })
 }
@@ -1002,16 +1014,13 @@ fn write_when(
                 return Ok(false);
             }
             tx.execute(
-                &format!("INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
-               created_at, ask, seen, seen_sum)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-                     (SELECT count(*) {IN_THREAD} {ANSWERABLE}),
-                     (SELECT coalesce(sum(m.id), 0) {IN_THREAD} {ANSWERABLE}))
+                "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
+               created_at, ask, seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(thread_id) DO UPDATE SET
                based_on = excluded.based_on, intent = excluded.intent, body = excluded.body,
                model = excluded.model, prompt = excluded.prompt, samples = excluded.samples,
-               created_at = excluded.created_at, ask = excluded.ask, seen = excluded.seen,
-               seen_sum = excluded.seen_sum"),
+               created_at = excluded.created_at, ask = excluded.ask, seen = excluded.seen",
                 params![
                     thread,
                     based_on,
@@ -1025,7 +1034,10 @@ fn write_when(
                     },
                     samples.len() as i64,
                     now_ms,
-                    nudge.map(|n| n.key)
+                    nudge.map(|n| n.key),
+                    // The set of the snapshot that the model read: the
+                    // check above makes it the set of this transaction.
+                    snap.seen
                 ],
             )?;
             Ok(true)
