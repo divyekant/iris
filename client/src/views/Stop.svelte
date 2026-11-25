@@ -62,6 +62,18 @@
     return wanted;
   }
 
+  /**
+   * Read the state again every `every` ms while the tab shows, so a stop or a resume at the
+   * terminal shows in an open tab (issue 589). One small read for each interval. Gives the
+   * function that ends it.
+   */
+  export function watch(every = 30_000): () => void {
+    const timer = setInterval(() => {
+      if (globalThis.document?.visibilityState !== "hidden") void refresh();
+    }, every);
+    return () => clearInterval(timer);
+  }
+
   /** Read the state again: at start, at each new view and when the tab comes back. */
   export async function refresh() {
     // An open Stop or Resume reads the state when it ends.
