@@ -1312,7 +1312,7 @@ fn the_upgrade_drops_the_items_of_a_draft_or_copy() {
     // The store of version 41: no view and no item trigger.
     b.store
         .write(|tx| {
-            tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; DROP TRIGGER IF EXISTS context_sender_name; DROP INDEX IF EXISTS message_context_unknown; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER IF EXISTS spam_drops_items; DROP TRIGGER IF EXISTS spam_back_drops_items; DROP VIEW item_droppable;")?;
+            tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; DROP TRIGGER IF EXISTS context_sender_name; DROP TRIGGER IF EXISTS context_hostile; DROP INDEX IF EXISTS message_context_unknown; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER IF EXISTS spam_drops_items; DROP TRIGGER IF EXISTS spam_back_drops_items; DROP VIEW item_droppable;")?;
             Ok(())
         })
         .unwrap();
@@ -2708,7 +2708,7 @@ Your one-time code is 918273. It ends in 10 minutes.
             "upgrade" => {
                 sql(
                     &b,
-                    "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; DROP TRIGGER IF EXISTS context_sender_name; DROP INDEX IF EXISTS message_context_unknown; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                    "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; DROP TRIGGER IF EXISTS context_sender_name; DROP TRIGGER IF EXISTS context_hostile; DROP INDEX IF EXISTS message_context_unknown; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                      ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
                 );
                 let Box_ {
@@ -2810,7 +2810,7 @@ Your one-time code is 918273. It ends in 10 minutes.
     b.store
         .write(|tx| {
             Ok(tx.execute_batch(
-                "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; DROP TRIGGER IF EXISTS context_sender_name; DROP INDEX IF EXISTS message_context_unknown; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; DROP TRIGGER IF EXISTS context_sender_name; DROP TRIGGER IF EXISTS context_hostile; DROP INDEX IF EXISTS message_context_unknown; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                  ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
             )?)
         })
@@ -2886,7 +2886,7 @@ Your one-time code is 918273. It ends in 10 minutes.
     b.store
         .write(|tx| {
             Ok(tx.execute_batch(
-                "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; DROP TRIGGER IF EXISTS context_sender_name; DROP INDEX IF EXISTS message_context_unknown; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; DROP TRIGGER IF EXISTS context_sender_name; DROP TRIGGER IF EXISTS context_hostile; DROP INDEX IF EXISTS message_context_unknown; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                  ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
             )?)
         })
@@ -3780,4 +3780,75 @@ fn known_parties_put_mail_with_no_date_first() {
     assert!(last[&m1].contains("Al <x0@example.net>"), "{}", last[&m1]);
     // The mail with no date does not get the party of later mail.
     assert!(!last[&m0].contains("Bea <x1@example.net>"), "{}", last[&m0]);
+}
+
+/// Issue 1049, pre-review: an earlier message that comes back, also with
+/// no content, can add a known party: the later message runs again.
+#[test]
+fn an_earlier_message_that_comes_back_with_no_content_runs_the_later_one_again() {
+    let b = store("context-back");
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sender(address, name, kind, decided_by)
+                 VALUES ('x1@example.net', 'Ann', 'person', 'person')
+                 ON CONFLICT(address) DO UPDATE SET name = 'Ann', kind = 'person',
+                   decided_by = 'person'",
+                [],
+            )?;
+            // The header that an earlier run saved.
+            tx.execute(
+                "UPDATE header SET from_addr = 'x1@example.net' WHERE message_id = ?1",
+                [m1],
+            )?;
+            tx.execute(
+                "UPDATE message SET gone_at = ?2 WHERE id = ?1",
+                [m1, NOW - DAY],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    assert!(!last[&m2].contains("Ann <x1@example.net>"), "{}", last[&m2]);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET gone_at = NULL, content_sha256 = NULL WHERE id = ?1",
+                [m1],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    iris_understand::store::update_due_talks(&b.store, NOW).unwrap();
+    let understood: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m2);
+    assert!(understood.is_none(), "m2 runs again");
+}
+
+/// Issue 1049, pre-review: each writer of a hostile mark changes the
+/// context of the later messages. A mark that a writer sets with no new run
+/// of the message (for example a release) runs the later message again.
+#[test]
+fn a_new_hostile_mark_with_no_run_runs_the_later_one_again() {
+    let b = store("context-hostile");
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET hostile = '[\"spoof\"]' WHERE id = ?1",
+                [m1],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    iris_understand::store::update_due_talks(&b.store, NOW).unwrap();
+    let understood: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m2);
+    assert!(understood.is_none(), "m2 runs again");
 }

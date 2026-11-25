@@ -47,8 +47,10 @@ ALTER TABLE message ADD COLUMN context TEXT;
 UPDATE message SET context = '?' WHERE understood_at IS NOT NULL;
 CREATE INDEX message_context_unknown ON message(id) WHERE context = '?';
 
+-- A message that goes away or comes back (also with no content: its
+-- header can hold a known party).
 CREATE TRIGGER context_gone AFTER UPDATE OF gone_at ON message
-  WHEN OLD.gone_at IS NULL AND NEW.gone_at IS NOT NULL AND NEW.thread_id IS NOT NULL
+  WHEN (OLD.gone_at IS NULL) IS NOT (NEW.gone_at IS NULL) AND NEW.thread_id IS NOT NULL
 BEGIN
   INSERT INTO talk_due(thread_id) SELECT NEW.thread_id
     WHERE NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = NEW.thread_id);
@@ -135,4 +137,13 @@ BEGIN
     SELECT DISTINCT m.thread_id FROM header h JOIN message m ON m.id = h.message_id
     WHERE h.from_addr = lower(NEW.address) AND m.thread_id IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM talk_due d WHERE d.thread_id = m.thread_id);
+END;
+
+-- A new or removed hostile mark (a release, the fixed check) changes the
+-- context of the later messages: hostile mail is not context.
+CREATE TRIGGER context_hostile AFTER UPDATE OF hostile ON message
+  WHEN OLD.hostile IS NOT NEW.hostile AND NEW.thread_id IS NOT NULL
+BEGIN
+  INSERT INTO talk_due(thread_id) SELECT NEW.thread_id
+    WHERE NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = NEW.thread_id);
 END;
