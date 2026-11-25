@@ -162,3 +162,24 @@ fn property_any_text_is_safe() {
         }
     }
 }
+
+/// The comment name of a bare address keeps its quoted pairs and its
+/// nested comments (issue #780).
+#[test]
+fn comment_name_reads_quoted_pairs_and_nested_comments() {
+    for (list, want) in [
+        ("a@example.org (Ana \\) Lee)", "Ana ) Lee"),
+        ("a@example.org (Ana \\( Lee)", "Ana ( Lee"),
+        ("a@example.org (Ana (work) Lee)", "Ana (work) Lee"),
+        ("a@example.org (Ana Lee), b@example.org", "Ana Lee"),
+    ] {
+        let got = addresses(list);
+        assert_eq!(got[0].0, "a@example.org", "{list:?}");
+        assert_eq!(got[0].1.as_deref(), Some(want), "{list:?}");
+    }
+    // An open comment gives no name, and the address stays.
+    assert_eq!(
+        addresses("a@example.org (Ana"),
+        vec![("a@example.org".into(), None)]
+    );
+}
