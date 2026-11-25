@@ -209,8 +209,10 @@ object, and JSON Lines for a list.
 ## Changesets from the terminal
 
 These commands talk to the running engine through the socket `iris.sock` in
-the data folder. They do not read the store. Start the engine with
-`iris serve` first. With no engine, they exit with code 4.
+the data folder. They do not read the store. They need a running engine.
+After `install.sh`, the background service runs the engine. For a source
+build, or an install with no service, run `iris serve` first (see "Connect a
+Gmail account", step 4). With no engine, they exit with code 4.
 
 | Command | Does |
 |---|---|
@@ -255,8 +257,9 @@ that adds an action gives the JSON `{"changeset": ..., "n": ...}`.
 
 The tools take the same path as the command, with the same author (`local`),
 the same policy and the same review. The read tools and the watch tools use
-the store directly. The other tools need the engine: start `iris serve`
-first. A failed tool call
+the store directly. The other tools need a running engine: the background
+service after `install.sh`, or `iris serve` (see "Connect a Gmail account",
+step 4). A failed tool call
 gives the error line and the exit code of the command. MCP has no tool to
 approve, to deny or to change the policy. Only the web client does these
 steps.
@@ -395,7 +398,8 @@ A watch tells you one time when a new mail matches a search text.
 | `iris watch remove <id>` | Removes the watch (`w-3`). |
 
 Test the text with `iris search` first. Only mail that arrives after the
-watch can match. `iris serve` checks each minute. Mail that you send, drafts
+watch can match. The engine checks each minute, and `iris mirror` and
+`iris understand` check before they end. Mail that you send, drafts
 and hostile mail never match.
 
 ## Understand the mail

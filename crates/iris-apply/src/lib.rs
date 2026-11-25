@@ -36,8 +36,8 @@ mod stop;
 
 pub use send::{
     bcc_open, bcc_test, bcc_waits, is_sent_by_iris, release, sending, sent_by_iris, set_sending,
-    CHANGE_CHANGED, CHANGE_DURING, CHANGE_GONE, CHANGE_NEW_MAIL, CHANGE_OLD_FILE, CHANGE_UNKNOWN,
-    HOLD_MS, NO_BCC, SENT_OTHER, SENT_OTHER_END,
+    CHANGE_CHANGED, CHANGE_DURING, CHANGE_GONE, CHANGE_NEW_MAIL, CHANGE_OLD_FILE, CHANGE_UNDO_FILE,
+    CHANGE_UNKNOWN, HOLD_MS, NO_BCC, SENT_OTHER, SENT_OTHER_END,
 };
 pub use state::{apply_state, apply_states};
 pub use step::{recover_step, step, step_clock, Step};
@@ -53,7 +53,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use unicase::UniCase;
 
 mod undo;
-pub use undo::undo;
+pub use undo::{undo, CHANGE_LATER};
 
 #[derive(Debug)]
 pub enum Error {

@@ -764,7 +764,6 @@ fn random_target_rows() {
 /// with the schema.
 #[test]
 fn random_draft_change_rows() {
-    iris_changeset::allow_draft_change(true);
     let dir = TempDir::new("fuzz-change");
     let s = store(&dir);
     let person = Author {

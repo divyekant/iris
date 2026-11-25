@@ -2,7 +2,7 @@
 
 These rules apply to every agent that works in this repository (Claude, Codex, and
 others). `CLAUDE.md` imports this file. The process comes from the projectstarter
-kit (projectstarter 0.6.1). Product rules are at the end, in [Product rules](#product-rules).
+kit (projectstarter 0.7.6). Product rules are at the end, in [Product rules](#product-rules).
 
 Write all documentation, PR text and code comments as `docs/writing-style.md` says
 (Simplified Technical English).
@@ -18,6 +18,34 @@ Write all documentation, PR text and code comments as `docs/writing-style.md` sa
 
 Never push to `develop`, `main` or a `release/*` branch. Never merge with
 `gh pr merge`, the GitHub button or `git push`.
+
+## Work without asking
+
+The owner gives standing approval for the full workflow of a change. Do each
+step of [Workflow for one change](#workflow-for-one-change) to the merge, and
+ask the owner nothing. The approval covers these steps:
+
+- Make the branch, commit, and push the branch.
+- Run local CI, the pre-review and the review loop.
+- Fix the findings, and run the review again.
+- Open the PR, mark it ready, and merge it into `develop` with
+  `review.py --merge` when the review is clean.
+- Move the tracker card, and file the issues of
+  [Known limits and deferred findings](#known-limits-and-deferred-findings).
+
+Do not ask "Shall I open the PR?" or "Shall I merge?". Tell the owner the
+result after the merge. If the default of your agent tool is to ask before a
+push or a merge, this file wins: it is the owner's approval.
+
+Stop and ask the owner only in these cases:
+
+| Case | Rule |
+|---|---|
+| A change to production | [Deploy](#deploy) |
+| A secret value (a key or a token) | [Secrets](#secrets) |
+| A change that the owner can see on a screen: the owner picks from the before/after page | [Plan and track](#plan-and-track) |
+| `review.py` Exit 1 (for example, Codex is not signed in) | Step 7 of the workflow |
+| Five review rounds with no clean review: `--force` needs the owner | Step 8 of the workflow |
 
 ## Set up
 
