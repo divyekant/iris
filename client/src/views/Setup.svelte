@@ -59,6 +59,7 @@
       <h1>The copy stopped</h1>
       <p class="big">The copy of {account.address} stopped. Iris copied {number(m.fetched)} of {m.total ? number(m.total) : "all"} messages{across(status)}.</p>
       <p class="quiet">Iris continues the copy after you sign in again. Nothing in your mailbox changed.</p>
+      {#if needsModel(status)}<NoModel />{/if}
       {#if m.understood > 0}<a class="go" href="#/brief">Open the brief</a>{/if}
     </section>
   {:else if stage === 1}
