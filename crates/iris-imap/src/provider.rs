@@ -420,10 +420,11 @@ const FIXED: [&str; 9] = [
 /// (fixed labels, then folder labels, then keyword labels), a name that a
 /// fixed name or an earlier label has gets " (folder)" or " (keyword)",
 /// then " (folder 2)", " (folder 3)" and so on. A lookup by name finds one
-/// label. The fixed names are taken first, so no label takes one.
+/// label. The fixed names are taken first, so no label takes one. Folder
+/// names decode to Unicode, so the compare folds Unicode case, not only ASCII.
 fn unique_names(mut labels: Vec<Label>) -> Vec<Label> {
     labels.sort_by(|a, b| a.id.cmp(&b.id));
-    let mut taken: BTreeSet<String> = FIXED.iter().map(|x| x.to_ascii_lowercase()).collect();
+    let mut taken: BTreeSet<String> = FIXED.iter().map(|x| x.to_lowercase()).collect();
     for l in labels.iter_mut() {
         let tag = if l.id.starts_with("folder:") {
             "folder"
@@ -434,7 +435,7 @@ fn unique_names(mut labels: Vec<Label>) -> Vec<Label> {
         };
         let base = l.name.clone();
         let mut n = 1;
-        while taken.contains(&l.name.to_ascii_lowercase()) {
+        while taken.contains(&l.name.to_lowercase()) {
             l.name = if n == 1 {
                 format!("{base} ({tag})")
             } else {
@@ -442,7 +443,7 @@ fn unique_names(mut labels: Vec<Label>) -> Vec<Label> {
             };
             n += 1;
         }
-        taken.insert(l.name.to_ascii_lowercase());
+        taken.insert(l.name.to_lowercase());
     }
     labels
 }
@@ -1268,6 +1269,13 @@ mod tests {
                 "work (keyword)",
             ]
         );
+        // Decoded names that differ only in Unicode case get one name each.
+        let out = unique_names(vec![
+            l("folder:&ANw-ber", "Über"),
+            l("folder:&APw-ber", "über"),
+        ]);
+        let names: Vec<&str> = out.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["Über", "über (folder)"]);
     }
 
     #[test]
