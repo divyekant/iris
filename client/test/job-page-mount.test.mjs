@@ -8,6 +8,12 @@ const fx = await load("/dev/fixtures.ts");
 const text = (el) => el.textContent.replace(/\s+/g, " ");
 const button = (view, name) => [...view.target.querySelectorAll("button")].find((b) => text(b).trim() === name);
 
+// The engine adds one event for each move of a job, as an end does.
+const doneOf = (d, kind = "complete") => ({
+  ...d,
+  job: { ...d.job, state: "done", end: kind, wait: undefined, question: undefined, events: [...d.job.events, { at: "2026-11-16T20:00:00Z", state: "done", by: "person", end: kind }] },
+});
+
 function serve(answer) {
   const asked = [];
   globalThis.fetch = async (url, init) => {
@@ -154,8 +160,9 @@ test("an answer or an end whose job document is lost or fails reads the job agai
 
 test("a late answer response does not put back a job that a newer end replaced (pre-review)", async () => {
   const d = structuredClone(fx.jobDetails["j-14"]);
-  const on = { ...d, job: { ...d.job, state: "working", question: undefined } };
-  const done = { ...d, job: { ...d.job, state: "done", end: "cancel", question: undefined } };
+  // The engine adds an event for each move: the answer first, then the end.
+  const on = { ...d, job: { ...d.job, state: "working", question: undefined, events: [...d.job.events, { at: "2026-11-16T19:00:00Z", state: "working", by: "person", answer: "Yes." }] } };
+  const done = doneOf(on, "cancel");
   let release;
   const held = new Promise((r) => (release = r));
   serve(async (method, path) => {
@@ -179,6 +186,63 @@ test("a late answer response does not put back a job that a newer end replaced (
     view.flushSync();
     assert.match(text(view.target.querySelector("[aria-label=Now]")), /Cancelled/);
     assert.ok(!button(view, "End"), "the job stays done");
+  } finally {
+    view.destroy();
+  }
+});
+
+
+test("a poll that read the job before the end commits does not hide the end (review round 2)", async () => {
+  const d = structuredClone(fx.jobDetails["j-15"]);
+  let release;
+  const finished = new Promise((r) => (release = r));
+  let reads = 0;
+  serve(async (method, path) => {
+    if (method === "POST" && path === "jobs/j-15/finish") return (await finished, [200, doneOf(d)]);
+    // A poll that starts after the end request reads the job from before the end.
+    reads++;
+    return [200, d];
+  });
+  const view = await mount("/src/views/Job.svelte", { detail: d, every: 20 });
+  try {
+    button(view, "End").click();
+    view.flushSync();
+    button(view, "Mark as done").click();
+    const before = reads;
+    await until(() => reads > before);
+    await new Promise((r) => setTimeout(r, 30));
+    release();
+    await until(() => (view.flushSync(), !button(view, "End")));
+    assert.doesNotMatch(text(view.target), /does not know if the job ended/);
+    assert.equal(view.target.querySelector("[aria-label='End the job']"), null);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a late scope answer does not put back a job that ended after it (review round 2)", async () => {
+  const d = structuredClone(fx.jobDetails["j-12"]);
+  let release;
+  const removed = new Promise((r) => (release = r));
+  const posts = [];
+  serve(async (method, path) => {
+    if (method === "POST") posts.push(path);
+    if (method === "POST" && path === "jobs/j-12/scope/remove") return (await removed, [200, { ...d, scope: [] }]);
+    if (method === "POST" && path === "jobs/j-12/finish") return [200, doneOf(d, "cancel")];
+    return [200, d];
+  });
+  const view = await mount("/src/views/Job.svelte", { detail: d, every: 60_000 });
+  try {
+    button(view, "Remove").click();
+    await until(() => posts.includes("jobs/j-12/scope/remove"));
+    button(view, "End").click();
+    view.flushSync();
+    button(view, "Cancel the job").click();
+    await until(() => (view.flushSync(), !button(view, "End")));
+    release();
+    await new Promise((r) => setTimeout(r, 30));
+    view.flushSync();
+    assert.equal(button(view, "End"), undefined, "the job stays done");
   } finally {
     view.destroy();
   }

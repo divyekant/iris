@@ -16,11 +16,20 @@
   let { detail: first, every = 5000 }: { detail: JobDetail; every?: number } = $props();
   // svelte-ignore state_referenced_locally
   let detail = $state(first);
-  // Each read and each write of the job takes a number at its start. Its job applies only if no
-  // request that started later applied first, so a late answer never puts back an older job (issue 322).
+  // A document from the engine applies only if it is not older than the page (issue 322). Each move of
+  // the job adds one event and the events never go, so fewer events is an older job: a read from before
+  // an end, or a late answer, never puts back an earlier state. With the same events (an edit, a scope
+  // change), the request that started later wins: each request takes a number at its start.
   let started = 0;
   let applied = 0;
-  const take = (n: number, d: JobDetail) => n > applied && ((applied = n), (detail = d), true);
+  const take = (n: number, d: JobDetail) => {
+    const have = detail.job.events?.length ?? 0;
+    const got = d.job.events?.length ?? 0;
+    if (got < have || (got === have && n <= applied)) return false;
+    applied = Math.max(applied, n);
+    detail = d;
+    return true;
+  };
   // Read the job again and show it, if no newer request applied first. It throws if the read fails.
   const reload = async () => {
     const n = ++started;
@@ -97,8 +106,6 @@
     else endError ||= "Iris does not know if the job ended. Try again, or open the job again later.";
   }
 
-  // The answer of the question. Its number is taken when the person sends it.
-  let asked = 0;
 </script>
 
 <p class="eyebrow">Job</p>
@@ -135,8 +142,7 @@
     {#key job.updated}
       <AnswerForm
         {job}
-        onsend={() => (asked = ++started)}
-        onanswered={(_, d) => take(asked, d)}
+        onanswered={(_, d) => take(++started, d)}
         onchanged={() => reload().catch(() => {})}
         onunknown={() => reload().catch(() => {})}
         lost="Iris does not know if your answer arrived. Open the job again to see."
@@ -154,7 +160,7 @@
   {/if}
 </section>
 
-<Scope {detail} onchange={(d) => (detail = d)} />
+<Scope {detail} onchange={(d) => take(++started, d)} />
 
 <Grants {job} />
 
