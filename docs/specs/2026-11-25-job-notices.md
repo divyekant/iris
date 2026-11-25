@@ -50,7 +50,7 @@ UNIQUE`), so a job cannot have a row today.
 
 ### The store
 
-Migration `N` (the next free number at merge; 59 on 2026-11-25) makes the
+Migration 63 (the next free number at the build) makes the
 table `notice` again, with the same row IDs and the same `sqlite_sequence`
 value, so the engine never uses an ID again (specification 1, 5.7):
 
@@ -130,6 +130,10 @@ A Mac app from before this change reads `rule_name`, `title` and `text`,
 and opens `#/brief`, so it shows a `Job due` row with no change. The new
 Mac app opens `#/jobs/<j-id>`.
 
+`app.notices` cuts the `text` of a job row so that `title: text` has at
+most 200 characters: the Mac app shows it as a system notice, and an old
+Mac app does not cut it. `/api/notices` gives the full goal.
+
 `POST /api/notices/<n-id>/done` marks a job row done as a rule row.
 
 ### The web client
@@ -179,8 +183,9 @@ job. No new token and no new part.
 - `apps/mac/src/engine.rs`: the route of a job row.
 - `docs/spec/01-mirror-store-forms.md` (the `notice` table), `docs/specs/2026-11-24-job-due-date.md` and `docs/specs/2026-11-16-notices.md`.
 
-Three PRs: the engine (store, policy, engine, API), the web client, the Mac
-app.
+Two PRs: the engine and the web client (store, policy, engine, API, notice
+list), so the web client never gets a job row that it cannot show; then the
+Mac app.
 
 ## Assumptions
 

@@ -408,7 +408,23 @@ export type WriteState =
   | { state: "waiting"; draft: string; sending: boolean; bcc_check?: string | null; leaves_at: string | null }
   | { state: "review"; draft: string; reason: string | null }
   | { state: "sent"; draft: string }
-  | { state: "stopped"; reason: string; draft: string | null };
+  | { state: "stopped"; reason: string; draft: string | null; change?: "update" | "new" | null };
+
+/**
+ * GET /api/drafts/{id}: the content of a draft, for the form of "Change and
+ * send" (draft change spec, section 5).
+ */
+export type DraftContent = {
+  draft: string;
+  account: string;
+  thread: string | null;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  body: string;
+  attachments: Attachment[];
+};
 
 /** A message summary, or only the ID of a message that is not in the mirror any more. */
 export type Target = (Summary & { gone?: false }) | { id: string; gone: true };
