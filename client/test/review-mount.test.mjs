@@ -890,6 +890,57 @@ test("a request on the screen that leaves the open list goes to the end with no 
   }
 });
 
+test("a new revision with a new mail action loads its draft, and the request can be decided (issue 184)", async () => {
+  const cs = structuredClone(fx.changesets.find((c) => c.id === "cs-79"));
+  const [first] = fx.answer("/changesets/cs-79/drafts").drafts;
+  // The author submits revision 2: the send of revision 1 is replaced by a send with a new draft.
+  const next = {
+    ...cs,
+    revision: 2,
+    actions: [
+      ...cs.actions.map((a) => ({ ...a, decision: { state: "replaced" } })),
+      { ...cs.actions[0], revision: 2, targets: { drafts: ["d-22"] } },
+      { ...cs.actions[1], revision: 2 },
+    ],
+  };
+  let open = [cs];
+  const asked = serve({
+    changesets: () => [200, { changesets: open }],
+    "changesets/cs-79/drafts": () => [200, { drafts: open[0] === cs ? [first] : [first, { ...first, revision: 2, draft: "d-22" }] }],
+  });
+  const view = await mount("/src/views/Review.svelte", { changesets: [cs], every: 20 });
+  try {
+    await until(() => (view.flushSync(), !view.target.querySelector("button.primary").disabled));
+    const before = view.target.querySelector("[data-changeset=cs-79]");
+    open = [next];
+    await until(() => asked.filter((p) => p === "changesets/cs-79/drafts").length === 2);
+    await until(() => (view.flushSync(), !view.target.querySelector("button.primary").disabled));
+    assert.equal(view.target.querySelector("[data-changeset=cs-79]"), before, "the request keeps its part");
+    assert.doesNotMatch(text(view.target), /changed after you opened it/);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a new revision with a change of an older revision loads the reason of that revision (issue 189)", async () => {
+  const base = changeset([]);
+  // Revision 2 keeps the open change of revision 1. Revision 4 keeps an open change of revision 3:
+  // the screen did not know the reason of revision 3 when it loaded the reasons.
+  const second = { ...base, revision: 2, actions: [act({ resolved: { messages: [] } }), act({ n: 2, revision: 2, resolved: { messages: [] } })] };
+  const fourth = { ...base, revision: 4, actions: [...second.actions, act({ n: 3, revision: 3, resolved: { messages: [] } }), act({ n: 4, revision: 4, resolved: { messages: [] } })] };
+  const reasons = [1, 2, 3, 4].map((revision) => ({ revision, why: `Reason ${revision}.` }));
+  let open = [second];
+  serve({ changesets: () => [200, { changesets: open }], "changesets/cs-9/revisions": () => [200, { revisions: reasons.slice(0, open[0].revision) }] });
+  const view = await mount("/src/views/Review.svelte", { changesets: [second], every: 20 });
+  try {
+    await until(() => (view.flushSync(), /From revision 1, which asked: “Reason 1\.”/.test(text(view.target))));
+    open = [fourth];
+    await until(() => (view.flushSync(), /From revision 3, which asked: “Reason 3\.”/.test(text(view.target))));
+  } finally {
+    view.destroy();
+  }
+});
+
 test("a request whose author makes a new revision takes no decision until it is open again (pre-review)", async () => {
   const first = changeset([act({ resolved: { messages: [] } })]);
   // The store keeps the older actions waiting while the new revision is a draft.

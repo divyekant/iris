@@ -67,13 +67,16 @@
   // The reason of each submitted revision (issue 189): an open change of an older revision
   // shows the reason of its own revision, not the quote above, which is the reason of the newest.
   let reasons: Record<number, string> = $state({});
-  let older = $derived(open.some((a) => a.revision < c.revision));
-  let askedReasons = false;
+  // Each document of the request can bring new older revisions: the reasons load again for each
+  // revision that has no reason yet, once for each set of revisions.
+  let reasonsNeed = $derived([...new Set(open.filter((a) => a.revision < c.revision && !(a.revision in reasons)).map((a) => a.revision))].join(","));
+  let reasonsAsked = "";
   $effect(() => {
-    if (!older || askedReasons) return;
-    askedReasons = true;
+    const need = reasonsNeed;
+    if (!need || need === reasonsAsked) return;
+    reasonsAsked = need;
     get<{ revisions: { revision: number; why: string }[] }>(`changesets/${encodeURIComponent(c.id)}/revisions`).then(
-      (got) => (reasons = Object.fromEntries(got.revisions.map((r) => [r.revision, r.why]))),
+      (got) => (reasons = { ...reasons, ...Object.fromEntries(got.revisions.map((r) => [r.revision, r.why])) }),
       // Without the reasons, each older change still says which revision it comes from.
       () => {},
     );
@@ -106,24 +109,26 @@
   let failed: Record<string, boolean> = $state({});
   let problem = $state("");
   // The draft of each draft and send action that waits (card R4-07), by the key of the action.
+  // A key names one action of one revision, so a draft never changes under its key. Each document
+  // of the request can bring new mail actions: the drafts load again for each set of keys that has
+  // no draft yet. A failed load waits for Try again.
   let drafts: Record<string, DraftView> | null = $state(null);
-  let draftsFailed = $state(false);
-  let mails = $derived(open.some(mail));
+  let draftsNeed = $derived(open.filter((a) => mail(a) && !drafts?.[key(a)]).map(key).join(","));
+  let draftsAsked = "";
+  let draftsTry = $state(0);
   $effect(() => {
-    if (!mails || drafts || draftsFailed) return;
+    void draftsTry;
+    const need = draftsNeed;
+    if (!need || need === draftsAsked) return;
+    draftsAsked = need;
     get<{ drafts: DraftView[] }>(`changesets/${encodeURIComponent(c.id)}/drafts`).then(
       (got) => {
-        const map: Record<string, DraftView> = Object.fromEntries(got.drafts.map((d) => [`${d.revision}.${d.n}`, d]));
-        // The answer leaves out an action that is not open now: the request changed after it loaded.
-        if (open.some((a) => mail(a) && !map[key(a)])) {
-          draftsFailed = true;
-          refresh("This request changed after you opened it. Here it is as it is now.");
-        } else drafts = map;
+        const map: Record<string, DraftView> = { ...drafts, ...Object.fromEntries(got.drafts.map((d) => [`${d.revision}.${d.n}`, d])) };
+        drafts = map;
+        // The answer leaves out an action that is open now: the request changed after it loaded.
+        if (need.split(",").some((k) => !map[k])) refresh("This request changed after you opened it. Here it is as it is now.");
       },
-      (e) => {
-        draftsFailed = true;
-        problem = e instanceof Error ? e.message : String(e);
-      },
+      (e) => (problem = e instanceof Error ? e.message : String(e)),
     );
   });
   // An action is complete when each of its rows loaded, and for a mail action its draft too:
@@ -151,8 +156,8 @@
   function retry() {
     problem = "";
     failed = {};
-    drafts = null;
-    draftsFailed = false;
+    draftsAsked = "";
+    draftsTry++;
   }
 
   let ready = $derived(!busy && !stale && !missing.length);
