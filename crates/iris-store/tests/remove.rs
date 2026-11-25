@@ -274,7 +274,30 @@ fn a_tombstone_takes_no_sync_write() {
     let dir = TempDir::new("tombstone");
     let store = Store::open(&dir.0).unwrap();
     let (a, _) = two(&store);
+    // The rows of a sync that runs at the time of the removal.
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'sync', 1)",
+                [a],
+            )?;
+            tx.execute(
+                "INSERT INTO sync_seen(account_id, message_id, labels) VALUES (?1, 'old', '')",
+                [a],
+            )?;
+            Ok(())
+        })
+        .unwrap();
     store.remove_account("a@example.org", NOW).unwrap();
+    let removing = [
+        "UPDATE sync_log SET ended_at = 2, result = 'x' WHERE account_id = ?1",
+        "UPDATE sync_seen SET labels = 'INBOX' WHERE account_id = ?1",
+        "UPDATE account SET address = 'other@example.org' WHERE id = ?1",
+    ];
+    for sql in removing {
+        let r = store.write(|tx| Ok(tx.execute(sql, [a])?));
+        assert!(r.is_err(), "a removing tombstone took: {sql}");
+    }
     let writes = [
         "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'sync', 1)",
         "INSERT INTO sync_seen(account_id, message_id, labels) VALUES (?1, 'x', '')",
