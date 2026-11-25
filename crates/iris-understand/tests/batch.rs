@@ -1414,6 +1414,44 @@ fn a_decline_during_a_refused_call_does_not_hold_the_mail() {
     assert!(b.understood(m));
 }
 
+/// A decline and a reopen around a refused call (#934): the call read a
+/// sender with no decline, so the decline is a changed input. The refusal
+/// writes no mark, and after the reopen the next run calls the model.
+#[test]
+fn a_decline_and_a_reopen_around_a_refused_call_leave_no_mark() {
+    let b = store("refusal-decline-reopen");
+    b.model(false, None);
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    let db = b._dir.0.join("iris.db");
+    b.script.push(Err(ModelError::Budget("refused".into())));
+    *b.script.during.borrow_mut() = Some(std::boxed::Box::new(move || {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO sender(address, kind, decided_by, declined_at)
+                 VALUES ('ana@example.org', 'stranger', 'engine', 1)
+                 ON CONFLICT(address) DO UPDATE SET declined_at = 1, kind = 'stranger'",
+                [],
+            )
+            .unwrap();
+    }));
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.script.calls(), 1);
+    assert_eq!(
+        b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
+        Some(0),
+        "the decline changed an input of the call"
+    );
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE sender SET declined_at = NULL", [])?;
+            Ok(())
+        })
+        .unwrap();
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.script.calls(), 2, "after the reopen the model reads it");
+}
+
 /// A change of the thread context during a refused call (a SPAM label on
 /// an earlier message) leaves no mark either (#153).
 #[test]
