@@ -30,10 +30,20 @@
     detail = d;
     return true;
   };
-  // Read the job again and show it, if no newer request applied first. It throws if the read fails.
+  // The writes of this page (edit, end, answer, scope) in flight, and all that started. A write gives the job
+  // after it. A read that overlaps a write can hold the job from before it (an edit adds no event), so a read
+  // applies only if no write was in flight at its start or started before its end.
+  let writes = 0;
+  let wrote = 0;
+  const busy = (on: boolean) => (on ? (writes++, wrote++) : writes--);
+  // Read the job again and show it, if no newer request applied first and no write overlapped it.
+  // Gives the job that it read. It throws if the read fails.
   const reload = async () => {
     const n = ++started;
-    take(n, await loadJob(detail.job.id));
+    const [w, quiet] = [wrote, writes === 0];
+    const d = await loadJob(detail.job.id);
+    if (quiet && writes === 0 && wrote === w) take(n, d);
+    return d;
   };
   // A failed read counts here, so the next read is planned again.
   let misses = $state(0);
@@ -66,14 +76,20 @@
   async function save(goal: string, dueAt: string | null): Promise<string> {
     const n = ++started;
     try {
-      take(n, await editJob(job.id, goal, dueAt));
+      busy(true);
+      let d: JobDetail;
+      try {
+        d = await editJob(job.id, goal, dueAt);
+      } finally {
+        busy(false);
+      }
+      take(n, d);
       editing = false;
       return "";
     } catch (e) {
       // The edit can have arrived (a lost answer, or a failed read after it): show the job as the engine has it.
-      const fresh = await loadJob(job.id).catch(() => null);
+      const fresh = await reload().catch(() => null);
       if (fresh) {
-        take(++started, fresh);
         if (fresh.job.goal === goal && sameDue(fresh.job.due, dueAt)) {
           editing = false;
           return "";
@@ -92,7 +108,14 @@
     endBusy = true;
     endError = "";
     try {
-      take(n, await endJob(job.id, kind));
+      busy(true);
+      let d: JobDetail;
+      try {
+        d = await endJob(job.id, kind);
+      } finally {
+        busy(false);
+      }
+      take(n, d);
     } catch (e) {
       const status = (e as { status?: number }).status;
       // A refusal (4xx, not a conflict) wrote nothing. Any other failure can come after the end: no answer,
@@ -102,7 +125,7 @@
     } finally {
       endBusy = false;
     }
-    if (detail.job.state === "done") ending = false;
+    if (detail.job.state === "done") ending = editing = false;
     else endError ||= "Iris does not know if the job ended. Try again, or open the job again later.";
   }
 
@@ -117,7 +140,7 @@
     {#if limit}<span class={limit.tone}>{limit.text}{#if limit.tone}<span class="dot" aria-hidden="true"></span>{/if}</span>{/if}
     <span>Started {day(job.created)}</span>
     {#if job.state !== "done"}
-      <button class="edit" type="button" onclick={() => (editing = true)}>Edit</button>
+      <button class="edit" type="button" onclick={() => ((editing = true), (ending = false))}>Edit</button>
       <button class="edit" type="button" onclick={() => ((ending = true), (endError = ""))} disabled={ending}>End</button>
     {/if}
   </p>
@@ -142,6 +165,7 @@
     {#key job.updated}
       <AnswerForm
         {job}
+        onbusy={busy}
         onanswered={(_, d) => take(++started, d)}
         onchanged={() => reload().catch(() => {})}
         onunknown={() => reload().catch(() => {})}
@@ -160,7 +184,7 @@
   {/if}
 </section>
 
-<Scope {detail} onchange={(d) => take(++started, d)} />
+<Scope {detail} onchange={(d) => take(++started, d)} onbusy={busy} />
 
 <Grants {job} />
 

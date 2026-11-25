@@ -247,3 +247,60 @@ test("a late scope answer does not put back a job that ended after it (review ro
     view.destroy();
   }
 });
+
+test("a poll that read the job before an edit commits does not undo the edit (review round 3)", async () => {
+  const d = structuredClone(fx.jobDetails["j-15"]);
+  const edited = { ...d, job: { ...d.job, goal: "Book the dentist for Tuesday morning." } };
+  let committed = false;
+  let release;
+  const stale = new Promise((r) => (release = r));
+  let polls = 0;
+  serve(async (method, path) => {
+    if (method === "POST" && path === "jobs/j-15/edit") {
+      // A poll starts while the edit runs, and reads the job from before it.
+      await until(() => polls > 0);
+      committed = true;
+      return [200, edited.job];
+    }
+    if (!committed) {
+      polls++;
+      await stale;
+      return [200, d];
+    }
+    return [200, edited];
+  });
+  const view = await mount("/src/views/Job.svelte", { detail: d, every: 20 });
+  try {
+    button(view, "Edit").click();
+    view.flushSync();
+    const goal = view.target.querySelector(".job-form textarea");
+    goal.value = edited.job.goal;
+    goal.dispatchEvent(new window.Event("input", { bubbles: true }));
+    view.flushSync();
+    view.target.querySelector(".job-form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    await until(() => (view.flushSync(), !view.target.querySelector(".job-form")));
+    release();
+    await new Promise((r) => setTimeout(r, 60));
+    view.flushSync();
+    assert.equal(text(view.target.querySelector("h1")).trim(), edited.job.goal);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("Edit closes the end question, so a done job never keeps an open edit (review round 3)", async () => {
+  const d = structuredClone(fx.jobDetails["j-12"]);
+  serve(() => [200, d]);
+  const view = await mount("/src/views/Job.svelte", { detail: d, every: 60_000 });
+  try {
+    button(view, "End").click();
+    view.flushSync();
+    assert.ok(button(view, "Mark as done"));
+    button(view, "Edit").click();
+    view.flushSync();
+    assert.equal(button(view, "Mark as done"), undefined);
+    assert.ok(view.target.querySelector(".job-form"));
+  } finally {
+    view.destroy();
+  }
+});

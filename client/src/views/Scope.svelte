@@ -11,7 +11,16 @@
   import { addThread, loadJob, removeRef } from "../jobs";
   import { byThread, reads, subjectOf, threadsOf, type Preview } from "../start";
 
-  let { detail, onchange }: { detail: JobDetail; onchange: (d: JobDetail) => void } = $props();
+  let {
+    detail,
+    onchange,
+    onbusy = () => {},
+  }: {
+    detail: JobDetail;
+    onchange: (d: JobDetail) => void;
+    /** True when a request of this part starts, false when it ends (before `onchange`). */
+    onbusy?: (on: boolean) => void;
+  } = $props();
 
   let job = $derived(detail.job);
   let open = $derived(job.state !== "done");
@@ -29,6 +38,7 @@
     busy = true;
     note = "";
     unknown = false;
+    onbusy(true);
     try {
       return await work();
     } catch (e) {
@@ -36,6 +46,7 @@
       unknown = (e as { status?: number }).status === undefined;
     } finally {
       busy = false;
+      onbusy(false);
     }
   }
 
