@@ -49,7 +49,7 @@ Each one has a test or a measure.
 |---|---|---|
 | M1 | The mirror matches Gmail with zero differences. | `iris mirror verify` reports 0 differences each day for 7 days on a real mailbox (exit criterion of release 1). |
 | M2 | Release 1 sends no write request to Gmail. | The OAuth scope is `gmail.readonly`. A test of the provider client fails if a code path calls a write endpoint. |
-| M3 | The engine stays inside the memory budget. | 50 MB resident memory with 100,000 messages (`crates/iris/tests/budget.rs`). |
+| M3 | The engine stays inside the memory budget. | 50 MB resident memory with 100,000 messages in a release build (the real-mailbox checks). The test `crates/iris/tests/budget.rs` checks the memory that a debug build allocates: 20 MiB of anonymous memory on Linux (the pages of the debug program file are about 33 MB, issue #1011), and 50 MB RSS on macOS. |
 | M4 | The first brief appears in 10 minutes or less. | Time from the connect step to the first brief, with the synthetic mailbox and the fake Gmail server. On the machine of the person, the measures page shows the time from the first account to the first brief with content (migration 27, table `measure_time`). The engine checks the brief every 10 seconds in `iris serve`, after `iris mirror` and `iris understand`, and at each `/api/brief`. |
 | M5 | Mail text is data. | No text from a message can start an action. The understanding step has no tools and returns only schema-valid JSON. |
 | M6 | Each item points to its source mail. | Each item has one or more sources. The schemas require the `sources` field. |
