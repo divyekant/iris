@@ -55,6 +55,45 @@ test("with more entries than the line listed, the dismissal shows the next line"
   }
 });
 
+test("a newer line that a poll shows during the dismissal stays", async () => {
+  const brief = { ...fx.brief, unconfirmed: { messages: 1, entries: ["l-9"], more: 0 } };
+  const newer = { ...fx.brief, unconfirmed: { messages: 2, entries: ["l-12", "l-9"], more: 0 } };
+  let polled = () => {};
+  const seen = new Promise((r) => (polled = r));
+  let briefs = 0;
+  const saved = globalThis.fetch;
+  const asked = [];
+  globalThis.fetch = async (url, init) => {
+    const key = `${init?.method ?? "GET"} ${String(url).replace(/^\/api\//, "")}`;
+    asked.push(key);
+    let answer = [404, { error: "Not found." }];
+    if (key === "GET status") answer = [200, fx.status];
+    // The first poll shows the newer line. Later reads fail, so only the view keeps it.
+    if (key === "GET brief" && ++briefs === 1) answer = [200, newer];
+    if (key === "POST ledger/unconfirmed/dismiss") {
+      // Answer after the poll put the newer line on the screen.
+      await seen;
+      await new Promise((r) => setTimeout(r, 30));
+      answer = [200, { dismissed: 1 }];
+    }
+    if (key === "GET brief" && briefs === 1) polled();
+    return new Response(JSON.stringify(answer[1]), { status: answer[0], headers: { "content-type": "application/json" } });
+  };
+  const app = await mount("/src/views/Brief.svelte", { brief, now: NOW, poll: 20 });
+  try {
+    const line = () => app.target.querySelector("p.unconfirmed");
+    line().querySelector("button").click();
+    await until(() => /2 messages\./.test(text(line() ?? app.target)));
+    await until(() => asked.filter((k) => k === "GET brief").length >= 2);
+    await new Promise((r) => setTimeout(r, 30));
+    assert.notEqual(line(), null);
+    assert.match(text(line()), /2 messages\./);
+  } finally {
+    app.destroy();
+    globalThis.fetch = saved;
+  }
+});
+
 test("a refused dismissal keeps the line and says why", async () => {
   const brief = { ...fx.brief, unconfirmed: { messages: 1, entries: ["l-9"] } };
   const net = serve({ "POST ledger/unconfirmed/dismiss": [400, { error: "no such entry form" }] });

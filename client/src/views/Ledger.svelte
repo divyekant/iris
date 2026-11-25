@@ -7,8 +7,9 @@
   reads the list again until no undo or change is open.
 -->
 <script lang="ts">
-  import { get, own, post, type LedgerEntry, type LedgerPage } from "../api";
+  import { get, own, post, type LedgerEntry, type LedgerPage, type Target } from "../api";
   import { byDay, did, status, time, what, who } from "../ledger";
+  import { messageRow, short, type Row } from "../review";
 
   // `wait`: the time between two reads of the list while an undo or a change is open.
   let { page, wait = 3000 }: { page: LedgerPage; wait?: number } = $props();
@@ -80,6 +81,21 @@
   function why(e: LedgerEntry): string {
     if (e.undo_of) return times.has(e.undo_of) ? `The undo of the change at ${times.get(e.undo_of)}.` : "The undo of an earlier change.";
     return e.why ?? "";
+  }
+
+  // Spec 2 section 7.3: the messages of an entry that Iris could not confirm, so that you can check
+  // each one in your mailbox. A page at a time, by entry ID.
+  let unknown = $state<Record<string, { rows: Row[]; next: string | null; loading: boolean; problem: string }>>({});
+  async function showUnknown(e: LedgerEntry) {
+    const was = unknown[e.id];
+    unknown[e.id] = { rows: was?.rows ?? [], next: was?.next ?? null, loading: true, problem: "" };
+    try {
+      const after = was?.next ? `&after=${encodeURIComponent(was.next)}` : "";
+      const p = await get<{ messages: Target[]; next: string | null }>(`ledger/${e.id}/unknown?limit=50${after}`);
+      unknown[e.id] = { rows: [...(was?.rows ?? []), ...p.messages.map(messageRow)], next: p.next, loading: false, problem: "" };
+    } catch (err) {
+      unknown[e.id] = { ...unknown[e.id], loading: false, problem: own(err) };
+    }
   }
 
   async function more() {
@@ -157,6 +173,23 @@
           <p><strong>{did(e)}</strong> {what(e)}</p>
           {#if why(e)}<p class="why">{why(e)}</p>{/if}
           {#if s}<p class="why state"><span class="dot" class:warn={e.state === "failed"}></span>{s}</p>{/if}
+          {#if (e.unknown ?? 0) > 0}
+            {@const u = unknown[e.id]}
+            {#if u?.rows.length}
+              <ul class="unknown" aria-label="Messages to check">
+                {#each u.rows as m (m.id)}
+                  <li>
+                    {#if m.gone}<span class="gone">A message that is not in Iris any more</span>
+                    {:else}<a href={m.href}><span class="from">{m.who}</span> <span class="subject">{m.what}</span> <span class="date">{short(m.when)}</span></a>{/if}
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            {#if u?.problem}<p class="why" role="alert">{u.problem}</p>{/if}
+            {#if !u || u.next}
+              <button type="button" class="check" onclick={() => showUnknown(e)} disabled={u?.loading}>{u?.loading ? "Loading" : u ? "Show more" : "Show the messages to check"}</button>
+            {/if}
+          {/if}
           <p class="meta">{who(e)} · <time datetime={e.at}>{time(e.at)}</time>{#if e.state === "undone"}{" · Undone"}{/if}</p>
           {#if e.undo_open}
             <p class="going"><span class="dot"></span>Iris undoes the change. {e.items > 0 ? "An item" : "A message"} that changed again, or that is gone, stays as it is. This can take a minute.</p>
@@ -284,6 +317,49 @@
   button:disabled {
     cursor: default;
     opacity: 0.6;
+  }
+  .check {
+    margin-top: var(--space-2);
+  }
+  ul.unknown {
+    margin-top: var(--space-2);
+  }
+  ul.unknown li {
+    padding: var(--space-1) 0;
+    border-bottom: none;
+    font-size: var(--font-size--1);
+  }
+  ul.unknown a {
+    display: flex;
+    gap: var(--space-2);
+    min-width: 0;
+    color: var(--color-text);
+    text-decoration: none;
+  }
+  ul.unknown a:hover .subject,
+  ul.unknown a:focus-visible .subject {
+    text-decoration: underline;
+  }
+  ul.unknown .from {
+    flex: none;
+    max-width: 30%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  ul.unknown .subject {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-text-muted);
+  }
+  ul.unknown .date,
+  ul.unknown .gone {
+    flex: none;
+    color: var(--color-text-faint);
+    font-variant-numeric: tabular-nums;
   }
   .more {
     margin-top: var(--space-4);

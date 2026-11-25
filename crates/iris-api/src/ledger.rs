@@ -388,6 +388,75 @@ pub fn dismiss_unconfirmed(store: &Store, ids: &[String], now: i64) -> Result<us
     })?)
 }
 
+/// A page of the messages of entry `id` (`l-<n>`) that the recovery cannot
+/// confirm (specification 2, section 7.3), so that the person can check
+/// each one in the mailbox. Each message has the form of `GET
+/// /api/messages`. `after` is the `next` value of the page before (an
+/// `m-<n>` ID): a keyset on the message row ID, so a page does not repeat
+/// or skip a message. Gives `None` when no entry has the ID.
+pub fn unknown_messages(
+    store: &Store,
+    id: &str,
+    limit: u32,
+    after: Option<&str>,
+) -> Result<Option<serde_json::Value>> {
+    if !(1..=crate::MAX_LIMIT).contains(&limit) {
+        return Err(Error::Query(format!(
+            "limit must be 1 to {}",
+            crate::MAX_LIMIT
+        )));
+    }
+    let Some(n) = parse_id(id) else {
+        return Ok(None);
+    };
+    let after = match after {
+        None => 0,
+        Some(a) => match iris_store::parse_id(a) {
+            Some((iris_store::Kind::Message, row)) => row,
+            _ => return Err(Error::Query(format!("not a message ID: {a:?}"))),
+        },
+    };
+    let rows = store.read(|c| {
+        if !c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM ledger WHERE id = ?1)",
+            [n],
+            |r| r.get::<_, bool>(0),
+        )? {
+            return Ok(None);
+        }
+        // One more row than the page tells if a next page exists.
+        let rows: Vec<i64> = c
+            .prepare(
+                "SELECT message_id FROM ledger_message
+                 WHERE ledger_id = ?1 AND listed = 'unknown' AND message_id > ?2
+                 ORDER BY message_id LIMIT ?3",
+            )?
+            .query_map(params![n, after, limit + 1], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(Some(rows))
+    })?;
+    let Some(mut rows) = rows else {
+        return Ok(None);
+    };
+    let next = (rows.len() > limit as usize).then(|| {
+        rows.truncate(limit as usize);
+        iris_store::format_id(iris_store::Kind::Message, rows[rows.len() - 1])
+    });
+    let ids = rows
+        .iter()
+        .map(|&r| iris_store::format_id(iris_store::Kind::Message, r))
+        .collect::<Vec<_>>()
+        .join(",");
+    let messages = if ids.is_empty() {
+        Vec::new()
+    } else {
+        crate::review::messages_by_id(store, &ids)?
+    };
+    Ok(Some(
+        serde_json::json!({ "messages": messages, "next": next }),
+    ))
+}
+
 /// The line of the brief (specification 2, section 7.3): the newest
 /// [`crate::MAX_LIMIT`] entries with messages that the recovery cannot
 /// confirm, that the person did not dismiss, of an account that is not

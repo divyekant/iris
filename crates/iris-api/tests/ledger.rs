@@ -1190,3 +1190,50 @@ async fn an_undone_entry_keeps_its_line() {
     let (_, brief) = call(&s, false, "/api/brief").await;
     assert_eq!(brief["unconfirmed"]["entries"], json!([]));
 }
+
+/// Issue #216: the person can read which messages of an entry the
+/// recovery cannot confirm, a page at a time. A confirmed message of the
+/// same entry is not in the list.
+#[tokio::test]
+async fn an_entry_lists_its_unconfirmed_messages() {
+    let dir = temp("unknown-list");
+    let s = store(&dir);
+    let l = unconfirmed(&s, &[1, 2], &[3]);
+    let ids = |v: &Value| -> Vec<String> {
+        v["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (code, all) = call(&s, false, &format!("/api/ledger/l-{l}/unknown")).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(ids(&all), ["m-1", "m-2"]);
+    assert_eq!(all["next"], Value::Null);
+    assert_eq!(all["messages"][0]["subject"], "Hi");
+
+    let (_, first) = call(&s, false, &format!("/api/ledger/l-{l}/unknown?limit=1")).await;
+    assert_eq!(ids(&first), ["m-1"]);
+    assert_eq!(first["next"], "m-1");
+    let (_, second) = call(
+        &s,
+        false,
+        &format!("/api/ledger/l-{l}/unknown?limit=1&after=m-1"),
+    )
+    .await;
+    assert_eq!(ids(&second), ["m-2"]);
+    assert_eq!(second["next"], Value::Null);
+
+    let ok = archived(&s, "person", &[3], PERSON);
+    let (code, none) = call(&s, false, &format!("/api/ledger/l-{ok}/unknown")).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(none, json!({"messages": [], "next": null}));
+
+    let (code, _) = call(&s, false, &format!("/api/ledger/l-{l}/unknown?after=x-1")).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let (code, _) = call(&s, false, &format!("/api/ledger/l-{l}/unknown?limit=0")).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let (code, _) = call(&s, false, "/api/ledger/l-999/unknown").await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+}

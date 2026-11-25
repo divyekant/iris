@@ -158,10 +158,14 @@
     dismissProblem = "";
     try {
       await post("ledger/unconfirmed/dismiss", { entries });
-      const more = brief.unconfirmed?.more ?? 0;
-      brief = { ...brief, unconfirmed: { messages: 0, entries: [], more: 0 } };
-      // Older entries than the line listed show in the next line.
-      if (more > 0) loadBrief().then((b) => void (brief = b), () => {});
+      // Hide the line only if it is still the line that you dismissed: a poll during the dismissal can
+      // show a newer entry, and that line stays.
+      const line = brief.unconfirmed?.entries ?? [];
+      if (line.length === entries.length && line.every((id, i) => id === entries[i])) brief = { ...brief, unconfirmed: { messages: 0, entries: [], more: 0 } };
+      // Then load the brief again: older entries than the line listed, or a newer failure, show in the
+      // next line. The ticket keeps a poll that started before the dismissal from putting the old line back.
+      const fresh = briefTicket();
+      loadBrief().then((b) => void (fresh() && (brief = b)), () => {});
     } catch (e) {
       dismissProblem = own(e);
     } finally {

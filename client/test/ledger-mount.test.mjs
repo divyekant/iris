@@ -196,3 +196,30 @@ test("a read of the list again does not drop a page that Show more added", async
     net.restore();
   }
 });
+
+test("an entry with messages that Iris could not confirm lists them, a page at a time", async () => {
+  const e = { ...fx.ledger.entries[0], id: "l-41", state: "failed", unknown: 2, can_undo: false, undo_open: false };
+  const msg = (id, subject) => ({ id, thread: "t-1", from: { name: "Dana", address: "dana@example.com" }, to: [], subject, snippet: "", date: "2026-11-15T09:00:00Z", labels: [], unread: false, gone: false });
+  const net = serve({
+    "GET ledger/l-41/unknown?limit=50": [200, { messages: [msg("m-7", "Invoice 7")], next: "m-7" }],
+    "GET ledger/l-41/unknown?limit=50&after=m-7": [200, { messages: [{ id: "m-8", gone: true }], next: null }],
+  });
+  const app = await mount("/src/views/Ledger.svelte", { page: { entries: [e], next: null } });
+  try {
+    const button = () => [...app.target.querySelectorAll("button.check")][0];
+    assert.match(text(app.target), /Iris could not confirm 2 messages: check them in your mailbox\./);
+    button().click();
+    await until(() => app.target.querySelector("ul.unknown a") !== null);
+    const link = app.target.querySelector("ul.unknown a");
+    assert.match(text(link), /Dana Invoice 7/);
+    assert.match(link.getAttribute("href"), /m-7/);
+    assert.equal(text(button()), "Show more");
+    button().click();
+    await until(() => /not in Iris any more/.test(text(app.target)));
+    assert.equal(button(), undefined);
+    assert.deepEqual(net.asked.filter((k) => k.includes("unknown")), ["GET ledger/l-41/unknown?limit=50", "GET ledger/l-41/unknown?limit=50&after=m-7"]);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});

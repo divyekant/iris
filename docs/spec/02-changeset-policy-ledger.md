@@ -924,7 +924,10 @@ shows in the next line, and an entry that fails later shows in a new line.
 The line leaves out an account in `removing` or `removed`. The line shows an entry only after its recovery ended (any state but
 `writing`): while the row is `writing`, the recovery can still list more
 messages, and a dismissal is for the final list. An `undone` entry keeps
-its line, because the undo restores only the confirmed messages. A state verb never stays in the state `writing`, because one transaction
+its line, because the undo restores only the confirmed messages. The
+history view lists the messages of each such entry, a page at a time
+(`GET /api/ledger/{id}/unknown`), and each one links to the mail, so that
+the person can check it in the mailbox. A state verb never stays in the state `writing`, because one transaction
 applies it.
 
 ### 7.4 Undo
