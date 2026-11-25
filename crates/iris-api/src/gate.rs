@@ -140,8 +140,7 @@ pub(crate) fn read_gate(
                  FROM party JOIN sender ON sender.id = party.sender JOIN g ON g.id = party.item
                 GROUP BY sender.id)
          SELECT id, address, name, n, at,
-                -- shortcut: no index on sender.name, so each sender of the
-                -- page reads the person rows; add an index if it shows.
+                -- An index search: sender_person_name_nocase (migration 68).
                 (SELECT k.address FROM sender k
                   WHERE k.kind = 'person' AND k.id != s.id AND trim(s.name) != ''
                     AND k.name = s.name COLLATE NOCASE ORDER BY k.id LIMIT 1)
