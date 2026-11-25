@@ -280,3 +280,64 @@ test("Edit closes the end question, so a done job never keeps an open edit (revi
     view.destroy();
   }
 });
+
+// Issue 959: the person ends the wait of a job early.
+test("Wake now ends the wait of a waiting job, with the updated of the job that the person saw", async () => {
+  const d = structuredClone(Object.values(fx.jobDetails).find((x) => x.job.state === "waiting"));
+  const woke = { ...d, job: { ...d.job, state: "working", wait: undefined, events: [...d.job.events, { at: "2026-11-16T20:00:00Z", state: "working", by: "person" }] } };
+  const asked = serve((method) => (method === "POST" ? [200, woke] : [200, woke]));
+  const view = await mount("/src/views/Job.svelte", { detail: d, every: 60_000 });
+  try {
+    button(view, "Wake now").click();
+    await until(() => (view.flushSync(), !button(view, "Wake now")));
+    assert.deepEqual(asked[0], ["POST", `jobs/${d.job.id}/wake`, { events: d.job.events.length }]);
+    assert.match(text(view.target), /You ended the wait\./);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a refused wake reads the job again and says why; a job that does not wait has no Wake now", async () => {
+  const d = structuredClone(Object.values(fx.jobDetails).find((x) => x.job.state === "waiting"));
+  const moved = { ...d, job: { ...d.job, wait: { ...d.job.wait, until: "2026-12-01T00:00:00Z" }, updated: "2026-11-16T21:00:00.000Z" } };
+  const asked = serve((method) => (method === "POST" ? [409, { error: "The job does not wait now, or its wait changed." }] : [200, moved]));
+  const view = await mount("/src/views/Job.svelte", { detail: d, every: 60_000 });
+  try {
+    button(view, "Wake now").click();
+    await until(() => (view.flushSync(), view.target.querySelector("[aria-label=Now] [role=alert]")));
+    assert.match(text(view.target.querySelector("[aria-label=Now] [role=alert]")), /its wait changed/);
+    assert.deepEqual(asked.map(([m]) => m), ["POST", "GET"]);
+    assert.ok(button(view, "Wake now"), "the new wait can still be woken");
+  } finally {
+    view.destroy();
+  }
+  for (const x of Object.values(fx.jobDetails).filter((x) => x.job.state !== "waiting")) {
+    const v = await mount("/src/views/Job.svelte", { detail: structuredClone(x), every: 60_000 });
+    assert.ok(!button(v, "Wake now"), x.job.id);
+    v.destroy();
+  }
+});
+
+test("a wake that waits in the queue sends the job of the press, not a newer wait (review of PR 1127)", async () => {
+  const d = structuredClone(Object.values(fx.jobDetails).find((x) => x.job.state === "waiting"));
+  // A scope remove runs first and answers with a newer wait: the engine woke the job and the agent waits again.
+  const newer = { ...d, scope: [], job: { ...d.job, events: [...d.job.events, { at: "2026-11-16T20:00:00Z", state: "working", by: "engine", why: "time" }, { at: "2026-11-16T20:00:00Z", state: "waiting", by: "agent", wait: d.job.wait }] } };
+  let release;
+  const held = new Promise((r) => (release = r));
+  const asked = serve(async (method, path) => {
+    if (path.endsWith("/scope/remove")) return (await held, [200, newer]);
+    if (path.endsWith("/wake")) return [409, { error: "The job does not wait now, or its wait changed." }];
+    return [200, newer];
+  });
+  const view = await mount("/src/views/Job.svelte", { detail: d, every: 60_000 });
+  try {
+    button(view, "Remove").click();
+    button(view, "Wake now").click();
+    release();
+    await until(() => asked.some(([, p]) => p.endsWith("/wake")));
+    const wake = asked.find(([, p]) => p.endsWith("/wake"));
+    assert.deepEqual(wake[2], { events: d.job.events.length }, "the count of the job at the press");
+  } finally {
+    view.destroy();
+  }
+});

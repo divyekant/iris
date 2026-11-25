@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { own, type JobDetail } from "../api";
-  import { agent, asker, clock, day, due, editJob, endJob, loadJob, now, sameDue, steps, waitMail } from "../jobs";
+  import { agent, asker, clock, day, due, editJob, endJob, loadJob, now, sameDue, steps, waitMail, wakeJob } from "../jobs";
   import AnswerForm from "./AnswerForm.svelte";
   import Grants from "./Grants.svelte";
   import JobForm from "./JobForm.svelte";
@@ -108,6 +108,27 @@
     else endError ||= "Iris does not know if the job ended. Try again, or open the job again later.";
   }
 
+
+  // End the wait early (issue 959). A wake by the person starts no agent: the Now card then gives the command.
+  let wakeBusy = $state(false);
+  let wakeError = $state("");
+  async function wake() {
+    wakeBusy = true;
+    wakeError = "";
+    // The job at the press: a request before it in the queue can show a newer wait, which this press must not end.
+    const seen = { id: job.id, events: job.events.length };
+    try {
+      await queue(() => wakeJob(seen.id, seen.events));
+    } catch (e) {
+      // A 409 wrote nothing: the job does not wait now, or waits for another thing. Any failure with
+      // no answer can come after the wake. Both read the job again and show it.
+      wakeError = own(e) || (e as Error).message;
+      await reload().catch(() => {});
+      if (detail.job.state !== "waiting" && (e as { status?: number }).status === undefined) wakeError = "";
+    } finally {
+      wakeBusy = false;
+    }
+  }
 </script>
 
 <p class="eyebrow">Job</p>
@@ -160,6 +181,10 @@
       {/if}
     {/if}
     {#if mail}<p class="mail"><a class="touch" href={mail.link}>{mail.subject}</a></p>{/if}
+    {#if job.state === "waiting"}
+      <p class="wake"><button class="edit" type="button" onclick={wake} disabled={wakeBusy}>Wake now</button></p>
+    {/if}
+    {#if wakeError}<p class="error" role="alert">{wakeError}</p>{/if}
   {/if}
 </section>
 
@@ -266,7 +291,8 @@
     outline: 2px solid var(--color-primary);
     outline-offset: 2px;
   }
-  .ask .error {
+  .ask .error,
+  .now .error {
     margin-top: var(--space-3);
     border-left: 4px solid var(--color-error);
     padding-left: var(--space-2);
@@ -326,6 +352,9 @@
   code {
     font-family: var(--font-family-mono);
     overflow-wrap: anywhere;
+  }
+  .wake {
+    margin-top: var(--space-2);
   }
   .mail {
     color: var(--color-text-muted);
