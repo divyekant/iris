@@ -1411,6 +1411,24 @@ pub fn rfc3339(ms: i64) -> String {
     )
 }
 
+/// True when the owner set a time zone that the computer knows (decision
+/// D1). A saved name that the computer no longer knows gives the zone of
+/// the computer, as [`iris_store::time_zone`] does, so it counts as not set.
+fn zone_set(c: &Connection) -> rusqlite::Result<bool> {
+    Ok(iris_store::owner_time_zone(c)?.is_some())
+}
+
+/// The time zone of the owner after a change from the web client (issue
+/// 891): `{"time_zone", "time_zone_set"}`, as in the status.
+pub fn zone(store: &Store) -> Result<serde_json::Value> {
+    Ok(store.read(|c| {
+        Ok(serde_json::json!({
+            "time_zone": iris_store::time_zone(c)?.iana_name(),
+            "time_zone_set": zone_set(c)?,
+        }))
+    })?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1654,22 +1672,4 @@ mod tests {
         assert_eq!(rfc3339(1_763_283_731_999), "2025-11-16T09:02:11Z");
         assert_eq!(rfc3339(-1000), "1969-12-31T23:59:59Z");
     }
-}
-
-/// True when the owner set a time zone that the computer knows (decision
-/// D1). A saved name that the computer no longer knows gives the zone of
-/// the computer, as [`iris_store::time_zone`] does, so it counts as not set.
-fn zone_set(c: &Connection) -> rusqlite::Result<bool> {
-    Ok(iris_store::owner_time_zone(c)?.is_some())
-}
-
-/// The time zone of the owner after a change from the web client (issue
-/// 891): `{"time_zone", "time_zone_set"}`, as in the status.
-pub fn zone(store: &Store) -> Result<serde_json::Value> {
-    Ok(store.read(|c| {
-        Ok(serde_json::json!({
-            "time_zone": iris_store::time_zone(c)?.iana_name(),
-            "time_zone_set": zone_set(c)?,
-        }))
-    })?)
 }
