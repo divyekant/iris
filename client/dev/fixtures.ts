@@ -25,6 +25,8 @@ const byForm = (form: string) => items.filter((i) => i.form === form);
 
 export const status: Status = {
   mode: "observe",
+  time_zone: "Europe/London",
+  time_zone_set: false,
   accounts: [
     {
       id: 1,
@@ -65,7 +67,7 @@ export const gate: GatePage = {
   count: 3,
   next: null,
   senders: [
-    { id: "p-71", name: "Maria Ruiz", address: "maria@brightpath.example", count: 2, items: [strangers[1], strangers[0]] },
+    { id: "p-71", name: "Maria Ruiz", address: "maria@brightpath.example", count: 2, items: [{ ...strangers[1], ready: ["draft"] }, strangers[0]] },
     { id: "p-72", name: "Leo Park", address: "leo@quartzlabs.example", count: 1, items: [strangers[2]] },
     { id: "p-73", name: null, address: "billing@vendorhub.example", count: 1, items: [strangers[3]] },
   ],
@@ -162,6 +164,7 @@ const entry = (id: number, at: string, rest: Partial<LedgerEntry>): LedgerEntry 
   skipped: 0,
   tried: 0,
   retry: false,
+  mail: null,
   ...rest,
 });
 export const ledger: LedgerPage = {
@@ -177,6 +180,8 @@ export const ledger: LedgerPage = {
     // An undo that changed nothing (decision D18): each message changed again after l-23, so l-23 keeps its Undo.
     entry(24, "2026-11-15T10:20:00Z", { verb: "inbox", skipped: 4, tried: 4, retry: true, why: "Undo of l-23", undo_of: "l-23" }),
     entry(23, "2026-11-15T10:05:00Z", { messages: 4, changed: 4, why: "Shipping notices that arrived.", can_undo: true }),
+    // A send names its mail (issue 490): two sends of a day differ by subject and recipient.
+    entry(22, "2026-11-14T16:40:00Z", { verb: "send", messages: 1, changed: 1, author: { kind: "agent", name: "Claude Code", job: "j-150", goal: "Renew the Acme contract" }, why: "Dana waits for the terms since Monday.", mail: { subject: "Re: Renewal for 2027", to: "dana@acme.example", recipients: 2 } }),
   ],
 };
 
@@ -495,6 +500,15 @@ export const notices = [
     message: { id: "m-3", thread: "t-3", date: "2026-11-16T09:00:00Z", from: { name: "First Harbor Bank", address: "alerts@bank.example" }, subject: "Your sign-in code", labels: ["INBOX"] } },
 ];
 
+/** The time zone of the owner (issue 891): sets it in the status. An empty name or a name that the computer does not know is a 400. */
+export function zonePost(body: { zone?: string | null }): [number, unknown] {
+  const zone = body.zone ?? null;
+  if (zone !== null && zone !== "UTC" && !Intl.supportedValuesOf("timeZone").includes(zone)) return [400, { error: `not a time zone: "${zone}"` }];
+  status.time_zone = zone ?? "Europe/London";
+  status.time_zone_set = zone !== null;
+  return [200, { time_zone: status.time_zone, time_zone_set: status.time_zone_set }];
+}
+
 export function noticePost(path: string): [number, unknown] | undefined {
   const done = path.match(/^\/notices\/([^/?]+)\/done$/);
   if (!done) return undefined;
@@ -597,7 +611,9 @@ const jobPage = (state: string | null) => {
   const list = Object.values(jobs)
     .filter((j) => (state && state !== "open" ? j.state === state : j.state !== "done"))
     .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)));
-  return { jobs: list, next: null };
+  // The newest session of each working job (issue 791), as the API gives it.
+  const sessions = Object.fromEntries(list.filter((j) => j.state === "working").map((j) => [j.id, jobDetails[j.id]?.session ?? null]));
+  return { jobs: list, next: null, sessions };
 };
 
 /** The stop switch of the fixtures (docs/specs/2026-11-17-stop.md). */
@@ -836,6 +852,7 @@ export const measures: Measures = {
   memory: { rss_kib: 31_744, messages: 18_402 },
   approvals: { decided: 50, approved: 47 },
   undo: { applied: 48, undone: 1 },
+  sends: { sent: 0, unreviewed_after_hostile: 0 },
 };
 
 /** GET /api/threads/t-8700/draft: the nudge to Alex, who is late with the SDK examples (R3-07). */

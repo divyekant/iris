@@ -3,7 +3,8 @@
 //! (`docs/specs/2026-11-24-matters-edit.md`).
 
 use iris_matters::{
-    confirm, create, decline, delete, edit, insert_proposal, propose_by_agent, write, Edit, Error,
+    confirm, create, decline, delete, edit, insert_proposal, joinable, propose_by_agent, write,
+    Edit, Error,
 };
 use iris_store::{NewMessage, Store};
 use rusqlite::params;
@@ -375,6 +376,42 @@ fn an_addition_waits_for_the_person() {
 /// A signal past its `expires` time is not live, also while the stored
 /// status is still `active` (issue #927): no matter by hand, no addition,
 /// no agent proposal.
+/// Each read of the live rule (the views and `joinable`) treats a signal
+/// past its `expires` time as not live at once, with no write and no
+/// engine tick (issue #972).
+#[test]
+fn a_read_sees_the_expiry_at_once() {
+    let past =
+        "UPDATE item SET doc = json_set(doc, '$.expires', '1970-01-01T00:00:01Z') WHERE id = 6";
+    let b = setup("expired-read", 4, &FORMS);
+    assert!(joinable(&b.store, r(6)).unwrap());
+    sql(&b, past).unwrap();
+    assert!(!joinable(&b.store, r(6)).unwrap());
+    let b = setup("expired-view", 4, &FORMS);
+    let m = create(&b.store, "T", &[r(1), r(6)], 1).unwrap();
+    let live = format!("SELECT count(*) FROM matter_live WHERE matter_id = {m}");
+    assert_eq!(q::<i64>(&b, &live), 2);
+    sql(&b, past).unwrap();
+    assert_eq!(q::<i64>(&b, &live), 1);
+    assert_eq!(
+        q::<String>(&b, "SELECT status FROM item WHERE id = 6"),
+        "active"
+    );
+    // A pending addition of the signal leaves `matter_add_live`, which the
+    // matter view of the API reads.
+    let b = setup("expired-add", 4, &FORMS);
+    let m = confirmed(&b, &[1, 2]);
+    sql(
+        &b,
+        &format!("INSERT INTO matter_add(item_id, matter_id, created_at) VALUES (6, {m}, 1)"),
+    )
+    .unwrap();
+    let pending = "SELECT count(*) FROM matter_add_live WHERE item_id = 6";
+    assert_eq!(q::<i64>(&b, pending), 1);
+    sql(&b, past).unwrap();
+    assert_eq!(q::<i64>(&b, pending), 0);
+}
+
 #[test]
 fn a_signal_past_its_time_is_not_live() {
     let b = setup("expired", 4, &FORMS);
@@ -401,6 +438,32 @@ fn a_signal_past_its_time_is_not_live() {
         propose_by_agent(tx, "U", &[r(3), r(6)], 1_000)
     });
     assert!(matches!(p, Err(Error::Bad(_))), "{p:?}");
+}
+
+/// A proposed signal that passes its `expires` time before the confirm,
+/// with no engine tick, makes the proposal not valid for each decision
+/// (issue #985).
+#[test]
+fn a_signal_that_expires_before_the_confirm_is_not_confirmed() {
+    let b = setup("expired-confirm", 4, &FORMS);
+    let p = write(&b.store, |tx| {
+        insert_proposal(tx, "P", "fake", None, &[3, 6], 1)
+    })
+    .unwrap();
+    sql(
+        &b,
+        "UPDATE item SET doc = json_set(doc, '$.expires', '1970-01-01T00:00:01Z') WHERE id = 6",
+    )
+    .unwrap();
+    assert!(matches!(
+        confirm(&b.store, p, "P", &[3, 6], 1_000),
+        Err(Error::Conflict(_))
+    ));
+    // The refusal rolled back the expiry; a decline must expire it too.
+    assert!(matches!(
+        decline(&b.store, p, 1_000),
+        Err(Error::Conflict(_))
+    ));
 }
 
 #[test]

@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { get, own, type Job, type JobPage, type JobState } from "../api";
-  import { due, now, pageSize, startJob } from "../jobs";
+  import { due, idle, now, pageSize, startJob } from "../jobs";
   import { href } from "../route";
   import JobForm from "./JobForm.svelte";
 
@@ -86,7 +86,13 @@
     try {
       const page = await get<JobPage>(`jobs?state=${state}&limit=${pageSize(state)}&after=${encodeURIComponent(pages[state].next ?? "")}`);
       const seen = new Set(pages[state].jobs.map((j) => j.id));
-      pages[state] = { jobs: [...pages[state].jobs, ...page.jobs.filter((j) => !seen.has(j.id))], next: page.next };
+      pages[state] = {
+        jobs: [...pages[state].jobs, ...page.jobs.filter((j) => !seen.has(j.id))],
+        next: page.next,
+        // The sessions of the jobs of the new page join those of the pages before.
+        // A page with no map (an older engine) keeps the map of the other pages.
+        sessions: { ...pages[state].sessions, ...page.sessions },
+      };
     } catch (e) {
       error = own(e);
     } finally {
@@ -95,14 +101,16 @@
   }
 </script>
 
-{#snippet line(job: Job)}
+{#snippet line(job: Job, page: JobPage)}
   {@const limit = due(job)}
+  <!-- A working job that no agent works on says so (issue 791), as its page does. -->
+  {@const off = job.state === "working" ? idle(page, job) : null}
   <li>
     <a class="job" href={href.job(job.id)}>
-      <span class="mark {job.state}" aria-hidden="true"></span>
+      <span class="mark {job.state}" class:idle={off} aria-hidden="true"></span>
       <span class="what">
         <span class="goal">{job.goal}</span>
-        <span class="detail">{job.state === "needs_you" ? job.question : now(job)}{#if limit}{" "}<span class={limit.tone}>{limit.text}.</span>{/if}</span>
+        <span class="detail">{job.state === "needs_you" ? job.question : off ? [off.said, off.ended].filter(Boolean).join(" ") : now(job)}{#if limit}{" "}<span class={limit.tone}>{limit.text}.</span>{/if}</span>
       </span>
     </a>
   </li>
@@ -134,7 +142,7 @@
   {#if page.jobs.length}
     <section aria-labelledby={state}>
       <h2 id={state}><span>{title}</span></h2>
-      <ul>{#each page.jobs as job (job.id)}{@render line(job)}{/each}</ul>
+      <ul>{#each page.jobs as job (job.id)}{@render line(job, page)}{/each}</ul>
       {#if page.next}<button type="button" onclick={() => more(state)} disabled={!!busy}>{busy === state ? "Loading" : "Show more"}</button>{/if}
     </section>
   {/if}
@@ -203,6 +211,10 @@
   }
   .mark.working {
     border-color: var(--color-primary);
+  }
+  /* No agent works on the job: the mark does not say "works" (issue 791). */
+  .mark.working.idle {
+    border-color: var(--color-text-faint);
   }
   .mark.done {
     border-color: var(--color-text-faint);

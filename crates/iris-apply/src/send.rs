@@ -391,10 +391,16 @@ fn claim(
         if !free {
             return Ok(None);
         }
+        // A send keeps its hostile evidence of now, for the measure of
+        // sends without review after hostile mail (issue #472).
+        let hostile_before = match draft {
+            Some(_) => Some(iris_changeset::hostile_evidence(tx, action).map_err(changeset_error)?),
+            None => None,
+        };
         tx.execute(
-            "INSERT INTO ledger(action_id, account_id, ops, post, state, undo, at)
-             VALUES (?1, ?2, ?3, ?4, 'writing', 'none', ?5)",
-            params![action, account, ops, post, now()],
+            "INSERT INTO ledger(action_id, account_id, ops, post, state, undo, at, hostile_before)
+             VALUES (?1, ?2, ?3, ?4, 'writing', 'none', ?5, ?6)",
+            params![action, account, ops, post, now(), hostile_before],
         )?;
         let ledger = tx.last_insert_rowid();
         // The call starts now: the claim records it before the call.

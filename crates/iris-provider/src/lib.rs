@@ -101,6 +101,27 @@ impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// A move of a folder provider with location IDs (docs/specs/2026-11-25-imap-moves.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Move {
+    /// `archive`: from the inbox to the archive folder.
+    Archive,
+    /// `inbox`: from the archive folder to the inbox.
+    Inbox,
+    /// `trash`: from the inbox or the archive folder to the trash.
+    Trash,
+    /// `untrash`: from the trash to the inbox.
+    Untrash,
+}
+
+fn not_supported_move() -> Error {
+    Error::Api {
+        status: 400,
+        reason: "notSupported".into(),
+        message: "this provider cannot move mail with new IDs".into(),
+    }
+}
+
 /// The mailbox of the secret.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Profile {
@@ -298,6 +319,30 @@ pub trait Provider: Send + Sync {
     /// (limit #634). Gmail sends the draft itself, so the draft is gone.
     fn keeps_sent_draft(&self) -> bool {
         false
+    }
+
+    /// True if a move gives a message a new ID: the ID names its place
+    /// (IMAP). Then the apply plans and makes each move with
+    /// [`Provider::move_plan`] and [`Provider::relocate`], and rebinds the
+    /// store row to the new ID (docs/specs/2026-11-25-imap-moves.md).
+    fn location_ids(&self) -> bool {
+        false
+    }
+
+    /// Reads only. For each message of `ids`, in order: true if `mv` moves
+    /// it, false if it is already done. A message that `mv` can neither move
+    /// nor skip, and a missing or ambiguous target folder of a message that
+    /// moves, is a definite refusal (`Api` 400).
+    fn move_plan(&self, _token: &str, _ids: &[&str], _mv: Move) -> Result<Vec<bool>> {
+        Err(not_supported_move())
+    }
+
+    /// Moves each message of `ids` and gives its new ID, in the order of
+    /// `ids`. Each message must be one that `mv` moves, else a definite
+    /// refusal before any write. After the first write, each error is
+    /// unknown ([`Error::write_result_unknown`]).
+    fn relocate(&self, _token: &str, _ids: &[&str], _mv: Move) -> Result<Vec<String>> {
+        Err(not_supported_move())
     }
 
     /// Iris confirmed that the sent copy `id` holds the approved content

@@ -519,6 +519,10 @@ pub struct Decision {
     /// No rule matched and the retry state holds the model call: nothing
     /// to save.
     pub waiting: bool,
+    /// The rule of each draft that the fixed rules made, before a draft
+    /// that a pinned item already holds is left out (#946). Empty when no
+    /// fixed rule completed the message.
+    pub rules: Vec<&'static str>,
     pub calls: u32,
     pub usage: Usage,
 }
@@ -542,6 +546,13 @@ pub fn decide(
         return Ok(d);
     }
     if let Some(mut drafts) = rules::apply(a, cx) {
+        d.rules = drafts
+            .iter()
+            .filter_map(|x| match x.by {
+                By::Rule(r) => Some(r),
+                By::Model => None,
+            })
+            .collect();
         // A rule finds an existing item again by its form and its rule.
         drafts.retain(|x| {
             let By::Rule(rule) = x.by else { return true };
@@ -556,16 +567,40 @@ pub fn decide(
         d.waiting = true;
         return Ok(d);
     };
-    let data = prompt::data(a, cx);
+    let mut data = prompt::data(a, cx);
     // Known until a call gives no reliable usage (see `add`).
     d.usage.known = true;
+    // A refusal for size (HTTP 400 or 413) of large data gets one more call
+    // with the small budget (#101): a local model can have a small window.
+    // The small data is never larger, so this happens at most once. A
+    // priced model refuses the second call (`Budgeted`: the charge of the
+    // refusal is not known): the first refusal then stands.
+    let mut ask = |instruction: &str, d: &mut Decision| match model.ask(instruction, &data) {
+        Err(
+            first @ iris_model::Error::Rejected {
+                status: 400 | 413, ..
+            },
+        ) if data.len() > prompt::SMALL_DATA => {
+            let small = prompt::data_in(a, cx, prompt::SMALL_DATA);
+            match model.ask(instruction, &small) {
+                Err(iris_model::Error::Budget(_)) => Err(first),
+                r => {
+                    d.calls += 1;
+                    d.usage.known = false;
+                    data = small;
+                    r
+                }
+            }
+        }
+        r => r,
+    };
     for attempt in 0..2 {
         let instruction = if attempt == 0 {
             INSTRUCTION.to_string()
         } else {
             format!("{INSTRUCTION}{}", prompt::RETRY_NOTE)
         };
-        let reply = match model.ask(&instruction, &data) {
+        let reply = match ask(&instruction, &mut d) {
             Ok(r) => r,
             // HTTP 200 with a body of an unknown format: the answer is not valid.
             Err(iris_model::Error::BadAnswer(_)) => {

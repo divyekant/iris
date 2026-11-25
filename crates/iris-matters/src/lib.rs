@@ -15,7 +15,7 @@ use std::fmt;
 /// The SQL condition "item `i` is live": a member form, a status that is
 /// not ended, no duplicate, not hidden, and no hostile origin mail. The
 /// same rule as the views `matter_live` and `matter_add_live` (migration
-/// 46), for one item.
+/// 57), for one item. A signal past its `expires` time is not live.
 #[macro_export]
 #[doc(hidden)]
 macro_rules! live_item {
@@ -26,6 +26,9 @@ macro_rules! live_item {
             " AND i.form IN ('commitment', 'conversation', 'record', 'signal')
     AND i.status NOT IN ('gone', 'cancelled', 'declined')
     AND (i.form <> 'signal' OR i.status = 'active')
+    AND (i.form <> 'signal'
+         OR coalesce(unixepoch(json_extract(i.doc, '$.expires'), 'subsec')
+                     > unixepoch('now', 'subsec'), 1))
     AND i.duplicate_of IS NULL
     AND coalesce(json_extract(i.doc, '$.attention.state'), 'shown') <> 'hidden'"
         )
@@ -250,8 +253,11 @@ fn confirm_with(
 }
 
 /// The check before each decision: `matter` is a proposal that is valid now.
-/// The trigger `matter_decide` holds the same rule in the store.
-fn decidable(tx: &Transaction, matter: i64) -> Result<()> {
+/// The trigger `matter_decide` holds the same rule in the store. It first
+/// expires each signal past its `expires` time at `now`, so a member that
+/// expired after the proposal is not live (issue #985).
+fn decidable(tx: &Transaction, matter: i64, now: i64) -> Result<()> {
+    iris_store::expire_signals(tx, now)?;
     if status(tx, matter)? != "proposed" {
         return Err(Error::Conflict("the matter is decided"));
     }
@@ -273,7 +279,7 @@ fn confirm_in(
     keep: &[(i64, Option<&str>)],
     now: i64,
 ) -> Result<()> {
-    decidable(tx, matter)?;
+    decidable(tx, matter, now)?;
     for (item, form) in keep {
         let member: bool = tx.query_row(
             "SELECT EXISTS (SELECT 1 FROM matter_item mi JOIN item ON item.id = mi.item_id
@@ -319,7 +325,7 @@ fn confirm_in(
 /// `Conflict`.
 pub fn decline(store: &Store, matter: i64, now: i64) -> Result<()> {
     write(store, |tx| {
-        decidable(tx, matter)?;
+        decidable(tx, matter, now)?;
         let n = tx.execute(
             "UPDATE matter SET status = 'declined', updated_at = ?2, decided_at = ?2
                  WHERE id = ?1 AND status = 'proposed'",

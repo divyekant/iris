@@ -336,6 +336,88 @@ fn a_reply_goes_into_its_thread() {
     assert_eq!(thread_of, thread_provider);
 }
 
+/// The hostile evidence that the claim of a send kept (issue #472).
+fn hostile_before(b: &Box, action: i64) -> Option<i64> {
+    b.store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT hostile_before FROM ledger WHERE action_id = ?1",
+                [action],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap()
+}
+
+/// Issue #472: the claim of a send keeps the hostile evidence of its
+/// thread. A person may send after hostile mail; the record says so, and
+/// a later change of the mark does not change the record.
+#[test]
+fn the_send_claim_keeps_the_hostile_evidence() {
+    let b = setup("hostile-claim");
+    let (thread, parent) = b.thread();
+    // The parent is understood, as in a_reply_goes_into_its_thread, and
+    // its thread waits for no link check: no hostile evidence yet.
+    let provider: String = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT provider_id FROM message WHERE id = ?1",
+                [parent],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    let head = b.gmail.metadata(TOKEN, &provider, &["Subject"]).unwrap();
+    let subject = head.headers[0].value.clone();
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE header SET subject = ?1 WHERE message_id = ?2",
+                rusqlite::params![subject, parent],
+            )?;
+            Ok(tx.execute("DELETE FROM link_check", [])?)
+        })
+        .unwrap();
+    let a = b.approved(
+        Verb::Draft,
+        &format!("t-{thread}"),
+        json!({"to": ["priya@example.com"], "body": "Thanks."}),
+        0,
+    );
+    let applied = b.apply(a);
+    assert!(matches!(applied, Ok(Outcome::Applied(_))), "{applied:?}");
+    let (d, _) = b.draft(a);
+    let s = b.approved(Verb::Send, &d, json!({}), AGED);
+    // Hostile mail is in the thread at the claim.
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE message SET hostile = '[\"dmarc\"]' WHERE id = ?1",
+                [parent],
+            )?)
+        })
+        .unwrap();
+    match b.release(s) {
+        Ok(Outcome::Applied(_)) => {}
+        other => panic!("{other:?}"),
+    }
+    // The draft action has no evidence: only a send keeps it.
+    assert_eq!(hostile_before(&b, a), None);
+    assert_eq!(hostile_before(&b, s), Some(1));
+    b.store
+        .write(|tx| Ok(tx.execute("UPDATE message SET hostile = NULL", [])?))
+        .unwrap();
+    assert_eq!(hostile_before(&b, s), Some(1));
+    let refused = b.store.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE ledger SET hostile_before = 0 WHERE action_id = ?1",
+            [s],
+        )?)
+    });
+    assert!(refused.is_err(), "the record does not change");
+}
+
 fn sent_message_id(raw: &str) -> String {
     raw.lines()
         .find_map(|l| l.strip_prefix("Message-ID: "))
@@ -2053,4 +2135,81 @@ fn a_failed_lookup_ends_after_a_day() {
     assert_eq!(state, "failed");
     assert_eq!(error.as_deref(), Some(iris_apply::CHANGE_UNKNOWN));
     assert_eq!(b.puts(), 1);
+}
+
+impl Box {
+    /// A send mark of the person on the approved `draft` action `action`,
+    /// as a press of Send makes it.
+    fn mark(&self, action: i64) {
+        self.sql(
+            "INSERT INTO write_send(action_id, request_key, request_hash, flags, created_at)
+             VALUES (?1, ?2, ?3, '[\"new_recipient\"]', ?4)",
+            rusqlite::params![action, format!("key-{action:0>16}"), "a".repeat(64), now()],
+        );
+    }
+
+    /// Step 2a of the apply step: the send of each marked draft. Gives the
+    /// state, the reason and the target of the newest send action.
+    fn send_marks(&self) -> (String, Option<String>, String) {
+        assert_eq!(
+            iris_changeset::send_written(&self.store, self.account, &now).unwrap(),
+            1
+        );
+        self.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT state, reason, targets FROM changeset_action
+                     WHERE verb = 'send' ORDER BY id DESC LIMIT 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?)
+            })
+            .unwrap()
+    }
+}
+
+/// The draft of an action (change spec, section 2): the mark of a write
+/// of a change gets the send of the draft that the change names, once the
+/// change is applied.
+#[test]
+fn a_write_of_a_change_gets_its_send() {
+    let b = setup("change-mark");
+    let (change, d, _) = b.changed(new_text());
+    b.mark(change);
+    let o = b.apply(change);
+    assert!(matches!(o, Ok(Outcome::Applied(_))), "{o:?}");
+    let (state, why, targets) = b.send_marks();
+    assert!(
+        ["approved", "in_review"].contains(&state.as_str()),
+        "{state} {why:?}"
+    );
+    assert_eq!(targets, json!({"drafts": [d]}).to_string());
+}
+
+/// A send mark binds to the content of its press: a draft row with
+/// another hash (here, after a refresh from Gmail) gets a denied send.
+#[test]
+fn a_mark_does_not_send_other_content() {
+    let b = setup("mark-other");
+    let a = b.approved(Verb::Draft, "a-1", mail(), 0);
+    b.mark(a);
+    let o = b.apply(a);
+    assert!(matches!(o, Ok(Outcome::Applied(_))), "{o:?}");
+    // The row now holds other valid content, as a refresh from Gmail
+    // writes it.
+    let raw: Vec<u8> = b
+        .store
+        .read(|c| Ok(c.query_row("SELECT raw FROM draft WHERE id = 1", [], |r| r.get(0))?))
+        .unwrap();
+    let raw = String::from_utf8(raw).unwrap().replace("Here.", "Other.");
+    let read = iris_compose::read(raw.as_bytes(), OWNER).unwrap();
+    let hash = iris_compose::hash(&read.content, read.reply.as_ref());
+    let content = json!({"content": read.content, "reply": read.reply}).to_string();
+    b.sql(
+        "UPDATE draft SET raw = ?1, hash = ?2, content = ?3 WHERE id = 1",
+        rusqlite::params![raw.as_bytes(), hash, content],
+    );
+    let (state, why, _) = b.send_marks();
+    assert_eq!(state, "denied");
+    assert_eq!(why.as_deref(), Some(iris_changeset::DRAFT_CHANGED));
 }

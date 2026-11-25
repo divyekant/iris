@@ -1469,10 +1469,25 @@ fn remove_one_account_and_add_it_again() {
         .unwrap();
     assert_eq!(done.accounts, 1);
     assert_eq!((per_account(s.account), per_account(second)), (30, 0));
-    // The late worker writes nothing for the removed account.
+    // The late worker writes nothing for the removed account: no mail, no
+    // sync row and no sync column of the tombstone (issue 910).
     other.modify_labels(&FakeGmail::id_of(1), &["STARRED"], &[]);
     assert!(late.sync().is_err());
+    assert!(late.verify().is_err());
     assert_eq!(per_account(second), 0);
+    assert_eq!(
+        count(
+            &s.store,
+            &format!(
+                "SELECT (SELECT count(*) FROM sync_log WHERE account_id = {second})
+                      + (SELECT count(*) FROM sync_seen WHERE account_id = {second})
+                      + (SELECT count(*) FROM account WHERE id = {second}
+                           AND coalesce(history_id, token, mirror_ready_at, sync_kind,
+                                        sync_start, sync_step) IS NOT NULL)"
+            ),
+        ),
+        0
+    );
     assert_eq!(worker_of(s.account, &s.fake).verify().unwrap().total, 0);
 
     // The same address again: a new account and a full first copy. The

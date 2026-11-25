@@ -1568,3 +1568,70 @@ fn reopen_keeps_a_kind_that_a_person_set_outside_the_gate() {
     assert_eq!(declined_at(&c, "ana@example.org"), None);
     assert_eq!(c.row("ana@example.org").3.as_deref(), Some("person"));
 }
+
+#[test]
+fn a_trusted_near_copy_is_a_person_until_reopen() {
+    // Issue #49: the person trusts a sender that the near-copy rule marks
+    // hostile. Reopen gives the row back to the engine.
+    let mut c = Case::new("trust");
+    for t in ["t1", "t2", "t3"] {
+        c.put(t, &[], &service_mail());
+    }
+    let look = c
+        .put(
+            "t4",
+            &[],
+            "From: <alerts@shop-secure.example.net>\r\nTo: owner@example.com",
+        )
+        .sender
+        .unwrap();
+    let a = "alerts@shop-secure.example.net";
+    assert_eq!(c.row(a).1.as_deref(), Some("hostile"));
+
+    assert_eq!(
+        gate_of(&c, gate::trust, look),
+        Gate::Done { rerun: vec![look] }
+    );
+    let (_, kind, basis, by) = c.row(a);
+    assert_eq!(
+        (kind.as_deref(), basis.as_deref(), by.as_deref()),
+        (Some("person"), Some(gate::TRUSTED), Some("person"))
+    );
+    // A new message and a refresh keep the trust. A second trust changes nothing.
+    assert_eq!(c.put("t4", &[], &format!("From: <{a}>")).kind, Kind::Person);
+    c.store.write(|tx| Ok(refresh(tx, 10)?)).unwrap();
+    assert_eq!(c.row(a).1.as_deref(), Some("person"));
+    assert_eq!(gate_of(&c, gate::trust, look), Gate::Done { rerun: vec![] });
+
+    // Reopen: the engine marks it hostile again and reports the change.
+    let Gate::Done { rerun } = gate_of(&c, gate::reopen, look) else {
+        panic!("reopen")
+    };
+    assert!(rerun.contains(&look), "{rerun:?}");
+    assert_eq!(c.row(a).1.as_deref(), Some("hostile"));
+
+    // Only an engine `hostile` row can be trusted.
+    let shop = c
+        .store
+        .read(|r| {
+            Ok(r.query_row(
+                "SELECT id FROM sender WHERE address LIKE '%@shop.example.com'",
+                [],
+                |x| x.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        gate_of(&c, gate::trust, shop),
+        Gate::NotHostile(Some(Kind::Service))
+    );
+    set(
+        &c,
+        "UPDATE sender SET decided_by = 'person' WHERE address = 'alerts@shop-secure.example.net'",
+    );
+    assert_eq!(
+        gate_of(&c, gate::trust, look),
+        Gate::NotHostile(Some(Kind::Hostile))
+    );
+    assert_eq!(gate_of(&c, gate::trust, 999), Gate::NoSender);
+}
