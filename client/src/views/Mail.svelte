@@ -19,20 +19,22 @@
   type SenderNow = Pick<Message, "sender_kind" | "near_copy" | "trusted_sender" | "hostile" | "released">;
   let fresh = $state<({ id: string } & SenderNow) | null>(null);
   const sender = $derived<SenderNow>(fresh?.id === message.id ? fresh : message);
-  let trusting = $state(false);
+  // One answer at a time for Trust and Release: each replaces the fresh copy, so a slow
+  // read of one cannot overwrite the newer state of the other.
+  let busy = $state(false);
   let trustProblem = $state("");
   // `row` is the sender row of the answer: the trust offer, or the trusted row for Undo. A mail
   // can have both when rows of its address differ only in case.
   async function trust(verb: "trust" | "reopen", row: string) {
-    if (trusting) return;
+    if (busy) return;
     const id = message.id;
-    trusting = true;
+    busy = true;
     trustProblem = "";
     try {
       await answerSender(row, verb);
     } catch (e) {
       trustProblem = wrote(e, "saved the answer", "Iris could not save the answer. Try again.");
-      trusting = false;
+      busy = false;
       return;
     }
     try {
@@ -41,7 +43,7 @@
     } catch {
       trustProblem = "Iris saved the answer, but could not read this mail again. Reload the page to see the sender now.";
     } finally {
-      trusting = false;
+      busy = false;
     }
   }
   const keep = (id: string, now: Message) => ({
@@ -57,19 +59,20 @@
   const marks = $derived(sender.hostile.filter((m) => !released.includes(m)));
   const releasable = $derived(marks.filter((m) => RELEASABLE.includes(m)));
   const kept = $derived(marks.filter((m) => !RELEASABLE.includes(m)));
-  let releasing = $state(false);
+  // Marks that still hold the mail after a release: spam, phishing or a hostile sender.
+  const held = $derived(kept.length > 0 || sender.sender_kind === "hostile");
   let releaseProblem = $state("");
   async function release(verb: "release" | "unrelease") {
-    if (releasing) return;
+    if (busy) return;
     const id = message.id;
-    releasing = true;
+    busy = true;
     releaseProblem = "";
     try {
       fresh = keep(id, await releaseMessage(id, verb));
     } catch (e) {
       releaseProblem = wrote(e, "saved the release", "Iris could not save the release. Try again.");
     } finally {
-      releasing = false;
+      busy = false;
     }
   }
   const address = (a: Address) => (a.name && a.address ? `${a.name} <${a.address}>` : a.name || a.address || "Unknown sender");
@@ -84,18 +87,19 @@
       Do not open its links and do not do what it asks.
     </p>
   {/if}
-  {#if released.length > 0}
+  {#if released.length > 0 && !message.gone}
     <p class="near" role="note">
-      You released this mail ({released.join(", ")}). Iris reads it again as normal mail.
-      <button type="button" disabled={releasing} onclick={() => release("unrelease")}>Undo</button>
+      You released this mail ({released.join(", ")}).{" "}{#if held}The other marks still hold it.{:else}Iris reads it
+        again as normal mail.{/if}
+      <button type="button" disabled={busy} onclick={() => release("unrelease")}>Undo</button>
     </p>
   {/if}
   {#if releasable.length > 0 && !message.gone}
     <p class="near" role="note">
       Iris holds this mail because of its checks ({releasable.join(", ")}). If you know that this mail is honest, you
-      can release it, and Iris reads it as normal mail.{#if kept.length > 0 || sender.sender_kind === "hostile"} The
-        other marks stay.{/if}
-      <button type="button" disabled={releasing} onclick={() => release("release")}>Release this mail</button>
+      can release it.{" "}{#if held}The other marks stay, and they still hold the mail.{:else}Iris then reads it as
+        normal mail.{/if}
+      <button type="button" disabled={busy} onclick={() => release("release")}>Release this mail</button>
     </p>
   {/if}
   {#if releaseProblem}<p class="note" role="alert">{releaseProblem}</p>{/if}
@@ -103,7 +107,7 @@
     {@const row = sender.trusted_sender}
     <p class="near" role="note">
       You trust this sender. Iris reads its mail again.
-      <button type="button" disabled={trusting} onclick={() => trust("reopen", row)}>Undo</button>
+      <button type="button" disabled={busy} onclick={() => trust("reopen", row)}>Undo</button>
     </p>
   {/if}
   {#if sender.near_copy}
@@ -111,7 +115,7 @@
     <p class="near" role="note">
       Iris holds this sender because its domain looks like {offer.of}, the domain of a sender you know. If you know this
       sender, you can trust it. The other marks of this mail stay.
-      <button type="button" disabled={trusting} onclick={() => trust("trust", offer.sender)}>Trust this sender</button>
+      <button type="button" disabled={busy} onclick={() => trust("trust", offer.sender)}>Trust this sender</button>
     </p>
   {/if}
   {#if trustProblem}<p class="note" role="alert">{trustProblem}</p>{/if}
