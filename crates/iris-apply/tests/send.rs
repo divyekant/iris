@@ -2213,3 +2213,17 @@ fn a_mark_does_not_send_other_content() {
     assert_eq!(state, "denied");
     assert_eq!(why.as_deref(), Some(iris_changeset::DRAFT_CHANGED));
 }
+
+/// A read-only sign-in stops a held send at its claim, also when the step
+/// that releases it started before the sign-in (issue #683).
+#[test]
+fn no_send_leaves_a_read_only_account() {
+    let b = setup("read-only");
+    let (s, _) = b.new_mail(AGED);
+    b.store
+        .write(|tx| Ok(tx.execute("UPDATE account SET state = 'read_only'", [])?))
+        .unwrap();
+    assert_eq!(b.release(s).unwrap(), Outcome::ReadOnly);
+    assert_eq!(b.sends(), 0);
+    assert_eq!(b.state(s), "held");
+}

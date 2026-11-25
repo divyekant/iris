@@ -354,7 +354,7 @@ fn claim(
     let ops = serde_json::to_string(ops).expect("plain data");
     let post = post.map(|p| serde_json::to_string(p).expect("plain data"));
     Ok(run.store.write(|tx| {
-        if let Some(o) = gate(tx, action)? {
+        if let Some(o) = gate(tx, action, account)? {
             return Ok(Some(Err(o)));
         }
         // A send leaves only from `held`, and only while the switch is on.

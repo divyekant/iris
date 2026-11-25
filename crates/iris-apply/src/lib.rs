@@ -167,6 +167,10 @@ pub enum Outcome {
     /// Iris is stopped (`iris resume` ends the stop). The action stays
     /// `approved` or `held`, and no call is made.
     Stopped,
+    /// The account has read access only (`account.state` `read_only`), for
+    /// example after a sign-in without `--write` during the step (issue
+    /// #683). The action stays `approved` or `held`, and no call is made.
+    ReadOnly,
     /// The result of a `drafts.create` or `drafts.send` call is not known
     /// yet. The ledger row stays in `writing`, and the recovery decides
     /// later. No call is made again.
@@ -855,7 +859,7 @@ impl<'a, 'b> Run<'a, 'b> {
         // A move with location IDs is one call for each batch.
         let single = change.single() && self.relocates(change).is_none();
         let claimed = self.store.write(|tx| {
-            if let Some(o) = gate(tx, action)? {
+            if let Some(o) = gate(tx, action, account)? {
                 return Ok(Err(o));
             }
             let approved: bool = tx.query_row(
@@ -1307,8 +1311,9 @@ impl Run<'_, '_> {
     /// [`gate`], and the state `approved`. Gives the outcome if the action
     /// does not apply now, and [`Error::NotApproved`] if it is not approved.
     fn recheck(&mut self, action: i64) -> Result<Option<Outcome>> {
+        let account = self.account;
         let checked = self.store.write(|tx| {
-            if let Some(o) = gate(tx, action)? {
+            if let Some(o) = gate(tx, action, account)? {
                 return Ok(Some(Some(o)));
             }
             let approved: bool = tx.query_row(
@@ -1355,7 +1360,7 @@ impl Run<'_, '_> {
         let ended = self.store.write(|tx| {
             // The mode and the expiry, as in the claim: an action that
             // waits or expires does not fail.
-            if let Some(o) = gate(tx, action)? {
+            if let Some(o) = gate(tx, action, account)? {
                 return Ok(Err(o));
             }
             let n = tx.execute(
@@ -1476,14 +1481,24 @@ fn writing_rows(store: &Store, account: i64) -> Result<bool> {
     })?)
 }
 
-/// The expiry and the mode, in the transaction of the caller: `expired`
-/// 14 days after the submit (section 5.5), and a wait in the mode
-/// `observe` (section 5.4). Gives the outcome if the action does not apply
+/// The stop, the read-only state of `account`, the expiry and the mode, in
+/// the transaction of the caller: `expired` 14 days after the submit
+/// (section 5.5), and a wait in the mode `observe` (section 5.4). Gives the outcome if the action does not apply
 /// now.
-fn gate(tx: &Connection, action: i64) -> iris_store::Result<Option<Outcome>> {
+fn gate(tx: &Connection, action: i64, account: i64) -> iris_store::Result<Option<Outcome>> {
     // The stop comes first: while stopped, nothing about the action changes.
     if iris_store::stopped(tx)?.is_some() {
         return Ok(Some(Outcome::Stopped));
+    }
+    // A read-only sign-in saves its token and the state in one write, so a
+    // write claim never starts after it, also within a step (issue #683).
+    let read_only: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM account WHERE id = ?1 AND state = 'read_only')",
+        [account],
+        |r| r.get(0),
+    )?;
+    if read_only {
+        return Ok(Some(Outcome::ReadOnly));
     }
     if expire(tx, action)? {
         return Ok(Some(Outcome::Expired));
@@ -1663,7 +1678,7 @@ fn check(
     action: i64,
     approved_hash: Option<String>,
 ) -> Result<Option<Outcome>> {
-    if let Some(o) = store.write(|tx| gate(tx, action))? {
+    if let Some(o) = store.write(|tx| gate(tx, action, account))? {
         return Ok(Some(o));
     }
     // Each mailbox that the action names: the account of each message,
