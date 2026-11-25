@@ -538,6 +538,22 @@ fn a_from_past_the_header_limit_is_a_spoof() {
             assert!(!run(&raw, &["SENT"], &[], &[]).contains(&Mark::Spoof));
         }
     }
+    // A folded line whose line break ends at the last byte of the limit:
+    // the piece after it is empty, but it is no end of the header.
+    let mut raw = String::from("Subject: Hi\nX-Pad: a\n");
+    let crlf_len = |s: &str| s.len() + s.matches('\n').count();
+    while HEAD_LIMIT - crlf_len(&raw) > 200 {
+        raw.push_str(&format!(" {}\n", "a".repeat(75)));
+    }
+    let rest = HEAD_LIMIT - crlf_len(&raw);
+    raw.push_str(&format!(" {}\n", "a".repeat(rest - 3)));
+    assert_eq!(crlf_len(&raw), HEAD_LIMIT);
+    raw.push_str(from);
+    raw.push_str("\nBody.\n");
+    let a = analysis(&raw, &[], &[], &[]);
+    assert!(a.head.cut, "the header goes on past the limit");
+    assert!(a.marks.contains(&Mark::Spoof));
+
     // A long header that ends in the limit, with a From of its own owner,
     // is no spoof.
     let mut raw = String::from("Subject: Hi\nFrom: Ana <ana@example.org>\nX-Pad: a\n");

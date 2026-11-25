@@ -140,10 +140,13 @@ fn fields(raw: &[u8]) -> (Vec<(String, String)>, bool) {
     let text = String::from_utf8_lossy(head);
     let mut out: Vec<(String, String)> = Vec::new();
     let mut ended = false;
-    for line in text.split('\n') {
+    let mut lines = text.split('\n').peekable();
+    while let Some(line) = lines.next() {
         let line = line.strip_suffix('\r').unwrap_or(line);
         if line.is_empty() {
-            ended = true;
+            // The empty line ends the block only with its own line break in
+            // the limit: a last piece with no break can be a cut line.
+            ended = lines.peek().is_some();
             break;
         }
         if line.starts_with([' ', '\t']) {
