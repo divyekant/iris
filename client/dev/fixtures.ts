@@ -162,6 +162,7 @@ const entry = (id: number, at: string, rest: Partial<LedgerEntry>): LedgerEntry 
   skipped: 0,
   tried: 0,
   retry: false,
+  mail: null,
   ...rest,
 });
 export const ledger: LedgerPage = {
@@ -177,6 +178,8 @@ export const ledger: LedgerPage = {
     // An undo that changed nothing (decision D18): each message changed again after l-23, so l-23 keeps its Undo.
     entry(24, "2026-11-15T10:20:00Z", { verb: "inbox", skipped: 4, tried: 4, retry: true, why: "Undo of l-23", undo_of: "l-23" }),
     entry(23, "2026-11-15T10:05:00Z", { messages: 4, changed: 4, why: "Shipping notices that arrived.", can_undo: true }),
+    // A send names its mail (issue 490): two sends of a day differ by subject and recipient.
+    entry(22, "2026-11-14T16:40:00Z", { verb: "send", messages: 1, changed: 1, author: { kind: "agent", name: "Claude Code", job: "j-150", goal: "Renew the Acme contract" }, why: "Dana waits for the terms since Monday.", mail: { subject: "Re: Renewal for 2027", to: "dana@acme.example", recipients: 2 } }),
   ],
 };
 

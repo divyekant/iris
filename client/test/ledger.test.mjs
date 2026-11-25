@@ -20,6 +20,15 @@ test("each verb reads in the past tense, with what it changed", () => {
   assert.equal(words({ verb: "send" }), "Sent a mail");
 });
 
+test("a send and a draft name their subject and first recipient, so two sends differ (issue 490)", () => {
+  const words = (x) => `${l.did(e(x))} ${l.what(e(x))}`;
+  assert.equal(words({ verb: "send", mail: { subject: "Q4 plan", to: "priya@example.com", recipients: 1 } }), "Sent “Q4 plan” to priya@example.com");
+  assert.equal(words({ verb: "send", mail: { subject: "Q4 plan", to: "priya@example.com", recipients: 2 } }), "Sent “Q4 plan” to priya@example.com and 1 other");
+  assert.equal(words({ verb: "draft", mail: { subject: " ", to: "dana@example.com", recipients: 4 } }), "Wrote the draft of a mail with no subject to dana@example.com and 3 others");
+  // A mail that Iris cannot read, or an engine from before the field: no name.
+  assert.equal(words({ verb: "send", mail: null }), "Sent a mail");
+});
+
 // Each verb that a changeset (and so the ledger) can hold has words: the list comes from the
 // schema, so that a new verb without words makes this test fail.
 test("each verb of the changeset schema has past-tense words", async () => {
