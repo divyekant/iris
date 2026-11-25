@@ -87,7 +87,8 @@
   // A changeset after a decision on this screen, by its ID. It takes the place of the one that the page loaded.
   let now: Record<string, Changeset> = $state({});
   let all = $derived(list.map((c) => now[c.id] ?? c));
-  let asks = $derived(all.filter((c) => !unknown.includes(c.id) && shown(c).some(waits)));
+  // Only an open request takes a decision: a draft revision, a withdrawn or a closed request does not count.
+  let asks = $derived(all.filter((c) => c.state === "open" && !unknown.includes(c.id) && shown(c).some(waits)));
   let count = $derived(asks.reduce((sum, c) => sum + shown(c).filter(waits).length, 0));
   let headline = $derived(
     count === 0
@@ -124,7 +125,10 @@
       <button type="button" onclick={() => settle(c.id)}>Try again</button>
     </p>
   {/if}
-  <div class="one" data-changeset={c.id} inert={unknown.includes(c.id)}><Request changeset={c} onchange={(d) => ((seen[d.id] = ++started), (now[d.id] = d))} /></div>
+  {#if c.state === "draft"}
+    <p class="later" role="status">{author(c)} changes this request. You can decide when they submit the new version.</p>
+  {/if}
+  <div class="one" data-changeset={c.id} inert={c.state === "draft" || unknown.includes(c.id)}><Request changeset={c} onchange={(d) => ((seen[d.id] = ++started), (now[d.id] = d))} /></div>
 {/each}
 
 <style>

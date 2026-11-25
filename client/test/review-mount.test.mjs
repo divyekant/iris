@@ -838,3 +838,25 @@ test("a new revision between two reads replaces the request on the screen, and a
     }
   }
 });
+
+test("a request whose author makes a new revision takes no decision until it is open again (pre-review)", async () => {
+  const first = changeset([act({ resolved: { messages: [] } })]);
+  // The store keeps the older actions waiting while the new revision is a draft.
+  const draft = { ...first, state: "draft" };
+  let open = [first];
+  serve({ changesets: () => [200, { changesets: open }], "changesets/cs-9": () => [200, draft] });
+  const view = await mount("/src/views/Review.svelte", { changesets: [first], every: 20 });
+  const one = () => view.target.querySelector("[data-changeset=cs-9]");
+  try {
+    assert.equal(one().hasAttribute("inert"), false);
+    open = [];
+    await until(() => (view.flushSync(), one().hasAttribute("inert")));
+    assert.match(text(view.target), /Nothing waits for your review\./);
+    assert.match(text(view.target), /Claude Code changes this request\. You can decide when they submit the new version\./);
+    open = [first];
+    await until(() => (view.flushSync(), !one().hasAttribute("inert")));
+    assert.match(text(view.target), /asks for one change/);
+  } finally {
+    view.destroy();
+  }
+});
