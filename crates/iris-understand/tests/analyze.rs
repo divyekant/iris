@@ -490,3 +490,65 @@ fn an_address_in_the_name_ends_at_a_character_that_a_domain_cannot_hold() {
     // domain still differs from the owner.
     assert!(spoof("support@bank.example\u{202E}x.y", from));
 }
+
+/// Issue #1033: a header block that does not end in the read limit can hide
+/// the `From` field past the limit. For each size of the block around the
+/// limit, a received message gets its `From` read or the mark `spoof`,
+/// never neither. Your sent mail never gets the mark.
+#[test]
+fn a_from_past_the_header_limit_is_a_spoof() {
+    use iris_understand::head::HEAD_LIMIT;
+    let from = "From: \"ceo@bank.example\" <x@evil.example.net>\n";
+    for pad in [
+        0,
+        1_000,
+        HEAD_LIMIT - 200,
+        HEAD_LIMIT - 60,
+        HEAD_LIMIT - 1,
+        HEAD_LIMIT,
+        HEAD_LIMIT + 5_000,
+    ] {
+        for at_end in [false, true] {
+            // Folded lines of one long field: about 78 bytes each.
+            let mut raw = String::from("X-Pad: a\n");
+            while raw.len() < pad {
+                raw.push_str(" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n");
+            }
+            let raw = if at_end {
+                format!("Subject: Hi\n{raw}{from}\nBody.\n")
+            } else {
+                format!("Subject: Hi\n{from}{raw}\nBody.\n")
+            };
+            let a = analysis(&raw, &[], &[], &[]);
+            assert!(
+                a.head.from_addr.is_some() || a.marks.contains(&Mark::Spoof),
+                "pad {pad} at_end {at_end}"
+            );
+            let bytes = crlf(&raw);
+            let header = bytes.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+            if header > HEAD_LIMIT {
+                assert!(
+                    a.head.cut,
+                    "pad {pad}: the end of the header is past the limit"
+                );
+            }
+            if header + 4 < HEAD_LIMIT {
+                assert!(!a.head.cut, "pad {pad}: the header ends in the limit");
+            }
+            assert!(!run(&raw, &["SENT"], &[], &[]).contains(&Mark::Spoof));
+        }
+    }
+    // A long header that ends in the limit, with a From of its own owner,
+    // is no spoof.
+    let mut raw = String::from("Subject: Hi\nFrom: Ana <ana@example.org>\nX-Pad: a\n");
+    while raw.len() < HEAD_LIMIT - 10_000 {
+        raw.push_str(
+            " aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        );
+    }
+    raw.push_str("\nBody. ");
+    raw.push_str(&"b".repeat(HEAD_LIMIT));
+    let a = analysis(&raw, &[], &[], &[]);
+    assert!(!a.head.cut);
+    assert!(!a.marks.contains(&Mark::Spoof));
+}

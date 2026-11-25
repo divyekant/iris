@@ -806,7 +806,7 @@ The `hostile` column of the message holds each mark that applies:
 | Mark | Rule |
 |---|---|
 | `dmarc` | `Authentication-Results` reports a DMARC fail for the domain of `From`. |
-| `spoof` | The display name is the name of a known person, the address is not the address of that person, and DKIM or DMARC does not pass for the domain of the address. If DKIM and DMARC pass, the address is a new sender, with the kind `stranger`. Also: the display name holds an email address whose registrable domain is not the one of the `From` address, as in `"ceo@bank.example" <x@evil.example.net>` (decision D32). A DKIM or DMARC pass does not clear this case. A name with the word `via` is a list form (`"x@y.example via List" <list@lists.example>`) and does not get the mark. |
+| `spoof` | The display name is the name of a known person, the address is not the address of that person, and DKIM or DMARC does not pass for the domain of the address. If DKIM and DMARC pass, the address is a new sender, with the kind `stranger`. Also: the display name holds an email address whose registrable domain is not the one of the `From` address, as in `"ceo@bank.example" <x@evil.example.net>` (decision D32). A DKIM or DMARC pass does not clear this case. A name with the word `via` is a list form (`"x@y.example via List" <list@lists.example>`) and does not get the mark. Also: a header block that does not end in the first 256 KiB (issue #1033). |
 | `link` | An HTML link of the message (from `Clean.links`) shows a web address with the host `S` (text that starts with `http://`, `https://` or `www.`, or a first word that is a domain with a known public suffix, not a file name such as `report.pdf`), and its target is an `http` or `https` URL that a browser opens on another owner. Iris reads the target with the WHATWG URL standard. The owner of a host is its registrable domain by the public suffix list, with the hosts and the `From` domain in punycode (so `münchen.de` and `xn--mnchen-3ya.de` are one owner). The link is deceptive if one of these is true: the target host is an IP address or Iris cannot read it; the target has a user part, a backslash or a percent sign in front of its path; the target host has another owner than `S`. If DMARC passes for the domain of `From` and that domain has the owner of `S`, a target host of another owner is not deceptive: the sender owns the shown domain and can link through a redirect. The first two conditions (an IP address or a target that Iris cannot read; a user part, a backslash or a percent sign) apply also to this sender. DMARC for another domain proves nothing about `S`. If `iris-clean` could not list each link (`links_cut`), or the part of the file past the read limit has a part header (after a delimiter of a declared boundary) with the type `text/html`, the message gets the mark. |
 | `spam` | The message has the label `SPAM`. |
 | `phishing` | The understanding step marks the message as phishing. |
@@ -818,7 +818,8 @@ The display name is input that Iris does not control. This is the failure
 list of the name-address part of the mark `spoof` (decision D32):
 
 - Supported input: a display name, decoded from RFC 2047, of any length and
-  any characters. The check splits the name into words at white space and at
+  any characters, in a header block that ends in the first 256 KiB of the
+  message (the read limit of the header). The check splits the name into words at white space and at
   the signs `"` `'` `<` `>` `(` `)` `[` `]` `,` `;` `:` and backtick. It
   removes `.`, `!` and `?` at the ends of each word. A full-width at sign
   (U+FF20, U+FE6B) counts as `@`.
@@ -841,7 +842,8 @@ list of the name-address part of the mark `spoof` (decision D32):
 | At least one address in the name has another owner than the `From` address, also when other addresses in the name have the same owner | The mark `spoof`, unless the name has the word `via`. |
 | A word has two `@` (`a@b@c.example`) | Not an address. No mark from this word. |
 | A name with the word `via`, in any case | No mark from this rule, also when the name holds an address of another owner. |
-| No `From` address that Iris can read | No display name, so no mark from this rule. |
+| The header block does not end in the first 256 KiB, so a `From` field past the limit is not read (issue #1033) | The mark `spoof`: Iris cannot check the sender that a mail program shows. Your sent mail does not get it. |
+| A complete header block with no `From` address that Iris can read | No display name, so no mark from this rule. |
 | A `From` address with an empty domain (`x@`) | Each address in the name has another owner: the mark `spoof`. |
 
 - Safe result for all other input: no mark from this rule. The other rules
