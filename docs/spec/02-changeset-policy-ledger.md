@@ -1201,6 +1201,12 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris write <t-id or m-id> [--intent <text>]` | Writes a draft of a reply in the voice of the owner with one model call, and one more call if the answer is not a valid draft and not a refusal (decision D7). It saves the draft in the store and prints it. It sends nothing and adds no action. It opens the store directly (section 8.1). | host | 3 |
 | `iris wait`, `iris ask` | Ends the session and waits, or asks the person. | session | 5 |
 
+Each form of `iris mirror` and `iris understand` (also `iris mirror verify`
+and `iris understand --estimate`) writes two more local changes before its
+exit, also after an error: the attention of each changed item (section 6.4),
+and the match of each watch whose mail came (`docs/specs/2026-11-16-watch.md`,
+issue #260).
+
 Without `--changeset`, a command that adds an action makes a new draft
 changeset, and prints its ID. Two callers in host mode look the same to the
 engine, so each caller names its own draft changeset. In session mode, the

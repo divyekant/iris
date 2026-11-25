@@ -791,7 +791,10 @@ async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
     // Message 5 is from the look-alike: it can be trusted.
     let m = g.get("/api/messages/m-5").await;
     assert_eq!(m["sender_kind"], "hostile");
-    assert_eq!(m["near_copy"], json!({"sender": look, "of": "paypal.com"}));
+    assert_eq!(
+        m["near_copy"],
+        json!({"sender": look, "of": "paypal.com", "trusted": false})
+    );
     assert_eq!(g.get("/api/messages/m-1").await["near_copy"], Value::Null);
 
     let (code, v) = g.answer(&look, "trust").await;
@@ -805,9 +808,14 @@ async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
         None
     );
     let m = g.get("/api/messages/m-5").await;
+    // After a reload the mail still names the trusted sender, so the
+    // person can undo the trust.
     assert_eq!(
         (m["sender_kind"].as_str(), &m["near_copy"]),
-        (Some("person"), &Value::Null)
+        (
+            Some("person"),
+            &json!({"sender": look, "of": null, "trusted": true})
+        )
     );
 
     // The trusted look-alike is no reference of the near-copy rule: the
@@ -823,10 +831,45 @@ async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
     assert_eq!(g.answer("p-999", "trust").await.0, StatusCode::NOT_FOUND);
 
     // Reopen: the engine decides again, and the mark comes back.
-    let (code, _) = g.answer(&look, "reopen").await;
+    let (code, v) = g.answer(&look, "reopen").await;
     assert_eq!(code, StatusCode::OK);
+    assert_eq!(
+        v["kind"], "hostile",
+        "the answer gives the kind after reopen"
+    );
     assert_eq!(
         g.one::<String>("SELECT kind FROM sender WHERE address = 'alerts@paypa1.com'"),
         "hostile"
+    );
+    assert_eq!(
+        g.get("/api/messages/m-5").await["near_copy"],
+        json!({"sender": look, "of": "paypal.com", "trusted": false})
+    );
+
+    // Rows that differ only in case: `near_copy` names the row of
+    // `sender_kind` (the most cautious kind), never another row.
+    g.answer(&look, "trust").await;
+    let upper = g.sender("ALERTS@paypa1.com", Some("hostile"));
+    g.exec(
+        "UPDATE sender SET basis = 'near copy of paypal.com' WHERE address = 'ALERTS@paypa1.com'",
+        [],
+    );
+    let m = g.get("/api/messages/m-5").await;
+    assert_eq!(
+        (m["sender_kind"].as_str(), &m["near_copy"]),
+        (
+            Some("hostile"),
+            &json!({"sender": upper, "of": "paypal.com", "trusted": false})
+        )
+    );
+    // A hostile row of another rule wins too, and then no trust is offered.
+    g.exec(
+        "UPDATE sender SET decided_by = 'person' WHERE address = 'ALERTS@paypa1.com'",
+        [],
+    );
+    let m = g.get("/api/messages/m-5").await;
+    assert_eq!(
+        (m["sender_kind"].as_str(), &m["near_copy"]),
+        (Some("hostile"), &Value::Null)
     );
 }

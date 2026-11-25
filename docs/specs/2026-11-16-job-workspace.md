@@ -390,7 +390,9 @@ mailbox is one `iris` verb, and no change reaches the mailbox before
 `submit`; drafts go in `drafts/`; notes go in `notes.md`; the session has
 no mailbox credentials; the only network is the allowed hosts of the
 adapter (the model host for a built-in adapter), through the egress proxy
-of the engine (`docs/specs/2026-11-17-session-launcher.md`), and the agent
+of the engine (`docs/specs/2026-11-17-session-launcher.md`), and the local
+port of the adapter, if `agents.toml` gives one
+(`docs/specs/2026-11-25-agents-read-paths-local-port.md`), and the agent
 tool can send the files of this folder to these hosts before any
 `submit`. The key of the agent tool is not a
 mailbox credential.

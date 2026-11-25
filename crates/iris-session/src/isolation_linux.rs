@@ -6,7 +6,7 @@
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
@@ -254,6 +254,7 @@ impl Bwrap {
         // again here, just before bwrap starts, and bwrap binds the object
         // of the descriptor, not a path (read paths spec, "Linux").
         let opened = self.open_reads(command)?;
+        let local_port = local_port_of(command);
         let read_fds: Vec<RawFd> = opened.iter().map(|f| f.as_raw_fd()).collect();
         let (info_r, info_w) = pipe()?;
         let (block_r, block_w) = pipe()?;
@@ -294,6 +295,7 @@ impl Bwrap {
         // The engine: the relay connects only while it runs.
         // SAFETY: getppid has no memory effects.
         let engine = pidfd_open(unsafe { libc::getppid() })?;
+        let engine_local = engine.try_clone()?;
         let mut child = command.spawn()?;
         drop(info_w);
         drop(block_r);
@@ -311,6 +313,12 @@ impl Bwrap {
                     .ok_or_else(|| io::Error::other("the session has no session address"))?;
                 let listener = listen_in(info.pid, port, deadline)?;
                 start_relay(listener, port, from, engine)?;
+            }
+            if let Some(port) = local_port {
+                // The server on the port is a program of the person, not
+                // an Iris proxy: the relay connects from 127.0.0.1.
+                let listener = listen_in(info.pid, port, deadline)?;
+                start_relay(listener, port, Ipv4Addr::LOCALHOST, engine_local)?;
             }
             // bwrap runs the program of the adapter after this byte.
             (&File::from(block_w)).write_all(b"x")
@@ -453,6 +461,7 @@ impl Isolation for Bwrap {
         program: &Path,
         args: &[String],
         bound: &[PathBuf],
+        local_port: Option<u16>,
     ) -> Command {
         // The real path of the program, so that a link in the home of the
         // person is not necessary.
@@ -469,6 +478,15 @@ impl Isolation for Bwrap {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let workspace = fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
         let mut a = self.view(home.as_deref(), &reads, bound, &workspace);
+        // The helper reads the local port from this pair, and the agent
+        // learns it too.
+        if let Some(port) = local_port {
+            a.extend([
+                "--setenv".into(),
+                crate::LOCAL_PORT_VAR.into(),
+                port.to_string().into(),
+            ]);
+        }
         if let Some(dir) = iris.as_deref().and_then(Path::parent) {
             let mut path = dir.as_os_str().to_os_string();
             if let Some(p) = std::env::var_os("PATH") {
@@ -519,6 +537,17 @@ impl Isolation for Bwrap {
             .and_then(|v| v.strip_prefix("http://127.0.0.1:")?.parse::<u16>().ok());
         self.spawn_with(session, command, port)
     }
+}
+
+/// The local port of `command`: the value of the pair
+/// `--setenv IRIS_LOCAL_PORT <port>` that [`Isolation::command`] writes.
+fn local_port_of(command: &std::process::Command) -> Option<u16> {
+    // Only the options of bwrap: the arguments after `--` are the
+    // program's.
+    let args: Vec<&OsStr> = command.get_args().take_while(|a| *a != "--").collect();
+    args.windows(3)
+        .find(|w| w[0] == "--setenv" && w[1] == crate::LOCAL_PORT_VAR)
+        .and_then(|w| w[2].to_str()?.parse().ok())
 }
 
 fn find_bwrap(path: Option<&OsStr>) -> Option<PathBuf> {
@@ -875,7 +904,7 @@ fn recv_fd(sock: &std::os::unix::net::UnixStream, wait: Duration) -> io::Result<
 pub(crate) fn start_relay(
     listener: TcpListener,
     port: u16,
-    from: std::net::Ipv4Addr,
+    from: Ipv4Addr,
     engine: OwnedFd,
 ) -> io::Result<()> {
     let open = Arc::new(AtomicUsize::new(0));

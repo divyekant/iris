@@ -1329,7 +1329,7 @@ fn the_upgrade_drops_the_items_of_a_draft_or_copy() {
     assert_eq!(b.items().len(), 2);
     b.store
         .write(|tx| {
-            tx.execute_batch("DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; PRAGMA user_version = 41;")?;
+            tx.execute_batch("DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 41;")?;
             Ok(())
         })
         .unwrap();
@@ -2647,4 +2647,279 @@ fn a_declined_sender_gets_no_model_call_until_the_decline_ends() {
     assert!(pending(m3) && !skipped(m3));
     // The first message, understood with the model before the decline, keeps its state.
     assert!(!pending(m1));
+}
+
+/// Issue #946: a code signal of the fixed code rule that a person pinned
+/// (a correction) stays, and the mail waits for the model when the rule
+/// stops applying, as for an item that is not pinned. This holds right
+/// after the pin, after a new understanding of the message with the pinned
+/// item, and after the upgrade of a version 57 store (the backfill).
+#[test]
+fn a_pinned_rule_item_whose_rule_stops_applying_makes_the_mail_wait() {
+    use iris_understand::store::recheck_fixed;
+    for path in ["pin", "rebuild", "upgrade"] {
+        let b = store(&format!("fixed-pinned-{path}"));
+        let fake = Fake::default();
+        let code = "From: Bank <no-reply@bank.example.com>
+To: owner@example.com
+Subject: Your sign-in
+
+Your one-time code is 918273. It ends in 10 minutes.
+";
+        let m = b.add("1", code, &["INBOX"]);
+        understand(&b.store, m, &fake, NOW).unwrap();
+        let set = |b: &Box_, kind: &str| {
+            b.store
+                .write(|tx| {
+                    Ok(tx.execute(
+                        "UPDATE sender SET kind = ?1, decided_by = 'person'
+                         WHERE address = 'no-reply@bank.example.com'",
+                        [kind],
+                    )?)
+                })
+                .unwrap();
+        };
+        let sql = |b: &Box_, q: &str| b.store.write(|tx| Ok(tx.execute_batch(q)?)).unwrap();
+        set(&b, "service");
+        assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
+        let row: i64 = b.col(
+            "SELECT i.id FROM item i JOIN item_source s ON s.item_id = i.id
+              WHERE s.message_id = ?1 AND json_extract(i.doc, '$.derived.rule') = 'code'",
+            m,
+        );
+        correct(
+            &b.store,
+            &format!("s-{row}"),
+            "expires",
+            json!("2026-02-01T00:00:00Z"),
+            NOW,
+        )
+        .unwrap();
+        let b = match path {
+            "rebuild" => {
+                // The code rule matches again; the pinned item holds its draft.
+                sql(
+                    &b,
+                    &format!("UPDATE message SET understood_at = NULL WHERE id = {m}"),
+                );
+                understand(&b.store, m, &fake, NOW).unwrap();
+                b
+            }
+            "upgrade" => {
+                sql(
+                    &b,
+                    "ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                     ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
+                );
+                let Box_ {
+                    _dir,
+                    store,
+                    account,
+                } = b;
+                drop(store);
+                let b = Box_ {
+                    store: Store::open(&_dir.0).unwrap(),
+                    _dir,
+                    account,
+                };
+                // The last run is not known: the queued fixed check runs the
+                // code rule again, with no model, and writes the record.
+                assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
+                b
+            }
+            _ => b,
+        };
+        assert!(!b.col::<bool>("SELECT understood_at IS NULL FROM message WHERE id = ?1", m));
+        let calls = fake.calls.borrow().len();
+        set(&b, "stranger");
+        assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1, "{path}");
+        assert!(
+            b.col::<bool>("SELECT understood_at IS NULL FROM message WHERE id = ?1", m),
+            "{path}: the mail waits for the model"
+        );
+        assert!(
+            b.col::<bool>("SELECT EXISTS (SELECT 1 FROM item WHERE id = ?1)", row),
+            "{path}: the pinned item stays"
+        );
+        assert_eq!(
+            fake.calls.borrow().len(),
+            calls,
+            "{path}: the check called no model"
+        );
+        // The model reads it, and a later check finds no change.
+        understand(&b.store, m, &fake, NOW).unwrap();
+        assert!(!b.col::<bool>("SELECT understood_at IS NULL FROM message WHERE id = ?1", m));
+        sql(
+            &b,
+            &format!("INSERT INTO fixed_due(message_id) VALUES ({m})"),
+        );
+        assert_eq!(
+            recheck_fixed(&b.store, NOW, None).unwrap(),
+            0,
+            "{path}: no loop"
+        );
+    }
+}
+
+/// Issue #946, the backfill of migration 58: a pinned model item from an
+/// earlier run and a code-rule item from the last run. The record says
+/// that the rule completed the message, so a change to `stranger` makes
+/// the mail wait for the model.
+#[test]
+fn the_backfill_keeps_the_rule_of_the_last_run_next_to_a_pinned_model_item() {
+    use iris_understand::store::recheck_fixed;
+    let b = store("fixed-backfill-mixed");
+    let code = "From: Bank <no-reply@bank.example.com>
+To: owner@example.com
+Subject: Your sign-in
+
+Your one-time code is 918273. It ends in 10 minutes.
+";
+    let signal = r#"{"items": [{"form": "signal", "title": "Code", "quote": "Your one-time code is 918273.",
+      "kind": "code", "code": "918273"}], "phishing": false}"#;
+    let m = b.add("1", code, &["INBOX"]);
+    let model = understand(&b.store, m, &Fake::with(&[signal]), NOW)
+        .unwrap()
+        .items[0];
+    correct(
+        &b.store,
+        &format!("s-{model}"),
+        "expires",
+        json!("2026-02-01T00:00:00Z"),
+        NOW,
+    )
+    .unwrap();
+    let set = |b: &Box_, kind: &str| {
+        b.store
+            .write(|tx| {
+                Ok(tx.execute(
+                    "UPDATE sender SET kind = ?1, decided_by = 'person'
+                     WHERE address = 'no-reply@bank.example.com'",
+                    [kind],
+                )?)
+            })
+            .unwrap();
+    };
+    set(&b, "service");
+    assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
+    assert!(b.col::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM item i JOIN item_source s ON s.item_id = i.id
+          WHERE s.message_id = ?1 AND json_extract(i.doc, '$.derived.rule') = 'code')",
+        m
+    ));
+    b.store
+        .write(|tx| {
+            Ok(tx.execute_batch(
+                "ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                 ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
+            )?)
+        })
+        .unwrap();
+    let Box_ {
+        _dir,
+        store,
+        account,
+    } = b;
+    drop(store);
+    let b = Box_ {
+        store: Store::open(&_dir.0).unwrap(),
+        _dir,
+        account,
+    };
+    set(&b, "stranger");
+    assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
+    assert!(
+        b.col::<bool>("SELECT understood_at IS NULL FROM message WHERE id = ?1", m),
+        "the mail waits for the model"
+    );
+}
+
+/// Issue #946, the backfill of migration 58: a pinned code item, and a
+/// later run as a stranger, before the upgrade. The store cannot show if
+/// the model read the message (a model run with no item) or not (the bug
+/// of #946). With no rule that applies now, the queued fixed check makes
+/// the mail wait for the model: at most one model call, never a missed
+/// read.
+#[test]
+fn an_unknown_last_run_next_to_a_pinned_rule_item_waits_for_the_model() {
+    use iris_understand::store::recheck_fixed;
+    let b = store("fixed-backfill-model");
+    let fake = Fake::default();
+    let code = "From: Bank <no-reply@bank.example.com>
+To: owner@example.com
+Subject: Your sign-in
+
+Your one-time code is 918273. It ends in 10 minutes.
+";
+    let m = b.add("1", code, &["INBOX"]);
+    understand(&b.store, m, &fake, NOW).unwrap();
+    let set = |b: &Box_, kind: &str| {
+        b.store
+            .write(|tx| {
+                Ok(tx.execute(
+                    "UPDATE sender SET kind = ?1, decided_by = 'person'
+                     WHERE address = 'no-reply@bank.example.com'",
+                    [kind],
+                )?)
+            })
+            .unwrap();
+    };
+    set(&b, "service");
+    recheck_fixed(&b.store, NOW, None).unwrap();
+    let row: i64 = b.col(
+        "SELECT i.id FROM item i JOIN item_source s ON s.item_id = i.id
+          WHERE s.message_id = ?1 AND json_extract(i.doc, '$.derived.rule') = 'code'",
+        m,
+    );
+    correct(
+        &b.store,
+        &format!("s-{row}"),
+        "expires",
+        json!("2026-02-01T00:00:00Z"),
+        NOW,
+    )
+    .unwrap();
+    set(&b, "stranger");
+    recheck_fixed(&b.store, NOW, None).unwrap();
+    understand(&b.store, m, &fake, NOW).unwrap();
+    assert!(!b.col::<bool>("SELECT understood_at IS NULL FROM message WHERE id = ?1", m));
+    b.store
+        .write(|tx| {
+            Ok(tx.execute_batch(
+                "ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                 ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
+            )?)
+        })
+        .unwrap();
+    let Box_ {
+        _dir,
+        store,
+        account,
+    } = b;
+    drop(store);
+    let b = Box_ {
+        store: Store::open(&_dir.0).unwrap(),
+        _dir,
+        account,
+    };
+    let calls = fake.calls.borrow().len();
+    assert_eq!(
+        recheck_fixed(&b.store, NOW, None).unwrap(),
+        1,
+        "no rule applies now"
+    );
+    assert!(
+        b.col::<bool>("SELECT understood_at IS NULL FROM message WHERE id = ?1", m),
+        "the mail waits for the model"
+    );
+    assert!(b.col::<bool>("SELECT EXISTS (SELECT 1 FROM item WHERE id = ?1)", row));
+    assert_eq!(
+        fake.calls.borrow().len(),
+        calls,
+        "the check called no model"
+    );
+    assert_eq!(
+        b.col::<i64>("SELECT count(*) FROM fixed_due WHERE message_id = ?1", m),
+        0
+    );
 }

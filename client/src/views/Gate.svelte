@@ -167,6 +167,11 @@
           <span class="mark" aria-hidden="true">{initials({ kind: "sender", sender: sender.id, name: sender.name ?? undefined, address: sender.address })}</span>
           <div class="body">
             <p class="who">{nameOf(sender)}{#if sender.name}<span class="address">{sender.address}</span>{/if}</p>
+            {#if sender.known_as}
+              <p class="known" role="note">
+                You know a person with this name at {sender.known_as}. This is a new address: accept it only if you know that it is the same person.
+              </p>
+            {/if}
             {@render asks(sender)}
             {#if problem[sender.id]}<p class="problem">{problem[sender.id]}</p>{/if}
           </div>
@@ -238,6 +243,13 @@
     color: var(--color-text-faint);
     font-size: var(--font-size--1);
     font-weight: 400;
+    overflow-wrap: anywhere;
+  }
+  .known {
+    margin: var(--space-1) 0 0;
+    font-size: var(--font-size--1);
+    border-left: 2px solid var(--color-warning);
+    padding-left: var(--space-2);
     overflow-wrap: anywhere;
   }
   .asks {

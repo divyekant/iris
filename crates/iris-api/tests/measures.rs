@@ -425,7 +425,7 @@ fn downgrade(s: &Store) {
              ALTER TABLE account DROP COLUMN categories_off_at;
              DROP TRIGGER understand_owner_label_add; DROP TRIGGER understand_owner_label_remove;
              DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower; DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender; DROP TRIGGER talk_due_sender_remove; DROP TRIGGER model_declined_end; DROP TRIGGER model_declined_end_remove; DROP TABLE model_declined; DROP TABLE talk_due; DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
-             PRAGMA user_version = 26;",
+             ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 26;",
         )?;
         Ok(())
     })
@@ -797,7 +797,7 @@ fn migration_45_corrects_an_approval_after_a_comment() {
         approve_revision(&s, a, true);
         s.write(|tx| {
             tx.execute_batch(UNDO_46)?;
-            tx.execute_batch("UPDATE person_decision SET approved = 1; PRAGMA user_version = 44;")?;
+            tx.execute_batch("UPDATE person_decision SET approved = 1; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 44;")?;
             Ok(())
         })
         .unwrap();

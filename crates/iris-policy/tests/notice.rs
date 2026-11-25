@@ -547,3 +547,54 @@ fn a_later_hostile_sign_hides_the_notice() {
         assert_eq!(s.read(notice::counts).unwrap(), (0, new[0].id), "case {i}");
     }
 }
+
+/// With a model set, a new mail waits for understanding, so a `phishing`
+/// mark of the model stops the notice (issue #321). A mail that the model
+/// did not read within `MODEL_WAIT_MS` of its fetch gets its notice.
+#[test]
+fn a_notice_waits_for_the_model_check() {
+    let (_d, s) = store("model-wait");
+    activate(&s, ANN);
+    s.write(|tx| {
+        tx.execute(
+            "INSERT INTO model_setting(id, provider, base_url, model, version, max_tokens, timeout_s)
+             VALUES (1, 'local', 'http://127.0.0.1:1', 'fake', 1, 1000, 30)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let phish = put(&s, &mail(), 0);
+    let safe = put(&s, &mail(), 1);
+    let slow = put(
+        &s,
+        &Mail {
+            fetched_ago: 6,
+            ..mail()
+        },
+        2,
+    );
+    assert_eq!(notices_now(&s), [slow]);
+    // The model marks one mail, and reads the other as safe.
+    s.write(|tx| {
+        tx.execute(
+            "UPDATE message SET hostile = '[\"phishing\"]', understood_at = ?2 WHERE id = ?1",
+            params![phish, NOW],
+        )?;
+        tx.execute(
+            "UPDATE message SET understood_at = ?2 WHERE id = ?1",
+            params![safe, NOW],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(notices_now(&s), [safe]);
+}
+
+fn notices_now(s: &Store) -> Vec<i64> {
+    notice::refresh(s, NOW)
+        .unwrap()
+        .iter()
+        .map(|n| n.message_id)
+        .collect()
+}

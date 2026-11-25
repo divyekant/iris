@@ -280,6 +280,18 @@ impl Launcher<'_> {
                 return self.fail(session, why, None, Some(&socket_path));
             }
         };
+        // The local port and the egress port are two listeners on
+        // 127.0.0.1 in the session. The egress port comes from the system,
+        // so the same number is rare: the start stops, and the next run
+        // gets a new egress port.
+        if let (Some(e), Some(local)) = (egress.as_ref(), adapter.allow_local) {
+            if e.port == local {
+                let why = format!(
+                    "allow_local {local} is the egress port of this session; run the job again"
+                );
+                return self.fail(session, why, None, Some(&socket_path));
+            }
+        }
         let helper = match self.start_helper(session, &dir, adapter, egress.as_ref()) {
             Ok(h) => h,
             Err(why) => return self.fail(session, why, None, Some(&socket_path)),
@@ -461,6 +473,7 @@ impl Launcher<'_> {
             &adapter.program,
             &adapter.args,
             &adapter.read_paths,
+            adapter.allow_local,
         );
         let mut args: Vec<OsString> = vec![session.to_string().into(), command.program.into()];
         args.extend(command.args);

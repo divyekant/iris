@@ -2,7 +2,7 @@
 
 - Date: 2026-11-25
 - Card: none (open-issues sweep, group imap; issues #775 and #620)
-- Status: Draft
+- Status: Built
 
 ## Problem
 
@@ -234,6 +234,13 @@ the rebind. `undo` of `archive` is `inbox`, and the undo of `trash` is
 `untrash` and then `archive` of each message that had no `INBOX` before, as
 today (spec 2 section 7.4).
 
+A message that another client moved after the entry is not refused by the
+plan (issue #990). Its row still has the ID of the folder that Iris moved it
+to, and that ID is not found now. So step 2 counts the message gone before
+`move_plan`, or, after a sync marked the row gone, the undo leaves it out.
+The plan only sees IDs of folders that Iris saw, so an undo never names a
+folder that its move cannot leave.
+
 ## Options not chosen
 
 - Match the new row to the old row by `Message-ID`, at the next sync or
@@ -271,14 +278,15 @@ write, or `Transport` (unknown) after the first write.
 | A new `UIDVALIDITY` after a `UID MOVE` of another folder | `Transport`, no more writes | `move_uidvalidity` |
 | A new target `UIDVALIDITY` between two `UID MOVE` commands | `Transport` (unknown) | `move_target_uidvalidity` |
 | `OK` with no `COPYUID`, or without each asked UID | `Transport` | `move_partial_copyuid` |
-| `NO` or `BAD` to `UID MOVE` | `Transport` | `move_refused_is_unknown` |
+| `NO` or `BAD` to `UID MOVE` | `Transport` | `move_partial_copyuid`, `move_unknown_is_not_retried` |
 | A lost answer after a `UID MOVE` that moved the message (old ID `NotFound`) | the recovery sets `listed = 'unknown'`, the entry ends `failed`, no second `UID MOVE`, no rebind | `move_unknown_is_not_retried` |
 | A started move whose old ID still has the labels of before | `listed = 'unknown'`, entry `failed`, no call | `move_unknown_is_not_retried` |
 | A crash after `UID MOVE`, then a sync before the recovery | the sync marks the old row gone and adds a new row; the recovery sets `listed = 'unknown'`, entry `failed`; zero differences | `move_crash_then_sync` |
 | A move and a sync of a message with no `Message-ID`, `References` or `In-Reply-To` | the thread follows the new ID; zero differences | `move_of_a_message_with_no_thread_headers` |
 | A message that is already at the target | the plan gives false, the apply skips it, no ledger row for it | `move_already_there` |
 | `archive`, sync, `inbox`, sync, then undo of both | the same store row, zero differences | `move_and_undo_keep_the_row` |
-| A sync after the move (QRESYNC, and CONDSTORE only) | no new row, no gone row, zero differences | `move_then_sync_keeps_the_row` |
+| A sync after the move (QRESYNC, and CONDSTORE only) | no new row, no gone row, zero differences | `move_and_undo_keep_the_row` |
+| Another client moves an archived message to the trash, then the undo of the archive | the undo counts that message gone or leaves it out (its archive ID is not found, or a sync marked the row gone); the other messages move back; zero differences | `undo_after_an_external_move` |
 | `Store::rebind` to an ID that another row has | `Error::Store`, the apply stops | `rebind_refuses_a_taken_id` |
 
 ## Impact

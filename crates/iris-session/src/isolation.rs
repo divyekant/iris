@@ -53,6 +53,9 @@ pub trait Isolation: Send + Sync {
     /// only network that it permits (none if `None`). `reads` are the real
     /// paths of the read paths of the adapter, which the launch checked
     /// (`crate::read_paths`): the session can read them, not write them.
+    /// The session can also connect to `127.0.0.1:<local_port>`, if given.
+    // Each input is one fact of the session, from a different source.
+    #[allow(clippy::too_many_arguments)]
     fn command(
         &self,
         session: i64,
@@ -61,6 +64,7 @@ pub trait Isolation: Send + Sync {
         program: &Path,
         args: &[String],
         reads: &[PathBuf],
+        local_port: Option<u16>,
     ) -> Command;
 
     /// The durable identity of the isolation of one session. It depends
@@ -158,6 +162,7 @@ pub mod test {
             program: &Path,
             args: &[String],
             _reads: &[PathBuf],
+            _local_port: Option<u16>,
         ) -> Command {
             Command {
                 program: program.to_path_buf(),
