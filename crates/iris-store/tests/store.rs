@@ -82,7 +82,7 @@ fn open_makes_the_data_folder() {
     }
     store
         .read(|c| {
-            assert_eq!(iris_store::schema_version(c)?, 62);
+            assert_eq!(iris_store::schema_version(c)?, 64);
             let journal: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
             assert_eq!(journal, "wal");
             let cache: i64 = c.query_row("PRAGMA cache_size", [], |r| r.get(0))?;
@@ -1559,13 +1559,13 @@ fn no_spam_message_keeps_a_droppable_item() {
         .write(|tx| Ok(tx.execute("UPDATE message SET gone_at = NULL WHERE id = ?1", [id])?))
         .unwrap();
     assert_eq!(items(&store), 0);
-    // An older store (version 61): a SPAM message with an item. The
+    // An older store (version 63): a SPAM message with an item. The
     // upgrade deletes the item and puts the thread in talk_due.
     store
         .write(|tx| {
             tx.execute_batch(
                 "DROP TRIGGER spam_drops_items; DROP TRIGGER spam_back_drops_items;
-                 DELETE FROM talk_due; PRAGMA user_version = 61;",
+                 DELETE FROM talk_due; PRAGMA user_version = 63;",
             )?;
             Ok(())
         })

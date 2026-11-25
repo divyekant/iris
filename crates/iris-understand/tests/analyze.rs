@@ -491,6 +491,90 @@ fn an_address_in_the_name_ends_at_a_character_that_a_domain_cannot_hold() {
     assert!(spoof("support@bank.example\u{202E}x.y", from));
 }
 
+/// Property (#982): the domain of an address in the display name is read
+/// as the owner check reads it, after the UTS 46 mapping. A punctuation
+/// character (classes Pd, Po, Ps, Pe, Pi and Pf) that maps to ASCII acts
+/// as that ASCII text. One that stays outside ASCII ends the domain, as
+/// ASCII punctuation does, unless IDNA2008 allows it in a label
+/// (`IDNA_PUNCTUATION`): then the domain is longer, with another owner.
+#[test]
+fn unicode_punctuation_ends_an_address_in_the_name() {
+    use idna::uts46::{AsciiDenyList, Hyphens, Uts46};
+    use iris_understand::{name_address_spoof as spoof, IDNA_PUNCTUATION};
+    use unicode_general_category::{get_general_category, GeneralCategory as G};
+    let from = "noreply@bank.example";
+    let map = |c: char| {
+        let s = c.to_string();
+        let (m, _) = Uts46::new().to_unicode(s.as_bytes(), AsciiDenyList::EMPTY, Hyphens::Allow);
+        m.into_owned()
+    };
+    let (mut ascii, mut cut, mut kept) = (0, 0, 0);
+    let punct = |c: char| {
+        matches!(
+            get_general_category(c),
+            G::DashPunctuation
+                | G::OtherPunctuation
+                | G::OpenPunctuation
+                | G::ClosePunctuation
+                | G::InitialPunctuation
+                | G::FinalPunctuation
+        )
+    };
+    for c in (0x80u32..0x3_0000).filter_map(char::from_u32) {
+        if !punct(c) {
+            continue;
+        }
+        let m = map(c);
+        // The first character after the mapping decides.
+        let ends = m.chars().next().is_some_and(|x| match x.is_ascii() {
+            true => !(x.is_ascii_alphanumeric() || "-.@".contains(x)),
+            false => punct(x) && !IDNA_PUNCTUATION.contains(&x),
+        });
+        for t in ["help", "evil.test", "日本.com", ""] {
+            let own = format!("support@bank.example{c}{t}");
+            let foreign = format!("support@other.example{c}{t}");
+            if m.is_ascii() {
+                // The same result as the mapped ASCII text.
+                let same = format!("support@bank.example{m}{t}");
+                assert_eq!(spoof(&own, from), spoof(&same, from), "{own:?} as {same:?}");
+                let same = format!("support@other.example{m}{t}");
+                assert_eq!(spoof(&foreign, from), spoof(&same, from), "{foreign:?}");
+                ascii += 1;
+            } else if !ends {
+                assert!(spoof(&own, from), "{own:?}");
+                assert!(spoof(&foreign, from), "{foreign:?}");
+                kept += 1;
+            } else {
+                assert!(!spoof(&own, from), "{own:?}");
+                assert!(spoof(&foreign, from), "{foreign:?}");
+                cut += 1;
+            }
+        }
+    }
+    assert!(ascii > 0 && cut > 1000 && kept > 0, "{ascii} {cut} {kept}");
+    assert!(!spoof("support@bank.example\u{2014}help", from));
+    // The cases of the review of PR #1066.
+    assert!(spoof(
+        "support@company.jp\u{30FB}日本.com",
+        "noreply@company.jp"
+    ));
+    assert!(spoof("support@bank.example\u{FF0D}evil.com", from));
+    assert!(spoof("support@bank.example\u{FE63}evil.com", from));
+    // An IDNA dot alone separates the labels of an address.
+    for dot in ['\u{3002}', '\u{FF0E}', '\u{FF61}'] {
+        let name = format!("ceo@bank{dot}example");
+        assert!(spoof(&name, "x@evil.example.net"), "{name:?}");
+        assert!(!spoof(&name, "x@bank.example"), "{name:?}");
+        let name = format!("support@bank.example{dot}evil.test");
+        assert!(spoof(&name, from), "{name:?}");
+    }
+    // These stay in the domain: the domain then differs from the owner.
+    for c in ['\u{202E}', '\u{200D}', '\u{0301}', '\u{FE0F}'] {
+        let w = format!("support@bank.example{c}x.y");
+        assert!(spoof(&w, from), "{w:?}");
+    }
+}
+
 /// Issue #1033: a header block that does not end in the read limit can hide
 /// the `From` field past the limit. For each size of the block around the
 /// limit, a received message gets its `From` read or the mark `spoof`,

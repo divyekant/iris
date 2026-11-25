@@ -645,6 +645,7 @@ fn an_open_send_mark_of_the_draft_blocks_a_change() {
         args: &args(MAIL()),
         key: "key-0123456789abcd",
         flags: &["new_recipient".to_string()],
+        draft: None,
     };
     let iris_changeset::Written::New(cs) = iris_changeset::write_mail(&s, &press, NOW)
         .unwrap()

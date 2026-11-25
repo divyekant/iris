@@ -531,7 +531,7 @@ fn new_quiet_gone_and_back() {
     assert_eq!(doc["id"], id.as_str());
 
     // A message comes back, and a new one comes. A message that comes
-    // back waits for the understanding again (store migration 62), so the
+    // back waits for the understanding again (store migration 64), so the
     // test marks it understood, as the next run does.
     b.sql(&format!(
         "UPDATE message SET gone_at = NULL WHERE id = {m2}"
@@ -761,7 +761,7 @@ fn the_document_follows_a_gone_status_from_the_sync() {
     check(&v, &doc);
     assert_eq!(doc["status"], "gone");
     b.sql("UPDATE message SET gone_at = NULL");
-    // The message waits for the understanding again (store migration 62).
+    // The message waits for the understanding again (store migration 64).
     b.sql(&format!("UPDATE message SET understood_at = {NOW}"));
     b.sql("UPDATE item SET status = status_before_gone, status_before_gone = NULL WHERE status = 'gone'");
     assert_eq!(b.talk("t1", NOW).unwrap()["status"], "active");

@@ -210,6 +210,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_60.sql"),
     include_str!("schema_61.sql"),
     include_str!("schema_62.sql"),
+    include_str!("schema_63.sql"),
+    include_str!("schema_64.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
@@ -978,6 +980,23 @@ pub(crate) fn settings(conn: &Connection) -> Result<()> {
                 (Some(a), Some(b)) => unicase::UniCase::new(a) == unicase::UniCase::new(b),
                 _ => false,
             })
+        },
+    )?;
+    // `iris_sha256(text)`: the SHA-256 of the UTF-8 text, as lower-case hex,
+    // or NULL for NULL. The basis of a thread summary reads it (issue 478).
+    conn.create_scalar_function(
+        "iris_sha256",
+        1,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            use sha2::Digest;
+            Ok(ctx.get::<Option<String>>(0)?.map(|t| {
+                sha2::Sha256::digest(t.as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            }))
         },
     )?;
     Ok(())

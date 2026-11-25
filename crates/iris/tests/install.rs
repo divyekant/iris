@@ -69,6 +69,8 @@ fn install_sh_installs_the_real_program_and_its_service() {
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("IRIS_INSTALL_DIR")
         .env_remove("IRIS_NO_SERVICE")
+        // The service keeps the data folder of the install (issue #243).
+        .env("IRIS_DATA", home.join("mail"))
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -94,5 +96,7 @@ fn install_sh_installs_the_real_program_and_its_service() {
     let text = std::fs::read_to_string(file).unwrap();
     assert!(text.contains(program.to_str().unwrap()), "{text}");
     assert!(text.contains("serve"));
+    let data = home.join("mail");
+    assert!(text.contains(data.to_str().unwrap()), "{text}");
     std::fs::remove_dir_all(&dir).unwrap();
 }

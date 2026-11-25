@@ -31,7 +31,7 @@ pay again for the same mail.
 5. The person sets the model and its key with the `iris` command. The key is
    a secret (spec 1 section 5.4).
 
-## Resets (issue #110, migration 62)
+## Resets (issue #110, migration 64)
 
 - A change of the label `SPAM` (it comes or goes) clears `understood_at`,
   as a change of `SENT`, `DRAFT`, `UNSENT` or `SENT_COPY` does. Mail that
@@ -40,7 +40,7 @@ pay again for the same mail.
   `DRAFT` in migration 42), so an old item does not show again when
   `SPAM` goes before the next run. A pinned item stays. A gone message
   that comes back with `SPAM`, and each message with `SPAM` at the
-  upgrade (migration 62), drop their droppable items too.
+  upgrade (migration 64), drop their droppable items too.
 - Each reset of `understood_at` by a change (new content, a gone message
   that comes back, a label of the list above, a new hostile mark) clears
   `tries` and `retry_at`, and puts the thread in `talk_due`. A failed try
