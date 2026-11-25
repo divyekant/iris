@@ -204,10 +204,7 @@ test("a line shows Draft ready only when the engine says a draft is ready", asyn
     try {
       const pill = view.target.querySelector(".ready");
       assert.equal(!!pill, shown, `${item.form} ready=${JSON.stringify(item.ready)}`);
-      if (shown) {
-        assert.equal(text(pill).trim(), "Draft ready");
-        assert.equal(pill.querySelector("a, button"), null, "the pill is no control: the line opens the item");
-      }
+      if (shown) assert.equal(text(pill).trim(), "Draft ready");
     } finally {
       view.destroy();
     }
@@ -381,5 +378,30 @@ test("a held line pushed out of a full section takes the place of its last line:
     assert.ok(!section.textContent.includes("Filler 17"), "the held line takes the place of the last line");
   } finally {
     view.destroy();
+  }
+});
+
+test("Reply and a Draft ready pill open the reply form of the thread from the line (issue 582)", async () => {
+  const talk = { ...fx.items.find((i) => i.form === "conversation" && i.status === "active"), ready: [] };
+  const owe = { ...fx.items.find((i) => i.form === "commitment" && i.direction === "you_owe"), ready: ["draft"] };
+  const owed = { ...fx.items.find((i) => i.form === "commitment" && i.direction === "owed_to_you"), ready: ["draft"] };
+  const threadOf = (item) => (item.sources.find((x) => x.role === "origin") ?? item.sources[0]).thread;
+  serve(() => [404, { error: "Not found." }]);
+  for (const [name, item, reply, pill] of [
+    ["a conversation", talk, `#/write/${talk.thread}`, null],
+    ["a conversation with a draft", { ...talk, ready: ["draft"] }, `#/write/${talk.thread}`, `#/write/${talk.thread}`],
+    ["a gone conversation", { ...talk, status: "gone", ready: ["draft"] }, null, null],
+    ["a commitment that you owe, with a draft", owe, null, `#/write/${threadOf(owe)}`],
+    // A draft owed to you can be a nudge to another person: the write view of the thread does not take it.
+    ["a commitment owed to you, with a draft", owed, null, null],
+  ]) {
+    const view = await mount("/src/views/Line.svelte", { item });
+    try {
+      assert.equal(view.target.querySelector("a.reply")?.getAttribute("href") ?? null, reply, `${name}: Reply`);
+      if (reply) assert.equal(view.target.querySelector("a.reply").getAttribute("aria-label"), `Reply: ${item.title}`);
+      assert.equal(view.target.querySelector("a.ready")?.getAttribute("href") ?? null, pill, `${name}: the pill`);
+    } finally {
+      view.destroy();
+    }
   }
 });
