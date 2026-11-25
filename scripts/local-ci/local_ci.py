@@ -275,17 +275,22 @@ def pre_review(root: Path, config: Dict[str, Any], merge_base: str) -> Optional[
                 if row.split()[0].isdigit())
     if added <= limit:
         return None
-    # An earlier proof commit of the branch keeps the record for a new checkout.
-    earlier = re.search("^" + PRE_REVIEW_TRAILER + r"([0-9a-f]{40})$",
-                        git(root, "log", "--format=%B", f"{merge_base}..HEAD"), re.MULTILINE)
-    if earlier:
-        return earlier.group(1)
+    branch = set(git(root, "rev-list", f"{merge_base}..HEAD").split())
+    # An earlier proof commit of the branch keeps the record for a new checkout. Only a valid
+    # proof commit counts, and only a record of a commit on the branch: a trailer in an ordinary
+    # commit message is text that anyone can write.
+    for proof in git(root, "rev-list", "--grep", "^" + PROOF_PREFIX, f"{merge_base}..HEAD").split():
+        record = head_record(root, proof)
+        if proof_problem(record):
+            continue
+        for line in str(record["message"]).splitlines():
+            if line.startswith(PRE_REVIEW_TRAILER) and line[len(PRE_REVIEW_TRAILER):] in branch:
+                return line[len(PRE_REVIEW_TRAILER):]
     try:
         sha = str(json.loads((root / ".local-ci" / "pre-review.json").read_text(encoding="utf-8"))["head"])
     except (OSError, ValueError, KeyError, TypeError):
         sha = ""
-    on_branch = re.fullmatch(r"[0-9a-f]{40}", sha) and sha in git(root, "rev-list", f"{merge_base}..HEAD").split()
-    if not on_branch:
+    if sha not in branch:
         raise Refusal(f"the branch adds {added} lines (more than {limit}) and has no pre-review; run "
                       "`python3 scripts/review/review.py --pre`, fix the findings, then run local CI again")
     return sha

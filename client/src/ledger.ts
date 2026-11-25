@@ -42,6 +42,8 @@ export function did(e: LedgerEntry): string {
     case "send":
       return "Sent";
     case "draft":
+      // A change of a draft, and its undo (draft change spec, section 6). An older engine leaves `change` out.
+      if (e.change) return e.undo_of ? "Restored the old text of" : "Changed the draft of";
       return "Wrote the draft of";
     default:
       // A verb that the changeset schema does not have yet: test/ledger.test.mjs checks each one.
