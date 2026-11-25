@@ -555,9 +555,16 @@ fn smallest_names(
     unsafe { libc::rewinddir(d.0) };
     let mut heap = std::collections::BinaryHeap::new();
     loop {
+        // `readdir` gives NULL at the end and on an error: only errno tells
+        // the two apart, so a failed read does not look like the end.
+        set_errno(0);
         // SAFETY: `d.0` is an open DIR.
         let e = unsafe { libc::readdir(d.0) };
         if e.is_null() {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error().is_some_and(|n| n != 0) {
+                return Err(err);
+            }
             break;
         }
         // SAFETY: `e` points to a valid entry until the next `readdir`.
@@ -586,6 +593,21 @@ fn smallest_names(
         .into_iter()
         .map(|n| std::ffi::OsStr::from_bytes(&n).to_owned())
         .collect())
+}
+
+#[cfg(unix)]
+fn set_errno(v: libc::c_int) {
+    // SAFETY: the errno of this thread is always valid to write.
+    unsafe {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            *libc::__errno_location() = v;
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        {
+            *libc::__error() = v;
+        }
+    }
 }
 
 /// The bytes of the file `name` of the opened folder `dir`, or `None` if it

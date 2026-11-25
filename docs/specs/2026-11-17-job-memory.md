@@ -201,9 +201,10 @@ next session. This is a known limit, with an issue in the code PR.
   The agent then loses a change to the notes when the reap save fails (for
   example, a file over the limit). The file stays the memory; the store holds
   a copy.
-- Add `workspaces/` to the backup. The backup then copies mail text of each
-  workspace again (the threads are already in the store) and the files of
-  `drafts/`. A backup must stay the size of the store.
+- Add all of `workspaces/` to the backup. The backup then copies mail text
+  of each workspace again (the threads are already in the store). A backup
+  must stay the size of the store. Since issue #350, the backup copies only
+  `drafts/` of each workspace (specification 1, section 5.1).
 - A verb to clear the copy (`iris job forget-notes`). An edit of the file
   does the same work with no new verb.
 - Cut a file over the limit to 64 KiB. A cut note can mislead the agent at a
@@ -255,8 +256,9 @@ stays as it is, and the session starts.
 
 ## Assumptions
 
-- The backup copies `iris.db` and not `workspaces/`:
-  `crates/iris-store/src/backup.rs`, `Store::backup`.
+- The backup copies `iris.db` and, of `workspaces/`, only `drafts/` of each
+  job (issue #350), not `notes.md`: `crates/iris-store/src/backup.rs`,
+  `Store::backup` and `copy_drafts`.
 - A build runs only while no session of the job runs:
   `docs/spec/03-job-workspace.md`, section 11, and
   `iris_session::launch` (the launch builds before the helper starts).
