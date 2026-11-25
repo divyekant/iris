@@ -820,6 +820,58 @@ fn data(
     .to_string()
 }
 
+/// Words that say nothing about one commitment: a key word of a
+/// commitment is none of these.
+const COMMON: &[&str] = &[
+    "about", "after", "again", "also", "before", "could", "from", "have", "just", "know",
+    "let", "like", "need", "please", "send", "sent", "that", "them", "then", "there", "they",
+    "this", "what", "when", "will", "with", "would", "your", "yours", "thanks", "thank",
+];
+
+/// The key words of a commitment of a nudge: the words of its title, its
+/// quote and its amount, lowercase. A word counts if it has 4 letters or
+/// more and is not in [`COMMON`], or if it has a digit and 2 characters
+/// or more (an amount, a date).
+fn key_words(ask: &Value) -> Vec<String> {
+    let mut out = vec![];
+    for field in ["title", "quote", "amount"] {
+        let text = match &ask[field] {
+            Value::String(s) => s.clone(),
+            Value::Null => continue,
+            v => v.to_string(),
+        };
+        for w in text.split(|c: char| !c.is_alphanumeric()) {
+            let w = w.to_lowercase();
+            let n = w.chars().count();
+            let digit = w.chars().any(|c| c.is_ascii_digit());
+            if (digit && n >= 2) || (!digit && n >= 4 && !COMMON.contains(&w.as_str())) {
+                out.push(w);
+            }
+        }
+    }
+    out
+}
+
+/// True if `body` names the commitment `ask` of a nudge: a word of the
+/// body starts with the first 5 characters of a key word ([`key_words`]),
+/// so "invoices" names "invoice". The model rewords each promise, so one
+/// key word is enough. A commitment with no key word passes.
+fn names(body: &str, ask: &Value) -> bool {
+    let keys = key_words(ask);
+    if keys.is_empty() {
+        return true;
+    }
+    let words: Vec<String> = body
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    keys.iter().any(|k| {
+        let stem: String = k.chars().take(5).collect();
+        words.iter().any(|w| w.starts_with(&stem))
+    })
+}
+
 /// The body of a valid answer.
 /// `need`: the count of commitments of a nudge, each of which `named` must
 /// list (0 for a reply that is not a nudge).
@@ -997,11 +1049,18 @@ fn write_when(
     // data (decision D7, issue #278). A refusal gets none: the same data
     // gets the same refusal. The second call pays through the same budget.
     // A nudge must name each of its commitments (issue #950).
-    let need = nudge.map_or(0, |n| n.ask.as_array().map_or(0, Vec::len));
-    let body = match read_answer(&reply, need) {
-        Err(Error::BadAnswer(_)) if reply.stop != iris_model::Stop::Refused => {
-            read_answer(&ask()?, need)?
-        }
+    // The body must also name each one in words (issue #1075).
+    let asks: &[Value] = nudge
+        .and_then(|n| n.ask.as_array())
+        .map_or(&[], Vec::as_slice);
+    let valid = |r: &iris_model::Reply| {
+        read_answer(r, asks.len()).and_then(|b| match asks.iter().all(|a| names(&b, a)) {
+            true => Ok(b),
+            false => Err(Error::BadAnswer("the reminder leaves out a commitment")),
+        })
+    };
+    let body = match valid(&reply) {
+        Err(Error::BadAnswer(_)) if reply.stop != iris_model::Stop::Refused => valid(&ask()?)?,
         r => r?,
     };
 
