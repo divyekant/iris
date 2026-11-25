@@ -32,7 +32,7 @@ test("the stranger gate shows each sender once, with what they ask and the answe
   const gate = html.split('id="strangers"')[1].split("</section>")[0];
   const t = text(gate);
   assert.match(t, /From senders you do not know 3/);
-  assert.match(t, /Maria Ruiz maria@brightpath\.example Intro from Sam Ortiz Review the pitch deck before Friday/);
+  assert.match(t, /Maria Ruiz maria@brightpath\.example Intro from Sam Ortiz Draft ready Review the pitch deck before Friday/);
   assert.match(t, /billing@vendorhub\.example Confirm the address for the invoice/);
   assert.equal((gate.match(/>Accept</g) ?? []).length, 3);
   assert.equal((gate.match(/>Ignore</g) ?? []).length, 3);
