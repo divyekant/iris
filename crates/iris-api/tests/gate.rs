@@ -887,10 +887,10 @@ async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
 
 /// Issues 369, 373 and 374: `POST /api/messages/{id}/release` releases the
 /// marks `dmarc`, `spoof` and `link` of a message, and queues the fixed
-/// check. `DELETE` ends the release. `GET /api/messages/{id}` names the
+/// check. `POST /api/messages/{id}/unrelease` ends the release. `GET /api/messages/{id}` names the
 /// released marks, so the client can offer Undo after a reload.
 #[tokio::test]
-async fn release_takes_a_message_out_of_quarantine_and_delete_undoes_it() {
+async fn release_takes_a_message_out_of_quarantine_and_unrelease_undoes_it() {
     let g = Gate::new("release");
     g.exec(
         r#"UPDATE message SET hostile = '["link","spoof"]' WHERE id = 3"#,
@@ -924,7 +924,7 @@ async fn release_takes_a_message_out_of_quarantine_and_delete_undoes_it() {
         g.one::<Option<String>>("SELECT released FROM message WHERE id = 4"),
         None
     );
-    let (code, _) = g.call("DELETE", "/api/messages/m-4/release").await;
+    let (code, _) = g.call("POST", "/api/messages/m-4/unrelease").await;
     assert_eq!(code, StatusCode::CONFLICT);
     assert_eq!(
         g.call("POST", "/api/messages/m-999/release").await.0,
@@ -936,7 +936,7 @@ async fn release_takes_a_message_out_of_quarantine_and_delete_undoes_it() {
     );
 
     // Undo.
-    let (code, v) = g.call("DELETE", "/api/messages/m-3/release").await;
+    let (code, v) = g.call("POST", "/api/messages/m-3/unrelease").await;
     assert_eq!(code, StatusCode::OK, "{v}");
     assert_eq!(v["released"], json!([]));
     assert_eq!(due(), 1, "the undo queues the check again, in one row");

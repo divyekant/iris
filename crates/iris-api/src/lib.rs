@@ -168,10 +168,8 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/messages", get(get_messages))
         .route("/api/messages/{id}", get(get_message))
         .route("/api/messages/{id}/raw", get(get_raw))
-        .route(
-            "/api/messages/{id}/release",
-            post(post_release).delete(delete_release),
-        )
+        .route("/api/messages/{id}/release", post(post_release))
+        .route("/api/messages/{id}/unrelease", post(post_unrelease))
         .route("/api/measures", get(get_measures))
         .route("/api/policy", get(get_policy))
         .route("/api/policy/confirm", post(post_confirm))
@@ -726,7 +724,7 @@ async fn post_release(
     Ok(gate::release(&s, &id, true)?.map_or_else(not_found, |m| Json(m).into_response()))
 }
 
-async fn delete_release(
+async fn post_unrelease(
     State(s): State<Arc<Store>>,
     Path(id): Path<String>,
     _: NoBody,

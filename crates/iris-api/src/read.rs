@@ -188,7 +188,7 @@ pub struct Message {
     /// The hostile marks that the person released for the current content
     /// (`POST /api/messages/{id}/release`, issues 369, 373 and 374). Each
     /// leaves `hostile` after the fixed check reads the message again.
-    /// `DELETE /api/messages/{id}/release` ends the release.
+    /// `POST /api/messages/{id}/unrelease` ends the release.
     pub released: Vec<String>,
     /// The Undo of a trust: the `p-` ID of a sender row of the `From`
     /// address, in any case, that the person trusted, so the person can

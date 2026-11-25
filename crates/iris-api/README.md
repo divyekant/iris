@@ -44,7 +44,7 @@ UTC. IDs have the format of specification 1, section 5.7 (`m-42`).
 | `/api/items?form=&status=&type=&before=&limit=` | `{"items": [...], "next"}`. Items newest first, by the date of the origin message. `form` is one of the five forms. `type` is a record type, and needs `form=record`. `before` is the `next` value of the page before: an item ID of the form of the filter. `limit` is 1 to 200, default 50. Items with the status `gone` are not in the list, unless `status=gone`. A `status` must be a status of the form (of any form, with no `form`). A `type` must be a record type of the schema. |
 | `/api/items/{id}` | One item (`c-`, `v-`, `r-`, `f-` or `s-`), also when it is gone. |
 | `/api/search?q=&limit=` | `{"messages": [summary]}`, newest first. `q` is the search text of specification 1, section 5.6. `limit` is 1 to 200, default 50. |
-| `/api/messages/{id}` | One message: the summary, and `to`, `cc`, `text` (the clean text, or `null`), `gone`, `hostile` (the hostile marks, for example `["dmarc"]`), `sender_kind` (the kind of the sender row of the `From` address: `person`, `service`, `stranger` or `hostile`; a sender with no row or no kind is a `stranger`; if two rows have the address in a different case, the first kind of `hostile`, `stranger`, `service`, `person` is used, and a row with no kind counts as `stranger`) and `items` (the IDs of the items that are not gone and that have the message as a source). |
+| `/api/messages/{id}` | One message: the summary, and `to`, `cc`, `text` (the clean text, or `null`), `gone`, `hostile` (the hostile marks, for example `["dmarc"]`), `sender_kind` (the kind of the sender row of the `From` address: `person`, `service`, `stranger` or `hostile`; a sender with no row or no kind is a `stranger`; if two rows have the address in a different case, the first kind of `hostile`, `stranger`, `service`, `person` is used, and a row with no kind counts as `stranger`) `released` (the hostile marks that the person released, below) and `items` (the IDs of the items that are not gone and that have the message as a source). |
 | `/api/messages/{id}/raw` | The raw source (RFC 5322) of the message, as a download (`message/rfc822`, `Content-Disposition: attachment`). |
 | `/api/jobs?state=&limit=&after=` | `{"jobs": [...], "next"}`: the jobs of the agents (card R4-09), newest first. `state` is `open` (the default: `working`, `waiting` and `needs_you`) or one state: `working`, `waiting`, `needs_you` or `done`. Each job is the job document of `docs/spec/schema/job.schema.json` without `events`. `limit` is 1 to 200, default 50. `after` is the `next` value of the page before (a job ID, `j-12`); the page holds the jobs with a lower ID. Another `state`, or an `after` that is not a job ID, is a 400. |
 | `/api/items/{id}/joinable` | `{"joinable": bool}`: true when the item (`c-`, `v-`, `r-` or `s-`) can join a matter now. The item is live (the rule of `matter_live`) and in no open matter. Another kind of ID is a 400. |
@@ -333,6 +333,20 @@ There is no body. The answer is the sender row: `{"id", "address", "name",
 sender whose kind is `stranger` (or no kind yet) and whose mail of now gives
 `stranger` too. For another sender, the answer is a 409 and nothing is
 written. A `p-` ID that no sender has, or another answer, is a 404.
+
+### Release a message from quarantine
+
+| Endpoint | Does |
+|---|---|
+| `POST /api/messages/{id}/release` | Releases each mark `dmarc`, `spoof` and `link` that the message has now (issues 369, 373 and 374). Iris reads the message again without these marks. The marks `spam` and `phishing` and a `hostile` sender stay. |
+| `POST /api/messages/{id}/unrelease` | Ends the release. Iris reads the message again with its marks. |
+
+There is no body. The answer is the message, as `GET /api/messages/{id}`
+gives it. The column `hostile` changes when the engine reads the message
+again, so `released` shows the release at once. A message that is gone, has
+no mark to release, or has no release to end gives a 409 and nothing is
+written. An `m-` ID that no message has is a 404. New content of the message
+ends its release.
 
 An accept makes the domain of the sender known, and a reopen of an accept
 can make it unknown. So the engine decides the near copies of the domain

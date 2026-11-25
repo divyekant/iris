@@ -852,7 +852,7 @@ from quarantine (`POST /api/messages/{id}/release`):
   no model. If no other mark stays, the message waits for the model as new
   mail does, and its items show.
 - A release is for one content: new content of the message ends it.
-- `DELETE /api/messages/{id}/release` ends the release. The fixed check
+- `POST /api/messages/{id}/unrelease` ends the release. The fixed check
   gives the marks back, and the items of the message go.
 - The web client offers Release in the hostile warning of a message with a
   mark that a release covers, and Undo on a released message.
