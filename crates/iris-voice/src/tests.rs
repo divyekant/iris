@@ -1377,7 +1377,7 @@ fn a_thread_is_late_only_while_each_rule_holds() {
             "a stale nudge with a key",
             "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
                created_at, ask)
-             SELECT ?1, min(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'p', 0, 1, '{}'
+             SELECT ?1, min(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'nudge/0.4', 0, 1, '{}'
                FROM message",
             at,
             true,
@@ -1386,7 +1386,7 @@ fn a_thread_is_late_only_while_each_rule_holds() {
             "a ready nudge of another commitment",
             "INSERT INTO reply_draft(thread_id, based_on, intent, body, model, prompt, samples,
                created_at, ask)
-             SELECT ?1, max(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'p', 0, 1, '{}'
+             SELECT ?1, max(id), (SELECT intent FROM nudge_intent), 'x', 'm', 'nudge/0.4', 0, 1, '{}'
                FROM message WHERE thread_id = ?1",
             at,
             true,
@@ -1530,6 +1530,18 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
     assert_eq!(prompt, NUDGE_PROMPT);
     let to = ready_to(&b.store, t);
     assert_eq!(to.as_deref(), Some("ana@example.org"));
+    // A nudge of an older build (#1075: its body did not have to name the
+    // commitment) is not ready, and the thread is late again.
+    let set_prompt = |p: &str| {
+        b.store
+            .write(|tx| Ok(tx.execute("UPDATE reply_draft SET prompt = ?1", [p])?))
+            .unwrap()
+    };
+    set_prompt("nudge/0.3");
+    assert_eq!(ready_to(&b.store, t), None);
+    assert_eq!(late_threads(&b.store, now), [t]);
+    set_prompt(NUDGE_PROMPT);
+    assert_eq!(ready_to(&b.store, t).as_deref(), Some("ana@example.org"));
 
     // A correction of the commitment after the save: the nudge is stale,
     // and the thread is late again for the new commitment. A close: stale.
@@ -1579,7 +1591,7 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
         evidence(&b.store, &format!("more{i}"), to);
     }
     understood(&b.store);
-    let fake = Fake::new(r#"{"body": "x", "named": [1]}"#);
+    let fake = Fake::new(r#"{"body": "x slides", "named": [1]}"#);
     let l = one_late(&b.store, 1008 + LATE_AFTER_MS);
     nudge(&b.store, &l, &fake, 1008 + LATE_AFTER_MS).unwrap();
     let data: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
@@ -1588,7 +1600,7 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
 
     // A thread that is not late gets no call.
     let (b, _) = asked("nudge-not-late");
-    let fake = Fake::new(r#"{"body": "x", "named": [1]}"#);
+    let fake = Fake::new(r#"{"body": "x slides", "named": [1]}"#);
     let l = one_late(&b.store, now);
     assert!(matches!(
         nudge(&b.store, &l, &fake, now - 1),
@@ -1606,7 +1618,7 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
     ] {
         let (b, t) = asked(&format!("nudge-during-{}", name.replace(' ', "-")));
         let store = &b.store;
-        let mut fake = Fake::new(r#"{"body": "x", "named": [1]}"#);
+        let mut fake = Fake::new(r#"{"body": "x slides", "named": [1]}"#);
         fake.during = Some(Box::new(move || {
             store
                 .write(|tx| {
@@ -1646,7 +1658,7 @@ fn a_saved_nudge_is_ready_while_a_later_commitment_is_not_due_yet() {
         })
         .unwrap();
     let l = one_late(&b.store, now);
-    let fake = Fake::new(r#"{"body": "Hi Ana", "named": [1]}"#);
+    let fake = Fake::new(r#"{"body": "Hi Ana, the slides?", "named": [1]}"#);
     nudge(&b.store, &l, &fake, now).unwrap();
     let ready_at = |at: i64| {
         b.store
@@ -1685,7 +1697,7 @@ fn one_nudge_names_each_late_commitment_of_its_person_and_another_person_waits()
     nudge(
         &b.store,
         &l,
-        &Fake::new(r#"{"body": "Hi Ana", "named": [1]}"#),
+        &Fake::new(r#"{"body": "Hi Ana, the slides?", "named": [1]}"#),
         now,
     )
     .unwrap();
@@ -1760,7 +1772,7 @@ fn one_nudge_names_each_late_commitment_of_its_person_and_another_person_waits()
     nudge(
         &b.store,
         &l,
-        &Fake::new(r#"{"body": "Hi Ana", "named": [1]}"#),
+        &Fake::new(r#"{"body": "Hi Ana, the slides?", "named": [1]}"#),
         now,
     )
     .unwrap();
@@ -1827,7 +1839,7 @@ fn a_promise_of_the_person_is_late_after_its_due_date() {
     assert!(late_threads(&b.store, 3 * 86_400_000 - 1).is_empty());
     let l = one_late(&b.store, 3 * 86_400_000);
     assert_eq!((l.thread, l.to()), (t, "ana@example.org".to_string()));
-    let fake = Fake::new(r#"{"body": "Hi Ana, any news? D", "named": [1]}"#);
+    let fake = Fake::new(r#"{"body": "Hi Ana, any news on the slides? D", "named": [1]}"#);
     nudge(&b.store, &l, &fake, 3 * 86_400_000).unwrap();
     assert_eq!(ready_to(&b.store, t).as_deref(), Some("ana@example.org"));
     // Another sender wrote last in the thread: no nudge.
@@ -2075,17 +2087,26 @@ fn a_nudge_that_leaves_out_a_commitment_is_not_saved() {
     for (answers, ok) in [
         (
             vec![
-                r#"{"body": "Hi Ana"}"#,
-                r#"{"body": "Hi Ana", "named": [2]}"#,
+                r#"{"body": "Hi Ana, the slides?"}"#,
+                r#"{"body": "Hi Ana, the slides?", "named": [2]}"#,
             ],
             false,
         ),
         (
             vec![
-                r#"{"body": "Hi Ana", "named": []}"#,
-                r#"{"body": "Hi Ana", "named": [1]}"#,
+                r#"{"body": "Hi Ana, the slides?", "named": []}"#,
+                r#"{"body": "Hi Ana, the slides?", "named": [1]}"#,
             ],
             true,
+        ),
+        // Issue #1075: "named" lists the commitment, but the body says
+        // nothing of it.
+        (
+            vec![
+                r#"{"body": "Hi Ana, any news?", "named": [1]}"#,
+                r#"{"body": "Hi Ana, any news?", "named": [1]}"#,
+            ],
+            false,
         ),
     ] {
         let (b, t) = asked(&format!("nudge-names-{ok}"));
@@ -2243,5 +2264,66 @@ fn a_change_of_the_answerable_set_makes_the_draft_stale() {
             "{name}: during the call"
         );
         assert_eq!(saved(&b.store, t), None, "{name}: during the call");
+    }
+}
+
+/// Issue #1075: a body names a commitment when one of its words starts
+/// with the stem of a key word of the commitment.
+#[test]
+fn a_body_names_a_commitment_only_with_its_words() {
+    let ask = serde_json::json!({"title": "Send the invoice", "quote": "can you send it?", "amount": "$1,200"});
+    assert_eq!(key_words(&ask), ["invoice", "200"]);
+    for (body, ok) in [
+        ("Hi Bo, any news on the invoices? D", true),
+        ("Hi Bo, the 1,200 dollars? D", true),
+        ("Hi Bo, INVOICE please. D", true),
+        ("Hi Bo, any news? D", false),
+        ("Hi Bo, can you send it? D", false),
+    ] {
+        assert_eq!(names(body, &ask), ok, "{body}");
+    }
+    // An amount is an object: its values are words, its field names are not.
+    let pay =
+        serde_json::json!({"title": "Pay it", "amount": {"value": 312.77, "currency": "USD"}});
+    assert!(!names("Can you confirm the value and the currency?", &pay));
+    assert!(names("Hi Bo, the 312.77? D", &pay));
+    // A commitment with no key word passes any body.
+    assert!(names(
+        "Hi",
+        &serde_json::json!({"title": "Do it", "quote": null})
+    ));
+}
+
+/// Issue #1075: for any commitment, a body that holds one of its key words
+/// names it, and a body of only common words names it only when it has no
+/// key word.
+#[test]
+fn a_body_with_a_key_word_names_its_commitment() {
+    let words = [
+        "slides", "deck", "the", "send", "report", "Q3", "2026", "ok", "contract", "you",
+    ];
+    let mut seed = 7u64;
+    let mut next = |n: usize| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as usize % n
+    };
+    for _ in 0..2000 {
+        let title: Vec<&str> = (0..1 + next(4)).map(|_| words[next(words.len())]).collect();
+        let ask = serde_json::json!({"title": title.join(" "), "quote": null});
+        let keys = key_words(&ask);
+        assert!(keys
+            .iter()
+            .all(|k| title.iter().any(|w| w.to_lowercase() == *k)));
+        if let Some(k) = keys.first() {
+            assert!(names(
+                &format!("Hi, any news on the {}? D", k.to_uppercase()),
+                &ask
+            ));
+            assert!(!names("Hi, any news? D", &ask), "{ask}");
+        } else {
+            assert!(names("Hi", &ask));
+        }
     }
 }

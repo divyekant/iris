@@ -1060,9 +1060,16 @@ commitment with the lowest row ID. It names each late commitment of that
 person in the thread, at most 10. A late commitment of another person
 waits for the next nudge. The data numbers each commitment (`n`).
 The answer of the model must list each number in `named`, or Iris asks
-one more time and then saves no draft (issue #950). `named` is the report
-of the model: Iris does not check the words of the body against each
-commitment (known limit #1075). The person reads each nudge before a send. The owner decided that the nudge stays a
+one more time and then saves no draft (issue #950). The body must also
+name each commitment in words: one word of the body starts with the
+first 5 characters of a key word of the commitment (a word of its title,
+quote or amount with 4 letters or more that is not a common word, or a
+word with a digit). If not, Iris asks one more time in the same way
+(issue #1075). A commitment with no key word passes. The check is
+generous on purpose, so it cannot prove that the body says the right
+thing about the commitment (limit #1146). The prompt version of a nudge is
+`nudge/0.4`. A saved nudge of another version is not ready, so each
+nudge of an older build is stale and the late thread gets a new one. The person reads each nudge before a send. The owner decided that the nudge stays a
 prepared reply (decision D8, `docs/decisions.md` entry D12). So the verb
 `nudge` and `iris nudge <c-id>` are not built.
 

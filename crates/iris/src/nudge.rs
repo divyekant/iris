@@ -542,7 +542,7 @@ mod tests {
             Ok(Box::new(Grab(
                 Fake(
                     calls.clone(),
-                    r#"{"body": "Hi Ana, any news? D", "named": [1]}"#,
+                    r#"{"body": "Hi Ana, any news on the slides or the deck? D", "named": [1]}"#,
                 ),
                 want.clone(),
                 path.clone(),
@@ -595,7 +595,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        answer.set(r#"{"body": "Hi Ana, any news? D", "named": [1]}"#);
+        answer.set(r#"{"body": "Hi Ana, any news on the slides or the deck? D", "named": [1]}"#);
         assert_eq!(step(&store, &connect, late), Ok(1));
         assert_eq!(calls.get(), 3);
         let _ = std::fs::remove_dir_all(&dir);

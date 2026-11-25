@@ -1621,11 +1621,12 @@ async fn the_draft_route_gives_a_ready_nudge_with_its_person() {
     let third = add_item(&store, "commitment", "open", 1, 30, owed(&dana));
     // The nudge that the engine saved: its `ask` is the key of now.
     let key = iris_voice::nudge_key_sql("?1", ("unixepoch('subsec') * 1000", "date('now')"));
+    let prompt = iris_voice::NUDGE_PROMPT;
     exec(
         &store,
         &format!(
             "INSERT INTO reply_draft(thread_id, based_on, body, model, prompt, samples, created_at, ask)
-             VALUES (?1, ?2, 'Any news, Dana?', 'fake', 'nudge/0.1', 0, 1, {key})"
+             VALUES (?1, ?2, 'Any news, Dana?', 'fake', '{prompt}', 0, 1, {key})"
         ),
         [thread, newest],
     );
