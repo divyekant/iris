@@ -689,7 +689,11 @@ impl Doc {
     fn predictor(&self, dict: &[u8]) -> Predictor {
         // An array holds the parameters of each filter: one filter here.
         let parms = match get(dict, b"/DecodeParms") {
-            Some(Val::Array(a)) => Some(a),
+            Some(Val::Array(a)) => {
+                let mut lx = Lexer::new(a);
+                lx.next();
+                value(&mut lx).and_then(|v| self.deref(v))
+            }
             Some(v) => self.deref(v),
             None => None,
         };
@@ -1032,21 +1036,28 @@ impl Doc {
                 (base, diffs)
             }
         };
-        let column: fn(&(&str, char, u8, u8)) -> u8 = match base {
-            Some(b"/StandardEncoding") => |g| g.2,
-            Some(b"/MacRomanEncoding") => |g| g.3,
+        // The named base: false for Standard, true for MacRoman.
+        let mac = match base {
+            Some(b"/StandardEncoding") => Some(false),
+            Some(b"/MacRomanEncoding") => Some(true),
             _ if diffs.is_none() => return None,
-            _ => |_| 0,
+            _ => None,
         };
         if tables.list.len() >= TABLE_LIMIT {
             return None;
         }
-        let mut t: Table =
-            std::array::from_fn(|b| latin(&[b as u8]).chars().next().unwrap_or('\0'));
-        for g in &GLYPHS {
-            let code = column(g);
-            if code != 0 {
-                t[code as usize] = g.1;
+        // A named base has no character for a code that it does not define.
+        // The other bases are Windows-1252.
+        let mut t: Table = match mac {
+            Some(_) => ['\0'; 256],
+            None => std::array::from_fn(|b| latin(&[b as u8]).chars().next().unwrap_or('\0')),
+        };
+        if let Some(mac) = mac {
+            for g in &GLYPHS {
+                let code = if mac { g.3 } else { g.2 };
+                if code != 0 {
+                    t[code as usize] = g.1;
+                }
             }
         }
         if let Some(a) = diffs {
@@ -2147,6 +2158,92 @@ mod tests {
             (6, "<< >>", Some(CMAP)),
         ]);
         assert_eq!(text(&pdf, 1000), None);
+    }
+
+    #[test]
+    fn named_bases_have_no_character_for_undefined_codes() {
+        // 0x80 is € in Windows-1252 and undefined in StandardEncoding; 0x7F
+        // is undefined in MacRomanEncoding.
+        let std = "<< /Type /Font /Subtype /Type1 /Encoding /StandardEncoding >>";
+        assert_eq!(
+            one_font(std, b"BT /F1 9 Tf (Total \\200 9) Tj ET").as_deref(),
+            Some("Total  9")
+        );
+        let mac = "<< /Type /Font /Subtype /Type1 /Encoding /MacRomanEncoding >>";
+        assert_eq!(
+            one_font(mac, b"BT /F1 9 Tf (Total \\177 9) Tj ET").as_deref(),
+            Some("Total  9")
+        );
+    }
+
+    /// Random `/Differences` arrays and predictor parameters in generated
+    /// PDFs: the text equals the text of an independent model of the rules.
+    #[test]
+    fn random_encodings_and_predictors_give_the_expected_text() {
+        const NAMES: [(&str, char); 8] = [
+            ("A", 'A'),
+            ("eacute", 'é'),
+            ("quoteright", '\u{2019}'),
+            ("fi", '\u{fb01}'),
+            ("uni00DF", 'ß'),
+            ("u0161", 'š'),
+            ("g9", '\0'),
+            ("Euro", '€'),
+        ];
+        let mut rng = Rng(0x0E1C_0D1C_2025_1125);
+        for _ in 0..400 {
+            // The model: the letters a to z, then each run of the array.
+            let mut model: Vec<char> = (0..256u32).map(|c| char::from_u32(c).unwrap()).collect();
+            let mut diffs = String::new();
+            for _ in 0..rng.below(4) {
+                let start = b'a' as usize + rng.below(26);
+                diffs.push_str(&format!("{start} "));
+                for code in (start..).take(1 + rng.below(4)) {
+                    let (name, c) = NAMES[rng.below(NAMES.len())];
+                    diffs.push_str(&format!("/{name} "));
+                    if code < 256 {
+                        model[code] = c;
+                    }
+                }
+            }
+            let codes: Vec<u8> = (0..1 + rng.below(30))
+                .map(|_| b'a' + rng.below(26) as u8)
+                .collect();
+            let hex: String = codes.iter().map(|b| format!("{b:02X}")).collect();
+            let want: String = codes
+                .iter()
+                .map(|&b| model[b as usize])
+                .filter(|&c| c != '\0')
+                .collect();
+            let content = format!("BT /F1 9 Tf <{hex}> Tj ET");
+            let page = "<< /Type /Page /Contents 3 0 R /Resources << /Font << /F1 5 0 R >> >> >>";
+            let font =
+                format!("<< /Type /Font /Subtype /Type1 /Encoding << /Differences [{diffs}] >> >>");
+            let head = format!("2 0 5 {} ", page.len() + 1);
+            let body = format!("{head}{page}\n{font}");
+            let columns = 1 + rng.below(12);
+            let parms = format!("<< /Predictor {} /Columns {columns} >>", 10 + rng.below(6));
+            let (decode, extra) = match rng.below(4) {
+                0 => (parms.clone(), None),
+                1 => (format!("[{parms}]"), None),
+                2 => ("[9 0 R]".to_string(), Some(parms)),
+                _ => ("9 0 R".to_string(), Some(parms)),
+            };
+            let dict = format!(
+                "<< /Type /ObjStm /N 2 /First {} /DecodeParms {decode} >>",
+                head.len()
+            );
+            let data = png_up(body.as_bytes(), columns);
+            let mut objs: Vec<(u32, &str, Option<&[u8]>)> = Vec::new();
+            if let Some(e) = &extra {
+                objs.push((9, e, None));
+            }
+            objs.push((3, "<< >>", Some(content.as_bytes())));
+            objs.push((10, &dict, Some(&data)));
+            let got = text(&doc(&objs), 1000);
+            let expect = readable(&want).then_some(want);
+            assert_eq!(got, expect, "{diffs} / {decode}");
+        }
     }
 
     #[test]

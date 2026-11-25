@@ -3,9 +3,10 @@
 //!
 //! Generated from the Latin encodings of ISO 32000-1 Annex D and the Adobe
 //! Glyph List (BSD-3-Clause), through the data files of pdfminer.six (MIT).
-//! Sorted by name, for a binary search.
+//! Sorted by name, for a binary search. A name can have more than one row
+//! (`space` is 32 and 202 in `/MacRomanEncoding`).
 
-pub(crate) const GLYPHS: [(&str, char, u8, u8); 235] = [
+pub(crate) const GLYPHS: [(&str, char, u8, u8); 236] = [
     ("A", '\u{41}', 65, 65),
     ("AE", '\u{c6}', 225, 174),
     ("Aacute", '\u{c1}', 0, 231),
@@ -215,6 +216,7 @@ pub(crate) const GLYPHS: [(&str, char, u8, u8); 235] = [
     ("six", '\u{36}', 54, 54),
     ("slash", '\u{2f}', 47, 47),
     ("space", '\u{20}', 0, 202),
+    ("space", '\u{20}', 32, 32),
     ("sterling", '\u{a3}', 163, 163),
     ("t", '\u{74}', 116, 116),
     ("thorn", '\u{fe}', 0, 0),

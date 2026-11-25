@@ -407,13 +407,15 @@ its first 1 KiB holds `%PDF`.
   code length comes from the code space. Without a code space, it is the
   shortest code with an entry, else 2 bytes for a `/Type0` font and 1 byte
   for another font. A code without an entry gives no text in a `/Type0`
-  font and Windows-1252 in another font. A `/Type0` font without a map
+  font. In another font, it reads through the encoding of the font (see
+  the next item), and as Windows-1252 if the font has no encoding. A `/Type0` font without a map
   gives no text. A font that the reader does not find reads as
   Windows-1252.
 - Encoding of a simple font (not `/Type0`): its `/Encoding` name, or the
   `/BaseEncoding` and `/Differences` of its encoding dictionary (direct or
   a reference). The base is `/StandardEncoding`, `/MacRomanEncoding` (ISO
-  32000-1 Annex D), or else Windows-1252. `/Differences` gives a glyph name
+  32000-1 Annex D), or else Windows-1252. A code that a named base does not
+  define gives no character. `/Differences` gives a glyph name
   to each code from a start code. A glyph name reads through the names of
   the Latin encodings of Annex D (Adobe Glyph List), `uniXXXX` or `uXXXX` to
   `uXXXXXX`. Another name gives no character. A font with a `/ToUnicode`
@@ -421,8 +423,10 @@ its first 1 KiB holds `%PDF`.
   gets one table of 1 KiB, at most 256 tables for each PDF. The fonts past
   the limit read as Windows-1252.
 - Predictor: after the inflate, a stream with a `/DecodeParms` `/Predictor`
-  of 10 to 15 loses its PNG predictor (rows of `/Columns`, `/Colors` and
-  `/BitsPerComponent`). A short last row and the rows after a bad filter
+  of 10 to 15 loses its PNG predictor. `/DecodeParms` is a dictionary, a
+  reference, or an array whose first item is one of these. The predictor
+  uses rows of `/Columns`, `/Colors` and `/BitsPerComponent`. A short last
+  row and the rows after a bad filter
   byte go out. A stream with another predictor is not read.
 - The reader reads the names of a stream dictionary (`/Length`, `/Filter`
   and the names above) only outside its strings, comments and inner
