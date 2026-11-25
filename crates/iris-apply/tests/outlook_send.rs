@@ -758,7 +758,10 @@ fn an_outlook_draft_has_the_display_name_of_the_mailbox() {
             })
             .unwrap();
         let raw = String::from_utf8(raw).unwrap();
-        raw.lines().find(|l| l.starts_with("From: ")).unwrap().to_string()
+        raw.lines()
+            .find(|l| l.starts_with("From: "))
+            .unwrap()
+            .to_string()
     };
     b.fake.set_display_name(Some("Dana Owner"));
     let (_, d) = b.new_mail(AGED);
