@@ -1834,7 +1834,7 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
     assert_eq!((b.script.calls(), items(&b)), (0, 0));
 
     // The release: the next run reads the mail with the model.
-    let r = b.store.write(|tx| Ok(release(tx, m)?)).unwrap();
+    let r = b.store.write(|tx| release(tx, m)).unwrap();
     assert_eq!(
         r,
         Release::Done {
@@ -1844,7 +1844,7 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
     );
     // A second release has nothing more to release.
     assert_eq!(
-        b.store.write(|tx| Ok(release(tx, m)?)).unwrap(),
+        b.store.write(|tx| release(tx, m)).unwrap(),
         Release::Nothing
     );
     let feed = || {
@@ -1864,14 +1864,14 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
     assert_eq!(hostile(&b), "[]");
 
     // The end of the release: the mark comes back with no model call.
-    assert!(b.store.write(|tx| Ok(unrelease(tx, m)?)).unwrap());
-    assert!(!b.store.write(|tx| Ok(unrelease(tx, m)?)).unwrap());
+    assert!(b.store.write(|tx| unrelease(tx, m)).unwrap());
+    assert!(!b.store.write(|tx| unrelease(tx, m)).unwrap());
     b.run(&Limits::default()).unwrap();
     assert_eq!(hostile(&b), r#"["link"]"#);
     assert_eq!((b.script.calls(), items(&b)), (1, 0));
 
     // New content ends a release.
-    b.store.write(|tx| Ok(release(tx, m)?)).unwrap();
+    b.store.write(|tx| release(tx, m)).unwrap();
     let other = bank("https://evil2.example.net/pay").replace('\n', "\r\n");
     let sha = b.store.put_content(other.as_bytes()).unwrap();
     b.store
@@ -1904,7 +1904,7 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
         })
         .unwrap();
     assert_eq!(
-        b.store.write(|tx| Ok(release(tx, m)?)).unwrap(),
+        b.store.write(|tx| release(tx, m)).unwrap(),
         Release::Nothing
     );
     b.store
@@ -1917,7 +1917,7 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
         })
         .unwrap();
     assert_eq!(
-        b.store.write(|tx| Ok(release(tx, m)?)).unwrap(),
+        b.store.write(|tx| release(tx, m)).unwrap(),
         Release::Done {
             released: vec!["link".into()],
             kept: vec!["phishing".into()]
