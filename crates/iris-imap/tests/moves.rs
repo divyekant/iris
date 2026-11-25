@@ -319,14 +319,17 @@ fn move_target_uidvalidity() {
     assert_eq!(moves_sent(&fake), 2);
 }
 
-/// An answer that does not name each moved UID is unknown.
+/// An answer that does not name each moved UID: a read on a new
+/// connection confirms the move when each UID left the source and the
+/// target has exactly one new message with its `Message-ID` and size
+/// (issue #984). A part move stays unknown.
 #[test]
 fn move_partial_copyuid() {
-    for mode in [
-        Moving::NoCopyuid,
-        Moving::PartialCopyuid,
-        Moving::RefuseAfterOne,
-        Moving::Close,
+    for (mode, confirmed) in [
+        (Moving::NoCopyuid, true),
+        (Moving::PartialCopyuid, true),
+        (Moving::Close, true),
+        (Moving::RefuseAfterOne, false),
     ] {
         let fake = server();
         fake.set_moving(mode);
@@ -334,11 +337,51 @@ fn move_partial_copyuid() {
         let a = add(&fake, "INBOX", 1);
         let b = add(&fake, "INBOX", 2);
         let r = mail.relocate(PASSWORD, &[&a, &b], Move::Archive);
+        assert_eq!(moves_sent(&fake), 1, "{mode:?}");
+        if confirmed {
+            let want: Vec<String> = fake
+                .uids("Archive")
+                .into_iter()
+                .map(|u| id(&fake, "Archive", u))
+                .collect();
+            assert_eq!(r.unwrap(), want, "{mode:?}");
+        } else {
+            assert!(
+                matches!(&r, Err(e) if e.write_result_unknown()),
+                "{mode:?}: {r:?}"
+            );
+        }
+    }
+}
+
+/// Issue #984: the confirm read never guesses. Two moved messages with
+/// one `Message-ID` and size, or a message with no `Message-ID`, keep
+/// the result unknown.
+#[test]
+fn move_confirm_needs_one_match() {
+    let same = Mailbox::new(1, 1).raw(0);
+    let no_id = b"From: a@example.org\r\nSubject: Hi\r\n\r\nHello.\r\n".to_vec();
+    for (name, raws) in [
+        ("same", [same.clone(), same]),
+        ("no id", [no_id.clone(), no_id]),
+    ] {
+        let fake = server();
+        let ids: Vec<String> = raws
+            .into_iter()
+            .map(|raw| {
+                let uid = fake.add("INBOX", raw, &["\\Seen"]);
+                id(&fake, "INBOX", uid)
+            })
+            .collect();
+        fake.set_moving(Moving::Close);
+        let mail = provider(&fake);
+        let r = mail.relocate(PASSWORD, &[&ids[0], &ids[1]], Move::Archive);
         assert!(
             matches!(&r, Err(e) if e.write_result_unknown()),
-            "{mode:?}: {r:?}"
+            "{name}: {r:?}"
         );
-        assert_eq!(moves_sent(&fake), 1, "{mode:?}");
+        assert_eq!(moves_sent(&fake), 1, "{name}");
+        assert_eq!(fake.uids("Archive").len(), 2, "{name}");
     }
 }
 

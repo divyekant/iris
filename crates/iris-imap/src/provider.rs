@@ -546,6 +546,69 @@ fn message_id(validity: u32, uid: u32, folder: &str) -> String {
     format!("{validity}:{uid}:{folder}")
 }
 
+/// The state of a move before its `UID MOVE` (issue #984): the target
+/// `UIDVALIDITY` and `UIDNEXT`, and the identity of each source UID.
+struct Before {
+    validity: u32,
+    next: Option<u32>,
+    seen: BTreeMap<u32, Option<(String, u32)>>,
+}
+
+/// The `Message-ID` and the `RFC822.SIZE` of `e`, if it has both.
+fn identity(e: &Entry) -> Option<(String, u32)> {
+    let h = e.headers.as_deref()?;
+    let id = mail_parser::MessageParser::default()
+        .parse_headers(h)?
+        .message_id()
+        .filter(|i| !i.is_empty())?
+        .to_owned();
+    Some((id, e.size?))
+}
+
+/// Confirms a move with an unknown result by a read (issue #984). Gives
+/// the new UID of each of `uids` only if each one left `folder`, and the
+/// target, with the same `UIDVALIDITY`, has exactly one message above the
+/// `UIDNEXT` of before with its `Message-ID` and size. Else `None`: the
+/// result stays unknown.
+fn confirm<S: Read + Write>(
+    s: &mut Session<S>,
+    folder: &str,
+    uids: &[u32],
+    to: &str,
+    b: &Before,
+) -> Result<Option<Vec<(u32, u32)>>> {
+    let Some(next) = b.next else { return Ok(None) };
+    let mut want = Vec::new();
+    for uid in uids {
+        match b.seen.get(uid) {
+            Some(Some(i)) => want.push((*uid, i)),
+            _ => return Ok(None),
+        }
+    }
+    s.examine(folder).map_err(read_error)?;
+    let mut left = true;
+    s.fetch_uids(uids, |_| left = false).map_err(read_error)?;
+    if !left {
+        return Ok(None);
+    }
+    if s.examine(to).map_err(read_error)?.uidvalidity != b.validity {
+        return Ok(None);
+    }
+    let mut arrived = Vec::new();
+    s.list(next, None, |e| arrived.push((e.uid, identity(&e))))
+        .map_err(read_error)?;
+    let mut pairs: Vec<(u32, u32)> = Vec::new();
+    for (uid, i) in want {
+        let mut m = arrived.iter().filter(|(_, a)| a.as_ref() == Some(i));
+        match (m.next(), m.next()) {
+            // Two source UIDs must not get one new UID.
+            (Some((n, _)), None) if !pairs.iter().any(|(_, p)| p == n) => pairs.push((uid, *n)),
+            _ => return Ok(None),
+        }
+    }
+    Ok(Some(pairs))
+}
+
 /// (UIDVALIDITY, UID, folder) of a message ID.
 fn parse_id(id: &str) -> Option<(u32, u32, &str)> {
     let mut p = id.splitn(3, ':');
@@ -1178,7 +1241,8 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        self.with(token, |s| {
+        // Reads only: the plan, the target and the UIDs of each source folder.
+        let (to, sources) = self.with(token, |s| {
             let folders = mail_folders(s)?;
             let (each, to) = plan(s, ids, mv, &folders)?;
             // Each ID must move: a skip here means that the caller did not plan.
@@ -1186,10 +1250,12 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
                 return Err(not_supported());
             };
             // The UIDs of each source folder, with its UIDVALIDITY.
-            let mut by_folder: BTreeMap<&str, (u32, Vec<u32>)> = BTreeMap::new();
+            let mut by_folder: BTreeMap<String, (u32, Vec<u32>)> = BTreeMap::new();
             for id in ids {
                 let (validity, uid, folder) = parse_id(id).ok_or(Error::NotFound)?;
-                let t = by_folder.entry(folder).or_insert((validity, Vec::new()));
+                let t = by_folder
+                    .entry(folder.to_owned())
+                    .or_insert((validity, Vec::new()));
                 if t.0 != validity || t.1.contains(&uid) {
                     return Err(Error::NotFound);
                 }
@@ -1197,55 +1263,80 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
             }
             // The page order of the IMAP provider spec, section 2: INBOX first.
             let mut sources: Vec<_> = by_folder.into_iter().collect();
-            sources.sort_by(|a, b| order(a.0).cmp(&order(b.0)));
-            let mut new: BTreeMap<(&str, u32), String> = BTreeMap::new();
-            let mut sent = false;
-            // The target UIDVALIDITY of the first COPYUID: each new ID uses it.
-            let mut to_validity: Option<u32> = None;
-            let unknown = |e: Error| Error::Transport(format!("unknown result: {e}"));
-            for (folder, (validity, uids)) in &sources {
-                let e = s.select(folder).map_err(|e| {
-                    let e = read_error(e);
-                    if sent {
-                        unknown(e)
-                    } else {
-                        e
-                    }
-                })?;
+            sources.sort_by(|a, b| order(&a.0).cmp(&order(&b.0)));
+            Ok((to.name.clone(), sources))
+        })?;
+        let mut new: BTreeMap<(String, u32), String> = BTreeMap::new();
+        let mut sent = false;
+        // The target UIDVALIDITY of the first move: each new ID uses it.
+        let mut to_validity: Option<u32> = None;
+        let unknown = |e: Error| Error::Transport(format!("unknown result: {e}"));
+        for (folder, (validity, uids)) in &sources {
+            let mut before: Option<Before> = None;
+            let moved = self.with(token, |s| {
+                let early = |e: Error, sent: bool| if sent { unknown(e) } else { e };
+                let target = s.examine(&to).map_err(|e| early(read_error(e), sent))?;
+                let e = s.select(folder).map_err(|e| early(read_error(e), sent))?;
                 if e.uidvalidity != *validity {
-                    return Err(if sent {
-                        unknown(Error::NotFound)
-                    } else {
-                        Error::NotFound
-                    });
+                    return Err(early(Error::NotFound, sent));
                 }
+                let mut seen = BTreeMap::new();
+                s.fetch_uids(uids, |e| {
+                    seen.insert(e.uid, identity(&e));
+                })
+                .map_err(|e| early(read_error(e), sent))?;
+                before = Some(Before {
+                    validity: target.uidvalidity,
+                    next: target.uidnext,
+                    seen,
+                });
                 sent = true;
                 // A NO or BAD can follow a part of the move (RFC 6851): unknown.
                 let copy = s
-                    .move_uids(uids, &to.name)
+                    .move_uids(uids, &to)
                     .map_err(|e| unknown(read_error(e)))?
                     .ok_or_else(|| Error::Transport("unknown result: no COPYUID".into()))?;
-                // A new target UIDVALIDITY makes the earlier new IDs stale (#1024).
-                if *to_validity.get_or_insert(copy.validity) != copy.validity {
-                    return Err(Error::Transport(
-                        "unknown result: the target UIDVALIDITY changed".into(),
-                    ));
+                uids.iter()
+                    .map(|uid| {
+                        let (_, n) =
+                            copy.pairs.iter().find(|(f, _)| f == uid).ok_or_else(|| {
+                                Error::Transport("unknown result: a UID is not in COPYUID".into())
+                            })?;
+                        Ok((*uid, *n))
+                    })
+                    .collect::<Result<Vec<_>>>()
+                    .map(|pairs| (copy.validity, pairs))
+            });
+            let (got, pairs) = match (moved, before) {
+                (Ok(m), _) => m,
+                // Issue #984: the answer of `UID MOVE` is lost or incomplete.
+                // A read on a new connection confirms the move, or the
+                // result stays unknown.
+                (Err(e), Some(b)) if e.write_result_unknown() => {
+                    match self.with(token, |s| confirm(s, folder, uids, &to, &b)) {
+                        Ok(Some(pairs)) => (b.validity, pairs),
+                        _ => return Err(e),
+                    }
                 }
-                for uid in uids {
-                    let (_, n) = copy.pairs.iter().find(|(f, _)| f == uid).ok_or_else(|| {
-                        Error::Transport("unknown result: a UID is not in COPYUID".into())
-                    })?;
-                    new.insert((folder, *uid), message_id(copy.validity, *n, &to.name));
-                }
+                (Err(e), _) => return Err(e),
+            };
+            // A new target UIDVALIDITY makes the earlier new IDs stale (#1024).
+            if *to_validity.get_or_insert(got) != got {
+                return Err(Error::Transport(
+                    "unknown result: the target UIDVALIDITY changed".into(),
+                ));
             }
-            Ok(ids
-                .iter()
-                .map(|id| {
-                    let (_, uid, folder) = parse_id(id).expect("parsed above");
-                    new[&(folder, uid)].clone()
-                })
-                .collect())
-        })
+            for (uid, n) in pairs {
+                new.insert((folder.clone(), uid), message_id(got, n, &to));
+            }
+        }
+        Ok(ids
+            .iter()
+            .map(|id| {
+                let (_, uid, folder) = parse_id(id).expect("parsed above");
+                new[&(folder.to_owned(), uid)].clone()
+            })
+            .collect())
     }
 
     fn trash(&self, _: &str, _: &str) -> Result<Minimal> {

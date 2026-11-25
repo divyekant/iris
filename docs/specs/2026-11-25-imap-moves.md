@@ -24,9 +24,11 @@ hostile mail) cannot apply. Triage is the main work of Iris.
 - After a move, the store row of the message stays the same row. Its
   provider ID changes to the new location ID (the rebind). The forms, the
   ledger rows and the undo stay on that row.
-- A move with an unknown result (a lost connection, a crash) ends in
-  `unknown`, as a Gmail call with an unknown result does today. No move
-  runs two times, and the recovery never rebinds a row.
+- A lost or incomplete answer to `UID MOVE` that a read on a new
+  connection confirms gives the new IDs, as a full answer (section 2,
+  issue #984). Each other unknown result (a crash, a read that cannot
+  confirm) ends in `unknown`, as a Gmail call with an unknown result does
+  today. No move runs two times, and the recovery never rebinds a row.
 
 ## Not in scope
 
@@ -114,7 +116,9 @@ a caller that does not know the new rule cannot move mail.
 1. `LIST`, the folders of section 1, and a check of each ID (its folder is
    a "moves from" folder of `mv`). Any refusal here is definite.
 2. For each source folder, in the page order of section 2 of the IMAP
-   provider spec: `SELECT`, a compare of its `UIDVALIDITY` with each ID of
+   provider spec: `EXAMINE` of the target (its `UIDVALIDITY` and
+   `UIDNEXT`), `SELECT` of the source, a `UID FETCH` of the `Message-ID`
+   and `RFC822.SIZE` of each UID, a compare of its `UIDVALIDITY` with each ID of
    that folder, then `UID MOVE <uids> <target>`. A new `UIDVALIDITY` before
    the first `UID MOVE` is `NotFound`, nothing written. After a `UID MOVE`
    of an earlier folder it is `Transport` (unknown), and nothing more is
@@ -140,6 +144,24 @@ Result rules:
   server move a part of the set before an error.
 - A refusal before the first `UID MOVE` was sent is definite, as for
   `modify` today. An error after it is `Transport` (unknown).
+
+The confirm read (issue #984). If the answer to the `UID MOVE` of a folder
+is lost, is `NO` or `BAD`, or does not name each asked UID in `COPYUID`,
+`relocate` reads on a new connection. It gives the new IDs only if all of
+these are true:
+
+- Each asked UID had a `Message-ID` and a size before the move.
+- No asked UID is in the source folder now.
+- The target has the `UIDVALIDITY` of before.
+- For each asked UID, exactly one target message with a UID at or above
+  the `UIDNEXT` of before has the same `Message-ID` and size, and no two
+  asked UIDs get the same target message.
+
+Else, or if the read fails, the result stays `Transport` (unknown). A
+message that the server moved is the only one that both left the source
+and came to the target after the `EXAMINE`. A second copy with the same
+`Message-ID` and size makes the match ambiguous, so the result stays
+unknown and nothing guesses.
 
 ### 3. The apply: the plan and the rebind
 
@@ -222,7 +244,9 @@ sync before the recovery. The sync then marks the old row gone and adds a
 new row for the new ID. The recovery gives that row `unknown` by the rule
 above. So after a crash or an unknown result, the forms of the message
 stay on the gone row, the new row is understood again, and the undo of
-that entry cannot move the message back: limit issue #984. The success
+that entry cannot move the message back: limit issue #1115 (the crash
+case; a lost answer that the confirm read of section 2 confirms has no
+such cost). The success
 path of section 3 has no such cost, because the rebind and `done` are one
 transaction under the sync lock.
 
@@ -277,9 +301,10 @@ write, or `Transport` (unknown) after the first write.
 | A new `UIDVALIDITY` before the first `UID MOVE` | `NotFound`, nothing sent | `move_uidvalidity` |
 | A new `UIDVALIDITY` after a `UID MOVE` of another folder | `Transport`, no more writes | `move_uidvalidity` |
 | A new target `UIDVALIDITY` between two `UID MOVE` commands | `Transport` (unknown) | `move_target_uidvalidity` |
-| `OK` with no `COPYUID`, or without each asked UID | `Transport` | `move_partial_copyuid` |
-| `NO` or `BAD` to `UID MOVE` | `Transport` | `move_partial_copyuid`, `move_unknown_is_not_retried` |
-| A lost answer after a `UID MOVE` that moved the message (old ID `NotFound`) | the recovery sets `listed = 'unknown'`, the entry ends `failed`, no second `UID MOVE`, no rebind | `move_unknown_is_not_retried` |
+| `OK` with no `COPYUID`, without each asked UID, or a lost answer, after a full move | the confirm read gives the new IDs; the apply rebinds; the undo works | `move_partial_copyuid`, `a_confirmed_lost_answer_rebinds` |
+| The confirm read finds two messages with one `Message-ID` and size, or a message with no `Message-ID` | `Transport` (unknown) | `move_confirm_needs_one_match` |
+| `NO` or `BAD` to `UID MOVE` after a part move | the confirm read finds a UID in the source: `Transport` | `move_partial_copyuid`, `move_unknown_is_not_retried` |
+| A lost answer that the confirm read cannot confirm | the recovery sets `listed = 'unknown'`, the entry ends `failed`, no second `UID MOVE`, no rebind | `move_unknown_is_not_retried` |
 | A started move whose old ID still has the labels of before | `listed = 'unknown'`, entry `failed`, no call | `move_unknown_is_not_retried` |
 | A crash after `UID MOVE`, then a sync before the recovery | the sync marks the old row gone and adds a new row; the recovery sets `listed = 'unknown'`, entry `failed`; zero differences | `move_crash_then_sync` |
 | A move and a sync of a message with no `Message-ID`, `References` or `In-Reply-To` | the thread follows the new ID; zero differences | `move_of_a_message_with_no_thread_headers` |
