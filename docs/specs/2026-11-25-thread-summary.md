@@ -24,10 +24,10 @@ must read all 14 mails to know where the thread is (issue #478).
 
 ## Not in scope
 
-- A summary of an attachment or of one long mail with no thread. A limit
-  issue records this.
+- A summary of an attachment or of one long mail with no thread. Issue
+  #1020 records this.
 - A summary on demand (a button). The engine prepares each summary; the
-  person does not ask for one in this version. A limit issue records this.
+  person does not ask for one in this version. Issue #1021 records this.
 - A summary of a thread at the stranger gate, of a hostile thread, of a feed
   item or of a signal. The person did not accept the sender, or the mail is
   not worth a model call.
@@ -147,7 +147,7 @@ end of the order and does not stop the others.
 ## Options not chosen
 
 - A summary on demand only: the person must ask, so the brief cannot show
-  "Summary ready". It can come later as a button (limit issue).
+  "Summary ready". It can come later as a button (issue #1021).
 - A summary of each thread: most threads are short, and the cost grows with
   the mailbox. Only long threads of items that need the person get one.
 - Keep the summary in the item document: the item belongs to understanding,
