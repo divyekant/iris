@@ -394,6 +394,10 @@ test("Reply and a Draft ready pill open the reply form of the thread from the li
     ["a commitment that you owe, with a draft", owe, null, `#/write/${threadOf(owe)}`],
     // A draft owed to you can be a nudge to another person: the write view of the thread does not take it.
     ["a commitment owed to you, with a draft", owed, null, null],
+    // Each other form keeps the pill that opens the item, also when its thread has a draft.
+    ...[...new Set(fx.items.map((i) => i.form))]
+      .filter((form) => form !== "conversation" && form !== "commitment")
+      .map((form) => [`a ${form} with a draft`, { ...fx.items.find((i) => i.form === form), ready: ["draft"] }, null, null]),
   ]) {
     const view = await mount("/src/views/Line.svelte", { item });
     try {

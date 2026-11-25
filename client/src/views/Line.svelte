@@ -120,11 +120,13 @@
   let waits = $derived(item.form === "conversation" && (item.your_turn || (item.new ?? 0) > 0));
   // Reply from the line (issue 582): the write view of the thread, as on the item page. A gone conversation has no mail to answer.
   let thread = $derived(item.form === "conversation" && item.status !== "gone" ? item.thread : undefined);
-  // The Draft ready pill opens the reply form, which fills with the draft (issue 743). A draft owed
-  // to you can be a nudge to another person, which the write view of the thread does not take.
+  // The Draft ready pill opens the reply form, which fills with the draft (issue 743), only for a
+  // reply that is yours to write: a conversation or a commitment that you owe. A draft owed to you
+  // can be a nudge to another person, and other forms keep the pill that opens the item.
   let drafted = $derived.by(() => {
-    if (!item.ready?.includes("draft") || (item.form === "commitment" && item.direction === "owed_to_you")) return undefined;
+    if (!item.ready?.includes("draft")) return undefined;
     if (item.form === "conversation") return thread;
+    if (item.form !== "commitment" || item.direction !== "you_owe") return undefined;
     return (item.sources.find((s) => s.role === "origin") ?? item.sources[0])?.thread;
   });
 </script>
