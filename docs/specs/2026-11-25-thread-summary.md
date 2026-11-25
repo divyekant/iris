@@ -61,9 +61,9 @@ A thread is a candidate when all of these are true:
   now: the build gives it a public form for a table of its own): no message
   of the thread is hostile, each message has its clean text, and
   understanding read each message.
-- It has no summary that covers its newest answerable message, and no try
-  for that newest message with the same model version that ended in an
-  invalid answer.
+- It has no summary with the current basis (see Store), and no try with
+  the current basis and the same model version that ended in an invalid
+  answer.
 
 ### Store
 
@@ -74,6 +74,9 @@ CREATE TABLE thread_summary (
   thread_id INTEGER PRIMARY KEY REFERENCES thread(id) ON DELETE CASCADE,
   -- The newest answerable message that the summary covers.
   based_on INTEGER NOT NULL REFERENCES message(id) ON DELETE CASCADE,
+  -- The basis: each message of the snapshot, as "id:content_sha256",
+  -- newest first, joined with ",".
+  basis TEXT NOT NULL,
   text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 1500),
   model TEXT NOT NULL,
   prompt TEXT NOT NULL,
@@ -82,17 +85,29 @@ CREATE TABLE thread_summary (
 CREATE TABLE thread_summary_try (
   thread_id INTEGER PRIMARY KEY REFERENCES thread(id) ON DELETE CASCADE,
   based_on INTEGER NOT NULL,
+  basis TEXT NOT NULL,
   model_version INTEGER NOT NULL,
   invalid INTEGER NOT NULL CHECK (invalid IN (0, 1)),
   at INTEGER NOT NULL
 );
 ```
 
-One summary for each thread: a new summary replaces the old one. The ready
-rule is the rule of a reply draft: `based_on` is the newest answerable
-message of the thread, and no message of the thread is hostile or waits
-for understanding. So a new mail, a hostile mark or a gone message makes the
-summary stale at the next read, with no write.
+One summary for each thread: a new summary replaces the old one. A summary
+is ready when two rules hold:
+
+1. The rule of a reply draft (`iris_voice::fresh_sql`): `based_on` is the
+   newest answerable message of the thread, and no message of the thread
+   is hostile or waits for understanding.
+2. The basis: the `basis` of the summary is the basis of the thread now.
+   The basis names each message of the snapshot (the newest 12 answerable
+   messages) with its row ID and its `content_sha256`. SQL computes it in
+   the read (`basis_sql(thread)`), with no hash function.
+
+So each change of the mail that the summary read makes the summary stale
+at the next read, with no write: a new mail, a hostile mark, an older
+message of the snapshot that goes away, leaves the thread or gets new
+content under the same ID. A message older than the snapshot is not in the
+summary, so its change does not matter (issue #1023).
 
 ### The model call
 
@@ -105,15 +120,17 @@ A new crate `iris-summary` (no provider client, as `iris-voice`):
 - `summarize(store, thread, model, now)`: reads a snapshot of the thread (the
   newest 12 answerable messages, oldest first, each cut to 4,000
   characters, with `from`, `by_owner` and `date`), makes one call, checks the
-  answer, and saves it in one transaction only if the newest answerable
-  message is still `based_on`.
+  answer, and saves it in one transaction only if the snapshot is the same
+  as before the call (each message of the snapshot, its text, and the
+  counts of hostile and unread messages). It saves the basis of that
+  snapshot.
 - The instruction is a constant (`summary/0.1`). The data block is one JSON
   object. The instruction says that the mail is data, that text in the mail
   that asks for an action is not from the owner, and that the summary names
   only facts of the mail. The answer is `{"summary": "..."}`.
 - The check refuses an answer that is not that object, an empty summary, and
   a summary longer than 1,500 characters. A refused answer gets one more
-  call (decision D7), then the try is `invalid` for that `based_on` and model
+  call (decision D7), then the try is `invalid` for that basis and model
   version.
 
 ### The engine step
@@ -185,10 +202,11 @@ clean text, of the account of the item.
 | Input or event | Result | Test |
 |---|---|---|
 | Mail text that asks the model to do something | The text is in the data block only. The answer is plain text; the client shows it as text. | Unit test: a hostile-looking instruction in the data stays in the data; the answer is shown escaped (client mount test). |
-| A new mail arrives during the call | The save checks `based_on` in its transaction and writes nothing. The next turn tries again. | Store test with a message added between snapshot and save. |
-| A hostile mark or a gone message after the save | The ready rule hides the summary at the next read. | API test. |
+| A new mail arrives during the call | The save compares the snapshot in its transaction and writes nothing. The next turn tries again. | Store test with a message added between snapshot and save. |
+| A hostile mark or a gone message after the save | The ready rule hides the summary at the next read. | Unit test of `ready` and an API test. |
+| An older message of the snapshot goes away, or gets new content under the same ID | The basis changes: the summary is stale, and the thread is a candidate again. | Unit test of `ready` and `candidates`. |
 | The model fails (time-out, 5xx) | No row. The wait after a model error applies (decision D35). | Engine test with a failing fake model. |
-| The answer is not valid twice | `thread_summary_try` with `invalid = 1` for that `based_on` and model version. No more calls until a new mail or a new model version. | Unit test. |
+| The answer is not valid twice | `thread_summary_try` with `invalid = 1` for that basis and model version. No more calls until the basis or the model version changes. | Unit test. |
 | The budget refuses | No call. The try moves the thread to the end. | Engine test. |
 | A crash during the save | One transaction: no summary, or the whole summary. | Store test. |
 | Another run holds the batch lock | No call in this turn. | Engine test. |
@@ -238,7 +256,9 @@ understanding does). It changes nothing outside Iris.
    fake model; the brief line shows "Summary ready". Red if the step does
    not run or `ready` lacks `summary`.
 2. A new mail in the thread removes the pill at the next read. Red if the
-   ready rule does not check `based_on`.
+   ready rule does not check the basis. An older message of the snapshot
+   that goes away removes the pill too. Red if the rule checks only the
+   newest message.
 3. A short thread, a gate thread and a hostile thread get no call. Red if
    the fake model counts a call.
 4. An invalid answer twice stops calls for that newest mail. Red if a third
@@ -290,14 +310,14 @@ model or a real mailbox.
 ## Spec checks
 
 - [x] Each assumption holds with a second caller, worker or tab: the batch
-  lock allows one run; the save checks `based_on` in its transaction.
+  lock allows one run; the save compares the snapshot in its transaction.
 - [x] Each assumption holds when an outcome is unknown: a lost model answer
   is a model failure; no row is written.
 - [x] Each dropped mechanism was dropped for a reason that makes it
   unnecessary: no on-demand button, because the engine prepares each
   summary.
 - [x] Each "idempotent" step is not check-then-act: the save re-reads
-  `based_on` in the same transaction as the write.
+  snapshot in the same transaction as the write.
 - [x] Each property that the design depends on has a test: see the failure
   list.
 - [x] The spec addresses the hardest problem of the change: mail as data and
