@@ -33,6 +33,10 @@ must read all 14 mails to know where the thread is (issue #478).
   not worth a model call.
 - A summary in the workspace of a job. Jobs read the clean mail.
 - Edit, rate or delete a summary.
+- The mail before the newest 12 answerable messages of a thread, and the
+  text of a message after its first 4,000 characters. The summary covers
+  the snapshot only, and the item page points to the mail. Issue #1023
+  records this.
 
 ## Design
 
@@ -40,10 +44,14 @@ must read all 14 mails to know where the thread is (issue #478).
 
 A thread is a candidate when all of these are true:
 
-- It is the thread of the origin message of an item in one of the brief
-  sections `you_owe`, `owed_to_you` or `conversations` (status `open`,
-  `deferred` past its day, or `active`). The attention of the item is not
-  `hidden`.
+- It is the thread of the origin message of an item that needs the
+  person: an item that the brief shows in `you_owe`, `owed_to_you` or
+  `conversations`. One SQL filter gives these items: the filters of the
+  three sections (`section_sql` of `crates/iris-api/src/read.rs`), with
+  the attention `shown`, from hostile mail never, and an item at the
+  stranger gate never. `iris-api` makes this filter public
+  (`needs_you_sql(now)`). The engine step gives it to `candidates`, and the
+  API uses it for `ready` (see API), so the two reads use one rule.
 - It is long: 5 or more answerable messages (the filter of
   `iris_voice::ANSWERABLE`: not spam, not trash, not gone, not a draft or a
   copy), or 8,000 or more characters of clean text in those messages. The
@@ -90,8 +98,10 @@ summary stale at the next read, with no write.
 
 A new crate `iris-summary` (no provider client, as `iris-voice`):
 
-- `candidates(c, now, limit)`: the candidate threads, the oldest try first,
-  as `iris_voice::late` orders the nudges.
+- `candidates(c, items, now, limit)`: the candidate threads of the items
+  that the SQL filter `items` selects, the oldest try first, as
+  `iris_voice::late` orders the nudges. The crate does not depend on
+  `iris-api`: the caller gives the filter.
 - `summarize(store, thread, model, now)`: reads a snapshot of the thread (the
   newest 12 answerable messages, oldest first, each cut to 4,000
   characters, with `from`, `by_owner` and `date`), makes one call, checks the
@@ -118,12 +128,17 @@ end of the order and does not stop the others.
 
 ### API
 
-- `ready` of an item gets `"summary"` when the thread of its origin message
-  has a summary that is ready. The brief sections, the gate, the bundles and
-  the lists of one form read it from the same column as `"draft"`
-  (`ready_doc_of`).
-- `GET /api/threads/{t}/summary`: `{"text", "based_on", "created",
-  "model"}`, or 404 when the thread has no summary that is ready.
+- `ready` of an item gets `"summary"` when two things are true: the item
+  itself passes `needs_you_sql(now)`, and the thread of its origin message
+  has a summary that is ready. So an item at the stranger gate never shows
+  "Summary ready", also when a known person in the same thread has an item
+  with a summary. The brief sections, the gate, the bundles and the lists
+  of one form read it from the same column as `"draft"` (`ready_doc_of`).
+- `GET /api/items/{id}/summary`: `{"text", "based_on", "created",
+  "model"}` of the summary of the thread of the origin message of the item,
+  with the same two conditions as `ready`, or 404. The item page reads it
+  for each item, so it does not depend on `ready`: `GET /api/items/{id}`
+  gives no `ready` (`doc_of`).
 - Open model: the enum of `ready` in `common.schema.json` gets `summary`.
   This is a minor version of the open model (spec 4, rule 2): a new enum
   value of an optional field. The open model goes from 1.3 to 1.4. Rule 8
@@ -135,10 +150,12 @@ end of the order and does not stop the others.
 ### Client
 
 - `Line.svelte`: a second pill in the ready row, "Summary ready", with a
-  lines icon, after "Draft ready". The pill is a link to the item page,
-  with `#summary`.
-- `Item.svelte`: when the item has `ready` with `summary`, the page reads
-  `GET /api/threads/{t}/summary` and shows a box above the mail: "Summary by
+  lines icon, after "Draft ready". The pill is a link to the item page
+  (`href.item(id)`, the route that the line uses now). The summary box is
+  the first part of the item page after its title, so the link needs no
+  anchor: the hash router reads `#/item/<id>` only.
+- `Item.svelte`: the page reads `GET /api/items/{id}/summary` and shows a
+  box above the mail: "Summary by
   Iris" in muted text, the text, and one faint line: "From the mail up to
   <date>. Read the mail for the exact words." A 404 shows nothing. The text
   is a Svelte text node, never HTML.
@@ -226,7 +243,11 @@ understanding does). It changes nothing outside Iris.
    the fake model counts a call.
 4. An invalid answer twice stops calls for that newest mail. Red if a third
    call happens.
-5. The item page shows the text as text: `<b>x</b>` in the summary shows the
+5. A thread with a known person's commitment and a stranger's commitment:
+   after the summary, the brief line of the first shows "Summary ready",
+   and the gate item of the second does not. Red if `ready` reads only the
+   thread.
+6. The item page shows the text as text: `<b>x</b>` in the summary shows the
    characters. Red if it renders bold.
 
 ## Verify
@@ -254,9 +275,10 @@ understanding does). It changes nothing outside Iris.
 
 1. Store and crate: migration, `iris-summary` with `candidates`,
    `summarize`, the check and the ready SQL, with tests (fake model).
-2. Engine step: `summary.rs` and the call after the nudge step.
+2. Engine step: `summary.rs`, the call after the nudge step, and the public
+   `needs_you_sql(now)` of `iris-api` that the step gives to `candidates`.
 3. API and open model 1.4: `ready` with `summary`, `GET
-   /api/threads/{t}/summary`.
+   /api/items/{id}/summary`.
 4. Client: the pill, the item page box, the before/after page.
 
 ## Test plan
