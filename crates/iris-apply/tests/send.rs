@@ -336,6 +336,88 @@ fn a_reply_goes_into_its_thread() {
     assert_eq!(thread_of, thread_provider);
 }
 
+/// The hostile evidence that the claim of a send kept (issue #472).
+fn hostile_before(b: &Box, action: i64) -> Option<i64> {
+    b.store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT hostile_before FROM ledger WHERE action_id = ?1",
+                [action],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap()
+}
+
+/// Issue #472: the claim of a send keeps the hostile evidence of its
+/// thread. A person may send after hostile mail; the record says so, and
+/// a later change of the mark does not change the record.
+#[test]
+fn the_send_claim_keeps_the_hostile_evidence() {
+    let b = setup("hostile-claim");
+    let (thread, parent) = b.thread();
+    // The parent is understood, as in a_reply_goes_into_its_thread, and
+    // its thread waits for no link check: no hostile evidence yet.
+    let provider: String = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT provider_id FROM message WHERE id = ?1",
+                [parent],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    let head = b.gmail.metadata(TOKEN, &provider, &["Subject"]).unwrap();
+    let subject = head.headers[0].value.clone();
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE header SET subject = ?1 WHERE message_id = ?2",
+                rusqlite::params![subject, parent],
+            )?;
+            Ok(tx.execute("DELETE FROM link_check", [])?)
+        })
+        .unwrap();
+    let a = b.approved(
+        Verb::Draft,
+        &format!("t-{thread}"),
+        json!({"to": ["priya@example.com"], "body": "Thanks."}),
+        0,
+    );
+    let applied = b.apply(a);
+    assert!(matches!(applied, Ok(Outcome::Applied(_))), "{applied:?}");
+    let (d, _) = b.draft(a);
+    let s = b.approved(Verb::Send, &d, json!({}), AGED);
+    // Hostile mail is in the thread at the claim.
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE message SET hostile = '[\"dmarc\"]' WHERE id = ?1",
+                [parent],
+            )?)
+        })
+        .unwrap();
+    match b.release(s) {
+        Ok(Outcome::Applied(_)) => {}
+        other => panic!("{other:?}"),
+    }
+    // The draft action has no evidence: only a send keeps it.
+    assert_eq!(hostile_before(&b, a), None);
+    assert_eq!(hostile_before(&b, s), Some(1));
+    b.store
+        .write(|tx| Ok(tx.execute("UPDATE message SET hostile = NULL", [])?))
+        .unwrap();
+    assert_eq!(hostile_before(&b, s), Some(1));
+    let refused = b.store.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE ledger SET hostile_before = 0 WHERE action_id = ?1",
+            [s],
+        )?)
+    });
+    assert!(refused.is_err(), "the record does not change");
+}
+
 fn sent_message_id(raw: &str) -> String {
     raw.lines()
         .find_map(|l| l.strip_prefix("Message-ID: "))

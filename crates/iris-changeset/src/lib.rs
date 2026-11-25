@@ -1668,9 +1668,23 @@ fn check_write(
 /// with no header (after the content cleanup) counts as hostile, because
 /// its sender is no longer known. The apply checks it again.
 pub fn hostile(c: &Connection, action: i64) -> Result<bool> {
+    let person: bool = c.query_row(
+        "SELECT cs.author_kind = 'person' FROM changeset_action a
+         JOIN changeset cs ON cs.id = a.changeset_id WHERE a.id = ?1",
+        [action],
+        |r| r.get(0),
+    )?;
+    Ok(!person && hostile_evidence(c, action)?)
+}
+
+/// True if a thread of `action` has hostile evidence now, for any author:
+/// a message that may be hostile, a message of a `hostile` sender, or a
+/// gone message with no header. The send claim keeps this result in
+/// `ledger.hostile_before` (issue #472).
+pub fn hostile_evidence(c: &Connection, action: i64) -> Result<bool> {
     Ok(c.query_row(
         &format!(
-            "SELECT cs.author_kind <> 'person' AND EXISTS (
+            "SELECT EXISTS (
            SELECT 1 FROM message m
            LEFT JOIN header h ON h.message_id = m.id
            LEFT JOIN sender p ON p.address = h.from_addr
@@ -1679,7 +1693,7 @@ pub fn hostile(c: &Connection, action: i64) -> Result<bool> {
                   -- A gone message after the cleanup has no header, so its
                   -- sender is not known: it counts as hostile evidence.
                   OR (m.gone_at IS NOT NULL AND h.message_id IS NULL)))
-         FROM changeset_action a JOIN changeset cs ON cs.id = a.changeset_id WHERE a.id = ?1",
+         FROM changeset_action a WHERE a.id = ?1",
             may_be_hostile = iris_store::may_be_hostile!(),
         ),
         [action],
