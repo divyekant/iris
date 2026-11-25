@@ -192,6 +192,28 @@ async fn an_intent_gives_a_draft_in_your_voice() {
     assert_eq!(code, StatusCode::BAD_REQUEST);
 }
 
+/// A draft waits for a holder of the run lock that lets go (#279): an
+/// understanding run stops before its next message for it.
+#[tokio::test]
+async fn a_draft_waits_for_the_run_lock() {
+    let s = store("wait", Some(1_000_000));
+    let held = iris_understand::batch::lock(&s).unwrap();
+    let free = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(held);
+    });
+    let (code, v) = post(
+        &s,
+        fake(),
+        "/api/threads/t-1/draft",
+        json!({"intent": "say yes", "parent": "m-1"}),
+    )
+    .await;
+    free.join().unwrap();
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(drafts(&s).len(), 1);
+}
+
 /// Each refusal saves no draft and names what to do.
 #[tokio::test]
 async fn a_refused_draft_saves_nothing() {

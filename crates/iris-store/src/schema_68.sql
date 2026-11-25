@@ -1,6 +1,6 @@
--- Migration 68 (issue 455): the header keeps the `Reply-To` addresses of
--- a message (bare, lowercase, comma-separated), as `to_addrs` and
--- `cc_addrs`. Understanding writes the value from the raw message. A row
--- that understanding wrote before this migration has NULL until the next
--- understanding of the message: a reply to it goes to the `From` address.
-ALTER TABLE header ADD COLUMN reply_to TEXT;
+-- Migration 68 (issue 1026): the known name of a gate sender
+-- (`iris_api::gate`, `known_as`) finds a person sender with the same
+-- display name, with no case. This partial index makes that lookup an
+-- index search, not a read of each sender row.
+CREATE INDEX IF NOT EXISTS sender_person_name_nocase ON sender(name COLLATE NOCASE)
+  WHERE kind = 'person';

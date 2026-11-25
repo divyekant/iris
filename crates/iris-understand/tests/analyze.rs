@@ -670,3 +670,38 @@ fn a_from_past_the_header_limit_is_a_spoof() {
     assert!(!a.head.cut);
     assert!(!a.marks.contains(&Mark::Spoof));
 }
+
+/// The link of an attached message counts with no sender proof: the DMARC
+/// pass of the outer sender for the shown domain does not prove the
+/// attached message (issue #372).
+#[test]
+fn a_deceptive_link_of_an_attached_message_is_a_mark() {
+    let mail = |target: &str| {
+        format!(
+            "Authentication-Results: mx.google.com; dkim=pass header.i=@shop.com; dmarc=pass (p=NONE) header.from=shop.com
+From: Shop <alerts@shop.com>
+Subject: Fwd: account
+Content-Type: multipart/mixed; boundary=o
+
+--o
+Content-Type: text/plain
+
+See below.
+--o
+Content-Type: message/rfc822
+
+From: Shop <alerts@shop.com>
+Subject: Your account
+Content-Type: text/html; charset=utf-8
+
+<p><a href=\"{target}\">https://www.shop.com/account</a></p>
+--o--
+"
+        )
+    };
+    assert_eq!(
+        run(&mail("https://click.mailer.example.org/r/1"), &[], &[], &[]),
+        vec![Mark::Link]
+    );
+    assert!(run(&mail("https://www.shop.com/account"), &[], &[], &[]).is_empty());
+}

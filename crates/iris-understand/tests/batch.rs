@@ -551,6 +551,192 @@ fn a_second_runner_gets_busy() {
     assert!(b.run(&Limits::default()).is_ok());
 }
 
+/// A draft or a question waits for the run lock (#279): the run stops
+/// before its next message, the waiter gets the lock, and the next run
+/// goes on with the mail that is left.
+#[test]
+fn a_run_yields_to_a_waiter_before_its_next_message() {
+    let b = store("yield");
+    b.model(false, None);
+    let first = b.add("1", "a", 2, &["INBOX"]);
+    let second = b.add("2", "b", 1, &["INBOX"]);
+    let dir = b.store.dir().to_path_buf();
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let waiter = std::thread::spawn({
+        let dir = dir.clone();
+        move || {
+            let store = Store::open(&dir).unwrap();
+            wait.recv().unwrap();
+            batch::lock_wait(&store, std::time::Duration::from_secs(30)).is_ok()
+        }
+    });
+    // During the first call, the other caller starts to wait. The call
+    // ends only when the waiter holds the want lock.
+    let want = dir.join(batch::WANT_FILE);
+    *b.script.during.borrow_mut() = Some(std::boxed::Box::new(move || {
+        go.send(()).unwrap();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !matches!(
+            iris_store::FileLock::probe(&want),
+            Ok(iris_store::Probe::Held)
+        ) {
+            assert!(std::time::Instant::now() < end, "the waiter does not wait");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }));
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!((r.stop.as_deref(), r.messages), (Some("yield"), 1));
+    assert!(waiter.join().unwrap(), "the waiter gets the run lock");
+    assert!(b.understood(first) != b.understood(second), "one message");
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.stop.as_deref(), Some("done"));
+    assert!(
+        b.understood(first) && b.understood(second),
+        "the next run goes on"
+    );
+}
+
+/// While a caller waits (it holds the want lock), no new holder takes the
+/// run lock with `batch::lock`, and the link and fixed scans stop before
+/// their next row and leave the rest of the queue (#279).
+#[test]
+fn a_waiter_gets_the_lock_first_and_stops_the_scans() {
+    let b = store("want");
+    b.model(false, None);
+    let m = b.add("1", "a", 2, &["INBOX"]);
+    b.add("2", "b", 1, &["INBOX"]);
+    b.store
+        .write(|tx| Ok(tx.execute("INSERT INTO fixed_due(message_id) VALUES (?1)", [m])?))
+        .unwrap();
+    let links = b.col("SELECT count(*) FROM link_check").unwrap();
+    assert!(links > 0, "new mail waits for its link check");
+    let want = iris_store::FileLock::try_take(&b.store.dir().join(batch::WANT_FILE))
+        .unwrap()
+        .unwrap();
+    assert!(matches!(batch::lock(&b.store), Err(Error::Busy)));
+    assert!(matches!(b.run(&Limits::default()), Err(Error::Busy)));
+    assert_eq!(b.script.calls(), 0);
+    assert_eq!(
+        iris_understand::store::recheck_links(&b.store, NOW, None).unwrap(),
+        0
+    );
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(links));
+    assert_eq!(
+        iris_understand::store::recheck_fixed(&b.store, NOW, None).unwrap(),
+        0
+    );
+    assert_eq!(b.col("SELECT count(*) FROM fixed_due"), Some(1));
+    drop(want);
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.stop.as_deref(), Some("done"));
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(0));
+    assert_eq!(b.col("SELECT count(*) FROM fixed_due"), Some(0));
+}
+
+/// A waiter that comes after the last message stops the fixed check at the
+/// end of the pass: the run says `yield`, not `done`, and the queued row
+/// waits for the next run (#279).
+#[test]
+fn a_waiter_stops_the_last_fixed_check_and_the_run_says_yield() {
+    let b = store("wantfixed");
+    b.model(false, None);
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    let want_path = b.store.dir().join(batch::WANT_FILE);
+    let held = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let during = {
+        let held = held.clone();
+        let dir = b.store.dir().to_path_buf();
+        move || {
+            // A sender change queues the message for a fixed check, and a
+            // draft starts to wait, during the only call of the pass.
+            let s = Store::open(&dir).unwrap();
+            s.write(|tx| Ok(tx.execute("INSERT INTO fixed_due(message_id) VALUES (?1)", [m])?))
+                .unwrap();
+            *held.borrow_mut() = iris_store::FileLock::try_take(&want_path).unwrap();
+        }
+    };
+    *b.script.during.borrow_mut() = Some(std::boxed::Box::new(during));
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!((r.stop.as_deref(), r.messages), (Some("yield"), 1));
+    assert_eq!(b.col("SELECT count(*) FROM fixed_due"), Some(1));
+    drop(held.borrow_mut().take());
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.stop.as_deref(), Some("done"));
+    assert_eq!(b.col("SELECT count(*) FROM fixed_due"), Some(0));
+}
+
+/// Two waiters take the run lock in turn: the one that waits first (it
+/// holds the want lock) gets the lock first, and the second one gets it
+/// after the first lets go (#279).
+#[test]
+fn two_waiters_take_the_lock_in_turn() {
+    let b = store("twowait");
+    let dir = b.store.dir().to_path_buf();
+    let held = batch::lock(&b.store).unwrap();
+    let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let waiter = |name: &'static str| {
+        let (dir, order) = (dir.clone(), order.clone());
+        std::thread::spawn(move || {
+            let s = Store::open(&dir).unwrap();
+            let l = batch::lock_wait(&s, std::time::Duration::from_secs(30)).unwrap();
+            order.lock().unwrap().push(name);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            drop(l);
+        })
+    };
+    let first = waiter("first");
+    let want = dir.join(batch::WANT_FILE);
+    while !matches!(
+        iris_store::FileLock::probe(&want),
+        Ok(iris_store::Probe::Held)
+    ) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let second = waiter("second");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    drop(held);
+    first.join().unwrap();
+    second.join().unwrap();
+    assert_eq!(*order.lock().unwrap(), ["first", "second"]);
+}
+
+/// A take of `batch::lock` holds a shared lock on the want file until it
+/// ends. A waiter cannot signal during that time, so the two never take
+/// the run lock in an order that the waiter cannot see (#279).
+#[test]
+fn a_take_in_progress_holds_back_a_waiter() {
+    let b = store("inflight");
+    drop(batch::lock(&b.store).unwrap());
+    let want = b.store.dir().join(batch::WANT_FILE);
+    let Ok(iris_store::Probe::Free(shared)) = iris_store::FileLock::probe(&want) else {
+        panic!("the want file exists and is free");
+    };
+    assert!(matches!(
+        batch::lock_wait(&b.store, std::time::Duration::from_millis(200)),
+        Err(Error::Busy)
+    ));
+    // A second take of `batch::lock` goes on, as two shared locks agree.
+    drop(batch::lock(&b.store).unwrap());
+    drop(shared);
+    assert!(batch::lock_wait(&b.store, std::time::Duration::ZERO).is_ok());
+}
+
+/// With no run, [`batch::lock_wait`] takes the lock at once. A holder that
+/// does not let go gives `Busy` after the wait.
+#[test]
+fn lock_wait_takes_a_free_lock_and_ends_after_its_limit() {
+    let b = store("lockwait");
+    let held = batch::lock_wait(&b.store, std::time::Duration::ZERO).unwrap();
+    let t = std::time::Instant::now();
+    assert!(matches!(
+        batch::lock_wait(&b.store, std::time::Duration::from_millis(200)),
+        Err(Error::Busy)
+    ));
+    assert!(t.elapsed() >= std::time::Duration::from_millis(200));
+    drop(held);
+    assert!(batch::lock(&b.store).is_ok());
+}
+
 #[test]
 fn max_messages_stops_in_the_thread() {
     let b = store("max");
