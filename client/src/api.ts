@@ -257,10 +257,23 @@ export type Attachment = FileView & { sha256: string };
  * GET /api/changesets/{id}/drafts: the draft of each `draft` and `send`
  * action that waits, as the review shows it. Each part of the text carries
  * the flags of the action that its words gave. An action whose text Iris
- * cannot read has `readable: false` and no text.
+ * cannot read has `readable: false` and no text. A readable `send` of a
+ * draft has `change`: how the write view changes the draft after the person
+ * denies this send only, and `newer_mail` when a newer mail stops that
+ * change (issue 1104). Absent from an older engine.
  */
 export type DraftView = { revision: number; n: number; draft: string | null; thread: string | null } & (
-  | { readable: true; to: Recipient[]; cc: Recipient[]; bcc?: Recipient[]; attachments?: FileView[]; subject: Part[]; body: Part[] }
+  | {
+      readable: true;
+      to: Recipient[];
+      cc: Recipient[];
+      bcc?: Recipient[];
+      attachments?: FileView[];
+      subject: Part[];
+      body: Part[];
+      change?: "update" | "new" | null;
+      newer_mail?: boolean;
+    }
   | { readable: false }
 );
 

@@ -438,6 +438,7 @@ export const drafts: Record<string, DraftView[]> = {
       draft: "d-21",
       thread: "t-9001",
       readable: true,
+      change: "update",
       to: [{ address: "dana@acme.example" }],
       cc: [{ address: "legal@acme-partners.example", flags: ["new_recipient", "outside_thread"] }],
       subject: [{ text: "Re: Renewal for 2027" }],

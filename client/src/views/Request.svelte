@@ -363,9 +363,12 @@
             {#each mail(a) ? unmarked(a, d) : a.flags.map((f) => FLAGS[f] ?? f) as words (words)}<p class="flag">{words}</p>{/each}
             {#if !approves(a)}<p class="denied">Iris will deny this change.</p>{/if}
             {#if d}{@render draft(d)}{/if}
-            {#if a.verb === "send" && d?.readable && d.draft}
+            <!-- Issue 1104: the button shows only when the draft can change after this deny. -->
+            {#if a.verb === "send" && d?.readable && d.draft && d.change}
               {@const id = d.draft}
               <button type="button" class="quiet change" disabled={!ready} onclick={() => changeSend(a, id)}>Deny this send and change it yourself</button>
+            {:else if a.verb === "send" && d?.readable && d.newer_mail}
+              <p class="because">A new mail came into this thread after this reply was written. To answer it, deny this send and write a new reply.</p>
             {/if}
             {@render lines(a)}
           </div>
