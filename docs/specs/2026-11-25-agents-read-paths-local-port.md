@@ -89,10 +89,14 @@ refuses the run, with the path and the reason, if:
   mounts. A bind mount can have the same device number as its parent, so
   the device number is not enough. On Linux the walk compares the mount
   ID of each entry (`statx` with `STATX_MNT_ID`, Linux 5.8 or later) with
-  the mount ID of the read path, and refuses a read path that is itself a
-  mount root (`STATX_ATTR_MOUNT_ROOT`) other than a mount of a system
-  folder the view already shows. If the kernel gives no mount ID, the run
-  is refused. On macOS there are no bind mounts; the walk compares the
+  the mount ID of the read path. If the kernel gives no mount ID, the run
+  is refused.
+- the read path is on a bind mount of a folder: the mount of the read
+  path (its mount ID in `/proc/self/mountinfo`) has a root other than
+  `/`. A bind mount of a part of the data folder elsewhere has another
+  real path, so the path checks above cannot see it. This also refuses a
+  read path in some containers, where folders are bind mounts (fail
+  closed). On macOS there are no bind mounts; the walk compares the
   device number (`st_dev`), and Seatbelt checks the real path of each
   access.
 
@@ -176,6 +180,7 @@ fails at its first call.
 | A read path with a socket, a FIFO or a device in its tree | The run is refused, with the path of the entry | launch test |
 | A read path with a mount point in its tree, also a bind mount on the same device | The run is refused, with the path of the entry | launch test (Linux: a bind mount in a private mount namespace of the test, if the test can make one; else a unit test of the mount ID compare) |
 | A kernel that gives no mount ID (`STATX_MNT_ID`) | The run of an adapter with read paths is refused | unit test |
+| A read path on a bind mount of a folder (mount root other than `/`), for example a bind of the data folder at another path | The run is refused, with the path | unit test of the `mountinfo` parse |
 | A tree of more than 200,000 entries | The run is refused | launch test |
 | A part of a read path that changes into a link after the launch checks | Linux: the open of the helper fails, and no session starts. macOS: Seatbelt checks the real path at each access | Linux helper test with a swap between the check and the open |
 | A read path that changes to another object (other device or inode) after the launch checks | The helper refuses it, and no session starts | Linux helper test |
