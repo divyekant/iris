@@ -235,6 +235,9 @@ pub enum Error {
     Account(&'static str),
     /// The time zone name is not in the time zone database of the computer.
     TimeZone(String),
+    /// Another message row of the account has the new provider ID
+    /// ([`rebind`]).
+    Taken(String),
 }
 
 impl fmt::Display for Error {
@@ -256,6 +259,7 @@ impl fmt::Display for Error {
                 f,
                 "time zone: {name} is not a time zone of this computer (use an IANA name, for example Europe/Berlin)"
             ),
+            Error::Taken(id) => write!(f, "another message has the provider ID {id}"),
         }
     }
 }
@@ -1114,6 +1118,39 @@ pub fn stopped(conn: &Connection) -> Result<Option<i64>> {
             r.get(0)
         })?,
     )
+}
+
+/// Give the message row `message` the provider ID `new`, after a move
+/// that gave the message a new location ID (IMAP moves spec, section 3).
+/// The row, its raw file, its forms and its ledger rows stay. A thread
+/// whose provider ID is the old message ID (the fallback thread ID of a
+/// message with no thread headers) gets `new` too. Refuses with
+/// [`Error::Taken`] if another row of the account has `new`. Run it in the
+/// transaction that saves the move.
+pub fn rebind(tx: &Connection, message: i64, new: &str) -> Result<()> {
+    let (account, old, thread): (i64, String, i64) = tx.query_row(
+        "SELECT account_id, provider_id, thread_id FROM message WHERE id = ?1",
+        [message],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let taken: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM message
+                        WHERE account_id = ?1 AND provider_id = ?2 AND id != ?3)",
+        params![account, new, message],
+        |r| r.get(0),
+    )?;
+    if taken {
+        return Err(Error::Taken(new.to_string()));
+    }
+    tx.execute(
+        "UPDATE message SET provider_id = ?2 WHERE id = ?1",
+        params![message, new],
+    )?;
+    tx.execute(
+        "UPDATE thread SET provider_id = ?3 WHERE id = ?1 AND provider_id = ?2",
+        params![thread, old, new],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
