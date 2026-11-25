@@ -16,6 +16,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::glyphs::GLYPHS;
 
+mod crypt;
+
 /// The most bytes of one decompressed stream.
 const STREAM_LIMIT: usize = 4 * 1024 * 1024;
 /// The most bytes of decompressed streams for one PDF.
@@ -58,6 +60,12 @@ pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
     if !is_pdf(pdf) {
         return (None, false);
     }
+    // An encrypted file opens only with the empty user password (issue #52).
+    let crypt = match crypt::setup(pdf) {
+        crypt::Setup::Plain => None,
+        crypt::Setup::Open(c) => Some(c),
+        crypt::Setup::Locked => return (None, false),
+    };
     let mut doc = Doc::new(limit);
     let mut stopped = false;
     let mut total = 0;
@@ -97,6 +105,20 @@ pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
         if !objects && !is_content(dict) {
             continue;
         }
+        // The key of an encrypted stream needs its object number and
+        // generation. A stream that Iris cannot decrypt is not read.
+        let plain;
+        let data = match (&crypt, header) {
+            (None, _) => data,
+            (Some(c), Some((h, Some(n)))) => match c.stream(n, generation(&pdf[..h]), data) {
+                Some(d) => {
+                    plain = d;
+                    &plain[..]
+                }
+                None => continue,
+            },
+            (Some(_), _) => continue,
+        };
         // Each stream gets at most the rest of the budget of the PDF.
         let cap = STREAM_LIMIT.min(TOTAL_LIMIT - total);
         let mut more = false;
@@ -379,6 +401,21 @@ fn object_number(before: &[u8]) -> Option<Option<u32>> {
     rest.last()
         .is_none_or(|b| b.is_ascii_whitespace())
         .then(|| std::str::from_utf8(first).ok()?.parse().ok())
+}
+
+/// The generation number of the object header that ends at the end of
+/// `upto` (`<number> <number> obj`), or 0 if Iris cannot read it.
+fn generation(upto: &[u8]) -> u16 {
+    let before = upto.strip_suffix(b"obj").unwrap_or(upto).trim_ascii_end();
+    let digits = before
+        .iter()
+        .rev()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    std::str::from_utf8(&before[before.len() - digits..])
+        .ok()
+        .and_then(|g| g.parse().ok())
+        .unwrap_or(0)
 }
 
 /// False for streams that are not page content: images, fonts, metadata,
@@ -1724,6 +1761,39 @@ fn readable(t: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encrypted_pdfs_with_an_empty_user_password_give_text() {
+        let want = "Invoice 2025-07 for Avel Torun\nTotal: 120.00 EUR";
+        for (name, pdf) in [
+            ("rc4-40", &include_bytes!("../tests/pdf/rc4-40.pdf")[..]),
+            ("rc4-128", include_bytes!("../tests/pdf/rc4-128.pdf")),
+            ("aes-128", include_bytes!("../tests/pdf/aes-128.pdf")),
+            ("aes-256", include_bytes!("../tests/pdf/aes-256.pdf")),
+            ("aes-256-r5", include_bytes!("../tests/pdf/aes-256-r5.pdf")),
+        ] {
+            assert_eq!(text(pdf, 1000).as_deref(), Some(want), "{name}");
+        }
+        // A user password: no text, and no garbage.
+        let locked = include_bytes!("../tests/pdf/aes-128-user.pdf");
+        assert_eq!(text_cut(locked, 1000), (None, false));
+        // Each prefix and each changed byte is safe.
+        for pdf in [
+            &include_bytes!("../tests/pdf/aes-256.pdf")[..],
+            include_bytes!("../tests/pdf/rc4-128.pdf"),
+        ] {
+            for cut in (0..pdf.len()).step_by(7) {
+                text_cut(&pdf[..cut], 1000);
+            }
+            // The AES-256 key check costs about 1 ms in a debug build: a
+            // step of 7 bytes keeps the test short.
+            for i in (0..pdf.len()).step_by(7) {
+                let mut bad = pdf.to_vec();
+                bad[i] ^= 0x5A;
+                text_cut(&bad, 1000);
+            }
+        }
+    }
 
     pub(crate) fn sample(content: &[u8], flate: bool) -> Vec<u8> {
         let (filter, data) = if flate {

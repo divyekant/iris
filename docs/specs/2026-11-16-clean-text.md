@@ -475,8 +475,11 @@ client. They are not defects of this design:
   no page uses gives its text too. A form without its own `/Resources`
   reads through the encoding of its font, or as Windows-1252. A font with
   an encoding that is not in scope (see Not in scope) can fail the quality
-  check. A stream with a TIFF predictor is not read. An encrypted PDF gives
-  no text.
+  check. A stream with a TIFF predictor is not read. An encrypted PDF
+  gives text only when it opens with the empty user password (an owner
+  password only), through the standard handler: RC4 of 40 to 128 bits,
+  AES-128 and AES-256 (`/R 2` to `/R 6`, issue #52). A PDF that needs a
+  user password, or that has another handler, gives no text.
 - The model reads clean text as data, never as instructions (specification
   1). So hidden text that stays is a quality limit, not a security hole.
 - A quoted-printable line of more than 64 KiB that has only white space,
