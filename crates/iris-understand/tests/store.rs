@@ -3354,10 +3354,20 @@ fn a_message_that_moves_to_another_thread_leaves_the_context_of_the_old_one() {
     drain(&b, &fake, &mut last);
     assert!(last[&m2].contains("Words k1k."));
     // The same provider message, in another thread.
+    let runs_of_m1 = |fake: &Fake| {
+        fake.calls
+            .borrow()
+            .iter()
+            .filter(|c| c.1.contains("The current message:\nWords k1k."))
+            .count()
+    };
+    let before = runs_of_m1(&fake);
     let moved = b.add_in("1", "other", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
     assert_eq!(moved, m1);
     drain(&b, &fake, &mut last);
     assert!(!last[&m2].contains("Words k1k."), "{}", last[&m2]);
+    // The moved message runs again too: its items name its new thread.
+    assert_eq!(runs_of_m1(&fake), before + 1);
 }
 
 /// Issue 1049, pre-review: sync saves a new sender address for an earlier

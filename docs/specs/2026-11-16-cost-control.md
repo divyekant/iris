@@ -74,6 +74,9 @@ pay again for the same mail.
   and a hash of the first parties of the list that the data held, and if
   the list had more, as for the thread context. A new kind or name of a
   sender puts the threads of that sender in `talk_due`.
+- The record ends with the thread and the date of the message itself
+  ("@thread:date"). An item of a run names its thread, so a message that
+  sync moves to another thread or date with the same content runs again.
 - Limit (issue #1135): a known person who is only in `To` or `Cc` of a
   thread does not put the thread in `talk_due`. A check compares the
   recorded context of an understood message with its context now, and

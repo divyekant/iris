@@ -16,7 +16,8 @@
 --    The hash covers only the held bytes. "p:" holds a hash of the known
 --    parties of the thread up to the message ("p!:n:" for the first n that
 --    the data held, with "+" if the list had more) (limit #1135: a known person
---    only in To or Cc puts no thread in `talk_due`). "-" marks hostile mail: a new run of
+--    only in To or Cc puts no thread in `talk_due`). "@thread:date" ends the
+--    record: a message that moves to another thread or date runs again. "-" marks hostile mail: a new run of
 --    it calls no model (the `phishing` answer stays until a rebuild), so no
 --    context can change its result.
 --    NULL for a message that no run understood. "?" for an understood

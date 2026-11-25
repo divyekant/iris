@@ -1257,8 +1257,11 @@ fn context_key(
         }
     };
     let cut = if held.is_some() { "!" } else { "" };
+    // The thread and the date of the message itself: an item of a run
+    // names its thread, so a move runs the message again.
+    let at = date.map_or_else(|| "-".to_string(), |d| d.to_string());
     Ok(Some(format!(
-        "t{cut}:{};s:{};{p}",
+        "t{cut}:{};s:{};{p};@{thread}:{at}",
         t.join(","),
         s.join(",")
     )))
