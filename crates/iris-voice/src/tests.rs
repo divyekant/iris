@@ -1455,7 +1455,7 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
     assert_eq!(data["reply_to"], "ana@example.org");
     assert_eq!(
         data["commitments"],
-        json!([{"title": "Send the slides", "kind": null, "amount": null, "due": null,
+        json!([{"n": 1, "title": "Send the slides", "kind": null, "amount": null, "due": null,
                 "quote": "can you send the slides?"}])
     );
     assert!(fake.calls.borrow()[0]

@@ -319,7 +319,7 @@ mod tests {
         let (store, dir) = open("one");
         ask(&store, "t1", "Ana, can you send the slides?");
         let calls = Rc::new(Cell::new(0));
-        let answer = Cell::new(r#"{"body": "Hi Ana, any news on the slides? D"}"#);
+        let answer = Cell::new(r#"{"body": "Hi Ana, any news on the slides? D", "named": [1]}"#);
         let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
             Ok(Box::new(Fake(calls.clone(), answer.get())))
         };
@@ -368,7 +368,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        answer.set(r#"{"body": "Hi Ana, any news on the slides? D"}"#);
+        answer.set(r#"{"body": "Hi Ana, any news on the slides? D", "named": [1]}"#);
         assert_eq!(step(&store, &connect, late), Ok(1));
         assert_eq!(calls.get(), 3);
         assert_eq!(
@@ -436,7 +436,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        answer.set(r#"{"body": "Hi Ana, any news? D"}"#);
+        answer.set(r#"{"body": "Hi Ana, any news? D", "named": [1]}"#);
         assert_eq!(step(&store, &connect, late), Ok(1));
         assert_eq!(calls.get(), 3);
         let _ = std::fs::remove_dir_all(&dir);
