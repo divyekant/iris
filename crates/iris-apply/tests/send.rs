@@ -2314,7 +2314,7 @@ fn only_the_newest_change_has_an_undo() {
 }
 
 /// The view `ledger_can_undo` names the two errors of an unknown result
-/// of a change and the age of a send mark (migration 57). A new value of
+/// of a change and the age of a send mark (migration 58). A new value of
 /// either one must change the view too.
 #[test]
 fn the_undo_view_names_the_errors_of_an_unknown_result() {

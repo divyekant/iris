@@ -1324,10 +1324,13 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
                 [row],
                 |r| r.get(0),
             )?,
+            // A kept draft of a tombstone is no target (issue 1014).
             (Kind::Draft, "drafts") => {
                 let found = c.execute(
                     "INSERT INTO action_draft(action_id, draft_id)
-                     SELECT ?1, id FROM draft WHERE id = ?2",
+                     SELECT ?1, d.id FROM draft d JOIN account a ON a.id = d.account_id
+                     WHERE d.id = ?2
+                       AND (a.state IS NULL OR a.state NOT IN ('removing', 'removed'))",
                     params![action, row],
                 )? == 1;
                 if verb == Verb::Draft {

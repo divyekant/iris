@@ -21,4 +21,5 @@ pub mod isolation;
 pub mod launch;
 pub mod macos_job;
 pub mod peer;
+pub mod read_paths;
 pub mod reap;

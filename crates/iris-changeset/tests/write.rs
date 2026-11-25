@@ -781,3 +781,49 @@ fn a_removed_account_ends_its_new_mail_drafts() {
         );
     }
 }
+
+/// No new action can name a kept draft of a removed account (issue 1014).
+#[test]
+fn a_kept_draft_of_a_removed_account_is_no_target() {
+    for gone in ["removing", "removed"] {
+        let dir = TempDir::new("kept");
+        let s = store(&dir);
+        let draft: i64 = s
+            .read(|c| Ok(c.query_row("SELECT count(*) FROM draft WHERE id = 1", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(draft, 1);
+        if gone == "removed" {
+            let address: String = s
+                .read(|c| {
+                    Ok(c.query_row("SELECT address FROM account WHERE id = 1", [], |r| r.get(0))?)
+                })
+                .unwrap();
+            s.remove_account(&address, NOW).unwrap();
+        } else {
+            s.write(|tx| Ok(tx.execute("UPDATE account SET state = 'removing' WHERE id = 1", [])?))
+                .unwrap();
+        }
+        let kept: i64 = s
+            .read(|c| Ok(c.query_row("SELECT count(*) FROM draft WHERE id = 1", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(kept, 1, "{gone}: the removal keeps the draft");
+        let who = author(AuthorKind::Agent);
+        let cs = create(&s, &who, NOW).unwrap();
+        let added = add_action(&s, cs, &who, Verb::Send, &["d-1"], &args(json!({})), None);
+        if added.is_ok() {
+            let _ = submit(&s, cs, &who, "Send.", NOW);
+        }
+        let open: i64 = s
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM changeset_action a JOIN action_draft d
+                       ON d.action_id = a.id
+                     WHERE d.draft_id = 1 AND a.state IN ('proposed', 'approved')",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(open, 0, "{gone}: a new send names the kept draft");
+    }
+}

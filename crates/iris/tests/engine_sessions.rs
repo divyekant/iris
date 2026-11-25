@@ -41,6 +41,7 @@ impl Isolation for Plain {
         _egress_port: Option<u16>,
         program: &Path,
         args: &[String],
+        _reads: &[std::path::PathBuf],
     ) -> Command {
         Command {
             program: program.to_path_buf(),

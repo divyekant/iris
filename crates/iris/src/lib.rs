@@ -1553,7 +1553,11 @@ fn run_store(cli: Cli) -> Result<(), String> {
                 .map_err(|e| format!("attention: {e}"))?;
             // The measure "time to the first brief" ends at the first brief with content.
             iris_api::measures::check_brief(&s, engine::now_ms())
-                .map_err(|e| format!("measures: {e}"))
+                .map_err(|e| format!("measures: {e}"))?;
+            // A watch matches with no engine too (issue #260).
+            s.check_watches(engine::now_ms())
+                .map(|_| ())
+                .map_err(|e| format!("watches: {e}"))
         });
         if let Err(e) = attention {
             return Err(match result {

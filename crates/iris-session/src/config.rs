@@ -24,6 +24,7 @@ const BUILT_IN: [&str; 2] = ["claude-code", "codex"];
 const MAX_COMMAND: usize = 32;
 const MAX_PASS_ENV: usize = 32;
 const MAX_HOSTS: usize = 16;
+const MAX_READ_PATHS: usize = crate::read_paths::MAX_READS;
 const MAX_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MINUTES: u32 = 30;
 const PROXY_NAMES: [&str; 4] = ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY"];
@@ -56,6 +57,10 @@ pub struct Custom {
     pub command: Vec<String>,
     pub pass_env: Vec<String>,
     pub allow_hosts: Vec<String>,
+    /// Folders and files that the session can read, not write
+    /// (`docs/specs/2026-11-25-agents-read-paths-local-port.md`). The
+    /// launch checks them with [`crate::read_paths::check`].
+    pub read_paths: Vec<PathBuf>,
 }
 
 /// An error of the file, with its line (from 1; 0 if no line applies).
@@ -93,6 +98,8 @@ struct RawAgent {
     pass_env: Vec<Spanned<String>>,
     #[serde(default)]
     allow_hosts: Option<Spanned<Vec<Spanned<String>>>>,
+    #[serde(default)]
+    read_paths: Option<Spanned<Vec<Spanned<String>>>>,
 }
 
 #[derive(Deserialize)]
@@ -235,11 +242,46 @@ fn check_agent(name: &str, raw: RawAgent, table: usize) -> Result<Custom, (usize
     for h in &hosts {
         check_host(h.get_ref()).map_err(|m| (h.span().start, m))?;
     }
+    let reads = match raw.read_paths {
+        Some(r) => {
+            let at = r.span().start;
+            let r = r.into_inner();
+            if r.len() > MAX_READ_PATHS {
+                return Err((
+                    at,
+                    format!("read_paths has more than {MAX_READ_PATHS} paths"),
+                ));
+            }
+            r
+        }
+        None => Vec::new(),
+    };
+    for r in &reads {
+        check_read_path(r.get_ref()).map_err(|m| (r.span().start, m))?;
+    }
     Ok(Custom {
         command: command.into_iter().map(Spanned::into_inner).collect(),
         pass_env: raw.pass_env.into_iter().map(Spanned::into_inner).collect(),
         allow_hosts: hosts.into_iter().map(Spanned::into_inner).collect(),
+        read_paths: reads
+            .into_iter()
+            .map(|r| PathBuf::from(r.into_inner()))
+            .collect(),
     })
+}
+
+/// A read path is absolute, not empty, with no `..` part and no NUL.
+fn check_read_path(p: &str) -> Result<(), String> {
+    let path = Path::new(p);
+    let dots = path
+        .components()
+        .any(|c| c == std::path::Component::ParentDir);
+    if p.is_empty() || p.contains('\0') || !path.is_absolute() || dots {
+        return Err(format!(
+            "read_paths {p:?} is not an absolute path with no .. part"
+        ));
+    }
+    Ok(())
 }
 
 /// The rule of the store for an agent name: 1 to 64 of a-z, 0-9 and `-`.
@@ -313,6 +355,9 @@ pub struct Adapter {
     /// The variables of the adapter, after the base list.
     pub pass_env: Vec<String>,
     pub allow_hosts: Vec<String>,
+    /// The read paths of the file, as written. The built-in adapters have
+    /// none.
+    pub read_paths: Vec<PathBuf>,
 }
 
 /// Resolves the adapter `name`: a built-in adapter or one of the file. The
@@ -321,6 +366,7 @@ pub struct Adapter {
 /// a session row is written.
 pub fn adapter(file: &AgentsFile, name: &str, path: Option<&OsStr>) -> Result<Adapter, String> {
     let prompt = PROMPT.to_string();
+    let mut read_paths = Vec::new();
     let (program, args, pass_env, allow_hosts) = match name {
         "claude-code" => (
             "claude".to_string(),
@@ -361,6 +407,7 @@ pub fn adapter(file: &AgentsFile, name: &str, path: Option<&OsStr>) -> Result<Ad
                 .ok_or_else(|| format!("no agent {name:?}: not built in and not in {FILE}"))?;
             let mut args: Vec<String> = c.command[1..].to_vec();
             args.push(prompt);
+            read_paths = c.read_paths.clone();
             (
                 c.command[0].clone(),
                 args,
@@ -377,6 +424,7 @@ pub fn adapter(file: &AgentsFile, name: &str, path: Option<&OsStr>) -> Result<Ad
         args,
         pass_env,
         allow_hosts,
+        read_paths,
     })
 }
 

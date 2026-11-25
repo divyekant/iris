@@ -135,10 +135,15 @@ fn mirror_sync_runs_understanding_so_search_finds_words_and_senders() {
     let dir = data_dir("mirror-understand");
     let store = Store::open(&dir).unwrap();
     add_account(&store, &gmail(fake.base_url()));
+    // A watch matches after the sync with no engine (issue #260). The
+    // synthetic mail has old dates, so the watch starts at time 0.
+    let watch = store.add_watch(&format!("from:{from}"), 0).unwrap();
 
     let (ok, out, err) = iris(&dir, &fake, &tokens, &["mirror", "sync"]);
     assert!(ok, "{err}");
     assert!(out.contains("understand: Run "), "{out}");
+    let matched = store.watch(watch).unwrap().unwrap();
+    assert!(matched.message.is_some(), "the watch did not match");
     for query in [word, format!("from:{from}")] {
         let (ok, out, err) = iris(&dir, &fake, &tokens, &["search", &query, "--json"]);
         assert!(ok, "{err}");

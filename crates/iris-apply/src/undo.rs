@@ -161,7 +161,7 @@ pub const CHANGE_LATER: &str =
 /// The arguments of the undo of the draft change entry `ledger`: the
 /// content before the change, with no subject for a reply (the draft keeps
 /// its subject). The same expression as the trigger `ledger_undo_insert`
-/// (migration 57). Refuses an entry that is not the newest entry of its
+/// (migration 58). Refuses an entry that is not the newest entry of its
 /// draft (view `ledger_can_undo`).
 fn change_args(c: &Connection, ledger: i64) -> iris_changeset::Result<String> {
     let args: Option<Option<String>> = c
