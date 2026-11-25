@@ -195,7 +195,7 @@ for each batch:
    `item_source`, `matter_item`, `matter_add` (a pending addition of
    migration 46) and the rows that hang on them.
 2. **Messages**: for each message: `header`, `body` (the trigger deletes the
-   search text), `message_label`, `attention_due`, `link_check`, `model_declined`,
+   search text), `message_label`, `attention_due`, `fixed_due`, `link_check`, `model_declined`,
    `sender_evidence`, `reply_draft`, `use_open`, and the `notice` rows of the
    message. Then the message row. Each raw message file that no message of
    another account uses is deleted, with the order of `clean_gone`: the file

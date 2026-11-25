@@ -198,6 +198,201 @@ pub fn recheck_links(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Resu
     }
 }
 
+/// Rows of `fixed_due` in one read of [`recheck_fixed`].
+pub const FIXED_CHECKS: i64 = 200;
+
+/// The fixed check of each message in `fixed_due` (store migration 54,
+/// decision D31): mail whose sender became or stopped being a `service`, or
+/// whose display name is the old or the new name of a known person. It runs
+/// the fixed steps again with no model: the hostile marks (the spoof check
+/// reads the known names) and the fixed rules (the code-signal rule reads
+/// the kind `service`). Only when the result differs from the stored one,
+/// it understands the message again with no model:
+/// - a new mark makes the message hostile: its items go;
+/// - a rule that matches now gives its items;
+/// - mail that no fixed rule covers now, and that the model never read (it
+///   was hostile, or a rule made its items), waits for the model as new mail
+///   does.
+///
+/// The check never calls the model, and mail whose model items still hold
+/// keeps them. A row goes only when the check read the state of now: a
+/// change during the check gives the message a new row. Gives the count of
+/// messages that it understood again. With `max`, it stops before one more
+/// message would be understood again: the run limit counts them, and the
+/// rest of the queue waits for the next run.
+pub fn recheck_fixed(store: &Store, now_ms: i64, max: Option<u64>) -> Result<u64> {
+    let mut done = 0;
+    let mut after = 0;
+    loop {
+        let rows: Vec<(i64, i64)> = store.read(|c| {
+            let mut st = c.prepare(
+                "SELECT id, message_id FROM fixed_due WHERE id > ?1 ORDER BY id LIMIT ?2",
+            )?;
+            let rows = st
+                .query_map([after, FIXED_CHECKS], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })?;
+        let Some(&(last, _)) = rows.last() else {
+            return Ok(done);
+        };
+        after = last;
+        for (row, id) in rows {
+            let start = store.read(|c| Ok(state(c, id, true)?))?;
+            // A file that Iris cannot read now keeps the row for the next run.
+            let Ok(differs) = fixed_differs(store, id, now_ms) else {
+                continue;
+            };
+            if differs && max.is_some_and(|n| done >= n) {
+                return Ok(done);
+            }
+            if differs {
+                // No model: the run ends with a refusal when the message
+                // needs the model. Write 1 has made it pending then.
+                match understand(store, id, &crate::budget::NoModel, now_ms) {
+                    Ok(_) | Err(Error::Model(..)) => done += 1,
+                    Err(_) => continue,
+                }
+            }
+            store.write(|tx| {
+                // With no change, the row goes only for the state that the
+                // check read; after a new run, for any state.
+                let same = differs || state(tx, id, true)? == start;
+                if same {
+                    tx.execute("DELETE FROM fixed_due WHERE id = ?1", [row])?;
+                }
+                Ok(())
+            })?;
+        }
+    }
+}
+
+/// Steps 1 to 3 for a message read from the store: one rule for
+/// [`understand`] and the fixed check. Mail past the read limit counts as
+/// cut text, and the mark `phishing` stays until a rebuild (section 6.7).
+fn analysis(raw: &[u8], raw_cut: bool, html_after: bool, cx: &Context, phishing: bool) -> Analysis {
+    let mut a = analyze_cut(raw, raw_cut, html_after, cx);
+    a.text.cut |= raw_cut;
+    if phishing {
+        a.marks.push(Mark::Phishing);
+    }
+    a
+}
+
+/// True when the fixed result of the understood received message `id` now
+/// (its hostile marks, or the rules of its rule items) is not the stored
+/// one. False for mail that is gone or your own. For mail that is not
+/// understood: true when the fixed steps alone complete it now.
+fn fixed_differs(store: &Store, id: i64, now_ms: i64) -> Result<bool> {
+    let row = read_row(store, id)?;
+    let own = row
+        .labels
+        .iter()
+        .any(|l| l == "SENT" || iris_store::DRAFT_OR_COPY.contains(&l.as_str()));
+    let understood: bool = store.read(|c| {
+        Ok(c.query_row(
+            "SELECT understood_at IS NOT NULL FROM message WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )?)
+    })?;
+    if row.gone || own || row.sha.is_none() {
+        return Ok(false);
+    }
+    let path = row
+        .sha
+        .as_deref()
+        .and_then(|s| store.content_path(s))
+        .ok_or(Error::NoMessage(id))?;
+    let (raw, raw_cut, html_after) = read_raw(&path)?;
+    let head = crate::Head::parse(&raw, row.authserv);
+    let (now, stored_marks, stored_rules, model_items) = store.read(|c| {
+        let now = inputs(
+            c,
+            id,
+            row.thread,
+            row.internal_date,
+            head.from_name.as_deref(),
+            head.from_addr.as_deref(),
+        )?;
+        let kind = match head.from_addr.as_deref() {
+            Some(a) => sender_kind_in(c, a)?,
+            None => Kind::Stranger,
+        };
+        let marks: String = c.query_row(
+            "SELECT coalesce(hostile, '[]') FROM message WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )?;
+        let mut rules = Vec::new();
+        let mut model = false;
+        let mut st = c.prepare_cached(
+            "SELECT i.derived_by, json_extract(i.doc, '$.derived.rule') FROM item_droppable d
+               JOIN item i ON i.id = d.item_id WHERE d.message_id = ?1",
+        )?;
+        for r in st.query_map([id], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, Option<String>>(1)?,
+            ))
+        })? {
+            match r? {
+                (Some(by), Some(rule)) if by == "rule" => rules.push(rule),
+                _ => model = true,
+            }
+        }
+        Ok(((now, kind), marks, rules, model))
+    })?;
+    let (inputs_now, kind) = now;
+    let known = |_: &str| inputs_now.known.clone();
+    let cx = Context {
+        me: &row.me,
+        kind,
+        labels: &row.labels,
+        authserv: row.authserv,
+        internal_date: row.internal_date,
+        now_ms,
+        known_person: &known,
+        existing: &inputs_now.pinned,
+        thread: &inputs_now.context,
+        same_sender: &inputs_now.same,
+        known: &inputs_now.parties,
+    };
+    let a = analysis(&raw, raw_cut, html_after, &cx, row.phishing);
+    if !understood {
+        // Pending mail, or mail that a model try limit or a refusal holds:
+        // understood again only when the fixed steps alone complete it now.
+        return Ok(decide(&a, &cx, None).is_ok_and(|d| d.hostile || !d.waiting));
+    }
+    if marks_json(&a.marks, false) != stored_marks {
+        return Ok(true);
+    }
+    // With no model, `decide` makes no call and gives no error.
+    let Ok(d) = decide(&a, &cx, None) else {
+        return Ok(true);
+    };
+    if d.hostile {
+        return Ok(false);
+    }
+    let mut stored_rules = stored_rules;
+    stored_rules.sort();
+    Ok(if d.waiting {
+        // The model reads the mail: a rule item does not hold now.
+        !stored_rules.is_empty()
+    } else {
+        let mut now: Vec<String> = d
+            .drafts
+            .iter()
+            .filter_map(|x| match x.by {
+                crate::By::Rule(r) => Some(r.to_string()),
+                crate::By::Model => None,
+            })
+            .collect();
+        now.sort();
+        model_items || now != stored_rules
+    })
+}
+
 /// For the received message `id`: true when it has a deceptive link, with
 /// the content hash that the check read. False when it has none, is gone,
 /// is your own mail or has no content. `None` when Iris cannot read the
@@ -295,12 +490,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         same_sender: &first.same,
         known: &[],
     };
-    let mut a = analyze_cut(&raw, raw_cut, html_after, &cx);
-    a.text.cut |= raw_cut;
-    // The mark phishing stays until a rebuild (section 6.7).
-    if row.phishing {
-        a.marks.push(Mark::Phishing);
-    }
+    let a = analysis(&raw, raw_cut, html_after, &cx, row.phishing);
     // A draft is not understood and is not hostile mail (section 6.7).
     let marks = if draft { Vec::new() } else { a.marks.clone() };
 
