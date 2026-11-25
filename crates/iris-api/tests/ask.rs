@@ -168,6 +168,34 @@ async fn answers_with_the_summary_of_each_source() {
     )
     .await;
     assert_eq!(v["sources"][0]["stranger"], json!(false), "{v}");
+    // Sent mail is from the owner (spec 1 section 6.7), also when its From
+    // address has no sender row: not a stranger.
+    let id: i64 = v["sources"][0]["message"]["id"].as_str().unwrap()[2..]
+        .parse()
+        .unwrap();
+    s.write(|tx| {
+        tx.execute("DELETE FROM sender", [])?;
+        tx.execute(
+            "INSERT OR IGNORE INTO label(account_id, provider_id, name, kind)
+             SELECT account_id, 'SENT', 'SENT', 'system' FROM message WHERE id = ?1",
+            [id],
+        )?;
+        Ok(tx.execute(
+            "INSERT OR IGNORE INTO message_label(message_id, label_id)
+             SELECT m.id, l.id FROM message m JOIN label l
+               ON l.account_id = m.account_id AND l.provider_id = 'SENT' WHERE m.id = ?1",
+            [id],
+        )?)
+    })
+    .unwrap();
+    let (_, v) = ask(
+        &s,
+        fake(reply),
+        r#"{"question": "When does my flight leave?"}"#,
+        true,
+    )
+    .await;
+    assert_eq!(v["sources"][0]["stranger"], json!(false), "{v}");
     // No match: no call and no answer.
     let (code, v) = ask(&s, fake(reply), r#"{"question": "weather in Oslo"}"#, true).await;
     assert_eq!(code, StatusCode::OK);

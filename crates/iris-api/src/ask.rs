@@ -11,7 +11,7 @@ use iris_understand::budget::ModelRow;
 use iris_understand::Model;
 use serde::Serialize;
 
-use crate::read::{message_row, sender_kind, MessageSummary};
+use crate::read::{is_sent, message_row, sender_kind, MessageSummary};
 use crate::{Error, Result};
 
 /// Makes the model client of a `model_setting` row. The program builds an
@@ -69,7 +69,9 @@ pub fn answer(store: &Store, connect: &Connect, question: &str, now_ms: i64) -> 
         for s in &a.sources {
             if ask::current(&tx, s)? {
                 if let Some((m, _)) = message_row(&tx, s.message)? {
-                    let stranger = sender_kind(&tx, m.from.address.as_deref())? == "stranger";
+                    // Sent mail is from the owner (spec 1 section 6.7).
+                    let stranger = !is_sent(&tx, s.message)?
+                        && sender_kind(&tx, m.from.address.as_deref())? == "stranger";
                     rows.insert(s.message, (m, stranger));
                 }
             }
