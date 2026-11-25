@@ -816,7 +816,7 @@ async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
         g.one::<String>("SELECT kind FROM sender WHERE address = 'ana@paypal.com'"),
         "stranger"
     );
-        // A sender that is not an engine near copy: no trust, no write.
+    // A sender that is not an engine near copy: no trust, no write.
     let (code, v) = g.answer(&s.ana, "trust").await;
     assert_eq!(code, StatusCode::CONFLICT);
     assert!(v["error"].as_str().unwrap().contains("near copy"), "{v}");
