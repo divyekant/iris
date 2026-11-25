@@ -807,6 +807,35 @@ The `hostile` column of the message holds each mark that applies:
 A message with the label `SENT` is your mail. It never gets the marks `dmarc`,
 `spoof` and `link`, because these marks test mail that you receive.
 
+The display name is input that Iris does not control. This is the failure
+list of the name-address part of the mark `spoof` (decision D32):
+
+- Supported input: a display name, decoded from RFC 2047, of any length and
+  any characters. The check splits the name into words at white space and at
+  the signs `"` `'` `<` `>` `(` `)` `[` `]` `,` `;` `:` and backtick. It
+  removes `.`, `!` and `?` at the ends of each word. A full-width at sign
+  (U+FF20, U+FE6B) counts as `@`.
+- An address in the name is a word with one `@`, a local part that is not
+  empty, and a domain with a dot and no empty label. Other words are text.
+- The owner of an address is its registrable domain by the public suffix
+  list, in punycode. A domain with a suffix that the list does not know has
+  its last label as the suffix. A domain that is only a public suffix (as
+  `co.uk`) is its own owner.
+- Failure modes and their results:
+
+| Input | Result |
+|---|---|
+| No word of the name is an address (for example `ceo at bank dot example`, `a@b`, `@bank.example`) | No mark from this rule. |
+| An address in the name has the owner of the `From` address, or is the `From` address | No mark from this rule. |
+| One address in the name has another owner, also next to an address with the same owner | The mark `spoof`. |
+| A word has two `@` (`a@b@c.example`) | Not an address. No mark from this word. |
+| A name with the word `via`, in any case | No mark from this rule, also when the name holds an address of another owner. |
+| No `From` address that Iris can read | No display name, so no mark from this rule. |
+| A `From` address with an empty domain (`x@`) | Each address in the name has another owner: the mark `spoof`. |
+
+- Safe result for all other input: no mark from this rule. The other rules
+  of the mark `spoof`, and the marks `dmarc` and `link`, still apply.
+
 The engine computes the marks `dmarc`, `spoof`, `link` and `spam` again at each change
 of the label set of the message. The mark `phishing` stays until a rebuild.
 When a mark is set, or the last mark is cleared, the engine runs understanding
