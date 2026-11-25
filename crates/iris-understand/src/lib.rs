@@ -282,18 +282,23 @@ fn name_domain(text: &str) -> String {
                     | G::FinalPunctuation
             )
     };
+    // Memory: one String of the length of the mapped domain. An ASCII
+    // character allocates nothing more; a non-ASCII character allocates
+    // its short mapping for one step only.
     let uts46 = Uts46::new();
-    let mut out = String::new();
+    let mut out = String::with_capacity(text.len());
     let mut one = [0u8; 4];
     'text: for c in text.chars() {
-        let mapped = if c.is_ascii() {
-            std::borrow::Cow::Owned(c.to_ascii_lowercase().to_string())
-        } else {
-            let one = c.encode_utf8(&mut one).as_bytes();
-            uts46
-                .to_unicode(one, AsciiDenyList::EMPTY, Hyphens::Allow)
-                .0
-        };
+        if c.is_ascii() {
+            let c = c.to_ascii_lowercase();
+            if ends(c) {
+                break;
+            }
+            out.push(c);
+            continue;
+        }
+        let one = c.encode_utf8(&mut one).as_bytes();
+        let mapped = uts46.to_unicode(one, AsciiDenyList::EMPTY, Hyphens::Allow).0;
         for m in mapped.chars() {
             if ends(m) {
                 break 'text;
@@ -301,7 +306,8 @@ fn name_domain(text: &str) -> String {
             out.push(m);
         }
     }
-    out.trim_end_matches('.').to_string()
+    out.truncate(out.trim_end_matches('.').len());
+    out
 }
 
 /// The punctuation that a domain label can hold after the UTS 46 mapping:
