@@ -241,11 +241,10 @@ pub fn name_address_spoof(name: &str, from: &str) -> bool {
             let (local, domain) = w.split_once('@')?;
             // The domain ends at the first ASCII character that a domain
             // cannot hold (#911): "a@bank.example/help", and at Unicode
-            // punctuation (#982): "a@bank.example—help". All other
-            // characters stay (letters, marks, format characters and the
-            // dots that IDNA reads as "."), so a mixed-script, reversed or
-            // longer domain still differs.
-            let end = domain.find(ends_domain).unwrap_or(domain.len());
+            // punctuation that no valid domain holds (#982):
+            // "a@bank.example—help". All other characters stay, so a
+            // mixed-script, reversed or longer domain still differs.
+            let end = domain_end(domain);
             let domain = domain[..end].trim_end_matches('.');
             let w = format!("{local}@{domain}");
             let ok = !local.is_empty()
@@ -257,23 +256,39 @@ pub fn name_address_spoof(name: &str, from: &str) -> bool {
         .any(|a| a != from.to_lowercase() && owner(&a) != from_owner)
 }
 
-/// A character that ends the domain of an address in a display name.
-fn ends_domain(c: char) -> bool {
+/// The end of the domain of an address in a display name: the first ASCII
+/// character that a domain cannot hold, or the first Unicode punctuation
+/// character (#982). The punctuation that IDNA2008 allows in a label
+/// ([`IDNA_PUNCTUATION`]) and the dots that IDNA reads as "." stay, so
+/// `company.jp・日本.com` stays whole.
+fn domain_end(domain: &str) -> usize {
     use unicode_general_category::{get_general_category, GeneralCategory as G};
-    if c.is_ascii() {
-        return !(c.is_ascii_alphanumeric() || "-.@".contains(c));
-    }
-    !matches!(c, '\u{3002}' | '\u{FF0E}' | '\u{FF61}')
-        && matches!(
-            get_general_category(c),
-            G::DashPunctuation
-                | G::OtherPunctuation
-                | G::OpenPunctuation
-                | G::ClosePunctuation
-                | G::InitialPunctuation
-                | G::FinalPunctuation
-        )
+    domain
+        .find(|c: char| {
+            if c.is_ascii() {
+                return !(c.is_ascii_alphanumeric() || "-.@".contains(c));
+            }
+            !IDNA_PUNCTUATION.contains(&c)
+                && matches!(
+                    get_general_category(c),
+                    G::DashPunctuation
+                        | G::OtherPunctuation
+                        | G::OpenPunctuation
+                        | G::ClosePunctuation
+                        | G::InitialPunctuation
+                        | G::FinalPunctuation
+                )
+        })
+        .unwrap_or(domain.len())
 }
+
+/// The punctuation that a domain can hold: the exceptions of RFC 5892
+/// section 2.6 (U+00B7, U+05F3, U+05F4, U+0F0B and U+30FB; IDNA2008
+/// disallows each other punctuation character), and the dots that IDNA
+/// maps to "." (U+3002, U+FF0E and U+FF61).
+pub const IDNA_PUNCTUATION: [char; 8] = [
+    '\u{00B7}', '\u{05F3}', '\u{05F4}', '\u{0F0B}', '\u{30FB}', '\u{3002}', '\u{FF0E}', '\u{FF61}',
+];
 
 /// True when the links of a received message give the mark `link`
 /// ([`link::deceptive`]). The caller skips your sent mail.
