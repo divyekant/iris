@@ -653,7 +653,7 @@ fn marks_agree_with_the_flags_for_random_text() {
 /// word does not split it in two.
 #[test]
 fn a_copied_run_with_combining_marks_gives_untrusted_content() {
-    let dir = TempDir::new("marks");
+    let dir = TempDir::new("marks-set");
     let s = store(&dir);
     let a = s
         .read(|c| Ok(c.query_row("SELECT id FROM account", [], |r| r.get::<_, i64>(0))?))
