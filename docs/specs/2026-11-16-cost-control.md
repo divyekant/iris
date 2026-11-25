@@ -69,9 +69,13 @@ pay again for the same mail.
 - The check runs at two places. After each run that ends (a success, or
   a failed try), two short walks check the later messages that can hold
   the message in their context: they stop after 3 context messages of the
-  thread, and after 5 texts of the same sender. And for each thread in
+  thread, and after 5 texts of the same sender. They read only rows to
+  check or to count (understood mail that is not hostile, and for the
+  sender walk mail with a text), so mail that waits for its first run
+  costs nothing. Hostile mail records "-": no context shaped it. And for each thread in
   `talk_due` (a message that goes away, new content, a new or changed
-  clean text, a message that moves to another thread or date, the start
+  clean text or sender address, a message that moves to another thread
+  or date, the start
   or the end of a link check, a sender kind change), it checks each
   understood message of the
   thread, 200 rows at a time. A difference that is only a message that

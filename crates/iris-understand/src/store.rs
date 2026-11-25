@@ -738,7 +738,9 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         keep_choices(tx, message)?;
         // The thread context counts only through a model call, and only
         // as far as the budget of the data held it.
-        let kept = if d.calls == 0 {
+        let kept = if d.hostile {
+            None
+        } else if d.calls == 0 {
             Some(0)
         } else if d.context_kept < after.context.len() {
             Some(d.context_kept)
@@ -753,7 +755,12 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
                 message,
                 now_ms,
                 fixed_rules(&d),
-                context_key(tx, message, kept, false)?
+                if d.hostile {
+                    // Hostile mail reads no context and makes no item.
+                    Some("-".to_string())
+                } else {
+                    context_key(tx, message, kept, false)?
+                }
             ],
         )?;
         // Issue 1049: this message can be context of the later messages of
@@ -1238,6 +1245,10 @@ fn check_one(
         )?;
         return Ok(false);
     };
+    if recorded == "-" {
+        // Hostile mail: no context shaped its run.
+        return Ok(false);
+    }
     let kept = kept_of(&recorded);
     if context_key(tx, id, kept, false)?.as_deref() == Some(recorded.as_str())
         || context_key(tx, id, kept, true)?.as_deref() == Some(recorded.as_str())
@@ -1317,6 +1328,12 @@ fn check_after(tx: &rusqlite::Connection, message: i64) -> rusqlite::Result<(usi
         " FROM message m WHERE m.thread_id = ?1 AND m.id <> ?2 AND m.internal_date > ?3
            AND (?4 IS NULL OR EXISTS (SELECT 1 FROM header h
                                       WHERE h.message_id = m.id AND h.from_addr = ?4))
+           -- Only a row to check or to count: an understood message that is
+           -- not hostile mail (its record is not '-'), or for the sender
+           -- walk a message with a text. Mail that waits for its first run
+           -- is neither, so a new thread costs no long walk.
+           AND ((m.understood_at IS NOT NULL AND m.context IS NOT '-')
+                OR (?4 IS NOT NULL AND EXISTS (SELECT 1 FROM body b WHERE b.message_id = m.id)))
          ORDER BY m.internal_date, m.id"
     ))?;
     let mut due = std::collections::BTreeMap::new();

@@ -9,7 +9,7 @@
 --    with `t` the newest 3 earlier messages of the thread and `s` the
 --    earlier messages of the same sender. "t!:" marks a run whose model
 --    data held only the listed thread messages (the budget cut the others,
---    or no model call ran). NULL for a message that no run understood
+--    or no model call ran). "-" marks hostile mail: no context shaped it. NULL for a message that no run understood
 --    since this migration. The first check of such a row records its
 --    context now and runs nothing again (limit issue #1119: a change
 --    before the migration is not seen).
@@ -24,8 +24,9 @@
 --    (`context_gone`). So does the start and the end of a link check
 --    (`link_check`, migration 20): while it waits, a message may be
 --    hostile, and it is not context (`may_be_hostile!`). So does a new
---    or changed clean text (`body`), and a message that sync moves to
---    another thread or another date (both threads).
+--    or changed clean text (`body`), a new or changed sender address
+--    (`header`), and a message that sync moves to another thread or
+--    another date (both threads).
 ALTER TABLE message ADD COLUMN context TEXT;
 
 CREATE TRIGGER context_gone AFTER UPDATE OF gone_at ON message
@@ -81,4 +82,26 @@ BEGIN
   INSERT INTO talk_due(thread_id) SELECT NEW.thread_id
     WHERE NEW.thread_id IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = NEW.thread_id);
+END;
+
+CREATE TRIGGER context_header_add AFTER INSERT ON header
+BEGIN
+  INSERT INTO talk_due(thread_id) SELECT m.thread_id FROM message m
+    WHERE m.id = NEW.message_id AND m.thread_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = m.thread_id);
+END;
+
+CREATE TRIGGER context_header AFTER UPDATE OF from_addr, message_id ON header
+  WHEN OLD.from_addr IS NOT NEW.from_addr OR OLD.message_id IS NOT NEW.message_id
+BEGIN
+  INSERT INTO talk_due(thread_id) SELECT m.thread_id FROM message m
+    WHERE m.id IN (OLD.message_id, NEW.message_id) AND m.thread_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = m.thread_id);
+END;
+
+CREATE TRIGGER context_header_remove AFTER DELETE ON header
+BEGIN
+  INSERT INTO talk_due(thread_id) SELECT m.thread_id FROM message m
+    WHERE m.id = OLD.message_id AND m.thread_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = m.thread_id);
 END;

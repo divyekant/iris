@@ -1312,7 +1312,7 @@ fn the_upgrade_drops_the_items_of_a_draft_or_copy() {
     // The store of version 41: no view and no item trigger.
     b.store
         .write(|tx| {
-            tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER IF EXISTS spam_drops_items; DROP TRIGGER IF EXISTS spam_back_drops_items; DROP VIEW item_droppable;")?;
+            tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER IF EXISTS spam_drops_items; DROP TRIGGER IF EXISTS spam_back_drops_items; DROP VIEW item_droppable;")?;
             Ok(())
         })
         .unwrap();
@@ -2708,7 +2708,7 @@ Your one-time code is 918273. It ends in 10 minutes.
             "upgrade" => {
                 sql(
                     &b,
-                    "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                    "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                      ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
                 );
                 let Box_ {
@@ -2810,7 +2810,7 @@ Your one-time code is 918273. It ends in 10 minutes.
     b.store
         .write(|tx| {
             Ok(tx.execute_batch(
-                "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                  ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
             )?)
         })
@@ -2886,7 +2886,7 @@ Your one-time code is 918273. It ends in 10 minutes.
     b.store
         .write(|tx| {
             Ok(tx.execute_batch(
-                "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                  ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
             )?)
         })
@@ -3321,4 +3321,75 @@ fn a_message_that_moves_to_another_thread_leaves_the_context_of_the_old_one() {
     assert_eq!(moved, m1);
     drain(&b, &fake, &mut last);
     assert!(!last[&m2].contains("Words k1k."), "{}", last[&m2]);
+}
+
+/// Issue 1049, pre-review: sync saves a new sender address for an earlier
+/// message with the same content (a header with no new body). A later
+/// message of the old sender, out of the thread walk, runs again.
+#[test]
+fn a_new_header_sender_with_the_same_content_runs_the_later_mail_again() {
+    let b = store("context-header");
+    let a =
+        |text: &str| format!("From: a@example.net\nTo: owner@example.com\nSubject: S\n\n{text}\n");
+    let m1 = b.add_in("1", "t", NOW - 9 * DAY, &a("First words."), &["INBOX"]);
+    for k in 2..=5 {
+        b.add_in(
+            &k.to_string(),
+            "t",
+            NOW - (10 - k as i64) * DAY,
+            &context_mail(k),
+            &["INBOX"],
+        );
+    }
+    let m6 = b.add_in("6", "t", NOW - DAY, &a("Last words."), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m6);
+    assert!(recorded.contains(&format!(";s:{m1}:")), "{recorded}");
+    let sha: String = b.col("SELECT content_sha256 FROM message WHERE id = ?1", m1);
+    b.store
+        .put_messages(
+            b.account,
+            &[NewMessage {
+                provider_id: "1".into(),
+                thread_provider_id: "t".into(),
+                content_sha256: Some(sha),
+                internal_date: Some(NOW - 9 * DAY),
+                labels: vec!["INBOX".into()],
+                header: iris_store::Header {
+                    from_addr: Some("b@example.net".into()),
+                    ..Default::default()
+                },
+                ..NewMessage::default()
+            }],
+        )
+        .unwrap();
+    drain(&b, &fake, &mut last);
+    let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m6);
+    assert!(recorded.ends_with(";s:"), "{recorded}");
+}
+
+/// Issue 1049, pre-review: in a new thread, the later messages wait for
+/// their first run. The check after the run of the first message reads
+/// none of them.
+#[test]
+fn the_check_after_a_run_skips_mail_that_waits_for_its_first_run() {
+    let b = store("context-pending");
+    let ids: Vec<i64> = (1..=60)
+        .map(|k| {
+            b.add_in(
+                &k.to_string(),
+                "t",
+                NOW - DAY * 100 + k as i64 * 1000,
+                &context_mail(k),
+                &["INBOX"],
+            )
+        })
+        .collect();
+    understand(&b.store, ids[0], &Fake::default(), NOW).unwrap();
+    assert_eq!(
+        iris_understand::store::check_later(&b.store, ids[0]).unwrap(),
+        0
+    );
 }
