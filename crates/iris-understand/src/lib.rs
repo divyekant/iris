@@ -298,7 +298,9 @@ fn name_domain(text: &str) -> String {
             continue;
         }
         let one = c.encode_utf8(&mut one).as_bytes();
-        let mapped = uts46.to_unicode(one, AsciiDenyList::EMPTY, Hyphens::Allow).0;
+        let mapped = uts46
+            .to_unicode(one, AsciiDenyList::EMPTY, Hyphens::Allow)
+            .0;
         for m in mapped.chars() {
             if ends(m) {
                 break 'text;
