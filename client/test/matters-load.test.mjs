@@ -118,10 +118,13 @@ test("a new proposal during the Undo time keeps the card and its hold, and shows
   }
 });
 
-test("a failed matter decision stays on the card when a newer proposal came during the hold (issue 345)", async () => {
+test("a failed matter decision stays on the card when a newer proposal came during the hold, and a changed proposal loads again (issue 345)", async () => {
   for (const [status, words, close] of [
     [400, /Iris did not record it/, true],
     [500, /Iris does not know if it recorded the decision/, false],
+    // The proposal changed after the load: the brief loads it again, with no Close.
+    [404, null, false],
+    [409, null, false],
   ]) {
     let proposed = list("g-5");
     const g7 = { ...as("g-7"), matter: { ...as("g-7").matter, title: "Roof repair" } };
@@ -137,6 +140,10 @@ test("a failed matter decision stays on the card when a newer proposal came duri
       await until(() => /Iris sees a matter/.test(text(view.target)));
       press("Not a matter");
       proposed = list("g-7", "g-5");
+      if (!words) {
+        await until(() => /Roof repair/.test(text(view.target)));
+        continue;
+      }
       await until(() => words.test(text(view.target)));
       // Polls go on, and the card keeps the result for the person to read.
       await new Promise((r) => setTimeout(r, 100));

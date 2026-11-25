@@ -94,11 +94,15 @@
       ondecided?.(answer);
     } catch (error) {
       // The card stays held: the person reads the result, and Close (or a reload) ends the hold.
+      // A 404 or a 409 is the exception below: the view loads the proposal again.
       const status = (error as { status?: number }).status ?? 0;
       // A 4xx answer wrote nothing. With no answer, or a 5xx, Iris cannot say.
       phase = { at: "failed", why: (error as Error).message, known: status >= 400 && status < 500 };
       // A 404 or a 409: the proposal changed after the page loaded it. Load it again.
-      if (status === 404 || status === 409) ondecided?.(null);
+      if (status === 404 || status === 409) {
+        onheld?.(false);
+        ondecided?.(null);
+      }
     }
   }
 
