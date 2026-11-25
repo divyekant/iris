@@ -222,8 +222,11 @@ fn a_missing_raw_message_fails_the_export() {
     );
     // #245: no file of the stopped export stays, and nothing looks complete.
     assert_eq!(fs::read_dir(&dest.0).unwrap().count(), 0);
-    let name = dest.0.file_name().unwrap().to_string_lossy();
-    assert!(!dest.0.with_file_name(format!(".{name}.partial")).exists());
+    let name = format!(".{}.partial", dest.0.file_name().unwrap().to_string_lossy());
+    let partial = fs::read_dir(dest.0.parent().unwrap())
+        .unwrap()
+        .any(|e| e.unwrap().file_name().to_string_lossy().starts_with(&name));
+    assert!(!partial);
     // The same folder takes the next export.
     fs::write(store.content_path(&shas[1]).unwrap(), raw(1)).unwrap();
     assert_eq!(iris_api::export(&store, &dest.0).unwrap().files, 3);
@@ -237,17 +240,53 @@ fn each_message_says_if_it_is_hostile_mail() {
     let dest = temp("hostile-out");
     let store = Store::open(&dir.0).unwrap();
     mailbox(&store, 2);
+    // An item of the second message, which then becomes hostile mail.
+    let item = exec(
+        &store,
+        "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+         VALUES ('commitment', 1, 'open', '{}', 0, 0)",
+        [],
+    );
+    exec(
+        &store,
+        "INSERT INTO item_source(item_id, message_id, role) VALUES (?1, 2, 'origin')",
+        [item],
+    );
     exec(
         &store,
         "UPDATE message SET hostile = '[\"x\"]' WHERE id = 2",
         [],
     );
     iris_api::export(&store, &dest.0).unwrap();
-    let got: Vec<_> = lines(&dest.0.join("messages.jsonl"))
-        .iter()
-        .map(|m| m["hostile_mail"].clone())
-        .collect();
+    let messages = lines(&dest.0.join("messages.jsonl"));
+    let got: Vec<_> = messages.iter().map(|m| m["hostile_mail"].clone()).collect();
     assert_eq!(got, [Value::Bool(false), Value::Bool(true)]);
+    // The message names its item, so a reader can tell the item of hostile mail.
+    let id = format!("c-{item}");
+    assert_eq!(messages[1]["items"], serde_json::json!([id]));
+    assert!(lines(&dest.0.join("items.jsonl"))
+        .iter()
+        .any(|i| i["id"] == id));
+}
+
+/// #245: the export never removes or writes into a folder that it did not
+/// make, also one with the name of an old partial folder.
+#[test]
+fn the_export_leaves_other_folders_alone() {
+    let dir = temp("other");
+    let dest = temp("other-out");
+    let store = Store::open(&dir.0).unwrap();
+    mailbox(&store, 1);
+    let name = dest.0.file_name().unwrap().to_string_lossy().to_string();
+    let other = TempDir(dest.0.with_file_name(format!(".{name}.partial")));
+    fs::create_dir_all(&other.0).unwrap();
+    fs::write(other.0.join("mine.txt"), "keep").unwrap();
+    iris_api::export(&store, &dest.0).unwrap();
+    assert_eq!(
+        fs::read_to_string(other.0.join("mine.txt")).unwrap(),
+        "keep"
+    );
+    assert!(dest.0.join("items.jsonl").is_file());
 }
 
 #[test]

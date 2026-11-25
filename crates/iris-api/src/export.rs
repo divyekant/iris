@@ -8,7 +8,7 @@ use std::path::Path;
 
 use iris_store::{format_id, new_private_dir, Kind, Store};
 
-use crate::read::{doc_of, message_in, MATTER};
+use crate::read::{doc_of, item_id, message_in, MATTER};
 use crate::Result;
 
 /// What [`export`] wrote.
@@ -47,10 +47,12 @@ fn line(out: &mut impl Write, v: &impl serde::Serialize) -> io::Result<()> {
 /// refers to a content file that is not there is an error
 /// ([`iris_store::Error::MissingContent`]): the export is not complete.
 ///
-/// The files go to the folder `.<name>.partial` next to `dest` first, and a
-/// rename moves them into `dest` at the end. After an error, `dest` stays
-/// empty and the partial folder is removed. After a crash, only the folder
-/// with `.partial` in its name holds files (#245).
+/// The files go to a new folder `.<name>.partial-<process>-<time>` next to
+/// `dest` first, and a rename moves them into `dest` at the end. The export
+/// makes that folder itself and fails if the name is taken, so it never
+/// writes into or removes a folder that it did not make. After an error,
+/// `dest` stays empty and the export removes its partial folder. After a
+/// crash, only a folder with `.partial` in its name holds files (#245).
 pub fn export(store: &Store, dest: &Path) -> Result<Exported> {
     // The content cleanup cannot delete a raw message during the export.
     let _lock = store.backup_lock()?;
@@ -60,15 +62,19 @@ pub fn export(store: &Store, dest: &Path) -> Result<Exported> {
             "the export folder must have a name".into(),
         ));
     };
-    let partial = dest.with_file_name(format!(".{}.partial", name.to_string_lossy()));
-    // The folder of an export that stopped: Iris made it, and it is not complete.
-    match fs::remove_dir_all(&partial) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => {
-            return Err(iris_store::Error::from(e).into())
-        }
-        _ => {}
-    }
-    new_private_dir(&partial)?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let partial = dest.with_file_name(format!(
+        ".{}.partial-{}-{nanos}",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    // Not recursive: an existing folder of that name is an error, never ours.
+    let mut b = fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+    b.create(&partial).map_err(iris_store::Error::from)?;
     let n = match write(store, &partial) {
         Ok(n) => n,
         Err(e) => {
@@ -109,6 +115,10 @@ fn write(store: &Store, dest: &Path) -> iris_store::Result<Exported> {
             "SELECT m.id, m.content_sha256, {} FROM message m ORDER BY m.id",
             iris_store::hostile_mail!()
         ))?;
+        let mut links = tx.prepare(
+            "SELECT i.id, i.form FROM item_source s JOIN item i ON i.id = s.item_id
+             WHERE s.message_id = ?1 ORDER BY i.id",
+        )?;
         let mut rows = st.query([])?;
         while let Some(r) = rows.next()? {
             let (row, sha, hostile): (i64, Option<String>, bool) =
@@ -135,6 +145,13 @@ fn write(store: &Store, dest: &Path) -> iris_store::Result<Exported> {
                 None => None,
             };
             let mut v = serde_json::to_value(&m).map_err(io::Error::from)?;
+            // Each item of the message, as `items.jsonl` has them: also a
+            // gone item and an item of hostile mail, which the API hides.
+            v["items"] = links
+                .query_map([row], |r| Ok(item_id(r.get(0)?, &r.get::<_, String>(1)?)))?
+                .filter_map(|i| i.transpose())
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .into();
             v["file"] = file.into();
             v["hostile_mail"] = hostile.into();
             line(&mut messages, &v)?;
