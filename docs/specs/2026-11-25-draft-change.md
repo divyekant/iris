@@ -303,7 +303,9 @@ not the form, while it can still leave (for `"new"`, the old draft can
 still change). This is also true when the send of that write stops the
 change of the draft (`change` is `null`, issue 1098), and after "Write
 another" (issue 1101): only the end of the write (sent or stopped) ends
-the record. When the write ends, the form shows if the draft could change
+the record. The write shows also when the thread of a reply has no mail
+to reply to now (its parent is in Trash): then it shows with no
+conversation and no form. When the write ends, the form shows if the draft could change
 when the link opened. Else the view shows the end of the write.
 
 "Change and send" in a draft link view opens the form in place only for

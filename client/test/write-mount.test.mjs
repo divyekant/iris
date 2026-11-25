@@ -1377,3 +1377,41 @@ test("Change and send of another draft on a draft link opens the link of that dr
     delete globalThis.location;
   }
 });
+
+test("a kept write of a reply draft link shows also when its thread has no mail to reply to (issue 1098)", async () => {
+  const api = await load("/src/api.ts");
+  const R7 = { ...D7, thread: "t-2", subject: "Re: Q4" };
+  let state = { state: "waiting", draft: "d-7", sending: true, leaves_at: null };
+  const net = serve((path) => {
+    if (path === "write/cs-1") return [200, state];
+    if (path === "threads/t-2/reply") return [409, { error: "This thread has no mail to reply to." }];
+    if (path.startsWith("drafts/d-7")) return [200, { ...R7, change: R7.change }];
+    return [404, { error: "Not found." }];
+  });
+  try {
+    for (const change of [null, "update"]) {
+      R7.change = change;
+      window.sessionStorage.clear();
+      // With no kept write: a closed draft says why, and a draft that can change needs its thread.
+      if (change === null) assert.deepEqual(await api.loadChange("d-7"), { closed: { ...R7, change: null } });
+      else await assert.rejects(api.loadChange("d-7"), /no mail to reply to/);
+      window.sessionStorage.setItem("iris.write.d-7.taken", JSON.stringify({ write: "cs-1", to: ["sam@okafor.example"], subject: "", body: "Hi Sam,\n" }));
+      const start = await api.loadChange("d-7");
+      assert.deepEqual(start, { accounts: [], change: { ...R7, change: null } });
+      state = { state: "waiting", draft: "d-7", sending: true, leaves_at: null };
+      const app = await mount("/src/views/Write.svelte", { start, every: 20 });
+      try {
+        await until(() => /Cancel the send/.test(text(app.target)));
+        assert.equal(app.target.querySelector("form"), null);
+        state = { state: "stopped", reason: "Cancelled in the outbox.", draft: "d-7", change: null };
+        await until(() => /This mail did not leave/.test(text(app.target)));
+        await new Promise((r) => setTimeout(r, 60));
+        assert.equal(app.target.querySelector("form"), null, "no form after the end");
+      } finally {
+        app.destroy();
+      }
+    }
+  } finally {
+    net.restore();
+  }
+});

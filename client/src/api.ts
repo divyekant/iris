@@ -407,8 +407,18 @@ export async function loadChange(id: string): Promise<ChangeStart> {
   const change = await get<DraftContent>(`drafts/${encodeURIComponent(id)}`);
   // A write of this draft link that can still leave shows its state, also when its
   // own send stops the change of the draft now (issue 1098).
-  if (!change.change && !keepsWrite(writePlace(id))) return { closed: change };
-  if (change.thread) return { thread: change.thread, reply: await get<ReplyStart>(`threads/${encodeURIComponent(change.thread)}/reply`), change };
+  const kept = keepsWrite(writePlace(id));
+  if (!change.change && !kept) return { closed: change };
+  if (change.thread) {
+    try {
+      return { thread: change.thread, reply: await get<ReplyStart>(`threads/${encodeURIComponent(change.thread)}/reply`), change };
+    } catch (e) {
+      if (!kept) throw e;
+      // The kept write needs no reply start (its parent can be in Trash now): it
+      // shows with no conversation, and with no change, so no form follows it.
+      return { accounts: [], change: { ...change, change: null } };
+    }
+  }
   return { accounts: (await get<Status>("status")).accounts, change };
 }
 
