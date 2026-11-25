@@ -386,7 +386,11 @@ fn a_draft_update_keeps_the_draft_id_and_replaces_its_message() {
     assert!(got.ends_with("\r\n\r\nBye\r\n"), "{got}");
     // Like a create, Gmail sets its own Message-ID.
     assert!(got.contains("Message-ID: <CACe_fake"), "{got}");
-    assert_eq!(fake.draft_ids(), [d.id.clone()], "no second draft");
+    assert_eq!(
+        fake.draft_ids(),
+        std::slice::from_ref(&d.id),
+        "no second draft"
+    );
     let puts = fake
         .requests()
         .iter()
