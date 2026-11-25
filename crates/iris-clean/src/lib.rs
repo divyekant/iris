@@ -107,8 +107,8 @@ pub struct Link {
 }
 
 /// True when `rest`, the part of a message past a cut, has a MIME part
-/// header with the type `text/html`: a mail client can show an HTML part
-/// there. `before` is the message from its start up to the cut: the scan
+/// header with the type `text/html`, `message/rfc822` or `message/global`:
+/// a mail client can show an HTML part there, also in an attached message. `before` is the message from its start up to the cut: the scan
 /// reads it first, for the boundaries that the headers declare and to know
 /// if the cut is in a header or in a body. Its HTML parts do not count.
 ///
@@ -241,7 +241,11 @@ impl PartScan {
                 }
             }
         }
+        // An attached message can hold an HTML part, with links that a mail
+        // client shows (issue #372).
         kind.starts_with(b"text/html")
+            || kind.starts_with(b"message/rfc822")
+            || kind.starts_with(b"message/global")
     }
 
     /// True for a delimiter line of a declared boundary: `--`, the
@@ -345,6 +349,7 @@ pub fn clean_cut(raw: &[u8], raw_cut: bool) -> Clean {
             &mut attach_left,
             &mut attachments,
             &mut attached,
+            at_end,
         );
     }
     Clean {
@@ -864,13 +869,15 @@ impl<'a> Walker<'a> {
 /// message. So the budget never has to go back. An attached message adds its
 /// own attachments after it: its text uses the budget first.
 /// Step 2 for one attachment. The links of an attached message go to
-/// `attached`.
+/// `attached`. `at_end` is the length of the raw message when it is a
+/// prefix of a longer message ([`clean_cut`]).
 fn attachment(
     f: File,
     parts: &mut usize,
     attach_left: &mut usize,
     out: &mut Vec<Attachment>,
     attached: &mut Links,
+    at_end: Option<usize>,
 ) {
     let body = f.part.raw_body();
     let enc = f.enc;
@@ -881,6 +888,11 @@ fn attachment(
     let mut cut = false;
     let mut inner_attachments = Vec::new();
     if f.mime_type == "message/rfc822" {
+        // An attached message that reaches the end of a cut raw message
+        // can have more links past the cut.
+        if at_end.is_some_and(|end| f.part.offset_end() as usize >= end) {
+            attached.cut = true;
+        }
         // Also with no budget left, the walk lists the attachments of the
         // attached message.
         let had_budget = *attach_left > 0;
@@ -950,6 +962,9 @@ fn attachment(
                     attach_left,
                     &mut inner_attachments,
                     attached,
+                    // The parts of the attached message have offsets in its
+                    // own bytes: the check above covers the cut.
+                    None,
                 );
             }
         }

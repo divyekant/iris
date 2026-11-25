@@ -38,7 +38,7 @@ each input.
 
 ```rust
 pub fn clean(raw: &[u8]) -> Clean;
-pub struct Clean { pub subject: String, pub text: String, pub cut: bool, pub attachments: Vec<Attachment>, pub invitation: bool, pub links: Vec<Link>, pub links_cut: bool }
+pub struct Clean { pub subject: String, pub text: String, pub cut: bool, pub attachments: Vec<Attachment>, pub invitation: bool, pub links: Vec<Link>, pub links_cut: bool, pub attached_links: Vec<Link> }
 pub struct Link { pub text: String, pub href: String }
 pub struct Attachment { pub name: String, pub mime_type: String, pub size: u64, pub text: Option<String> }
 pub fn remove_repeated_end(text: &str, earlier: &[&str]) -> String;
@@ -233,7 +233,10 @@ not used makes no cut in either case.
   when the scan above finds an HTML part header in its bytes past the
   limit, when it is not 7bit, 8bit or binary (Iris does not scan the rest
   of another encoding), or when it holds an attached message that is not
-  read.
+  read. When the raw message is a prefix (`clean_cut`), an attached message
+  that reaches the cut sets `links_cut`, and the scan of the rest counts a
+  part header with the type `message/rfc822` or `message/global` as an
+  HTML part.
 - Images go out. The `alt` text stays, unless `width` or `height` is `0` or
   `1` (a tracking pixel).
 - Headings, lists, block quotes, `pre`, `hr` and line breaks become Markdown.
