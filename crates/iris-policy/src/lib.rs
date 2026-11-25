@@ -16,7 +16,7 @@ pub mod notice;
 pub mod propose;
 
 pub use active::{
-    active, confirm, file_state, next_rule_id, version_text, Active, Confirm, FileState,
+    active, confirm, file_state, next_rule_id, state, version_text, Active, Confirm, FileState,
 };
 pub use edit::{
     change, discard, edit_text, end_grants, grant_rule, Change, Discarded, Edited, DEFAULT_TEXT,
@@ -168,7 +168,7 @@ names!(
 
 names!(
     /// The values of the condition `recipients`. `thread`: each address in
-    /// To and Cc of the draft is in From, To or Cc of a live message of its
+    /// To, Cc and Bcc of the draft is in From, To or Cc of a live message of its
     /// thread, or is one of your addresses (decision D3).
     Recipients { Thread = "thread" }
 );

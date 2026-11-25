@@ -137,6 +137,8 @@ pub struct Read {
     /// True if the message has a `Bcc` header. A provider can remove it
     /// from a sent copy (send content spec, section 4).
     pub bcc_header: bool,
+    /// The `Date` header, in seconds since 1970, if the message has one.
+    pub date: Option<i64>,
 }
 
 impl Content {
@@ -678,6 +680,7 @@ fn read_with(raw: &[u8], account: &str, strict: bool) -> Option<Read> {
         reply,
         files,
         bcc_header: names.contains("bcc"),
+        date: m.date().map(|d| d.to_timestamp()),
     };
     // By construction: the message that Iris writes for this content has
     // the same recipient, subject and ID headers, as mail-parser reads them

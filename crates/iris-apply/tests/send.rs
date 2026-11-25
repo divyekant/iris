@@ -1579,27 +1579,478 @@ fn a_sent_copy_with_no_bcc_takes_the_approved_bcc_with_a_note() {
     assert_eq!(b.ledger_note(plain), None);
 }
 
-/// Until the apply of a change exists (part B2 of
-/// docs/specs/2026-11-25-draft-change.md), an approved change of a draft is
-/// denied with no provider call, and never makes a new draft.
+impl Box {
+    /// A new mail draft at Gmail and a person change of it, approved.
+    /// Gives the change action, the `d-N` ID and the Gmail draft ID.
+    fn changed(&self, args: Value) -> (i64, String, String) {
+        self.changed_from(mail(), args)
+    }
+
+    /// As [`Box::changed`], from a new mail with the content `first`.
+    fn changed_from(&self, first: Value, args: Value) -> (i64, String, String) {
+        iris_changeset::allow_draft_change(true);
+        let a = self.approved(Verb::Draft, "a-1", first, 0);
+        assert!(matches!(self.apply(a), Ok(Outcome::Applied(_))));
+        let (d, provider) = self.draft(a);
+        (self.approved(Verb::Draft, &d, args, 0), d, provider)
+    }
+
+    fn puts(&self) -> usize {
+        self.fake
+            .requests()
+            .iter()
+            .filter(|r| r.starts_with("PUT"))
+            .count()
+    }
+
+    /// The hash and the content of draft row 1.
+    fn row(&self) -> (String, String) {
+        self.store
+            .read(|c| {
+                Ok(
+                    c.query_row("SELECT hash, content FROM draft WHERE id = 1", [], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })?,
+                )
+            })
+            .unwrap()
+    }
+
+    /// The state, the call count, the undo and the error of the ledger
+    /// entry of `action`.
+    fn entry(&self, action: i64) -> (String, i64, String, Option<String>) {
+        self.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT state, call, undo, error FROM ledger WHERE action_id = ?1",
+                    [action],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?)
+            })
+            .unwrap()
+    }
+}
+
+fn new_text() -> Value {
+    json!({"to": ["priya@example.com"], "subject": "Q4 numbers", "body": "New text.\n"})
+}
+
+/// A change of a draft (docs/specs/2026-11-25-draft-change.md, section 2):
+/// one `drafts.update` of the same Gmail draft, no new draft, and the
+/// draft row keeps its ID with the new content.
 #[test]
-fn a_change_of_a_draft_is_denied_until_its_apply_exists() {
-    iris_changeset::allow_draft_change(true);
-    let b = setup("change-later");
-    let a = b.approved(Verb::Draft, "a-1", mail(), 0);
-    assert!(matches!(b.apply(a), Ok(Outcome::Applied(_))));
-    let (d, _) = b.draft(a);
+fn a_change_updates_the_draft_in_place() {
+    let b = setup("change");
+    let (change, d, provider) = b.changed(new_text());
+    let (old_hash, _) = b.row();
     let creates = b.posts("/drafts");
+    let o = b.apply(change);
+    assert!(matches!(o, Ok(Outcome::Applied(_))), "{o:?}");
+    assert_eq!(b.puts(), 1);
+    assert_eq!(b.posts("/drafts"), creates, "no new draft");
+    assert_eq!(b.state(change), "applied");
+    let (hash, content) = b.row();
+    assert_ne!(hash, old_hash);
+    assert!(content.contains("New text."), "{content}");
+    let raw = b.gmail.draft_raw(TOKEN, &provider).unwrap().raw.unwrap();
+    assert!(String::from_utf8_lossy(&raw).contains("New text."));
+    assert_eq!(
+        b.entry(change),
+        ("applied".into(), 1, "inverse".into(), None)
+    );
+    let (ops, pre): (String, String) = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT ops, pre FROM ledger WHERE action_id = ?1",
+                [change],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    let ops: Value = serde_json::from_str(&ops).unwrap();
+    assert_eq!(ops["call"], "drafts.update");
+    assert_eq!(ops["pre_hash"], json!(old_hash));
+    assert_eq!(ops["hash"], json!(hash));
+    assert_eq!(format!("d-{}", ops["draft"]), d);
+    let pre: Value = serde_json::from_str(&pre).unwrap();
+    assert_eq!(pre["draft"]["content"]["body"], "Hi Priya,\n\nHere.\n");
+    assert!(pre["date"].is_i64(), "{pre}");
+    // A send binds to the new content.
+    let send = b.approved(Verb::Send, &d, json!({}), AGED);
+    assert!(
+        matches!(b.release(send), Ok(Outcome::Applied(_))),
+        "{}",
+        b.state(send)
+    );
+}
+
+/// The same content again: no call, a final entry with no undo.
+#[test]
+fn the_same_content_again_makes_no_call() {
+    let b = setup("change-same");
+    let (change, _, _) = b.changed(mail());
+    let before = b.row();
+    let o = b.apply(change);
+    assert!(matches!(o, Ok(Outcome::Applied(_))), "{o:?}");
+    assert_eq!(b.puts(), 0);
+    assert_eq!(b.row(), before);
+    assert_eq!(b.entry(change), ("applied".into(), 0, "none".into(), None));
+}
+
+/// The draft at Gmail is not the content of the row: no call. The row
+/// refreshes from Gmail, and the action is denied.
+#[test]
+fn a_draft_changed_at_gmail_is_not_changed() {
+    let b = setup("change-gmail");
+    let (change, _, provider) = b.changed(new_text());
+    let raw = b.gmail.draft_raw(TOKEN, &provider).unwrap().raw.unwrap();
+    let edited = String::from_utf8(raw)
+        .unwrap()
+        .replace("Here.", "Edited in Gmail.");
+    assert!(b.fake.edit_draft(&provider, edited.as_bytes()));
+    match b.apply(change) {
+        Ok(Outcome::Denied(why)) => assert_eq!(why, iris_apply::CHANGE_CHANGED),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.puts(), 0);
+    assert!(b.row().1.contains("Edited in Gmail."), "{}", b.row().1);
+}
+
+/// A draft that is gone at Gmail: no call, the action is denied.
+#[test]
+fn a_gone_draft_is_denied() {
+    let b = setup("change-gone");
+    let (change, _, provider) = b.changed(new_text());
+    assert!(b.fake.delete_draft(&provider));
+    match b.apply(change) {
+        Ok(Outcome::Denied(why)) => assert_eq!(why, iris_apply::CHANGE_GONE),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.puts(), 0);
+}
+
+/// A definite rejection: the entry fails, and the draft row does not change.
+#[test]
+fn a_rejected_change_leaves_the_draft() {
+    let b = setup("change-rejected");
+    let (change, _, _) = b.changed(new_text());
+    let before = b.row();
+    b.fake.fail_next_write(&[400], false);
+    let o = b.apply(change);
+    assert!(matches!(o, Ok(Outcome::Failed { .. })), "{o:?}");
+    assert_eq!(b.row(), before);
+    assert_eq!(b.entry(change).0, "failed");
+}
+
+/// An unknown result (section 4): recovery reads the draft at Gmail and
+/// never calls again. The new hash: the change applied. The old hash:
+/// Iris does not know, and the entry fails.
+#[test]
+fn a_lost_answer_is_recovered_with_one_call() {
+    let b = setup("change-lost");
+    let (change, _, _) = b.changed(new_text());
+    b.fake.fail_next_write(&[503], true);
+    let o = b.apply(change);
+    assert!(matches!(o, Ok(Outcome::Applied(_))), "{o:?}");
+    assert_eq!(b.puts(), 1);
+    assert!(b.row().1.contains("New text."));
+
+    let b = setup("change-lost-not");
+    let (change, _, _) = b.changed(new_text());
+    let before = b.row();
+    b.fake.fail_next_write(&[503], false);
+    match b.apply(change) {
+        Ok(Outcome::Failed { error, .. }) => assert_eq!(error, iris_apply::CHANGE_UNKNOWN),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.puts(), 1, "recovery does not call again");
+    assert_eq!(b.row().0, before.0);
+    assert_eq!(b.entry(change).0, "failed");
+}
+
+/// A reply change keeps the subject and the reply headers of its draft,
+/// and stays in its thread.
+#[test]
+fn a_reply_change_stays_in_its_thread() {
+    iris_changeset::allow_draft_change(true);
+    let b = setup("change-reply");
+    let (thread, parent) = b.thread();
+    // The parent is understood: the mirror has the subject of Gmail, so
+    // submit flags the same subject as the apply.
+    let provider: String = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT provider_id FROM message WHERE id = ?1",
+                [parent],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    let head = b.gmail.metadata(TOKEN, &provider, &["Subject"]).unwrap();
+    b.sql(
+        "UPDATE header SET subject = ?1 WHERE message_id = ?2",
+        rusqlite::params![head.headers[0].value, parent],
+    );
+    let a = b.approved(
+        Verb::Draft,
+        &format!("t-{thread}"),
+        json!({"to": ["priya@example.com"], "body": "Thanks."}),
+        0,
+    );
+    let o = b.apply(a);
+    assert!(matches!(o, Ok(Outcome::Applied(_))), "{o:?}");
+    let (d, provider) = b.draft(a);
+    let old = String::from_utf8(b.gmail.draft_raw(TOKEN, &provider).unwrap().raw.unwrap()).unwrap();
+    let header = |raw: &str, name: &str| {
+        raw.lines()
+            .find(|l| l.to_ascii_lowercase().starts_with(&format!("{name}:")))
+            .map(str::to_string)
+    };
     let change = b.approved(
         Verb::Draft,
         &d,
-        json!({"to": ["priya@example.com"], "subject": "Q4", "body": "New text."}),
+        json!({"to": ["priya@example.com"], "body": "Thanks again."}),
+        0,
+    );
+    let o = b.apply(change);
+    assert!(matches!(o, Ok(Outcome::Applied(_))), "{o:?}");
+    let at = b.gmail.draft_raw(TOKEN, &provider).unwrap();
+    let new = String::from_utf8(at.raw.unwrap()).unwrap();
+    assert!(new.contains("Thanks again."));
+    for name in ["subject", "in-reply-to"] {
+        assert_eq!(header(&new, name), header(&old, name), "{name}");
+    }
+    let thread_provider: String = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT provider_id FROM thread WHERE id = ?1",
+                [thread],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(at.message.thread_id, thread_provider);
+}
+
+/// A reply change answers the parent that its approval binds. A newer
+/// mail in the thread becomes the parent at submit, and the draft still
+/// answers the old message: no call (change spec, section 1).
+#[test]
+fn a_reply_change_after_a_new_mail_is_denied() {
+    iris_changeset::allow_draft_change(true);
+    let b = setup("change-newer");
+    let (thread, parent) = b.thread();
+    let (provider, thread_provider, date): (String, String, i64) = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT m.provider_id, t.provider_id, m.internal_date FROM message m
+                 JOIN thread t ON t.id = m.thread_id WHERE m.id = ?1",
+                [parent],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .unwrap();
+    let head = b.gmail.metadata(TOKEN, &provider, &["Subject"]).unwrap();
+    b.sql(
+        "UPDATE header SET subject = ?1 WHERE message_id = ?2",
+        rusqlite::params![head.headers[0].value, parent],
+    );
+    let a = b.approved(
+        Verb::Draft,
+        &format!("t-{thread}"),
+        json!({"to": ["priya@example.com"], "body": "Thanks."}),
+        0,
+    );
+    let o = b.apply(a);
+    assert!(matches!(o, Ok(Outcome::Applied(_))), "{o:?}");
+    let (d, _) = b.draft(a);
+    // A new mail of priya, at Gmail and in the thread of the mirror.
+    let raw = format!(
+        "From: priya@example.com\r\nTo: {OWNER}\r\nSubject: {}\r\nMessage-ID: <newer@example.com>\r\nDate: Wed, 25 Nov 2026 10:00:00 +0000\r\n\r\nOne more thing.\r\n",
+        head.headers[0].value
+    );
+    let id = b.fake.add_message(raw.as_bytes(), &["INBOX"]);
+    b.store
+        .put_messages(
+            b.account,
+            &[iris_store::NewMessage {
+                provider_id: id,
+                thread_provider_id: thread_provider,
+                internal_date: Some(date + 1),
+                header: iris_store::Header {
+                    from_addr: Some("priya@example.com".into()),
+                    subject: Some(head.headers[0].value.clone()),
+                    message_id_hdr: Some("<newer@example.com>".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+    b.sql("UPDATE message SET hostile = NULL", []);
+    let change = b.approved(
+        Verb::Draft,
+        &d,
+        json!({"to": ["priya@example.com"], "body": "Thanks again."}),
         0,
     );
     match b.apply(change) {
-        Ok(Outcome::Denied(why)) => assert_eq!(why, iris_changeset::CHANGE_OFF),
+        Ok(Outcome::Denied(why)) => assert_eq!(why, iris_apply::CHANGE_NEW_MAIL),
         other => panic!("{other:?}"),
     }
-    assert_eq!(b.posts("/drafts"), creates, "no new draft");
-    assert!(b.fake.requests().iter().all(|r| !r.starts_with("PUT")));
+    assert_eq!(b.puts(), 0);
+}
+
+/// An attachment file of the stored draft is gone: no call, because the
+/// undo could not compose the old draft again.
+#[test]
+fn a_change_needs_the_files_of_the_old_draft() {
+    let b = setup("change-old-file");
+    let file = b"the file".as_slice();
+    let sha = b.store.put_attachment(file).unwrap();
+    let mut m = mail();
+    m["attachments"] =
+        json!([{"name": "a.txt", "type": "text/plain", "sha256": sha, "size": file.len()}]);
+    let (change, _, _) = b.changed_from(m, new_text());
+    std::fs::remove_file(b.store.attachment_path(&sha).unwrap()).unwrap();
+    match b.apply(change) {
+        Ok(Outcome::Denied(why)) => assert_eq!(why, iris_apply::CHANGE_OLD_FILE),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.puts(), 0);
+}
+
+/// A stop after the claim (change spec, section 4): the entry stays in
+/// `writing`, and a new process recovers it from the store with no second
+/// call. The new hash at Gmail ends `applied`; the old hash ends `failed`.
+#[test]
+fn a_change_in_writing_recovers_after_a_restart() {
+    for applied in [true, false] {
+        let b = setup(&format!("change-restart-{applied}"));
+        let (change, _, _) = b.changed(new_text());
+        let before = b.row();
+        // The read after the call fails, so the apply stops with the entry
+        // in `writing`, as a crash does.
+        let fake = b.fake.clone();
+        b.fake.before_next_matching("PUT", move || {
+            if !applied {
+                fake.fail_next_write(&[503], false);
+            }
+            fake.fail_next_matching("GET /gmail/v1/users/me/drafts/", 400);
+        });
+        let o = b.apply(change);
+        assert!(matches!(o, Ok(Outcome::Pending)), "{o:?}");
+        assert_eq!(b.entry(change).0, "writing");
+        // A new process: a new store handle and a new client.
+        let store = Store::open(&b.dir).unwrap();
+        let gmail = Gmail::new(Config {
+            base_url: b.fake.base_url(),
+            ..Config::default()
+        });
+        let (t, mut renew) = b.token();
+        let mut token = Token {
+            token: t,
+            renew: &mut renew,
+            refused: false,
+        };
+        iris_apply::recover_step(&store, &gmail, &mut token, b.account).unwrap();
+        assert_eq!(b.puts(), 1, "recovery does not call again");
+        if applied {
+            assert_eq!(b.entry(change).0, "applied");
+            assert!(b.row().1.contains("New text."));
+        } else {
+            let (state, _, _, error) = b.entry(change);
+            assert_eq!(state, "failed");
+            assert_eq!(error.as_deref(), Some(iris_apply::CHANGE_UNKNOWN));
+            assert_eq!(b.row().0, before.0);
+        }
+    }
+}
+
+impl Box {
+    /// Move the time of the ledger entry of `action` back by `ms`, as a
+    /// clock does. `ledger_change` forbids a change of `at`: drop and
+    /// remake the trigger in this test store only.
+    fn age_entry(&self, action: i64, ms: i64) {
+        self.store
+            .write(|tx| {
+                let sql: String = tx.query_row(
+                    "SELECT sql FROM sqlite_schema WHERE name = 'ledger_change'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                tx.execute_batch("DROP TRIGGER ledger_change")?;
+                tx.execute(
+                    "UPDATE ledger SET at = at - ?2 WHERE action_id = ?1",
+                    params![action, ms],
+                )?;
+                tx.execute_batch(&sql)?;
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+/// The person edits the draft in Gmail between the update and the read
+/// back (change spec, section 7): the entry fails with the reason of the
+/// window, and the row keeps the text of the person.
+#[test]
+fn an_edit_during_the_update_is_kept() {
+    let b = setup("change-during");
+    let (change, _, provider) = b.changed(new_text());
+    let raw = b.gmail.draft_raw(TOKEN, &provider).unwrap().raw.unwrap();
+    let edited = String::from_utf8(raw).unwrap().replace("Here.", "Edited.");
+    let fake = b.fake.clone();
+    let id = provider.clone();
+    b.fake.before_next_matching("PUT", move || {
+        let f = fake.clone();
+        fake.before_next_matching("GET /gmail/v1/users/me/drafts/", move || {
+            assert!(f.edit_draft(&id, edited.as_bytes()));
+        });
+    });
+    match b.apply(change) {
+        Ok(Outcome::Failed { error, .. }) => assert_eq!(error, iris_apply::CHANGE_DURING),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.puts(), 1);
+    assert!(b.row().1.contains("Edited."), "{}", b.row().1);
+}
+
+/// Recovery when the draft ID is gone and each read of the lookup by
+/// Message-ID fails: the entry waits, and fails after 24 hours with no
+/// second call (change spec, section 4).
+#[test]
+fn a_failed_lookup_ends_after_a_day() {
+    let b = setup("change-lookup");
+    let (change, _, provider) = b.changed(new_text());
+    let fake = b.fake.clone();
+    b.fake.before_next_matching("PUT", move || {
+        fake.fail_next_write(&[503], false);
+        fake.fail_next_matching("GET /gmail/v1/users/me/drafts/", 400);
+    });
+    assert!(matches!(b.apply(change), Ok(Outcome::Pending)));
+    assert!(b.fake.delete_draft(&provider));
+    let recover = |b: &Box| {
+        b.fake
+            .fail_next_matching("GET /gmail/v1/users/me/drafts?", 400);
+        let (t, mut renew) = b.token();
+        let mut token = Token {
+            token: t,
+            renew: &mut renew,
+            refused: false,
+        };
+        iris_apply::recover_step(&b.store, &b.gmail, &mut token, b.account).unwrap();
+    };
+    recover(&b);
+    assert_eq!(b.entry(change).0, "writing");
+    b.age_entry(change, 24 * 60 * 60 * 1000 + 1);
+    recover(&b);
+    let (state, _, _, error) = b.entry(change);
+    assert_eq!(state, "failed");
+    assert_eq!(error.as_deref(), Some(iris_apply::CHANGE_UNKNOWN));
+    assert_eq!(b.puts(), 1);
 }
