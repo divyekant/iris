@@ -1295,6 +1295,7 @@ dependencies = [
 name = "iris-understand"
 version = "0.0.0"
 dependencies = [
+ "idna",
  "idna_adapter",
  "iris-clean",
  "iris-eval",

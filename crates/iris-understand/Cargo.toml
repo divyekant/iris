@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+idna = "=1.1.0"
 idna_adapter = "=1.1.0"
 iris-clean = { version = "0.0.0", path = "../iris-clean" }
 iris-model = { version = "0.0.0", path = "../iris-model" }
