@@ -201,15 +201,17 @@ fn state_in(
         Some(d) => iris_apply::bcc_waits(c, d)?,
         None => None,
     };
-    let change = match draft {
+    let can = match draft {
         Some(d) => change(store, c, d, now_ms)?,
-        None => None,
+        None => CANNOT,
     };
     let draft = draft.map(|d| format_id(Kind::Draft, d));
     // A stopped write with a draft says how the next press of Send writes
     // it (draft change spec, section 5).
     let stopped = |why: &str| match &draft {
-        Some(_) => json!({"state": "stopped", "reason": why, "draft": draft, "change": change}),
+        Some(_) => {
+            json!({"state": "stopped", "reason": why, "draft": draft, "change": can.change, "newer": can.newer})
+        }
         None => json!({"state": "stopped", "reason": why, "draft": draft}),
     };
     if let Some(send) = send {
@@ -263,12 +265,20 @@ fn state_in(
 /// "Change and send". The value is the outcome that the apply of the next
 /// press gives: the checks of a change in place for Gmail (section 1, the
 /// files included), and the checks of a create for another provider.
-fn change(
-    store: &Store,
-    c: &Connection,
-    draft: i64,
-    now_ms: i64,
-) -> rusqlite::Result<Option<&'static str>> {
+/// How the next press of Send can write a draft (draft change spec,
+/// section 5): `change` is the value of the API, and `newer` says that
+/// `change` is null because the thread of a reply has a newer mail.
+struct Can {
+    change: Option<&'static str>,
+    newer: bool,
+}
+
+const CANNOT: Can = Can {
+    change: None,
+    newer: false,
+};
+
+fn change(store: &Store, c: &Connection, draft: i64, now_ms: i64) -> rusqlite::Result<Can> {
     let row: Option<(String, Option<i64>, String)> = c
         .query_row(
             "SELECT a.provider, d.thread_id, d.content FROM draft d
@@ -278,7 +288,7 @@ fn change(
         )
         .optional()?;
     let Some((provider, thread, content)) = row else {
-        return Ok(None);
+        return Ok(CANNOT);
     };
     let db = |e| match e {
         iris_changeset::Error::Store(iris_store::Error::Db(e)) => e,
@@ -288,20 +298,29 @@ fn change(
         .map_err(db)?
         .is_some()
     {
-        return Ok(None);
+        return Ok(CANNOT);
     }
     // A reply: the newest eligible message of the thread is still the
     // message that the draft answers.
     if let Some(thread) = thread {
         let answers = iris_changeset::draft_parent(c, draft).map_err(db)?;
-        if answers.is_none() || answers != iris_changeset::reply_parent(c, thread)? {
-            return Ok(None);
+        if answers.is_none() {
+            return Ok(CANNOT);
+        }
+        if answers != iris_changeset::reply_parent(c, thread)? {
+            return Ok(Can {
+                change: None,
+                newer: true,
+            });
         }
     }
     if provider != "gmail" {
         // The next press makes a new draft from the form: the apply of a
         // create does not read the files of the old draft.
-        return Ok(Some("new"));
+        return Ok(Can {
+            change: Some("new"),
+            newer: false,
+        });
     }
     // The next press changes the draft in place: its apply denies the
     // change when a file of the old draft is gone (section 1).
@@ -313,13 +332,17 @@ fn change(
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.to_string().into()))?,
         None => false,
     };
-    Ok(files.then_some("update"))
+    Ok(Can {
+        change: files.then_some("update"),
+        newer: false,
+    })
 }
 
 /// The content of the draft `d-N` for the form of a change (draft change
 /// spec, section 5): `to`, `cc`, `bcc`, `subject`, `body`, `attachments`,
-/// the account and the thread, and `change`: how the next press of Send
-/// writes the draft, the same value as the state of a stopped write. The
+/// the account and the thread, `change`: how the next press of Send
+/// writes the draft, and `newer`, the same values as the state of a
+/// stopped write. The
 /// Outbox reads it after a cancel (issue 941). `None` for a draft that does
 /// not exist, of an account that Iris removes, or with content that Iris
 /// does not write.
@@ -327,7 +350,7 @@ pub fn draft_content(store: &Store, id: &str, now_ms: i64) -> Result<Option<Valu
     let Some((Kind::Draft, row)) = parse_id(id) else {
         return Ok(None);
     };
-    type Found = (i64, Option<i64>, String, Option<&'static str>);
+    type Found = (i64, Option<i64>, String, Can);
     let found: Option<Found> = store.read(|c| {
         let tx = c.unchecked_transaction()?;
         let found = tx
@@ -346,7 +369,7 @@ pub fn draft_content(store: &Store, id: &str, now_ms: i64) -> Result<Option<Valu
             None => None,
         })
     })?;
-    let Some((account, thread, content, change)) = found else {
+    let Some((account, thread, content, can)) = found else {
         return Ok(None);
     };
     let Some(m) = serde_json::from_str::<Value>(&content)
@@ -365,7 +388,8 @@ pub fn draft_content(store: &Store, id: &str, now_ms: i64) -> Result<Option<Valu
         "subject": m.subject,
         "body": m.body,
         "attachments": m.attachments,
-        "change": change,
+        "change": can.change,
+        "newer": can.newer,
     })))
 }
 

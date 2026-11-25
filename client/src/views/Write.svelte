@@ -107,13 +107,16 @@
   // the same draft. A record of an earlier write of this place gives way.
   // svelte-ignore state_referenced_locally
   const opened = start.change;
+  // A reply draft answers an older mail of its thread (draft change spec, section 5).
+  const NEWER = "A new mail came into this thread. Write a new reply.";
   const fromDraft = (d: DraftContent): Saved => ({
     account: d.account, to: d.to, cc: d.cc, bcc: d.bcc, files: d.attachments, subject: d.subject, body: d.body,
     key: "", sig: "", flags: [], draft: d.change === "update" ? { draft: d.draft, account: d.account } : null,
   });
   if (opened) keep(null);
-  let changeNote = $state(!opened ? "" : opened.change ? "This is the draft that you cancelled. Change it, then press Send." : "This draft cannot change now. Write a new mail here.");
-  const saved = opened?.change ? fromDraft(opened) : restore();
+  let changeNote = $state(!opened ? "" : opened.change ? "This is the draft that you cancelled. Change it, then press Send." : opened.newer ? NEWER : "This draft cannot change now. Write a new mail here.");
+  // A draft link opens the draft or a fresh form, never a saved form of another mail.
+  const saved = opened ? (opened.change ? fromDraft(opened) : null) : restore();
   // A reload keeps the changed form (sessionStorage), not the draft again.
   if (opened && typeof history !== "undefined") history.replaceState(history.state, "", thread ? href.reply(thread) : "#/write");
   let account = $state(saved?.account ?? reply?.account ?? (accounts[0] ? `a-${accounts[0].id}` : ""));
@@ -536,6 +539,7 @@
     {:else}
       <h2 class="stop">This mail did not leave</h2>
       <p class="muted">{ws.reason}</p>
+      {#if ws.newer}<p class="muted">{NEWER}</p>{/if}
       <div class="row">
         {#if ws.change && ws.draft}<button type="button" class="pill" onclick={changeIt} disabled={busy}>Change and send</button>{/if}
         <!-- While the draft loads, Write another waits: the draft fills only its own form. -->

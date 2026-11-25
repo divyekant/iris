@@ -411,7 +411,7 @@ export type WriteState =
   | { state: "waiting"; draft: string; sending: boolean; bcc_check?: string | null; leaves_at: string | null }
   | { state: "review"; draft: string; reason: string | null }
   | { state: "sent"; draft: string }
-  | { state: "stopped"; reason: string; draft: string | null; change?: "update" | "new" | null };
+  | { state: "stopped"; reason: string; draft: string | null; change?: "update" | "new" | null; newer?: boolean };
 
 /**
  * GET /api/drafts/{id}: the content of a draft, for the form of "Change and
@@ -429,6 +429,8 @@ export type DraftContent = {
   attachments: Attachment[];
   /** How the next press of Send writes the draft, as `change` of a stopped write (issue 941). */
   change: "update" | "new" | null;
+  /** A reply whose thread has a newer eligible mail: `change` is null for this reason. */
+  newer: boolean;
 };
 
 /** A message summary, or only the ID of a message that is not in the mirror any more. */

@@ -194,7 +194,7 @@ async fn a_press_writes_the_mail_after_its_warnings() {
     assert_eq!(
         st,
         json!({"state": "stopped", "reason": "Cancelled in the outbox.", "draft": "d-1",
-               "change": "update"})
+               "change": "update", "newer": false})
     );
 }
 
@@ -670,7 +670,7 @@ async fn an_old_write_is_stopped() {
         Ok(())
     })
     .unwrap();
-    let mut old = json!({"state": "stopped", "reason": "Iris did not send this mail in 24 hours, so it stopped. Look for the draft in your Gmail drafts.", "draft": "d-1", "change": "update"});
+    let mut old = json!({"state": "stopped", "reason": "Iris did not send this mail in 24 hours, so it stopped. Look for the draft in your Gmail drafts.", "draft": "d-1", "change": "update", "newer": false});
     let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
     assert_eq!(st, old);
     // A second stop cause does not hide the age: the draft also changed in
@@ -894,7 +894,7 @@ async fn a_write_of_a_change_stops_on_other_content() {
     assert_eq!(
         st,
         json!({"state": "stopped", "reason": iris_changeset::DRAFT_CHANGED, "draft": "d-1",
-               "change": "update"})
+               "change": "update", "newer": false})
     );
 }
 
@@ -931,7 +931,7 @@ async fn a_stopped_write_changes_its_draft() {
         d,
         json!({"draft": "d-1", "account": "a-1", "thread": null, "to": ["priya@example.com"],
                "cc": [], "bcc": [], "subject": "Q4", "body": "Hi.\n", "attachments": [],
-               "change": "update"})
+               "change": "update", "newer": false})
     );
     let mut body = new_mail("0123456789abcdef-2", json!(["new_recipient"]));
     body["body"] = json!("Changed.\n");
@@ -1061,6 +1061,8 @@ async fn a_stopped_reply_changes_only_for_its_parent() {
     let (code, _) = call(&s, "POST", &format!("/api/changesets/{cs}/withdraw"), None).await;
     assert_eq!(code, StatusCode::OK);
     assert_eq!(change(&s, &cs).await, "update");
+    let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    assert_eq!(st["newer"], false, "{st}");
     set("UPDATE account SET provider = 'outlook' WHERE id = 1");
     assert_eq!(change(&s, &cs).await, "new");
     set("UPDATE account SET provider = 'gmail' WHERE id = 1;
@@ -1069,6 +1071,15 @@ async fn a_stopped_reply_changes_only_for_its_parent() {
          INSERT INTO header(message_id, from_addr, to_addrs, subject, message_id_hdr)
            VALUES (3, 'priya@example.com', 'owner@example.com', 'Q4', '<m3@example.com>');");
     assert_eq!(change(&s, &cs).await, Value::Null);
+    // The view names the newer mail (draft change spec, section 5): the
+    // write state and the draft read agree.
+    let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    let (_, d) = call(&s, "GET", "/api/drafts/d-1", None).await;
+    assert_eq!(
+        (&st["newer"], &d["newer"]),
+        (&json!(true), &json!(true)),
+        "{st} {d}"
+    );
     set("UPDATE account SET provider = 'outlook' WHERE id = 1");
     assert_eq!(change(&s, &cs).await, Value::Null);
     set("UPDATE account SET provider = 'gmail' WHERE id = 1");

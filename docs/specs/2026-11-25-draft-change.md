@@ -282,16 +282,22 @@ A ledger row of a change in `writing` after a crash or a lost answer:
 The client reads the content of the draft from `GET /api/drafts/{d-N}`
 (a new read route: `to`, `cc`, `bcc`, `subject`, `body`, `attachments`,
 and the account and the thread). The route also gives `change`, with the
-values of the table above for the draft now. The engine computes both
-values with one function, so the draft answer and the write state never
-disagree (issue 941).
+values of the table above for the draft now, and `newer`. `newer` is
+true only when `change` is `null` because the thread of a reply has a
+newer eligible message. The state of a stopped write with a draft gives
+`newer` too, so each view can show the message of the table. The engine
+computes these values with one function, so the draft answer and the
+write state never disagree (issue 941).
 
 A cancel in the Outbox makes a stopped mail too. After a cancel, the
 Outbox reads `GET /api/drafts/{d-N}`. If `change` is not `null`, the
 cancelled card shows "Change and send". The link opens the write view of
 the draft (`#/write/d-N`), with the content of the draft in the form, as
 after "Change and send" in the write view. For a reply, the form is under
-the conversation of its thread.
+the conversation of its thread. If `change` is `null` when the link
+opens, the form is empty, and the view says why: the message of the table
+when `newer` is true, else "This draft cannot change now. Write a new
+mail here.". The form never shows a saved form of another mail.
 
 The write view, in the state `stopped` with `change` not `null`, shows
 "Change and send". The press opens the form with the content of the

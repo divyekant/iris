@@ -1086,6 +1086,8 @@ test("#/write/d-N opens the form with the draft; update sends the draft, new doe
     window.sessionStorage.clear();
     // An earlier write of this place gives way to the change.
     window.sessionStorage.setItem("iris.write.new.taken", JSON.stringify({ write: "cs-9", to: ["x@example.com"], subject: "Old", body: "Old" }));
+    // An unfinished form of another mail: the draft link never shows it.
+    window.sessionStorage.setItem("iris.write.new", JSON.stringify({ key: "k-old", to: ["old@example.com"], cc: [], bcc: [], subject: "Other", body: "Other text" }));
     const net = serve((path, method) => {
       if (method === "POST" && path === "write") return [201, { write: "cs-1" }];
       if (path === "write/cs-1") return [200, { state: "saving" }];
@@ -1099,6 +1101,8 @@ test("#/write/d-N opens the form with the draft; update sends the draft, new doe
       if (change === null) {
         assert.match(text(app.target), /This draft cannot change now\./);
         assert.equal(app.target.querySelector("textarea").value, "");
+        assert.equal(app.target.querySelector("input.subject").value, "");
+        assert.doesNotMatch(text(app.target), /old@example\.com/, "no address of the other mail");
         continue;
       }
       assert.match(text(app.target), /This is the draft that you cancelled\./);
@@ -1114,5 +1118,36 @@ test("#/write/d-N opens the form with the draft; update sends the draft, new doe
       app.destroy();
       net.restore();
     }
+  }
+});
+
+test("a reply draft with a newer mail in its thread says so, from the draft link and from a stopped write", async () => {
+  const net = serve((path, method) => {
+    if (method === "POST" && path === "write") return [201, { write: "cs-1" }];
+    if (path === "write/cs-1") return [200, { state: "stopped", reason: "You stopped this mail.", draft: "d-7", change: null, newer: true }];
+    return [404, { error: "Not found." }];
+  });
+  const DRAFT = { draft: "d-7", account: "a-1", thread: "t-2", to: ["old@example.com"], cc: [], bcc: [],
+                  subject: "Re: Q4", body: "Old reply.\n", attachments: [], change: null, newer: true };
+  let app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY, change: DRAFT }, every: 20 });
+  try {
+    app.flushSync();
+    assert.match(text(app.target), /A new mail came into this thread\. Write a new reply\./);
+    assert.doesNotMatch(text(app.target), /This draft cannot change now/);
+    assert.equal(app.target.querySelector("textarea").value, "", "a fresh reply, not the old text");
+  } finally {
+    app.destroy();
+  }
+  window.sessionStorage.clear();
+  app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+  try {
+    type(app.target.querySelector("textarea"), "Here they are.\n");
+    app.flushSync();
+    press(app);
+    await until(() => text(app.target).includes("This mail did not leave"));
+    assert.match(text(app.target), /A new mail came into this thread\. Write a new reply\./);
+  } finally {
+    app.destroy();
+    net.restore();
   }
 });
