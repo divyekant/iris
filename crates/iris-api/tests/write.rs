@@ -998,66 +998,64 @@ const KEY_TAKEN: &str = "This key belongs to another mail.";
 
 /// The `change` of a stopped write (draft change spec, section 5): none
 /// for a sent draft, `new` for a draft of an account that is not Gmail,
-/// and none for a reply whose thread has a newer mail.
+/// and none for a draft of any provider that Iris does not write.
 #[tokio::test]
 async fn a_stopped_write_says_how_its_draft_can_change() {
     let dir = temp("change-kinds");
     let s = store(&dir);
     let cs = stopped_write(&s).await;
-    let change = |s: Arc<Store>, cs: String| async move {
-        call(&s, "GET", &format!("/api/write/{cs}"), None).await.1["change"].clone()
-    };
-    s.write(|tx| {
-        Ok(tx.execute(
-            "UPDATE draft SET sent_at = 1, sent_message = 's1' WHERE id = 1",
-            [],
-        )?)
-    })
-    .unwrap();
-    assert_eq!(change(s.clone(), cs.clone()).await, Value::Null);
-    s.write(|tx| {
-        tx.execute(
-            "UPDATE draft SET sent_at = NULL, sent_message = NULL WHERE id = 1",
-            [],
-        )?;
-        Ok(tx.execute("UPDATE account SET provider = 'outlook' WHERE id = 1", [])?)
-    })
-    .unwrap();
-    assert_eq!(change(s.clone(), cs.clone()).await, "new");
-    // A reply draft that answers m-2: `update` while m-2 is the newest mail.
-    s.write(|tx| {
-        tx.execute("UPDATE account SET provider = 'gmail' WHERE id = 1", [])?;
-        tx.execute(
-            "UPDATE header SET message_id_hdr = '<m2@example.com>' WHERE message_id = 2",
-            [],
-        )?;
-        let content = json!({"content": {"to": ["priya@example.com"], "cc": [], "subject": "Re: Q4",
-                                         "body": "Hi.\n"},
-                             "reply": {"in_reply_to": "<m2@example.com>", "references": "<m2@example.com>"}});
-        Ok(tx.execute(
-            "UPDATE draft SET thread_id = 1, content = ?1 WHERE id = 1",
-            [content.to_string()],
-        )?)
-    })
-    .unwrap();
-    assert_eq!(change(s.clone(), cs.clone()).await, "update");
-    s.write(|tx| {
-        Ok(tx.execute_batch(
-            "INSERT INTO message(account_id, thread_id, provider_id, internal_date)
-               VALUES (1, 1, 'p3', 3000);
-             INSERT INTO header(message_id, from_addr, to_addrs, subject, message_id_hdr)
-               VALUES (3, 'priya@example.com', 'owner@example.com', 'Q4', '<m3@example.com>');",
-        )?)
-    })
-    .unwrap();
-    assert_eq!(change(s.clone(), cs).await, Value::Null);
-    // A press of the reply draft with another parent of the same thread:
-    // 400, nothing written.
-    let before = count(&s, "SELECT count(*) FROM changeset");
-    let reply = json!({"thread": "t-1", "parent": "m-3", "to": ["priya@example.com"],
-                       "cc": [], "body": "Hi.\n", "key": "0123456789abcdef-6",
-                       "flags": [], "draft": "d-1"});
+    let set = |sql: &'static str| s.write(|tx| Ok(tx.execute_batch(sql)?)).unwrap();
+    set("UPDATE draft SET sent_at = 1, sent_message = 's1' WHERE id = 1");
+    assert_eq!(change(&s, &cs).await, Value::Null);
+    set(
+        "UPDATE draft SET sent_at = NULL, sent_message = NULL WHERE id = 1;
+         UPDATE account SET provider = 'outlook' WHERE id = 1;",
+    );
+    assert_eq!(change(&s, &cs).await, "new");
+    set("UPDATE draft SET foreign_at = 1 WHERE id = 1");
+    assert_eq!(change(&s, &cs).await, Value::Null);
+}
+
+async fn change(s: &Arc<Store>, cs: &str) -> Value {
+    call(s, "GET", &format!("/api/write/{cs}"), None).await.1["change"].clone()
+}
+
+/// A stopped reply: its draft answers the parent of the press, m-2, also
+/// when the mirror has no Message-ID of m-2. The change ends when the
+/// thread gets a newer mail, for each provider. A press of the draft with
+/// another parent of the same thread: 400, nothing written.
+#[tokio::test]
+async fn a_stopped_reply_changes_only_for_its_parent() {
+    let dir = temp("change-reply");
+    let s = store(&dir);
+    let reply = json!({"thread": "t-1", "parent": "m-2", "to": ["priya@example.com"],
+                       "cc": [], "body": "Hi.\n", "key": KEY, "flags": ["new_recipient"]});
     let (code, v) = call(&s, "POST", "/api/write", Some(reply)).await;
+    assert_eq!(code, StatusCode::CREATED, "{v}");
+    let cs = v["write"].as_str().unwrap().to_string();
+    made(&s);
+    let set = |sql: &'static str| s.write(|tx| Ok(tx.execute_batch(sql)?)).unwrap();
+    set("UPDATE draft SET thread_id = 1 WHERE id = 1;
+         UPDATE header SET message_id_hdr = NULL WHERE message_id = 2;");
+    let (code, _) = call(&s, "POST", &format!("/api/changesets/{cs}/withdraw"), None).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(change(&s, &cs).await, "update");
+    set("UPDATE account SET provider = 'outlook' WHERE id = 1");
+    assert_eq!(change(&s, &cs).await, "new");
+    set("UPDATE account SET provider = 'gmail' WHERE id = 1;
+         INSERT INTO message(account_id, thread_id, provider_id, internal_date)
+           VALUES (1, 1, 'p3', 3000);
+         INSERT INTO header(message_id, from_addr, to_addrs, subject, message_id_hdr)
+           VALUES (3, 'priya@example.com', 'owner@example.com', 'Q4', '<m3@example.com>');");
+    assert_eq!(change(&s, &cs).await, Value::Null);
+    set("UPDATE account SET provider = 'outlook' WHERE id = 1");
+    assert_eq!(change(&s, &cs).await, Value::Null);
+    set("UPDATE account SET provider = 'gmail' WHERE id = 1");
+    let before = count(&s, "SELECT count(*) FROM changeset");
+    let press = json!({"thread": "t-1", "parent": "m-3", "to": ["priya@example.com"],
+                       "cc": [], "body": "Hi.\n", "key": "0123456789abcdef-6",
+                       "flags": ["new_recipient"], "draft": "d-1"});
+    let (code, v) = call(&s, "POST", "/api/write", Some(press)).await;
     assert_eq!(
         (code, &v["error"]),
         (

@@ -1769,6 +1769,36 @@ pub fn change_denied(
     draft: i64,
     now_ms: i64,
 ) -> Result<Option<String>> {
+    denied(c, action, draft, now_ms, false)
+}
+
+/// The checks of [`change_denied`] with no action and for each provider:
+/// the reason why the person cannot change the draft `draft` now, or
+/// `None`. The write view offers "Change and send" only with `None`.
+pub fn change_blocked(c: &Connection, draft: i64, now_ms: i64) -> Result<Option<String>> {
+    denied(c, 0, draft, now_ms, true)
+}
+
+/// The message that the reply draft `draft` answers: the parent that the
+/// action which made the draft resolved to. `None` for a new mail.
+pub fn draft_parent(c: &Connection, draft: i64) -> Result<Option<i64>> {
+    Ok(c.query_row(
+        "SELECT am.message_id FROM draft d
+         JOIN action_message am ON am.action_id = d.action_id
+         WHERE d.id = ?1 AND d.thread_id IS NOT NULL",
+        [draft],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
+fn denied(
+    c: &Connection,
+    action: i64,
+    draft: i64,
+    now_ms: i64,
+    any_provider: bool,
+) -> Result<Option<String>> {
     let row: Option<(bool, String, bool, bool, bool)> = c
         .query_row(
             "SELECT coalesce(cs.author_kind = 'person', ?1 = 0), ac.provider,
@@ -1789,7 +1819,7 @@ pub fn change_denied(
     if !person {
         return Ok(Some("Only you can change a draft.".into()));
     }
-    if provider != "gmail" {
+    if provider != "gmail" && !any_provider {
         return Ok(Some("Iris cannot change a draft of this account.".into()));
     }
     if sent {

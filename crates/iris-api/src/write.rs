@@ -257,51 +257,36 @@ fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Val
 /// makes a new draft (an account that is not Gmail), `None` offers no
 /// "Change and send".
 fn change(c: &Connection, draft: i64, now_ms: i64) -> rusqlite::Result<Option<&'static str>> {
-    let row: Option<(String, bool, bool, Option<i64>, String)> = c
+    let row: Option<(String, Option<i64>)> = c
         .query_row(
-            "SELECT a.provider, d.sent_at IS NOT NULL,
-                    coalesce(a.state IN ('removing', 'removed'), 0), d.thread_id, d.content
-             FROM draft d JOIN account a ON a.id = d.account_id WHERE d.id = ?1",
+            "SELECT a.provider, d.thread_id FROM draft d JOIN account a ON a.id = d.account_id
+             WHERE d.id = ?1",
             [draft],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    let Some((provider, sent, removed, thread, content)) = row else {
+    let Some((provider, thread)) = row else {
         return Ok(None);
     };
-    if provider != "gmail" {
-        return Ok((!sent && !removed).then_some("new"));
-    }
-    let denied = iris_changeset::change_denied(c, 0, draft, now_ms).map_err(|e| match e {
+    let db = |e| match e {
         iris_changeset::Error::Store(iris_store::Error::Db(e)) => e,
         e => rusqlite::Error::ToSqlConversionFailure(e.to_string().into()),
-    })?;
-    if denied.is_some() {
+    };
+    if iris_changeset::change_blocked(c, draft, now_ms)
+        .map_err(db)?
+        .is_some()
+    {
         return Ok(None);
     }
     // A reply: the newest eligible message of the thread is still the
     // message that the draft answers.
     if let Some(thread) = thread {
-        let answers: Option<String> = serde_json::from_str::<Value>(&content)
-            .ok()
-            .and_then(|v| v["reply"]["in_reply_to"].as_str().map(bare));
-        let newest: Option<String> = match iris_changeset::reply_parent(c, thread)? {
-            Some(m) => c
-                .query_row(
-                    "SELECT message_id_hdr FROM header WHERE message_id = ?1",
-                    [m],
-                    |r| r.get::<_, Option<String>>(0),
-                )
-                .optional()?
-                .flatten()
-                .map(|v| bare(&v)),
-            None => None,
-        };
-        if answers.is_none() || answers != newest {
+        let answers = iris_changeset::draft_parent(c, draft).map_err(db)?;
+        if answers.is_none() || answers != iris_changeset::reply_parent(c, thread)? {
             return Ok(None);
         }
     }
-    Ok(Some("update"))
+    Ok(Some(if provider == "gmail" { "update" } else { "new" }))
 }
 
 /// The content of the draft `d-N` for the form of a change (draft change
@@ -346,10 +331,6 @@ pub fn draft_content(store: &Store, id: &str) -> Result<Option<Value>> {
 }
 
 /// A Message-ID with no angle brackets, in lower case.
-fn bare(v: &str) -> String {
-    v.trim().trim_matches(['<', '>']).to_ascii_lowercase()
-}
-
 /// The most characters of the parent text in the reply form.
 pub const PARENT_TEXT: usize = 600;
 
