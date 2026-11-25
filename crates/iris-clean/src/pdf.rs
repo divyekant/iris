@@ -123,9 +123,17 @@ pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
             Predictor::None => decoded,
             Predictor::Png(p) => unpredict(&decoded, p).into(),
             Predictor::Other => continue,
+            // The parameters come later in the file: an object stream waits
+            // for the end of the pass. Another stream is not read.
+            Predictor::Later => {
+                if objects {
+                    doc.defer(dict, decoded.into_owned());
+                }
+                continue;
+            }
         };
         if objects {
-            doc.object_stream(dict, &decoded);
+            doc.object_stream(dict, &decoded, true);
         } else if is_cmap(&decoded) {
             if let Some(n) = num {
                 doc.add_map(n, &decoded);
@@ -145,6 +153,7 @@ pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
             break;
         }
     }
+    doc.finish_later();
     let (out, full) = doc.text(limit);
     stopped |= doc.full || full;
     // Join the lines that are not empty, without a list of all lines.
@@ -421,6 +430,9 @@ enum Predictor {
     Png(Png),
     /// A predictor that the reader does not apply: the stream is not read.
     Other,
+    /// The parameters are a reference to an object that the reader does
+    /// not have.
+    Later,
 }
 
 /// The row form of a PNG predictor: the bytes of a pixel and of a row.
@@ -641,6 +653,9 @@ struct Doc {
     full: bool,
     last: u8,
     font: u16,
+    /// Object streams whose predictor parameters come later in the file:
+    /// the dictionary and the inflated data. Their bytes count in `obj_bytes`.
+    later: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl Doc {
@@ -659,6 +674,31 @@ impl Doc {
             full: false,
             last: LINE,
             font: NO_FONT,
+            later: Vec::new(),
+        }
+    }
+
+    /// Keep an object stream until the end of the pass, inside the object
+    /// budget. A stream past the budget is not read.
+    fn defer(&mut self, dict: &[u8], data: Vec<u8>) {
+        let cost = dict.len() + data.len() + 64;
+        if self.obj_bytes + cost <= OBJ_BUDGET {
+            self.obj_bytes += cost;
+            self.later.push((dict.to_vec(), data));
+        }
+    }
+
+    /// Read the object streams that waited for their predictor. Their
+    /// objects do not replace objects that the pass kept.
+    fn finish_later(&mut self) {
+        for (dict, data) in std::mem::take(&mut self.later) {
+            self.obj_bytes -= dict.len() + data.len() + 64;
+            let data = match self.predictor(&dict) {
+                Predictor::None => data,
+                Predictor::Png(p) => unpredict(&data, p),
+                Predictor::Other | Predictor::Later => continue,
+            };
+            self.object_stream(&dict, &data, false);
         }
     }
 
@@ -692,13 +732,18 @@ impl Doc {
             Some(Val::Array(a)) => {
                 let mut lx = Lexer::new(a);
                 lx.next();
-                value(&mut lx).and_then(|v| self.deref(v))
+                value(&mut lx)
             }
-            Some(v) => self.deref(v),
-            None => None,
+            v => v,
         };
-        let Some(parms) = parms else {
-            return Predictor::None;
+        let parms = match parms {
+            None => return Predictor::None,
+            // An object that the pass did not keep (yet).
+            Some(Val::Ref(n)) if !self.objs.contains_key(&n) => return Predictor::Later,
+            Some(v) => match self.deref(v) {
+                Some(d) => d,
+                None => return Predictor::None,
+            },
         };
         let int_of = |k: &[u8], default: i64| match get(parms, k) {
             Some(Val::Int(n)) => n,
@@ -730,7 +775,7 @@ impl Doc {
     }
 
     /// Keep the objects of one decoded object stream.
-    fn object_stream(&mut self, dict: &[u8], data: &[u8]) {
+    fn object_stream(&mut self, dict: &[u8], data: &[u8], replace: bool) {
         let (Some(Val::Int(n)), Some(Val::Int(first))) = (get(dict, b"/N"), get(dict, b"/First"))
         else {
             return;
@@ -757,7 +802,7 @@ impl Doc {
                 .get(k + 1)
                 .map_or(data.len(), |o| o.1)
                 .min(data.len());
-            if s < e {
+            if s < e && (replace || !self.objs.contains_key(&num)) {
                 self.keep(num, &data[s..e]);
             }
         }
@@ -2150,6 +2195,18 @@ mod tests {
             (6, "<< >>", Some(CMAP)),
         ]);
         assert_eq!(text(&pdf, 1000).as_deref(), Some("Hello World"));
+        // Parameters after the stream: the stream waits for them.
+        let later = dict.replace(
+            "/DecodeParms << /Predictor 12 /Columns 7 >>",
+            "/DecodeParms 9 0 R",
+        );
+        let pdf = doc(&[
+            (3, "<< >>", Some(CODES)),
+            (10, &later, Some(&png_up(body.as_bytes(), 7))),
+            (6, "<< >>", Some(CMAP)),
+            (9, "<< /Predictor 12 /Columns 7 >>", None),
+        ]);
+        assert_eq!(text(&pdf, 1000).as_deref(), Some("Hello World"));
         // A TIFF predictor is not read: the objects are missing.
         let dict = dict.replace("/Predictor 12", "/Predictor 2");
         let pdf = doc(&[
@@ -2235,11 +2292,13 @@ mod tests {
             );
             let data = png_up(body.as_bytes(), columns);
             let mut objs: Vec<(u32, &str, Option<&[u8]>)> = Vec::new();
-            if let Some(e) = &extra {
-                objs.push((9, e, None));
-            }
             objs.push((3, "<< >>", Some(content.as_bytes())));
             objs.push((10, &dict, Some(&data)));
+            // The parameters before or after the stream.
+            if let Some(e) = &extra {
+                let at = if rng.below(2) == 0 { 0 } else { objs.len() };
+                objs.insert(at, (9, e, None));
+            }
             let got = text(&doc(&objs), 1000);
             let expect = readable(&want).then_some(want);
             assert_eq!(got, expect, "{diffs} / {decode}");

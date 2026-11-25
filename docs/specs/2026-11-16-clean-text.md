@@ -291,8 +291,8 @@ The search reads the lines in order and stops at the first of these:
   German, Spanish, Italian, Danish or Norwegian or Swedish, Dutch, Polish,
   Portuguese, Czech, Finnish, Turkish, Russian or Chinese. The client form
   in any language is an attribution line too: a line of less than 400 bytes
-  with a year (`19..` or `20..`, 4 digits), a time (`10:00`), an address in
-  `<>` and a `:` (or `：`) at the end.
+  with a year (`19..` or `20..`, 4 digits) and a time (`10:00`) outside
+  `<>`, an address in `<>` and a `:` (or `：`) at the end.
   Gmail writes "Am 3. Feb. 2025 um 10:00 schrieb Ana <ana@example.org>:".
   Two lines join into the client form only if the second line alone is not
   the client form. Two lines never join if the first line ends with `.`,
@@ -426,8 +426,11 @@ its first 1 KiB holds `%PDF`.
   of 10 to 15 loses its PNG predictor. `/DecodeParms` is a dictionary, a
   reference, or an array whose first item is one of these. The predictor
   uses rows of `/Columns`, `/Colors` and `/BitsPerComponent`. A short last
-  row and the rows after a bad filter
-  byte go out. A stream with another predictor is not read.
+  row and the rows after a bad filter byte go out. A stream with another predictor is not read. If the
+  parameters are a reference to an object that comes later in the file,
+  an object stream waits for the end of the pass inside the object budget
+  (4 MiB), and its objects then do not replace objects that the pass kept.
+  Another stream with such a reference is not read.
 - The reader reads the names of a stream dictionary (`/Length`, `/Filter`
   and the names above) only outside its strings, comments and inner
   dictionaries.

@@ -143,7 +143,21 @@ fn dated(s: &str) -> bool {
     if s.len() >= 400 || !(s.ends_with(':') || s.ends_with('：')) {
         return false;
     }
-    let b = s.as_bytes();
+    // The time and the year count only outside `<>`, so an address such as
+    // `<ana2025@example.org>` is not a date.
+    let outside: Vec<u8> = s
+        .split('<')
+        .enumerate()
+        .flat_map(|(i, part)| {
+            let text = if i == 0 {
+                part
+            } else {
+                part.split_once('>').map_or("", |p| p.1)
+            };
+            text.bytes().chain(*b" ")
+        })
+        .collect();
+    let b = &outside[..];
     let time = b.windows(4).any(|w| {
         w[0].is_ascii_digit() && w[1] == b':' && w[2].is_ascii_digit() && w[3].is_ascii_digit()
     });
@@ -384,6 +398,9 @@ mod tests {
             strip_quotes(t, false),
             "Let's meet at 10:00 with Ana <ana@example.org>:"
         );
+        // A year or a time inside the address does not count.
+        let t = "Let's meet at 10:00 with Ana <ana2025@example.org>:\n> The proposed time works";
+        assert_eq!(strip_quotes(t, false), t.lines().next().unwrap());
         // An own sentence does not join the next line.
         let t = "On Tuesday at 10:00.\nAna <ana@example.org>:\n> example";
         assert_eq!(
