@@ -11,7 +11,7 @@ use iris_understand::budget::ModelRow;
 use iris_understand::Model;
 use serde::Serialize;
 
-use crate::read::{message_row, MessageSummary};
+use crate::read::{message_row, sender_kind, MessageSummary};
 use crate::{Error, Result};
 
 /// Makes the model client of a `model_setting` row. The program builds an
@@ -27,6 +27,9 @@ pub struct AskSource {
     /// that the message has them.
     pub quote: Option<String>,
     pub message: MessageSummary,
+    /// True if the sender of the message is a stranger (specification 1,
+    /// section 6.7): its text can try to mislead the answer (issue #255).
+    pub stranger: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -66,7 +69,8 @@ pub fn answer(store: &Store, connect: &Connect, question: &str, now_ms: i64) -> 
         for s in &a.sources {
             if ask::current(&tx, s)? {
                 if let Some((m, _)) = message_row(&tx, s.message)? {
-                    rows.insert(s.message, m);
+                    let stranger = sender_kind(&tx, m.from.address.as_deref())? == "stranger";
+                    rows.insert(s.message, (m, stranger));
                 }
             }
         }
@@ -75,10 +79,12 @@ pub fn answer(store: &Store, connect: &Connect, question: &str, now_ms: i64) -> 
             .iter()
             .enumerate()
             .filter_map(|(i, s)| {
+                let (message, stranger) = rows.remove(&s.message)?;
                 Some(AskSource {
                     n: i + 1,
                     quote: s.quote.clone(),
-                    message: rows.remove(&s.message)?,
+                    message,
+                    stranger,
                 })
             })
             .collect())

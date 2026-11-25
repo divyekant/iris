@@ -1249,7 +1249,7 @@ pub fn brief_section(
 /// shortcut: the case-insensitive match scans the sender table, one scan
 /// for each message detail and never for a search (about 4 ms for 100,000
 /// senders). Add a `lower(address)` index to the store if it shows in a profile.
-fn sender_kind(c: &Connection, address: Option<&str>) -> rusqlite::Result<String> {
+pub(crate) fn sender_kind(c: &Connection, address: Option<&str>) -> rusqlite::Result<String> {
     let Some(address) = address else {
         return Ok("stranger".into());
     };

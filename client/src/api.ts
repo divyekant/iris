@@ -199,7 +199,8 @@ export type Summary = {
 };
 
 /** POST /api/ask (card R5-09). `answer` has a mark `[n]` after each fact: the source with that `n`. */
-export type AskSource = { n: number; quote: string | null; message: Summary };
+/** `stranger`: the sender is a stranger, so the text can try to mislead the answer (issue 255). */
+export type AskSource = { n: number; quote: string | null; message: Summary; stranger: boolean };
 export type AskAnswer = { answer: string | null; sources: AskSource[]; read: number; cost_micro_usd: number | null };
 
 export type Message = Summary & {

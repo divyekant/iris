@@ -181,6 +181,27 @@ test("questions and answers stack, and each mark opens its source mail", async (
   }
 });
 
+// Issue 255: mail from a stranger can try to mislead an answer, so its
+// source chip and mark say that the sender is a stranger.
+test("a source from a stranger says so on its chip and its mark", async () => {
+  thread.turns.length = 0;
+  serve([() => [200, fx.askAnswer("When does my flight leave?")]]);
+  const view = await mount("/src/views/Ask.svelte");
+  try {
+    await send(view, "When does my flight leave?");
+    await until(() => view.target.querySelector("a.cite"));
+    view.flushSync();
+    const chip = view.target.querySelector(".chip");
+    assert.equal(text(chip.querySelector(".stranger")), "Stranger");
+    assert.match(view.target.querySelector("a.cite").getAttribute("aria-label"), /\(from a stranger\)$/);
+  } finally {
+    view.destroy();
+    thread.turns.length = 0;
+  }
+  // A source that is not from a stranger has no mark.
+  assert.ok(fx.askAnswer("Q4 numbers?").sources.every((s) => !s.stranger));
+});
+
 test("a question that fails after the view closed comes back to the box", async () => {
   thread.turns.length = 0;
   thread.draft = "";

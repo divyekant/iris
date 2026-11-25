@@ -144,12 +144,30 @@ async fn answers_with_the_summary_of_each_source() {
                     "from": {"name": "Example Air", "address": "noreply@airline.example"},
                     "subject": "Your booking confirmation",
                     "labels": []
-                }
+                },
+                // No sender row: a stranger (issue #255).
+                "stranger": true
             }],
             "read": 1,
             "cost_micro_usd": 110
         })
     );
+    // A known service is not a stranger.
+    s.write(|tx| {
+        Ok(tx.execute(
+            "INSERT INTO sender(address, kind) VALUES ('noreply@airline.example', 'service')",
+            [],
+        )?)
+    })
+    .unwrap();
+    let (_, v) = ask(
+        &s,
+        fake(reply),
+        r#"{"question": "When does my flight leave?"}"#,
+        true,
+    )
+    .await;
+    assert_eq!(v["sources"][0]["stranger"], json!(false), "{v}");
     // No match: no call and no answer.
     let (code, v) = ask(&s, fake(reply), r#"{"question": "weather in Oslo"}"#, true).await;
     assert_eq!(code, StatusCode::OK);

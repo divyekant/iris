@@ -406,7 +406,7 @@ model as data, and answers with the messages that the answer comes from.
 | Field | Content |
 |---|---|
 | `answer` | The answer, or `null` when the mail does not answer the question. The model gives the answer as claims, each with the numbers of its messages. A claim is one fact, in one or more sentences. One or more marks `[n]` come before the end mark of its last sentence, and name the sources of all of its text. The engine drops a claim with a number that names no message of the data. The text of a claim has no other mark. |
-| `sources` | `{"n", "quote", "message"}` for each source, in the order of `n` from 1. `message` is a message summary. `quote` is words of the message that support the answer, or `null`. The engine checks that the message has the words. |
+| `sources` | `{"n", "quote", "message", "stranger"}` for each source, in the order of `n` from 1. `message` is a message summary. `quote` is words of the message that support the answer, or `null`. The engine checks that the message has the words. `stranger` is `true` if the sender is a stranger (a sender with no row or the kind `stranger`): its text can try to mislead the answer, so the view marks the source (issue 255). |
 | `read` | The count of messages that the model read. 0 means that no message matched, and no model call went out. |
 | `cost_micro_usd` | The cost of the call, or `null` with no call or for a local model. |
 
