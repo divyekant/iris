@@ -18,8 +18,9 @@ pay again for the same mail.
 1. A batch runner understands the pending messages of the store in the order
    of spec 1 section 7.1.
 2. A message that a run understood is never sent to the model again while
-   its mail does not change. A second run on the same store, with no change
-   of the mail, makes zero calls for these messages. A message that is not
+   its mail and the context of its last run (section "Resets") do not
+   change. A second run on the same store, with no change of the mail,
+   makes zero calls for these messages. A message that is not
    understood keeps the retries of spec 1 section 7.4 (`tries`,
    `retry_at`).
 3. The store keeps the calls, the tokens and the cost of each run.
