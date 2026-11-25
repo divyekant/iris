@@ -142,6 +142,8 @@ export type Status = {
   waits_model?: number;
   /** The time zone of defer dates and due dates (an IANA name, `iris zone`). Null or left out: the zone of the browser. */
   time_zone?: string | null;
+  /** True when the owner set the time zone (`iris zone` or the Accounts page), false when it is the zone of the machine that runs Iris. */
+  time_zone_set?: boolean;
   /** After model errors: the time of the next model call (RFC 3339), while it is later than now. An older engine leaves it out. */
   model_retry_at?: string;
 };

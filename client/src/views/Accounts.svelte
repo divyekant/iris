@@ -4,7 +4,7 @@
   accounts in one list.
 -->
 <script lang="ts">
-  import { postStatus, readStatus, type Account, type Status } from "../api";
+  import { own, post, postStatus, readStatus, type Account, type Status } from "../api";
   import { poll as every } from "../clock";
   import { accountNames, signIn, when } from "../format";
 
@@ -95,6 +95,37 @@
     }
   }
 
+  // The time zone of the owner (issue 891): the days of due dates and defer dates. An engine that
+  // cannot set it from the web leaves `time_zone_set` out, and the page shows no setting.
+  const zones: string[] = (Intl as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf?.("timeZone") ?? [];
+  // "": the time zone of the machine that runs Iris.
+  // svelte-ignore state_referenced_locally
+  let zone = $state(initial.time_zone_set ? (initial.time_zone ?? "") : "");
+  let zoneBusy = $state(false);
+  let zoneNote = $state("");
+  let zoneError = $state("");
+  let zoneNow = $derived(status.time_zone_set ? (status.time_zone ?? "") : "");
+
+  async function saveZone() {
+    zoneBusy = true;
+    zoneNote = zoneError = "";
+    try {
+      const next = await post<{ time_zone: string | null; time_zone_set: boolean }>("zone", { zone: zone || null });
+      status = { ...status, ...next };
+      zone = next.time_zone_set ? (next.time_zone ?? "") : "";
+      zoneNote = "Saved.";
+      // A poll that started before the save can show the old zone: read again.
+      await refresh().catch(() => {});
+    } catch (e) {
+      if ((e as { status?: number }).status === undefined) {
+        zoneError = "Iris could not tell if it saved the time zone.";
+        await refresh().catch(() => {});
+      } else zoneError = own(e);
+    } finally {
+      zoneBusy = false;
+    }
+  }
+
   // The state of one account, in one sentence, and its tone.
   function stateOf(a: Account): { text: string; tone: "ok" | "busy" | "retry" | "stopped" } {
     // An account that the person removed (decision D34): the engine deletes its mail now.
@@ -173,6 +204,27 @@
     <li class="none">No account yet. <a href="#/setup">Set up Iris</a> to copy your mail.</li>
   {/each}
 </ul>
+
+{#if status.time_zone_set !== undefined}
+  <section class="zone" aria-labelledby="zone">
+    <h2 id="zone">Time zone</h2>
+    <p>
+      Iris uses this time zone for the days of due dates and defer dates. Now:
+      {#if status.time_zone_set}<strong>{status.time_zone}</strong>, set by you.{:else}<strong>{status.time_zone ?? "UTC"}</strong>, the time zone of the machine that runs Iris.{/if}
+    </p>
+    <form class="actions" onsubmit={(e) => (e.preventDefault(), saveZone())}>
+      <label for="zone-pick">Time zone</label>
+      <select id="zone-pick" value={zone} onchange={(e) => ((zone = e.currentTarget.value), (zoneNote = zoneError = ""))} disabled={zoneBusy}>
+        <option value="">The time zone of the machine that runs Iris</option>
+        {#if zone && !zones.includes(zone)}<option value={zone}>{zone}</option>{/if}
+        {#each zones as z (z)}<option value={z}>{z.replaceAll("_", " ")}</option>{/each}
+      </select>
+      <button type="submit" class="quiet" disabled={zoneBusy || zone === zoneNow}>{zoneBusy ? "Saving…" : "Save"}</button>
+    </form>
+    {#if zoneNote}<p class="note" role="status">{zoneNote}</p>{/if}
+    {#if zoneError}<p class="error" role="alert">{zoneError}</p>{/if}
+  </section>
+{/if}
 
 <section class="add" aria-labelledby="add">
   <h2 id="add">Add an account</h2>
@@ -314,12 +366,49 @@
     color: var(--color-text-muted);
     font-size: var(--font-size--1);
   }
+  .zone {
+    margin: 0 0 var(--space-8);
+  }
+  .zone h2,
   .add h2 {
     margin: 0 0 var(--space-2);
     font-size: var(--font-size-1);
   }
+  .zone > p,
   .add p {
     margin: 0;
     color: var(--color-text-muted);
+  }
+  .zone strong {
+    color: var(--color-text);
+    font-weight: 500;
+  }
+  .zone .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    align-items: center;
+    margin-top: var(--space-3);
+  }
+  .zone label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .zone select {
+    font: inherit;
+    min-width: 0;
+    max-width: 100%;
+    padding: var(--space-2) var(--space-3);
+    color: var(--color-text);
+    background: var(--color-background);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+  }
+  .zone .note {
+    margin-top: var(--space-2);
+    font-size: var(--font-size--1);
   }
 </style>
