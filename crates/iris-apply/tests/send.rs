@@ -2227,3 +2227,18 @@ fn no_send_leaves_a_read_only_account() {
     assert_eq!(b.sends(), 0);
     assert_eq!(b.state(s), "held");
 }
+
+/// A read-only sign-in stops a draft change at its claim: no
+/// `drafts.update` and no ledger entry (issue #683).
+#[test]
+fn no_change_leaves_a_read_only_account() {
+    let b = setup("change-read-only");
+    let (change, _, _) = b.changed(new_text());
+    let before = b.row();
+    b.store
+        .write(|tx| Ok(tx.execute("UPDATE account SET state = 'read_only'", [])?))
+        .unwrap();
+    assert_eq!(b.apply(change).unwrap(), Outcome::ReadOnly);
+    assert_eq!(b.puts(), 0);
+    assert_eq!(b.row(), before);
+}

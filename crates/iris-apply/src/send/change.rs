@@ -257,7 +257,7 @@ fn claim(
     let post = serde_json::to_string(post).expect("plain data");
     let pre = (!noop).then(|| serde_json::to_string(pre).expect("plain data"));
     Ok(run.store.write(|tx| {
-        if let Some(o) = super::super::gate(tx, action)? {
+        if let Some(o) = super::super::gate(tx, action, account)? {
             return Ok(Some(Err(o)));
         }
         let approved: bool = tx.query_row(
