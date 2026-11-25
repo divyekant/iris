@@ -227,7 +227,8 @@ needed. Each change of `SENT` or a label of `iris_store::DRAFT_OR_COPY`
 also clears `understood_at`.
 
 Each folder label has the kind `system`, a folder that the person made
-too: the provider refuses each folder change (section 7), and the
+too: `modify` refuses each folder change (section 7; only `relocate`
+moves mail, between inbox, archive and trash), and the
 provider spec (section 4) gives `system` to each folder that a provider
 cannot change as a user label. So a `label` action cannot target a
 folder. A message in the `\Archive` folder has its folder label, no

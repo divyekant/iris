@@ -2,9 +2,10 @@
 //! `docs/specs/2026-11-17-imap-client.md`).
 //!
 //! [`connect`] opens a TLS connection (port 993). [`Session::start`] signs
-//! in on any stream, so that tests use a plain local stream. The client only
-//! reads: it opens folders with `EXAMINE` and fetches with `BODY.PEEK[]`, so
-//! no call changes the mailbox.
+//! in on any stream, so that tests use a plain local stream. The reads open
+//! folders with `EXAMINE` and fetch with `BODY.PEEK[]`, so no read changes
+//! the mailbox. Only two calls write, each after a `SELECT`:
+//! [`Session::store`] (`UID STORE`) and [`Session::move_uids`] (`UID MOVE`).
 //!
 //! Memory: [`Session::fetch_raw`] streams the message to a sink. Each other
 //! response is at most [`RESPONSE_LIMIT`] bytes. [`Session::changes`] and
