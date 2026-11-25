@@ -436,7 +436,14 @@ export async function loadChange(id: string): Promise<ChangeStart> {
       return only(change);
     }
   }
-  return { accounts: (await get<Status>("status")).accounts, change };
+  try {
+    return { accounts: (await get<Status>("status")).accounts, change };
+  } catch (e) {
+    // The accounts serve only the form after the write (issue 1112): a kept write shows
+    // with no form after it, and the next open reads the accounts again.
+    if (!kept) throw e;
+    return only(change);
+  }
 }
 
 export async function loadOutbox(): Promise<Outbox> {

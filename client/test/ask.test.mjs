@@ -194,6 +194,8 @@ test("a source from a stranger says so on its chip and its mark", async () => {
     const chip = view.target.querySelector(".chip");
     assert.equal(text(chip.querySelector(".stranger")), "Stranger");
     assert.match(view.target.querySelector("a.cite").getAttribute("aria-label"), /\(from a stranger\)$/);
+    // Issue 1110: the chip that opens the source says it too.
+    assert.match(chip.getAttribute("aria-label"), /^Source 1: .+ \(from a stranger\)$/);
   } finally {
     view.destroy();
     thread.turns.length = 0;

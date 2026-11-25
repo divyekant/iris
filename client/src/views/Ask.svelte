@@ -71,7 +71,7 @@
               <ul class="sources" aria-label="Sources">
                 {#each sources as s (s.n)}
                   <li>
-                    <a class="chip touch" href={href.mail(s.message.id)}><span class="n" aria-hidden="true">{s.n}</span><span class="label">{label(s)}</span>{#if s.stranger}<span class="stranger">Stranger</span>{/if}</a>
+                    <a class="chip touch" href={href.mail(s.message.id)} aria-label={`Source ${s.n}: ${named(s)}`}><span class="n" aria-hidden="true">{s.n}</span><span class="label">{label(s)}</span>{#if s.stranger}<span class="stranger">Stranger</span>{/if}</a>
                   </li>
                 {/each}
               </ul>

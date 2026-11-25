@@ -96,3 +96,29 @@ test("the due date of a job is a day of the owner zone, not of the browser (issu
     process.env.TZ = zone;
   }
 });
+
+test("endOfDay refuses a day that the owner zone skipped, and keeps the days around it (issue 987)", () => {
+  const { today } = act;
+  // Pacific/Apia skipped 2011-12-30, Pacific/Kwajalein skipped 1993-08-21.
+  for (const [tz, gone] of [["Pacific/Apia", "2011-12-30"], ["Pacific/Kwajalein", "1993-08-21"]]) {
+    assert.throws(() => s.endOfDay(gone, tz), /does not exist in the time zone/, `${tz} ${gone}`);
+    assert.throws(() => s.keepDue(undefined, gone, tz), /does not exist/);
+    assert.throws(() => s.dueValue({}, gone, tz), /does not exist/);
+    for (const near of [-2, -1, 1, 2]) {
+      const t = new Date(Date.parse(`${gone}T12:00:00Z`) + near * 86_400_000).toISOString().slice(0, 10);
+      assert.equal(today(new Date(Date.parse(s.endOfDay(t, tz))), tz), t, `${tz} ${t}`);
+    }
+  }
+});
+
+test("with no owner zone, endOfDay refuses a day that the browser zone skipped (issue 987)", () => {
+  const zone = process.env.TZ;
+  try {
+    process.env.TZ = "Pacific/Apia";
+    assert.throws(() => s.endOfDay("2011-12-30", null), /2011-12-30 does not exist in the time zone of this browser/);
+    assert.match(s.endOfDay("2011-12-29", null), /^2011-12-29T23:59:59\.999-10:00$/);
+    assert.match(s.endOfDay("2011-12-31", null), /^2011-12-31T23:59:59\.999\+14:00$/);
+  } finally {
+    process.env.TZ = zone;
+  }
+});

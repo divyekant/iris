@@ -2,7 +2,7 @@
 // name on each brief line, and the accounts view.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { load, mount } from "./mount.mjs";
+import { load, mount, until } from "./mount.mjs";
 
 const fx = await load("/dev/fixtures.ts");
 const { accountNames } = await load("/src/format.ts");
@@ -546,5 +546,40 @@ test("UTC is a choice, and a machine zone with no name is not called UTC", async
     assert.ok(values.includes("Europe/Berlin"));
   } finally {
     view.destroy();
+  }
+});
+
+test("the time zone selector follows a status change from outside the page, and keeps an unsaved choice (issue 1016)", async () => {
+  const saved = globalThis.fetch;
+  let now = { time_zone: "Europe/London", time_zone_set: false };
+  globalThis.fetch = async () => new Response(JSON.stringify({ ...fx.status, ...now }), { status: 200, headers: { "content-type": "application/json" } });
+  const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, ...now }, poll: 10 });
+  const pick = view.target.querySelector("#zone-pick");
+  const save = () => view.target.querySelector("section.zone button[type=submit]");
+  try {
+    assert.equal(pick.value, "");
+    // Another tab or `iris zone` sets the zone: the next poll shows it in the selector.
+    now = { time_zone: "Asia/Tokyo", time_zone_set: true };
+    await until(() => (view.flushSync(), /Now: Asia\/Tokyo, set by you/.test(text(view.target.querySelector("section.zone")))));
+    assert.equal(pick.value, "Asia/Tokyo");
+    assert.ok(save().disabled, "nothing to save: the selector shows the zone now");
+    // An unsaved choice stays through a poll that shows another change.
+    pick.value = "Europe/Berlin";
+    pick.dispatchEvent(new Event("change", { bubbles: true }));
+    now = { time_zone: "UTC", time_zone_set: true };
+    await until(() => (view.flushSync(), /Now: UTC, set by you/.test(text(view.target.querySelector("section.zone")))));
+    assert.equal(pick.value, "Europe/Berlin");
+    assert.ok(!save().disabled);
+    // Another tab saves the same zone: the choice is saved, so the selector follows the next change.
+    now = { time_zone: "Europe/Berlin", time_zone_set: true };
+    await until(() => (view.flushSync(), /Now: Europe\/Berlin, set by you/.test(text(view.target.querySelector("section.zone")))));
+    assert.ok(save().disabled);
+    now = { time_zone: "UTC", time_zone_set: true };
+    await until(() => (view.flushSync(), /Now: UTC, set by you/.test(text(view.target.querySelector("section.zone")))));
+    assert.equal(pick.value, "UTC");
+    assert.ok(save().disabled);
+  } finally {
+    view.destroy();
+    globalThis.fetch = saved;
   }
 });
