@@ -114,35 +114,42 @@ pub(crate) fn check(conn: &Connection, data_dir: &std::path::Path) -> Result<Che
 /// Reads `policy.toml` in the data folder and compares it to the active
 /// policy. Changes nothing.
 pub fn file_state(store: &Store) -> Result<FileState> {
+    Ok(state(store)?.1)
+}
+
+/// The active policy and the state of the file on disk, from one read
+/// transaction: the file state compares the file to this active policy
+/// (#816). See [`file_state`] for the wait of a missing file.
+pub fn state(store: &Store) -> Result<(Active, FileState)> {
     // A policy writer (`Store::write_policy`, with the backup lock) moves
     // the old file aside, then links the new one: a read between the two
     // sees no file (issue #141). For a missing file, wait for the backup
     // lock, then read again: no writer is then in its write. The wait
     // can be long during a backup, so call this off an async runtime
     // thread. With no holder, the lock comes at once.
-    let state = file_state_now(store)?;
-    if state != FileState::Missing {
+    let state = state_now(store)?;
+    if state.1 != FileState::Missing {
         return Ok(state);
     }
     let _lock = store.backup_lock()?;
-    file_state_now(store)
+    state_now(store)
 }
 
-fn file_state_now(store: &Store) -> Result<FileState> {
+fn state_now(store: &Store) -> Result<(Active, FileState)> {
     store.read(|conn| {
-        let loaded = match check(conn, store.dir())? {
-            Checked::Missing => return Ok(FileState::Missing),
-            Checked::Invalid(e) => return Ok(FileState::Invalid(e)),
-            Checked::Ok(l) => l,
-        };
         let active = active(conn)?;
-        Ok(
-            if active.sha256.as_deref() == Some(loaded.sha256.as_str()) && active.error.is_none() {
-                FileState::Same
-            } else {
-                FileState::Changed(loaded)
-            },
-        )
+        let file = match check(conn, store.dir())? {
+            Checked::Missing => FileState::Missing,
+            Checked::Invalid(e) => FileState::Invalid(e),
+            Checked::Ok(l) => {
+                if active.sha256.as_deref() == Some(l.sha256.as_str()) && active.error.is_none() {
+                    FileState::Same
+                } else {
+                    FileState::Changed(l)
+                }
+            }
+        };
+        Ok((active, file))
     })
 }
 

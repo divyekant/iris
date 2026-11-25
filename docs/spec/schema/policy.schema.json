@@ -242,7 +242,7 @@
           "maximum": 4294967295
         },
         "recipients": {
-          "$comment": "thread: each address in To and Cc of the draft is in its thread (decision D3).",
+          "$comment": "thread: each address in To, Cc and Bcc of the draft is in its thread (decision D3).",
           "enum": [
             "thread"
           ]
