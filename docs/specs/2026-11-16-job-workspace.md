@@ -286,7 +286,7 @@ these rules:
   `submit` and again just before the apply, with the same results as for
   a message. A feed, signal or conversation item is never a target in a
   session, so `correct` on one is refused.
-- `iris send` and `iris nudge` make send actions. The engine refuses
+- `iris send` makes send actions (`iris nudge` is not built, decision D8). The engine refuses
   these verbs in session mode, and refuses at `submit` each send action
   in a changeset of a session, on each path that makes one: only a person
   sends (decision D2). `iris draft` in session mode makes a reply in a
