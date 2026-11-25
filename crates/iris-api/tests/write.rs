@@ -998,7 +998,8 @@ const KEY_TAKEN: &str = "This key belongs to another mail.";
 
 /// The `change` of a stopped write (draft change spec, section 5): none
 /// for a sent draft, `new` for a draft of an account that is not Gmail,
-/// and none for a draft of any provider that Iris does not write.
+/// and none for a draft of any provider that Iris does not write or whose
+/// attachment file is gone.
 #[tokio::test]
 async fn a_stopped_write_says_how_its_draft_can_change() {
     let dir = temp("change-kinds");
@@ -1013,6 +1014,19 @@ async fn a_stopped_write_says_how_its_draft_can_change() {
     );
     assert_eq!(change(&s, &cs).await, "new");
     set("UPDATE draft SET foreign_at = 1 WHERE id = 1");
+    assert_eq!(change(&s, &cs).await, Value::Null);
+    // An attachment of the draft whose file is not in the attachment
+    // folder: the form cannot take it, so no change.
+    set("UPDATE draft SET foreign_at = NULL WHERE id = 1");
+    assert_eq!(change(&s, &cs).await, "new");
+    set(
+        "UPDATE draft SET content = json_set(content, '$.content.attachments',
+           json('[{\"name\": \"q4.pdf\", \"type\": \"application/pdf\",
+                   \"sha256\": \"0000000000000000000000000000000000000000000000000000000000000000\",
+                   \"size\": 14}]')) WHERE id = 1",
+    );
+    assert_eq!(change(&s, &cs).await, Value::Null);
+    set("UPDATE account SET provider = 'gmail' WHERE id = 1");
     assert_eq!(change(&s, &cs).await, Value::Null);
 }
 

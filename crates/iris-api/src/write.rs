@@ -141,7 +141,7 @@ pub fn state(store: &Store, cs: i64, now_ms: i64) -> Result<Option<Value>> {
     Ok(store.read(|conn| {
         // One snapshot: the engine moves the write at the same time.
         let tx = conn.unchecked_transaction()?;
-        let v = state_in(&tx, cs, now_ms)?;
+        let v = state_in(store, &tx, cs, now_ms)?;
         tx.finish()?;
         Ok(v)
     })?)
@@ -158,7 +158,12 @@ type Mark = (
     i64,
 );
 
-fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Value>> {
+fn state_in(
+    store: &Store,
+    c: &Connection,
+    cs: i64,
+    now_ms: i64,
+) -> rusqlite::Result<Option<Value>> {
     let mark: Option<Mark> = c
         .query_row(
             concat!(
@@ -197,7 +202,7 @@ fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Val
         None => None,
     };
     let change = match draft {
-        Some(d) => change(c, d, now_ms)?,
+        Some(d) => change(store, c, d, now_ms)?,
         None => None,
     };
     let draft = draft.map(|d| format_id(Kind::Draft, d));
@@ -256,16 +261,21 @@ fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Val
 /// (draft change spec, section 5): `update` changes it in place, `new`
 /// makes a new draft (an account that is not Gmail), `None` offers no
 /// "Change and send".
-fn change(c: &Connection, draft: i64, now_ms: i64) -> rusqlite::Result<Option<&'static str>> {
-    let row: Option<(String, Option<i64>)> = c
+fn change(
+    store: &Store,
+    c: &Connection,
+    draft: i64,
+    now_ms: i64,
+) -> rusqlite::Result<Option<&'static str>> {
+    let row: Option<(String, Option<i64>, String)> = c
         .query_row(
-            "SELECT a.provider, d.thread_id FROM draft d JOIN account a ON a.id = d.account_id
-             WHERE d.id = ?1",
+            "SELECT a.provider, d.thread_id, d.content FROM draft d
+             JOIN account a ON a.id = d.account_id WHERE d.id = ?1",
             [draft],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let Some((provider, thread)) = row else {
+    let Some((provider, thread, content)) = row else {
         return Ok(None);
     };
     let db = |e| match e {
@@ -285,6 +295,19 @@ fn change(c: &Connection, draft: i64, now_ms: i64) -> rusqlite::Result<Option<&'
         if answers.is_none() || answers != iris_changeset::reply_parent(c, thread)? {
             return Ok(None);
         }
+    }
+    // The form takes the attachments of the draft: each file must be in
+    // the attachment folder, as the apply checks.
+    let Some(content) = serde_json::from_str::<Value>(&content)
+        .ok()
+        .and_then(|v| serde_json::from_value::<iris_compose::Content>(v["content"].clone()).ok())
+    else {
+        return Ok(None);
+    };
+    let files = iris_apply::has_files(store, &content)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.to_string().into()))?;
+    if !files {
+        return Ok(None);
     }
     Ok(Some(if provider == "gmail" { "update" } else { "new" }))
 }
