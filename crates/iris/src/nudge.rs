@@ -532,4 +532,40 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A priced model whose invalid answer has unknown usage: the budget
+    /// refuses the retry, the run stops as `unknown`, the shared wait
+    /// starts, and the step stops (review of #964).
+    #[test]
+    fn a_priced_call_of_unknown_usage_starts_the_wait() {
+        let (store, dir) = open("unknown-priced");
+        ask(&store, "t-a", "Ana, can you send the deck?");
+        ask(&store, "t-b", "Ana, can you send the slides?");
+        store
+            .write(|tx| {
+                tx.execute("UPDATE model_setting SET budget_micro_usd = 1000000", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+            Ok(Box::new(Fake(calls.clone(), "unknown:not json")))
+        };
+        let late = 1_000 + iris_voice::LATE_AFTER_MS;
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!(calls.get(), 1, "no retry and no next thread");
+        assert_eq!(
+            count(
+                &store,
+                "SELECT count(*) FROM understand_run WHERE stop = 'unknown' AND unknown_calls = 1"
+            ),
+            1
+        );
+        assert_eq!(
+            count(&store, "SELECT retry_at IS NOT NULL FROM model_setting"),
+            1,
+            "the shared wait starts"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
