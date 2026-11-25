@@ -111,7 +111,17 @@
 
 {#snippet asks(sender: GateSender)}
   <ul class="asks">
-    {#each sender.items as item (item.id)}<li><a class="touch" href={href.item(item.id)}>{item.title}</a></li>{/each}
+    {#each sender.items as item (item.id)}
+      <li>
+        <a class="touch" href={href.item(item.id)}>{item.title}</a>
+        <!-- Issue 478: the ready mark of a brief line. At the gate it is no control: accept the sender first. -->
+        {#if item.ready?.includes("draft")}<span class="ready" title="Iris wrote a reply in your voice. Nothing is sent."
+            ><svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"
+              ><path d="M10.5 2.5l3 3-7.5 7.5H3v-3z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" /></svg
+            >Draft ready</span
+          >{/if}
+      </li>
+    {/each}
     {#if sender.count > sender.items.length}<li class="more">and {items(sender.count - sender.items.length)} more</li>{/if}
   </ul>
 {/snippet}
@@ -244,6 +254,18 @@
   }
   .more {
     color: var(--color-text-faint);
+  }
+  /* The ready pill of Line.svelte, after the title. */
+  .ready {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    margin-left: var(--space-2);
+    padding: 0 var(--space-2);
+    border: 1px solid var(--color-primary);
+    border-radius: var(--radius-full);
+    color: var(--color-primary);
+    white-space: nowrap;
   }
   .answers {
     flex: none;

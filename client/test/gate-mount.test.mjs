@@ -318,3 +318,18 @@ test("an answer with no reply of the engine says that Iris does not know if it s
     view.destroy();
   }
 });
+
+test("an item at the gate with a reply draft shows Draft ready, as a brief line does (issue 478)", async () => {
+  const [maria, ...rest] = fx.gate.senders;
+  const marked = { ...maria, items: [{ ...maria.items[0], ready: ["draft"] }, maria.items[1]] };
+  const view = await mount("/src/views/Gate.svelte", { page: { ...fx.gate, senders: [marked, ...rest] }, declined: 0 });
+  try {
+    const pills = [...view.target.querySelectorAll(".asks .ready")];
+    assert.equal(pills.length, 1, "only the item with a ready draft");
+    assert.equal(text(pills[0]).trim(), "Draft ready");
+    assert.equal(pills[0].closest("li").querySelector("a").textContent, maria.items[0].title);
+    assert.equal(pills[0].closest("a"), null, "the pill is no link at the gate");
+  } finally {
+    view.destroy();
+  }
+});
