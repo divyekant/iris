@@ -233,7 +233,7 @@ pub(crate) fn draft(run: &mut Run<'_, '_>, action: i64) -> Result<Outcome> {
         hash,
         thread: thread.clone(),
     };
-    let name = owner_name(store, run.account, &run.address)?;
+    let name = owner_name(run)?;
     let post = Stored {
         content,
         reply,
@@ -327,11 +327,19 @@ fn files(store: &Store, content: &Content) -> Result<Option<Vec<Vec<u8>>>> {
 }
 
 /// The display name of the owner for `From` (send content spec, section
-/// 3): the `From` name of the newest message of a Gmail account from its
-/// own address with the label `SENT`. `None` for another provider, or a
-/// name that [`iris_compose::from_name`] refuses.
-fn owner_name(store: &Store, account: i64, address: &str) -> Result<Option<String>> {
-    let name: Option<Option<String>> = store.read(|c| {
+/// 3): the name that the provider gives ([`Provider::display_name`],
+/// Outlook), else the `From` name of the newest message of a Gmail account
+/// from its own address with the label `SENT`. `None` for another
+/// provider, or a name that [`iris_compose::from_name`] refuses.
+fn owner_name(run: &mut Run<'_, '_>) -> Result<Option<String>> {
+    if let Some(n) = run
+        .call(|g, t| g.display_name(t))
+        .map_err(Error::Provider)?
+    {
+        return Ok(iris_compose::from_name(&n));
+    }
+    let (account, address) = (run.account, run.address.clone());
+    let name: Option<Option<String>> = run.store.read(|c| {
         Ok(c.query_row(
             "SELECT h.from_name FROM message m JOIN header h ON h.message_id = m.id
              JOIN account a ON a.id = m.account_id
