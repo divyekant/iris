@@ -30,6 +30,13 @@
   let goal = $state(first);
   // svelte-ignore state_referenced_locally
   let due = $state(day ?? (old ? dayOf(old) : ""));
+  // The field follows the owner zone (it can come after the form opens) until the person changes it.
+  // svelte-ignore state_referenced_locally
+  let dueEdited = $state(day !== undefined);
+  $effect(() => {
+    const shown = old ? dayOf(old) : "";
+    if (!dueEdited) due = shown;
+  });
   $effect(() => ondraft?.(goal, due));
   let note = $state("");
   let sending = $state(false);
@@ -53,9 +60,9 @@
   <div class="due">
     <label>
       <span class="label">Due</span>
-      <input type="date" bind:value={due} />
+      <input type="date" bind:value={due} oninput={() => (dueEdited = true)} />
     </label>
-    {#if due}<button class="quiet" type="button" onclick={() => (due = "")}>No due date</button>{/if}
+    {#if due}<button class="quiet" type="button" onclick={() => ((due = ""), (dueEdited = true))}>No due date</button>{/if}
   </div>
   {#if note}<p class="error" role="alert">{note}</p>{/if}
   <div class="row">
