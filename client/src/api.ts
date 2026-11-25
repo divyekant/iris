@@ -413,9 +413,12 @@ export async function loadChange(id: string): Promise<ChangeStart> {
     try {
       return { thread: change.thread, reply: await get<ReplyStart>(`threads/${encodeURIComponent(change.thread)}/reply`), change };
     } catch (e) {
-      if (!kept) throw e;
+      // Only "no mail to reply to" (409) ends the reply start. Another error
+      // (the engine is busy, no answer) shows, and the next open reads again.
+      if (!kept || (e as { status?: number }).status !== 409) throw e;
       // The kept write needs no reply start (its parent can be in Trash now): it
       // shows with no conversation, and with no change, so no form follows it.
+      // With no mail to reply to, the engine offers no change of the reply.
       return { accounts: [], change: { ...change, change: null } };
     }
   }

@@ -1381,10 +1381,11 @@ test("Change and send of another draft on a draft link opens the link of that dr
 test("a kept write of a reply draft link shows also when its thread has no mail to reply to (issue 1098)", async () => {
   const api = await load("/src/api.ts");
   const R7 = { ...D7, thread: "t-2", subject: "Re: Q4" };
+  let busy = false;
   let state = { state: "waiting", draft: "d-7", sending: true, leaves_at: null };
   const net = serve((path) => {
     if (path === "write/cs-1") return [200, state];
-    if (path === "threads/t-2/reply") return [409, { error: "This thread has no mail to reply to." }];
+    if (path === "threads/t-2/reply") return busy ? [503, { error: "The store is busy." }] : [409, { error: "This thread has no mail to reply to." }];
     if (path.startsWith("drafts/d-7")) return [200, { ...R7, change: R7.change }];
     return [404, { error: "Not found." }];
   });
@@ -1396,6 +1397,10 @@ test("a kept write of a reply draft link shows also when its thread has no mail 
       if (change === null) assert.deepEqual(await api.loadChange("d-7"), { closed: { ...R7, change: null } });
       else await assert.rejects(api.loadChange("d-7"), /no mail to reply to/);
       window.sessionStorage.setItem("iris.write.d-7.taken", JSON.stringify({ write: "cs-1", to: ["sam@okafor.example"], subject: "", body: "Hi Sam,\n" }));
+      // Another error of the reply start shows: the next open reads the reply again.
+      busy = true;
+      await assert.rejects(api.loadChange("d-7"), /The store is busy/);
+      busy = false;
       const start = await api.loadChange("d-7");
       assert.deepEqual(start, { accounts: [], change: { ...R7, change: null } });
       state = { state: "waiting", draft: "d-7", sending: true, leaves_at: null };
