@@ -57,7 +57,7 @@ impl std::fmt::Display for Failure {
 }
 
 /// Writes and saves the draft of the reply to `thread`, with one model call
-/// through the budget. `now_ms` is the time of the start; `clock` gives the
+/// through the budget, and one more if the answer is not a valid draft. `now_ms` is the time of the start; `clock` gives the
 /// time of the end of the run (never before the start).
 pub fn draft(
     store: &Store,

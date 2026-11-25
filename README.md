@@ -374,7 +374,8 @@ same person first), and writes the reply in their style. The command saves
 the draft and prints it. It sends nothing. When you open the reply to the
 same thread in the web client (`#/write/t-42`), the reply box shows the saved
 draft. If a newer mail came into the thread, the draft does not show. The call uses the same budget as
-understanding. Iris makes no draft for a thread with hostile mail, or for a
+understanding. If the answer of the model is not a valid draft, Iris asks
+the model one more time. Iris makes no draft for a thread with hostile mail, or for a
 thread with a message that understanding did not read yet.
 
 ## Back up, export and move

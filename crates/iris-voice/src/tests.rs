@@ -8,7 +8,8 @@ use super::*;
 /// A model that records each call and gives a fixed answer. `during` runs
 /// inside the call, as a sync would.
 struct Fake<'a> {
-    answer: String,
+    /// The answer of each call in turn. The last answer repeats.
+    answers: Vec<String>,
     stop: Stop,
     calls: RefCell<Vec<(String, String)>>,
     during: Option<Box<dyn Fn() + 'a>>,
@@ -17,7 +18,7 @@ struct Fake<'a> {
 impl<'a> Fake<'a> {
     fn new(answer: &str) -> Self {
         Fake {
-            answer: answer.into(),
+            answers: vec![answer.into()],
             stop: Stop::End,
             calls: RefCell::new(Vec::new()),
             during: None,
@@ -31,14 +32,16 @@ impl Model for Fake<'_> {
     }
 
     fn ask(&self, instruction: &str, data: &str) -> std::result::Result<Reply, iris_model::Error> {
-        self.calls
-            .borrow_mut()
-            .push((instruction.to_string(), data.to_string()));
+        let n = {
+            let mut calls = self.calls.borrow_mut();
+            calls.push((instruction.to_string(), data.to_string()));
+            calls.len() - 1
+        };
         if let Some(f) = &self.during {
             f();
         }
         Ok(Reply {
-            text: self.answer.clone(),
+            text: self.answers[n.min(self.answers.len() - 1)].clone(),
             usage: Usage::default(),
             stop: self.stop,
         })
@@ -453,8 +456,39 @@ fn invalid_answers_save_nothing() {
             write(&b.store, t, None, &fake, 1),
             Err(Error::BadAnswer(_))
         ));
+        // A refusal gets no second call (decision D7, issue #278).
+        let calls = if stop == Stop::Refused { 1 } else { 2 };
+        assert_eq!(fake.calls.borrow().len(), calls, "{stop:?}");
     }
     assert_eq!(saved(&b.store, t), None);
+}
+
+#[test]
+fn an_invalid_answer_gets_one_more_call_with_the_same_data() {
+    let (b, t) = mailbox("retry");
+    for (first, then, ok) in [
+        ("not json", r#"{"body": "Second try."}"#, true),
+        (r#"{"text": "x"}"#, "still not json", false),
+    ] {
+        let mut fake = Fake::new(first);
+        fake.answers.push(then.into());
+        let r = write(&b.store, t, None, &fake, 1);
+        assert_eq!(r.is_ok(), ok, "{first} then {then}: {r:?}");
+        let calls = fake.calls.borrow();
+        assert_eq!(calls.len(), 2, "one retry only");
+        assert_eq!(
+            calls[0], calls[1],
+            "the retry sends the same instruction and data"
+        );
+    }
+    assert_eq!(
+        saved(&b.store, t).map(|s| s.0).as_deref(),
+        Some("Second try.")
+    );
+    // A valid first answer makes one call only.
+    let fake = Fake::new(r#"{"body": "Fine."}"#);
+    write(&b.store, t, None, &fake, 2).unwrap();
+    assert_eq!(fake.calls.borrow().len(), 1);
 }
 
 #[test]
