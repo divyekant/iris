@@ -852,8 +852,14 @@ fn mail_with_the_label_spam_is_left_out() {
     assert!(!paths.contains("commitments/c-1.json"), "{paths:?}");
     assert!(text.contains("MY-REPLY-TEXT"), "{text}");
     assert!(!store.read(|c| Ok(readable(c, 1)?)).unwrap());
-    // When the label goes, the next build has the message again.
+    // When the label goes, the message waits for the understanding again
+    // (issue #110), and then the next build has it again.
     spam(false);
+    build(&store, job, &ws).unwrap();
+    assert!(!walk(&ws).1.contains("DANA-TEXT"));
+    store
+        .write(|tx| Ok(tx.execute("UPDATE message SET understood_at = 1 WHERE id = 1", [])?))
+        .unwrap();
     build(&store, job, &ws).unwrap();
     assert!(walk(&ws).1.contains("DANA-TEXT"));
     assert!(ws.join("commitments/c-1.json").exists());

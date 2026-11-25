@@ -172,7 +172,7 @@
           {#if "closed" in start}
             {@const d = start.closed}
             <p class="problem" role="status">
-              {#if d.newer && d.thread}{NEWER_MAIL} <a href={href.reply(d.thread)}>Write a new reply</a>{:else}This draft cannot change now. <a href="#/write">Write a new mail</a>{/if}
+              {#if d.newer_mail && d.thread}{NEWER_MAIL} <a href={href.reply(d.thread)}>Write a new reply</a>{:else}This draft cannot change now. <a href="#/write">Write a new mail</a>{/if}
             </p>
           {:else}<Write {start} />{/if}
         {:catch error}{@render failed(error)}{/await}

@@ -277,16 +277,14 @@ A ledger row of a change in `writing` after a crash or a lost answer:
 |---|---|---|
 | `"update"` | A Gmail account, each check of section 1 passes for the draft now, and for a reply, the newest eligible message of the thread is still the parent of the draft (its `Message-ID` is the `In-Reply-To` of the draft row) | Sends `draft`: the same draft changes |
 | `"new"` | An Outlook or IMAP account, each check of section 1 passes for the draft now but the provider check and the attachment check, and for a reply, the newest eligible message of the thread is still the parent of the draft. The create of a new draft does not read the files of the old draft, so a missing file does not stop it: the form shows the attachment, and the person can remove it | No `draft`: a new draft, as today |
-| `null` | All other cases (sent, `foreign_at`, a send waits, a missing file of a Gmail draft, or a reply whose thread has a newer eligible message) | No "Change and send". For a reply with a newer message, the view says "A new mail came into this thread. Write a new reply." |
+| `null` | All other cases (sent, `foreign_at`, a send waits, a missing file of a Gmail draft, or a reply whose thread has a newer eligible message) | No "Change and send". For a reply with a newer message, the state also has `newer_mail: true` (issue #1077), and the view says "A new mail came into this thread. Write a new reply." A newer message sorts after the parent by internal date and row ID. |
 
 The client reads the content of the draft from `GET /api/drafts/{d-N}`
 (a new read route: `to`, `cc`, `bcc`, `subject`, `body`, `attachments`,
 and the account and the thread). The route also gives `change`, with the
-values of the table above for the draft now, and `newer`. `newer` is
-true only when `change` is `null` because the thread of a reply has a
-newer eligible message. The state of a stopped write with a draft gives
-`newer` too, so each view can show the message of the table. The engine
-computes these values with one function, so the draft answer and the
+values of the table above for the draft now, and `newer_mail` as in the
+stopped state (only when it is true). The engine computes these values
+with one function, so the draft answer and the
 write state never disagree (issue 941).
 
 A cancel in the Outbox makes a stopped mail too. After a cancel, the
@@ -302,12 +300,9 @@ press sends `draft` only when `change` is `"update"` now.
 
 If `change` is `null` when the link opens, the view shows no form. It
 says why and links to a new write: "A new mail came into this thread.
-Write a new reply." with a link to the reply of the thread when `newer`
-is true, else "This draft cannot change now." with a link to a new mail.
-A saved form of the draft link does not show. `newer` is true only when
-the message that a reply answers now comes after the parent of the
-draft, in the order of `reply_parent`. When the parent of the draft is
-in Trash and an older mail is the parent now, `newer` is false.
+Write a new reply." with a link to the reply of the thread when
+`newer_mail` is true, else "This draft cannot change now." with a link
+to a new mail. A saved form of the draft link does not show.
 
 If the draft read of the Outbox fails after a cancel, each later poll of
 the Outbox tries it again, until the engine answers.

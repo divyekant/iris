@@ -1031,6 +1031,29 @@ test("Change and send opens the form with the draft and a new key; update sends 
   }
 });
 
+test("A stopped reply with a newer mail says why it cannot change (draft change spec, section 5, #1077)", async () => {
+  for (const newer of [true, undefined]) {
+    window.sessionStorage.clear();
+    const net = serve((path, method) => {
+      if (method === "POST" && path === "write") return [201, { write: "cs-1" }];
+      if (path === "write/cs-1")
+        return [200, { state: "stopped", reason: "You stopped this mail.", draft: "d-1", change: null, newer_mail: newer }];
+      return [404, { error: "Not found." }];
+    });
+    const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+    try {
+      await fill(app);
+      press(app);
+      await until(() => text(app.target).includes("This mail did not leave"));
+      const why = text(app.target).includes("A new mail came into this thread. Write a new reply.");
+      assert.equal(why, newer === true);
+    } finally {
+      app.destroy();
+      net.restore();
+    }
+  }
+});
+
 test("Write another waits while the draft loads, and a draft holds only for its own account", async () => {
   const TWO = [...ACCOUNTS, { ...ACCOUNTS[0], id: 2, address: "dk@work.example" }];
   let release;
@@ -1081,7 +1104,7 @@ test("Write another waits while the draft loads, and a draft holds only for its 
 
 test("#/write/d-N opens the form with the draft; update sends the draft, new does not (issue 941)", async () => {
   const DRAFT = { draft: "d-7", account: "a-1", thread: null, to: ["sam@okafor.example"], cc: ["kim@example.com"], bcc: [],
-                  subject: "Dinner on Saturday?", body: "Hi Sam,\n\nAre you free?\n", attachments: [], newer: false };
+                  subject: "Dinner on Saturday?", body: "Hi Sam,\n\nAre you free?\n", attachments: [] };
   for (const change of ["update", "new"]) {
     window.sessionStorage.clear();
     // A write of the new-mail form does not show in the form of the draft.
@@ -1116,13 +1139,13 @@ test("#/write/d-N opens the form with the draft; update sends the draft, new doe
 test("a reply draft link keeps the draft text, not an automatic draft; a stopped write names a newer mail", async () => {
   const net = serve((path, method) => {
     if (method === "POST" && path === "write") return [201, { write: "cs-1" }];
-    if (path === "write/cs-1") return [200, { state: "stopped", reason: "You stopped this mail.", draft: "d-7", change: null, newer: true }];
+    if (path === "write/cs-1") return [200, { state: "stopped", reason: "You stopped this mail.", draft: "d-7", change: null, newer_mail: true }];
     // An automatic draft for the parent of the thread: a draft link does not take it.
     if (method === "GET" && path === "threads/t-2/draft") return [200, { body: "Hi Priya,\n\nYes.", based_on: "m-9", nudge: false }];
     return [404, { error: "Not found." }];
   });
   const DRAFT = { draft: "d-7", account: "a-1", thread: "t-2", to: ["priya@example.com"], cc: [], bcc: [],
-                  subject: "Re: Q4", body: "", attachments: [], change: "update", newer: false };
+                  subject: "Re: Q4", body: "", attachments: [], change: "update" };
   let app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY, change: DRAFT }, every: 20 });
   try {
     await new Promise((r) => setTimeout(r, 60));
@@ -1148,7 +1171,7 @@ test("a reply draft link keeps the draft text, not an automatic draft; a stopped
 test("loadChange: a draft that cannot change opens no form, and reads nothing more (issue 941)", async () => {
   const api = await load("/src/api.ts");
   const DRAFT = { draft: "d-7", account: "a-1", thread: "t-2", to: ["priya@example.com"], cc: [], bcc: [],
-                  subject: "Re: Q4", body: "Old.\n", attachments: [], newer: true };
+                  subject: "Re: Q4", body: "Old.\n", attachments: [], newer_mail: true };
   for (const change of [null, "update"]) {
     const net = serve((path) => {
       if (path === "drafts/d-7") return [200, { ...DRAFT, change }];
@@ -1172,7 +1195,7 @@ test("loadChange: a draft that cannot change opens no form, and reads nothing mo
 
 test("a draft link keeps its own form: the unfinished new mail stays, and a reload keeps the changes (issue 941)", async () => {
   const DRAFT = { draft: "d-7", account: "a-1", thread: null, to: ["sam@okafor.example"], cc: [], bcc: [],
-                  subject: "Dinner on Saturday?", body: "Hi Sam,\n", attachments: [], change: "update", newer: false };
+                  subject: "Dinner on Saturday?", body: "Hi Sam,\n", attachments: [], change: "update" };
   const net = serve((path, method) => (method === "POST" && path === "write" ? [201, { write: "cs-1" }] : path === "write/cs-1" ? [200, { state: "saving" }] : [404, { error: "Not found." }]));
   try {
     // An unfinished new mail.

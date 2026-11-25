@@ -502,7 +502,7 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `sync_seen` | `account_id`, `message_id`, `labels` TEXT (JSON), PK(`account_id`, `message_id`) | The messages that the lists of a full resync or a verify name, with their label sets. The engine clears it when a new run starts, not when an unfinished run continues after a crash. |
 | `label` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, `name` TEXT, `kind` TEXT (`system` or `user`), UNIQUE(`account_id`, `provider_id`) | Labels of the provider. |
 | `thread` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, `viewed_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | Threads of the provider. Gives the `t-` IDs. `viewed_at` is the last view of the thread in Iris. |
-| `message` | `id` INTEGER PK, `account_id`, `thread_id`, `provider_id` TEXT, `content_sha256` TEXT, `size` INTEGER, `internal_date` INTEGER, `fetched_at` INTEGER, `gone_at` INTEGER, `understood_at` INTEGER, `hostile` TEXT (JSON), `tries` INTEGER, `retry_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | One row for each message. Gives the `m-` IDs. `hostile` is the list of the hostile marks of the message (section 6.7). `tries` and `retry_at` hold the failed tries of the model (section 7.4). `fixed_rules` TEXT (migration 58) records how the last understanding completed the message, for the fixed check: NULL when the model made an item, a JSON array of the rule of each rule item when the fixed rules completed it (a rule item that a pinned item holds counts too), or `unknown` after the backfill of a store that could not show it; the fixed check runs such a message again. The store clears `understood_at` when the content hash changes, when a gone message comes back, and when the message gets or loses the label `SENT`, `DRAFT`, `UNSENT` or `SENT_COPY`. A message with `DRAFT`, `UNSENT` or `SENT_COPY` that is not gone keeps no item that a new understanding replaces: the triggers of store migration 42 delete such items when the label comes and when the message comes back. |
+| `message` | `id` INTEGER PK, `account_id`, `thread_id`, `provider_id` TEXT, `content_sha256` TEXT, `size` INTEGER, `internal_date` INTEGER, `fetched_at` INTEGER, `gone_at` INTEGER, `understood_at` INTEGER, `hostile` TEXT (JSON), `tries` INTEGER, `retry_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | One row for each message. Gives the `m-` IDs. `hostile` is the list of the hostile marks of the message (section 6.7). `tries` and `retry_at` hold the failed tries of the model (section 7.4). `fixed_rules` TEXT (migration 58) records how the last understanding completed the message, for the fixed check: NULL when the model made an item, a JSON array of the rule of each rule item when the fixed rules completed it (a rule item that a pinned item holds counts too), or `unknown` after the backfill of a store that could not show it; the fixed check runs such a message again. `released` TEXT (migration 64): the hostile marks that the person released for the current content (a JSON array of `dmarc`, `spoof` and `link`), or NULL (section 6.7). A trigger sets it to NULL when the content hash changes, and a trigger queues the fixed check at each change of it. The store clears `understood_at` when the content hash changes, when a gone message comes back, and when the message gets or loses the label `SENT`, `DRAFT`, `UNSENT`, `SENT_COPY` or `SPAM` (store migration 65). Each such change also sets `tries` to 0 and `retry_at` to NULL, also for a message that failed the model 3 times, so the message gets a new try budget (issue #110). A message with `DRAFT`, `UNSENT` or `SENT_COPY` that is not gone keeps no item that a new understanding replaces: the triggers of store migration 42 delete such items when the label comes and when the message comes back. |
 | `message_label` | `message_id`, `label_id`, PK(`message_id`, `label_id`) | The label set of each message. |
 | `header` | `message_id` PK, `date` INTEGER, `from_addr` TEXT, `from_name` TEXT, `to_addrs` TEXT, `cc_addrs` TEXT, `subject` TEXT, `message_id_hdr` TEXT, `in_reply_to` TEXT, `list_id` TEXT, `auth` TEXT | Parsed headers that queries need. `auth` holds the SPF, DKIM and DMARC results from `Authentication-Results`. `to_addrs` and `cc_addrs` hold bare lowercase addresses joined by `,`. `from_addr` is ASCII lowercase: the triggers of store migration 39 keep this form for each write. |
 | `body` | `message_id` INTEGER PK, `subject` TEXT, `sender` TEXT, `text` TEXT | The clean text of the message (section 7.2), with the subject and the sender name and address. `message_id` is the row ID. |
@@ -836,6 +836,37 @@ The `hostile` column of the message holds each mark that applies:
 
 A message with the label `SENT` is your mail. It never gets the marks `dmarc`,
 `spoof` and `link`, because these marks test mail that you receive.
+
+The fixed marks can hold honest mail: a click counter of another owner, a
+link list that `iris-clean` could not read in full, or a deceptive link in
+quoted text (issues 369, 373 and 374). So the person can release one message
+from quarantine (`POST /api/messages/{id}/release`):
+
+- A release covers each mark `dmarc`, `spoof` and `link` that the message
+  has now. The column `released` of the message holds these marks. The marks
+  `spam` (a label of the provider) and `phishing` (the answer of the model),
+  and a `hostile` sender (it has Trust, below), stay. A message with no mark
+  that a release covers, or a gone message, gets no release (HTTP 409).
+- The understanding step and the link check leave a released mark out. The
+  release clears `understood_at`, so the next run understands the message
+  again on the one path, whatever check runs first. If no other mark stays,
+  the model reads it as new mail, and its items show. A second release
+  before that run gives 409, as for content that Iris did not read yet.
+- A release is for one content: new content of the message ends it.
+- `POST /api/messages/{id}/unrelease` ends the release. In the same write,
+  the released marks go back into `message.hostile`, so each gate holds the
+  message at once, and `understood_at` is cleared. The next run then
+  understands the message as hostile mail, with no model call: its items
+  go and its conversation changes (section 7.3).
+- A release sets the model tries of the message to 0, as a rerun does, so
+  a message that used its tries before a mark held it can get its items.
+- A release names only marks of the current content. While the message
+  waits for its next understanding (`understood_at` is NULL, for example
+  after new content), the marks can be from old content, so a release
+  gives 409 with no write.
+- A gone message gives 409 with no write, for a release and for an undo.
+- The web client offers Release in the hostile warning of a message with a
+  mark that a release covers, and Undo on a released message.
 
 The display name is input that Iris does not control. This is the failure
 list of the name-address part of the mark `spoof` (decision D32):

@@ -217,6 +217,8 @@ export type Message = Summary & {
   near_copy?: { sender: string; of: string } | null;
   /** The Undo of a trust: the sender row of this address that the person trusted (issue 1043). */
   trusted_sender?: string | null;
+  /** The hostile marks that the person released (issues 369, 373, 374): Undo ends the release. */
+  released?: string[];
   items: string[];
 };
 
@@ -430,7 +432,7 @@ export type WriteState =
   | { state: "waiting"; draft: string; sending: boolean; bcc_check?: string | null; leaves_at: string | null }
   | { state: "review"; draft: string; reason: string | null }
   | { state: "sent"; draft: string }
-  | { state: "stopped"; reason: string; draft: string | null; change?: "update" | "new" | null; newer?: boolean };
+  | { state: "stopped"; reason: string; draft: string | null; change?: "update" | "new" | null; newer_mail?: boolean };
 
 /**
  * GET /api/drafts/{id}: the content of a draft, for the form of "Change and
@@ -448,8 +450,8 @@ export type DraftContent = {
   attachments: Attachment[];
   /** How the next press of Send writes the draft, as `change` of a stopped write (issue 941). */
   change: "update" | "new" | null;
-  /** A reply whose thread has a newer eligible mail: `change` is null for this reason. */
-  newer: boolean;
+  /** Present (true) only when a newer mail in the thread of a reply stops the change. */
+  newer_mail?: boolean;
 };
 
 /** A message summary, or only the ID of a message that is not in the mirror any more. */
@@ -793,6 +795,14 @@ export async function loadBrief(): Promise<Brief> {
  * Your answer to a sender: `accept`, `decline` (the screen says "Ignore") or `reopen` (undo) at
  * the stranger gate, or `trust` for a sender that only its look-alike domain makes hostile.
  */
+/** The hostile marks that the person can release: the checks of Iris. `spam`, `phishing` and a hostile sender stay. */
+export const RELEASABLE = ["dmarc", "spoof", "link"];
+
+/** Release a mail from quarantine, or end the release (`unrelease`). The answer is the mail. */
+export function releaseMessage(id: string, verb: "release" | "unrelease"): Promise<Message> {
+  return post<Message>(`messages/${encodeURIComponent(id)}/${verb}`, {});
+}
+
 export function answerSender(id: string, answer: "accept" | "decline" | "reopen" | "trust"): Promise<GateAnswer> {
   return post<GateAnswer>(`senders/${encodeURIComponent(id)}/${answer}`, {});
 }

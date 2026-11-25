@@ -201,17 +201,19 @@ fn state_in(
         Some(d) => iris_apply::bcc_waits(c, d)?,
         None => None,
     };
-    let can = match draft {
+    let (change, newer_mail) = match draft {
         Some(d) => change(store, c, d, now_ms)?,
-        None => CANNOT,
+        None => (None, false),
     };
     let draft = draft.map(|d| format_id(Kind::Draft, d));
     // A stopped write with a draft says how the next press of Send writes
     // it (draft change spec, section 5).
+    // `newer_mail` says why a reply has no change: a newer mail came into
+    // its thread (issue #1077).
     let stopped = |why: &str| match &draft {
-        Some(_) => {
-            json!({"state": "stopped", "reason": why, "draft": draft, "change": can.change, "newer": can.newer})
-        }
+        Some(_) if newer_mail => json!({"state": "stopped", "reason": why, "draft": draft,
+                                         "change": change, "newer_mail": true}),
+        Some(_) => json!({"state": "stopped", "reason": why, "draft": draft, "change": change}),
         None => json!({"state": "stopped", "reason": why, "draft": draft}),
     };
     if let Some(send) = send {
@@ -265,20 +267,14 @@ fn state_in(
 /// "Change and send". The value is the outcome that the apply of the next
 /// press gives: the checks of a change in place for Gmail (section 1, the
 /// files included), and the checks of a create for another provider.
-/// How the next press of Send can write a draft (draft change spec,
-/// section 5): `change` is the value of the API, and `newer` says that
-/// `change` is null because the thread of a reply has a newer mail.
-struct Can {
-    change: Option<&'static str>,
-    newer: bool,
-}
-
-const CANNOT: Can = Can {
-    change: None,
-    newer: false,
-};
-
-fn change(store: &Store, c: &Connection, draft: i64, now_ms: i64) -> rusqlite::Result<Can> {
+/// The second value is true when only a newer mail in the thread of a
+/// reply stops the change.
+fn change(
+    store: &Store,
+    c: &Connection,
+    draft: i64,
+    now_ms: i64,
+) -> rusqlite::Result<(Option<&'static str>, bool)> {
     let row: Option<(String, Option<i64>, String)> = c
         .query_row(
             "SELECT a.provider, d.thread_id, d.content FROM draft d
@@ -288,7 +284,7 @@ fn change(store: &Store, c: &Connection, draft: i64, now_ms: i64) -> rusqlite::R
         )
         .optional()?;
     let Some((provider, thread, content)) = row else {
-        return Ok(CANNOT);
+        return Ok((None, false));
     };
     let db = |e| match e {
         iris_changeset::Error::Store(iris_store::Error::Db(e)) => e,
@@ -298,39 +294,37 @@ fn change(store: &Store, c: &Connection, draft: i64, now_ms: i64) -> rusqlite::R
         .map_err(db)?
         .is_some()
     {
-        return Ok(CANNOT);
+        return Ok((None, false));
     }
     // A reply: the newest eligible message of the thread is still the
     // message that the draft answers.
     if let Some(thread) = thread {
         let answers = iris_changeset::draft_parent(c, draft).map_err(db)?;
-        let now = iris_changeset::reply_parent(c, thread)?;
-        let (Some(answers), Some(now)) = (answers, now) else {
-            return Ok(CANNOT);
-        };
-        if answers != now {
-            // `newer` only when the parent now comes after the parent of the
-            // draft, in the order of `reply_parent`. When the parent of the
-            // draft is in Trash, an older mail is the parent now: not newer.
-            let newer: Option<bool> = c.query_row(
-                "SELECT (coalesce(b.internal_date, -1), b.id) > (coalesce(a.internal_date, -1), a.id)
-                 FROM message a, message b WHERE a.id = ?1 AND b.id = ?2",
-                [answers, now],
-                |r| r.get(0),
-            )?;
-            return Ok(Can {
-                change: None,
-                newer: newer.unwrap_or(false),
-            });
+        if answers.is_none() {
+            return Ok((None, false));
+        }
+        let newest = iris_changeset::reply_parent(c, thread)?;
+        if answers != newest {
+            // Only a message that sorts after the parent is a new mail: a
+            // gone parent with an older message left is not. A NULL date
+            // sorts first, as in `reply_parent`.
+            let newer = c
+                .query_row(
+                    "SELECT (coalesce(n.internal_date, -9223372036854775808), n.id)
+                      > (coalesce(p.internal_date, -9223372036854775808), p.id)
+                 FROM message n, message p WHERE n.id = ?1 AND p.id = ?2",
+                    rusqlite::params![newest, answers],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(false);
+            return Ok((None, newer));
         }
     }
     if provider != "gmail" {
         // The next press makes a new draft from the form: the apply of a
         // create does not read the files of the old draft.
-        return Ok(Can {
-            change: Some("new"),
-            newer: false,
-        });
+        return Ok((Some("new"), false));
     }
     // The next press changes the draft in place: its apply denies the
     // change when a file of the old draft is gone (section 1).
@@ -342,25 +336,21 @@ fn change(store: &Store, c: &Connection, draft: i64, now_ms: i64) -> rusqlite::R
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.to_string().into()))?,
         None => false,
     };
-    Ok(Can {
-        change: files.then_some("update"),
-        newer: false,
-    })
+    Ok((files.then_some("update"), false))
 }
 
 /// The content of the draft `d-N` for the form of a change (draft change
 /// spec, section 5): `to`, `cc`, `bcc`, `subject`, `body`, `attachments`,
-/// the account and the thread, `change`: how the next press of Send
-/// writes the draft, and `newer`, the same values as the state of a
-/// stopped write. The
-/// Outbox reads it after a cancel (issue 941). `None` for a draft that does
-/// not exist, of an account that Iris removes, or with content that Iris
-/// does not write.
+/// the account and the thread, and `change`: how the next press of Send
+/// writes the draft, and `newer_mail`, the same values as the state of a
+/// stopped write. The Outbox reads it after a cancel (issue 941). `None`
+/// for a draft that does not exist, of an account that Iris removes, or
+/// with content that Iris does not write.
 pub fn draft_content(store: &Store, id: &str, now_ms: i64) -> Result<Option<Value>> {
     let Some((Kind::Draft, row)) = parse_id(id) else {
         return Ok(None);
     };
-    type Found = (i64, Option<i64>, String, Can);
+    type Found = (i64, Option<i64>, String, (Option<&'static str>, bool));
     let found: Option<Found> = store.read(|c| {
         let tx = c.unchecked_transaction()?;
         let found = tx
@@ -379,7 +369,7 @@ pub fn draft_content(store: &Store, id: &str, now_ms: i64) -> Result<Option<Valu
             None => None,
         })
     })?;
-    let Some((account, thread, content, can)) = found else {
+    let Some((account, thread, content, (change, newer_mail))) = found else {
         return Ok(None);
     };
     let Some(m) = serde_json::from_str::<Value>(&content)
@@ -388,7 +378,7 @@ pub fn draft_content(store: &Store, id: &str, now_ms: i64) -> Result<Option<Valu
     else {
         return Ok(None);
     };
-    Ok(Some(json!({
+    let mut v = json!({
         "draft": format_id(Kind::Draft, row),
         "account": format_id(Kind::Account, account),
         "thread": thread.map(|t| format_id(Kind::Thread, t)),
@@ -398,9 +388,13 @@ pub fn draft_content(store: &Store, id: &str, now_ms: i64) -> Result<Option<Valu
         "subject": m.subject,
         "body": m.body,
         "attachments": m.attachments,
-        "change": can.change,
-        "newer": can.newer,
-    })))
+        "change": change,
+    });
+    // As in the stopped state: only when a newer mail stops the change.
+    if newer_mail {
+        v["newer_mail"] = json!(true);
+    }
+    Ok(Some(v))
 }
 
 /// A Message-ID with no angle brackets, in lower case.

@@ -77,7 +77,7 @@ test("#/write/d-N of a draft that cannot change shows why and a link, with no fo
   let newer = true;
   globalThis.fetch = (url) => {
     const path = String(url).replace(/^\/api\//, "");
-    const out = path === "drafts/d-7" ? { ...DRAFT, newer } : path === "stop" ? { stopped: false, since: null, live: 0, busy: false } : null;
+    const out = path === "drafts/d-7" ? { ...DRAFT, newer_mail: newer } : path === "stop" ? { stopped: false, since: null, live: 0, busy: false } : null;
     if (!out) return new Promise(() => {});
     return Promise.resolve(new Response(JSON.stringify(out), { status: 200, headers: { "content-type": "application/json" } }));
   };

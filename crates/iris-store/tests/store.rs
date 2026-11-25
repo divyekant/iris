@@ -82,7 +82,7 @@ fn open_makes_the_data_folder() {
     }
     store
         .read(|c| {
-            assert_eq!(iris_store::schema_version(c)?, 63);
+            assert_eq!(iris_store::schema_version(c)?, 65);
             let journal: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
             assert_eq!(journal, "wal");
             let cache: i64 = c.query_row("PRAGMA cache_size", [], |r| r.get(0))?;
@@ -1300,4 +1300,341 @@ fn rebind_refuses_a_taken_id() {
     let r = store.write(|tx| iris_store::rebind(tx, ids[2], "2:2:Archive"));
     assert!(matches!(r, Err(Error::Taken(_))), "{r:?}");
     assert_eq!(provider(ids[2]), "1:3:INBOX");
+}
+
+/// Issue #110: a change that needs the understanding again (here SPAM,
+/// and new content) gives the message a new try budget and puts its thread
+/// in `talk_due`. A failed try keeps its count.
+#[test]
+fn a_reset_gives_a_new_try_budget() {
+    let dir = TempDir::new("reset-tries");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(acc, &[("SPAM", "SPAM", "system")])
+        .unwrap();
+    let mut m = msg("a", "t1", 1, &["INBOX"], "Hi", "x");
+    m.content_sha256 = Some(store.put_content(b"raw a").unwrap());
+    let id = store.put_messages(acc, &[m.clone()]).unwrap()[0];
+    let state = || -> (Option<i64>, i64, Option<i64>, i64) {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT understood_at, tries, retry_at,
+                       (SELECT count(*) FROM talk_due d WHERE d.thread_id = m.thread_id)
+                     FROM message m WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    let set = |sql: &str| {
+        store.write(|tx| Ok(tx.execute(sql, [id])?)).unwrap();
+    };
+    set("DELETE FROM talk_due WHERE ?1 > 0");
+    // An understood message, with old failed tries.
+    set("UPDATE message SET understood_at = 5, tries = 2, retry_at = 9 WHERE id = ?1");
+    // A failed try keeps its count.
+    set("UPDATE message SET understood_at = NULL, tries = tries + 1 WHERE id = ?1");
+    assert_eq!(state(), (None, 3, Some(9), 0));
+    // SPAM comes: the understanding runs again, with a new budget.
+    set("UPDATE message SET understood_at = 5 WHERE id = ?1");
+    m.labels = vec!["INBOX".into(), "SPAM".into()];
+    store.put_messages(acc, &[m.clone()]).unwrap();
+    assert_eq!(state(), (None, 0, None, 1));
+    // SPAM goes: the same.
+    set("DELETE FROM talk_due WHERE ?1 > 0");
+    set("UPDATE message SET understood_at = 5, tries = 3, retry_at = 9 WHERE id = ?1");
+    m.labels = vec!["INBOX".into()];
+    store.put_messages(acc, &[m.clone()]).unwrap();
+    assert_eq!(state(), (None, 0, None, 1));
+    // New content of a message that never got understood: a new budget.
+    set("UPDATE message SET tries = 3, retry_at = 9 WHERE id = ?1");
+    m.content_sha256 = Some(store.put_content(b"raw b").unwrap());
+    store.put_messages(acc, &[m]).unwrap();
+    assert_eq!(state().1, 0);
+    assert_eq!(state().2, None);
+}
+
+/// Issue #110, the invariant for each start state: after each change that
+/// needs the understanding again, `tries` is 0 and `retry_at` is NULL. This
+/// holds also for mail that failed the model 3 times (`understood_at` is
+/// NULL already). A label that is not a reset label changes nothing.
+#[test]
+fn each_reset_change_gives_each_state_a_new_budget() {
+    let dir = TempDir::new("reset-each");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(
+            acc,
+            &[
+                ("SPAM", "SPAM", "system"),
+                ("SENT", "SENT", "system"),
+                ("Work", "Work", "user"),
+            ],
+        )
+        .unwrap();
+    let mut m = msg("a", "t1", 1, &["INBOX"], "Hi", "x");
+    m.content_sha256 = Some(store.put_content(b"raw a").unwrap());
+    let id = store.put_messages(acc, &[m]).unwrap()[0];
+    let set = |sql: &str| {
+        store
+            .write(|tx| Ok(tx.execute_batch(&sql.replace("?id", &id.to_string()))?))
+            .unwrap();
+    };
+    let state = || -> (Option<i64>, i64, Option<i64>, i64) {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT understood_at, tries, retry_at,
+                       (SELECT count(*) FROM talk_due d WHERE d.thread_id = m.thread_id)
+                     FROM message m WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    let label = |name: &str, on: bool| {
+        if on {
+            format!(
+                "INSERT INTO message_label(message_id, label_id)
+                 SELECT ?id, id FROM label WHERE provider_id = '{name}';"
+            )
+        } else {
+            format!(
+                "DELETE FROM message_label WHERE message_id = ?id
+                   AND label_id = (SELECT id FROM label WHERE provider_id = '{name}');"
+            )
+        }
+    };
+    let content = |raw: &[u8]| {
+        format!(
+            "UPDATE message SET content_sha256 = '{}' WHERE id = ?id;",
+            store.put_content(raw).unwrap()
+        )
+    };
+    // Each change, with the SQL that makes the state before it.
+    let changes: Vec<(&str, String, String)> = vec![
+        ("SPAM comes", String::new(), label("SPAM", true)),
+        ("SPAM goes", label("SPAM", true), label("SPAM", false)),
+        ("SENT comes", String::new(), label("SENT", true)),
+        ("SENT goes", label("SENT", true), label("SENT", false)),
+        (
+            "comes back",
+            "UPDATE message SET gone_at = 1 WHERE id = ?id;".into(),
+            "UPDATE message SET gone_at = NULL WHERE id = ?id;".into(),
+        ),
+        ("new content", content(b"raw a"), content(b"raw b")),
+    ];
+    // The start states: failed 3 times, and understood after 2 failures.
+    let starts = [
+        (
+            "failed",
+            "UPDATE message SET understood_at = NULL, tries = 3, retry_at = 9 WHERE id = ?id;",
+        ),
+        (
+            "understood",
+            "UPDATE message SET understood_at = 5, tries = 2, retry_at = 9 WHERE id = ?id;",
+        ),
+    ];
+    for (change, before, sql) in &changes {
+        for (start, start_sql) in starts {
+            set("DELETE FROM message_label WHERE message_id = ?id
+                   AND label_id IN (SELECT id FROM label WHERE provider_id IN ('SPAM', 'SENT'));
+                 UPDATE message SET gone_at = NULL WHERE id = ?id;");
+            set(before);
+            set(start_sql);
+            set("DELETE FROM talk_due;");
+            set(sql);
+            assert_eq!(state(), (None, 0, None, 1), "{change} from {start}");
+        }
+    }
+    // A user label is not a reset: the failed state stays.
+    set(starts[0].1);
+    set("DELETE FROM talk_due;");
+    set(&label("Work", true));
+    set(&label("Work", false));
+    assert_eq!(state(), (None, 3, Some(9), 0));
+}
+
+/// Issue #110: when SPAM comes, the droppable items of the message go at
+/// once. So when SPAM goes before the next run, no old item shows again;
+/// the next run makes the items. A conversation item stays.
+#[test]
+fn spam_drops_the_items_of_its_message() {
+    let dir = TempDir::new("spam-drops");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(acc, &[("SPAM", "SPAM", "system")])
+        .unwrap();
+    let id = store
+        .put_messages(acc, &[msg("a", "t1", 1, &["INBOX"], "Hi", "x")])
+        .unwrap()[0];
+    let items = |sql: &str| -> i64 {
+        store
+            .read(|c| Ok(c.query_row(sql, [id], |r| r.get(0))?))
+            .unwrap()
+    };
+    store
+        .write(|tx| {
+            for form in ["commitment", "conversation"] {
+                tx.execute(
+                    "INSERT INTO item(form, account_id, status, doc, created_at, updated_at, derived_by)
+                     VALUES (?1, ?2, 'open', '{}', 0, 0, 'model')",
+                    rusqlite::params![form, acc],
+                )?;
+                tx.execute(
+                    "INSERT INTO item_source(item_id, message_id, role)
+                     VALUES (last_insert_rowid(), ?1, 'origin')",
+                    [id],
+                )?;
+            }
+            tx.execute("UPDATE message SET understood_at = 5 WHERE id = ?1", [id])?;
+            Ok(())
+        })
+        .unwrap();
+    let count = "SELECT count(*) FROM item_source s JOIN item i ON i.id = s.item_id
+                 WHERE s.message_id = ?1 AND i.form = 'commitment'";
+    let talk = "SELECT count(*) FROM item_source s JOIN item i ON i.id = s.item_id
+                WHERE s.message_id = ?1 AND i.form = 'conversation'";
+    assert_eq!(items(count), 1);
+    let mut m = msg("a", "t1", 1, &["INBOX", "SPAM"], "Hi", "x");
+    store.put_messages(acc, &[m.clone()]).unwrap();
+    assert_eq!(items(count), 0);
+    m.labels = vec!["INBOX".into()];
+    store.put_messages(acc, &[m]).unwrap();
+    assert_eq!(items(count), 0);
+    assert_eq!(items(talk), 1);
+    assert_eq!(
+        items("SELECT understood_at IS NULL FROM message WHERE id = ?1"),
+        1
+    );
+}
+
+/// Issue #110, the invariant for each path: a message that is not gone and
+/// has SPAM has no droppable item. The paths: a gone message that comes back
+/// with SPAM, and a SPAM message of an older store at the upgrade.
+#[test]
+fn no_spam_message_keeps_a_droppable_item() {
+    let dir = TempDir::new("spam-paths");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(acc, &[("SPAM", "SPAM", "system")])
+        .unwrap();
+    let id = store
+        .put_messages(acc, &[msg("a", "t1", 1, &["INBOX", "SPAM"], "Hi", "x")])
+        .unwrap()[0];
+    let add_item = |store: &Store| {
+        store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO item(form, account_id, status, doc, created_at, updated_at, derived_by)
+                     VALUES ('commitment', ?1, 'open', '{}', 0, 0, 'model')",
+                    [acc],
+                )?;
+                tx.execute(
+                    "INSERT INTO item_source(item_id, message_id, role)
+                     VALUES (last_insert_rowid(), ?1, 'origin')",
+                    [id],
+                )?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    let items = |store: &Store| -> i64 {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM item_source WHERE message_id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    // A gone message keeps its items. It comes back with SPAM: they go.
+    store
+        .write(|tx| Ok(tx.execute("UPDATE message SET gone_at = 1 WHERE id = ?1", [id])?))
+        .unwrap();
+    add_item(&store);
+    assert_eq!(items(&store), 1);
+    store
+        .write(|tx| Ok(tx.execute("UPDATE message SET gone_at = NULL WHERE id = ?1", [id])?))
+        .unwrap();
+    assert_eq!(items(&store), 0);
+    // An older store (version 64): a SPAM message with an item. The
+    // upgrade deletes the item and puts the thread in talk_due.
+    store
+        .write(|tx| {
+            tx.execute_batch(
+                "DROP TRIGGER spam_drops_items; DROP TRIGGER spam_back_drops_items;
+                 DELETE FROM talk_due; PRAGMA user_version = 64;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    add_item(&store);
+    assert_eq!(items(&store), 1);
+    drop(store);
+    let store = Store::open(&dir.0).unwrap();
+    assert_eq!(items(&store), 0);
+    let due: i64 = store
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM talk_due", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(due, 1);
+}
+
+/// Issue #110, the upgrade: a live message of an older store can have SPAM
+/// and an understanding from before the label, also with no droppable
+/// item. The upgrade resets it and puts its thread in talk_due. A gone
+/// message waits for its come-back.
+#[test]
+fn the_upgrade_resets_each_live_spam_message() {
+    let dir = TempDir::new("spam-upgrade");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(acc, &[("SPAM", "SPAM", "system")])
+        .unwrap();
+    let ids = store
+        .put_messages(
+            acc,
+            &[
+                msg("a", "t1", 1, &["INBOX", "SPAM"], "Hi", "x"),
+                msg("b", "t2", 1, &["INBOX", "SPAM"], "Hi", "x"),
+                msg("c", "t3", 1, &["INBOX"], "Hi", "x"),
+            ],
+        )
+        .unwrap();
+    // Understood before the label in version 64: a, b and c understood,
+    // b gone. No message has an item.
+    store
+        .write(|tx| {
+            tx.execute_batch(&format!(
+                "UPDATE message SET understood_at = 5, tries = 1, retry_at = 9;
+                 UPDATE message SET gone_at = 1 WHERE id = {};
+                 DELETE FROM talk_due; PRAGMA user_version = 64;",
+                ids[1]
+            ))?;
+            Ok(())
+        })
+        .unwrap();
+    drop(store);
+    let store = Store::open(&dir.0).unwrap();
+    let state = |id: i64| -> (Option<i64>, i64, Option<i64>, i64) {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT understood_at, tries, retry_at,
+                       (SELECT count(*) FROM talk_due d WHERE d.thread_id = m.thread_id)
+                     FROM message m WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    assert_eq!(state(ids[0]), (None, 0, None, 1), "live SPAM");
+    assert_eq!(state(ids[1]), (Some(5), 1, Some(9), 0), "gone SPAM");
+    assert_eq!(state(ids[2]), (Some(5), 1, Some(9), 0), "no SPAM");
 }
