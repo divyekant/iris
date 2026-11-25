@@ -543,7 +543,29 @@ struct Nudge<'a> {
     key: &'a str,
 }
 
+/// The snapshot of a thread. Its statements run in one read transaction,
+/// so the counts, the messages and the evidence come from one state of the
+/// store (#841). In a transaction of the caller, they use that one.
 fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
+    let tx = if c.is_autocommit() {
+        Some(c.unchecked_transaction()?)
+    } else {
+        None
+    };
+    let s = snapshot_in(c, thread);
+    // The drop of `tx` ends the read.
+    drop(tx);
+    s
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs between the first two statements of a snapshot, for a test.
+    pub(crate) static BETWEEN: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        std::cell::RefCell::new(None);
+}
+
+fn snapshot_in(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
     let (count, not_ready, hostile) = c
         .prepare_cached(&format!(
             "SELECT count(*),
@@ -552,6 +574,8 @@ fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
              {IN_THREAD}"
         ))?
         .query_row([thread], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    #[cfg(test)]
+    BETWEEN.with(|b| b.borrow_mut().as_mut().map(|f| f()));
     let mut st = c.prepare_cached(&format!(
         "SELECT m.id, h.from_addr, h.from_name, h.to_addrs, h.cc_addrs, b.subject,
            substr(ltrim(b.text, char(32, 9, 10, 13)), 1, ?3),
