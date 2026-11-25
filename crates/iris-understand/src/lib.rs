@@ -572,15 +572,25 @@ pub fn decide(
     d.usage.known = true;
     // A refusal for size (HTTP 400 or 413) of large data gets one more call
     // with the small budget (#101): a local model can have a small window.
-    // The small data is never larger, so this happens at most once.
+    // The small data is never larger, so this happens at most once. A
+    // priced model refuses the second call (`Budgeted`: the charge of the
+    // refusal is not known): the first refusal then stands.
     let mut ask = |instruction: &str, d: &mut Decision| match model.ask(instruction, &data) {
-        Err(iris_model::Error::Rejected {
-            status: 400 | 413, ..
-        }) if data.len() > prompt::SMALL_DATA => {
-            d.calls += 1;
-            d.usage.known = false;
-            data = prompt::data_in(a, cx, prompt::SMALL_DATA);
-            model.ask(instruction, &data)
+        Err(
+            first @ iris_model::Error::Rejected {
+                status: 400 | 413, ..
+            },
+        ) if data.len() > prompt::SMALL_DATA => {
+            let small = prompt::data_in(a, cx, prompt::SMALL_DATA);
+            match model.ask(instruction, &small) {
+                Err(iris_model::Error::Budget(_)) => Err(first),
+                r => {
+                    d.calls += 1;
+                    d.usage.known = false;
+                    data = small;
+                    r
+                }
+            }
         }
         r => r,
     };

@@ -74,10 +74,16 @@ pub fn data_in(a: &Analysis, cx: &Context, budget: usize) -> String {
         (None, Some(ad)) => ad.clone(),
         _ => String::new(),
     };
+    // The headers take at most half of the budget, so the current message
+    // text always has room (#101). The full budget never reaches the limit.
+    let room = budget / 2;
     let mut field = |name: &str, value: &str| {
+        let Some(max) = room.checked_sub(d.len() + name.len() + 3) else {
+            return;
+        };
         d.push_str(name);
         d.push_str(": ");
-        push_cut(&mut d, value, MAX_FIELD);
+        push_cut(&mut d, value, max.min(MAX_FIELD));
         d.push('\n');
     };
     field("From", &from);
@@ -103,8 +109,9 @@ pub fn data_in(a: &Analysis, cx: &Context, budget: usize) -> String {
     for (name, mime, size) in a.text.attachments.iter().take(MAX_ATTACHMENTS) {
         field("Attachment", &format!("{name} ({mime}, {size} bytes)"));
     }
-    // The headers take at most about 30,000 bytes. The clean text takes the
-    // rest if it needs it: 32,000 characters can be 128,000 bytes.
+    // With the full budget, the headers take at most about 30,000 bytes. The
+    // clean text takes the rest if it needs it: 32,000 characters can be
+    // 128,000 bytes.
     let mut current = String::from("\nThe current message:\n");
     // The budget holds the whole block that the client sends: the
     // delimiter lines and their line breaks too.

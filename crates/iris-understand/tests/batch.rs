@@ -469,6 +469,37 @@ fn a_refused_key_gives_the_reservation_back() {
     assert!(!b.understood(m));
 }
 
+/// A priced model stops the run after a refusal for size (the charge is
+/// not known), so the call with the small data budget (#101) cannot go
+/// out. The refusal then counts as a failed try, as before: the message
+/// does not wait for a model change.
+#[test]
+fn a_priced_refusal_for_size_of_large_data_counts_a_failed_try() {
+    let b = store("size");
+    b.model(true, Some(10_000));
+    b.script.push(Err(ModelError::Rejected {
+        status: 413,
+        message: "too large".into(),
+    }));
+    let big = format!(
+        "From: Ana Lee <ana@example.org>\nTo: owner@example.com\nSubject: Big\n\
+         Message-ID: <big@example.org>\nDate: Tue, 30 Dec 2025 08:00:00 +0000\n\
+         Content-Type: text/plain\n\nCan you send the slides?\n{}\n",
+        "Notes. ".repeat(5000)
+    );
+    let m = b.add_raw("big", "a", 1, &big, &["INBOX"]);
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.script.calls(), 1);
+    assert_eq!(
+        b.col(&format!("SELECT tries FROM message WHERE id = {m}")),
+        Some(1)
+    );
+    assert_eq!(
+        b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
+        Some(0)
+    );
+}
+
 #[test]
 fn a_cost_over_the_reservation_stops_the_run() {
     let b = store("overrun");

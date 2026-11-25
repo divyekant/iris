@@ -671,6 +671,18 @@ fn the_model_data_stays_within_its_budget() {
         let wrap = 2 + iris_model::DATA_START.len() + iris_model::DATA_END.len();
         assert_eq!(block.len(), data.len() + wrap);
     }
+    // The headers take at most half of the small budget (#101): with the
+    // largest header values and attachment names, the block stays in the
+    // small budget and holds the start of the current message text.
+    a.text.attachment_text.clear();
+    a.text.attachments = vec![("é".repeat(500), "application/pdf".into(), 1); 20];
+    let data = prompt::data_in(&a, &cx, prompt::SMALL_DATA);
+    let block = iris_model::data_block(&data);
+    assert!(block.len() <= prompt::SMALL_DATA, "{}", block.len());
+    assert!(data.contains(&body[..5000]));
+    // The full budget keeps every header line whole, as before.
+    let data = prompt::data(&a, &cx);
+    assert_eq!(data.matches("Attachment: ").count(), 20);
     a.text.attachments.clear();
     a.text.attachment_text = vec![("x.txt".into(), "<<<".repeat(300_000))];
     let data = prompt::data(&a, &cx);
