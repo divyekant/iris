@@ -155,20 +155,48 @@ fn snapshot_ids(thread: &str) -> String {
     )
 }
 
-/// SQL of the basis of the thread `thread` (an SQL expression): the SHA-256
-/// (`iris_sha256` of the store) of each input of the model call from the
-/// snapshot ([`snapshot_ids`], newest first, [`SNAPSHOT_COLUMNS`]). A summary is ready only while its basis is the
-/// basis of its thread, so a change of any message of the snapshot (it goes
-/// away, leaves the thread, or gets a new text, label or date) makes it
-/// stale.
-pub fn basis_sql(thread: &str) -> String {
+/// SQL of the SHA-256 (`iris_sha256` of the store) of the model inputs
+/// ([`SNAPSHOT_COLUMNS`], newest first) of the answerable messages of the
+/// thread `thread` (an SQL expression) for which `cond` holds (SQL that
+/// starts with `AND`, or empty).
+fn inputs_sql(thread: &str, cond: &str) -> String {
     format!(
         "(SELECT iris_sha256(group_concat(x.k, char(10) ORDER BY x.n)) FROM
            (SELECT json_array({}) AS k, row_number() OVER ({NEWEST}) AS n
-              {} {ANSWERABLE} AND m.id IN ({}) {NEWEST}) x)",
+              {} {ANSWERABLE} {cond} {NEWEST}) x)",
         columns(),
         messages_sql(thread),
-        snapshot_ids(thread)
+    )
+}
+
+/// SQL of the inputs of each answerable message of `thread` up to the
+/// message `upto` (an SQL expression of a row ID) in the order of
+/// [`NEWEST`]: the mail that a summary based on `upto` represents. NULL
+/// when `upto` is no message.
+fn covers_sql(thread: &str, upto: &str) -> String {
+    inputs_sql(
+        thread,
+        &format!(
+            "AND (coalesce(m.internal_date, 0), m.id) <=
+                 (SELECT coalesce(u.internal_date, 0), u.id FROM message u WHERE u.id = {upto})"
+        ),
+    )
+}
+
+/// SQL of the basis of the thread `thread` (an SQL expression):
+/// `<snapshot>.<covers>`. `<snapshot>` is the SHA-256 of each input of the
+/// model call from the snapshot ([`snapshot_ids`]). `<covers>` is the
+/// SHA-256 of the inputs of each answerable message of the thread, also the
+/// messages that the snapshot leaves out: the earlier summary in the data
+/// can carry their facts (issue #1023). A summary is ready only while its
+/// basis is the basis of its thread, so a change of any answerable message
+/// (it goes away, leaves the thread, or gets a new text, label or date)
+/// makes it stale.
+pub fn basis_sql(thread: &str) -> String {
+    format!(
+        "({} || '.' || {})",
+        inputs_sql(thread, &format!("AND m.id IN ({})", snapshot_ids(thread))),
+        inputs_sql(thread, "")
     )
 }
 
@@ -405,9 +433,16 @@ fn snapshot(c: &Transaction<'_>, thread: i64) -> Result<Snapshot> {
         .prepare_cached(&format!("SELECT count(*) {msgs} {ANSWERABLE}"))?
         .query_row([thread], |r| r.get(0))?;
     let left_out = answerable - newest.len() as i64;
+    // The last summary carries forward only while each message that it
+    // represents is still answerable with the same inputs: the covers part
+    // of its basis is the covers of the thread up to its `based_on` now.
     let earlier = match left_out > 0 {
         true => c
-            .prepare_cached("SELECT text FROM thread_summary WHERE thread_id = ?1")?
+            .prepare_cached(&format!(
+                "SELECT s.text FROM thread_summary s WHERE s.thread_id = ?1
+                   AND substr(s.basis, instr(s.basis, '.') + 1) = {}",
+                covers_sql("?1", "s.based_on")
+            ))?
             .query_row([thread], |r| r.get(0))
             .optional()?,
         false => None,

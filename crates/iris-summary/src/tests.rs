@@ -815,3 +815,63 @@ fn a_long_thread_builds_on_its_last_summary() {
     let v: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
     assert_eq!(v["earlier_summary"], Value::Null);
 }
+
+/// Invariant: a summary is ready, or goes into the data as the earlier
+/// summary, only while each message that it represents is still in the
+/// thread with the same model inputs. The earlier summary represents each
+/// answerable message up to its `based_on`, also the messages that the
+/// snapshot now leaves out (review finding on #1139).
+#[test]
+fn a_left_out_message_that_leaves_or_changes_ends_the_earlier_summary() {
+    for how in ["gone", "trash", "text"] {
+        let b = open(&format!("left-{how}"));
+        let t = thread(&b, "t1", 12, 1000);
+        let c = cands(&b).remove(0);
+        let first = Fake::new(&[r#"{"summary": "Message 1 says the venue is the park."}"#]);
+        summarize(&b.store, &c, &first, 100_000).unwrap();
+        add(&b.store, "t1", "t1-a", 98_000, "Still open.");
+        add(&b.store, "t1", "t1-b", 99_000, "Who books it?");
+        let c = cands(&b).remove(0);
+        let fake = Fake::new(&[GOOD]);
+        summarize(&b.store, &c, &fake, 200_000).unwrap();
+        let v: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
+        // t1-1 and t1-2 are left out; the earlier summary holds their facts.
+        assert_eq!(v["left_out"], 2, "{how}");
+        assert_eq!(
+            v["earlier_summary"], "Message 1 says the venue is the park.",
+            "{how}"
+        );
+        assert!(ready_of(&b, t).is_some(), "{how}");
+        b.store
+            .write(|tx| {
+                match how {
+                    "gone" => tx.execute(
+                        "UPDATE message SET gone_at = 1 WHERE provider_id = 't1-1'",
+                        [],
+                    )?,
+                    "text" => tx.execute(
+                        "UPDATE body SET text = 'Message 1 says the venue is the hall.'
+                          WHERE message_id = (SELECT id FROM message WHERE provider_id = 't1-1')",
+                        [],
+                    )?,
+                    _ => tx.execute(
+                        "INSERT INTO message_label(message_id, label_id)
+                         SELECT m.id, l.id FROM message m, label l
+                          WHERE m.provider_id = 't1-1' AND l.provider_id = 'TRASH'",
+                        [],
+                    )?,
+                };
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(ready_of(&b, t), None, "{how}");
+        let c = cands(&b);
+        assert_eq!(c.len(), 1, "{how}");
+        let fake = Fake::new(&[GOOD]);
+        summarize(&b.store, &c[0], &fake, 300_000).unwrap();
+        let v: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
+        // The summaries that represent the old t1-1 do not carry forward.
+        assert_eq!(v["earlier_summary"], Value::Null, "{how}");
+        assert!(ready_of(&b, t).is_some(), "{how}");
+    }
+}

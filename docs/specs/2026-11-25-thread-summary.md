@@ -114,8 +114,11 @@ So each change of the mail that the summary read makes the summary stale
 at the next read, with no write: a new mail, a hostile mark, an older
 message of the snapshot that goes away or leaves the thread, new content
 or a new clean text under the same ID, and a new `SENT` label or date of a
-message. A message that the snapshot leaves out is not in the
-basis, so its change does not make the summary stale (issue #1023).
+message. The basis has a second part, the covers: the SHA-256 of the same
+inputs of each answerable message of the thread, also the messages that the
+snapshot leaves out. The earlier summary in the data can carry the facts of
+these messages (issue #1023), so a left-out message that goes away, leaves
+the thread or changes makes the summary stale too.
 
 ### The model call
 
@@ -137,7 +140,12 @@ A new crate `iris-summary` (no provider client, as `iris-voice`):
   (`earlier_summary`, else null), so the facts of the left-out mail carry
   forward from one summary to the next. The instruction says that the
   earlier summary is data, and that the mail in the snapshot is correct
-  where the two differ. The save compares the earlier summary too. A
+  where the two differ. The save compares the earlier summary too. The
+  last summary goes into the data only while the covers part of its basis
+  is the covers of the thread now up to its `based_on`: each message that
+  it represents is still answerable with the same inputs. Else the data
+  gives no earlier summary. A message that arrives later with an older date
+  also ends the carry forward (issue #1138). A
   summary of a thread that the snapshot covers in full gets no earlier
   summary. A thread whose first summary comes after it has more than 12
   messages has no earlier summary: its first summary covers the snapshot
@@ -251,7 +259,9 @@ clean text, of the account of the item.
 
 Memory: one summary of at most 1,500 characters for each candidate thread,
 in SQLite. The step holds one snapshot (at most 12 x 4,000 characters, and one
-earlier summary of at most 1,500 characters) in memory during a call.
+earlier summary of at most 1,500 characters) in memory during a call. The
+covers of a basis joins the inputs of each answerable message in SQLite (at
+most about 4,000 characters for each message) for the time of one hash.
 
 ## Assumptions
 
