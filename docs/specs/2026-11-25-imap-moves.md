@@ -48,90 +48,121 @@ hostile mail) cannot apply. Triage is the main work of Iris.
 | Role | Folder |
 |---|---|
 | Inbox | `INBOX` |
-| Archive | the folder with `\Archive` (RFC 6154). If no folder has it, a folder with no attribute whose last name part is a common archive name (`Archive`, `Archives`, `Archiv`, `Archivio`, `Archivo`, `Arquivo`, `Archief`, `Arkiv`), with the same rules as the other names of section 4 of the IMAP provider spec. Else none |
-| Trash | the trash folder of section 4 of the IMAP provider spec |
+| Archive | the folder with `\Archive` (RFC 6154). If no folder has it, a folder with no attribute whose last name part is a common archive name (`Archive`, `Archives`, `Archiv`, `Archivio`, `Archivo`, `Arquivo`, `Archief`, `Arkiv`), with the same rules as the other names of section 4 of the IMAP provider spec |
+| Trash | the folder with `\Trash`, else a folder by a trash name (section 4 of the IMAP provider spec) |
 
-A message of a folder with `\Archive`, or of the archive folder by name,
-has the label of that folder and no `INBOX`, so the mirror shows it as
-archived. Labels do not change.
+A move needs exactly one folder of its target role and of its source
+role. Two folders with the attribute of the role, or (with no attribute)
+two folders whose names match, is `Api` 400 `ambiguousArchive` or
+`ambiguousTrash`, before any write. No folder of the role is `Api` 400
+`noArchive` or `noTrash`. The IMAP provider spec lets two trash folders
+both give `TRASH`; that rule stays for reads.
 
-| Verb | Trait call | Source | Target | No target folder |
-|---|---|---|---|---|
-| `archive` | `modify(remove: INBOX)` | `INBOX` | archive | `Api` 400 `noArchive`, before any write |
-| `inbox` | `modify(add: INBOX)` | archive | `INBOX` | `Api` 400 `noArchive` |
-| `trash` | `trash` | `INBOX` or archive | trash | `Api` 400 `noTrash` |
-| `untrash` | `untrash` | trash | `INBOX` | `Api` 400 `noTrash` |
+A message of the archive folder has the label of that folder and no
+`INBOX`, so the mirror shows it as archived. Labels do not change.
 
-A `modify` of `INBOX` for a message that is already at the target (an
-`archive` of a message in the archive folder) writes nothing for that
-message, as Gmail does. A message in any other folder (a user folder,
-`\Sent`, `\Drafts`, `\Junk`) is `Api` 400 `notSupported` for the whole call,
-before any write, as today. A `modify` that moves and also changes flags is
-`Api` 400 `badRequest`: the apply sends each verb as its own call, so no
-caller does this.
+The source of each message comes from its ID: an IMAP ID holds its folder
+(IMAP provider spec, section 3). So the plan of a move needs no read of a
+message.
 
-### 2. The provider call
+| Verb | Moves from | Already done (skip) | Target |
+|---|---|---|---|
+| `archive` | `INBOX` | the archive folder, the trash folder | archive |
+| `inbox` | the archive folder | `INBOX` | `INBOX` |
+| `trash` | `INBOX`, the archive folder | the trash folder | trash |
+| `untrash` | the trash folder | `INBOX`, the archive folder | `INBOX` |
 
-A new trait method of `iris_provider::Provider`:
+A message in any other folder (a user folder, `\Sent`, `\Drafts`,
+`\Junk`, a second trash folder) refuses the whole action with `Api` 400
+`notSupported`, before any write and before the claim of the ledger
+(section 3).
+
+### 2. The provider calls
+
+New items of `iris_provider::Provider`, each with a default:
 
 ```rust
-/// True if a move gives a message a new ID (IMAP). Then the apply calls
-/// `relocate` for each move and rebinds each store row.
+/// The four moves of a folder provider with location IDs.
+pub enum Move { Archive, Inbox, Trash, Untrash }
+
+/// True if a move gives a message a new ID (IMAP). Default: false.
 fn location_ids(&self) -> bool { false }
 
-/// Moves each message of `ids` as `modify` would with `add` and `remove`
-/// (only `INBOX`), and gives the new ID of each, in the order of `ids`.
-/// `None`: the message was already at the target and did not move.
-fn relocate(&self, token: &str, ids: &[&str], add: &[&str], remove: &[&str])
-    -> Result<Vec<Option<String>>>;
+/// Reads only. For each message of `ids`, in order: true if `mv` moves it,
+/// false if it is already done (the skip column of section 1). Any message
+/// that `mv` cannot move or skip, and a missing or ambiguous folder, is a
+/// definite refusal. Default: `Api` 400 `notSupported`.
+fn move_plan(&self, token: &str, ids: &[&str], mv: Move) -> Result<Vec<bool>>;
+
+/// Moves each message of `ids` and gives its new ID, in the order of
+/// `ids`. Each ID must be a "moves from" ID of `mv`, else a definite
+/// refusal before any write. Default: `Api` 400 `notSupported`.
+fn relocate(&self, token: &str, ids: &[&str], mv: Move) -> Result<Vec<String>>;
 ```
 
-The default of `relocate` is `Api` 400 `notSupported`. `modify` of IMAP
-keeps its refusal of `INBOX`, so a caller that does not know the new rule
-cannot move mail. `trash` and `untrash` of IMAP move one message and give
-a `Minimal` whose `id` is the new ID.
+`modify`, `trash` and `untrash` of IMAP keep their refusal of each move, so
+a caller that does not know the new rule cannot move mail.
 
-For each source folder, in the page order of section 2 of the IMAP provider
-spec, the IMAP provider does these steps:
+`relocate` of the IMAP provider does these steps:
 
-1. A check pass over all folders first, with no write: `SELECT` of each
-   source folder, the `UIDVALIDITY` of each ID, and the target folder of
-   each message (section 1). Any refusal of this pass is definite.
-2. `SELECT` of the source folder, the `UIDVALIDITY` again, then
-   `UID MOVE <uids> <target>`.
+1. `LIST`, the folders of section 1, and a check of each ID (its folder is
+   a "moves from" folder of `mv`). Any refusal here is definite.
+2. For each source folder, in the page order of section 2 of the IMAP
+   provider spec: `SELECT`, a compare of its `UIDVALIDITY` with each ID of
+   that folder, then `UID MOVE <uids> <target>`. A new `UIDVALIDITY` before
+   the first `UID MOVE` is `NotFound`, nothing written. After a `UID MOVE`
+   of an earlier folder it is `Transport` (unknown), and nothing more is
+   written.
 3. The `OK` answer must hold `[COPYUID <validity> <source uids> <target uids>]`
    (RFC 4315 section 3). Each target UID with the target `UIDVALIDITY` and
    the target folder name gives the new ID.
 
 `UID MOVE` moves only UIDs that are in the selected source folder now. So
 the source folder is the condition of the move (provider spec, section 4):
-a message that another client moved after the check does not move.
+a message that another client moved after the plan does not move.
 
 Result rules:
 
 - Each asked UID in `COPYUID`: success, with the new IDs.
 - An `OK` with no `COPYUID`, or with a `COPYUID` that does not hold each
   asked UID, is `Transport` (unknown). A UID that is not there was moved or
-  removed by another client, or the server is broken. The recovery decides.
+  removed by another client, or the server is broken.
 - A `NO` or `BAD` to `UID MOVE` is `Transport` (unknown): RFC 6851 lets a
   server move a part of the set before an error.
 - A refusal before the first `UID MOVE` was sent is definite, as for
   `modify` today. An error after it is `Transport` (unknown).
 
-### 3. The apply: the rebind
+### 3. The apply: the plan and the rebind
 
-`iris-apply` calls `relocate` in place of `modify` for each change that
-`moves()` when `location_ids()` is true. On success, one store transaction
-does these steps for each message of the call:
+When `location_ids()` is true, `iris-apply` uses the two calls for the
+verbs `archive`, `inbox`, `trash` and `untrash`:
+
+- Step 2 (the read before the claim) calls `move_plan` for the messages
+  that are not gone. It skips each message with `false`, as it skips a
+  message that already has the target state today. A refusal ends the
+  action `failed` before the claim, so no message moves and no ledger
+  message row says that one did. The label read of step 2 stays for the
+  `pre` labels of the ledger.
+- Step 4 calls `relocate` in place of `modify`, `trash` and `untrash`: one
+  call for each batch of the moved messages.
+
+On success, one store transaction does these steps for each message of the
+call:
 
 1. Sets the ledger message row `done`, as today.
-2. With a new ID: sets `message.provider_id` of the row to the new ID
-   (`Store::rebind`). The row ID, the thread, the raw file
-   (`content_sha256`), the forms and the ledger rows stay.
+2. Sets `message.provider_id` of the row to the new ID (`Store::rebind`).
+   The row ID, the raw file (`content_sha256`), the forms and the ledger
+   rows stay.
+3. If the provider ID of the thread of the row is the old message ID (the
+   thread of a message with no `Message-ID`, `References` or
+   `In-Reply-To`: IMAP provider spec, section 3), it sets the provider ID
+   of that thread to the new ID too. Such a thread has only this message,
+   because no other message can refer to a message with no `Message-ID`.
+   So the thread that `iris_sync::verify` reads from the provider and the
+   thread in the store stay equal.
 
 Then the apply reads the labels of each new ID (`minimal`), as it does for
-Outlook moves (`mirror_read`). `trash` and `untrash` rebind to the `id` of
-the `Minimal` that they give, in the same transaction as `done`.
+Outlook moves (`mirror_read`).
 
 `Store::rebind` refuses a new ID that another row of the account already
 has. That can happen only if a sync stored the new location first, and the
@@ -152,29 +183,32 @@ The next sync then sees:
 
 A move with an unknown result, or a crash after `UID MOVE` and before the
 transaction of section 3, leaves the ledger message rows not `done`. The
-recovery (spec 2 section 7.3) handles them with the rules of today for a
-call that started:
+recovery (spec 2 section 7.3) gets one new rule for these rows:
 
+- On a provider with `location_ids()`, each ledger message row of a move
+  whose call started (its call number is saved) and that is not `done`
+  gets `listed = 'unknown'`, whatever the read of its old ID gives: the
+  labels of before, `NotFound`, or a store row that a sync marked gone.
+  The ledger entry ends `failed`, and the action shows the messages as not
+  confirmed.
+- Today a row whose message is `NotFound` or gone gets `listed = 'gone'`,
+  and an entry with only such rows ends `applied`. For a move with location
+  IDs, `NotFound` is what a successful move gives, so `gone` would report
+  an unconfirmed move as applied.
 - The recovery never calls `UID MOVE` again, and never rebinds a row. Only
   the `COPYUID` of the same command names the moved message with
   certainty. A `Message-ID` match does not: the target folder can hold
   another copy with the same `Message-ID`, so a rebind by `Message-ID`
   could put the forms and the undo on the wrong message.
-- A started move whose old ID is still there with the labels of before
-  did not move, but the recovery cannot tell it from a move that another
-  client undid. The row gets `listed = 'unknown'`, as today for a started
-  call with the labels of before. The ledger entry ends `failed`, and the
-  action shows the message as not confirmed. Iris does not call again.
-- A started move whose old ID is gone gets `listed = 'unknown'` too.
+- A row of a call that never started keeps the rule of today.
 
 After a crash, the sync lock ends with the process, and the engine can
 sync before the recovery. The sync then marks the old row gone and adds a
-new row for the new ID. The recovery finds the old row gone (`listed =
-'gone'`, as today). So after a crash or an unknown result, the forms of
-the message stay on the gone row, the new row is understood again, and
-the undo of that entry cannot move the message back. This is the cost of
-an unknown result: limit issue #984. The success path
-of section 3 has no such cost, because the rebind and `done` are one
+new row for the new ID. The recovery gives that row `unknown` by the rule
+above. So after a crash or an unknown result, the forms of the message
+stay on the gone row, the new row is understood again, and the undo of
+that entry cannot move the message back: limit issue #984. The success
+path of section 3 has no such cost, because the rebind and `done` are one
 transaction under the sync lock.
 
 ### 5. The undo
@@ -210,33 +244,35 @@ write, or `Transport` (unknown) after the first write.
 | Input or event | Result | Test |
 |---|---|---|
 | No `MOVE` or no `UIDPLUS` | `Api` 400 `notSupported`, nothing sent | `move_needs_move_and_uidplus` |
-| No archive folder, for `archive` or `inbox` | `Api` 400 `noArchive`, nothing sent | `move_without_archive_folder` |
-| No trash folder | `Api` 400 `noTrash`, nothing sent | `move_without_archive_folder` |
-| A message in a user folder, `\Sent`, `\Drafts` or `\Junk` | `Api` 400 `notSupported`, nothing sent | `move_from_other_folder_refuses` |
+| No archive folder, for `archive` or `inbox` | `Api` 400 `noArchive`, nothing sent | `move_without_folder` |
+| No trash folder | `Api` 400 `noTrash`, nothing sent | `move_without_folder` |
+| Two archive folders or two trash folders | `Api` 400 `ambiguousArchive` or `ambiguousTrash`, nothing sent | `move_ambiguous_folder` |
+| An action with one message in `INBOX` and one in a user folder, `\Sent`, `\Drafts` or `\Junk` | the plan refuses, the action is `failed` before the claim, nothing moves | `move_from_other_folder_refuses` |
 | A new `UIDVALIDITY` before the first `UID MOVE` | `NotFound`, nothing sent | `move_uidvalidity` |
 | A new `UIDVALIDITY` after a `UID MOVE` of another folder | `Transport`, no more writes | `move_uidvalidity` |
 | `OK` with no `COPYUID`, or without each asked UID | `Transport` | `move_partial_copyuid` |
 | `NO` or `BAD` to `UID MOVE` | `Transport` | `move_refused_is_unknown` |
-| A lost connection after `UID MOVE` | `Transport`; the recovery sets `listed = 'unknown'`, the entry ends `failed`, no second `UID MOVE`, no rebind | `move_unknown_is_not_retried` |
+| A lost answer after a `UID MOVE` that moved the message (old ID `NotFound`) | the recovery sets `listed = 'unknown'`, the entry ends `failed`, no second `UID MOVE`, no rebind | `move_unknown_is_not_retried` |
 | A started move whose old ID still has the labels of before | `listed = 'unknown'`, entry `failed`, no call | `move_unknown_is_not_retried` |
-| A crash after `UID MOVE`, then a sync before the recovery | the sync marks the old row gone and adds a new row; the recovery sets `listed = 'gone'`; zero differences | `move_crash_then_sync` |
-| A message that is already at the target | `None`, no write for it | `move_already_there` |
+| A crash after `UID MOVE`, then a sync before the recovery | the sync marks the old row gone and adds a new row; the recovery sets `listed = 'unknown'`, entry `failed`; zero differences | `move_crash_then_sync` |
+| A move and a sync of a message with no `Message-ID`, `References` or `In-Reply-To` | the thread follows the new ID; zero differences | `move_of_a_message_with_no_thread_headers` |
+| A message that is already at the target | the plan gives false, the apply skips it, no ledger row for it | `move_already_there` |
 | `archive`, sync, `inbox`, sync, then undo of both | the same store row, zero differences | `move_and_undo_keep_the_row` |
 | A sync after the move (QRESYNC, and CONDSTORE only) | no new row, no gone row, zero differences | `move_then_sync_keeps_the_row` |
 | `Store::rebind` to an ID that another row has | `Error::Store`, the apply stops | `rebind_refuses_a_taken_id` |
 
 ## Impact
 
-- `crates/iris-provider`: `location_ids` and `relocate`, with defaults.
+- `crates/iris-provider`: `Move`, `location_ids`, `move_plan` and `relocate`, with defaults.
 - `crates/iris-imap`: `Session::move_uids` (`UID MOVE`, `COPYUID`), the
-  archive folder, `relocate`, `trash`, `untrash`. The Gmail refusal comes
+  archive folder, `move_plan`, `relocate`. The Gmail refusal comes
   before each other check of `profile` (issue #981).
 - `crates/iris-fakeimap`: the capabilities `MOVE` and `UIDPLUS`, `UID MOVE`
   with `COPYUID`, and a switch to drop the answer after
   a `UID MOVE` (the unknown result).
-- `crates/iris-store`: `Store::rebind`. No migration.
-- `crates/iris-apply`: `relocate` in place of `modify` for moves, and the
-  rebind in the `done` transaction. The recovery does not change.
+- `crates/iris-store`: `Store::rebind` (the message, and a thread with the fallback ID). No migration.
+- `crates/iris-apply`: `move_plan` in step 2, `relocate` in step 4, the
+  rebind in the `done` transaction, and the recovery rule of section 4.
 - Docs: the provider spec section 4, the IMAP provider spec section 7, and
   the README IMAP line.
 
@@ -303,9 +339,9 @@ None. The change needs no migration and no setting. A server without
 ## Plan
 
 1. Spec (this PR).
-2. `iris-provider`, `iris-imap`, `iris-fakeimap`: `relocate`, `trash`,
-   `untrash` and the fake server, and the fix of #981.
-3. `iris-store`, `iris-apply`: the rebind and the recovery, with the
+2. `iris-provider`, `iris-imap`, `iris-fakeimap`: `Move`, `move_plan`,
+   `relocate` and the fake server, and the fix of #981.
+3. `iris-store`, `iris-apply`: the plan, the rebind and the recovery, with the
    end-to-end tests of the failure list. Close #775.
 
 ## Test plan
