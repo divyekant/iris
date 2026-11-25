@@ -79,7 +79,8 @@ CREATE TABLE thread_summary (
   -- The basis (hex): for a thread of 12 answerable messages or fewer, the
   -- SHA-256 of each model input of the snapshot (all of them). For a longer
   -- thread, <snapshot>.<covers>: the SHA-256 of the snapshot inputs, a dot,
-  -- and the SHA-256 of the inputs of each answerable message.
+  -- and the SHA-256 of the list of the SHA-256 of the inputs of each
+  -- answerable message.
   basis TEXT NOT NULL,
   text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 1500),
   model TEXT NOT NULL,
@@ -265,8 +266,9 @@ clean text, of the account of the item.
 Memory: one summary of at most 1,500 characters for each candidate thread,
 in SQLite. The step holds one snapshot (at most 12 x 4,000 characters, and one
 earlier summary of at most 1,500 characters) in memory during a call. The
-covers of a basis joins the inputs of each answerable message in SQLite (at
-most about 4,000 characters for each message) for the time of one hash.
+covers of a thread of more than 12 answerable messages hashes the inputs of
+each message first, and then the list of these hashes: SQLite holds 64
+characters for each message for the time of one hash.
 
 ## Assumptions
 

@@ -169,12 +169,30 @@ fn inputs_sql(thread: &str, cond: &str) -> String {
     )
 }
 
-/// SQL of the inputs of each answerable message of `thread` up to the
-/// message `upto` (an SQL expression of a row ID) in the order of
-/// [`NEWEST`]: the mail that a summary based on `upto` represents. NULL
-/// when `upto` is no message.
-fn covers_sql(thread: &str, upto: &str) -> String {
-    inputs_sql(
+/// SQL of the covers of the answerable messages of the thread `thread` for
+/// which `cond` holds: [`inputs_sql`] for [`MESSAGES`] messages or fewer
+/// (the basis of a short thread, also of the first release). For more, the
+/// SHA-256 of the SHA-256 of the inputs of each message, so the memory of
+/// the hash does not grow with the text of a long thread (64 characters for
+/// each message).
+fn covers_sql(thread: &str, cond: &str) -> String {
+    let msgs = messages_sql(thread);
+    format!(
+        "(CASE WHEN (SELECT count(*) {msgs} {ANSWERABLE} {cond}) <= {MESSAGES} THEN {}
+          ELSE (SELECT iris_sha256(group_concat(x.k, char(10) ORDER BY x.n)) FROM
+                 (SELECT iris_sha256(json_array({})) AS k, row_number() OVER ({NEWEST}) AS n
+                    {msgs} {ANSWERABLE} {cond} {NEWEST}) x) END)",
+        inputs_sql(thread, cond),
+        columns(),
+    )
+}
+
+/// SQL of the covers ([`covers_sql`]) of each answerable message of
+/// `thread` up to the message `upto` (an SQL expression of a row ID) in the
+/// order of [`NEWEST`]: the mail that a summary based on `upto` represents.
+/// NULL when `upto` is no message.
+fn covers_upto_sql(thread: &str, upto: &str) -> String {
+    covers_sql(
         thread,
         &format!(
             "AND (coalesce(m.internal_date, 0), m.id) <=
@@ -184,20 +202,20 @@ fn covers_sql(thread: &str, upto: &str) -> String {
 }
 
 /// SQL of the basis of the thread `thread` (an SQL expression). A thread
-/// of [`MESSAGES`] answerable messages or fewer: the SHA-256 of the inputs
-/// of each of them (the snapshot holds all of them, so the basis is the
-/// basis of the first release of the summary). A longer thread:
-/// `<snapshot>.<covers>`. `<snapshot>` is the SHA-256 of each input of the
-/// model call from the snapshot ([`snapshot_ids`]). `<covers>` is the
-/// SHA-256 of the inputs of each answerable message of the thread, also the
-/// messages that the snapshot leaves out: the earlier summary in the data
-/// can carry their facts (issue #1023). So the part after the last `.` (the
-/// full basis when it has none) is always the covers. A summary is ready
-/// only while its basis is the basis of its thread, so a change of any
-/// answerable message (it goes away, leaves the thread, or gets a new text,
-/// label or date) makes it stale.
+/// of [`MESSAGES`] answerable messages or fewer: its covers
+/// ([`covers_sql`]), the SHA-256 of the inputs of each message (the
+/// snapshot holds all of them, so the basis is the basis of the first
+/// release of the summary). A longer thread: `<snapshot>.<covers>`.
+/// `<snapshot>` is the SHA-256 of each input of the model call from the
+/// snapshot ([`snapshot_ids`]). `<covers>` covers each answerable message
+/// of the thread, also the messages that the snapshot leaves out: the
+/// earlier summary in the data can carry their facts (issue #1023). So the
+/// part after the `.` (the full basis when it has none) is always the
+/// covers. A summary is ready only while its basis is the basis of its
+/// thread, so a change of any answerable message (it goes away, leaves the
+/// thread, or gets a new text, label or date) makes it stale.
 pub fn basis_sql(thread: &str) -> String {
-    let all = inputs_sql(thread, "");
+    let all = covers_sql(thread, "");
     format!(
         "(CASE WHEN (SELECT count(*) {} {ANSWERABLE}) <= {MESSAGES} THEN {all}
                ELSE {} || '.' || {all} END)",
@@ -447,7 +465,7 @@ fn snapshot(c: &Transaction<'_>, thread: i64) -> Result<Snapshot> {
             .prepare_cached(&format!(
                 "SELECT s.text FROM thread_summary s WHERE s.thread_id = ?1
                    AND substr(s.basis, instr(s.basis, '.') + 1) = {}",
-                covers_sql("?1", "s.based_on")
+                covers_upto_sql("?1", "s.based_on")
             ))?
             .query_row([thread], |r| r.get(0))
             .optional()?,
