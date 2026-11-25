@@ -19,6 +19,12 @@ use super::{
 pub const GONE: &str = "The draft is gone at Gmail.";
 /// The draft at Gmail is not the content of the draft row.
 pub const CHANGED: &str = "The draft changed at Gmail. Iris did not change it.";
+/// A reply change keeps its reply headers, so it cannot answer a newer
+/// message (section 1).
+pub const NEW_MAIL: &str = "A new mail came into this thread. Write a new reply.";
+/// An attachment of the stored draft has no file (section 1): the undo
+/// could not compose the old draft again.
+pub const OLD_FILE: &str = "A file of the draft is not in Iris. Change it in Gmail.";
 /// Recovery cannot show that the call applied (section 4, step 3).
 pub const UNKNOWN: &str = "Iris does not know if the draft changed. Look at it in Gmail.";
 
@@ -87,9 +93,17 @@ pub(super) fn apply(run: &mut Run<'_, '_>, action: i64, args: &str) -> Result<Ou
     let Ok(mut content) = serde_json::from_str::<Content>(args) else {
         return deny("the arguments are not a draft content");
     };
-    // A reply keeps the subject of its draft (section 1), as at submit.
+    // The files of the stored draft: the undo composes it again.
+    if files(store, &old.content)?.is_none() {
+        return deny(OLD_FILE);
+    }
+    // A reply keeps the subject of its draft (section 1), as at submit,
+    // and answers the parent that the approval binds.
     if d.thread.is_some() {
         content.subject = old.content.subject.clone();
+        if !same_parent(run, action, old.reply.as_ref())? {
+            return deny(NEW_MAIL);
+        }
     }
     let content = match content.check() {
         Ok(c) => c,
@@ -182,6 +196,45 @@ pub(super) fn apply(run: &mut Run<'_, '_>, action: i64, args: &str) -> Result<Ou
         // Step 7: a definite rejection. The draft row does not change.
         Err(e) => end(run, ledger, "failed", Some(e.to_string()), false),
     }
+}
+
+/// True if the parent of the action (the newest eligible message of the
+/// thread at submit, bound by the approval) is the message that the reply
+/// headers of the draft answer. The Message-ID comes from Gmail: the
+/// mirror can lack it before the understanding of the message.
+fn same_parent(
+    run: &mut Run<'_, '_>,
+    action: i64,
+    reply: Option<&iris_compose::Reply>,
+) -> Result<bool> {
+    let Some(reply) = reply else {
+        return Ok(false);
+    };
+    let parent = run.store.read(|c| {
+        let p = iris_changeset::parent(c, action).map_err(changeset_error)?;
+        Ok(match p.filter(|p| !p.gone) {
+            Some(p) => Some(c.query_row(
+                "SELECT provider_id FROM message WHERE id = ?1",
+                [p.message],
+                |r| r.get::<_, String>(0),
+            )?),
+            None => None,
+        })
+    })?;
+    let Some(provider) = parent else {
+        return Ok(false);
+    };
+    let head = match run.call(|g, t| g.metadata(t, &provider, &["Message-ID"])) {
+        Ok(h) => h,
+        Err(GmailError::NotFound) => return Ok(false),
+        Err(e) => return Err(Error::Provider(e)),
+    };
+    let bare = |v: &str| v.trim().trim_matches(['<', '>']).to_ascii_lowercase();
+    Ok(head
+        .headers
+        .iter()
+        .find(|h| h.name.eq_ignore_ascii_case("Message-ID"))
+        .is_some_and(|h| bare(&h.value) == bare(&reply.in_reply_to)))
 }
 
 /// The claim of a change (section 2, step 4): in one transaction, the

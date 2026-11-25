@@ -1583,8 +1583,13 @@ impl Box {
     /// A new mail draft at Gmail and a person change of it, approved.
     /// Gives the change action, the `d-N` ID and the Gmail draft ID.
     fn changed(&self, args: Value) -> (i64, String, String) {
+        self.changed_from(mail(), args)
+    }
+
+    /// As [`Box::changed`], from a new mail with the content `first`.
+    fn changed_from(&self, first: Value, args: Value) -> (i64, String, String) {
         iris_changeset::allow_draft_change(true);
-        let a = self.approved(Verb::Draft, "a-1", mail(), 0);
+        let a = self.approved(Verb::Draft, "a-1", first, 0);
         assert!(matches!(self.apply(a), Ok(Outcome::Applied(_))));
         let (d, provider) = self.draft(a);
         (self.approved(Verb::Draft, &d, args, 0), d, provider)
@@ -1828,4 +1833,140 @@ fn a_reply_change_stays_in_its_thread() {
         })
         .unwrap();
     assert_eq!(at.message.thread_id, thread_provider);
+}
+
+/// A reply change answers the parent that its approval binds. A newer
+/// mail in the thread becomes the parent at submit, and the draft still
+/// answers the old message: no call (change spec, section 1).
+#[test]
+fn a_reply_change_after_a_new_mail_is_denied() {
+    iris_changeset::allow_draft_change(true);
+    let b = setup("change-newer");
+    let (thread, parent) = b.thread();
+    let (provider, thread_provider, date): (String, String, i64) = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT m.provider_id, t.provider_id, m.internal_date FROM message m
+                 JOIN thread t ON t.id = m.thread_id WHERE m.id = ?1",
+                [parent],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .unwrap();
+    let head = b.gmail.metadata(TOKEN, &provider, &["Subject"]).unwrap();
+    b.sql(
+        "UPDATE header SET subject = ?1 WHERE message_id = ?2",
+        rusqlite::params![head.headers[0].value, parent],
+    );
+    let a = b.approved(
+        Verb::Draft,
+        &format!("t-{thread}"),
+        json!({"to": ["priya@example.com"], "body": "Thanks."}),
+        0,
+    );
+    let o = b.apply(a);
+    assert!(matches!(o, Ok(Outcome::Applied(_))), "{o:?}");
+    let (d, _) = b.draft(a);
+    // A new mail of priya, at Gmail and in the thread of the mirror.
+    let raw = format!(
+        "From: priya@example.com\r\nTo: {OWNER}\r\nSubject: {}\r\nMessage-ID: <newer@example.com>\r\nDate: Wed, 25 Nov 2026 10:00:00 +0000\r\n\r\nOne more thing.\r\n",
+        head.headers[0].value
+    );
+    let id = b.fake.add_message(raw.as_bytes(), &["INBOX"]);
+    b.store
+        .put_messages(
+            b.account,
+            &[iris_store::NewMessage {
+                provider_id: id,
+                thread_provider_id: thread_provider,
+                internal_date: Some(date + 1),
+                header: iris_store::Header {
+                    from_addr: Some("priya@example.com".into()),
+                    subject: Some(head.headers[0].value.clone()),
+                    message_id_hdr: Some("<newer@example.com>".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+    b.sql("UPDATE message SET hostile = NULL", []);
+    let change = b.approved(
+        Verb::Draft,
+        &d,
+        json!({"to": ["priya@example.com"], "body": "Thanks again."}),
+        0,
+    );
+    match b.apply(change) {
+        Ok(Outcome::Denied(why)) => assert_eq!(why, iris_apply::CHANGE_NEW_MAIL),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.puts(), 0);
+}
+
+/// An attachment file of the stored draft is gone: no call, because the
+/// undo could not compose the old draft again.
+#[test]
+fn a_change_needs_the_files_of_the_old_draft() {
+    let b = setup("change-old-file");
+    let file = b"the file".as_slice();
+    let sha = b.store.put_attachment(file).unwrap();
+    let mut m = mail();
+    m["attachments"] =
+        json!([{"name": "a.txt", "type": "text/plain", "sha256": sha, "size": file.len()}]);
+    let (change, _, _) = b.changed_from(m, new_text());
+    std::fs::remove_file(b.store.attachment_path(&sha).unwrap()).unwrap();
+    match b.apply(change) {
+        Ok(Outcome::Denied(why)) => assert_eq!(why, iris_apply::CHANGE_OLD_FILE),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.puts(), 0);
+}
+
+/// A stop after the claim (change spec, section 4): the entry stays in
+/// `writing`, and a new process recovers it from the store with no second
+/// call. The new hash at Gmail ends `applied`; the old hash ends `failed`.
+#[test]
+fn a_change_in_writing_recovers_after_a_restart() {
+    for applied in [true, false] {
+        let b = setup(&format!("change-restart-{applied}"));
+        let (change, _, _) = b.changed(new_text());
+        let before = b.row();
+        // The read after the call fails, so the apply stops with the entry
+        // in `writing`, as a crash does.
+        let fake = b.fake.clone();
+        b.fake.before_next_matching("PUT", move || {
+            if !applied {
+                fake.fail_next_write(&[503], false);
+            }
+            fake.fail_next_matching("GET /gmail/v1/users/me/drafts/", 400);
+        });
+        let o = b.apply(change);
+        assert!(matches!(o, Ok(Outcome::Pending)), "{o:?}");
+        assert_eq!(b.entry(change).0, "writing");
+        // A new process: a new store handle and a new client.
+        let store = Store::open(&b.dir).unwrap();
+        let gmail = Gmail::new(Config {
+            base_url: b.fake.base_url(),
+            ..Config::default()
+        });
+        let (t, mut renew) = b.token();
+        let mut token = Token {
+            token: t,
+            renew: &mut renew,
+            refused: false,
+        };
+        iris_apply::recover_step(&store, &gmail, &mut token, b.account).unwrap();
+        assert_eq!(b.puts(), 1, "recovery does not call again");
+        if applied {
+            assert_eq!(b.entry(change).0, "applied");
+            assert!(b.row().1.contains("New text."));
+        } else {
+            let (state, _, _, error) = b.entry(change);
+            assert_eq!(state, "failed");
+            assert_eq!(error.as_deref(), Some(iris_apply::CHANGE_UNKNOWN));
+            assert_eq!(b.row().0, before.0);
+        }
+    }
 }
