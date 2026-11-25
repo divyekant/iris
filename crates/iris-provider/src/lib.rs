@@ -257,6 +257,33 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// True if [`Provider::update_draft`] replaces the MIME bytes of a draft
+    /// in place, so that the read back of the draft checks the change
+    /// (Gmail). Else a change of a draft makes a new draft
+    /// (`docs/specs/2026-11-25-draft-change.md`, "Not in scope").
+    fn updates_drafts(&self) -> bool {
+        false
+    }
+
+    /// Replaces the message of the draft `id` with `raw`, in the thread
+    /// `thread` for a reply. One request: no retry after an unknown result.
+    /// A provider without [`Provider::updates_drafts`] refuses the call and
+    /// sends nothing.
+    fn update_draft(
+        &self,
+        token: &str,
+        id: &str,
+        raw: &[u8],
+        thread: Option<&str>,
+    ) -> Result<Draft> {
+        let _ = (token, id, raw, thread);
+        Err(Error::Api {
+            status: 400,
+            reason: "unsupported".into(),
+            message: "this provider cannot change a draft in place".into(),
+        })
+    }
+
     /// True if a change of `INBOX` moves the message to another folder, so
     /// that its folder label changes too (Outlook). Then the apply reads
     /// the labels back after the write. A label provider (Gmail) and a

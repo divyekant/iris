@@ -368,6 +368,75 @@ fn a_rate_limit_of_a_draft_write_is_unknown_and_has_no_second_request() {
 }
 
 #[test]
+fn a_draft_update_keeps_the_draft_id_and_replaces_its_message() {
+    let fake = FakeGmail::start(Mailbox::new(3, 5)).unwrap();
+    let gmail = client(&fake);
+    let thread = gmail.messages(TOKEN, &[], true, None).unwrap().messages[0]
+        .thread_id
+        .clone();
+    let d = gmail.create_draft(TOKEN, DRAFT, Some(&thread)).unwrap();
+    let new = b"From: owner@example.com\r\nSubject: Hi\r\nMessage-ID: <iris.1@example.com>\r\n\r\nBye\r\n";
+    let u = gmail
+        .update_draft(TOKEN, &d.id, new, Some(&thread))
+        .unwrap();
+    assert_eq!(u.id, d.id, "the same draft");
+    assert_eq!(u.message.thread_id, thread, "the same thread");
+    assert_ne!(u.message.id, d.message.id, "a new message");
+    let got = String::from_utf8(gmail.draft_raw(TOKEN, &d.id).unwrap().raw.unwrap()).unwrap();
+    assert!(got.ends_with("\r\n\r\nBye\r\n"), "{got}");
+    // Like a create, Gmail sets its own Message-ID.
+    assert!(got.contains("Message-ID: <CACe_fake"), "{got}");
+    assert_eq!(
+        fake.draft_ids(),
+        std::slice::from_ref(&d.id),
+        "no second draft"
+    );
+    let puts = fake
+        .requests()
+        .iter()
+        .filter(|r| r.starts_with("PUT "))
+        .count();
+    assert_eq!(puts, 1);
+
+    // A reply update with no thread ID leaves the thread, as a create
+    // with no thread ID: the client must send it.
+    let away = gmail.update_draft(TOKEN, &d.id, new, None).unwrap();
+    assert_ne!(away.message.thread_id, thread, "no threadId, no thread");
+    let back = gmail
+        .update_draft(TOKEN, &d.id, new, Some(&thread))
+        .unwrap();
+    assert_eq!(back.message.thread_id, thread);
+
+    // A draft that does not exist.
+    assert!(matches!(
+        gmail.update_draft(TOKEN, "r999", new, None),
+        Err(iris_gmail::Error::NotFound)
+    ));
+    // A rate limit and a lost answer are unknown, with no second request.
+    fake.fail_next_write(&[429], false);
+    assert!(gmail
+        .update_draft(TOKEN, &d.id, DRAFT, None)
+        .unwrap_err()
+        .write_result_unknown());
+    fake.fail_next_write(&[503], true);
+    assert!(gmail
+        .update_draft(TOKEN, &d.id, DRAFT, None)
+        .unwrap_err()
+        .write_result_unknown());
+    let puts = fake
+        .requests()
+        .iter()
+        .filter(|r| r.starts_with("PUT "))
+        .count();
+    assert_eq!(puts, 6, "one request for each call");
+    let got = String::from_utf8(gmail.draft_raw(TOKEN, &d.id).unwrap().raw.unwrap()).unwrap();
+    assert!(
+        got.ends_with("\r\n\r\nHello\r\n"),
+        "the applied lost call changed the draft: {got}"
+    );
+}
+
+#[test]
 fn the_person_can_edit_and_delete_a_draft_at_the_fake() {
     let fake = FakeGmail::start(Mailbox::new(3, 5)).unwrap();
     let gmail = client(&fake);
