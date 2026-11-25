@@ -239,13 +239,10 @@ pub fn name_address_spoof(name: &str, from: &str) -> bool {
         .iter()
         .filter_map(|w| {
             let (local, domain) = w.split_once('@')?;
-            // The domain ends at the first ASCII character that a domain
-            // cannot hold (#911): "a@bank.example/help". A character
-            // outside ASCII stays, so a mixed-script domain still differs.
-            let end = domain
-                .find(|c: char| c.is_ascii() && !(c.is_ascii_alphanumeric() || "-.@".contains(c)))
-                .unwrap_or(domain.len());
-            let domain = domain[..end].trim_end_matches('.');
+            // The domain as the owner check reads it: mapped by UTS 46,
+            // then cut where a domain cannot go on (#911, #982).
+            let domain = name_domain(domain);
+            let domain = domain.as_str();
             let w = format!("{local}@{domain}");
             let ok = !local.is_empty()
                 && !domain.contains('@')
@@ -255,6 +252,71 @@ pub fn name_address_spoof(name: &str, from: &str) -> bool {
         })
         .any(|a| a != from.to_lowercase() && owner(&a) != from_owner)
 }
+
+/// The domain of an address in a display name, from the text after its
+/// `@` (#911, #982). Each character gets the UTS 46 mapping, the mapping
+/// of the owner check (the URL host parser), one character at a time, so
+/// that the context of the mail cannot change it: `－` (U+FF0D) is `-` and
+/// `。` (U+3002) is `.`. The domain ends at the first mapped character that
+/// a domain cannot hold: an ASCII character other than a letter, a digit,
+/// `-`, `.` and `@`, or a Unicode punctuation character that IDNA2008
+/// disallows in a label (so `bank.example—help` ends at the dash). All other
+/// characters stay, so a mixed-script, reversed or longer domain has
+/// another owner. A character that UTS 46 disallows maps to U+FFFD, which
+/// stays.
+fn name_domain(text: &str) -> String {
+    use idna::uts46::{AsciiDenyList, Hyphens, Uts46};
+    use unicode_general_category::{get_general_category, GeneralCategory as G};
+    let ends = |c: char| {
+        if c.is_ascii() {
+            return !(c.is_ascii_alphanumeric() || "-.@".contains(c));
+        }
+        !IDNA_PUNCTUATION.contains(&c)
+            && matches!(
+                get_general_category(c),
+                G::DashPunctuation
+                    | G::OtherPunctuation
+                    | G::OpenPunctuation
+                    | G::ClosePunctuation
+                    | G::InitialPunctuation
+                    | G::FinalPunctuation
+            )
+    };
+    // Memory: one String of the length of the mapped domain. An ASCII
+    // character allocates nothing more; a non-ASCII character allocates
+    // its short mapping for one step only.
+    let uts46 = Uts46::new();
+    let mut out = String::with_capacity(text.len());
+    let mut one = [0u8; 4];
+    'text: for c in text.chars() {
+        if c.is_ascii() {
+            let c = c.to_ascii_lowercase();
+            if ends(c) {
+                break;
+            }
+            out.push(c);
+            continue;
+        }
+        let one = c.encode_utf8(&mut one).as_bytes();
+        let mapped = uts46
+            .to_unicode(one, AsciiDenyList::EMPTY, Hyphens::Allow)
+            .0;
+        for m in mapped.chars() {
+            if ends(m) {
+                break 'text;
+            }
+            out.push(m);
+        }
+    }
+    out.truncate(out.trim_end_matches('.').len());
+    out
+}
+
+/// The punctuation that a domain label can hold after the UTS 46 mapping:
+/// the exceptions of RFC 5892 section 2.6. IDNA2008 disallows each other
+/// punctuation character in a label.
+pub const IDNA_PUNCTUATION: [char; 5] =
+    ['\u{00B7}', '\u{05F3}', '\u{05F4}', '\u{0F0B}', '\u{30FB}'];
 
 /// True when the links of a received message give the mark `link`
 /// ([`link::deceptive`]). The caller skips your sent mail.
