@@ -671,46 +671,59 @@ fn the_list_and_its_sessions_always_agree_while_the_job_moves() {
 }
 
 /// Issue #959: the person ends the wait of a job early, once, and only the
-/// wait that the person saw.
+/// wait that the person saw: `events` is the number of events of the job
+/// document that the person saw. Events are never removed, so the count
+/// names one state of the job, also when two events have the same time.
 #[tokio::test]
 async fn the_person_wakes_a_waiting_job_once() {
     let dir = temp("wake");
     let s = store(&dir);
     let job = iris_job::create(&s, "Pay the invoice.", None, NOW).unwrap();
     let uri = format!("/api/jobs/{}/wake", iris_job::format_job_id(job));
-    let seen = || iris_job::job_json(&iris_job::get(&s, job).unwrap())["updated"].clone();
+    let seen = || iris_job::events(&s, job).unwrap().len();
     // A working job does not wait.
-    let (code, _) = post(&s, &uri, json!({ "updated": seen() })).await;
+    let (code, _) = post(&s, &uri, json!({ "events": seen() })).await;
     assert_eq!(code, StatusCode::CONFLICT);
     let until = |ms| Wait {
         thread: None,
         until_ms: ms,
     };
     wait(&s, job, until(NOW + 86_400_000), None, NOW + 1).unwrap();
-    for bad in [json!({}), json!({ "updated": 1 }), json!(null)] {
+    for bad in [
+        json!({}),
+        json!({ "events": "2" }),
+        json!({ "events": -1 }),
+        json!({ "updated": "x" }),
+        json!(null),
+    ] {
         let (code, v) = post(&s, &uri, bad.clone()).await;
         assert_eq!(code, StatusCode::BAD_REQUEST, "{bad}");
         assert!(v["error"].is_string(), "{bad}");
     }
     assert_eq!(
-        post(&s, "/api/jobs/j-999/wake", json!({ "updated": seen() }))
+        post(&s, "/api/jobs/j-999/wake", json!({ "events": seen() }))
             .await
             .0,
         StatusCode::NOT_FOUND
     );
-    // A wake for a wait that the person did not see changes nothing.
-    let (code, _) = post(&s, &uri, json!({ "updated": "2026-01-01T00:00:00.000Z" })).await;
+    // The person saw the first wait. The engine wakes the job and the agent
+    // waits again in the same millisecond: the old count changes nothing.
+    let first = seen();
+    iris_job::wake(&s, job, By::Engine, Some("time"), NOW + 1).unwrap();
+    wait(&s, job, until(NOW + 2 * 86_400_000), None, NOW + 1).unwrap();
+    let (code, _) = post(&s, &uri, json!({ "events": first })).await;
     assert_eq!(code, StatusCode::CONFLICT);
     assert_eq!(
         iris_job::get(&s, job).unwrap().state,
         iris_job::State::Waiting
     );
-    let (code, doc) = post(&s, &uri, json!({ "updated": seen() })).await;
+    let (code, doc) = post(&s, &uri, json!({ "events": seen() })).await;
     assert_eq!(code, StatusCode::OK, "{doc}");
     assert_eq!(doc["job"]["state"], "working");
-    let last = doc["job"]["events"].as_array().unwrap().last().unwrap();
-    assert_eq!(last["by"], "person");
+    let events = doc["job"]["events"].as_array().unwrap();
+    assert_eq!(events.len(), seen());
+    assert_eq!(events.last().unwrap()["by"], "person");
     // A second wake finds no wait.
-    let (code, _) = post(&s, &uri, json!({ "updated": doc["job"]["updated"] })).await;
+    let (code, _) = post(&s, &uri, json!({ "events": seen() })).await;
     assert_eq!(code, StatusCode::CONFLICT);
 }

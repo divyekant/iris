@@ -248,9 +248,9 @@ export function endJob(id: string, end: "complete" | "cancel"): Promise<JobDetai
   return detailOf(post<JobDetail>(`jobs/${encodeURIComponent(id)}/finish`, { end }));
 }
 
-/** End the wait of `job` early (issue 959), for the wait that the person saw (`updated`). The answer is the job, as `loadJob` gives it. */
-export function wakeJob(job: Pick<Job, "id" | "updated">): Promise<JobDetail> {
-  return detailOf(post<JobDetail>(`jobs/${encodeURIComponent(job.id)}/wake`, { updated: job.updated }));
+/** End the wait of job `id` early (issue 959), for the job that the person saw: `events` is the number of its events then. The answer is the job, as `loadJob` gives it. */
+export function wakeJob(id: string, events: number): Promise<JobDetail> {
+  return detailOf(post<JobDetail>(`jobs/${encodeURIComponent(id)}/wake`, { events }));
 }
 
 /** The job page of `id`, read again: for example after a change whose answer did not come. */

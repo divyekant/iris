@@ -115,8 +115,10 @@
   async function wake() {
     wakeBusy = true;
     wakeError = "";
+    // The job at the press: a request before it in the queue can show a newer wait, which this press must not end.
+    const seen = { id: job.id, events: job.events.length };
     try {
-      await queue(() => wakeJob(job));
+      await queue(() => wakeJob(seen.id, seen.events));
     } catch (e) {
       // A 409 wrote nothing: the job does not wait now, or waits for another thing. Any failure with
       // no answer can come after the wake. Both read the job again and show it.

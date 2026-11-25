@@ -122,14 +122,19 @@ pub fn finish_job(store: &Store, row: i64, end: iris_job::End, now_ms: i64) -> R
 }
 
 /// The person ends the wait of the job `row` (issue #959), if the job still
-/// waits and is the job that the person saw (`updated`, as the job document
-/// gives it). Else `Conflict`, and nothing changes. A wake by the person
+/// waits and has the `events` events of the job document that the person
+/// saw. Else `Conflict`, and nothing changes. A wake by the person
 /// starts no session (docs/specs/2026-11-17-wait.md): the job page then
 /// shows the command that starts an agent.
-pub fn wake_job(store: &Store, row: i64, updated: &str, now_ms: i64) -> Result<()> {
+pub fn wake_job(store: &Store, row: i64, events: u64, now_ms: i64) -> Result<()> {
     iris_job::transaction(store, |c| {
         let j = iris_job::get_in(c, row)?;
-        if j.state != JobState::Waiting || iris_job::job_json(&j)["updated"] != updated {
+        let now: i64 = c.query_row(
+            "SELECT count(*) FROM job_event WHERE job_id = ?1",
+            [row],
+            |r| r.get(0),
+        )?;
+        if j.state != JobState::Waiting || u64::try_from(now).ok() != Some(events) {
             return Err(iris_job::Error::Refused("the job does not wait now".into()));
         }
         iris_job::wake_in(c, row, By::Person, None, now_ms)

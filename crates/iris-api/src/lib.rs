@@ -1207,9 +1207,11 @@ async fn post_job_finish(
 
 #[derive(Deserialize)]
 struct JobWakeBody {
-    /// The `updated` of the job when the person saw its wait. A wake of
-    /// another wait, or of a job that does not wait, gets 409.
-    updated: String,
+    /// The number of events of the job document that the person saw. Events
+    /// are never removed, so the count names one state of the job, also when
+    /// two events have the same time. A wake of another wait, or of a job
+    /// that does not wait, gets 409.
+    events: u64,
 }
 
 /// The person ends the wait of a job early (issue #959). The answer is the
@@ -1223,7 +1225,7 @@ async fn post_job_wake(
     let Some(row) = job_row(&s, &id)? else {
         return Ok(not_found());
     };
-    wake_job(&s, row, &b.updated, now_ms())?;
+    wake_job(&s, row, b.events, now_ms())?;
     Ok(stream(move |w| write_job(&s, row, w)).await)
 }
 

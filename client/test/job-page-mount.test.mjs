@@ -290,7 +290,7 @@ test("Wake now ends the wait of a waiting job, with the updated of the job that 
   try {
     button(view, "Wake now").click();
     await until(() => (view.flushSync(), !button(view, "Wake now")));
-    assert.deepEqual(asked[0], ["POST", `jobs/${d.job.id}/wake`, { updated: d.job.updated }]);
+    assert.deepEqual(asked[0], ["POST", `jobs/${d.job.id}/wake`, { events: d.job.events.length }]);
     assert.match(text(view.target), /You ended the wait\./);
   } finally {
     view.destroy();
@@ -315,5 +315,29 @@ test("a refused wake reads the job again and says why; a job that does not wait 
     const v = await mount("/src/views/Job.svelte", { detail: structuredClone(x), every: 60_000 });
     assert.ok(!button(v, "Wake now"), x.job.id);
     v.destroy();
+  }
+});
+
+test("a wake that waits in the queue sends the job of the press, not a newer wait (review of PR 1127)", async () => {
+  const d = structuredClone(Object.values(fx.jobDetails).find((x) => x.job.state === "waiting"));
+  // A scope remove runs first and answers with a newer wait: the engine woke the job and the agent waits again.
+  const newer = { ...d, scope: [], job: { ...d.job, events: [...d.job.events, { at: "2026-11-16T20:00:00Z", state: "working", by: "engine", why: "time" }, { at: "2026-11-16T20:00:00Z", state: "waiting", by: "agent", wait: d.job.wait }] } };
+  let release;
+  const held = new Promise((r) => (release = r));
+  const asked = serve(async (method, path) => {
+    if (path.endsWith("/scope/remove")) return (await held, [200, newer]);
+    if (path.endsWith("/wake")) return [409, { error: "The job does not wait now, or its wait changed." }];
+    return [200, newer];
+  });
+  const view = await mount("/src/views/Job.svelte", { detail: d, every: 60_000 });
+  try {
+    button(view, "Remove").click();
+    button(view, "Wake now").click();
+    release();
+    await until(() => asked.some(([, p]) => p.endsWith("/wake")));
+    const wake = asked.find(([, p]) => p.endsWith("/wake"));
+    assert.deepEqual(wake[2], { events: d.job.events.length }, "the count of the job at the press");
+  } finally {
+    view.destroy();
   }
 });
