@@ -572,6 +572,7 @@ fn set(s: &Store, sql: &str) {
 /// resolves to the newest message of the thread.
 #[test]
 fn a_change_of_a_draft_is_proposed_only_when_each_check_passes() {
+    iris_changeset::allow_draft_change(true);
     let dir = TempDir::new("change");
     let s = store(&dir);
     let a = one(&s, AuthorKind::Person, Verb::Draft, &["d-1"], REPLY());
@@ -588,7 +589,10 @@ fn a_change_of_a_draft_is_proposed_only_when_each_check_passes() {
     };
     denied(AuthorKind::Agent, "Only you can change a draft.");
     one(&s, AuthorKind::Person, Verb::Draft, &["d-9"], REPLY());
-    assert_eq!(last_state(&s).0, "denied");
+    assert_eq!(
+        last_state(&s),
+        ("denied".into(), Some("The draft does not exist.".into()))
+    );
     for (sql, why, undo) in [
         (
             "UPDATE account SET provider = 'outlook'",
@@ -633,6 +637,7 @@ fn a_change_of_a_draft_is_proposed_only_when_each_check_passes() {
 /// blocks a change, while the mark is open (not withdrawn, not too old).
 #[test]
 fn an_open_send_mark_of_the_draft_blocks_a_change() {
+    iris_changeset::allow_draft_change(true);
     let dir = TempDir::new("change-mark");
     let s = store(&dir);
     // A write of a new mail: its approved draft action has a mark, and the
@@ -676,4 +681,51 @@ fn an_open_send_mark_of_the_draft_blocks_a_change() {
     );
     one(&s, AuthorKind::Person, Verb::Draft, &["d-2"], MAIL());
     assert_eq!(last_state(&s).0, "proposed", "{:?}", last_state(&s));
+}
+
+/// The flags of a change read the account of the draft, and a reply change
+/// reads the subject of its draft, not the subject of the thread.
+#[test]
+fn the_flags_of_a_change_read_the_changed_draft() {
+    iris_changeset::allow_draft_change(true);
+    let dir = TempDir::new("change-flags");
+    let s = store(&dir);
+    set(
+        &s,
+        "UPDATE draft SET content = json_set(content, '$.content.subject', 'Re: $500 fee');
+         INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+           VALUES (1, 1, 2, 'draft', '{\"accounts\":[\"a-1\"]}', '{}');
+         INSERT INTO draft(account_id, provider_id, message_id_hdr, content, hash, raw,
+                           action_id, created_at, updated_at)
+           SELECT 1, 'r2', 'iris.2@example.com', content, hash, raw, 2, 0, 0
+             FROM draft WHERE id = 1",
+    );
+    let flags = |a: &Value| a["flags"].clone();
+    // A reply change: priya wrote to the owner, the owner never to priya.
+    let got = one(&s, AuthorKind::Person, Verb::Draft, &["d-1"], REPLY());
+    assert_eq!(state(&got), "proposed", "{got}");
+    assert_eq!(flags(&got), json!(["new_recipient", "money"]), "{got}");
+    // A new-mail change has no thread: the account comes from the draft.
+    let got = one(
+        &s,
+        AuthorKind::Person,
+        Verb::Draft,
+        &["d-2"],
+        json!({"to": ["sam@example.com"], "subject": "Hi", "body": "Hello"}),
+    );
+    assert_eq!(state(&got), "proposed", "{got}");
+    assert_eq!(flags(&got), json!(["new_recipient"]), "{got}");
+}
+
+/// A reply change needs a message to reply to, as a new reply does.
+#[test]
+fn a_reply_change_needs_a_parent() {
+    iris_changeset::allow_draft_change(true);
+    let dir = TempDir::new("change-parent");
+    let s = store(&dir);
+    set(&s, "UPDATE message SET gone_at = 1 WHERE thread_id = 1");
+    one(&s, AuthorKind::Person, Verb::Draft, &["d-1"], REPLY());
+    let (state, why) = last_state(&s);
+    assert_eq!(state, "denied");
+    assert!(why.is_some(), "a reason");
 }

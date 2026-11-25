@@ -20,6 +20,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use iris_store::{format_id, parse_id, Kind, Store};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -1245,6 +1246,9 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
     }
     let write = WRITE_VERBS.contains(&verb.as_str());
     match (verb, group.as_str()) {
+        (Verb::Draft, "drafts") if !CHANGE_ON.load(Ordering::SeqCst) => {
+            return Ok(Some(CHANGE_OFF.into()))
+        }
         (Verb::Draft, "accounts" | "threads" | "drafts") | (Verb::Send, "drafts") => {}
         (Verb::Draft, _) => {
             return Ok(Some(
@@ -1390,6 +1394,9 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
             }
             _ => return bad(),
         };
+        if !found && verb == Verb::Draft && kind == Kind::Draft {
+            return Ok(Some("The draft does not exist.".into()));
+        }
         if !found {
             let id = format_id(kind, row);
             return Ok(Some(format!("{id} is not in the mirror")));
@@ -1569,24 +1576,15 @@ fn check_write(
         }
         // The apply reads the Message-ID of the parent at Gmail: the mirror
         // can lack it before the understanding of the message. A change
-        // keeps the subject of its draft.
-        if let Some(draft) = change {
-            let subject: String = c.query_row(
-                "SELECT coalesce(json_extract(content, '$.content.subject'), '') FROM draft
-                 WHERE id = ?1",
-                [draft],
-                |r| r.get(0),
-            )?;
-            iris_compose::Content { subject, ..content }
-        } else {
-            match parent(c, action)? {
-                None => return Ok(Some("the thread has no message to reply to".into())),
-                Some(p) => iris_compose::Content {
-                    subject: iris_compose::reply_subject(&p.subject),
-                    ..content
-                },
-            }
-        }
+        // keeps the subject of its draft, but also needs a parent.
+        let Some(p) = parent(c, action)? else {
+            return Ok(Some("the thread has no message to reply to".into()));
+        };
+        let subject = match change_reply_subject(c, action)? {
+            Some(subject) => subject,
+            None => iris_compose::reply_subject(&p.subject),
+        };
+        iris_compose::Content { subject, ..content }
     } else {
         content
     };
@@ -1657,6 +1655,33 @@ pub fn hostile(c: &Connection, action: i64) -> Result<bool> {
 
 /// The reason of a change or a send of a draft while another change of the
 /// same draft is open (change spec, section 1).
+/// The refusal of a change of a draft while its apply and undo are not built.
+pub const CHANGE_OFF: &str = "Iris cannot change a draft yet.";
+
+// shortcut: a process switch, off by default, so that no approved change of
+// a draft reaches an apply that refuses it. Remove it when the apply and the
+// undo of a change exist (D6, part B3).
+static CHANGE_ON: AtomicBool = AtomicBool::new(false);
+
+/// Lets submit accept a change of a draft. Only tests turn it on now.
+pub fn allow_draft_change(on: bool) {
+    CHANGE_ON.store(on, Ordering::SeqCst);
+}
+
+/// The subject of the draft that a reply change of `action` changes, or
+/// `None` when the action changes no reply draft.
+pub fn change_reply_subject(c: &Connection, action: i64) -> Result<Option<String>> {
+    Ok(c.query_row(
+        "SELECT coalesce(json_extract(d.content, '$.content.subject'), '')
+         FROM changeset_action a JOIN action_draft ad ON ad.action_id = a.id
+         JOIN draft d ON d.id = ad.draft_id
+         WHERE a.id = ?1 AND a.verb = 'draft' AND d.thread_id IS NOT NULL",
+        [action],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
 pub const CHANGING: &str = "Iris changes this draft now. Try again in a minute.";
 
 /// True if a `draft` action other than `action` names the draft `draft`

@@ -1584,6 +1584,7 @@ fn a_sent_copy_with_no_bcc_takes_the_approved_bcc_with_a_note() {
 /// denied with no provider call, and never makes a new draft.
 #[test]
 fn a_change_of_a_draft_is_denied_until_its_apply_exists() {
+    iris_changeset::allow_draft_change(true);
     let b = setup("change-later");
     let a = b.approved(Verb::Draft, "a-1", mail(), 0);
     assert!(matches!(b.apply(a), Ok(Outcome::Applied(_))));
@@ -1596,7 +1597,7 @@ fn a_change_of_a_draft_is_denied_until_its_apply_exists() {
         0,
     );
     match b.apply(change) {
-        Ok(Outcome::Denied(why)) => assert_eq!(why, iris_apply::CHANGE_NOT_BUILT),
+        Ok(Outcome::Denied(why)) => assert_eq!(why, iris_changeset::CHANGE_OFF),
         other => panic!("{other:?}"),
     }
     assert_eq!(b.posts("/drafts"), creates, "no new draft");

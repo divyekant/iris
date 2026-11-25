@@ -99,9 +99,6 @@ fn random_id(address: &str) -> std::result::Result<String, Error> {
     Ok(iris_compose::message_id(bytes, address))
 }
 
-/// The reason of the denial of a change of a draft before its apply exists.
-pub const CHANGE_NOT_BUILT: &str = "Iris cannot change a draft yet.";
-
 const GROWN: &str = "The warnings of the draft changed after the approval.";
 
 /// True if `content` has a draft flag that the approval of `action` did
@@ -143,7 +140,7 @@ pub(crate) fn draft(run: &mut Run<'_, '_>, action: i64) -> Result<Outcome> {
     // section 2) is the next part of the build. Until then, a change is
     // denied with no provider call, never applied as a new draft.
     if change {
-        return deny(CHANGE_NOT_BUILT);
+        return deny(iris_changeset::CHANGE_OFF);
     }
     let Ok(mut content) = serde_json::from_str::<Content>(&args) else {
         return deny("the arguments are not a draft content");
