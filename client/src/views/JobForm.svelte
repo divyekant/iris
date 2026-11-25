@@ -4,8 +4,7 @@
   the `due` value and gives the text of a failure, or "" when it worked.
 -->
 <script lang="ts">
-  import { ymd } from "../act";
-  import { keepDue } from "../start";
+  import { dayOf, keepDue } from "../start";
 
   let {
     goal: first = "",
@@ -30,7 +29,7 @@
   // svelte-ignore state_referenced_locally
   let goal = $state(first);
   // svelte-ignore state_referenced_locally
-  let due = $state(day ?? (old ? ymd(new Date(old)) : ""));
+  let due = $state(day ?? (old ? dayOf(old) : ""));
   $effect(() => ondraft?.(goal, due));
   let note = $state("");
   let sending = $state(false);

@@ -362,3 +362,25 @@ test("Reply of a conversation stays while Mute holds, and after Mute fails (R3-1
     view.destroy();
   }
 });
+
+test("the next day of the owner starts at its midnight, also on a day with a clock change (issue 890)", () => {
+  // Berlin: the clock goes from 02:00 to 03:00 on 29 Mar 2026, and from 03:00 to 02:00 on 25 Oct 2026.
+  assert.equal(act.startOfNextDay(new Date("2026-03-29T00:00:00Z"), "Europe/Berlin"), Date.parse("2026-03-29T22:00:00Z"));
+  assert.equal(act.startOfNextDay(new Date("2026-10-24T23:00:00Z"), "Europe/Berlin"), Date.parse("2026-10-25T23:00:00Z"));
+  assert.equal(act.startOfNextDay(new Date(), null), null);
+  assert.equal(act.startOfNextDay(new Date(), "Not/AZone"), null);
+  // The brief timer: the midnight of the owner when it comes before the midnight of the browser (Los Angeles).
+  assert.equal(format.nextDay(new Date("2026-10-25T08:00:00Z"), "Europe/Berlin"), "2026-10-25T23:00:00.000Z");
+  // Property: the result is the first instant of the next day of the owner. Havana and Santiago change the clock at midnight.
+  const zones = ["Europe/Berlin", "America/New_York", "Australia/Lord_Howe", "America/St_Johns", "America/Havana", "America/Santiago", "Asia/Kolkata", "UTC"];
+  for (const zone of zones) {
+    for (let t = Date.UTC(2026, 0, 1); t < Date.UTC(2027, 0, 1); t += 7_200_000 + 61_000) {
+      const now = new Date(t);
+      const at = act.startOfNextDay(now, zone);
+      const day = act.today(now, zone);
+      assert.ok(at > t, `${zone} ${now.toISOString()}`);
+      assert.equal(act.today(new Date(at - 1), zone), day, `${zone} ${now.toISOString()}: the day before`);
+      assert.notEqual(act.today(new Date(at), zone), day, `${zone} ${now.toISOString()}: the next day`);
+    }
+  }
+});

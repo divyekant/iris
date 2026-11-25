@@ -184,18 +184,17 @@ test("an old job that asks you shows first, also behind a full page of newer wor
   assert.ok(html.includes("Show more"));
 });
 
-test("a job due date counts days in the browser, also when the owner zone differs (issue #892)", () => {
-  // The day of the browser, as the start page picked it: the end of 17 Nov here.
-  const end = new Date(2026, 10, 17, 23, 59);
-  const job = { ...fx.jobs["j-12"], due: end.toISOString() };
-  const now = new Date(2026, 10, 17, 0, 0);
-  const browser = j.due(job, now).text;
-  assert.match(browser, /today$/);
-  const offset = -now.getTimezoneOffset() / 60;
-  access.zone = offset >= 0 ? "Pacific/Kiritimati" : "Etc/GMT+12"; // A zone far from the browser.
+test("a job due date counts days and names its day in the owner zone, as the start gives it (issue 892)", () => {
+  // The end of 17 Nov in Tokyo, the zone of the owner: 14:59 UTC.
+  const job = { ...fx.jobs["j-12"], due: "2026-11-17T23:59:59.999+09:00" };
+  access.zone = "Asia/Tokyo";
   try {
-    assert.equal(j.due(job, now).text, browser);
+    assert.equal(j.due(job, new Date("2026-11-16T14:00:00Z")).text, "Due Tue 17 Nov, tomorrow");
+    assert.equal(j.due(job, new Date("2026-11-17T00:00:00Z")).text, "Due Tue 17 Nov, today");
+    assert.equal(j.due({ ...job, state: "done" }).text, "Was due Tue 17 Nov");
   } finally {
     access.zone = undefined;
   }
+  // An unknown zone: the day of the browser.
+  assert.equal(j.dueDay(job.due, "Not/AZone"), j.day(job.due));
 });
