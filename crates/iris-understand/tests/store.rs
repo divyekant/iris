@@ -1312,7 +1312,7 @@ fn the_upgrade_drops_the_items_of_a_draft_or_copy() {
     // The store of version 41: no view and no item trigger.
     b.store
         .write(|tx| {
-            tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP TRIGGER IF EXISTS spam_drops_items; DROP TRIGGER IF EXISTS spam_back_drops_items; DROP VIEW item_droppable;")?;
+            tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER IF EXISTS spam_drops_items; DROP TRIGGER IF EXISTS spam_back_drops_items; DROP VIEW item_droppable;")?;
             Ok(())
         })
         .unwrap();
@@ -2708,7 +2708,7 @@ Your one-time code is 918273. It ends in 10 minutes.
             "upgrade" => {
                 sql(
                     &b,
-                    "DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                    "ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                      ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
                 );
                 let Box_ {
@@ -2810,7 +2810,7 @@ Your one-time code is 918273. It ends in 10 minutes.
     b.store
         .write(|tx| {
             Ok(tx.execute_batch(
-                "DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                "ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                  ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
             )?)
         })
@@ -2886,7 +2886,7 @@ Your one-time code is 918273. It ends in 10 minutes.
     b.store
         .write(|tx| {
             Ok(tx.execute_batch(
-                "DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                "ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                  ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
             )?)
         })
