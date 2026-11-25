@@ -1256,9 +1256,9 @@ fn release_row(tx: &Transaction, message: i64) -> iris_store::Result<Option<Rele
 /// The person releases received message `message` from quarantine (issues
 /// 369, 373 and 374): each mark of [`RELEASABLE`] that it has now goes to
 /// `message.released`, with the marks that the person released before. The
-/// trigger of migration 64 queues the fixed check, which understands the
-/// message again without these marks: with the model, as new mail, if no
-/// other mark stays. New content of the message ends the release.
+/// write clears `understood_at`, so the next run understands the message
+/// again without these marks: with the model, as new mail, if no other mark
+/// stays. New content of the message ends the release.
 pub fn release(tx: &Transaction, message: i64) -> iris_store::Result<Release> {
     let Some((marks, mut all, understood)) = release_row(tx, message)? else {
         return Ok(Release::NoMessage);
@@ -1282,7 +1282,11 @@ pub fn release(tx: &Transaction, message: i64) -> iris_store::Result<Release> {
         // A release is a new decision of the person: the model gets new
         // tries, as after a rerun (`rerun_senders`). A message that used
         // its tries before a mark held it can then get its items.
-        "UPDATE message SET released = ?2, tries = 0, retry_at = NULL, waits_model = 0
+        // The release also clears `understood_at`: the next run
+        // understands the message again on the one path, without the
+        // released marks, whatever other check runs first.
+        "UPDATE message SET released = ?2, understood_at = NULL,
+           tries = 0, retry_at = NULL, waits_model = 0
          WHERE id = ?1",
         params![
             message,

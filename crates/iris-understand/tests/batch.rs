@@ -1841,6 +1841,14 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
             Ok(())
         })
         .unwrap();
+    // A link check waits at the time of the release: it cannot take the
+    // place of the understanding.
+    b.store
+        .write(|tx| {
+            tx.execute("INSERT INTO link_check(message_id) VALUES (?1)", [m])?;
+            Ok(())
+        })
+        .unwrap();
     let r = b.store.write(|tx| release(tx, m)).unwrap();
     assert_eq!(
         r,
@@ -1849,10 +1857,10 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
             kept: vec![]
         }
     );
-    // A second release has nothing more to release.
+    // A second release before the run: Iris reads the mail again now.
     assert_eq!(
         b.store.write(|tx| release(tx, m)).unwrap(),
-        Release::Nothing
+        Release::Reading
     );
     let feed = || {
         Ok((

@@ -847,10 +847,11 @@ from quarantine (`POST /api/messages/{id}/release`):
   `spam` (a label of the provider) and `phishing` (the answer of the model),
   and a `hostile` sender (it has Trust, below), stay. A message with no mark
   that a release covers, or a gone message, gets no release (HTTP 409).
-- The understanding step and the link check leave a released mark out. A
-  trigger queues the fixed check, which understands the message again with
-  no model. If no other mark stays, the message waits for the model as new
-  mail does, and its items show.
+- The understanding step and the link check leave a released mark out. The
+  release clears `understood_at`, so the next run understands the message
+  again on the one path, whatever check runs first. If no other mark stays,
+  the model reads it as new mail, and its items show. A second release
+  before that run gives 409, as for content that Iris did not read yet.
 - A release is for one content: new content of the message ends it.
 - `POST /api/messages/{id}/unrelease` ends the release. In the same write,
   the released marks go back into `message.hostile`, so each gate holds the
