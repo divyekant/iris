@@ -31,6 +31,22 @@ pay again for the same mail.
 5. The person sets the model and its key with the `iris` command. The key is
    a secret (spec 1 section 5.4).
 
+## Resets (issue #110, migration 59)
+
+- A change of the label `SPAM` (it comes or goes) clears `understood_at`,
+  as a change of `SENT`, `DRAFT`, `UNSENT` or `SENT_COPY` does. Mail that
+  leaves `SPAM` gets its items at the next run. Mail that gets `SPAM` drops
+  its items at the next run; each read hides them before that.
+- Each reset of `understood_at` by a change (new content, a gone message
+  that comes back, a label of the list above, a new hostile mark) clears
+  `tries` and `retry_at`, and puts the thread in `talk_due`. A failed try
+  adds 1 to `tries` and keeps its count.
+- New content clears `tries` and `retry_at` also for a message that was
+  never understood.
+- Not done: a later message of the thread that used the changed message as
+  context keeps its items until its own next change. Its items come from
+  its own text, and a run again of each later message costs model calls.
+
 ## Not in scope
 
 These subjects change when a message must be understood again. They belong
@@ -41,8 +57,6 @@ pending state that the store gives. Each one has an issue:
   resets after a change to or from `service`, conversations of other
   threads (#106), and kinds that a person sets (#111).
 - The visibility of pinned items of hostile mail (#112).
-- Resets after a `SPAM` label change, and the clear of `tries` and
-  `retry_at` when a message changes (#110).
 - The selection and the reset of `iris rebuild` (spec 1 section 7.5). This
   spec only says that rebuild runs through the runner.
 - The run after each sync in `iris serve` and `iris mirror sync` (R1-28). It

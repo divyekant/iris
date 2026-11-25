@@ -82,7 +82,7 @@ fn open_makes_the_data_folder() {
     }
     store
         .read(|c| {
-            assert_eq!(iris_store::schema_version(c)?, 58);
+            assert_eq!(iris_store::schema_version(c)?, 59);
             let journal: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
             assert_eq!(journal, "wal");
             let cache: i64 = c.query_row("PRAGMA cache_size", [], |r| r.get(0))?;
@@ -1300,4 +1300,58 @@ fn rebind_refuses_a_taken_id() {
     let r = store.write(|tx| iris_store::rebind(tx, ids[2], "2:2:Archive"));
     assert!(matches!(r, Err(Error::Taken(_))), "{r:?}");
     assert_eq!(provider(ids[2]), "1:3:INBOX");
+}
+
+/// Issue #110: a change that needs the understanding again (here SPAM,
+/// and new content) gives the message a new try budget and puts its thread
+/// in `talk_due`. A failed try keeps its count.
+#[test]
+fn a_reset_gives_a_new_try_budget() {
+    let dir = TempDir::new("reset-tries");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(acc, &[("SPAM", "SPAM", "system")])
+        .unwrap();
+    let mut m = msg("a", "t1", 1, &["INBOX"], "Hi", "x");
+    m.content_sha256 = Some(store.put_content(b"raw a").unwrap());
+    let id = store.put_messages(acc, &[m.clone()]).unwrap()[0];
+    let state = || -> (Option<i64>, i64, Option<i64>, i64) {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT understood_at, tries, retry_at,
+                       (SELECT count(*) FROM talk_due d WHERE d.thread_id = m.thread_id)
+                     FROM message m WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    let set = |sql: &str| {
+        store.write(|tx| Ok(tx.execute(sql, [id])?)).unwrap();
+    };
+    set("DELETE FROM talk_due WHERE ?1 > 0");
+    // An understood message, with old failed tries.
+    set("UPDATE message SET understood_at = 5, tries = 2, retry_at = 9 WHERE id = ?1");
+    // A failed try keeps its count.
+    set("UPDATE message SET understood_at = NULL, tries = tries + 1 WHERE id = ?1");
+    assert_eq!(state(), (None, 3, Some(9), 0));
+    // SPAM comes: the understanding runs again, with a new budget.
+    set("UPDATE message SET understood_at = 5 WHERE id = ?1");
+    m.labels = vec!["INBOX".into(), "SPAM".into()];
+    store.put_messages(acc, &[m.clone()]).unwrap();
+    assert_eq!(state(), (None, 0, None, 1));
+    // SPAM goes: the same.
+    set("DELETE FROM talk_due WHERE ?1 > 0");
+    set("UPDATE message SET understood_at = 5, tries = 3, retry_at = 9 WHERE id = ?1");
+    m.labels = vec!["INBOX".into()];
+    store.put_messages(acc, &[m.clone()]).unwrap();
+    assert_eq!(state(), (None, 0, None, 1));
+    // New content of a message that never got understood: a new budget.
+    set("UPDATE message SET tries = 3, retry_at = 9 WHERE id = ?1");
+    m.content_sha256 = Some(store.put_content(b"raw b").unwrap());
+    store.put_messages(acc, &[m]).unwrap();
+    assert_eq!(state().1, 0);
+    assert_eq!(state().2, None);
 }
