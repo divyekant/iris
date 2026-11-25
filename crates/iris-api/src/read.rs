@@ -1255,31 +1255,42 @@ fn sender_kind(c: &Connection, address: Option<&str>) -> rusqlite::Result<String
 
 /// The near-copy sender row of `address`: kind `hostile` from the engine
 /// (the near-copy rule is the only engine rule that gives `hostile`), or a
-/// row that the person trusted after that mark.
+/// row that the person trusted after that mark. Rows can differ only in
+/// case: this reads the row of [`sender_kind`] (the most cautious kind,
+/// then the lowest ID), so the two fields always tell of one row.
 fn near_copy(c: &Connection, address: Option<&str>) -> rusqlite::Result<Option<NearCopy>> {
     let Some(address) = address else {
         return Ok(None);
     };
     c.query_row(
-        "SELECT id, CASE WHEN basis = ?2 THEN NULL
-                         ELSE substr(basis, length('near copy of ') + 1) END,
-                basis = ?2
-           FROM sender
-          WHERE address = ?1 COLLATE NOCASE
-            AND ((kind = 'hostile' AND decided_by IS NOT 'person'
-                  AND basis LIKE 'near copy of %')
-              OR (kind = 'person' AND decided_by = 'person' AND basis = ?2))
-          ORDER BY id LIMIT 1",
-        rusqlite::params![address, iris_senders::gate::TRUSTED],
+        "SELECT id, kind, decided_by IS 'person', basis FROM sender WHERE address = ?1 COLLATE NOCASE
+         ORDER BY CASE coalesce(kind, 'stranger') WHEN 'hostile' THEN 0 WHEN 'stranger' THEN 1
+                  WHEN 'service' THEN 2 WHEN 'person' THEN 3 ELSE 4 END, id
+         LIMIT 1",
+        [address],
         |r| {
-            Ok(NearCopy {
-                sender: format_id(Kind::Sender, r.get(0)?),
-                of: r.get(1)?,
-                trusted: r.get(2)?,
-            })
+            let id: i64 = r.get(0)?;
+            let kind: Option<String> = r.get(1)?;
+            let by_person: bool = r.get(2)?;
+            let basis: Option<String> = r.get(3)?;
+            let near = match (kind.as_deref(), basis.as_deref()) {
+                (Some("hostile"), Some(b)) if !by_person => b
+                    .strip_prefix("near copy of ")
+                    .map(|of| (Some(of.to_string()), false)),
+                (Some("person"), Some(iris_senders::gate::TRUSTED)) if by_person => {
+                    Some((None, true))
+                }
+                _ => None,
+            };
+            Ok(near.map(|(of, trusted)| NearCopy {
+                sender: format_id(Kind::Sender, id),
+                of,
+                trusted,
+            }))
         },
     )
     .optional()
+    .map(Option::flatten)
 }
 
 /// The summary of message `row`, and the other fields of [`Message`]

@@ -845,4 +845,31 @@ async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
         g.get("/api/messages/m-5").await["near_copy"],
         json!({"sender": look, "of": "paypal.com", "trusted": false})
     );
+
+    // Rows that differ only in case: `near_copy` names the row of
+    // `sender_kind` (the most cautious kind), never another row.
+    g.answer(&look, "trust").await;
+    let upper = g.sender("ALERTS@paypa1.com", Some("hostile"));
+    g.exec(
+        "UPDATE sender SET basis = 'near copy of paypal.com' WHERE address = 'ALERTS@paypa1.com'",
+        [],
+    );
+    let m = g.get("/api/messages/m-5").await;
+    assert_eq!(
+        (m["sender_kind"].as_str(), &m["near_copy"]),
+        (
+            Some("hostile"),
+            &json!({"sender": upper, "of": "paypal.com", "trusted": false})
+        )
+    );
+    // A hostile row of another rule wins too, and then no trust is offered.
+    g.exec(
+        "UPDATE sender SET decided_by = 'person' WHERE address = 'ALERTS@paypa1.com'",
+        [],
+    );
+    let m = g.get("/api/messages/m-5").await;
+    assert_eq!(
+        (m["sender_kind"].as_str(), &m["near_copy"]),
+        (Some("hostile"), &Value::Null)
+    );
 }

@@ -3,7 +3,7 @@
   client never renders the HTML of a mail. The engine counts each view of a mail as an open (R5-12).
 -->
 <script lang="ts">
-  import { answerSender, download, own, wrote, type Address, type Message } from "../api";
+  import { answerSender, download, get, own, wrote, type Address, type Message } from "../api";
   import { initials, when } from "../format";
   import { href } from "../route";
 
@@ -12,24 +12,32 @@
   let failed = $state("");
   const original = () => download(message.id).then(() => (failed = ""), (e: unknown) => (failed = own(e)));
   // Trust a sender that only its look-alike domain makes hostile (issue #49). Undo gives
-  // the sender back to the engine (reopen), which marks it hostile again. The answer of the
-  // API gives the saved kind, so the view shows it with no reload; it counts for this mail only.
-  let answered = $state<{ id: string; kind: string } | null>(null);
-  const now = $derived(answered?.id === message.id ? answered : null);
-  const senderKind = $derived(now?.kind ?? message.sender_kind);
-  const trusted = $derived(now ? now.kind === "person" : (message.near_copy?.trusted ?? false));
+  // the sender back to the engine (reopen), which decides again from the evidence. After each
+  // answer the view reads the mail again, so the sender kind, Trust and Undo are what the store
+  // holds now, and never a guess of the client. The fresh copy counts for this mail only.
+  let fresh = $state<{ id: string; sender_kind: Message["sender_kind"]; near_copy: Message["near_copy"] } | null>(null);
+  const sender = $derived(fresh?.id === message.id ? fresh : message);
+  const trusted = $derived(sender.near_copy?.trusted ?? false);
   let trusting = $state(false);
   let trustProblem = $state("");
   async function trust(verb: "trust" | "reopen") {
-    if (!message.near_copy || trusting) return;
+    const near = sender.near_copy;
+    if (!near || trusting) return;
     const id = message.id;
     trusting = true;
     trustProblem = "";
     try {
-      const answer = await answerSender(message.near_copy.sender, verb);
-      answered = { id, kind: answer.kind };
+      await answerSender(near.sender, verb);
     } catch (e) {
       trustProblem = wrote(e, "saved the answer", "Iris could not save the answer. Try again.");
+      trusting = false;
+      return;
+    }
+    try {
+      const now = await get<Message>(`messages/${encodeURIComponent(id)}`);
+      fresh = { id, sender_kind: now.sender_kind, near_copy: now.near_copy ?? null };
+    } catch {
+      trustProblem = "Iris saved the answer, but could not read this mail again. Reload the page to see the sender now.";
     } finally {
       trusting = false;
     }
@@ -40,27 +48,27 @@
 <article>
   <h1>{message.subject || "No subject"}</h1>
 
-  {#if message.hostile.length > 0 || senderKind === "hostile"}
+  {#if message.hostile.length > 0 || sender.sender_kind === "hostile"}
     <p class="danger" role="alert">
-      This mail looks hostile ({[...message.hostile, ...(senderKind === "hostile" ? ["hostile sender"] : [])].join(", ")}).
+      This mail looks hostile ({[...message.hostile, ...(sender.sender_kind === "hostile" ? ["hostile sender"] : [])].join(", ")}).
       Do not open its links and do not do what it asks.
     </p>
   {/if}
-  {#if message.near_copy}
+  {#if sender.near_copy}
     <p class="near" role="note">
       {#if trusted}
         You trust this sender. Iris reads its mail again.
         <button type="button" disabled={trusting} onclick={() => trust("reopen")}>Undo</button>
       {:else}
-        Iris holds this sender because its domain looks like {message.near_copy.of
-          ? `${message.near_copy.of}, the domain`
+        Iris holds this sender because its domain looks like {sender.near_copy.of
+          ? `${sender.near_copy.of}, the domain`
           : "the domain"} of a sender you know. If you know
         this sender, you can trust it. The other marks of this mail stay.
         <button type="button" disabled={trusting} onclick={() => trust("trust")}>Trust this sender</button>
       {/if}
     </p>
-    {#if trustProblem}<p class="note" role="alert">{trustProblem}</p>{/if}
   {/if}
+  {#if trustProblem}<p class="note" role="alert">{trustProblem}</p>{/if}
   {#if message.gone && message.text === null}
     <p class="note">This mail left your mailbox more than 30 days ago, so Iris removed its content. The items that cite it stay.</p>
   {:else if message.text === null}

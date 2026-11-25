@@ -347,27 +347,40 @@ test("a sender with the name of a person you know shows a warning (issue #370)",
   }
 });
 
+// A fake engine for one mail of a near-copy sender: each answer sets the sender state that
+// `after` gives, and a read of the mail gives that state, as the store holds it.
+function engine(start, after) {
+  let now = start;
+  const asked = serve((path) => {
+    const verb = path.split("/")[2];
+    if (path.startsWith("senders/")) {
+      now = after[verb];
+      return [200, { ...row("p-90"), kind: now.sender_kind }];
+    }
+    return [200, { ...fx.message("m-55210"), hostile: now.hostile ?? [], ...now }];
+  });
+  const message = { ...fx.message("m-55210"), hostile: start.hostile ?? [], ...start };
+  return { asked, message };
+}
+const nearCopy = { sender_kind: "hostile", near_copy: { sender: "p-90", of: "northwind.example", trusted: false } };
+const trustedRow = { sender_kind: "person", near_copy: { sender: "p-90", of: null, trusted: true } };
+
 test("Trust in a mail answers the near-copy sender, and Undo reopens it (issue #49)", async () => {
-  // The engine answers trust with the kind person, and reopen with the kind hostile again.
-  const asked = serve((path) => [200, { ...row(path.split("/")[1]), kind: path.endsWith("/trust") ? "person" : "hostile" }]);
-  const message = {
-    ...fx.message("m-55210"),
-    hostile: [],
-    sender_kind: "hostile",
-    near_copy: { sender: "p-90", of: "northwind.example", trusted: false },
-  };
+  const { asked, message } = engine(nearCopy, { trust: trustedRow, reopen: nearCopy });
   const view = await mount("/src/views/Mail.svelte", { message });
   try {
     assert.match(text(view.target), /looks hostile \(hostile sender\)/);
     button(view, "Trust this sender").click();
     await until(() => text(view.target).includes("You trust this sender."));
-    assert.doesNotMatch(text(view.target), /looks hostile/, "the saved kind is person");
+    assert.doesNotMatch(text(view.target), /looks hostile/, "the store holds the kind person");
     button(view, "Undo").click();
     await until(() => button(view, "Trust this sender"));
     assert.match(text(view.target), /looks hostile \(hostile sender\)/);
     assert.deepEqual(asked, [
       ["POST", "senders/p-90/trust"],
+      ["GET", "messages/m-55210"],
       ["POST", "senders/p-90/reopen"],
+      ["GET", "messages/m-55210"],
     ]);
   } finally {
     view.destroy();
@@ -375,13 +388,7 @@ test("Trust in a mail answers the near-copy sender, and Undo reopens it (issue #
 });
 
 test("a mail of a trusted sender keeps Undo after a reload, and other marks stay (issue #49)", async () => {
-  const asked = serve((path) => [200, { ...row(path.split("/")[1]), kind: "hostile" }]);
-  const message = {
-    ...fx.message("m-55210"),
-    hostile: ["link"],
-    sender_kind: "person",
-    near_copy: { sender: "p-90", of: null, trusted: true },
-  };
+  const { asked, message } = engine({ ...trustedRow, hostile: ["link"] }, { reopen: { ...nearCopy, near_copy: { ...nearCopy.near_copy, of: null }, hostile: ["link"] } });
   const view = await mount("/src/views/Mail.svelte", { message });
   try {
     assert.match(text(view.target), /You trust this sender\./);
@@ -390,7 +397,41 @@ test("a mail of a trusted sender keeps Undo after a reload, and other marks stay
     await until(() => button(view, "Trust this sender"));
     assert.match(text(view.target), /looks hostile \(link, hostile sender\)/);
     assert.match(text(view.target), /its domain looks like the domain of a sender you know/);
-    assert.deepEqual(asked, [["POST", "senders/p-90/reopen"]]);
+    assert.deepEqual(asked, [
+      ["POST", "senders/p-90/reopen"],
+      ["GET", "messages/m-55210"],
+    ]);
+  } finally {
+    view.destroy();
+  }
+});
+
+for (const [kind, now] of [
+  ["stranger", { sender_kind: "stranger", near_copy: null }],
+  ["person", { sender_kind: "person", near_copy: null }],
+]) {
+  test(`after Undo, a sender that the engine now holds as a ${kind} shows neither Trust nor Undo (issue #49)`, async () => {
+    const { message } = engine(trustedRow, { reopen: now });
+    const view = await mount("/src/views/Mail.svelte", { message });
+    try {
+      button(view, "Undo").click();
+      await until(() => !text(view.target).includes("You trust this sender."));
+      assert.equal(button(view, "Trust this sender"), undefined);
+      assert.equal(button(view, "Undo"), undefined);
+      assert.doesNotMatch(text(view.target), /looks hostile/);
+    } finally {
+      view.destroy();
+    }
+  });
+}
+
+test("a trust that Iris saved but cannot read again says so (issue #49)", async () => {
+  serve((path) => (path.startsWith("senders/") ? [200, { ...row("p-90"), kind: "person" }] : [500, { error: "x" }]));
+  const message = { ...fx.message("m-55210"), hostile: [], ...nearCopy };
+  const view = await mount("/src/views/Mail.svelte", { message });
+  try {
+    button(view, "Trust this sender").click();
+    await until(() => text(view.target).includes("Reload the page"));
   } finally {
     view.destroy();
   }
