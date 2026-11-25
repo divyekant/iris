@@ -203,3 +203,18 @@ fn domain_literals() {
     );
     assert_eq!(got("a@[x, b@y.example"), ["a@[x", "b@y.example"]);
 }
+
+/// Many open domain literals with no `]` cost one pass, not a scan for
+/// each `[` (a hostile header can hold thousands).
+#[test]
+fn open_domain_literals_are_linear() {
+    let list = "a@[x, ".repeat(200_000);
+    let start = std::time::Instant::now();
+    let got = addresses(&list);
+    assert_eq!(got.len(), 200_000);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+}
