@@ -1208,10 +1208,10 @@ fn release_row(tx: &Transaction, message: i64) -> iris_store::Result<Option<Rele
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    Ok(row.map(|(hostile, released, understood)| {
+    Ok(row.map(|(marks, released, understood)| {
         let list = |j: &str| serde_json::from_str::<Vec<String>>(j).unwrap_or_default();
         (
-            list(&hostile),
+            list(&marks),
             released.as_deref().map(list).unwrap_or_default(),
             understood,
         )
@@ -1225,7 +1225,7 @@ fn release_row(tx: &Transaction, message: i64) -> iris_store::Result<Option<Rele
 /// message again without these marks: with the model, as new mail, if no
 /// other mark stays. New content of the message ends the release.
 pub fn release(tx: &Transaction, message: i64) -> iris_store::Result<Release> {
-    let Some((hostile, mut all, understood)) = release_row(tx, message)? else {
+    let Some((marks, mut all, understood)) = release_row(tx, message)? else {
         return Ok(Release::NoMessage);
     };
     // The sync clears `understood_at` when the content changes and keeps
@@ -1233,7 +1233,7 @@ pub fn release(tx: &Transaction, message: i64) -> iris_store::Result<Release> {
     if !understood {
         return Ok(Release::Reading);
     }
-    let now: Vec<String> = hostile
+    let now: Vec<String> = marks
         .iter()
         .filter(|m| RELEASABLE.contains(&m.as_str()) && !all.contains(m))
         .cloned()
@@ -1254,7 +1254,7 @@ pub fn release(tx: &Transaction, message: i64) -> iris_store::Result<Release> {
             serde_json::to_string(&all).expect("strings serialize")
         ],
     )?;
-    let kept = hostile.into_iter().filter(|m| !now.contains(m)).collect();
+    let kept = marks.into_iter().filter(|m| !now.contains(m)).collect();
     Ok(Release::Done {
         released: now,
         kept,
