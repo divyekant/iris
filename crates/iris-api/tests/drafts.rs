@@ -277,7 +277,7 @@ async fn the_drafts_stream_one_at_a_time_and_name_a_flag_with_no_mark() {
         out: Vec::new(),
         writes: 0,
     };
-    iris_api::write_drafts(&s, cs, &mut w).unwrap();
+    iris_api::write_drafts(&s, cs, NOW, &mut w).unwrap();
     let v: Value = serde_json::from_slice(&w.out).unwrap();
     let ns: Vec<i64> = v["drafts"]
         .as_array()

@@ -1110,3 +1110,98 @@ async fn a_stopped_reply_changes_only_for_its_parent() {
     );
     assert_eq!(count(&s, "SELECT count(*) FROM changeset"), before);
 }
+
+/// An agent asks to send d-1, and the send waits in the review. Gives the
+/// `change` and `newer_mail` of its review entry (issue 1104), after a
+/// check that each is the value of the draft read of d-1 once the person
+/// denied this send only.
+async fn review_change(s: &Arc<Store>) -> (Value, Value) {
+    let agent = iris_changeset::Author {
+        kind: iris_changeset::AuthorKind::Agent,
+        name: Some("Claude Code".into()),
+        session: None,
+        job: None,
+    };
+    let row = iris_changeset::create(s, &agent, now()).unwrap();
+    iris_changeset::add_action(
+        s,
+        row,
+        &agent,
+        iris_changeset::Verb::Send,
+        &["d-1"],
+        &Default::default(),
+        None,
+    )
+    .unwrap();
+    iris_changeset::submit(s, row, &agent, "Send the reply.", now()).unwrap();
+    let cs = format!("cs-{row}");
+    let (code, v) = call(s, "GET", &format!("/api/changesets/{cs}/drafts"), None).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    let entry = &v["drafts"][0];
+    assert_eq!(entry["draft"], "d-1", "{v}");
+    let said = (entry["change"].clone(), entry["newer_mail"].clone());
+    assert_eq!(
+        call(s, "GET", "/api/drafts/d-1", None).await.1["change"],
+        Value::Null,
+        "the send waits"
+    );
+    let a = call(s, "GET", &format!("/api/changesets/{cs}"), None)
+        .await
+        .1["actions"][0]
+        .clone();
+    let deny = json!({"actions": [{"revision": a["revision"], "n": a["n"], "approve": false, "hash": a["hash"]}]});
+    let (code, v) = call(
+        s,
+        "POST",
+        &format!("/api/changesets/{cs}/decide"),
+        Some(deny),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    let d = call(s, "GET", "/api/drafts/d-1", None).await.1;
+    assert_eq!(
+        said,
+        (d["change"].clone(), d["newer_mail"].clone()),
+        "the review and the draft read agree"
+    );
+    said
+}
+
+/// Issue 1104: the review entry of a waiting send of a reply says if the
+/// person can change its draft after a deny of that send. A newer mail in
+/// the thread stops the change, and the entry says why.
+#[tokio::test]
+async fn the_review_says_if_a_denied_send_can_change() {
+    let dir = temp("review-change");
+    let s = store(&dir);
+    let reply = json!({"thread": "t-1", "parent": "m-2", "to": ["priya@example.com"],
+                       "cc": [], "body": "Hi.\n", "key": KEY, "flags": ["new_recipient"]});
+    let (code, v) = call(&s, "POST", "/api/write", Some(reply)).await;
+    assert_eq!(code, StatusCode::CREATED, "{v}");
+    let write = v["write"].as_str().unwrap().to_string();
+    made(&s);
+    let set = |sql: &'static str| s.write(|tx| Ok(tx.execute_batch(sql)?)).unwrap();
+    set("UPDATE draft SET thread_id = 1 WHERE id = 1");
+    let (code, _) = call(
+        &s,
+        "POST",
+        &format!("/api/changesets/{write}/withdraw"),
+        None,
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(review_change(&s).await, (json!("update"), Value::Null));
+    set("UPDATE account SET provider = 'outlook' WHERE id = 1");
+    assert_eq!(review_change(&s).await, (json!("new"), Value::Null));
+    set(
+        "INSERT INTO message(account_id, thread_id, provider_id, internal_date)
+           VALUES (1, 1, 'p3', 3000);
+         INSERT INTO header(message_id, from_addr, to_addrs, subject, message_id_hdr)
+           VALUES (3, 'priya@example.com', 'owner@example.com', 'Q4', '<m3@example.com>');",
+    );
+    assert_eq!(review_change(&s).await, (Value::Null, json!(true)));
+    set("UPDATE account SET provider = 'gmail' WHERE id = 1");
+    assert_eq!(review_change(&s).await, (Value::Null, json!(true)));
+    set("UPDATE message SET gone_at = 1 WHERE id = 3");
+    assert_eq!(review_change(&s).await, (json!("update"), Value::Null));
+}
