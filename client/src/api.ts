@@ -642,6 +642,21 @@ function takeStatus(n: number, s: Status): boolean {
   return true;
 }
 
+/** The answer of `POST /api/zone`: the time zone fields of the status. */
+export type Zone = Pick<Status, "time_zone" | "time_zone_set">;
+
+/**
+ * Set the time zone of the owner (issue 891): an IANA name, or null for the zone of the machine that
+ * runs Iris. The answer is the newest status of the zone: it takes a status number when it arrives,
+ * so a status read that started before it cannot put the old zone back in `access.zone`.
+ */
+export async function postZone(zone: string | null): Promise<Zone> {
+  const z = await post<Zone>("zone", { zone });
+  statusTaken = ++statusStarted;
+  access.zone = z.time_zone ?? null;
+  return z;
+}
+
 async function statusRead(): Promise<[Status, boolean]> {
   const n = ++statusStarted;
   const s = await getJson<Status>("status");

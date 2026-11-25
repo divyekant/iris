@@ -4,7 +4,7 @@
   accounts in one list.
 -->
 <script lang="ts">
-  import { own, post, postStatus, readStatus, type Account, type Status } from "../api";
+  import { own, postStatus, postZone, readStatus, type Account, type Status } from "../api";
   import { poll as every } from "../clock";
   import { accountNames, signIn, when } from "../format";
 
@@ -97,7 +97,8 @@
 
   // The time zone of the owner (issue 891): the days of due dates and defer dates. An engine that
   // cannot set it from the web leaves `time_zone_set` out, and the page shows no setting.
-  const zones: string[] = (Intl as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf?.("timeZone") ?? [];
+  // The canonical names of the browser leave out UTC, which `iris zone` takes too.
+  const zones: string[] = ["UTC", ...((Intl as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf?.("timeZone") ?? []).filter((z) => z !== "UTC")];
   // "": the time zone of the machine that runs Iris.
   // svelte-ignore state_referenced_locally
   let zone = $state(initial.time_zone_set ? (initial.time_zone ?? "") : "");
@@ -110,7 +111,8 @@
     zoneBusy = true;
     zoneNote = zoneError = "";
     try {
-      const next = await post<{ time_zone: string | null; time_zone_set: boolean }>("zone", { zone: zone || null });
+      // postZone sets the shared zone of the other views too, also when the next status read fails.
+      const next = await postZone(zone || null);
       status = { ...status, ...next };
       zone = next.time_zone_set ? (next.time_zone ?? "") : "";
       zoneNote = "Saved.";
@@ -210,7 +212,7 @@
     <h2 id="zone">Time zone</h2>
     <p>
       Iris uses this time zone for the days of due dates and defer dates. Now:
-      {#if status.time_zone_set}<strong>{status.time_zone}</strong>, set by you.{:else}<strong>{status.time_zone ?? "UTC"}</strong>, the time zone of the machine that runs Iris.{/if}
+      {#if status.time_zone_set}<strong>{status.time_zone}</strong>, set by you.{:else if status.time_zone}<strong>{status.time_zone}</strong>, the time zone of the machine that runs Iris.{:else}the time zone of the machine that runs Iris. Iris cannot read the name of this zone.{/if}
     </p>
     <form class="actions" onsubmit={(e) => (e.preventDefault(), saveZone())}>
       <label for="zone-pick">Time zone</label>

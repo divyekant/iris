@@ -500,7 +500,7 @@ export const notices = [
 /** The time zone of the owner (issue 891): sets it in the status. An empty name or a name that the computer does not know is a 400. */
 export function zonePost(body: { zone?: string | null }): [number, unknown] {
   const zone = body.zone ?? null;
-  if (zone !== null && !Intl.supportedValuesOf("timeZone").includes(zone)) return [400, { error: `not a time zone: "${zone}"` }];
+  if (zone !== null && zone !== "UTC" && !Intl.supportedValuesOf("timeZone").includes(zone)) return [400, { error: `not a time zone: "${zone}"` }];
   status.time_zone = zone ?? "Europe/London";
   status.time_zone_set = zone !== null;
   return [200, { time_zone: status.time_zone, time_zone_set: status.time_zone_set }];

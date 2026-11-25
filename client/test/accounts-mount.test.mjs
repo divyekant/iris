@@ -495,3 +495,56 @@ test("a refused time zone shows the reason, and a lost answer says that Iris can
     globalThis.fetch = saved;
   }
 });
+
+// Review of PR 1009. Invariant: after a save that the engine took, the shared zone of the other views
+// (`access.zone`) is the saved zone, whatever the status reads around it do.
+test("a saved zone sets the shared zone, also when the next status read fails or an older read answers late", async () => {
+  const saved = globalThis.fetch;
+  const { readStatus } = await load("/src/api.ts");
+  const json = (v) => new Response(JSON.stringify(v), { status: 200, headers: { "content-type": "application/json" } });
+  let late;
+  const old = { ...fx.status, time_zone: "Europe/London", time_zone_set: false };
+  let reads = 0;
+  globalThis.fetch = async (url, init) => {
+    if (init?.method === "POST") return json({ time_zone: JSON.parse(init.body).zone, time_zone_set: true });
+    reads++;
+    // The first read is slow and old: it answers after the save. Each later read fails.
+    if (reads === 1) return new Promise((r) => (late = () => r(json(old))));
+    throw new TypeError("Failed to fetch");
+  };
+  const view = await mount("/src/views/Accounts.svelte", { status: old, poll: 0 });
+  const tick = async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0)); };
+  const pick = view.target.querySelector("#zone-pick");
+  try {
+    const slow = readStatus().catch(() => null);
+    pick.value = "UTC";
+    pick.dispatchEvent(new Event("change", { bubbles: true }));
+    await tick();
+    view.target.querySelector("section.zone button[type=submit]").click();
+    await tick();
+    assert.equal(access.zone, "UTC", "the failed read after the save keeps the saved zone");
+    assert.match(text(view.target.querySelector("section.zone")), /Now: UTC, set by you\..*Saved\./);
+    late();
+    await slow;
+    await tick();
+    assert.equal(access.zone, "UTC", "an older read that answers late does not put the old zone back");
+  } finally {
+    view.destroy();
+    globalThis.fetch = saved;
+    access.zone = null;
+  }
+});
+
+test("UTC is a choice, and a machine zone with no name is not called UTC", async () => {
+  const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, time_zone: null, time_zone_set: false }, poll: 0 });
+  try {
+    const part = text(view.target.querySelector("section.zone"));
+    assert.match(part, /Now: the time zone of the machine that runs Iris\. Iris cannot read the name of this zone\./);
+    assert.doesNotMatch(part, /Now: UTC/);
+    const values = [...view.target.querySelectorAll("#zone-pick option")].map((o) => o.value);
+    assert.equal(values.filter((v) => v === "UTC").length, 1);
+    assert.ok(values.includes("Europe/Berlin"));
+  } finally {
+    view.destroy();
+  }
+});
