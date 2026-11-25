@@ -751,10 +751,11 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         } else {
             None
         };
+        // No model call: no party reached a model.
         let parties = if d.calls == 0 {
             Some(0)
         } else {
-            Some(d.parties_held).filter(|&n| n < after.parties.len())
+            d.parties_room
         };
         tx.execute(
             "UPDATE message SET understood_at = ?2, retry_at = NULL, fixed_rules = ?3,
@@ -1173,7 +1174,7 @@ fn context_key(
     c: &rusqlite::Connection,
     message: i64,
     held: Option<&[usize]>,
-    parties_held: Option<usize>,
+    parties_room: Option<usize>,
     waiting: bool,
 ) -> rusqlite::Result<Option<String>> {
     let row: Option<(Option<i64>, Option<i64>, Option<String>)> = c
@@ -1244,16 +1245,17 @@ fn context_key(
                 .collect::<rusqlite::Result<_>>()?;
         }
     }
-    // The known parties of the data: all of them, or the first n that the
-    // data held, and "+" if the list had more.
+    // The known parties of the data: all of them, or with a room of the
+    // budget, the first ones that fit in it now, and "+" if the list has
+    // more. So a party that starts to fit changes the record.
     let parties = known_parties(c, thread, message, date)?;
     let parties: Vec<&str> = parties.iter().map(String::as_str).collect();
-    let p = match parties_held {
+    let p = match parties_room {
         None => format!("p:{:016x}", fnv(&parties)),
-        Some(n) => {
-            let n = n.min(parties.len());
+        Some(room) => {
+            let n = crate::prompt::parties_in(&parties, room);
             let more = if n < parties.len() { "+" } else { "" };
-            format!("p!:{n}:{:016x}{more}", fnv(&parties[..n]))
+            format!("p!:{room}:{:016x}{more}", fnv(&parties[..n]))
         }
     };
     let cut = if held.is_some() { "!" } else { "" };
@@ -1287,8 +1289,8 @@ fn held_of(recorded: &str) -> Option<Vec<usize>> {
     )
 }
 
-/// The count of the known parties of a recorded context that the data
-/// held: `None` for all of them ("p:"), or n of "p!:n:".
+/// The room of the budget for the known parties of a recorded context:
+/// `None` when the data held all of them ("p:"), or n of "p!:n:".
 fn parties_of(recorded: &str) -> Option<usize> {
     let p = recorded.split(';').find_map(|x| x.strip_prefix("p!:"))?;
     p.split(':').next().and_then(|n| n.parse().ok())

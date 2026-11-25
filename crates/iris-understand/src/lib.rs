@@ -593,9 +593,9 @@ pub struct Decision {
     /// data held (the budget can cut or leave out older ones). Empty with
     /// no model call: the thread context then shaped nothing (issue 1049).
     pub context_held: Vec<usize>,
-    /// The count of the first known parties in the data of the last model
-    /// call. 0 with no model call.
-    pub parties_held: usize,
+    /// The bytes of the budget for the known parties in the data of the
+    /// last model call, when the data left out a party.
+    pub parties_room: Option<usize>,
     pub calls: u32,
     pub usage: Usage,
 }
@@ -642,7 +642,7 @@ pub fn decide(
     };
     let (mut data, held) = prompt::data_kept(a, cx, prompt::MAX_DATA);
     d.context_held = held.thread;
-    d.parties_held = held.parties;
+    d.parties_room = held.parties_room;
     // Known until a call gives no reliable usage (see `add`).
     d.usage.known = true;
     // A refusal for size (HTTP 400 or 413) of large data gets one more call
@@ -663,7 +663,7 @@ pub fn decide(
                     d.calls += 1;
                     d.usage.known = false;
                     d.context_held = held.thread;
-                    d.parties_held = held.parties;
+                    d.parties_room = held.parties_room;
                     data = small;
                     r
                 }

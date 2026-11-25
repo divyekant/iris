@@ -3712,7 +3712,7 @@ fn a_known_party_that_the_budget_left_out_runs_nothing_again() {
     drain(&b, &fake, &mut last);
     assert!(!last[&m2].contains("Known party"));
     let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m2);
-    assert!(recorded.contains(";p!:0:"), "{recorded}");
+    assert!(recorded.contains(";p!:"), "{recorded}");
     let runs_of_m2 = |fake: &Fake| {
         fake.calls
             .borrow()
@@ -3861,4 +3861,71 @@ fn a_new_hostile_mark_with_no_run_runs_the_later_one_again() {
     iris_understand::store::update_due_talks(&b.store, NOW).unwrap();
     let understood: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m2);
     assert!(understood.is_none(), "m2 runs again");
+}
+
+/// Issue 1049, pre-review: the record holds the room of the budget for the
+/// known parties. A party that did not fit and starts to fit (a shorter
+/// name) runs the later message again.
+#[test]
+fn a_known_party_that_starts_to_fit_runs_the_later_one_again() {
+    let b = store("context-parties-fit");
+    b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let raw2 = |k: usize| {
+        format!(
+            "From: y@example.net\nTo: owner@example.com\nSubject: S\n\n{}\n",
+            "漢".repeat(k)
+        )
+    };
+    let m2 = b.add_in("2", "t", NOW - DAY, &raw2(1_000), &["INBOX"]);
+    let name = |n: &str| {
+        b.store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO sender(address, name, kind, decided_by)
+                     VALUES ('x1@example.net', ?1, 'person', 'person')
+                     ON CONFLICT(address) DO UPDATE SET name = ?1, kind = 'person',
+                       decided_by = 'person'",
+                    [n],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    };
+    name(&"N".repeat(800));
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    // Find a current text that leaves a room of 100 to 700 bytes: the long
+    // name does not fit, a short one does.
+    let (mut lo, mut hi) = (1_000, iris_understand::prompt::MAX_DATA / 3);
+    loop {
+        let k = (lo + hi) / 2;
+        new_content(&b, m2, &raw2(k));
+        drain(&b, &fake, &mut last);
+        let r: String = b.col("SELECT context FROM message WHERE id = ?1", m2);
+        let room = r
+            .split(';')
+            .find_map(|x| x.strip_prefix("p!:"))
+            .and_then(|x| x.split(':').next())
+            .and_then(|n| n.parse::<usize>().ok());
+        match room {
+            Some(n) if (100..=700).contains(&n) => break,
+            Some(n) if n < 100 => hi = k,
+            _ => lo = k,
+        }
+        assert!(hi - lo > 1, "no size with a room of 100 to 700 bytes");
+    }
+    assert!(!last[&m2].contains("Known party"));
+    let runs = |fake: &Fake| {
+        fake.calls
+            .borrow()
+            .iter()
+            .filter(|c| c.1.contains("漢漢漢"))
+            .count()
+    };
+    let before = runs(&fake);
+    name("Ann");
+    drain(&b, &fake, &mut last);
+    assert_eq!(runs(&fake), before + 1, "m2 runs again");
+    assert!(last[&m2].contains("Ann <x1@example.net>"));
 }

@@ -14,8 +14,9 @@
 --    cut it, or no model call ran): each entry then also holds the count
 --    of the bytes that the data held, and "+" if the text had more bytes.
 --    The hash covers only the held bytes. "p:" holds a hash of the known
---    parties of the thread up to the message ("p!:n:" for the first n that
---    the data held, with "+" if the list had more) (limit #1135: a known person
+--    parties of the thread up to the message ("p!:n:" when the budget left
+--    out a party: n bytes were left for the parties, the hash covers the
+--    first parties that fit in them, and "+" marks more) (limit #1135: a known person
 --    only in To or Cc puts no thread in `talk_due`). "@thread:date" ends the
 --    record: a message that moves to another thread or date runs again. "-" marks hostile mail: a new run of
 --    it calls no model (the `phishing` answer stays until a rebuild), so no

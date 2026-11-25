@@ -71,9 +71,10 @@ pay again for the same mail.
   gets: the known persons in the headers of the messages up to the
   current one, in the order of the runs (date, then row ID). Later mail
   does not change them. The list is in the order of the address (at most
-  50). When the budget left out some parties, the record holds the count
-  and a hash of the first parties of the list that the data held, and if
-  the list had more, as for the thread context. A new kind or name of a
+  50). When the budget left out some parties, the record holds the bytes
+  of the budget that were left for them, and a hash of the first parties
+  that fit in those bytes now, and "+" if the list has more. So a party
+  that starts to fit (a shorter name) changes the record. A new kind or name of a
   sender puts the threads of that sender in `talk_due`.
 - The record ends with the thread and the date of the message itself
   ("@thread:date"). An item of a run names its thread, so a message that

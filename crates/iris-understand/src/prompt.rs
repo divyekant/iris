@@ -79,8 +79,32 @@ pub struct Kept {
     /// For each earlier message of the thread, newest first, the bytes of
     /// its escaped text that the data held.
     pub thread: Vec<usize>,
-    /// The count of the first known parties that the data held.
-    pub parties: usize,
+    /// The bytes of the budget left for the known parties, when the data
+    /// left out a party. `None` when the data held each party.
+    pub parties_room: Option<usize>,
+}
+
+/// The line of one known party in the data.
+pub(crate) fn party_line(p: &str) -> String {
+    let mut line = String::from("Known party: ");
+    push_cut(&mut line, p, MAX_FIELD);
+    line.push('\n');
+    line
+}
+
+/// The count of the first `parties` whose lines fit in `room` bytes: the
+/// data takes them in order and stops at the first one that does not fit.
+pub(crate) fn parties_in(parties: &[&str], mut room: usize) -> usize {
+    let mut n = 0;
+    for p in parties.iter().take(MAX_KNOWN) {
+        let len = party_line(p).len();
+        if len > room {
+            break;
+        }
+        room -= len;
+        n += 1;
+    }
+    n
 }
 
 pub fn data_kept(a: &Analysis, cx: &Context, budget: usize) -> (String, Kept) {
@@ -145,19 +169,17 @@ pub fn data_kept(a: &Analysis, cx: &Context, budget: usize) -> (String, Kept) {
         }
     }
     // Known persons that the mail can name with no address (section 7.4).
-    // The first party that does not fit ends the list, so the data holds
-    // the first `parties` of them.
-    let mut parties = 0;
+    // The first party that does not fit ends the list (`parties_in`).
+    let room = left;
+    let mut parties_room = None;
     for p in cx.known.iter().take(MAX_KNOWN) {
-        let mut line = String::from("Known party: ");
-        push_cut(&mut line, p, MAX_FIELD);
-        line.push('\n');
+        let line = party_line(p);
         if line.len() > left {
+            parties_room = Some(room);
             break;
         }
         left -= line.len();
         d.push_str(&line);
-        parties += 1;
     }
     for (name, text) in &a.text.attachment_text {
         let head = format!("\n\nText of the attachment {}:\n", escape(name));
@@ -200,7 +222,7 @@ pub fn data_kept(a: &Analysis, cx: &Context, budget: usize) -> (String, Kept) {
         d,
         Kept {
             thread: held,
-            parties,
+            parties_room,
         },
     )
 }
