@@ -192,7 +192,7 @@
             {/if}
             {#if u?.problem}<p class="why" role="alert">{u.problem}</p>{/if}
             <!-- A failed read keeps its button, so that you can try again: it reads the same page. -->
-            {#if !u || u.next || u.failed}
+            {#if !u || u.loading || u.next || u.failed}
               <button type="button" class="check" onclick={() => showUnknown(e)} disabled={u?.loading}>{u?.loading ? "Loading" : u?.failed ? "Try again" : u ? "Show more" : "Show the messages to check"}</button>
             {/if}
           {/if}
