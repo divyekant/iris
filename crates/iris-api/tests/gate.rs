@@ -735,6 +735,49 @@ fn ids_of(list: &Value) -> Vec<String> {
     ids(list)
 }
 
+/// Issue 478: an item at the gate shows the reply draft of its thread, as a
+/// brief line does. Both read `ready` from the same column, so the gate and
+/// the sections agree for each item.
+#[tokio::test]
+async fn a_gate_item_shows_a_ready_draft_of_its_thread() {
+    let g = Gate::new("ready");
+    let s = sample(&g);
+    g.exec("DELETE FROM link_check WHERE ?1", [1]);
+    // The clean text of message 1: a draft answers only a fetched message.
+    g.exec(
+        "INSERT INTO body(message_id, subject, sender, text) VALUES (?1, 'Invoice', 'ana', 'Pay?')",
+        [1],
+    );
+    // A draft of the thread of message 1, the source of Ana's ask.
+    g.exec(
+        "INSERT INTO reply_draft(thread_id, based_on, body, model, prompt, samples, created_at)
+         SELECT thread_id, id, 'Yes.', 'fake', 'draft/0.1', 0, 1 FROM message WHERE id = ?1",
+        [1],
+    );
+    let ready = |page: &Value| -> Vec<(String, Value)> {
+        page["senders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|p| p["items"].as_array().unwrap().clone())
+            .map(|d| (d["id"].as_str().unwrap().to_string(), d["ready"].clone()))
+            .collect()
+    };
+    let gate = g.get("/api/gate").await;
+    let marks = ready(&gate);
+    assert!(
+        marks.contains(&(s.ask.clone(), json!(["draft"]))),
+        "{marks:?}"
+    );
+    assert!(marks.contains(&(s.group.clone(), Value::Null)), "{marks:?}");
+    assert!(marks.contains(&(s.reply.clone(), Value::Null)), "{marks:?}");
+    assert_eq!(g.get("/api/brief").await["gate"], gate);
+    // A draft that does not answer the newest message of its thread is stale: no mark.
+    g.exec("UPDATE reply_draft SET based_on = 2 WHERE ?1", [1]);
+    let marks = ready(&g.get("/api/gate").await);
+    assert!(marks.contains(&(s.ask.clone(), Value::Null)), "{marks:?}");
+}
+
 #[tokio::test]
 async fn a_gate_sender_with_the_name_of_a_known_person_says_so() {
     // Issue #370: a new address under the name of a known person.
@@ -893,11 +936,11 @@ async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
 async fn release_takes_a_message_out_of_quarantine_and_unrelease_undoes_it() {
     let g = Gate::new("release");
     g.exec(
-        r#"UPDATE message SET hostile = '["link","spoof"]' WHERE id = 3"#,
+        r#"UPDATE message SET hostile = '["link","spoof"]', understood_at = 1 WHERE id = 3"#,
         [],
     );
     g.exec(
-        r#"UPDATE message SET hostile = '["phishing"]' WHERE id = 4"#,
+        r#"UPDATE message SET hostile = '["phishing"]', understood_at = 1 WHERE id = 4"#,
         [],
     );
     let due = || g.one::<i64>("SELECT count(*) FROM fixed_due WHERE message_id = 3");
@@ -941,8 +984,27 @@ async fn release_takes_a_message_out_of_quarantine_and_unrelease_undoes_it() {
     assert_eq!(v["released"], json!([]));
     assert_eq!(due(), 1, "the undo queues the check again, in one row");
 
-    // Gone mail cannot be released.
+    // Content that Iris did not read yet: its marks can be old, so no
+    // release and no write.
+    g.exec("UPDATE message SET understood_at = NULL WHERE id = 3", []);
+    let (code, v) = g.call("POST", "/api/messages/m-3/release").await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+    assert_eq!(
+        g.one::<Option<String>>("SELECT released FROM message WHERE id = 3"),
+        None
+    );
+    g.exec("UPDATE message SET understood_at = 1 WHERE id = 3", []);
+
+    // Gone mail: no release and no undo, and no write.
+    let (code, v) = g.call("POST", "/api/messages/m-3/release").await;
+    assert_eq!(code, StatusCode::OK, "{v}");
     g.exec("UPDATE message SET gone_at = 1 WHERE id = 3", []);
+    let (code, v) = g.call("POST", "/api/messages/m-3/unrelease").await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+    assert_eq!(
+        g.one::<Option<String>>("SELECT released FROM message WHERE id = 3"),
+        Some(r#"["link","spoof"]"#.into())
+    );
     let (code, v) = g.call("POST", "/api/messages/m-3/release").await;
     assert_eq!(code, StatusCode::CONFLICT, "{v}");
 }
