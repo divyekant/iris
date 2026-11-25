@@ -375,12 +375,47 @@ fn move_plan_transport_error() {
     assert_eq!(changed(b.apply(a)), 1);
 }
 
-/// An unknown result of `UID MOVE` ends `failed` with each started row
-/// `unknown`: no second `UID MOVE` and no rebind, whether the message
-/// moved (old ID not found) or not (old ID with its labels).
+/// Issue #984: a lost or incomplete answer to a move that the provider
+/// confirms by a read rebinds each row, as a normal answer: the entry is
+/// applied, a sync adds no row, and the undo moves each message back.
+#[test]
+fn a_confirmed_lost_answer_rebinds() {
+    for mode in [Moving::Close, Moving::NoCopyuid] {
+        let fake = server(Caps::ALL);
+        let (ua, ub) = (add(&fake, "INBOX", 1), add(&fake, "INBOX", 2));
+        let b = setup(&format!("confirmed-{mode:?}"), fake);
+        let ms = [b.row("INBOX", ua), b.row("INBOX", ub)];
+        let rows = b.rows();
+        b.fake.set_moving(mode);
+        let a = b.approved("archive", &ms);
+        assert_eq!(changed(b.apply(a)), 2, "{mode:?}");
+        assert_eq!(b.moves_sent(), 1, "{mode:?}");
+        for &m in &ms {
+            assert!(b.provider_id(m).ends_with(":Archive"), "{mode:?}");
+        }
+        b.fake.set_moving(Moving::Normal);
+        b.sync();
+        assert_eq!(b.rows(), rows, "{mode:?}: no new row, no gone row");
+        b.verify(&format!("{mode:?}"));
+        let outcomes = b.undo(a);
+        assert!(
+            outcomes.iter().all(|o| matches!(o, Outcome::Applied(_))),
+            "{mode:?}: {outcomes:?}"
+        );
+        for &m in &ms {
+            assert!(b.provider_id(m).ends_with(":INBOX"), "{mode:?}");
+        }
+    }
+}
+
+/// An unknown result of `UID MOVE` that a read cannot confirm (here a
+/// part move) ends `failed` with each started row `unknown`: no second
+/// `UID MOVE` and no rebind, whether the message moved (old ID not
+/// found) or not (old ID with its labels).
 #[test]
 fn move_unknown_is_not_retried() {
-    for mode in [Moving::RefuseAfterOne, Moving::Close, Moving::NoCopyuid] {
+    {
+        let mode = Moving::RefuseAfterOne;
         let fake = server(Caps::ALL);
         let (ua, ub) = (add(&fake, "INBOX", 1), add(&fake, "INBOX", 2));
         let b = setup(&format!("unknown-{mode:?}"), fake);
