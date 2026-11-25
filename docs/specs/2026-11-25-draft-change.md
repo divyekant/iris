@@ -279,8 +279,8 @@ A ledger row of a change in `writing` after a crash or a lost answer:
 | Value | When | Next press of Send |
 |---|---|---|
 | `"update"` | A Gmail account, each check of section 1 passes for the draft now, and for a reply, the newest eligible message of the thread is still the parent of the draft (its `Message-ID` is the `In-Reply-To` of the draft row) | Sends `draft`: the same draft changes |
-| `"new"` | An Outlook or IMAP account, the draft is not sent, and its account is still an account of Iris | No `draft`: a new draft, as today |
-| `null` | All other cases (sent, `foreign_at`, a send waits, or a reply whose thread has a newer eligible message) | No "Change and send". For a reply with a newer message, the view says "A new mail came into this thread. Write a new reply." |
+| `"new"` | An Outlook or IMAP account, each check of section 1 passes for the draft now but the provider check and the attachment check, and for a reply, the newest eligible message of the thread is still the parent of the draft. The create of a new draft does not read the files of the old draft, so a missing file does not stop it: the form shows the attachment, and the person can remove it | No `draft`: a new draft, as today |
+| `null` | All other cases (sent, `foreign_at`, a send waits, a missing file of a Gmail draft, or a reply whose thread has a newer eligible message) | No "Change and send". For a reply with a newer message, the view says "A new mail came into this thread. Write a new reply." |
 
 The client reads the content of the draft from `GET /api/drafts/{d-N}`
 (a new read route: `to`, `cc`, `bcc`, `subject`, `body`, `attachments`,

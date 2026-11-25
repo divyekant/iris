@@ -1310,6 +1310,7 @@ dependencies = [
 name = "iris-understand"
 version = "0.0.0"
 dependencies = [
+ "idna",
  "idna_adapter",
  "iris-clean",
  "iris-eval",
@@ -1321,6 +1322,7 @@ dependencies = [
  "jsonschema",
  "rusqlite",
  "serde_json",
+ "unicode-general-category",
  "unicode-normalization",
  "url",
 ]
