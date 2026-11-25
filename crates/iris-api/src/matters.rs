@@ -108,7 +108,12 @@ fn load(
         if members {
             if let Some(Value::Array(list)) = by_form.get_mut(*f) {
                 let mut d = doc_at(r, 8)?;
-                ready_into(r, &mut d)?;
+                // Only a confirmed matter shows its members as brief lines, with the
+                // pills of `ready` (issue #1015). A proposal and an addition ask for a
+                // decision about the grouping: their rows show no pill, so no `ready`.
+                if doc["status"] == "confirmed" {
+                    ready_into(r, &mut d)?;
+                }
                 list.push(d);
             }
         }
@@ -218,8 +223,8 @@ fn member(id: &str) -> Result<(i64, &'static str)> {
 }
 
 /// The matter document with its member documents, or `None`. One
-/// statement. Each member and each addition has `ready`, as a brief line
-/// (issue #1015).
+/// statement. Each member of a confirmed matter has `ready`, as a brief
+/// line (issue #1015).
 fn view(c: &Connection, row: i64) -> iris_store::Result<Option<Value>> {
     let ready = format!(", {}", ready_columns(c)?);
     let sql = select("m.id = ?1", "m.id", &ready);
@@ -227,7 +232,7 @@ fn view(c: &Connection, row: i64) -> iris_store::Result<Option<Value>> {
         return Ok(None);
     };
     let mut docs = Vec::new();
-    additions(c, &mut doc, Some((&mut docs, &ready)))?;
+    additions(c, &mut doc, Some(&mut docs))?;
     Ok(Some(
         json!({ "matter": doc, "items": items, "additions": docs }),
     ))
@@ -235,12 +240,11 @@ fn view(c: &Connection, row: i64) -> iris_store::Result<Option<Value>> {
 
 /// Sets the field `additions` of a confirmed matter document: the item IDs
 /// of its live additions (the view `matter_add_live`), newest first, with
-/// no item of hostile mail. With `docs`, also the item documents, with
-/// the ready columns (`ready`, as for [`select`]).
+/// no item of hostile mail. With `docs`, also the item documents.
 fn additions(
     c: &Connection,
     doc: &mut Value,
-    mut docs: Option<(&mut Vec<Value>, &str)>,
+    mut docs: Option<&mut Vec<Value>>,
 ) -> rusqlite::Result<()> {
     if doc["status"] != "confirmed" {
         return Ok(());
@@ -248,9 +252,8 @@ fn additions(
     let Some((_, row)) = doc["id"].as_str().and_then(parse_id) else {
         return Ok(());
     };
-    let ready = docs.as_ref().map_or("", |(_, r)| *r);
     let mut st = c.prepare_cached(&format!(
-        "SELECT item.id, item.form, item.status, item.doc, {MATTER}{ready}
+        "SELECT item.id, item.form, item.status, item.doc, {MATTER}
            FROM matter_add_live a JOIN item ON item.id = a.item_id
           WHERE a.matter_id = ?1 AND NOT {from_hostile}
           ORDER BY a.created_at DESC, item.id DESC LIMIT 50",
@@ -264,10 +267,8 @@ fn additions(
             continue;
         };
         ids.push(Value::from(format_id(*kind, r.get(0)?)));
-        if let Some((d, _)) = docs.as_mut() {
-            let mut one = doc_at(r, 0)?;
-            ready_into(r, &mut one)?;
-            d.push(one);
+        if let Some(d) = docs.as_deref_mut() {
+            d.push(doc_at(r, 0)?);
         }
     }
     if !ids.is_empty() {

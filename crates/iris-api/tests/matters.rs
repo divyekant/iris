@@ -836,8 +836,9 @@ async fn joinable_agrees_with_create() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Issue #1015: a member of a matter shows the reply draft of its thread,
-/// as a brief line does, on the matter page and on the answer of a confirm.
+/// Issue #1015: a member of a confirmed matter shows the reply draft of its
+/// thread, as a brief line does: the same marks as the list of its form. A
+/// proposal shows its members as rows of a decision, with no `ready`.
 #[tokio::test]
 async fn a_member_shows_a_ready_draft_of_its_thread() {
     let (dir, s) = setup("ready");
@@ -862,26 +863,36 @@ async fn a_member_shows_a_ready_draft_of_its_thread() {
             .map(|d| (d["id"].as_str().unwrap().to_string(), d["ready"].clone()))
             .collect()
     };
+    // A proposal: no marks.
     let (code, v) = call(&s, Method::GET, "/api/matters/g-1", "").await;
     assert_eq!(code, StatusCode::OK, "{v}");
-    let got = marks(&v);
-    assert!(got.contains(&("c-3".into(), json!(["draft"]))), "{got:?}");
-    assert!(got.contains(&("r-1".into(), Value::Null)), "{got:?}");
-    assert!(got.contains(&("v-2".into(), Value::Null)), "{got:?}");
-    // The list of one form gives the same mark for the same item.
-    let (_, list) = call(&s, Method::GET, "/api/items?form=commitment", "").await;
-    let c3 = list["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|d| d["id"] == "c-3")
-        .unwrap();
-    assert_eq!(c3["ready"], json!(["draft"]), "{list}");
-    // The answer of a confirm is the same view.
+    assert!(marks(&v).iter().all(|(_, r)| r.is_null()), "{v}");
+    // The answer of a confirm is the view of a confirmed matter: marks.
     let body = json!({ "title": "Tokyo trip", "items": ["r-1", "v-2", "c-3"] }).to_string();
     let (code, v) = call(&s, Method::POST, "/api/matters/g-1/confirm", &body).await;
     assert_eq!(code, StatusCode::OK, "{v}");
     assert!(marks(&v).contains(&("c-3".into(), json!(["draft"]))), "{v}");
+    // Each member has the marks of the list of its form, also a summary mark:
+    // both read the same columns (`read::ready_columns`).
+    let (code, v) = call(&s, Method::GET, "/api/matters/g-1", "").await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    let got = marks(&v);
+    assert!(got.contains(&("c-3".into(), json!(["draft"]))), "{got:?}");
+    for (id, ready) in &got {
+        let form = match &id[..1] {
+            "c" => "commitment",
+            "v" => "conversation",
+            _ => "record",
+        };
+        let (_, list) = call(&s, Method::GET, &format!("/api/items?form={form}"), "").await;
+        let one = list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == id.as_str())
+            .unwrap();
+        assert_eq!(&one["ready"], ready, "{id}");
+    }
     // A stale draft: no mark.
     s.write(|tx| {
         tx.execute("UPDATE reply_draft SET based_on = 1", [])?;

@@ -312,7 +312,7 @@
           "pattern": "^a-[1-9][0-9]*$"
         },
         "ready": {
-          "description": "What Iris prepared for the item, on the items of the brief only (card R3-09). draft: the thread of the origin message has a reply draft that is not stale. summary (since iris/1.4): the item needs the person, and the thread of the origin message has a summary that is not stale.",
+          "description": "What Iris prepared for the item, on the items that show as brief lines only: the brief, the gate, the item lists and the members of a confirmed matter (card R3-09, issue 1015). draft: the thread of the origin message has a reply draft that is not stale. summary (since iris/1.4): the item needs the person, and the thread of the origin message has a summary that is not stale.",
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
