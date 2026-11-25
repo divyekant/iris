@@ -1461,11 +1461,16 @@ fn app_notices_give_due_jobs_and_count_questions() {
     iris_job::ask(&store, asked, "Which day?", None, now + 1).unwrap();
     let due = iris_job::create(&store, "Renew the passport.", Some(now + 2), now).unwrap();
     iris_job::move_due(&store, now + 3).unwrap();
-    let r = answer_as(
-        &store,
-        &socket::local(),
-        json!({ "v": 1, "verb": "app.notices", "args": { "after": 0 } }),
-    );
+    let ask = |args: Value| {
+        answer_as(
+            &store,
+            &socket::local(),
+            json!({ "v": 1, "verb": "app.notices", "args": args }),
+        )
+    };
+    // The first call of an app gives no notice: it makes the app live.
+    ask(json!({}));
+    let r = ask(json!({ "after": 0 }));
     let list = r["result"]["notices"].as_array().unwrap();
     assert_eq!(list.len(), 1, "{r}");
     assert_eq!(list[0]["job"], json!(format!("j-{due}")));
