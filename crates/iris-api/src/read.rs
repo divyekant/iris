@@ -616,18 +616,19 @@ pub fn items(store: &Store, filter: &Filter, limit: u32) -> Result<Page> {
     let (outer, inner) = (date("item"), date("i"));
     let items = store.read(|c| {
         let mut st = c.prepare(&format!(
-            "SELECT id, form, status, doc, {MATTER} FROM item
+            "SELECT id, form, status, doc, {MATTER}, {ready} FROM item
              WHERE (?1 IS NULL OR form = ?1)
                AND (status = ?2 OR (?2 IS NULL AND status != 'gone'))
                AND (?3 IS NULL OR json_extract(doc, '$.type') = ?3)
                AND NOT {FROM_HOSTILE}
                AND (?4 IS NULL OR ({outer}, id) <
                     (SELECT {inner}, i.id FROM item i WHERE i.id = ?4))
-             ORDER BY {outer} DESC, id DESC LIMIT ?5"
+             ORDER BY {outer} DESC, id DESC LIMIT ?5",
+            ready = ready_draft(c)?
         ))?;
         let rows = st.query_map(
             params![filter.form, filter.status, filter.kind, before, limit + 1],
-            doc_of,
+            ready_doc_of,
         )?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     })?;
@@ -1012,11 +1013,7 @@ fn read_section(
             let row_keys = (4..4 + keys.len())
                 .map(|i| r.get::<_, SqlValue>(i))
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mut doc = doc_of(r)?;
-            if r.get::<_, bool>("ready_draft")? {
-                doc["ready"] = Value::from(vec!["draft"]);
-            }
-            Ok((doc, row_keys))
+            Ok((ready_doc_of(r)?, row_keys))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
@@ -1397,7 +1394,7 @@ pub(crate) const MATTER: &str = "(SELECT mi.matter_id FROM matter_item mi
 /// mail that made the item has a reply draft that the person can use now
 /// (card R3-09, [`iris_voice::ready_item_sql`]). A nudge (card R3-07)
 /// marks only the commitments of its key, at the time of this read.
-fn ready_draft(c: &Connection) -> iris_store::Result<String> {
+pub(crate) fn ready_draft(c: &Connection) -> iris_store::Result<String> {
     let now = crate::now_ms();
     // `today` gives `YYYY-MM-DD`, so the quoted literal is safe.
     let today = format!("'{}'", iris_store::today(c, now)?);
@@ -1412,10 +1409,23 @@ fn ready_draft(c: &Connection) -> iris_store::Result<String> {
     ))
 }
 
+/// As [`doc_of`], with `ready` from the column [`ready_draft`] of the row.
+/// Each list whose items show as brief lines (the sections and the gate)
+/// reads its items with this function, so a prepared draft shows on each.
+/// The lists: the sections and bundles of the brief, the gate, and the
+/// lists of one form (`/api/items`).
+pub(crate) fn ready_doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+    let mut doc = doc_of(r)?;
+    if r.get::<_, bool>("ready_draft")? {
+        doc["ready"] = Value::from(vec!["draft"]);
+    }
+    Ok(doc)
+}
+
 /// The document of an item row (id, form, status, doc, and the column
 /// [`MATTER`] by name). The row is the true copy of the ID, the status,
 /// the matter and the account, so they replace the values of the document. A stored `ready`
-/// is removed: only [`read_section`] sets it, from the store. Each output of
+/// is removed: only [`ready_doc_of`] sets it, from the store. Each output of
 /// an item (the API, the read verbs, the export) uses this function.
 pub(crate) fn doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     doc_at(r, 0)
