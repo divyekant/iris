@@ -263,6 +263,31 @@ test("setup and the brief say how to set a model while mail waits for one (issue
   }
 });
 
+test("each setup step says that a hosted model receives the mail text, whatever the model state (spec 1 section 7.4)", async () => {
+  const account = fx.status.accounts[0];
+  const messages = { total: 400, fetched: 200, understood: 0, gone: 0 };
+  const steps = {
+    "connect": { accounts: [] },
+    "copy": { accounts: [{ ...account, mirror_ready_at: null }] },
+    "stopped": { accounts: [{ ...account, state: "needs_sign_in", mirror_ready_at: null }] },
+    "ready": { accounts: [account], messages: { ...messages, fetched: 400 } },
+  };
+  const models = {
+    "no model, mail waits": { model: false, waits_model: 394 },
+    "no model, nothing waits": { model: false, waits_model: 0 },
+    "a model set before the copy": { model: true, waits_model: 0 },
+    "an older engine": { model: undefined, waits_model: undefined },
+  };
+  for (const [step, part] of Object.entries(steps)) {
+    for (const [name, model] of Object.entries(models)) {
+      const status = { ...fx.status, messages, ...part, ...model };
+      const t = text(await render("/src/views/Setup.svelte", { status, poll: 0 }));
+      assert.match(t, /Iris sends the text of your mail to (Anthropic|that model)/, `${step}, ${name}`);
+      assert.match(t, /no mail text leaves/i, `${step}, ${name}`);
+    }
+  }
+});
+
 test("an item shows the quote of its mail first, its fields, and opens each source mail", async () => {
   const html = await render("/src/views/Item.svelte", { item: item("v-88"), now: NOW });
   const t = text(html);

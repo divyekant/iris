@@ -35,6 +35,18 @@
     {/each}
   </ol>
 
+  <!-- Spec 1 section 7.4: each setup step says where the mail text goes. With mail that waits for a model, the full note. -->
+  {#snippet where()}
+    {#if needsModel(status)}
+      <NoModel />
+    {:else}
+      <p class="quiet where">
+        With a hosted model, such as Anthropic, Iris sends the text of your mail to that model. With a model on this machine, no mail text
+        leaves it. To see the model that Iris uses, run <code>iris model show</code>.
+      </p>
+    {/if}
+  {/snippet}
+
   {#if stage === 0}
     <section>
       <h1>Connect your Gmail account</h1>
@@ -53,13 +65,14 @@
         </li>
       </ol>
       <p class="quiet">This page goes to the next step when the account is connected.</p>
+      {@render where()}
     </section>
   {:else if stage === 1 && stopped}
     <section>
       <h1>The copy stopped</h1>
       <p class="big">The copy of {account.address} stopped. Iris copied {number(m.fetched)} of {m.total ? number(m.total) : "all"} messages{across(status)}.</p>
       <p class="quiet">Iris continues the copy after you sign in again. Nothing in your mailbox changed.</p>
-      {#if needsModel(status)}<NoModel />{/if}
+      {@render where()}
       {#if m.understood > 0}<a class="go" href="#/brief">Open the brief</a>{/if}
     </section>
   {:else if stage === 1}
@@ -68,7 +81,7 @@
       <p class="big"><strong>{number(m.fetched)}</strong> of {m.total ? number(m.total) : "all"} messages copied{across(status)}.</p>
       <progress max={m.total || 1} value={m.fetched} aria-label="Messages copied"></progress>
       <p class="quiet">Iris only reads. Nothing in your mailbox changes. You can close this page: the copy continues.</p>
-      {#if needsModel(status)}<NoModel />{/if}
+      {@render where()}
       {#if m.understood > 0}
         <p>Your first brief is ready. It grows as the copy continues.</p>
         <a class="go" href="#/brief">Open the brief</a>
@@ -82,7 +95,7 @@
         <progress max={m.fetched || 1} value={m.understood} aria-label="Messages read"></progress>
         <p class="quiet">Iris reads the mail to make your brief: {number(m.understood)} of {number(m.fetched)} messages.</p>
       {/if}
-      {#if needsModel(status)}<NoModel />{/if}
+      {@render where()}
       <a class="go" href="#/brief">Open the brief</a>
     </section>
   {/if}
