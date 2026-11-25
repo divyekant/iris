@@ -787,7 +787,10 @@ fn a_turn_runs_the_nudge_step() {
     let drafts = |s: &Store| {
         col(
             s,
-            "SELECT count(*) FROM understand_run WHERE prompt = 'nudge/0.1'",
+            &format!(
+                "SELECT count(*) FROM understand_run WHERE prompt = '{}'",
+                iris_voice::NUDGE_PROMPT
+            ),
         )
     };
     assert_eq!(drafts(&store), Some(0));

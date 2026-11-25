@@ -1550,9 +1550,11 @@ fn one_nudge_names_each_late_commitment_of_its_person_and_another_person_waits()
     // for Bo.
     // A third late commitment, owed by Ana again: the key changes, the
     // nudge is stale, and the next nudge names both of Ana's (decision D8).
-    set("INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+    set(
+        "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
          SELECT form, account_id, status, json_set(doc, '$.title', 'Send the notes'), 3, 3
-           FROM item WHERE id = 1");
+           FROM item WHERE id = 1",
+    );
     set("INSERT INTO item_source(item_id, message_id, role)
          SELECT 3, message_id, role FROM item_source WHERE item_id = 1");
     assert_eq!(ready_to(&b.store, t), None);
@@ -1568,7 +1570,10 @@ fn one_nudge_names_each_late_commitment_of_its_person_and_another_person_waits()
         .map(|c| c["title"].as_str().unwrap())
         .collect();
     assert_eq!(titles, ["Send the slides", "Send the notes"]);
-    assert!(data["commitments"][0].get("item").is_none(), "no row ID in the data");
+    assert!(
+        data["commitments"][0].get("item").is_none(),
+        "no row ID in the data"
+    );
     let items = b
         .store
         .read(|c| Ok(super::ready(c, t)?.unwrap().items))
