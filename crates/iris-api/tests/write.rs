@@ -119,6 +119,17 @@ fn made(s: &Store) {
                 action
             ],
         )?;
+        // The ledger entry of the create: the send of the mark binds to its
+        // hash (draft change spec, section 2).
+        let ops = serde_json::json!({"call": "drafts.create", "message_id": "iris.1@example.com",
+                                     "date": 1, "hash": iris_compose::hash(&c, None), "thread": null});
+        tx.execute(
+            "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+             VALUES (?1, 1, ?2, 'writing', 'none', 0)",
+            rusqlite::params![action, ops.to_string()],
+        )?;
+        tx.execute("UPDATE ledger SET call = 1 WHERE action_id = ?1", [action])?;
+        tx.execute("UPDATE ledger SET state = 'applied' WHERE action_id = ?1", [action])?;
         Ok(())
     })
     .unwrap();
