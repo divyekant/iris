@@ -183,20 +183,26 @@ fn covers_sql(thread: &str, upto: &str) -> String {
     )
 }
 
-/// SQL of the basis of the thread `thread` (an SQL expression):
+/// SQL of the basis of the thread `thread` (an SQL expression). A thread
+/// of [`MESSAGES`] answerable messages or fewer: the SHA-256 of the inputs
+/// of each of them (the snapshot holds all of them, so the basis is the
+/// basis of the first release of the summary). A longer thread:
 /// `<snapshot>.<covers>`. `<snapshot>` is the SHA-256 of each input of the
 /// model call from the snapshot ([`snapshot_ids`]). `<covers>` is the
 /// SHA-256 of the inputs of each answerable message of the thread, also the
 /// messages that the snapshot leaves out: the earlier summary in the data
-/// can carry their facts (issue #1023). A summary is ready only while its
-/// basis is the basis of its thread, so a change of any answerable message
-/// (it goes away, leaves the thread, or gets a new text, label or date)
-/// makes it stale.
+/// can carry their facts (issue #1023). So the part after the last `.` (the
+/// full basis when it has none) is always the covers. A summary is ready
+/// only while its basis is the basis of its thread, so a change of any
+/// answerable message (it goes away, leaves the thread, or gets a new text,
+/// label or date) makes it stale.
 pub fn basis_sql(thread: &str) -> String {
+    let all = inputs_sql(thread, "");
     format!(
-        "({} || '.' || {})",
+        "(CASE WHEN (SELECT count(*) {} {ANSWERABLE}) <= {MESSAGES} THEN {all}
+               ELSE {} || '.' || {all} END)",
+        messages_sql(thread),
         inputs_sql(thread, &format!("AND m.id IN ({})", snapshot_ids(thread))),
-        inputs_sql(thread, "")
     )
 }
 

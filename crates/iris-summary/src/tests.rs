@@ -875,3 +875,59 @@ fn a_left_out_message_that_leaves_or_changes_ends_the_earlier_summary() {
         assert!(ready_of(&b, t).is_some(), "{how}");
     }
 }
+
+/// A summary saved before #1023 keeps its basis: for a thread of 12
+/// answerable messages or fewer, the basis is the same as the basis of the
+/// first release, so the summary stays ready after the upgrade and carries
+/// forward when the thread grows.
+#[test]
+fn a_summary_of_the_first_release_stays_ready_and_carries_forward() {
+    // The basis SQL of the first release (summary/0.1).
+    let old = format!(
+        "(SELECT iris_sha256(group_concat(x.k, char(10) ORDER BY x.n)) FROM
+           (SELECT json_array({}) AS k, row_number() OVER ({NEWEST}) AS n
+              {} {ANSWERABLE} {NEWEST} LIMIT {MESSAGES}) x)",
+        columns(),
+        messages_sql("?1")
+    );
+    for n in [5, 12] {
+        let b = open(&format!("legacy-{n}"));
+        let t = thread(&b, "t1", n, 1000);
+        let (old_basis, new_basis): (String, String) = b
+            .store
+            .read(|c| {
+                Ok(
+                    c.query_row(&format!("SELECT {old}, {}", basis_sql("?1")), [t], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })?,
+                )
+            })
+            .unwrap();
+        assert_eq!(old_basis, new_basis, "{n}");
+        // A row as the first release saved it.
+        let newest = cands(&b).remove(0).based_on;
+        b.store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO thread_summary(thread_id, based_on, basis, text, model, prompt, created_at)
+                     VALUES (?1, ?2, ?3, 'Old facts.', 'fake', 'summary/0.1', 1)",
+                    params![t, newest, old_basis],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(ready_of(&b, t).is_some(), "{n}");
+        assert!(cands(&b).is_empty(), "{n}");
+        add(&b.store, "t1", "t1-a", 98_000, "Still open.");
+        add(&b.store, "t1", "t1-b", 99_000, "Who books it?");
+        let c = cands(&b).remove(0);
+        let fake = Fake::new(&[GOOD]);
+        summarize(&b.store, &c, &fake, 200_000).unwrap();
+        let v: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
+        let expect = match n > MESSAGES - 2 {
+            true => Value::from("Old facts."),
+            false => Value::Null,
+        };
+        assert_eq!(v["earlier_summary"], expect, "{n}");
+    }
+}

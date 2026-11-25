@@ -76,7 +76,10 @@ CREATE TABLE thread_summary (
   thread_id INTEGER PRIMARY KEY REFERENCES thread(id) ON DELETE CASCADE,
   -- The newest answerable message that the summary covers.
   based_on INTEGER NOT NULL REFERENCES message(id) ON DELETE CASCADE,
-  -- The basis: the SHA-256 (hex) of each model input of the snapshot.
+  -- The basis (hex): for a thread of 12 answerable messages or fewer, the
+  -- SHA-256 of each model input of the snapshot (all of them). For a longer
+  -- thread, <snapshot>.<covers>: the SHA-256 of the snapshot inputs, a dot,
+  -- and the SHA-256 of the inputs of each answerable message.
   basis TEXT NOT NULL,
   text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 1500),
   model TEXT NOT NULL,
@@ -114,7 +117,8 @@ So each change of the mail that the summary read makes the summary stale
 at the next read, with no write: a new mail, a hostile mark, an older
 message of the snapshot that goes away or leaves the thread, new content
 or a new clean text under the same ID, and a new `SENT` label or date of a
-message. The basis has a second part, the covers: the SHA-256 of the same
+message. For a thread of more than 12 answerable messages, the basis has
+a second part after a dot, the covers: the SHA-256 of the same
 inputs of each answerable message of the thread, also the messages that the
 snapshot leaves out. The earlier summary in the data can carry the facts of
 these messages (issue #1023), so a left-out message that goes away, leaves
@@ -142,7 +146,8 @@ A new crate `iris-summary` (no provider client, as `iris-voice`):
   earlier summary is data, and that the mail in the snapshot is correct
   where the two differ. The save compares the earlier summary too. The
   last summary goes into the data only while the covers part of its basis
-  is the covers of the thread now up to its `based_on`: each message that
+  (the part after the dot, or the full basis of a short thread, where the
+  snapshot is the whole thread) is the covers of the thread now up to its `based_on`: each message that
   it represents is still answerable with the same inputs. Else the data
   gives no earlier summary. A message that arrives later with an older date
   also ends the carry forward (issue #1138). A
