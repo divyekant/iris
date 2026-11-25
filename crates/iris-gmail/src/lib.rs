@@ -940,7 +940,13 @@ impl Provider for Gmail {
     fn send_draft(&self, token: &str, id: &str, raw: &[u8], thread: Option<&str>) -> Result<Sent> {
         Gmail::send_draft(self, token, id, raw, thread)
     }
-    fn update_draft(&self, token: &str, id: &str, raw: &[u8], thread: Option<&str>) -> Result<Draft> {
+    fn update_draft(
+        &self,
+        token: &str,
+        id: &str,
+        raw: &[u8],
+        thread: Option<&str>,
+    ) -> Result<Draft> {
         Gmail::update_draft(self, token, id, raw, thread)
     }
     fn updates_drafts(&self) -> bool {

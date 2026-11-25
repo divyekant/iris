@@ -376,7 +376,9 @@ fn a_draft_update_keeps_the_draft_id_and_replaces_its_message() {
         .clone();
     let d = gmail.create_draft(TOKEN, DRAFT, Some(&thread)).unwrap();
     let new = b"From: owner@example.com\r\nSubject: Hi\r\nMessage-ID: <iris.1@example.com>\r\n\r\nBye\r\n";
-    let u = gmail.update_draft(TOKEN, &d.id, new, Some(&thread)).unwrap();
+    let u = gmail
+        .update_draft(TOKEN, &d.id, new, Some(&thread))
+        .unwrap();
     assert_eq!(u.id, d.id, "the same draft");
     assert_eq!(u.message.thread_id, thread, "the same thread");
     assert_ne!(u.message.id, d.message.id, "a new message");
@@ -385,7 +387,11 @@ fn a_draft_update_keeps_the_draft_id_and_replaces_its_message() {
     // Like a create, Gmail sets its own Message-ID.
     assert!(got.contains("Message-ID: <CACe_fake"), "{got}");
     assert_eq!(fake.draft_ids(), [d.id.clone()], "no second draft");
-    let puts = fake.requests().iter().filter(|r| r.starts_with("PUT ")).count();
+    let puts = fake
+        .requests()
+        .iter()
+        .filter(|r| r.starts_with("PUT "))
+        .count();
     assert_eq!(puts, 1);
 
     // A draft that does not exist.
@@ -395,13 +401,26 @@ fn a_draft_update_keeps_the_draft_id_and_replaces_its_message() {
     ));
     // A rate limit and a lost answer are unknown, with no second request.
     fake.fail_next_write(&[429], false);
-    assert!(gmail.update_draft(TOKEN, &d.id, DRAFT, None).unwrap_err().write_result_unknown());
+    assert!(gmail
+        .update_draft(TOKEN, &d.id, DRAFT, None)
+        .unwrap_err()
+        .write_result_unknown());
     fake.fail_next_write(&[503], true);
-    assert!(gmail.update_draft(TOKEN, &d.id, DRAFT, None).unwrap_err().write_result_unknown());
-    let puts = fake.requests().iter().filter(|r| r.starts_with("PUT ")).count();
+    assert!(gmail
+        .update_draft(TOKEN, &d.id, DRAFT, None)
+        .unwrap_err()
+        .write_result_unknown());
+    let puts = fake
+        .requests()
+        .iter()
+        .filter(|r| r.starts_with("PUT "))
+        .count();
     assert_eq!(puts, 4, "one request for each call");
     let got = String::from_utf8(gmail.draft_raw(TOKEN, &d.id).unwrap().raw.unwrap()).unwrap();
-    assert!(got.ends_with("\r\n\r\nHello\r\n"), "the applied lost call changed the draft: {got}");
+    assert!(
+        got.ends_with("\r\n\r\nHello\r\n"),
+        "the applied lost call changed the draft: {got}"
+    );
 }
 
 #[test]

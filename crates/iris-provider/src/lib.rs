@@ -269,7 +269,13 @@ pub trait Provider: Send + Sync {
     /// `thread` for a reply. One request: no retry after an unknown result.
     /// A provider without [`Provider::updates_drafts`] refuses the call and
     /// sends nothing.
-    fn update_draft(&self, token: &str, id: &str, raw: &[u8], thread: Option<&str>) -> Result<Draft> {
+    fn update_draft(
+        &self,
+        token: &str,
+        id: &str,
+        raw: &[u8],
+        thread: Option<&str>,
+    ) -> Result<Draft> {
         let _ = (token, id, raw, thread);
         Err(Error::Api {
             status: 400,

@@ -1292,7 +1292,10 @@ async fn update_draft(
         return error(StatusCode::BAD_REQUEST, "Invalid JSON payload received.");
     };
     if body.id.as_deref().is_some_and(|b| b != id) {
-        return error(StatusCode::BAD_REQUEST, "The draft ID of the body is not the ID of the path.");
+        return error(
+            StatusCode::BAD_REQUEST,
+            "The draft ID of the body is not the ID of the path.",
+        );
     }
     let raw = match draft_raw(&DraftBody {
         message: body.message,
