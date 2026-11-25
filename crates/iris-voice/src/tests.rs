@@ -2153,7 +2153,8 @@ fn a_change_of_the_answerable_set_makes_the_draft_stale() {
         b.store.put_messages(1, &[m]).unwrap();
         sql(b, "UPDATE message SET understood_at = 1");
     };
-    let cases: &[(&str, &dyn Fn(&Box_, i64))] = &[
+    type Change<'a> = &'a dyn Fn(&Box_, i64);
+    let cases: &[(&str, Change)] = &[
         ("late older", &|b, _| add(b, "late-old", "t1", "INBOX")),
         ("out of the trash", &|b, _| {
             sql(b, "DELETE FROM message_label WHERE label_id IN (SELECT id FROM label WHERE provider_id = 'TRASH')")
