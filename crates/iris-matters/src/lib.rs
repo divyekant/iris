@@ -246,16 +246,15 @@ fn confirm_with(
     if keep.len() != n {
         return Err(Error::Bad("an item is two times in the list"));
     }
-    write(store, |tx| {
-        // A proposed signal can pass its `expires` time before the confirm.
-        iris_store::expire_signals(tx, now)?;
-        confirm_in(tx, matter, &title, &keep, now)
-    })
+    write(store, |tx| confirm_in(tx, matter, &title, &keep, now))
 }
 
 /// The check before each decision: `matter` is a proposal that is valid now.
-/// The trigger `matter_decide` holds the same rule in the store.
-fn decidable(tx: &Transaction, matter: i64) -> Result<()> {
+/// The trigger `matter_decide` holds the same rule in the store. It first
+/// expires each signal past its `expires` time at `now`, so a member that
+/// expired after the proposal is not live (issue #985).
+fn decidable(tx: &Transaction, matter: i64, now: i64) -> Result<()> {
+    iris_store::expire_signals(tx, now)?;
     if status(tx, matter)? != "proposed" {
         return Err(Error::Conflict("the matter is decided"));
     }
@@ -277,7 +276,7 @@ fn confirm_in(
     keep: &[(i64, Option<&str>)],
     now: i64,
 ) -> Result<()> {
-    decidable(tx, matter)?;
+    decidable(tx, matter, now)?;
     for (item, form) in keep {
         let member: bool = tx.query_row(
             "SELECT EXISTS (SELECT 1 FROM matter_item mi JOIN item ON item.id = mi.item_id
@@ -323,7 +322,7 @@ fn confirm_in(
 /// `Conflict`.
 pub fn decline(store: &Store, matter: i64, now: i64) -> Result<()> {
     write(store, |tx| {
-        decidable(tx, matter)?;
+        decidable(tx, matter, now)?;
         let n = tx.execute(
             "UPDATE matter SET status = 'declined', updated_at = ?2, decided_at = ?2
                  WHERE id = ?1 AND status = 'proposed'",

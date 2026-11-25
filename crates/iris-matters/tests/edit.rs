@@ -404,7 +404,8 @@ fn a_signal_past_its_time_is_not_live() {
 }
 
 /// A proposed signal that passes its `expires` time before the confirm,
-/// with no engine tick, makes the proposal not valid (issue #985).
+/// with no engine tick, makes the proposal not valid for each decision
+/// (issue #985).
 #[test]
 fn a_signal_that_expires_before_the_confirm_is_not_confirmed() {
     let b = setup("expired-confirm", 4, &FORMS);
@@ -419,6 +420,11 @@ fn a_signal_that_expires_before_the_confirm_is_not_confirmed() {
     .unwrap();
     assert!(matches!(
         confirm(&b.store, p, "P", &[3, 6], 1_000),
+        Err(Error::Conflict(_))
+    ));
+    // The refusal rolled back the expiry; a decline must expire it too.
+    assert!(matches!(
+        decline(&b.store, p, 1_000),
         Err(Error::Conflict(_))
     ));
 }
