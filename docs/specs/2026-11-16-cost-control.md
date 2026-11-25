@@ -18,8 +18,9 @@ pay again for the same mail.
 1. A batch runner understands the pending messages of the store in the order
    of spec 1 section 7.1.
 2. A message that a run understood is never sent to the model again while
-   its mail does not change. A second run on the same store, with no change
-   of the mail, makes zero calls for these messages. A message that is not
+   its mail and the context of its last run (section "Resets") do not
+   change. A second run on the same store, with no change of the mail,
+   makes zero calls for these messages. A message that is not
    understood keeps the retries of spec 1 section 7.4 (`tries`,
    `retry_at`).
 3. The store keeps the calls, the tokens and the cost of each run.
@@ -54,9 +55,66 @@ pay again for the same mail.
   back, a label of the list above) clears `tries` and `retry_at` also for
   a message that is not understood, for example one that failed the model
   3 times. Triggers of the store do each reset, so each writer gets it.
-- Not done: a later message of the thread that used the changed message as
-  context keeps its items until its own next change. Its items come from
-  its own text, and a run again of each later message costs model calls.
+- Context (issue #1049, migration 69): each successful run records the
+  row IDs and a hash of the text of the earlier messages that shaped it
+  (`message.context`): the newest 3 earlier messages of the thread, with
+  a hash of the text that the model data held of each (sender, subject
+  and the first 2,000 characters of the clean text), and the newest 5
+  texts of the same sender, with a hash of the clean text, which shapes
+  the clean text of the message. When the budget of the data cut the
+  thread context, or no model call ran, the record holds a hash of only
+  the bytes that the data held, and if the text had more bytes (the data
+  had a cut mark). So a change of an earlier text that the run did not
+  read runs nothing again, and a text that shrinks to the held bytes (the
+  data then has no cut mark) runs the later message again. The record
+  also holds a hash of the known parties of the thread, which the model
+  gets: the known persons in the headers of the messages up to the
+  current one, in the order of the runs (date, then row ID). Later mail
+  does not change them. The list is in the order of the address (at most
+  50). When the budget left out some parties, the record holds the bytes
+  of the budget that were left for them, and a hash of the first parties
+  that fit in those bytes now, and "+" if the list has more. So a party
+  that starts to fit (a shorter name) changes the record. A new kind or name of a
+  sender puts the threads of that sender in `talk_due`.
+- The record ends with the thread and the date of the message itself
+  ("@thread:date"). An item of a run names its thread, so a message that
+  sync moves to another thread or date with the same content runs again.
+- Limit (issue #1135): a known person who is only in `To` or `Cc` of a
+  thread does not put the thread in `talk_due`. A check compares the
+  recorded context of an understood message with its context now, and
+  clears `understood_at` where they differ. So a later message runs again
+  only when the context that its last run used changed: an earlier
+  message got `SPAM` or a hostile mark, left `SPAM`, went away or came
+  back, got new content, or a run understood it (a late older message).
+- The check runs at two places. After each run that ends (a success, or
+  a failed try), two short walks check the later messages that can hold
+  the message in their context: they stop after 3 context messages of the
+  thread, and after 5 texts of the same sender. They read only rows to
+  check or to count (understood mail that is not hostile, and for the
+  sender walk mail with a text), so mail that waits for its first run
+  costs nothing. Each walk reads at most 64 rows: rows that do not count
+  (for example `SPAM` of the same sender) can make a walk longer, and then
+  the walk puts the thread in `talk_due`. Hostile mail records "-": a new run of it calls no model, also after
+  a `phishing` answer of the model, which stays until a rebuild (spec 1).
+  So no change of the context can change its result. And for each thread in
+  `talk_due` (a message that goes away, new content, a new or changed
+  clean text or sender address, a message that moves to another thread
+  or date, the start
+  or the end of a link check, a sender kind change), it checks each
+  understood message of the
+  thread, 200 rows at a time. A difference that is only a message that
+  waits for a run waits for the end of that run, so one change runs a
+  message once. A run reads only earlier messages, so a reset never comes
+  back to the message that caused it.
+- Upgrade: migration 69 gives each understood message the record "?":
+  its context is not known. Each batch run first records the context now
+  of each "?" message whose thread is not in `talk_due`, and the queue
+  step does the same. A change after the migration puts the thread in
+  `talk_due` before that, and the check runs each "?" message of the
+  thread again. So a change after the upgrade is never lost. A thread
+  that was in `talk_due` at the upgrade runs its old messages once.
+- Limit (issue #1119): a change before the upgrade is not seen, because
+  the first record of a message is its context at that time.
 
 ## Not in scope
 

@@ -548,7 +548,7 @@ fn reply_in(c: &Connection, thread: i64) -> Result<Option<Value>> {
         .map_err(iris_store::Error::from)?;
     // The recipients come from the header row. After a sync of new content
     // and before understanding reads it, the row is empty or of the old
-    // content (migration 69).
+    // content (migration 70).
     if !current {
         return Err(Error::Conflict(
             "Iris has not read the newest mail of this thread yet. Try again in a moment.".into(),

@@ -453,7 +453,7 @@ async fn a_reply_goes_to_reply_to_and_offers_the_others() {
 
 /// The reply form gives recipients only from a header row of the content
 /// of the parent now: after a sync of new content and before understanding
-/// reads it, the row is empty or of the old content (migration 69).
+/// reads it, the row is empty or of the old content (migration 70).
 #[tokio::test]
 async fn a_reply_waits_for_the_read_of_new_content() {
     let dir = temp("reply-new-content");

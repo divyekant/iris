@@ -835,3 +835,98 @@ async fn joinable_agrees_with_create() {
     assert_eq!(code, StatusCode::BAD_REQUEST);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Issue #1015: a member of a confirmed matter shows the reply draft of its
+/// thread, as a brief line does: the same marks as the list of its form. A
+/// proposal shows its members as rows of a decision, with no `ready`.
+#[tokio::test]
+async fn a_member_shows_a_ready_draft_of_its_thread() {
+    let (dir, s) = setup("ready");
+    // Message 3 (thread gt2) is the origin of c-3: its clean text and a
+    // draft that answers it, with the set of the messages that it read.
+    s.write(|tx| {
+        tx.execute_batch(&format!(
+            "UPDATE message SET understood_at = 1 WHERE id = 3;
+             INSERT INTO body(message_id, subject, sender, text) VALUES (3, 'Trip', 'ana', 'Book?');
+             INSERT INTO reply_draft(thread_id, based_on, body, model, prompt, samples, created_at)
+               SELECT thread_id, id, 'Yes.', 'fake', 'draft/0.1', 0, 1 FROM message WHERE id = 3;
+             UPDATE reply_draft SET seen = ({});",
+            iris_voice::seen_sql(&iris_voice::messages_sql("reply_draft.thread_id"))
+        ))?;
+        Ok(())
+    })
+    .unwrap();
+    let marks = |v: &Value| -> Vec<(String, Value)> {
+        ["commitment", "conversation", "record"]
+            .iter()
+            .flat_map(|f| v["items"][*f].as_array().unwrap().clone())
+            .map(|d| (d["id"].as_str().unwrap().to_string(), d["ready"].clone()))
+            .collect()
+    };
+    // A proposal: no marks.
+    let (code, v) = call(&s, Method::GET, "/api/matters/g-1", "").await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert!(marks(&v).iter().all(|(_, r)| r.is_null()), "{v}");
+    // The answer of a confirm is the view of a confirmed matter: marks.
+    let body = json!({ "title": "Tokyo trip", "items": ["r-1", "v-2", "c-3"] }).to_string();
+    let (code, v) = call(&s, Method::POST, "/api/matters/g-1/confirm", &body).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert!(marks(&v).contains(&("c-3".into(), json!(["draft"]))), "{v}");
+    // Each member has the marks of the list of its form, also a summary mark:
+    // both read the same columns (`read::ready_columns`).
+    let (code, v) = call(&s, Method::GET, "/api/matters/g-1", "").await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    let got = marks(&v);
+    assert!(got.contains(&("c-3".into(), json!(["draft"]))), "{got:?}");
+    for (id, ready) in &got {
+        let form = match &id[..1] {
+            "c" => "commitment",
+            "v" => "conversation",
+            _ => "record",
+        };
+        let (_, list) = call(&s, Method::GET, &format!("/api/items?form={form}"), "").await;
+        let one = list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == id.as_str())
+            .unwrap();
+        assert_eq!(&one["ready"], ready, "{id}");
+    }
+    // A stale draft: no mark.
+    s.write(|tx| {
+        tx.execute("UPDATE reply_draft SET based_on = 1", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, v) = call(&s, Method::GET, "/api/matters/g-1", "").await;
+    assert!(marks(&v).contains(&("c-3".into(), Value::Null)), "{v}");
+    // A conversation that needs the person, with a fresh summary of its
+    // thread: the summary mark.
+    s.write(|tx| {
+        tx.execute_batch(&format!(
+            "UPDATE item SET status = 'active', doc = json_set(doc, '$.new', 1) WHERE id = 2;
+             UPDATE message SET understood_at = 1 WHERE thread_id = ({thread});
+             INSERT OR IGNORE INTO body(message_id, subject, sender, text)
+               SELECT id, 'Trip', 'ana', 'Book?' FROM message WHERE thread_id = ({thread});
+             INSERT INTO thread_summary(thread_id, based_on, basis, text, model, prompt, created_at)
+             SELECT t.thread_id, (SELECT m.id {} {} {} LIMIT 1), {}, 'Ana asked to book.',
+                    'fake', 'summary/0.1', 1
+               FROM ({thread}) t",
+            iris_voice::messages_sql("t.thread_id"),
+            iris_voice::ANSWERABLE,
+            iris_voice::NEWEST,
+            iris_summary::basis_sql("t.thread_id"),
+            thread = "SELECT m.thread_id FROM item_source s JOIN message m ON m.id = s.message_id
+                      WHERE s.item_id = 2 AND s.role = 'origin'"
+        ))?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, v) = call(&s, Method::GET, "/api/matters/g-1", "").await;
+    assert!(
+        marks(&v).contains(&("v-2".into(), json!(["summary"]))),
+        "{v}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

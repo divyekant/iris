@@ -218,6 +218,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_67.sql"),
     include_str!("schema_68.sql"),
     include_str!("schema_69.sql"),
+    include_str!("schema_70.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
@@ -854,7 +855,7 @@ impl Store {
                     h.list_id,
                     h.auth,
                     // A parsed header comes from this content; an empty one
-                    // waits for understanding (migration 69). `Header` has
+                    // waits for understanding (migration 70). `Header` has
                     // no `Reply-To`, so the row has none.
                     (!h.is_empty()).then_some(m.content_sha256.as_deref()).flatten()
                 ])?; }
