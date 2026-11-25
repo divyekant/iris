@@ -113,7 +113,7 @@ summary, so its change does not matter (issue #1023).
 
 A new crate `iris-summary` (no provider client, as `iris-voice`):
 
-- `candidates(c, items, now, limit)`: the candidate threads of the items
+- `candidates(c, items, limit)`: the candidate threads of the items
   that the SQL filter `items` selects, the oldest try first, as
   `iris_voice::late` orders the nudges. The crate does not depend on
   `iris-api`: the caller gives the filter.
