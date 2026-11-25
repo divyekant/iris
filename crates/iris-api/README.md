@@ -41,7 +41,7 @@ UTC. IDs have the format of specification 1, section 5.7 (`m-42`).
 | `/api/changesets` | `{"changesets": [...]}`: each open changeset (specification 2, section 5.1), the newest changeset first. A changeset is open while one or more of its actions is `proposed`, `in_review`, `approved` or `held`. The answer streams in parts of 64 KiB. |
 | `/api/changesets/{id}` | One changeset (`cs-77`) in each state, as the document of specification 2, section 5.1. The answer streams. An ID that no changeset has is a 404. |
 | `/api/messages?ids=` | `{"messages": [...]}`: the summary of each message of `ids` (`m-1,m-2`, 1 to 200 IDs), in the order of `ids`, with `"gone": false`. A message that is gone, or that is not in the mirror, is `{"id", "gone": true}`. A text that is not a message ID is a 400. The review shows the real messages of each action with it. |
-| `/api/items?form=&status=&type=&before=&limit=` | `{"items": [...], "next"}`. Items newest first, by the date of the origin message. `form` is one of the five forms. `type` is a record type, and needs `form=record`. `before` is the `next` value of the page before: an item ID of the form of the filter. `limit` is 1 to 200, default 50. Items with the status `gone` are not in the list, unless `status=gone`. A `status` must be a status of the form (of any form, with no `form`). A `type` must be a record type of the schema. |
+| `/api/items?form=&status=&type=&before=&limit=` | `{"items": [...], "next"}`. Items newest first, by the date of the origin message. `form` is one of the five forms. `type` is a record type, and needs `form=record`. `before` is the `next` value of the page before: an item ID of the form of the filter. `limit` is 1 to 200, default 50. Items with the status `gone` are not in the list, unless `status=gone`. A `status` must be a status of the form (of any form, with no `form`). A `type` must be a record type of the schema. An item has `ready` as in the brief (issue 478). |
 | `/api/items/{id}` | One item (`c-`, `v-`, `r-`, `f-` or `s-`), also when it is gone. |
 | `/api/search?q=&limit=` | `{"messages": [summary]}`, newest first. `q` is the search text of specification 1, section 5.6. `limit` is 1 to 200, default 50. |
 | `/api/messages/{id}` | One message: the summary, and `to`, `cc`, `text` (the clean text, or `null`), `gone`, `hostile` (the hostile marks, for example `["dmarc"]`), `sender_kind` (the kind of the sender row of the `From` address: `person`, `service`, `stranger` or `hostile`; a sender with no row or no kind is a `stranger`; if two rows have the address in a different case, the first kind of `hostile`, `stranger`, `service`, `person` is used, and a row with no kind counts as `stranger`) and `items` (the IDs of the items that are not gone and that have the message as a source). |
@@ -309,7 +309,8 @@ section, so a rule decides before the gate asks the person.
 `{"count", "senders": [...], "next"}`. `count` is the count of all senders of
 the list. Each sender is `{"id", "address", "name", "count", "items"}`:
 `count` is the count of its items in the list, and `items` holds its newest 3
-items. The newest sender comes first, by the time of its newest item: the
+items. An item has `ready` as in the brief (`["draft"]` when its thread has a
+reply draft that the person can use now, issue 478). The newest sender comes first, by the time of its newest item: the
 `latest.at` of a conversation, else the date of the origin message. `limit`
 is 1 to 200, default 50. `after` is the `next` value of the page before of
 the same list. Another `after` is a 400.
