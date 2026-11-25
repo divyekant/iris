@@ -297,6 +297,13 @@ fn compose_as(
     )
 }
 
+/// True if the attachment folder has the file of each attachment of
+/// `content`, with the SHA-256 and the size of its entry. The write view
+/// offers a change of a draft only then (draft change spec, section 5).
+pub fn has_files(store: &Store, content: &Content) -> Result<bool> {
+    Ok(files(store, content)?.is_some())
+}
+
 /// The file of each attachment of `content`, from the attachment folder
 /// (send content spec, section 2). `None` if a file is missing, or its
 /// SHA-256 or its size is not the value of its entry.

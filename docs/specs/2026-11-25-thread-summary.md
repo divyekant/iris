@@ -219,6 +219,7 @@ clean text, of the account of the item.
 | The answer is not valid twice | `thread_summary_try` with `invalid = 1` for that basis and model version. No more calls until the basis or the model version changes. | Unit test. |
 | The model refuses | No second call. The answer is not valid. | Unit test. |
 | The budget refuses | No call. The try moves the thread to the end. | Engine test. |
+| The item or the summary changes during a read of `GET /api/items/{id}/summary` | One SQL statement reads the item condition and the summary, so both come from one snapshot. | API test with a writer that changes the item and the summary text in one transaction. |
 | A crash during the save | One transaction: no summary, or the whole summary. | Store test. |
 | Another run holds the batch lock | No call in this turn. | Engine test. |
 | Any other input (a thread with no clean text, a thread of another kind) | Not a candidate: no call. | Unit test of `candidates`. |

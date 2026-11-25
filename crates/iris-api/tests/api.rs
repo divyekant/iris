@@ -2285,3 +2285,83 @@ async fn an_item_that_needs_you_shows_the_summary_of_its_thread_until_it_is_stal
     let (status, _) = get(&store, &format!("/api/items/c-{with}/summary")).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "a stale summary");
 }
+
+/// The summary of an item and the condition that the item needs the person
+/// come from one snapshot of the store. The writer keeps two states, each
+/// in one transaction: the item is open with the summary text "Open.", or
+/// the item is closed with the summary text "Closed.". So in each
+/// snapshot, the item needs the person only with the text "Open.", and the
+/// route never gives "Closed.". A route that reads the item and the summary
+/// in two snapshots can see the open item, then the text of the closed one.
+#[test]
+fn the_summary_route_reads_the_item_and_the_summary_in_one_snapshot() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = temp("summary-snapshot");
+    let (store, _) = filled_n(&dir, 30);
+    let person = sender(&store, "dana@contoso.example", Some("person"));
+    let owe = json!({"direction": "you_owe", "kind": "task", "owner": {"kind": "self"},
+                     "counterparty": party(&person)});
+    exec(&store, "UPDATE message SET understood_at = 1 WHERE ?1", [1]);
+    exec(&store, "DELETE FROM link_check WHERE ?1", [1]);
+    let first: i64 = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT min(id) FROM message WHERE thread_id = (SELECT thread_id FROM message WHERE id = 1)",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    let item = add_item(&store, "commitment", "open", first, 10, owe);
+    let id = format!("c-{item}");
+    summarize_all(&store);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    assert!(iris_api::summary(&store, &id, now).unwrap().is_some());
+    exec(
+        &store,
+        "CREATE TABLE kept AS SELECT * FROM thread_summary WHERE thread_id = (SELECT thread_id FROM message WHERE id = ?1)",
+        [first],
+    );
+    exec(
+        &store,
+        "UPDATE thread_summary SET text = 'Open.' WHERE ?1",
+        [1],
+    );
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let (s, stop) = (store.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut closed = false;
+            while !stop.load(Ordering::Relaxed) {
+                closed = !closed;
+                s.write(|tx| {
+                    let (status, text) = if closed { ("closed", "Closed.") } else { ("open", "Open.") };
+                    tx.execute(
+                        "UPDATE item SET status = ?2 WHERE id = ?1",
+                        rusqlite::params![item, status],
+                    )?;
+                    tx.execute(
+                        "UPDATE thread_summary SET text = ?1 WHERE thread_id IN (SELECT thread_id FROM kept)",
+                        [text],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            }
+        })
+    };
+    let mut seen = 0;
+    for _ in 0..2000 {
+        if let Some(summary) = iris_api::summary(&store, &id, now).unwrap() {
+            assert_eq!(summary["text"], "Open.", "the summary of a closed item");
+            seen += 1;
+        }
+    }
+    assert!(seen > 0, "the route gave no summary");
+    stop.store(true, Ordering::Relaxed);
+    writer.join().unwrap();
+}

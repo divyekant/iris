@@ -180,7 +180,7 @@ documents in `schema/examples/` (files `changeset*.json`).
 
 ```json
 {
-  "model": "iris/1.3",
+  "model": "iris/1.4",
   "id": "cs-77",
   "revision": 1,
   "author": { "kind": "agent", "name": "Claude Code", "session": "se-12", "job": "j-142" },
@@ -790,7 +790,7 @@ or with a change of Iris state:
 | `undo` | `inverse` (the verb has an undo) or `none` (final, for example a sent message, or an action applied before the ledger). The column records the verb, and does not change. An undo is available now only if the entry is `applied` or `failed`, has `inverse`, and has a message with `done` that is not gone, or, for a state entry, an item in `post` and the IDs of its correction rows in `ops` (section 7.4), or, for a `draft` change entry, a `pre` and a draft that passes the undo checks of `docs/specs/2026-11-25-draft-change.md` section 3. A `draft` create and a no-op change have `none`. A state entry from before migration 26 has no such IDs, so it has no undo. The view `ledger_can_undo` (migration 23) lists these entries, and `iris_apply::undo` refuses each other entry. Else the ledger shows the entry as final, for example after Gmail deleted each message of a `trash` entry. |
 | `undone_by` | The ledger entry of the undo. |
 | `at` | The time. |
-| `hostile_before` | For a `send` only (migration 59): 1 if the thread of the draft had hostile evidence at the claim (`iris_changeset::hostile_evidence`: a message that may be hostile, a message of a `hostile` sender, or a gone message with no header), else 0. NULL for each other entry, and for a send claimed before migration 59. The trigger `ledger_hostile_before` keeps it fixed. The measure "sends without review after hostile mail" counts the applied sends with 1 that no person decided (issue #472). |
+| `hostile_before` | For a `send` only (migration 59): 1 if the thread of the draft had hostile evidence at the claim (`iris_changeset::hostile_evidence`: a message that may be hostile, a message of a `hostile` sender, or a gone message with no header), else 0. NULL for each other entry, and for a send claimed before migration 59. The trigger `ledger_hostile_before` keeps it fixed. The measure "sends without review after hostile mail" counts the applied sends with 1 that no person decided (issue #472). A send with NULL counts in neither of its fields (issue #1059). |
 
 The `ledger_message` table has one row for each message of the entry:
 
@@ -1175,7 +1175,7 @@ and goes through the policy as an agent changeset does. A rule with
 | Command | Does | Mode | Release |
 |---|---|---|---|
 | `iris serve [--addr <addr>]` | Starts the engine. The default address is `127.0.0.1:4800`. The engine refuses an address that is not a loopback address, until open question 1 has a decision. | host | 0 |
-| `iris service install` | Installs and starts the background service that runs `iris serve`: a launchd agent on macOS, a systemd user unit on Linux. If a call to the service manager fails or its result is not known, the service file stays and the command returns the error. The state of the service manager is then not known: a second `install` finishes the work, and `remove` undoes it. Both are safe to repeat. | host | 1 |
+| `iris service install` | Installs and starts the background service that runs `iris serve --data <folder>`: a launchd agent on macOS, a systemd user unit on Linux. The folder is the data folder of the command (`--data`, else `IRIS_DATA`, else the folder of the system), as an absolute path (issue #243). If a call to the service manager fails or its result is not known, the service file stays and the command returns the error. The state of the service manager is then not known: a second `install` finishes the work, and `remove` undoes it. Both are safe to repeat. | host | 1 |
 | `iris service remove` | Stops the background service and removes its file. If the stop fails, or if launchd cannot say if the agent runs, the file stays and the command returns the error. A second remove tries again. On Linux with no running systemd (`/run/systemd/system` is absent), nothing can run the unit, so it deletes the file with no `systemctl` call. If systemd runs and the stop fails (also when `systemctl` is not found), the file stays and the command returns the error. After a good stop, a failed `systemctl --user daemon-reload` is not an error, because the unit is stopped and disabled. | host | 1 |
 | `iris status` | Host mode: shows the account, the sync, the mode and the counts of the mailbox. Session mode: shows only the job (its ID, goal, state and due date) and the counts of the workspace. It shows no account, sync or mailbox count. | both | 1 |
 | `iris mirror sync` | Runs an incremental sync now, then one run of understanding inside the approved budget. If another run holds the run lock, it waits for that run to end. | host | 1 |
