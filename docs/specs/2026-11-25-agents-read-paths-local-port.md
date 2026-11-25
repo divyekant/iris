@@ -68,8 +68,15 @@ After the parse, the launch resolves each read path (`canonicalize`) and
 checks it.
 
 **Invariant.** No read path shows an object of a protected folder: the
-data folder, the home folder of the person (`HOME` of the engine) as a
-whole, or a folder of system state. A path is only one name of a folder:
+data folder, a home folder as a whole, or a folder of system state.
+
+**The home folders.** `HOME` can be absent or wrong (a service, or a data
+folder that `IRIS_DATA` or `--data` sets). So the protected home folders
+are each of these that exists: the real path of `HOME` of the engine, the
+home folder of the user of the engine in the user database
+(`getpwuid(geteuid())`), and the home folder of each other account of the
+user database (`getpwent`). If the user database gives no home folder for
+the user of the engine, the run of an adapter with read paths is refused. A path is only one name of a folder:
 a bind mount gives the same folder a second name, also with the mount
 root `/`. So the checks compare the place of a folder in its file system,
 not its name in the mount tree.
@@ -90,9 +97,9 @@ The launch refuses the run, with the path and the reason, if:
 - one of these is true, compared by place on the same device:
   - the read path holds the place of the data folder, is inside it, or is
     the same place;
-  - the read path holds the place of the home folder, or is the same
-    place. A folder inside the home folder is allowed: `~/.nvm` passes,
-    `/home` and `/Users` do not;
+  - the read path holds the place of a home folder, or is the same
+    place. A folder inside a home folder is allowed: `~/.nvm` passes,
+    `/home`, `/Users` and `/home/alice` do not;
   - the read path holds, is inside, or is a folder of system state:
     `/proc`, `/sys`, `/dev`, `/run`, `/var/run`, `/tmp`, `/var/tmp`,
     `/private/var/run`, `/private/tmp`, `/private/var/folders`,
@@ -199,6 +206,8 @@ fails at its first call.
 | `mountinfo` that cannot be read or parsed, or a mount point with an escape that the parse does not know | The run is refused | unit test |
 | A read path that is `/proc`, `/sys`, `/dev`, `/run`, `/tmp` or another folder of system state, inside one, or holds one, also by another name | The run is refused, with the path | launch test |
 | A read path that holds `HOME` (for example `/home`) | The run is refused, with the path | launch test |
+| `HOME` absent or wrong, and a read path that is or holds the home folder of the user database (for example `/home/alice`) | The run is refused, with the path | launch test with `HOME` unset |
+| The user database gives no home folder for the user of the engine | The run of an adapter with read paths is refused | unit test |
 | A read path with a socket, a FIFO or a device in its tree | The run is refused, with the path of the entry | launch test |
 | A read path with a mount point in its tree, also a bind mount on the same device | The run is refused, with the path of the entry | launch test (Linux: a bind mount in a private mount namespace of the test, if the test can make one; else a unit test of the mount ID compare) |
 | A kernel that gives no mount ID (`STATX_MNT_ID`) | The run of an adapter with read paths is refused | unit test |
@@ -223,6 +232,19 @@ All other input: the run is refused, and no session starts.
 - `crates/iris-session/src/isolation_linux.rs`: the binds, the second
   listener and relay.
 - `crates/iris-session/src/isolation_macos.rs`: the profile.
+- The rules of `JOB.md` (`crates/iris-workspace/src/lib.rs`, `RULES`, and
+  `docs/spec/03-job-workspace.md`, sections 9 and the sample). The
+  `allow_local` PR changes the two lines of the network in both files in
+  the same PR, because a test compares them byte for byte:
+  - "Nothing leaves this folder before `iris submit`, other than what your
+    agent tool sends to the hosts and the local port that `agents.toml`
+    allows for it (its model host)."
+  - "This session has no network other than the hosts and the local port
+    that `agents.toml` allows for your agent tool (its model host), and no
+    mailbox credentials."
+  The text is the same for each session, so the build of the workspace
+  does not need to know the adapter. A session with no `allow_local` has
+  no local port, and the line stays true.
 - Docs: `docs/AGENT-SESSIONS.md` or the place where `agents.toml` is
   documented for the person.
 - The launcher and sandbox specs get a line that points here.
