@@ -129,7 +129,9 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 
-pub use backup::{BackupLock, Cleaned, PolicyExpect, PolicyWrite, GONE_KEEP_MS};
+pub use backup::{
+    BackupLock, Cleaned, PolicyExpect, PolicyWrite, DRAFT_FILES_MAX, DRAFT_FILE_MAX, GONE_KEEP_MS,
+};
 pub use content::ContentWriter;
 pub use file_lock::{FileLock, Probe};
 pub use remove::{Deleted, STATE_REMOVED, STATE_REMOVING};
