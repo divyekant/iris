@@ -14,6 +14,16 @@ const SYNC_MESSAGES: usize = 2_000;
 /// The base decision of Iris is the lightest memory footprint: 50 MB.
 const MAX_RSS_KIB: u64 = 50 * 1024;
 
+/// The highest anonymous memory (heap, stacks and other private pages that
+/// the program allocates) of `iris serve` on Linux, in KiB. Issue #1011: in
+/// the debug build of the tests, the pages of the program file were about
+/// 33 MB of an RSS of 50 MB, and they grow with each change of the code, not
+/// with the work. The store uses no mmap (`PRAGMA mmap_size = 0`), so its
+/// page cache is anonymous memory too. The anonymous memory after the first sync of
+/// `SYNC_MESSAGES` was 15,900 to 17,500 KiB (2026-11-25); the limit leaves
+/// about 15 % over the highest value.
+const MAX_ANON_KIB: u64 = 20 * 1024;
+
 /// The longest time from the program start to the first HTTP answer.
 const MAX_START: Duration = Duration::from_secs(1);
 
@@ -27,7 +37,7 @@ fn check(
     let mut over = Vec::new();
     if rss_kib > max_rss_kib {
         over.push(format!(
-            "RSS {rss_kib} KiB is over the limit {max_rss_kib} KiB"
+            "memory {rss_kib} KiB is over the limit {max_rss_kib} KiB"
         ));
     }
     if start > max_start {
@@ -39,6 +49,24 @@ fn check(
         Ok(())
     } else {
         Err(over.join("; "))
+    }
+}
+
+/// The memory of a process that the budget limits, in KiB, with its limit:
+/// on Linux the anonymous memory (`/proc/<pid>/smaps_rollup`), elsewhere the
+/// RSS (`ps`) with the limit of 50 MB.
+fn memory_kib(pid: u32) -> (u64, u64) {
+    match std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")) {
+        Ok(text) => {
+            let anon = text
+                .lines()
+                .find_map(|l| l.strip_prefix("Anonymous:"))
+                .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
+                .expect("smaps_rollup has Anonymous");
+            eprintln!("RSS {} KiB, anonymous {anon} KiB", rss_kib(pid));
+            (anon, MAX_ANON_KIB)
+        }
+        Err(_) => (rss_kib(pid), MAX_RSS_KIB),
     }
 }
 
@@ -121,7 +149,7 @@ const START_TRIES: usize = 3;
 
 #[test]
 fn serve_stays_inside_the_memory_and_start_budget() {
-    let mut fastest: Option<(Duration, u64)> = None;
+    let mut fastest: Option<(Duration, (u64, u64))> = None;
     for i in 0..START_TRIES {
         let begin = Instant::now();
         let mut child = KillOnDrop(
@@ -136,17 +164,17 @@ fn serve_stays_inside_the_memory_and_start_budget() {
         let addr = read_addr(child.0.stderr.take().unwrap(), MAX_START * 10).unwrap();
         wait_for_http(&addr, begin, MAX_START * 10).unwrap();
         let start = begin.elapsed();
-        let rss = rss_kib(child.0.id());
-        eprintln!("iris serve: start {start:?}, RSS {rss} KiB");
+        let mem = memory_kib(child.0.id());
+        eprintln!("iris serve: start {start:?}, memory {} KiB", mem.0);
         if fastest.is_none_or(|(f, _)| start < f) {
-            fastest = Some((start, rss));
+            fastest = Some((start, mem));
         }
         if start <= MAX_START {
             break;
         }
     }
-    let (start, rss) = fastest.unwrap();
-    check(rss, start, MAX_RSS_KIB, MAX_START).unwrap();
+    let (start, (mem, limit)) = fastest.unwrap();
+    check(mem, start, limit, MAX_START).unwrap();
 }
 
 #[test]
@@ -157,7 +185,7 @@ fn check_accepts_values_inside_the_limits() {
 #[test]
 fn check_fails_when_a_limit_is_too_low() {
     let err = check(3000, Duration::from_millis(20), 1, MAX_START).unwrap_err();
-    assert!(err.contains("RSS"), "{err}");
+    assert!(err.contains("memory"), "{err}");
     let err = check(
         3000,
         Duration::from_millis(20),
@@ -240,15 +268,15 @@ fn serve_stays_inside_the_memory_budget_after_a_first_sync() {
         assert!(child.0.try_wait().unwrap().is_none(), "iris serve ended");
         std::thread::sleep(Duration::from_millis(50));
     }
-    let rss = rss_kib(child.0.id());
+    let (mem, limit) = memory_kib(child.0.id());
     let fetched = common::count(
         &store,
         "SELECT count(*) FROM message WHERE fetched_at IS NOT NULL",
     );
     eprintln!(
-        "iris serve: first sync of {fetched} messages in {:?}, RSS {rss} KiB",
+        "iris serve: first sync of {fetched} messages in {:?}, memory {mem} KiB",
         begin.elapsed()
     );
     assert_eq!(fetched, SYNC_MESSAGES as i64);
-    check(rss, Duration::ZERO, MAX_RSS_KIB, MAX_START).unwrap();
+    check(mem, Duration::ZERO, limit, MAX_START).unwrap();
 }
