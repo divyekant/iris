@@ -1312,7 +1312,7 @@ fn the_upgrade_drops_the_items_of_a_draft_or_copy() {
     // The store of version 41: no view and no item trigger.
     b.store
         .write(|tx| {
-            tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER IF EXISTS spam_drops_items; DROP TRIGGER IF EXISTS spam_back_drops_items; DROP VIEW item_droppable;")?;
+            tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; DROP TRIGGER IF EXISTS context_sender_name; DROP TRIGGER IF EXISTS context_hostile; DROP INDEX IF EXISTS message_context_unknown; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER IF EXISTS spam_drops_items; DROP TRIGGER IF EXISTS spam_back_drops_items; DROP VIEW item_droppable;")?;
             Ok(())
         })
         .unwrap();
@@ -2708,7 +2708,7 @@ Your one-time code is 918273. It ends in 10 minutes.
             "upgrade" => {
                 sql(
                     &b,
-                    "ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                    "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; DROP TRIGGER IF EXISTS context_sender_name; DROP TRIGGER IF EXISTS context_hostile; DROP INDEX IF EXISTS message_context_unknown; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                      ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
                 );
                 let Box_ {
@@ -2810,7 +2810,7 @@ Your one-time code is 918273. It ends in 10 minutes.
     b.store
         .write(|tx| {
             Ok(tx.execute_batch(
-                "ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; DROP TRIGGER IF EXISTS context_sender_name; DROP TRIGGER IF EXISTS context_hostile; DROP INDEX IF EXISTS message_context_unknown; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                  ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
             )?)
         })
@@ -2886,7 +2886,7 @@ Your one-time code is 918273. It ends in 10 minutes.
     b.store
         .write(|tx| {
             Ok(tx.execute_batch(
-                "ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; DROP TRIGGER IF EXISTS context_sender_name; DROP TRIGGER IF EXISTS context_hostile; DROP INDEX IF EXISTS message_context_unknown; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                  ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
             )?)
         })
@@ -2970,4 +2970,962 @@ fn migration_61_gives_old_mail_with_a_cut_header_the_spoof_mark() {
     assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
     assert!(hostile(big).unwrap_or_default().contains("spoof"));
     assert_eq!(fake.calls.borrow().len(), calls, "no model call");
+}
+
+/// Issue 1049: the text of message `k` of the context tests. Each one has
+/// its own sender, so only the thread context carries it.
+fn context_mail(k: usize) -> String {
+    format!("From: x{k}@example.net\nTo: owner@example.com\nSubject: S\n\nWords k{k}k.\n")
+}
+
+/// Runs the queue and each message that waits for the understanding,
+/// oldest first, until nothing waits. Records the data of the last model
+/// call of each message.
+fn drain(b: &Box_, fake: &Fake, last: &mut std::collections::HashMap<i64, String>) {
+    for _ in 0..20 {
+        // Step 1 of each batch run, then the queue of the threads.
+        iris_understand::store::recheck_links(&b.store, NOW, None).unwrap();
+        iris_understand::store::update_due_talks(&b.store, NOW).unwrap();
+        let waiting: Vec<i64> = b
+            .store
+            .read(|c| {
+                let mut st = c.prepare(
+                    "SELECT id FROM message WHERE understood_at IS NULL AND gone_at IS NULL
+                     ORDER BY internal_date, id",
+                )?;
+                let v = st
+                    .query_map([], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                Ok(v)
+            })
+            .unwrap();
+        if waiting.is_empty() {
+            return;
+        }
+        for m in waiting {
+            let before = fake.calls.borrow().len();
+            understand(&b.store, m, fake, NOW).unwrap();
+            if let Some(c) = fake.calls.borrow().get(before) {
+                last.insert(m, c.1.clone());
+            }
+        }
+    }
+    panic!("the understanding did not end");
+}
+
+/// Issue 1049, generated changes: after each change of the messages of a
+/// thread (SPAM comes or goes, a message goes away or comes back) and the
+/// runs that follow, the last model call of each live message that is not
+/// SPAM had exactly its context now: the newest 3 earlier live messages
+/// without SPAM.
+#[test]
+fn a_change_of_an_earlier_message_runs_the_later_ones_again() {
+    const N: usize = 5;
+    let b = store("context-check");
+    let ids: Vec<i64> = (1..=N)
+        .map(|k| {
+            b.add_in(
+                &k.to_string(),
+                "t",
+                NOW - DAY * (10 - k as i64),
+                &context_mail(k),
+                &["INBOX"],
+            )
+        })
+        .collect();
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    let (mut spam, mut gone) = ([false; N], [false; N]);
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    for step in 0..40 {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        let k = (x % N as u64) as usize;
+        let m = ids[k];
+        let sql = if x.is_multiple_of(2) {
+            spam[k] = !spam[k];
+            if spam[k] {
+                "INSERT INTO message_label(message_id, label_id)
+                 SELECT ?1, id FROM label WHERE provider_id = 'SPAM'"
+            } else {
+                "DELETE FROM message_label WHERE message_id = ?1
+                   AND label_id = (SELECT id FROM label WHERE provider_id = 'SPAM')"
+            }
+        } else {
+            gone[k] = !gone[k];
+            if gone[k] {
+                "UPDATE message SET gone_at = 1 WHERE id = ?1"
+            } else {
+                "UPDATE message SET gone_at = NULL WHERE id = ?1"
+            }
+        };
+        b.store
+            .write(|tx| {
+                tx.execute(sql, [m])?;
+                Ok(())
+            })
+            .unwrap();
+        drain(&b, &fake, &mut last);
+        for j in 0..N {
+            if spam[j] || gone[j] {
+                continue;
+            }
+            let data = &last[&ids[j]];
+            let context: Vec<usize> = (0..j)
+                .rev()
+                .filter(|&i| !spam[i] && !gone[i])
+                .take(3)
+                .collect();
+            for i in 0..N {
+                let has = data.contains(&format!("Words k{}k.", i + 1));
+                let want = i == j || context.contains(&i);
+                assert_eq!(
+                    has,
+                    want,
+                    "step {step}, message {}, context {}",
+                    j + 1,
+                    i + 1
+                );
+            }
+        }
+    }
+}
+
+/// Issue 1049: a message that a run understood before migration 69 has no
+/// recorded context. The first check records its context and runs nothing
+/// again.
+#[test]
+fn a_message_with_no_recorded_context_gets_one_and_does_not_run_again() {
+    let b = store("context-baseline");
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let fake = Fake::default();
+    understand(&b.store, m1, &fake, NOW).unwrap();
+    understand(&b.store, m2, &fake, NOW).unwrap();
+    iris_understand::store::update_due_talks(&b.store, NOW).unwrap();
+    let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m2);
+    assert!(
+        recorded.starts_with(&format!("t:{m1}:")) && recorded.contains(";s:;p:"),
+        "{recorded}"
+    );
+    // Migration 69 gives each understood message "?".
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE message SET context = '?'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    iris_understand::store::update_due_talks(&b.store, NOW).unwrap();
+    let understood: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m2);
+    assert!(understood.is_some());
+    let now: String = b.col("SELECT context FROM message WHERE id = ?1", m2);
+    assert_eq!(now, recorded);
+    assert_eq!(fake.calls.borrow().len(), 2);
+}
+
+/// Issue 1049, pre-review: a change after migration 69 and before the
+/// queue step records the context of an old message ("?") runs the later
+/// message again: the change put the thread in `talk_due` first.
+#[test]
+fn a_change_before_the_first_record_of_an_old_message_runs_it_again() {
+    let b = store("context-upgrade");
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    assert!(last[&m2].contains("Words k1k."));
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE message SET context = '?'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    // A new clean text of the same row: only the context of m2 changes.
+    b.store
+        .put_body(
+            m1,
+            &iris_store::Body {
+                subject: "S".into(),
+                sender: "x1".into(),
+                text: "New words.".into(),
+            },
+        )
+        .unwrap();
+    let runs = |fake: &Fake| {
+        fake.calls
+            .borrow()
+            .iter()
+            .filter(|c| c.1.contains("Words k2k."))
+            .count()
+    };
+    let before = runs(&fake);
+    drain(&b, &fake, &mut last);
+    // The run of m1 makes its clean text again from its content.
+    assert_eq!(runs(&fake), before + 1, "m2 runs again");
+}
+
+/// Issue 1049: the key records only the earlier messages that the data of
+/// the model call held. When the current message fills the budget, a
+/// change of an earlier message runs nothing again.
+#[test]
+fn a_context_that_the_budget_left_out_runs_nothing_again() {
+    let b = store("context-budget");
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let long = format!(
+        "From: y@example.net\nTo: owner@example.com\nSubject: S\n\n{}\n",
+        "漢字".repeat(20_000)
+    );
+    let m2 = b.add_in("2", "t", NOW - DAY, &long, &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    assert!(!last[&m2].contains("Words k1k."));
+    let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m2);
+    assert!(recorded.starts_with("t!:;s:;p:"), "{recorded}");
+    let calls = fake.calls.borrow().len();
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO message_label(message_id, label_id)
+                 SELECT ?1, id FROM label WHERE provider_id = 'SPAM'",
+                [m1],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    drain(&b, &fake, &mut last);
+    assert_eq!(
+        fake.calls.borrow().len(),
+        calls,
+        "SPAM makes no call, and m2 did not run again"
+    );
+}
+
+/// Issue 1049: in a long thread, the check after a run reads only the next
+/// few messages, and a run in order of a new thread runs nothing twice.
+#[test]
+fn the_check_after_a_run_reads_only_the_next_few_messages() {
+    let b = store("context-long");
+    let n = 60;
+    let ids: Vec<i64> = (1..=n)
+        .map(|k| {
+            b.add_in(
+                &k.to_string(),
+                "t",
+                NOW - DAY * 100 + k as i64 * 1000,
+                &context_mail(k),
+                &["INBOX"],
+            )
+        })
+        .collect();
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    assert_eq!(fake.calls.borrow().len(), n, "one call for each message");
+    // Each message has its own sender: only the thread walk reads rows.
+    let read = iris_understand::store::check_later(&b.store, ids[0]).unwrap();
+    assert!(read <= 3, "{read} rows");
+    // The first message leaves: the next 3 messages run again, no other.
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO message_label(message_id, label_id)
+                 SELECT ?1, id FROM label WHERE provider_id = 'SPAM'",
+                [ids[0]],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    drain(&b, &fake, &mut last);
+    assert_eq!(fake.calls.borrow().len(), n + 3);
+}
+
+/// Sets new content on message `m` (the same row), as sync does.
+fn new_content(b: &Box_, m: i64, raw: &str) {
+    let sha = b
+        .store
+        .put_content(raw.replace('\n', "\r\n").as_bytes())
+        .unwrap();
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET content_sha256 = ?2 WHERE id = ?1",
+                rusqlite::params![m, sha],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Issue 1049, pre-review: new content of an earlier message keeps its row
+/// ID, and the later message runs again with the new text.
+#[test]
+fn new_content_of_an_earlier_message_runs_the_later_one_again() {
+    let b = store("context-content");
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    assert!(last[&m2].contains("Words k1k."));
+    new_content(
+        &b,
+        m1,
+        "From: x1@example.net\nTo: owner@example.com\nSubject: S\n\nNew words.\n",
+    );
+    drain(&b, &fake, &mut last);
+    assert!(last[&m2].contains("New words."), "{}", last[&m2]);
+}
+
+/// Issue 1049, pre-review: an earlier message that changes its sender from
+/// A to B is not a text of A any more. A later message of A after more
+/// than 3 other messages (out of the thread walk) runs again.
+#[test]
+fn a_new_sender_of_an_earlier_message_runs_the_later_mail_of_the_old_sender_again() {
+    let b = store("context-sender");
+    let a =
+        |text: &str| format!("From: a@example.net\nTo: owner@example.com\nSubject: S\n\n{text}\n");
+    let m1 = b.add_in("1", "t", NOW - 9 * DAY, &a("First words."), &["INBOX"]);
+    for k in 2..=5 {
+        b.add_in(
+            &k.to_string(),
+            "t",
+            NOW - (10 - k as i64) * DAY,
+            &context_mail(k),
+            &["INBOX"],
+        );
+    }
+    let m6 = b.add_in("6", "t", NOW - DAY, &a("Last words."), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m6);
+    assert!(recorded.contains(&format!(";s:{m1}:")), "{recorded}");
+    let calls = fake.calls.borrow().len();
+    new_content(
+        &b,
+        m1,
+        "From: b@example.net\nTo: owner@example.com\nSubject: S\n\nFirst words.\n",
+    );
+    drain(&b, &fake, &mut last);
+    let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m6);
+    assert!(recorded.contains(";s:;p:"), "{recorded}");
+    // m1 and m6 ran again; m2 to m5 too, because m1 is in their context.
+    assert!(fake.calls.borrow().len() >= calls + 2);
+}
+
+/// Issue 1049, pre-review: a new clean text of an earlier message (the
+/// same row and content) runs the later message again.
+#[test]
+fn a_new_clean_text_of_an_earlier_message_runs_the_later_one_again() {
+    let b = store("context-body");
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    b.store
+        .put_body(
+            m1,
+            &iris_store::Body {
+                subject: "S".into(),
+                sender: "x1".into(),
+                text: "Other clean words.".into(),
+            },
+        )
+        .unwrap();
+    drain(&b, &fake, &mut last);
+    assert!(last[&m2].contains("Other clean words."), "{}", last[&m2]);
+}
+
+/// Issue 1049, pre-review: sync moves an understood earlier message to
+/// another thread with the same content. The later message of the old
+/// thread runs again without it.
+#[test]
+fn a_message_that_moves_to_another_thread_leaves_the_context_of_the_old_one() {
+    let b = store("context-move");
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    assert!(last[&m2].contains("Words k1k."));
+    // The same provider message, in another thread.
+    let runs_of_m1 = |fake: &Fake| {
+        fake.calls
+            .borrow()
+            .iter()
+            .filter(|c| c.1.contains("The current message:\nWords k1k."))
+            .count()
+    };
+    let before = runs_of_m1(&fake);
+    let moved = b.add_in("1", "other", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    assert_eq!(moved, m1);
+    drain(&b, &fake, &mut last);
+    assert!(!last[&m2].contains("Words k1k."), "{}", last[&m2]);
+    // The moved message runs again too: its items name its new thread.
+    assert_eq!(runs_of_m1(&fake), before + 1);
+}
+
+/// Issue 1049, pre-review: sync saves a new sender address for an earlier
+/// message with the same content (a header with no new body). A later
+/// message of the old sender, out of the thread walk, runs again.
+#[test]
+fn a_new_header_sender_with_the_same_content_runs_the_later_mail_again() {
+    let b = store("context-header");
+    let a =
+        |text: &str| format!("From: a@example.net\nTo: owner@example.com\nSubject: S\n\n{text}\n");
+    let m1 = b.add_in("1", "t", NOW - 9 * DAY, &a("First words."), &["INBOX"]);
+    for k in 2..=5 {
+        b.add_in(
+            &k.to_string(),
+            "t",
+            NOW - (10 - k as i64) * DAY,
+            &context_mail(k),
+            &["INBOX"],
+        );
+    }
+    let m6 = b.add_in("6", "t", NOW - DAY, &a("Last words."), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m6);
+    assert!(recorded.contains(&format!(";s:{m1}:")), "{recorded}");
+    let sha: String = b.col("SELECT content_sha256 FROM message WHERE id = ?1", m1);
+    b.store
+        .put_messages(
+            b.account,
+            &[NewMessage {
+                provider_id: "1".into(),
+                thread_provider_id: "t".into(),
+                content_sha256: Some(sha),
+                internal_date: Some(NOW - 9 * DAY),
+                labels: vec!["INBOX".into()],
+                header: iris_store::Header {
+                    from_addr: Some("b@example.net".into()),
+                    ..Default::default()
+                },
+                ..NewMessage::default()
+            }],
+        )
+        .unwrap();
+    drain(&b, &fake, &mut last);
+    let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m6);
+    assert!(recorded.contains(";s:;p:"), "{recorded}");
+}
+
+/// Issue 1049, pre-review: in a new thread, the later messages wait for
+/// their first run. The check after the run of the first message reads
+/// none of them.
+#[test]
+fn the_check_after_a_run_skips_mail_that_waits_for_its_first_run() {
+    let b = store("context-pending");
+    let ids: Vec<i64> = (1..=60)
+        .map(|k| {
+            b.add_in(
+                &k.to_string(),
+                "t",
+                NOW - DAY * 100 + k as i64 * 1000,
+                &context_mail(k),
+                &["INBOX"],
+            )
+        })
+        .collect();
+    understand(&b.store, ids[0], &Fake::default(), NOW).unwrap();
+    assert_eq!(
+        iris_understand::store::check_later(&b.store, ids[0]).unwrap(),
+        0
+    );
+}
+
+/// Issue 1049, pre-review: the record holds only the earlier text that the
+/// run read. A change of an earlier text after the cut of the thread
+/// context (2,000 characters) runs nothing again.
+#[test]
+fn a_change_beyond_the_text_that_the_run_read_runs_nothing_again() {
+    let b = store("context-tail");
+    let raw = |text: &str| {
+        format!(
+            "From: x1@example.net\nTo: owner@example.com\nSubject: S\n\n{}{text}\n",
+            "Some words. ".repeat(250)
+        )
+    };
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &raw("Old tail."), &["INBOX"]);
+    b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    let later = |fake: &Fake| {
+        fake.calls
+            .borrow()
+            .iter()
+            .filter(|c| c.1.contains("Words k2k."))
+            .count()
+    };
+    let runs = later(&fake);
+    assert_eq!(runs, 1);
+    new_content(&b, m1, &raw("New tail."));
+    drain(&b, &fake, &mut last);
+    assert_eq!(later(&fake), runs, "no new run of the later message");
+    // A change inside the cut runs the later message again.
+    new_content(&b, m1, &raw("New tail.").replacen("Some", "Other", 1));
+    drain(&b, &fake, &mut last);
+    assert_eq!(later(&fake), runs + 1);
+}
+
+/// Issue 1049, pre-review: the budget cut an earlier text. When that text
+/// shrinks to exactly the bytes that the data held, the next data has no
+/// cut mark, so the later message runs again.
+#[test]
+fn an_earlier_text_that_shrinks_to_the_held_bytes_runs_the_later_one_again() {
+    let b = store("context-shrink");
+    let words = "x".repeat(1_500);
+    let raw1 =
+        |text: &str| format!("From: x1@example.net\nTo: owner@example.com\nSubject: S\n\n{text}\n");
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &raw1(&words), &["INBOX"]);
+    let raw2 = |k: usize| {
+        format!(
+            "From: y@example.net\nTo: owner@example.com\nSubject: S\n\n{}\n",
+            "漢".repeat(k)
+        )
+    };
+    let m2 = b.add_in("2", "t", NOW - DAY, &raw2(1_000), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    // Find a size of the current text that leaves room for only a part of
+    // the earlier text: a larger current text leaves less room. The clean
+    // text has at most 32,000 characters, so each one takes 3 bytes.
+    let record = |b: &Box_| -> String { b.col("SELECT context FROM message WHERE id = ?1", m2) };
+    let (mut lo, mut hi) = (1_000, iris_understand::prompt::MAX_DATA / 3);
+    loop {
+        let k = (lo + hi) / 2;
+        new_content(&b, m2, &raw2(k));
+        drain(&b, &fake, &mut last);
+        let r = record(&b);
+        // "t:": the data held the whole earlier text. "t!:": a part or none.
+        let Some(e) = r.strip_prefix("t!:") else {
+            lo = k;
+            assert!(hi - lo > 1, "no size with a cut earlier text");
+            continue;
+        };
+        let e = e.split(';').next().unwrap();
+        let n: usize = e
+            .rsplit(':')
+            .next()
+            .map_or(0, |n| n.trim_end_matches('+').parse().unwrap_or(0));
+        // The whole entry has more than 1,500 bytes.
+        if (200..1_500).contains(&n) {
+            break;
+        }
+        if n < 200 {
+            hi = k;
+        } else {
+            lo = k;
+        }
+        assert!(hi - lo > 1, "no size with a cut earlier text");
+    }
+    // The data holds the start of the entry and the cut mark.
+    let data = last[&m2].clone();
+    let head = "Earlier message in the thread:\n";
+    let start = data.find(head).unwrap() + head.len();
+    // The cut mark of the data (`prompt::CUT_MARK`).
+    let mark = data[start..].find("\n[cut]").unwrap();
+    let held = &data[start..start + mark];
+    let text = held.split_once("Subject: S\n").unwrap().1.to_string();
+    assert!(text.len() < words.len() && !text.is_empty());
+    let calls = fake.calls.borrow().len();
+    new_content(&b, m1, &raw1(&text));
+    drain(&b, &fake, &mut last);
+    let later: Vec<_> = fake.calls.borrow()[calls..]
+        .iter()
+        .filter(|c| c.1.contains("漢漢漢"))
+        .map(|c| c.1.clone())
+        .collect();
+    assert_eq!(later.len(), 1, "the later message runs again");
+}
+
+/// Issue 1049, pre-review: many later rows that do not count (SPAM of the
+/// same sender) do not make the walk after a run long. The thread goes to
+/// the queue, and the queue checks the later mail of the sender.
+#[test]
+fn a_long_tail_of_spam_keeps_the_walk_short() {
+    let b = store("context-spam-tail");
+    let a =
+        |text: &str| format!("From: a@example.net\nTo: owner@example.com\nSubject: S\n\n{text}\n");
+    let m1 = b.add_in("1", "t", NOW - 300 * DAY, &a("First words."), &["INBOX"]);
+    for k in 0..150 {
+        b.add_in(
+            &format!("s{k}"),
+            "t",
+            NOW - (290 - k) * DAY,
+            &a(&format!("Spam {k}.")),
+            &["SPAM"],
+        );
+    }
+    let last_a = b.add_in("z", "t", NOW - DAY, &a("Last words."), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", last_a);
+    assert!(recorded.contains(&format!(";s:{m1}:")), "{recorded}");
+    let read = iris_understand::store::check_later(&b.store, m1).unwrap();
+    assert!(read <= 2 * 64, "{read} rows");
+    let due: i64 = b.col(
+        "SELECT count(*) FROM talk_due WHERE thread_id = (SELECT thread_id FROM message WHERE id = ?1)",
+        m1,
+    );
+    assert_eq!(due, 1);
+    b.store
+        .put_body(
+            m1,
+            &iris_store::Body {
+                subject: "S".into(),
+                sender: "a".into(),
+                text: "Other first words.".into(),
+            },
+        )
+        .unwrap();
+    let before = fake.calls.borrow().len();
+    drain(&b, &fake, &mut last);
+    assert!(
+        fake.calls.borrow()[before..]
+            .iter()
+            .any(|c| c.1.contains("Last words.")),
+        "the later mail of the sender runs again"
+    );
+}
+
+/// Issue 1049, pre-review: the known parties of the thread are data of the
+/// model. An earlier sender that becomes a known person, or a known person
+/// with a new name, runs the later mail of another sender again. Later
+/// mail does not change the parties of an earlier run.
+#[test]
+fn a_new_known_party_runs_the_later_mail_again() {
+    let b = store("context-parties");
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    assert!(!last[&m2].contains("Ann"));
+    let set = |sql: &str| {
+        b.store
+            .write(|tx| {
+                tx.execute(sql, [])?;
+                Ok(())
+            })
+            .unwrap();
+    };
+    set(
+        "INSERT INTO sender(address, name, kind, decided_by) VALUES ('x1@example.net', 'Ann', 'person', 'person')
+         ON CONFLICT(address) DO UPDATE SET name = 'Ann', kind = 'person', decided_by = 'person'",
+    );
+    drain(&b, &fake, &mut last);
+    assert!(last[&m2].contains("Ann <x1@example.net>"), "{}", last[&m2]);
+    // A new name of the known person (a person sets kinds and names).
+    set("UPDATE sender SET name = 'Ann B' WHERE address = 'x1@example.net'");
+    drain(&b, &fake, &mut last);
+    assert!(
+        last[&m2].contains("Ann B <x1@example.net>"),
+        "{}",
+        last[&m2]
+    );
+    // A known person in later mail only: the earlier run keeps its data.
+    let calls = fake.calls.borrow().len();
+    let m3 = b.add_in("3", "t", NOW - DAY / 2, &context_mail(3), &["INBOX"]);
+    set(
+        "INSERT INTO sender(address, name, kind, decided_by) VALUES ('x3@example.net', 'Cy', 'person', 'person')
+         ON CONFLICT(address) DO UPDATE SET name = 'Cy', kind = 'person', decided_by = 'person'",
+    );
+    drain(&b, &fake, &mut last);
+    assert_eq!(fake.calls.borrow().len(), calls + 1, "only m3 runs");
+    assert!(last.contains_key(&m3));
+    let _ = m1;
+}
+
+/// Issue 1049, pre-review: a later message with the same date is later in
+/// the order of the runs, so its known sender does not run the earlier
+/// message again.
+#[test]
+fn a_known_party_of_a_later_message_with_the_same_date_runs_nothing_earlier() {
+    let b = store("context-parties-date");
+    let m1 = b.add_in("1", "t", NOW - DAY, &context_mail(1), &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    assert!(m1 < m2);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    let runs_of_m1 = |fake: &Fake| {
+        fake.calls
+            .borrow()
+            .iter()
+            .filter(|c| c.1.contains("Words k1k.") && !c.1.contains("Words k2k."))
+            .count()
+    };
+    let before = runs_of_m1(&fake);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sender(address, name, kind, decided_by)
+                 VALUES ('x2@example.net', 'Bo', 'person', 'person')
+                 ON CONFLICT(address) DO UPDATE SET name = 'Bo', kind = 'person',
+                   decided_by = 'person'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    drain(&b, &fake, &mut last);
+    assert_eq!(runs_of_m1(&fake), before, "m1 does not run again");
+}
+
+/// Issue 1049, pre-review: the record holds only the known parties that the
+/// data held. When the current message fills the budget, a new name of a
+/// known party runs nothing again.
+#[test]
+fn a_known_party_that_the_budget_left_out_runs_nothing_again() {
+    let b = store("context-parties-budget");
+    b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let long = format!(
+        "From: y@example.net\nTo: owner@example.com\nSubject: S\n\n{}\n",
+        "漢字".repeat(20_000)
+    );
+    let m2 = b.add_in("2", "t", NOW - DAY, &long, &["INBOX"]);
+    let set = |sql: &str| {
+        b.store
+            .write(|tx| {
+                tx.execute(sql, [])?;
+                Ok(())
+            })
+            .unwrap();
+    };
+    set("INSERT INTO sender(address, name, kind, decided_by)
+         VALUES ('x1@example.net', 'Ann', 'person', 'person')
+         ON CONFLICT(address) DO UPDATE SET name = 'Ann', kind = 'person',
+           decided_by = 'person'");
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    assert!(!last[&m2].contains("Known party"));
+    let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m2);
+    assert!(recorded.contains(";p!:"), "{recorded}");
+    let runs_of_m2 = |fake: &Fake| {
+        fake.calls
+            .borrow()
+            .iter()
+            .filter(|c| c.1.contains("漢字漢字"))
+            .count()
+    };
+    let before = runs_of_m2(&fake);
+    set("UPDATE sender SET name = 'Ann B' WHERE address = 'x1@example.net'");
+    drain(&b, &fake, &mut last);
+    // m1 runs again: its own data holds the party.
+    assert_eq!(runs_of_m2(&fake), before, "m2 does not run again");
+}
+
+/// Issue 1049, pre-review: mail that the model called phishing records
+/// "-". A new run of it calls no model, because the mark stays until a
+/// rebuild (spec 1), so a change of an earlier message runs nothing.
+#[test]
+fn mail_that_the_model_calls_phishing_calls_no_model_after_a_change() {
+    let b = store("context-phishing");
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let fake = Fake::with(&[r#"{"items": [], "phishing": false}"#, PHISHING]);
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m2);
+    assert_eq!(recorded, "-");
+    let calls = fake.calls.borrow().len();
+    // A new understood_at makes the next run of m2 a new run.
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET understood_at = NULL WHERE id = ?1",
+                [m2],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    drain(&b, &fake, &mut last);
+    assert_eq!(fake.calls.borrow().len(), calls, "no model call");
+    let marks: Option<String> = b.col("SELECT hostile FROM message WHERE id = ?1", m2);
+    assert_eq!(marks.as_deref(), Some(r#"["phishing"]"#));
+    let _ = m1;
+}
+
+/// Issue 1049, pre-review: the known parties follow the order of the runs,
+/// in which mail with no date comes first.
+#[test]
+fn known_parties_put_mail_with_no_date_first() {
+    let b = store("context-parties-nodate");
+    let m0 = b.add_in("0", "t", NOW - 3 * DAY, &context_mail(0), &["INBOX"]);
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET internal_date = NULL WHERE id = ?1",
+                [m0],
+            )?;
+            for (a, n) in [("x0@example.net", "Al"), ("x1@example.net", "Bea")] {
+                tx.execute(
+                    "INSERT INTO sender(address, name, kind, decided_by)
+                     VALUES (?1, ?2, 'person', 'person')
+                     ON CONFLICT(address) DO UPDATE SET name = ?2, kind = 'person',
+                       decided_by = 'person'",
+                    [a, n],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    // The dated message gets the party of the earlier mail with no date.
+    assert!(last[&m1].contains("Al <x0@example.net>"), "{}", last[&m1]);
+    // The mail with no date does not get the party of later mail.
+    assert!(!last[&m0].contains("Bea <x1@example.net>"), "{}", last[&m0]);
+}
+
+/// Issue 1049, pre-review: an earlier message that comes back, also with
+/// no content, can add a known party: the later message runs again.
+#[test]
+fn an_earlier_message_that_comes_back_with_no_content_runs_the_later_one_again() {
+    let b = store("context-back");
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sender(address, name, kind, decided_by)
+                 VALUES ('x1@example.net', 'Ann', 'person', 'person')
+                 ON CONFLICT(address) DO UPDATE SET name = 'Ann', kind = 'person',
+                   decided_by = 'person'",
+                [],
+            )?;
+            // The header that an earlier run saved.
+            tx.execute(
+                "UPDATE header SET from_addr = 'x1@example.net' WHERE message_id = ?1",
+                [m1],
+            )?;
+            tx.execute(
+                "UPDATE message SET gone_at = ?2 WHERE id = ?1",
+                [m1, NOW - DAY],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    assert!(!last[&m2].contains("Ann <x1@example.net>"), "{}", last[&m2]);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET gone_at = NULL, content_sha256 = NULL WHERE id = ?1",
+                [m1],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    iris_understand::store::update_due_talks(&b.store, NOW).unwrap();
+    let understood: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m2);
+    assert!(understood.is_none(), "m2 runs again");
+}
+
+/// Issue 1049, pre-review: each writer of a hostile mark changes the
+/// context of the later messages. A mark that a writer sets with no new run
+/// of the message (for example a release) runs the later message again.
+#[test]
+fn a_new_hostile_mark_with_no_run_runs_the_later_one_again() {
+    let b = store("context-hostile");
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET hostile = '[\"spoof\"]' WHERE id = ?1",
+                [m1],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    iris_understand::store::update_due_talks(&b.store, NOW).unwrap();
+    let understood: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m2);
+    assert!(understood.is_none(), "m2 runs again");
+}
+
+/// Issue 1049, pre-review: the record holds the room of the budget for the
+/// known parties. A party that did not fit and starts to fit (a shorter
+/// name) runs the later message again.
+#[test]
+fn a_known_party_that_starts_to_fit_runs_the_later_one_again() {
+    let b = store("context-parties-fit");
+    b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let raw2 = |k: usize| {
+        format!(
+            "From: y@example.net\nTo: owner@example.com\nSubject: S\n\n{}\n",
+            "漢".repeat(k)
+        )
+    };
+    let m2 = b.add_in("2", "t", NOW - DAY, &raw2(1_000), &["INBOX"]);
+    let name = |n: &str| {
+        b.store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO sender(address, name, kind, decided_by)
+                     VALUES ('x1@example.net', ?1, 'person', 'person')
+                     ON CONFLICT(address) DO UPDATE SET name = ?1, kind = 'person',
+                       decided_by = 'person'",
+                    [n],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    };
+    name(&"N".repeat(800));
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    // Find a current text that leaves a room of 100 to 700 bytes: the long
+    // name does not fit, a short one does.
+    let (mut lo, mut hi) = (1_000, iris_understand::prompt::MAX_DATA / 3);
+    loop {
+        let k = (lo + hi) / 2;
+        new_content(&b, m2, &raw2(k));
+        drain(&b, &fake, &mut last);
+        let r: String = b.col("SELECT context FROM message WHERE id = ?1", m2);
+        let room = r
+            .split(';')
+            .find_map(|x| x.strip_prefix("p!:"))
+            .and_then(|x| x.split(':').next())
+            .and_then(|n| n.parse::<usize>().ok());
+        match room {
+            Some(n) if (100..=700).contains(&n) => break,
+            Some(n) if n < 100 => hi = k,
+            _ => lo = k,
+        }
+        assert!(hi - lo > 1, "no size with a room of 100 to 700 bytes");
+    }
+    assert!(!last[&m2].contains("Known party"));
+    let runs = |fake: &Fake| {
+        fake.calls
+            .borrow()
+            .iter()
+            .filter(|c| c.1.contains("漢漢漢"))
+            .count()
+    };
+    let before = runs(&fake);
+    name("Ann");
+    drain(&b, &fake, &mut last);
+    assert_eq!(runs(&fake), before + 1, "m2 runs again");
+    assert!(last[&m2].contains("Ann <x1@example.net>"));
 }

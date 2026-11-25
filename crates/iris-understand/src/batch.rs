@@ -418,6 +418,9 @@ fn run_messages(
     limits: &Limits,
     now_ms: i64,
 ) -> Result<Stop, Error> {
+    // Issue 1049: the context of the understood messages from before
+    // migration 69, before a step below changes one.
+    store::record_unknown_contexts(store)?;
     // Step 1: the link check of each new or old content (migration 20),
     // with no model, so a model error cannot hold it back. Each message
     // that it understands counts toward the run limit.

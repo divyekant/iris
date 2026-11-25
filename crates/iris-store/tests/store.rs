@@ -82,7 +82,7 @@ fn open_makes_the_data_folder() {
     }
     store
         .read(|c| {
-            assert_eq!(iris_store::schema_version(c)?, 68);
+            assert_eq!(iris_store::schema_version(c)?, 69);
             let journal: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
             assert_eq!(journal, "wal");
             let cache: i64 = c.query_row("PRAGMA cache_size", [], |r| r.get(0))?;
@@ -1594,7 +1594,7 @@ fn no_spam_message_keeps_a_droppable_item() {
     store
         .write(|tx| {
             tx.execute_batch(
-                "ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER spam_drops_items; DROP TRIGGER spam_back_drops_items;
+                "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; DROP TRIGGER IF EXISTS context_sender_name; DROP TRIGGER IF EXISTS context_hostile; DROP INDEX IF EXISTS message_context_unknown; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER spam_drops_items; DROP TRIGGER spam_back_drops_items;
                  DELETE FROM talk_due; PRAGMA user_version = 64;",
             )?;
             Ok(())
@@ -1639,7 +1639,7 @@ fn the_upgrade_resets_each_live_spam_message() {
             tx.execute_batch(&format!(
                 "UPDATE message SET understood_at = 5, tries = 1, retry_at = 9;
                  UPDATE message SET gone_at = 1 WHERE id = {};
-                 ALTER TABLE reply_draft DROP COLUMN seen;
+                 DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; DROP TRIGGER IF EXISTS context_body_add; DROP TRIGGER IF EXISTS context_body; DROP TRIGGER IF EXISTS context_body_remove; DROP TRIGGER IF EXISTS context_move; DROP TRIGGER IF EXISTS context_header_add; DROP TRIGGER IF EXISTS context_header; DROP TRIGGER IF EXISTS context_header_remove; DROP TRIGGER IF EXISTS context_sender_name; DROP TRIGGER IF EXISTS context_hostile; DROP INDEX IF EXISTS message_context_unknown; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen;
                  DELETE FROM talk_due; PRAGMA user_version = 64;",
                 ids[1]
             ))?;

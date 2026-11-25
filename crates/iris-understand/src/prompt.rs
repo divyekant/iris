@@ -67,6 +67,47 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
 
 /// [`data`] in at most about `budget` bytes.
 pub fn data_in(a: &Analysis, cx: &Context, budget: usize) -> String {
+    data_kept(a, cx, budget).0
+}
+
+/// [`data_in`], and for each earlier message of the thread that the budget
+/// left in (the newest first), the count of bytes of its escaped text
+/// ([`escape`] of the entry of `Context::thread`) that the data holds.
+/// The parts of the context that the data of [`data_kept`] held (issue 1049).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Kept {
+    /// For each earlier message of the thread, newest first, the bytes of
+    /// its escaped text that the data held.
+    pub thread: Vec<usize>,
+    /// The bytes of the budget left for the known parties, when the data
+    /// left out a party. `None` when the data held each party.
+    pub parties_room: Option<usize>,
+}
+
+/// The line of one known party in the data.
+pub(crate) fn party_line(p: &str) -> String {
+    let mut line = String::from("Known party: ");
+    push_cut(&mut line, p, MAX_FIELD);
+    line.push('\n');
+    line
+}
+
+/// The count of the first `parties` whose lines fit in `room` bytes: the
+/// data takes them in order and stops at the first one that does not fit.
+pub(crate) fn parties_in(parties: &[&str], mut room: usize) -> usize {
+    let mut n = 0;
+    for p in parties.iter().take(MAX_KNOWN) {
+        let len = party_line(p).len();
+        if len > room {
+            break;
+        }
+        room -= len;
+        n += 1;
+    }
+    n
+}
+
+pub fn data_kept(a: &Analysis, cx: &Context, budget: usize) -> (String, Kept) {
     let h = &a.head;
     let mut d = String::new();
     let from = match (&h.from_name, &h.from_addr) {
@@ -128,14 +169,17 @@ pub fn data_in(a: &Analysis, cx: &Context, budget: usize) -> String {
         }
     }
     // Known persons that the mail can name with no address (section 7.4).
+    // The first party that does not fit ends the list (`parties_in`).
+    let room = left;
+    let mut parties_room = None;
     for p in cx.known.iter().take(MAX_KNOWN) {
-        let mut line = String::from("Known party: ");
-        push_cut(&mut line, p, MAX_FIELD);
-        line.push('\n');
-        if line.len() <= left {
-            left -= line.len();
-            d.push_str(&line);
+        let line = party_line(p);
+        if line.len() > left {
+            parties_room = Some(room);
+            break;
         }
+        left -= line.len();
+        d.push_str(&line);
     }
     for (name, text) in &a.text.attachment_text {
         let head = format!("\n\nText of the attachment {}:\n", escape(name));
@@ -148,6 +192,7 @@ pub fn data_in(a: &Analysis, cx: &Context, budget: usize) -> String {
     }
     // The newest earlier messages are the most useful context.
     let mut earlier: Vec<String> = Vec::new();
+    let mut held: Vec<usize> = Vec::new();
     for e in cx.thread.iter().rev() {
         let head = "\nEarlier message in the thread:\n";
         if left <= head.len() + 1 + CUT_MARK.len() {
@@ -155,7 +200,14 @@ pub fn data_in(a: &Analysis, cx: &Context, budget: usize) -> String {
         }
         let mut block = head.to_string();
         left -= head.len() + 1;
-        left -= push_cut(&mut block, e, left);
+        let n = push_cut(&mut block, e, left);
+        left -= n;
+        // The bytes of the text, without the cut mark.
+        held.push(if n == escape(e).len() {
+            n
+        } else {
+            n.saturating_sub(CUT_MARK.len())
+        });
         block.push('\n');
         earlier.push(block);
     }
@@ -166,7 +218,13 @@ pub fn data_in(a: &Analysis, cx: &Context, budget: usize) -> String {
     // Each text from the mail went through the escape: the client escape
     // adds nothing, so the block stays in the budget.
     debug_assert!(!d.contains("<<<"));
-    d
+    (
+        d,
+        Kept {
+            thread: held,
+            parties_room,
+        },
+    )
 }
 
 /// Push `text` to `out`, escaped as `iris_model::data_block` does and cut
@@ -196,7 +254,7 @@ fn push_cut(out: &mut String, text: &str, max: usize) -> usize {
 }
 
 /// `<<<` as `‹‹‹`, the escape of `iris_model::data_block`.
-fn escape(s: &str) -> String {
+pub(crate) fn escape(s: &str) -> String {
     s.replace("<<<", "‹‹‹")
 }
 
