@@ -139,7 +139,7 @@ pub(super) fn apply(run: &mut Run<'_, '_>, action: i64, args: &str) -> Result<Ou
     let post = Stored {
         content,
         reply: old.reply.clone(),
-        name: owner_name(store, run.account, &run.address)?,
+        name: owner_name(run)?,
     };
     // The undo composes the old message again, with its `Date`.
     let date = undoes.as_ref().and_then(|u| u.date).unwrap_or(now() / 1000);
