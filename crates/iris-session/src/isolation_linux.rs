@@ -584,10 +584,17 @@ fn boot_id() -> io::Result<String> {
 /// the ID was its own during the reads (an ID goes to another process only
 /// after the reap), so the values are its own.
 pub(crate) fn identify(pid: i32) -> io::Result<Option<(OwnedFd, Info)>> {
-    let gone = |e: io::Error| if exited(&e) { Ok(None) } else { Err(e) };
     let fd = match pidfd_open(pid) {
         Ok(fd) => fd,
-        Err(e) => return gone(e),
+        Err(e) if exited(&e) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    // A read of `/proc` fails in more than one way when the process ends or
+    // is reaped during the read (`ns/pid` of a reaped process gives
+    // `EACCES`). The pidfd is the truth: an error after its exit is "ended".
+    let gone = |e: io::Error| match readable(fd.as_raw_fd(), Duration::ZERO) {
+        Ok(true) => Ok(None),
+        _ => Err(e),
     };
     let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
         Ok(s) => s,

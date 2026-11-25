@@ -963,3 +963,21 @@ fn a_local_port_pair_after_the_program_is_not_read() {
     c.args(["--setenv", crate::LOCAL_PORT_VAR, "11434", "--", "/bin/t"]);
     assert_eq!(local_port_of(&c), Some(11434));
 }
+
+/// Invariant: `identify` gives `None`, never an error, for a process that
+/// ends or is reaped during its reads of `/proc` (issue 1111: the read of
+/// `ns/pid` of a reaped process gives `EACCES`).
+#[test]
+fn identify_never_fails_on_a_process_that_ends_during_the_reads() {
+    for _ in 0..300 {
+        let mut c = std::process::Command::new("true").spawn().unwrap();
+        let pid = c.id() as i32;
+        let reaper = thread::spawn(move || c.wait().unwrap());
+        while !reaper.is_finished() {
+            if let Err(e) = identify(pid) {
+                panic!("identify({pid}) failed: {e}");
+            }
+        }
+        reaper.join().unwrap();
+    }
+}
