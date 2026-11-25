@@ -58,16 +58,27 @@ fn check(
 fn memory_kib(pid: u32) -> (u64, u64) {
     match std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")) {
         Ok(text) => {
-            let anon = text
-                .lines()
-                .find_map(|l| l.strip_prefix("Anonymous:"))
-                .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
-                .expect("smaps_rollup has Anonymous");
+            let anon = anonymous_kib(&text)
+                .unwrap_or_else(|| panic!("no Anonymous line in smaps_rollup:\n{text}"));
             eprintln!("RSS {} KiB, anonymous {anon} KiB", rss_kib(pid));
             (anon, MAX_ANON_KIB)
         }
         Err(_) => (rss_kib(pid), MAX_RSS_KIB),
     }
+}
+
+/// The value of the line `Anonymous: <n> kB` of `/proc/<pid>/smaps_rollup`.
+/// `None` if no such line has a whole number of kB: the caller then fails.
+/// The `procfs` crate also reads this file; one field does not need a new
+/// dependency.
+fn anonymous_kib(text: &str) -> Option<u64> {
+    text.lines().find_map(|l| {
+        let mut words = l.strip_prefix("Anonymous:")?.split_whitespace();
+        match (words.next()?.parse().ok()?, words.next(), words.next()) {
+            (n, Some("kB"), None) => Some(n),
+            _ => None,
+        }
+    })
 }
 
 /// Read the RSS of a process in KiB. `ps -o rss=` works on macOS and Linux.
@@ -175,6 +186,50 @@ fn serve_stays_inside_the_memory_and_start_budget() {
     }
     let (start, (mem, limit)) = fastest.unwrap();
     check(mem, start, limit, MAX_START).unwrap();
+}
+
+#[test]
+fn anonymous_kib_reads_only_a_whole_anonymous_line() {
+    assert_eq!(
+        anonymous_kib("Rss: 9 kB\nAnonymous:      16924 kB\n"),
+        Some(16924)
+    );
+    for bad in [
+        "",
+        "Rss: 9 kB",
+        "Anonymous: kB",
+        "Anonymous: -1 kB",
+        "Anonymous: 1.5 kB",
+        "Anonymous: 12",
+        "Anonymous: 12 MB",
+        "Anonymous: 12 kB x",
+        "AnonHugePages: 12 kB",
+    ] {
+        assert_eq!(anonymous_kib(bad), None, "{bad:?}");
+    }
+    // Random text never panics, and a valid line among random lines is
+    // found with its value.
+    let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let alphabet = b"Anonymous: kB0123456789 \n\t-.xA";
+    for _ in 0..2_000 {
+        let len = (next() % 64) as usize;
+        let noise: String = (0..len)
+            .map(|_| alphabet[(next() % alphabet.len() as u64) as usize] as char)
+            .collect();
+        let _ = anonymous_kib(&noise);
+        let n = next() % 10_000_000;
+        let text = format!(
+            "Rss: 1 kB\nAnonymous: {n} kB\n{}",
+            noise.replace("Anonymous", "x")
+        );
+        assert_eq!(anonymous_kib(&text), Some(n), "{text:?}");
+    }
 }
 
 #[test]
