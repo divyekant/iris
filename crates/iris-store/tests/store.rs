@@ -1367,14 +1367,20 @@ fn each_reset_change_gives_each_state_a_new_budget() {
     store
         .put_labels(
             acc,
-            &[("SPAM", "SPAM", "system"), ("SENT", "SENT", "system"), ("Work", "Work", "user")],
+            &[
+                ("SPAM", "SPAM", "system"),
+                ("SENT", "SENT", "system"),
+                ("Work", "Work", "user"),
+            ],
         )
         .unwrap();
     let mut m = msg("a", "t1", 1, &["INBOX"], "Hi", "x");
     m.content_sha256 = Some(store.put_content(b"raw a").unwrap());
     let id = store.put_messages(acc, &[m]).unwrap()[0];
     let set = |sql: &str| {
-        store.write(|tx| Ok(tx.execute_batch(&sql.replace("?id", &id.to_string()))?)).unwrap();
+        store
+            .write(|tx| Ok(tx.execute_batch(&sql.replace("?id", &id.to_string()))?))
+            .unwrap();
     };
     let state = || -> (Option<i64>, i64, Option<i64>) {
         store
@@ -1412,14 +1418,23 @@ fn each_reset_change_gives_each_state_a_new_budget() {
         ("SPAM goes", label("SPAM", true), label("SPAM", false)),
         ("SENT comes", String::new(), label("SENT", true)),
         ("SENT goes", label("SENT", true), label("SENT", false)),
-        ("comes back", "UPDATE message SET gone_at = 1 WHERE id = ?id;".into(),
-         "UPDATE message SET gone_at = NULL WHERE id = ?id;".into()),
+        (
+            "comes back",
+            "UPDATE message SET gone_at = 1 WHERE id = ?id;".into(),
+            "UPDATE message SET gone_at = NULL WHERE id = ?id;".into(),
+        ),
         ("new content", content(b"raw a"), content(b"raw b")),
     ];
     // The start states: failed 3 times, and understood after 2 failures.
     let starts = [
-        ("failed", "UPDATE message SET understood_at = NULL, tries = 3, retry_at = 9 WHERE id = ?id;"),
-        ("understood", "UPDATE message SET understood_at = 5, tries = 2, retry_at = 9 WHERE id = ?id;"),
+        (
+            "failed",
+            "UPDATE message SET understood_at = NULL, tries = 3, retry_at = 9 WHERE id = ?id;",
+        ),
+        (
+            "understood",
+            "UPDATE message SET understood_at = 5, tries = 2, retry_at = 9 WHERE id = ?id;",
+        ),
     ];
     for (change, before, sql) in &changes {
         for (start, start_sql) in starts {
