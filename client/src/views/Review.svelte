@@ -17,9 +17,24 @@
   let list = $state(changesets);
   let later: Changeset[] = $state([]);
   let order: string[] = [];
-  // Each read takes a number at its start. An answer applies only if no later read applied first.
+  // Each read takes a number at its start: the list of open requests, the state of one request, and
+  // the answer of a decision on this screen. For each request, a document applies only if no read that
+  // started later applied first, so a late answer never puts back an older document.
   let started = 0;
   let applied = 0;
+  const seen: Record<string, number> = {};
+  // What can change on the screen: the revision, the state, and the decision of each action.
+  const mark = (c: Changeset) => `${c.revision}|${c.state}|${c.actions.map((a) => a.decision?.state ?? "").join(",")}`;
+  function put(n: number, d: Changeset) {
+    if ((seen[d.id] ?? 0) >= n) return;
+    seen[d.id] = n;
+    unknown = unknown.filter((x) => x !== d.id);
+    const shownAs = all.find((c) => c.id === d.id);
+    // A Request keeps its part (its ticks and pages): only a changed document replaces its document.
+    if (shownAs) {
+      if (mark(shownAs) !== mark(d)) now[d.id] = d;
+    } else later = later.map((c) => (c.id === d.id ? d : c));
+  }
   $effect(() => {
     if (!every) return;
     const timer = setInterval(async () => {
@@ -27,21 +42,17 @@
       const n = ++started;
       try {
         const open = (await get<{ changesets: Changeset[] }>("changesets")).changesets;
-        if (n <= applied || !Array.isArray(open)) return;
+        if (!Array.isArray(open)) return;
+        for (const c of open) put(n, c);
+        if (n <= applied) return;
         applied = n;
-        // An announced request stays in `later` until Show, also when it closes before then.
-        const fresh = open.filter((c) => !list.some((x) => x.id === c.id) && !later.some((x) => x.id === c.id));
-        later = [...later.map((c) => open.find((x) => x.id === c.id) ?? c), ...fresh];
         order = open.map((c) => c.id);
-        // A request on the screen that is open again (a new revision after a draft): take the new document.
-        for (const c of open) {
-          const shownAs = all.find((x) => x.id === c.id);
-          if (shownAs && (shownAs.state !== "open" || unknown.includes(c.id))) now[c.id] = c;
-        }
-        unknown = unknown.filter((id) => !order.includes(id));
+        // A new request waits in `later` until Show. An announced request stays there, also when it closes.
+        const fresh = open.filter((c) => !list.some((x) => x.id === c.id) && !later.some((x) => x.id === c.id));
+        later = [...later, ...fresh];
         // A request on the screen or announced that the engine no longer lists as open: read its state,
         // so that it never keeps the controls of an open request.
-        void settle([...all, ...later].filter((c) => c.state === "open" && !order.includes(c.id)).map((c) => c.id));
+        for (const c of [...all, ...later]) if (c.state === "open" && !order.includes(c.id)) void settle(c.id);
       } catch {
         // The next read tries again.
       }
@@ -52,19 +63,13 @@
   // The requests that left the open list and whose state Iris could not read. Each is locked
   // (inert) with a line and Try again, and the headline does not count it. The next poll tries again.
   let unknown: string[] = $state([]);
-  async function settle(ids: string[]) {
-    await Promise.all(
-      ids.map(async (id) => {
-        try {
-          const d = await get<Changeset>(`changesets/${encodeURIComponent(id)}`);
-          if (list.some((c) => c.id === id)) now[id] = d;
-          else later = later.map((c) => (c.id === id ? d : c));
-          unknown = unknown.filter((x) => x !== id);
-        } catch {
-          if (!unknown.includes(id)) unknown = [...unknown, id];
-        }
-      }),
-    );
+  async function settle(id: string) {
+    const n = ++started;
+    try {
+      put(n, await get<Changeset>(`changesets/${encodeURIComponent(id)}`));
+    } catch {
+      if ((seen[id] ?? 0) < n && !unknown.includes(id)) unknown = [...unknown, id];
+    }
   }
 
   // Show the new requests in the order of the engine. A request that is no longer open stays at the end with its state.
@@ -116,10 +121,10 @@
   {#if unknown.includes(c.id)}
     <p class="later" role="status">
       This request is no longer open. Iris could not read its state.
-      <button type="button" onclick={() => settle([c.id])}>Try again</button>
+      <button type="button" onclick={() => settle(c.id)}>Try again</button>
     </p>
   {/if}
-  <div class="one" data-changeset={c.id} inert={unknown.includes(c.id)}><Request changeset={c} onchange={(d) => (now[d.id] = d)} /></div>
+  <div class="one" data-changeset={c.id} inert={unknown.includes(c.id)}><Request changeset={c} onchange={(d) => ((seen[d.id] = ++started), (now[d.id] = d))} /></div>
 {/each}
 
 <style>

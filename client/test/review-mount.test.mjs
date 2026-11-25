@@ -796,3 +796,45 @@ test("a request on the screen that leaves the open list for a draft and comes ba
     }
   }
 });
+
+test("a new revision between two reads replaces the request on the screen, and a late state read never puts back an older one (issue 184)", async () => {
+  const first = changeset([act({ resolved: { messages: [] } })]);
+  // The author submits a new revision between two reads: the request is open in both.
+  {
+    const next = { ...first, revision: 2, actions: [act({ revision: 2, resolved: { messages: [] } }), act({ n: 2, revision: 2, resolved: { messages: [] } })] };
+    let open = [first];
+    serve({ changesets: () => [200, { changesets: open }] });
+    const view = await mount("/src/views/Review.svelte", { changesets: [first], every: 20 });
+    try {
+      assert.match(text(view.target), /asks for one change/);
+      open = [next];
+      await until(() => (view.flushSync(), /asks for 2 changes/.test(text(view.target))));
+    } finally {
+      view.destroy();
+    }
+  }
+  // The request leaves the open list. Two reads of its state answer in the reverse order: the older stays out.
+  {
+    const approved = { ...first, state: "closed", actions: [act({ resolved: { messages: [] }, decision: { state: "approved", by: "person" } })] };
+    const applied = { ...first, state: "closed", actions: [act({ resolved: { messages: [] }, decision: { state: "applied" } })] };
+    let release;
+    const held = new Promise((r) => (release = r));
+    let reads = 0;
+    serve({
+      changesets: () => [200, { changesets: [] }],
+      "changesets/cs-9": async () => (++reads === 1 ? (await held, [200, approved]) : [200, applied]),
+    });
+    const view = await mount("/src/views/Review.svelte", { changesets: [first], every: 20 });
+    try {
+      // The second read answers first: the action is done.
+      await until(() => (view.flushSync(), /Done/.test(text(view.target))));
+      release();
+      await new Promise((r) => setTimeout(r, 60));
+      view.flushSync();
+      assert.match(text(view.target), /Done/);
+      assert.doesNotMatch(text(view.target), /You approved it/);
+    } finally {
+      view.destroy();
+    }
+  }
+});
