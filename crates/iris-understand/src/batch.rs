@@ -358,6 +358,10 @@ fn run_messages(
     // cannot be made does not keep stale items of a changed sender. Its
     // resets come before the main pass, which sees them.
     refresh_senders(store, now_ms)?;
+    // The fixed check after a kind or name change (decision D31), with no
+    // model, so a model that cannot be made does not hold it back either.
+    let left = limits.max_messages.map(|n| n.saturating_sub(done));
+    let done = done + fixed_check(store, now_ms, run, left)?;
     let inner: Box<dyn Model> = match row {
         Some(r) if calls => connect(r).map_err(Error::Connect)?,
         _ => Box::new(NoModel),
@@ -378,9 +382,9 @@ fn run_messages(
         since_refresh: 0,
         rerun: false,
     };
-    // Main pass, then one more pass if a sender rerun reset mail. Reruns of
-    // the second pass wait for the next run, so a message gets at most 2
-    // calls of `store::understand` in one run.
+    // Main pass, then one more pass if a sender rerun or a fixed check
+    // reset mail. Resets of the second pass wait for the next run, so a
+    // message gets at most 2 calls of `store::understand` in one run.
     for pass in 0..2 {
         if pass == 1 && !r.rerun {
             break;
@@ -400,6 +404,10 @@ fn run_messages(
                 }
             }
         }
+        // The kind and name changes of this pass (the sender step of each
+        // message). Mail that the check of the main pass resets gets the
+        // second pass.
+        r.fixed()?;
     }
     let s = model.state();
     Ok(if !s.refused {
@@ -422,6 +430,23 @@ fn refresh_senders(store: &Store, now_ms: i64) -> Result<u64, Error> {
     Ok(reset)
 }
 
+/// The fixed check of the queue `fixed_due` (decision D31), inside the
+/// message limit `left`. Counts the messages that it understood again in
+/// the run row, and gives their count.
+fn fixed_check(store: &Store, now_ms: i64, run: i64, left: Option<u64>) -> Result<u64, Error> {
+    let n = store::recheck_fixed(store, now_ms, left).map_err(Error::Understand)?;
+    if n > 0 {
+        store.write(|tx| {
+            tx.execute(
+                "UPDATE understand_run SET messages = messages + ?2 WHERE id = ?1",
+                params![run, i64_of(n)],
+            )?;
+            Ok(())
+        })?;
+    }
+    Ok(n)
+}
+
 struct Runner<'a> {
     store: &'a Store,
     model: &'a Budgeted<'a>,
@@ -442,6 +467,20 @@ impl Runner<'_> {
         let reset = refresh_senders(self.store, self.now_ms)?;
         self.since_refresh = 0;
         self.rerun |= reset > 0;
+        self.fixed()
+    }
+
+    /// The fixed check of the queue `fixed_due` (decision D31). Each message
+    /// that it understands again counts toward the run limit. Mail that it
+    /// makes pending gets one more pass.
+    fn fixed(&mut self) -> Result<(), Error> {
+        let left = self
+            .limits
+            .max_messages
+            .map(|n| n.saturating_sub(self.done));
+        let n = fixed_check(self.store, self.now_ms, self.run, left)?;
+        self.done += n;
+        self.rerun |= n > 0;
         Ok(())
     }
 

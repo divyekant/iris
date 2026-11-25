@@ -485,6 +485,7 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `message_fts` | FTS5 table on `subject`, `sender`, `text`, with `content='body'` and `content_rowid='message_id'` | Full-text search. Triggers on `body` keep it current. |
 | `sender` | `id` INTEGER PK, `address` TEXT UNIQUE, `name` TEXT, `kind` TEXT, `basis` TEXT, `decided_by` TEXT, `decided_at` INTEGER, `declined_at` INTEGER | The sender axis. Gives the `p-` IDs. `declined_at`: the time of a decline at the stranger gate (section 6.7), or NULL. |
 | `model_declined` | `message_id` INTEGER PK, FK to `message` | Migration 53: each message that understanding saved with no model call because its sender was a declined stranger (section 6.7). A trigger on `sender` makes these messages pending again when the decline stops applying, and marks their threads in `talk_due`. |
+| `fixed_due` | `id` INTEGER PK AUTOINCREMENT, `message_id` INTEGER, FK to `message` | Migration 54: the mail whose fixed result a change of the sender axis can change (section 6.7, decision D31). Triggers on `sender` add a row for the mail from an address that becomes or stops being a `service`, and for the mail under the old or the new name of a known person. Each trigger gives the message a new row. The fixed check removes only the row that it read. |
 | `sender_evidence` | `message_id` FK, `address` TEXT, `rule` TEXT (`sent`, `replied` or `service`), `content_sha256` TEXT; PK (`address`, `rule`, `message_id`) | The messages that prove a `person` or `service` kind (section 6.7). The sender step writes the rows. A `sent` row: the sent message names the address in `To`, `Cc` or `Bcc`. A `replied` row: the sent message comes after a message from the address in its thread. A `service` row: the message from the address is automated mail with a Gmail DKIM pass; the rule counts its 2 earlier messages when it reads the row. A row counts only while its message is not gone and has the same content hash. |
 | `item` | `id` INTEGER PK, `form` TEXT, `account_id`, `status` TEXT, `status_before_gone` TEXT, `doc` TEXT (JSON), `created_at`, `updated_at`, `derived_by` TEXT, `duplicate_of` INTEGER | One row for each item of each form. `doc` is the form document of section 6. `duplicate_of` marks a possible duplicate (section 7.5). |
 | `item_source` | `item_id`, `message_id`, `role` TEXT, PK(`item_id`, `message_id`) | Many to many: one message can feed more than one item. |
@@ -763,6 +764,23 @@ newest first, so a known person can be a `stranger` for some time. The brief rea
 party when it runs its query (section 8), so a later change of a kind moves
 the items. If a sender becomes `hostile` or stops being `hostile`, the engine
 runs understanding again on each message from that address.
+
+Other changes of the sender axis change only fixed results (decision D31). The
+code-signal rule reads the kind `service`, and the spoof check reads the names
+of the known persons. So when a sender becomes or stops being a `service`, or
+the name of a known person comes, goes or changes, store triggers queue the
+affected mail in `fixed_due`: the mail from that address, or the mail under the
+old or the new name. Each understanding run runs the fixed steps again on the
+queued mail, with no model call: after each sender refresh and before the model
+is made, and after the last thread of each pass. Mail that the check of the main
+pass makes pending gets the second pass of the same run. Only a message whose fixed result changed
+is understood again with no model: a new mark makes it hostile mail, and a rule
+that matches now gives its items. A message that no fixed rule covers now, and
+that the model never read (it was hostile mail, or a rule made its items),
+waits for the model as new mail does. A message whose model items still hold
+keeps them. Mail that is not understood yet (pending, or held by the try limit
+of the model) is understood again only when the fixed steps alone complete it
+now: it is hostile, or a rule covers it.
 
 A message with the label `SENT` is from you (`self`), also when its `From` is
 an alias. The engine does not understand a message with the label `DRAFT`,

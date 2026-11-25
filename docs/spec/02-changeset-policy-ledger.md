@@ -73,7 +73,7 @@ not have the label `SPAM` or `TRASH`.
 | `skip` | feed item | reason | none (Iris state) | set the old value (below) | 5 |
 | `mute` | conversation | reason | none (Iris state) | set the old value (below) | 5 |
 | `dismiss` | signal | reason | none (Iris state) | set the old value (below) | 5 |
-| `draft` | one thread (a reply) or one account (`a-N`, a new mail) | recipients, subject, text | `drafts.create` (section 7.5) | none: Iris never deletes a draft. The change of a draft and its undo come in a later card | 3 |
+| `draft` | one thread (a reply), one account (`a-N`, a new mail), or one Gmail draft of Iris (`d-N`, a change by the person) | recipients, subject, text | `drafts.create`, or `drafts.update` for a change (section 7.5) | a create: none, because Iris never deletes a draft. A change: `drafts.update` with the old content (`docs/specs/2026-11-25-draft-change.md`) | 3 |
 | `send` | one draft (`d-N`) | none | `drafts.send`, after the hold (section 7.5) | none: final after the hold | 3 |
 | `nudge` | commitment `owed_to_you` | none | makes a `draft` action, then a `send` action | as `draft` and `send` | not built (decision D8, section 7.5) |
 | `wait` | thread, or a date | until | none | not applicable | 5 |
@@ -779,13 +779,13 @@ or with a change of Iris state:
 | `id` | `l-` and a number. |
 | `action` | The action that the entry applies. One entry for each action. The changeset, the revision, the verb, the author and the decision (`rule` with its ID and the policy version of section 6.3, or `person`) come from the action row. That row does not change after the submit, and an applied action keeps the decision that approved it. |
 | `account` | The mailbox of the provider calls. None for a state verb. |
-| `ops` | The provider operations, as JSON: the call (`batchModify` for each 1,000 messages, or `trash` or `untrash` for each message), the labels to add and remove, and the number of calls. Only an undo of `trash` writes `untrash` (section 7.4). For a state verb, the fields and the IDs of the correction rows of the entry. For `draft` and `send` (release 3): the call (`drafts.create` or `drafts.send`), the `Message-ID`, the `Date`, the content hash and, for a send, the Gmail draft ID (`docs/specs/2026-11-16-send.md`). |
-| `pre`, `post` | For a state verb: the old and the new values. For `draft`: `post` only, the content with its reply headers. |
+| `ops` | The provider operations, as JSON: the call (`batchModify` for each 1,000 messages, or `trash` or `untrash` for each message), the labels to add and remove, and the number of calls. Only an undo of `trash` writes `untrash` (section 7.4). For a state verb, the fields and the IDs of the correction rows of the entry. For `draft` and `send` (release 3): the call (`drafts.create`, `drafts.update` or `drafts.send`), the `Message-ID`, the `Date`, the content hash and, for a send and a change, the Gmail draft ID (`docs/specs/2026-11-16-send.md`). A change also has the content hash before the change (`pre_hash`). A no-op change (the same content again) has no call (`docs/specs/2026-11-25-draft-change.md`, section 2). |
+| `pre`, `post` | For a state verb: the old and the new values. For a `draft` create and a no-op change: `post` only, the content with its reply headers. For a `draft` change and its undo: `pre`, the stored content and the `Date` before the change, and `post`, the new content. |
 | `call` | The number of the last provider call that the engine started, from 1. 0 before the first call. |
 | `state` | `writing`, `applied`, `failed` or `undone`. The trigger `ledger_state` moves the action to the same state. |
 | `error` | The refusal of the provider, or why the engine could not confirm each message. |
 | `history_id` | The Gmail history ID after the apply. |
-| `undo` | `inverse` (the verb has an undo) or `none` (final, for example a sent message, or an action applied before the ledger). The column records the verb, and does not change. An undo is available now only if the entry is `applied` or `failed`, has `inverse`, and has a message with `done` that is not gone, or, for a state entry, an item in `post` and the IDs of its correction rows in `ops` (section 7.4). A state entry from before migration 26 has no such IDs, so it has no undo. The view `ledger_can_undo` (migration 23) lists these entries, and `iris_apply::undo` refuses each other entry. Else the ledger shows the entry as final, for example after Gmail deleted each message of a `trash` entry. |
+| `undo` | `inverse` (the verb has an undo) or `none` (final, for example a sent message, or an action applied before the ledger). The column records the verb, and does not change. An undo is available now only if the entry is `applied` or `failed`, has `inverse`, and has a message with `done` that is not gone, or, for a state entry, an item in `post` and the IDs of its correction rows in `ops` (section 7.4), or, for a `draft` change entry, a `pre` and a draft that passes the undo checks of `docs/specs/2026-11-25-draft-change.md` section 3. A `draft` create and a no-op change have `none`. A state entry from before migration 26 has no such IDs, so it has no undo. The view `ledger_can_undo` (migration 23) lists these entries, and `iris_apply::undo` refuses each other entry. Else the ledger shows the entry as final, for example after Gmail deleted each message of a `trash` entry. |
 | `undone_by` | The ledger entry of the undo. |
 | `at` | The time. |
 
@@ -922,17 +922,22 @@ applies it.
 1. The person selects undo on a ledger entry, in the web client. The entry
    must be `applied` or `failed`, with the undo `inverse`, and with one or
    more messages with `done` that are not gone (a state entry: one or more
-   items in `post` that are in the store). No other undo of the entry is
-   open.
+   items in `post` that are in the store; a draft change entry: a `pre`
+   content and a draft that passes the checks of
+   `docs/specs/2026-11-25-draft-change.md` section 3). No other undo of
+   the entry is open.
 2. The engine (`iris_apply::undo`) makes a changeset with author `person`
    and one action: the inverse of the entry (`archive` and `inbox`, `read`
    and `unread`, `label` and `unlabel` of the same name, `trash` and
-   `untrash`, and `restore` for a `close`, `decline`, `defer`, `correct`, `skip`, `mute` or `dismiss`
-   entry). Its target is the entry (`{"ledger": ["l-N"]}`), and submit
+   `untrash`, `restore` for a `close`, `decline`, `defer`, `correct`, `skip`, `mute` or `dismiss`
+   entry, and `draft` with the old content for a draft change entry,
+   `docs/specs/2026-11-25-draft-change.md` section 3). Its target is the entry (`{"ledger": ["l-N"]}`), and submit
    resolves the messages with `done` that are not gone, in SQL, so no list
    of message IDs is in memory (section 9). For `restore`, submit resolves
    the items of the entry instead (`action_item`), and the apply runs with
-   the state verbs (section 4). Only an action with the link
+   the state verbs (section 4). For a draft change entry, submit resolves
+   the draft of the entry (`ops`), and the apply is the change apply of
+   the draft change spec. Only an action with the link
    of migration 23 to that entry can target an entry. The undo of `label`
    or `unlabel` changes the label of the entry by its ID (from `ops`), so a
    rename of the label at Gmail after the entry does not change the undo.
@@ -1014,6 +1019,12 @@ An undo of an undo is a new action, not a delete of the record.
 | A write of `undone_by` with an entry that is not its undo | The ledger shows a wrong undo | The trigger `ledger_undone_by` refuses it: only the entry of action 1 of its own undo makes an entry `undone`. |
 | An undo of `label` or `unlabel` whose label Gmail deleted after the entry | The undo makes again a label that the person deleted, or Gmail refuses the call | Before step 2, the apply reads `labels.list`. If the label ID of the entry is not there, the engine denies the undo action, by `engine`, with no write call. The entry keeps its state. |
 
+   A draft change entry has no message result: when the `draft` action
+   of its undo is `applied` (the read back at Gmail has the hash of
+   `pre`), the same transaction sets `undone_by` of the change entry to
+   the undo entry, and the trigger `ledger_state` moves its action to
+   `undone` (`docs/specs/2026-11-25-draft-change.md`, section 3). A
+   failed or denied undo leaves the change entry `applied`.
 ### 7.5 Release 3: draft, send and the held outbox
 
 The text of a nudge comes first (R3-07). When a person is late on a
@@ -1064,8 +1075,9 @@ and the release step. That specification must meet these constraints:
   send of the same draft.
 - The undo of a `draft` action that changes a draft restores the old
   content of the draft. It never deletes a draft of the person. So a
-  draft create has no undo, and no `draft` action can change a draft
-  until its undo exists (R3-01 makes only creates).
+  draft create has no undo. `docs/specs/2026-11-25-draft-change.md`
+  (decision D6) defines the change of a Gmail draft and its undo
+  together.
 - Each verb records its result in the ledger and has a crash test.
 
 ## 8. The iris command
