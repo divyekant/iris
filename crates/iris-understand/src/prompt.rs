@@ -49,6 +49,9 @@ pub const RETRY_NOTE: &str =
 /// items, attachment text, then the earlier messages of the thread, newest
 /// first, fill the rest.
 pub const MAX_DATA: usize = 96_000;
+/// The budget of the one more call after a refusal for size (HTTP 400 or
+/// 413, #101): about 6,000 tokens, for a local model with a small window.
+pub const SMALL_DATA: usize = 24_000;
 /// The most known parties in the data.
 pub const MAX_KNOWN: usize = 50;
 /// The most bytes of one header value in the data.
@@ -59,6 +62,11 @@ const CUT_MARK: &str = "\n[cut]";
 /// The data block text: the headers that the model needs, the sender kind,
 /// the clean text and the attachment names, in at most about `MAX_DATA` bytes.
 pub fn data(a: &Analysis, cx: &Context) -> String {
+    data_in(a, cx, MAX_DATA)
+}
+
+/// [`data`] in at most about `budget` bytes.
+pub fn data_in(a: &Analysis, cx: &Context, budget: usize) -> String {
     let h = &a.head;
     let mut d = String::new();
     let from = match (&h.from_name, &h.from_addr) {
@@ -101,7 +109,7 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
     // The budget holds the whole block that the client sends: the
     // delimiter lines and their line breaks too.
     let wrap = iris_model::DATA_START.len() + iris_model::DATA_END.len() + 2;
-    let mut left = MAX_DATA.saturating_sub(wrap + d.len() + current.len());
+    let mut left = budget.saturating_sub(wrap + d.len() + current.len());
     left -= push_cut(&mut current, &a.text.text, left);
     // An existing item that does not fit is left out: the model can then
     // find it again, and the store keeps the pinned item (section 7.5).
