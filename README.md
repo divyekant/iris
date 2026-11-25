@@ -297,7 +297,7 @@ the variables and the hosts of its adapter:
 | Agent | Program | Variables | Hosts |
 |---|---|---|---|
 | `claude-code` | `claude` | `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` | `api.anthropic.com` |
-| `codex` | `codex` | `OPENAI_API_KEY`, `CODEX_HOME` | `api.openai.com` |
+| `codex` | `codex` | `OPENAI_API_KEY`, `CODEX_HOME` | `api.openai.com`, `chatgpt.com` |
 
 The program must be on the `PATH` of the engine. The variables come from the
 environment of the engine (`iris serve` or the service), not from your

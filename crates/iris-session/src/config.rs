@@ -419,7 +419,9 @@ pub fn adapter(file: &AgentsFile, name: &str, path: Option<&OsStr>) -> Result<Ad
                 prompt,
             ],
             vec!["OPENAI_API_KEY".to_string(), "CODEX_HOME".to_string()],
-            vec!["api.openai.com".to_string()],
+            // A ChatGPT sign-in in `CODEX_HOME` calls chatgpt.com; an API
+            // key calls api.openai.com (issue 404).
+            vec!["api.openai.com".to_string(), "chatgpt.com".to_string()],
         ),
         _ => {
             let c = file

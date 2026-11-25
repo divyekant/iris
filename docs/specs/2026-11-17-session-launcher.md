@@ -567,7 +567,8 @@ runs the command with no isolation, for the test scripts only.
 ### Model egress
 
 The built-in agent tools call their model over HTTPS: `claude-code` needs
-`api.anthropic.com`, and `codex` needs `api.openai.com`. An isolation with
+`api.anthropic.com`, and `codex` needs `api.openai.com` (an API key) or
+`chatgpt.com` (a ChatGPT sign-in in `CODEX_HOME`). An isolation with
 no network stops them. The engine gives each session one narrow path out:
 
 - The engine listens on one TCP port of `127.0.0.1` for each running
@@ -588,7 +589,7 @@ no network stops them. The engine gives each session one narrow path out:
   in `https_proxy`.
 - The proxy takes only `CONNECT <host>:443`. The host must be in the
   allowed hosts of the adapter: `api.anthropic.com` for `claude-code`,
-  `api.openai.com` for `codex`, and `allow_hosts` for an adapter of
+  `api.openai.com` and `chatgpt.com` for `codex`, and `allow_hosts` for an adapter of
   `agents.toml`. The engine resolves the host itself, and checks each
   address that it connects to: it refuses a loopback, private, link-local,
   unique local, multicast, unspecified, documentation or other reserved
