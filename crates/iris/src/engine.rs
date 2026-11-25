@@ -896,7 +896,6 @@ pub const ATTENTION_EVERY: Duration = Duration::from_secs(10);
 /// of the person (spec 2 section 6.6, [`iris_policy::propose::refresh`]),
 /// and the notices by rule ([`iris_policy::notice::refresh`]).
 fn attention_loop(store: Arc<Store>) {
-    let mut mark = None;
     let open = {
         let store = store.clone();
         move |id| {
@@ -906,22 +905,32 @@ fn attention_loop(store: Arc<Store>) {
         }
     };
     let system = crate::notify::spawn(open, crate::notify::show);
+    let mut turn = AttentionState::default();
     loop {
         // The system notice runs on its own thread: this loop never waits
         // for it.
-        for n in attention_turn(&store, &mut mark) {
+        for n in attention_turn(&store, &mut turn) {
             let _ = system.try_send(n);
         }
         std::thread::sleep(ATTENTION_EVERY);
     }
 }
 
+/// The state of the attention loop between two turns. Kept in memory.
+#[derive(Default)]
+pub struct AttentionState {
+    /// The mark of the proposed rules.
+    pub mark: Option<iris_policy::propose::Mark>,
+    /// The largest job notice row ID that the loop read. The first turn
+    /// sets it to the largest notice row ID, so a restart shows no old job
+    /// notice.
+    pub jobs_seen: Option<i64>,
+}
+
 /// One turn of the attention loop. Gives the notices for the system. Each
 /// step logs its own error, so one failed step does not stop the others.
-pub fn attention_turn(
-    store: &Store,
-    mark: &mut Option<iris_policy::propose::Mark>,
-) -> Vec<crate::notify::Shown> {
+pub fn attention_turn(store: &Store, turn: &mut AttentionState) -> Vec<crate::notify::Shown> {
+    let mark = &mut turn.mark;
     // The conversations first: a kind change marks their threads, and
     // the attention reads the items.
     if let Err(e) = iris_understand::store::update_due_talks(store, now_ms()) {
@@ -946,16 +955,40 @@ pub fn attention_turn(
             Vec::new()
         }
     };
-    // The due date of a job (decision D24): the move to needs you, then one
-    // system notice for each moved job. The jobs page shows the state.
+    // Job notices (docs/specs/2026-11-25-job-notices.md): the first turn
+    // starts after the notices that are there, so a restart shows no old one.
+    if turn.jobs_seen.is_none() {
+        match store.read(iris_policy::notice::counts) {
+            Ok((_, max)) => turn.jobs_seen = Some(max),
+            Err(e) => say!("iris: job notices: {e}"),
+        }
+    }
+    // The due date of a job (decision D24): the move to needs you. Its
+    // trigger adds the `Job due` row in the transaction of the move.
     match iris_job::move_due(store, now_ms()) {
-        Ok(turn) => {
-            for (job, e) in &turn.failed {
+        Ok(moves) => {
+            for (job, e) in &moves.failed {
                 say!("iris: due job j-{job}: {e}");
             }
-            system.extend(turn.moved.iter().map(crate::notify::Shown::job_due));
         }
         Err(e) => say!("iris: due jobs: {e}"),
+    }
+    // One system notice for each new `Job due` row, from any path. A
+    // `Job question` row never interrupts: `jobs_after` leaves it out.
+    if let Some(seen) = turn.jobs_seen {
+        match store.read(|c| iris_policy::notice::jobs_after(c, seen)) {
+            Ok(new) => {
+                if let Some(last) = new.last() {
+                    turn.jobs_seen = Some(last.id);
+                }
+                system.extend(
+                    crate::notify::for_system(new, now_ms())
+                        .iter()
+                        .map(crate::notify::Shown::rule),
+                );
+            }
+            Err(e) => say!("iris: job notices: {e}"),
+        }
     }
     // The measure "time to the first brief" ends at the first brief with content.
     if let Err(e) = iris_api::measures::check_brief(store, now_ms()) {

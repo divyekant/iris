@@ -75,8 +75,8 @@ pub const QUEUE: usize = 100;
 pub struct Shown {
     pub title: String,
     pub text: String,
-    /// The row ID of a notice by rule. The queue shows it only while the
-    /// notice is still open. `None` for a job notice.
+    /// The row ID of the notice. The queue shows it only while the notice
+    /// is still open.
     pub notice: Option<i64>,
 }
 
@@ -84,23 +84,20 @@ pub struct Shown {
 pub const JOB_TEXT_MAX: usize = 200;
 
 impl Shown {
-    /// A notice by rule (R5-08).
+    /// A notice row: a notice by rule (R5-08), or a job that passed its due
+    /// date (decision D24, `docs/specs/2026-11-25-job-notices.md`). The text
+    /// of a job notice is the job ID and the goal, which is the words of the
+    /// person, cut on a character boundary.
     pub fn rule(n: &iris_policy::notice::Notice) -> Shown {
+        let text = format!("{}: {}", n.title, n.text);
         Shown {
             title: format!("Iris: {}", n.rule_name),
-            text: format!("{}: {}", n.title, n.text),
+            text: if n.job_id.is_some() {
+                text.chars().take(JOB_TEXT_MAX).collect()
+            } else {
+                text
+            },
             notice: Some(n.id),
-        }
-    }
-
-    /// A job that passed its due date (decision D24): the job ID and the
-    /// goal, which is the words of the person, cut on a character boundary.
-    pub fn job_due(d: &iris_job::Due) -> Shown {
-        let text = format!("{}: {}", iris_job::format_job_id(d.id), d.goal);
-        Shown {
-            title: "Iris: Job due".into(),
-            text: text.chars().take(JOB_TEXT_MAX).collect(),
-            notice: None,
         }
     }
 }
@@ -257,8 +254,9 @@ mod tests {
     fn notice(id: i64) -> iris_policy::notice::Notice {
         iris_policy::notice::Notice {
             id,
-            message_id: id,
-            rule: 1,
+            message_id: Some(id),
+            rule: Some(1),
+            job_id: None,
             rule_name: "r".into(),
             title: "t".into(),
             text: "x".into(),
@@ -268,11 +266,18 @@ mod tests {
 
     #[test]
     fn a_job_notice_names_the_job_and_cuts_the_goal() {
-        let d = iris_job::Due {
-            id: 7,
-            goal: "é".repeat(300),
+        let d = iris_policy::notice::Notice {
+            id: 9,
+            message_id: None,
+            rule: None,
+            job_id: Some(7),
+            rule_name: "Job due".into(),
+            title: "j-7".into(),
+            text: "é".repeat(300),
+            created_at: 0,
         };
-        let n = Shown::job_due(&d);
+        let n = Shown::rule(&d);
+        assert_eq!(n.notice, Some(9));
         assert_eq!(n.title, "Iris: Job due");
         assert!(n.text.starts_with("j-7: éé"));
         assert_eq!(n.text.chars().count(), JOB_TEXT_MAX);
@@ -304,18 +309,12 @@ mod tests {
         for id in 1..=3 {
             tx.send(Shown::rule(&notice(id))).unwrap();
         }
-        // A job notice has no notice row: the check does not apply.
-        let due = iris_job::Due {
-            id: 7,
-            goal: "g".into(),
-        };
-        tx.send(Shown::job_due(&due)).unwrap();
         drop(tx);
         let t = Instant::now();
-        while SHOWN.lock().unwrap().len() < 3 && t.elapsed() < Duration::from_secs(5) {
+        while SHOWN.lock().unwrap().len() < 2 && t.elapsed() < Duration::from_secs(5) {
             std::thread::yield_now();
         }
-        assert_eq!(*SHOWN.lock().unwrap(), vec![1, 3, 0]);
+        assert_eq!(*SHOWN.lock().unwrap(), vec![1, 3]);
     }
 
     #[test]

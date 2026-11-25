@@ -1448,3 +1448,30 @@ fn the_end_of_a_wait_is_a_day_or_an_rfc3339_time() {
         let _ = socket::until_ms(&s);
     }
 }
+
+/// Job notices (`docs/specs/2026-11-25-job-notices.md`): `app.notices`
+/// gives a `Job due` row with its `job` and no `rule`, and counts a
+/// `Job question` row in `open` with no system notice for it.
+#[test]
+fn app_notices_give_due_jobs_and_count_questions() {
+    let d = dir("app-job-notices");
+    let store = Store::open(&d).unwrap();
+    let now = iris::engine::now_ms();
+    let asked = iris_job::create(&store, "Book the flight.", None, now).unwrap();
+    iris_job::ask(&store, asked, "Which day?", None, now + 1).unwrap();
+    let due = iris_job::create(&store, "Renew the passport.", Some(now + 2), now).unwrap();
+    iris_job::move_due(&store, now + 3).unwrap();
+    let r = answer_as(
+        &store,
+        &socket::local(),
+        json!({ "v": 1, "verb": "app.notices", "args": { "after": 0 } }),
+    );
+    let list = r["result"]["notices"].as_array().unwrap();
+    assert_eq!(list.len(), 1, "{r}");
+    assert_eq!(list[0]["job"], json!(format!("j-{due}")));
+    assert_eq!(list[0]["rule"], Value::Null);
+    assert_eq!(list[0]["rule_name"], json!("Job due"));
+    assert_eq!(list[0]["text"], json!("Renew the passport."));
+    assert_eq!(list[0]["message"], Value::Null);
+    assert_eq!(r["result"]["open"], json!(2));
+}
