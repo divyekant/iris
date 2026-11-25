@@ -157,7 +157,8 @@ end of the order and does not stop the others.
   has a summary that is ready. So an item at the stranger gate never shows
   "Summary ready", also when a known person in the same thread has an item
   with a summary. The brief sections, the gate, the bundles and the lists
-  of one form read it from the same column as `"draft"` (`ready_doc_of`).
+  of one form read it with `"draft"`, from the columns of `ready_columns`
+  (`ready_doc_of`).
 - `GET /api/items/{id}/summary`: `{"text", "based_on", "created",
   "model"}` of the summary of the thread of the origin message of the item,
   with the same two conditions as `ready`, or 404. The item page reads it

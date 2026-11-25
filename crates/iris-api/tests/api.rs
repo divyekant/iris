@@ -2079,3 +2079,118 @@ async fn status_gives_the_time_zone_of_the_owner() {
     let (_, v) = get(&store, "/api/status").await;
     assert_eq!(v["time_zone"], "Asia/Kolkata");
 }
+
+/// Save a summary of each thread of the store that is ready now: it reads
+/// the newest message that a reply can answer, with the basis of the
+/// thread (issue 478).
+fn summarize_all(store: &Store) {
+    let threads = "SELECT DISTINCT thread_id FROM message";
+    exec(
+        store,
+        &format!(
+            "INSERT INTO thread_summary(thread_id, based_on, basis, text, model, prompt, created_at)
+             SELECT t.thread_id, (SELECT m.id {} {} {} LIMIT 1), {}, 'Dana asked for the venue.',
+                    'fake', 'summary/0.1', 1000
+               FROM ({threads}) t WHERE ?1",
+            iris_voice::messages_sql("t.thread_id"),
+            iris_voice::ANSWERABLE,
+            iris_voice::NEWEST,
+            iris_summary::basis_sql("t.thread_id")
+        ),
+        [1],
+    );
+}
+
+/// Issue 478: an item that needs the person shows the summary of its
+/// thread in `ready` and at `GET /api/items/{id}/summary`, until the
+/// summary is stale. An item that does not need the person shows neither,
+/// also in the same thread. Red if `ready` lacks `summary`, if it does not
+/// read the item filter, or if it does not check the basis.
+#[tokio::test]
+async fn an_item_that_needs_you_shows_the_summary_of_its_thread_until_it_is_stale() {
+    let dir = temp("ready-summary");
+    let (store, _) = filled_n(&dir, 30);
+    let person = sender(&store, "dana@contoso.example", Some("person"));
+    let owe = json!({"direction": "you_owe", "kind": "task", "owner": {"kind": "self"},
+                     "counterparty": party(&person)});
+    exec(&store, "UPDATE message SET understood_at = 1 WHERE ?1", [1]);
+    exec(&store, "DELETE FROM link_check WHERE ?1", [1]);
+    let first: i64 = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT min(id) FROM message WHERE thread_id = (SELECT thread_id FROM message WHERE id = 1)",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    let with = add_item(&store, "commitment", "open", first, 10, owe.clone());
+    // A closed item of the same thread does not need the person.
+    let closed = add_item(&store, "commitment", "closed", first, 20, owe);
+    let (_, brief) = get(&store, "/api/brief").await;
+    assert_eq!(
+        ready_marks(&brief["you_owe"]),
+        vec![(format!("c-{with}"), Value::Null)]
+    );
+    let (status, _) = get(&store, &format!("/api/items/c-{with}/summary")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "no summary yet");
+
+    summarize_all(&store);
+    let want = vec![(format!("c-{with}"), json!(["summary"]))];
+    let (_, brief) = get(&store, "/api/brief").await;
+    assert_eq!(ready_marks(&brief["you_owe"]), want);
+    let (_, page) = get(&store, "/api/brief/you_owe").await;
+    assert_eq!(ready_marks(&page), want);
+    let (_, list) = get(&store, "/api/items?form=commitment").await;
+    let mut marks = ready_marks(&list);
+    marks.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut sorted = vec![
+        (format!("c-{with}"), json!(["summary"])),
+        (format!("c-{closed}"), Value::Null),
+    ];
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(marks, sorted);
+    let (status, summary) = get(&store, &format!("/api/items/c-{with}/summary")).await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    assert_eq!(summary["text"], "Dana asked for the venue.");
+    assert_eq!(summary["model"], "fake");
+    assert_eq!(summary["created"], "1970-01-01T00:00:01Z");
+    assert!(
+        summary["based_on"].as_str().unwrap().starts_with("m-"),
+        "{summary}"
+    );
+    let (status, _) = get(&store, &format!("/api/items/c-{closed}/summary")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "the item does not need you");
+    let (status, _) = get(&store, "/api/items/c-999999/summary").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = get(&store, "/api/items/zz/summary").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // The item page reads no `ready`.
+    let (_, one) = get(&store, &format!("/api/items/c-{with}")).await;
+    assert_eq!(one["ready"], Value::Null, "{one}");
+    // The open model 1.4 allows the value, and 1.3 does not (rule 2.8).
+    let schema = iris_spec::validator("commitment");
+    let marked = brief["you_owe"]["items"][0].clone();
+    assert_eq!(marked["model"], iris_store::MODEL);
+    assert!(schema.is_valid(&marked), "{marked}");
+    let mut old = marked.clone();
+    old["model"] = json!("iris/1.3");
+    assert!(!schema.is_valid(&old), "{old}");
+
+    // A new text of the newest message of the snapshot: the basis changes,
+    // so the summary is stale on both paths.
+    exec(
+        &store,
+        "UPDATE body SET text = text || ' (changed)' WHERE message_id = (SELECT based_on FROM thread_summary s
+           WHERE s.thread_id = (SELECT thread_id FROM message WHERE id = ?1))",
+        [first],
+    );
+    exec(&store, "DELETE FROM link_check WHERE ?1", [1]);
+    let (_, brief) = get(&store, "/api/brief").await;
+    assert_eq!(
+        ready_marks(&brief["you_owe"]),
+        vec![(format!("c-{with}"), Value::Null)]
+    );
+    let (status, _) = get(&store, &format!("/api/items/c-{with}/summary")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "a stale summary");
+}

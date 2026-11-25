@@ -921,6 +921,7 @@ dependencies = [
  "iris-senders",
  "iris-spec",
  "iris-store",
+ "iris-summary",
  "iris-synth",
  "iris-triage",
  "iris-understand",

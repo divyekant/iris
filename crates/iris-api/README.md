@@ -46,6 +46,7 @@ UTC. IDs have the format of specification 1, section 5.7 (`m-42`).
 | `/api/messages/{id}` | One message: the summary, and `to`, `cc`, `text` (the clean text, or `null`), `gone`, `hostile` (the hostile marks, for example `["dmarc"]`), `sender_kind` (the kind of the sender row of the `From` address: `person`, `service`, `stranger` or `hostile`; a sender with no row or no kind is a `stranger`; if two rows have the address in a different case, the first kind of `hostile`, `stranger`, `service`, `person` is used, and a row with no kind counts as `stranger`) and `items` (the IDs of the items that are not gone and that have the message as a source). |
 | `/api/messages/{id}/raw` | The raw source (RFC 5322) of the message, as a download (`message/rfc822`, `Content-Disposition: attachment`). |
 | `/api/jobs?state=&limit=&after=` | `{"jobs": [...], "next"}`: the jobs of the agents (card R4-09), newest first. `state` is `open` (the default: `working`, `waiting` and `needs_you`) or one state: `working`, `waiting`, `needs_you` or `done`. Each job is the job document of `docs/spec/schema/job.schema.json` without `events`. `limit` is 1 to 200, default 50. `after` is the `next` value of the page before (a job ID, `j-12`); the page holds the jobs with a lower ID. Another `state`, or an `after` that is not a job ID, is a 400. |
+| `/api/items/{id}/summary` | `{"text", "based_on", "created", "model"}`: the summary of the thread of the origin message of the item (issue 478). `based_on` is the newest message that the summary read. The conditions are those of `"summary"` in `ready`: the item needs the person, and the summary is not stale. Else the answer is a 404. An ID that is not an item ID is a 400. Iris makes the summary in the background. This route only reads it. |
 | `/api/items/{id}/joinable` | `{"joinable": bool}`: true when the item (`c-`, `v-`, `r-` or `s-`) can join a matter now. The item is live (the rule of `matter_live`) and in no open matter. Another kind of ID is a 400. |
 | `/api/items/{id}/job` | The mail that a start of a job from the commitment or conversation `id` grants now: `{"messages": [...]}`. Each entry is the summary of a message (`id`, `thread`, `date`, `from`, `subject`) with `readable`: true when the message can go into a workspace now. The list holds each source message of the item and each message of the thread of each source, in the order of the thread and then the date. The checks and the error codes are those of `POST /api/jobs`. |
 | `POST /api/jobs` | Body `{"item", "goal", "due", "messages"}`: starts a job from one commitment (`c-4`) or conversation (`v-2`) for the person ("Handle this", `docs/specs/2026-11-17-start-job.md`). `goal` is 1 to 2,000 characters after the trim. `due` is an RFC 3339 time, or null. `messages` is the list of message IDs of `/api/items/{id}/job` that the person saw; if it is not the grant of now as a set, the answer is a 409 and no job starts. The scope of the job is the item and the thread of each source message of the item. The answer is 201 with the job document. Another kind of ID, a goal or a due date that is not valid, or another field is a 400. An ID that no item of that form has is a 404. A gone item, an item with no source, or a source that an agent cannot read (hostile mail, a draft, gone, not understood, the source of a signal) is a 409. If a job that is not done has the item in its scope, the answer is a 409 `{"error", "job"}` with that job ID, and no job starts. |
@@ -95,8 +96,13 @@ has `"ready": ["draft"]` when Iris prepared a reply for it (card R3-09): the
 thread of the mail that made the item has a reply draft of `iris write`, and
 the draft is not stale. A draft is stale when the thread has a newer message
 than the one that the draft answers, when its newest message is gone, or when
-a message of the thread is hostile or waits for understanding. With nothing
-ready, the item has no `ready` field.
+a message of the thread is hostile or waits for understanding. `ready` holds
+`"summary"` when the item needs the person (You owe, Owed to you or
+Conversations) and the thread of the mail that made the item has a summary
+that is not stale (issue 478). A summary is stale for the same reasons as a
+draft, and also when a message that it read gets a new text, label or date,
+or goes away. An item at the stranger gate never has `"summary"`. With
+nothing ready, the item has no `ready` field.
 
 The attention of an item (specification 2, section 6.4) decides where it
 shows. Each item that a list field or `records` would have is in exactly one
@@ -303,7 +309,8 @@ section, so a rule decides before the gate asks the person.
 the list. Each sender is `{"id", "address", "name", "count", "items"}`:
 `count` is the count of its items in the list, and `items` holds its newest 3
 items. An item has `ready` as in the brief (`["draft"]` when its thread has a
-reply draft that the person can use now, issue 478). The newest sender comes first, by the time of its newest item: the
+reply draft that the person can use now, issue 478). A gate item never has
+`"summary"`. The newest sender comes first, by the time of its newest item: the
 `latest.at` of a conversation, else the date of the origin message. `limit`
 is 1 to 200, default 50. `after` is the `next` value of the page before of
 the same list. Another `after` is a 400.
