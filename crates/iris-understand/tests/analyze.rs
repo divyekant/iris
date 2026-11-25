@@ -463,3 +463,30 @@ fn the_name_address_check_holds_for_any_name() {
         assert!(!spoof(&list, from), "{list:?}");
     }
 }
+
+/// Property of the name check (#911): an address in the name ends at the
+/// first ASCII character that a domain cannot hold. An address of the same
+/// owner, with any such character and text after it, is never a spoof. A
+/// foreign address with the same tail always is.
+#[test]
+fn an_address_in_the_name_ends_at_a_character_that_a_domain_cannot_hold() {
+    use iris_understand::name_address_spoof as spoof;
+    let from = "noreply@bank.example";
+    let tails = ["help", "x", "", "a.b", "é", "1"];
+    for c in (0x21u8..0x7f).map(char::from) {
+        if c.is_ascii_alphanumeric() || "-.@".contains(c) {
+            continue;
+        }
+        for t in tails {
+            let own = format!("support@bank.example{c}{t}");
+            assert!(!spoof(&own, from), "{own:?}");
+            let own = format!("Bank support@mail.bank.example.{c}{t}");
+            assert!(!spoof(&own, from), "{own:?}");
+            let foreign = format!("support@other.example{c}{t}");
+            assert!(spoof(&foreign, from), "{foreign:?}");
+        }
+    }
+    // A character outside ASCII does not end the domain, so a mixed-script
+    // domain still differs from the owner.
+    assert!(spoof("support@bank.example\u{202E}x.y", from));
+}
