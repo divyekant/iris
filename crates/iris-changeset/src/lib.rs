@@ -20,7 +20,6 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use iris_store::{format_id, parse_id, Kind, Store};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -1246,9 +1245,6 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
     }
     let write = WRITE_VERBS.contains(&verb.as_str());
     match (verb, group.as_str()) {
-        (Verb::Draft, "drafts") if !CHANGE_ON.load(Ordering::SeqCst) => {
-            return Ok(Some(CHANGE_OFF.into()))
-        }
         (Verb::Draft, "accounts" | "threads" | "drafts") | (Verb::Send, "drafts") => {}
         (Verb::Draft, _) => {
             return Ok(Some(
@@ -1335,23 +1331,7 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
                     params![action, row],
                 )? == 1;
                 if verb == Verb::Draft {
-                    // The change of a reply resolves to one message, its
-                    // parent, with the rule of a thread target (change
-                    // spec, section 1). The apply checks that it is the
-                    // message of the `In-Reply-To` of the draft.
-                    let thread: Option<i64> = c
-                        .query_row("SELECT thread_id FROM draft WHERE id = ?1", [row], |r| {
-                            r.get(0)
-                        })
-                        .optional()?
-                        .flatten();
-                    if let Some(m) = thread.map(|t| reply_parent(c, t)).transpose()?.flatten() {
-                        c.execute(
-                            "INSERT OR IGNORE INTO action_message(action_id, message_id)
-                             VALUES (?1, ?2)",
-                            params![action, m],
-                        )?;
-                    }
+                    change_parent(c, action, row)?;
                     found
                 } else {
                     // The thread of a reply, for the hostile check and the flags.
@@ -1434,6 +1414,26 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
     Ok(None)
 }
 
+/// The parent of a change of the reply draft `draft`: one message, with
+/// the rule of a thread target (change spec, section 1). The apply checks
+/// that it is the message of the `In-Reply-To` of the draft. A draft of a
+/// new mail has no parent.
+fn change_parent(c: &Connection, action: i64, draft: i64) -> Result<()> {
+    let thread: Option<i64> = c
+        .query_row("SELECT thread_id FROM draft WHERE id = ?1", [draft], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .flatten();
+    if let Some(m) = thread.map(|t| reply_parent(c, t)).transpose()?.flatten() {
+        c.execute(
+            "INSERT OR IGNORE INTO action_message(action_id, message_id) VALUES (?1, ?2)",
+            params![action, m],
+        )?;
+    }
+    Ok(())
+}
+
 /// The messages of an undo: the messages with `done` of the ledger entry
 /// that the action undoes, that are not gone (migration 23). Step 2 of the
 /// undo of a `trash` takes only those with no `INBOX` in `pre`.
@@ -1457,6 +1457,27 @@ fn resolve_undo(c: &Connection, action: i64, ids: &[Value]) -> Result<Option<Str
         return Ok(Some(
             "only an undo of the entry targets a ledger entry".into(),
         ));
+    }
+    // The undo of a change of a draft (change spec, section 3): the draft
+    // of the entry, with the checks of a change.
+    let draft: Option<i64> = c
+        .query_row(
+            "SELECT json_extract(ops, '$.draft') FROM ledger
+             WHERE id = ?1 AND json_extract(ops, '$.call') = 'drafts.update'",
+            [ledger],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(draft) = draft {
+        let found = c.execute(
+            "INSERT INTO action_draft(action_id, draft_id) SELECT ?1, id FROM draft WHERE id = ?2",
+            params![action, draft],
+        )? == 1;
+        if !found {
+            return Ok(Some("The draft does not exist.".into()));
+        }
+        change_parent(c, action, draft)?;
+        return Ok(None);
     }
     // The undo of a state entry: the items of the entry, which pins them
     // while the undo is open. The apply sets back only the items that
@@ -1657,19 +1678,6 @@ pub fn hostile(c: &Connection, action: i64) -> Result<bool> {
 
 /// The reason of a change or a send of a draft while another change of the
 /// same draft is open (change spec, section 1).
-/// The refusal of a change of a draft while its apply and undo are not built.
-pub const CHANGE_OFF: &str = "Iris cannot change a draft yet.";
-
-// shortcut: a process switch, off by default, so that no approved change of
-// a draft reaches an apply that refuses it. Remove it when the apply and the
-// undo of a change exist (D6, part B3).
-static CHANGE_ON: AtomicBool = AtomicBool::new(false);
-
-/// Lets submit accept a change of a draft. Only tests turn it on now.
-pub fn allow_draft_change(on: bool) {
-    CHANGE_ON.store(on, Ordering::SeqCst);
-}
-
 /// The subject of the draft that a reply change of `action` changes, or
 /// `None` when the action changes no reply draft.
 pub fn change_reply_subject(c: &Connection, action: i64) -> Result<Option<String>> {
