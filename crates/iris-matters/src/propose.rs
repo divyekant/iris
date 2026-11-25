@@ -246,8 +246,11 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
             "UPDATE matter_run SET candidates = ?1 WHERE id = 1",
             [&print],
         )?;
+        // A signal can expire during the call: the checks of the write
+        // read the status at the end of the call.
+        iris_store::expire_signals(tx, ended)?;
         match answer {
-            Some(v) => save(tx, v, &sent, &matters, &name, run, now),
+            Some(v) => save(tx, v, &sent, &matters, &name, run, ended),
             None => Ok((0, 0, 0)),
         }
     })?;

@@ -662,6 +662,50 @@ fn an_addition_waits_for_the_person() {
     assert_eq!(col(&b, "SELECT count(*) FROM matter_add"), 0);
 }
 
+/// A signal that is past its `expires` time at the end of the model call is
+/// no addition and no member, also while its stored status is `active`: the
+/// final write expires signals again (issue #927).
+#[test]
+fn a_signal_that_expires_during_the_call_is_not_saved() {
+    let b = setup(
+        "expire-during",
+        3,
+        &titles(4),
+        &["record", "conversation", "commitment", "signal"],
+    );
+    activate_signals(&b);
+    let m = iris_matters::create(
+        &b.store,
+        "Tokyo trip",
+        &[(1, "record"), (2, "conversation")],
+        NOW,
+    )
+    .unwrap();
+    let add = json!({"matters": [], "additions": [
+        {"matter": format!("g-{m}"), "items": ["s-4"]},
+    ]});
+    // During the call, the clock passes `expires`; no tick runs.
+    let f = fake_during(
+        vec![Ok(add.to_string())],
+        Some((
+            b.dir.clone(),
+            "UPDATE item SET doc = json_set(doc, '$.expires', '1970-01-01T00:00:01Z') WHERE id = 4"
+                .into(),
+        )),
+    );
+    let o = run(&b, &f, Gate::Now, NOW);
+    assert!(f.data.borrow()[0].contains("\"id\":\"s-4\""));
+    assert_eq!(o.added, 0, "{o:?}");
+    assert_eq!(col(&b, "SELECT count(*) FROM matter_add"), 0);
+    assert_eq!(
+        col(
+            &b,
+            "SELECT count(*) FROM item WHERE id = 4 AND status = 'expired'"
+        ),
+        1
+    );
+}
+
 /// Random additions never write an addition outside the rules: the matter
 /// was sent and is confirmed, the item was sent with its prefix, it has no
 /// member row in the matter, and no item is in two places.
