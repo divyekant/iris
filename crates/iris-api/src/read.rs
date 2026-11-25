@@ -585,18 +585,19 @@ pub fn items(store: &Store, filter: &Filter, limit: u32) -> Result<Page> {
     let (outer, inner) = (date("item"), date("i"));
     let items = store.read(|c| {
         let mut st = c.prepare(&format!(
-            "SELECT id, form, status, doc, {MATTER} FROM item
+            "SELECT id, form, status, doc, {MATTER}, {ready} FROM item
              WHERE (?1 IS NULL OR form = ?1)
                AND (status = ?2 OR (?2 IS NULL AND status != 'gone'))
                AND (?3 IS NULL OR json_extract(doc, '$.type') = ?3)
                AND NOT {FROM_HOSTILE}
                AND (?4 IS NULL OR ({outer}, id) <
                     (SELECT {inner}, i.id FROM item i WHERE i.id = ?4))
-             ORDER BY {outer} DESC, id DESC LIMIT ?5"
+             ORDER BY {outer} DESC, id DESC LIMIT ?5",
+            ready = ready_draft(c)?
         ))?;
         let rows = st.query_map(
             params![filter.form, filter.status, filter.kind, before, limit + 1],
-            doc_of,
+            ready_doc_of,
         )?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     })?;
@@ -1329,6 +1330,8 @@ pub(crate) fn ready_draft(c: &Connection) -> iris_store::Result<String> {
 /// As [`doc_of`], with `ready` from the column [`ready_draft`] of the row.
 /// Each list whose items show as brief lines (the sections and the gate)
 /// reads its items with this function, so a prepared draft shows on each.
+/// The lists: the sections and bundles of the brief, the gate, and the
+/// lists of one form (`/api/items`).
 pub(crate) fn ready_doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     let mut doc = doc_of(r)?;
     if r.get::<_, bool>("ready_draft")? {
