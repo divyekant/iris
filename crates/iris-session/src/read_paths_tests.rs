@@ -190,7 +190,7 @@ impl Rng {
         let alphabet = ["a", "b", "-", "_", ".", "\\", " ", "\t", "\n", "é"];
         let mut p = Vec::new();
         for _ in 0..=self.next(4) {
-            p.push(b'/');
+            p.extend_from_slice(b"/");
             for _ in 0..=self.next(6) {
                 let c = alphabet[self.next(alphabet.len() as u64) as usize];
                 p.extend_from_slice(c.as_bytes());
