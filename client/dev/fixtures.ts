@@ -841,7 +841,7 @@ export const nudgeDraft = {
   based_on: "m-54001",
   nudge: true,
   to: "alex@example.com",
-  item: "c-207",
+  items: ["c-207"],
   body: "Hi Alex,\n\nA quick check on the SDK examples. When can you send them?\n\nThanks",
 };
 
