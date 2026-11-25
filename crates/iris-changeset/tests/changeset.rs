@@ -535,7 +535,8 @@ fn first_contact_flag_for_a_stranger_thread() {
 /// verbs, JSON shapes, IDs and arguments, written as another writer would.
 /// Submit never panics. A mailbox action is `proposed` only with one or
 /// more messages, a state action only with items of its kind, a draft only
-/// with one account or one thread, and a send only with the one draft.
+/// with one account, one thread or (a change by the person) one draft, and
+/// a send only with the one draft.
 #[test]
 fn random_target_rows() {
     let dir = TempDir::new("fuzz");
