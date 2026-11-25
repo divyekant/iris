@@ -99,6 +99,10 @@ mail came into this thread. Write a new reply.", when the parent is not
 the message whose `Message-ID` is the `In-Reply-To` of the draft row: a
 change keeps the reply headers, so it cannot answer another message.
 
+The submit runs each check of the table but the attachment check: the
+submit reads only the database, and the files are in the attachment
+folder. The apply runs the attachment check (section 2, step 2).
+
 The same checks run again in the apply (section 2, step 1), and a third
 time in the claim transaction (section 2, step 4), because the state can
 change between the submit and the apply. The flags of the change (R3-03)

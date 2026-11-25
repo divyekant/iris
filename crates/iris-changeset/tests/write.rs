@@ -82,8 +82,12 @@ fn store(dir: &TempDir) -> Store {
         tx.execute(
             "INSERT INTO draft(account_id, thread_id, provider_id, message_id_hdr, content, hash,
                                raw, action_id, created_at, updated_at)
-             VALUES (1, 1, 'r1', 'iris.1@example.com', '{}', ?1, ?2, 1, 0, 0)",
-            rusqlite::params![iris_compose::hash(&c, None), raw],
+             VALUES (1, 1, 'r1', 'iris.1@example.com', ?3, ?1, ?2, 1, 0, 0)",
+            rusqlite::params![
+                iris_compose::hash(&c, None),
+                raw,
+                serde_json::json!({"content": c, "reply": null}).to_string()
+            ],
         )?;
         Ok(())
     })
@@ -180,9 +184,9 @@ fn submit_denies_a_draft_that_is_not_valid() {
             json!({"to": ["p@x.org"], "subject": "s", "body": "x"}),
             "no subject",
         ),
-        (&["m-1"], REPLY(), "one account or one thread"),
-        // A draft change waits for its undo (spec 2, section 7.5).
-        (&["d-1"], REPLY(), "one account or one thread"),
+        (&["m-1"], REPLY(), "one account, one thread or one draft"),
+        // Only the person changes a draft (change spec, section 1).
+        (&["d-1"], REPLY(), "Only you can change a draft."),
         (&both, REPLY(), "one target"),
         // No mail with no text, from any author (issue 741).
         (
@@ -608,7 +612,10 @@ fn a_change_of_a_draft_is_proposed_only_when_each_check_passes() {
     }
     // A send of the draft waits for review: no change.
     one(&s, AuthorKind::Agent, Verb::Send, &["d-1"], json!({}));
-    denied(AuthorKind::Person, "The draft waits to send. Cancel it first.");
+    denied(
+        AuthorKind::Person,
+        "The draft waits to send. Cancel it first.",
+    );
     set(&s, "UPDATE changeset_action SET state = 'denied', decided_by = 'engine', reason = 'no', decided_at = 1 WHERE verb = 'send' AND state = 'proposed'");
     // A change that the person approved is open: a second change and a
     // send wait for it.
@@ -628,19 +635,31 @@ fn a_change_of_a_draft_is_proposed_only_when_each_check_passes() {
 fn an_open_send_mark_of_the_draft_blocks_a_change() {
     let dir = TempDir::new("change-mark");
     let s = store(&dir);
-    set(
-        &s,
-        "UPDATE changeset_action SET state = 'approved', decided_by = 'person', decided_at = 1 WHERE id = 1;",
-    );
+    // A write of a new mail: its approved draft action has a mark, and the
+    // apply made draft 2.
+    let press = iris_changeset::Press {
+        mail: iris_changeset::Mail::New { account: "a-1" },
+        args: &args(MAIL()),
+        key: "key-0123456789abcd",
+        flags: &["new_recipient".to_string()],
+    };
+    let iris_changeset::Written::New(cs) = iris_changeset::write_mail(&s, &press, NOW)
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("a new write");
+    };
     s.write(|tx| {
         Ok(tx.execute(
-            "INSERT INTO write_send(action_id, request_key, request_hash, flags, created_at)
-             VALUES (1, 'key-0123456789abcd', ?1, '[]', ?2)",
-            rusqlite::params!["0".repeat(64), NOW - 1000],
+            "INSERT INTO draft(account_id, provider_id, message_id_hdr, content, hash, raw,
+                               action_id, created_at, updated_at)
+             SELECT 1, 'r2', 'iris.2@example.com', d.content, d.hash, d.raw, a.id, 0, 0
+               FROM draft d, changeset_action a WHERE d.id = 1 AND a.changeset_id = ?1",
+            [cs],
         )?)
     })
     .unwrap();
-    one(&s, AuthorKind::Person, Verb::Draft, &["d-1"], REPLY());
+    one(&s, AuthorKind::Person, Verb::Draft, &["d-2"], REPLY());
     assert_eq!(
         last_state(&s),
         (
@@ -649,7 +668,12 @@ fn an_open_send_mark_of_the_draft_blocks_a_change() {
         )
     );
     // The person stopped that write: the change can go.
-    set(&s, "UPDATE changeset SET state = 'withdrawn' WHERE id = 1");
-    one(&s, AuthorKind::Person, Verb::Draft, &["d-1"], REPLY());
-    assert_eq!(last_state(&s).0, "proposed");
+    set(
+        &s,
+        &format!(
+            "UPDATE changeset SET state = 'withdrawn', withdrawn_by = 'person' WHERE id = {cs}"
+        ),
+    );
+    one(&s, AuthorKind::Person, Verb::Draft, &["d-2"], MAIL());
+    assert_eq!(last_state(&s).0, "proposed", "{:?}", last_state(&s));
 }

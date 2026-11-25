@@ -1145,7 +1145,17 @@
                   "threads": {
                     "maxItems": 1
                   },
-                  "drafts": false
+                  "drafts": {
+                    "$comment": "A change of one draft of Iris in place (docs/specs/2026-11-25-draft-change.md, section 1). A change of a reply resolves to one message, its parent; a change of a new mail resolves to none.",
+                    "maxItems": 1
+                  }
+                }
+              },
+              "resolved": {
+                "properties": {
+                  "messages": {
+                    "maxItems": 1
+                  }
                 }
               },
               "args": {
