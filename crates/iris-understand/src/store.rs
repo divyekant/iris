@@ -373,31 +373,22 @@ fn fixed_differs(store: &Store, id: i64, now_ms: i64) -> Result<bool> {
         // The model reads the mail: a rule item does not hold now.
         !stored_rules.is_empty()
     } else {
-        let mut now: Vec<String> = d
-            .drafts
-            .iter()
-            .filter_map(|x| match x.by {
-                crate::By::Rule(r) => Some(r.to_string()),
-                crate::By::Model => None,
-            })
-            .collect();
+        let mut now: Vec<String> = d.rules.iter().map(|r| r.to_string()).collect();
         now.sort();
         model_items || now != stored_rules
     })
 }
 
-/// The record of `message.fixed_rules` for the drafts of one
-/// understanding: `None` when the model made a draft, else the rule of each
-/// draft as a JSON array.
-fn fixed_rules(drafts: &[crate::Draft]) -> Option<String> {
-    let rules: Option<Vec<String>> = drafts
-        .iter()
-        .map(|x| match x.by {
-            crate::By::Rule(r) => Some(r.to_string()),
-            crate::By::Model => None,
-        })
-        .collect();
-    rules.map(|r| serde_json::to_string(&r).expect("strings serialize"))
+/// The record of `message.fixed_rules` for one decision: `None` when the
+/// model made a draft, else the rules that the fixed rules matched
+/// ([`crate::Decision::rules`]), also of a draft that a pinned item holds.
+fn fixed_rules(d: &crate::Decision) -> Option<String> {
+    if d.drafts.iter().any(|x| matches!(x.by, crate::By::Model)) {
+        return None;
+    }
+    let mut rules = d.rules.clone();
+    rules.sort();
+    Some(serde_json::to_string(&rules).expect("strings serialize"))
 }
 
 /// For the received message `id`: true when it has a deceptive link, with
@@ -692,7 +683,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         tx.execute(
             "UPDATE message SET understood_at = ?2, retry_at = NULL, fixed_rules = ?3
              WHERE id = ?1",
-            params![message, now_ms, fixed_rules(&d.drafts)],
+            params![message, now_ms, fixed_rules(&d)],
         )?;
         if skip {
             tx.execute(
