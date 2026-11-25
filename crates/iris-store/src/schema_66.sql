@@ -4,6 +4,6 @@
 -- after the save makes the draft not ready (`iris_voice::ready_sql`): a
 -- late sync of an older message, a message that leaves the trash or spam,
 -- a message that moves into the thread, and also one that leaves the set.
--- A row of an older build has no value: NULL, and only the rules of
--- `based_on` apply to it (limit issue #1107).
+-- A row of an older build has no value: NULL. Such a draft is not ready,
+-- because nothing shows the set that it read (#1107).
 ALTER TABLE reply_draft ADD COLUMN seen TEXT;

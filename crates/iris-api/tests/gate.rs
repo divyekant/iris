@@ -754,6 +754,14 @@ async fn a_gate_item_shows_a_ready_draft_of_its_thread() {
          SELECT thread_id, id, 'Yes.', 'fake', 'draft/0.1', 0, 1 FROM message WHERE id = ?1",
         [1],
     );
+    // The set of the messages that the draft read, as a save keeps it (#479).
+    g.exec(
+        &format!(
+            "UPDATE reply_draft SET seen = ({}) WHERE ?1",
+            iris_voice::seen_sql(&iris_voice::messages_sql("reply_draft.thread_id"))
+        ),
+        [1],
+    );
     let ready = |page: &Value| -> Vec<(String, Value)> {
         page["senders"]
             .as_array()
