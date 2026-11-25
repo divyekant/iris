@@ -22,6 +22,7 @@ iris-senders = { version = "0.0.0", path = "../iris-senders" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
 iris-triage = { version = "0.0.0", path = "../iris-triage" }
 iris-understand = { version = "0.0.0", path = "../iris-understand" }
+iris-summary = { version = "0.0.0", path = "../iris-summary" }
 iris-voice = { version = "0.0.0", path = "../iris-voice" }
 iris-workspace = { version = "0.0.0", path = "../iris-workspace" }
 rusqlite = "=0.43.0"
