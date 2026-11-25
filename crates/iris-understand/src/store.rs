@@ -1169,13 +1169,13 @@ fn put_header(tx: &Transaction, message: i64, a: &Analysis) -> rusqlite::Result<
     let subject = Some(a.text.subject.clone()).filter(|s| !s.is_empty());
     tx.prepare_cached(
         "INSERT INTO header(message_id, date, from_addr, from_name, to_addrs, cc_addrs, subject,
-           message_id_hdr, in_reply_to, list_id, auth)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+           message_id_hdr, in_reply_to, list_id, auth, reply_to)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT(message_id) DO UPDATE SET
            date = excluded.date, from_addr = excluded.from_addr, from_name = excluded.from_name,
            to_addrs = excluded.to_addrs, cc_addrs = excluded.cc_addrs, subject = excluded.subject,
            message_id_hdr = excluded.message_id_hdr, in_reply_to = excluded.in_reply_to,
-           list_id = excluded.list_id, auth = excluded.auth",
+           list_id = excluded.list_id, auth = excluded.auth, reply_to = excluded.reply_to",
     )?
     .execute(params![
         message,
@@ -1189,6 +1189,7 @@ fn put_header(tx: &Transaction, message: i64, a: &Analysis) -> rusqlite::Result<
         h.in_reply_to,
         h.list_id,
         h.auth.as_ref().map(|a| a.json()),
+        list(&h.reply_to),
     ])?;
     Ok(())
 }

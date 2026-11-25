@@ -400,6 +400,57 @@ async fn a_reply_names_the_newest_mail() {
     assert_eq!(code, StatusCode::CONFLICT);
 }
 
+/// The reply goes to the `Reply-To` addresses of the parent, else to its
+/// `From` address (issue #455). `all` gives the other people of the parent
+/// for reply all: each address once, never the account or an address of
+/// `to`, and only addresses that pass the address check. For a parent of
+/// the person, `to` is its `To` list and `all` its `Cc` list.
+#[tokio::test]
+async fn a_reply_goes_to_reply_to_and_offers_the_others() {
+    let dir = temp("reply-all");
+    let s = store(&dir);
+    let set = |sql: &str| s.write(|tx| Ok(tx.execute_batch(sql)?)).unwrap();
+    set("UPDATE header SET reply_to = 'list@example.org',
+           to_addrs = 'owner@example.com,sam@example.com',
+           cc_addrs = 'Ana <ANA@example.com>, priya@example.com, not an address, sam@example.com'
+         WHERE message_id = 2");
+    let (code, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["to"], json!(["list@example.org"]));
+    assert_eq!(v["cc"], json!([]));
+    let all: Vec<String> = serde_json::from_value(v["all"].clone()).unwrap();
+    assert_eq!(
+        all.iter().map(|a| a.to_lowercase()).collect::<Vec<_>>(),
+        ["priya@example.com", "sam@example.com", "ana@example.com"]
+    );
+    // No Reply-To: the From address, which `all` then leaves out.
+    set("UPDATE header SET reply_to = NULL WHERE message_id = 2");
+    let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+    assert_eq!(v["to"], json!(["priya@example.com"]));
+    let all: Vec<String> = serde_json::from_value(v["all"].clone()).unwrap();
+    assert_eq!(
+        all.iter().map(|a| a.to_lowercase()).collect::<Vec<_>>(),
+        ["sam@example.com", "ana@example.com"]
+    );
+    // A Reply-To that is not an address counts as none.
+    set("UPDATE header SET reply_to = 'not an address' WHERE message_id = 2");
+    let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+    assert_eq!(v["to"], json!(["priya@example.com"]));
+    // The person wrote the parent: its To list, and its Cc list for all.
+    // Its Reply-To is the person's own and does not count.
+    set("INSERT INTO label(account_id, provider_id, name, kind) VALUES (1, 'SENT', 'SENT', 'system');
+         INSERT INTO message_label(message_id, label_id) SELECT 2, id FROM label WHERE provider_id = 'SENT';
+         UPDATE header SET reply_to = 'owner@example.com', to_addrs = 'sam@example.com'
+         WHERE message_id = 2");
+    let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+    assert_eq!(v["to"], json!(["sam@example.com"]));
+    let all: Vec<String> = serde_json::from_value(v["all"].clone()).unwrap();
+    assert_eq!(
+        all.iter().map(|a| a.to_lowercase()).collect::<Vec<_>>(),
+        ["ana@example.com", "priya@example.com"]
+    );
+}
+
 /// The start values hold the conversation above the reply form: the newest
 /// answerable mails, oldest first, with the parent last, and the count of
 /// the older ones. A draft or a mail in the trash is not part of it. The

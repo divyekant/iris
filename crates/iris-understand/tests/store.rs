@@ -354,6 +354,26 @@ fn the_model_gives_a_commitment_and_the_mail_stays_in_the_data() {
     assert!(calls[0].1.contains("Sender kind: stranger"));
 }
 
+/// The header keeps the `Reply-To` addresses, bare and lowercase, as the
+/// other address lists (issue #455). A message with none keeps NULL.
+#[test]
+fn the_header_keeps_the_reply_to_addresses() {
+    let b = store("replyto");
+    let raw = ASK.replace(
+        "Subject:",
+        "Reply-To: \"Team, Lease\" <Team@Example.org>, bo@example.org\nSubject:",
+    );
+    let with = b.add("1", &raw, &["INBOX"]);
+    let without = b.add("2", ASK, &["INBOX"]);
+    for m in [with, without] {
+        understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW).unwrap();
+    }
+    let got: Option<String> = b.col("SELECT reply_to FROM header WHERE message_id = ?1", with);
+    assert_eq!(got.as_deref(), Some("team@example.org,bo@example.org"));
+    let got: Option<String> = b.col("SELECT reply_to FROM header WHERE message_id = ?1", without);
+    assert_eq!(got, None);
+}
+
 #[test]
 fn one_bad_answer_gets_one_more_try() {
     let b = store("retry");
@@ -1312,7 +1332,7 @@ fn the_upgrade_drops_the_items_of_a_draft_or_copy() {
     // The store of version 41: no view and no item trigger.
     b.store
         .write(|tx| {
-            tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER IF EXISTS spam_drops_items; DROP TRIGGER IF EXISTS spam_back_drops_items; DROP VIEW item_droppable;")?;
+            tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; ALTER TABLE reply_draft DROP COLUMN seen; ALTER TABLE header DROP COLUMN reply_to; DROP TRIGGER IF EXISTS spam_drops_items; DROP TRIGGER IF EXISTS spam_back_drops_items; DROP VIEW item_droppable;")?;
             Ok(())
         })
         .unwrap();
@@ -2708,7 +2728,7 @@ Your one-time code is 918273. It ends in 10 minutes.
             "upgrade" => {
                 sql(
                     &b,
-                    "ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                    "ALTER TABLE reply_draft DROP COLUMN seen; ALTER TABLE header DROP COLUMN reply_to; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                      ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
                 );
                 let Box_ {
@@ -2810,7 +2830,7 @@ Your one-time code is 918273. It ends in 10 minutes.
     b.store
         .write(|tx| {
             Ok(tx.execute_batch(
-                "ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                "ALTER TABLE reply_draft DROP COLUMN seen; ALTER TABLE header DROP COLUMN reply_to; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                  ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
             )?)
         })
@@ -2886,7 +2906,7 @@ Your one-time code is 918273. It ends in 10 minutes.
     b.store
         .write(|tx| {
             Ok(tx.execute_batch(
-                "ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                "ALTER TABLE reply_draft DROP COLUMN seen; ALTER TABLE header DROP COLUMN reply_to; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                  ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
             )?)
         })
