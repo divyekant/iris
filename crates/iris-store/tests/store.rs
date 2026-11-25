@@ -82,7 +82,7 @@ fn open_makes_the_data_folder() {
     }
     store
         .read(|c| {
-            assert_eq!(iris_store::schema_version(c)?, 54);
+            assert_eq!(iris_store::schema_version(c)?, 55);
             let journal: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
             assert_eq!(journal, "wal");
             let cache: i64 = c.query_row("PRAGMA cache_size", [], |r| r.get(0))?;
@@ -1136,4 +1136,32 @@ fn read_to_limits_the_open_spools() {
         .unwrap();
         assert_eq!(refused_at.get(), Some(iris_store::MAX_SPOOLS + 1));
     }
+}
+
+#[test]
+fn the_mail_under_one_name_uses_an_index() {
+    // Issue 812: the name triggers of migration 54 find the mail under a
+    // known person name with `h.from_name = name COLLATE NOCASE`. The
+    // lookup is an index search, not a scan of the header table.
+    let dir = std::env::temp_dir().join(format!("iris-store-from-name-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    for sql in [
+        "EXPLAIN QUERY PLAN SELECT h.message_id FROM header h WHERE h.from_name = ?1 COLLATE NOCASE",
+        "EXPLAIN QUERY PLAN SELECT h.message_id FROM header h JOIN message m ON m.id = h.message_id
+          WHERE m.gone_at IS NULL AND h.from_name = ?1 COLLATE NOCASE",
+    ] {
+        let plan: Vec<String> = store
+            .read(|c| {
+                Ok(c.prepare(sql)?
+                    .query_map(["Ana Lee"], |r| r.get(3))?
+                    .collect::<rusqlite::Result<_>>()?)
+            })
+            .unwrap();
+        assert!(
+            plan.iter().any(|p| p.contains("INDEX header_from_name_nocase")),
+            "{sql}: {plan:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
