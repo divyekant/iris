@@ -1301,6 +1301,7 @@ dependencies = [
  "jsonschema",
  "rusqlite",
  "serde_json",
+ "unicode-normalization",
  "url",
 ]
 
