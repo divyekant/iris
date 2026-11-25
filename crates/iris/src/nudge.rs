@@ -19,7 +19,8 @@ pub const PAGE: usize = 20;
 
 /// One nudge step: a call for each late thread of one page of
 /// [`iris_voice::late`] (at most [`PAGE`] threads, the oldest try first),
-/// at most [`MAX_PER_TURN`] calls. No call when another run holds the
+/// at most [`MAX_PER_TURN`] calls. A thread starts only when its two calls
+/// (a call and one retry) fit in the rest of the limit. No call when another run holds the
 /// lock, when no model is set, or during the wait after a model error.
 /// Each try is in the store ([`iris_voice::tried`]): it moves the thread to
 /// the end of the order, so a thread that the budget cannot pay does not
@@ -49,13 +50,13 @@ pub fn step(store: &Store, connect: Connect, now_ms: i64) -> Result<usize, Strin
     let mut saved = 0;
     let mut calls = 0;
     for l in late {
-        if calls >= MAX_PER_TURN {
+        // A nudge can make two calls (a call and the retry of an invalid
+        // answer). With less room in the turn, the thread waits for the
+        // next step, so its retry is not lost.
+        if MAX_PER_TURN - calls < 2 {
             break;
         }
-        // The retry of an invalid answer is a second call: it goes only
-        // if the limit of the turn has room for it.
-        let retry = MAX_PER_TURN - calls >= 2;
-        let (outcome, made) = call(store, &row, model.as_ref(), &l, now_ms, retry)?;
+        let (outcome, made) = call(store, &row, model.as_ref(), &l, now_ms)?;
         calls += made;
         store
             .write(|tx| {
@@ -102,7 +103,6 @@ fn call(
     model: &dyn Model,
     late: &iris_voice::Late,
     now_ms: i64,
-    retry: bool,
 ) -> Result<(Outcome, usize), String> {
     let run = store
         .write(|tx| {
@@ -121,7 +121,7 @@ fn call(
         })
         .map_err(|e| e.to_string())?;
     let budgeted = Budgeted::new(model, store, run, Some(row));
-    let result = iris_voice::nudge_with(store, late, &budgeted, now_ms, retry);
+    let result = iris_voice::nudge(store, late, &budgeted, now_ms);
     let s = budgeted.state();
     let stop = if s.refused || s.overrun {
         "budget"
@@ -436,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn a_step_makes_at_most_the_limit_of_calls_with_the_retries() {
+    fn a_step_starts_a_thread_only_when_its_retry_fits() {
         let (store, dir) = open("limit");
         for t in ["t1", "t2", "t3"] {
             ask(&store, t, "Ana, can you send the slides?");
@@ -452,11 +452,14 @@ mod tests {
             Ok(Box::new(Fake(calls.clone(), "not json")))
         };
         let late = 1_000 + iris_voice::LATE_AFTER_MS;
-        // The first thread gets a call and its retry, the second one call
-        // with no retry: 3 calls, and the third thread waits.
+        // The first thread gets a call and its retry. One call of the limit
+        // is left, too few for a call and a retry, so the other threads
+        // wait and stay open for the next step.
         assert_eq!(step(&store, &connect, late), Ok(0));
-        assert_eq!(calls.get() as usize, MAX_PER_TURN);
-        assert_eq!(blocked(&store), 2);
+        assert_eq!((calls.get(), blocked(&store)), (2, 1));
+        // The next step gives the second thread its call and its retry.
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!((calls.get(), blocked(&store)), (4, 2));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
