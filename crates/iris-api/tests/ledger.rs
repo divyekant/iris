@@ -668,3 +668,119 @@ const HOSTILE: [(&str, &str); 3] = [
         "UPDATE sender SET kind = 'person' WHERE address = 'bad@example.com'",
     ),
 ];
+
+/// A `draft` action of account 1 with `content` as its arguments, its
+/// draft row, and a `send` action of that draft, each with an applied
+/// ledger entry. `tamper` changes the stored bytes of the draft after the
+/// hash, as another writer could. Gives the ledger row IDs (draft, send).
+fn mailed(s: &Store, content: &iris_compose::Content, tamper: bool) -> (i64, i64) {
+    let c = content.clone().check().unwrap();
+    let mut raw = iris_compose::compose("owner@example.com", "iris.1@example.com", &c, None, 1);
+    let hash = iris_compose::hash(&c, None);
+    if tamper {
+        raw.extend_from_slice(b"\r\nmore");
+    }
+    s.write(|tx| {
+        tx.execute("INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0)", [])?;
+        let cs = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+             VALUES (?1, 1, 1, 'draft', '{\"accounts\":[\"a-1\"]}', ?2)",
+            params![cs, serde_json::to_string(&c).unwrap()],
+        )?;
+        let draft_action = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO draft(account_id, provider_id, message_id_hdr, content, hash, raw,
+                               action_id, created_at, updated_at)
+             VALUES (1, 'r' || ?3, 'iris.' || ?3 || '@example.com', '{}', ?1, ?2, ?3, 0, 0)",
+            params![hash, raw, draft_action],
+        )?;
+        let draft = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+             VALUES (?1, 1, 2, 'send', ?2, '{}')",
+            params![cs, format!("{{\"drafts\":[\"d-{draft}\"]}}")],
+        )?;
+        let send_action = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO action_draft(action_id, draft_id) VALUES (?1, ?2)",
+            [send_action, draft],
+        )?;
+        for a in [draft_action, send_action] {
+            let (_, h) = iris_changeset::hash(tx, a).unwrap();
+            tx.execute("UPDATE changeset_action SET hash = ?2 WHERE id = ?1", params![a, h])?;
+        }
+        tx.execute(
+            "UPDATE changeset SET why = 'Write to Dana.', submitted_at = ?2 WHERE id = ?1",
+            params![cs, NOW],
+        )?;
+        let mut ids = vec![];
+        for a in [draft_action, send_action] {
+            tx.execute(
+                "UPDATE changeset_action SET state = 'approved', decided_by = 'person', decided_at = 1
+                 WHERE id = ?1",
+                [a],
+            )?;
+            tx.execute(
+                "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+                 VALUES (?1, 1, '{\"call\":\"drafts.create\",\"calls\":1}', 'writing', 'none', ?2)",
+                params![a, NOW],
+            )?;
+            let l = tx.last_insert_rowid();
+            tx.execute("UPDATE ledger SET state = 'applied' WHERE id = ?1", [l])?;
+            ids.push(l);
+        }
+        Ok((ids[0], ids[1]))
+    })
+    .unwrap()
+}
+
+/// A send and a draft entry name the subject and the recipients of their
+/// mail (issue 490). The subject is bounded, the first recipient comes
+/// from to, the count covers to, cc and bcc, and a send whose stored bytes do not match
+/// the approved hash names no mail. Each other entry has no mail.
+#[tokio::test]
+async fn a_send_names_its_subject_and_recipients() {
+    let dir = temp("mail");
+    let s = store(&dir);
+    let archive = archived(&s, "person", &[1], PERSON);
+    let long = "A".repeat(250);
+    let (draft, send) = mailed(
+        &s,
+        &iris_compose::Content {
+            to: vec!["dana@example.com".into()],
+            cc: vec!["lee@example.com".into()],
+            bcc: vec!["sam@example.com".into()],
+            subject: long.clone(),
+            body: "Hello".into(),
+            ..Default::default()
+        },
+        false,
+    );
+    let (_, tampered) = mailed(
+        &s,
+        &iris_compose::Content {
+            to: vec!["priya@example.com".into()],
+            subject: "Q4 plan".into(),
+            body: "Hello".into(),
+            ..Default::default()
+        },
+        true,
+    );
+    let (code, p) = call(&s, false, "/api/ledger").await;
+    assert_eq!(code, StatusCode::OK);
+    let by = |l: i64| {
+        p["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == format!("l-{l}"))
+            .cloned()
+            .unwrap()
+    };
+    let want = json!({ "subject": "A".repeat(200), "to": "dana@example.com", "recipients": 3 });
+    assert_eq!(by(draft)["mail"], want);
+    assert_eq!(by(send)["mail"], want);
+    assert_eq!(by(tampered)["mail"], Value::Null);
+    assert_eq!(by(archive)["mail"], Value::Null);
+}

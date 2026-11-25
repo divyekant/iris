@@ -59,6 +59,44 @@ pub struct LedgerEntry {
     /// For an undo: true when an undo of the undone entry can
     /// start now (`ledger_can_undo`). False for each other entry.
     pub retry: bool,
+    /// For a `send` or a `draft` entry: the subject and the recipients of
+    /// its draft (issue 490). `None` for each other entry, and for a mail
+    /// whose content Iris cannot read.
+    pub mail: Option<Mail>,
+    /// The action of the entry, to read the content of its draft.
+    #[serde(skip)]
+    action: i64,
+}
+
+/// The words of the mail of a `send` or a `draft` entry.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct Mail {
+    /// At most 200 characters.
+    pub subject: String,
+    /// The first recipient of `to`. A checked draft has one or more.
+    pub to: Option<String>,
+    /// The number of all recipients (to, cc and bcc).
+    pub recipients: usize,
+}
+
+/// The longest subject that an entry gives, in characters.
+const SUBJECT: usize = 200;
+
+/// Read the mail of a `send` or a `draft` entry. The content comes from the
+/// same reader as the review and the outbox ([`iris_changeset::action_content`]):
+/// a send reads the stored bytes of its draft, only if they hash to the
+/// approved hash. An entry whose content Iris cannot read keeps no mail.
+fn with_mail(c: &Connection, mut e: LedgerEntry) -> LedgerEntry {
+    if e.verb == "send" || e.verb == "draft" {
+        if let Ok(Some((_, m))) = iris_changeset::action_content(c, e.action) {
+            e.mail = Some(Mail {
+                subject: m.subject.chars().take(SUBJECT).collect(),
+                to: m.to.first().cloned(),
+                recipients: m.to.len() + m.cc.len() + m.bcc.len(),
+            });
+        }
+    }
+    e
 }
 
 /// The author of the changeset of an entry. `goal` is the goal of the job of
@@ -132,7 +170,8 @@ const ENTRY: &str = "SELECT l.id, a.verb, {args}, l.state, l.at, substr(l.error,
                        - (SELECT count(*) FROM json_each(coalesce(l.post, '{}'))))
              ELSE 0 END,
         coalesce({tried}, 0),
-        EXISTS (SELECT 1 FROM ledger_can_undo v WHERE v.ledger_id = {undone})
+        EXISTS (SELECT 1 FROM ledger_can_undo v WHERE v.ledger_id = {undone}),
+        a.id
      FROM ledger l
      JOIN changeset_action a ON a.id = l.action_id
      JOIN changeset c ON c.id = a.changeset_id
@@ -181,6 +220,8 @@ fn entry(r: &rusqlite::Row) -> rusqlite::Result<LedgerEntry> {
         skipped: r.get(24)?,
         tried: r.get(25)?,
         retry: r.get(26)?,
+        mail: None,
+        action: r.get(27)?,
     })
 }
 
@@ -202,7 +243,8 @@ pub fn ledger(store: &Store, limit: u32, after: Option<&str>) -> Result<LedgerPa
     let mut entries: Vec<LedgerEntry> = store.read(|c| {
         let mut st = c.prepare_cached(&entry_sql("WHERE l.id < ?1 ORDER BY l.id DESC LIMIT ?2"))?;
         let rows = st.query_map(params![before, limit + 1], entry)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let rows: Vec<LedgerEntry> = rows.collect::<rusqlite::Result<_>>()?;
+        Ok(rows.into_iter().map(|e| with_mail(c, e)).collect())
     })?;
     let more = entries.len() > limit as usize;
     entries.truncate(limit as usize);
@@ -213,8 +255,9 @@ pub fn ledger(store: &Store, limit: u32, after: Option<&str>) -> Result<LedgerPa
 }
 
 fn one(c: &Connection, id: i64) -> rusqlite::Result<Option<LedgerEntry>> {
-    c.query_row(&entry_sql("WHERE l.id = ?1"), [id], entry)
-        .optional()
+    Ok(c.query_row(&entry_sql("WHERE l.id = ?1"), [id], entry)
+        .optional()?
+        .map(|e| with_mail(c, e)))
 }
 
 /// The row ID of `l-<n>`, only in its canonical form.

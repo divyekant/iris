@@ -177,7 +177,7 @@ section 7).
 Each entry is `{"id", "verb", "args", "state", "at", "error", "messages",
 "changed", "items", "title", "changeset", "author", "decided_by", "rule",
 "policy", "reason", "why", "can_undo", "undo_open", "undone_by", "undo_of",
-"skipped", "tried", "retry"}`:
+"skipped", "tried", "retry", "mail"}`:
 
 - `args` holds only the short arguments that the words of a verb need: `label`, `until`, `date` and `field`. Each other argument (for example the body of a draft) stays out.
 - Each text has at most 2,000 characters, so a page stays small.
@@ -187,6 +187,7 @@ Each entry is `{"id", "verb", "args", "state", "at", "error", "messages",
 - `author` is `{"kind", "name", "job", "goal"}`: `goal` is the goal of the job of an agent.
 - `decided_by` is `rule` (with `rule` and `policy`) or `person`. `reason` is the reason of the decision, and `why` is the reason of the author.
 - `can_undo` is true when an undo can start now (the view `ledger_can_undo`). `undo_open` is true while an undo waits or applies. `undone_by` is the entry of the undo. `undo_of` is the entry that this entry undoes.
+- `mail` is `{"subject", "to", "recipients"}` for a `send` or a `draft` entry (issue 490): the subject of the draft (at most 200 characters), its first `to` address, and the count of all its recipients (to, cc and bcc). The words come from the same reader as the review and the outbox: a send reads the stored bytes of its draft, only if they hash to the approved hash. `mail` is null for each other entry, and for a mail whose content Iris cannot read.
 - `tried` counts the targets that an undo entry tries to restore: each message that the undone entry changed (also a message that is gone now) and each item of a state entry. Step 2 of the undo of `trash` (`archive`) tries only the messages that had no `INBOX` before the trash. `skipped` counts the targets of `tried` that an applied undo entry left as they were, because an earlier undo restored them, they changed again after the undone entry, or they are gone. `retry` is true when an undo of the undone entry can start now. For each other entry, `tried` and `skipped` are 0 and `retry` is false. An undo that changed nothing keeps the undone entry open (D18).
 
 ## Measures
