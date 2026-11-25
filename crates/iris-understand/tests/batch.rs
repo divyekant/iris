@@ -551,6 +551,67 @@ fn a_second_runner_gets_busy() {
     assert!(b.run(&Limits::default()).is_ok());
 }
 
+/// A draft or a question waits for the run lock (#279): the run stops
+/// before its next message, the waiter gets the lock, and the next run
+/// goes on with the mail that is left.
+#[test]
+fn a_run_yields_to_a_waiter_before_its_next_message() {
+    let b = store("yield");
+    b.model(false, None);
+    let first = b.add("1", "a", 2, &["INBOX"]);
+    let second = b.add("2", "b", 1, &["INBOX"]);
+    let dir = b.store.dir().to_path_buf();
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let waiter = std::thread::spawn({
+        let dir = dir.clone();
+        move || {
+            let store = Store::open(&dir).unwrap();
+            wait.recv().unwrap();
+            batch::lock_wait(&store, std::time::Duration::from_secs(30)).is_ok()
+        }
+    });
+    // During the first call, the other caller starts to wait. The call
+    // ends only when the waiter holds the want lock.
+    let want = dir.join(batch::WANT_FILE);
+    *b.script.during.borrow_mut() = Some(std::boxed::Box::new(move || {
+        go.send(()).unwrap();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !matches!(
+            iris_store::FileLock::probe(&want),
+            Ok(iris_store::Probe::Held)
+        ) {
+            assert!(std::time::Instant::now() < end, "the waiter does not wait");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }));
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!((r.stop.as_deref(), r.messages), (Some("yield"), 1));
+    assert!(waiter.join().unwrap(), "the waiter gets the run lock");
+    assert!(b.understood(first) != b.understood(second), "one message");
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.stop.as_deref(), Some("done"));
+    assert!(
+        b.understood(first) && b.understood(second),
+        "the next run goes on"
+    );
+}
+
+/// With no run, [`batch::lock_wait`] takes the lock at once. A holder that
+/// does not let go gives `Busy` after the wait.
+#[test]
+fn lock_wait_takes_a_free_lock_and_ends_after_its_limit() {
+    let b = store("lockwait");
+    let held = batch::lock_wait(&b.store, std::time::Duration::ZERO).unwrap();
+    let t = std::time::Instant::now();
+    assert!(matches!(
+        batch::lock_wait(&b.store, std::time::Duration::from_millis(200)),
+        Err(Error::Busy)
+    ));
+    assert!(t.elapsed() >= std::time::Duration::from_millis(200));
+    drop(held);
+    assert!(batch::lock(&b.store).is_ok());
+}
+
 #[test]
 fn max_messages_stops_in_the_thread() {
     let b = store("max");

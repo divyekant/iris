@@ -499,7 +499,7 @@ fn a_charge_outside_the_reservation_gets_its_stop() {
 
 /// The call holds the run lock from the read of the model row to the
 /// settlement, so `iris model set` and a budget change wait for it. With
-/// the lock held, Ask makes no call.
+/// the lock held, Ask waits for it (`batch::lock_wait`).
 #[test]
 fn the_call_holds_the_run_lock() {
     let b = Rc::new(setup("lock", Some(1_000_000), MAIL));
@@ -513,11 +513,17 @@ fn the_call_holds_the_run_lock() {
     assert_eq!(*busy.borrow(), Some(true));
     // The lock goes with the end of the call.
     drop(batch::lock(&b.store).unwrap());
+    // A holder that lets go within the wait: the question waits for the
+    // lock and gets its answer (#279).
     let held = batch::lock(&b.store).unwrap();
+    let free = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(held);
+    });
     let (got, calls) = run(&b, Ok(reply), "flight");
-    assert!(matches!(got, Err(Error::Busy)), "{got:?}");
-    assert!(calls.borrow().is_empty());
-    drop(held);
+    free.join().unwrap();
+    assert!(got.is_ok(), "{got:?}");
+    assert_eq!(calls.borrow().len(), 1);
     // A question with no match needs no lock.
     let _held = batch::lock(&b.store).unwrap();
     assert!(run(&b, Ok(reply), "weather in Oslo").0.is_ok());

@@ -2136,7 +2136,7 @@ fn a_snapshot_reads_one_state_of_the_thread() {
 /// trash, a message that moves into the thread and a message that goes to
 /// the trash each make the draft stale, also with the same newest message
 /// and each message understood. A draft of an older build (no `seen`)
-/// keeps the rules of `based_on`.
+/// is not ready (#1107).
 #[test]
 fn a_change_of_the_answerable_set_makes_the_draft_stale() {
     let sql = |b: &Box_, q: &str| b.store.write(|tx| Ok(tx.execute_batch(q)?)).unwrap();

@@ -17,6 +17,16 @@ use crate::Model;
 
 /// The run lock file in the data folder.
 pub const LOCK_FILE: &str = "understand.lock";
+
+/// The file lock of a caller that waits for the run lock ([`lock_wait`]).
+/// While a caller holds it, a run stops before its next message
+/// ([`Stop::Yield`]), so a draft or a question of the person does not wait
+/// for a long run (#279).
+pub const WANT_FILE: &str = "understand.want";
+
+/// The longest wait of [`lock_wait`]. One model call of a run must end
+/// before the run stops.
+pub const WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 /// Messages between two sender refreshes (step 5 of the runner).
 pub const BATCH: usize = 50;
 /// The age limit of the first group of threads.
@@ -134,6 +144,36 @@ pub fn lock(store: &Store) -> Result<RunLock, Error> {
     }
 }
 
+/// Takes the run lock. If a run holds it, asks the run to stop (the lock
+/// on [`WANT_FILE`]) and waits up to `max`, then gives [`Error::Busy`].
+/// A second waiter only waits: the first one releases the want lock when
+/// it has the run lock, and the second one takes it then. The OS releases
+/// the want lock of a waiter that crashes.
+pub fn lock_wait(store: &Store, max: std::time::Duration) -> Result<RunLock, Error> {
+    let start = std::time::Instant::now();
+    let mut want = None;
+    loop {
+        match lock(store) {
+            Err(Error::Busy) if start.elapsed() < max => {}
+            r => return r,
+        }
+        if want.is_none() {
+            want = iris_store::FileLock::try_take(&store.dir().join(WANT_FILE))
+                .map_err(|e| Error::Store(e.into()))?;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// True while a caller of [`lock_wait`] waits. An error of the probe reads
+/// as no waiter: the run goes on.
+fn wanted(store: &Store) -> bool {
+    matches!(
+        iris_store::FileLock::probe(&store.dir().join(WANT_FILE)),
+        Ok(iris_store::Probe::Held)
+    )
+}
+
 /// The limits of one run.
 #[derive(Clone, Debug)]
 pub struct Limits {
@@ -183,6 +223,9 @@ pub enum Stop {
     Model,
     /// A call to a priced model with an unknown result or unknown usage.
     Unknown,
+    /// A draft or a question of the person waits for the run lock
+    /// ([`lock_wait`]). The next run goes on with the mail that is left.
+    Yield,
     Error,
 }
 
@@ -196,6 +239,7 @@ impl Stop {
             Stop::Messages => "messages",
             Stop::Model => "model",
             Stop::Unknown => "unknown",
+            Stop::Yield => "yield",
             Stop::Error => "error",
         }
     }
@@ -498,6 +542,9 @@ impl Runner<'_> {
             };
             if self.limits.max_messages.is_some_and(|n| self.done >= n) {
                 return Ok(Some(Stop::Messages));
+            }
+            if wanted(self.store) {
+                return Ok(Some(Stop::Yield));
             }
             if let Some(max) = self.limits.max_cost_micro_usd {
                 let spent = self.store.read(|c| Ok(run_cost(c, self.run)?))?;
