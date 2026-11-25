@@ -1443,7 +1443,7 @@ async fn get_draft_content(
     State(s): State<Arc<Store>>,
     Path(id): Path<String>,
 ) -> Result<Response> {
-    Ok(match write::draft_content(&s, &id)? {
+    Ok(match write::draft_content(&s, &id, now_ms())? {
         Some(v) => Json(v).into_response(),
         None => not_found(),
     })
