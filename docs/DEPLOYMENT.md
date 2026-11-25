@@ -175,8 +175,9 @@ update lets you roll back.
 
 If you run Iris with another data folder (`--data <path>` or `IRIS_DATA`),
 give the same folder to each `iris` command below, for example
-`iris --data <path> backup <empty-folder>`. The background service uses
-only the default data folder (issue #243).
+`iris --data <path> backup <empty-folder>`. `iris service install` writes
+the data folder of the command into the service file, so the background
+service uses the same folder.
 
 Before each update, run `iris backup <empty-folder>`. Keep the backup until
 you no longer need to roll back. The backup holds your mail and the key, so
@@ -219,8 +220,7 @@ To roll back, do these steps:
    or `~/.local/share/iris` on Linux.
 4. Run `iris status` (with the same `--data` if you set one). Make sure that
    it shows your accounts.
-5. If you use the default data folder, run `iris service install`. Else
-   start `iris serve` with your data folder.
+5. Run `iris service install`, with the same `--data` if you set one.
 
 The service file points to `~/.local/bin/iris`, so the service runs the old
 program after a restart of the service. To restart it:
