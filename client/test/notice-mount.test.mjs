@@ -127,3 +127,30 @@ test("Done with no answer keeps the notice and says that Iris does not know if i
     view.destroy();
   }
 });
+
+test("a job notice opens the job and never says that a mail left", async () => {
+  serve(() => [200, {}]);
+  const job = {
+    id: "n-9",
+    rule: null,
+    job: "j-7",
+    rule_name: "Job due",
+    title: "j-7",
+    text: "Renew the passport.",
+    created: "2026-11-25T09:00:00Z",
+    message: null,
+  };
+  const gone = { ...copy(fx.notices[0]), id: "n-8", message: null };
+  const view = await mount("/src/views/Notices.svelte", { first: [job, gone], poll: 0 });
+  try {
+    const [j, g] = cards(view);
+    assert.equal(j.querySelector("a").getAttribute("href"), "#/jobs/j-7");
+    assert.match(text(j), /Job due j-7: Renew the passport\./);
+    assert.doesNotMatch(text(j), /left your mailbox/);
+    // A notice by rule whose mail is gone still says so.
+    assert.equal(g.querySelector("a"), null);
+    assert.match(text(g), /left your mailbox/);
+  } finally {
+    view.destroy();
+  }
+});

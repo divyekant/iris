@@ -119,7 +119,7 @@ struct Row {
     retry_at: Option<i64>,
     phishing: bool,
     /// The hostile marks that the person released for the current content
-    /// (`message.released`, migration 63).
+    /// (`message.released`, migration 64).
     released: Vec<String>,
 }
 
@@ -1221,7 +1221,7 @@ fn release_row(tx: &Transaction, message: i64) -> iris_store::Result<Option<Rele
 /// The person releases received message `message` from quarantine (issues
 /// 369, 373 and 374): each mark of [`RELEASABLE`] that it has now goes to
 /// `message.released`, with the marks that the person released before. The
-/// trigger of migration 63 queues the fixed check, which understands the
+/// trigger of migration 64 queues the fixed check, which understands the
 /// message again without these marks: with the model, as new mail, if no
 /// other mark stays. New content of the message ends the release.
 pub fn release(tx: &Transaction, message: i64) -> iris_store::Result<Release> {

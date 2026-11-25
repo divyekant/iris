@@ -219,11 +219,15 @@ impl Poll {
 
 fn notice(v: &Value) -> Option<Notice> {
     let s = |k: &str| v[k].as_str();
-    // The mail ID goes into the route only when it is a plain ID (`m-42`).
-    let route = match v["message"]["id"].as_str() {
-        Some(id) if plain_id(id) => format!("#/mail/{id}"),
+    // An ID goes into the route only when it is a plain ID (`m-42`, `j-7`).
+    // A job notice opens its job (`docs/specs/2026-11-25-job-notices.md`).
+    let route = match (v["job"].as_str(), v["message"]["id"].as_str()) {
+        (Some(id), _) if id.starts_with("j-") && plain_id(id) => format!("#/jobs/{id}"),
+        (_, Some(id)) if plain_id(id) => format!("#/mail/{id}"),
         _ => "#/brief".to_string(),
     };
+    // The engine cuts the text of a job notice for the system notice; the
+    // body of a rule notice stays whole (`docs/specs/2026-11-16-notices.md`).
     Some(Notice {
         title: s("rule_name")?.to_string(),
         body: format!("{}: {}", s("title")?, s("text")?),
@@ -575,6 +579,27 @@ mod tests {
         assert_eq!(n(json!(null)), "#/brief");
         for odd in ["m-", "-1", "mm-1", "m-1/../x", "m-1#x", "M-1", "m-1 "] {
             assert_eq!(n(json!({ "id": odd })), "#/brief", "{odd}");
+        }
+    }
+
+    #[test]
+    fn a_click_on_a_job_notice_opens_the_job() {
+        let job = |id: Value| {
+            notice(
+                &json!({ "rule_name": "Job due", "title": "j-7", "text": "x".repeat(500),
+                "message": null, "job": id }),
+            )
+            .unwrap()
+        };
+        assert_eq!(job(json!("j-7")).route, "#/jobs/j-7");
+        // A rule notice keeps its whole body.
+        let long = "s".repeat(200);
+        let rule = notice(&json!({ "rule_name": "r", "title": "Ann", "text": long,
+            "message": null, "job": null }))
+        .unwrap();
+        assert_eq!(rule.body, format!("Ann: {long}"));
+        for odd in ["j-", "j-7/../x", "m-7", "J-7"] {
+            assert_eq!(job(json!(odd)).route, "#/brief", "{odd}");
         }
     }
 

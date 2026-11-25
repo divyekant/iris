@@ -1,16 +1,21 @@
 // Notices by rule (card R5-08): one notice for each new mail that a `notify` rule matched.
+// Job notices (docs/specs/2026-11-25-job-notices.md): one notice for each move of a job to needs you.
 import { get, post, type Summary } from "./api";
 
 export type Notice = {
   id: string;
-  rule: number;
+  /** The rule. Null for a job notice. */
+  rule: number | null;
+  /** The `j-` ID of the job of a job notice. Null or absent for a notice by rule. */
+  job?: string | null;
+  /** The name of the rule, or `Job due` or `Job question`. */
   rule_name: string;
-  /** The sender, one line. */
+  /** The sender, or the job ID, one line. */
   title: string;
-  /** The subject, one line. */
+  /** The subject, or the goal of the job, one line. */
   text: string;
   created: string;
-  /** The mail. Null when it left the mailbox. */
+  /** The mail. Null for a job notice, and when the mail left the mailbox. */
   message: Summary | null;
 };
 

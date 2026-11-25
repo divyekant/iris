@@ -1,28 +1,66 @@
--- Migration 63 (issues 369, 373 and 374): the person can release one
--- message from quarantine. `message.released` holds the hostile marks that
--- the person released (a JSON array of `dmarc`, `spoof` and `link`), for
--- the current content of the message. NULL: no release.
+-- Migration 63: a notice row when a job needs you (issues #844 and #845,
+-- docs/specs/2026-11-25-job-notices.md).
 --
--- The understanding step leaves a released mark out of the marks that it
--- computes for the message, so each gate that reads `message.hostile` sees
--- the message as the person decided. The marks `spam` and `phishing` and a
--- `hostile` sender are not released here.
-ALTER TABLE message ADD COLUMN released TEXT;
+-- The table `notice` gets job rows: one for each move of a job to
+-- `needs_you`, by a trigger in the transaction of the move. A rule row has
+-- a mail and a rule; a job row has a job event and no rule.
 
--- A release or the end of a release queues the fixed check
--- (`iris_understand::store::recheck_fixed`), which understands the message
--- again with no model when its marks change. The trigger deletes the old
--- row and inserts a new one, as the triggers of migration 54 do.
-CREATE TRIGGER IF NOT EXISTS fixed_due_release AFTER UPDATE OF released ON message
-  WHEN OLD.released IS NOT NEW.released AND NEW.gone_at IS NULL
-BEGIN
-  DELETE FROM fixed_due WHERE message_id = NEW.id;
-  INSERT INTO fixed_due(message_id) VALUES (NEW.id);
-END;
+-- A test that sets the schema version back runs this migration again on a
+-- store that has the trigger: the rename below then fails on it.
+DROP TRIGGER IF EXISTS notice_job;
 
--- A release is for one content: new content of the message ends it.
-CREATE TRIGGER IF NOT EXISTS message_release_content AFTER UPDATE OF content_sha256 ON message
-  WHEN OLD.content_sha256 IS NOT NEW.content_sha256 AND NEW.released IS NOT NULL
+CREATE TABLE notice_new (
+  -- AUTOINCREMENT: the engine never uses an ID again (specification 1, 5.7).
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- No foreign key: the cleanup of gone mail keeps the notice.
+  message_id INTEGER UNIQUE,
+  -- The job and the event of its move to `needs_you`. No foreign key, as
+  -- for the mail.
+  job_id INTEGER,
+  job_event_id INTEGER UNIQUE,
+  -- The rule and the active policy version that matched (a rule row).
+  rule INTEGER,
+  -- The name of the rule at the time of the notice, or `Job due` or
+  -- `Job question` for a job row.
+  rule_name TEXT NOT NULL,
+  policy_version INTEGER,
+  -- A rule row: the sender and the subject. A job row: `j-<n>` and the
+  -- goal of the person.
+  title TEXT NOT NULL,
+  text TEXT NOT NULL,
+  -- Milliseconds since 1970-01-01 UTC.
+  created_at INTEGER NOT NULL,
+  done_at INTEGER,
+  CHECK ((message_id IS NULL) <> (job_event_id IS NULL)),
+  CHECK ((job_id IS NULL) = (job_event_id IS NULL)),
+  CHECK ((message_id IS NULL) = (rule IS NULL)),
+  CHECK ((message_id IS NULL) = (policy_version IS NULL))
+);
+
+INSERT INTO notice_new (id, message_id, rule, rule_name, policy_version, title, text, created_at, done_at)
+  SELECT id, message_id, rule, rule_name, policy_version, title, text, created_at, done_at FROM notice;
+
+-- Keep the sequence of the old table when its largest row is gone.
+UPDATE sqlite_sequence
+  SET seq = max(seq, (SELECT seq FROM sqlite_sequence WHERE name = 'notice'))
+  WHERE name = 'notice_new' AND EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'notice');
+INSERT INTO sqlite_sequence (name, seq)
+  SELECT 'notice_new', seq FROM sqlite_sequence
+  WHERE name = 'notice' AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'notice_new');
+
+DROP TABLE notice;
+ALTER TABLE notice_new RENAME TO notice;
+
+-- Each move to `needs_you` adds a job row. `add_event` is the one insert of
+-- `job_event`, and each move goes through it, so this covers each path.
+CREATE TRIGGER notice_job AFTER INSERT ON job_event
+WHEN NEW.state = 'needs_you'
 BEGIN
-  UPDATE message SET released = NULL WHERE id = NEW.id;
+  INSERT INTO notice (job_id, job_event_id, rule_name, title, text, created_at)
+  SELECT NEW.job_id, NEW.id,
+         CASE NEW.by WHEN 'engine' THEN 'Job due' ELSE 'Job question' END,
+         'j-' || NEW.job_id,
+         substr(j.goal, 1, 2000),
+         NEW.at
+  FROM job j WHERE j.id = NEW.job_id;
 END;

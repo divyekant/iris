@@ -37,7 +37,11 @@ export type Measures = {
   memory: { rss_kib: number | null; messages: number };
   approvals: { decided: number; approved: number };
   undo: { applied: number; undone: number };
-  /** `unreviewed_after_hostile`: sends that a rule approved, not a person, after hostile mail in the thread. */
+  /**
+   * `sent`: the sends that Iris checked for hostile mail at the send. A send from before that check (migration 59)
+   * counts in neither field (issue 1059). `unreviewed_after_hostile`: sends that a rule approved, not a person,
+   * after hostile mail in the thread.
+   */
   sends: { sent: number; unreviewed_after_hostile: number };
 };
 
@@ -143,8 +147,8 @@ export function rows(m: Measures, now = new Date()): Row[] {
       ? { name: "Changes that you undid", value: "Not yet", detail: "Iris has applied no change yet. Lower is better.", tone: "none" }
       : { name: "Changes that you undid", value: `${num(undone)} of ${num(applied)}`, detail: `${percent(undone, applied)}. Lower is better.`, tone: "flat" },
     sent === 0
-      ? { name: "Sends without review after hostile mail", value: "Not yet", detail: "Iris has sent no mail yet. Target: zero.", tone: "none" }
-      : { name: "Sends without review after hostile mail", value: num(unreviewed), detail: `Of ${plural(sent, "send", "sends")}. Target: zero.`, tone: unreviewed > 0 ? "missed" : "met" },
+      ? { name: "Sends without review after hostile mail", value: "Not yet", detail: "No send that Iris checked for hostile mail yet. Target: zero.", tone: "none" }
+      : { name: "Sends without review after hostile mail", value: num(unreviewed), detail: `Of ${plural(sent, "send", "sends")} that Iris checked for hostile mail. Target: zero.`, tone: unreviewed > 0 ? "missed" : "met" },
   ];
 }
 
