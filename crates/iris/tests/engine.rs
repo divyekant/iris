@@ -1507,3 +1507,29 @@ fn remove_one_account_and_add_it_again() {
         .unwrap()
         .contains(&second));
 }
+
+/// Issue #683: a read-only sign-in waits while an apply holds the apply
+/// lock. An apply holds it from its gate to the end of its write calls
+/// (also from the recheck to the label create), so no write call with the
+/// old grant runs after the state is `read_only`.
+#[test]
+fn a_read_only_sign_in_waits_for_the_apply_lock() {
+    let s = setup("read-only-lock", 5);
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(s.store.dir().join(iris_apply::LOCK_FILE))
+        .unwrap();
+    held.try_lock().unwrap();
+    let (store, base) = (s.store.clone(), s.fake.base_url());
+    let saver = std::thread::spawn(move || {
+        sign_in_as(&store, &gmail(base), &client_json(), "read-refresh", false)
+    });
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(!saver.is_finished(), "the sign-in waits for the apply lock");
+    assert_state(&s.store, s.account, STATE_OK);
+    drop(held);
+    assert_eq!(saver.join().unwrap(), s.account);
+    assert_state(&s.store, s.account, STATE_READ_ONLY);
+}

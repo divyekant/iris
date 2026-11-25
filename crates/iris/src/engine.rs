@@ -142,6 +142,13 @@ pub fn save_sign_in(
     } else {
         STATE_READ_ONLY
     };
+    // A read-only sign-in waits for the apply lock (issue #683): an apply
+    // holds it from its gate to the end of its write calls, so no write
+    // call with the old grant runs after the state is `read_only`.
+    let _lock = match tokens.write {
+        true => None,
+        false => Some(iris_apply::wait_lock(store, iris_apply::OFF_WAIT).map_err(Error::Apply)?),
+    };
     let id = store.save_account_secret("gmail", &address, None, &sealed, state)?;
     Ok((id, address))
 }

@@ -1044,19 +1044,9 @@ pub const OFF_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 /// later claim reads off. If the lock stays busy for [`OFF_WAIT`], nothing
 /// changes and the answer is [`Error::Busy`].
 pub fn set_sending(store: &Store, on: bool) -> Result<()> {
-    let _lock = if on {
-        None
-    } else {
-        let start = std::time::Instant::now();
-        loop {
-            match super::lock(store) {
-                Ok(l) => break Some(l),
-                Err(Error::Busy) if start.elapsed() < OFF_WAIT => {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-                Err(e) => return Err(e),
-            }
-        }
+    let _lock = match on {
+        true => None,
+        false => Some(super::wait_lock(store, OFF_WAIT)?),
     };
     // SQLite reads the clock in the statement, after it holds the write
     // lock: a hold always counts from the moment the switch changed, also

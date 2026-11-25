@@ -37,7 +37,7 @@ mod stop;
 pub use send::{
     bcc_open, bcc_test, bcc_waits, has_files, is_sent_by_iris, release, sending, sent_by_iris,
     set_sending, CHANGE_CHANGED, CHANGE_DURING, CHANGE_GONE, CHANGE_NEW_MAIL, CHANGE_OLD_FILE,
-    CHANGE_UNDO_FILE, CHANGE_UNKNOWN, HOLD_MS, NO_BCC, SENT_OTHER, SENT_OTHER_END,
+    CHANGE_UNDO_FILE, CHANGE_UNKNOWN, HOLD_MS, NO_BCC, OFF_WAIT, SENT_OTHER, SENT_OTHER_END,
 };
 pub use state::{apply_state, apply_states};
 pub use step::{recover_step, step, step_clock, Step};
@@ -373,6 +373,22 @@ fn lock(store: &Store) -> Result<std::fs::File> {
 
 /// The name of the apply lock in the data folder.
 pub const LOCK_FILE: &str = "apply.lock";
+
+/// Wait up to `wait` for the apply lock, and give it. An apply holds the
+/// lock from its first gate to the end of its write calls, so while the
+/// caller holds it no write call runs and none starts. After `wait`, gives
+/// [`Error::Busy`].
+pub fn wait_lock(store: &Store, wait: std::time::Duration) -> Result<std::fs::File> {
+    let start = std::time::Instant::now();
+    loop {
+        match lock(store) {
+            Err(Error::Busy) if start.elapsed() < wait => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            r => return r,
+        }
+    }
+}
 
 /// The access token of the mailbox. `renew` gives a new token after HTTP
 /// 401, or `None` if there is none (the account needs a sign-in).
