@@ -277,7 +277,8 @@ fn outlook_of(store: &Arc<Store>, account: i64) -> Result<Box<dyn Provider>> {
     // The store gives the sent copies at each read of labels: another
     // engine process can complete a send (issue #719).
     let read = store.clone();
-    let sent = move || iris_apply::sent_by_iris(&read, account).map_err(|e| e.to_string());
+    let sent =
+        move |id: &str| iris_apply::is_sent_by_iris(&read, account, id).map_err(|e| e.to_string());
     Ok(Box::new(
         iris_graph::Outlook::new(iris_graph::Graph::new(graph_config()?))
             .with_sent_source(sent)

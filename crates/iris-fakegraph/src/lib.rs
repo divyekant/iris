@@ -530,6 +530,16 @@ async fn gate(State(s): State<Shared>, req: Request, next: Next) -> Response {
         tokio::time::sleep(delay).await;
     }
     let answer = check(req.headers()).err();
+    // A server that answers before it reads the request body closes the
+    // connection, and the next request of the pooled connection fails at
+    // transport (issue #883). So each injected answer reads the body first.
+    let req = if answer.is_some() || failure.is_some() || body.is_some() {
+        let (parts, b) = req.into_parts();
+        let _ = axum::body::to_bytes(b, usize::MAX).await;
+        Request::from_parts(parts, axum::body::Body::empty())
+    } else {
+        req
+    };
     let response = match (answer, failure) {
         (Some(e), _) => e,
         (None, Some((status, after))) => {

@@ -35,8 +35,8 @@ mod step;
 mod stop;
 
 pub use send::{
-    bcc_open, bcc_test, bcc_waits, release, sending, sent_by_iris, set_sending, HOLD_MS, NO_BCC,
-    SENT_OTHER, SENT_OTHER_END,
+    bcc_open, bcc_test, bcc_waits, is_sent_by_iris, release, sending, sent_by_iris, set_sending,
+    HOLD_MS, NO_BCC, SENT_OTHER, SENT_OTHER_END,
 };
 pub use state::{apply_state, apply_states};
 pub use step::{recover_step, step, step_clock, Step};

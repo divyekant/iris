@@ -685,6 +685,20 @@ pub fn sent_by_iris(store: &Store, account: i64) -> Result<Vec<String>> {
     })?)
 }
 
+/// True if `provider_id` is a sent copy of `account` whose content Iris
+/// confirmed: the same rule as [`sent_by_iris`], with one indexed lookup
+/// (index `draft_sent_copy`) in place of the full list (issue #804).
+pub fn is_sent_by_iris(store: &Store, account: i64, provider_id: &str) -> Result<bool> {
+    Ok(store.read(|c| {
+        Ok(c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM iris_sent_copy
+                            WHERE account_id = ?1 AND provider_id = ?2)",
+            (account, provider_id),
+            |r| r.get(0),
+        )?)
+    })?)
+}
+
 /// The draft of a send action.
 struct Draft {
     id: i64,
