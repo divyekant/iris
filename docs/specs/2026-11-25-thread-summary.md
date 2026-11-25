@@ -54,7 +54,9 @@ A thread is a candidate when all of these are true:
   API uses it for `ready` (see API), so the two reads use one rule.
 - It is long: 5 or more answerable messages (the filter of
   `iris_voice::ANSWERABLE`: not spam, not trash, not gone, not a draft or a
-  copy), or 8,000 or more characters of clean text in those messages. The
+  copy), or 2 or more answerable messages with 8,000 or more characters of
+  clean text in them. One long message alone is not a thread (issue
+  #1020). The
   filter is private now. The build makes it public, so that the two crates
   use one filter and no copy.
 - The ready rules of a reply draft hold (`iris_voice::ready_of`, private
@@ -74,8 +76,7 @@ CREATE TABLE thread_summary (
   thread_id INTEGER PRIMARY KEY REFERENCES thread(id) ON DELETE CASCADE,
   -- The newest answerable message that the summary covers.
   based_on INTEGER NOT NULL REFERENCES message(id) ON DELETE CASCADE,
-  -- The basis: each message of the snapshot, as "id:content_sha256",
-  -- newest first, joined with ",".
+  -- The basis: the SHA-256 (hex) of each model input of the snapshot.
   basis TEXT NOT NULL,
   text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 1500),
   model TEXT NOT NULL,
@@ -99,14 +100,20 @@ is ready when two rules hold:
    newest answerable message of the thread, and no message of the thread
    is hostile or waits for understanding.
 2. The basis: the `basis` of the summary is the basis of the thread now.
-   The basis names each message of the snapshot (the newest 12 answerable
-   messages) with its row ID and its `content_sha256`. SQL computes it in
-   the read (`basis_sql(thread)`), with no hash function.
+   The basis is the SHA-256 of each input of the model call from the
+   snapshot (the newest 12 answerable messages): for each message, its row
+   ID, `from`, its subject, its date, `by_owner` (the `SENT` label) and its
+   clean text as the data cuts it. One SQL list of these columns
+   (`SNAPSHOT_COLUMNS`) feeds both the snapshot of the call and the basis,
+   so the two cannot read different inputs. SQL computes the basis in the
+   read (`basis_sql(thread)`) through a function of the store,
+   `iris_sha256(text)`, which each connection registers.
 
 So each change of the mail that the summary read makes the summary stale
 at the next read, with no write: a new mail, a hostile mark, an older
-message of the snapshot that goes away, leaves the thread or gets new
-content under the same ID. A message older than the snapshot is not in the
+message of the snapshot that goes away or leaves the thread, new content
+or a new clean text under the same ID, and a new `SENT` label or date of a
+message. A message older than the snapshot is not in the
 summary, so its change does not matter (issue #1023).
 
 ### The model call
@@ -204,7 +211,7 @@ clean text, of the account of the item.
 | Mail text that asks the model to do something | The text is in the data block only. The answer is plain text; the client shows it as text. | Unit test: a hostile-looking instruction in the data stays in the data; the answer is shown escaped (client mount test). |
 | A new mail arrives during the call | The save compares the snapshot in its transaction and writes nothing. The next turn tries again. | Store test with a message added between snapshot and save. |
 | A hostile mark or a gone message after the save | The ready rule hides the summary at the next read. | Unit test of `ready` and an API test. |
-| An older message of the snapshot goes away, or gets new content under the same ID | The basis changes: the summary is stale, and the thread is a candidate again. | Unit test of `ready` and `candidates`. |
+| An older message of the snapshot goes away, or gets new content, a new clean text, a new `SENT` label or a new date under the same ID | The basis changes: the summary is stale, and the thread is a candidate again. | Unit test of `ready` and `candidates`. |
 | The model fails (time-out, 5xx) | No row. The wait after a model error applies (decision D35). | Engine test with a failing fake model. |
 | The answer is not valid twice | `thread_summary_try` with `invalid = 1` for that basis and model version. No more calls until the basis or the model version changes. | Unit test. |
 | The budget refuses | No call. The try moves the thread to the end. | Engine test. |
@@ -214,7 +221,7 @@ clean text, of the account of the item.
 
 ## Impact
 
-- `crates/iris-store`: one migration, two tables.
+- `crates/iris-store`: one migration, two tables, the SQL function `iris_sha256`, and the delete of the two tables in the removal of an account.
 - New crate `crates/iris-summary`.
 - `crates/iris/src/summary.rs` and one call in `crates/iris/src/engine.rs`.
 - `crates/iris-api`: `ready` gets `summary`; one new endpoint; README.
