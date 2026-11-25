@@ -302,7 +302,8 @@ section, so a rule decides before the gate asks the person.
 `{"count", "senders": [...], "next"}`. `count` is the count of all senders of
 the list. Each sender is `{"id", "address", "name", "count", "items"}`:
 `count` is the count of its items in the list, and `items` holds its newest 3
-items. The newest sender comes first, by the time of its newest item: the
+items. An item has `ready` as in the brief (`["draft"]` when its thread has a
+reply draft that the person can use now, issue 478). The newest sender comes first, by the time of its newest item: the
 `latest.at` of a conversation, else the date of the origin message. `limit`
 is 1 to 200, default 50. `after` is the `next` value of the page before of
 the same list. Another `after` is a 400.
