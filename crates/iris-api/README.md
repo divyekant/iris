@@ -344,9 +344,10 @@ written. A `p-` ID that no sender has, or another answer, is a 404.
 
 There is no body. The answer is the message, as `GET /api/messages/{id}`
 gives it. The column `hostile` changes when the engine reads the message
-again, so `released` shows the release at once. A message that is gone, has
-no mark to release, or has no release to end gives a 409 and nothing is
-written. An `m-` ID that no message has is a 404. New content of the message
+again, so `released` shows the release at once. A 409 with no write comes
+for a message that is gone, that has no mark to release, or that has no
+release to end. A release also gives a 409 while Iris did not read the
+current content yet, because its marks can be from old content. An `m-` ID that no message has is a 404. New content of the message
 ends its release.
 
 An accept makes the domain of the sender known, and a reopen of an accept

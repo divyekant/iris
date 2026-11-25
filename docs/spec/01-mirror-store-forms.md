@@ -854,8 +854,11 @@ from quarantine (`POST /api/messages/{id}/release`):
 - A release is for one content: new content of the message ends it.
 - `POST /api/messages/{id}/unrelease` ends the release. The fixed check
   gives the marks back, and the items of the message go.
-- The web client offers Release in the hostile warning of a message with a
-  mark that a release covers, and Undo on a released message.
+- A release names only marks of the current content. While the message
+  waits for its next understanding (`understood_at` is NULL, for example
+  after new content), the marks can be from old content, so a release
+  gives 409 with no write.
+- A gone message gives 409 with no write, for a release and for an undo.
 
 The display name is input that Iris does not control. This is the failure
 list of the name-address part of the mark `spoof` (decision D32):

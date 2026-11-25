@@ -1864,8 +1864,14 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
     assert_eq!(hostile(&b), "[]");
 
     // The end of the release: the mark comes back with no model call.
-    assert!(b.store.write(|tx| unrelease(tx, m)).unwrap());
-    assert!(!b.store.write(|tx| unrelease(tx, m)).unwrap());
+    assert!(matches!(
+        b.store.write(|tx| unrelease(tx, m)).unwrap(),
+        Release::Done { .. }
+    ));
+    assert_eq!(
+        b.store.write(|tx| unrelease(tx, m)).unwrap(),
+        Release::Nothing
+    );
     b.run(&Limits::default()).unwrap();
     assert_eq!(hostile(&b), r#"["link"]"#);
     assert_eq!((b.script.calls(), items(&b)), (1, 0));
@@ -1877,7 +1883,8 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
     b.store
         .write(|tx| {
             tx.execute(
-                "UPDATE message SET content_sha256 = ?2 WHERE id = ?1",
+                // As the sync does: new content clears `understood_at`.
+                "UPDATE message SET content_sha256 = ?2, understood_at = NULL WHERE id = ?1",
                 rusqlite::params![m, sha],
             )?;
             Ok(())
@@ -1888,6 +1895,12 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
             "SELECT released IS NULL FROM message WHERE id = {m}"
         )),
         Some(1)
+    );
+    // The old marks stay until Iris reads the new content: no release of
+    // them, so the new content gets its own marks.
+    assert_eq!(
+        b.store.write(|tx| release(tx, m)).unwrap(),
+        Release::Reading
     );
     b.run(&Limits::default()).unwrap();
     assert_eq!(hostile(&b), r#"["link"]"#);

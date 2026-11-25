@@ -936,11 +936,11 @@ async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
 async fn release_takes_a_message_out_of_quarantine_and_unrelease_undoes_it() {
     let g = Gate::new("release");
     g.exec(
-        r#"UPDATE message SET hostile = '["link","spoof"]' WHERE id = 3"#,
+        r#"UPDATE message SET hostile = '["link","spoof"]', understood_at = 1 WHERE id = 3"#,
         [],
     );
     g.exec(
-        r#"UPDATE message SET hostile = '["phishing"]' WHERE id = 4"#,
+        r#"UPDATE message SET hostile = '["phishing"]', understood_at = 1 WHERE id = 4"#,
         [],
     );
     let due = || g.one::<i64>("SELECT count(*) FROM fixed_due WHERE message_id = 3");
@@ -984,8 +984,27 @@ async fn release_takes_a_message_out_of_quarantine_and_unrelease_undoes_it() {
     assert_eq!(v["released"], json!([]));
     assert_eq!(due(), 1, "the undo queues the check again, in one row");
 
-    // Gone mail cannot be released.
+    // Content that Iris did not read yet: its marks can be old, so no
+    // release and no write.
+    g.exec("UPDATE message SET understood_at = NULL WHERE id = 3", []);
+    let (code, v) = g.call("POST", "/api/messages/m-3/release").await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+    assert_eq!(
+        g.one::<Option<String>>("SELECT released FROM message WHERE id = 3"),
+        None
+    );
+    g.exec("UPDATE message SET understood_at = 1 WHERE id = 3", []);
+
+    // Gone mail: no release and no undo, and no write.
+    let (code, v) = g.call("POST", "/api/messages/m-3/release").await;
+    assert_eq!(code, StatusCode::OK, "{v}");
     g.exec("UPDATE message SET gone_at = 1 WHERE id = 3", []);
+    let (code, v) = g.call("POST", "/api/messages/m-3/unrelease").await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+    assert_eq!(
+        g.one::<Option<String>>("SELECT released FROM message WHERE id = 3"),
+        Some(r#"["link","spoof"]"#.into())
+    );
     let (code, v) = g.call("POST", "/api/messages/m-3/release").await;
     assert_eq!(code, StatusCode::CONFLICT, "{v}");
 }

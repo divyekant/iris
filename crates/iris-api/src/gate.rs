@@ -291,18 +291,18 @@ pub fn release(store: &Store, id: &str, on: bool) -> Result<Option<crate::read::
         if !exists {
             return Ok(Ok(None));
         }
-        let done = if on {
-            match release(tx, row)? {
-                Release::Done { .. } => Ok(()),
-                Release::NoMessage => Err("This mail is gone."),
-                Release::Nothing => {
-                    Err("Iris holds this mail for a reason that you cannot release here.")
-                }
-            }
-        } else if unrelease(tx, row)? {
-            Ok(())
+        let done = match if on {
+            release(tx, row)?
         } else {
-            Err("You did not release this mail.")
+            unrelease(tx, row)?
+        } {
+            Release::Done { .. } => Ok(()),
+            Release::NoMessage => Err("This mail is gone."),
+            Release::Reading => Err("Iris reads this mail again now. Try again in a moment."),
+            Release::Nothing if on => {
+                Err("Iris holds this mail for a reason that you cannot release here.")
+            }
+            Release::Nothing => Err("You did not release this mail."),
         };
         Ok(match done {
             Ok(()) => Ok(crate::read::message_in(tx, row)?),

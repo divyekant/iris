@@ -1186,8 +1186,36 @@ pub enum Release {
     },
     /// No message has the row ID, or it is gone.
     NoMessage,
-    /// The message has no mark that the person can release.
+    /// The message has no mark that the person can release, or (for
+    /// [`unrelease`]) no release.
     Nothing,
+    /// Iris did not understand the current content yet, so its marks are
+    /// not known. A release names only marks of the current content.
+    Reading,
+}
+
+/// The marks and the release of message `message`, when it is not gone.
+/// `understood` is false while the stored marks can be from old content.
+fn release_row(
+    tx: &Transaction,
+    message: i64,
+) -> iris_store::Result<Option<(Vec<String>, Vec<String>, bool)>> {
+    let row: Option<(String, Option<String>, bool)> = tx
+        .query_row(
+            "SELECT coalesce(hostile, '[]'), released, understood_at IS NOT NULL
+               FROM message WHERE id = ?1 AND gone_at IS NULL",
+            [message],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    Ok(row.map(|(hostile, released, understood)| {
+        let list = |j: &str| serde_json::from_str::<Vec<String>>(j).unwrap_or_default();
+        (
+            list(&hostile),
+            released.as_deref().map(list).unwrap_or_default(),
+            understood,
+        )
+    }))
 }
 
 /// The person releases received message `message` from quarantine (issues
@@ -1197,21 +1225,14 @@ pub enum Release {
 /// message again without these marks: with the model, as new mail, if no
 /// other mark stays. New content of the message ends the release.
 pub fn release(tx: &Transaction, message: i64) -> iris_store::Result<Release> {
-    let row: Option<(String, Option<String>)> = tx
-        .query_row(
-            "SELECT coalesce(hostile, '[]'), released FROM message
-             WHERE id = ?1 AND gone_at IS NULL",
-            [message],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let Some((hostile, released)) = row else {
+    let Some((hostile, mut all, understood)) = release_row(tx, message)? else {
         return Ok(Release::NoMessage);
     };
-    let hostile: Vec<String> = serde_json::from_str(&hostile).unwrap_or_default();
-    let mut all: Vec<String> = released
-        .and_then(|j| serde_json::from_str(&j).ok())
-        .unwrap_or_default();
+    // The sync clears `understood_at` when the content changes and keeps
+    // the old marks until the next understanding: never release those.
+    if !understood {
+        return Ok(Release::Reading);
+    }
     let now: Vec<String> = hostile
         .iter()
         .filter(|m| RELEASABLE.contains(&m.as_str()) && !all.contains(m))
@@ -1237,12 +1258,22 @@ pub fn release(tx: &Transaction, message: i64) -> iris_store::Result<Release> {
 }
 
 /// The person ends the release of message `message`. The fixed check gives
-/// the marks back. False when the message has no release.
-pub fn unrelease(tx: &Transaction, message: i64) -> iris_store::Result<bool> {
-    Ok(tx.execute(
-        "UPDATE message SET released = NULL WHERE id = ?1 AND released IS NOT NULL",
+/// the marks back. A gone message keeps its row as it is.
+pub fn unrelease(tx: &Transaction, message: i64) -> iris_store::Result<Release> {
+    let Some((hostile, released, _)) = release_row(tx, message)? else {
+        return Ok(Release::NoMessage);
+    };
+    if released.is_empty() {
+        return Ok(Release::Nothing);
+    }
+    tx.execute(
+        "UPDATE message SET released = NULL WHERE id = ?1",
         [message],
-    )? > 0)
+    )?;
+    Ok(Release::Done {
+        released: Vec::new(),
+        kept: hostile,
+    })
 }
 
 /// Set-based writes and thread pages of [`RERUN_PAGE`], so the work is
