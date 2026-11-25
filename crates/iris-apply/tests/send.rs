@@ -2053,7 +2053,9 @@ fn a_failed_lookup_ends_after_a_day() {
     assert_eq!(state, "failed");
     assert_eq!(error.as_deref(), Some(iris_apply::CHANGE_UNKNOWN));
     assert_eq!(b.puts(), 1);
+}
 
+impl Box {
     /// A send mark of the person on the approved `draft` action `action`,
     /// as a press of Send makes it.
     fn mark(&self, action: i64) {
