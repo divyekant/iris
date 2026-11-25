@@ -700,6 +700,27 @@ fn two_waiters_take_the_lock_in_turn() {
     assert_eq!(*order.lock().unwrap(), ["first", "second"]);
 }
 
+/// A take of `batch::lock` holds a shared lock on the want file until it
+/// ends. A waiter cannot signal during that time, so the two never take
+/// the run lock in an order that the waiter cannot see (#279).
+#[test]
+fn a_take_in_progress_holds_back_a_waiter() {
+    let b = store("inflight");
+    drop(batch::lock(&b.store).unwrap());
+    let want = b.store.dir().join(batch::WANT_FILE);
+    let Ok(iris_store::Probe::Free(shared)) = iris_store::FileLock::probe(&want) else {
+        panic!("the want file exists and is free");
+    };
+    assert!(matches!(
+        batch::lock_wait(&b.store, std::time::Duration::from_millis(200)),
+        Err(Error::Busy)
+    ));
+    // A second take of `batch::lock` goes on, as two shared locks agree.
+    drop(batch::lock(&b.store).unwrap());
+    drop(shared);
+    assert!(batch::lock_wait(&b.store, std::time::Duration::ZERO).is_ok());
+}
+
 /// With no run, [`batch::lock_wait`] takes the lock at once. A holder that
 /// does not let go gives `Busy` after the wait.
 #[test]

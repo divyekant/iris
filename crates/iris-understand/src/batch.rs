@@ -137,12 +137,28 @@ pub struct RunLock(#[allow(dead_code)] iris_store::FileLock);
 
 /// Takes the run lock, or gives [`Error::Busy`]. While a caller of
 /// [`lock_wait`] waits, it gives [`Error::Busy`] too: the waiter gets the
-/// lock first (#279).
+/// lock first (#279). A shared lock on [`WANT_FILE`] stays held through
+/// the take, so a waiter that comes during the take waits for its end and
+/// then finds the run lock held: the two never take the lock in an order
+/// that the waiter cannot see.
 pub fn lock(store: &Store) -> Result<RunLock, Error> {
-    if wanted(store) {
-        return Err(Error::Busy);
+    let want = store.dir().join(WANT_FILE);
+    // The file exists after this, so the probe below always gives a lock.
+    // No lock here: an exclusive try would look like a waiter to a run.
+    std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&want)
+        .map_err(|e| Error::Store(e.into()))?;
+    match iris_store::FileLock::probe(&want) {
+        Ok(iris_store::Probe::Free(shared)) => {
+            let r = take(store);
+            drop(shared);
+            r
+        }
+        Ok(_) => Err(Error::Busy),
+        Err(e) => Err(Error::Store(e.into())),
     }
-    take(store)
 }
 
 fn take(store: &Store) -> Result<RunLock, Error> {

@@ -199,20 +199,25 @@ tries the run lock again each 50 ms, for up to `batch::WAIT` (60 seconds).
 Then it fails with "a run is in progress", as before.
 
 - While a waiter holds `understand.want`, `batch::lock` gives "a run is in
-  progress". So the run after a sync, the nudge and summary steps of the
+  progress". `batch::lock` holds a shared lock on `understand.want` through
+  its take of the run lock, so a waiter cannot signal during a take. So the run after a sync, the nudge and summary steps of the
   engine and `iris model set` do not take the lock before the waiter.
 - A holder that works in a loop probes `understand.want` (a shared lock
   try) before each unit of work and stops: the batch runner before each
   message and before each row of the link and fixed checks (`stop =
   yield`), the nudge step before each thread. The summary step makes the
-  calls of one thread only, so it needs no probe.
+  calls of one thread only, so it needs no probe. In the nudge and summary
+  steps, the model refuses each call while a waiter waits, also the retry
+  of an invalid answer: the run row says `yield`, and the thread is not
+  blocked.
 - The OS releases the want lock of a waiter that crashes, so no signal
   stays. Waiters take the run lock in turn: only the holder of the want
   lock tries the run lock, and it releases the want lock when it returns.
 - A scan that stops for a waiter says so (`store::Scan::yielded`), also
   the fixed check at the end of a pass. The run then ends with `stop =
   yield`, not `done`.
-- Limit: a model call that runs when the waiter comes is not stopped. A
+- Limit: a model call that runs when the waiter comes is not stopped, and
+  in a batch run the retry of the answer of that message can follow it. A
   call can take up to `timeout_s` (default 120 seconds), so a waiter can
   still fail after 60 seconds (limit #1126).
 
