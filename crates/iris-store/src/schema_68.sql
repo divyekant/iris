@@ -3,7 +3,9 @@
 -- change of that context runs the message again.
 --
 -- 1. `message.context`: the row IDs of the context of the last successful
---    run, as text (`iris_understand::store::context_key`): "t:7,4;s:4",
+--    run, as text (`iris_understand::store::context_key`): "t:7@..,4@..;s:4@..",
+--    each entry a row ID and the start of its content SHA-256, so that new
+--    content of the same row changes the record,
 --    with `t` the newest 3 earlier messages of the thread and `s` the
 --    earlier messages of the same sender. "t!:" marks a run whose model
 --    data held only the listed thread messages (the budget cut the others,

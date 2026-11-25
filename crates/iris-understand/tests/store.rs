@@ -3105,7 +3105,11 @@ fn a_message_with_no_recorded_context_gets_one_and_does_not_run_again() {
     understand(&b.store, m1, &fake, NOW).unwrap();
     understand(&b.store, m2, &fake, NOW).unwrap();
     let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m2);
-    assert_eq!(recorded, format!("t:{m1};s:"));
+    let sha: String = b.col(
+        "SELECT substr(content_sha256, 1, 16) FROM message WHERE id = ?1",
+        m1,
+    );
+    assert_eq!(recorded, format!("t:{m1}@{sha};s:"));
     b.store
         .write(|tx| {
             tx.execute("UPDATE message SET context = NULL", [])?;
@@ -3120,7 +3124,11 @@ fn a_message_with_no_recorded_context_gets_one_and_does_not_run_again() {
     let understood: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m2);
     assert!(understood.is_some());
     let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m2);
-    assert_eq!(recorded, format!("t:{m1};s:"));
+    let sha: String = b.col(
+        "SELECT substr(content_sha256, 1, 16) FROM message WHERE id = ?1",
+        m1,
+    );
+    assert_eq!(recorded, format!("t:{m1}@{sha};s:"));
     assert_eq!(fake.calls.borrow().len(), 2);
 }
 
@@ -3198,4 +3206,78 @@ fn the_check_after_a_run_reads_only_the_next_few_messages() {
         .unwrap();
     drain(&b, &fake, &mut last);
     assert_eq!(fake.calls.borrow().len(), n + 3);
+}
+
+/// Sets new content on message `m` (the same row), as sync does.
+fn new_content(b: &Box_, m: i64, raw: &str) {
+    let sha = b
+        .store
+        .put_content(raw.replace('\n', "\r\n").as_bytes())
+        .unwrap();
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET content_sha256 = ?2 WHERE id = ?1",
+                rusqlite::params![m, sha],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Issue 1049, pre-review: new content of an earlier message keeps its row
+/// ID, and the later message runs again with the new text.
+#[test]
+fn new_content_of_an_earlier_message_runs_the_later_one_again() {
+    let b = store("context-content");
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    assert!(last[&m2].contains("Words k1k."));
+    new_content(
+        &b,
+        m1,
+        "From: x1@example.net\nTo: owner@example.com\nSubject: S\n\nNew words.\n",
+    );
+    drain(&b, &fake, &mut last);
+    assert!(last[&m2].contains("New words."), "{}", last[&m2]);
+}
+
+/// Issue 1049, pre-review: an earlier message that changes its sender from
+/// A to B is not a text of A any more. A later message of A after more
+/// than 3 other messages (out of the thread walk) runs again.
+#[test]
+fn a_new_sender_of_an_earlier_message_runs_the_later_mail_of_the_old_sender_again() {
+    let b = store("context-sender");
+    let a =
+        |text: &str| format!("From: a@example.net\nTo: owner@example.com\nSubject: S\n\n{text}\n");
+    let m1 = b.add_in("1", "t", NOW - 9 * DAY, &a("First words."), &["INBOX"]);
+    for k in 2..=5 {
+        b.add_in(
+            &k.to_string(),
+            "t",
+            NOW - (10 - k as i64) * DAY,
+            &context_mail(k),
+            &["INBOX"],
+        );
+    }
+    let m6 = b.add_in("6", "t", NOW - DAY, &a("Last words."), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m6);
+    assert!(recorded.contains(&format!(";s:{m1}@")), "{recorded}");
+    let calls = fake.calls.borrow().len();
+    new_content(
+        &b,
+        m1,
+        "From: b@example.net\nTo: owner@example.com\nSubject: S\n\nFirst words.\n",
+    );
+    drain(&b, &fake, &mut last);
+    let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m6);
+    assert!(recorded.ends_with(";s:"), "{recorded}");
+    // m1 and m6 ran again; m2 to m5 too, because m1 is in their context.
+    assert!(fake.calls.borrow().len() >= calls + 2);
 }

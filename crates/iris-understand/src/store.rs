@@ -1111,8 +1111,18 @@ macro_rules! thread_context_from {
     };
 }
 
+/// One entry of a context key: the row ID and the start of the content
+/// SHA-256 of message `m` ("7@3fa9c0d1e2b4a6f8"), so that new content of
+/// the same row changes the key too.
+macro_rules! context_entry {
+    () => {
+        "m.id || '@' || substr(coalesce(m.content_sha256, '-'), 1, 16)"
+    };
+}
+
 /// The context of a run of `message` now (store migration 68, issue
-/// 1049), as text ("t:7,4;s:4"): `t` the row IDs of the newest
+/// 1049), as text ("t:7@..,4@..;s:4@.."): `t` the entries (row ID and
+/// content, [`context_entry!`]) of the newest
 /// [`THREAD_MESSAGES`] earlier messages of the thread, newest first, and
 /// `s` the row IDs of the earlier messages of the same sender, which shape
 /// the clean text of each run. With `kept`, the data of the model call held
@@ -1139,29 +1149,39 @@ fn context_key(
     let Some((Some(thread), date, from)) = row else {
         return Ok(None);
     };
-    let ids = |rows: Vec<i64>| {
-        rows.iter()
-            .map(i64::to_string)
-            .collect::<Vec<_>>()
-            .join(",")
-    };
+    let ids = |rows: Vec<String>| rows.join(",");
     let (mut t, mut s) = (Vec::new(), Vec::new());
     if let Some(date) = date {
         let kept = kept.map_or(THREAD_MESSAGES, |k| (k as i64).min(THREAD_MESSAGES));
         t = if waiting {
-            c.prepare_cached(concat!("SELECT m.id ", thread_context_from!(waiting)))?
-                .query_map(params![thread, message, date, kept, MAX_TRIES], |r| {
-                    r.get(0)
-                })?
-                .collect::<rusqlite::Result<_>>()?
+            c.prepare_cached(concat!(
+                "SELECT ",
+                context_entry!(),
+                " ",
+                thread_context_from!(waiting)
+            ))?
+            .query_map(params![thread, message, date, kept, MAX_TRIES], |r| {
+                r.get(0)
+            })?
+            .collect::<rusqlite::Result<_>>()?
         } else {
-            c.prepare_cached(concat!("SELECT m.id ", thread_context_from!()))?
-                .query_map(params![thread, message, date, kept], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?
+            c.prepare_cached(concat!(
+                "SELECT ",
+                context_entry!(),
+                " ",
+                thread_context_from!()
+            ))?
+            .query_map(params![thread, message, date, kept], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?
         };
         if let Some(from) = &from {
             s = c
-                .prepare_cached(concat!("SELECT m.id ", same_sender_from!()))?
+                .prepare_cached(concat!(
+                    "SELECT ",
+                    context_entry!(),
+                    " ",
+                    same_sender_from!()
+                ))?
                 .query_map(
                     params![thread, message, date, from, SAME_SENDER_MESSAGES],
                     |r| r.get(0),

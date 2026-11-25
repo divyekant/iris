@@ -55,7 +55,8 @@ pay again for the same mail.
   a message that is not understood, for example one that failed the model
   3 times. Triggers of the store do each reset, so each writer gets it.
 - Context (issue #1049, migration 68): each successful run records the
-  row IDs of the earlier messages that shaped it (`message.context`): the
+  row IDs and the content (the start of the content SHA-256) of the
+  earlier messages that shaped it (`message.context`): the
   newest 3 earlier messages of the thread, and the newest 5 texts of the
   same sender, which shape the clean text. When the budget of the data
   left out some thread messages, or no model call ran, the record holds
@@ -69,8 +70,8 @@ pay again for the same mail.
   a failed try), two short walks check the later messages that can hold
   the message in their context: they stop after 3 context messages of the
   thread, and after 5 texts of the same sender. And for each thread in
-  `talk_due` (a message that goes away, the start or the end of a link
-  check, a sender kind change), it checks each understood message of the
+  `talk_due` (a message that goes away, new content, the start or the end
+  of a link check, a sender kind change), it checks each understood message of the
   thread, 200 rows at a time. A difference that is only a message that
   waits for a run waits for the end of that run, so one change runs a
   message once. A run reads only earlier messages, so a reset never comes
