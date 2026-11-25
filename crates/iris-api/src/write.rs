@@ -317,7 +317,7 @@ pub fn draft_content(store: &Store, id: &str) -> Result<Option<Value>> {
         Ok(c.query_row(
             "SELECT d.account_id, d.thread_id, d.content FROM draft d
              JOIN account a ON a.id = d.account_id
-             WHERE d.id = ?1 AND (a.state IS NULL OR a.state NOT IN ('removing', 'removed'))",
+             WHERE d.id = ?1 AND d.foreign_at IS NULL AND (a.state IS NULL OR a.state NOT IN ('removing', 'removed'))",
             [row],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )

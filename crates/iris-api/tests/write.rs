@@ -951,6 +951,12 @@ async fn a_stopped_write_changes_its_draft() {
     // The draft waits for the change now: the first write offers none.
     let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
     assert_eq!(st["change"], Value::Null, "{st}");
+    // A draft that the person changed into a form that Iris does not write
+    // has no content to show.
+    s.write(|tx| Ok(tx.execute("UPDATE draft SET foreign_at = 1 WHERE id = 1", [])?))
+        .unwrap();
+    let (code, _) = call(&s, "GET", "/api/drafts/d-1", None).await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
 }
 
 /// A draft field that is not a draft of the account or the thread of the
@@ -1045,4 +1051,20 @@ async fn a_stopped_write_says_how_its_draft_can_change() {
     })
     .unwrap();
     assert_eq!(change(s.clone(), cs).await, Value::Null);
+    // A press of the reply draft with another parent of the same thread:
+    // 400, nothing written.
+    let before = count(&s, "SELECT count(*) FROM changeset");
+    let reply = json!({"thread": "t-1", "parent": "m-3", "to": ["priya@example.com"],
+                       "cc": [], "body": "Hi.\n", "key": "0123456789abcdef-6",
+                       "flags": [], "draft": "d-1"});
+    let (code, v) = call(&s, "POST", "/api/write", Some(reply)).await;
+    assert_eq!(
+        (code, &v["error"]),
+        (
+            StatusCode::BAD_REQUEST,
+            &json!("The draft does not answer this message.")
+        ),
+        "{v}"
+    );
+    assert_eq!(count(&s, "SELECT count(*) FROM changeset"), before);
 }

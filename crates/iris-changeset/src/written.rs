@@ -214,7 +214,8 @@ pub fn write_mail(
 /// True if the press changes the draft `draft` (a Gmail draft), false if
 /// it makes a new draft (another provider). Refuses a draft that does not
 /// exist, that is of an account that Iris removes, or that is not of the
-/// account (a new mail) or the thread (a reply) of `mail`.
+/// account (a new mail) or the thread (a reply) of `mail`, and a reply
+/// draft that does not answer the parent of `mail`.
 fn change_target(
     c: &Connection,
     draft: &str,
@@ -224,17 +225,17 @@ fn change_target(
     let Some((Kind::Draft, row)) = parse_id(draft) else {
         return Err(gone());
     };
-    let found: Option<(i64, Option<i64>, String)> = c
+    let found: Option<(i64, Option<i64>, String, String)> = c
         .query_row(
-            "SELECT d.account_id, d.thread_id, a.provider FROM draft d
+            "SELECT d.account_id, d.thread_id, a.provider, d.content FROM draft d
              JOIN account a ON a.id = d.account_id
              WHERE d.id = ?1 AND (a.state IS NULL OR a.state NOT IN ('removing', 'removed'))",
             [row],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()
         .map_err(|e| e.to_string())?;
-    let Some((account, thread, provider)) = found else {
+    let Some((account, thread, provider, content)) = found else {
         return Err(gone());
     };
     let same = match (mail, thread) {
@@ -244,6 +245,26 @@ fn change_target(
     };
     if !same {
         return Err("The draft is not of this account or thread.".into());
+    }
+    // A reply: the parent of the press is the message that the draft
+    // answers (draft change spec, section 5).
+    if let Mail::Reply { parent, .. } = mail {
+        let bare = |v: &str| v.trim().trim_matches(['<', '>']).to_ascii_lowercase();
+        let answers = serde_json::from_str::<Value>(&content)
+            .ok()
+            .and_then(|v| v["reply"]["in_reply_to"].as_str().map(bare));
+        let header: Option<String> = c
+            .query_row(
+                "SELECT message_id_hdr FROM header WHERE message_id = ?1",
+                [parent],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .flatten();
+        if answers.is_none() || answers != header.as_deref().map(bare) {
+            return Err("The draft does not answer this message.".into());
+        }
     }
     Ok(provider == "gmail")
 }
