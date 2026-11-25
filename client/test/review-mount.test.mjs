@@ -831,8 +831,10 @@ test("a new revision between two reads replaces the request on the screen, and a
       await new Promise((r) => setTimeout(r, 100));
       assert.deepEqual(asked.filter((p) => p === "changesets" || p === "changesets/cs-9"), ["changesets", "changesets/cs-9"], "no read starts while one waits");
       release();
-      await until(() => (view.flushSync(), /You approved it/.test(text(view.target))));
-      assert.equal(reads, 1, "a closed request needs no second read");
+      // The approved action can still move (issue 997): the next read shows it applied, and then the reads end.
+      await until(() => (view.flushSync(), /Done/.test(text(view.target))));
+      await new Promise((r) => setTimeout(r, 100));
+      assert.equal(reads, 2, "a closed request whose actions ended needs no more reads");
     } finally {
       view.destroy();
     }
@@ -1047,5 +1049,38 @@ test("a send whose draft cannot change after its deny offers no change, and a ne
     } finally {
       view.destroy();
     }
+  }
+});
+
+test("a closed request on the screen follows its started actions until they end (issue 997)", async () => {
+  const first = changeset([act({ decision: { state: "approved", by: "person" } }), act({ n: 2, decision: { state: "in_review" } })]);
+  const closed = (state) => ({ ...first, state: "withdrawn", withdrawn_by: "author", actions: [{ ...first.actions[0], decision: { state, by: "person" } }, { ...first.actions[1], decision: { state: "cancelled", by: "author" } }] });
+  let open = [first];
+  let shownState = "approved";
+  let fail = false;
+  const asked = serve({ changesets: () => [200, { changesets: open }], "changesets/cs-9": () => (fail ? [500, { error: "database: locked" }] : [200, closed(shownState)]) });
+  const view = await mount("/src/views/Review.svelte", { changesets: [first], every: 20 });
+  const reads = () => asked.filter((p) => p === "changesets/cs-9").length;
+  try {
+    open = [];
+    await until(() => (view.flushSync(), /withdrew this request/.test(text(view.target))));
+    assert.match(text(view.target), /You approved it/);
+    // A failed read of a closed request does not lock it: it keeps its last state, and the next poll reads again.
+    fail = true;
+    const before = reads();
+    await until(() => reads() >= before + 2);
+    view.flushSync();
+    assert.doesNotMatch(text(view.target), /could not read its state/);
+    assert.equal(view.target.querySelector("[data-changeset=cs-9]").inert, false);
+    fail = false;
+    // Iris applies the approved action after the withdraw: the screen follows it.
+    shownState = "applied";
+    await until(() => (view.flushSync(), /Done/.test(text(view.target))));
+    // An action that ended takes no more reads.
+    const after = reads();
+    await new Promise((r) => setTimeout(r, 120));
+    assert.equal(reads(), after, "no read of a request whose actions all ended");
+  } finally {
+    view.destroy();
   }
 });
