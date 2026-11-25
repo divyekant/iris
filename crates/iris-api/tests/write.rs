@@ -759,7 +759,6 @@ fn changed_write(s: &Store, body: &str) -> String {
         session: None,
         job: None,
     };
-    iris_changeset::allow_draft_change(true);
     let mut args = new_mail(KEY, json!([]));
     let args = args.as_object_mut().unwrap();
     for k in ["account", "key", "flags"] {

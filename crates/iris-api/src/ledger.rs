@@ -63,6 +63,10 @@ pub struct LedgerEntry {
     /// its draft (issue 490). `None` for each other entry, and for a mail
     /// whose content Iris cannot read.
     pub mail: Option<Mail>,
+    /// For a `draft` entry: true when it changed a draft that exists
+    /// (`drafts.update`), not a create. An undo of a change is a change
+    /// with `undo_of`.
+    pub change: bool,
     /// The action of the entry, to read the content of its draft.
     #[serde(skip)]
     action: i64,
@@ -229,7 +233,8 @@ const ENTRY: &str = "SELECT l.id, a.verb, {args}, l.state, l.at, substr(l.error,
              ELSE 0 END,
         coalesce({tried}, 0),
         EXISTS (SELECT 1 FROM ledger_can_undo v WHERE v.ledger_id = {undone}),
-        a.id
+        a.id,
+        json_valid(l.ops) AND json_extract(l.ops, '$.call') IS 'drafts.update'
      FROM ledger l
      JOIN changeset_action a ON a.id = l.action_id
      JOIN changeset c ON c.id = a.changeset_id
@@ -279,6 +284,7 @@ fn entry(r: &rusqlite::Row) -> rusqlite::Result<LedgerEntry> {
         tried: r.get(25)?,
         retry: r.get(26)?,
         mail: None,
+        change: r.get(28)?,
         action: r.get(27)?,
     })
 }

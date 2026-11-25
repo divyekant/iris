@@ -18,6 +18,8 @@ fn inverse(verb: &str) -> Option<Verb> {
         "unlabel" => Verb::Label,
         "trash" => Verb::Untrash,
         "untrash" => Verb::Trash,
+        // A change of a draft: a change back to the content of `pre`.
+        "draft" => Verb::Draft,
         // A state entry: `restore` sets its `pre` values again.
         v if iris_changeset::STATE_VERBS.contains(&v) => Verb::Restore,
         _ => return None,
@@ -91,23 +93,24 @@ fn make(
     // A state entry changes items: submit resolves them, and refuses an
     // entry with no item in the store.
     let restore = verb_back == Verb::Restore;
-    if !restore && !done(c, ledger, false)? {
-        return Err(refused(format!(
-            "l-{ledger} changed no message that is in the mirror"
-        )));
-    }
+    let args = if verb == "draft" {
+        change_args(c, ledger)?
+    } else {
+        if !restore && !done(c, ledger, false)? {
+            return Err(refused(format!(
+                "l-{ledger} changed no message that is in the mirror"
+            )));
+        }
+        // The same arguments: none, or the label name. `restore` takes none.
+        if restore {
+            "{}".into()
+        } else {
+            args
+        }
+    };
     let why = format!("Undo of l-{ledger}");
     let cs = iris_changeset::create_in(c, author, now_ms)?;
-    // The same arguments: none, or the label name. `restore` takes none.
-    add(
-        c,
-        cs,
-        1,
-        verb_back,
-        if restore { "{}" } else { &args },
-        &why,
-        ledger,
-    )?;
+    add(c, cs, 1, verb_back, &args, &why, ledger)?;
     if verb == "trash" && done(c, ledger, true)? {
         add(c, cs, 2, Verb::Archive, "{}", &why, ledger)?;
     }
@@ -148,6 +151,38 @@ fn make(
         ids.push(id);
     }
     Ok(ids)
+}
+
+/// The draft change entry has a later entry of its draft, or its draft is
+/// sent or has a claimed send (change spec, section 3).
+pub const CHANGE_LATER: &str =
+    "The draft changed or went out after this change. Iris cannot undo it.";
+
+/// The arguments of the undo of the draft change entry `ledger`: the
+/// content before the change, with no subject for a reply (the draft keeps
+/// its subject). The same expression as the trigger `ledger_undo_insert`
+/// (migration 60). Refuses an entry that is not the newest entry of its
+/// draft (view `ledger_can_undo`).
+fn change_args(c: &Connection, ledger: i64) -> iris_changeset::Result<String> {
+    let args: Option<Option<String>> = c
+        .query_row(
+            "SELECT CASE WHEN EXISTS (SELECT 1 FROM ledger_can_undo v WHERE v.ledger_id = l.id)
+                    THEN CASE WHEN json_extract(l.ops, '$.thread') IS NULL
+                           THEN json(json_extract(l.pre, '$.draft.content'))
+                         ELSE json_remove(json_extract(l.pre, '$.draft.content'), '$.subject') END
+                    END
+             FROM ledger l WHERE l.id = ?1 AND json_extract(l.ops, '$.call') = 'drafts.update'",
+            [ledger],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match args {
+        None => Err(iris_changeset::Error::Refused(format!(
+            "l-{ledger} has no undo: it made no change of a draft"
+        ))),
+        Some(None) => Err(iris_changeset::Error::Refused(CHANGE_LATER.into())),
+        Some(Some(a)) => Ok(a),
+    }
 }
 
 /// True if the entry has a message with `done` that is not gone. With
