@@ -1040,9 +1040,9 @@ waits for the next nudge. The owner decided that the nudge stays a
 prepared reply (decision D8, `docs/decisions.md` entry D12). So the verb
 `nudge` and `iris nudge <c-id>` are not built.
 
-A later specification defines the verbs `draft`, `send` and `nudge`, and the
-held outbox. `docs/specs/2026-11-16-send.md` (R3-01) defines `draft`, `send`
-and the release step. That specification must meet these constraints:
+A later specification defines the verbs `draft` and `send`, and the held
+outbox. The verb `nudge` is not built (decision D8). `docs/specs/2026-11-16-send.md`
+(R3-01) defines `draft`, `send` and the release step. That specification must meet these constraints:
 
 - A `send` never goes at once. After the approval, it waits in the held
   outbox for the hold delay (default 60 seconds). The outbox survives a
@@ -1152,9 +1152,11 @@ the approval to the web client (section 8.6).
 
 Release 3 exception: `iris write` (card R3-05) opens the data folder
 directly, as `understand` does, and needs no running engine. It writes one
-reply draft of a thread (table `reply_draft`), a run row, and the cost of one
-model call from the approved budget. It holds the run lock of `understand`
-during the call. It is not a mailbox action: the draft stays in the store, and
+reply draft of a thread (table `reply_draft`), a run row, and the cost of
+each model call from the approved budget. It makes one model call. If the
+answer is not a valid draft and not a refusal, it makes one more call
+(decision D7, section 8.2). The approved budget pays for each call. It holds
+the run lock of `understand` during the calls. It is not a mailbox action: the draft stays in the store, and
 nothing goes to Gmail. So it does not go through the policy or the socket.
 The `draft` verb that adds a Gmail draft action (section 8.2) goes through the
 socket.
@@ -1212,8 +1214,8 @@ engine checks each message that a target resolves to, at `submit` and again
 just before the apply. A message outside the grant at `submit` makes the
 submit fail with no change. A message that left the grant before the apply
 makes the action refused, with the reason. Each item target must be an item
-of the workspace now, by the same two checks. `iris send` and `iris nudge` are
-refused in session mode, and `submit` refuses each send action in a
+of the workspace now, by the same two checks. `iris send` is refused in session
+mode (`iris nudge` is not built, decision D8), and `submit` refuses each send action in a
 changeset of a session. `iris draft` in session mode makes only a reply in a
 granted thread (decision D3): `submit` refuses a new mail and a reply whose
 parent message is not in the grant.

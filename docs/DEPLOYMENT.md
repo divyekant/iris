@@ -193,7 +193,13 @@ To roll back, do these steps:
    ```
 
    Replace `v2026.11.16.1` with the tag of the earlier release (see the
-   GitHub Releases page).
+   GitHub Releases page). If the first install set `IRIS_INSTALL_DIR`, set
+   the same `IRIS_INSTALL_DIR` in this command. Else the earlier release goes
+   to `~/.local/bin`, and `iris` can still run the bad release.
+
+   Run `iris --version`. Make sure that it prints the tag of the earlier
+   release. Do not do step 4 before this check: the bad release can migrate
+   the restored store again.
 
    CAUTION: The restore in step 3 removes each local change since the
    backup: decisions, ledger entries, items, drafts and job state. The mail

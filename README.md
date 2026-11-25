@@ -118,11 +118,20 @@ time: the account keeps its copy of the mail.
 3. If the browser is on another machine than Iris, add `--paste`. Then copy
    the address of the browser after the sign-in, and paste it into the
    command.
-4. Start the engine:
+4. Start the engine. If `install.sh` started the background service, the
+   service runs the engine, and the account syncs with no more step. Run
+   this command in these cases:
+
+   - a source build;
+   - an install with `IRIS_NO_SERVICE=1`;
+   - an install that printed "the background service did not start".
 
    ```bash
    iris serve
    ```
+
+   Do not run `iris serve` while the service runs. The second engine stops
+   with the error "another engine runs on this data folder".
 
 The engine syncs the mailbox at once, then each 60 seconds. If Google refuses
 the stored sign-in, run `iris account add` again.
@@ -141,7 +150,8 @@ record `docs/decisions/2026-11-microsoft-sign-in.md` tells how to make one.
 2. Open the address that the command prints, and sign in to Microsoft. For
    a single-tenant registration, add `--tenant <tenant ID>`. For a browser
    on another machine, add `--paste`.
-3. Start the engine with `iris serve`.
+3. If the background service does not run the engine, start it with
+   `iris serve` (see "Connect a Gmail account", step 4).
 
 Microsoft gives a new refresh token at each refresh. Iris encrypts each new
 token in place of the old one. If Microsoft refuses the stored sign-in, run
@@ -159,7 +169,8 @@ The command asks for the password with no echo, signs in one time to check
 it, and saves it encrypted. Use an app password if your provider has them.
 `--port` (default 993) and `--user` (default the address) change the sign-in.
 To give a new password, run `iris account add-imap <address>` with no
-`--host`. Then start the engine with `iris serve`.
+`--host`. If the background service does not run the engine, start it
+with `iris serve` (see "Connect a Gmail account", step 4).
 
 An IMAP account has these limits: Iris can change the read state of a
 message, and add or remove a keyword that the server already lists. It cannot
