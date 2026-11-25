@@ -101,7 +101,9 @@ pub struct Undo {
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Sends {
-    /// The applied sends.
+    /// The applied sends with a hostile record (`ledger.hostile_before`).
+    /// A send claimed before migration 59 has no record and does not count
+    /// (issue #1059): its evidence is not known now.
     pub sent: i64,
     /// The applied sends that no person decided, whose thread had hostile
     /// evidence at the claim of the send (`ledger.hostile_before`, the
@@ -199,7 +201,7 @@ pub fn measures(store: &Store, rss_kib: Option<i64>) -> Result<Measures> {
         // it: the hostile evidence that its claim kept (migration 59), so a
         // later change of a sender or a removed account does not change it.
         let sends = c.query_row(
-            "SELECT count(*), coalesce(sum(l.hostile_before = 1 AND a.decided_by IS NOT 'person'), 0)
+            "SELECT count(l.hostile_before), coalesce(sum(l.hostile_before = 1 AND a.decided_by IS NOT 'person'), 0)
              FROM ledger l JOIN changeset_action a ON a.id = l.action_id
              WHERE a.verb = 'send' AND l.state = 'applied'",
             [],

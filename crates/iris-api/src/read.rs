@@ -74,6 +74,9 @@ pub struct Status {
     /// (`iris zone`, decision D1). `None` when the time zone of the computer
     /// has no IANA name: then a client uses its own.
     pub time_zone: Option<String>,
+    /// True when the owner set the time zone (`iris zone <name>`, or the
+    /// web client, issue 891). False when it is the zone of the computer.
+    pub time_zone_set: bool,
     /// The end of the wait after model errors (RFC 3339), while it runs.
     /// No model call runs before it, unless the person asks for a try now
     /// (`POST /api/model/try`, issue #136).
@@ -178,27 +181,27 @@ pub struct Message {
     /// sender with no row or no kind yet is a `stranger`. A hostile sender can
     /// send a message with no hostile mark.
     pub sender_kind: String,
-    /// The sender row of the `From` address when only the near-copy rule
-    /// makes it hostile, so the person can trust it (`POST
-    /// /api/senders/{id}/trust`, issue #49), or when the person trusted it,
-    /// so the person can undo the trust (`reopen`). `None` for each other
-    /// sender.
+    /// The trust offer: the sender row of `sender_kind` when only the
+    /// near-copy rule makes it hostile, so the person can trust it (`POST
+    /// /api/senders/{id}/trust`, issue #49). `None` for each other sender.
     pub near_copy: Option<NearCopy>,
+    /// The Undo of a trust: the `p-` ID of a sender row of the `From`
+    /// address, in any case, that the person trusted, so the person can
+    /// undo the trust (`reopen`, issue #1043). Rows can differ only in
+    /// case, so a mail can have a trust offer for one row and an Undo for
+    /// another. `None` with no trusted row.
+    pub trusted_sender: Option<String>,
     /// The items that are not gone and that have this message as a source.
     pub items: Vec<String>,
 }
 
-/// A sender that the near-copy rule marks hostile, or that the person
-/// trusted after that mark.
+/// A sender that the near-copy rule marks hostile.
 #[derive(Debug, Serialize, PartialEq)]
 pub struct NearCopy {
     /// The `p-` ID of the sender row.
     pub sender: String,
-    /// The known domain that the domain of the sender looks like. `None`
-    /// after a trust: the trust replaces the basis that names the domain.
-    pub of: Option<String>,
-    /// True when the person trusted the sender.
-    pub trusted: bool,
+    /// The known domain that the domain of the sender looks like.
+    pub of: String,
 }
 
 /// One section of the brief: the full count, and at most [`MAX_LIMIT`] items.
@@ -396,13 +399,15 @@ pub fn status(store: &Store) -> Result<Status> {
         let model_retry_at = iris_understand::batch::retry_after(c)?
             .filter(|&t| t > now)
             .map(rfc3339);
+        let (time_zone, time_zone_set) = zone_of(c)?;
         Ok(Status {
             mode: iris_policy::active(c)?.policy.mode.name(),
             accounts,
             messages,
             model,
             waits_model,
-            time_zone: iris_store::time_zone(c)?.iana_name().map(str::to_string),
+            time_zone,
+            time_zone_set,
             model_retry_at,
         })
     })?;
@@ -496,6 +501,7 @@ pub(crate) fn message_in(c: &Connection, row: i64) -> rusqlite::Result<Option<Me
     };
     more.sender_kind = sender_kind(c, summary.from.address.as_deref())?;
     more.near_copy = near_copy(c, summary.from.address.as_deref())?;
+    more.trusted_sender = trusted_sender(c, summary.from.address.as_deref())?;
     // The same items as `GET /api/items/{id}` shows: none of hostile mail.
     let mut st = c.prepare_cached(concat!(
         "SELECT i.id, i.form FROM item_source s JOIN item i ON i.id = s.item_id
@@ -605,18 +611,19 @@ pub fn items(store: &Store, filter: &Filter, limit: u32) -> Result<Page> {
     let (outer, inner) = (date("item"), date("i"));
     let items = store.read(|c| {
         let mut st = c.prepare(&format!(
-            "SELECT id, form, status, doc, {MATTER} FROM item
+            "SELECT id, form, status, doc, {MATTER}, {ready} FROM item
              WHERE (?1 IS NULL OR form = ?1)
                AND (status = ?2 OR (?2 IS NULL AND status != 'gone'))
                AND (?3 IS NULL OR json_extract(doc, '$.type') = ?3)
                AND NOT {FROM_HOSTILE}
                AND (?4 IS NULL OR ({outer}, id) <
                     (SELECT {inner}, i.id FROM item i WHERE i.id = ?4))
-             ORDER BY {outer} DESC, id DESC LIMIT ?5"
+             ORDER BY {outer} DESC, id DESC LIMIT ?5",
+            ready = ready_draft(c)?
         ))?;
         let rows = st.query_map(
             params![filter.form, filter.status, filter.kind, before, limit + 1],
-            doc_of,
+            ready_doc_of,
         )?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     })?;
@@ -1001,11 +1008,7 @@ fn read_section(
             let row_keys = (4..4 + keys.len())
                 .map(|i| r.get::<_, SqlValue>(i))
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mut doc = doc_of(r)?;
-            if r.get::<_, bool>("ready_draft")? {
-                doc["ready"] = Value::from(vec!["draft"]);
-            }
-            Ok((doc, row_keys))
+            Ok((ready_doc_of(r)?, row_keys))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
@@ -1253,44 +1256,48 @@ fn sender_kind(c: &Connection, address: Option<&str>) -> rusqlite::Result<String
     Ok(kind.unwrap_or_else(|| "stranger".into()))
 }
 
-/// The near-copy sender row of `address`: kind `hostile` from the engine
-/// (the near-copy rule is the only engine rule that gives `hostile`), or a
-/// row that the person trusted after that mark. Rows can differ only in
-/// case: this reads the row of [`sender_kind`] (the most cautious kind,
-/// then the lowest ID), so the two fields always tell of one row.
+/// The trust offer of `address`: the row of [`sender_kind`] (the most
+/// cautious kind, then the lowest ID) when it has the kind `hostile` from
+/// the engine with a near-copy basis. The near-copy rule is the only engine
+/// rule that gives `hostile`. So the offer is always for the row that makes
+/// the mail hostile.
 fn near_copy(c: &Connection, address: Option<&str>) -> rusqlite::Result<Option<NearCopy>> {
     let Some(address) = address else {
         return Ok(None);
     };
+    let row: Option<(i64, Option<String>, bool, Option<String>)> = c
+        .query_row(
+            "SELECT id, kind, decided_by IS 'person', basis FROM sender
+              WHERE address = ?1 COLLATE NOCASE
+              ORDER BY CASE coalesce(kind, 'stranger') WHEN 'hostile' THEN 0 WHEN 'stranger' THEN 1
+                       WHEN 'service' THEN 2 WHEN 'person' THEN 3 ELSE 4 END, id
+              LIMIT 1",
+            [address],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    Ok(row.and_then(|(id, kind, by_person, basis)| {
+        let of = basis?.strip_prefix("near copy of ")?.to_string();
+        (kind.as_deref() == Some("hostile") && !by_person).then(|| NearCopy {
+            sender: format_id(Kind::Sender, id),
+            of,
+        })
+    }))
+}
+
+/// The trusted row of `address` in any case, with the lowest ID.
+fn trusted_sender(c: &Connection, address: Option<&str>) -> rusqlite::Result<Option<String>> {
+    let Some(address) = address else {
+        return Ok(None);
+    };
     c.query_row(
-        "SELECT id, kind, decided_by IS 'person', basis FROM sender WHERE address = ?1 COLLATE NOCASE
-         ORDER BY CASE coalesce(kind, 'stranger') WHEN 'hostile' THEN 0 WHEN 'stranger' THEN 1
-                  WHEN 'service' THEN 2 WHEN 'person' THEN 3 ELSE 4 END, id
-         LIMIT 1",
-        [address],
-        |r| {
-            let id: i64 = r.get(0)?;
-            let kind: Option<String> = r.get(1)?;
-            let by_person: bool = r.get(2)?;
-            let basis: Option<String> = r.get(3)?;
-            let near = match (kind.as_deref(), basis.as_deref()) {
-                (Some("hostile"), Some(b)) if !by_person => b
-                    .strip_prefix("near copy of ")
-                    .map(|of| (Some(of.to_string()), false)),
-                (Some("person"), Some(iris_senders::gate::TRUSTED)) if by_person => {
-                    Some((None, true))
-                }
-                _ => None,
-            };
-            Ok(near.map(|(of, trusted)| NearCopy {
-                sender: format_id(Kind::Sender, id),
-                of,
-                trusted,
-            }))
-        },
+        "SELECT id FROM sender WHERE address = ?1 COLLATE NOCASE
+            AND kind = 'person' AND decided_by = 'person' AND basis = ?2
+          ORDER BY id LIMIT 1",
+        rusqlite::params![address, iris_senders::gate::TRUSTED],
+        |r| Ok(format_id(Kind::Sender, r.get(0)?)),
     )
     .optional()
-    .map(Option::flatten)
 }
 
 /// The summary of message `row`, and the other fields of [`Message`]
@@ -1331,6 +1338,7 @@ pub(crate) fn message_row(
                             .unwrap_or_default(),
                         sender_kind: String::new(),
                         near_copy: None,
+                        trusted_sender: None,
                         items: Vec::new(),
                     },
                 ))
@@ -1376,7 +1384,7 @@ pub(crate) const MATTER: &str = "(SELECT mi.matter_id FROM matter_item mi
 /// mail that made the item has a reply draft that the person can use now
 /// (card R3-09, [`iris_voice::ready_item_sql`]). A nudge (card R3-07)
 /// marks only the commitments of its key, at the time of this read.
-fn ready_draft(c: &Connection) -> iris_store::Result<String> {
+pub(crate) fn ready_draft(c: &Connection) -> iris_store::Result<String> {
     let now = crate::now_ms();
     // `today` gives `YYYY-MM-DD`, so the quoted literal is safe.
     let today = format!("'{}'", iris_store::today(c, now)?);
@@ -1391,10 +1399,23 @@ fn ready_draft(c: &Connection) -> iris_store::Result<String> {
     ))
 }
 
+/// As [`doc_of`], with `ready` from the column [`ready_draft`] of the row.
+/// Each list whose items show as brief lines (the sections and the gate)
+/// reads its items with this function, so a prepared draft shows on each.
+/// The lists: the sections and bundles of the brief, the gate, and the
+/// lists of one form (`/api/items`).
+pub(crate) fn ready_doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+    let mut doc = doc_of(r)?;
+    if r.get::<_, bool>("ready_draft")? {
+        doc["ready"] = Value::from(vec!["draft"]);
+    }
+    Ok(doc)
+}
+
 /// The document of an item row (id, form, status, doc, and the column
 /// [`MATTER`] by name). The row is the true copy of the ID, the status,
 /// the matter and the account, so they replace the values of the document. A stored `ready`
-/// is removed: only [`read_section`] sets it, from the store. Each output of
+/// is removed: only [`ready_doc_of`] sets it, from the store. Each output of
 /// an item (the API, the read verbs, the export) uses this function.
 pub(crate) fn doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     doc_at(r, 0)
@@ -1466,6 +1487,22 @@ pub fn rfc3339(ms: i64) -> String {
         rem % 3600 / 60,
         rem % 60
     )
+}
+
+/// The time zone of the owner and if the owner set it (decision D1), from
+/// one read of `owner_setting`, so the two values always agree. A saved
+/// name that the computer no longer knows gives the zone of the computer,
+/// as [`iris_store::time_zone`] does, so it counts as not set.
+fn zone_of(c: &Connection) -> rusqlite::Result<(Option<String>, bool)> {
+    let (zone, set) = iris_store::time_zone_and_set(c)?;
+    Ok((zone.iana_name().map(str::to_string), set))
+}
+
+/// The time zone of the owner after a change from the web client (issue
+/// 891): `{"time_zone", "time_zone_set"}`, as in the status.
+pub fn zone(store: &Store) -> Result<serde_json::Value> {
+    let (time_zone, time_zone_set) = store.read(|c| Ok(zone_of(c)?))?;
+    Ok(serde_json::json!({ "time_zone": time_zone, "time_zone_set": time_zone_set }))
 }
 
 #[cfg(test)]

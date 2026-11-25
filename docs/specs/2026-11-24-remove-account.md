@@ -209,9 +209,11 @@ for each batch:
    message. Then the message row. Each raw message file that no message of
    another account uses is deleted, with the order of `clean_gone`: the file
    goes while the transaction holds the write lock.
-3. **Threads and labels**: each thread that no draft refers to, with
-   `talk_due` and `nudge_try`. Each label. A thread that a draft refers to
-   stays as a bare row (an ID and a provider ID, no mail).
+3. **Threads and labels**: each thread that no draft refers to. The rows
+   `talk_due`, `nudge_try`, `thread_summary` and `thread_summary_try` of
+   each thread of the account, also of a thread that stays (issue 478: a
+   summary and the key of a try hold mail data). Each label. A thread that
+   a draft refers to stays as a bare row (an ID and a provider ID, no mail).
 4. **Sync rows**: `sync_log` and `sync_seen` of the account.
 5. **Senders**: a sender kind comes from the evidence in the store
    (spec 1 section 6.7): the mail from the address (`header.from_addr`) and

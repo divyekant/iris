@@ -279,8 +279,8 @@ A ledger row of a change in `writing` after a crash or a lost answer:
 | Value | When | Next press of Send |
 |---|---|---|
 | `"update"` | A Gmail account, each check of section 1 passes for the draft now, and for a reply, the newest eligible message of the thread is still the parent of the draft (its `Message-ID` is the `In-Reply-To` of the draft row) | Sends `draft`: the same draft changes |
-| `"new"` | An Outlook or IMAP account, the draft is not sent, and its account is still an account of Iris | No `draft`: a new draft, as today |
-| `null` | All other cases (sent, `foreign_at`, a send waits, or a reply whose thread has a newer eligible message) | No "Change and send". For a reply with a newer message, the view says "A new mail came into this thread. Write a new reply." |
+| `"new"` | An Outlook or IMAP account, each check of section 1 passes for the draft now but the provider check and the attachment check, and for a reply, the newest eligible message of the thread is still the parent of the draft. The create of a new draft does not read the files of the old draft, so a missing file does not stop it: the form shows the attachment, and the person can remove it | No `draft`: a new draft, as today |
+| `null` | All other cases (sent, `foreign_at`, a send waits, a missing file of a Gmail draft, or a reply whose thread has a newer eligible message) | No "Change and send". For a reply with a newer message, the view says "A new mail came into this thread. Write a new reply." |
 
 The client reads the content of the draft from `GET /api/drafts/{d-N}`
 (a new read route: `to`, `cc`, `bcc`, `subject`, `body`, `attachments`,
@@ -294,9 +294,11 @@ of the owner.
 
 ### 6. The ledger view
 
-A change entry shows "Changed a draft" with the subject of the draft,
-and Undo while `can_undo` is true (the checks of section 3). The undo
-entry shows "Restored a draft". `ledger_can_undo` lists a change entry
+A change entry shows "Changed the draft of" with the subject and the
+first recipient of the draft, and Undo while `can_undo` is true (the
+checks of section 3). The undo entry shows "Restored the old text of"
+with the same words. The API marks both entries with `change` (an entry
+of `drafts.update`); the undo also has `undo_of`. `ledger_can_undo` lists a change entry
 only while its draft passes the checks of section 1 and the entry is
 the newest entry of its draft.
 
@@ -368,7 +370,7 @@ This is the same class of risk that spec 2 accepts for a label change
 | `crates/iris-api` | `draft` in `POST /api/write`, `change` in `GET /api/write/{cs}`, `GET /api/drafts/{d-N}`, the ledger texts |
 | `client/` | "Change and send" in the write view, the ledger texts. A before/after page |
 | `docs/spec/02-changeset-policy-ledger.md` | The `draft` row of section 4, and section 7.5 |
-| Store | One migration. It changes the view `ledger_can_undo` so that it lists an `applied` draft change entry that is the newest entry of its draft and whose draft passes the checks of section 1. It changes the trigger `ledger_undo_insert` so that the undo of a draft change can be a `draft` action on the same draft. The view and the trigger keep each rule for the entries of the other verbs, so each existing entry keeps its state and its undo. `ops`, `pre` and `post` are JSON, and the `draft` row has each column, so no table changes. |
+| Store | One migration. It changes the view `ledger_can_undo` so that it lists an `applied` draft change entry that is the newest entry of its draft and whose draft passes the checks of section 1 (the SQL of `change_denied` for no action, so the view and the undo agree). It changes the trigger `ledger_undo_insert` so that the undo of a draft change can be a `draft` action on the same draft. The view and the trigger keep each rule for the entries of the other verbs, so each existing entry keeps its state and its undo. `ops`, `pre` and `post` are JSON, and the `draft` row has each column, so no table changes. |
 | `crates/iris-apply`, `crates/iris-api` | The rule "the draft of an action" (section 2) in `send_written` and in the state of a write |
 
 Memory: the apply holds two copies of one message (the old read back and

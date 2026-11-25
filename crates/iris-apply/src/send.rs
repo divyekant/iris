@@ -20,7 +20,8 @@ use iris_store::Store;
 mod change;
 pub use change::{
     CHANGED as CHANGE_CHANGED, DURING as CHANGE_DURING, GONE as CHANGE_GONE,
-    NEW_MAIL as CHANGE_NEW_MAIL, OLD_FILE as CHANGE_OLD_FILE, UNKNOWN as CHANGE_UNKNOWN,
+    NEW_MAIL as CHANGE_NEW_MAIL, OLD_FILE as CHANGE_OLD_FILE, UNDO_FILE as CHANGE_UNDO_FILE,
+    UNKNOWN as CHANGE_UNKNOWN,
 };
 
 /// The hold delay of a send after its approval (spec 2, section 7.5).
@@ -148,6 +149,7 @@ pub(crate) fn draft(run: &mut Run<'_, '_>, action: i64) -> Result<Outcome> {
         Ok(c.query_row(
             "SELECT args, json_type(targets, '$.threads') IS NOT NULL,
                     json_type(targets, '$.drafts') IS NOT NULL
+                      OR json_type(targets, '$.ledger') IS NOT NULL
              FROM changeset_action WHERE id = ?1",
             [action],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
@@ -293,6 +295,13 @@ fn compose_as(
         date,
         &files,
     )
+}
+
+/// True if the attachment folder has the file of each attachment of
+/// `content`, with the SHA-256 and the size of its entry. The write view
+/// offers a change of a draft only then (draft change spec, section 5).
+pub fn has_files(store: &Store, content: &Content) -> Result<bool> {
+    Ok(files(store, content)?.is_some())
 }
 
 /// The file of each attachment of `content`, from the attachment folder

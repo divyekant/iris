@@ -562,3 +562,110 @@ async fn one_job_names_its_newest_session() {
     assert_eq!(v["session"]["end"], "launch_failed");
     assert_eq!(v["session"]["exit"], Value::Null);
 }
+
+/// Issue 791: the list gives the newest session of each working job of the
+/// page, by job ID, so that it can say when no agent works on a job. A
+/// working job with no session has null. A job in another state has no
+/// entry, and each job document stays as the schema gives it.
+#[tokio::test]
+async fn the_list_names_the_newest_session_of_each_working_job() {
+    let dir = temp("list-sessions");
+    let s = store(&dir);
+    let failed = iris_job::create(&s, "Get the contract.", None, NOW).unwrap();
+    let none = iris_job::create(&s, "Book the room.", None, NOW).unwrap();
+    let asks = iris_job::create(&s, "Pay the bill.", None, NOW).unwrap();
+    let session = iris_job::register(&s, failed, "codex", NOW + 1).unwrap();
+    iris_job::end(
+        &s,
+        session,
+        iris_job::EndReason::LaunchFailed,
+        None,
+        NOW + 2,
+    )
+    .unwrap();
+    iris_job::ask(&s, asks, "Which card?", None, NOW + 3).unwrap();
+
+    let (code, v) = get(&s, "/api/jobs").await;
+    assert_eq!(code, StatusCode::OK);
+    let id = iris_job::format_job_id;
+    let sessions = v["sessions"].as_object().unwrap();
+    assert_eq!(sessions.len(), 2, "only the working jobs: {sessions:?}");
+    assert_eq!(
+        sessions[&id(failed)]["id"],
+        iris_job::format_session_id(session)
+    );
+    assert_eq!(sessions[&id(failed)]["end"], "launch_failed");
+    assert_eq!(sessions[&id(none)], Value::Null);
+    assert!(!sessions.contains_key(&id(asks)));
+    for j in v["jobs"].as_array().unwrap() {
+        assert!(
+            j.get("session").is_none(),
+            "the job document keeps its schema"
+        );
+    }
+}
+
+/// The page and its sessions come from one snapshot. A writer moves a job
+/// between `working` with an open session and `needs_you` with an ended
+/// session, in one transaction each time. No read may show the job working
+/// with an ended session.
+#[test]
+fn the_list_and_its_sessions_always_agree_while_the_job_moves() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = temp("list-snapshot");
+    let s = store(&dir);
+    let job = iris_job::create(&s, "Get the contract.", None, NOW).unwrap();
+    let first = iris_job::register(&s, job, "codex", NOW + 1).unwrap();
+    let key = iris_job::format_job_id(job);
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let (s, stop) = (s.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut session = first;
+            let mut at = NOW + 10;
+            while !stop.load(Ordering::Relaxed) {
+                at += 10;
+                s.write(|tx| {
+                    let move_ = || -> iris_job::Result<i64> {
+                        if iris_job::get_in(tx, job)?.state == iris_job::State::Working {
+                            iris_job::end_in(
+                                tx,
+                                session,
+                                iris_job::EndReason::LaunchFailed,
+                                None,
+                                at,
+                            )?;
+                            iris_job::reap_in(tx, session, at)?;
+                            iris_job::ask_in(tx, job, "Which card?", None, at)?;
+                            Ok(session)
+                        } else {
+                            iris_job::answer_in(tx, job, "The blue card.", None, at)?;
+                            iris_job::register_in(tx, job, "codex", at)
+                        }
+                    };
+                    move_().map_err(|e| iris_store::Error::Query(e.to_string()))
+                })
+                .map(|s| session = s)
+                .unwrap();
+            }
+        })
+    };
+    for _ in 0..300 {
+        let page = iris_api::jobs(&s, "open", 50, None).unwrap();
+        let v = serde_json::to_value(&page).unwrap();
+        let working = v["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|j| j["id"] == key && j["state"] == "working");
+        if working {
+            assert_eq!(
+                v["sessions"][&key]["end"],
+                Value::Null,
+                "a working job shows an open session: {v}"
+            );
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    writer.join().unwrap();
+}

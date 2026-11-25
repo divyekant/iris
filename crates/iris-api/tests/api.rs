@@ -1737,6 +1737,13 @@ async fn an_item_shows_a_ready_draft_of_its_thread_until_the_draft_is_stale() {
     assert_eq!(ready_marks(&brief["you_owe"]), want);
     let (_, page) = get(&store, "/api/brief/you_owe").await;
     assert_eq!(ready_marks(&page), want);
+    // The list of one form shows the same marks (issue 478).
+    let (_, list) = get(&store, "/api/items?form=commitment").await;
+    let mut marks = ready_marks(&list);
+    marks.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut sorted = want.clone();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(marks, sorted);
     // The open model allows the field: the item with it passes its schema.
     let schema = iris_spec::validator("commitment");
     let marked = &brief["you_owe"]["items"][0];
@@ -2068,7 +2075,98 @@ async fn status_gives_the_time_zone_of_the_owner() {
     let (_, v) = get(&store, "/api/status").await;
     let computer = jiff::tz::TimeZone::system();
     assert_eq!(v["time_zone"], serde_json::json!(computer.iana_name()));
+    assert_eq!(v["time_zone_set"], false);
     store.set_time_zone(Some("Asia/Kolkata")).unwrap();
     let (_, v) = get(&store, "/api/status").await;
     assert_eq!(v["time_zone"], "Asia/Kolkata");
+    assert_eq!(v["time_zone_set"], true);
+}
+
+/// Issue 891: the web client sets the time zone of the owner, as `iris
+/// zone` does. A name that the computer does not know, a missing key and
+/// another key are a 400, and nothing is written. Null goes back to the
+/// time zone of the computer.
+#[tokio::test]
+async fn the_person_sets_the_time_zone_from_the_web_client() {
+    let dir = temp("zone-set");
+    let (store, _) = filled_n(&dir, 1);
+    let computer = serde_json::json!(jiff::tz::TimeZone::system().iana_name());
+
+    let (code, v) = post(
+        &store,
+        "/api/zone",
+        serde_json::json!({ "zone": "Asia/Kolkata" }),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(
+        v,
+        serde_json::json!({ "time_zone": "Asia/Kolkata", "time_zone_set": true })
+    );
+    let (_, s) = get(&store, "/api/status").await;
+    assert_eq!(s["time_zone"], "Asia/Kolkata");
+
+    for bad in [
+        serde_json::json!({ "zone": "Mars/Olympus" }),
+        serde_json::json!({ "zone": "" }),
+        serde_json::json!({ "zone": 5 }),
+        serde_json::json!({}),
+        serde_json::json!({ "zone": "Europe/Berlin", "more": 1 }),
+    ] {
+        let (code, _) = post(&store, "/api/zone", bad.clone()).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{bad}");
+        let (_, s) = get(&store, "/api/status").await;
+        assert_eq!(s["time_zone"], "Asia/Kolkata", "nothing written for {bad}");
+    }
+
+    let (code, v) = post(&store, "/api/zone", serde_json::json!({ "zone": null })).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(
+        v,
+        serde_json::json!({ "time_zone": computer, "time_zone_set": false })
+    );
+}
+
+/// Issue 891 review: the status reads the time zone and `time_zone_set`
+/// from one read, so a change of the zone at the same time never gives a
+/// mixed pair (the old zone with the new flag, or the reverse).
+#[test]
+fn the_time_zone_and_its_flag_always_agree_while_the_zone_changes() {
+    let dir = temp("zone-pair");
+    let (store, _) = filled_n(&dir, 1);
+    let computer = jiff::tz::TimeZone::system().iana_name().map(str::to_string);
+    // A zone that is not the zone of the computer, so the two states differ.
+    let zone = ["Asia/Kolkata", "Pacific/Chatham"]
+        .into_iter()
+        .find(|z| computer.as_deref() != Some(*z))
+        .unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer = {
+        let (store, stop) = (store.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut on = false;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                on = !on;
+                store.set_time_zone(on.then_some(zone)).unwrap();
+            }
+        })
+    };
+    for _ in 0..300 {
+        let s = iris_api::status(&store).unwrap();
+        let want = if s.time_zone_set {
+            Some(zone.to_string())
+        } else {
+            computer.clone()
+        };
+        assert_eq!(s.time_zone, want, "set = {}", s.time_zone_set);
+        let z = iris_api::zone(&store).unwrap();
+        let want = if z["time_zone_set"] == true {
+            serde_json::json!(zone)
+        } else {
+            serde_json::json!(computer)
+        };
+        assert_eq!(z["time_zone"], want, "{z}");
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    writer.join().unwrap();
 }

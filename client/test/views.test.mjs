@@ -532,7 +532,7 @@ test("the measures page opens with a sentence, the bars of 14 days and one line 
   assert.match(t, /Memory of the engine 31 MB With 18,402 messages/);
   assert.match(t, /Changes you approved as proposed 47 of 50 94%/);
   assert.match(t, /Changes that you undid 1 of 48 2%/);
-  assert.match(t, /Sends without review after hostile mail Not yet Iris has sent no mail yet/);
+  assert.match(t, /Sends without review after hostile mail Not yet No send that Iris checked for hostile mail yet/);
   assert.match(t, /1\.8 a day on the 12 days that you used Iris/);
   const html = await render("/src/views/Measures.svelte", { measures: fx.measures, now });
   // 14 bars: 12 days of use and 2 dotted days with no use. Today is the primary bar.
@@ -548,8 +548,11 @@ test("each measure says when it has no data, and the sentence names a missed tar
   assert.deepEqual(rows(empty, now).map((r) => r.tone), ["none", "none", "none", "none", "none", "none", "none"]);
   // Issue 472: sends after hostile mail meet the target only at zero.
   const sends = (sent, unreviewed_after_hostile) => rows({ ...empty, sends: { sent, unreviewed_after_hostile } }, now)[6];
-  assert.deepEqual(sends(4, 0), { name: "Sends without review after hostile mail", value: "0", detail: "Of 4 sends. Target: zero.", tone: "met" });
-  assert.deepEqual([sends(1, 1).value, sends(1, 1).detail, sends(1, 1).tone], ["1", "Of 1 send. Target: zero.", "missed"]);
+  assert.deepEqual(sends(4, 0), { name: "Sends without review after hostile mail", value: "0", detail: "Of 4 sends that Iris checked for hostile mail. Target: zero.", tone: "met" });
+  assert.deepEqual([sends(1, 1).value, sends(1, 1).detail, sends(1, 1).tone], ["1", "Of 1 send that Iris checked for hostile mail. Target: zero.", "missed"]);
+  // Issue 1059: a store with only sends from before migration 59 gives sent 0. The row does not say that
+  // Iris sent no mail.
+  assert.deepEqual([sends(0, 0).value, sends(0, 0).detail], ["Not yet", "No send that Iris checked for hostile mail yet. Target: zero."]);
   assert.deepEqual(lead(empty, now), { opens: 0, text: "" });
   assert.equal(localDay(now), "2026-11-16");
   assert.equal(bars(empty, now)[0].day, "2026-11-03");
@@ -1195,7 +1198,7 @@ test("the Records view counts from /api/records, so a record type that a rule hi
 });
 
 test("a mail from a near-copy sender offers Trust, with the domain it looks like", async () => {
-  const message = { ...fx.message("m-55210"), sender_kind: "hostile", near_copy: { sender: "p-90", of: "northwind.example", trusted: false } };
+  const message = { ...fx.message("m-55210"), sender_kind: "hostile", near_copy: { sender: "p-90", of: "northwind.example" } };
   const shown = text(await render("/src/views/Mail.svelte", { message }));
   assert.match(shown, /its domain looks like northwind\.example/);
   assert.match(shown, /Trust this sender/);

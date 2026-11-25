@@ -723,19 +723,28 @@ pub fn list(store: &Store, state: State) -> Result<Vec<Job>> {
 /// One page of the jobs in `states`, newest first: at most `limit` jobs
 /// whose row ID is below `before` (all jobs with `None`).
 pub fn page(store: &Store, states: &[State], limit: u32, before: Option<i64>) -> Result<Vec<Job>> {
+    read(store, |c| page_in(c, states, limit, before))
+}
+
+/// [`page`] in a read or write transaction of the caller, so that the
+/// caller can read more rows from the same snapshot.
+pub fn page_in(
+    c: &Connection,
+    states: &[State],
+    limit: u32,
+    before: Option<i64>,
+) -> Result<Vec<Job>> {
     let names: Vec<&str> = states.iter().map(|s| s.as_str()).collect();
     let names = serde_json::to_string(&names).map_err(std::io::Error::other)?;
-    Ok(store.read(|c| {
-        let mut q = c.prepare_cached(&format!(
-            "SELECT {JOB_COLUMNS} FROM job
-             WHERE state IN (SELECT value FROM json_each(?1)) AND id < ?2
-             ORDER BY id DESC LIMIT ?3"
-        ))?;
-        let jobs = q
-            .query_map(params![names, before.unwrap_or(i64::MAX), limit], job_of)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(jobs)
-    })?)
+    let mut q = c.prepare_cached(&format!(
+        "SELECT {JOB_COLUMNS} FROM job
+         WHERE state IN (SELECT value FROM json_each(?1)) AND id < ?2
+         ORDER BY id DESC LIMIT ?3"
+    ))?;
+    let jobs = q
+        .query_map(params![names, before.unwrap_or(i64::MAX), limit], job_of)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(jobs)
 }
 
 /// Call `f` for each event of `job`, in order.

@@ -38,9 +38,6 @@ fn author(kind: AuthorKind) -> Author {
 /// Account 1. Thread 1: messages 1 and 2, with Message-IDs (2 is newer).
 /// Thread 2 (message 3's thread): one message with no Message-ID. Draft 1, a reply in thread 1.
 fn store(dir: &TempDir) -> Store {
-    // Each test of this binary sees a change of a draft: the switch is
-    // global to the process, and the test order is not fixed.
-    iris_changeset::allow_draft_change(true);
     let s = Store::open(&dir.0).unwrap();
     let a = s.add_account("gmail", "owner@example.com").unwrap();
     let m = |id: &str, t: &str, date: i64, mid: Option<&str>| NewMessage {
@@ -648,6 +645,7 @@ fn an_open_send_mark_of_the_draft_blocks_a_change() {
         args: &args(MAIL()),
         key: "key-0123456789abcd",
         flags: &["new_recipient".to_string()],
+        draft: None,
     };
     let iris_changeset::Written::New(cs) = iris_changeset::write_mail(&s, &press, NOW)
         .unwrap()
