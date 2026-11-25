@@ -1866,6 +1866,15 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
     b.run(&Limits::default()).unwrap();
     assert_eq!(hostile(&b), "[]");
     assert_eq!((b.script.calls(), items(&b)), (1, 1));
+    // The released message is in the conversation of its thread.
+    let talk = |b: &Box_| {
+        b.col(&format!(
+            "SELECT count(*) FROM item_source s JOIN item i ON i.id = s.item_id
+             WHERE s.message_id = {m} AND i.form = 'conversation' AND i.status <> 'gone'"
+        ))
+        .unwrap()
+    };
+    assert!(talk(&b) > 0);
     // The link check of the same content keeps the release.
     iris_understand::store::recheck_links(&b.store, NOW, None).unwrap();
     assert_eq!(hostile(&b), "[]");
@@ -1882,7 +1891,6 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
     // The undo holds the mail at once, before the fixed check runs: each
     // gate reads `message.hostile`.
     assert_eq!(hostile(&b), r#"["link"]"#);
-    assert_eq!(items(&b), 0);
     assert_eq!(
         b.col(&format!(
             "SELECT count(*) FROM message m WHERE m.id = {m} AND {}",
@@ -1893,6 +1901,8 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
     b.run(&Limits::default()).unwrap();
     assert_eq!(hostile(&b), r#"["link"]"#);
     assert_eq!((b.script.calls(), items(&b)), (1, 0));
+    // The undo takes the message out of the conversation (section 7.3).
+    assert_eq!(talk(&b), 0);
 
     // New content ends a release.
     b.store.write(|tx| release(tx, m)).unwrap();

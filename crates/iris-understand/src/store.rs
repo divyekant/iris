@@ -1263,8 +1263,11 @@ pub fn release(tx: &Transaction, message: i64) -> iris_store::Result<Release> {
 
 /// The person ends the release of message `message`. The released marks go
 /// back into `message.hostile` in the same write, so each gate that reads
-/// the marks holds the message at once, before the fixed check reads it
-/// again. A gone message keeps its row as it is.
+/// the marks holds the message at once. The write also clears
+/// `understood_at`, so the next run understands the message again on the
+/// one path of hostile mail: it drops the items and updates the
+/// conversation (section 7.3), with no model call. A gone message keeps its
+/// row as it is.
 pub fn unrelease(tx: &Transaction, message: i64) -> iris_store::Result<Release> {
     let Some((mut hostile, released, _)) = release_row(tx, message)? else {
         return Ok(Release::NoMessage);
@@ -1278,15 +1281,8 @@ pub fn unrelease(tx: &Transaction, message: i64) -> iris_store::Result<Release> 
         }
     }
     hostile.sort();
-    // As the understanding of hostile mail does: the items that it may
-    // drop go.
     tx.execute(
-        "DELETE FROM item WHERE id IN (
-           SELECT item_id FROM item_droppable WHERE message_id = ?1)",
-        [message],
-    )?;
-    tx.execute(
-        "UPDATE message SET released = NULL, hostile = ?2 WHERE id = ?1",
+        "UPDATE message SET released = NULL, hostile = ?2, understood_at = NULL WHERE id = ?1",
         params![
             message,
             serde_json::to_string(&hostile).expect("strings serialize")

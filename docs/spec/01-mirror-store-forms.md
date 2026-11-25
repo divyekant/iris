@@ -853,9 +853,10 @@ from quarantine (`POST /api/messages/{id}/release`):
   mail does, and its items show.
 - A release is for one content: new content of the message ends it.
 - `POST /api/messages/{id}/unrelease` ends the release. In the same write,
-  the released marks go back into `message.hostile` and the items that the
-  understanding of hostile mail drops go, so each gate holds the message at
-  once. The fixed check then reads the message again.
+  the released marks go back into `message.hostile`, so each gate holds the
+  message at once, and `understood_at` is cleared. The next run then
+  understands the message as hostile mail, with no model call: its items
+  go and its conversation changes (section 7.3).
 - A release sets the model tries of the message to 0, as a rerun does, so
   a message that used its tries before a mark held it can get its items.
 - A release names only marks of the current content. While the message
