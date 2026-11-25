@@ -178,6 +178,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_53.sql"),
     include_str!("schema_54.sql"),
     include_str!("schema_55.sql"),
+    include_str!("schema_56.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
@@ -260,7 +261,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// document. Same value as `iris_clean::TEXT_LIMIT`.
 /// The `model` value of each open model document that Iris writes
 /// (spec 4, rule 2.1).
-pub const MODEL: &str = "iris/1.2";
+pub const MODEL: &str = "iris/1.3";
 
 /// The `$id` of the common definitions of the open model.
 pub const COMMON_SCHEMA_ID: &str = "urn:iris:model:1:common";
@@ -555,6 +556,12 @@ impl Store {
                 rusqlite::params![now, today(tx, now)?],
             )?)
         })
+    }
+
+    /// Mark each active signal whose `expires` time is at or before `now`
+    /// as `expired` ([`expire_signals`]).
+    pub fn expire_signals(&self, now: i64) -> Result<usize> {
+        self.write(|tx| expire_signals(tx, now))
     }
 
     /// Take the run lock of the `sync_log` row `row`, and create its file.
@@ -1036,6 +1043,24 @@ pub fn today(c: &Connection, now_ms: i64) -> rusqlite::Result<String> {
 pub fn day_in(zone: &jiff::tz::TimeZone, now_ms: i64) -> String {
     let at = jiff::Timestamp::from_millisecond(now_ms).unwrap_or(jiff::Timestamp::UNIX_EPOCH);
     zone.to_datetime(at).date().to_string()
+}
+
+/// Mark each active signal whose `expires` time is at or before `now_ms` as
+/// `expired`, in the status column and the document (specification 1,
+/// section 6.8). The status rule of `iris_understand` sets it only when it
+/// writes the item, so the store would keep `active` after the time (issue
+/// #927). A signal with no `expires` stays active. Gives the number of
+/// signals that expired.
+pub fn expire_signals(c: &Connection, now_ms: i64) -> Result<usize> {
+    Ok(c.execute(
+        "UPDATE item SET status = 'expired', updated_at = ?1,
+           doc = json_set(doc, '$.status', 'expired', '$.updated',
+             strftime('%Y-%m-%dT%H:%M:%S', ?1 / 1000, 'unixepoch')
+               || printf('.%03dZ', ?1 % 1000))
+         WHERE form = 'signal' AND status = 'active'
+           AND unixepoch(json_extract(doc, '$.expires'), 'subsec') * 1000 <= ?1",
+        [now_ms],
+    )?)
 }
 
 /// The schema version of an open database.

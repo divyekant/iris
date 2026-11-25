@@ -1,5 +1,5 @@
 import { access } from "./access.svelte.ts";
-import { today } from "./act";
+import { startOfNextDay, today } from "./act";
 import type { Account, Brief, Item, MatterForm, Money, Party, Section, Status } from "./api";
 
 export function party(p: Party | undefined): string {
@@ -168,21 +168,11 @@ export function matterCounts(counts: Partial<Record<MatterForm, number>>): strin
   return text ? capital(text) : "No items now";
 }
 
-/** The start of the next local day, as an ISO date-time. */
+/** The start of the next local day, as an ISO date-time: the first midnight of the owner or of the browser. */
 export function nextDay(now = new Date(), zone: string | null | undefined = access.zone): string {
   const browser = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
-  let owner = browser;
-  try {
-    if (zone) {
-      const parts = new Intl.DateTimeFormat("en-US", { timeZone: zone, hourCycle: "h23", hour: "numeric", minute: "numeric", second: "numeric" }).formatToParts(now);
-      const part = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0);
-      const elapsed = ((part("hour") * 60 + part("minute")) * 60 + part("second")) * 1000 + now.getMilliseconds();
-      // shortcut: a day with a clock change is 23 or 25 hours, so this can be one hour off; the next call corrects it.
-      owner = now.getTime() - elapsed + DAY;
-    }
-  } catch {
-    // An unknown zone: the midnight of the browser.
-  }
+  // No zone, or an unknown zone: the midnight of the browser.
+  const owner = startOfNextDay(now, zone) ?? browser;
   return new Date(Math.min(browser, owner)).toISOString();
 }
 

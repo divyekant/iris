@@ -39,8 +39,10 @@ booking. That breaks trust in matters.
 
 ## Not in scope
 
-- A merge of two matters. The person can move the items of one matter to
-  the other (remove, then add) and delete the empty one. Limit issue.
+- A merge of two matters. The person can delete one matter, then add its
+  items to the other. A delete frees the items, because a declined matter
+  is not open. The other order does not work: rule 5 refuses the removal
+  of the last kept member (issue #865). Limit issue.
 - An agent proposal of an addition to a confirmed matter. An agent
   proposes a new matter only. Limit issue.
 - Policy rules that read the matter of an item (spec 2 section 6). This

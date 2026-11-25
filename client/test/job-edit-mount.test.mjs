@@ -268,3 +268,38 @@ test("a due-date question names Iris as the asker, an agent question names the a
   assert.match(text(agent.target), /The agent asked you:/);
   agent.destroy();
 });
+
+test("the due field of an edit follows the owner zone that comes after the form opens (owner time zone, D1)", async () => {
+  const { access } = await load("/src/access.svelte.ts");
+  const keep = access.zone;
+  access.zone = undefined;
+  const old = "2026-11-20T17:00:00Z";
+  const sent = [];
+  const view = await mount("/src/views/JobForm.svelte", {
+    goal: "Book the dentist",
+    due: old,
+    action: "Save",
+    save: async (goal, due) => (sent.push(due), ""),
+    oncancel: () => {},
+  });
+  try {
+    // No status yet: the browser day (Los Angeles).
+    assert.equal(view.target.querySelector("input[type=date]").value, "2026-11-20");
+    // The status answers with the owner zone: the same instant is Nov 21 in Tokyo.
+    access.zone = "Asia/Tokyo";
+    view.flushSync();
+    assert.equal(view.target.querySelector("input[type=date]").value, "2026-11-21");
+    // Save with no change keeps the instant.
+    submit(view);
+    await until(() => sent.length === 1);
+    assert.equal(sent[0], old);
+    // After the person picks a day, a later zone change does not move the field.
+    fill(view, "input[type=date]", "2026-11-25");
+    access.zone = "UTC";
+    view.flushSync();
+    assert.equal(view.target.querySelector("input[type=date]").value, "2026-11-25");
+  } finally {
+    view.destroy();
+    access.zone = keep;
+  }
+});

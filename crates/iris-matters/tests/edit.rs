@@ -372,6 +372,37 @@ fn an_addition_waits_for_the_person() {
     assert!(add(4).is_err());
 }
 
+/// A signal past its `expires` time is not live, also while the stored
+/// status is still `active` (issue #927): no matter by hand, no addition,
+/// no agent proposal.
+#[test]
+fn a_signal_past_its_time_is_not_live() {
+    let b = setup("expired", 4, &FORMS);
+    sql(
+        &b,
+        "UPDATE item SET doc = json_set(doc, '$.expires', '1970-01-01T00:00:01Z') WHERE id = 6",
+    )
+    .unwrap();
+    // Each refusal rolls back, so each path must expire the signal itself.
+    let m = create(&b.store, "T", &[r(1), r(2)], 999).unwrap();
+    assert!(matches!(
+        create(&b.store, "T", &[r(4), r(6)], 1_000),
+        Err(Error::Conflict(_))
+    ));
+    let e = Edit {
+        add: vec![r(6)],
+        ..Default::default()
+    };
+    assert!(matches!(
+        edit(&b.store, m, &e, 1_000),
+        Err(Error::Conflict(_))
+    ));
+    let p = write(&b.store, |tx| {
+        propose_by_agent(tx, "U", &[r(3), r(6)], 1_000)
+    });
+    assert!(matches!(p, Err(Error::Bad(_))), "{p:?}");
+}
+
 #[test]
 fn an_agent_proposes_and_the_person_decides() {
     let b = setup("agent", 4, &FORMS);

@@ -572,8 +572,8 @@ fn a_provider_with_a_store_source_sees_a_send_of_another_process() {
         ..Config::default()
     };
     let (account, second) = (b.account, Store::open(&b.dir).unwrap());
-    let other = Outlook::new(Graph::new(config.clone())).with_sent_source(move || {
-        iris_apply::sent_by_iris(&second, account).map_err(|e| e.to_string())
+    let other = Outlook::new(Graph::new(config.clone())).with_sent_source(move |id| {
+        iris_apply::is_sent_by_iris(&second, account, id).map_err(|e| e.to_string())
     });
     let start = Outlook::new(Graph::new(config))
         .with_sent(iris_apply::sent_by_iris(&b.store, account).unwrap());
@@ -599,7 +599,7 @@ fn a_failed_store_source_gives_an_error() {
         base_url: b.fake.base_url(),
         ..Config::default()
     }))
-    .with_sent_source(|| Err("disk I/O error".into()));
+    .with_sent_source(|_| Err("disk I/O error".into()));
     let id = b.fake.messages().into_keys().next().unwrap();
     assert!(failing.minimal(TOKEN, &id).is_err());
 }
@@ -660,14 +660,14 @@ fn the_completion_adds_sent_to_a_mirrored_copy() {
     assert_eq!(b.release(s), Outcome::Pending);
     b.fake.deliver_copies();
     iris_sync::sync(&b.store, &b.outlook, b.account, TOKEN).unwrap();
-    let blind = stale(&b).with_sent_source(|| Ok(Vec::new()));
+    let blind = stale(&b).with_sent_source(|_| Ok(false));
     iris_apply::recover(&b.store, &blind, &mut tok(), b.account).unwrap();
     let copy = b.row().1.expect("the send is complete");
     assert!(b.labels(&copy).contains(&"SENT".to_string()));
     // The engine value reads the copies from the store.
     let (account, second) = (b.account, Store::open(&b.dir).unwrap());
-    let engine = stale(&b).with_sent_source(move || {
-        iris_apply::sent_by_iris(&second, account).map_err(|e| e.to_string())
+    let engine = stale(&b).with_sent_source(move |id| {
+        iris_apply::is_sent_by_iris(&second, account, id).map_err(|e| e.to_string())
     });
     iris_sync::sync(&b.store, &engine, b.account, TOKEN).unwrap();
     assert!(b.labels(&copy).contains(&"SENT".to_string()));
@@ -707,4 +707,36 @@ fn migration_41_adds_sent_to_the_confirmed_copies() {
         })
         .unwrap();
     assert!(has_sent);
+}
+
+/// Issue #804: the lookup of one ID agrees with the full list for each
+/// mirror message, a confirmed copy and an unknown ID, and the provider asks
+/// the source only for the message that it labels, not for the full list.
+#[test]
+fn the_sent_lookup_of_one_id_agrees_with_the_list() {
+    let b = setup("sent-lookup");
+    let (s, _) = b.new_mail(AGED);
+    assert!(matches!(b.release(s), Outcome::Applied(_)));
+    let copy = b.row().1.expect("the send is complete");
+    let list = iris_apply::sent_by_iris(&b.store, b.account).unwrap();
+    assert_eq!(list, vec![copy.clone()]);
+    let mut ids: Vec<String> = b.fake.messages().into_keys().collect();
+    ids.extend([copy.clone(), "no-such-id".into(), String::new()]);
+    for id in &ids {
+        assert_eq!(
+            iris_apply::is_sent_by_iris(&b.store, b.account, id).unwrap(),
+            list.contains(id),
+            "{id}"
+        );
+        assert!(!iris_apply::is_sent_by_iris(&b.store, b.account + 1, id).unwrap());
+    }
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (seen, account, second) = (asked.clone(), b.account, Store::open(&b.dir).unwrap());
+    let engine = stale(&b).with_sent_source(move |id| {
+        seen.lock().unwrap().push(id.to_string());
+        iris_apply::is_sent_by_iris(&second, account, id).map_err(|e| e.to_string())
+    });
+    let m = engine.minimal(TOKEN, &copy).unwrap();
+    assert!(m.label_ids.contains(&"SENT".to_string()));
+    assert_eq!(*asked.lock().unwrap(), vec![copy.clone()]);
 }

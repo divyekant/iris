@@ -314,3 +314,23 @@ fn a_2xx_other_than_the_success_status_is_unknown() {
     fake.answer_next_status(201, &moved);
     graph.move_to(TOKEN, &id, archive, "W/\"1\"").unwrap();
 }
+
+/// Issue #883: an injected answer must not leave the request body unread.
+/// Else the fake server closes the connection after the answer, the next
+/// write on the pooled connection fails at transport, and the queue of
+/// answers shifts by one request.
+#[test]
+fn an_injected_answer_keeps_the_connection_for_the_next_write() {
+    use serde_json::json;
+    let (fake, graph) = setup();
+    let id = inbox_message(&fake);
+    // A body that the server cannot have read when it answers.
+    let big = [MIME, &vec![b'x'; 4 << 20][..]].concat();
+    for _ in 0..5 {
+        fake.answer_next_status(201, &answer(&id, json!({"isDraft": true, "id": ""})));
+        let err = graph.create_draft(TOKEN, &big).unwrap_err();
+        assert!(matches!(err, iris_graph::Error::Differs(_)), "{err}");
+        fake.answer_next_status(201, &answer(&id, json!({"isDraft": true})));
+        graph.create_draft(TOKEN, MIME).unwrap();
+    }
+}

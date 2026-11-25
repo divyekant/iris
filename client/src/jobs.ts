@@ -2,6 +2,7 @@
 // step of its timeline, as plain sentences. Pure functions, so the tests need
 // no DOM. Text from an agent or from mail is data: the view shows it as text.
 import { get, post, type Job, type JobChangeset, type JobDetail, type JobEvent, type JobPage, type JobSession, type Target } from "./api";
+import { access } from "./access.svelte.ts";
 import { daysFrom } from "./format";
 import { href } from "./route";
 
@@ -9,6 +10,15 @@ const n = (count: number, one: string, many: string) => `${count.toLocaleString(
 
 /** A short day: "Wed 18 Nov". */
 export const day = (value: string) => new Date(value).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+/** The short day of a due date, in the time zone of the owner (issue 892). An unknown zone: the zone of the browser. */
+export function dueDay(value: string, zone: string | null | undefined = access.zone): string {
+  try {
+    if (zone) return new Date(value).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: zone });
+  } catch {
+    // An unknown zone.
+  }
+  return day(value);
+}
 /** A time of day: "09:20". */
 export const clock = (value: string) => new Date(value).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 
@@ -23,12 +33,12 @@ export const pageSize = (state: Job["state"]) => (state === "done" ? 20 : 50);
  */
 export function due(job: Job, now = new Date()): { text: string; tone: "late" | "soon" | "" } | null {
   if (!job.due) return null;
-  if (job.state === "done") return { text: `Was due ${day(job.due)}`, tone: "" };
-  // A job due date is a day of the browser (start.ts, issue #892), not of the owner zone.
-  const days = daysFrom(job.due, now, null);
+  if (job.state === "done") return { text: `Was due ${dueDay(job.due)}`, tone: "" };
+  // A job due date is a day of the owner zone, as the start gives it (start.ts, issue 892).
+  const days = daysFrom(job.due, now);
   // The words say "late" each time the tone does, so color is not the only sign.
-  if (Date.parse(job.due) <= now.getTime()) return { text: `Was due ${day(job.due)}, ${days < 0 ? relative.format(days, "day") : "earlier today"}`, tone: "late" };
-  return { text: `Due ${day(job.due)}, ${relative.format(days, "day")}`, tone: days <= 2 ? "soon" : "" };
+  if (Date.parse(job.due) <= now.getTime()) return { text: `Was due ${dueDay(job.due)}, ${days < 0 ? relative.format(days, "day") : "earlier today"}`, tone: "late" };
+  return { text: `Due ${dueDay(job.due)}, ${relative.format(days, "day")}`, tone: days <= 2 ? "soon" : "" };
 }
 
 /**

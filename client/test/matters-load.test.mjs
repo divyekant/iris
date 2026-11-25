@@ -83,3 +83,78 @@ test("the brief line of additions lists only the confirmed matters with an addit
   assert.deepEqual(asked, ["matters"]);
   assert.deepEqual(growing.map((m) => m.id), ["g-4"]);
 });
+
+test("a new proposal during the Undo time keeps the card and its hold, and shows at Undo (issue 345)", async () => {
+  let proposed = list("g-5");
+  let quiet = false;
+  const posts = [];
+  const g7 = { ...as("g-7"), matter: { ...as("g-7").matter, title: "Roof repair" } };
+  globalThis.fetch = async (url, init) => {
+    const path = String(url).replace(/^\/api\//, "");
+    if (init?.method === "POST") return posts.push(path), new Response(JSON.stringify(as("g-5", "declined")), { status: 200 });
+    // After `quiet`, the polls get no answer: what shows comes from a read made during the hold.
+    if (quiet && path.startsWith("matters")) return new Promise(() => {});
+    const body = path === "matters" ? proposed : path === "matters/g-7" ? g7 : path.startsWith("matters/") ? as(path.slice(8)) : path === "brief" ? fx.brief : path === "status" ? fx.answer("status") : [];
+    return new Response(JSON.stringify(body), { status: 200 });
+  };
+  const view = await mount("/src/views/Brief.svelte", { brief: fx.brief, watches: [], now: new Date("2026-11-16T09:05:00Z"), poll: 5, hold: 400 });
+  const press = (name) => [...view.target.querySelectorAll("button")].find((b) => text(b).trim() === name).click();
+  try {
+    await until(() => /Iris sees a matter/.test(text(view.target)));
+    press("Not a matter");
+    await until(() => [...view.target.querySelectorAll("button")].some((b) => text(b).trim() === "Undo"));
+    // A newer proposal arrives while the decision waits: the card stays, and nothing is sent.
+    proposed = list("g-7", "g-5");
+    await new Promise((r) => setTimeout(r, 150));
+    assert.deepEqual(posts, [], "the held decision waits for its time");
+    assert.match(text(view.target), /Office lease/);
+    quiet = true;
+    press("Undo");
+    // At Undo, the card shows the newest proposal that a poll read during the hold, with no new poll.
+    await until(() => /Roof repair/.test(text(view.target)));
+    assert.deepEqual(posts, []);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a failed matter decision stays on the card when a newer proposal came during the hold, and a changed proposal loads again (issue 345)", async () => {
+  for (const [status, words, close] of [
+    [400, /Iris did not record it/, true],
+    [500, /Iris does not know if it recorded the decision/, false],
+    // The proposal changed after the load: the brief loads it again, with no Close.
+    [404, null, false],
+    [409, null, false],
+  ]) {
+    let proposed = list("g-5");
+    const g7 = { ...as("g-7"), matter: { ...as("g-7").matter, title: "Roof repair" } };
+    globalThis.fetch = async (url, init) => {
+      const path = String(url).replace(/^\/api\//, "");
+      if (init?.method === "POST") return new Response(JSON.stringify({ error: "store" }), { status });
+      const body = path === "matters" ? proposed : path === "matters/g-7" ? g7 : path.startsWith("matters/") ? as(path.slice(8)) : path === "brief" ? fx.brief : path === "status" ? fx.answer("status") : [];
+      return new Response(JSON.stringify(body), { status: 200 });
+    };
+    const view = await mount("/src/views/Brief.svelte", { brief: fx.brief, watches: [], now: new Date("2026-11-16T09:05:00Z"), poll: 5, hold: 200 });
+    const press = (name) => [...view.target.querySelectorAll("button")].find((b) => text(b).trim() === name).click();
+    try {
+      await until(() => /Iris sees a matter/.test(text(view.target)));
+      press("Not a matter");
+      proposed = list("g-7", "g-5");
+      if (!words) {
+        await until(() => /Roof repair/.test(text(view.target)));
+        continue;
+      }
+      await until(() => words.test(text(view.target)));
+      // Polls go on, and the card keeps the result for the person to read.
+      await new Promise((r) => setTimeout(r, 100));
+      assert.match(text(view.target), words, `${status}`);
+      assert.doesNotMatch(text(view.target), /Roof repair/, `${status}`);
+      if (close) {
+        press("Close");
+        await until(() => /Roof repair/.test(text(view.target)));
+      }
+    } finally {
+      view.destroy();
+    }
+  }
+});

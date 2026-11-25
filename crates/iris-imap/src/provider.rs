@@ -179,11 +179,19 @@ fn permanent(e: &crate::Examined, flags: &[&str]) -> bool {
 /// The folders that hold mail: selectable, and not a view of other
 /// folders. In the page order of spec section 2.
 fn mail_folders<S: Read + Write>(s: &mut Session<S>) -> Result<Vec<Folder>> {
+    // Gmail over IMAP keeps archived mail only in `[Gmail]/All Mail`, a `\All`
+    // folder, so the mirror would miss it. A Gmail account uses the Gmail sign-in.
+    if s.has("X-GM-EXT-1") {
+        return Err(api(
+            "gmailImap",
+            "use the Gmail sign-in for a Gmail account",
+        ));
+    }
     let mut v: Vec<Folder> = s
         .folders()
         .map_err(read_error)?
         .into_iter()
-        // shortcut: mail only in `\All` (Gmail over IMAP) does not sync, issue #633.
+        // A `\All` folder is a view of the mail of the other folders.
         .filter(|f| f.selectable && !matches!(f.special, Some(Special::All | Special::Flagged)))
         .collect();
     // shortcut: a longer folder name refuses the account, issue #650.
@@ -195,21 +203,98 @@ fn mail_folders<S: Read + Write>(s: &mut Session<S>) -> Result<Vec<Folder>> {
     Ok(v)
 }
 
-/// The common names of the four special folders (spec section 4), ASCII
-/// and compared with no case. shortcut: English names only, issue #648.
+/// The common names of the four special folders (spec section 4), in
+/// lowercase, compared with the lowercase text of the last name part. English,
+/// German, French, Spanish, Italian, Dutch, Portuguese and the Scandinavian
+/// names of the common mail clients and servers.
 const NAMES: [(Special, &[&str]); 4] = [
     (
         Special::Sent,
-        &["sent", "sent items", "sent messages", "sent mail"],
+        &[
+            "sent",
+            "sent items",
+            "sent messages",
+            "sent mail",
+            "gesendet",
+            "gesendete objekte",
+            "gesendete elemente",
+            "envoyés",
+            "éléments envoyés",
+            "messages envoyés",
+            "enviados",
+            "elementos enviados",
+            "inviati",
+            "posta inviata",
+            "elementi inviati",
+            "verzonden",
+            "verzonden items",
+            "itens enviados",
+            "skickat",
+            "skickade objekt",
+            "sendt",
+            "sendte elementer",
+        ],
     ),
-    (Special::Drafts, &["drafts", "draft"]),
+    (
+        Special::Drafts,
+        &[
+            "drafts",
+            "draft",
+            "entwürfe",
+            "brouillons",
+            "borradores",
+            "bozze",
+            "concepten",
+            "rascunhos",
+            "utkast",
+            "kladder",
+        ],
+    ),
     (
         Special::Junk,
-        &["junk", "spam", "junk e-mail", "junk email", "bulk mail"],
+        &[
+            "junk",
+            "spam",
+            "junk e-mail",
+            "junk email",
+            "bulk mail",
+            "junk-e-mail",
+            "courrier indésirable",
+            "indésirables",
+            "correo no deseado",
+            "posta indesiderata",
+            "ongewenste e-mail",
+            "lixo eletrônico",
+            "skräppost",
+            "uønsket post",
+        ],
     ),
     (
         Special::Trash,
-        &["trash", "deleted items", "deleted messages", "bin"],
+        &[
+            "trash",
+            "deleted items",
+            "deleted messages",
+            "bin",
+            "papierkorb",
+            "gelöschte elemente",
+            "gelöschte objekte",
+            "corbeille",
+            "éléments supprimés",
+            "papelera",
+            "elementos eliminados",
+            "cestino",
+            "posta eliminata",
+            "elementi eliminati",
+            "prullenbak",
+            "verwijderde items",
+            "lixeira",
+            "itens excluídos",
+            "papperskorgen",
+            "borttagna objekt",
+            "papirkurv",
+            "slettede elementer",
+        ],
     ),
 ];
 
@@ -226,11 +311,47 @@ fn by_name(folders: &mut [Folder]) {
                 Some(d) if !d.is_empty() => f.name.rsplit(d).next().unwrap_or(&f.name),
                 _ => f.name.as_str(),
             };
-            if names.iter().any(|n| last.eq_ignore_ascii_case(n)) {
+            if names.contains(&folder_text(last).to_lowercase().as_str()) {
                 f.special = Some(special);
             }
         }
     }
+}
+
+/// The text of a folder name in modified UTF-7 (RFC 3501 section 5.1.3),
+/// for display and for the name match. A name that is not valid modified
+/// UTF-7 stays as the server sent it.
+fn folder_text(name: &str) -> String {
+    utf7(name).unwrap_or_else(|| name.to_owned())
+}
+
+fn utf7(name: &str) -> Option<String> {
+    use base64::Engine;
+    let mut out = String::new();
+    let mut rest = name;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        let end = after.find('-')?;
+        if end == 0 {
+            out.push('&');
+        } else {
+            let b = base64::engine::general_purpose::STANDARD_NO_PAD
+                .decode(after[..end].replace(',', "/"))
+                .ok()?;
+            if b.len() % 2 != 0 {
+                return None;
+            }
+            let units: Vec<u16> = b
+                .chunks(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect();
+            out.push_str(&String::from_utf16(&units).ok()?);
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Some(out)
 }
 
 /// The page order of a folder (spec section 2): `INBOX` first, then by name.
@@ -260,7 +381,7 @@ fn folder_label(f: &Folder) -> (String, String, &'static str) {
         Some(Special::Trash) => fixed("TRASH"),
         // `\Sent` and `\Drafts` too: no IMAP message gets SENT or DRAFT. Each
         // folder is system: the provider cannot change a folder (spec section 4).
-        _ => (format!("folder:{}", f.name), f.name.clone(), "system"),
+        _ => (format!("folder:{}", f.name), folder_text(&f.name), "system"),
     }
 }
 
@@ -299,10 +420,11 @@ const FIXED: [&str; 9] = [
 /// (fixed labels, then folder labels, then keyword labels), a name that a
 /// fixed name or an earlier label has gets " (folder)" or " (keyword)",
 /// then " (folder 2)", " (folder 3)" and so on. A lookup by name finds one
-/// label. The fixed names are taken first, so no label takes one.
+/// label. The fixed names are taken first, so no label takes one. Folder
+/// names decode to Unicode, so the compare folds Unicode case, not only ASCII.
 fn unique_names(mut labels: Vec<Label>) -> Vec<Label> {
     labels.sort_by(|a, b| a.id.cmp(&b.id));
-    let mut taken: BTreeSet<String> = FIXED.iter().map(|x| x.to_ascii_lowercase()).collect();
+    let mut taken: BTreeSet<String> = FIXED.iter().map(|x| x.to_lowercase()).collect();
     for l in labels.iter_mut() {
         let tag = if l.id.starts_with("folder:") {
             "folder"
@@ -313,7 +435,7 @@ fn unique_names(mut labels: Vec<Label>) -> Vec<Label> {
         };
         let base = l.name.clone();
         let mut n = 1;
-        while taken.contains(&l.name.to_ascii_lowercase()) {
+        while taken.contains(&l.name.to_lowercase()) {
             l.name = if n == 1 {
                 format!("{base} ({tag})")
             } else {
@@ -321,7 +443,7 @@ fn unique_names(mut labels: Vec<Label>) -> Vec<Label> {
             };
             n += 1;
         }
-        taken.insert(l.name.to_ascii_lowercase());
+        taken.insert(l.name.to_lowercase());
     }
     labels
 }
@@ -1005,6 +1127,74 @@ impl Write for SinkGuard<'_> {
 mod tests {
     use super::*;
 
+    /// Modified UTF-7 of `s` (RFC 3501 section 5.1.3), the encoder of the test.
+    fn encode(s: &str) -> String {
+        use base64::Engine;
+        let mut out = String::new();
+        let mut wide: Vec<u16> = Vec::new();
+        let flush = |out: &mut String, wide: &mut Vec<u16>| {
+            if !wide.is_empty() {
+                let b: Vec<u8> = wide.iter().flat_map(|u| u.to_be_bytes()).collect();
+                let t = base64::engine::general_purpose::STANDARD_NO_PAD.encode(b);
+                out.push_str(&format!("&{}-", t.replace('/', ",")));
+                wide.clear();
+            }
+        };
+        for c in s.chars() {
+            if (' '..='~').contains(&c) {
+                flush(&mut out, &mut wide);
+                if c == '&' {
+                    out.push_str("&-");
+                } else {
+                    out.push(c);
+                }
+            } else {
+                wide.extend(c.encode_utf16(&mut [0; 2]).iter());
+            }
+        }
+        flush(&mut out, &mut wide);
+        out
+    }
+
+    #[test]
+    fn folder_text_examples() {
+        assert_eq!(folder_text("Entw&APw-rfe"), "Entwürfe");
+        assert_eq!(folder_text("A&-B"), "A&B");
+        assert_eq!(
+            folder_text("~peter/mail/&U,BTFw-/&ZeVnLIqe-"),
+            "~peter/mail/台北/日本語"
+        );
+        // Not valid: the name stays as the server sent it.
+        for bad in ["a&b", "&AP-", "&2D0-", "&AP,-"] {
+            assert_eq!(folder_text(bad), bad);
+        }
+    }
+
+    /// Property: each text round-trips through modified UTF-7, and no input
+    /// of random bytes from the alphabet panics.
+    #[test]
+    fn folder_text_round_trip_and_no_panic() {
+        let chars = [
+            'a', 'Z', ' ', '&', '-', ',', '/', '+', 'ü', 'é', '台', '😀', 'A',
+        ];
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..5000 {
+            let n = (next() % 12) as usize;
+            let s: String = (0..n)
+                .map(|_| chars[(next() % chars.len() as u64) as usize])
+                .collect();
+            assert_eq!(folder_text(&encode(&s)), s, "{s:?}");
+            // Raw input that a server can send: no panic.
+            let _ = folder_text(&s);
+        }
+    }
+
     #[test]
     fn thread_rules() {
         let h = |s: &str| thread_of(Some(s.as_bytes()), "id");
@@ -1079,6 +1269,13 @@ mod tests {
                 "work (keyword)",
             ]
         );
+        // Decoded names that differ only in Unicode case get one name each.
+        let out = unique_names(vec![
+            l("folder:&ANw-ber", "Über"),
+            l("folder:&APw-ber", "über"),
+        ]);
+        let names: Vec<&str> = out.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["Über", "über (folder)"]);
     }
 
     #[test]

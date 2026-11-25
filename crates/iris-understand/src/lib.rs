@@ -239,6 +239,14 @@ pub fn name_address_spoof(name: &str, from: &str) -> bool {
         .iter()
         .filter_map(|w| {
             let (local, domain) = w.split_once('@')?;
+            // The domain ends at the first ASCII character that a domain
+            // cannot hold (#911): "a@bank.example/help". A character
+            // outside ASCII stays, so a mixed-script domain still differs.
+            let end = domain
+                .find(|c: char| c.is_ascii() && !(c.is_ascii_alphanumeric() || "-.@".contains(c)))
+                .unwrap_or(domain.len());
+            let domain = domain[..end].trim_end_matches('.');
+            let w = format!("{local}@{domain}");
             let ok = !local.is_empty()
                 && !domain.contains('@')
                 && domain.contains('.')

@@ -70,9 +70,15 @@ Errors map as follows:
 The provider reads the folder list (`LIST "" "*"`) at each `profile`,
 `labels`, `messages` and `changes` call. It skips folders that cannot be
 selected, and folders with `\All` or `\Flagged`: these are views of mail in
-other folders, and their copies would count each message two times. Mail
-that is only in a `\All` folder (Gmail over IMAP) does not sync: limit
-issue #633.
+other folders, and their copies would count each message two times.
+Gmail over IMAP keeps archived mail only in its `\All` folder. So a server
+with the capability `X-GM-EXT-1` (Gmail) gets `Api` 400 `gmailImap` from
+each call, before the mirror can miss that mail. A Gmail account uses the
+Gmail sign-in (issue #633).
+
+The label name of a folder is the decoded text of its modified UTF-7 name
+(RFC 3501 section 5.1.3). A name that does not decode stays as the server
+sent it. The label ID keeps the name as the server sent it.
 
 The order of the folders is `INBOX` first, then the other folders by the
 bytes of the name. A page token holds the name of its folder, not an
@@ -135,17 +141,19 @@ and lists `Spam` with only `\HasNoChildren`, `Spam` gets `\Junk`:
 
 | Role | Common names |
 |---|---|
-| `\Sent` | `Sent`, `Sent Items`, `Sent Messages`, `Sent Mail` |
-| `\Drafts` | `Drafts`, `Draft` |
-| `\Junk` | `Junk`, `Spam`, `Junk E-mail`, `Junk Email`, `Bulk Mail` |
-| `\Trash` | `Trash`, `Deleted Items`, `Deleted Messages`, `Bin` |
+| `\Sent` | `Sent`, `Sent Items`, `Sent Messages`, `Sent Mail`, and the German, French, Spanish, Italian, Dutch, Portuguese and Scandinavian names in `NAMES` of `crates/iris-imap/src/provider.rs` (for example `Gesendet`, `Envoyés`, `Enviados`) |
+| `\Drafts` | `Drafts`, `Draft`, and the names in `NAMES` (for example `Entwürfe`, `Brouillons`) |
+| `\Junk` | `Junk`, `Spam`, `Junk E-mail`, `Junk Email`, `Bulk Mail`, and the names in `NAMES` (for example `Courrier indésirable`) |
+| `\Trash` | `Trash`, `Deleted Items`, `Deleted Messages`, `Bin`, and the names in `NAMES` (for example `Papierkorb`, `Corbeille`) |
+
+The match compares the lowercase decoded text of the last name part.
 
 A folder with the attribute wins: if one folder has `\Junk`, a folder
 named `Spam` with no attribute is an ordinary folder. The mapping errs to
 the safe side: a folder named `Sent` gets `SENT_COPY`, so its mail stays
-out of the understanding, and never gets `SENT`. A role folder with
-another name (for example `Gesendet`) on a server with no attributes is
-an ordinary folder: limit issue #648 (English names only).
+out of the understanding, and never gets `SENT`. A role folder with a
+name that is not in the list, on a server with no attributes, is an
+ordinary folder.
 
 No IMAP message gets `SENT` or `DRAFT`. Each of the two labels is proof
 that the owner wrote the mail (the sender axis, the hostile checks, the
@@ -499,6 +507,8 @@ times after an unknown result (spec 2 section 7.2).
 | A `\Sent` folder message | `SENT_COPY`, no `SENT` | `labels_of_special_folders_and_flags` |
 | A server with no special-use attributes, or with `\Sent` only and a `Spam` folder with `\HasNoChildren` | the common names give each missing role; an attribute wins | `special_folders_by_name`, `name_fallback_for_each_role`, `an_attribute_wins_over_a_name` |
 | `create_label("Todo")` | `Api` 400 `notSupported`, nothing written | `writes_refuse_before_any_command` |
+| Folder names in other languages, in modified UTF-7, with no attributes | the special labels, and the decoded label name | `special_folders_by_name_in_other_languages`, `folder_text_examples` |
+| Gmail over IMAP (`X-GM-EXT-1`) | `Api` 400 `gmailImap` from each call | `gmail_over_imap_refuses` |
 | A folder name over 255 bytes | `Api` 400 `longFolderName` | `long_folder_name` |
 | A thread header ID over 998 bytes | the own location ID as thread | `long_thread_header_is_ignored` |
 | A keyword or folder named as a fixed label | a name with ` (keyword)` or ` (folder)` | `label_names_are_unique` |

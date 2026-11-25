@@ -277,7 +277,8 @@ fn outlook_of(store: &Arc<Store>, account: i64) -> Result<Box<dyn Provider>> {
     // The store gives the sent copies at each read of labels: another
     // engine process can complete a send (issue #719).
     let read = store.clone();
-    let sent = move || iris_apply::sent_by_iris(&read, account).map_err(|e| e.to_string());
+    let sent =
+        move |id: &str| iris_apply::is_sent_by_iris(&read, account, id).map_err(|e| e.to_string());
     Ok(Box::new(
         iris_graph::Outlook::new(iris_graph::Graph::new(graph_config()?))
             .with_sent_source(sent)
@@ -524,6 +525,12 @@ impl Worker {
     /// Verify the mirror of the account one time (specification 1, section 4.8).
     pub fn verify(&mut self) -> Result<iris_sync::Report> {
         self.call(iris_sync::verify)
+    }
+
+    /// [`Worker::verify`] under `held`, the sync lock of the account that
+    /// the caller took before any token call (issue #836).
+    pub fn verify_held(&mut self, held: &iris_sync::SyncLock) -> Result<iris_sync::Report> {
+        self.call(|s, m, a, t| iris_sync::verify_held(held, s, m, a, t))
     }
 
     /// Call `f` with an access token. On HTTP 401, get a new access token
@@ -1049,6 +1056,9 @@ impl Engine {
         }
         if let Err(e) = self.store.reopen_deferred(now_ms()) {
             say!("iris: deferred commitments: {e}");
+        }
+        if let Err(e) = self.store.expire_signals(now_ms()) {
+            say!("iris: signal expiry: {e}");
         }
         if let Err(e) = iris_changeset::expire(&self.store, now_ms()) {
             say!("iris: changeset expiry: {e}");

@@ -767,10 +767,47 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
         print!("{}", out.text);
         return out.failure.map_or(Ok(()), Err);
     }
+    if let Command::List {
+        form,
+        status,
+        kind,
+        before,
+        limit,
+        json,
+    } = &cli.command
+    {
+        let store = Store::open(&data?).map_err(|e| socket::Failure {
+            code: socket::code::ERROR,
+            error: format!("store: {e}"),
+        })?;
+        let filter = iris_api::Filter {
+            form: form.as_deref(),
+            status: status.as_deref(),
+            kind: kind.as_deref(),
+            before: before.as_deref(),
+        };
+        print!(
+            "{}",
+            verbs::list(&store, &filter, limit.unwrap_or(50), *json).map_err(list_failure)?
+        );
+        return Ok(());
+    }
     run_store(cli).map_err(|error| socket::Failure {
         code: socket::code::ERROR,
         error,
     })
+}
+
+/// The failure of `iris list` (CLI and MCP): a refused filter is a wrong
+/// argument, code 2 (specification 2, section 8.4); other errors are code 1.
+fn list_failure(e: iris_api::Error) -> socket::Failure {
+    socket::Failure {
+        code: match e {
+            iris_api::Error::Query(_) => socket::code::USAGE,
+            _ => socket::code::ERROR,
+        },
+        error: e.to_string(),
+    }
 }
 
 /// The request on the engine socket of a verb that changes changesets
@@ -1357,7 +1394,13 @@ fn mcp(dir: PathBuf) -> Result<(), String> {
                     kind: kind.as_deref(),
                     before: before.as_deref(),
                 };
-                read(open().and_then(|s| verbs::list(&s, &filter, limit, true)))
+                match open() {
+                    Err(e) => Outcome::fail(socket::code::ERROR, e),
+                    Ok(s) => match verbs::list(&s, &filter, limit, true) {
+                        Ok(text) => Outcome::ok(text),
+                        Err(e) => fail(list_failure(e)),
+                    },
+                }
             }
             Call::WatchAdd { text } => watch(WatchCommand::Add { text }),
             Call::WatchList => watch(WatchCommand::List { json: true }),
@@ -1587,23 +1630,9 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             print(verbs::search(&open()?, text, *limit, *json))
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
-        Command::List {
-            form,
-            status,
-            kind,
-            before,
-            limit,
-            json,
-        } => {
-            let filter = iris_api::Filter {
-                form: form.as_deref(),
-                status: status.as_deref(),
-                kind: kind.as_deref(),
-                before: before.as_deref(),
-            };
-            print(verbs::list(&open()?, &filter, limit.unwrap_or(50), *json))
-        }
-        // `run` refuses it in host mode, before the store.
+        // `run` lists the items (the exit code of a bad filter), and
+        // refuses a verb of a session in host mode, before the store.
+        Command::List { .. } => Err("iris list runs in `run`".into()),
         Command::Wait { .. } | Command::Ask { .. } | Command::Done { .. } => {
             Err("this is a verb of a session".into())
         }
@@ -1955,16 +1984,25 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
             say!("iris: account {account}: {}", engine::Error::NeedsSignIn);
             continue;
         }
-        // Another process runs the first copy: no full mirror exists to
-        // compare (issue #679). The check comes before any token or
-        // provider call, so their errors cannot hide it.
-        if matches!(command, MirrorCommand::Verify)
-            && !mirror_ready(&store, account)?
-            && iris_sync::other_sync_runs(&store, account).map_err(|e| e.to_string())?
-        {
-            println!("account {account}: {FIRST_COPY_RUNS}");
-            continue;
-        }
+        // Verify takes the sync lock before any token or provider call, and
+        // holds it to the end: a first copy cannot start after this check,
+        // and their errors cannot hide the line of a first copy in another
+        // process (issues #679, #836). No full mirror exists to compare then.
+        let held = match command {
+            MirrorCommand::Sync => None,
+            MirrorCommand::Verify => match iris_sync::lock(&store, account) {
+                Ok(l) => Some(l),
+                Err(iris_sync::Error::OtherSync) if !mirror_ready(&store, account)? => {
+                    println!("account {account}: {FIRST_COPY_RUNS}");
+                    continue;
+                }
+                Err(e) => {
+                    failed = true;
+                    say!("iris: account {account}: {e}");
+                    continue;
+                }
+            },
+        };
         let mail = match engine::provider_for(&store, account, &config) {
             Ok(m) => m,
             Err(e) => {
@@ -1990,32 +2028,28 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
                     if s.resync { ", full resync" } else { "" }
                 )
             }),
-            MirrorCommand::Verify => worker.verify().map(|r| {
-                let mut text = format!(
-                    "verified at history {}: {} differences, {} skipped{}",
-                    r.history_id,
-                    r.total,
-                    r.skipped,
-                    if r.resync {
-                        ", the next sync runs a full resync"
-                    } else {
-                        ""
+            MirrorCommand::Verify => worker
+                .verify_held(held.as_ref().expect("verify holds the sync lock"))
+                .map(|r| {
+                    let mut text = format!(
+                        "verified at history {}: {} differences, {} skipped{}",
+                        r.history_id,
+                        r.total,
+                        r.skipped,
+                        if r.resync {
+                            ", the next sync runs a full resync"
+                        } else {
+                            ""
+                        }
+                    );
+                    for d in &r.differences {
+                        text.push_str(&format!("\n  {}", verbs::field(&d.to_string())));
                     }
-                );
-                for d in &r.differences {
-                    text.push_str(&format!("\n  {}", verbs::field(&d.to_string())));
-                }
-                text
-            }),
+                    text
+                }),
         };
         match line {
             Ok(text) => println!("account {account}: {text}"),
-            // A first copy that started after the check above.
-            Err(engine::Error::Sync(iris_sync::Error::OtherSync))
-                if matches!(command, MirrorCommand::Verify) && !mirror_ready(&store, account)? =>
-            {
-                println!("account {account}: {FIRST_COPY_RUNS}")
-            }
             Err(e) => {
                 failed = true;
                 say!("iris: account {account}: {e}");
@@ -2382,9 +2416,12 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
 
     // One thread: the lightest memory footprint has priority.
     // The time driver: the socket waits at most READ_WAIT for a request.
+    // The blocking threads: the API and its stream writers, and one for each
+    // connection of the command socket (#814).
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
+        .max_blocking_threads(iris_api::BLOCKING_THREADS + socket::MAX_CONNECTIONS)
         .build()?;
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;

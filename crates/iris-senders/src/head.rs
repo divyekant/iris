@@ -190,8 +190,23 @@ fn comment_name(entry: &str, addr: &str) -> Option<String> {
     let at = low.find(addr)? + addr.len();
     let rest = entry.get(at..)?.trim_start();
     let inner = rest.strip_prefix('(')?;
-    let end = inner.find(')')?;
-    Some(inner[..end].trim().to_string()).filter(|n| !n.is_empty())
+    // A quoted pair (`\)`) is text and a nested comment stays in the name
+    // (RFC 5322 section 3.2.2). The name ends at the `)` of depth 0.
+    let (mut name, mut depth, mut escaped) = (String::new(), 0u32, false);
+    for c in inner.chars() {
+        match c {
+            _ if std::mem::take(&mut escaped) => name.push(c),
+            '\\' => escaped = true,
+            ')' if depth == 0 => {
+                let name = name.trim().to_string();
+                return (!name.is_empty()).then_some(name);
+            }
+            '(' => (depth += 1, name.push(c)).1,
+            ')' => (depth -= 1, name.push(c)).1,
+            _ => name.push(c),
+        }
+    }
+    None
 }
 
 /// Split an address list at the commas that are outside quotes and angle

@@ -25,7 +25,7 @@ use iris_store::{NewMessage, Store};
 use rusqlite::{params, OptionalExtension, Transaction};
 
 mod verify;
-pub use verify::{verify, Difference, Report, LISTED};
+pub use verify::{verify, verify_held, Difference, Report, LISTED};
 
 /// `account.sync_kind` of a first sync.
 pub const KIND_FIRST: &str = "first";
@@ -166,16 +166,6 @@ pub fn lock(store: &Store, account: i64) -> Result<SyncLock> {
 
 fn lock_path(store: &Store, account: i64) -> std::path::PathBuf {
     store.sync_lock_path(account)
-}
-
-/// Another process holds the sync lock of `account` now. A shared probe
-/// that creates no file ([`iris_store::FileLock::probe`]). A sync that
-/// tries to take the lock in the same moment gets [`Error::OtherSync`]
-/// once, and the engine tries it again at its next sync turn.
-pub fn other_sync_runs(store: &Store, account: i64) -> Result<bool> {
-    let probe =
-        iris_store::FileLock::probe(&lock_path(store, account)).map_err(iris_store::Error::Io)?;
-    Ok(matches!(probe, iris_store::Probe::Held))
 }
 
 /// Sync `account` with Gmail: continue an unfinished first sync or full
