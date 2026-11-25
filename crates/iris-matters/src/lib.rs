@@ -246,7 +246,11 @@ fn confirm_with(
     if keep.len() != n {
         return Err(Error::Bad("an item is two times in the list"));
     }
-    write(store, |tx| confirm_in(tx, matter, &title, &keep, now))
+    write(store, |tx| {
+        // A proposed signal can pass its `expires` time before the confirm.
+        iris_store::expire_signals(tx, now)?;
+        confirm_in(tx, matter, &title, &keep, now)
+    })
 }
 
 /// The check before each decision: `matter` is a proposal that is valid now.
