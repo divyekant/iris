@@ -49,10 +49,14 @@ pub fn step(store: &Store, connect: Connect, now_ms: i64) -> Result<usize, Strin
     let mut saved = 0;
     let mut calls = 0;
     for l in late {
-        if calls == MAX_PER_TURN {
+        if calls >= MAX_PER_TURN {
             break;
         }
-        let outcome = call(store, &row, model.as_ref(), &l, now_ms)?;
+        // The retry of an invalid answer is a second call: it goes only
+        // if the limit of the turn has room for it.
+        let retry = MAX_PER_TURN - calls >= 2;
+        let (outcome, made) = call(store, &row, model.as_ref(), &l, now_ms, retry)?;
+        calls += made;
         store
             .write(|tx| {
                 Ok(iris_voice::tried(
@@ -65,19 +69,18 @@ pub fn step(store: &Store, connect: Connect, now_ms: i64) -> Result<usize, Strin
             })
             .map_err(|e| e.to_string())?;
         match outcome {
-            // No call went out: the next thread can still fit the budget.
+            // The next thread can still fit the budget.
             Outcome::Refused => continue,
             Outcome::ModelFailed => break,
             Outcome::Saved => saved += 1,
             Outcome::Invalid | Outcome::Other => {}
         }
-        calls += 1;
     }
     Ok(saved)
 }
 
 enum Outcome {
-    /// The budget refused the call. No row stays.
+    /// The budget refused a call. No row stays if no call went out.
     Refused,
     Saved,
     /// The model answered, and the answer is not a valid draft.
@@ -92,13 +95,15 @@ enum Outcome {
 /// One nudge call under the budget, as `iris write` makes it
 /// (`crate::reply`): an `understand_run` row for the counts of the call,
 /// and the shared model wait at its end. The caller holds the run lock.
+/// Gives the outcome and the count of model calls that went out.
 fn call(
     store: &Store,
     row: &ModelRow,
     model: &dyn Model,
     late: &iris_voice::Late,
     now_ms: i64,
-) -> Result<Outcome, String> {
+    retry: bool,
+) -> Result<(Outcome, usize), String> {
     let run = store
         .write(|tx| {
             tx.execute(
@@ -116,7 +121,7 @@ fn call(
         })
         .map_err(|e| e.to_string())?;
     let budgeted = Budgeted::new(model, store, run, Some(row));
-    let result = iris_voice::nudge(store, late, &budgeted, now_ms);
+    let result = iris_voice::nudge_with(store, late, &budgeted, now_ms, retry);
     let s = budgeted.state();
     let stop = if s.refused || s.overrun {
         "budget"
@@ -132,12 +137,12 @@ fn call(
     let failed = matches!(stop, "unknown" | "model");
     // A refusal before the call leaves no row: the step runs each turn.
     let refused = s.refused && !s.store_failed;
-    store
+    let made = store
         .write(|tx| {
             let r = batch::report(tx, run)?;
             if refused && r.calls == 0 {
                 tx.execute("DELETE FROM understand_run WHERE id = ?1", [run])?;
-                return Ok(());
+                return Ok(0);
             }
             let ended = now_ms.max(crate::engine::now_ms());
             tx.execute(
@@ -145,19 +150,20 @@ fn call(
                 params![run, ended, stop],
             )?;
             batch::update_wait(tx, failed, r.calls > 0, ended)?;
-            Ok(())
+            Ok(r.calls.max(0) as usize)
         })
         .map_err(|e| e.to_string())?;
     if let Some(e) = budgeted.take_error() {
         return Err(format!("store: {e}"));
     }
-    Ok(match result {
+    let outcome = match result {
         _ if refused => Outcome::Refused,
         _ if failed => Outcome::ModelFailed,
         Ok(_) => Outcome::Saved,
         Err(iris_voice::Error::BadAnswer(_)) => Outcome::Invalid,
         Err(_) => Outcome::Other,
-    })
+    };
+    Ok((outcome, made))
 }
 
 #[cfg(test)]
@@ -182,7 +188,10 @@ mod tests {
 
         fn request_bytes(&self, instruction: &str, data: &str) -> u64 {
             // The thread "t-big" costs more than any budget of the tests.
-            match data.contains(r#""subject":"t-big""#) {
+            // The thread "t-retry" does too, after the first call.
+            let big = data.contains(r#""subject":"t-big""#)
+                || (data.contains(r#""subject":"t-retry""#) && self.0.get() > 0);
+            match big {
                 true => 1 << 40,
                 false => (instruction.len() + data.len()) as u64,
             }
@@ -423,6 +432,58 @@ mod tests {
         answer.set(r#"{"body": "Hi Ana, any news? D"}"#);
         assert_eq!(step(&store, &connect, late), Ok(1));
         assert_eq!(calls.get(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_step_makes_at_most_the_limit_of_calls_with_the_retries() {
+        let (store, dir) = open("limit");
+        for t in ["t1", "t2", "t3"] {
+            ask(&store, t, "Ana, can you send the slides?");
+        }
+        store
+            .write(|tx| {
+                tx.execute("UPDATE model_setting SET budget_micro_usd = 1000000", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+            Ok(Box::new(Fake(calls.clone(), "not json")))
+        };
+        let late = 1_000 + iris_voice::LATE_AFTER_MS;
+        // The first thread gets a call and its retry, the second one call
+        // with no retry: 3 calls, and the third thread waits.
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!(calls.get() as usize, MAX_PER_TURN);
+        assert_eq!(blocked(&store), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_refused_retry_counts_the_first_call() {
+        let (store, dir) = open("refused-retry");
+        ask(&store, "t-retry", "Ana, can you send the deck?");
+        ask(&store, "t-next", "Ana, can you send the slides?");
+        store
+            .write(|tx| {
+                tx.execute("UPDATE model_setting SET budget_micro_usd = 1000000", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+            Ok(Box::new(Fake(calls.clone(), "not json")))
+        };
+        let late = 1_000 + iris_voice::LATE_AFTER_MS;
+        // "t-retry": one paid call, then the budget refuses the retry. The
+        // run row stays with its call. "t-next": a call and its retry.
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!(calls.get() as usize, MAX_PER_TURN);
+        assert_eq!(
+            count(&store, "SELECT coalesce(sum(calls), 0) FROM understand_run"),
+            MAX_PER_TURN as i64
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

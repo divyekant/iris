@@ -459,8 +459,21 @@ pub struct Ready {
 /// the person that owes). The same entry must be in [`late`] before the
 /// call and again in the write of the draft, so a commitment that is done,
 /// hidden, changed or answered during the call gets no nudge. The draft
-/// keeps the key in `reply_draft.ask`.
+/// keeps the key in `reply_draft.ask`. An invalid answer gets one more
+/// call ([`nudge_with`]).
 pub fn nudge(store: &Store, late: &Late, model: &dyn Model, now_ms: i64) -> Result<Saved> {
+    nudge_with(store, late, model, now_ms, true)
+}
+
+/// [`nudge`]. With `retry` false, an invalid answer gets no second call,
+/// so the nudge makes at most one call (the call limit of a nudge step).
+pub fn nudge_with(
+    store: &Store,
+    late: &Late,
+    model: &dyn Model,
+    now_ms: i64,
+    retry: bool,
+) -> Result<Saved> {
     let still = |c: &Connection| Ok(self::late(c, now_ms, Some(late.thread), 1)?.contains(late));
     let mut ask: Value = serde_json::from_str(&late.key).unwrap_or(Value::Null);
     let to = late.to();
@@ -483,6 +496,7 @@ pub fn nudge(store: &Store, late: &Late, model: &dyn Model, now_ms: i64) -> Resu
         Some(&nudge),
         model,
         now_ms,
+        retry,
         &still,
     )
 }
@@ -765,7 +779,8 @@ pub struct Form<'a> {
     pub to: Option<&'a str>,
 }
 
-/// Writes a draft of the reply to `thread` with one model call, and saves
+/// Writes a draft of the reply to `thread` with one model call (two if the
+/// first answer is not a valid draft), and saves
 /// it in place of the last draft of the thread.
 pub fn write(
     store: &Store,
@@ -795,13 +810,17 @@ pub fn write_reply(
     model: &dyn Model,
     now_ms: i64,
 ) -> Result<Saved> {
-    write_when(store, thread, form, None, model, now_ms, &|_| Ok(true))
+    write_when(store, thread, form, None, model, now_ms, true, &|_| {
+        Ok(true)
+    })
 }
 
 /// [`write`], with one more condition `still` that must be true before the
 /// call and in the write of the draft (else [`Error::Changed`]). A nudge
 /// gives its recipient in place of the [`recipient`] rule, its commitment
-/// in the data, and its instruction and prompt.
+/// in the data, and its instruction and prompt. With `retry`, an invalid
+/// answer gets one more call.
+#[allow(clippy::too_many_arguments)]
 fn write_when(
     store: &Store,
     thread: i64,
@@ -809,6 +828,7 @@ fn write_when(
     nudge: Option<&Nudge>,
     model: &dyn Model,
     now_ms: i64,
+    retry: bool,
     still: &dyn Fn(&Connection) -> rusqlite::Result<bool>,
 ) -> Result<Saved> {
     let intent = form.intent.map(str::trim).filter(|i| !i.is_empty());
@@ -886,7 +906,7 @@ fn write_when(
     // data (decision D7, issue #278). A refusal gets none: the same data
     // gets the same refusal. The second call pays through the same budget.
     let body = match read_answer(&reply) {
-        Err(Error::BadAnswer(_)) if reply.stop != iris_model::Stop::Refused => {
+        Err(Error::BadAnswer(_)) if retry && reply.stop != iris_model::Stop::Refused => {
             read_answer(&ask()?)?
         }
         r => r?,
