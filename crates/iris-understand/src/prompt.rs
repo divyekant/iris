@@ -73,7 +73,17 @@ pub fn data_in(a: &Analysis, cx: &Context, budget: usize) -> String {
 /// [`data_in`], and for each earlier message of the thread that the budget
 /// left in (the newest first), the count of bytes of its escaped text
 /// ([`escape`] of the entry of `Context::thread`) that the data holds.
-pub fn data_kept(a: &Analysis, cx: &Context, budget: usize) -> (String, Vec<usize>) {
+/// The parts of the context that the data of [`data_kept`] held (issue 1049).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Kept {
+    /// For each earlier message of the thread, newest first, the bytes of
+    /// its escaped text that the data held.
+    pub thread: Vec<usize>,
+    /// The count of the first known parties that the data held.
+    pub parties: usize,
+}
+
+pub fn data_kept(a: &Analysis, cx: &Context, budget: usize) -> (String, Kept) {
     let h = &a.head;
     let mut d = String::new();
     let from = match (&h.from_name, &h.from_addr) {
@@ -135,14 +145,19 @@ pub fn data_kept(a: &Analysis, cx: &Context, budget: usize) -> (String, Vec<usiz
         }
     }
     // Known persons that the mail can name with no address (section 7.4).
+    // The first party that does not fit ends the list, so the data holds
+    // the first `parties` of them.
+    let mut parties = 0;
     for p in cx.known.iter().take(MAX_KNOWN) {
         let mut line = String::from("Known party: ");
         push_cut(&mut line, p, MAX_FIELD);
         line.push('\n');
-        if line.len() <= left {
-            left -= line.len();
-            d.push_str(&line);
+        if line.len() > left {
+            break;
         }
+        left -= line.len();
+        d.push_str(&line);
+        parties += 1;
     }
     for (name, text) in &a.text.attachment_text {
         let head = format!("\n\nText of the attachment {}:\n", escape(name));
@@ -181,7 +196,13 @@ pub fn data_kept(a: &Analysis, cx: &Context, budget: usize) -> (String, Vec<usiz
     // Each text from the mail went through the escape: the client escape
     // adds nothing, so the block stays in the budget.
     debug_assert!(!d.contains("<<<"));
-    (d, held)
+    (
+        d,
+        Kept {
+            thread: held,
+            parties,
+        },
+    )
 }
 
 /// Push `text` to `out`, escaped as `iris_model::data_block` does and cut

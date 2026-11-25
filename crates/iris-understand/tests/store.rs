@@ -3636,3 +3636,83 @@ fn a_new_known_party_runs_the_later_mail_again() {
     assert!(last.contains_key(&m3));
     let _ = m1;
 }
+
+/// Issue 1049, pre-review: a later message with the same date is later in
+/// the order of the runs, so its known sender does not run the earlier
+/// message again.
+#[test]
+fn a_known_party_of_a_later_message_with_the_same_date_runs_nothing_earlier() {
+    let b = store("context-parties-date");
+    let m1 = b.add_in("1", "t", NOW - DAY, &context_mail(1), &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    assert!(m1 < m2);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    let runs_of_m1 = |fake: &Fake| {
+        fake.calls
+            .borrow()
+            .iter()
+            .filter(|c| c.1.contains("Words k1k.") && !c.1.contains("Words k2k."))
+            .count()
+    };
+    let before = runs_of_m1(&fake);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sender(address, name, kind, decided_by)
+                 VALUES ('x2@example.net', 'Bo', 'person', 'person')
+                 ON CONFLICT(address) DO UPDATE SET name = 'Bo', kind = 'person',
+                   decided_by = 'person'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    drain(&b, &fake, &mut last);
+    assert_eq!(runs_of_m1(&fake), before, "m1 does not run again");
+}
+
+/// Issue 1049, pre-review: the record holds only the known parties that the
+/// data held. When the current message fills the budget, a new name of a
+/// known party runs nothing again.
+#[test]
+fn a_known_party_that_the_budget_left_out_runs_nothing_again() {
+    let b = store("context-parties-budget");
+    b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let long = format!(
+        "From: y@example.net\nTo: owner@example.com\nSubject: S\n\n{}\n",
+        "漢字".repeat(20_000)
+    );
+    let m2 = b.add_in("2", "t", NOW - DAY, &long, &["INBOX"]);
+    let set = |sql: &str| {
+        b.store
+            .write(|tx| {
+                tx.execute(sql, [])?;
+                Ok(())
+            })
+            .unwrap();
+    };
+    set("INSERT INTO sender(address, name, kind, decided_by)
+         VALUES ('x1@example.net', 'Ann', 'person', 'person')
+         ON CONFLICT(address) DO UPDATE SET name = 'Ann', kind = 'person',
+           decided_by = 'person'");
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    assert!(!last[&m2].contains("Known party"));
+    let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m2);
+    assert!(recorded.contains(";p!:0:"), "{recorded}");
+    let runs_of_m2 = |fake: &Fake| {
+        fake.calls
+            .borrow()
+            .iter()
+            .filter(|c| c.1.contains("漢字漢字"))
+            .count()
+    };
+    let before = runs_of_m2(&fake);
+    set("UPDATE sender SET name = 'Ann B' WHERE address = 'x1@example.net'");
+    drain(&b, &fake, &mut last);
+    // m1 runs again: its own data holds the party.
+    assert_eq!(runs_of_m2(&fake), before, "m2 does not run again");
+}

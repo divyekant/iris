@@ -751,6 +751,11 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         } else {
             None
         };
+        let parties = if d.calls == 0 {
+            Some(0)
+        } else {
+            Some(d.parties_held).filter(|&n| n < after.parties.len())
+        };
         tx.execute(
             "UPDATE message SET understood_at = ?2, retry_at = NULL, fixed_rules = ?3,
                     context = ?4
@@ -763,7 +768,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
                     // Hostile mail reads no context and makes no item.
                     Some("-".to_string())
                 } else {
-                    context_key(tx, message, held.as_deref(), false)?
+                    context_key(tx, message, held.as_deref(), parties, false)?
                 }
             ],
         )?;
@@ -1043,7 +1048,7 @@ fn inputs(
             .unwrap_or_default(),
         same: same_sender(c, message, thread, date, from_addr)?,
         context: thread_context(c, message, thread, date)?,
-        parties: known_parties(c, thread, date)?,
+        parties: known_parties(c, thread, message, date)?,
         pinned: pinned(c, message)?,
     })
 }
@@ -1165,6 +1170,7 @@ fn context_key(
     c: &rusqlite::Connection,
     message: i64,
     held: Option<&[usize]>,
+    parties_held: Option<usize>,
     waiting: bool,
 ) -> rusqlite::Result<Option<String>> {
     let row: Option<(Option<i64>, Option<i64>, Option<String>)> = c
@@ -1235,13 +1241,21 @@ fn context_key(
                 .collect::<rusqlite::Result<_>>()?;
         }
     }
-    // The known parties of the data. The record holds the whole list: a
-    // party that the budget left out can only cost one more run.
-    let parties = known_parties(c, thread, date)?;
-    let p = fnv(&parties.iter().map(String::as_str).collect::<Vec<_>>());
+    // The known parties of the data: all of them, or the first n that the
+    // data held, and "+" if the list had more.
+    let parties = known_parties(c, thread, message, date)?;
+    let parties: Vec<&str> = parties.iter().map(String::as_str).collect();
+    let p = match parties_held {
+        None => format!("p:{:016x}", fnv(&parties)),
+        Some(n) => {
+            let n = n.min(parties.len());
+            let more = if n < parties.len() { "+" } else { "" };
+            format!("p!:{n}:{:016x}{more}", fnv(&parties[..n]))
+        }
+    };
     let cut = if held.is_some() { "!" } else { "" };
     Ok(Some(format!(
-        "t{cut}:{};s:{};p:{p:016x}",
+        "t{cut}:{};s:{};{p}",
         t.join(","),
         s.join(",")
     )))
@@ -1267,6 +1281,13 @@ fn held_of(recorded: &str) -> Option<Vec<usize>> {
     )
 }
 
+/// The count of the known parties of a recorded context that the data
+/// held: `None` for all of them ("p:"), or n of "p!:n:".
+fn parties_of(recorded: &str) -> Option<usize> {
+    let p = recorded.split(';').find_map(|x| x.strip_prefix("p!:"))?;
+    p.split(':').next().and_then(|n| n.parse().ok())
+}
+
 /// Checks one understood message `id` with the recorded context
 /// `recorded` (issue 1049). A message with no recorded context (from
 /// before migration 68) gets its context now. A message whose context now
@@ -1281,7 +1302,7 @@ fn check_one(
     let Some(recorded) = recorded else {
         // A message from before the migration: the context of its run is
         // not known. Record the newest ones that can be in it.
-        let now = context_key(tx, id, None, false)?;
+        let now = context_key(tx, id, None, None, false)?;
         tx.execute(
             "UPDATE message SET context = ?2 WHERE id = ?1",
             params![id, now],
@@ -1295,9 +1316,12 @@ fn check_one(
     // "?": a message from before migration 68 whose context the queue step
     // did not record before a change (see [`record_unknown`]). Run it again.
     let held = held_of(&recorded);
+    let parties = parties_of(&recorded);
     if recorded != "?"
-        && context_key(tx, id, held.as_deref(), false)?.as_deref() == Some(recorded.as_str())
-        || context_key(tx, id, held.as_deref(), true)?.as_deref() == Some(recorded.as_str())
+        && (context_key(tx, id, held.as_deref(), parties, false)?.as_deref()
+            == Some(recorded.as_str())
+            || context_key(tx, id, held.as_deref(), parties, true)?.as_deref()
+                == Some(recorded.as_str()))
     {
         return Ok(false);
     }
@@ -1451,11 +1475,13 @@ const KNOWN_PARTIES: i64 = crate::prompt::MAX_KNOWN as i64;
 fn known_parties(
     c: &rusqlite::Connection,
     thread: i64,
+    message: i64,
     date: Option<i64>,
 ) -> rusqlite::Result<Vec<String>> {
     {
-        // Only the messages up to the current one (issue 1049): later mail
-        // does not change the data of an earlier run.
+        // Only the messages up to the current one in the order of the runs
+        // (date, then row ID; issue 1049): later mail does not change the
+        // data of an earlier run.
         let mut st = c.prepare_cached(
             "SELECT DISTINCT s.name, s.address FROM message m
              JOIN header h ON h.message_id = m.id
@@ -1463,11 +1489,12 @@ fn known_parties(
                OR instr(',' || coalesce(h.to_addrs, '') || ',', ',' || s.address || ',') > 0
                OR instr(',' || coalesce(h.cc_addrs, '') || ',', ',' || s.address || ',') > 0)
              WHERE m.thread_id = ?1 AND m.gone_at IS NULL
-               AND (?3 IS NULL OR m.internal_date <= ?3)
+               AND (?3 IS NULL OR m.internal_date < ?3
+                    OR (m.internal_date = ?3 AND m.id <= ?4))
              ORDER BY s.address LIMIT ?2",
         )?;
         let v = st
-            .query_map(params![thread, KNOWN_PARTIES, date], |r| {
+            .query_map(params![thread, KNOWN_PARTIES, date, message], |r| {
                 let (name, addr): (Option<String>, String) = (r.get(0)?, r.get(1)?);
                 Ok(match name.filter(|n| !n.is_empty()) {
                     Some(n) => format!("{n} <{addr}>"),
@@ -1832,7 +1859,7 @@ fn record_unknown(tx: &rusqlite::Connection) -> rusqlite::Result<usize> {
         .query_map([CHECK_PAGE], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     for &id in &page {
-        let now = context_key(tx, id, None, false)?;
+        let now = context_key(tx, id, None, None, false)?;
         tx.execute(
             "UPDATE message SET context = ?2 WHERE id = ?1",
             params![id, now],

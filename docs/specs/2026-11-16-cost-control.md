@@ -68,7 +68,10 @@ pay again for the same mail.
   data then has no cut mark) runs the later message again. The record
   also holds a hash of the known parties of the thread, which the model
   gets: the known persons in the headers of the messages up to the
-  current one. Later mail does not change them. A new kind or name of a
+  current one, in the order of the runs (date, then row ID). Later mail
+  does not change them. When the budget left out some parties, the record
+  holds the count and a hash of the parties that the data held, and if
+  the list had more, as for the thread context. A new kind or name of a
   sender puts the threads of that sender in `talk_due`.
 - Limit (issue #1135): a known person who is only in `To` or `Cc` of a
   thread does not put the thread in `talk_due`. A check compares the
