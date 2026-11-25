@@ -393,8 +393,10 @@ impl Store {
 /// The SHA-256 of each attachment file that a live reference names (spec
 /// section 1): an open action (a draft revision, `proposed`, `in_review`,
 /// `approved` or `held`), a ledger claim in `writing`, the content before
-/// a draft change whose undo is available (view `ledger_can_undo`), and a
-/// draft row that is not sent and not foreign. Each such file can be read
+/// each draft change of a draft that is not sent and not foreign, and a
+/// draft row that is not sent and not foreign. The view `ledger_can_undo`
+/// is not used: a held send or an open change hides an undo only for a
+/// time, and the undo then needs its files again. Each such file can be read
 /// again by an apply, a recovery or an undo. The match does not filter by
 /// verb, so each place that holds the content keeps its files.
 ///
@@ -411,7 +413,10 @@ WITH refs(doc, path) AS (
   SELECT l.post, '$.content.attachments' FROM ledger l WHERE l.state = 'writing'
   UNION ALL
   SELECT l.pre, '$.draft.content.attachments' FROM ledger l
-  WHERE l.id IN (SELECT ledger_id FROM ledger_can_undo)
+  JOIN draft d ON d.id = json_extract(l.ops, '$.draft')
+  WHERE json_valid(l.ops) AND json_extract(l.ops, '$.call') = 'drafts.update'
+    AND l.undo = 'inverse' AND l.state IN ('applied', 'failed')
+    AND d.sent_at IS NULL AND d.foreign_at IS NULL
   UNION ALL
   SELECT d.content, '$.content.attachments' FROM draft d
   WHERE d.sent_at IS NULL AND d.foreign_at IS NULL

@@ -232,8 +232,9 @@ fn no_folder_is_no_work() {
 }
 
 /// Issue #853, pre-review: the content before a draft change stays live
-/// while the undo of the change is available (view `ledger_can_undo`). A
-/// later change ends the undo, and then the old file goes.
+/// while its draft is not sent, also while the undo is hidden for a time
+/// (here, a later change in `writing` that Gmail then rejects). When the
+/// draft is sent, the old file goes.
 #[test]
 fn a_draft_change_keeps_the_file_of_its_undo() {
     let dir = TempDir::new("undo");
@@ -291,16 +292,47 @@ fn a_draft_change_keeps_the_file_of_its_undo() {
     assert_eq!(s.clean_attachments(NOW).unwrap(), Some(0));
     assert!(exists(&s, &before), "the undo can read the old file");
     assert!(exists(&s, &after), "the draft names the new file");
-    // A later change with no attachment in its pre: the first undo ends.
+    // A later change starts: the first undo is hidden for a time.
+    let later = s
+        .write(|tx| {
+            let a = action(tx, "{}", Some("approved"))?;
+            tx.execute(
+                "INSERT INTO ledger(action_id, account_id, ops, pre, post, state, undo, at)
+                 VALUES (?1, ?2, ?3, '{}', '{}', 'writing', 'inverse', 0)",
+                params![
+                    a,
+                    account,
+                    serde_json::json!({"call": "drafts.update", "draft": draft}).to_string()
+                ],
+            )?;
+            Ok(tx.last_insert_rowid())
+        })
+        .unwrap();
+    assert!(!can_undo(first));
+    assert_eq!(s.clean_attachments(NOW).unwrap(), Some(0));
+    assert!(exists(&s, &before), "a hidden undo keeps its file");
+    // Gmail rejects the later change: the first undo is available again.
     s.write(|tx| {
-        entry(tx, draft, "{\"draft\":{\"content\":{}},\"date\":null}")?;
+        tx.execute(
+            "UPDATE ledger SET state = 'failed', error = 'rejected' WHERE id = ?1",
+            [later],
+        )?;
         Ok(())
     })
     .unwrap();
-    assert!(!can_undo(first));
-    assert_eq!(s.clean_attachments(NOW).unwrap(), Some(1));
+    assert!(can_undo(first));
+    assert!(exists(&s, &before));
+    // The draft is sent: no undo can come back, and the old file goes.
+    s.write(|tx| {
+        tx.execute(
+            "UPDATE draft SET sent_at = 1, sent_message = 'm' WHERE id = ?1",
+            [draft],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(s.clean_attachments(NOW).unwrap(), Some(2));
     assert!(!exists(&s, &before));
-    assert!(exists(&s, &after));
 }
 
 /// A small deterministic generator of JSON values (a linear congruential
