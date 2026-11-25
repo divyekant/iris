@@ -144,7 +144,10 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/handled", get(get_handled))
         .route("/api/ledger", get(get_ledger))
         .route("/api/ledger/{id}/undo", post(post_undo))
-        .route("/api/ledger/unconfirmed/dismiss", post(post_dismiss_unconfirmed))
+        .route(
+            "/api/ledger/unconfirmed/dismiss",
+            post(post_dismiss_unconfirmed),
+        )
         .route("/api/gate", get(get_gate))
         .route("/api/gate/declined", get(get_declined))
         .route("/api/senders/{id}/{answer}", post(post_answer))

@@ -912,6 +912,7 @@ async fn a_change_of_a_draft_is_marked() {
     assert_eq!(by(change)["mail"]["subject"], "Q4 plan");
     assert_eq!(by(create)["change"], false);
     assert_eq!(by(archive)["change"], false);
+}
 
 /// A failed `archive` entry: the recovery cannot confirm `unknown`, and
 /// Gmail confirmed `done`. Gives the ledger row ID.
@@ -986,7 +987,10 @@ async fn dismiss(store: &Arc<Store>, body: Value) -> (StatusCode, Value) {
         .header("content-type", "application/json")
         .body(Body::from(body.to_string()))
         .unwrap();
-    let res = iris_api::router(store.clone(), auth).oneshot(req).await.unwrap();
+    let res = iris_api::router(store.clone(), auth)
+        .oneshot(req)
+        .await
+        .unwrap();
     let code = res.status();
     let body = to_bytes(res.into_body(), 1 << 20).await.unwrap();
     (code, serde_json::from_slice(&body).unwrap_or(Value::Null))
@@ -1017,19 +1021,33 @@ async fn the_brief_shows_unconfirmed_messages_until_dismissed() {
     assert_eq!(entry(ok)["unknown"], 0);
     let (code, brief) = call(&s, false, "/api/brief").await;
     assert_eq!(code, StatusCode::OK);
-    assert_eq!(brief["unconfirmed"], json!({"messages": 2, "entries": [format!("l-{first}")]}));
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 2, "entries": [format!("l-{first}")]})
+    );
 
     // The line showed `first`. A later failure comes before the dismissal.
     let second = unconfirmed(&s, &[3], &[]);
-    let (code, b) = dismiss(&s, json!({"entries": [format!("l-{first}"), format!("l-{ok}")]})).await;
+    let (code, b) = dismiss(
+        &s,
+        json!({"entries": [format!("l-{first}"), format!("l-{ok}")]}),
+    )
+    .await;
     assert_eq!((code, b), (StatusCode::OK, json!({"dismissed": 1})));
     let (_, brief) = call(&s, false, "/api/brief").await;
-    assert_eq!(brief["unconfirmed"], json!({"messages": 1, "entries": [format!("l-{second}")]}));
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 1, "entries": [format!("l-{second}")]})
+    );
     // A second dismissal of the same entry changes nothing.
     let (_, b) = dismiss(&s, json!({"entries": [format!("l-{first}")]})).await;
     assert_eq!(b, json!({"dismissed": 0}));
     // An ID that is not `l-<n>` writes nothing.
-    for bad in [json!({"entries": ["x"]}), json!({"entries": [format!("l-{second}"), "l-01"]}), json!({})] {
+    for bad in [
+        json!({"entries": ["x"]}),
+        json!({"entries": [format!("l-{second}"), "l-01"]}),
+        json!({}),
+    ] {
         let (code, _) = dismiss(&s, bad).await;
         assert_eq!(code, StatusCode::BAD_REQUEST);
     }

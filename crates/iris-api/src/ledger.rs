@@ -405,7 +405,9 @@ pub(crate) fn unconfirmed(c: &Connection) -> rusqlite::Result<Unconfirmed> {
         .prepare(&format!(
             "SELECT DISTINCT lm.ledger_id {OPEN} ORDER BY lm.ledger_id DESC LIMIT ?1"
         ))?
-        .query_map([crate::MAX_LIMIT], |r| Ok(format!("l-{}", r.get::<_, i64>(0)?)))?
+        .query_map([crate::MAX_LIMIT], |r| {
+            Ok(format!("l-{}", r.get::<_, i64>(0)?))
+        })?
         .collect::<rusqlite::Result<_>>()?;
     Ok(Unconfirmed { messages, entries })
 }
@@ -470,4 +472,3 @@ mod tests {
         }
     }
 }
-
