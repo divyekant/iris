@@ -77,7 +77,10 @@ pay again for the same mail.
   thread, and after 5 texts of the same sender. They read only rows to
   check or to count (understood mail that is not hostile, and for the
   sender walk mail with a text), so mail that waits for its first run
-  costs nothing. Hostile mail records "-": no context shaped it. And for each thread in
+  costs nothing. Each walk reads at most 64 rows: rows that do not count
+  (for example `SPAM` of the same sender) can make a walk longer, and then
+  the walk puts the thread in `talk_due`. Hostile mail records "-": no
+  context shaped it. And for each thread in
   `talk_due` (a message that goes away, new content, a new or changed
   clean text or sender address, a message that moves to another thread
   or date, the start
@@ -87,9 +90,15 @@ pay again for the same mail.
   waits for a run waits for the end of that run, so one change runs a
   message once. A run reads only earlier messages, so a reset never comes
   back to the message that caused it.
-- Limit (issue #1119): a message that a run understood before migration
-  68 has no recorded context. The first check records its context now and
-  runs nothing again, so a change before the upgrade is not seen.
+- Upgrade: migration 68 gives each understood message the record "?":
+  its context is not known. Each batch run first records the context now
+  of each "?" message whose thread is not in `talk_due`, and the queue
+  step does the same. A change after the migration puts the thread in
+  `talk_due` before that, and the check runs each "?" message of the
+  thread again. So a change after the upgrade is never lost. A thread
+  that was in `talk_due` at the upgrade runs its old messages once.
+- Limit (issue #1119): a change before the upgrade is not seen, because
+  the first record of a message is its context at that time.
 
 ## Not in scope
 

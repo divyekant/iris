@@ -14,10 +14,9 @@
 --    cut it, or no model call ran): each entry then also holds the count
 --    of the bytes that the data held, and "+" if the text had more bytes.
 --    The hash covers only the held bytes. "-" marks hostile mail: no context shaped it.
---    NULL for a message that no run understood
---    since this migration. The first check of such a row records its
---    context now and runs nothing again (limit issue #1119: a change
---    before the migration is not seen).
+--    NULL for a message that no run understood. "?" for an understood
+--    message from before this migration (step 3; limit issue #1119: a
+--    change before the migration is not seen).
 -- 2. A check compares the recorded context of each understood message of
 --    a thread with its context now, and clears `understood_at` where they
 --    differ (`understand_reset` of migration 65 then clears `tries` and
@@ -33,6 +32,15 @@
 --    (`header`), and a message that sync moves to another thread or
 --    another date (both threads).
 ALTER TABLE message ADD COLUMN context TEXT;
+
+-- 3. An understood message from before this migration gets "?": its
+--    context is not known yet. The queue step records the context of each
+--    such message whose thread is not in `talk_due`, before it checks the
+--    threads of the queue. A change after this migration puts the thread in
+--    `talk_due` first, so the check of a "?" message runs it again: a
+--    change after the migration is never lost.
+UPDATE message SET context = '?' WHERE understood_at IS NOT NULL;
+CREATE INDEX message_context_unknown ON message(id) WHERE context = '?';
 
 CREATE TRIGGER context_gone AFTER UPDATE OF gone_at ON message
   WHEN OLD.gone_at IS NULL AND NEW.gone_at IS NOT NULL AND NEW.thread_id IS NOT NULL

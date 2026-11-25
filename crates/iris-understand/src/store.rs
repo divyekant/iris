@@ -1284,8 +1284,11 @@ fn check_one(
         // Hostile mail: no context shaped its run.
         return Ok(false);
     }
+    // "?": a message from before migration 68 whose context the queue step
+    // did not record before a change (see [`record_unknown`]). Run it again.
     let held = held_of(&recorded);
-    if context_key(tx, id, held.as_deref(), false)?.as_deref() == Some(recorded.as_str())
+    if recorded != "?"
+        && context_key(tx, id, held.as_deref(), false)?.as_deref() == Some(recorded.as_str())
         || context_key(tx, id, held.as_deref(), true)?.as_deref() == Some(recorded.as_str())
     {
         return Ok(false);
@@ -1339,7 +1342,10 @@ const CHECK_PAGE: i64 = 200;
 /// context, and only a later message of the same sender with fewer than
 /// [`SAME_SENDER_MESSAGES`] such messages of that sender between can have
 /// it in its sender context. So two short walks find each message to
-/// check, and a run in a long thread reads only a few rows. Gives the
+/// check, and a run in a long thread reads only a few rows. Each walk
+/// reads at most [`WALK_ROWS`] rows: rows that do not count (for example
+/// SPAM) can make a walk longer, and then the thread goes to `talk_due`.
+/// Gives the
 /// count of messages that run again, and the count of rows that the walks
 /// read.
 fn check_after(tx: &rusqlite::Connection, message: i64) -> rusqlite::Result<(usize, usize)> {
@@ -1369,7 +1375,7 @@ fn check_after(tx: &rusqlite::Connection, message: i64) -> rusqlite::Result<(usi
            -- is neither, so a new thread costs no long walk.
            AND ((m.understood_at IS NOT NULL AND m.context IS NOT '-')
                 OR (?4 IS NOT NULL AND EXISTS (SELECT 1 FROM body b WHERE b.message_id = m.id)))
-         ORDER BY m.internal_date, m.id"
+         ORDER BY m.internal_date, m.id LIMIT ?5"
     ))?;
     let mut due = std::collections::BTreeMap::new();
     let mut read = 0;
@@ -1383,13 +1389,14 @@ fn check_after(tx: &rusqlite::Connection, message: i64) -> rusqlite::Result<(usi
         if !understood_only && sender.is_none() {
             continue;
         }
-        let mut rows = st.query(params![thread, message, date, sender])?;
-        let mut between = 0;
+        let mut rows = st.query(params![thread, message, date, sender, WALK_ROWS])?;
+        let (mut between, mut walked) = (0, 0);
         while let Some(r) = rows.next()? {
             if between >= max {
                 break;
             }
             read += 1;
+            walked += 1;
             let (id, recorded, understood, ok): (i64, Option<String>, bool, bool) =
                 (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
             if understood {
@@ -1399,6 +1406,15 @@ fn check_after(tx: &rusqlite::Connection, message: i64) -> rusqlite::Result<(usi
                 between += 1;
             }
         }
+        if between < max && walked == WALK_ROWS {
+            // Many later rows that do not count (for example SPAM): the walk
+            // can go on. The queue checks the whole thread in pages.
+            tx.execute(
+                "INSERT INTO talk_due(thread_id) SELECT ?1
+                 WHERE NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = ?1)",
+                [thread],
+            )?;
+        }
     }
     let mut reset = 0;
     for (id, recorded) in due {
@@ -1406,6 +1422,10 @@ fn check_after(tx: &rusqlite::Connection, message: i64) -> rusqlite::Result<(usi
     }
     Ok((reset, read))
 }
+
+/// The most rows of one walk of [`check_after`]. A longer walk puts the
+/// thread in `talk_due`.
+const WALK_ROWS: i64 = 64;
 
 /// Runs the check of the later messages after `message` (issue 1049), as
 /// the end of a run does. Gives the count of rows that it read. For tests.
@@ -1749,6 +1769,7 @@ pub const RERUN_PAGE: i64 = 500;
 /// runner calls it after its sender refresh, and the engine at each turn of
 /// its attention thread, so a kind change of the stranger gate counts too.
 pub fn update_due_talks(store: &Store, now_ms: i64) -> iris_store::Result<usize> {
+    record_unknown_contexts(store)?;
     let mut done = 0;
     loop {
         let n = store.write(|tx| {
@@ -1770,6 +1791,39 @@ pub fn update_due_talks(store: &Store, now_ms: i64) -> iris_store::Result<usize>
         }
         done += n;
     }
+}
+
+/// Issue 1049: records the context now of each understood message from
+/// before migration 68 whose thread is not in `talk_due`, in pages. The
+/// batch run does it first, before step 1 can change a context.
+pub fn record_unknown_contexts(store: &Store) -> iris_store::Result<()> {
+    while store.write(|tx| Ok(record_unknown(tx)?))? > 0 {}
+    Ok(())
+}
+
+/// Issue 1049: records the context now of a page of understood messages
+/// from before migration 68 (context "?") whose thread is not in
+/// `talk_due`. No change since the migration reached such a thread, so the
+/// context now is the context of its last run, as far as Iris can know
+/// (limit #1119). A message whose thread is in `talk_due` keeps "?", and
+/// the check of the thread runs it again. Gives the count of rows.
+fn record_unknown(tx: &rusqlite::Connection) -> rusqlite::Result<usize> {
+    let page: Vec<i64> = tx
+        .prepare_cached(
+            "SELECT m.id FROM message m WHERE m.context = '?'
+               AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = m.thread_id)
+             ORDER BY m.id LIMIT ?1",
+        )?
+        .query_map([CHECK_PAGE], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for &id in &page {
+        let now = context_key(tx, id, None, false)?;
+        tx.execute(
+            "UPDATE message SET context = ?2 WHERE id = ?1",
+            params![id, now],
+        )?;
+    }
+    Ok(page.len())
 }
 
 /// Deletes the items of `message` that a new run replaces: the rows of the
