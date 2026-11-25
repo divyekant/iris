@@ -611,7 +611,9 @@ const jobPage = (state: string | null) => {
   const list = Object.values(jobs)
     .filter((j) => (state && state !== "open" ? j.state === state : j.state !== "done"))
     .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)));
-  return { jobs: list, next: null };
+  // The newest session of each working job (issue 791), as the API gives it.
+  const sessions = Object.fromEntries(list.filter((j) => j.state === "working").map((j) => [j.id, jobDetails[j.id]?.session ?? null]));
+  return { jobs: list, next: null, sessions };
 };
 
 /** The stop switch of the fixtures (docs/specs/2026-11-17-stop.md). */
