@@ -948,6 +948,22 @@ pub(crate) fn settings(conn: &Connection) -> Result<()> {
         }
     }
     conn.execute_batch(PRAGMAS)?;
+    // `iris_same_name(a, b)`: the two names are equal with Unicode case
+    // folding, as the label rules of submit and apply (`unicase`). SQLite
+    // `COLLATE NOCASE` folds only ASCII (issue #965).
+    conn.create_scalar_function(
+        "iris_same_name",
+        2,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let (a, b) = (ctx.get::<Option<String>>(0)?, ctx.get::<Option<String>>(1)?);
+            Ok(match (a, b) {
+                (Some(a), Some(b)) => unicase::UniCase::new(a) == unicase::UniCase::new(b),
+                _ => false,
+            })
+        },
+    )?;
     Ok(())
 }
 

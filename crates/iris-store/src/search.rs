@@ -209,7 +209,7 @@ impl Query {
                 Filter::Label(v) => arg(
                     &mut sql,
                     " AND EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                       WHERE ml.message_id = m.id AND (l.name = ? COLLATE NOCASE OR l.provider_id = ?))",
+                       WHERE ml.message_id = m.id AND (iris_same_name(l.name, ?) OR l.provider_id = ?))",
                     v.clone().into(),
                 ),
                 Filter::Form(v) => {
