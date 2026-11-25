@@ -926,8 +926,11 @@ The line leaves out an account in `removing` or `removed`. The line shows an ent
 messages, and a dismissal is for the final list. An `undone` entry keeps
 its line, because the undo restores only the confirmed messages. The
 history view lists the messages of each such entry, a page at a time
-(`GET /api/ledger/{id}/unknown`), and each one links to the mail, so that
-the person can check it in the mailbox. A state verb never stays in the state `writing`, because one transaction
+(`GET /api/ledger/{id}/unknown`), so that the person can check each one
+in the mailbox. A message that Iris still has links to its mail. A message
+whose row is gone (for example, sync saw an IMAP move before the recovery
+listed it) shows as "not in Iris any more", with no link: Iris has no copy
+to show, and the person checks the mailbox. A state verb never stays in the state `writing`, because one transaction
 applies it.
 
 ### 7.4 Undo

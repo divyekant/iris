@@ -85,16 +85,17 @@
 
   // Spec 2 section 7.3: the messages of an entry that Iris could not confirm, so that you can check
   // each one in your mailbox. A page at a time, by entry ID.
-  let unknown = $state<Record<string, { rows: Row[]; next: string | null; loading: boolean; problem: string }>>({});
+  let unknown = $state<Record<string, { rows: Row[]; next: string | null; loading: boolean; failed: boolean; problem: string }>>({});
   async function showUnknown(e: LedgerEntry) {
     const was = unknown[e.id];
-    unknown[e.id] = { rows: was?.rows ?? [], next: was?.next ?? null, loading: true, problem: "" };
+    unknown[e.id] = { rows: was?.rows ?? [], next: was?.next ?? null, loading: true, failed: false, problem: "" };
     try {
       const after = was?.next ? `&after=${encodeURIComponent(was.next)}` : "";
       const p = await get<{ messages: Target[]; next: string | null }>(`ledger/${e.id}/unknown?limit=50${after}`);
-      unknown[e.id] = { rows: [...(was?.rows ?? []), ...p.messages.map(messageRow)], next: p.next, loading: false, problem: "" };
+      unknown[e.id] = { rows: [...(was?.rows ?? []), ...p.messages.map(messageRow)], next: p.next, loading: false, failed: false, problem: "" };
     } catch (err) {
-      unknown[e.id] = { ...unknown[e.id], loading: false, problem: own(err) };
+      // `own` gives "" when the engine is out of reach (the page says so): the read still failed.
+      unknown[e.id] = { ...unknown[e.id], loading: false, failed: true, problem: own(err) };
     }
   }
 
@@ -186,8 +187,9 @@
               </ul>
             {/if}
             {#if u?.problem}<p class="why" role="alert">{u.problem}</p>{/if}
-            {#if !u || u.next}
-              <button type="button" class="check" onclick={() => showUnknown(e)} disabled={u?.loading}>{u?.loading ? "Loading" : u ? "Show more" : "Show the messages to check"}</button>
+            <!-- A failed read keeps its button, so that you can try again: it reads the same page. -->
+            {#if !u || u.next || u.failed}
+              <button type="button" class="check" onclick={() => showUnknown(e)} disabled={u?.loading}>{u?.loading ? "Loading" : u?.failed ? "Try again" : u ? "Show more" : "Show the messages to check"}</button>
             {/if}
           {/if}
           <p class="meta">{who(e)} · <time datetime={e.at}>{time(e.at)}</time>{#if e.state === "undone"}{" · Undone"}{/if}</p>

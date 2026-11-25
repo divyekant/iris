@@ -223,3 +223,27 @@ test("an entry with messages that Iris could not confirm lists them, a page at a
     net.restore();
   }
 });
+
+test("a failed read of the messages to check keeps a button to try again", async () => {
+  const e = { ...fx.ledger.entries[0], id: "l-42", state: "failed", unknown: 1, can_undo: false, undo_open: false };
+  let tries = 0;
+  const net = serve({
+    // The first read gets no answer, and the second a 500 with words: each keeps the button.
+    "GET ledger/l-42/unknown?limit=50": () => (++tries === 1 ? [0, null] : tries === 2 ? [500, { error: "The store is busy." }] : [200, { messages: [{ id: "m-9", gone: true }], next: null }]),
+  });
+  const app = await mount("/src/views/Ledger.svelte", { page: { entries: [e], next: null } });
+  try {
+    const button = () => app.target.querySelector("button.check");
+    button().click();
+    await until(() => button() !== null && text(button()) === "Try again");
+    button().click();
+    await until(() => /The store is busy\./.test(text(app.target)) && text(button()) === "Try again");
+    button().click();
+    await until(() => /not in Iris any more/.test(text(app.target)));
+    assert.equal(button(), null);
+    assert.equal(tries, 3);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
