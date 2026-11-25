@@ -1,4 +1,4 @@
-//! Migration 61: job rows in `notice` (issues #844 and #845,
+//! Migration 62: job rows in `notice` (issues #844 and #845,
 //! docs/specs/2026-11-25-job-notices.md).
 
 use std::fs;
@@ -15,7 +15,7 @@ impl Drop for TempDir {
     }
 }
 
-const MIGRATIONS: [&str; 60] = [
+const MIGRATIONS: [&str; 61] = [
     include_str!("../src/schema_1.sql"),
     include_str!("../src/schema_2.sql"),
     include_str!("../src/schema_3.sql"),
@@ -76,6 +76,7 @@ const MIGRATIONS: [&str; 60] = [
     include_str!("../src/schema_58.sql"),
     include_str!("../src/schema_59.sql"),
     include_str!("../src/schema_60.sql"),
+    include_str!("../src/schema_61.sql"),
 ];
 
 fn rule_row(c: &Connection, message: i64) -> rusqlite::Result<i64> {
@@ -103,7 +104,7 @@ fn an_old_store_keeps_its_notices_and_a_job_move_adds_a_row() {
         for sql in MIGRATIONS {
             c.execute_batch(sql).unwrap();
         }
-        c.pragma_update(None, "user_version", 60).unwrap();
+        c.pragma_update(None, "user_version", 61).unwrap();
         for m in [10, 11, 12] {
             rule_row(&c, m).unwrap();
         }
@@ -114,7 +115,7 @@ fn an_old_store_keeps_its_notices_and_a_job_move_adds_a_row() {
     }
     let s = Store::open(&dir.0).unwrap();
     s.write(|tx| {
-        assert_eq!(iris_store::schema_version(tx)?, 61);
+        assert_eq!(iris_store::schema_version(tx)?, 62);
         let rows: Vec<(i64, i64, Option<i64>)> = tx
             .prepare("SELECT id, message_id, done_at FROM notice ORDER BY id")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?

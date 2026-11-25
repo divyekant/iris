@@ -50,7 +50,7 @@ UNIQUE`), so a job cannot have a row today.
 
 ### The store
 
-Migration 61 (the next free number at the build) makes the
+Migration 62 (the next free number at the build) makes the
 table `notice` again, with the same row IDs and the same `sqlite_sequence`
 value, so the engine never uses an ID again (specification 1, 5.7):
 
