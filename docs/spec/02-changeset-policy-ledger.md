@@ -496,7 +496,7 @@ Conditions in `when`:
 | `commitment_kind` | The kind of a commitment. |
 | `author` | `person`, `agent`, `triage` or `local`. Each value matches only that author. |
 | `older_than_days` | The age of the message in days. |
-| `recipients` | `thread`: the action is a reply `draft`, and each address in To and Cc of the draft is in its thread, or is one of your addresses. An address is in the thread only if it is the From of a live message of the thread, or in To or Cc of a live message of the thread that you sent (decision D13, issue #435). A new mail has no thread, so it never matches. A rule with `recipients` has only the verb `draft` (decision D3, issue #386). |
+| `recipients` | `thread`: the action is a reply `draft`, and each address in To, Cc and Bcc of the draft is in its thread (issue #880), or is one of your addresses. An address is in the thread only if it is the From of a live message of the thread, or in To or Cc of a live message of the thread that you sent (decision D13, issue #435). A new mail has no thread, so it never matches. A rule with `recipients` has only the verb `draft` (decision D3, issue #386). |
 
 Version 1 has no other condition, and no expression language. A new condition
 needs a change to this specification.
@@ -694,7 +694,9 @@ changes:
 - The candidate rule is added to the active policy. An action counts for it
   only when the rule changes the decision of that action to approved
   (section 6.4), with the author, the job and the flag `bulk` of the
-  action. The engine proposes the rule when 10 or more approvals count and
+  action, and the mark of the author now (`trash` only, decision D14,
+  issue #916): a `trash` of a marked author goes to review, so it never
+  counts. The engine proposes the rule when 10 or more approvals count and
   no refusal counts.
 - A domain candidate also needs counted approvals on two or more
   addresses. With one address, the address proposal covers it. When the
