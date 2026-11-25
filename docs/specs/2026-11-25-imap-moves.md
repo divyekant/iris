@@ -24,9 +24,9 @@ hostile mail) cannot apply. Triage is the main work of Iris.
 - After a move, the store row of the message stays the same row. Its
   provider ID changes to the new location ID (the rebind). The forms, the
   ledger rows and the undo stay on that row.
-- A move with an unknown result (a lost connection, a crash) ends in a
-  known state when the recovery can find the message, else in `unknown`,
-  as today. No move runs two times.
+- A move with an unknown result (a lost connection, a crash) ends in
+  `unknown`, as a Gmail call with an unknown result does today. No move
+  runs two times, and the recovery never rebinds a row.
 
 ## Not in scope
 
@@ -152,24 +152,30 @@ The next sync then sees:
 
 A move with an unknown result, or a crash after `UID MOVE` and before the
 transaction of section 3, leaves the ledger message rows not `done`. The
-recovery (spec 2 section 7.3) reads each such row. For a move on a
-provider with location IDs, it does these steps:
+recovery (spec 2 section 7.3) handles them with the rules of today for a
+call that started:
 
-1. `minimal` of the old ID. If the message is there with the labels of
-   before, it did not move: the row gets the pre state, as today.
-2. Else (`NotFound`, or the labels of after): `messages_with_id` with the
-   `Message-ID` header of the row (`header.message_id_hdr`). The IMAP
-   provider implements it with `UID SEARCH HEADER Message-ID <id>` in each
-   mail folder.
-3. Exactly one match in the target folder, and no match in the source
-   folder: the move happened. One transaction sets the row `done` and
-   rebinds it to the match.
-4. Any other result (no `Message-ID`, no match, two matches, a match in
-   the source folder that step 1 did not find): the row stays `unknown`.
-   Iris does not call again (spec 2 section 7.2).
+- The recovery never calls `UID MOVE` again, and never rebinds a row. Only
+  the `COPYUID` of the same command names the moved message with
+  certainty. A `Message-ID` match does not: the target folder can hold
+  another copy with the same `Message-ID`, so a rebind by `Message-ID`
+  could put the forms and the undo on the wrong message.
+- A started move whose old ID is still there with the labels of before
+  did not move, but the recovery cannot tell it from a move that another
+  client undid. The row gets `listed = 'unknown'`, as today for a started
+  call with the labels of before. The ledger entry ends `failed`, and the
+  action shows the message as not confirmed. Iris does not call again.
+- A started move whose old ID is gone gets `listed = 'unknown'` too.
 
-The `Message-ID` search reads only. It is not a write, so it can repeat
-after a crash.
+After a crash, the sync lock ends with the process, and the engine can
+sync before the recovery. The sync then marks the old row gone and adds a
+new row for the new ID. The recovery finds the old row gone (`listed =
+'gone'`, as today). So after a crash or an unknown result, the forms of
+the message stay on the gone row, the new row is understood again, and
+the undo of that entry cannot move the message back. This is the cost of
+an unknown result: limit issue #984. The success path
+of section 3 has no such cost, because the rebind and `done` are one
+transaction under the sync lock.
 
 ### 5. The undo
 
@@ -181,10 +187,10 @@ today (spec 2 section 7.4).
 
 ## Options not chosen
 
-- Keep location IDs and match the new row to the old row at the next sync
-  by `Message-ID`: the sync of every provider would get a rule for one
-  provider, and a message with no `Message-ID`, or two copies, has no
-  answer.
+- Match the new row to the old row by `Message-ID`, at the next sync or
+  in the recovery: the target folder can hold another copy with the same
+  `Message-ID`, so the match can put the forms and the undo on the wrong
+  message.
 - `OBJECTID` (RFC 8474) `EMAILID` as the message ID: an `EMAILID` alone
   cannot fetch a message, and few servers have it.
 - `COPY` then `UID STORE +FLAGS \Deleted` then `UID EXPUNGE`: three writes,
@@ -211,9 +217,9 @@ write, or `Transport` (unknown) after the first write.
 | A new `UIDVALIDITY` after a `UID MOVE` of another folder | `Transport`, no more writes | `move_uidvalidity` |
 | `OK` with no `COPYUID`, or without each asked UID | `Transport` | `move_partial_copyuid` |
 | `NO` or `BAD` to `UID MOVE` | `Transport` | `move_refused_is_unknown` |
-| A lost connection after `UID MOVE` | `Transport`, then the recovery finds the message by `Message-ID` and rebinds | `move_recovery_rebinds` |
-| A crash after `UID MOVE` and before the store transaction | the same recovery | `move_recovery_rebinds` |
-| A recovery with no `Message-ID`, no match or two matches | the row stays `unknown`, no call | `move_recovery_ambiguous` |
+| A lost connection after `UID MOVE` | `Transport`; the recovery sets `listed = 'unknown'`, the entry ends `failed`, no second `UID MOVE`, no rebind | `move_unknown_is_not_retried` |
+| A started move whose old ID still has the labels of before | `listed = 'unknown'`, entry `failed`, no call | `move_unknown_is_not_retried` |
+| A crash after `UID MOVE`, then a sync before the recovery | the sync marks the old row gone and adds a new row; the recovery sets `listed = 'gone'`; zero differences | `move_crash_then_sync` |
 | A message that is already at the target | `None`, no write for it | `move_already_there` |
 | `archive`, sync, `inbox`, sync, then undo of both | the same store row, zero differences | `move_and_undo_keep_the_row` |
 | A sync after the move (QRESYNC, and CONDSTORE only) | no new row, no gone row, zero differences | `move_then_sync_keeps_the_row` |
@@ -223,13 +229,14 @@ write, or `Transport` (unknown) after the first write.
 
 - `crates/iris-provider`: `location_ids` and `relocate`, with defaults.
 - `crates/iris-imap`: `Session::move_uids` (`UID MOVE`, `COPYUID`), the
-  archive folder, `relocate`, `trash`, `untrash`, `messages_with_id`.
+  archive folder, `relocate`, `trash`, `untrash`. The Gmail refusal comes
+  before each other check of `profile` (issue #981).
 - `crates/iris-fakeimap`: the capabilities `MOVE` and `UIDPLUS`, `UID MOVE`
-  with `COPYUID`, `UID SEARCH HEADER`, and a switch to drop the answer after
+  with `COPYUID`, and a switch to drop the answer after
   a `UID MOVE` (the unknown result).
 - `crates/iris-store`: `Store::rebind`. No migration.
-- `crates/iris-apply`: `relocate` in place of `modify` for moves, the rebind
-  in the `done` transaction, and the recovery of section 4.
+- `crates/iris-apply`: `relocate` in place of `modify` for moves, and the
+  rebind in the `done` transaction. The recovery does not change.
 - Docs: the provider spec section 4, the IMAP provider spec section 7, and
   the README IMAP line.
 
@@ -259,8 +266,7 @@ write, or `Transport` (unknown) after the first write.
 
 ## Open questions
 
-- Is the `Message-ID` search slow on a large server with no index? The
-  recovery is rare, so a slow search is acceptable.
+None.
 
 ## Acceptance criteria
 
@@ -270,8 +276,9 @@ write, or `Transport` (unknown) after the first write.
   row).
 - The undo of each move brings the message back to its folder with zero
   differences. Red if the undo uses the old ID.
-- A lost answer after `UID MOVE` ends `done` with a rebind when the
-  `Message-ID` matches once. Red if the recovery calls `UID MOVE` again.
+- A lost answer after `UID MOVE` ends `failed` with the message
+  `unknown`, and no second `UID MOVE`. Red if the recovery calls
+  `UID MOVE` again or rebinds a row.
 - A server without `MOVE` or `UIDPLUS` refuses each move before any write.
 
 ## Verify
@@ -289,8 +296,7 @@ None. The change needs no migration and no setting. A server without
 ## Risks
 
 - A wrong rebind would point a row at another message. The rebind uses
-  only the `COPYUID` of the same command, or one unique `Message-ID` match
-  in the target folder.
+  only the `COPYUID` of the same command.
 - Rollback: a revert. A row that was rebound keeps its new ID, which is the
   real location of the message, so the old code syncs it as before.
 
@@ -298,7 +304,7 @@ None. The change needs no migration and no setting. A server without
 
 1. Spec (this PR).
 2. `iris-provider`, `iris-imap`, `iris-fakeimap`: `relocate`, `trash`,
-   `untrash`, `messages_with_id` and the fake server.
+   `untrash` and the fake server, and the fix of #981.
 3. `iris-store`, `iris-apply`: the rebind and the recovery, with the
    end-to-end tests of the failure list. Close #775.
 
@@ -312,11 +318,12 @@ fake IMAP server and check zero differences with `iris_sync::verify`.
 - [x] Each assumption holds with a second caller: the sync lock stops a
   sync between the move and the rebind; another IMAP client can move the
   message, and then `COPYUID` does not hold it (unknown).
-- [x] Each assumption holds when an outcome is unknown: section 4.
+- [x] Each assumption holds when an outcome is unknown: section 4, with
+  the crash and the sync before the recovery.
 - [x] Each dropped mechanism was dropped for a reason: `COPY` and
   `EXPUNGE` (two copies after a crash).
 - [x] Each "idempotent" step is not check-then-act: `UID MOVE` is never
-  sent two times; the recovery only reads.
+  sent two times; the recovery only reads and never rebinds.
 - [x] Each property has a test: the failure list.
 - [x] The spec addresses the hardest problem: the new ID after a move, and
   the unknown result.
