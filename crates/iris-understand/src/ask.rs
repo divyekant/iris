@@ -308,7 +308,10 @@ pub fn current(c: &Connection, source: &Source) -> rusqlite::Result<bool> {
             row,
         )
         .optional()?;
-    Ok(row.is_some_and(|r| card(r).2 == source.seen))
+    Ok(match row {
+        Some(r) => card(r, |t| Ok::<_, rusqlite::Error>(t.to_string()))?.2 == source.seen,
+        None => false,
+    })
 }
 
 fn clock_ms() -> i64 {
@@ -321,6 +324,17 @@ fn clock_ms() -> i64 {
 /// a rough stem, as a prefix term in quotes, joined with OR. `None` if no
 /// word is left.
 pub fn terms(question: &str) -> Option<String> {
+    // A stem is only letters and digits, so it needs no escape.
+    let out: Vec<String> = stems(question)
+        .iter()
+        .map(|s| format!("\"{s}\"*"))
+        .collect();
+    (!out.is_empty()).then(|| out.join(" OR "))
+}
+
+/// The stems of the words of a question that [`terms`] searches: no stop
+/// word, each once, at most [`MAX_TERMS`].
+fn stems(question: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for word in question
         .split(|c: char| !c.is_alphanumeric())
@@ -329,17 +343,15 @@ pub fn terms(question: &str) -> Option<String> {
         if word.chars().count() < 2 || STOP.contains(&word.as_str()) {
             continue;
         }
-        let stem = stem(&word);
-        // A stem is only letters and digits, so it needs no escape.
-        let term = format!("\"{stem}\"*");
-        if !out.contains(&term) {
-            out.push(term);
+        let stem = stem(&word).to_string();
+        if !out.contains(&stem) {
+            out.push(stem);
         }
         if out.len() == MAX_TERMS {
             break;
         }
     }
-    (!out.is_empty()).then(|| out.join(" OR "))
+    out
 }
 
 /// A rough English stem, so that "flights" and "leaving" find "flight" and
@@ -365,6 +377,12 @@ fn find(store: &Store, question: &str) -> Result<Vec<Doc>, Error> {
         return Ok(vec![]);
     };
     Ok(store.read(|c| {
+        // The stems as the index folds them, for the part of a long text
+        // that the model reads.
+        let mut folded = Vec::new();
+        for s in stems(question) {
+            folded.extend(iris_store::index_tokens(c, &s)?.into_iter().map(|t| t.word));
+        }
         let mut st = c.prepare(&format!(
             "SELECT {COLUMNS}
              FROM message_fts f
@@ -378,7 +396,7 @@ fn find(store: &Store, question: &str) -> Result<Vec<Doc>, Error> {
         let rows = st.query_map(params![query, MAX_MESSAGES as i64], row)?;
         let mut docs = Vec::new();
         for (i, r) in rows.enumerate() {
-            let (message, card, seen, text) = card(r?);
+            let (message, card, seen, text) = card(r?, |t| near(c, t, &folded))?;
             docs.push(Doc {
                 message,
                 block: format!("Message {}\n{card}", i + 1),
@@ -416,9 +434,16 @@ fn row(r: &Row) -> rusqlite::Result<Columns> {
 }
 
 /// The message as the model sees it, with no number: the row, the card,
-/// its hash and the cut text.
-fn card((message, date, name, addr, subject, text): Columns) -> (i64, String, u64, String) {
-    let text = cut(&text, MAX_TEXT);
+/// the hash of the whole message, and the part of the text that `part`
+/// gives. The hash does not depend on the part, so [`current`] needs no
+/// question.
+fn card<E>(
+    (message, date, name, addr, subject, text): Columns,
+    part: impl FnOnce(&str) -> Result<String, E>,
+) -> Result<(i64, String, u64, String), E> {
+    let mut h = DefaultHasher::new();
+    (date, &name, &addr, &subject, &text).hash(&mut h);
+    let text = part(&text)?;
     let from = match (name, addr) {
         (Some(n), Some(a)) => format!("{n} <{a}>"),
         (n, a) => n.or(a).unwrap_or_default(),
@@ -430,9 +455,68 @@ fn card((message, date, name, addr, subject, text): Columns) -> (i64, String, u6
         cut(&subject.unwrap_or_default(), 300),
         text
     );
-    let mut h = DefaultHasher::new();
-    card.hash(&mut h);
-    (message, card, h.finish(), text)
+    Ok((message, card, h.finish(), text))
+}
+
+/// The characters of the text before the first match that the model also
+/// reads, for the context of the match.
+const LEAD: usize = 200;
+
+/// The characters of a long text that [`near`] looks at for matches.
+/// shortcut: a match after this point is not found, change it if long
+/// messages miss answers past it. It keeps the token list of one call small.
+const SCAN: usize = 64 * MAX_TEXT;
+
+/// The part of `text` that the model reads (issue #272): all of a text of
+/// up to [`MAX_TEXT`] characters. Of a longer text, the [`MAX_TEXT`]
+/// characters with the most index tokens that start with a stem of
+/// `stems`, the first such part if two have the same count. The part starts
+/// and ends at a space, and a mark `[…]` stands for each cut.
+fn near(c: &Connection, text: &str, stems: &[String]) -> iris_store::Result<String> {
+    if text.chars().nth(MAX_TEXT).is_none() {
+        return Ok(text.to_string());
+    }
+    let scan = &text[..text.char_indices().nth(SCAN).map_or(text.len(), |(i, _)| i)];
+    // The character offset of each match, in order.
+    let mut hits = Vec::new();
+    let (mut n, mut last) = (0, 0);
+    for t in iris_store::index_tokens(c, scan)? {
+        if stems.iter().any(|s| t.word.starts_with(s.as_str())) {
+            n += scan[last..t.range.start].chars().count();
+            last = t.range.start;
+            hits.push(n);
+        }
+    }
+    let count = |s: usize| hits.iter().filter(|&&h| h >= s && h < s + MAX_TEXT).count();
+    let mut best = (0, count(0));
+    for &h in &hits {
+        let s = h.saturating_sub(LEAD);
+        let k = count(s);
+        if k > best.1 {
+            best = (s, k);
+        }
+    }
+    let at = |k: usize| text.char_indices().nth(k).map_or(text.len(), |(i, _)| i);
+    let (mut from, mut to) = (at(best.0), at(best.0 + MAX_TEXT));
+    if from > 0 {
+        from = text[from..to]
+            .find(char::is_whitespace)
+            .map_or(from, |i| from + i);
+    }
+    if to < text.len() {
+        to = text[from..to]
+            .rfind(char::is_whitespace)
+            .map_or(to, |i| from + i);
+    }
+    let mut out = String::new();
+    if from > 0 {
+        out.push_str("[…] ");
+    }
+    out.push_str(text[from..to].trim());
+    if to < text.len() {
+        out.push_str(" […]");
+    }
+    Ok(out)
 }
 
 /// The end of a mark `[n]` (1 to 3 digits) that starts at byte `at`.
@@ -828,6 +912,50 @@ mod tests {
     }
 
     /// A small xorshift generator with a fixed seed, so a failure repeats.
+    /// Issue #272: a long text gives the model the part with the matched
+    /// words, cut at spaces, with a mark for each cut. A short text is all
+    /// sent. The oracle is the place of a unique word in random text.
+    #[test]
+    fn property_a_long_text_gives_the_part_with_the_match() {
+        let c = Connection::open_in_memory().unwrap();
+        let stems = vec!["zebra".to_string()];
+        assert_eq!(near(&c, "a zebras b", &stems).unwrap(), "a zebras b");
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..200 {
+            let n = 600 + rng.below(3000);
+            let mut words: Vec<String> = (0..n).map(|i| format!("w{i}")).collect();
+            let at = rng.below(n);
+            words[at] = "Zébras".into();
+            let text = words.join(" ");
+            let part = near(&c, &text, &stems).unwrap();
+            let body = part.trim_start_matches("[…] ").trim_end_matches(" […]");
+            assert!(text.contains(body), "{part:?}");
+            assert!(body.chars().count() <= MAX_TEXT);
+            assert!(
+                part.contains(" Zébras ") || part.starts_with("Zébras") || part.ends_with("Zébras")
+            );
+            assert_eq!(part.starts_with("[…] "), !text.starts_with(body));
+            assert_eq!(part.ends_with(" […]"), !text.ends_with(body));
+            // Each end of the part is the end of a word of the text.
+            let (i, j) = (
+                text.find(body).unwrap(),
+                text.find(body).unwrap() + body.len(),
+            );
+            assert!(i == 0 || text[..i].ends_with(' '), "{part:?}");
+            assert!(j == text.len() || text[j..].starts_with(' '), "{part:?}");
+        }
+        // No match: the start of the text, as before.
+        let text = (0..2000)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let part = near(&c, &text, &stems).unwrap();
+        assert!(
+            part.starts_with("w0 w1 ") && part.ends_with(" […]"),
+            "{part:?}"
+        );
+    }
+
     struct Rng(u64);
     impl Rng {
         fn below(&mut self, n: usize) -> usize {
