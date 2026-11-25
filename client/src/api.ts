@@ -425,7 +425,11 @@ export type Job = {
   question?: string;
   end?: "complete" | "cancel";
 };
-export type JobPage = { jobs: Job[]; next: string | null };
+/**
+ * `sessions`: the newest session of each working job of the page, by job ID, or null for a job with no session
+ * (issue 791). An engine from before the field leaves it out: then the list does not know the session.
+ */
+export type JobPage = { jobs: Job[]; next: string | null; sessions?: Record<string, JobSession | null> };
 /** A submitted changeset of a job: `actions` counts the actions of its newest revision in each state. */
 export type JobChangeset = { id: string; at: string; state: string; why: string | null; actions: Record<string, number> };
 /** One job (GET /api/jobs/{id}): the job with its events, its changesets, and the newest mail of each wait thread. */

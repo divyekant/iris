@@ -97,6 +97,35 @@ export function agent(d: Pick<JobDetail, "job" | "session">): { said: string; en
   return { said, ended: `The last session (${s.id}, ${s.agent}) ${ENDED[s.end]}${code}.`, run };
 }
 
+/**
+ * The words of a working job of a list when no agent works on it (issue 791), from the session that the page gives.
+ * Null when an agent works on it, when the job does not work, or when the engine gave no session for it.
+ */
+export function idle(page: Pick<JobPage, "sessions">, job: Job): { said: string; ended?: string } | null {
+  const sessions = page.sessions;
+  if (!sessions || !Object.hasOwn(sessions, job.id)) return null;
+  const a = agent({ job: { ...job, events: [] }, session: sessions[job.id] });
+  return a && { said: a.said, ended: a.ended };
+}
+
+/** A working job that no agent works on now, with the words of `idle`. */
+export type Idle = { job: Job; said: string; ended?: string };
+
+/** The working jobs that no agent works on now (issue 791), for the brief: each page of working jobs. */
+export async function loadIdle(): Promise<Idle[]> {
+  const out: Idle[] = [];
+  let next: string | null = null;
+  do {
+    const page: JobPage = await get<JobPage>(`jobs?state=working&limit=200${next ? `&after=${encodeURIComponent(next)}` : ""}`);
+    for (const job of page.jobs) {
+      const i = job.state === "working" ? idle(page, job) : null;
+      if (i) out.push({ job, ...i });
+    }
+    next = page.next;
+  } while (next);
+  return out;
+}
+
 /** One step of the timeline. `quote` is text of the agent or the person, shown as text. */
 export type Step = {
   at: string;
