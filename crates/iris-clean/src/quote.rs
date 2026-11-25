@@ -1,16 +1,24 @@
 //! Quoted history and signatures in plain text.
 
 /// The ends of the "On ... wrote:" line in common clients and languages.
-const WROTE: [&str; 9] = [
+const WROTE: [&str; 17] = [
     "wrote:",
     "a écrit :",
     "a écrit:",
     "schrieb:",
     "escribió:",
     "scrisse:",
+    "ha scritto:",
     "skrev:",
     "schreef:",
     "napisał:",
+    "napisał(a):",
+    "escreveu:",
+    "napsal(a):",
+    "kirjoitti:",
+    "yazdı:",
+    "написал(а):",
+    "写道：",
 ];
 
 /// The first words of an "On ... wrote:" line in common clients and languages.
@@ -48,12 +56,13 @@ pub fn strip_quotes(text: &str, is_reply: bool) -> String {
             end = i;
             break;
         }
-        if let Some(n) = attribution(&lines[i..]) {
+        if let Some((n, dated)) = attribution(&lines[i..]) {
             let next = lines[i + n..].iter().find(|l| !l.trim().is_empty());
             // "Here is what I wrote:" is not history. A cut needs a quote
-            // after the line, or (in a reply) the start of a client line.
+            // after the line, or (in a reply) the start or the form of a
+            // client line.
             let quoted = next.is_some_and(|l| l.trim_start().starts_with('>'));
-            let client = ATTRIBUTION_START.iter().any(|p| t.starts_with(p));
+            let client = dated || ATTRIBUTION_START.iter().any(|p| t.starts_with(p));
             if quoted || (is_reply && client) {
                 end = i;
                 break;
@@ -88,20 +97,50 @@ pub fn strip_quotes(text: &str, is_reply: bool) -> String {
     kept.join("\n")
 }
 
-/// The count of lines (1 or 2) of an "On ... wrote:" line at the start.
-fn attribution(lines: &[&str]) -> Option<usize> {
+/// An "On ... wrote:" line at the start: the count of its lines (1 or 2),
+/// and true if it is the form of a client in any language (see [`dated`]).
+fn attribution(lines: &[&str]) -> Option<(usize, bool)> {
     let ends = |s: &str| {
-        let s = s.trim().to_lowercase();
-        s.len() < 400 && WROTE.iter().any(|w| s.ends_with(w))
+        let l = s.trim().to_lowercase();
+        (l.len() < 400 && WROTE.iter().any(|w| l.ends_with(w))) || dated(s)
     };
     if ends(lines[0]) {
-        return Some(1);
+        return Some((1, dated(lines[0])));
     }
     let first = lines[0].trim();
     let second = lines.get(1)?.trim();
+    if first.len() + second.len() >= 400 {
+        return None;
+    }
     // Clients wrap a long "On ... wrote:" line.
-    (first.starts_with("On ") && !second.is_empty() && ends(&format!("{first} {second}")))
-        .then_some(2)
+    let joined = format!("{first} {second}");
+    // A wrap of the client form: the first line ends with no sentence
+    // mark and has no address, and the second line alone is not the form.
+    let dated_wrap = dated(&joined)
+        && !first.ends_with(['.', '!', '?'])
+        && !first.contains('<')
+        && !ends(second);
+    let wrapped = ATTRIBUTION_START.iter().any(|p| first.starts_with(p)) || dated_wrap;
+    (wrapped && !second.is_empty() && ends(&joined)).then_some((2, dated_wrap))
+}
+
+/// The form of the attribution line of a client in any language: a time
+/// (`10:00`) and an address in `<>`, and a `:` at the end. Gmail writes
+/// "Am 3. Feb. 2025 um 10:00 schrieb Ana <ana@example.org>:".
+fn dated(s: &str) -> bool {
+    let s = s.trim();
+    if s.len() >= 400 || !(s.ends_with(':') || s.ends_with('：')) {
+        return false;
+    }
+    let b = s.as_bytes();
+    let time = b.windows(4).any(|w| {
+        w[0].is_ascii_digit() && w[1] == b':' && w[2].is_ascii_digit() && w[3].is_ascii_digit()
+    });
+    let address = s.split('<').skip(1).any(|r| {
+        r.split_once('>')
+            .is_some_and(|(a, _)| a.contains('@') && !a.contains(char::is_whitespace))
+    });
+    time && address
 }
 
 fn is_original_marker(t: &str) -> bool {
@@ -202,6 +241,88 @@ mod tests {
         assert_eq!(strip_quotes(t, true), "Fine.");
         // Inline answers stay, the quoted lines go.
         assert_eq!(strip_quotes("> Q1?\nA1\n> Q2?\nA2", true), "A1\nA2");
+    }
+
+    #[test]
+    fn attribution_lines_of_other_languages() {
+        let lines = [
+            "Am Mo., 3. Feb. 2025 um 10:00 Uhr schrieb Ana Bel <ana@example.org>:",
+            "Op ma 3 feb 2025 om 10:00 schreef Ana Bel <ana@example.org>:",
+            "Il giorno lun 3 feb 2025 alle ore 10:00 Ana Bel <ana@example.org> ha scritto:",
+            "pon., 3 lut 2025 o 10:00 Ana Bel <ana@example.org> napisał(a):",
+            "Em seg., 3 de fev. de 2025 às 10:00, Ana Bel <ana@example.org> escreveu:",
+            "пн, 3 февр. 2025 г. в 10:00, Ana Bel <ana@example.org>:",
+            "2025年2月3日(月) 10:00 Ana Bel <ana@example.org>:",
+            "Ana Bel <ana@example.org> 于2025年2月3日周一 10:00写道：",
+        ];
+        for l in lines {
+            // With a quote after it, and in a reply without a quote.
+            assert_eq!(
+                strip_quotes(&format!("Ja.\n\n{l}\n> Frage?"), false),
+                "Ja.",
+                "{l}"
+            );
+            assert_eq!(
+                strip_quotes(&format!("Ja.\n\n{l}\nFrage?"), true),
+                "Ja.",
+                "{l}"
+            );
+        }
+        // Gmail wraps a long line.
+        let t =
+            "Ja.\n\nAm Mo., 3. Feb. 2025 um 10:00 Uhr schrieb Ana Bel\n<ana@example.org>:\nFrage?";
+        assert_eq!(strip_quotes(t, true), "Ja.");
+    }
+
+    /// Random replies of known pieces: the quote step only takes lines out,
+    /// and the own first line always stays.
+    #[test]
+    fn random_replies_keep_the_first_line_and_add_nothing() {
+        const PIECES: [&str; 12] = [
+            "Am 3. Feb. 2025 um 10:00 schrieb Ana <ana@example.org>:",
+            "Ana <a@b> 10:00：",
+            "<ana@example.org>:",
+            "um 10:0",
+            "0 <x@y>:",
+            "> quoted",
+            "On Mon, Ana",
+            "wrote:",
+            "",
+            "---",
+            "Ünïcödé 写道 ：",
+            "From: Ana",
+        ];
+        let mut seed = 0x51E7_C0DE_2025_1125u64;
+        let mut next = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        for _ in 0..20_000 {
+            let mut lines = vec!["Keep this line."];
+            for _ in 0..next(8) {
+                lines.push(PIECES[next(PIECES.len())]);
+            }
+            let input = lines.join("\n");
+            for reply in [false, true] {
+                let out = strip_quotes(&input, reply);
+                assert!(out.starts_with("Keep this line."), "{input:?}");
+                let mut rest = lines.iter();
+                for l in out.split('\n') {
+                    assert!(rest.any(|x| *x == l), "{input:?} gave {out:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_address_line_without_a_time_is_not_history() {
+        let t = "Send it to Ana Bel <ana@example.org>:\nthe plan and the price.";
+        assert_eq!(strip_quotes(t, true), t);
+        // A time and an address, but not at the end.
+        let t = "At 10:00 call Ana <ana@example.org>: then go.\nok";
+        assert_eq!(strip_quotes(t, true), t);
     }
 
     #[test]
