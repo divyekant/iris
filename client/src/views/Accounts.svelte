@@ -100,12 +100,14 @@
   // The canonical names of the browser leave out UTC, which `iris zone` takes too.
   const zones: string[] = ["UTC", ...((Intl as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf?.("timeZone") ?? []).filter((z) => z !== "UTC")];
   // "": the time zone of the machine that runs Iris.
-  // svelte-ignore state_referenced_locally
-  let zone = $state(initial.time_zone_set ? (initial.time_zone ?? "") : "");
+  let zoneNow = $derived(status.time_zone_set ? (status.time_zone ?? "") : "");
+  // The unsaved choice of the person, or null. With none, the selector follows each status,
+  // also a change from another tab or `iris zone` (issue 1016).
+  let picked = $state<string | null>(null);
+  let zone = $derived(picked ?? zoneNow);
   let zoneBusy = $state(false);
   let zoneNote = $state("");
   let zoneError = $state("");
-  let zoneNow = $derived(status.time_zone_set ? (status.time_zone ?? "") : "");
 
   async function saveZone() {
     zoneBusy = true;
@@ -114,7 +116,7 @@
       // postZone sets the shared zone of the other views too, also when the next status read fails.
       const next = await postZone(zone || null);
       status = { ...status, ...next };
-      zone = next.time_zone_set ? (next.time_zone ?? "") : "";
+      picked = null;
       zoneNote = "Saved.";
       // A poll that started before the save can show the old zone: read again.
       await refresh().catch(() => {});
@@ -216,7 +218,7 @@
     </p>
     <form class="actions" onsubmit={(e) => (e.preventDefault(), saveZone())}>
       <label for="zone-pick">Time zone</label>
-      <select id="zone-pick" value={zone} onchange={(e) => ((zone = e.currentTarget.value), (zoneNote = zoneError = ""))} disabled={zoneBusy}>
+      <select id="zone-pick" value={zone} onchange={(e) => ((picked = e.currentTarget.value), (zoneNote = zoneError = ""))} disabled={zoneBusy}>
         <option value="">The time zone of the machine that runs Iris</option>
         {#if zone && !zones.includes(zone)}<option value={zone}>{zone}</option>{/if}
         {#each zones as z (z)}<option value={z}>{z.replaceAll("_", " ")}</option>{/each}
