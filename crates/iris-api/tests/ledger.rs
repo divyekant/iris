@@ -1147,3 +1147,46 @@ async fn the_line_waits_for_the_end_of_the_recovery() {
         json!({"messages": 2, "entries": [format!("l-{l}")], "more": 0})
     );
 }
+
+/// Issue #216, pre-review: an undo restores only the confirmed messages,
+/// so an `undone` entry keeps its line until the person dismisses it.
+#[tokio::test]
+async fn an_undone_entry_keeps_its_line() {
+    let dir = temp("unconfirmed-undone");
+    let s = store(&dir);
+    let l = unconfirmed(&s, &[1], &[2]);
+    // The undo of the confirmed message 2 ends as the apply ends it
+    // (section 7.4, step 5).
+    call(&s, true, &format!("/api/ledger/l-{l}/undo")).await;
+    s.write(|tx| {
+        let a: i64 = tx.query_row(
+            "SELECT action_id FROM ledger_undo WHERE ledger_id = ?1",
+            [l],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+             VALUES (?1, 1, '{\"call\":\"batchModify\",\"add\":[\"INBOX\"],\"remove\":[],\"calls\":1}', 'writing', 'inverse', ?2)",
+            params![a, NOW + 1],
+        )?;
+        let u = tx.last_insert_rowid();
+        tx.execute("UPDATE ledger SET state = 'applied' WHERE id = ?1", [u])?;
+        tx.execute(
+            "UPDATE ledger SET state = 'undone', undone_by = ?2 WHERE id = ?1",
+            [l, u],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, p) = call(&s, false, "/api/ledger").await;
+    assert_eq!(p["entries"][1]["state"], "undone");
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 1, "entries": [format!("l-{l}")], "more": 0})
+    );
+    let (_, b) = dismiss(&s, json!({"entries": [format!("l-{l}")]})).await;
+    assert_eq!(b, json!({"dismissed": 1}));
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(brief["unconfirmed"]["entries"], json!([]));
+}

@@ -74,6 +74,8 @@ test("a failed or a running entry says so; a done entry needs no words", () => {
     "Failed. 1 of 3 messages changed. Iris could not confirm 2 messages: check them in your mailbox. Gmail did not answer.",
   );
   assert.equal(l.status(e({ state: "failed", messages: 1, changed: 0, unknown: 1, error: null })), "Failed. 0 of 1 message changed. Iris could not confirm 1 message: check it in your mailbox.");
+  // An undo restores only the confirmed messages: the others stay to check.
+  assert.equal(l.status(e({ state: "undone", messages: 3, changed: 1, unknown: 2 })), "Undone. Iris could not confirm 2 messages: check them in your mailbox.");
 });
 
 test("an undo that skipped messages says so, and the change keeps its Undo (D18)", () => {
