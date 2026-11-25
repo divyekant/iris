@@ -110,3 +110,15 @@ test("endOfDay refuses a day that the owner zone skipped, and keeps the days aro
     }
   }
 });
+
+test("with no owner zone, endOfDay refuses a day that the browser zone skipped (issue 987)", () => {
+  const zone = process.env.TZ;
+  try {
+    process.env.TZ = "Pacific/Apia";
+    assert.throws(() => s.endOfDay("2011-12-30", null), /2011-12-30 does not exist in the time zone of this browser/);
+    assert.match(s.endOfDay("2011-12-29", null), /^2011-12-29T23:59:59\.999-10:00$/);
+    assert.match(s.endOfDay("2011-12-31", null), /^2011-12-31T23:59:59\.999\+14:00$/);
+  } finally {
+    process.env.TZ = zone;
+  }
+});

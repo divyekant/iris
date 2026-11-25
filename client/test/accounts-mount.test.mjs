@@ -570,6 +570,14 @@ test("the time zone selector follows a status change from outside the page, and 
     await until(() => (view.flushSync(), /Now: UTC, set by you/.test(text(view.target.querySelector("section.zone")))));
     assert.equal(pick.value, "Europe/Berlin");
     assert.ok(!save().disabled);
+    // Another tab saves the same zone: the choice is saved, so the selector follows the next change.
+    now = { time_zone: "Europe/Berlin", time_zone_set: true };
+    await until(() => (view.flushSync(), /Now: Europe\/Berlin, set by you/.test(text(view.target.querySelector("section.zone")))));
+    assert.ok(save().disabled);
+    now = { time_zone: "UTC", time_zone_set: true };
+    await until(() => (view.flushSync(), /Now: UTC, set by you/.test(text(view.target.querySelector("section.zone")))));
+    assert.equal(pick.value, "UTC");
+    assert.ok(save().disabled);
   } finally {
     view.destroy();
     globalThis.fetch = saved;

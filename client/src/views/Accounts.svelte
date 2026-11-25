@@ -105,6 +105,10 @@
   // also a change from another tab or `iris zone` (issue 1016).
   let picked = $state<string | null>(null);
   let zone = $derived(picked ?? zoneNow);
+  // A choice that the status now shows is no longer unsaved: the selector follows the next change.
+  $effect(() => {
+    if (picked !== null && picked === zoneNow) picked = null;
+  });
   let zoneBusy = $state(false);
   let zoneNote = $state("");
   let zoneError = $state("");

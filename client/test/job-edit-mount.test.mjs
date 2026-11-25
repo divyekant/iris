@@ -329,3 +329,27 @@ test("End closes the add-mail form with its picked thread, so a done job offers 
   assert.equal(view.target.querySelector("#scope-search"), null);
   view.destroy();
 });
+
+test("the job form refuses a day that the owner zone skipped, sends nothing, and takes another day (issue 987)", async () => {
+  const { access } = await load("/src/access.svelte.ts");
+  const keep = access.zone;
+  access.zone = "Pacific/Apia";
+  const sent = [];
+  const view = await mount("/src/views/JobForm.svelte", { goal: "Book the dentist", action: "Save", save: async (goal, due) => (sent.push(due), ""), oncancel: () => {} });
+  try {
+    fill(view, "input[type=date]", "2011-12-30");
+    submit(view);
+    await until(() => (view.flushSync(), view.target.querySelector("[role=alert]")));
+    assert.match(text(view.target.querySelector("[role=alert]")), /2011-12-30 does not exist in the time zone Pacific\/Apia\. Pick another day\./);
+    assert.equal(sent.length, 0, "no save of a day that does not exist");
+    const go = view.target.querySelector("button[type=submit]");
+    assert.equal(go.disabled, false, "the form takes another try");
+    fill(view, "input[type=date]", "2011-12-31");
+    submit(view);
+    await until(() => sent.length === 1);
+    assert.equal(sent[0], "2011-12-31T23:59:59.999+14:00");
+  } finally {
+    view.destroy();
+    access.zone = keep;
+  }
+});
