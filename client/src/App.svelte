@@ -1,10 +1,10 @@
 <script lang="ts">
   import { access } from "./access.svelte.ts";
-  import { followSignIn, get, loadBrief, loadOutbox, own, type Changeset, type GatePage, type HandledPage, type LedgerPage, type JobDetail, type JobPage, type MatterList, type MatterView, type Item as ItemData, type Message as MessageData, type Page, type Policy, type ReplyStart, type Status } from "./api";
+  import { followSignIn, get, loadBrief, loadChange, loadOutbox, NEWER_MAIL, own, type Changeset, type GatePage, type HandledPage, type LedgerPage, type JobDetail, type JobPage, type MatterList, type MatterView, type Item as ItemData, type Message as MessageData, type Page, type Policy, type ReplyStart, type Status } from "./api";
   import { home } from "./format";
   import { pageSize } from "./jobs";
   import type { Measures as MeasuresData } from "./measures";
-  import { NAV, parse, SECTIONS, type Route } from "./route";
+  import { href, NAV, parse, SECTIONS, type Route } from "./route";
   import Setup from "./views/Setup.svelte";
   import Brief from "./views/Brief.svelte";
   import List from "./views/List.svelte";
@@ -76,6 +76,7 @@
   const MORE = NAV.slice(4);
   let moreOpen = $state(false);
   const back = () => (history.length > 1 ? history.back() : (location.hash = "#/brief"));
+
 </script>
 
 <!-- The Mac app drags its window by the empty part of this bar and of its
@@ -129,7 +130,7 @@
   {#if access.none && !["home", "setup", "brief"].includes(route.view)}
     <p class="problem">Iris has no account yet. <a href="#/setup">Set up Iris</a> to copy your mail.</p>
   {/if}
-  {#if route.view === "item" || route.view === "start" || route.view === "mail" || route.view === "section" || route.view === "bundle" || route.view === "handled" || route.view === "gate" || route.view === "job" || route.view === "matter" || (route.view === "write" && route.thread)}
+  {#if route.view === "item" || route.view === "start" || route.view === "mail" || route.view === "section" || route.view === "bundle" || route.view === "handled" || route.view === "gate" || route.view === "job" || route.view === "matter" || (route.view === "write" && (route.thread || route.draft))}
     <button class="back" type="button" onclick={back}>Back</button>
   {/if}
   {#key hash}
@@ -166,7 +167,16 @@
         <Outbox {first} />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "write"}
-      {#if route.thread}
+      {#if route.draft}
+        {#await loadChange(route.draft) then start}
+          {#if "closed" in start}
+            {@const d = start.closed}
+            <p class="problem" role="status">
+              {#if d.newer_mail && d.thread}{NEWER_MAIL} <a href={href.reply(d.thread)}>Write a new reply</a>{:else}This draft cannot change now. <a href="#/write">Write a new mail</a>{/if}
+            </p>
+          {:else}<Write {start} />{/if}
+        {:catch error}{@render failed(error)}{/await}
+      {:else if route.thread}
         {@const thread = route.thread}
         {#await get<ReplyStart>(`threads/${encodeURIComponent(thread)}/reply`) then reply}<Write start={{ thread, reply }} />{:catch error}{@render failed(error)}{/await}
       {:else}

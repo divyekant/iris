@@ -18,13 +18,14 @@
 -->
 <script lang="ts">
   import { onDestroy, untrack } from "svelte";
-  import { get, own, post, upload, type Account, type Attachment, type DraftContent, type ReplyStart, type ThreadDraft, type WriteState } from "../api";
+  import { get, NEWER_MAIL, own, post, upload, type Account, type Attachment, type DraftContent, type ReplyStart, type ThreadDraft, type WriteState } from "../api";
   import { chips, unique } from "../chips";
   import { bytes, initials, PROVIDER, when } from "../format";
   import { FLAGS } from "../review";
   import { href } from "../route";
 
-  type Start = { accounts: Account[] } | { thread: string; reply: ReplyStart };
+  // `change`: the draft of #/write/d-N (issue 941), from GET /api/drafts/{d-N}.
+  type Start = ({ accounts: Account[] } | { thread: string; reply: ReplyStart }) & { change?: DraftContent };
   // `every`: the ms between two reads of the write state (a prop for the tests).
   let { start, every = 2000 }: { start: Start; every?: number } = $props();
 
@@ -34,7 +35,11 @@
   const thread = "thread" in start ? start.thread : null;
   // svelte-ignore state_referenced_locally
   const accounts = "accounts" in start ? start.accounts : [];
-  const place = `iris.write.${thread ?? "new"}`;
+  // svelte-ignore state_referenced_locally
+  const opened = start.change;
+  // A draft link (#/write/d-N) keeps its form in its own place, so it never
+  // replaces the unfinished form of a new mail or of a reply.
+  const place = `iris.write.${opened?.draft ?? thread ?? "new"}`;
 
   type Changing = { draft: string; account: string };
   type Saved = {
@@ -101,7 +106,18 @@
     }
   }
 
-  const saved = restore();
+  // #/write/d-N (issue 941): the form opens with the content of the draft, as
+  // after "Change and send" in this view. For `update`, the next press changes
+  // the same draft. A reload keeps the form of this place.
+  const fromDraft = (d: DraftContent): Saved => ({
+    account: d.account, to: d.to, cc: d.cc, bcc: d.bcc, files: d.attachments, subject: d.subject, body: d.body,
+    key: "", sig: "", flags: [], draft: d.change === "update" ? { draft: d.draft, account: d.account } : null,
+  });
+  let changeNote = $state(opened ? "This is the draft that you cancelled. Change it, then press Send." : "");
+  // A draft link (only for a draft that can change now) opens its own saved
+  // form after a reload, else the draft. The next press changes the draft
+  // only as the engine allows now.
+  const saved = opened ? { ...(restore() ?? fromDraft(opened)), draft: fromDraft(opened).draft } : restore();
   let account = $state(saved?.account ?? reply?.account ?? (accounts[0] ? `a-${accounts[0].id}` : ""));
   let to = $state<string[]>(unique(saved?.to ?? reply?.to ?? []));
   const startCc = unique(saved?.cc ?? reply?.cc ?? []);
@@ -252,7 +268,8 @@
       same(f.cc, reply?.cc ?? []));
   let filled = $state(false);
   let asked = false;
-  if (thread && reply && untouched(saved) && !taken()) {
+  // A draft link fills the form only from its own draft (draft change spec, section 5).
+  if (!opened && thread && reply && untouched(saved) && !taken()) {
     get<ThreadDraft>(`threads/${encodeURIComponent(thread)}/draft`).then(
       (d) => {
         if (alive && !write && !asked && !d.nudge && d.based_on === reply.parent.id && untouched({ to, cc, bcc, files, body, intent, toText, ccText, bccText })) {
@@ -298,6 +315,7 @@
       sent_ = { subject: thread ? "" : subject, body: mail.body };
       unknown = false;
       changing = null;
+      changeNote = "";
       write = v.write;
       follow();
     } catch (e) {
@@ -334,7 +352,12 @@
       if (mine <= applied || id !== write) return;
       applied = mine;
       ws = v;
-      if (v.state === "sent" || v.state === "stopped") keep(null, id);
+      if (v.state === "sent" || v.state === "stopped") {
+        keep(null, id);
+        // A draft link that resumed an earlier write of its place: that write
+        // ended, so the form of the draft shows again (issue 941).
+        if (id === resumed) [write, resumed, ws] = ["", "", { state: "saving" }];
+      }
     } catch {
       // The engine can restart. The next read tries again.
     }
@@ -413,7 +436,8 @@
   function again() {
     keep(null, write);
     changing = null;
-    if (thread) return void (location.hash = "#/write");
+    changeNote = "";
+    if (thread || opened) return void (location.hash = "#/write");
     clearTimeout(timer);
     [write, to, cc, bcc, files, subject, body, note, toText, ccText, bccText] = ["", [], [], [], [], "", "", "", "", "", ""];
     ws = { state: "saving" };
@@ -439,6 +463,9 @@
 
   // After a reload: show the write that the engine took, and follow its state.
   const kept = taken();
+  // A draft link resumes a write of its place until that write ends: the form
+  // never hides a write that may still leave.
+  let resumed = opened && kept ? kept.write : "";
   if (kept) {
     write = kept.write;
     sentTo = kept.to;
@@ -520,7 +547,7 @@
     {:else}
       <h2 class="stop">This mail did not leave</h2>
       <p class="muted">{ws.reason}</p>
-      {#if ws.newer_mail}<p class="muted">A new mail came into this thread. Write a new reply.</p>{/if}
+      {#if ws.newer_mail}<p class="muted">{NEWER_MAIL}</p>{/if}
       <div class="row">
         {#if ws.change && ws.draft}<button type="button" class="pill" onclick={changeIt} disabled={busy}>Change and send</button>{/if}
         <!-- While the draft loads, Write another waits: the draft fills only its own form. -->
@@ -533,6 +560,7 @@
   <form class="dock" onsubmit={(e) => (e.preventDefault(), send())}>
     <!-- While the press runs, the form does not change: the engine takes the mail as it was. -->
     <fieldset disabled={busy || drafting}>
+    {#if changeNote}<p class="saved opened" role="status">{changeNote}</p>{/if}
     {#if accounts.length > 1}
       <label class="line">
         <span class="k">From</span>
@@ -846,6 +874,9 @@
     margin: var(--space-2) 0 0;
     color: var(--color-text-muted);
     font-size: var(--font-size--1);
+  }
+  .opened {
+    margin: 0 0 var(--space-3);
   }
   .files {
     list-style: none;

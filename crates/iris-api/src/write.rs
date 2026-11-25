@@ -342,15 +342,15 @@ fn change(
 /// The content of the draft `d-N` for the form of a change (draft change
 /// spec, section 5): `to`, `cc`, `bcc`, `subject`, `body`, `attachments`,
 /// the account and the thread, and `change`: how the next press of Send
-/// writes the draft, the same value as the state of a stopped write. The
-/// Outbox reads it after a cancel (issue 941). `None` for a draft that does
-/// not exist, of an account that Iris removes, or with content that Iris
-/// does not write.
+/// writes the draft, and `newer_mail`, the same values as the state of a
+/// stopped write. The Outbox reads it after a cancel (issue 941). `None`
+/// for a draft that does not exist, of an account that Iris removes, or
+/// with content that Iris does not write.
 pub fn draft_content(store: &Store, id: &str, now_ms: i64) -> Result<Option<Value>> {
     let Some((Kind::Draft, row)) = parse_id(id) else {
         return Ok(None);
     };
-    type Found = (i64, Option<i64>, String, Option<&'static str>);
+    type Found = (i64, Option<i64>, String, (Option<&'static str>, bool));
     let found: Option<Found> = store.read(|c| {
         let tx = c.unchecked_transaction()?;
         let found = tx
@@ -364,12 +364,12 @@ pub fn draft_content(store: &Store, id: &str, now_ms: i64) -> Result<Option<Valu
             .optional()?;
         Ok(match found {
             Some((account, thread, content)) => {
-                Some((account, thread, content, change(store, &tx, row, now_ms)?.0))
+                Some((account, thread, content, change(store, &tx, row, now_ms)?))
             }
             None => None,
         })
     })?;
-    let Some((account, thread, content, change)) = found else {
+    let Some((account, thread, content, (change, newer_mail))) = found else {
         return Ok(None);
     };
     let Some(m) = serde_json::from_str::<Value>(&content)
@@ -378,7 +378,7 @@ pub fn draft_content(store: &Store, id: &str, now_ms: i64) -> Result<Option<Valu
     else {
         return Ok(None);
     };
-    Ok(Some(json!({
+    let mut v = json!({
         "draft": format_id(Kind::Draft, row),
         "account": format_id(Kind::Account, account),
         "thread": thread.map(|t| format_id(Kind::Thread, t)),
@@ -389,7 +389,12 @@ pub fn draft_content(store: &Store, id: &str, now_ms: i64) -> Result<Option<Valu
         "body": m.body,
         "attachments": m.attachments,
         "change": change,
-    })))
+    });
+    // As in the stopped state: only when a newer mail stops the change.
+    if newer_mail {
+        v["newer_mail"] = json!(true);
+    }
+    Ok(Some(v))
 }
 
 /// A Message-ID with no angle brackets, in lower case.

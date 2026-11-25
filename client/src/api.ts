@@ -365,6 +365,25 @@ export type OutboxSend = {
 export type Outbox = { sending: { on: boolean; since: string | null }; count: number; sends: OutboxSend[]; next: string | null };
 
 /** The whole outbox: each page of GET /api/outbox, so no send that can leave is hidden. */
+/** The words of a reply draft whose thread has a newer mail (draft change spec, section 5). */
+export const NEWER_MAIL = "A new mail came into this thread. Write a new reply.";
+
+/**
+ * The start of #/write/d-N (issue 941): the form of a draft that can change,
+ * under its thread for a reply. A draft that cannot change opens no form
+ * (`closed`): the view says why and links to a new mail or a new reply.
+ */
+export type ChangeStart =
+  | ({ change: DraftContent } & ({ thread: string; reply: ReplyStart } | { accounts: Status["accounts"] }))
+  | { closed: DraftContent };
+
+export async function loadChange(id: string): Promise<ChangeStart> {
+  const change = await get<DraftContent>(`drafts/${encodeURIComponent(id)}`);
+  if (!change.change) return { closed: change };
+  if (change.thread) return { thread: change.thread, reply: await get<ReplyStart>(`threads/${encodeURIComponent(change.thread)}/reply`), change };
+  return { accounts: (await get<Status>("status")).accounts, change };
+}
+
 export async function loadOutbox(): Promise<Outbox> {
   const first = await get<Outbox>("outbox");
   const sends = [...first.sends];
@@ -429,6 +448,10 @@ export type DraftContent = {
   subject: string;
   body: string;
   attachments: Attachment[];
+  /** How the next press of Send writes the draft, as `change` of a stopped write (issue 941). */
+  change: "update" | "new" | null;
+  /** Present (true) only when a newer mail in the thread of a reply stops the change. */
+  newer_mail?: boolean;
 };
 
 /** A message summary, or only the ID of a message that is not in the mirror any more. */

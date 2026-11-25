@@ -11,7 +11,7 @@ export type Route =
   | { view: "bundle"; rule: number }
   | { view: "gate"; declined: boolean }
   | { view: "item" | "mail" | "job" | "matter" | "start"; id: string }
-  | { view: "write"; thread: string | null };
+  | { view: "write"; thread: string | null; draft?: string };
 
 const LISTS = { commitments: "commitment", conversations: "conversation", feed: "feed", signals: "signal" } as const;
 
@@ -29,6 +29,9 @@ export const JOB_ID = /^j-[1-9]\d{0,17}$/;
 
 /** The ID of a mail thread (`t-N`). */
 export const THREAD_ID = /^t-[1-9]\d{0,17}$/;
+
+/** The ID of a draft (`d-N`). */
+export const DRAFT_ID = /^d-[1-9]\d{0,17}$/;
 
 /** The canonical matter ID (docs/spec/schema/matter.schema.json). */
 export const MATTER_ID = /^g-[1-9]\d{0,17}$/;
@@ -61,8 +64,10 @@ export function parse(hash: string): Route {
     return parts.length === 2 && ID.test(id) ? { view: one, id } : { view: "home" };
   }
   // #/write: a new mail. #/write/t-4: a reply in the thread t-4 (card R3-04).
+  // #/write/d-9: a change of the draft d-9 (issue 941).
   if (name === "write") {
     if (parts.length === 1 || (parts.length === 2 && parts[1] === "")) return { view: "write", thread: null };
+    if (parts.length === 2 && DRAFT_ID.test(id)) return { view: "write", thread: null, draft: id };
     return parts.length === 2 && THREAD_ID.test(id) ? { view: "write", thread: id } : { view: "home" };
   }
   if (name === "setup" || name === "brief" || name === "ask" || name === "measures" || name === "rules" || name === "review" || name === "handled" || name === "outbox" || name === "history" || name === "accounts") return { view: name };
@@ -77,6 +82,7 @@ export const href = {
   job: (id: string) => `#/jobs/${encodeURIComponent(id)}`,
   matter: (id: string) => `#/matters/${encodeURIComponent(id)}`,
   reply: (thread: string) => `#/write/${encodeURIComponent(thread)}`,
+  change: (draft: string) => `#/write/${encodeURIComponent(draft)}`,
 };
 
 export const NAV = [
