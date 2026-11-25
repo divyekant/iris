@@ -29,7 +29,9 @@
         const open = (await get<{ changesets: Changeset[] }>("changesets")).changesets;
         if (n <= applied || !Array.isArray(open)) return;
         applied = n;
-        later = open.filter((c) => !list.some((x) => x.id === c.id));
+        // An announced request stays in `later` until Show, also when it closes before then.
+        const fresh = open.filter((c) => !list.some((x) => x.id === c.id) && !later.some((x) => x.id === c.id));
+        later = [...later.map((c) => open.find((x) => x.id === c.id) ?? c), ...fresh];
         order = open.map((c) => c.id);
       } catch {
         // The next read tries again.
@@ -37,11 +39,25 @@
     }, every);
     return () => clearInterval(timer);
   });
-  // Show the new requests in the order of the engine. A request that is no longer open stays at the end with its state.
-  function showLater() {
-    const known = [...list, ...later];
-    list = [...order.flatMap((id) => known.filter((c) => c.id === id)), ...list.filter((c) => !order.includes(c.id))];
-    later = [];
+  // Show the new requests in the order of the engine. A request that is no longer open stays at the end with its state:
+  // for an announced request that closed before Show, the screen reads that state first.
+  let showing = $state(false);
+  async function showLater() {
+    if (showing) return;
+    showing = true;
+    const gone = later.filter((c) => !order.includes(c.id));
+    // With no closed request, Show applies at once (no await).
+    const closed = gone.length
+      ? await Promise.all(gone.map((c) => get<Changeset>(`changesets/${encodeURIComponent(c.id)}`).catch(() => c)))
+      : [];
+    const known = [...list, ...later.filter((c) => order.includes(c.id))];
+    list = [
+      ...order.flatMap((id) => known.filter((c) => c.id === id)),
+      ...list.filter((c) => !order.includes(c.id)),
+      ...closed.filter((c) => !list.some((x) => x.id === c.id)),
+    ];
+    later = later.filter((c) => !list.some((x) => x.id === c.id));
+    showing = false;
   }
 
   // Each open changeset shows, also one whose actions all have a decision. The headline counts only the waiting ones.
@@ -74,7 +90,7 @@
 {#if later.length > 0}
   <p class="later" role="status">
     {later.length === 1 ? "1 new request" : `${later.length} new requests`} came in.
-    <button type="button" onclick={showLater}>Show</button>
+    <button type="button" onclick={showLater} disabled={showing}>Show</button>
   </p>
 {/if}
 

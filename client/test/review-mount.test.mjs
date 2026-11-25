@@ -701,3 +701,33 @@ test("a request that comes while the review is open shows after Show, and the op
     view.destroy();
   }
 });
+
+test("an announced request stays until Show, and a request that closed before Show shows with its state (issue 184)", async () => {
+  const first = changeset([act({ resolved: { messages: [] } })]);
+  const second = { ...changeset([act({ resolved: { messages: [] } })]), id: "cs-10", author: { kind: "agent", name: "Codex" } };
+  let open = [first];
+  let polls = 0;
+  serve({
+    changesets: () => (polls++, [200, { changesets: open }]),
+    "changesets/cs-10": [200, { ...second, state: "withdrawn", withdrawn_by: "author" }],
+  });
+  const view = await mount("/src/views/Review.svelte", { changesets: [first], every: 20 });
+  try {
+    const shown = () => [...view.target.querySelectorAll("[data-changeset]")].map((el) => el.dataset.changeset);
+    open = [second, first];
+    await until(() => (view.flushSync(), /1 new request/.test(text(view.target))));
+    // The agent withdraws the request before the person presses Show: the line stays.
+    open = [first];
+    const now = polls;
+    await until(() => polls >= now + 2);
+    view.flushSync();
+    assert.match(text(view.target), /1 new request came in/);
+    [...view.target.querySelectorAll("button")].find((b) => text(b).trim() === "Show").click();
+    await until(() => (view.flushSync(), shown().length === 2));
+    assert.deepEqual(shown(), ["cs-9", "cs-10"], "the closed request goes at the end");
+    assert.match(text(view.target.querySelector("[data-changeset=cs-10]")), /Codex withdrew this request/);
+    assert.doesNotMatch(text(view.target), /new request/);
+  } finally {
+    view.destroy();
+  }
+});
