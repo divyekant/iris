@@ -1825,8 +1825,8 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
                 path.display(),
                 done.files
             );
-            // Issue 1063: name each draft of a job that the copy left out, so
-            // that the person can copy it by hand.
+            // Issue 1063: name each draft over 1 MiB that the copy left out,
+            // and count the files after the first names of a folder.
             for s in &done.skipped {
                 for name in &s.large {
                     println!(

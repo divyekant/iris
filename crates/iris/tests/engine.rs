@@ -479,6 +479,46 @@ fn backup_copies_the_data_folder_with_the_sign_in() {
 }
 
 #[test]
+fn backup_prints_each_draft_that_it_leaves_out() {
+    // Issue 1063: the command tells the person which drafts to copy by hand.
+    let s = setup("backup-drafts", 1);
+    let ws = s.store.dir().join("workspaces");
+    let big = ws.join("j-1/drafts");
+    std::fs::create_dir_all(&big).unwrap();
+    std::fs::write(big.join("big.md"), vec![b'a'; 1024 * 1024 + 1]).unwrap();
+    let many = ws.join("j-2/drafts");
+    std::fs::create_dir_all(&many).unwrap();
+    for i in 0..iris_store::DRAFT_FILES_MAX + 5 {
+        std::fs::write(many.join(format!("d{i:04}.md")), "d").unwrap();
+    }
+    let dest = s.store.dir().with_extension("copy");
+    let _ = std::fs::remove_dir_all(&dest);
+    let out = Command::new(env!("CARGO_BIN_EXE_iris"))
+        .args(["backup", "--data"])
+        .arg(s.store.dir())
+        .arg(&dest)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!(
+            "iris: not in the backup, over 1 MiB: {}\n",
+            big.join("big.md").display()
+        )),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "iris: not in the backup, after the first {} files: 5 files of {}\n",
+            iris_store::DRAFT_FILES_MAX,
+            many.display()
+        )),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn a_tick_opens_a_deferred_commitment_and_expires_a_signal() {
     let store = Arc::new(Store::open(&data_dir("deferred")).unwrap());
     // No token: the tick starts no sync worker.
