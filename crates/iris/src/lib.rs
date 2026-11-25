@@ -767,10 +767,47 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
         print!("{}", out.text);
         return out.failure.map_or(Ok(()), Err);
     }
+    if let Command::List {
+        form,
+        status,
+        kind,
+        before,
+        limit,
+        json,
+    } = &cli.command
+    {
+        let store = Store::open(&data?).map_err(|e| socket::Failure {
+            code: socket::code::ERROR,
+            error: format!("store: {e}"),
+        })?;
+        let filter = iris_api::Filter {
+            form: form.as_deref(),
+            status: status.as_deref(),
+            kind: kind.as_deref(),
+            before: before.as_deref(),
+        };
+        print!(
+            "{}",
+            verbs::list(&store, &filter, limit.unwrap_or(50), *json).map_err(list_failure)?
+        );
+        return Ok(());
+    }
     run_store(cli).map_err(|error| socket::Failure {
         code: socket::code::ERROR,
         error,
     })
+}
+
+/// The failure of `iris list` (CLI and MCP): a refused filter is a wrong
+/// argument, code 2 (specification 2, section 8.4); other errors are code 1.
+fn list_failure(e: iris_api::Error) -> socket::Failure {
+    socket::Failure {
+        code: match e {
+            iris_api::Error::Query(_) => socket::code::USAGE,
+            _ => socket::code::ERROR,
+        },
+        error: e.to_string(),
+    }
 }
 
 /// The request on the engine socket of a verb that changes changesets
@@ -1357,7 +1394,13 @@ fn mcp(dir: PathBuf) -> Result<(), String> {
                     kind: kind.as_deref(),
                     before: before.as_deref(),
                 };
-                read(open().and_then(|s| verbs::list(&s, &filter, limit, true)))
+                match open() {
+                    Err(e) => Outcome::fail(socket::code::ERROR, e),
+                    Ok(s) => match verbs::list(&s, &filter, limit, true) {
+                        Ok(text) => Outcome::ok(text),
+                        Err(e) => fail(list_failure(e)),
+                    },
+                }
             }
             Call::WatchAdd { text } => watch(WatchCommand::Add { text }),
             Call::WatchList => watch(WatchCommand::List { json: true }),
@@ -1587,23 +1630,9 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             print(verbs::search(&open()?, text, *limit, *json))
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
-        Command::List {
-            form,
-            status,
-            kind,
-            before,
-            limit,
-            json,
-        } => {
-            let filter = iris_api::Filter {
-                form: form.as_deref(),
-                status: status.as_deref(),
-                kind: kind.as_deref(),
-                before: before.as_deref(),
-            };
-            print(verbs::list(&open()?, &filter, limit.unwrap_or(50), *json))
-        }
-        // `run` refuses it in host mode, before the store.
+        // `run` lists the items (the exit code of a bad filter), and
+        // refuses a verb of a session in host mode, before the store.
+        Command::List { .. } => Err("iris list runs in `run`".into()),
         Command::Wait { .. } | Command::Ask { .. } | Command::Done { .. } => {
             Err("this is a verb of a session".into())
         }
