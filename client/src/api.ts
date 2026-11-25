@@ -142,6 +142,8 @@ export type Status = {
   waits_model?: number;
   /** The time zone of defer dates and due dates (an IANA name, `iris zone`). Null or left out: the zone of the browser. */
   time_zone?: string | null;
+  /** After model errors: the time of the next model call (RFC 3339), while it is later than now. An older engine leaves it out. */
+  model_retry_at?: string;
 };
 
 /** A rule of policy.toml (spec 2 section 6.2). `when` holds only the conditions that the rule sets. */
@@ -607,19 +609,58 @@ async function call(path: string, accept: string, body?: unknown): Promise<Respo
 
 /** Get one JSON resource from the local API. Throws an Error with the API's error text. */
 export async function get<T>(path: string): Promise<T> {
+  if (path === "status") return (await statusRead())[0] as T;
+  return getJson<T>(path);
+}
+
+async function getJson<T>(path: string): Promise<T> {
   const response = await call(path, "application/json");
   const body = await response.json().catch(() => null);
   // The status goes with the error, so that a caller can tell a 404 from other failures.
   if (!response.ok) throw Object.assign(new Error(body?.error ?? `The engine answered ${response.status}.`), { status: response.status });
-  // Spec 1 section 4.7: the provider refused the sign-in of these accounts, so their sync stopped.
-  if (path === "status") {
-    const accounts = (body as Status).accounts ?? [];
-    access.locked = accounts.filter((a) => a.state === "needs_sign_in").map(({ address, provider }) => ({ address, provider }));
-    access.none = accounts.length === 0;
-    access.accounts = accountNames(accounts);
-    access.zone = (body as Status).time_zone ?? null;
-  }
   return body as T;
+}
+
+// The order of the status answers. Each request that answers with the status (a read, or a change
+// such as a removal or a try now) takes a number at its start. An answer is the newest only if no
+// answer of a request that started after it came first: requests in flight can answer out of order.
+let statusStarted = 0;
+let statusTaken = 0;
+
+/** Take `s`, the answer of request `n`, if it is the newest. Gives true if it is. */
+function takeStatus(n: number, s: Status): boolean {
+  if (n <= statusTaken) return false;
+  statusTaken = n;
+  // Spec 1 section 4.7: the provider refused the sign-in of these accounts, so their sync stopped.
+  const accounts = s.accounts ?? [];
+  access.locked = accounts.filter((a) => a.state === "needs_sign_in").map(({ address, provider }) => ({ address, provider }));
+  access.none = accounts.length === 0;
+  access.accounts = accountNames(accounts);
+  access.zone = s.time_zone ?? null;
+  return true;
+}
+
+async function statusRead(): Promise<[Status, boolean]> {
+  const n = ++statusStarted;
+  const s = await getJson<Status>("status");
+  return [s, takeStatus(n, s)];
+}
+
+/** Read the status. Gives null if a newer status answered first: a view keeps the newer one. */
+export async function readStatus(): Promise<Status | null> {
+  const [s, newest] = await statusRead();
+  return newest ? s : null;
+}
+
+/**
+ * Send a change whose answer is the status (POST). Gives the status, or null if a newer status
+ * answered first. A read that started during the change can show the state from before its commit,
+ * so after a change, a view reads the status again.
+ */
+export async function postStatus(path: string, body: unknown): Promise<Status | null> {
+  const n = ++statusStarted;
+  const s = await post<Status>(path, body);
+  return takeStatus(n, s) ? s : null;
 }
 
 /** Put one file into the attachment folder of the engine. The entry of a draft adds the name and the type. */
