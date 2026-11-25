@@ -425,7 +425,7 @@ fn downgrade(s: &Store) {
              ALTER TABLE account DROP COLUMN categories_off_at;
              DROP TRIGGER understand_owner_label_add; DROP TRIGGER understand_owner_label_remove;
              DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower; DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender; DROP TRIGGER talk_due_sender_remove; DROP TRIGGER model_declined_end; DROP TRIGGER model_declined_end_remove; DROP TABLE model_declined; DROP TABLE talk_due; DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
-             ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 26;",
+             DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 26;",
         )?;
         Ok(())
     })
@@ -797,7 +797,7 @@ fn migration_45_corrects_an_approval_after_a_comment() {
         approve_revision(&s, a, true);
         s.write(|tx| {
             tx.execute_batch(UNDO_46)?;
-            tx.execute_batch("UPDATE person_decision SET approved = 1; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 44;")?;
+            tx.execute_batch("UPDATE person_decision SET approved = 1; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 44;")?;
             Ok(())
         })
         .unwrap();
@@ -810,8 +810,9 @@ fn migration_45_corrects_an_approval_after_a_comment() {
 }
 
 /// Issue 472: a send counts as without review after hostile mail only if
-/// no person decided it, and hostile mail came in the thread of its draft
-/// before the send.
+/// no person decided it and its claim kept hostile evidence
+/// (`ledger.hostile_before`). The removal of the account and a later
+/// change of the mail do not change the count.
 #[tokio::test]
 async fn sends_after_hostile_mail_count_only_without_a_person() {
     let s = store("hostile-sends");
@@ -825,39 +826,33 @@ async fn sends_after_hostile_mail_count_only_without_a_person() {
         for t in triggers {
             tx.execute_batch(&format!("DROP TRIGGER \"{t}\""))?;
         }
-        tx.execute_batch(&format!(
-            "INSERT INTO thread(id, account_id, provider_id) VALUES (1, {a}, 't1'), (2, {a}, 't2');
-             -- Thread 1: hostile mail at 100, before the sends at 200.
-             -- Thread 2: hostile mail at 300, after its send at 200.
-             INSERT INTO message(account_id, thread_id, provider_id, internal_date, hostile)
-               VALUES ({a}, 1, 'm1', 100, '[\"dmarc\"]'), ({a}, 2, 'm2', 300, '[\"dmarc\"]'),
-                      ({a}, 2, 'm3', 50, '[]');
-             INSERT INTO changeset(id, author_kind, created_at) VALUES (1, 'agent', 0);
+        tx.execute_batch(
+            "INSERT INTO changeset(id, author_kind, created_at) VALUES (1, 'agent', 0);
              INSERT INTO changeset_action(id, changeset_id, revision, n, verb, targets, args,
                                           state, decided_by, rule, policy)
-               VALUES (1, 1, 1, 1, 'draft', '{{}}', '{{}}', 'applied', 'person', NULL, NULL),
-                      (2, 1, 1, 2, 'draft', '{{}}', '{{}}', 'applied', 'person', NULL, NULL),
-                      (3, 1, 1, 3, 'send', '{{}}', '{{}}', 'applied', 'engine', NULL, NULL),
-                      (4, 1, 1, 4, 'send', '{{}}', '{{}}', 'applied', 'person', NULL, NULL),
-                      (5, 1, 1, 5, 'send', '{{}}', '{{}}', 'applied', 'engine', NULL, NULL),
-                      (6, 1, 1, 6, 'send', '{{}}', '{{}}', 'failed', 'engine', NULL, NULL);
-             INSERT INTO draft(id, account_id, thread_id, provider_id, message_id_hdr, content,
-                               hash, raw, action_id, created_at, updated_at)
-               VALUES (1, {a}, 1, 'r1', 'x1@example.com', '{{}}', 'h', x'00', 1, 0, 0),
-                      (2, {a}, 2, 'r2', 'x2@example.com', '{{}}', 'h', x'00', 2, 0, 0);
-             INSERT INTO action_draft(action_id, draft_id) VALUES (3, 1), (4, 1), (5, 2), (6, 1);
-             INSERT INTO ledger(action_id, ops, state, undo, at)
-               VALUES (3, '{{}}', 'applied', 'none', 200), (4, '{{}}', 'applied', 'none', 200),
-                      (5, '{{}}', 'applied', 'none', 200), (6, '{{}}', 'failed', 'none', 200);"
-        ))?;
+               VALUES (3, 1, 1, 3, 'send', '{}', '{}', 'applied', 'engine', NULL, NULL),
+                      (4, 1, 1, 4, 'send', '{}', '{}', 'applied', 'person', NULL, NULL),
+                      (5, 1, 1, 5, 'send', '{}', '{}', 'applied', 'engine', NULL, NULL),
+                      (6, 1, 1, 6, 'send', '{}', '{}', 'failed', 'engine', NULL, NULL),
+                      (7, 1, 1, 7, 'send', '{}', '{}', 'applied', 'engine', NULL, NULL);
+             -- Send 7 was claimed before migration 59: no evidence was kept.
+             INSERT INTO ledger(action_id, ops, state, undo, at, hostile_before)
+               VALUES (3, '{}', 'applied', 'none', 200, 1), (4, '{}', 'applied', 'none', 200, 1),
+                      (5, '{}', 'applied', 'none', 200, 0), (6, '{}', 'failed', 'none', 200, 1),
+                      (7, '{}', 'applied', 'none', 200, NULL);",
+        )?;
         Ok(())
     })
     .unwrap();
-    let m = get(&s).await;
-    // Send 3: no person decided it, after hostile mail. Send 4: the person. Send 5:
-    // the hostile mail came after it. Send 6 failed.
+    // Send 3: no person decided it, after hostile mail. Send 4: the person.
+    // Send 5: no hostile mail at its claim. Send 6 failed.
+    let want = json!({"sent": 4, "unreviewed_after_hostile": 1});
+    assert_eq!(get(&s).await["sends"], want);
+    s.remove_account("owner@example.com", now()).unwrap();
+    let _ = a;
     assert_eq!(
-        m["sends"],
-        json!({"sent": 3, "unreviewed_after_hostile": 1})
+        get(&s).await["sends"],
+        want,
+        "the removal changes the measure"
     );
 }

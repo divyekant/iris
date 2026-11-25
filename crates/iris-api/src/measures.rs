@@ -103,8 +103,9 @@ pub struct Undo {
 pub struct Sends {
     /// The applied sends.
     pub sent: i64,
-    /// The applied sends that a rule approved, not a person, in a thread
-    /// with hostile mail that came before the send. The target is zero.
+    /// The applied sends that no person decided, whose thread had hostile
+    /// evidence at the claim of the send (`ledger.hostile_before`, the
+    /// result of `iris_changeset::hostile_evidence`). The target is zero.
     pub unreviewed_after_hostile: i64,
 }
 
@@ -195,19 +196,12 @@ pub fn measures(store: &Store, rss_kib: Option<i64>) -> Result<Measures> {
             },
         )?;
         // A send without review: no person decided it. Hostile mail before
-        // it: a message of the thread of its draft that is hostile mail and
-        // came before the send.
+        // it: the hostile evidence that its claim kept (migration 59), so a
+        // later change of a sender or a removed account does not change it.
         let sends = c.query_row(
-            concat!(
-                "SELECT count(*), coalesce(sum(a.decided_by IS NOT 'person' AND EXISTS (
-                   SELECT 1 FROM action_draft ad JOIN draft d ON d.id = ad.draft_id
-                     JOIN message m ON m.thread_id = d.thread_id
-                   WHERE ad.action_id = a.id AND m.internal_date <= l.at AND ",
-                iris_store::hostile_mail!(),
-                ")), 0)
-                 FROM ledger l JOIN changeset_action a ON a.id = l.action_id
-                 WHERE a.verb = 'send' AND l.state = 'applied'"
-            ),
+            "SELECT count(*), coalesce(sum(l.hostile_before = 1 AND a.decided_by IS NOT 'person'), 0)
+             FROM ledger l JOIN changeset_action a ON a.id = l.action_id
+             WHERE a.verb = 'send' AND l.state = 'applied'",
             [],
             |r| {
                 Ok(Sends {
