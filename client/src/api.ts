@@ -115,7 +115,8 @@ export type Brief = {
 export type Bundle = Section & { rule: number; name: string };
 
 /** One sender at the stranger gate (spec 1 section 6.7): its count of items, and the newest 3. */
-export type GateSender = { id: string; address: string; name: string | null; count: number; items: Item[] };
+/** A sender at the gate. `known_as`: the address of a person you know with the same name (issue #370). */
+export type GateSender = { id: string; address: string; name: string | null; known_as?: string | null; count: number; items: Item[] };
 export type GatePage = { count: number; senders: GateSender[]; next: string | null };
 /** The sender row after an answer at the gate. */
 export type GateAnswer = { id: string; address: string; name: string | null; kind: string; decided_by: string | null; declined: boolean };
@@ -211,6 +212,8 @@ export type Message = Summary & {
   hostile: string[];
   /** The kind of the From sender (spec 1 section 6.7). */
   sender_kind?: "person" | "service" | "stranger" | "hostile";
+  /** The sender when only its look-alike domain makes it hostile: you can trust it (issue #49). */
+  near_copy?: { sender: string; of: string | null; trusted: boolean } | null;
   items: string[];
 };
 
@@ -741,7 +744,10 @@ export async function loadBrief(): Promise<Brief> {
   return { ...brief, signals: { ...brief.signals, count: Math.max(brief.signals.count, items.length), items } };
 }
 
-/** Your answer to a sender at the stranger gate: `accept`, `decline` (the screen says "Ignore") or `reopen` (undo). */
-export function answerSender(id: string, answer: "accept" | "decline" | "reopen"): Promise<GateAnswer> {
+/**
+ * Your answer to a sender: `accept`, `decline` (the screen says "Ignore") or `reopen` (undo) at
+ * the stranger gate, or `trust` for a sender that only its look-alike domain makes hostile.
+ */
+export function answerSender(id: string, answer: "accept" | "decline" | "reopen" | "trust"): Promise<GateAnswer> {
   return post<GateAnswer>(`senders/${encodeURIComponent(id)}/${answer}`, {});
 }
