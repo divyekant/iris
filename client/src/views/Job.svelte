@@ -6,7 +6,8 @@
 -->
 <script lang="ts">
   import { get, own, type JobDetail } from "../api";
-  import { agent, asker, clock, day, due, editJob, loadJob, now, sameDue, steps, waitMail } from "../jobs";
+  import { agent, asker, clock, day, due, editJob, endJob, loadJob, now, sameDue, steps, waitMail } from "../jobs";
+  import AnswerForm from "./AnswerForm.svelte";
   import Grants from "./Grants.svelte";
   import JobForm from "./JobForm.svelte";
   import Scope from "./Scope.svelte";
@@ -67,6 +68,31 @@
       return own(e) || (e as Error).message;
     }
   }
+
+  // End the job (issue 322): one question in place, as the remove of an account.
+  let ending = $state(false);
+  let endBusy = $state(false);
+  let endError = $state("");
+  const reload = () => loadJob(job.id).then((d) => (detail = d));
+  async function end(kind: "complete" | "cancel") {
+    endBusy = true;
+    endError = "";
+    try {
+      detail = await endJob(job.id, kind);
+      ending = false;
+    } catch (e) {
+      const status = (e as { status?: number }).status;
+      if (status !== undefined && status !== 409) endError = own(e) || (e as Error).message;
+      else {
+        // No answer, or a conflict (the job ended already): the engine knows. Show the job as it has it.
+        await reload().catch(() => {});
+        if (detail.job.state === "done") ending = false;
+        else endError = "Iris does not know if the job ended. Try again, or open the job again later.";
+      }
+    } finally {
+      endBusy = false;
+    }
+  }
 </script>
 
 <p class="eyebrow">Job</p>
@@ -77,14 +103,37 @@
   <p class="limits">
     {#if limit}<span class={limit.tone}>{limit.text}{#if limit.tone}<span class="dot" aria-hidden="true"></span>{/if}</span>{/if}
     <span>Started {day(job.created)}</span>
-    {#if job.state !== "done"}<button class="edit" type="button" onclick={() => (editing = true)}>Edit</button>{/if}
+    {#if job.state !== "done"}
+      <button class="edit" type="button" onclick={() => (editing = true)}>Edit</button>
+      <button class="edit" type="button" onclick={() => ((ending = true), (endError = ""))} disabled={ending}>End</button>
+    {/if}
   </p>
+{/if}
+
+{#if ending && job.state !== "done"}
+  <div class="ask" role="group" aria-label="End the job">
+    <p>End this job? The agent stops, and the copy of the mail for the agent goes. The steps stay on this page.</p>
+    <p class="actions">
+      <button type="button" class="primary" onclick={() => end("complete")} disabled={endBusy}>Mark as done</button>
+      <button type="button" class="quiet" onclick={() => end("cancel")} disabled={endBusy}>Cancel the job</button>
+      <button type="button" class="quiet" onclick={() => ((ending = false), (endError = ""))} disabled={endBusy}>Keep the job</button>
+    </p>
+    {#if endError}<p class="error" role="alert">{endError}</p>{/if}
+  </div>
 {/if}
 
 <section class="now {job.state}" class:idle aria-label="Now">
   {#if job.state === "needs_you"}
     <p class="label">{asker(job)} asks you</p>
     <p class="question">{job.question}</p>
+    {#key job.updated}
+      <AnswerForm
+        {job}
+        onanswered={(_, d) => (detail = d)}
+        onchanged={() => reload().catch(() => {})}
+        lost="Iris does not know if your answer arrived. Open the job again to see."
+      />
+    {/key}
   {:else}
     <p class="said">{idle ? idle.said : now(job)}</p>
     {#if idle}
@@ -154,6 +203,56 @@
   .edit:focus-visible {
     outline: 2px solid var(--color-primary);
     outline-offset: 2px;
+  }
+  .edit:disabled {
+    color: var(--color-text-faint);
+    cursor: default;
+    text-decoration: none;
+  }
+  .ask {
+    margin: calc(-1 * var(--space-4)) 0 var(--space-8);
+    padding: var(--space-4);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-3);
+    margin-top: var(--space-3);
+  }
+  .actions button {
+    padding: var(--space-2) var(--space-4);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-full);
+    background: transparent;
+    color: var(--color-text);
+    font: inherit;
+    cursor: pointer;
+    transition: border-color var(--transition-fast);
+  }
+  .actions button:hover:not(:disabled) {
+    border-color: var(--color-text-muted);
+  }
+  .actions .primary {
+    border-color: var(--color-primary);
+    background: var(--color-primary);
+    color: var(--color-on-primary);
+    font-weight: 500;
+  }
+  .actions button:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  .actions button:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+  .ask .error {
+    margin-top: var(--space-3);
+    border-left: 4px solid var(--color-error);
+    padding-left: var(--space-2);
+    font-size: var(--font-size--1);
   }
   .dot {
     display: inline-block;
@@ -327,6 +426,17 @@
     }
     .now {
       padding: var(--space-4);
+    }
+  }
+  @media (max-width: 600px), (any-pointer: coarse) {
+    .actions button,
+    .edit {
+      min-height: var(--size-touch);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .actions button {
+      transition: none;
     }
   }
 </style>

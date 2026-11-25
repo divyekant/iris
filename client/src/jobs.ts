@@ -194,6 +194,11 @@ export async function editJob(id: string, goal: string, due: string | null): Pro
 }
 
 /** The job page of `id`, read again: for example after a change whose answer did not come. */
+/** End the job `id` (issue 322): `complete` (done) or `cancel`. The answer is the job, as `loadJob` gives it. */
+export function endJob(id: string, end: "complete" | "cancel"): Promise<JobDetail> {
+  return post<JobDetail>(`jobs/${encodeURIComponent(id)}/finish`, { end });
+}
+
 export function loadJob(id: string): Promise<JobDetail> {
   return get<JobDetail>(`jobs/${encodeURIComponent(id)}`);
 }
