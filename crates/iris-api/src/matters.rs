@@ -156,7 +156,7 @@ pub fn matters(store: &Store) -> Result<Value> {
 /// for a matter with too few members that are not hostile mail.
 pub fn matter(store: &Store, id: &str) -> Result<Option<Value>> {
     let row = row_of(id, Kind::Matter)?;
-    Ok(store.read(|c| Ok(view(c, row)?))?)
+    Ok(store.read(|c| view(c, row))?)
 }
 
 /// The person confirms the proposal `id` with a title and the item IDs to
@@ -196,7 +196,7 @@ fn decided(
     r: std::result::Result<(), MatterError>,
 ) -> Result<Option<Value>> {
     match r {
-        Ok(()) => Ok(store.read(|c| Ok(view(c, row)?))?),
+        Ok(()) => Ok(store.read(|c| view(c, row))?),
         Err(MatterError::NotFound) => Ok(None),
         Err(e) => Err(error(e)),
     }
@@ -288,7 +288,7 @@ pub fn create_matter(store: &Store, title: &str, items: &[String], now_ms: i64) 
     let items = refs(items)?;
     let row = iris_matters::create(store, title, &items, now_ms).map_err(error)?;
     store
-        .read(|c| Ok(view(c, row)?))?
+        .read(|c| view(c, row))?
         .ok_or_else(|| Error::Conflict("the new matter is not visible".into()))
 }
 
