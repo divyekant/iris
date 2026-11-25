@@ -45,25 +45,3 @@ BEGIN
     SELECT h.message_id FROM header h WHERE h.from_addr = lower(OLD.address));
 END;
 
--- The start of a decline (a decline, a new address, a new kind
--- `stranger`): the pending mail of the sender can wait for the model (a
--- budget refusal, a retry time, the try limit). The mail of a declined
--- stranger makes no model call, so it waits no more: the next run
--- understands it with the fixed steps.
-CREATE TRIGGER IF NOT EXISTS model_declined_start AFTER UPDATE OF address, kind, declined_at ON sender
-  WHEN NEW.declined_at IS NOT NULL AND coalesce(NEW.kind, 'stranger') = 'stranger'
-   AND NOT (OLD.declined_at IS NOT NULL AND coalesce(OLD.kind, 'stranger') = 'stranger'
-            AND OLD.address IS NEW.address)
-BEGIN
-  UPDATE message SET tries = 0, retry_at = NULL, waits_model = 0
-   WHERE understood_at IS NULL
-     AND id IN (SELECT message_id FROM header WHERE from_addr = lower(NEW.address));
-END;
-
-CREATE TRIGGER IF NOT EXISTS model_declined_start_add AFTER INSERT ON sender
-  WHEN NEW.declined_at IS NOT NULL AND coalesce(NEW.kind, 'stranger') = 'stranger'
-BEGIN
-  UPDATE message SET tries = 0, retry_at = NULL, waits_model = 0
-   WHERE understood_at IS NULL
-     AND id IN (SELECT message_id FROM header WHERE from_addr = lower(NEW.address));
-END;

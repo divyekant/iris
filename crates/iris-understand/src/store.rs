@@ -574,16 +574,11 @@ pub fn mark_waiting(
     if seen.message != message || !seen.same(tx)? {
         return Ok(false);
     }
-    // The mail of a declined stranger never waits for the model (decision
-    // D29): a decline between the refusal and the mark leaves no mark.
-    let set = tx.execute(
-        "UPDATE message SET waits_model = ?2 WHERE id = ?1 AND understood_at IS NULL
-           AND NOT EXISTS (SELECT 1 FROM header h JOIN sender s ON s.address = h.from_addr
-                           WHERE h.message_id = message.id AND s.declined_at IS NOT NULL
-                             AND coalesce(s.kind, 'stranger') = 'stranger')",
+    tx.execute(
+        "UPDATE message SET waits_model = ?2 WHERE id = ?1 AND understood_at IS NULL",
         params![message, mark],
     )?;
-    Ok(set > 0)
+    Ok(true)
 }
 
 fn state(c: &rusqlite::Connection, message: i64, full: bool) -> rusqlite::Result<Option<String>> {

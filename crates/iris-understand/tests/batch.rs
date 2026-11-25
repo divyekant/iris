@@ -1386,10 +1386,11 @@ fn a_change_during_a_refused_call_leaves_no_mark() {
     assert_eq!(marks, Some(0), "the changed message has no mark");
 }
 
-/// A decline of the sender during a refused call leaves no mark (decision
-/// D29): the mail of a declined stranger never waits for the model.
+/// A decline of the sender during a refused call (decision D29): the mark
+/// of the refusal does not hold the mail of a declined stranger, so the next
+/// run understands it with no model call.
 #[test]
-fn a_decline_during_a_refused_call_leaves_no_mark() {
+fn a_decline_during_a_refused_call_does_not_hold_the_mail() {
     let b = store("refusal-decline");
     b.model(false, None);
     let m = b.add("1", "a", 1, &["INBOX"]);
@@ -1407,10 +1408,10 @@ fn a_decline_during_a_refused_call_leaves_no_mark() {
             .unwrap();
     }));
     b.run(&Limits::default()).unwrap();
-    assert_eq!(
-        b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
-        Some(0)
-    );
+    assert_eq!(b.script.calls(), 1);
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.script.calls(), 1, "no second call");
+    assert!(b.understood(m));
 }
 
 /// A change of the thread context during a refused call (a SPAM label on
@@ -1514,6 +1515,26 @@ fn the_mail_of_a_declined_stranger_does_not_wait_for_the_model() {
             Ok(())
         })
         .unwrap();
+    // A model wait written after the decline (a store from before this
+    // rule, or a refusal that raced the decline) holds nothing either.
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET waits_model = 1, retry_at = ?2 WHERE id = ?1",
+                rusqlite::params![limit, NOW + 86_400_000],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    // The estimate counts no call for the mail of a declined stranger with
+    // a header. Mail with no header yet (`behind`) counts as a call: the
+    // estimate is an upper bound.
+    let e = batch::estimate(&b.store, NOW).unwrap();
+    assert_eq!(
+        e.output_tokens,
+        2 * batch::OUTPUT_TOKENS,
+        "older and behind"
+    );
     b.run(&Limits::default()).unwrap();
     assert_eq!(b.script.calls(), 0);
     assert!(!b.understood(older), "the older message still waits");
