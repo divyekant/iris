@@ -788,12 +788,19 @@ async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
         "UPDATE sender SET basis = 'near copy of paypal.com' WHERE address = 'alerts@paypa1.com'",
         [],
     );
+    // The state of the mail of message 5: kind, trust offer, Undo.
+    let mail = |m: Value| {
+        (
+            m["sender_kind"].clone(),
+            m["near_copy"].clone(),
+            m["trusted_sender"].clone(),
+        )
+    };
+    let offer = |id: &str| json!({"sender": id, "of": "paypal.com"});
     // Message 5 is from the look-alike: it can be trusted.
-    let m = g.get("/api/messages/m-5").await;
-    assert_eq!(m["sender_kind"], "hostile");
     assert_eq!(
-        m["near_copy"],
-        json!({"sender": look, "of": "paypal.com", "trusted": false})
+        mail(g.get("/api/messages/m-5").await),
+        (json!("hostile"), offer(&look), Value::Null)
     );
     assert_eq!(g.get("/api/messages/m-1").await["near_copy"], Value::Null);
 
@@ -807,15 +814,11 @@ async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
         g.one::<Option<i64>>("SELECT understood_at FROM message WHERE id = 5"),
         None
     );
-    let m = g.get("/api/messages/m-5").await;
     // After a reload the mail still names the trusted sender, so the
     // person can undo the trust.
     assert_eq!(
-        (m["sender_kind"].as_str(), &m["near_copy"]),
-        (
-            Some("person"),
-            &json!({"sender": look, "of": null, "trusted": true})
-        )
+        mail(g.get("/api/messages/m-5").await),
+        (json!("person"), Value::Null, json!(look))
     );
 
     // The trusted look-alike is no reference of the near-copy rule: the
@@ -838,38 +841,46 @@ async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
         "the answer gives the kind after reopen"
     );
     assert_eq!(
-        g.one::<String>("SELECT kind FROM sender WHERE address = 'alerts@paypa1.com'"),
-        "hostile"
-    );
-    assert_eq!(
-        g.get("/api/messages/m-5").await["near_copy"],
-        json!({"sender": look, "of": "paypal.com", "trusted": false})
+        mail(g.get("/api/messages/m-5").await),
+        (json!("hostile"), offer(&look), Value::Null)
     );
 
-    // Rows that differ only in case: `near_copy` names the row of
-    // `sender_kind` (the most cautious kind), never another row.
+    // Rows that differ only in case (issue #1043): the kind and the trust
+    // offer come from the most cautious row, and the Undo of a trusted row
+    // of any case stays. Each other row state gives the same Undo.
     g.answer(&look, "trust").await;
     let upper = g.sender("ALERTS@paypa1.com", Some("hostile"));
-    g.exec(
-        "UPDATE sender SET basis = 'near copy of paypal.com' WHERE address = 'ALERTS@paypa1.com'",
-        [],
-    );
-    let m = g.get("/api/messages/m-5").await;
-    assert_eq!(
-        (m["sender_kind"].as_str(), &m["near_copy"]),
+    let set_upper = |kind: &str, by: &str, basis: Option<&str>| {
+        g.exec(
+            "UPDATE sender SET kind = ?1, decided_by = ?2, basis = ?3
+              WHERE address = 'ALERTS@paypa1.com'",
+            rusqlite::params![kind, by, basis],
+        );
+    };
+    for (kind, by, basis, want_offer) in [
         (
-            Some("hostile"),
-            &json!({"sender": upper, "of": "paypal.com", "trusted": false})
-        )
-    );
-    // A hostile row of another rule wins too, and then no trust is offered.
-    g.exec(
-        "UPDATE sender SET decided_by = 'person' WHERE address = 'ALERTS@paypa1.com'",
-        [],
-    );
-    let m = g.get("/api/messages/m-5").await;
+            "hostile",
+            "engine",
+            Some("near copy of paypal.com"),
+            offer(&upper),
+        ),
+        ("hostile", "person", None, Value::Null),
+        ("stranger", "engine", None, Value::Null),
+        ("person", "engine", None, Value::Null),
+    ] {
+        set_upper(kind, by, basis);
+        assert_eq!(
+            mail(g.get("/api/messages/m-5").await),
+            (json!(kind), want_offer, json!(look)),
+            "{kind} {by}"
+        );
+    }
+    // Undo of the trusted row works: the engine marks it again, and the
+    // offer goes to the lowest hostile row. No Undo stays.
+    set_upper("hostile", "engine", Some("near copy of paypal.com"));
+    assert_eq!(g.answer(&look, "reopen").await.0, StatusCode::OK);
     assert_eq!(
-        (m["sender_kind"].as_str(), &m["near_copy"]),
-        (Some("hostile"), &Value::Null)
+        mail(g.get("/api/messages/m-5").await),
+        (json!("hostile"), offer(&look), Value::Null)
     );
 }

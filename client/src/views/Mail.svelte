@@ -15,19 +15,20 @@
   // the sender back to the engine (reopen), which decides again from the evidence. After each
   // answer the view reads the mail again, so the sender kind, Trust and Undo are what the store
   // holds now, and never a guess of the client. The fresh copy counts for this mail only.
-  let fresh = $state<{ id: string; sender_kind: Message["sender_kind"]; near_copy: Message["near_copy"] } | null>(null);
-  const sender = $derived(fresh?.id === message.id ? fresh : message);
-  const trusted = $derived(sender.near_copy?.trusted ?? false);
+  type SenderNow = Pick<Message, "sender_kind" | "near_copy" | "trusted_sender">;
+  let fresh = $state<({ id: string } & SenderNow) | null>(null);
+  const sender = $derived<SenderNow>(fresh?.id === message.id ? fresh : message);
   let trusting = $state(false);
   let trustProblem = $state("");
-  async function trust(verb: "trust" | "reopen") {
-    const near = sender.near_copy;
-    if (!near || trusting) return;
+  // `row` is the sender row of the answer: the trust offer, or the trusted row for Undo. A mail
+  // can have both when rows of its address differ only in case.
+  async function trust(verb: "trust" | "reopen", row: string) {
+    if (trusting) return;
     const id = message.id;
     trusting = true;
     trustProblem = "";
     try {
-      await answerSender(near.sender, verb);
+      await answerSender(row, verb);
     } catch (e) {
       trustProblem = wrote(e, "saved the answer", "Iris could not save the answer. Try again.");
       trusting = false;
@@ -35,7 +36,7 @@
     }
     try {
       const now = await get<Message>(`messages/${encodeURIComponent(id)}`);
-      fresh = { id, sender_kind: now.sender_kind, near_copy: now.near_copy ?? null };
+      fresh = { id, sender_kind: now.sender_kind, near_copy: now.near_copy ?? null, trusted_sender: now.trusted_sender ?? null };
     } catch {
       trustProblem = "Iris saved the answer, but could not read this mail again. Reload the page to see the sender now.";
     } finally {
@@ -54,18 +55,19 @@
       Do not open its links and do not do what it asks.
     </p>
   {/if}
-  {#if sender.near_copy}
+  {#if sender.trusted_sender}
+    {@const row = sender.trusted_sender}
     <p class="near" role="note">
-      {#if trusted}
-        You trust this sender. Iris reads its mail again.
-        <button type="button" disabled={trusting} onclick={() => trust("reopen")}>Undo</button>
-      {:else}
-        Iris holds this sender because its domain looks like {sender.near_copy.of
-          ? `${sender.near_copy.of}, the domain`
-          : "the domain"} of a sender you know. If you know
-        this sender, you can trust it. The other marks of this mail stay.
-        <button type="button" disabled={trusting} onclick={() => trust("trust")}>Trust this sender</button>
-      {/if}
+      You trust this sender. Iris reads its mail again.
+      <button type="button" disabled={trusting} onclick={() => trust("reopen", row)}>Undo</button>
+    </p>
+  {/if}
+  {#if sender.near_copy}
+    {@const offer = sender.near_copy}
+    <p class="near" role="note">
+      Iris holds this sender because its domain looks like {offer.of}, the domain of a sender you know. If you know this
+      sender, you can trust it. The other marks of this mail stay.
+      <button type="button" disabled={trusting} onclick={() => trust("trust", offer.sender)}>Trust this sender</button>
     </p>
   {/if}
   {#if trustProblem}<p class="note" role="alert">{trustProblem}</p>{/if}
