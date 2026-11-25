@@ -456,3 +456,78 @@ test("a trust that Iris saved but cannot read again says so (issue #49)", async 
     view.destroy();
   }
 });
+
+// A fake engine for the release of one mail (issues 369, 373, 374): the answer of a release
+// is the mail with `released`, and the marks stay in `hostile` until the engine reads it again.
+function holder(start) {
+  let now = { released: [], ...start };
+  const asked = serve((path) => {
+    const verb = path.split("/")[2];
+    if (verb === "release") now = { ...now, released: now.hostile.filter((m) => ["dmarc", "spoof", "link"].includes(m)) };
+    if (verb === "unrelease") now = { ...now, released: [] };
+    return [200, { ...fx.message("m-55210"), sender_kind: "stranger", near_copy: null, trusted_sender: null, ...now }];
+  });
+  const message = { ...fx.message("m-55210"), sender_kind: "stranger", near_copy: null, trusted_sender: null, ...start };
+  return { asked, message };
+}
+
+test("Release takes a mail out of quarantine, and Undo puts it back (issues 369, 373, 374)", async () => {
+  const { asked, message } = holder({ hostile: ["link"] });
+  const view = await mount("/src/views/Mail.svelte", { message });
+  try {
+    assert.match(text(view.target), /looks hostile \(link\)/);
+    assert.match(text(view.target), /Iris holds this mail because of its checks \(link\)/);
+    assert.doesNotMatch(text(view.target), /The other marks stay/);
+    button(view, "Release this mail").click();
+    await until(() => text(view.target).includes("You released this mail (link)."));
+    assert.doesNotMatch(text(view.target), /looks hostile/);
+    assert.equal(button(view, "Release this mail"), undefined);
+    button(view, "Undo").click();
+    await until(() => button(view, "Release this mail"));
+    assert.match(text(view.target), /looks hostile \(link\)/);
+    assert.deepEqual(asked, [
+      ["POST", "messages/m-55210/release"],
+      ["POST", "messages/m-55210/unrelease"],
+    ]);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a released mail keeps Undo after a reload, and marks that Iris cannot release stay", async () => {
+  const { message } = holder({ hostile: ["link", "phishing"], released: ["link"] });
+  const view = await mount("/src/views/Mail.svelte", { message });
+  try {
+    assert.match(text(view.target), /You released this mail \(link\)\./);
+    assert.match(text(view.target), /looks hostile \(phishing\)/);
+    assert.equal(button(view, "Release this mail"), undefined);
+  } finally {
+    view.destroy();
+  }
+});
+
+for (const hostile of [["phishing"], ["spam"], []]) {
+  test(`a mail with the marks [${hostile}] has no Release`, async () => {
+    const { message } = holder({ hostile });
+    const view = await mount("/src/views/Mail.svelte", { message });
+    try {
+      assert.equal(button(view, "Release this mail"), undefined);
+    } finally {
+      view.destroy();
+    }
+  });
+}
+
+test("Release names the other marks, and a refusal of the engine shows its text", async () => {
+  serve(() => [409, { error: "Iris holds this mail for a reason that you cannot release here." }]);
+  const message = { ...fx.message("m-55210"), hostile: ["spoof", "spam"], sender_kind: "stranger", near_copy: null, trusted_sender: null };
+  const view = await mount("/src/views/Mail.svelte", { message });
+  try {
+    assert.match(text(view.target), /checks \(spoof\)\. .*The other marks stay\./);
+    button(view, "Release this mail").click();
+    await until(() => text(view.target).includes("you cannot release here"));
+    assert.ok(button(view, "Release this mail"));
+  } finally {
+    view.destroy();
+  }
+});

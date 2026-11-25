@@ -217,6 +217,8 @@ export type Message = Summary & {
   near_copy?: { sender: string; of: string } | null;
   /** The Undo of a trust: the sender row of this address that the person trusted (issue 1043). */
   trusted_sender?: string | null;
+  /** The hostile marks that the person released (issues 369, 373, 374): Undo ends the release. */
+  released?: string[];
   items: string[];
 };
 
@@ -751,6 +753,14 @@ export async function loadBrief(): Promise<Brief> {
  * Your answer to a sender: `accept`, `decline` (the screen says "Ignore") or `reopen` (undo) at
  * the stranger gate, or `trust` for a sender that only its look-alike domain makes hostile.
  */
+/** The hostile marks that the person can release: the checks of Iris. `spam`, `phishing` and a hostile sender stay. */
+export const RELEASABLE = ["dmarc", "spoof", "link"];
+
+/** Release a mail from quarantine, or end the release (`unrelease`). The answer is the mail. */
+export function releaseMessage(id: string, verb: "release" | "unrelease"): Promise<Message> {
+  return post<Message>(`messages/${encodeURIComponent(id)}/${verb}`, {});
+}
+
 export function answerSender(id: string, answer: "accept" | "decline" | "reopen" | "trust"): Promise<GateAnswer> {
   return post<GateAnswer>(`senders/${encodeURIComponent(id)}/${answer}`, {});
 }

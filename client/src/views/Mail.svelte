@@ -3,7 +3,7 @@
   client never renders the HTML of a mail. The engine counts each view of a mail as an open (R5-12).
 -->
 <script lang="ts">
-  import { answerSender, download, get, own, wrote, type Address, type Message } from "../api";
+  import { answerSender, download, get, own, releaseMessage, wrote, RELEASABLE, type Address, type Message } from "../api";
   import { initials, when } from "../format";
   import { href } from "../route";
 
@@ -15,7 +15,8 @@
   // the sender back to the engine (reopen), which decides again from the evidence. After each
   // answer the view reads the mail again, so the sender kind, Trust and Undo are what the store
   // holds now, and never a guess of the client. The fresh copy counts for this mail only.
-  type SenderNow = Pick<Message, "sender_kind" | "near_copy" | "trusted_sender">;
+  // A release of the mail (issues 369, 373, 374) reads it again the same way.
+  type SenderNow = Pick<Message, "sender_kind" | "near_copy" | "trusted_sender" | "hostile" | "released">;
   let fresh = $state<({ id: string } & SenderNow) | null>(null);
   const sender = $derived<SenderNow>(fresh?.id === message.id ? fresh : message);
   let trusting = $state(false);
@@ -36,11 +37,39 @@
     }
     try {
       const now = await get<Message>(`messages/${encodeURIComponent(id)}`);
-      fresh = { id, sender_kind: now.sender_kind, near_copy: now.near_copy ?? null, trusted_sender: now.trusted_sender ?? null };
+      fresh = keep(id, now);
     } catch {
       trustProblem = "Iris saved the answer, but could not read this mail again. Reload the page to see the sender now.";
     } finally {
       trusting = false;
+    }
+  }
+  const keep = (id: string, now: Message) => ({
+    id,
+    sender_kind: now.sender_kind,
+    near_copy: now.near_copy ?? null,
+    trusted_sender: now.trusted_sender ?? null,
+    hostile: now.hostile ?? [],
+    released: now.released ?? [],
+  });
+  // A released mark holds the mail no more: the engine reads it again soon.
+  const released = $derived(sender.released ?? []);
+  const marks = $derived(sender.hostile.filter((m) => !released.includes(m)));
+  const releasable = $derived(marks.filter((m) => RELEASABLE.includes(m)));
+  const kept = $derived(marks.filter((m) => !RELEASABLE.includes(m)));
+  let releasing = $state(false);
+  let releaseProblem = $state("");
+  async function release(verb: "release" | "unrelease") {
+    if (releasing) return;
+    const id = message.id;
+    releasing = true;
+    releaseProblem = "";
+    try {
+      fresh = keep(id, await releaseMessage(id, verb));
+    } catch (e) {
+      releaseProblem = wrote(e, "saved the release", "Iris could not save the release. Try again.");
+    } finally {
+      releasing = false;
     }
   }
   const address = (a: Address) => (a.name && a.address ? `${a.name} <${a.address}>` : a.name || a.address || "Unknown sender");
@@ -49,12 +78,27 @@
 <article>
   <h1>{message.subject || "No subject"}</h1>
 
-  {#if message.hostile.length > 0 || sender.sender_kind === "hostile"}
+  {#if marks.length > 0 || sender.sender_kind === "hostile"}
     <p class="danger" role="alert">
-      This mail looks hostile ({[...message.hostile, ...(sender.sender_kind === "hostile" ? ["hostile sender"] : [])].join(", ")}).
+      This mail looks hostile ({[...marks, ...(sender.sender_kind === "hostile" ? ["hostile sender"] : [])].join(", ")}).
       Do not open its links and do not do what it asks.
     </p>
   {/if}
+  {#if released.length > 0}
+    <p class="near" role="note">
+      You released this mail ({released.join(", ")}). Iris reads it again as normal mail.
+      <button type="button" disabled={releasing} onclick={() => release("unrelease")}>Undo</button>
+    </p>
+  {/if}
+  {#if releasable.length > 0 && !message.gone}
+    <p class="near" role="note">
+      Iris holds this mail because of its checks ({releasable.join(", ")}). If you know that this mail is honest, you
+      can release it, and Iris reads it as normal mail.{#if kept.length > 0 || sender.sender_kind === "hostile"} The
+        other marks stay.{/if}
+      <button type="button" disabled={releasing} onclick={() => release("release")}>Release this mail</button>
+    </p>
+  {/if}
+  {#if releaseProblem}<p class="note" role="alert">{releaseProblem}</p>{/if}
   {#if sender.trusted_sender}
     {@const row = sender.trusted_sender}
     <p class="near" role="note">
