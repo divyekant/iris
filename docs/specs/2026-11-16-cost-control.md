@@ -88,8 +88,9 @@ pay again for the same mail.
   sender walk mail with a text), so mail that waits for its first run
   costs nothing. Each walk reads at most 64 rows: rows that do not count
   (for example `SPAM` of the same sender) can make a walk longer, and then
-  the walk puts the thread in `talk_due`. Hostile mail records "-": no
-  context shaped it. And for each thread in
+  the walk puts the thread in `talk_due`. Hostile mail records "-": a new run of it calls no model, also after
+  a `phishing` answer of the model, which stays until a rebuild (spec 1).
+  So no change of the context can change its result. And for each thread in
   `talk_due` (a message that goes away, new content, a new or changed
   clean text or sender address, a message that moves to another thread
   or date, the start

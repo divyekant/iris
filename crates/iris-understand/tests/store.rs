@@ -3716,3 +3716,68 @@ fn a_known_party_that_the_budget_left_out_runs_nothing_again() {
     // m1 runs again: its own data holds the party.
     assert_eq!(runs_of_m2(&fake), before, "m2 does not run again");
 }
+
+/// Issue 1049, pre-review: mail that the model called phishing records
+/// "-". A new run of it calls no model, because the mark stays until a
+/// rebuild (spec 1), so a change of an earlier message runs nothing.
+#[test]
+fn mail_that_the_model_calls_phishing_calls_no_model_after_a_change() {
+    let b = store("context-phishing");
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let fake = Fake::with(&[r#"{"items": [], "phishing": false}"#, PHISHING]);
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m2);
+    assert_eq!(recorded, "-");
+    let calls = fake.calls.borrow().len();
+    // A new understood_at makes the next run of m2 a new run.
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET understood_at = NULL WHERE id = ?1",
+                [m2],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    drain(&b, &fake, &mut last);
+    assert_eq!(fake.calls.borrow().len(), calls, "no model call");
+    let marks: Option<String> = b.col("SELECT hostile FROM message WHERE id = ?1", m2);
+    assert_eq!(marks.as_deref(), Some(r#"["phishing"]"#));
+    let _ = m1;
+}
+
+/// Issue 1049, pre-review: the known parties follow the order of the runs,
+/// in which mail with no date comes first.
+#[test]
+fn known_parties_put_mail_with_no_date_first() {
+    let b = store("context-parties-nodate");
+    let m0 = b.add_in("0", "t", NOW - 3 * DAY, &context_mail(0), &["INBOX"]);
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET internal_date = NULL WHERE id = ?1",
+                [m0],
+            )?;
+            for (a, n) in [("x0@example.net", "Al"), ("x1@example.net", "Bea")] {
+                tx.execute(
+                    "INSERT INTO sender(address, name, kind, decided_by)
+                     VALUES (?1, ?2, 'person', 'person')
+                     ON CONFLICT(address) DO UPDATE SET name = ?2, kind = 'person',
+                       decided_by = 'person'",
+                    [a, n],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    // The dated message gets the party of the earlier mail with no date.
+    assert!(last[&m1].contains("Al <x0@example.net>"), "{}", last[&m1]);
+    // The mail with no date does not get the party of later mail.
+    assert!(!last[&m0].contains("Bea <x1@example.net>"), "{}", last[&m0]);
+}

@@ -765,7 +765,10 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
                 now_ms,
                 fixed_rules(&d),
                 if d.hostile {
-                    // Hostile mail reads no context and makes no item.
+                    // Hostile mail makes no item, and a new run of it calls
+                    // no model: the `phishing` answer of a model stays until
+                    // a rebuild (spec 1, section 6.7). So no context can
+                    // change its result.
                     Some("-".to_string())
                 } else {
                     context_key(tx, message, held.as_deref(), parties, false)?
@@ -1489,7 +1492,9 @@ fn known_parties(
                OR instr(',' || coalesce(h.to_addrs, '') || ',', ',' || s.address || ',') > 0
                OR instr(',' || coalesce(h.cc_addrs, '') || ',', ',' || s.address || ',') > 0)
              WHERE m.thread_id = ?1 AND m.gone_at IS NULL
-               AND (?3 IS NULL OR m.internal_date < ?3
+               -- The order of the runs: mail with no date first.
+               AND ((m.internal_date IS NULL AND (?3 IS NOT NULL OR m.id <= ?4))
+                    OR m.internal_date < ?3
                     OR (m.internal_date = ?3 AND m.id <= ?4))
              ORDER BY s.address LIMIT ?2",
         )?;
