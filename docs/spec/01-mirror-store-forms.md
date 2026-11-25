@@ -817,17 +817,21 @@ list of the name-address part of the mark `spoof` (decision D32):
   (U+FF20, U+FE6B) counts as `@`.
 - An address in the name is a word with one `@`, a local part that is not
   empty, and a domain with a dot and no empty label. Other words are text.
-- The owner of an address is its registrable domain by the public suffix
-  list, in punycode. A domain with a suffix that the list does not know has
-  its last label as the suffix. A domain that is only a public suffix (as
+- The owner of an address is its registrable domain, in punycode: the
+  public suffix and one label more. The public suffix is the longer of the
+  suffix of the public suffix list (with its private part, as `github.io`)
+  and a hosting suffix of the `HOSTED` list of `iris-senders` (as
+  `wordpress.com`). So `alice.wordpress.com` and `bob.wordpress.com` have
+  two owners. A domain with a suffix that the two lists do not know has its
+  last label as the suffix. A domain that is only a public suffix (as
   `co.uk`) is its own owner.
 - Failure modes and their results:
 
 | Input | Result |
 |---|---|
 | No word of the name is an address (for example `ceo at bank dot example`, `a@b`, `@bank.example`) | No mark from this rule. |
-| An address in the name has the owner of the `From` address, or is the `From` address | No mark from this rule. |
-| One address in the name has another owner, also next to an address with the same owner | The mark `spoof`. |
+| Each address in the name has the owner of the `From` address | No mark from this rule. |
+| At least one address in the name has another owner than the `From` address, also when other addresses in the name have the same owner | The mark `spoof`, unless the name has the word `via`. |
 | A word has two `@` (`a@b@c.example`) | Not an address. No mark from this word. |
 | A name with the word `via`, in any case | No mark from this rule, also when the name holds an address of another owner. |
 | No `From` address that Iris can read | No display name, so no mark from this rule. |
