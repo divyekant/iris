@@ -135,8 +135,17 @@ impl From<rusqlite::Error> for Error {
 /// releases it when the process ends, also after a crash.
 pub struct RunLock(#[allow(dead_code)] iris_store::FileLock);
 
-/// Takes the run lock, or gives [`Error::Busy`].
+/// Takes the run lock, or gives [`Error::Busy`]. While a caller of
+/// [`lock_wait`] waits, it gives [`Error::Busy`] too: the waiter gets the
+/// lock first (#279).
 pub fn lock(store: &Store) -> Result<RunLock, Error> {
+    if wanted(store) {
+        return Err(Error::Busy);
+    }
+    take(store)
+}
+
+fn take(store: &Store) -> Result<RunLock, Error> {
     match iris_store::FileLock::try_take(&store.dir().join(LOCK_FILE)) {
         Ok(Some(l)) => Ok(RunLock(l)),
         Ok(None) => Err(Error::Busy),
@@ -153,7 +162,7 @@ pub fn lock_wait(store: &Store, max: std::time::Duration) -> Result<RunLock, Err
     let start = std::time::Instant::now();
     let mut want = None;
     loop {
-        match lock(store) {
+        match take(store) {
             Err(Error::Busy) if start.elapsed() < max => {}
             r => return r,
         }
@@ -165,9 +174,11 @@ pub fn lock_wait(store: &Store, max: std::time::Duration) -> Result<RunLock, Err
     }
 }
 
-/// True while a caller of [`lock_wait`] waits. An error of the probe reads
-/// as no waiter: the run goes on.
-fn wanted(store: &Store) -> bool {
+/// True while a caller of [`lock_wait`] waits. Each holder of the run lock
+/// that works in a loop (a run, the nudge and summary steps of the engine)
+/// stops before its next unit of work. An error of the probe reads as no
+/// waiter: the holder goes on.
+pub fn wanted(store: &Store) -> bool {
     matches!(
         iris_store::FileLock::probe(&store.dir().join(WANT_FILE)),
         Ok(iris_store::Probe::Held)
@@ -398,6 +409,10 @@ fn run_messages(
         )?;
         Ok(())
     })?;
+    // Each scan stops for a waiter and leaves its rows (#279).
+    if wanted(store) {
+        return Ok(Stop::Yield);
+    }
     // Step 2 before step 3: the refresh needs no model, so a model that
     // cannot be made does not keep stale items of a changed sender. Its
     // resets come before the main pass, which sees them.
@@ -406,6 +421,9 @@ fn run_messages(
     // model, so a model that cannot be made does not hold it back either.
     let left = limits.max_messages.map(|n| n.saturating_sub(done));
     let done = done + fixed_check(store, now_ms, run, left)?;
+    if wanted(store) {
+        return Ok(Stop::Yield);
+    }
     let inner: Box<dyn Model> = match row {
         Some(r) if calls => connect(r).map_err(Error::Connect)?,
         _ => Box::new(NoModel),

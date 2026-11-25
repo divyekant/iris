@@ -596,6 +596,43 @@ fn a_run_yields_to_a_waiter_before_its_next_message() {
     );
 }
 
+/// While a caller waits (it holds the want lock), no new holder takes the
+/// run lock with `batch::lock`, and the link and fixed scans stop before
+/// their next row and leave the rest of the queue (#279).
+#[test]
+fn a_waiter_gets_the_lock_first_and_stops_the_scans() {
+    let b = store("want");
+    b.model(false, None);
+    let m = b.add("1", "a", 2, &["INBOX"]);
+    b.add("2", "b", 1, &["INBOX"]);
+    b.store
+        .write(|tx| Ok(tx.execute("INSERT INTO fixed_due(message_id) VALUES (?1)", [m])?))
+        .unwrap();
+    let links = b.col("SELECT count(*) FROM link_check").unwrap();
+    assert!(links > 0, "new mail waits for its link check");
+    let want = iris_store::FileLock::try_take(&b.store.dir().join(batch::WANT_FILE))
+        .unwrap()
+        .unwrap();
+    assert!(matches!(batch::lock(&b.store), Err(Error::Busy)));
+    assert!(matches!(b.run(&Limits::default()), Err(Error::Busy)));
+    assert_eq!(b.script.calls(), 0);
+    assert_eq!(
+        iris_understand::store::recheck_links(&b.store, NOW, None).unwrap(),
+        0
+    );
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(links));
+    assert_eq!(
+        iris_understand::store::recheck_fixed(&b.store, NOW, None).unwrap(),
+        0
+    );
+    assert_eq!(b.col("SELECT count(*) FROM fixed_due"), Some(1));
+    drop(want);
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.stop.as_deref(), Some("done"));
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(0));
+    assert_eq!(b.col("SELECT count(*) FROM fixed_due"), Some(0));
+}
+
 /// With no run, [`batch::lock_wait`] takes the lock at once. A holder that
 /// does not let go gives `Busy` after the wait.
 #[test]

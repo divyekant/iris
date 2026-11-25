@@ -154,6 +154,11 @@ pub fn recheck_links(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Resu
         };
         after = last;
         for (row, id) in rows {
+            // A draft or a question waits for the run lock: the rest of
+            // the queue waits for the next run (#279).
+            if crate::batch::wanted(store) {
+                return Ok(marked);
+            }
             // The row ID first: a trigger that queues the message again
             // after this read gives it a new row, which this check keeps.
             let Some(read) = link_read(store, id) else {
@@ -215,6 +220,11 @@ pub fn recheck_fixed(store: &Store, now_ms: i64, max: Option<u64>) -> Result<u64
         };
         after = last;
         for (row, id) in rows {
+            // A draft or a question waits for the run lock: the rest of
+            // the queue waits for the next run (#279).
+            if crate::batch::wanted(store) {
+                return Ok(done);
+            }
             let start = store.read(|c| Ok(state(c, id, true)?))?;
             // A file that Iris cannot read now keeps the row for the next run.
             let Ok(differs) = fixed_differs(store, id, now_ms) else {

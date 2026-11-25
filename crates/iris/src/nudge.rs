@@ -50,6 +50,10 @@ pub fn step(store: &Store, connect: Connect, now_ms: i64) -> Result<usize, Strin
     let mut saved = 0;
     let mut calls = 0;
     for l in late {
+        // A draft or a question of the person waits for the lock (#279).
+        if batch::wanted(store) {
+            break;
+        }
         // A nudge can make two calls (a call and the retry of an invalid
         // answer). With less room in the turn, the thread waits for the
         // next step, so its retry is not lost.
@@ -421,6 +425,60 @@ mod tests {
         assert_eq!(step(&store, &connect, late), Ok(0));
         drop(lock);
         assert_eq!(calls.get(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A draft or a question that waits for the lock (#279): the step stops
+    /// before its next thread, and takes no lock while the waiter waits.
+    #[test]
+    fn a_step_stops_for_a_waiter_and_does_not_start_while_it_waits() {
+        type Want = Rc<std::cell::RefCell<Option<iris_store::FileLock>>>;
+        struct Grab(Fake, Want, std::path::PathBuf);
+        impl Model for Grab {
+            fn name(&self) -> &str {
+                self.0.name()
+            }
+            fn request_bytes(&self, i: &str, d: &str) -> u64 {
+                self.0.request_bytes(i, d)
+            }
+            fn ask(&self, i: &str, d: &str) -> Result<Reply, iris_model::Error> {
+                // A waiter comes during the first call.
+                self.1.borrow_mut().get_or_insert_with(|| {
+                    iris_store::FileLock::try_take(&self.2).unwrap().unwrap()
+                });
+                self.0.ask(i, d)
+            }
+        }
+        let (store, dir) = open("want");
+        ask(&store, "t1", "Ana, can you send the slides?");
+        ask(&store, "t2", "Ana, can you send the deck?");
+        let calls = Rc::new(Cell::new(0));
+        let want: Want = Rc::default();
+        let path = dir.join(batch::WANT_FILE);
+        let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+            Ok(Box::new(Grab(
+                Fake(
+                    calls.clone(),
+                    r#"{"body": "Hi Ana, any news? D", "named": [1]}"#,
+                ),
+                want.clone(),
+                path.clone(),
+            )))
+        };
+        let late = 1_000 + iris_voice::LATE_AFTER_MS;
+        store
+            .write(|tx| {
+                tx.execute("UPDATE model_setting SET budget_micro_usd = 1000000", [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(step(&store, &connect, late), Ok(1));
+        assert_eq!(calls.get(), 1, "the second thread waits");
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!(calls.get(), 1, "no lock while the waiter waits");
+        drop(want.borrow_mut().take());
+        assert_eq!(step(&store, &connect, late), Ok(1));
+        assert_eq!(calls.get(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
