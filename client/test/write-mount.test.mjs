@@ -276,6 +276,50 @@ test("a reply opens under the conversation, names its recipients and names the p
   }
 });
 
+test("Reply to all copies the other people of the parent, once, and only when the person asks (issue #455)", async () => {
+  const net = serve(() => [201, { write: "cs-5" }]);
+  const all = ["sam@okafor.example", "Ana@Example.com"];
+  const app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: { ...REPLY, all } }, every: 20 });
+  try {
+    const button = () => [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Reply to all");
+    assert.doesNotMatch(text(app.target.querySelector(".who")), /copy to/, "a reply goes to the sender only by default");
+    button().click();
+    app.flushSync();
+    assert.match(text(app.target.querySelector(".who")), /Reply to Priya Shah, copy to sam@okafor\.example, Ana@Example\.com/);
+    assert.equal(button(), undefined, "each one is in the copy now");
+    // Change shows them as copy chips; a removed one brings the button back.
+    [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Change").click();
+    app.flushSync();
+    [...app.target.querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === "Remove sam@okafor.example").click();
+    app.flushSync();
+    button().click();
+    app.flushSync();
+    type(app.target.querySelector("textarea"), "Yes.\n");
+    app.flushSync();
+    press(app);
+    await until(() => net.posts().length > 0);
+    const [post] = net.posts();
+    assert.deepEqual(post.body.to, ["priya@example.com"]);
+    assert.deepEqual(post.body.cc, ["Ana@Example.com", "sam@okafor.example"]);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("a reply with no other people shows no Reply to all", async () => {
+  const net = serve(() => [201, { write: "cs-5" }]);
+  for (const reply of [REPLY, { ...REPLY, all: [] }, { ...REPLY, all: ["PRIYA@example.com"] }]) {
+    const app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply }, every: 20 });
+    try {
+      assert.equal([...app.target.querySelectorAll("button")].find((b) => b.textContent === "Reply to all"), undefined);
+    } finally {
+      app.destroy();
+    }
+  }
+  net.restore();
+});
+
 test("Change opens the recipients of a reply as chips", async () => {
   const net = serve(() => [201, { write: "cs-5" }]);
   const app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });

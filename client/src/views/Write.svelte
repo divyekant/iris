@@ -470,6 +470,15 @@
     return m?.from.name || a;
   };
   const named = $derived(to.map(name).join(", "));
+  // Reply all is a choice (issue #455): the others of the parent that the form does not have yet.
+  const others = $derived.by(() => {
+    const have = new Set([...to, ...cc, ...bcc].map((a) => a.toLowerCase()));
+    return (reply?.all ?? []).filter((a) => !have.has(a.toLowerCase()));
+  });
+  function replyAll() {
+    cc = unique([...cc, ...others]);
+    copy = true;
+  }
   const last = $derived(reply ? reply.conversation.length - 1 : -1);
 
   // After a reload: show the write that the engine took, and follow its state.
@@ -580,7 +589,7 @@
     {/if}
     <!-- Each address that Send can send shows in the form: open address text opens the fields. -->
     {#if reply && !editing && to.some(valid) && !toText && !ccText && !bccText}
-      <p class="who">Reply to <strong>{named}</strong>{#if cc.length}<span class="faint">, copy to {cc.join(", ")}</span>{/if}{#if bcc.length}<span class="faint">, Bcc {bcc.join(", ")}</span>{/if}<button type="button" class="end" onclick={() => (editing = true)}>Change</button></p>
+      <p class="who">Reply to <strong>{named}</strong>{#if cc.length}<span class="faint">, copy to {cc.join(", ")}</span>{/if}{#if bcc.length}<span class="faint">, Bcc {bcc.join(", ")}</span>{/if}{#if others.length}<button type="button" class="end" title={`Copy to ${others.join(", ")}`} onclick={replyAll}>Reply to all</button>{/if}<button type="button" class="end" onclick={() => (editing = true)}>Change</button></p>
     {:else}
       {#each [["to", "To"], ["cc", "Copy"], ["bcc", "Bcc"]] as const as [field, label] (field)}
         {#if field === "to" || (field === "cc" ? copy || cc.length > 0 || ccText !== "" : blind || bcc.length > 0 || bccText !== "")}
@@ -599,6 +608,7 @@
               <input id="write-bcc" type="text" autocomplete="off" bind:value={bccText} oninput={() => typed("bcc")} onkeydown={(e) => keydown("bcc", e)} onblur={() => typed("bcc", true)} />
             {/if}
             {#if field === "to"}
+              {#if others.length}<button type="button" class="end" title={`Copy to ${others.join(", ")}`} onclick={replyAll}>Reply to all</button>{/if}
               {#if !copy && cc.length === 0 && ccText === ""}<button type="button" class="end" onclick={() => (copy = true)}>Add copy</button>{/if}
               {#if !blind && bcc.length === 0 && bccText === ""}<button type="button" class="end" onclick={() => (blind = true)}>Add Bcc</button>{/if}
             {/if}

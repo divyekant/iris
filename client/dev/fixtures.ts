@@ -702,6 +702,7 @@ const replyStart: ReplyStart = {
   parent: { id: "m-55212", from: { name: "Priya Raman", address: "priya@northwind.example" }, date: "2026-11-17T09:12:00Z", text: "Thanks. Could you also add the Q3 numbers next to them?" },
   to: ["priya@northwind.example"],
   cc: [],
+  all: ["sam@northwind.example", "lena@northwind.example"],
   subject: "Re: Q4 numbers for the board",
   topic: "Re: Q4 numbers for the board",
   conversation: [
