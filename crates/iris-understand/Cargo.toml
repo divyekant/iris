@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+idna = "=1.1.0"
 idna_adapter = "=1.1.0"
 iris-clean = { version = "0.0.0", path = "../iris-clean" }
 iris-model = { version = "0.0.0", path = "../iris-model" }
@@ -20,6 +21,7 @@ rusqlite = "=0.43.0"
 serde_json = "1"
 url = "=2.5.4"
 unicode-normalization = "=0.1.26"
+unicode-general-category = "=1.1.0"
 
 [dev-dependencies]
 iris-eval = { version = "0.0.0", path = "../iris-eval" }

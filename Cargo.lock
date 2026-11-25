@@ -1248,6 +1248,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-summary"
+version = "0.0.0"
+dependencies = [
+ "iris-model",
+ "iris-store",
+ "iris-understand",
+ "iris-voice",
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
 name = "iris-sync"
 version = "0.0.0"
 dependencies = [
@@ -1296,6 +1308,7 @@ dependencies = [
 name = "iris-understand"
 version = "0.0.0"
 dependencies = [
+ "idna",
  "idna_adapter",
  "iris-clean",
  "iris-eval",
@@ -1307,6 +1320,7 @@ dependencies = [
  "jsonschema",
  "rusqlite",
  "serde_json",
+ "unicode-general-category",
  "unicode-normalization",
  "url",
 ]
