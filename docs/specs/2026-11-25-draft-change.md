@@ -217,9 +217,12 @@ differences:
   undo, by row ID) can be undone. An entry with a later entry of the
   same draft that counts is final. A later entry counts when it is in
   `writing`, when it is `applied` or `undone` and made a provider call,
-  or when it is a `failed` send whose `ledger_send` claim stays (its
-  result is not known). A no-op entry (section 2, step 3) and a
-  definitely rejected entry do not count. So the change A to B stays
+  or when it is `failed` after its provider call started with a result
+  that is not known: a change or an undo that recovery failed (section
+  4), or a send whose `ledger_send` claim stays. A no-op entry (section
+  2, step 3) and an entry that the provider definitely rejected do not
+  count. So after A to B, then B to C with a lost answer and an edit of
+  the person back to B, the undo of A to B is a 409. So the change A to B stays
   the newest entry after a press of Send with B again, and after a send
   that Gmail refused. So for the changes A to B, B to C and C to B, the
   first entry cannot undo the last B. The hash check alone cannot show
