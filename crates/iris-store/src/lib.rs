@@ -117,6 +117,7 @@ mod id;
 mod remove;
 mod search;
 mod secret;
+mod tokens;
 pub mod verify_log;
 mod watch;
 
@@ -139,6 +140,7 @@ pub use remove::{Deleted, STATE_REMOVED, STATE_REMOVING};
 pub const SYNC_STOPPED: &str = "stopped: the process ended before the sync ended";
 pub use id::{format_id, parse_id, Kind};
 pub use search::{day_ms, Query};
+pub use tokens::{index_tokens, Token};
 pub use watch::{Watch, SINCE_MARGIN_MS, TEXT_MAX, WAIT_MAX};
 
 /// The schema migrations, in order. Item `n` makes `PRAGMA user_version` `n + 1`.
