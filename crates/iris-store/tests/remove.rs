@@ -266,6 +266,87 @@ fn a_removed_account_gets_no_new_mail() {
     assert_eq!(rows(&store, a), 0);
 }
 
+/// Issue 910: a sync that kept the account ID writes no sync row and no
+/// account column to a tombstone, in state `removing` and `removed`. Only
+/// the end of the delete and the new address of a removed tombstone change it.
+#[test]
+fn a_tombstone_takes_no_sync_write() {
+    let dir = TempDir::new("tombstone");
+    let store = Store::open(&dir.0).unwrap();
+    let (a, _) = two(&store);
+    store.remove_account("a@example.org", NOW).unwrap();
+    let writes = [
+        "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'sync', 1)",
+        "INSERT INTO sync_seen(account_id, message_id, labels) VALUES (?1, 'x', '')",
+        "UPDATE account SET sync_kind = 'full', sync_start = 'h', sync_step = 1 WHERE id = ?1",
+        "UPDATE account SET sync_step = 2 WHERE id = ?1",
+        "UPDATE account SET history_id = '9' WHERE id = ?1",
+        "UPDATE account SET token = x'00' WHERE id = ?1",
+        "UPDATE account SET state = 'needs_sign_in' WHERE id = ?1",
+        "UPDATE account SET state = NULL WHERE id = ?1",
+        "UPDATE account SET categories_off_at = 1 WHERE id = ?1",
+    ];
+    let refused = |store: &Store| {
+        for sql in writes {
+            let r = store.write(|tx| Ok(tx.execute(sql, [a])?));
+            assert!(r.is_err(), "a tombstone took: {sql}");
+        }
+    };
+    refused(&store);
+    store
+        .delete_removed(None, &mut none, &mut |_| Ok(()))
+        .unwrap();
+    assert_eq!(state(&store, a).as_deref(), Some(STATE_REMOVED));
+    refused(&store);
+    assert_eq!(
+        n(
+            &store,
+            "SELECT count(*) FROM sync_log WHERE account_id = ?1",
+            a
+        ),
+        0
+    );
+    // The same address again renames the tombstone.
+    store
+        .save_account_secret("gmail", "a@example.org", None, b"sealed", "ok")
+        .unwrap();
+    assert_eq!(state(&store, a).as_deref(), Some(STATE_REMOVED));
+}
+
+/// The update trigger of migration 56 names each account column that the
+/// removal sets to NULL. A new column must join the trigger.
+#[test]
+fn the_tombstone_trigger_names_each_account_column() {
+    let dir = TempDir::new("tombstone-columns");
+    drop(Store::open(&dir.0).unwrap());
+    let c = Connection::open(dir.0.join("iris.db")).unwrap();
+    let sql: String = c
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'removed_account_update'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let mut q = c
+        .prepare(
+            "SELECT name FROM pragma_table_info('account')
+             WHERE name NOT IN ('id', 'provider', 'address', 'state')",
+        )
+        .unwrap();
+    let cols: Vec<String> = q
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(!cols.is_empty());
+    for col in cols {
+        assert!(
+            sql.contains(&format!("NEW.{col} IS NOT NULL")),
+            "account column {col} is not in the trigger removed_account_update"
+        );
+    }
+}
+
 #[test]
 fn the_removal_refuses_an_unknown_or_removed_account() {
     let dir = TempDir::new("refuse");
