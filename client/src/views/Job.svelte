@@ -5,7 +5,7 @@
   shows as text only.
 -->
 <script lang="ts">
-  import { get, own, type JobDetail } from "../api";
+  import { own, type JobDetail } from "../api";
   import { agent, asker, clock, day, due, editJob, endJob, loadJob, now, sameDue, steps, waitMail } from "../jobs";
   import AnswerForm from "./AnswerForm.svelte";
   import Grants from "./Grants.svelte";
@@ -16,6 +16,16 @@
   let { detail: first, every = 5000 }: { detail: JobDetail; every?: number } = $props();
   // svelte-ignore state_referenced_locally
   let detail = $state(first);
+  // Each read and each write of the job takes a number at its start. Its job applies only if no
+  // request that started later applied first, so a late answer never puts back an older job (issue 322).
+  let started = 0;
+  let applied = 0;
+  const take = (n: number, d: JobDetail) => n > applied && ((applied = n), (detail = d), true);
+  // Read the job again and show it, if no newer request applied first. It throws if the read fails.
+  const reload = async () => {
+    const n = ++started;
+    take(n, await loadJob(detail.job.id));
+  };
   // A failed read counts here, so the next read is planned again.
   let misses = $state(0);
   // While the job works, its session can start, fail or end at any time, also
@@ -23,17 +33,11 @@
   $effect(() => {
     void misses;
     if (detail.job.state !== "working") return;
-    const id = detail.job.id;
     let live = true;
     const timer = setTimeout(() => {
-      get<JobDetail>(`jobs/${encodeURIComponent(id)}`).then(
-        (d) => {
-          if (live) detail = d;
-        },
-        () => {
-          if (live) misses++;
-        },
-      );
+      reload().catch(() => {
+        if (live) misses++;
+      });
     }, every);
     return () => {
       live = false;
@@ -51,15 +55,16 @@
 
   let editing = $state(false);
   async function save(goal: string, dueAt: string | null): Promise<string> {
+    const n = ++started;
     try {
-      detail = await editJob(job.id, goal, dueAt);
+      take(n, await editJob(job.id, goal, dueAt));
       editing = false;
       return "";
     } catch (e) {
       // The edit can have arrived (a lost answer, or a failed read after it): show the job as the engine has it.
       const fresh = await loadJob(job.id).catch(() => null);
       if (fresh) {
-        detail = fresh;
+        take(++started, fresh);
         if (fresh.job.goal === goal && sameDue(fresh.job.due, dueAt)) {
           editing = false;
           return "";
@@ -73,26 +78,27 @@
   let ending = $state(false);
   let endBusy = $state(false);
   let endError = $state("");
-  const reload = () => loadJob(job.id).then((d) => (detail = d));
   async function end(kind: "complete" | "cancel") {
+    const n = ++started;
     endBusy = true;
     endError = "";
     try {
-      detail = await endJob(job.id, kind);
-      ending = false;
+      take(n, await endJob(job.id, kind));
     } catch (e) {
       const status = (e as { status?: number }).status;
-      if (status !== undefined && status !== 409) endError = own(e) || (e as Error).message;
-      else {
-        // No answer, or a conflict (the job ended already): the engine knows. Show the job as it has it.
-        await reload().catch(() => {});
-        if (detail.job.state === "done") ending = false;
-        else endError = "Iris does not know if the job ended. Try again, or open the job again later.";
-      }
+      // A refusal (4xx, not a conflict) wrote nothing. Any other failure can come after the end: no answer,
+      // a body that the client cannot read, a 5xx, or a 409 because the job ended already. Read the job again.
+      if (status !== undefined && status >= 400 && status < 500 && status !== 409) endError = own(e) || (e as Error).message;
+      else await reload().catch(() => {});
     } finally {
       endBusy = false;
     }
+    if (detail.job.state === "done") ending = false;
+    else endError ||= "Iris does not know if the job ended. Try again, or open the job again later.";
   }
+
+  // The answer of the question. Its number is taken when the person sends it.
+  let asked = 0;
 </script>
 
 <p class="eyebrow">Job</p>
@@ -129,8 +135,10 @@
     {#key job.updated}
       <AnswerForm
         {job}
-        onanswered={(_, d) => (detail = d)}
+        onsend={() => (asked = ++started)}
+        onanswered={(_, d) => take(asked, d)}
         onchanged={() => reload().catch(() => {})}
+        onunknown={() => reload().catch(() => {})}
         lost="Iris does not know if your answer arrived. Open the job again to see."
       />
     {/key}

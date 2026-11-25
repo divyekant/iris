@@ -110,3 +110,76 @@ test("a done job has no End", async () => {
   assert.ok(!button(view, "End"));
   view.destroy();
 });
+
+test("an answer or an end whose job document is lost or fails reads the job again (pre-review)", async () => {
+  // The answer commits, but its body does not parse: the page reads the job and shows it.
+  const d = structuredClone(fx.jobDetails["j-14"]);
+  const on = { ...d, job: { ...d.job, state: "working", question: undefined } };
+  globalThis.fetch = async (url, init) => {
+    const path = String(url).replace(/^\/api\//, "");
+    if (path === "policy") return new Response(JSON.stringify(fx.answer("/policy")), { status: 200, headers: { "content-type": "application/json" } });
+    if (init?.method === "POST") return new Response("{\"job\":", { status: 200, headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify(on), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  let view = await mount("/src/views/Job.svelte", { detail: d, every: 60_000 });
+  try {
+    const field = view.target.querySelector("[aria-label=Now] textarea");
+    field.value = "Yes.";
+    field.dispatchEvent(new window.Event("input", { bubbles: true }));
+    view.flushSync();
+    view.target.querySelector("[aria-label=Now] form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    await until(() => !view.target.querySelector("[aria-label=Now] textarea"));
+    assert.match(text(view.target.querySelector("[aria-label=Now]")), /works on it|No agent/);
+  } finally {
+    view.destroy();
+  }
+  // The end commits, then the engine fails (500): the page reads the job and shows it done.
+  const w = structuredClone(fx.jobDetails["j-12"]);
+  const done = { ...w, job: { ...w.job, state: "done", end: "complete", wait: undefined } };
+  for (const answer of [[500, { error: "The engine answered 500." }], [200, null]]) {
+    const asked = serve((method) => (method === "POST" ? answer : [200, done]));
+    view = await mount("/src/views/Job.svelte", { detail: w, every: 60_000 });
+    try {
+      button(view, "End").click();
+      view.flushSync();
+      button(view, "Mark as done").click();
+      await until(() => !button(view, "End"));
+      assert.deepEqual(asked[1].slice(0, 2), ["GET", "jobs/j-12"]);
+      assert.match(text(view.target.querySelector("[aria-label=Now]")), /Done/);
+    } finally {
+      view.destroy();
+    }
+  }
+});
+
+test("a late answer response does not put back a job that a newer end replaced (pre-review)", async () => {
+  const d = structuredClone(fx.jobDetails["j-14"]);
+  const on = { ...d, job: { ...d.job, state: "working", question: undefined } };
+  const done = { ...d, job: { ...d.job, state: "done", end: "cancel", question: undefined } };
+  let release;
+  const held = new Promise((r) => (release = r));
+  serve(async (method, path) => {
+    if (path === "jobs/j-14/answer") return await held, [200, on];
+    if (path === "jobs/j-14/finish") return [200, done];
+    return [200, done];
+  });
+  const view = await mount("/src/views/Job.svelte", { detail: d, every: 60_000 });
+  try {
+    const field = view.target.querySelector("[aria-label=Now] textarea");
+    field.value = "Yes.";
+    field.dispatchEvent(new window.Event("input", { bubbles: true }));
+    view.flushSync();
+    view.target.querySelector("[aria-label=Now] form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    button(view, "End").click();
+    view.flushSync();
+    button(view, "Cancel the job").click();
+    await until(() => !button(view, "End"));
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    view.flushSync();
+    assert.match(text(view.target.querySelector("[aria-label=Now]")), /Cancelled/);
+    assert.ok(!button(view, "End"), "the job stays done");
+  } finally {
+    view.destroy();
+  }
+});

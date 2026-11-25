@@ -13,6 +13,8 @@
     ondraft = () => {},
     onanswered,
     onchanged,
+    onsend = () => {},
+    onunknown = () => {},
     lost = "Iris does not know if your answer arrived. Open the job to see.",
   }: {
     job: Job;
@@ -20,6 +22,10 @@
     ondraft?: (text: string) => void;
     onanswered: (job: Job, detail: JobDetail) => void;
     onchanged: () => void;
+    /** Called when the answer request starts. */
+    onsend?: () => void;
+    /** Called when Iris does not know if the answer arrived. */
+    onunknown?: () => void;
     lost?: string;
   } = $props();
 
@@ -40,6 +46,7 @@
     busy = true;
     error = "";
     try {
+      onsend();
       onanswered(job, await answerJob(job, text));
     } catch (e) {
       const status = (e as { status?: number }).status;
@@ -47,9 +54,11 @@
         // Another tab answered, the agent asked again, or the person ended the job: the view loads the job again.
         error = "This job does not ask this question now.";
         onchanged();
-      } else if (status === undefined) {
-        // No answer: the engine can have stored it, so say that the result is not known, never the access text (issue 610).
+      } else if (status === undefined || status >= 500) {
+        // No answer, a body that the client cannot read, or a 5xx: the engine can have stored it, so say
+        // that the result is not known, never the access text (issue 610).
         error = lost;
+        onunknown();
       } else {
         error = own(e) || "Iris could not send your answer. Try again.";
       }

@@ -193,14 +193,25 @@ export async function editJob(id: string, goal: string, due: string | null): Pro
   return loadJob(id);
 }
 
-/** The job page of `id`, read again: for example after a change whose answer did not come. */
-/** End the job `id` (issue 322): `complete` (done) or `cancel`. The answer is the job, as `loadJob` gives it. */
-export function endJob(id: string, end: "complete" | "cancel"): Promise<JobDetail> {
-  return post<JobDetail>(`jobs/${encodeURIComponent(id)}/finish`, { end });
+/**
+ * A job document from the engine. A response with no job (a body that the client
+ * cannot read, for example a stream that stopped) is an error with no status, as a
+ * lost answer: a write before it can have committed.
+ */
+async function detailOf(answer: Promise<JobDetail | null>): Promise<JobDetail> {
+  const d = await answer;
+  if (!d || typeof d.job?.id !== "string") throw new Error("The engine gave no job.");
+  return d;
 }
 
+/** End the job `id` (issue 322): `complete` (done) or `cancel`. The answer is the job, as `loadJob` gives it. */
+export function endJob(id: string, end: "complete" | "cancel"): Promise<JobDetail> {
+  return detailOf(post<JobDetail>(`jobs/${encodeURIComponent(id)}/finish`, { end }));
+}
+
+/** The job page of `id`, read again: for example after a change whose answer did not come. */
 export function loadJob(id: string): Promise<JobDetail> {
-  return get<JobDetail>(`jobs/${encodeURIComponent(id)}`);
+  return detailOf(get<JobDetail>(`jobs/${encodeURIComponent(id)}`));
 }
 
 /** True when two due dates name the same instant, or both are empty. */
@@ -234,5 +245,5 @@ export async function loadQuestions(): Promise<Job[]> {
 /** Your answer to the question of a job (card R5-05). The engine starts a new session of the job with it. */
 export function answerJob(job: Pick<Job, "id" | "question" | "updated">, answer: string): Promise<JobDetail> {
   // The question and the time that the person saw: the engine refuses (409) an answer to an older question.
-  return post<JobDetail>(`jobs/${encodeURIComponent(job.id)}/answer`, { answer, question: job.question, updated: job.updated });
+  return detailOf(post<JobDetail>(`jobs/${encodeURIComponent(job.id)}/answer`, { answer, question: job.question, updated: job.updated }));
 }
