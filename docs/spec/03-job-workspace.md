@@ -145,6 +145,17 @@ The file has these lines, in this order:
    <fence>
    ```
 
+   Then, for each attachment of the message with text, these lines:
+
+   ```
+   <empty line>
+   Attachment: <name>
+   <empty line>
+   <fence>mail
+   <attachment text>
+   <fence>
+   ```
+
    - Each address is an address (section 2).
    - `From: <address>` has no name when the message has no display name.
      A display name that is empty or only spaces counts as no name.
@@ -155,8 +166,23 @@ The file has these lines, in this order:
    - `<text>` is the clean text of the message (specification 1, section
      4), with the white space at its end removed.
    - `<fence>` is a run of backticks. Its length is one more than the
-     longest run of backticks in `<text>`, and three or more. So no line of
-     the text can close the block (CommonMark).
+     longest run of backticks in the text of its block, and three or more.
+     So no line of the text can close the block (CommonMark). Each block
+     has its own fence.
+   - The attachments come from the raw message file, through the clean
+     text step (specification 1, section 7.2): the first 8 MiB of the file,
+     and at most 1,000,000 bytes of attachment text for the message in all.
+     An attachment has text when it is a plain-text file, an attached
+     message or a simple PDF, and its text is not empty or only white
+     space. The attachments are in the order of their MIME parts.
+   - `<name>` is the name of the attachment from the clean text step: the
+     file name of the part, or the subject of an attached message with no
+     file name. It has no control characters, at most 255 characters, and
+     no white space at its start or end. It is empty when the part has no
+     name.
+   - `<attachment text>` is the text of the attachment, with the white
+     space at its end removed.
+   - A message with no raw file has no attachment lines.
 
 Each line of the file ends with LF. The file ends with the LF after the last
 fence.

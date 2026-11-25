@@ -227,12 +227,13 @@ The forms `feed`, `signal` and
 The build reads nothing else from the mailbox.
 
 The thread file holds the clean body text of each message (`body.text`),
-not the text of its attachments. Understanding reads the attachment text
-from the raw message, and the store does not keep it, so a record from a
-PDF invoice can have facts that the workspace does not show. The agent
-sees the item file and the body. This is a known limit, with a GitHub
-issue: a later card adds the clean attachment text of the granted
-messages, with the same grant rules and a size limit.
+then the text of each attachment that has text (a plain-text file, an
+attached message or a simple PDF). The build reads the attachment text from
+the raw message file of each granted message, with `iris-clean`, as
+understanding does: at most the first 8 MiB of the file, and at most
+`iris_clean::ATTACHMENT_TEXT_LIMIT` (1,000,000) bytes of attachment text
+for each message. So a record from a PDF invoice shows the same facts in
+the workspace. A message with no raw file shows no attachment text.
 
 Each value in a file that the build writes comes from the granted
 messages, from the job and its scope, or is identity data. Identity data
@@ -361,6 +362,12 @@ Subject: Q4 numbers
 
 ```mail
 <clean text>
+```
+
+Attachment: invoice.pdf
+
+```mail
+<attachment text>
 ```
 ````
 
