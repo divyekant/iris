@@ -137,8 +137,12 @@ pub fn state(store: &Store) -> Result<(Active, FileState)> {
 
 fn state_now(store: &Store) -> Result<(Active, FileState)> {
     store.read(|conn| {
-        let active = active(conn)?;
-        let file = match check(conn, store.dir())? {
+        // One snapshot for the active policy and the removed rule IDs that
+        // `check` reads: each statement of the connection has its own
+        // snapshot otherwise, and a writer can commit between them.
+        let conn = conn.unchecked_transaction()?;
+        let active = active(&conn)?;
+        let file = match check(&conn, store.dir())? {
             Checked::Missing => FileState::Missing,
             Checked::Invalid(e) => FileState::Invalid(e),
             Checked::Ok(l) => {
