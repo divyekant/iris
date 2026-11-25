@@ -184,7 +184,10 @@ end of the order and does not stop the others.
 - `Item.svelte`: the page reads `GET /api/items/{id}/summary` and shows a
   box above the mail: "Summary by
   Iris" in muted text, the text, and one faint line: "From the mail up to
-  <date>. Read the mail for the exact words." A 404 shows nothing. The text
+  <date>. Read the mail for the exact words." The date is the date of the
+  message `based_on` (`GET /api/messages?ids=`), never `created`. With no
+  date, the line says "From the newest mail of the thread." Each new state
+  of the item reads the summary again. A 404 shows nothing. The text
   is a Svelte text node, never HTML.
 - A before/after page shows the brief line and the item page.
 

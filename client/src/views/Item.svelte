@@ -5,7 +5,7 @@
   the title (issue 478).
 -->
 <script lang="ts">
-  import { get, type Item, type ItemSummary } from "../api";
+  import { get, type Item, type ItemSummary, type Target } from "../api";
   import { watch } from "../clock";
   import { due, field, money, party, RECORD_FIELDS, when } from "../format";
   import { href } from "../route";
@@ -70,14 +70,29 @@
     return r;
   });
   // The summary of the long thread (issue 478). A 404 or a failure shows nothing.
+  // Each new state of the item (Done, Decline, a matter) is a new `item`, so the
+  // effect reads the summary again, and only the read of the item as it is now
+  // applies (`live`): an item that stops needing
+  // the person loses the summary. `upTo` is the date of the newest mail that the
+  // summary read (`based_on`), not the time when Iris wrote it.
   let summary: ItemSummary | null = $state(null);
+  let upTo: string | null = $state(null);
   $effect(() => {
     const id = item.id;
     let live = true;
     summary = null;
+    upTo = null;
     get<ItemSummary>(`items/${encodeURIComponent(id)}/summary`).then(
       (s) => {
-        if (live) summary = s;
+        if (!live) return;
+        summary = s;
+        get<{ messages: Target[] }>(`messages?ids=${encodeURIComponent(s.based_on)}`).then(
+          (m) => {
+            const first = m?.messages?.[0];
+            if (live && first && !first.gone) upTo = first.date;
+          },
+          () => {},
+        );
       },
       () => {},
     );
@@ -102,7 +117,7 @@
     <section class="summary" aria-label="Summary by Iris">
       <p class="by">Summary by Iris</p>
       <p class="text">{summary.text}</p>
-      <p class="limit">From the mail up to {when(summary.created)}. Read the mail for the exact words.</p>
+      <p class="limit">{upTo ? `From the mail up to ${when(upTo)}.` : "From the newest mail of the thread."} Read the mail for the exact words.</p>
     </section>
   {/if}
 
