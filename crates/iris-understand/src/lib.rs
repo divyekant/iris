@@ -369,12 +369,15 @@ pub fn analyze_cut(raw: &[u8], raw_cut: bool, html_after: bool, cx: &Context) ->
             }
         }
     }
+    // A header block past the read limit can hide the `From` field that a
+    // mail program shows, so Iris cannot check the sender (issue #1033).
     if !sent
         && !marks.contains(&Mark::Spoof)
-        && head
-            .from_name
-            .as_deref()
-            .is_some_and(|n| name_address_spoof(n, from))
+        && (head.cut
+            || head
+                .from_name
+                .as_deref()
+                .is_some_and(|n| name_address_spoof(n, from)))
     {
         marks.push(Mark::Spoof);
     }

@@ -181,16 +181,19 @@ def do_open(api: Api, root: Path) -> int:
     return 0
 
 
-def ci_state(api: Api, slug: str, sha: str) -> str:
-    runs = api("GET", f"repos/{slug}/commits/{sha}/check-runs?per_page=100").get("check_runs", [])
-    mine = [r for r in runs if r.get("name") == CI_CHECK]
+def ci_state(api: Api, slug: str, sha: str, number: int) -> str:
+    # RELEASE_TOKEN is a fine-grained token, and those cannot get the Checks permission.
+    # So read the runs of the `ci` workflow through the Actions API.
+    # Only a pull_request run of this release PR counts: a manual run (workflow_dispatch) of the
+    # same commit must not turn a red PR check green. The newest such run counts.
+    runs = api("GET", f"repos/{slug}/actions/runs?head_sha={sha}&event=pull_request&per_page=100").get("workflow_runs", [])
+    mine = [r for r in runs if r.get("name") == CI_CHECK and r.get("event") == "pull_request"
+            and number in [p.get("number") for p in r.get("pull_requests") or []]]
     if not mine:
         return "missing"
-    if any(r.get("status") != "completed" for r in mine):
+    if mine[0].get("status") != "completed":
         return "pending"
-    if all(r.get("conclusion") == "success" for r in mine):
-        return "success"
-    return "failure"
+    return "success" if mine[0].get("conclusion") == "success" else "failure"
 
 
 def publish(api: Api, slug: str, tag: str, sha: str, notes: str) -> None:
@@ -234,7 +237,7 @@ def do_check(api: Api, root: Path) -> int:
         return 0
     pr = api("GET", f"repos/{slug}/pulls/{prs[0]['number']}")
     head = pr["head"]["sha"]
-    state = ci_state(api, slug, head)
+    state = ci_state(api, slug, head, pr["number"])
     if state in ("pending", "missing"):
         print(f"release: PR #{pr['number']} waits for the `{CI_CHECK}` check ({state})")
         return 0

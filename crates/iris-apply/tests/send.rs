@@ -336,6 +336,88 @@ fn a_reply_goes_into_its_thread() {
     assert_eq!(thread_of, thread_provider);
 }
 
+/// The hostile evidence that the claim of a send kept (issue #472).
+fn hostile_before(b: &Box, action: i64) -> Option<i64> {
+    b.store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT hostile_before FROM ledger WHERE action_id = ?1",
+                [action],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap()
+}
+
+/// Issue #472: the claim of a send keeps the hostile evidence of its
+/// thread. A person may send after hostile mail; the record says so, and
+/// a later change of the mark does not change the record.
+#[test]
+fn the_send_claim_keeps_the_hostile_evidence() {
+    let b = setup("hostile-claim");
+    let (thread, parent) = b.thread();
+    // The parent is understood, as in a_reply_goes_into_its_thread, and
+    // its thread waits for no link check: no hostile evidence yet.
+    let provider: String = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT provider_id FROM message WHERE id = ?1",
+                [parent],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    let head = b.gmail.metadata(TOKEN, &provider, &["Subject"]).unwrap();
+    let subject = head.headers[0].value.clone();
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE header SET subject = ?1 WHERE message_id = ?2",
+                rusqlite::params![subject, parent],
+            )?;
+            Ok(tx.execute("DELETE FROM link_check", [])?)
+        })
+        .unwrap();
+    let a = b.approved(
+        Verb::Draft,
+        &format!("t-{thread}"),
+        json!({"to": ["priya@example.com"], "body": "Thanks."}),
+        0,
+    );
+    let applied = b.apply(a);
+    assert!(matches!(applied, Ok(Outcome::Applied(_))), "{applied:?}");
+    let (d, _) = b.draft(a);
+    let s = b.approved(Verb::Send, &d, json!({}), AGED);
+    // Hostile mail is in the thread at the claim.
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE message SET hostile = '[\"dmarc\"]' WHERE id = ?1",
+                [parent],
+            )?)
+        })
+        .unwrap();
+    match b.release(s) {
+        Ok(Outcome::Applied(_)) => {}
+        other => panic!("{other:?}"),
+    }
+    // The draft action has no evidence: only a send keeps it.
+    assert_eq!(hostile_before(&b, a), None);
+    assert_eq!(hostile_before(&b, s), Some(1));
+    b.store
+        .write(|tx| Ok(tx.execute("UPDATE message SET hostile = NULL", [])?))
+        .unwrap();
+    assert_eq!(hostile_before(&b, s), Some(1));
+    let refused = b.store.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE ledger SET hostile_before = 0 WHERE action_id = ?1",
+            [s],
+        )?)
+    });
+    assert!(refused.is_err(), "the record does not change");
+}
+
 fn sent_message_id(raw: &str) -> String {
     raw.lines()
         .find_map(|l| l.strip_prefix("Message-ID: "))
@@ -1588,7 +1670,6 @@ impl Box {
 
     /// As [`Box::changed`], from a new mail with the content `first`.
     fn changed_from(&self, first: Value, args: Value) -> (i64, String, String) {
-        iris_changeset::allow_draft_change(true);
         let a = self.approved(Verb::Draft, "a-1", first, 0);
         assert!(matches!(self.apply(a), Ok(Outcome::Applied(_))));
         let (d, provider) = self.draft(a);
@@ -1773,7 +1854,6 @@ fn a_lost_answer_is_recovered_with_one_call() {
 /// and stays in its thread.
 #[test]
 fn a_reply_change_stays_in_its_thread() {
-    iris_changeset::allow_draft_change(true);
     let b = setup("change-reply");
     let (thread, parent) = b.thread();
     // The parent is understood: the mirror has the subject of Gmail, so
@@ -1833,6 +1913,18 @@ fn a_reply_change_stays_in_its_thread() {
         })
         .unwrap();
     assert_eq!(at.message.thread_id, thread_provider);
+    // The undo of the reply change: the old text, in the same thread, with
+    // the same reply headers (change spec, section 3).
+    let undo = b.undo(change).unwrap();
+    let o = b.apply(undo);
+    assert!(matches!(o, Ok(Outcome::Applied(_))), "{o:?}");
+    let at = b.gmail.draft_raw(TOKEN, &provider).unwrap();
+    let back = String::from_utf8(at.raw.unwrap()).unwrap();
+    assert!(back.contains("Thanks.") && !back.contains("Thanks again."));
+    for name in ["subject", "in-reply-to"] {
+        assert_eq!(header(&back, name), header(&old, name), "{name}");
+    }
+    assert_eq!(at.message.thread_id, thread_provider);
 }
 
 /// A reply change answers the parent that its approval binds. A newer
@@ -1840,7 +1932,6 @@ fn a_reply_change_stays_in_its_thread() {
 /// answers the old message: no call (change spec, section 1).
 #[test]
 fn a_reply_change_after_a_new_mail_is_denied() {
-    iris_changeset::allow_draft_change(true);
     let b = setup("change-newer");
     let (thread, parent) = b.thread();
     let (provider, thread_provider, date): (String, String, i64) = b
@@ -2130,4 +2221,326 @@ fn a_mark_does_not_send_other_content() {
     let (state, why, _) = b.send_marks();
     assert_eq!(state, "denied");
     assert_eq!(why.as_deref(), Some(iris_changeset::DRAFT_CHANGED));
+}
+
+impl Box {
+    /// The row ID of the ledger entry of `action`.
+    fn ledger_of(&self, action: i64) -> i64 {
+        self.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT id FROM ledger WHERE action_id = ?1",
+                    [action],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    }
+
+    /// Start the undo of the entry of `action`, as the person does. Gives
+    /// the one action of the undo.
+    fn undo(&self, action: i64) -> iris_apply::Result<i64> {
+        let ids = iris_apply::undo(&self.store, self.ledger_of(action), now())?;
+        assert_eq!(ids.len(), 1);
+        Ok(ids[0])
+    }
+
+    /// True if the view `ledger_can_undo` lists the entry of `action`.
+    fn can_undo(&self, action: i64) -> bool {
+        let l = self.ledger_of(action);
+        self.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM ledger_can_undo WHERE ledger_id = ?1)",
+                    [l],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    }
+}
+
+fn other_text() -> Value {
+    json!({"to": ["priya@example.com"], "subject": "Q4 numbers", "body": "Other text.\n"})
+}
+
+/// The undo of a change (change spec, section 3): one `drafts.update` of
+/// the same draft back to the old text, with the `Date` of `pre`. The
+/// change entry is `undone`, and the entry of the undo has no undo.
+#[test]
+fn an_undo_puts_the_old_text_back() {
+    let b = setup("undo");
+    let (old_hash, _) = {
+        let (change, _, _) = b.changed(new_text());
+        let before = b.row();
+        assert!(matches!(b.apply(change), Ok(Outcome::Applied(_))));
+        assert!(b.can_undo(change));
+        let undo = b.undo(change).unwrap();
+        assert!(!b.can_undo(change), "an undo is open");
+        let creates = b.posts("/drafts");
+        let o = b.apply(undo);
+        assert!(matches!(o, Ok(Outcome::Applied(_))), "{o:?}");
+        assert_eq!(b.puts(), 2);
+        assert_eq!(b.posts("/drafts"), creates, "no new draft");
+        assert_eq!(b.entry(change).0, "undone");
+        assert_eq!(b.entry(undo), ("applied".into(), 1, "none".into(), None));
+        let (pre, ops): (String, String) =
+            b.store
+                .read(|c| {
+                    Ok(c.query_row(
+                    "SELECT (SELECT json_extract(pre, '$.date') FROM ledger WHERE action_id = ?1),
+                            (SELECT json_extract(ops, '$.date') FROM ledger WHERE action_id = ?2)",
+                    [change, undo],
+                    |r| Ok((r.get::<_, i64>(0)?.to_string(), r.get::<_, i64>(1)?.to_string())),
+                )?)
+                })
+                .unwrap();
+        assert_eq!(ops, pre, "the Date of the old draft");
+        assert!(b.undo(change).is_err(), "an undone entry has no undo");
+        before
+    };
+    assert_eq!(b.row().0, old_hash);
+    let (_, provider) = b.draft(1);
+    let raw = b.gmail.draft_raw(TOKEN, &provider).unwrap().raw.unwrap();
+    assert!(String::from_utf8_lossy(&raw).contains("Here."));
+}
+
+/// The person changed the draft in Gmail after the change: the undo is
+/// denied with no call, and the text of the person stays.
+#[test]
+fn an_undo_after_an_edit_at_gmail_is_denied() {
+    let b = setup("undo-gmail");
+    let (change, _, provider) = b.changed(new_text());
+    assert!(matches!(b.apply(change), Ok(Outcome::Applied(_))));
+    let undo = b.undo(change).unwrap();
+    let raw = b.gmail.draft_raw(TOKEN, &provider).unwrap().raw.unwrap();
+    let edited = String::from_utf8(raw)
+        .unwrap()
+        .replace("New text.", "Edited in Gmail.");
+    assert!(b.fake.edit_draft(&provider, edited.as_bytes()));
+    match b.apply(undo) {
+        Ok(Outcome::Denied(why)) => assert_eq!(why, iris_apply::CHANGE_CHANGED),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.puts(), 1);
+    assert_eq!(b.entry(change).0, "applied");
+    let raw = b.gmail.draft_raw(TOKEN, &provider).unwrap().raw.unwrap();
+    assert!(String::from_utf8_lossy(&raw).contains("Edited in Gmail."));
+}
+
+/// A file of the old text is gone: the undo is denied with no call.
+#[test]
+fn an_undo_needs_the_files_of_the_old_text() {
+    let b = setup("undo-file");
+    let file = b"the file".as_slice();
+    let sha = b.store.put_attachment(file).unwrap();
+    let mut m = mail();
+    m["attachments"] =
+        json!([{"name": "a.txt", "type": "text/plain", "sha256": sha, "size": file.len()}]);
+    let (change, _, _) = b.changed_from(m, new_text());
+    assert!(matches!(b.apply(change), Ok(Outcome::Applied(_))));
+    let undo = b.undo(change).unwrap();
+    std::fs::remove_file(b.store.attachment_path(&sha).unwrap()).unwrap();
+    match b.apply(undo) {
+        Ok(Outcome::Denied(why)) => assert_eq!(why, iris_apply::CHANGE_UNDO_FILE),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.puts(), 1);
+}
+
+/// Only the newest entry of a draft that counts has an undo (change spec,
+/// section 3). A rejected change and a no-op change do not count. A
+/// change that recovery failed counts.
+#[test]
+fn a_later_change_with_an_unknown_result_ends_the_undo() {
+    let b = setup("undo-later");
+    let (first, d, _) = b.changed(new_text());
+    assert!(matches!(b.apply(first), Ok(Outcome::Applied(_))));
+    let rejected = b.approved(Verb::Draft, &d, other_text(), 0);
+    b.fake.fail_next_write(&[400], false);
+    assert!(matches!(b.apply(rejected), Ok(Outcome::Failed { .. })));
+    let same = b.approved(Verb::Draft, &d, new_text(), 0);
+    assert!(matches!(b.apply(same), Ok(Outcome::Applied(_))));
+    assert_eq!(b.entry(same).1, 0, "a no-op");
+    assert!(b.can_undo(first));
+    let lost = b.approved(Verb::Draft, &d, other_text(), 0);
+    b.fake.fail_next_write(&[503], false);
+    match b.apply(lost) {
+        Ok(Outcome::Failed { error, .. }) => assert_eq!(error, iris_apply::CHANGE_UNKNOWN),
+        other => panic!("{other:?}"),
+    }
+    assert!(!b.can_undo(first));
+    match b.undo(first) {
+        Err(iris_apply::Error::Undo(why)) => assert_eq!(why, iris_apply::CHANGE_LATER),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The changes A to B, B to C and C to B: the hash at Gmail is the hash
+/// after the first change, but only the last change has an undo.
+#[test]
+fn only_the_newest_change_has_an_undo() {
+    let b = setup("undo-newest");
+    let (first, d, _) = b.changed(new_text());
+    assert!(matches!(b.apply(first), Ok(Outcome::Applied(_))));
+    for args in [other_text(), new_text()] {
+        let a = b.approved(Verb::Draft, &d, args, 0);
+        assert!(matches!(b.apply(a), Ok(Outcome::Applied(_))));
+    }
+    assert!(matches!(
+        b.undo(first),
+        Err(iris_apply::Error::Undo(why)) if why == iris_apply::CHANGE_LATER
+    ));
+    let last = b.ledger_of(first) + 2;
+    assert!(iris_apply::undo(&b.store, last, now()).is_ok());
+}
+
+/// The view `ledger_can_undo` names the two errors of an unknown result
+/// of a change and the age of a send mark (migration 60). A new value of
+/// either one must change the view too.
+#[test]
+fn the_undo_view_names_the_errors_of_an_unknown_result() {
+    let b = setup("undo-view");
+    let sql: String = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT sql FROM sqlite_schema WHERE name = 'ledger_can_undo'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    for why in [iris_apply::CHANGE_UNKNOWN, iris_apply::CHANGE_DURING] {
+        assert!(sql.contains(&format!("'{why}'")), "{why}");
+    }
+    // The age of a send mark with no send: MARK_MS.
+    assert!(sql.contains(&format!("- {}", iris_changeset::MARK_MS)));
+}
+
+/// Recovery after Gmail gave the changed draft a new ID, and the person
+/// then edited it (issue #1001): the one draft of the lookup has another
+/// hash. The entry fails, and the draft row takes the new ID and the text
+/// of the person, so later reads use the ID that Gmail has.
+#[test]
+fn recovery_keeps_the_new_id_of_an_edited_draft() {
+    let b = setup("change-new-id");
+    let (change, _, provider) = b.changed(new_text());
+    let (_, row_raw): (String, Vec<u8>) = b
+        .store
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT hash, raw FROM draft WHERE id = 1", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?,
+            )
+        })
+        .unwrap();
+    // The edit keeps the Message-ID of the row, so the lookup finds it.
+    let edited = String::from_utf8(row_raw)
+        .unwrap()
+        .replace("Here.", "Edited in Gmail.");
+    let fake = b.fake.clone();
+    b.fake.before_next_matching("PUT", move || {
+        fake.fail_next_write(&[503], true);
+        let f = fake.clone();
+        fake.before_next_matching("GET /gmail/v1/users/me/drafts/", move || {
+            assert!(f.rename_draft(&provider, "r-new"));
+            assert!(f.edit_draft("r-new", edited.as_bytes()));
+        });
+    });
+    match b.apply(change) {
+        Ok(Outcome::Failed { error, .. }) => assert_eq!(error, iris_apply::CHANGE_UNKNOWN),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.puts(), 1);
+    let (id, content): (String, String) = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT provider_id, content FROM draft WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(id, "r-new");
+    assert!(content.contains("Edited in Gmail."), "{content}");
+}
+
+/// The store refuses an undo link of a draft change entry whose arguments
+/// are not the content of `pre` (trigger `ledger_undo_insert`, migration
+/// 57), so no other path makes an undo that writes other text.
+#[test]
+fn the_store_refuses_an_undo_with_other_text() {
+    let b = setup("undo-link");
+    let (change, _, _) = b.changed(new_text());
+    assert!(matches!(b.apply(change), Ok(Outcome::Applied(_))));
+    let l = b.ledger_of(change);
+    let who = Author {
+        kind: AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    let cs = create(&b.store, &who, now()).unwrap();
+    let r = b.store.write(|tx| {
+        tx.execute(
+            "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args, why)
+             VALUES (?1, 1, 1, 'draft', ?2, ?3, 'Undo')",
+            params![
+                cs,
+                json!({"ledger": [format!("l-{l}")]}).to_string(),
+                other_text().to_string()
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO ledger_undo(action_id, ledger_id, step) VALUES (?1, ?2, 1)",
+            params![tx.last_insert_rowid(), l],
+        )?;
+        Ok(())
+    });
+    assert!(r.is_err(), "the link is refused");
+    assert!(b.undo(change).is_ok(), "the undo of the content of pre");
+}
+
+/// The view `ledger_can_undo` agrees with the undo: while a send of the
+/// draft waits (an approved send in its hold, before its claim, or the
+/// send mark of a press with no send yet), the view hides the undo, and
+/// the undo is refused.
+#[test]
+fn no_undo_while_a_send_of_the_draft_waits() {
+    for marked in [false, true] {
+        let b = setup(&format!("undo-send-{marked}"));
+        let (change, d, _) = b.changed(new_text());
+        if marked {
+            b.mark(change);
+        }
+        assert!(matches!(b.apply(change), Ok(Outcome::Applied(_))));
+        if !marked {
+            let send = b.approved(Verb::Send, &d, json!({}), 0);
+            assert_eq!(b.state(send), "approved");
+        }
+        assert!(!b.can_undo(change), "marked {marked}");
+        assert!(
+            matches!(b.undo(change), Err(iris_apply::Error::Undo(_))),
+            "marked {marked}"
+        );
+    }
+}
+
+/// A change of a draft of an account that Iris removes has no undo (issue
+/// 1014): the view hides it, and the undo is refused. Each path that the
+/// checks of a change guard (submit, the apply, the claim) refuses it too.
+#[test]
+fn no_undo_while_the_account_is_removed() {
+    let b = setup("undo-removed");
+    let (change, _, _) = b.changed(new_text());
+    assert!(matches!(b.apply(change), Ok(Outcome::Applied(_))));
+    b.sql(
+        "UPDATE account SET state = 'removing' WHERE id = ?1",
+        [b.account],
+    );
+    assert!(!b.can_undo(change));
+    assert!(matches!(b.undo(change), Err(iris_apply::Error::Undo(_))));
 }

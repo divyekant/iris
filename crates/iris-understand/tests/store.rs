@@ -1329,7 +1329,7 @@ fn the_upgrade_drops_the_items_of_a_draft_or_copy() {
     assert_eq!(b.items().len(), 2);
     b.store
         .write(|tx| {
-            tx.execute_batch("DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 41;")?;
+            tx.execute_batch("DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 41;")?;
             Ok(())
         })
         .unwrap();
@@ -2708,7 +2708,7 @@ Your one-time code is 918273. It ends in 10 minutes.
             "upgrade" => {
                 sql(
                     &b,
-                    "ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                    "DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                      ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
                 );
                 let Box_ {
@@ -2810,7 +2810,7 @@ Your one-time code is 918273. It ends in 10 minutes.
     b.store
         .write(|tx| {
             Ok(tx.execute_batch(
-                "ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                "DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                  ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
             )?)
         })
@@ -2886,7 +2886,7 @@ Your one-time code is 918273. It ends in 10 minutes.
     b.store
         .write(|tx| {
             Ok(tx.execute_batch(
-                "ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                "DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                  ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
             )?)
         })
@@ -2922,4 +2922,52 @@ Your one-time code is 918273. It ends in 10 minutes.
         b.col::<i64>("SELECT count(*) FROM fixed_due WHERE message_id = ?1", m),
         0
     );
+}
+
+/// Issue #1033: migration 61 queues the understood mail that can have a
+/// header past the read limit, and the fixed check gives it the mark
+/// `spoof` with no model call. Small mail is not queued.
+#[test]
+fn migration_61_gives_old_mail_with_a_cut_header_the_spoof_mark() {
+    use iris_understand::store::recheck_fixed;
+    let b = store("cut-header");
+    let fake = Fake::default();
+    let mut raw = String::from("To: owner@example.com\nSubject: Hi\nX-Pad: a\n");
+    while raw.len() < iris_understand::head::HEAD_LIMIT + 1_000 {
+        raw.push_str(&format!(" {}\n", "a".repeat(75)));
+    }
+    raw.push_str("From: \"ceo@bank.example\" <x@evil.example.net>\n\nPay now.\n");
+    let big = b.add("1", &raw, &["INBOX"]);
+    let small = b.add("2", FEED, &["INBOX"]);
+    for m in [big, small] {
+        understand(&b.store, m, &fake, NOW).unwrap();
+    }
+    let hostile = |id| b.col::<Option<String>>("SELECT hostile FROM message WHERE id = ?1", id);
+    assert!(hostile(big).unwrap_or_default().contains("spoof"));
+    // The state of an older version: understood, with no mark, and sizes.
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE message SET hostile = NULL WHERE id = ?1", [big])?;
+            tx.execute(
+                "UPDATE message SET size = ?2 WHERE id = ?1",
+                [big, raw.len() as i64 + 1_000],
+            )?;
+            tx.execute("UPDATE message SET size = 400 WHERE id = ?1", [small])?;
+            tx.execute("DELETE FROM fixed_due", [])?;
+            tx.execute_batch(include_str!("../../iris-store/src/schema_61.sql"))?;
+            Ok(())
+        })
+        .unwrap();
+    let queued = |id| {
+        b.col::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM fixed_due WHERE message_id = ?1)",
+            id,
+        )
+    };
+    assert!(queued(big));
+    assert!(!queued(small));
+    let calls = fake.calls.borrow().len();
+    assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
+    assert!(hostile(big).unwrap_or_default().contains("spoof"));
+    assert_eq!(fake.calls.borrow().len(), calls, "no model call");
 }
