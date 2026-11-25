@@ -790,6 +790,7 @@ or with a change of Iris state:
 | `undo` | `inverse` (the verb has an undo) or `none` (final, for example a sent message, or an action applied before the ledger). The column records the verb, and does not change. An undo is available now only if the entry is `applied` or `failed`, has `inverse`, and has a message with `done` that is not gone, or, for a state entry, an item in `post` and the IDs of its correction rows in `ops` (section 7.4), or, for a `draft` change entry, a `pre` and a draft that passes the undo checks of `docs/specs/2026-11-25-draft-change.md` section 3. A `draft` create and a no-op change have `none`. A state entry from before migration 26 has no such IDs, so it has no undo. The view `ledger_can_undo` (migration 23) lists these entries, and `iris_apply::undo` refuses each other entry. Else the ledger shows the entry as final, for example after Gmail deleted each message of a `trash` entry. |
 | `undone_by` | The ledger entry of the undo. |
 | `at` | The time. |
+| `hostile_before` | For a `send` only (migration 59): 1 if the thread of the draft had hostile evidence at the claim (`iris_changeset::hostile_evidence`: a message that may be hostile, a message of a `hostile` sender, or a gone message with no header), else 0. NULL for each other entry, and for a send claimed before migration 59. The trigger `ledger_hostile_before` keeps it fixed. The measure "sends without review after hostile mail" counts the applied sends with 1 that no person decided (issue #472). |
 
 The `ledger_message` table has one row for each message of the entry:
 
@@ -1200,6 +1201,12 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris draft <thread> <file>`, `iris send <draft>` | Adds write actions. `iris nudge <c-id>` is not built (decision D8, section 7.5). | both | 3 |
 | `iris write <t-id or m-id> [--intent <text>]` | Writes a draft of a reply in the voice of the owner with one model call, and one more call if the answer is not a valid draft and not a refusal (decision D7). It saves the draft in the store and prints it. It sends nothing and adds no action. It opens the store directly (section 8.1). | host | 3 |
 | `iris wait`, `iris ask` | Ends the session and waits, or asks the person. | session | 5 |
+
+Each form of `iris mirror` and `iris understand` (also `iris mirror verify`
+and `iris understand --estimate`) writes two more local changes before its
+exit, also after an error: the attention of each changed item (section 6.4),
+and the match of each watch whose mail came (`docs/specs/2026-11-16-watch.md`,
+issue #260).
 
 Without `--changeset`, a command that adds an action makes a new draft
 changeset, and prints its ID. Two callers in host mode look the same to the

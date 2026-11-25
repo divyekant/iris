@@ -150,7 +150,9 @@ impl Store {
                      OR EXISTS (SELECT 1 FROM action_item ai JOIN item i ON i.id = ai.item_id
                                 WHERE ai.action_id = changeset_action.id AND i.account_id = ?1)
                      OR EXISTS (SELECT 1 FROM action_draft ad JOIN draft d ON d.id = ad.draft_id
-                                WHERE ad.action_id = changeset_action.id AND d.account_id = ?1))",
+                                WHERE ad.action_id = changeset_action.id AND d.account_id = ?1)
+                     OR EXISTS (SELECT 1 FROM json_each(changeset_action.targets, '$.accounts')
+                                WHERE value = 'a-' || ?1))",
                 params![id, now],
             )?;
             // Before the items go: after that, no other row links a job to

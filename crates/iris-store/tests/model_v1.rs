@@ -103,7 +103,7 @@ fn each_stored_item_gets_model_1_0_and_the_attention_queue_stays() {
     }
     let s = Store::open(&dir.0).unwrap();
     s.write(|tx| {
-        assert_eq!(iris_store::schema_version(tx)?, 55);
+        assert_eq!(iris_store::schema_version(tx)?, 59);
         let got: Vec<Value> = tx
             .prepare("SELECT doc FROM item ORDER BY id")?
             .query_map([], |r| r.get::<_, String>(0))?

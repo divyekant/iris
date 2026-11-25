@@ -82,7 +82,7 @@ fn open_makes_the_data_folder() {
     }
     store
         .read(|c| {
-            assert_eq!(iris_store::schema_version(c)?, 55);
+            assert_eq!(iris_store::schema_version(c)?, 59);
             let journal: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
             assert_eq!(journal, "wal");
             let cache: i64 = c.query_row("PRAGMA cache_size", [], |r| r.get(0))?;
@@ -1243,4 +1243,61 @@ fn the_mail_under_one_name_uses_an_index() {
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The rebind of a move (IMAP moves spec, section 3): the row keeps its ID,
+/// a fallback thread ID follows the message, a thread of other messages
+/// keeps its ID, and an ID that another row has is refused.
+#[test]
+fn rebind_refuses_a_taken_id() {
+    let dir = TempDir::new("rebind");
+    let (store, acc) = setup(&dir);
+    let ids = store
+        .put_messages(
+            acc,
+            &[
+                // A message with no thread headers: its thread ID is its own ID.
+                msg("1:1:INBOX", "1:1:INBOX", 1, &["INBOX"], "a", "a"),
+                msg("1:2:INBOX", "<t@example.com>", 2, &["INBOX"], "b", "b"),
+                msg("1:3:INBOX", "<t@example.com>", 3, &["INBOX"], "c", "c"),
+            ],
+        )
+        .unwrap();
+    let thread = |m: i64| -> String {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT t.provider_id FROM message m JOIN thread t ON t.id = m.thread_id
+                     WHERE m.id = ?1",
+                    [m],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    let provider = |m: i64| -> String {
+        store
+            .read(|c| {
+                Ok(
+                    c.query_row("SELECT provider_id FROM message WHERE id = ?1", [m], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap()
+    };
+    store
+        .write(|tx| iris_store::rebind(tx, ids[0], "2:1:Archive"))
+        .unwrap();
+    assert_eq!(provider(ids[0]), "2:1:Archive");
+    assert_eq!(thread(ids[0]), "2:1:Archive");
+    store
+        .write(|tx| iris_store::rebind(tx, ids[1], "2:2:Archive"))
+        .unwrap();
+    assert_eq!(provider(ids[1]), "2:2:Archive");
+    assert_eq!(thread(ids[1]), "<t@example.com>");
+    // The ID of another row: refused, and nothing changes.
+    let r = store.write(|tx| iris_store::rebind(tx, ids[2], "2:2:Archive"));
+    assert!(matches!(r, Err(Error::Taken(_))), "{r:?}");
+    assert_eq!(provider(ids[2]), "1:3:INBOX");
 }

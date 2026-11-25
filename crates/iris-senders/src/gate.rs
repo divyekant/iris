@@ -26,6 +26,9 @@ use crate::{domain_of, recheck, rules, sweep, Changes, Kind};
 /// The `basis` of a sender that the person accepted at the gate.
 pub const ACCEPTED: &str = "accepted at the gate";
 
+/// The `basis` of a near-copy sender that the person trusted (issue #49).
+pub const TRUSTED: &str = "trusted after a near-copy mark";
+
 /// The result of one answer at the gate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Answer {
@@ -40,6 +43,9 @@ pub enum Answer {
     /// (or is on the list of declined senders): for example, a rule took
     /// its items out. Nothing changed.
     NotAtGate,
+    /// [`trust`] only: the sender is not `hostile` by the engine now. Nothing
+    /// changed.
+    NotHostile(Option<Kind>),
 }
 
 /// The state of one row.
@@ -56,7 +62,7 @@ impl Row {
     fn accepted(&self) -> bool {
         self.by.as_deref() == Some("person")
             && self.kind.as_deref() == Some(Kind::Person.name())
-            && self.basis.as_deref() == Some(ACCEPTED)
+            && matches!(self.basis.as_deref(), Some(ACCEPTED | TRUSTED))
     }
 }
 
@@ -152,6 +158,38 @@ pub fn decline(conn: &Connection, id: i64, now_ms: i64, at_gate: bool) -> rusqli
         params![id, now_ms],
     )?;
     Ok(Answer::Done { rerun: Vec::new() })
+}
+
+/// Trust the sender `id` that the near-copy rule marks `hostile` (issue #49):
+/// its domain looks like the domain of a known sender, but the person knows
+/// the sender. The kind becomes `person`, decided by the person, so the
+/// engine never marks it again. The near-copy rule is the only rule that
+/// gives the kind `hostile`. The hostile marks of each message (`dmarc`,
+/// `spoof`, `link`, `spam`, `phishing`) do not change. [`reopen`] removes
+/// the trust. A trusted sender gives `Done` again with no change.
+pub fn trust(conn: &Connection, id: i64, now_ms: i64) -> rusqlite::Result<Answer> {
+    let Some(row) = row(conn, id)? else {
+        return Ok(Answer::NoSender);
+    };
+    if row.accepted() && row.basis.as_deref() == Some(TRUSTED) {
+        return Ok(Answer::Done { rerun: Vec::new() });
+    }
+    // The stored kind is what the person saw. A person-set kind is not the
+    // engine's mark.
+    let stored = row.kind.as_deref().and_then(Kind::parse);
+    if stored != Some(Kind::Hostile) || row.by.as_deref() == Some("person") {
+        return Ok(Answer::NotHostile(stored));
+    }
+    conn.execute(
+        "UPDATE sender SET kind = 'person', basis = ?2, decided_by = 'person',
+                decided_at = ?3, declined_at = NULL
+          WHERE id = ?1",
+        params![id, TRUSTED, now_ms],
+    )?;
+    // The sender is no more hostile: its mail is understood again. Its
+    // domain is no reference of the near-copy rule (`known_domains`), so no
+    // other row changes.
+    Ok(Answer::Done { rerun: vec![id] })
 }
 
 /// Remove the answer of the gate for the sender `id`: the decline, and the

@@ -135,10 +135,15 @@ fn mirror_sync_runs_understanding_so_search_finds_words_and_senders() {
     let dir = data_dir("mirror-understand");
     let store = Store::open(&dir).unwrap();
     add_account(&store, &gmail(fake.base_url()));
+    // A watch matches after the sync with no engine (issue #260). The
+    // synthetic mail has old dates, so the watch starts at time 0.
+    let watch = store.add_watch(&format!("from:{from}"), 0).unwrap();
 
     let (ok, out, err) = iris(&dir, &fake, &tokens, &["mirror", "sync"]);
     assert!(ok, "{err}");
     assert!(out.contains("understand: Run "), "{out}");
+    let matched = store.watch(watch).unwrap().unwrap();
+    assert!(matched.message.is_some(), "the watch did not match");
     for query in [word, format!("from:{from}")] {
         let (ok, out, err) = iris(&dir, &fake, &tokens, &["search", &query, "--json"]);
         assert!(ok, "{err}");
@@ -172,6 +177,39 @@ fn mirror_sync_runs_understanding_so_search_finds_words_and_senders() {
         })
         .unwrap();
     assert_eq!(state, "shown");
+}
+
+/// Issue #1040: each exit step of `iris mirror` runs, also when an earlier
+/// step fails. A broken attention refresh does not stop the watch check.
+#[test]
+fn a_failed_attention_refresh_still_checks_the_watches() {
+    let mailbox = Mailbox::new(5, 25);
+    let from = (0..mailbox.len())
+        .filter(|&i| mailbox.truth(i).sender == iris_synth::Sender::KnownPerson)
+        .find_map(|i| {
+            iris_understand::Head::parse(
+                &mailbox.raw(i),
+                Some(iris_understand::head::GMAIL_AUTHSERV),
+            )
+            .from_addr
+        })
+        .expect("a known person");
+    let fake = FakeGmail::start(mailbox).unwrap();
+    let tokens = token_server();
+    let dir = data_dir("mirror-exit-steps");
+    let store = Store::open(&dir).unwrap();
+    add_account(&store, &gmail(fake.base_url()));
+    // The synthetic mail has old dates, so the watch starts at time 0.
+    let watch = store.add_watch(&format!("from:{from}"), 0).unwrap();
+    // Only the attention refresh reads this table.
+    store
+        .write(|tx| Ok(tx.execute_batch("DROP TABLE attention_pass")?))
+        .unwrap();
+    let (ok, _, err) = iris(&dir, &fake, &tokens, &["mirror", "sync"]);
+    assert!(!ok, "the attention error is the exit code");
+    assert!(err.contains("attention:"), "{err}");
+    let matched = store.watch(watch).unwrap().unwrap();
+    assert!(matched.message.is_some(), "the watch did not match: {err}");
 }
 
 #[test]

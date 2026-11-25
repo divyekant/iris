@@ -216,6 +216,40 @@ Hello.
     );
 }
 
+/// #102: the composed and the decomposed forms of a letter (Unicode
+/// canonical equivalence, NFC) match, on either side.
+#[test]
+fn a_quote_in_another_unicode_form_matches_the_mail() {
+    let mail = |t: &str| {
+        format!(
+            "From: Ana Lee <ana@example.org>
+To: owner@example.com
+Subject: Lunch
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+{t}
+"
+        )
+    };
+    let item = |q: &str| {
+        json!([{"form": "commitment", "title": "Book", "quote": q,
+                "direction": "you_owe", "kind": "task"}])
+    };
+    let (nfc, nfd) = (
+        "Book the Caf\u{e9} Lune for Ren\u{e9}e.",
+        "Book the Cafe\u{301} Lune for Rene\u{301}e.",
+    );
+    for (text, q) in [(nfd, nfc), (nfc, nfd)] {
+        let m = Fake::with(vec![answer(item(q))]);
+        let d = run(&mail(text), Kind::Person, &[], &[], Some(&m))
+            .1
+            .unwrap();
+        assert_eq!((d.calls, d.drafts.len()), (1, 1), "{q:?}");
+    }
+}
+
 #[test]
 fn phishing_is_hostile_with_no_item() {
     let m = Fake::with(vec![Ok(text(r#"{"items": [], "phishing": true}"#))]);
@@ -524,6 +558,61 @@ fn sent_mail_from_an_alias_or_to_bcc_only_keeps_the_owner_and_the_model_parties(
     );
 }
 
+/// #101: a model that refuses the data for its size (HTTP 400 or 413, as a
+/// local model with a small context window does) gets one more call with
+/// the small budget `prompt::SMALL_DATA`. The call counts, and the answer
+/// of the second call is used.
+#[test]
+fn a_refusal_for_size_gets_one_call_with_the_small_budget() {
+    let big = ASK.replace(
+        "Can you send the slides by Friday?",
+        &format!(
+            "Can you send the slides by Friday?\n\n{}",
+            "Notes. ".repeat(12_000)
+        ),
+    );
+    for status in [400, 413] {
+        let refuse = Err(ModelError::Rejected {
+            status,
+            message: "context length".into(),
+        });
+        let m = Fake::with(vec![refuse, answer(task())]);
+        let d = run(&big, Kind::Person, &[], &[], Some(&m)).1.unwrap();
+        assert_eq!(
+            (d.calls, d.drafts.len(), d.failed),
+            (2, 1, false),
+            "{status}"
+        );
+        let calls = m.calls.borrow();
+        assert!(calls[0].1.len() > prompt::SMALL_DATA);
+        assert!(
+            calls[1].1.len() <= prompt::SMALL_DATA,
+            "{}",
+            calls[1].1.len()
+        );
+        assert!(calls[1].1.contains("Can you send the slides by Friday?"));
+        // The second call is not a retry after a bad answer.
+        assert_eq!(calls[0].0, calls[1].0);
+    }
+    // Small data that the server refuses is not cut again: the try fails.
+    let refuse = || {
+        Err(ModelError::Rejected {
+            status: 400,
+            message: "bad".into(),
+        })
+    };
+    let m = Fake::with(vec![refuse(), refuse()]);
+    let d = run(ASK, Kind::Person, &[], &[], Some(&m)).1.unwrap();
+    assert_eq!((d.calls, d.failed), (1, true));
+    // A large refusal for another reason (422) is not cut either.
+    let m = Fake::with(vec![Err(ModelError::Rejected {
+        status: 422,
+        message: "x".into(),
+    })]);
+    let d = run(&big, Kind::Person, &[], &[], Some(&m)).1.unwrap();
+    assert_eq!((d.calls, d.failed), (1, true));
+}
+
 /// The data of one model call stays within `prompt::MAX_DATA` for the
 /// largest inputs, and it always holds the whole clean text of the message.
 #[test]
@@ -582,6 +671,18 @@ fn the_model_data_stays_within_its_budget() {
         let wrap = 2 + iris_model::DATA_START.len() + iris_model::DATA_END.len();
         assert_eq!(block.len(), data.len() + wrap);
     }
+    // The headers take at most half of the small budget (#101): with the
+    // largest header values and attachment names, the block stays in the
+    // small budget and holds the start of the current message text.
+    a.text.attachment_text.clear();
+    a.text.attachments = vec![("é".repeat(500), "application/pdf".into(), 1); 20];
+    let data = prompt::data_in(&a, &cx, prompt::SMALL_DATA);
+    let block = iris_model::data_block(&data);
+    assert!(block.len() <= prompt::SMALL_DATA, "{}", block.len());
+    assert!(data.contains(&body[..5000]));
+    // The full budget keeps every header line whole, as before.
+    let data = prompt::data(&a, &cx);
+    assert_eq!(data.matches("Attachment: ").count(), 20);
     a.text.attachments.clear();
     a.text.attachment_text = vec![("x.txt".into(), "<<<".repeat(300_000))];
     let data = prompt::data(&a, &cx);

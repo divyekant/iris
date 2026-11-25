@@ -115,7 +115,8 @@ export type Brief = {
 export type Bundle = Section & { rule: number; name: string };
 
 /** One sender at the stranger gate (spec 1 section 6.7): its count of items, and the newest 3. */
-export type GateSender = { id: string; address: string; name: string | null; count: number; items: Item[] };
+/** A sender at the gate. `known_as`: the address of a person you know with the same name (issue #370). */
+export type GateSender = { id: string; address: string; name: string | null; known_as?: string | null; count: number; items: Item[] };
 export type GatePage = { count: number; senders: GateSender[]; next: string | null };
 /** The sender row after an answer at the gate. */
 export type GateAnswer = { id: string; address: string; name: string | null; kind: string; decided_by: string | null; declined: boolean };
@@ -142,6 +143,8 @@ export type Status = {
   waits_model?: number;
   /** The time zone of defer dates and due dates (an IANA name, `iris zone`). Null or left out: the zone of the browser. */
   time_zone?: string | null;
+  /** True when the owner set the time zone (`iris zone` or the Accounts page), false when it is the zone of the machine that runs Iris. */
+  time_zone_set?: boolean;
   /** After model errors: the time of the next model call (RFC 3339), while it is later than now. An older engine leaves it out. */
   model_retry_at?: string;
 };
@@ -209,6 +212,8 @@ export type Message = Summary & {
   hostile: string[];
   /** The kind of the From sender (spec 1 section 6.7). */
   sender_kind?: "person" | "service" | "stranger" | "hostile";
+  /** The sender when only its look-alike domain makes it hostile: you can trust it (issue #49). */
+  near_copy?: { sender: string; of: string | null; trusted: boolean } | null;
   items: string[];
 };
 
@@ -323,6 +328,8 @@ export type LedgerEntry = {
   tried: number;
   /** For an undo: true when the change that it undoes can be undone now. */
   retry: boolean;
+  /** A send or a draft: the subject, the first `to` address and the count of all recipients. Null when Iris cannot read it. */
+  mail?: { subject: string; to: string | null; recipients: number } | null;
 };
 
 export type LedgerPage = { entries: LedgerEntry[]; next: string | null };
@@ -425,7 +432,11 @@ export type Job = {
   question?: string;
   end?: "complete" | "cancel";
 };
-export type JobPage = { jobs: Job[]; next: string | null };
+/**
+ * `sessions`: the newest session of each working job of the page, by job ID, or null for a job with no session
+ * (issue 791). An engine from before the field leaves it out: then the list does not know the session.
+ */
+export type JobPage = { jobs: Job[]; next: string | null; sessions?: Record<string, JobSession | null> };
 /** A submitted changeset of a job: `actions` counts the actions of its newest revision in each state. */
 export type JobChangeset = { id: string; at: string; state: string; why: string | null; actions: Record<string, number> };
 /** One job (GET /api/jobs/{id}): the job with its events, its changesets, and the newest mail of each wait thread. */
@@ -640,6 +651,21 @@ function takeStatus(n: number, s: Status): boolean {
   return true;
 }
 
+/** The answer of `POST /api/zone`: the time zone fields of the status. */
+export type Zone = Pick<Status, "time_zone" | "time_zone_set">;
+
+/**
+ * Set the time zone of the owner (issue 891): an IANA name, or null for the zone of the machine that
+ * runs Iris. The answer is the newest status of the zone: it takes a status number when it arrives,
+ * so a status read that started before it cannot put the old zone back in `access.zone`.
+ */
+export async function postZone(zone: string | null): Promise<Zone> {
+  const z = await post<Zone>("zone", { zone });
+  statusTaken = ++statusStarted;
+  access.zone = z.time_zone ?? null;
+  return z;
+}
+
 async function statusRead(): Promise<[Status, boolean]> {
   const n = ++statusStarted;
   const s = await getJson<Status>("status");
@@ -716,7 +742,10 @@ export async function loadBrief(): Promise<Brief> {
   return { ...brief, signals: { ...brief.signals, count: Math.max(brief.signals.count, items.length), items } };
 }
 
-/** Your answer to a sender at the stranger gate: `accept`, `decline` (the screen says "Ignore") or `reopen` (undo). */
-export function answerSender(id: string, answer: "accept" | "decline" | "reopen"): Promise<GateAnswer> {
+/**
+ * Your answer to a sender: `accept`, `decline` (the screen says "Ignore") or `reopen` (undo) at
+ * the stranger gate, or `trust` for a sender that only its look-alike domain makes hostile.
+ */
+export function answerSender(id: string, answer: "accept" | "decline" | "reopen" | "trust"): Promise<GateAnswer> {
   return post<GateAnswer>(`senders/${encodeURIComponent(id)}/${answer}`, {});
 }

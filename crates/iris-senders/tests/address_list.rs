@@ -183,3 +183,38 @@ fn comment_name_reads_quoted_pairs_and_nested_comments() {
         vec![("a@example.org".into(), None)]
     );
 }
+
+/// A domain literal holds `:` and `,` that are not list syntax. A `[` that
+/// does not follow `@`, or has no `]`, is text (issue #83).
+#[test]
+fn domain_literals() {
+    let got = |l: &str| addresses(l).into_iter().map(|(a, _)| a).collect::<Vec<_>>();
+    assert_eq!(
+        got("user@[IPv6:2001:db8::1], b@example.org"),
+        ["user@[ipv6:2001:db8::1]", "b@example.org"]
+    );
+    assert_eq!(
+        got("T: <u@[IPv6:2001:db8::1]>, c@x.example;"),
+        ["u@[ipv6:2001:db8::1]", "c@x.example"]
+    );
+    assert_eq!(
+        got("Ana [work] <a@x.example>, b@y.example"),
+        ["a@x.example", "b@y.example"]
+    );
+    assert_eq!(got("a@[x, b@y.example"), ["a@[x", "b@y.example"]);
+}
+
+/// Many open domain literals with no `]` cost one pass, not a scan for
+/// each `[` (a hostile header can hold thousands).
+#[test]
+fn open_domain_literals_are_linear() {
+    let list = "a@[x, ".repeat(200_000);
+    let start = std::time::Instant::now();
+    let got = addresses(&list);
+    assert_eq!(got.len(), 200_000);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+}
