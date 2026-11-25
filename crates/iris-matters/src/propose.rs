@@ -126,6 +126,8 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
     let mut out = Outcome::default();
     // Step 0 always runs, before each early stop.
     let (row, skip) = write(store, |tx| {
+        // An expired signal is not live, so it leaves its matters here.
+        iris_store::expire_signals(tx, now)?;
         out.cleaned = clean(tx)?;
         let Some(row) = model_row(tx)? else {
             return Ok((None, Some(Skip::NoModel)));

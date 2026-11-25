@@ -100,6 +100,7 @@ pub fn create(store: &Store, title_text: &str, items: &[Ref], now: i64) -> Resul
     let t = title(title_text)?;
     let list = rows(items, 1, "give 1 to 50 items")?;
     write(store, |tx| {
+        iris_store::expire_signals(tx, now)?;
         for item in items {
             if !live(tx, *item)? {
                 return Err(Error::Conflict("an item is not live now"));
@@ -142,6 +143,7 @@ pub fn edit(store: &Store, matter: i64, e: &Edit, now: i64) -> Result<()> {
         return Err(Error::Bad("an item is in add and in remove"));
     }
     write(store, |tx| {
+        iris_store::expire_signals(tx, now)?;
         if status(tx, matter)? != "confirmed" {
             return Err(Error::Conflict("the matter is not confirmed"));
         }
@@ -306,6 +308,7 @@ pub fn propose_by_agent(
 ) -> Result<i64> {
     let t = title(title_text)?;
     let list = rows(items, 2, "give 2 to 50 items")?;
+    iris_store::expire_signals(tx, now)?;
     let mut threads = HashSet::new();
     for (row, form) in items {
         let thread: Option<i64> = tx

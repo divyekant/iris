@@ -644,9 +644,16 @@ fn an_addition_waits_for_the_person() {
         col(&b, "SELECT count(*) FROM matter_add WHERE item_id = 3"),
         0
     );
-    // An expired signal is no candidate, and its addition ends.
+    // An expired signal is no candidate, and its addition ends. The stored
+    // status stays `active`: only the clock passed `expires` (issue #927).
     b.store
-        .write(|tx| Ok(tx.execute("UPDATE item SET status = 'expired' WHERE id = 4", [])?))
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE item SET doc = json_set(doc, '$.expires',
+                   strftime('%Y-%m-%dT%H:%M:%SZ', ?1 / 1000, 'unixepoch')) WHERE id = 4",
+                [NOW + 3],
+            )?)
+        })
         .unwrap();
     reset_fingerprint(&b);
     let f = fake(vec![]);
