@@ -518,6 +518,25 @@ fn a_tick_opens_a_deferred_commitment_and_expires_a_signal() {
     assert_eq!(status("signal"), ("expired".into(), "expired".into()));
 }
 
+/// Issue #853: the first tick runs the attachment cleanup. An old file that
+/// nothing names goes; a new file stays.
+#[test]
+fn a_tick_deletes_an_old_attachment_that_nothing_names() {
+    let store = Arc::new(Store::open(&data_dir("attachments")).unwrap());
+    let old = store.put_attachment(b"old upload").unwrap();
+    let new = store.put_attachment(b"new upload").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(store.attachment_path(&old).unwrap())
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(86_400))
+        .unwrap();
+    let mut e = Engine::new(store.clone(), config("http://127.0.0.1:9".into()), None);
+    assert!(e.tick().unwrap().is_empty());
+    assert!(!store.attachment_path(&old).unwrap().exists());
+    assert!(store.attachment_path(&new).unwrap().exists());
+}
+
 #[test]
 fn understanding_runs_apart_from_the_sync_and_after_a_held_lock() {
     let s = setup("engine-understand", 5);

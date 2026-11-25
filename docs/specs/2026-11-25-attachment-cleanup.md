@@ -27,8 +27,16 @@ an open draft, and must attach it again.
 
 ## Not in scope
 
-- A cleanup on the removal of an account (D34). The rule of this spec
-  applies there too, because a removed account has no open actions.
+- A cleanup step in the removal of an account (D34). The hourly cleanup
+  covers it: a draft of an account in `removing` or `removed` is not a
+  live place (section 1), because no new action can name it and the
+  account never signs in again. An open action of the account keeps its
+  files through its args until it is decided.
+- A draft that the person deleted at the provider. The store does not
+  record the deletion: an apply finds it only as "the draft is gone" and
+  denies the action. So its draft row stays live, and its files stay.
+  This is a known limit (issue #1094): it costs disk, never a
+  file.
 - A limit on the size of the folder.
 - A setting for the keep period.
 
@@ -42,8 +50,8 @@ A file is live when its SHA-256 is in one of these places:
 |---|---|
 | `changeset_action.args`, `$.attachments[*].sha256`, of a `draft` action whose state is open: `NULL` (a draft revision), `proposed`, `in_review`, `approved` or `held` | The apply reads each file. |
 | `ledger.post`, `$.content.attachments[*].sha256`, of a ledger row in the state `writing` | Recovery makes the same bytes again (send spec, section 4, step 2). |
-| `draft.content`, `$.content.attachments[*].sha256`, of a draft row with `sent_at IS NULL` and `foreign_at IS NULL` | The client can edit the draft. The edit submits a new `draft` action with the same entries, and its apply reads the files. |
-| `ledger.pre`, `$.draft.content.attachments[*].sha256`, of a draft change entry (`ops.call` is `drafts.update`, `undo` is `inverse`, state `applied` or `failed`) of a draft row with `sent_at IS NULL` and `foreign_at IS NULL` | The undo of the change makes the old content again, and its apply reads the files (draft change spec). The view `ledger_can_undo` is not used: a held send or an open change hides the undo only for a time. So the files stay until the draft is sent, becomes foreign or goes. A later change can make an undo impossible and still keep its files: this costs disk, never a file. |
+| `draft.content`, `$.content.attachments[*].sha256`, of a draft row with `sent_at IS NULL` and `foreign_at IS NULL`, of an account that is not `removing` or `removed` | The client can edit the draft. The edit submits a new `draft` action with the same entries, and its apply reads the files. |
+| `ledger.pre`, `$.draft.content.attachments[*].sha256`, of a draft change entry (`ops.call` is `drafts.update`, `undo` is `inverse`, state `applied` or `failed`) of a draft row with `sent_at IS NULL` and `foreign_at IS NULL`, of an account that is not `removing` or `removed` | The undo of the change makes the old content again, and its apply reads the files (draft change spec). The view `ledger_can_undo` is not used: a held send or an open change hides the undo only for a time. So the files stay until the draft is sent, becomes foreign or goes. A later change can make an undo impossible and still keep its files: this costs disk, never a file. |
 
 The JSON of these places is input that Iris does not control: `iris
 draft` saves a draft revision before submit checks its content. The

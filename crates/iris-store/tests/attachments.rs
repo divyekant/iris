@@ -415,3 +415,99 @@ fn any_draft_args_leave_the_cleanup_working() {
         assert!(exists(&s, &kept), "case {case}");
     }
 }
+
+/// Issue #853, pre-review: a draft of an account in `removing` or
+/// `removed` keeps no file. No new action can name the draft, and the
+/// account never signs in again.
+#[test]
+fn a_removed_account_keeps_no_draft_file() {
+    let dir = TempDir::new("removed");
+    let s = Store::open(&dir.0).unwrap();
+    let mut files = Vec::new();
+    for (n, state) in [None, Some("removing"), Some("removed")]
+        .into_iter()
+        .enumerate()
+    {
+        let account = s
+            .add_account("gmail", &format!("owner{n}@example.com"))
+            .unwrap();
+        let sha = file(&s, format!("draft {n}").as_bytes(), OLD);
+        s.write(|tx| {
+            let a = action(tx, "{}", Some("denied"))?;
+            tx.execute(
+                "INSERT INTO draft(account_id, provider_id, message_id_hdr, content, hash, raw,
+                                   action_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, 'h', x'00', ?5, 0, 0)",
+                params![
+                    account,
+                    format!("r{n}"),
+                    format!("iris.{n}@example.com"),
+                    format!("{{\"content\":{}}}", content(&sha)),
+                    a
+                ],
+            )?;
+            tx.execute(
+                "UPDATE account SET state = ?2 WHERE id = ?1",
+                params![account, state],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        files.push((state, sha));
+    }
+    assert_eq!(s.clean_attachments(NOW).unwrap(), Some(2));
+    for (state, sha) in &files {
+        assert_eq!(exists(&s, sha), state.is_none(), "{state:?}");
+    }
+}
+
+/// Issue #853, pre-review: an upload waits for the write lock that the
+/// cleanup holds from its read of the references to its last delete. So
+/// an upload of the same bytes never lands between the age check and the
+/// delete. The test holds the lock as the cleanup does, and checks that
+/// the upload does not make the file new before the lock is free.
+#[test]
+fn an_upload_waits_for_the_cleanup_lock() {
+    let dir = TempDir::new("overlap");
+    let s = std::sync::Arc::new(Store::open(&dir.0).unwrap());
+    let sha = file(&s, b"same", OLD);
+    let modified = |s: &Store| {
+        fs::metadata(s.attachment_path(&sha).unwrap())
+            .unwrap()
+            .modified()
+            .unwrap()
+    };
+    let old = modified(&s);
+    let (held, wait) = std::sync::mpsc::channel();
+    let (free, go) = std::sync::mpsc::channel::<()>();
+    let holder = {
+        let s = s.clone();
+        std::thread::spawn(move || {
+            s.write(|_| {
+                held.send(()).unwrap();
+                go.recv().unwrap();
+                Ok(())
+            })
+            .unwrap()
+        })
+    };
+    wait.recv().unwrap();
+    let upload = {
+        let s = s.clone();
+        std::thread::spawn(move || s.put_attachment(b"same").unwrap())
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(modified(&s), old, "the upload waits for the lock");
+    assert!(!upload.is_finished());
+    free.send(()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(upload.join().unwrap(), sha);
+    assert_ne!(modified(&s), old, "the upload makes the file new");
+    // The upload has the real time, not the test time `NOW`.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    assert_eq!(s.clean_attachments(now).unwrap(), Some(0));
+    assert!(exists(&s, &sha));
+}

@@ -394,7 +394,11 @@ impl Store {
 /// section 1): an open action (a draft revision, `proposed`, `in_review`,
 /// `approved` or `held`), a ledger claim in `writing`, the content before
 /// each draft change of a draft that is not sent and not foreign, and a
-/// draft row that is not sent and not foreign. The view `ledger_can_undo`
+/// draft row that is not sent and not foreign. A draft of an account in
+/// `removing` or `removed` is not live: no new action can name it
+/// (iris-changeset refuses it) and the account never signs in again (remove
+/// account spec), so no apply or undo reads its files. An open action of
+/// such an account still keeps its files through its args. The view `ledger_can_undo`
 /// is not used: a held send or an open change hides an undo only for a
 /// time, and the undo then needs its files again. Each such file can be read
 /// again by an apply, a recovery or an undo. The match does not filter by
@@ -417,9 +421,11 @@ WITH refs(doc, path) AS (
   WHERE json_valid(l.ops) AND json_extract(l.ops, '$.call') = 'drafts.update'
     AND l.undo = 'inverse' AND l.state IN ('applied', 'failed')
     AND d.sent_at IS NULL AND d.foreign_at IS NULL
+    AND d.account_id NOT IN (SELECT id FROM account WHERE state IN ('removing', 'removed'))
   UNION ALL
   SELECT d.content, '$.content.attachments' FROM draft d
   WHERE d.sent_at IS NULL AND d.foreign_at IS NULL
+    AND d.account_id NOT IN (SELECT id FROM account WHERE state IN ('removing', 'removed'))
 ),
 arrays(doc, path) AS (
   SELECT CASE WHEN json_valid(doc) THEN
