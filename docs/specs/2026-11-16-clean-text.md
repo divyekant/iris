@@ -458,16 +458,19 @@ client. They are not defects of this design:
 - A quoted-printable line of more than 64 KiB that has only white space,
   CR and `=` with white space splits at 64 KiB. Its white space can then
   differ from the decode of the whole body.
-- Addresses (`iris-people`, through `mail-parser` 1.0.1): these forms give no
-  address, so the person goes out of the profiles. A comment inside an
-  address (`john(work)@example.org`), a domain literal with a `:` outside
-  `<>` (`user@[IPv6:2001:db8::1]`), a quoted local part outside `<>` with an
-  escaped character (`"a\"b"@example.org`), and an `@` outside a quoted
-  local part (`a@b@example.org`). The same valid forms inside `<>` work.
-  `mail-parser` reads a bare quoted local part (`"a:b"@example.org`) as a
-  name and `@example.org`. `iris-people` joins the two again when the list
-  holds that exact text, so this form works. A comment after a bare address
-  (`a@example.org (Ana)`) is the display name.
+- Addresses (`iris-people`): `iris-people` reads address lists with the
+  address scanner of the sender axis (`iris_senders::head::addresses`), not
+  with `mail-parser`. A comment inside an address (`john(work)@example.org`)
+  gives `john@example.org`. A domain literal (`user@[IPv6:2001:db8::1]`) and
+  a quoted local part with an escaped character (`"a\"b"@example.org`) give
+  their address. A comment after a bare address (`a@example.org (Ana)`) is
+  the display name. These limits stay:
+  - An address with two `@` outside a quoted local part (`a@b@example.org`)
+    gives no address.
+  - A `<` or `>` inside a quoted local part breaks the list (issue #980).
+  - Mail that Iris understood before the change to the scanner keeps the
+    recipients that `mail-parser` read, so a domain-literal recipient of
+    that mail is not in the profiles (issue #1003).
 
 ### Limits and the cut
 
@@ -524,8 +527,8 @@ input: no panic, bounded memory and time, and a `Clean` with less text (and
 - Dependencies: `encoding_rs` 0.8, `miniz_oxide` 0.9 and `mail-parser`
   1.0.1 (with `encodify` and `hashify`). `mail-parser` needs Rust 1.98 or
   newer, so `rust-toolchain.toml` pins Rust 1.100.0.
-- `iris-people` reads address lists with `mail-parser` too (see "Known
-  limits").
+- `iris-people` reads address lists with the address scanner of
+  `iris-senders`, not with `mail-parser` (see "Known limits").
 
 ## Assumptions
 
