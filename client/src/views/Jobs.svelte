@@ -90,7 +90,8 @@
         jobs: [...pages[state].jobs, ...page.jobs.filter((j) => !seen.has(j.id))],
         next: page.next,
         // The sessions of the jobs of the new page join those of the pages before.
-        sessions: pages[state].sessions && page.sessions ? { ...pages[state].sessions, ...page.sessions } : undefined,
+        // A page with no map (an older engine) keeps the map of the other pages.
+        sessions: { ...pages[state].sessions, ...page.sessions },
       };
     } catch (e) {
       error = own(e);
