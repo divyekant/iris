@@ -70,11 +70,25 @@ refuses the run, with the path and the reason, if:
 - the path does not exist or cannot be resolved;
 - the real path is `/`;
 - the real path is the data folder, is inside it, or holds it;
-- the real path is the home folder of the person (`HOME` of the engine)
-  itself. A folder inside the home folder is allowed.
+- the real path is the home folder of the person (the real path of `HOME`
+  of the engine), or holds it. A folder inside the home folder is
+  allowed. So `/home` or `/Users` is refused, and `~/.nvm` is allowed;
+- the real path is, is inside, or holds a folder of system state:
+  `/proc`, `/sys`, `/dev`, `/run`, `/var/run`, `/tmp`, `/var/tmp`,
+  `/private/var/run`, `/private/tmp`, `/private/var/folders` and
+  `/Volumes`. These folders hold sockets, devices, process data and the
+  files of other programs;
+- the tree of the path holds an entry that is not a regular file, a
+  folder or a link: a socket, a FIFO or a device. A socket is reachable
+  through a read-only bind, because a network namespace does not block a
+  Unix socket. The walk does not follow links, and it stops with a
+  refusal after 200,000 entries;
+- the tree of the path holds a mount point (an entry on another device
+  than the read path itself). A mount can bring a virtual file system,
+  such as a `/proc`, into the view.
 
-The real path goes into the view, not the string of the file. A link in
-the file is resolved once, at the launch.
+A link inside a read path that points outside it stays a link in the
+view. Its target is visible only if the view holds the target.
 
 The launch refuses `allow_local` when it is the same port as the egress
 port of the session. The egress port comes from the system, so the
@@ -82,11 +96,21 @@ launch takes a new egress port in that case.
 
 ### Linux
 
-- Each read path is a `--ro-bind <real> <real>` of `bwrap`, after the
-  system folders and the program files, and before the empty mount of the
-  data folder. So a read path that holds a part of the data folder cannot
-  show it (the check above refuses it first; the mount order is the
-  second guard).
+- The launch checks happen in the engine. Between the checks and the
+  mount, a process of the person can change a part of the path into a
+  link. So the hold helper opens each read path again, just before it
+  starts `bwrap`, with `openat2` and `RESOLVE_NO_SYMLINKS` (`O_PATH`):
+  the open fails if a part of the path is a link. The helper checks that
+  the open file is on the same device and inode that the launch checked,
+  then gives the file descriptor to `bwrap` with `--ro-bind-fd <fd>
+  <real>`. `bwrap` mounts the object of the descriptor, not a path. If
+  an open or a check fails, no session starts. `bwrap` has
+  `--ro-bind-fd` since version 0.5.0; the check of the isolation refuses
+  an older `bwrap` when an adapter has read paths.
+- The binds come after the system folders, the private home and the
+  program files, and before the empty mount of the data folder. So a read
+  path that holds a part of the data folder cannot show it (the check
+  above refuses it first; the mount order is the second guard).
 - `allow_local`: the helper binds a second listener in the network
   namespace of the session, on `127.0.0.1:<allow_local>`, in the same
   child process as the egress listener (sandbox spec, "Egress on Linux",
@@ -101,7 +125,11 @@ launch takes a new egress port in that case.
 
 - Each read path is a `(subpath "<real>")` in `file-read*` of the
   Seatbelt profile, and its parent folders are literals in
-  `file-read-metadata`. The rule comes before the last rule that denies
+  `file-read-metadata`. Seatbelt checks the real path of each access at
+  the time of the access, so a link that a process makes later points to
+  a path that the profile checks again.
+- The profile has no `network-outbound` rule for a Unix socket other than
+  the session socket, so a socket in a read path is not reachable. The rule comes before the last rule that denies
   `/System/Volumes/Data`, so a read path under that folder is refused
   (Seatbelt takes the last rule that matches).
 - The data folder gets a `(deny file-read* (subpath "<data dir>"))` after
@@ -134,7 +162,14 @@ fails at its first call.
 | More than 16 read paths | The parse refuses the file, with the line | config test |
 | A read path that does not exist at the run | The run is refused, with the path | launch test |
 | A read path that is `/`, the home folder, the data folder, inside it or holds it (also through a link) | The run is refused, with the path | launch test |
-| A read path that changes into a link after the launch | The view holds the real path of the launch | not testable in CI; the bind is of the resolved path |
+| A read path that is `/proc`, `/sys`, `/dev`, `/run`, `/tmp` or another folder of system state, inside one, or holds one | The run is refused, with the path | launch test |
+| A read path that holds `HOME` (for example `/home`) | The run is refused, with the path | launch test |
+| A read path with a socket, a FIFO or a device in its tree | The run is refused, with the path of the entry | launch test |
+| A read path with a mount point in its tree | The run is refused, with the path of the entry | launch test |
+| A tree of more than 200,000 entries | The run is refused | launch test |
+| A part of a read path that changes into a link after the launch checks | Linux: the open of the helper fails, and no session starts. macOS: Seatbelt checks the real path at each access | Linux helper test with a swap between the check and the open |
+| A read path that changes to another object (other device or inode) after the launch checks | The helper refuses it, and no session starts | Linux helper test |
+| `bwrap` older than 0.5.0 and an adapter with read paths | The check refuses the run | unit test of the version parse |
 | A write to a read path | The system refuses it (read-only bind) | Linux sandbox test |
 | A connection to a local port other than `allow_local` | Refused: no listener in the namespace (Linux), the profile denies it (macOS) | Linux sandbox test |
 | `allow_local` with no server on the port | The relay closes the connection | Linux sandbox test |
@@ -171,8 +206,20 @@ All other input: the run is refused, and no session starts.
 
 ## External writes
 
-None. The read paths are read only, and the relay copies bytes to a
-program of the person on the same machine.
+The read paths are read only. They make no write.
+
+The local relay can carry a write: the agent can send a request that
+changes the state of the program on the port (for example a Docker API).
+Iris does not read or change the bytes. The person chooses the port, and
+the docs say that each request of the agent reaches that program.
+
+| Case | What happens |
+|---|---|
+| Success | The program answers. The relay copies the answer to the agent. |
+| Definite rejection (the program refuses, or no program listens) | The relay copies the answer, or closes the connection of the agent when the connect fails. |
+| Unknown result (a time-out, a lost answer, an end of the session or of the engine) | The relay closes the connection of the agent. Iris does not know if the program acted, and records nothing. |
+| Retry | Iris never connects again for the agent and never sends bytes again. A retry is a new connection of the agent tool. The agent tool decides it. |
+
 
 ## Open questions
 
@@ -206,6 +253,10 @@ None. Both keys are opt-in.
 
 ## Risks
 
+- A program of the person can make a socket in a read path after the
+  launch checks. Linux: the bind shows it, and a process of the session
+  can connect to it. Known limit, with an issue: the docs tell the person
+  to list only folders of programs.
 - A person can list a folder with credentials. The session can then send
   them to an allowed host. The docs say so next to the key. The checks
   refuse only the root, the home folder and the data folder.
