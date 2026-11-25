@@ -107,6 +107,16 @@
       "then": { "allOf": [ { "not": { "required": ["withdrawn_by"] } }, { "not": { "required": ["comments"] } } ] }
     },
     {
+      "$comment": "A draft action with a drafts target (a change of a draft, docs/specs/2026-11-25-draft-change.md): since 1.3 (specification 4, rule 2.8).",
+      "if": { "properties": { "model": { "enum": ["iris/1.0", "iris/1.1", "iris/1.2"] } }, "required": ["model"] },
+      "then": { "properties": { "actions": { "items": { "not": { "properties": { "verb": { "const": "draft" }, "targets": { "required": ["drafts"] } }, "required": ["verb", "targets"] } } } } }
+    },
+    {
+      "$comment": "Only the person changes a draft (docs/specs/2026-11-25-draft-change.md, section 1): a checked draft action with a drafts target is in a changeset of the person.",
+      "if": { "not": { "properties": { "author": { "properties": { "kind": { "const": "person" } }, "required": ["kind"] } }, "required": ["author"] } },
+      "then": { "properties": { "actions": { "items": { "not": { "properties": { "verb": { "const": "draft" }, "targets": { "required": ["drafts"] }, "decision": { "properties": { "state": { "enum": ["proposed", "in_review", "approved", "held", "applied", "failed", "undone", "expired", "replaced"] } }, "required": ["state"] } }, "required": ["verb", "targets", "decision"] } } } } }
+    },
+    {
       "$comment": "Only a withdrawn changeset names who withdrew it (decision D16).",
       "if": { "required": ["withdrawn_by"] },
       "then": { "properties": { "state": { "const": "withdrawn" } } }
@@ -915,7 +925,7 @@
           }
         },
         {
-          "$comment": "A mailbox verb changes threads or messages, and resolves to one or more messages. close, defer and decline change commitments; skip, mute and dismiss change a feed item, a conversation and a signal. correct changes any item (section 4). draft takes one account or one thread; send takes one draft (release 3). restore takes its ledger entry, and resolves to no message: it changes the items of a state entry (section 7.4).",
+          "$comment": "A mailbox verb changes threads or messages, and resolves to one or more messages. close, defer and decline change commitments; skip, mute and dismiss change a feed item, a conversation and a signal. correct changes any item (section 4). draft takes one account, one thread or one draft (a change); send takes one draft (release 3). restore takes its ledger entry, and resolves to no message: it changes the items of a state entry (section 7.4).",
           "if": {
             "properties": {
               "verb": {
@@ -1145,7 +1155,17 @@
                   "threads": {
                     "maxItems": 1
                   },
-                  "drafts": false
+                  "drafts": {
+                    "$comment": "A change of one draft of Iris in place (docs/specs/2026-11-25-draft-change.md, section 1). A change of a reply resolves to one message, its parent; a change of a new mail resolves to none.",
+                    "maxItems": 1
+                  }
+                }
+              },
+              "resolved": {
+                "properties": {
+                  "messages": {
+                    "maxItems": 1
+                  }
                 }
               },
               "args": {
@@ -1253,6 +1273,68 @@
                 }
               }
             }
+          }
+        },
+        {
+          "$comment": "A checked change of a draft (docs/specs/2026-11-25-draft-change.md, section 1) follows the same rules: a reply change has no subject and one parent, a new-mail change has a subject and no resolved message.",
+          "if": {
+            "properties": {
+              "verb": {
+                "const": "draft"
+              },
+              "targets": {
+                "required": [
+                  "drafts"
+                ]
+              }
+            },
+            "required": [
+              "verb",
+              "targets"
+            ]
+          },
+          "then": {
+            "oneOf": [
+              {
+                "required": [
+                  "resolved"
+                ],
+                "properties": {
+                  "args": {
+                    "properties": {
+                      "subject": false
+                    }
+                  },
+                  "resolved": {
+                    "required": [
+                      "messages"
+                    ],
+                    "properties": {
+                      "messages": {
+                        "minItems": 1,
+                        "maxItems": 1
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "args": {
+                    "required": [
+                      "subject"
+                    ]
+                  },
+                  "resolved": {
+                    "properties": {
+                      "messages": {
+                        "maxItems": 0
+                      }
+                    }
+                  }
+                }
+              }
+            ]
           }
         },
         {

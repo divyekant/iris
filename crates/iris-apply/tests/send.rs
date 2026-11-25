@@ -1578,3 +1578,28 @@ fn a_sent_copy_with_no_bcc_takes_the_approved_bcc_with_a_note() {
     assert!(matches!(b.release(plain), Ok(Outcome::Applied(_))));
     assert_eq!(b.ledger_note(plain), None);
 }
+
+/// Until the apply of a change exists (part B2 of
+/// docs/specs/2026-11-25-draft-change.md), an approved change of a draft is
+/// denied with no provider call, and never makes a new draft.
+#[test]
+fn a_change_of_a_draft_is_denied_until_its_apply_exists() {
+    iris_changeset::allow_draft_change(true);
+    let b = setup("change-later");
+    let a = b.approved(Verb::Draft, "a-1", mail(), 0);
+    assert!(matches!(b.apply(a), Ok(Outcome::Applied(_))));
+    let (d, _) = b.draft(a);
+    let creates = b.posts("/drafts");
+    let change = b.approved(
+        Verb::Draft,
+        &d,
+        json!({"to": ["priya@example.com"], "subject": "Q4", "body": "New text."}),
+        0,
+    );
+    match b.apply(change) {
+        Ok(Outcome::Denied(why)) => assert_eq!(why, iris_changeset::CHANGE_OFF),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.posts("/drafts"), creates, "no new draft");
+    assert!(b.fake.requests().iter().all(|r| !r.starts_with("PUT")));
+}

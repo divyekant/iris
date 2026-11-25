@@ -2,7 +2,7 @@
 
 - Status: draft, for the approval of the maintainer
 - Applies to: release 2 ("Apply"). Parts for releases 3 to 5 are marked.
-- Open model version: 1.2
+- Open model version: 1.3
 - Related: [Specification 1](01-mirror-store-forms.md), the manifesto and the
   experience document "Iris: the ideal experience"
 
@@ -73,7 +73,7 @@ not have the label `SPAM` or `TRASH`.
 | `skip` | feed item | reason | none (Iris state) | set the old value (below) | 5 |
 | `mute` | conversation | reason | none (Iris state) | set the old value (below) | 5 |
 | `dismiss` | signal | reason | none (Iris state) | set the old value (below) | 5 |
-| `draft` | one thread (a reply), one account (`a-N`, a new mail), or one Gmail draft of Iris (`d-N`, a change by the person) | recipients, subject, text | `drafts.create`, or `drafts.update` for a change (section 7.5) | a create: none, because Iris never deletes a draft. A change: `drafts.update` with the old content (`docs/specs/2026-11-25-draft-change.md`) | 3 |
+| `draft` | one thread (a reply), one account (`a-N`, a new mail), or one Gmail draft of Iris (`d-N`, a change by the person, since `iris/1.3`) | recipients, subject, text | `drafts.create`, or `drafts.update` for a change (section 7.5) | a create: none, because Iris never deletes a draft. A change: `drafts.update` with the old content (`docs/specs/2026-11-25-draft-change.md`) | 3 |
 | `send` | one draft (`d-N`) | none | `drafts.send`, after the hold (section 7.5) | none: final after the hold | 3 |
 | `nudge` | commitment `owed_to_you` | none | makes a `draft` action, then a `send` action | as `draft` and `send` | not built (decision D8, section 7.5) |
 | `wait` | thread, or a date | until | none | not applicable | 5 |
@@ -180,7 +180,7 @@ documents in `schema/examples/` (files `changeset*.json`).
 
 ```json
 {
-  "model": "iris/1.2",
+  "model": "iris/1.3",
   "id": "cs-77",
   "revision": 1,
   "author": { "kind": "agent", "name": "Claude Code", "session": "se-12", "job": "j-142" },

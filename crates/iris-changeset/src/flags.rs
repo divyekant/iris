@@ -548,6 +548,9 @@ pub fn action_content(c: &Connection, action: i64) -> Result<Option<(String, Con
                     "SELECT a.address FROM account a WHERE 'a-' || a.id IN
                        (SELECT value FROM json_each(?2, '$.accounts'))
                      UNION ALL
+                     SELECT a.address FROM action_draft ad JOIN draft d ON d.id = ad.draft_id
+                       JOIN account a ON a.id = d.account_id WHERE ad.action_id = ?1
+                     UNION ALL
                      SELECT a.address FROM action_message am JOIN message m ON m.id = am.message_id
                        JOIN account a ON a.id = m.account_id WHERE am.action_id = ?1
                      LIMIT 1",
@@ -561,9 +564,13 @@ pub fn action_content(c: &Connection, action: i64) -> Result<Option<(String, Con
             let Ok(mut content) = serde_json::from_str::<Content>(&args) else {
                 return Ok(None);
             };
-            // The subject from the mirror. The apply sets the subject from
-            // Gmail and checks the flags of the final content again.
-            if let Some(p) = crate::parent(c, action)? {
+            // A change of a reply keeps the subject of its draft (change
+            // spec, section 1). Else the subject from the mirror: the apply
+            // sets the subject from Gmail and checks the flags of the final
+            // content again.
+            if let Some(subject) = crate::change_reply_subject(c, action)? {
+                content.subject = subject;
+            } else if let Some(p) = crate::parent(c, action)? {
                 content.subject = iris_compose::reply_subject(&p.subject);
             }
             Ok(content.check().ok().map(|c| (address, c)))

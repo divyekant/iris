@@ -123,18 +123,25 @@ fn grown(
 /// `drafts.create` call, and the `draft` row.
 pub(crate) fn draft(run: &mut Run<'_, '_>, action: i64) -> Result<Outcome> {
     let store = run.store;
-    let (args, reply_target): (String, bool) = store.read(|c| {
+    let (args, reply_target, change): (String, bool, bool) = store.read(|c| {
         Ok(c.query_row(
-            "SELECT args, json_type(targets, '$.threads') IS NOT NULL
+            "SELECT args, json_type(targets, '$.threads') IS NOT NULL,
+                    json_type(targets, '$.drafts') IS NOT NULL
              FROM changeset_action WHERE id = ?1",
             [action],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?)
     })?;
     let deny = |why: &str| -> Result<Outcome> {
         decide(store, action, "denied", why)?;
         Ok(Outcome::Denied(why.into()))
     };
+    // shortcut: the apply of a change (docs/specs/2026-11-25-draft-change.md,
+    // section 2) is the next part of the build. Until then, a change is
+    // denied with no provider call, never applied as a new draft.
+    if change {
+        return deny(iris_changeset::CHANGE_OFF);
+    }
     let Ok(mut content) = serde_json::from_str::<Content>(&args) else {
         return deny("the arguments are not a draft content");
     };
