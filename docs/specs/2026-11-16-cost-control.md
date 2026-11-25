@@ -55,12 +55,15 @@ pay again for the same mail.
   a message that is not understood, for example one that failed the model
   3 times. Triggers of the store do each reset, so each writer gets it.
 - Context (issue #1049, migration 68): each successful run records the
-  row IDs and a hash of the texts (clean text, sender, subject) of the
-  earlier messages that shaped it (`message.context`): the
-  newest 3 earlier messages of the thread, and the newest 5 texts of the
-  same sender, which shape the clean text. When the budget of the data
-  left out some thread messages, or no model call ran, the record holds
-  only the thread messages that the data held. A check compares the
+  row IDs and a hash of the text of the earlier messages that shaped it
+  (`message.context`): the newest 3 earlier messages of the thread, with
+  a hash of the text that the model data held of each (sender, subject
+  and the first 2,000 characters of the clean text), and the newest 5
+  texts of the same sender, with a hash of the clean text, which shapes
+  the clean text of the message. When the budget of the data cut the
+  thread context, or no model call ran, the record holds a hash of only
+  the bytes that the data held. So a change of an earlier text that the
+  run did not read runs nothing again. A check compares the
   recorded context of an understood message with its context now, and
   clears `understood_at` where they differ. So a later message runs again
   only when the context that its last run used changed: an earlier

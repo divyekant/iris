@@ -3044,7 +3044,7 @@ fn a_change_of_an_earlier_message_runs_the_later_ones_again() {
         x ^= x << 17;
         let k = (x % N as u64) as usize;
         let m = ids[k];
-        let sql = if x % 2 == 0 {
+        let sql = if x.is_multiple_of(2) {
             spam[k] = !spam[k];
             if spam[k] {
                 "INSERT INTO message_label(message_id, label_id)
@@ -3392,4 +3392,39 @@ fn the_check_after_a_run_skips_mail_that_waits_for_its_first_run() {
         iris_understand::store::check_later(&b.store, ids[0]).unwrap(),
         0
     );
+}
+
+/// Issue 1049, pre-review: the record holds only the earlier text that the
+/// run read. A change of an earlier text after the cut of the thread
+/// context (2,000 characters) runs nothing again.
+#[test]
+fn a_change_beyond_the_text_that_the_run_read_runs_nothing_again() {
+    let b = store("context-tail");
+    let raw = |text: &str| {
+        format!(
+            "From: x1@example.net\nTo: owner@example.com\nSubject: S\n\n{}{text}\n",
+            "Some words. ".repeat(250)
+        )
+    };
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &raw("Old tail."), &["INBOX"]);
+    b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    let later = |fake: &Fake| {
+        fake.calls
+            .borrow()
+            .iter()
+            .filter(|c| c.1.contains("Words k2k."))
+            .count()
+    };
+    let runs = later(&fake);
+    assert_eq!(runs, 1);
+    new_content(&b, m1, &raw("New tail."));
+    drain(&b, &fake, &mut last);
+    assert_eq!(later(&fake), runs, "no new run of the later message");
+    // A change inside the cut runs the later message again.
+    new_content(&b, m1, &raw("New tail.").replacen("Some", "Other", 1));
+    drain(&b, &fake, &mut last);
+    assert_eq!(later(&fake), runs + 1);
 }

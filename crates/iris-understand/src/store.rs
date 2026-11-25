@@ -738,12 +738,16 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         keep_choices(tx, message)?;
         // The thread context counts only through a model call, and only
         // as far as the budget of the data held it.
-        let kept = if d.hostile {
-            None
-        } else if d.calls == 0 {
-            Some(0)
-        } else if d.context_kept < after.context.len() {
-            Some(d.context_kept)
+        let full: Vec<usize> = after
+            .context
+            .iter()
+            .rev()
+            .map(|e| crate::prompt::escape(e).len())
+            .collect();
+        let held = if d.calls == 0 {
+            Some(Vec::new())
+        } else if d.context_held != full {
+            Some(d.context_held.clone())
         } else {
             None
         };
@@ -759,7 +763,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
                     // Hostile mail reads no context and makes no item.
                     Some("-".to_string())
                 } else {
-                    context_key(tx, message, kept, false)?
+                    context_key(tx, message, held.as_deref(), false)?
                 }
             ],
         )?;
@@ -1118,45 +1122,49 @@ macro_rules! thread_context_from {
     };
 }
 
-/// The columns of one entry of a context key: the row ID and the texts
-/// that a run reads of message `m` (its clean text, sender and subject), so
-/// that a new text of the same row changes the key too.
-macro_rules! context_entry {
-    () => {
-        "m.id, b.sender, b.subject, b.text"
-    };
-}
-
-/// One entry of a context key: "7:" and the FNV-1a 64 hash of the texts of
-/// the row (a stable hash: a new build gives the same key).
-fn entry(r: &rusqlite::Row) -> rusqlite::Result<String> {
-    let id: i64 = r.get(0)?;
+/// The FNV-1a 64 hash of `parts` (a stable hash: a new build gives the
+/// same key).
+fn fnv(parts: &[&str]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for i in 1..=3 {
-        let text: String = r.get(i)?;
-        for b in text.bytes().chain([0xff]) {
+    for p in parts {
+        for b in p.bytes().chain([0xff]) {
             h ^= u64::from(b);
             h = h.wrapping_mul(0x0000_0100_0000_01b3);
         }
     }
-    Ok(format!("{id}:{h:016x}"))
+    h
+}
+
+/// The entry of the thread context that a run gives the model for one
+/// earlier message: one text for the run and for [`context_key`].
+fn render_context(sender: &str, subject: &str, text: &str) -> String {
+    format!(
+        "From: {sender}\nSubject: {subject}\n{}",
+        crate::cut(text, THREAD_CHARS)
+    )
 }
 
 /// The context of a run of `message` now (store migration 68, issue
-/// 1049), as text ("t:7:<hash>,4:<hash>;s:4:<hash>"): `t` the entries
-/// ([`entry`]: the row ID and a hash of its texts) of the newest
-/// [`THREAD_MESSAGES`] earlier messages of the thread, newest first, and
-/// `s` the row IDs of the earlier messages of the same sender, which shape
-/// the clean text of each run. With `kept`, the data of the model call held
-/// only the newest `kept` of them (the budget of the data cut it, or no
-/// model call ran: 0), and the key is "t!:7;s:4". It reads the sender
-/// address from the store, so a check and the run agree. `waiting`: count
-/// each message that waits for a run as understood. `None` for a message
-/// with no thread.
+/// 1049), as text ("t:7:<hash>,4:<hash>;s:4:<hash>"), so that a change of
+/// what a run reads changes it:
+///
+/// - `t`: the newest [`THREAD_MESSAGES`] earlier messages of the thread,
+///   newest first, each with the hash of its entry of the thread context
+///   ([`render_context`], escaped as the data escapes it).
+/// - With `held`, the data of the model call held only the first
+///   `held.len()` of them, and of each only `held[i]` bytes (the budget
+///   cut it, or no model call ran: empty). The key is then "t!:7:<hash>:<bytes>",
+///   and each hash is of the bytes that the data held.
+/// - `s`: the earlier messages of the same sender, each with the hash of
+///   its clean text, which shapes the clean text of the run.
+///
+/// It reads the sender address from the store, so a check and the run
+/// agree. `waiting`: count each message that waits for a run as
+/// understood. `None` for a message with no thread.
 fn context_key(
     c: &rusqlite::Connection,
     message: i64,
-    kept: Option<usize>,
+    held: Option<&[usize]>,
     waiting: bool,
 ) -> rusqlite::Result<Option<String>> {
     let row: Option<(Option<i64>, Option<i64>, Option<String>)> = c
@@ -1171,56 +1179,80 @@ fn context_key(
     let Some((Some(thread), date, from)) = row else {
         return Ok(None);
     };
-    let ids = |rows: Vec<String>| rows.join(",");
     let (mut t, mut s) = (Vec::new(), Vec::new());
     if let Some(date) = date {
-        let kept = kept.map_or(THREAD_MESSAGES, |k| (k as i64).min(THREAD_MESSAGES));
-        t = if waiting {
+        let limit = held.map_or(THREAD_MESSAGES, |h| (h.len() as i64).min(THREAD_MESSAGES));
+        let row = |r: &rusqlite::Row| -> rusqlite::Result<(i64, String)> {
+            let (id, sender, subject, text): (i64, String, String, String) =
+                (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
+            Ok((
+                id,
+                crate::prompt::escape(&render_context(&sender, &subject, &text)),
+            ))
+        };
+        let rows: Vec<(i64, String)> = if waiting {
             c.prepare_cached(concat!(
-                "SELECT ",
-                context_entry!(),
-                " ",
+                "SELECT m.id, b.sender, b.subject, b.text ",
                 thread_context_from!(waiting)
             ))?
-            .query_map(params![thread, message, date, kept, MAX_TRIES], entry)?
+            .query_map(params![thread, message, date, limit, MAX_TRIES], row)?
             .collect::<rusqlite::Result<_>>()?
         } else {
             c.prepare_cached(concat!(
-                "SELECT ",
-                context_entry!(),
-                " ",
+                "SELECT m.id, b.sender, b.subject, b.text ",
                 thread_context_from!()
             ))?
-            .query_map(params![thread, message, date, kept], entry)?
+            .query_map(params![thread, message, date, limit], row)?
             .collect::<rusqlite::Result<_>>()?
         };
+        for (i, (id, text)) in rows.iter().enumerate() {
+            t.push(match held {
+                None => format!("{id}:{:016x}", fnv(&[text])),
+                Some(h) => {
+                    // The bytes that the data held, or fewer if the text is
+                    // shorter now: the count is part of the entry.
+                    let mut n = h.get(i).copied().unwrap_or(0).min(text.len());
+                    while !text.is_char_boundary(n) {
+                        n -= 1;
+                    }
+                    format!("{id}:{:016x}:{n}", fnv(&[&text[..n]]))
+                }
+            });
+        }
         if let Some(from) = &from {
             s = c
-                .prepare_cached(concat!(
-                    "SELECT ",
-                    context_entry!(),
-                    " ",
-                    same_sender_from!()
-                ))?
+                .prepare_cached(concat!("SELECT m.id, b.text ", same_sender_from!()))?
                 .query_map(
                     params![thread, message, date, from, SAME_SENDER_MESSAGES],
-                    entry,
+                    |r| {
+                        let (id, text): (i64, String) = (r.get(0)?, r.get(1)?);
+                        Ok(format!("{id}:{:016x}", fnv(&[&text])))
+                    },
                 )?
                 .collect::<rusqlite::Result<_>>()?;
         }
     }
-    let cut = if kept.is_some() { "!" } else { "" };
-    Ok(Some(format!("t{cut}:{};s:{}", ids(t), ids(s))))
+    let cut = if held.is_some() { "!" } else { "" };
+    Ok(Some(format!("t{cut}:{};s:{}", t.join(","), s.join(","))))
 }
 
-/// The `kept` of a recorded context: `None` for the full window, or the
-/// count of thread messages that the data held.
-fn kept_of(recorded: &str) -> Option<usize> {
+/// The `held` of a recorded context: `None` for the full window, or the
+/// bytes of each thread message that the data held.
+fn held_of(recorded: &str) -> Option<Vec<usize>> {
     let t = recorded.strip_prefix("t!:")?;
     Some(
         t.split(';')
             .next()
-            .map_or(0, |t| t.split(',').filter(|x| !x.is_empty()).count()),
+            .unwrap_or("")
+            .split(',')
+            .filter(|x| !x.is_empty())
+            .map(|e| {
+                e.rsplit(':')
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0)
+            })
+            .collect(),
     )
 }
 
@@ -1249,9 +1281,9 @@ fn check_one(
         // Hostile mail: no context shaped its run.
         return Ok(false);
     }
-    let kept = kept_of(&recorded);
-    if context_key(tx, id, kept, false)?.as_deref() == Some(recorded.as_str())
-        || context_key(tx, id, kept, true)?.as_deref() == Some(recorded.as_str())
+    let held = held_of(&recorded);
+    if context_key(tx, id, held.as_deref(), false)?.as_deref() == Some(recorded.as_str())
+        || context_key(tx, id, held.as_deref(), true)?.as_deref() == Some(recorded.as_str())
     {
         return Ok(false);
     }
@@ -1474,10 +1506,7 @@ fn thread_context(
             .query_map(params![thread, message, date, THREAD_MESSAGES], |r| {
                 let (from, subject, text): (String, String, String) =
                     (r.get(0)?, r.get(1)?, r.get(2)?);
-                Ok(format!(
-                    "From: {from}\nSubject: {subject}\n{}",
-                    crate::cut(&text, THREAD_CHARS)
-                ))
+                Ok(render_context(&from, &subject, &text))
             })?
             .collect::<rusqlite::Result<_>>()?;
         v

@@ -588,10 +588,11 @@ pub struct Decision {
     /// that a pinned item already holds is left out (#946). Empty when no
     /// fixed rule completed the message.
     pub rules: Vec<&'static str>,
-    /// The count of earlier messages of the thread in the data of the last
-    /// model call (the budget can leave out older ones). 0 with no model
-    /// call: the thread context then shaped nothing (issue 1049).
-    pub context_kept: usize,
+    /// For each earlier message of the thread in the data of the last
+    /// model call, newest first, the bytes of its escaped text that the
+    /// data held (the budget can cut or leave out older ones). Empty with
+    /// no model call: the thread context then shaped nothing (issue 1049).
+    pub context_held: Vec<usize>,
     pub calls: u32,
     pub usage: Usage,
 }
@@ -636,8 +637,8 @@ pub fn decide(
         d.waiting = true;
         return Ok(d);
     };
-    let (mut data, kept) = prompt::data_kept(a, cx, prompt::MAX_DATA);
-    d.context_kept = kept;
+    let (mut data, held) = prompt::data_kept(a, cx, prompt::MAX_DATA);
+    d.context_held = held;
     // Known until a call gives no reliable usage (see `add`).
     d.usage.known = true;
     // A refusal for size (HTTP 400 or 413) of large data gets one more call
@@ -651,13 +652,13 @@ pub fn decide(
                 status: 400 | 413, ..
             },
         ) if data.len() > prompt::SMALL_DATA => {
-            let (small, kept) = prompt::data_kept(a, cx, prompt::SMALL_DATA);
+            let (small, held) = prompt::data_kept(a, cx, prompt::SMALL_DATA);
             match model.ask(instruction, &small) {
                 Err(iris_model::Error::Budget(_)) => Err(first),
                 r => {
                     d.calls += 1;
                     d.usage.known = false;
-                    d.context_kept = kept;
+                    d.context_held = held;
                     data = small;
                     r
                 }

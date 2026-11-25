@@ -4,12 +4,17 @@
 --
 -- 1. `message.context`: the row IDs of the context of the last successful
 --    run, as text (`iris_understand::store::context_key`): "t:7@..,4@..;s:4@..",
---    each entry a row ID and a hash of the texts that a run reads of it
---    (`body`), so that a new text of the same row changes the record,
---    with `t` the newest 3 earlier messages of the thread and `s` the
---    earlier messages of the same sender. "t!:" marks a run whose model
---    data held only the listed thread messages (the budget cut the others,
---    or no model call ran). "-" marks hostile mail: no context shaped it. NULL for a message that no run understood
+--    each entry a row ID and a hash of the text that a run read of it,
+--    so that a new text of the same row changes the record. `t` holds the
+--    newest 3 earlier messages of the thread, each with a hash of its
+--    entry of the thread context (sender, subject and the first 2,000
+--    characters of the clean text). `s` holds the earlier messages of the
+--    same sender, each with a hash of its clean text. "t!:" marks a run
+--    whose model data held only part of the thread context (the budget
+--    cut it, or no model call ran): each entry then also holds the count
+--    of the bytes that the data held, and the hash covers only those
+--    bytes. "-" marks hostile mail: no context shaped it.
+--    NULL for a message that no run understood
 --    since this migration. The first check of such a row records its
 --    context now and runs nothing again (limit issue #1119: a change
 --    before the migration is not seen).

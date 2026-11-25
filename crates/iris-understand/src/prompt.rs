@@ -70,9 +70,10 @@ pub fn data_in(a: &Analysis, cx: &Context, budget: usize) -> String {
     data_kept(a, cx, budget).0
 }
 
-/// [`data_in`], and the count of earlier messages of the thread that the
-/// budget left in (the newest ones).
-pub fn data_kept(a: &Analysis, cx: &Context, budget: usize) -> (String, usize) {
+/// [`data_in`], and for each earlier message of the thread that the budget
+/// left in (the newest first), the count of bytes of its escaped text
+/// ([`escape`] of the entry of `Context::thread`) that the data holds.
+pub fn data_kept(a: &Analysis, cx: &Context, budget: usize) -> (String, Vec<usize>) {
     let h = &a.head;
     let mut d = String::new();
     let from = match (&h.from_name, &h.from_addr) {
@@ -154,6 +155,7 @@ pub fn data_kept(a: &Analysis, cx: &Context, budget: usize) -> (String, usize) {
     }
     // The newest earlier messages are the most useful context.
     let mut earlier: Vec<String> = Vec::new();
+    let mut held: Vec<usize> = Vec::new();
     for e in cx.thread.iter().rev() {
         let head = "\nEarlier message in the thread:\n";
         if left <= head.len() + 1 + CUT_MARK.len() {
@@ -161,7 +163,14 @@ pub fn data_kept(a: &Analysis, cx: &Context, budget: usize) -> (String, usize) {
         }
         let mut block = head.to_string();
         left -= head.len() + 1;
-        left -= push_cut(&mut block, e, left);
+        let n = push_cut(&mut block, e, left);
+        left -= n;
+        // The bytes of the text, without the cut mark.
+        held.push(if n == escape(e).len() {
+            n
+        } else {
+            n.saturating_sub(CUT_MARK.len())
+        });
         block.push('\n');
         earlier.push(block);
     }
@@ -172,7 +181,7 @@ pub fn data_kept(a: &Analysis, cx: &Context, budget: usize) -> (String, usize) {
     // Each text from the mail went through the escape: the client escape
     // adds nothing, so the block stays in the budget.
     debug_assert!(!d.contains("<<<"));
-    (d, earlier.len())
+    (d, held)
 }
 
 /// Push `text` to `out`, escaped as `iris_model::data_block` does and cut
@@ -202,7 +211,7 @@ fn push_cut(out: &mut String, text: &str, max: usize) -> usize {
 }
 
 /// `<<<` as `‹‹‹`, the escape of `iris_model::data_block`.
-fn escape(s: &str) -> String {
+pub(crate) fn escape(s: &str) -> String {
     s.replace("<<<", "‹‹‹")
 }
 
