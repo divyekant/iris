@@ -71,8 +71,10 @@ eligibility of step 1 of the proposal step, the member insert trigger and
 the local API use the four forms. A live signal has the status `active`
 only. A signal that is `used`, `dismissed`, `expired` or `gone` stops to
 matter (spec 1, section 6.6), so it is not a candidate, not an addition and
-not a live member. The engine sets `expired` at `expires`, so the views need
-no clock. The other forms keep the live rule of R6-01: status not `gone`,
+not a live member. A signal past its `expires` time is not live, also
+while its stored status is still `active`: the views and the rule
+`live_item!` compare `expires` with the clock (migration 57, issue #972).
+The engine and each matters write also set the status `expired`. The other forms keep the live rule of R6-01: status not `gone`,
 `cancelled` or `declined`, no `duplicate_of`, attention not `hidden`, and no
 hostile origin mail.
 

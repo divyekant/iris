@@ -119,19 +119,21 @@ pub struct Candidate {
 }
 
 /// The columns of one message of the snapshot: each input of the model
-/// call (row ID, `from`, subject, date, clean text as the data cuts it, and
-/// the `SENT` label). The snapshot of the call and [`basis_sql`] read this
+/// call (row ID, `from`, subject, date, clean text as the data cuts it, the
+/// `SENT` label, and if the cut left out text). The snapshot of the call and [`basis_sql`] read this
 /// one list, so the basis covers each input of the call.
 const SNAPSHOT_COLUMNS: &str = "m.id, h.from_addr, h.from_name, b.subject,
     strftime('%Y-%m-%dT%H:%M:%SZ', m.internal_date / 1000, 'unixepoch'),
     substr(ltrim(b.text, char(32, 9, 10, 13)), 1, {CHARS}),
     EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-            WHERE ml.message_id = m.id AND l.provider_id = 'SENT')";
+            WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
+    coalesce(length(trim(b.text, char(32, 9, 10, 13))), 0) > {CHARS}";
 
-/// [`SNAPSHOT_COLUMNS`] with the cut of the text: one character more than
-/// [`cut`] keeps, so `cut` still marks a cut.
+/// [`SNAPSHOT_COLUMNS`] with the cut of the text at [`MESSAGE_CHARS`]. The
+/// last column says if the cut left out text. The store decides it from the
+/// full text, so no trim of the kept part can hide a cut.
 fn columns() -> String {
-    SNAPSHOT_COLUMNS.replace("{CHARS}", &(MESSAGE_CHARS + 1).to_string())
+    SNAPSHOT_COLUMNS.replace("{CHARS}", &MESSAGE_CHARS.to_string())
 }
 
 /// SQL of the basis of the thread `thread` (an SQL expression): the SHA-256
@@ -298,6 +300,8 @@ struct Msg {
     date: Option<String>,
     text: String,
     sent: bool,
+    /// The store left out text of the message ([`columns`]).
+    more: bool,
 }
 
 /// The state of the thread that a summary depends on, in memory that does
@@ -355,6 +359,7 @@ fn snapshot(c: &Transaction<'_>, thread: i64) -> Result<Snapshot> {
             date: r.get(4)?,
             text: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
             sent: r.get(6)?,
+            more: r.get(7)?,
         })
     })?;
     let mut newest = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -370,11 +375,14 @@ fn snapshot(c: &Transaction<'_>, thread: i64) -> Result<Snapshot> {
 }
 
 /// `text` with at most `limit` characters, and the cut mark after a cut.
-fn cut(text: &str, limit: usize) -> String {
+/// `more` says that `text` is already a cut of a longer text: then the mark
+/// is always there, whatever the trim removes.
+fn cut(text: &str, limit: usize, more: bool) -> String {
     let text = text.trim();
     match text.char_indices().nth(limit) {
-        None => text.to_string(),
-        Some((end, _)) => format!("{}{CUT_MARK}", &text[..end]),
+        None if !more => text.to_string(),
+        None => format!("{text}{CUT_MARK}"),
+        Some((end, _)) => format!("{}{CUT_MARK}", text[..end].trim_end()),
     }
 }
 
@@ -383,7 +391,7 @@ fn cut(text: &str, limit: usize) -> String {
 fn data(s: &Snapshot) -> String {
     json!({
         "owner": s.owner,
-        "subject": s.newest.last().map(|m| cut(&m.subject, 300)),
+        "subject": s.newest.last().map(|m| cut(&m.subject, 300, false)),
         "thread": s.newest.iter().map(|m| json!({
             "from": match (&m.from_name, &m.from_addr) {
                 (Some(n), Some(a)) => format!("{n} <{a}>"),
@@ -392,7 +400,7 @@ fn data(s: &Snapshot) -> String {
             },
             "by_owner": m.sent,
             "date": m.date,
-            "text": cut(&m.text, MESSAGE_CHARS),
+            "text": cut(&m.text, MESSAGE_CHARS, m.more),
         })).collect::<Vec<_>>(),
     })
     .to_string()

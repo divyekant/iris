@@ -42,8 +42,8 @@ pub use flags::{
 };
 pub use outbox::{cancel, cancel_draft, hold, send_of_draft, Cancel, CANCELLED};
 pub use written::{
-    last_mark, send_written, write_mail, written_since, Mail, Press, Refusal, Written, MARK_MS,
-    NEW_WARNINGS, WRITTEN,
+    last_mark, send_written, write_mail, written_since, Mail, Press, Refusal, Written,
+    DRAFT_CHANGED, MARK_MS, NEW_WARNINGS, WRITTEN,
 };
 
 /// The flag `bulk`: more than this count of messages in one action, or in
@@ -1224,6 +1224,7 @@ fn clear(c: &Connection, action: i64) -> Result<()> {
 fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Option<String>> {
     // add_action writes one group of IDs. Another writer of the table may not.
     let bad = || Ok(Some("the targets are not valid".to_string()));
+    let raw = targets;
     let Ok(targets) = serde_json::from_str::<Map<String, Value>>(targets) else {
         return bad();
     };
@@ -1234,7 +1235,10 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
     // The undo of a ledger entry (section 7.4) names the entry. Its
     // messages come from the ledger in SQL, never as a list in memory.
     if group == "ledger" && !state {
-        return resolve_undo(c, action, ids);
+        return match resolve_undo(c, action, ids)? {
+            None => tombstone(c, action, raw),
+            refused => Ok(refused),
+        };
     }
     let linked: bool = c.query_row(
         "SELECT EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = ?1)",
@@ -1328,10 +1332,13 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
                 [row],
                 |r| r.get(0),
             )?,
+            // A kept draft of a tombstone is no target (issue 1014).
             (Kind::Draft, "drafts") => {
                 let found = c.execute(
                     "INSERT INTO action_draft(action_id, draft_id)
-                     SELECT ?1, id FROM draft WHERE id = ?2",
+                     SELECT ?1, d.id FROM draft d JOIN account a ON a.id = d.account_id
+                     WHERE d.id = ?2
+                       AND (a.state IS NULL OR a.state NOT IN ('removing', 'removed'))",
                     params![action, row],
                 )? == 1;
                 if verb == Verb::Draft {
@@ -1431,7 +1438,32 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
     if accounts > 1 {
         return Ok(Some("the targets are in two or more accounts".into()));
     }
-    Ok(None)
+    tombstone(c, action, raw)
+}
+
+/// Refuse an action whose resolved targets are in an account in state
+/// `removing` or `removed`: no new action targets a tombstone (issues 904,
+/// 1014, 1041). It reads each resolved row (messages, items, drafts) and
+/// each named thread, so a path of [`resolve`] cannot miss the check.
+fn tombstone(c: &Connection, action: i64, targets: &str) -> Result<Option<String>> {
+    let removed: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM account a
+           WHERE a.state IN ('removing', 'removed') AND a.id IN (
+             SELECT m.account_id FROM action_message am
+             JOIN message m ON m.id = am.message_id WHERE am.action_id = ?1
+             UNION ALL
+             SELECT i.account_id FROM action_item ai
+             JOIN item i ON i.id = ai.item_id WHERE ai.action_id = ?1
+             UNION ALL
+             SELECT d.account_id FROM action_draft ad
+             JOIN draft d ON d.id = ad.draft_id WHERE ad.action_id = ?1
+             UNION ALL
+             SELECT t.account_id FROM json_each(?2, '$.threads') j
+             JOIN thread t ON 't-' || t.id = j.value))",
+        params![action, targets],
+        |r| r.get(0),
+    )?;
+    Ok(removed.then(|| "the account was removed".to_string()))
 }
 
 /// The messages of an undo: the messages with `done` of the ledger entry
@@ -1636,9 +1668,23 @@ fn check_write(
 /// with no header (after the content cleanup) counts as hostile, because
 /// its sender is no longer known. The apply checks it again.
 pub fn hostile(c: &Connection, action: i64) -> Result<bool> {
+    let person: bool = c.query_row(
+        "SELECT cs.author_kind = 'person' FROM changeset_action a
+         JOIN changeset cs ON cs.id = a.changeset_id WHERE a.id = ?1",
+        [action],
+        |r| r.get(0),
+    )?;
+    Ok(!person && hostile_evidence(c, action)?)
+}
+
+/// True if a thread of `action` has hostile evidence now, for any author:
+/// a message that may be hostile, a message of a `hostile` sender, or a
+/// gone message with no header. The send claim keeps this result in
+/// `ledger.hostile_before` (issue #472).
+pub fn hostile_evidence(c: &Connection, action: i64) -> Result<bool> {
     Ok(c.query_row(
         &format!(
-            "SELECT cs.author_kind <> 'person' AND EXISTS (
+            "SELECT EXISTS (
            SELECT 1 FROM message m
            LEFT JOIN header h ON h.message_id = m.id
            LEFT JOIN sender p ON p.address = h.from_addr
@@ -1647,7 +1693,7 @@ pub fn hostile(c: &Connection, action: i64) -> Result<bool> {
                   -- A gone message after the cleanup has no header, so its
                   -- sender is not known: it counts as hostile evidence.
                   OR (m.gone_at IS NOT NULL AND h.message_id IS NULL)))
-         FROM changeset_action a JOIN changeset cs ON cs.id = a.changeset_id WHERE a.id = ?1",
+         FROM changeset_action a WHERE a.id = ?1",
             may_be_hostile = iris_store::may_be_hostile!(),
         ),
         [action],

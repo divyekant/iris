@@ -37,6 +37,8 @@ export type Measures = {
   memory: { rss_kib: number | null; messages: number };
   approvals: { decided: number; approved: number };
   undo: { applied: number; undone: number };
+  /** `unreviewed_after_hostile`: sends that a rule approved, not a person, after hostile mail in the thread. */
+  sends: { sent: number; unreviewed_after_hostile: number };
 };
 
 /** met: meets its target. missed: misses it. flat: no fixed target. none: no data yet. */
@@ -97,6 +99,7 @@ export function rows(m: Measures, now = new Date()): Row[] {
   const rss = m.memory.rss_kib;
   const { decided, approved } = m.approvals;
   const { applied, undone } = m.undo;
+  const { sent, unreviewed_after_hostile: unreviewed } = m.sends;
   return [
     m.days.length === 0
       ? { name: "Days you used Iris", value: "Not yet", detail: "Target: each day.", tone: "none" }
@@ -139,7 +142,9 @@ export function rows(m: Measures, now = new Date()): Row[] {
     applied === 0
       ? { name: "Changes that you undid", value: "Not yet", detail: "Iris has applied no change yet. Lower is better.", tone: "none" }
       : { name: "Changes that you undid", value: `${num(undone)} of ${num(applied)}`, detail: `${percent(undone, applied)}. Lower is better.`, tone: "flat" },
-    { name: "Sends without review after hostile mail", value: "Not yet", detail: "Iris does not measure this yet. Target: zero.", tone: "none" },
+    sent === 0
+      ? { name: "Sends without review after hostile mail", value: "Not yet", detail: "Iris has sent no mail yet. Target: zero.", tone: "none" }
+      : { name: "Sends without review after hostile mail", value: num(unreviewed), detail: `Of ${plural(sent, "send", "sends")}. Target: zero.`, tone: unreviewed > 0 ? "missed" : "met" },
   ];
 }
 

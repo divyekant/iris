@@ -29,5 +29,7 @@ iris-gmail = { version = "0.0.0", path = "../iris-gmail" }
 iris-spec = { version = "0.0.0", path = "../iris-spec" }
 iris-fakegmail = { version = "0.0.0", path = "../iris-fakegmail" }
 iris-fakegraph = { version = "0.0.0", path = "../iris-fakegraph" }
+iris-fakeimap = { version = "0.0.0", path = "../iris-fakeimap" }
+iris-imap = { version = "0.0.0", path = "../iris-imap" }
 iris-graph = { version = "0.0.0", path = "../iris-graph" }
 iris-synth = { version = "0.0.0", path = "../iris-synth" }

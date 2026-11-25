@@ -25,8 +25,10 @@ each input.
 
 - The full CSS cascade, CSS layout and CSS selectors other than the subset in
   [Hidden HTML](#hidden-html).
-- PDF font encodings other than Windows-1252 and a `ToUnicode` map:
-  `/Differences`, `/MacRomanEncoding`, and the predefined CMaps of CID fonts.
+- PDF font encodings other than Windows-1252, `/StandardEncoding`,
+  `/MacRomanEncoding`, `/Differences` and a `ToUnicode` map: for example
+  the predefined CMaps of CID fonts and the built-in encoding of a symbol
+  font.
 - The model and the fixed rules (specification 1, sections 7.3 and 7.4).
 - The detection of hostile mail (specification 1, section 6.7).
 
@@ -289,7 +291,8 @@ The search reads the lines in order and stops at the first of these:
   German, Spanish, Italian, Danish or Norwegian or Swedish, Dutch, Polish,
   Portuguese, Czech, Finnish, Turkish, Russian or Chinese. The client form
   in any language is an attribution line too: a line of less than 400 bytes
-  with a time (`10:00`), an address in `<>` and a `:` (or `：`) at the end.
+  with a year (`19..` or `20..`, 4 digits) and a time (`10:00`) outside
+  `<>`, an address in `<>` and a `:` (or `：`) at the end.
   Gmail writes "Am 3. Feb. 2025 um 10:00 schrieb Ana <ana@example.org>:".
   Two lines join into the client form only if the second line alone is not
   the client form. Two lines never join if the first line ends with `.`,
@@ -404,9 +407,30 @@ its first 1 KiB holds `%PDF`.
   code length comes from the code space. Without a code space, it is the
   shortest code with an entry, else 2 bytes for a `/Type0` font and 1 byte
   for another font. A code without an entry gives no text in a `/Type0`
-  font and Windows-1252 in another font. A `/Type0` font without a map
-  gives no text. A font that the reader does not find, or a font that is
-  not `/Type0` and has no map, reads as Windows-1252.
+  font. In another font, it reads through the encoding of the font (see
+  the next item), and as Windows-1252 if the font has no encoding. A `/Type0` font without a map
+  gives no text. A font that the reader does not find reads as
+  Windows-1252.
+- Encoding of a simple font (not `/Type0`): its `/Encoding` name, or the
+  `/BaseEncoding` and `/Differences` of its encoding dictionary (direct or
+  a reference). The base is `/StandardEncoding`, `/MacRomanEncoding` (ISO
+  32000-1 Annex D), or else Windows-1252. A code that a named base does not
+  define gives no character. `/Differences` gives a glyph name
+  to each code from a start code. A glyph name reads through the names of
+  the Latin encodings of Annex D (Adobe Glyph List), `uniXXXX` or `uXXXX` to
+  `uXXXXXX`. Another name gives no character. A font with a `/ToUnicode`
+  map reads a code without an entry through its encoding. Each font object
+  gets one table of 1 KiB, at most 256 tables for each PDF. The fonts past
+  the limit read as Windows-1252.
+- Predictor: after the inflate, a stream with a `/DecodeParms` `/Predictor`
+  of 10 to 15 loses its PNG predictor. `/DecodeParms` is a dictionary, a
+  reference, or an array whose first item is one of these. The predictor
+  uses rows of `/Columns`, `/Colors` and `/BitsPerComponent`. A short last
+  row and the rows after a bad filter byte go out. A stream with another predictor is not read. If the
+  parameters are a reference to an object that comes later in the file,
+  an object stream waits for the end of the pass inside the object budget
+  (4 MiB), and its objects then do not replace objects that the pass kept.
+  Another stream with such a reference is not read.
 - The reader reads the names of a stream dictionary (`/Length`, `/Filter`
   and the names above) only outside its strings, comments and inner
   dictionaries.
@@ -449,25 +473,28 @@ client. They are not defects of this design:
 - PDF: text hidden by a white fill, by clipping, by a position off the page,
   by a small font or by an object on top of it stays. A content stream that
   no page uses gives its text too. A form without its own `/Resources`
-  reads as Windows-1252. A font with another encoding than Windows-1252 or
-  a `ToUnicode` map (see Not in scope) can fail the quality check. An
-  object stream with a `/DecodeParms` predictor gives wrong objects. An
-  encrypted PDF gives no text.
+  reads through the encoding of its font, or as Windows-1252. A font with
+  an encoding that is not in scope (see Not in scope) can fail the quality
+  check. A stream with a TIFF predictor is not read. An encrypted PDF gives
+  no text.
 - The model reads clean text as data, never as instructions (specification
   1). So hidden text that stays is a quality limit, not a security hole.
 - A quoted-printable line of more than 64 KiB that has only white space,
   CR and `=` with white space splits at 64 KiB. Its white space can then
   differ from the decode of the whole body.
-- Addresses (`iris-people`, through `mail-parser` 1.0.1): these forms give no
-  address, so the person goes out of the profiles. A comment inside an
-  address (`john(work)@example.org`), a domain literal with a `:` outside
-  `<>` (`user@[IPv6:2001:db8::1]`), a quoted local part outside `<>` with an
-  escaped character (`"a\"b"@example.org`), and an `@` outside a quoted
-  local part (`a@b@example.org`). The same valid forms inside `<>` work.
-  `mail-parser` reads a bare quoted local part (`"a:b"@example.org`) as a
-  name and `@example.org`. `iris-people` joins the two again when the list
-  holds that exact text, so this form works. A comment after a bare address
-  (`a@example.org (Ana)`) is the display name.
+- Addresses (`iris-people`): `iris-people` reads address lists with the
+  address scanner of the sender axis (`iris_senders::head::addresses`), not
+  with `mail-parser`. A comment inside an address (`john(work)@example.org`)
+  gives `john@example.org`. A domain literal (`user@[IPv6:2001:db8::1]`) and
+  a quoted local part with an escaped character (`"a\"b"@example.org`) give
+  their address. A comment after a bare address (`a@example.org (Ana)`) is
+  the display name. These limits stay:
+  - An address with two `@` outside a quoted local part (`a@b@example.org`)
+    gives no address.
+  - A `<` or `>` inside a quoted local part breaks the list (issue #980).
+  - Mail that Iris understood before the change to the scanner keeps the
+    recipients that `mail-parser` read, so a domain-literal recipient of
+    that mail is not in the profiles (issue #1003).
 
 ### Limits and the cut
 
@@ -524,8 +551,8 @@ input: no panic, bounded memory and time, and a `Clean` with less text (and
 - Dependencies: `encoding_rs` 0.8, `miniz_oxide` 0.9 and `mail-parser`
   1.0.1 (with `encodify` and `hashify`). `mail-parser` needs Rust 1.98 or
   newer, so `rust-toolchain.toml` pins Rust 1.100.0.
-- `iris-people` reads address lists with `mail-parser` too (see "Known
-  limits").
+- `iris-people` reads address lists with the address scanner of
+  `iris-senders`, not with `mail-parser` (see "Known limits").
 
 ## Assumptions
 
