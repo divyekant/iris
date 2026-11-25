@@ -55,6 +55,13 @@ fn a_question_waits_quietly_and_the_due_date_interrupts() {
     assert_eq!(q.title, format!("j-{asked}"));
     // The goal is the words of the person, one line.
     assert_eq!(q.text, "Book the flight.");
+    // A long goal is not cut to the 200 characters of a mail subject.
+    let long = "a".repeat(1500);
+    let l = iris_job::create(&s, &long, None, NOW).unwrap();
+    iris_job::ask(&s, l, "Why?", None, NOW + 1).unwrap();
+    let all = s.read(notice::list).unwrap();
+    assert_eq!(all.iter().find(|n| n.job_id == Some(l)).unwrap().text, long);
+    iris_job::answer(&s, l, "Because.", None, NOW + 2).unwrap();
     let d = list.iter().find(|n| n.job_id == Some(due)).unwrap();
     assert_eq!(d.rule_name, "Job due");
     assert_eq!(s.read(notice::counts).unwrap().0, 2);

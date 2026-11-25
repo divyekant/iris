@@ -179,8 +179,9 @@ job. No new token and no new part.
 - `apps/mac/src/engine.rs`: the route of a job row.
 - `docs/spec/01-mirror-store-forms.md` (the `notice` table), `docs/specs/2026-11-24-job-due-date.md` and `docs/specs/2026-11-16-notices.md`.
 
-Three PRs: the engine (store, policy, engine, API), the web client, the Mac
-app.
+Two PRs: the engine and the web client (store, policy, engine, API, notice
+list), so the web client never gets a job row that it cannot show; then the
+Mac app.
 
 ## Assumptions
 

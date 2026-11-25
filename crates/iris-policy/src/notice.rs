@@ -158,16 +158,21 @@ fn words(tx: &Connection, id: i64) -> Result<(String, String)> {
 /// One line of at most [`WORDS_MAX`] characters: each control character and
 /// each run of white space becomes one space.
 pub fn line(s: &str) -> String {
-    let one: String = s
-        .split(|c: char| c.is_whitespace() || c.is_control())
-        .filter(|w| !w.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let one = one_line(s);
     if one.chars().count() <= WORDS_MAX {
         one
     } else {
         one.chars().take(WORDS_MAX - 3).collect::<String>() + "..."
     }
+}
+
+/// One line with no cut: each control character and each run of white
+/// space becomes one space.
+pub fn one_line(s: &str) -> String {
+    s.split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The SQL condition "the notice is open": not done, its mail is not
@@ -257,8 +262,10 @@ fn select(conn: &Connection, rest: &str, p: impl rusqlite::Params) -> Result<Vec
         ))?
         .query_map(p, |r| {
             let job_id: Option<i64> = r.get(3)?;
-            // The goal of a job is the words of the person: one line here.
-            let one = |s: String| if job_id.is_some() { line(&s) } else { s };
+            // The goal of a job is the words of the person: one line here,
+            // with no cut (the store keeps at most 2,000 characters). The
+            // system notice cuts its own text.
+            let one = |s: String| if job_id.is_some() { one_line(&s) } else { s };
             Ok(Notice {
                 id: r.get(0)?,
                 message_id: r.get(1)?,
