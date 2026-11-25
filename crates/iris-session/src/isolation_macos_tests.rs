@@ -402,6 +402,8 @@ fn paths(work: &str) -> Paths {
         home: "/data/sessions/se-1.home".into(),
         tmp: "/data/sessions/se-1.tmp".into(),
         programs: vec!["/Users/a/.local/bin/claude".into(), "/opt/iris/iris".into()],
+        reads: vec![],
+        data_dir: "/data".into(),
     }
 }
 
@@ -703,6 +705,7 @@ fn the_command_runs_the_program_in_the_profile_with_the_private_folders() {
         Some(4100),
         &program,
         &["--task".to_string(), "a b".to_string()],
+        &[],
     );
     assert_eq!(c.program, PathBuf::from(SANDBOX_EXEC));
     let a: Vec<String> = c
@@ -798,6 +801,8 @@ fn the_real_profile_starts_programs_and_hides_launchd() {
         home: d.join("home"),
         tmp: d.join("tmp"),
         programs: vec![],
+        reads: vec![],
+        data_dir: d.clone(),
     };
     let run = |script: &str| {
         let mut c = std::process::Command::new("/usr/bin/sandbox-exec");
@@ -825,4 +830,49 @@ fn the_real_profile_starts_programs_and_hides_launchd() {
     let out = run("launchctl list");
     assert!(!out.status.success() || out.stdout.is_empty(), "{out:?}");
     let _ = fs::remove_dir_all(&d);
+}
+
+#[test]
+fn a_read_path_is_readable_and_the_data_folder_stays_denied() {
+    let mut p = paths("/data/workspaces/j-1");
+    let (no_reads, _) = profile(&p, None);
+    assert!(!no_reads.contains("(deny file-read* file-write* (subpath (param"));
+    p.reads = vec!["/Users/a/.nvm/v22".into()];
+    let (text, params) = profile(&p, None);
+    let k = |v: &str| {
+        let k = &params.iter().find(|(_, x)| x == Path::new(v)).unwrap().0;
+        format!("(param \"{k}\")")
+    };
+    let reads = text
+        .lines()
+        .find(|l| l.starts_with("(allow file-read* "))
+        .unwrap();
+    assert!(reads.contains(&format!("(subpath {})", k("/Users/a/.nvm/v22"))));
+    // A read path is never writable.
+    let ro = k("/Users/a/.nvm/v22");
+    assert!(text
+        .lines()
+        .filter(|l| l.contains("file-write*") && l.starts_with("(allow"))
+        .all(|l| !l.contains(&ro)));
+    // The data folder is denied after the read paths and before the
+    // folders of the session come back.
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("(deny file-read* file-write* (subpath (param"))
+        .unwrap();
+    let key = line.split('"').nth(1).unwrap();
+    assert_eq!(
+        params.iter().find(|(x, _)| x == key).unwrap().1,
+        Path::new("/data")
+    );
+    let deny = text.find(line).unwrap();
+    assert!(text.find(reads).unwrap() < deny);
+    assert!(deny < text.rfind("(allow file-read* file-write*").unwrap());
+    // The folders above the workspace in the data folder stay resolvable.
+    let after = &text[deny..];
+    let meta = after
+        .lines()
+        .find(|l| l.starts_with("(allow file-read-metadata"))
+        .unwrap();
+    assert!(meta.contains("(literal (param"), "{meta}");
 }

@@ -315,6 +315,30 @@ max_minutes = 60
 
 Iris adds the fixed prompt as the last argument of `command`.
 
+If the program of an agent needs files outside the system folders (for
+example a Node.js program in `~/.nvm`), list the folders in `read_paths`:
+
+```toml
+[agent.my-agent]
+command = ["/home/me/.nvm/versions/node/v22.11.0/bin/node", "/home/me/tools/agent.js"]
+read_paths = ["/home/me/.nvm/versions/node/v22.11.0", "/home/me/tools"]
+```
+
+CAUTION: The agent can read each file in a read path and send it to its
+hosts. List only folders of programs. Do not list a folder with keys,
+logins or mail.
+
+- The session can read a read path, not write it. Each path is absolute, at
+  most 16 paths.
+- Iris refuses a run if a read path is the data folder, is in it or holds
+  it; is a home folder or holds one (`~/.nvm` is allowed, `~` and `/home`
+  are not); is, is in or holds a folder of system state (`/proc`, `/sys`,
+  `/dev`, `/run`, `/tmp` and others); or holds a socket, a FIFO, a device,
+  a mount point, or a file with more than one hard link on the device of
+  the data folder or of a home folder.
+- The built-in agents get no read paths. They sign in only with their
+  variables.
+
 On Linux, the sandbox needs `bwrap`. [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 gives the prerequisites of the sandbox on Linux and on macOS.
 
