@@ -25,6 +25,8 @@ const byForm = (form: string) => items.filter((i) => i.form === form);
 
 export const status: Status = {
   mode: "observe",
+  time_zone: "Europe/London",
+  time_zone_set: false,
   accounts: [
     {
       id: 1,
@@ -497,6 +499,15 @@ export const notices = [
   { id: "n-1", rule: 9, rule_name: "Bank security codes", title: "First Harbor Bank", text: "Your sign-in code", created: "2026-11-16T09:00:00Z",
     message: { id: "m-3", thread: "t-3", date: "2026-11-16T09:00:00Z", from: { name: "First Harbor Bank", address: "alerts@bank.example" }, subject: "Your sign-in code", labels: ["INBOX"] } },
 ];
+
+/** The time zone of the owner (issue 891): sets it in the status. An empty name or a name that the computer does not know is a 400. */
+export function zonePost(body: { zone?: string | null }): [number, unknown] {
+  const zone = body.zone ?? null;
+  if (zone !== null && zone !== "UTC" && !Intl.supportedValuesOf("timeZone").includes(zone)) return [400, { error: `not a time zone: "${zone}"` }];
+  status.time_zone = zone ?? "Europe/London";
+  status.time_zone_set = zone !== null;
+  return [200, { time_zone: status.time_zone, time_zone_set: status.time_zone_set }];
+}
 
 export function noticePost(path: string): [number, unknown] | undefined {
   const done = path.match(/^\/notices\/([^/?]+)\/done$/);

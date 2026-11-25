@@ -142,6 +142,8 @@ export type Status = {
   waits_model?: number;
   /** The time zone of defer dates and due dates (an IANA name, `iris zone`). Null or left out: the zone of the browser. */
   time_zone?: string | null;
+  /** True when the owner set the time zone (`iris zone` or the Accounts page), false when it is the zone of the machine that runs Iris. */
+  time_zone_set?: boolean;
   /** After model errors: the time of the next model call (RFC 3339), while it is later than now. An older engine leaves it out. */
   model_retry_at?: string;
 };
@@ -640,6 +642,21 @@ function takeStatus(n: number, s: Status): boolean {
   access.accounts = accountNames(accounts);
   access.zone = s.time_zone ?? null;
   return true;
+}
+
+/** The answer of `POST /api/zone`: the time zone fields of the status. */
+export type Zone = Pick<Status, "time_zone" | "time_zone_set">;
+
+/**
+ * Set the time zone of the owner (issue 891): an IANA name, or null for the zone of the machine that
+ * runs Iris. The answer is the newest status of the zone: it takes a status number when it arrives,
+ * so a status read that started before it cannot put the old zone back in `access.zone`.
+ */
+export async function postZone(zone: string | null): Promise<Zone> {
+  const z = await post<Zone>("zone", { zone });
+  statusTaken = ++statusStarted;
+  access.zone = z.time_zone ?? null;
+  return z;
 }
 
 async function statusRead(): Promise<[Status, boolean]> {
