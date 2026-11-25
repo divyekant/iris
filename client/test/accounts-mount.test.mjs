@@ -316,6 +316,45 @@ test("a removal that answers removing shows the removed line when a later status
   }
 });
 
+test("a removal answer that a newer poll hides never says that the account is removed (issue 932)", async () => {
+  const saved = globalThis.fetch;
+  const [one, two] = fx.status.accounts;
+  const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  let release;
+  let fail = false;
+  globalThis.fetch = async (url, init) => {
+    if (init?.method === "POST") {
+      // The engine took the removal and answers while the delete runs, but only after a newer poll answered.
+      await new Promise((r) => (release = r));
+      return json({ ...fx.status, accounts: [{ ...one, state: "removing" }, two] });
+    }
+    if (fail) throw new TypeError("Failed to fetch");
+    return json(fx.status);
+  };
+  const view = await mount("/src/views/Accounts.svelte", { status: fx.status, poll: 0 });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const press = (label) => [...view.target.querySelectorAll("button")].find((b) => b.textContent.trim() === label).click();
+  try {
+    view.target.querySelector(`button[aria-label="Remove ${one.address}"]`).click();
+    await wait(0);
+    press("Remove");
+    await wait(5);
+    // A read that started after the removal answers first, with the status from before it.
+    await get("status");
+    fail = true;
+    release();
+    await wait(10);
+    const row = text(view.target.querySelector(".accounts li"));
+    assert.doesNotMatch(row, /Iris removed this account/);
+    assert.doesNotMatch(text(view.target), /Removed /);
+    assert.match(row, /Iris removes this account and deletes its mail from this machine\./);
+    assert.ok([...view.target.querySelectorAll("button")].some((b) => b.textContent.trim() === "Check again"));
+  } finally {
+    view.destroy();
+    globalThis.fetch = saved;
+  }
+});
+
 test("a slow poll that started before a removal does not put the removed account back", async () => {
   const saved = globalThis.fetch;
   const [one, two] = fx.status.accounts;
