@@ -117,3 +117,37 @@ test("a new proposal during the Undo time keeps the card and its hold, and shows
     view.destroy();
   }
 });
+
+test("a failed matter decision stays on the card when a newer proposal came during the hold (issue 345)", async () => {
+  for (const [status, words, close] of [
+    [400, /Iris did not record it/, true],
+    [500, /Iris does not know if it recorded the decision/, false],
+  ]) {
+    let proposed = list("g-5");
+    const g7 = { ...as("g-7"), matter: { ...as("g-7").matter, title: "Roof repair" } };
+    globalThis.fetch = async (url, init) => {
+      const path = String(url).replace(/^\/api\//, "");
+      if (init?.method === "POST") return new Response(JSON.stringify({ error: "store" }), { status });
+      const body = path === "matters" ? proposed : path === "matters/g-7" ? g7 : path.startsWith("matters/") ? as(path.slice(8)) : path === "brief" ? fx.brief : path === "status" ? fx.answer("status") : [];
+      return new Response(JSON.stringify(body), { status: 200 });
+    };
+    const view = await mount("/src/views/Brief.svelte", { brief: fx.brief, watches: [], now: new Date("2026-11-16T09:05:00Z"), poll: 5, hold: 200 });
+    const press = (name) => [...view.target.querySelectorAll("button")].find((b) => text(b).trim() === name).click();
+    try {
+      await until(() => /Iris sees a matter/.test(text(view.target)));
+      press("Not a matter");
+      proposed = list("g-7", "g-5");
+      await until(() => words.test(text(view.target)));
+      // Polls go on, and the card keeps the result for the person to read.
+      await new Promise((r) => setTimeout(r, 100));
+      assert.match(text(view.target), words, `${status}`);
+      assert.doesNotMatch(text(view.target), /Roof repair/, `${status}`);
+      if (close) {
+        press("Close");
+        await until(() => /Roof repair/.test(text(view.target)));
+      }
+    } finally {
+      view.destroy();
+    }
+  }
+});

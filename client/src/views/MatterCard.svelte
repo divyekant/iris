@@ -21,7 +21,7 @@
   }: {
     view: MatterView;
     ondecided?: (answer: MatterView | null) => void;
-    /** True while a decision waits for its Undo time or its answer, so the view keeps this card (issue 345). */
+    /** True while a decision waits for its Undo time or its answer, or its failed result shows, so the view keeps this card (issue 345). */
     onheld?: (on: boolean) => void;
     all?: boolean;
     delay?: number;
@@ -93,7 +93,7 @@
       onheld?.(false);
       ondecided?.(answer);
     } catch (error) {
-      onheld?.(false);
+      // The card stays held: the person reads the result, and Close (or a reload) ends the hold.
       const status = (error as { status?: number }).status ?? 0;
       // A 4xx answer wrote nothing. With no answer, or a 5xx, Iris cannot say.
       phase = { at: "failed", why: (error as Error).message, known: status >= 400 && status < 500 };
@@ -160,7 +160,7 @@
       <button class="quiet" type="button" onclick={() => (phase = { at: "idle" })}>Cancel</button>
     {:else if phase.at === "failed"}
       <span class="why">{phase.known ? `Iris did not record it: ${phase.why}` : "Iris does not know if it recorded the decision. Reload the page to see."}</span>
-      {#if phase.known}<button class="quiet" type="button" onclick={() => (phase = { at: "idle" })}>Close</button>{/if}
+      {#if phase.known}<button class="quiet" type="button" onclick={() => ((phase = { at: "idle" }), onheld?.(false))}>Close</button>{/if}
     {:else}
       <span class="said">{said[phase.choice]}</span>
       {#if phase.at === "held"}
