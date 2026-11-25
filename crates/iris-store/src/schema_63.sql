@@ -1,4 +1,4 @@
--- Migration 62: a notice row when a job needs you (issues #844 and #845,
+-- Migration 63: a notice row when a job needs you (issues #844 and #845,
 -- docs/specs/2026-11-25-job-notices.md).
 --
 -- The table `notice` gets job rows: one for each move of a job to
