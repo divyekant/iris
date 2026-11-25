@@ -84,13 +84,17 @@ test("the brief line of additions lists only the confirmed matters with an addit
   assert.deepEqual(growing.map((m) => m.id), ["g-4"]);
 });
 
-test("a new proposal during the Undo time keeps the card and its hold (issue 345)", async () => {
+test("a new proposal during the Undo time keeps the card and its hold, and shows at Undo (issue 345)", async () => {
   let proposed = list("g-5");
+  let quiet = false;
   const posts = [];
+  const g7 = { ...as("g-7"), matter: { ...as("g-7").matter, title: "Roof repair" } };
   globalThis.fetch = async (url, init) => {
     const path = String(url).replace(/^\/api\//, "");
     if (init?.method === "POST") return posts.push(path), new Response(JSON.stringify(as("g-5", "declined")), { status: 200 });
-    const body = path === "matters" ? proposed : path.startsWith("matters/") ? as(path.slice(8)) : path === "brief" ? fx.brief : path === "status" ? fx.answer("status") : [];
+    // After `quiet`, the polls get no answer: what shows comes from a read made during the hold.
+    if (quiet && path.startsWith("matters")) return new Promise(() => {});
+    const body = path === "matters" ? proposed : path === "matters/g-7" ? g7 : path.startsWith("matters/") ? as(path.slice(8)) : path === "brief" ? fx.brief : path === "status" ? fx.answer("status") : [];
     return new Response(JSON.stringify(body), { status: 200 });
   };
   const view = await mount("/src/views/Brief.svelte", { brief: fx.brief, watches: [], now: new Date("2026-11-16T09:05:00Z"), poll: 5, hold: 400 });
@@ -103,9 +107,12 @@ test("a new proposal during the Undo time keeps the card and its hold (issue 345
     proposed = list("g-7", "g-5");
     await new Promise((r) => setTimeout(r, 150));
     assert.deepEqual(posts, [], "the held decision waits for its time");
+    assert.match(text(view.target), /Office lease/);
+    quiet = true;
     press("Undo");
-    // After the hold, the brief takes the newest proposal again.
-    await until(() => posts.length === 0 && !/Undo/.test(text(view.target)));
+    // At Undo, the card shows the newest proposal that a poll read during the hold, with no new poll.
+    await until(() => /Roof repair/.test(text(view.target)));
+    assert.deepEqual(posts, []);
   } finally {
     view.destroy();
   }
