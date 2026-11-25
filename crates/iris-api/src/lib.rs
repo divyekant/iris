@@ -45,7 +45,7 @@ pub use auth::{Auth, CODE_LIFE, SIGN_IN};
 pub use drafts::write_drafts;
 pub use export::{export, Exported};
 pub use jobs::*;
-pub use ledger::{ledger, undo_entry, LedgerEntry, LedgerPage};
+pub use ledger::{dismiss_unconfirmed, ledger, undo_entry, LedgerEntry, LedgerPage, Unconfirmed};
 pub use matters::{
     confirm_matter, create_matter, decline_matter, delete_matter, edit_matter, matter, matters,
 };
@@ -144,6 +144,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/handled", get(get_handled))
         .route("/api/ledger", get(get_ledger))
         .route("/api/ledger/{id}/undo", post(post_undo))
+        .route("/api/ledger/unconfirmed/dismiss", post(post_dismiss_unconfirmed))
         .route("/api/gate", get(get_gate))
         .route("/api/gate/declined", get(get_declined))
         .route("/api/senders/{id}/{answer}", post(post_answer))
@@ -350,6 +351,22 @@ async fn post_undo(
     _: NoBody,
 ) -> Result<Response> {
     Ok(undo_entry(&s, &id, now_ms())?.map_or_else(not_found, |e| Json(e).into_response()))
+}
+
+#[derive(Deserialize)]
+struct UnconfirmedBody {
+    entries: Vec<String>,
+}
+
+/// The person dismisses the line of the brief for the entries that it
+/// showed (specification 2, section 7.3).
+async fn post_dismiss_unconfirmed(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<UnconfirmedBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let n = dismiss_unconfirmed(&s, &b.entries, now_ms())?;
+    Ok(Json(serde_json::json!({ "dismissed": n })).into_response())
 }
 
 async fn get_changesets(State(s): State<Arc<Store>>) -> Response {

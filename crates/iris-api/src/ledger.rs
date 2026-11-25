@@ -25,6 +25,9 @@ pub struct LedgerEntry {
     /// The messages of the entry, and the messages that Gmail confirmed.
     pub messages: i64,
     pub changed: i64,
+    /// The messages whose change the recovery cannot confirm
+    /// (`ledger_message.listed = 'unknown'`, section 7.3).
+    pub unknown: i64,
     /// The items of a state verb, and the title of the first item.
     pub items: i64,
     pub title: Option<String>,
@@ -212,6 +215,7 @@ const TRIED: &str = "(SELECT (SELECT count(*) FROM ledger_message lm
 const ENTRY: &str = "SELECT l.id, a.verb, {args}, l.state, l.at, substr(l.error, 1, 2000),
         (SELECT count(*) FROM ledger_message lm WHERE lm.ledger_id = l.id),
         (SELECT count(*) FROM ledger_message lm WHERE lm.ledger_id = l.id AND lm.done = 1),
+        (SELECT count(*) FROM ledger_message lm WHERE lm.ledger_id = l.id AND lm.listed = 'unknown'),
         (SELECT count(*) FROM action_item ai WHERE ai.action_id = a.id),
         (SELECT CASE WHEN json_type(i.doc, '$.title') = 'text' THEN substr(json_extract(i.doc, '$.title'), 1, 2000) END
          FROM action_item ai JOIN item i ON i.id = ai.item_id
@@ -262,30 +266,31 @@ fn entry(r: &rusqlite::Row) -> rusqlite::Result<LedgerEntry> {
         error: r.get(5)?,
         messages: r.get(6)?,
         changed: r.get(7)?,
-        items: r.get(8)?,
-        title: r.get(9)?,
-        changeset: iris_changeset::format_changeset_id(r.get(10)?),
+        unknown: r.get(8)?,
+        items: r.get(9)?,
+        title: r.get(10)?,
+        changeset: iris_changeset::format_changeset_id(r.get(11)?),
         author: Author {
-            kind: r.get(11)?,
-            name: r.get(12)?,
-            job: r.get(13)?,
-            goal: r.get(14)?,
+            kind: r.get(12)?,
+            name: r.get(13)?,
+            job: r.get(14)?,
+            goal: r.get(15)?,
         },
-        decided_by: r.get(15)?,
-        rule: r.get(16)?,
-        policy: r.get(17)?,
-        reason: r.get(18)?,
-        why: r.get(19)?,
-        can_undo: r.get(20)?,
-        undo_open: r.get(21)?,
-        undone_by: l(r.get(22)?),
-        undo_of: l(r.get(23)?),
-        skipped: r.get(24)?,
-        tried: r.get(25)?,
-        retry: r.get(26)?,
+        decided_by: r.get(16)?,
+        rule: r.get(17)?,
+        policy: r.get(18)?,
+        reason: r.get(19)?,
+        why: r.get(20)?,
+        can_undo: r.get(21)?,
+        undo_open: r.get(22)?,
+        undone_by: l(r.get(23)?),
+        undo_of: l(r.get(24)?),
+        skipped: r.get(25)?,
+        tried: r.get(26)?,
+        retry: r.get(27)?,
         mail: None,
-        change: r.get(28)?,
-        action: r.get(27)?,
+        change: r.get(29)?,
+        action: r.get(28)?,
     })
 }
 
@@ -350,6 +355,61 @@ pub fn undo_entry(store: &Store, id: &str, now_ms: i64) -> Result<Option<LedgerE
     Ok(store.read(|c| Ok(one(c, n)?))?)
 }
 
+/// Dismiss the line of the brief for the entries `ids` (`l-<n>`) whose
+/// messages the recovery cannot confirm (specification 2, section 7.3).
+/// The client sends the entries that the line showed, so an entry that
+/// fails later shows a new line. An entry with no such message, or one
+/// that is dismissed already, is left as it is. Gives the number of new
+/// dismissals. An ID that is not in the canonical form is
+/// [`Error::Query`], and nothing is written.
+pub fn dismiss_unconfirmed(store: &Store, ids: &[String], now: i64) -> Result<usize> {
+    if ids.len() > crate::MAX_LIMIT as usize {
+        return Err(Error::Query(format!(
+            "at most {} entries",
+            crate::MAX_LIMIT
+        )));
+    }
+    let rows = ids
+        .iter()
+        .map(|id| parse_id(id).ok_or_else(|| Error::Query(format!("no such entry form: {id:?}"))))
+        .collect::<Result<Vec<i64>>>()?;
+    Ok(store.write(|tx| {
+        let mut n = 0;
+        for id in &rows {
+            n += tx.execute(
+                "INSERT OR IGNORE INTO ledger_unknown_seen(ledger_id, at)
+                 SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM ledger_message
+                   WHERE ledger_id = ?1 AND listed = 'unknown')",
+                params![id, now],
+            )?;
+        }
+        Ok(n)
+    })?)
+}
+
+/// The line of the brief (specification 2, section 7.3): the entries with
+/// messages that the recovery cannot confirm, that the person did not
+/// dismiss, newest first, and the count of their messages.
+#[derive(Debug, Default, Serialize, PartialEq)]
+pub struct Unconfirmed {
+    pub messages: i64,
+    /// At most [`crate::MAX_LIMIT`] entries, as `l-<n>`.
+    pub entries: Vec<String>,
+}
+
+pub(crate) fn unconfirmed(c: &Connection) -> rusqlite::Result<Unconfirmed> {
+    const OPEN: &str = "FROM ledger_message lm WHERE lm.listed = 'unknown'
+        AND NOT EXISTS (SELECT 1 FROM ledger_unknown_seen s WHERE s.ledger_id = lm.ledger_id)";
+    let messages = c.query_row(&format!("SELECT count(*) {OPEN}"), [], |r| r.get(0))?;
+    let entries = c
+        .prepare(&format!(
+            "SELECT DISTINCT lm.ledger_id {OPEN} ORDER BY lm.ledger_id DESC LIMIT ?1"
+        ))?
+        .query_map([crate::MAX_LIMIT], |r| Ok(format!("l-{}", r.get::<_, i64>(0)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(Unconfirmed { messages, entries })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,3 +470,4 @@ mod tests {
         }
     }
 }
+
