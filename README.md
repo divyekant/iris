@@ -173,9 +173,10 @@ To give a new password, run `iris account add-imap <address>` with no
 with `iris serve` (see "Connect a Gmail account", step 4).
 
 An IMAP account has these limits: Iris can change the read state of a
-message, and add or remove a keyword that the server already lists. It cannot
-archive, move, trash, draft or send (issues #775 and #628), and it makes no new
-keyword (issue #652).
+message, and add or remove a keyword that the server already lists. Iris can
+archive, move to the inbox, trash and restore a message only if the server
+supports `MOVE` and `UIDPLUS`. Iris cannot draft or send, and makes no new
+keyword.
 
 ## Data folder and the web client
 
