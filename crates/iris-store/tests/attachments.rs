@@ -511,3 +511,48 @@ fn an_upload_waits_for_the_cleanup_lock() {
     assert_eq!(s.clean_attachments(now).unwrap(), Some(0));
     assert!(exists(&s, &sha));
 }
+
+/// Issue #853, pre-review: the same holds for a second Store of the same
+/// data folder (another process, for example the `iris` command). Its
+/// upload waits for the SQLite write lock that the cleanup holds.
+#[test]
+fn an_upload_of_another_store_waits_for_the_cleanup_lock() {
+    let dir = TempDir::new("overlap2");
+    let a = std::sync::Arc::new(Store::open(&dir.0).unwrap());
+    let b = Store::open(&dir.0).unwrap();
+    let sha = file(&a, b"same", OLD);
+    let modified = || {
+        fs::metadata(a.attachment_path(&sha).unwrap())
+            .unwrap()
+            .modified()
+            .unwrap()
+    };
+    let old = modified();
+    let (held, wait) = std::sync::mpsc::channel();
+    let (free, go) = std::sync::mpsc::channel::<()>();
+    // Store `a` holds the SQLite write lock, as its cleanup does.
+    let holder = {
+        let a = a.clone();
+        std::thread::spawn(move || {
+            a.write(|tx| {
+                tx.execute(
+                    "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0)",
+                    [],
+                )?;
+                held.send(()).unwrap();
+                go.recv().unwrap();
+                Ok(())
+            })
+            .unwrap()
+        })
+    };
+    wait.recv().unwrap();
+    let upload = std::thread::spawn(move || b.put_attachment(b"same").unwrap());
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(modified(), old, "the upload of store b waits for the lock");
+    assert!(!upload.is_finished());
+    free.send(()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(upload.join().unwrap(), sha);
+    assert_ne!(modified(), old, "the upload makes the file new");
+}

@@ -96,7 +96,10 @@ after `clean_gone`. An error is logged, and the next run tries again.
 ### 4. Concurrency
 
 `put_attachment` renames its temporary file into the folder while it
-holds the write lock of the store. So an upload and step 3 of the
+holds the write lock of the store and an `IMMEDIATE` transaction, in the
+same order as the cleanup. The `IMMEDIATE` transaction takes the SQLite
+write lock of the data folder, which each `Store` shares, also a `Store`
+of another process (the `iris` command). So an upload and step 3 of the
 cleanup do not overlap:
 
 - If the upload renames first, the file is new, and step 4.2 keeps it.
@@ -140,7 +143,7 @@ No library applies: the change is a store query and a file delete.
 
 - `crates/iris-store/src/backup.rs`: `clean_attachments`.
 - `crates/iris-store/src/lib.rs`: `put_attachment` renames under the
-  write lock. The comment "Nothing deletes a file" changes.
+  write lock and an `IMMEDIATE` transaction. The comment "Nothing deletes a file" changes.
 - `crates/iris/src/engine.rs`: the call each `CLEAN_EVERY`.
 - `docs/specs/2026-11-24-send-content.md`, section 2: the cleanup line.
 - No schema change. No API change. No screen change.

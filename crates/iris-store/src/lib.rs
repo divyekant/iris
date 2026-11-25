@@ -899,10 +899,16 @@ impl Store {
         make_private_dir(&root)?;
         let mut w = ContentWriter::with_ext(&root, "")?;
         io::Write::write_all(&mut w, bytes)?;
-        // The rename runs under the write lock, so it does not overlap a
-        // run of clean_attachments: the file is new, or made again.
-        let _writer = lock(&self.writer);
-        w.finish()
+        // The rename runs under the write lock of this store and the SQLite
+        // write lock (an IMMEDIATE transaction), which each Store of the
+        // data folder shares, also in another process. clean_attachments
+        // holds both locks in the same order, so the rename does not
+        // overlap a cleanup run: the file is new, or made again.
+        let mut conn = lock(&self.writer);
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let sha = w.finish()?;
+        tx.commit()?;
+        Ok(sha)
     }
 
     /// The path of the attachment file with this SHA-256, or `None` if the
