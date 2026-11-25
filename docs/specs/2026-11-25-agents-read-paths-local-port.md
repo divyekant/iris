@@ -65,40 +65,60 @@ allow_local = 11434
 
 The engine reads `agents.toml` at each `run` (launcher spec, "Adapters").
 After the parse, the launch resolves each read path (`canonicalize`) and
-refuses the run, with the path and the reason, if:
+checks it.
 
-- the path does not exist or cannot be resolved;
-- the real path is `/`;
-- the real path is the data folder, is inside it, or holds it;
-- the real path is the home folder of the person (the real path of `HOME`
-  of the engine), or holds it. A folder inside the home folder is
-  allowed. So `/home` or `/Users` is refused, and `~/.nvm` is allowed;
-- the real path is, is inside, or holds a folder of system state:
-  `/proc`, `/sys`, `/dev`, `/run`, `/var/run`, `/tmp`, `/var/tmp`,
-  `/private/var/run`, `/private/tmp`, `/private/var/folders` and
-  `/Volumes`. These folders hold sockets, devices, process data and the
-  files of other programs;
+**Invariant.** No read path shows an object of a protected folder: the
+data folder, the home folder of the person (`HOME` of the engine) as a
+whole, or a folder of system state. A path is only one name of a folder:
+a bind mount gives the same folder a second name, also with the mount
+root `/`. So the checks compare the place of a folder in its file system,
+not its name in the mount tree.
+
+**The place of a folder** (Linux) is the pair (file system, path in that
+file system). The launch reads `/proc/self/mountinfo` and finds the mount
+of the real path (the longest mount point that holds it; for the same
+point, the last line). The place is the device (`major:minor`) of that
+mount, and the root of the mount joined with the rest of the real path
+below the mount point. A bind mount of a folder at another name has the
+same place as the folder. On macOS there are no bind mounts, so the place
+is the real path.
+
+The launch refuses the run, with the path and the reason, if:
+
+- the path does not exist or cannot be resolved, or `mountinfo` cannot be
+  read or parsed (fail closed);
+- one of these is true, compared by place on the same device:
+  - the read path holds the place of the data folder, is inside it, or is
+    the same place;
+  - the read path holds the place of the home folder, or is the same
+    place. A folder inside the home folder is allowed: `~/.nvm` passes,
+    `/home` and `/Users` do not;
+  - the read path holds, is inside, or is a folder of system state:
+    `/proc`, `/sys`, `/dev`, `/run`, `/var/run`, `/tmp`, `/var/tmp`,
+    `/private/var/run`, `/private/tmp`, `/private/var/folders`,
+    `/Volumes` and `/System/Volumes/Data`. These folders hold sockets,
+    devices, process data and the files of other programs. This check
+    also compares the real path, so a virtual file system (`proc`,
+    `sysfs`, `devtmpfs`) is refused by its type in `mountinfo` too;
 - the tree of the path holds an entry that is not a regular file, a
   folder or a link: a socket, a FIFO or a device. A socket is reachable
   through a read-only bind, because a network namespace does not block a
   Unix socket. The walk does not follow links, and it stops with a
   refusal after 200,000 entries;
-- the tree of the path holds a mount point. A mount can bring a virtual
-  file system, such as a `/proc`, or a bind mount of another folder (also
-  of the data folder) into the view, and `bwrap` binds a tree with its
-  mounts. A bind mount can have the same device number as its parent, so
-  the device number is not enough. On Linux the walk compares the mount
-  ID of each entry (`statx` with `STATX_MNT_ID`, Linux 5.8 or later) with
-  the mount ID of the read path. If the kernel gives no mount ID, the run
-  is refused.
-- the read path is on a bind mount of a folder: the mount of the read
-  path (its mount ID in `/proc/self/mountinfo`) has a root other than
-  `/`. A bind mount of a part of the data folder elsewhere has another
-  real path, so the path checks above cannot see it. This also refuses a
-  read path in some containers, where folders are bind mounts (fail
-  closed). On macOS there are no bind mounts; the walk compares the
-  device number (`st_dev`), and Seatbelt checks the real path of each
-  access.
+- the tree of the path holds a mount point. `bwrap` binds a tree with its
+  mounts, and a nested mount has a place of its own that the checks above
+  do not compare. The walk compares the mount ID of each entry (`statx`
+  with `STATX_MNT_ID`, Linux 5.8 or later) with the mount ID of the read
+  path. If the kernel gives no mount ID, the run is refused. On macOS the
+  walk compares the device number (`st_dev`).
+
+So each folder that the view shows through a read path is the read path's
+own place in one file system, with no nested mount, and that place does
+not touch a protected place. This holds for each name of a folder,
+because the compare does not use the name.
+
+On macOS, Seatbelt also checks the real path of each access, and the
+profile denies the data folder after the read paths (see "macOS").
 
 A link inside a read path that points outside it stays a link in the
 view. Its target is visible only if the view holds the target.
@@ -175,12 +195,13 @@ fails at its first call.
 | More than 16 read paths | The parse refuses the file, with the line | config test |
 | A read path that does not exist at the run | The run is refused, with the path | launch test |
 | A read path that is `/`, the home folder, the data folder, inside it or holds it (also through a link) | The run is refused, with the path | launch test |
-| A read path that is `/proc`, `/sys`, `/dev`, `/run`, `/tmp` or another folder of system state, inside one, or holds one | The run is refused, with the path | launch test |
+| A bind mount of the data folder, of a part of it or of the home folder at another name, with any mount root (also `/`) | The place compare refuses it, with the path | unit test of the place from `mountinfo` lines |
+| `mountinfo` that cannot be read or parsed, or a mount point with an escape that the parse does not know | The run is refused | unit test |
+| A read path that is `/proc`, `/sys`, `/dev`, `/run`, `/tmp` or another folder of system state, inside one, or holds one, also by another name | The run is refused, with the path | launch test |
 | A read path that holds `HOME` (for example `/home`) | The run is refused, with the path | launch test |
 | A read path with a socket, a FIFO or a device in its tree | The run is refused, with the path of the entry | launch test |
 | A read path with a mount point in its tree, also a bind mount on the same device | The run is refused, with the path of the entry | launch test (Linux: a bind mount in a private mount namespace of the test, if the test can make one; else a unit test of the mount ID compare) |
 | A kernel that gives no mount ID (`STATX_MNT_ID`) | The run of an adapter with read paths is refused | unit test |
-| A read path on a bind mount of a folder (mount root other than `/`), for example a bind of the data folder at another path | The run is refused, with the path | unit test of the `mountinfo` parse |
 | A tree of more than 200,000 entries | The run is refused | launch test |
 | A part of a read path that changes into a link after the launch checks | Linux: the open of the helper fails, and no session starts. macOS: Seatbelt checks the real path at each access | Linux helper test with a swap between the check and the open |
 | A read path that changes to another object (other device or inode) after the launch checks | The helper refuses it, and no session starts | Linux helper test |
