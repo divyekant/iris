@@ -323,6 +323,172 @@ impl Store {
     }
 }
 
+/// The most files that one batch of [`Store::clean_attachments`] checks
+/// and deletes under the write lock.
+pub const ATTACH_BATCH: usize = 200;
+
+impl Store {
+    /// Delete each file of the attachment folder that is [`GONE_KEEP_MS`] or
+    /// more old at `now` and that no live reference names (attachment
+    /// cleanup spec `docs/specs/2026-11-25-attachment-cleanup.md`). Gives
+    /// the number of deleted files, or `None` when a backup holds the lock.
+    pub fn clean_attachments(&self, now: i64) -> Result<Option<u64>> {
+        self.clean_attachments_with(now, ATTACH_BATCH, |_| {})
+    }
+
+    /// [`Store::clean_attachments`] with this batch size, and a call of
+    /// `before_batch` with the old files of each batch before the batch
+    /// takes the write lock. For tests.
+    #[doc(hidden)]
+    pub fn clean_attachments_with(
+        &self,
+        now: i64,
+        batch: usize,
+        mut before_batch: impl FnMut(&[String]),
+    ) -> Result<Option<u64>> {
+        let Some(_lock) = self.try_backup_lock()? else {
+            return Ok(None);
+        };
+        let root = self.dir.join(crate::ATTACHMENTS);
+        let cutoff = now - GONE_KEEP_MS;
+        let mut deleted = 0;
+        let dirs = match fs::read_dir(&root) {
+            Ok(d) => d,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Some(0)),
+            Err(e) => return Err(e.into()),
+        };
+        for dir in dirs {
+            let dir = dir?;
+            let Some(aa) = dir.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if aa.len() != 2 || !dir.file_type()?.is_dir() {
+                continue;
+            }
+            // The scan of one folder holds no lock: it only finds the old
+            // files. Each batch checks them again under the lock.
+            let mut old = Vec::new();
+            for file in fs::read_dir(dir.path())? {
+                let file = file?;
+                let Some(sha) = file.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                // Only `<aa>/<sha256>`: a temporary file or any other name
+                // stays.
+                if content::file_path(&root, &sha, "").as_deref() == Some(&*file.path())
+                    && is_old(&file.path(), cutoff)?
+                {
+                    old.push(sha);
+                }
+            }
+            for part in old.chunks(batch.max(1)) {
+                before_batch(part);
+                deleted += self.delete_old(&root, part, cutoff)?;
+            }
+        }
+        Ok(Some(deleted))
+    }
+
+    /// Delete each file of `part` that no live reference names and that is
+    /// still old. The write lock of the store and the SQLite write lock
+    /// (`IMMEDIATE`) stay held from the read of the references to the last
+    /// delete. put_attachment renames under the same locks, in the same
+    /// order, so an upload makes a file new before the check or after the
+    /// delete.
+    fn delete_old(&self, root: &Path, part: &[String], cutoff: i64) -> Result<u64> {
+        let mut conn = lock(&self.writer);
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let live: std::collections::HashSet<String> = tx
+            .prepare(LIVE_ATTACHMENTS)?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut deleted = 0;
+        for sha in part {
+            let Some(path) = content::file_path(root, sha, "") else {
+                continue;
+            };
+            if live.contains(sha) || !is_old(&path, cutoff)? {
+                continue;
+            }
+            match fs::remove_file(&path) {
+                Ok(()) => deleted += 1,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        tx.commit()?;
+        Ok(deleted)
+    }
+}
+
+/// True if `path` is a file (not a link) whose modification time is at or
+/// before `cutoff`. A missing file is not old.
+fn is_old(path: &Path, cutoff: i64) -> Result<bool> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    if !meta.is_file() {
+        return Ok(false);
+    }
+    let ms = match meta.modified()?.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_millis()).unwrap_or(i64::MAX),
+        Err(_) => i64::MIN,
+    };
+    Ok(ms <= cutoff)
+}
+
+/// The SHA-256 of each attachment file that a live reference names (spec
+/// section 1): an open action (a draft revision, `proposed`, `in_review`,
+/// `approved` or `held`), a ledger claim in `writing`, the content before
+/// each draft change of a draft that is not sent and not foreign, and a
+/// draft row that is not sent and not foreign. A draft of an account in
+/// `removing` or `removed` is not live: no new action can name it
+/// (iris-changeset refuses it) and the account never signs in again (remove
+/// account spec), so no apply or undo reads its files. An open action of
+/// such an account still keeps its files through its args. The view `ledger_can_undo`
+/// is not used: a held send or an open change hides an undo only for a
+/// time, and the undo then needs its files again. Each such file can be read
+/// again by an apply, a recovery or an undo. The match does not filter by
+/// verb, so each place that holds the content keeps its files.
+///
+/// The JSON is input that Iris does not control (`iris draft` saves a
+/// revision before its check). So each document is read only when it is
+/// valid JSON with an array at the path, and each entry only when it is an
+/// object with a text `sha256`. Any other value names no file and does not
+/// stop the cleanup.
+const LIVE_ATTACHMENTS: &str = "
+WITH refs(doc, path) AS (
+  SELECT a.args, '$.attachments' FROM changeset_action a
+  WHERE a.state IS NULL OR a.state IN ('proposed', 'in_review', 'approved', 'held')
+  UNION ALL
+  SELECT l.post, '$.content.attachments' FROM ledger l WHERE l.state = 'writing'
+  UNION ALL
+  SELECT l.pre, '$.draft.content.attachments' FROM ledger l
+  JOIN draft d ON d.id = json_extract(l.ops, '$.draft')
+  WHERE json_valid(l.ops) AND json_extract(l.ops, '$.call') = 'drafts.update'
+    AND l.undo = 'inverse' AND l.state IN ('applied', 'failed')
+    AND d.sent_at IS NULL AND d.foreign_at IS NULL
+    AND d.account_id NOT IN (SELECT id FROM account WHERE state IN ('removing', 'removed'))
+  UNION ALL
+  SELECT d.content, '$.content.attachments' FROM draft d
+  WHERE d.sent_at IS NULL AND d.foreign_at IS NULL
+    AND d.account_id NOT IN (SELECT id FROM account WHERE state IN ('removing', 'removed'))
+),
+arrays(doc, path) AS (
+  SELECT CASE WHEN json_valid(doc) THEN
+           CASE WHEN json_type(doc, path) = 'array' THEN doc END END, path
+  FROM refs
+),
+hashes(sha) AS (
+  SELECT CASE WHEN j.type = 'object' THEN
+           CASE WHEN json_type(j.value, '$.sha256') = 'text'
+             THEN json_extract(j.value, '$.sha256') END END
+  FROM arrays r, json_each(r.doc, r.path) j
+)
+SELECT DISTINCT sha FROM hashes WHERE sha IS NOT NULL";
+
 /// Before the cleanup deletes the evidence of gone mail (the header that
 /// names the sender, then the message row with its marks and labels), it
 /// keeps the last verdict of each notice and each watch match on such mail

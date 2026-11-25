@@ -44,8 +44,6 @@ The owner decided (`docs/decisions.md`, entry D12, items D4 and D5):
   account (section 3). A limit issue records this.
 - Display names of the recipients. `To`, `Cc` and `Bcc` stay bare
   addresses.
-- A cleanup of attachment files that no draft uses. A limit issue
-  records this.
 
 ## Design
 
@@ -96,8 +94,9 @@ message uses, and the backup copies only the content files of messages.
 - The writer of the attachment folder is the writer of the content
   folder (`ContentWriter`: a temporary file, `fsync`, then a rename to
   the SHA-256), with another root.
-- Nothing deletes a file of the attachment folder. The content cleanup
-  reads only the content folder. A limit issue records the growth.
+- The content cleanup reads only the content folder. The attachment
+  cleanup (`docs/specs/2026-11-25-attachment-cleanup.md`) deletes an old
+  file that no live action, claim or draft names.
 - `iris backup` copies each file of the attachment folder, with the
   check of its SHA-256, as it copies the content files. A restore then
   has each file that a draft action names.

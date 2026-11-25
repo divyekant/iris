@@ -131,7 +131,8 @@ use std::sync::{Mutex, MutexGuard};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 
 pub use backup::{
-    BackupLock, Cleaned, PolicyExpect, PolicyWrite, DRAFT_FILES_MAX, DRAFT_FILE_MAX, GONE_KEEP_MS,
+    BackupLock, Cleaned, PolicyExpect, PolicyWrite, ATTACH_BATCH, DRAFT_FILES_MAX, DRAFT_FILE_MAX,
+    GONE_KEEP_MS,
 };
 pub use content::ContentWriter;
 pub use file_lock::{FileLock, Probe};
@@ -892,14 +893,23 @@ impl Store {
 
     /// Write one attachment file to the attachment folder and give its
     /// SHA-256 (send content spec `docs/specs/2026-11-24-send-content.md`,
-    /// section 2). Nothing deletes a file of this folder, and the content
-    /// cleanup never reads it.
+    /// section 2). The content cleanup never reads this folder.
+    /// [`Store::clean_attachments`] deletes an old file that nothing names.
     pub fn put_attachment(&self, bytes: &[u8]) -> Result<String> {
         let root = self.dir.join(ATTACHMENTS);
         make_private_dir(&root)?;
         let mut w = ContentWriter::with_ext(&root, "")?;
         io::Write::write_all(&mut w, bytes)?;
-        w.finish()
+        // The rename runs under the write lock of this store and the SQLite
+        // write lock (an IMMEDIATE transaction), which each Store of the
+        // data folder shares, also in another process. clean_attachments
+        // holds both locks in the same order, so the rename does not
+        // overlap a cleanup run: the file is new, or made again.
+        let mut conn = lock(&self.writer);
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let sha = w.finish()?;
+        tx.commit()?;
+        Ok(sha)
     }
 
     /// The path of the attachment file with this SHA-256, or `None` if the
