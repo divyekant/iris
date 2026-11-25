@@ -56,6 +56,32 @@ fn store(dir: &TempDir) -> Arc<Store> {
     Arc::new(s)
 }
 
+/// Each message of the test store has raw content, and understanding read
+/// its header from it (migration 70): the reply form uses the header.
+fn read_all(s: &Store) {
+    s.write(|tx| {
+        tx.execute_batch(
+            "CREATE TEMP TABLE was AS SELECT id, understood_at FROM message m
+               WHERE content_sha256 IS NULL AND EXISTS (SELECT 1 FROM header h WHERE h.message_id = m.id)
+                 AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                                 WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT');
+             CREATE TEMP TABLE checks AS SELECT message_id FROM link_check;
+             UPDATE message SET content_sha256 = 'c' || id WHERE id IN (SELECT id FROM was);
+             -- The test state stays: the same link checks and understanding.
+             DELETE FROM link_check WHERE message_id IN (SELECT id FROM was)
+               AND message_id NOT IN (SELECT message_id FROM checks);
+             DROP TABLE checks;
+             UPDATE message SET understood_at = (SELECT understood_at FROM was WHERE was.id = message.id)
+               WHERE id IN (SELECT id FROM was);
+             DROP TABLE was;
+             UPDATE header SET content_sha256 =
+               (SELECT content_sha256 FROM message WHERE id = header.message_id);",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+}
+
 async fn call(
     store: &Arc<Store>,
     method: &str,
@@ -359,6 +385,7 @@ async fn a_body_that_is_not_valid_writes_nothing() {
 async fn a_reply_names_the_newest_mail() {
     let dir = temp("reply");
     let s = store(&dir);
+    read_all(&s);
     let (code, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
     assert_eq!(code, StatusCode::OK, "{v}");
     assert_eq!(v["account"], "a-1");
@@ -387,6 +414,7 @@ async fn a_reply_names_the_newest_mail() {
     };
     assert!(v["write"].is_string(), "{v}");
     // A thread with no mail, and a thread that does not exist.
+    read_all(&s);
     let (code, _) = call(&s, "GET", "/api/threads/t-9/reply", None).await;
     assert_eq!(code, StatusCode::NOT_FOUND);
     s.write(|tx| {
@@ -396,6 +424,7 @@ async fn a_reply_names_the_newest_mail() {
         )?)
     })
     .unwrap();
+    read_all(&s);
     let (code, _) = call(&s, "GET", "/api/threads/t-2/reply", None).await;
     assert_eq!(code, StatusCode::CONFLICT);
 }
@@ -414,6 +443,7 @@ async fn a_reply_goes_to_reply_to_and_offers_the_others() {
            to_addrs = 'owner@example.com,sam@example.com',
            cc_addrs = 'Ana <ANA@example.com>, priya@example.com, not an address, sam@example.com'
          WHERE message_id = 2");
+    read_all(&s);
     let (code, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
     assert_eq!(code, StatusCode::OK, "{v}");
     assert_eq!(v["to"], json!(["list@example.org"]));
@@ -425,6 +455,7 @@ async fn a_reply_goes_to_reply_to_and_offers_the_others() {
     );
     // No Reply-To: the From address, which `all` then leaves out.
     set("UPDATE header SET reply_to = NULL WHERE message_id = 2");
+    read_all(&s);
     let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
     assert_eq!(v["to"], json!(["priya@example.com"]));
     let all: Vec<String> = serde_json::from_value(v["all"].clone()).unwrap();
@@ -434,6 +465,7 @@ async fn a_reply_goes_to_reply_to_and_offers_the_others() {
     );
     // A Reply-To that is not an address counts as none.
     set("UPDATE header SET reply_to = 'not an address' WHERE message_id = 2");
+    read_all(&s);
     let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
     assert_eq!(v["to"], json!(["priya@example.com"]));
     // The person wrote the parent: its To list, and its Cc list for all.
@@ -442,6 +474,7 @@ async fn a_reply_goes_to_reply_to_and_offers_the_others() {
          INSERT INTO message_label(message_id, label_id) SELECT 2, id FROM label WHERE provider_id = 'SENT';
          UPDATE header SET reply_to = 'owner@example.com', to_addrs = 'sam@example.com'
          WHERE message_id = 2");
+    read_all(&s);
     let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
     assert_eq!(v["to"], json!(["sam@example.com"]));
     let all: Vec<String> = serde_json::from_value(v["all"].clone()).unwrap();
@@ -458,6 +491,7 @@ async fn a_reply_goes_to_reply_to_and_offers_the_others() {
 async fn a_reply_waits_for_the_read_of_new_content() {
     let dir = temp("reply-new-content");
     let s = store(&dir);
+    read_all(&s);
     let set = |sql: &str| s.write(|tx| Ok(tx.execute_batch(sql)?)).unwrap();
     for (sql, code) in [
         (
@@ -472,6 +506,12 @@ async fn a_reply_waits_for_the_read_of_new_content() {
         (
             "UPDATE header SET content_sha256 = 'b' WHERE message_id = 2",
             StatusCode::OK,
+        ),
+        // A message with no raw content: neither row has a hash.
+        (
+            "UPDATE message SET content_sha256 = NULL WHERE id = 2;
+             UPDATE header SET content_sha256 = NULL WHERE message_id = 2",
+            StatusCode::CONFLICT,
         ),
         (
             "DELETE FROM header WHERE message_id = 2",
@@ -500,6 +540,7 @@ async fn reply_all_lists_a_large_recipient_list_once() {
         Ok(())
     })
     .unwrap();
+    read_all(&s);
     let (code, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
     assert_eq!(code, StatusCode::OK);
     let all = v["all"].as_array().unwrap();
@@ -573,6 +614,7 @@ async fn a_reply_shows_the_conversation() {
         Ok(())
     })
     .unwrap();
+    read_all(&s);
     let (code, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
     assert_eq!(code, StatusCode::OK, "{v}");
     let mails = v["conversation"].as_array().unwrap();
@@ -605,6 +647,7 @@ async fn a_reply_shows_the_conversation() {
         )?)
     })
     .unwrap();
+    read_all(&s);
     let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
     assert_eq!(v["earlier"], 0);
     assert_eq!(v["conversation"][0]["hostile"], true);
@@ -667,6 +710,7 @@ async fn a_reply_after_your_own_mail_goes_to_its_recipients() {
         let dir = temp(&format!("own-{i}"));
         let s = store(&dir);
         newest(&s, OWNER, to, true);
+        read_all(&s);
         let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
         assert_eq!(v["to"], json!(want), "{to}");
         assert_eq!(v["subject"], "Re: Q4");
@@ -716,6 +760,7 @@ async fn property_each_start_address_is_valid() {
             )?)
         })
         .unwrap();
+        read_all(&s);
         let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
         for a in v["to"].as_array().unwrap() {
             let a = a.as_str().unwrap().to_string();
@@ -739,6 +784,7 @@ async fn a_forged_from_does_not_choose_the_recipients() {
     let dir = temp("forged");
     let s = store(&dir);
     newest(&s, OWNER, "victim@example.com, other@example.com", false);
+    read_all(&s);
     let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
     assert_eq!(v["to"], json!([OWNER]));
 }

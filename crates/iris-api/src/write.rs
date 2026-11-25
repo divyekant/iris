@@ -528,7 +528,7 @@ fn reply_in(c: &Connection, thread: i64) -> Result<Option<Value>> {
             "SELECT m.account_id, h.subject, h.to_addrs, h.cc_addrs, h.reply_to, a.address,
                     EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                             WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
-                    h.message_id IS NOT NULL AND h.content_sha256 IS m.content_sha256
+                    coalesce(m.content_sha256 IS NOT NULL AND h.content_sha256 = m.content_sha256, 0)
              FROM message m JOIN account a ON a.id = m.account_id
              LEFT JOIN header h ON h.message_id = m.id WHERE m.id = ?1",
             [parent],
@@ -548,7 +548,8 @@ fn reply_in(c: &Connection, thread: i64) -> Result<Option<Value>> {
         .map_err(iris_store::Error::from)?;
     // The recipients come from the header row. After a sync of new content
     // and before understanding reads it, the row is empty or of the old
-    // content (migration 70).
+    // content (migration 70). A message with no raw content has no parsed
+    // header at all.
     if !current {
         return Err(Error::Conflict(
             "Iris has not read the newest mail of this thread yet. Try again in a moment.".into(),
