@@ -585,7 +585,7 @@ fn read_answer_accepts_only_a_valid_body() {
                 })
             })
             .filter(|b| !b.is_empty() && b.chars().count() <= MAX_BODY);
-        match read_answer(&reply) {
+        match read_answer(&reply, 0) {
             Ok(body) => {
                 accepted += 1;
                 assert_eq!(Some(body), expect, "{text:?}");
@@ -1433,7 +1433,7 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
     let now = 1000 + LATE_AFTER_MS;
     // A nudge draft makes the thread not late until the thread changes.
     let (b, t) = asked("nudge-saved");
-    let fake = Fake::new(r#"{"body": "Hi Ana, any news on the slides? D"}"#);
+    let fake = Fake::new(r#"{"body": "Hi Ana, any news on the slides? D", "named": [1]}"#);
     // The ask went to Bo first and to Ana: the nudge goes to Ana, the
     // person of the commitment, not to the first recipient.
     b.store
@@ -1518,7 +1518,7 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
         evidence(&b.store, &format!("more{i}"), to);
     }
     understood(&b.store);
-    let fake = Fake::new(r#"{"body": "x"}"#);
+    let fake = Fake::new(r#"{"body": "x", "named": [1]}"#);
     let l = one_late(&b.store, 1008 + LATE_AFTER_MS);
     nudge(&b.store, &l, &fake, 1008 + LATE_AFTER_MS).unwrap();
     let data: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
@@ -1527,7 +1527,7 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
 
     // A thread that is not late gets no call.
     let (b, _) = asked("nudge-not-late");
-    let fake = Fake::new(r#"{"body": "x"}"#);
+    let fake = Fake::new(r#"{"body": "x", "named": [1]}"#);
     let l = one_late(&b.store, now);
     assert!(matches!(
         nudge(&b.store, &l, &fake, now - 1),
@@ -1545,7 +1545,7 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
     ] {
         let (b, t) = asked(&format!("nudge-during-{}", name.replace(' ', "-")));
         let store = &b.store;
-        let mut fake = Fake::new(r#"{"body": "x"}"#);
+        let mut fake = Fake::new(r#"{"body": "x", "named": [1]}"#);
         fake.during = Some(Box::new(move || {
             store
                 .write(|tx| {
@@ -1585,7 +1585,7 @@ fn a_saved_nudge_is_ready_while_a_later_commitment_is_not_due_yet() {
         })
         .unwrap();
     let l = one_late(&b.store, now);
-    let fake = Fake::new(r#"{"body": "Hi Ana"}"#);
+    let fake = Fake::new(r#"{"body": "Hi Ana", "named": [1]}"#);
     nudge(&b.store, &l, &fake, now).unwrap();
     let ready_at = |at: i64| {
         b.store
@@ -1621,7 +1621,13 @@ fn one_nudge_names_each_late_commitment_of_its_person_and_another_person_waits()
     evidence(&b.store, "ask", "bo@example.org");
     set("INSERT INTO sender(address, kind) VALUES ('bo@example.org', 'person')");
     let l = one_late(&b.store, now);
-    nudge(&b.store, &l, &Fake::new(r#"{"body": "Hi Ana"}"#), now).unwrap();
+    nudge(
+        &b.store,
+        &l,
+        &Fake::new(r#"{"body": "Hi Ana", "named": [1]}"#),
+        now,
+    )
+    .unwrap();
     assert_eq!(ready_to(&b.store, t).as_deref(), Some("ana@example.org"));
 
     // A second late commitment of the same thread, owed by Bo: the nudge
@@ -1650,7 +1656,7 @@ fn one_nudge_names_each_late_commitment_of_its_person_and_another_person_waits()
     assert_eq!(ready_to(&b.store, t), None);
     let l = one_late(&b.store, now);
     assert_eq!(l.to(), "ana@example.org");
-    let fake = Fake::new(r#"{"body": "Hi Ana, the slides and the notes?"}"#);
+    let fake = Fake::new(r#"{"body": "Hi Ana, the slides and the notes?", "named": [1, 2]}"#);
     nudge(&b.store, &l, &fake, now).unwrap();
     let data: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
     let titles: Vec<&str> = data["commitments"]
@@ -1690,7 +1696,13 @@ fn one_nudge_names_each_late_commitment_of_its_person_and_another_person_waits()
         })
         .unwrap();
     let l = one_late(&b.store, now);
-    nudge(&b.store, &l, &Fake::new(r#"{"body": "Hi Ana"}"#), now).unwrap();
+    nudge(
+        &b.store,
+        &l,
+        &Fake::new(r#"{"body": "Hi Ana", "named": [1]}"#),
+        now,
+    )
+    .unwrap();
     b.store
         .write(|tx| {
             tx.execute(
@@ -1754,7 +1766,7 @@ fn a_promise_of_the_person_is_late_after_its_due_date() {
     assert!(late_threads(&b.store, 3 * 86_400_000 - 1).is_empty());
     let l = one_late(&b.store, 3 * 86_400_000);
     assert_eq!((l.thread, l.to()), (t, "ana@example.org".to_string()));
-    let fake = Fake::new(r#"{"body": "Hi Ana, any news? D"}"#);
+    let fake = Fake::new(r#"{"body": "Hi Ana, any news? D", "named": [1]}"#);
     nudge(&b.store, &l, &fake, 3 * 86_400_000).unwrap();
     assert_eq!(ready_to(&b.store, t).as_deref(), Some("ana@example.org"));
     // Another sender wrote last in the thread: no nudge.
@@ -1991,4 +2003,41 @@ fn a_nudge_names_at_most_the_limit_of_commitments() {
         .map(|e| e["item"].as_i64().unwrap())
         .collect();
     assert_eq!(items, (1..=MAX_NUDGE_ITEMS as i64).collect::<Vec<_>>());
+}
+
+/// Issue #950: a reminder that leaves out one of its late commitments gets
+/// one more call. Two such answers save no draft, so the brief never marks
+/// it "Nudge ready". The data numbers each commitment.
+#[test]
+fn a_nudge_that_leaves_out_a_commitment_is_not_saved() {
+    let now = 1000 + LATE_AFTER_MS;
+    for (answers, ok) in [
+        (
+            vec![
+                r#"{"body": "Hi Ana"}"#,
+                r#"{"body": "Hi Ana", "named": [2]}"#,
+            ],
+            false,
+        ),
+        (
+            vec![
+                r#"{"body": "Hi Ana", "named": []}"#,
+                r#"{"body": "Hi Ana", "named": [1]}"#,
+            ],
+            true,
+        ),
+    ] {
+        let (b, t) = asked(&format!("nudge-names-{ok}"));
+        let mut fake = Fake::new(answers[0]);
+        fake.answers = answers.iter().map(|a| a.to_string()).collect();
+        let l = one_late(&b.store, now);
+        let r = nudge(&b.store, &l, &fake, now);
+        assert_eq!(r.is_ok(), ok, "{r:?}");
+        assert!(matches!(r, Ok(_) | Err(Error::BadAnswer(_))), "{r:?}");
+        assert_eq!(fake.calls.borrow().len(), 2);
+        let data: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
+        assert_eq!(data["commitments"][0]["n"], 1);
+        assert!(fake.calls.borrow()[0].0.contains("\"named\""));
+        assert_eq!(saved(&b.store, t).is_some(), ok);
+    }
 }

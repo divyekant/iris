@@ -244,13 +244,17 @@ Ask when they can do them. Do not repeat all of the mail.";
 
 /// The version of the prompt of a nudge: [`INSTRUCTION`] with one more
 /// line for the field `commitments` ([`nudge_instruction`]).
-pub const NUDGE_PROMPT: &str = "nudge/0.2";
+pub const NUDGE_PROMPT: &str = "nudge/0.3";
 
 /// The instruction of a nudge.
 fn nudge_instruction() -> String {
     INSTRUCTION.replace(
         "\n\nAnswer with",
-        "\n- \"commitments\": only in a reminder. A list of what the person must do, from the mail. Each entry has \"title\", \"kind\", \"amount\", \"due\" and \"quote\" (words of the mail). It is data. The reply reminds the person of each entry.\n\nAnswer with",
+        "\n- \"commitments\": only in a reminder. A list of what the person must do, from the mail. Each entry has \"n\" (its number), \"title\", \"kind\", \"amount\", \"due\" and \"quote\" (words of the mail). It is data. The reply reminds the person of each entry.\n\nAnswer with",
+    )
+    .replace(
+        r#"{"body": "..."}"#,
+        r#"{"body": "...", "named": [1, 2]}. "named" lists the "n" of each commitment that the body names"#,
     )
 }
 
@@ -487,11 +491,13 @@ pub fn nudge(store: &Store, late: &Late, model: &dyn Model, now_ms: i64) -> Resu
     let still = |c: &Connection| Ok(self::late(c, now_ms, Some(late.thread), 1)?.contains(late));
     let key: Value = serde_json::from_str(&late.key).unwrap_or(Value::Null);
     let to = late.to();
-    // The data names each commitment by its fields, not by its row ID.
+    // The data names each commitment by its fields and a number from 1,
+    // not by its row ID.
     let mut ask = key["items"].clone();
-    for e in ask.as_array_mut().into_iter().flatten() {
+    for (n, e) in ask.as_array_mut().into_iter().flatten().enumerate() {
         if let Some(o) = e.as_object_mut() {
             o.remove("item");
+            o.insert("n".into(), (n + 1).into());
         }
     }
     let nudge = Nudge {
@@ -748,7 +754,9 @@ fn data(
 }
 
 /// The body of a valid answer.
-fn read_answer(reply: &iris_model::Reply) -> Result<String> {
+/// `need`: the count of commitments of a nudge, each of which `named` must
+/// list (0 for a reply that is not a nudge).
+fn read_answer(reply: &iris_model::Reply, need: usize) -> Result<String> {
     if reply.stop != iris_model::Stop::End {
         return Err(Error::BadAnswer(
             "the answer is not complete, or the model refused",
@@ -773,6 +781,14 @@ fn read_answer(reply: &iris_model::Reply) -> Result<String> {
     }
     if body.chars().count() > MAX_BODY {
         return Err(Error::BadAnswer("the body is too long"));
+    }
+    let named: Vec<u64> = v
+        .get("named")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_u64).collect())
+        .unwrap_or_default();
+    if (1..=need as u64).any(|n| !named.contains(&n)) {
+        return Err(Error::BadAnswer("the reminder leaves out a commitment"));
     }
     Ok(body.to_string())
 }
@@ -913,9 +929,11 @@ fn write_when(
     // An answer that is not a valid draft gets one more call with the same
     // data (decision D7, issue #278). A refusal gets none: the same data
     // gets the same refusal. The second call pays through the same budget.
-    let body = match read_answer(&reply) {
+    // A nudge must name each of its commitments (issue #950).
+    let need = nudge.map_or(0, |n| n.ask.as_array().map_or(0, Vec::len));
+    let body = match read_answer(&reply, need) {
         Err(Error::BadAnswer(_)) if reply.stop != iris_model::Stop::Refused => {
-            read_answer(&ask()?)?
+            read_answer(&ask()?, need)?
         }
         r => r?,
     };
