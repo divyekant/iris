@@ -260,7 +260,9 @@ fn state_in(
 /// How the next press of Send writes the draft `draft` of a stopped write
 /// (draft change spec, section 5): `update` changes it in place, `new`
 /// makes a new draft (an account that is not Gmail), `None` offers no
-/// "Change and send".
+/// "Change and send". The value is the outcome that the apply of the next
+/// press gives: the checks of a change in place for Gmail (section 1, the
+/// files included), and the checks of a create for another provider.
 fn change(
     store: &Store,
     c: &Connection,
@@ -296,20 +298,22 @@ fn change(
             return Ok(None);
         }
     }
-    // The form takes the attachments of the draft: each file must be in
-    // the attachment folder, as the apply checks.
-    let Some(content) = serde_json::from_str::<Value>(&content)
+    if provider != "gmail" {
+        // The next press makes a new draft from the form: the apply of a
+        // create does not read the files of the old draft.
+        return Ok(Some("new"));
+    }
+    // The next press changes the draft in place: its apply denies the
+    // change when a file of the old draft is gone (section 1).
+    let files = match serde_json::from_str::<Value>(&content)
         .ok()
         .and_then(|v| serde_json::from_value::<iris_compose::Content>(v["content"].clone()).ok())
-    else {
-        return Ok(None);
+    {
+        Some(content) => iris_apply::has_files(store, &content)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.to_string().into()))?,
+        None => false,
     };
-    let files = iris_apply::has_files(store, &content)
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.to_string().into()))?;
-    if !files {
-        return Ok(None);
-    }
-    Ok(Some(if provider == "gmail" { "update" } else { "new" }))
+    Ok(files.then_some("update"))
 }
 
 /// The content of the draft `d-N` for the form of a change (draft change
