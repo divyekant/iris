@@ -348,18 +348,49 @@ test("a sender with the name of a person you know shows a warning (issue #370)",
 });
 
 test("Trust in a mail answers the near-copy sender, and Undo reopens it (issue #49)", async () => {
-  const asked = serve((path) => [200, rowFor(path)]);
-  const message = { ...fx.message("m-55210"), sender_kind: "hostile", near_copy: { sender: "p-90", of: "northwind.example" } };
+  // The engine answers trust with the kind person, and reopen with the kind hostile again.
+  const asked = serve((path) => [200, { ...row(path.split("/")[1]), kind: path.endsWith("/trust") ? "person" : "hostile" }]);
+  const message = {
+    ...fx.message("m-55210"),
+    hostile: [],
+    sender_kind: "hostile",
+    near_copy: { sender: "p-90", of: "northwind.example", trusted: false },
+  };
   const view = await mount("/src/views/Mail.svelte", { message });
   try {
+    assert.match(text(view.target), /looks hostile \(hostile sender\)/);
     button(view, "Trust this sender").click();
     await until(() => text(view.target).includes("You trust this sender."));
+    assert.doesNotMatch(text(view.target), /looks hostile/, "the saved kind is person");
     button(view, "Undo").click();
     await until(() => button(view, "Trust this sender"));
+    assert.match(text(view.target), /looks hostile \(hostile sender\)/);
     assert.deepEqual(asked, [
       ["POST", "senders/p-90/trust"],
       ["POST", "senders/p-90/reopen"],
     ]);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a mail of a trusted sender keeps Undo after a reload, and other marks stay (issue #49)", async () => {
+  const asked = serve((path) => [200, { ...row(path.split("/")[1]), kind: "hostile" }]);
+  const message = {
+    ...fx.message("m-55210"),
+    hostile: ["link"],
+    sender_kind: "person",
+    near_copy: { sender: "p-90", of: null, trusted: true },
+  };
+  const view = await mount("/src/views/Mail.svelte", { message });
+  try {
+    assert.match(text(view.target), /You trust this sender\./);
+    assert.match(text(view.target), /looks hostile \(link\)/);
+    button(view, "Undo").click();
+    await until(() => button(view, "Trust this sender"));
+    assert.match(text(view.target), /looks hostile \(link, hostile sender\)/);
+    assert.match(text(view.target), /its domain looks like the domain of a sender you know/);
+    assert.deepEqual(asked, [["POST", "senders/p-90/reopen"]]);
   } finally {
     view.destroy();
   }

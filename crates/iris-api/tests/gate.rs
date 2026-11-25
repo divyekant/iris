@@ -791,7 +791,10 @@ async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
     // Message 5 is from the look-alike: it can be trusted.
     let m = g.get("/api/messages/m-5").await;
     assert_eq!(m["sender_kind"], "hostile");
-    assert_eq!(m["near_copy"], json!({"sender": look, "of": "paypal.com"}));
+    assert_eq!(
+        m["near_copy"],
+        json!({"sender": look, "of": "paypal.com", "trusted": false})
+    );
     assert_eq!(g.get("/api/messages/m-1").await["near_copy"], Value::Null);
 
     let (code, v) = g.answer(&look, "trust").await;
@@ -805,9 +808,14 @@ async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
         None
     );
     let m = g.get("/api/messages/m-5").await;
+    // After a reload the mail still names the trusted sender, so the
+    // person can undo the trust.
     assert_eq!(
         (m["sender_kind"].as_str(), &m["near_copy"]),
-        (Some("person"), &Value::Null)
+        (
+            Some("person"),
+            &json!({"sender": look, "of": null, "trusted": true})
+        )
     );
 
     // The trusted look-alike is no reference of the near-copy rule: the
@@ -823,10 +831,18 @@ async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
     assert_eq!(g.answer("p-999", "trust").await.0, StatusCode::NOT_FOUND);
 
     // Reopen: the engine decides again, and the mark comes back.
-    let (code, _) = g.answer(&look, "reopen").await;
+    let (code, v) = g.answer(&look, "reopen").await;
     assert_eq!(code, StatusCode::OK);
+    assert_eq!(
+        v["kind"], "hostile",
+        "the answer gives the kind after reopen"
+    );
     assert_eq!(
         g.one::<String>("SELECT kind FROM sender WHERE address = 'alerts@paypa1.com'"),
         "hostile"
+    );
+    assert_eq!(
+        g.get("/api/messages/m-5").await["near_copy"],
+        json!({"sender": look, "of": "paypal.com", "trusted": false})
     );
 }

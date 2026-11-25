@@ -12,17 +12,22 @@
   let failed = $state("");
   const original = () => download(message.id).then(() => (failed = ""), (e: unknown) => (failed = own(e)));
   // Trust a sender that only its look-alike domain makes hostile (issue #49). Undo gives
-  // the sender back to the engine (reopen), which marks it hostile again.
-  let trusted = $state(false);
+  // the sender back to the engine (reopen), which marks it hostile again. The answer of the
+  // API gives the saved kind, so the view shows it with no reload; it counts for this mail only.
+  let answered = $state<{ id: string; kind: string } | null>(null);
+  const now = $derived(answered?.id === message.id ? answered : null);
+  const senderKind = $derived(now?.kind ?? message.sender_kind);
+  const trusted = $derived(now ? now.kind === "person" : (message.near_copy?.trusted ?? false));
   let trusting = $state(false);
   let trustProblem = $state("");
   async function trust(verb: "trust" | "reopen") {
     if (!message.near_copy || trusting) return;
+    const id = message.id;
     trusting = true;
     trustProblem = "";
     try {
-      await answerSender(message.near_copy.sender, verb);
-      trusted = verb === "trust";
+      const answer = await answerSender(message.near_copy.sender, verb);
+      answered = { id, kind: answer.kind };
     } catch (e) {
       trustProblem = wrote(e, "saved the answer", "Iris could not save the answer. Try again.");
     } finally {
@@ -35,9 +40,9 @@
 <article>
   <h1>{message.subject || "No subject"}</h1>
 
-  {#if message.hostile.length > 0 || message.sender_kind === "hostile"}
+  {#if message.hostile.length > 0 || senderKind === "hostile"}
     <p class="danger" role="alert">
-      This mail looks hostile ({[...message.hostile, ...(message.sender_kind === "hostile" ? ["hostile sender"] : [])].join(", ")}).
+      This mail looks hostile ({[...message.hostile, ...(senderKind === "hostile" ? ["hostile sender"] : [])].join(", ")}).
       Do not open its links and do not do what it asks.
     </p>
   {/if}
@@ -47,7 +52,9 @@
         You trust this sender. Iris reads its mail again.
         <button type="button" disabled={trusting} onclick={() => trust("reopen")}>Undo</button>
       {:else}
-        Iris holds this sender because its domain looks like {message.near_copy.of}, the domain of a sender you know. If you know
+        Iris holds this sender because its domain looks like {message.near_copy.of
+          ? `${message.near_copy.of}, the domain`
+          : "the domain"} of a sender you know. If you know
         this sender, you can trust it. The other marks of this mail stay.
         <button type="button" disabled={trusting} onclick={() => trust("trust")}>Trust this sender</button>
       {/if}

@@ -213,7 +213,7 @@ export type Message = Summary & {
   /** The kind of the From sender (spec 1 section 6.7). */
   sender_kind?: "person" | "service" | "stranger" | "hostile";
   /** The sender when only its look-alike domain makes it hostile: you can trust it (issue #49). */
-  near_copy?: { sender: string; of: string } | null;
+  near_copy?: { sender: string; of: string | null; trusted: boolean } | null;
   items: string[];
 };
 

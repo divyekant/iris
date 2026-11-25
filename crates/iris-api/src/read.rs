@@ -180,19 +180,25 @@ pub struct Message {
     pub sender_kind: String,
     /// The sender row of the `From` address when only the near-copy rule
     /// makes it hostile, so the person can trust it (`POST
-    /// /api/senders/{id}/trust`, issue #49). `None` for each other sender.
+    /// /api/senders/{id}/trust`, issue #49), or when the person trusted it,
+    /// so the person can undo the trust (`reopen`). `None` for each other
+    /// sender.
     pub near_copy: Option<NearCopy>,
     /// The items that are not gone and that have this message as a source.
     pub items: Vec<String>,
 }
 
-/// A sender that the near-copy rule marks hostile.
+/// A sender that the near-copy rule marks hostile, or that the person
+/// trusted after that mark.
 #[derive(Debug, Serialize, PartialEq)]
 pub struct NearCopy {
     /// The `p-` ID of the sender row.
     pub sender: String,
-    /// The known domain that the domain of the sender looks like.
-    pub of: String,
+    /// The known domain that the domain of the sender looks like. `None`
+    /// after a trust: the trust replaces the basis that names the domain.
+    pub of: Option<String>,
+    /// True when the person trusted the sender.
+    pub trusted: bool,
 }
 
 /// One section of the brief: the full count, and at most [`MAX_LIMIT`] items.
@@ -1248,21 +1254,28 @@ fn sender_kind(c: &Connection, address: Option<&str>) -> rusqlite::Result<String
 }
 
 /// The near-copy sender row of `address`: kind `hostile` from the engine
-/// (the near-copy rule is the only engine rule that gives `hostile`).
+/// (the near-copy rule is the only engine rule that gives `hostile`), or a
+/// row that the person trusted after that mark.
 fn near_copy(c: &Connection, address: Option<&str>) -> rusqlite::Result<Option<NearCopy>> {
     let Some(address) = address else {
         return Ok(None);
     };
     c.query_row(
-        "SELECT id, substr(basis, length('near copy of ') + 1) FROM sender
-          WHERE address = ?1 COLLATE NOCASE AND kind = 'hostile'
-            AND decided_by IS NOT 'person' AND basis LIKE 'near copy of %'
+        "SELECT id, CASE WHEN basis = ?2 THEN NULL
+                         ELSE substr(basis, length('near copy of ') + 1) END,
+                basis = ?2
+           FROM sender
+          WHERE address = ?1 COLLATE NOCASE
+            AND ((kind = 'hostile' AND decided_by IS NOT 'person'
+                  AND basis LIKE 'near copy of %')
+              OR (kind = 'person' AND decided_by = 'person' AND basis = ?2))
           ORDER BY id LIMIT 1",
-        [address],
+        rusqlite::params![address, iris_senders::gate::TRUSTED],
         |r| {
             Ok(NearCopy {
                 sender: format_id(Kind::Sender, r.get(0)?),
                 of: r.get(1)?,
+                trusted: r.get(2)?,
             })
         },
     )
