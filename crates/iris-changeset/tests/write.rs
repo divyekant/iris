@@ -545,3 +545,111 @@ fn a_stranger_thread_flags_first_contact_with_gone_messages() {
     let got = one(&s, AuthorKind::Person, Verb::Draft, &["a-1"], MAIL());
     assert_eq!(flags(&got), json!(["new_recipient"]), "{got}");
 }
+
+/// The state of the action `n` of the newest changeset.
+fn last_state(s: &Store) -> (String, Option<String>) {
+    s.read(|c| {
+        Ok(c.query_row(
+            "SELECT state, reason FROM changeset_action ORDER BY id DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    })
+    .unwrap()
+}
+
+fn set(s: &Store, sql: &str) {
+    s.write(|tx| Ok(tx.execute_batch(sql)?)).unwrap();
+}
+
+/// A change of a draft (docs/specs/2026-11-25-draft-change.md, section 1):
+/// only the person, a Gmail draft of Iris that is not sent, not foreign and
+/// has no send or other change open. A reply change has no subject and
+/// resolves to the newest message of the thread.
+#[test]
+fn a_change_of_a_draft_is_proposed_only_when_each_check_passes() {
+    let dir = TempDir::new("change");
+    let s = store(&dir);
+    let a = one(&s, AuthorKind::Person, Verb::Draft, &["d-1"], REPLY());
+    assert_eq!(state(&a), "proposed", "{a}");
+    assert_eq!(a["resolved"]["messages"], json!(["m-2"]));
+    one(&s, AuthorKind::Person, Verb::Draft, &["d-1"], MAIL());
+    assert_eq!(
+        last_state(&s).1.as_deref(),
+        Some("a reply takes no subject: Iris sets it")
+    );
+    let denied = |by: AuthorKind, why: &str| {
+        one(&s, by, Verb::Draft, &["d-1"], REPLY());
+        assert_eq!(last_state(&s), ("denied".into(), Some(why.into())), "{why}");
+    };
+    denied(AuthorKind::Agent, "Only you can change a draft.");
+    one(&s, AuthorKind::Person, Verb::Draft, &["d-9"], REPLY());
+    assert_eq!(last_state(&s).0, "denied");
+    for (sql, why, undo) in [
+        (
+            "UPDATE account SET provider = 'outlook'",
+            "Iris cannot change a draft of this account.",
+            "UPDATE account SET provider = 'gmail'",
+        ),
+        (
+            "UPDATE draft SET sent_at = 1, sent_message = 'g9'",
+            "The draft is sent.",
+            "UPDATE draft SET sent_at = NULL, sent_message = NULL",
+        ),
+        (
+            "UPDATE draft SET foreign_at = 1",
+            "The draft has a form that Iris does not write. Change it in Gmail.",
+            "UPDATE draft SET foreign_at = NULL",
+        ),
+    ] {
+        set(&s, sql);
+        denied(AuthorKind::Person, why);
+        set(&s, undo);
+    }
+    // A send of the draft waits for review: no change.
+    one(&s, AuthorKind::Agent, Verb::Send, &["d-1"], json!({}));
+    denied(AuthorKind::Person, "The draft waits to send. Cancel it first.");
+    set(&s, "UPDATE changeset_action SET state = 'denied', decided_by = 'engine', reason = 'no', decided_at = 1 WHERE verb = 'send' AND state = 'proposed'");
+    // A change that the person approved is open: a second change and a
+    // send wait for it.
+    one(&s, AuthorKind::Person, Verb::Draft, &["d-1"], REPLY());
+    set(&s, "UPDATE changeset_action SET state = 'approved', decided_by = 'person', decided_at = 1 WHERE id = (SELECT max(id) FROM changeset_action)");
+    denied(AuthorKind::Person, iris_changeset::CHANGING);
+    one(&s, AuthorKind::Person, Verb::Send, &["d-1"], json!({}));
+    assert_eq!(
+        last_state(&s),
+        ("denied".into(), Some(iris_changeset::CHANGING.into()))
+    );
+}
+
+/// The send mark of another write that made the draft and has no send yet
+/// blocks a change, while the mark is open (not withdrawn, not too old).
+#[test]
+fn an_open_send_mark_of_the_draft_blocks_a_change() {
+    let dir = TempDir::new("change-mark");
+    let s = store(&dir);
+    set(
+        &s,
+        "UPDATE changeset_action SET state = 'approved', decided_by = 'person', decided_at = 1 WHERE id = 1;",
+    );
+    s.write(|tx| {
+        Ok(tx.execute(
+            "INSERT INTO write_send(action_id, request_key, request_hash, flags, created_at)
+             VALUES (1, 'key-0123456789abcd', ?1, '[]', ?2)",
+            rusqlite::params!["0".repeat(64), NOW - 1000],
+        )?)
+    })
+    .unwrap();
+    one(&s, AuthorKind::Person, Verb::Draft, &["d-1"], REPLY());
+    assert_eq!(
+        last_state(&s),
+        (
+            "denied".into(),
+            Some("The draft waits to send. Cancel it first.".into())
+        )
+    );
+    // The person stopped that write: the change can go.
+    set(&s, "UPDATE changeset SET state = 'withdrawn' WHERE id = 1");
+    one(&s, AuthorKind::Person, Verb::Draft, &["d-1"], REPLY());
+    assert_eq!(last_state(&s).0, "proposed");
+}
