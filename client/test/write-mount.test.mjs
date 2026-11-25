@@ -56,10 +56,10 @@ async function fill(app, to = "sam@okafor.example ") {
   app.flushSync();
 }
 
-test("generated hashes: #/write/<id> opens a reply only for one canonical thread ID and no other part", () => {
+test("generated hashes: #/write/<id> opens a reply or a change only for one canonical thread or draft ID and no other part", () => {
   let seed = 23;
   const rand = (n) => ((seed = (seed * 1103515245 + 12345) % 2147483648), seed % n);
-  const pieces = ["#/write", "/", "t-", "m-", "0", "1", "9", "x", "%", "%2F", "-", "write", "#"];
+  const pieces = ["#/write", "/", "t-", "d-", "m-", "0", "1", "9", "x", "%", "%2F", "-", "write", "#"];
   let replies = 0;
   for (let i = 0; i < 5000; i++) {
     const start = ["#/write/t-", "#/write/", "#write/t-", ""][rand(4)];
@@ -67,7 +67,10 @@ test("generated hashes: #/write/<id> opens a reply only for one canonical thread
     const r = route.parse(hash);
     if (r.view !== "write") continue;
     const rest = hash.replace(/^#\/?/, "");
-    if (r.thread === null) assert.match(rest, /^write\/?$/, hash);
+    if (r.draft) {
+      assert.equal(rest, `write/${r.draft}`, hash);
+      assert.match(r.draft, route.DRAFT_ID, hash);
+    } else if (r.thread === null) assert.match(rest, /^write\/?$/, hash);
     else {
       assert.equal(rest, `write/${r.thread}`, hash);
       assert.match(r.thread, route.THREAD_ID, hash);
@@ -85,6 +88,10 @@ test("the routes of the write view", () => {
   assert.deepEqual(route.parse("#/write/m-4"), { view: "home" });
   assert.deepEqual(route.parse("#/write/t-4/x"), { view: "home" });
   assert.equal(route.href.reply("t-4"), "#/write/t-4");
+  assert.deepEqual(route.parse("#/write/d-9"), { view: "write", thread: null, draft: "d-9" });
+  assert.deepEqual(route.parse(route.href.change("d-9")), { view: "write", thread: null, draft: "d-9" });
+  assert.deepEqual(route.parse("#/write/d-0"), { view: "home" });
+  assert.deepEqual(route.parse("#/write/d-9/x"), { view: "home" });
   assert.ok(route.NAV.some(([link]) => link === "#/write"));
 });
 
@@ -1069,5 +1076,43 @@ test("Write another waits while the draft loads, and a draft holds only for its 
     app.destroy();
     globalThis.fetch = fast;
     net.restore();
+  }
+});
+
+test("#/write/d-N opens the form with the draft; update sends the draft, new does not, and null opens an empty form (issue 941)", async () => {
+  const DRAFT = { draft: "d-7", account: "a-1", thread: null, to: ["sam@okafor.example"], cc: ["kim@example.com"], bcc: [],
+                  subject: "Dinner on Saturday?", body: "Hi Sam,\n\nAre you free?\n", attachments: [] };
+  for (const change of ["update", "new", null]) {
+    window.sessionStorage.clear();
+    // An earlier write of this place gives way to the change.
+    window.sessionStorage.setItem("iris.write.new.taken", JSON.stringify({ write: "cs-9", to: ["x@example.com"], subject: "Old", body: "Old" }));
+    const net = serve((path, method) => {
+      if (method === "POST" && path === "write") return [201, { write: "cs-1" }];
+      if (path === "write/cs-1") return [200, { state: "saving" }];
+      return [404, { error: "Not found." }];
+    });
+    const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: { ...DRAFT, change } }, every: 20 });
+    try {
+      app.flushSync();
+      const form = app.target.querySelector("form");
+      assert.ok(form, `${change}: the form shows`);
+      if (change === null) {
+        assert.match(text(app.target), /This draft cannot change now\./);
+        assert.equal(app.target.querySelector("textarea").value, "");
+        continue;
+      }
+      assert.match(text(app.target), /This is the draft that you cancelled\./);
+      assert.equal(app.target.querySelector("input.subject").value, "Dinner on Saturday?");
+      assert.equal(app.target.querySelector("textarea").value, "Hi Sam,\n\nAre you free?\n");
+      press(app);
+      await until(() => net.posts().length === 1);
+      const sent = net.posts()[0].body;
+      assert.deepEqual([sent.to, sent.cc, sent.subject], [["sam@okafor.example"], ["kim@example.com"], "Dinner on Saturday?"]);
+      assert.equal(sent.draft, change === "update" ? "d-7" : undefined);
+      assert.ok(sent.key, "a press has a key");
+    } finally {
+      app.destroy();
+      net.restore();
+    }
   }
 });

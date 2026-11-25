@@ -424,6 +424,8 @@ export type DraftContent = {
   subject: string;
   body: string;
   attachments: Attachment[];
+  /** How the next press of Send writes the draft, as `change` of a stopped write (issue 941). */
+  change: "update" | "new" | null;
 };
 
 /** A message summary, or only the ID of a message that is not in the mirror any more. */

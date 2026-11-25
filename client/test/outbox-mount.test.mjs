@@ -113,7 +113,7 @@ test("the cards follow the engine: a cancel note stays, and a new send of the dr
 });
 
 
-/** A fetch whose GET answers wait for `open()`, one gate for each read. */
+/** A fetch whose reads of the outbox wait for `open()`, one gate for each read. A draft has no change. */
 function gated(state) {
   const asked = [];
   const waits = [];
@@ -121,6 +121,7 @@ function gated(state) {
   globalThis.fetch = async (url, init = {}) => {
     const path = String(url).replace(/^\/api\//, "");
     const method = init.method ?? "GET";
+    if (path.startsWith("drafts/")) return new Response(JSON.stringify({ change: null }), { status: 200, headers: { "content-type": "application/json" } });
     asked.push(`${method} ${path}`);
     if (method === "POST") {
       const draft = path.split("/")[1];
@@ -222,6 +223,7 @@ test("after a cancel, Cancel stays off until a read shows the outbox", async () 
   let sends = fx.outbox().sends;
   let fail = 0;
   const net = serve((path, method) => {
+    if (path.startsWith("drafts/")) return [404, { error: "Not found." }];
     if (method === "POST") {
       sends = sends.filter((x) => x.draft !== "d-14");
       fail = 1;
@@ -238,12 +240,44 @@ test("after a cancel, Cancel stays off until a read shows the outbox", async () 
   try {
     card().querySelector("button").click();
     // The read after the cancel fails: the card stays, with Cancel off.
-    await until(() => net.asked.filter((a) => a.startsWith("GET")).length === 1);
+    await until(() => net.asked.filter((a) => a.startsWith("GET outbox")).length === 1);
     await new Promise((r) => setTimeout(r, 20));
     app.flushSync();
     assert.equal(card().querySelector("button").disabled, true);
     card().querySelector("button").click();
     assert.equal(net.asked.filter((a) => a.startsWith("POST")).length, 1);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("a cancelled send links to Change and send only when the engine says that its draft can change (issue 941)", async () => {
+  let sends = fx.outbox().sends;
+  const net = serve((path, method) => {
+    const cancel = path.match(/^outbox\/(d-\d+)\/cancel$/);
+    if (method === "POST" && cancel) {
+      sends = sends.filter((x) => x.draft !== cancel[1]);
+      return [200, { cancelled: cancel[1] }];
+    }
+    // d-14 can change in place. d-15 cannot (a reply with a newer mail).
+    if (path === "drafts/d-14") return [200, { draft: "d-14", change: "update" }];
+    if (path === "drafts/d-15") return [200, { draft: "d-15", change: null }];
+    return [200, { ...fx.outbox(), count: sends.length, sends }];
+  });
+  const app = await mount("/src/views/Outbox.svelte", { first: fx.outbox() });
+  const cards = () => [...app.target.querySelectorAll("li.card")];
+  const button = (subject) => cards().find((c) => c.textContent.includes(subject)).querySelector("button");
+  const links = () => [...app.target.querySelectorAll(".notes a")].map((a) => [a.textContent, a.getAttribute("href")]);
+  try {
+    button("Signing").click();
+    await until(() => links().length === 1);
+    assert.deepEqual(links(), [["Change and send", "#/write/d-14"]]);
+    button("Renewal").click();
+    await until(() => net.asked.includes("GET drafts/d-15") && cards().length === 1);
+    app.flushSync();
+    assert.match(text(app.target.querySelector(".notes")), /"Renewal: \$48,000 for 12 months" is cancelled\./);
+    assert.deepEqual(links(), [["Change and send", "#/write/d-14"]], "no link for a draft that cannot change");
   } finally {
     app.destroy();
     net.restore();

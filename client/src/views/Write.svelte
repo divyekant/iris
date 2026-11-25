@@ -24,7 +24,8 @@
   import { FLAGS } from "../review";
   import { href } from "../route";
 
-  type Start = { accounts: Account[] } | { thread: string; reply: ReplyStart };
+  // `change`: the draft of #/write/d-N (issue 941), from GET /api/drafts/{d-N}.
+  type Start = ({ accounts: Account[] } | { thread: string; reply: ReplyStart }) & { change?: DraftContent };
   // `every`: the ms between two reads of the write state (a prop for the tests).
   let { start, every = 2000 }: { start: Start; every?: number } = $props();
 
@@ -101,7 +102,20 @@
     }
   }
 
-  const saved = restore();
+  // #/write/d-N (issue 941): the form opens with the content of the draft, as
+  // after "Change and send" in this view. For `update`, the next press changes
+  // the same draft. A record of an earlier write of this place gives way.
+  // svelte-ignore state_referenced_locally
+  const opened = start.change;
+  const fromDraft = (d: DraftContent): Saved => ({
+    account: d.account, to: d.to, cc: d.cc, bcc: d.bcc, files: d.attachments, subject: d.subject, body: d.body,
+    key: "", sig: "", flags: [], draft: d.change === "update" ? { draft: d.draft, account: d.account } : null,
+  });
+  if (opened) keep(null);
+  let changeNote = $state(!opened ? "" : opened.change ? "This is the draft that you cancelled. Change it, then press Send." : "This draft cannot change now. Write a new mail here.");
+  const saved = opened?.change ? fromDraft(opened) : restore();
+  // A reload keeps the changed form (sessionStorage), not the draft again.
+  if (opened && typeof history !== "undefined") history.replaceState(history.state, "", thread ? href.reply(thread) : "#/write");
   let account = $state(saved?.account ?? reply?.account ?? (accounts[0] ? `a-${accounts[0].id}` : ""));
   let to = $state<string[]>(unique(saved?.to ?? reply?.to ?? []));
   const startCc = unique(saved?.cc ?? reply?.cc ?? []);
@@ -298,6 +312,7 @@
       sent_ = { subject: thread ? "" : subject, body: mail.body };
       unknown = false;
       changing = null;
+      changeNote = "";
       write = v.write;
       follow();
     } catch (e) {
@@ -413,6 +428,7 @@
   function again() {
     keep(null, write);
     changing = null;
+    changeNote = "";
     if (thread) return void (location.hash = "#/write");
     clearTimeout(timer);
     [write, to, cc, bcc, files, subject, body, note, toText, ccText, bccText] = ["", [], [], [], [], "", "", "", "", "", ""];
@@ -532,6 +548,7 @@
   <form class="dock" onsubmit={(e) => (e.preventDefault(), send())}>
     <!-- While the press runs, the form does not change: the engine takes the mail as it was. -->
     <fieldset disabled={busy || drafting}>
+    {#if changeNote}<p class="saved opened" role="status">{changeNote}</p>{/if}
     {#if accounts.length > 1}
       <label class="line">
         <span class="k">From</span>
@@ -845,6 +862,9 @@
     margin: var(--space-2) 0 0;
     color: var(--color-text-muted);
     font-size: var(--font-size--1);
+  }
+  .opened {
+    margin: 0 0 var(--space-3);
   }
   .files {
     list-style: none;
