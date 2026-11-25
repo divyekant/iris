@@ -1244,7 +1244,11 @@ pub fn release(tx: &Transaction, message: i64) -> iris_store::Result<Release> {
     all.extend(now.iter().cloned());
     all.sort();
     tx.execute(
-        "UPDATE message SET released = ?2 WHERE id = ?1",
+        // A release is a new decision of the person: the model gets new
+        // tries, as after a rerun (`rerun_senders`). A message that used
+        // its tries before a mark held it can then get its items.
+        "UPDATE message SET released = ?2, tries = 0, retry_at = NULL, waits_model = 0
+         WHERE id = ?1",
         params![
             message,
             serde_json::to_string(&all).expect("strings serialize")
@@ -1257,18 +1261,36 @@ pub fn release(tx: &Transaction, message: i64) -> iris_store::Result<Release> {
     })
 }
 
-/// The person ends the release of message `message`. The fixed check gives
-/// the marks back. A gone message keeps its row as it is.
+/// The person ends the release of message `message`. The released marks go
+/// back into `message.hostile` in the same write, so each gate that reads
+/// the marks holds the message at once, before the fixed check reads it
+/// again. A gone message keeps its row as it is.
 pub fn unrelease(tx: &Transaction, message: i64) -> iris_store::Result<Release> {
-    let Some((hostile, released, _)) = release_row(tx, message)? else {
+    let Some((mut hostile, released, _)) = release_row(tx, message)? else {
         return Ok(Release::NoMessage);
     };
     if released.is_empty() {
         return Ok(Release::Nothing);
     }
+    for m in released {
+        if !hostile.contains(&m) {
+            hostile.push(m);
+        }
+    }
+    hostile.sort();
+    // As the understanding of hostile mail does: the items that it may
+    // drop go.
     tx.execute(
-        "UPDATE message SET released = NULL WHERE id = ?1",
+        "DELETE FROM item WHERE id IN (
+           SELECT item_id FROM item_droppable WHERE message_id = ?1)",
         [message],
+    )?;
+    tx.execute(
+        "UPDATE message SET released = NULL, hostile = ?2 WHERE id = ?1",
+        params![
+            message,
+            serde_json::to_string(&hostile).expect("strings serialize")
+        ],
     )?;
     Ok(Release::Done {
         released: Vec::new(),

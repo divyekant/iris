@@ -982,6 +982,8 @@ async fn release_takes_a_message_out_of_quarantine_and_unrelease_undoes_it() {
     let (code, v) = g.call("POST", "/api/messages/m-3/unrelease").await;
     assert_eq!(code, StatusCode::OK, "{v}");
     assert_eq!(v["released"], json!([]));
+    // The marks come back at once, before the fixed check runs.
+    assert_eq!(v["hostile"], json!(["link", "spoof"]));
     assert_eq!(due(), 1, "the undo queues the check again, in one row");
 
     // Content that Iris did not read yet: its marks can be old, so no

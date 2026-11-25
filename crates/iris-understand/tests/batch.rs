@@ -1833,7 +1833,14 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
     assert_eq!(hostile(&b), r#"["link"]"#);
     assert_eq!((b.script.calls(), items(&b)), (0, 0));
 
-    // The release: the next run reads the mail with the model.
+    // The release: the next run reads the mail with the model, also when
+    // the model used each try of the message before the mark held it.
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE message SET tries = 3 WHERE id = ?1", [m])?;
+            Ok(())
+        })
+        .unwrap();
     let r = b.store.write(|tx| release(tx, m)).unwrap();
     assert_eq!(
         r,
@@ -1871,6 +1878,17 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
     assert_eq!(
         b.store.write(|tx| unrelease(tx, m)).unwrap(),
         Release::Nothing
+    );
+    // The undo holds the mail at once, before the fixed check runs: each
+    // gate reads `message.hostile`.
+    assert_eq!(hostile(&b), r#"["link"]"#);
+    assert_eq!(items(&b), 0);
+    assert_eq!(
+        b.col(&format!(
+            "SELECT count(*) FROM message m WHERE m.id = {m} AND {}",
+            iris_store::may_be_hostile!()
+        )),
+        Some(1)
     );
     b.run(&Limits::default()).unwrap();
     assert_eq!(hostile(&b), r#"["link"]"#);

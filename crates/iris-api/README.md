@@ -340,7 +340,7 @@ written. A `p-` ID that no sender has, or another answer, is a 404.
 | Endpoint | Does |
 |---|---|
 | `POST /api/messages/{id}/release` | Releases each mark `dmarc`, `spoof` and `link` that the message has now (issues 369, 373 and 374). Iris reads the message again without these marks. The marks `spam` and `phishing` and a `hostile` sender stay. |
-| `POST /api/messages/{id}/unrelease` | Ends the release. Iris reads the message again with its marks. |
+| `POST /api/messages/{id}/unrelease` | Ends the release. The released marks are back in `hostile` at once, and the items of the message go. Iris reads the message again with its marks. |
 
 There is no body. The answer is the message, as `GET /api/messages/{id}`
 gives it. The column `hostile` changes when the engine reads the message
