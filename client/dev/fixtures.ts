@@ -84,7 +84,7 @@ export const brief: Brief = {
   // Iris prepared a reply for the first item (card R3-09).
   you_owe: of(byForm("commitment").filter((i) => i.direction === "you_owe").map((i, n) => (n ? i : { ...i, ready: ["draft"] }))),
   // Alex is late: Iris prepared a nudge (card R3-07).
-  owed_to_you: of([...byForm("commitment").filter((i) => i.direction === "owed_to_you").map((i, n) => (n ? i : { ...i, ready: ["draft"] })), alexNotes]),
+  owed_to_you: of([...byForm("commitment").filter((i) => i.direction === "owed_to_you").map((i, n): Item => (n ? i : { ...i, ready: ["draft"] })), alexNotes]),
   conversations: of(byForm("conversation")),
   records: { receipt: 1, booking: 1 },
   // The feed example is bundled by rule 3 ("Bundle the feed"), so it is only in its bundle.
