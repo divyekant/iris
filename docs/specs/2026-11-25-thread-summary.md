@@ -159,7 +159,8 @@ end of the order and does not stop the others.
   has a summary that is ready. So an item at the stranger gate never shows
   "Summary ready", also when a known person in the same thread has an item
   with a summary. The brief sections, the gate, the bundles and the lists
-  of one form read it from the same column as `"draft"` (`ready_doc_of`).
+  of one form read it with `"draft"`, from the columns of `ready_columns`
+  (`ready_doc_of`).
 - `GET /api/items/{id}/summary`: `{"text", "based_on", "created",
   "model"}` of the summary of the thread of the origin message of the item,
   with the same two conditions as `ready`, or 404. The item page reads it
@@ -183,7 +184,10 @@ end of the order and does not stop the others.
 - `Item.svelte`: the page reads `GET /api/items/{id}/summary` and shows a
   box above the mail: "Summary by
   Iris" in muted text, the text, and one faint line: "From the mail up to
-  <date>. Read the mail for the exact words." A 404 shows nothing. The text
+  <date>. Read the mail for the exact words." The date is the date of the
+  message `based_on` (`GET /api/messages?ids=`), never `created`. With no
+  date, the line says "From the newest mail of the thread." Each new state
+  of the item reads the summary again. A 404 shows nothing. The text
   is a Svelte text node, never HTML.
 - A before/after page shows the brief line and the item page.
 
@@ -218,6 +222,7 @@ clean text, of the account of the item.
 | The answer is not valid twice | `thread_summary_try` with `invalid = 1` for that basis and model version. No more calls until the basis or the model version changes. | Unit test. |
 | The model refuses | No second call. The answer is not valid. | Unit test. |
 | The budget refuses | No call. The try moves the thread to the end. | Engine test. |
+| The item or the summary changes during a read of `GET /api/items/{id}/summary` | One SQL statement reads the item condition and the summary, so both come from one snapshot. | API test with a writer that changes the item and the summary text in one transaction. |
 | A crash during the save | One transaction: no summary, or the whole summary. | Store test. |
 | Another run holds the batch lock | No call in this turn. | Engine test. |
 | Any other input (a thread with no clean text, a thread of another kind) | Not a candidate: no call. | Unit test of `candidates`. |
