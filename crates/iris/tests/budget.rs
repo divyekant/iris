@@ -53,27 +53,32 @@ fn check(
 }
 
 /// The memory of a process that the budget limits, in KiB, with its limit:
-/// on Linux the anonymous memory (`/proc/<pid>/smaps_rollup`), elsewhere the
-/// RSS (`ps`) with the limit of 50 MB.
+/// on Linux the anonymous memory, elsewhere the RSS (`ps`) with the limit of
+/// 50 MB. Linux reads `Anonymous` of `/proc/<pid>/smaps_rollup` (kernel 4.14
+/// and later), else `RssAnon` of `/proc/<pid>/status` (issue #1035). The
+/// debug RSS of Linux is near 50 MB, so Linux never falls back to the RSS.
 fn memory_kib(pid: u32) -> (u64, u64) {
-    match std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")) {
-        Ok(text) => {
-            let anon = anonymous_kib(&text)
-                .unwrap_or_else(|| panic!("no Anonymous line in smaps_rollup:\n{text}"));
-            eprintln!("RSS {} KiB, anonymous {anon} KiB", rss_kib(pid));
-            (anon, MAX_ANON_KIB)
-        }
-        Err(_) => (rss_kib(pid), MAX_RSS_KIB),
+    if !cfg!(target_os = "linux") {
+        return (rss_kib(pid), MAX_RSS_KIB);
     }
+    let read = |file: &str, key: &str| {
+        let text = std::fs::read_to_string(format!("/proc/{pid}/{file}")).ok()?;
+        Some(kib_line(&text, key).unwrap_or_else(|| panic!("no {key} line in {file}:\n{text}")))
+    };
+    let anon = read("smaps_rollup", "Anonymous:")
+        .or_else(|| read("status", "RssAnon:"))
+        .expect("measure not available: no /proc/<pid>/smaps_rollup and no /proc/<pid>/status");
+    eprintln!("RSS {} KiB, anonymous {anon} KiB", rss_kib(pid));
+    (anon, MAX_ANON_KIB)
 }
 
-/// The value of the line `Anonymous: <n> kB` of `/proc/<pid>/smaps_rollup`.
-/// `None` if no such line has a whole number of kB: the caller then fails.
-/// The `procfs` crate also reads this file; one field does not need a new
-/// dependency.
-fn anonymous_kib(text: &str) -> Option<u64> {
+/// The value of the line `<key> <n> kB` of a `/proc` file, for example
+/// `Anonymous:` of `smaps_rollup` or `RssAnon:` of `status`. `None` if no
+/// such line has a whole number of kB: the caller then fails. The `procfs`
+/// crate also reads these files; one field does not need a new dependency.
+fn kib_line(text: &str, key: &str) -> Option<u64> {
     text.lines().find_map(|l| {
-        let mut words = l.strip_prefix("Anonymous:")?.split_whitespace();
+        let mut words = l.strip_prefix(key)?.split_whitespace();
         match (words.next()?.parse().ok()?, words.next(), words.next()) {
             (n, Some("kB"), None) => Some(n),
             _ => None,
@@ -189,7 +194,8 @@ fn serve_stays_inside_the_memory_and_start_budget() {
 }
 
 #[test]
-fn anonymous_kib_reads_only_a_whole_anonymous_line() {
+fn kib_line_reads_only_a_whole_line_of_its_key() {
+    let anonymous_kib = |t: &str| kib_line(t, "Anonymous:");
     assert_eq!(
         anonymous_kib("Rss: 9 kB\nAnonymous:      16924 kB\n"),
         Some(16924)
@@ -229,6 +235,15 @@ fn anonymous_kib_reads_only_a_whole_anonymous_line() {
             noise.replace("Anonymous", "x")
         );
         assert_eq!(anonymous_kib(&text), Some(n), "{text:?}");
+    }
+    // The fallback of issue #1035: `status` has `RssAnon:` in the same form.
+    assert_eq!(
+        kib_line("VmRSS: 9 kB\nRssAnon:\t  812 kB\n", "RssAnon:"),
+        Some(812)
+    );
+    if cfg!(target_os = "linux") {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        assert!(kib_line(&status, "RssAnon:").is_some(), "{status}");
     }
 }
 
