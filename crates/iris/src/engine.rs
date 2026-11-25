@@ -1121,6 +1121,9 @@ impl Engine {
             if let Err(e) = self.store.clean_gone(now_ms()) {
                 say!("iris: content cleanup: {e}");
             }
+            if let Err(e) = self.store.clean_attachments(now_ms()) {
+                say!("iris: attachment cleanup: {e}");
+            }
             // The grants of an ended job match nothing: remove them from
             // the policy (issue #385). A held lock or a file with a change
             // to confirm waits for the next pass.

@@ -323,6 +323,92 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Delete each file of the attachment folder that is [`GONE_KEEP_MS`] or
+    /// more old at `now` and that no live reference names (attachment
+    /// cleanup spec `docs/specs/2026-11-25-attachment-cleanup.md`). Gives
+    /// the number of deleted files, or `None` when a backup holds the lock.
+    pub fn clean_attachments(&self, now: i64) -> Result<Option<u64>> {
+        let Some(_lock) = self.try_backup_lock()? else {
+            return Ok(None);
+        };
+        let root = self.dir.join(crate::ATTACHMENTS);
+        let mut conn = lock(&self.writer);
+        // The write lock stays held from the read of the references to the
+        // last delete. put_attachment renames under the same lock, so an
+        // upload makes a file new before the check or after the delete.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let live: std::collections::HashSet<String> = tx
+            .prepare(LIVE_ATTACHMENTS)?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let cutoff = now - GONE_KEEP_MS;
+        let mut deleted = 0;
+        let dirs = match fs::read_dir(&root) {
+            Ok(d) => d,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Some(0)),
+            Err(e) => return Err(e.into()),
+        };
+        for dir in dirs {
+            let dir = dir?;
+            let Some(aa) = dir.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if aa.len() != 2 || !dir.file_type()?.is_dir() {
+                continue;
+            }
+            for file in fs::read_dir(dir.path())? {
+                let file = file?;
+                let Some(sha) = file.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                // Only `<aa>/<sha256>`: a temporary file or any other name
+                // stays.
+                if content::file_path(&root, &sha, "").as_deref() != Some(&*file.path())
+                    || !file.file_type()?.is_file()
+                    || live.contains(&sha)
+                {
+                    continue;
+                }
+                let modified = file.metadata()?.modified()?;
+                let ms = match modified.duration_since(std::time::UNIX_EPOCH) {
+                    Ok(d) => i64::try_from(d.as_millis()).unwrap_or(i64::MAX),
+                    Err(_) => i64::MIN,
+                };
+                if ms > cutoff {
+                    continue;
+                }
+                match fs::remove_file(file.path()) {
+                    Ok(()) => deleted += 1,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(Some(deleted))
+    }
+}
+
+/// The SHA-256 of each attachment file that a live reference names: an
+/// open action (a draft revision, `proposed`, `in_review`, `approved` or
+/// `held`), a ledger claim in `writing`, and a draft row that is not sent
+/// and not foreign. Each such file can be read again by an apply or a
+/// recovery. The match does not filter by verb, so each place that holds
+/// the content keeps its files.
+const LIVE_ATTACHMENTS: &str = "
+SELECT json_extract(j.value, '$.sha256') FROM changeset_action a,
+  json_each(CASE WHEN json_valid(a.args) THEN a.args END, '$.attachments') j
+WHERE a.state IS NULL OR a.state IN ('proposed', 'in_review', 'approved', 'held')
+UNION
+SELECT json_extract(j.value, '$.sha256') FROM ledger l,
+  json_each(l.post, '$.content.attachments') j
+WHERE l.state = 'writing'
+UNION
+SELECT json_extract(j.value, '$.sha256') FROM draft d,
+  json_each(d.content, '$.content.attachments') j
+WHERE d.sent_at IS NULL AND d.foreign_at IS NULL";
+
 /// Before the cleanup deletes the evidence of gone mail (the header that
 /// names the sender, then the message row with its marks and labels), it
 /// keeps the last verdict of each notice and each watch match on such mail

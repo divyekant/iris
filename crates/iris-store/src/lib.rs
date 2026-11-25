@@ -892,13 +892,16 @@ impl Store {
 
     /// Write one attachment file to the attachment folder and give its
     /// SHA-256 (send content spec `docs/specs/2026-11-24-send-content.md`,
-    /// section 2). Nothing deletes a file of this folder, and the content
-    /// cleanup never reads it.
+    /// section 2). The content cleanup never reads this folder.
+    /// [`Store::clean_attachments`] deletes an old file that nothing names.
     pub fn put_attachment(&self, bytes: &[u8]) -> Result<String> {
         let root = self.dir.join(ATTACHMENTS);
         make_private_dir(&root)?;
         let mut w = ContentWriter::with_ext(&root, "")?;
         io::Write::write_all(&mut w, bytes)?;
+        // The rename runs under the write lock, so it does not overlap a
+        // run of clean_attachments: the file is new, or made again.
+        let _writer = lock(&self.writer);
         w.finish()
     }
 
