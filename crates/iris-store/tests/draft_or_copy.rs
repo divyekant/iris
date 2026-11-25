@@ -160,7 +160,7 @@ const GATES_WITHOUT: [(&str, &str); 3] = [
 ];
 
 /// Each gate of received mail also skips drafts and sent copies: a file
-/// that reads `may_be_hostile!` reads `draft_or_copy!` too, or is in
+/// that reads `may_be_hostile!` reads `draft_or_copy!` (or `not_received!`) too, or is in
 /// [`GATES_WITHOUT`] with its reason.
 #[test]
 fn each_gate_skips_drafts_and_sent_copies() {
@@ -170,7 +170,8 @@ fn each_gate_skips_drafts_and_sent_copies() {
     let mut bad = Vec::new();
     for (path, text) in &files {
         let gate = text.contains("may_be_hostile!(") && !path.contains("/tests");
-        let skip = text.contains("draft_or_copy!(");
+        // `not_received!` (iris-store) holds `draft_or_copy!`.
+        let skip = text.contains("draft_or_copy!(") || text.contains("not_received!(");
         let listed = GATES_WITHOUT
             .iter()
             .any(|(f, _)| path.ends_with(&format!("/{f}")));

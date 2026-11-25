@@ -140,6 +140,42 @@ fn refuses_an_unknown_schema() {
     assert!(matches!(Store::open(&dir.0), Err(Error::UnknownSchema(-1))));
 }
 
+/// `label:` folds the case of each letter, not only ASCII (issue #965).
+#[test]
+fn a_label_filter_folds_unicode_case() {
+    let dir = TempDir::new("label-fold");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(
+            acc,
+            &[
+                ("Label_2", "Entwürfe", "user"),
+                ("Label_3", "ΣΧΈΔΙΑ", "user"),
+            ],
+        )
+        .unwrap();
+    let ids = store
+        .put_messages(
+            acc,
+            &[
+                msg("a", "t1", 1, &["Label_2"], "One", "x"),
+                msg("b", "t2", 2, &["Label_3"], "Two", "y"),
+            ],
+        )
+        .unwrap();
+    let s = |q: &str| store.search(q, 10).unwrap();
+    for q in [
+        "label:Entwürfe",
+        "label:ENTWÜRFE",
+        "label:entwürfe",
+        "label:Label_2",
+    ] {
+        assert_eq!(s(q), [ids[0]], "{q}");
+    }
+    assert_eq!(s("label:σχέδια"), [ids[1]]);
+    assert_eq!(s("label:Entwurfe"), Vec::<i64>::new(), "a letter differs");
+}
+
 #[test]
 fn search_words_phrases_and_filters() {
     let dir = TempDir::new("search");
