@@ -17,7 +17,7 @@ use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use md5::{Digest, Md5};
 use sha2::{Sha256, Sha384, Sha512};
 
-use super::{direct_name, get, hex, literal, value, Lexer, Val};
+use super::{direct_name, find, get, hex, literal, value, Lexer, Val};
 
 /// The padding string of the password (Algorithm 2, step a).
 const PAD: [u8; 32] = [
@@ -55,42 +55,72 @@ pub(super) enum Setup {
     Locked,
 }
 
-/// The encryption of `pdf`: the last `/Encrypt` entry of a trailer or a
-/// cross-reference stream, and the first `/ID` string.
+/// The encryption of `pdf`, from the trailer that the last `startxref`
+/// names: a `trailer` dictionary after an `xref` table, or the dictionary of
+/// a cross-reference stream. A viewer reads the same trailer. `/Encrypt`
+/// text in other places (a content stream, a comment) does not count. A
+/// file whose trailer Iris cannot find reads as a file with no encryption:
+/// encrypted streams then give no readable text.
 pub(super) fn setup(pdf: &[u8]) -> Setup {
-    let Some(dict) = encrypt_dict(pdf) else {
+    let Some(trailer) = trailer(pdf) else {
         return Setup::Plain;
+    };
+    let dict = match get(trailer, b"/Encrypt") {
+        None => return Setup::Plain,
+        Some(Val::Dict(d)) => Some(d),
+        Some(Val::Ref(n)) => object_dict(pdf, n),
+        Some(_) => None,
+    };
+    let Some(dict) = dict else {
+        return Setup::Locked;
     };
     // Only the standard handler. Another filter needs its own software.
     if get(dict, b"/Filter") != Some(Val::Name(b"/Standard")) {
         return Setup::Locked;
     }
-    let id = first_id(pdf).unwrap_or_default();
+    let id = match get(trailer, b"/ID") {
+        Some(Val::Array(a)) => string(&a[1..]).unwrap_or_default(),
+        _ => Vec::new(),
+    };
     match open(dict, &id) {
         Some(c) => Setup::Open(c),
         None => Setup::Locked,
     }
 }
 
-/// The dictionary of the last `/Encrypt` entry: a direct dictionary, or the
-/// object `N 0 obj` of a reference. `None` if the file has no such entry,
-/// or if the entry does not give a dictionary.
-fn encrypt_dict(pdf: &[u8]) -> Option<&[u8]> {
-    const KEY: &[u8] = b"/Encrypt";
-    let mut end = pdf.len();
-    let at = loop {
-        let at = rfind(&pdf[..end], KEY)?;
-        // `/EncryptMetadata` is another name.
-        let next = pdf.get(at + KEY.len()).copied().unwrap_or(b' ');
-        if super::is_delimiter(next) {
-            break at;
-        }
-        end = at;
+/// The bytes at the end of the file where `startxref` must be.
+const TAIL: usize = 1024;
+
+/// The trailer dictionary that the last `startxref` of the last
+/// [`TAIL`] bytes names. Each step reads a bounded part of the file.
+fn trailer(pdf: &[u8]) -> Option<&[u8]> {
+    let tail_at = pdf.len().saturating_sub(TAIL);
+    let at = tail_at + rfind(&pdf[tail_at..], b"startxref")?;
+    let mut lx = Lexer::new(&pdf[at + 9..]);
+    let Some(Val::Int(offset)) = value(&mut lx) else {
+        return None;
     };
-    let after = &pdf[at + KEY.len()..pdf.len().min(at + KEY.len() + DICT_BYTES)];
-    match value(&mut Lexer::new(after))? {
-        Val::Dict(d) => Some(d),
-        Val::Ref(n) => object_dict(pdf, n),
+    let offset = usize::try_from(offset).ok().filter(|&o| o < pdf.len())?;
+    let rest = &pdf[offset..];
+    let first = rest.iter().position(|b| !b.is_ascii_whitespace())?;
+    let rest = &rest[first..];
+    if rest.starts_with(b"xref") {
+        // A classic table: the trailer comes after the entries of the
+        // table, about 20 bytes for each object.
+        let t = find(rest, b"trailer")?;
+        let after = &rest[t + 7..rest.len().min(t + 7 + DICT_BYTES)];
+        return match value(&mut Lexer::new(after))? {
+            Val::Dict(d) => Some(d),
+            _ => None,
+        };
+    }
+    // A cross-reference stream: `N G obj << /Type /XRef ... >>`.
+    let mut lx = Lexer::new(&rest[..rest.len().min(DICT_BYTES)]);
+    for _ in 0..3 {
+        lx.next()?;
+    }
+    match value(&mut lx)? {
+        Val::Dict(d) if get(d, b"/Type") == Some(Val::Name(b"/XRef")) => Some(d),
         _ => None,
     }
 }
@@ -111,15 +141,6 @@ fn object_dict(pdf: &[u8], n: u32) -> Option<&[u8]> {
         Val::Dict(d) => Some(d),
         _ => None,
     }
-}
-
-/// The first string of the last `/ID` array.
-fn first_id(pdf: &[u8]) -> Option<Vec<u8>> {
-    let at = rfind(pdf, b"/ID")?;
-    let rest = &pdf[at + 3..pdf.len().min(at + 3 + 1024)];
-    let open = rest.iter().position(|&b| !b.is_ascii_whitespace())?;
-    (rest[open] == b'[').then_some(())?;
-    string(&rest[open + 1..])
 }
 
 fn rfind(hay: &[u8], needle: &[u8]) -> Option<usize> {
@@ -321,6 +342,13 @@ fn hash_2b(salt: &[u8]) -> [u8; 32] {
 
 /// RC4 of `data` with `key` (1 to 32 bytes).
 fn rc4(key: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut out = data.to_vec();
+    rc4_in_place(key, &mut out);
+    out
+}
+
+/// RC4 of `data` with `key` (1 to 32 bytes), in place.
+fn rc4_in_place(key: &[u8], data: &mut [u8]) {
     let mut s: [u8; 256] = std::array::from_fn(|i| i as u8);
     let mut j = 0u8;
     for i in 0..256 {
@@ -328,22 +356,27 @@ fn rc4(key: &[u8], data: &[u8]) -> Vec<u8> {
         s.swap(i, j as usize);
     }
     let (mut i, mut j) = (0u8, 0u8);
-    data.iter()
-        .map(|&b| {
-            i = i.wrapping_add(1);
-            j = j.wrapping_add(s[i as usize]);
-            s.swap(i as usize, j as usize);
-            b ^ s[s[i as usize].wrapping_add(s[j as usize]) as usize]
-        })
-        .collect()
+    for b in data {
+        i = i.wrapping_add(1);
+        j = j.wrapping_add(s[i as usize]);
+        s.swap(i as usize, j as usize);
+        *b ^= s[s[i as usize].wrapping_add(s[j as usize]) as usize];
+    }
 }
 
 impl Crypt {
-    /// The decrypted data of the stream of object `num`, generation `gen`.
-    /// `None` for AES data that is not complete blocks or has bad padding.
-    pub(super) fn stream(&self, num: u32, gen: u16, data: &[u8]) -> Option<Vec<u8>> {
+    /// Decrypts the data of the stream of object `num`, generation `gen`,
+    /// in place, with no copy. Gives the range of the plain data in `data`,
+    /// or `None` for AES data that is not complete blocks or has bad
+    /// padding.
+    pub(super) fn stream(
+        &self,
+        num: u32,
+        gen: u16,
+        data: &mut [u8],
+    ) -> Option<std::ops::Range<usize>> {
         match self.cipher {
-            Cipher::None => Some(data.to_vec()),
+            Cipher::None => Some(0..data.len()),
             Cipher::Aes256 => aes_cbc(&self.key, data),
             c => {
                 // Algorithm 1: the key of the object.
@@ -357,7 +390,10 @@ impl Crypt {
                 let k = h.finalize();
                 let k = &k[..(self.key.len() + 5).min(16)];
                 match c {
-                    Cipher::Rc4 => Some(rc4(k, data)),
+                    Cipher::Rc4 => {
+                        rc4_in_place(k, data);
+                        Some(0..data.len())
+                    }
                     _ => aes_cbc(k, data),
                 }
             }
@@ -365,19 +401,23 @@ impl Crypt {
     }
 }
 
-/// AES-CBC decryption with the IV in the first block and PKCS#7 padding.
-fn aes_cbc(key: &[u8], data: &[u8]) -> Option<Vec<u8>> {
+/// AES-CBC decryption in place, with the IV in the first block and PKCS#7
+/// padding. Block `i` of the plain data stays at block `i` of `data`, so
+/// the plain data is `16..` less the padding.
+fn aes_cbc(key: &[u8], data: &mut [u8]) -> Option<std::ops::Range<usize>> {
     if data.len() < 32 || !data.len().is_multiple_of(16) {
         return None;
     }
-    let mut out = Vec::with_capacity(data.len() - 16);
     let mut prev: [u8; 16] = data[..16].try_into().ok()?;
     let mut run = |dec: &dyn Fn(&mut aes::Block)| {
-        for chunk in data[16..].chunks(16) {
-            let mut block = aes::Block::try_from(chunk).expect("16 bytes");
+        for chunk in data[16..].chunks_mut(16) {
+            let cipher: [u8; 16] = (&*chunk).try_into().expect("16 bytes");
+            let mut block = aes::Block::from(cipher);
             dec(&mut block);
-            out.extend(block.iter().zip(prev).map(|(a, b)| a ^ b));
-            prev.copy_from_slice(chunk);
+            for ((o, b), p) in chunk.iter_mut().zip(block.iter()).zip(prev) {
+                *o = b ^ p;
+            }
+            prev = cipher;
         }
     };
     match key.len() {
@@ -391,12 +431,12 @@ fn aes_cbc(key: &[u8], data: &[u8]) -> Option<Vec<u8>> {
         }
         _ => return None,
     }
-    let pad = *out.last()? as usize;
-    if pad == 0 || pad > 16 || out[out.len() - pad..].iter().any(|&b| b as usize != pad) {
+    let pad = *data.last()? as usize;
+    let end = data.len().checked_sub(pad)?;
+    if pad == 0 || pad > 16 || data[end..].iter().any(|&b| b as usize != pad) {
         return None;
     }
-    out.truncate(out.len() - pad);
-    Some(out)
+    Some(16..end)
 }
 
 #[cfg(test)]
@@ -412,20 +452,64 @@ mod tests {
         );
     }
 
+    /// A file whose trailer has `dict` as its value of `/Encrypt`.
+    fn with_trailer(entry: &str) -> Vec<u8> {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let at = pdf.len();
+        pdf.extend_from_slice(
+            format!("xref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size 1 {entry} >>\n").as_bytes(),
+        );
+        pdf.extend_from_slice(format!("startxref\n{at}\n%%EOF\n").as_bytes());
+        pdf
+    }
+
     #[test]
     fn bad_input_fails_closed() {
-        for pdf in [
-            &b"%PDF-1.4 trailer << /Encrypt 9 0 R >>"[..],
-            b"%PDF-1.4 trailer << /Encrypt << /Filter /Other >> >>",
-            b"%PDF-1.4 trailer << /Encrypt << /Filter /Standard /V 2 /R 3 >> >>",
-            b"%PDF-1.4 trailer << /Encrypt << /Filter /Standard /V 5 /R 6 /U <00> /UE <00> >> >>",
-            b"%PDF-1.4 trailer << /Encrypt << /Filter /Standard /V 9 /R 9 /O <00> /U <00> /P 0 >> >>",
+        for entry in [
+            "/Encrypt 9 0 R",
+            "/Encrypt << /Filter /Other >>",
+            "/Encrypt << /Filter /Standard /V 2 /R 3 >>",
+            "/Encrypt << /Filter /Standard /V 5 /R 6 /U <00> /UE <00> >>",
+            "/Encrypt << /Filter /Standard /V 9 /R 9 /O <00> /U <00> /P 0 >>",
+            "/Encrypt (x)",
         ] {
-            assert!(!matches!(setup(pdf), Setup::Open(_)), "{pdf:?}");
+            assert!(
+                matches!(setup(&with_trailer(entry)), Setup::Locked),
+                "{entry}"
+            );
         }
         assert!(matches!(
-            setup(b"%PDF-1.4 << /EncryptMetadata false >>"),
+            setup(&with_trailer("/EncryptMetadata false")),
             Setup::Plain
         ));
+    }
+
+    /// Only the trailer counts: `/Encrypt` text in a content stream or in a
+    /// file with no `startxref` does not make the file encrypted.
+    #[test]
+    fn encrypt_text_outside_the_trailer_does_not_count() {
+        let pdf = b"%PDF-1.4\n1 0 obj\n<< /Length 40 >>\nstream\nBT (x /Encrypt 2 0 R y) Tj ET\nendstream\nendobj\n";
+        assert!(matches!(setup(pdf), Setup::Plain));
+        let mut pdf = with_trailer("");
+        pdf.splice(9..9, b"% /Encrypt << /Filter /Other >>\n".iter().copied());
+        assert!(matches!(setup(&pdf), Setup::Plain));
+    }
+
+    /// Many near matches cost one bounded scan: the setup reads the tail
+    /// and the trailer only.
+    #[test]
+    fn many_near_matches_are_linear() {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        pdf.extend("/EncryptMetadata 1 0 obj ".repeat(400_000).bytes());
+        let start = std::time::Instant::now();
+        assert!(matches!(setup(&pdf), Setup::Plain));
+        let mut pdf = with_trailer("/Encrypt 1 0 R");
+        pdf.extend("x1 0 obj ".repeat(1_000_000).bytes());
+        let _ = setup(&pdf);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
     }
 }

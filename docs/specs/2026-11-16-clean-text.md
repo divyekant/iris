@@ -479,7 +479,13 @@ client. They are not defects of this design:
   gives text only when it opens with the empty user password (an owner
   password only), through the standard handler: RC4 of 40 to 128 bits,
   AES-128 and AES-256 (`/R 2` to `/R 6`, issue #52). A PDF that needs a
-  user password, or that has another handler, gives no text.
+  user password, or that has another handler, gives no text. Iris reads
+  the encryption only from the trailer that the last `startxref` (in the
+  last 1 KiB) names: a `trailer` dictionary or a cross-reference stream.
+  `/Encrypt` text in other places does not count. Iris decrypts each
+  stream in place, so the decryption adds no copy of the file when the
+  file is base64 or quoted-printable (a 7bit, 8bit or binary attachment
+  is copied once).
 - The model reads clean text as data, never as instructions (specification
   1). So hidden text that stays is a quality limit, not a security hole.
 - A quoted-printable line of more than 64 KiB that has only white space,
