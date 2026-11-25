@@ -357,7 +357,9 @@ fn mail_text_that_gives_orders_stays_a_string_in_the_data() {
     assert!(!instruction.contains("Ignore the rules"));
     let v: Value = serde_json::from_str(&data).unwrap();
     assert_eq!(v["owner"], "me@example.com");
-    assert_eq!(v.as_object().unwrap().len(), 3, "{data}");
+    assert_eq!(v.as_object().unwrap().len(), 5, "{data}");
+    assert_eq!(v["left_out"], 0);
+    assert_eq!(v["earlier_summary"], Value::Null);
     assert_eq!(v["thread"][4]["text"], order.trim());
 }
 
@@ -452,7 +454,7 @@ fn a_refusal_gets_no_second_call() {
 }
 
 #[test]
-fn the_snapshot_holds_the_newest_twelve_messages_each_cut() {
+fn the_snapshot_holds_the_first_and_the_newest_eleven_messages_each_cut() {
     let b = open("snapshot");
     thread(&b, "t1", 14, 1000);
     add(
@@ -468,10 +470,15 @@ fn the_snapshot_holds_the_newest_twelve_messages_each_cut() {
     let v: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
     let msgs = v["thread"].as_array().unwrap();
     assert_eq!(msgs.len(), MESSAGES);
+    // The first message of the thread, then the newest 11 (issue #1023).
+    assert_eq!(msgs[0]["text"], "Message 0 about the venue.", "first");
     assert_eq!(
-        msgs[0]["text"], "Message 3 about the venue.",
+        msgs[1]["text"], "Message 4 about the venue.",
         "oldest first"
     );
+    assert_eq!(v["left_out"], 3);
+    // No earlier summary of the thread.
+    assert_eq!(v["earlier_summary"], Value::Null);
     let last = msgs[MESSAGES - 1]["text"].as_str().unwrap();
     assert!(last.ends_with("[cut]"));
     assert_eq!(
@@ -772,4 +779,39 @@ fn only_the_summary_object_is_a_valid_answer() {
         };
         assert_eq!(read_answer(&reply).is_ok(), ok, "{len}");
     }
+}
+
+/// A thread longer than the snapshot gets its last summary in the data, so
+/// the facts of the left-out messages carry forward (issue #1023). A new
+/// summary of a thread that the snapshot covers in full gets none.
+#[test]
+fn a_long_thread_builds_on_its_last_summary() {
+    let b = open("earlier");
+    thread(&b, "t1", 13, 1000);
+    let c = cands(&b).remove(0);
+    let fake = Fake::new(&[r#"{"summary": "Ana asked for the venue in March."}"#]);
+    summarize(&b.store, &c, &fake, 100_000).unwrap();
+    let v: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
+    assert_eq!(v["left_out"], 1);
+    assert_eq!(v["earlier_summary"], Value::Null);
+    add(&b.store, "t1", "t1-new", 99_000, "The venue is booked.");
+    let c = cands(&b).remove(0);
+    let fake = Fake::new(&[GOOD]);
+    summarize(&b.store, &c, &fake, 200_000).unwrap();
+    let v: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
+    assert_eq!(v["left_out"], 2);
+    assert_eq!(v["earlier_summary"], "Ana asked for the venue in March.");
+    // The earlier summary is in the data block only.
+    assert!(!fake.calls.borrow()[0].0.contains("Ana asked"));
+
+    let b = open("earlier-short");
+    thread(&b, "t1", 5, 1000);
+    let c = cands(&b).remove(0);
+    summarize(&b.store, &c, &Fake::new(&[GOOD]), 100_000).unwrap();
+    add(&b.store, "t1", "t1-new", 99_000, "The venue is booked.");
+    let c = cands(&b).remove(0);
+    let fake = Fake::new(&[GOOD]);
+    summarize(&b.store, &c, &fake, 200_000).unwrap();
+    let v: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
+    assert_eq!(v["earlier_summary"], Value::Null);
 }

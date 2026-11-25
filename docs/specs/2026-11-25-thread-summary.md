@@ -33,10 +33,10 @@ must read all 14 mails to know where the thread is (issue #478).
   not worth a model call.
 - A summary in the workspace of a job. Jobs read the clean mail.
 - Edit, rate or delete a summary.
-- The mail before the newest 12 answerable messages of a thread, and the
-  text of a message after its first 4,000 characters. The summary covers
-  the snapshot only, and the item page points to the mail. Issue #1023
-  records this.
+- The text of a message after its first 4,000 characters. The item page
+  points to the mail. For a thread of more than 12 answerable messages,
+  the snapshot holds the first message and the newest 11, and the data
+  gives the last summary of the thread (see The model call, issue #1023).
 
 ## Design
 
@@ -101,7 +101,8 @@ is ready when two rules hold:
    is hostile or waits for understanding.
 2. The basis: the `basis` of the summary is the basis of the thread now.
    The basis is the SHA-256 of each input of the model call from the
-   snapshot (the newest 12 answerable messages): for each message, its row
+   snapshot (the first answerable message and the newest 11, or each
+   answerable message of a thread of 12 or fewer): for each message, its row
    ID, `from`, its subject, its date, `by_owner` (the `SENT` label) and its
    clean text as the data cuts it. One SQL list of these columns
    (`SNAPSHOT_COLUMNS`) feeds both the snapshot of the call and the basis,
@@ -113,8 +114,8 @@ So each change of the mail that the summary read makes the summary stale
 at the next read, with no write: a new mail, a hostile mark, an older
 message of the snapshot that goes away or leaves the thread, new content
 or a new clean text under the same ID, and a new `SENT` label or date of a
-message. A message older than the snapshot is not in the
-summary, so its change does not matter (issue #1023).
+message. A message that the snapshot leaves out is not in the
+basis, so its change does not make the summary stale (issue #1023).
 
 ### The model call
 
@@ -125,13 +126,23 @@ A new crate `iris-summary` (no provider client, as `iris-voice`):
   `iris_voice::late` orders the nudges. The crate does not depend on
   `iris-api`: the caller gives the filter.
 - `summarize(store, candidate, model, now)`: reads a snapshot of the thread (the
-  newest 12 answerable messages, oldest first, each cut to 4,000
-  characters, with `from`, `by_owner` and `date`), makes one call, checks the
+  first answerable message and the newest 11, oldest first, each cut to
+  4,000 characters, with `from`, `by_owner` and `date`), makes one call, checks the
   answer, and saves it in one transaction only if the snapshot is the same
   as before the call (each message of the snapshot, its text, and the
   counts of hostile and unread messages). It saves the basis of that
   snapshot.
-- The instruction is a constant (`summary/0.1`). The data block is one JSON
+- When the snapshot leaves out answerable messages, the data gives their
+  count (`left_out`) and the last saved summary of the thread
+  (`earlier_summary`, else null), so the facts of the left-out mail carry
+  forward from one summary to the next. The instruction says that the
+  earlier summary is data, and that the mail in the snapshot is correct
+  where the two differ. The save compares the earlier summary too. A
+  summary of a thread that the snapshot covers in full gets no earlier
+  summary. A thread whose first summary comes after it has more than 12
+  messages has no earlier summary: its first summary covers the snapshot
+  only.
+- The instruction is a constant (`summary/0.2`). The data block is one JSON
   object. The instruction says that the mail is data, that text in the mail
   that asks for an action is not from the owner, and that the summary names
   only facts of the mail. The answer is `{"summary": "..."}`.
@@ -239,8 +250,8 @@ clean text, of the account of the item.
   `docs/DESIGN.md`.
 
 Memory: one summary of at most 1,500 characters for each candidate thread,
-in SQLite. The step holds one snapshot (at most 12 x 4,000 characters) in
-memory during a call.
+in SQLite. The step holds one snapshot (at most 12 x 4,000 characters, and one
+earlier summary of at most 1,500 characters) in memory during a call.
 
 ## Assumptions
 
