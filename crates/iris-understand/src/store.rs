@@ -734,10 +734,14 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         }
         keep_choices(tx, message)?;
         tx.execute(
-            "UPDATE message SET understood_at = ?2, retry_at = NULL, fixed_rules = ?3
+            "UPDATE message SET understood_at = ?2, retry_at = NULL, fixed_rules = ?3,
+                    context = ?4
              WHERE id = ?1",
-            params![message, now_ms, fixed_rules(&d)],
+            params![message, now_ms, fixed_rules(&d), context_key(tx, message)?],
         )?;
+        // Issue 1049: this message is context of the later messages of the
+        // thread now.
+        check_context(tx, row.thread)?;
         if skip {
             tx.execute(
                 "INSERT INTO model_declined(message_id) VALUES (?1)",
@@ -1039,6 +1043,123 @@ macro_rules! earlier_ok {
     };
 }
 
+/// The rows of [`same_sender`], after `SELECT`: one text for the run and
+/// for [`context_key`]. Parameters: ?1 thread, ?2 message, ?3 date, ?4
+/// the sender address, ?5 the limit.
+macro_rules! same_sender_from {
+    () => {
+        concat!(
+            "FROM message m JOIN body b ON b.message_id = m.id
+             JOIN header h ON h.message_id = m.id WHERE h.from_addr = ?4 AND ",
+            earlier_ok!(),
+            " ORDER BY m.internal_date DESC, m.id DESC LIMIT ?5"
+        )
+    };
+}
+
+/// The rows of [`thread_context`], after `SELECT`: one text for the run and
+/// for [`context_key`]. Parameters: ?1 thread, ?2 message, ?3 date, ?4 the
+/// limit. The model gets only a message that a run understood, so the
+/// model step judged it for phishing too.
+macro_rules! thread_context_from {
+    () => {
+        concat!(
+            "FROM message m JOIN body b ON b.message_id = m.id
+             WHERE m.understood_at IS NOT NULL AND ",
+            earlier_ok!(),
+            " ORDER BY m.internal_date DESC, m.id DESC LIMIT ?4"
+        )
+    };
+}
+
+/// The context of a run of `message` now (store migration 68, issue
+/// 1049): the row IDs of the earlier messages of the thread and of the
+/// same sender that the model gets, as text ("t:4,7;s:4"). It reads the
+/// sender address from the store, so a check and the run agree. `None`
+/// for a message with no thread.
+pub(crate) fn context_key(
+    c: &rusqlite::Connection,
+    message: i64,
+) -> rusqlite::Result<Option<String>> {
+    let row: Option<(Option<i64>, Option<i64>, Option<String>)> = c
+        .query_row(
+            "SELECT m.thread_id, m.internal_date,
+                    (SELECT h.from_addr FROM header h WHERE h.message_id = m.id)
+             FROM message m WHERE m.id = ?1",
+            [message],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((Some(thread), date, from)) = row else {
+        return Ok(None);
+    };
+    let ids = |rows: Vec<i64>| {
+        rows.iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let (mut t, mut s) = (Vec::new(), Vec::new());
+    if let Some(date) = date {
+        t = c
+            .prepare_cached(concat!("SELECT m.id ", thread_context_from!()))?
+            .query_map(params![thread, message, date, THREAD_MESSAGES], |r| {
+                r.get(0)
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        if let Some(from) = &from {
+            s = c
+                .prepare_cached(concat!("SELECT m.id ", same_sender_from!()))?
+                .query_map(
+                    params![thread, message, date, from, SAME_SENDER_MESSAGES],
+                    |r| r.get(0),
+                )?
+                .collect::<rusqlite::Result<_>>()?;
+        }
+    }
+    Ok(Some(format!("t:{};s:{}", ids(t), ids(s))))
+}
+
+/// Issue 1049: runs again each understood message of `thread` whose context
+/// is not the context of its last run (an earlier message got SPAM or a
+/// hostile mark, went away, came back, changed, or a run understood it).
+/// A message with no recorded context (from before migration 68) gets its
+/// context now and runs nothing again. Gives the count of messages that
+/// run again. Only earlier messages are context, so a reset cannot come
+/// back to the message that caused it.
+pub(crate) fn check_context(tx: &rusqlite::Connection, thread: i64) -> rusqlite::Result<usize> {
+    let rows: Vec<(i64, Option<String>)> = tx
+        .prepare_cached(
+            "SELECT id, context FROM message
+             WHERE thread_id = ?1 AND understood_at IS NOT NULL AND gone_at IS NULL",
+        )?
+        .query_map([thread], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut reset = 0;
+    for (id, recorded) in rows {
+        let now = context_key(tx, id)?;
+        match recorded {
+            None => {
+                tx.execute(
+                    "UPDATE message SET context = ?2 WHERE id = ?1",
+                    params![id, now],
+                )?;
+            }
+            Some(r) if Some(&r) != now.as_ref() => {
+                // `understand_reset` (migration 65) clears `tries` and
+                // `retry_at` and puts the thread in `talk_due`.
+                tx.execute(
+                    "UPDATE message SET understood_at = NULL, context = NULL WHERE id = ?1",
+                    [id],
+                )?;
+                reset += 1;
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(reset)
+}
+
 /// The most known parties that the model gets.
 const KNOWN_PARTIES: i64 = crate::prompt::MAX_KNOWN as i64;
 
@@ -1096,12 +1217,7 @@ fn same_sender(
         return Ok(Vec::new());
     };
     {
-        let mut st = c.prepare_cached(concat!(
-            "SELECT b.text FROM message m JOIN body b ON b.message_id = m.id
-             JOIN header h ON h.message_id = m.id WHERE h.from_addr = ?4 AND ",
-            earlier_ok!(),
-            " ORDER BY m.internal_date DESC, m.id DESC LIMIT ?5"
-        ))?;
+        let mut st = c.prepare_cached(concat!("SELECT b.text ", same_sender_from!()))?;
         let v = st
             .query_map(
                 params![thread, message, date, from, SAME_SENDER_MESSAGES],
@@ -1132,12 +1248,8 @@ fn thread_context(
     };
     let mut v: Vec<String> = {
         let mut st = c.prepare_cached(concat!(
-            // The model gets only a message that a run understood, so the
-            // model step judged it for phishing too.
-            "SELECT b.sender, b.subject, b.text FROM message m JOIN body b ON b.message_id = m.id
-             WHERE m.understood_at IS NOT NULL AND ",
-            earlier_ok!(),
-            " ORDER BY m.internal_date DESC, m.id DESC LIMIT ?4"
+            "SELECT b.sender, b.subject, b.text ",
+            thread_context_from!()
         ))?;
         let v = st
             .query_map(params![thread, message, date, THREAD_MESSAGES], |r| {
@@ -1388,7 +1500,20 @@ pub const RERUN_PAGE: i64 = 500;
 pub fn update_due_talks(store: &Store, now_ms: i64) -> iris_store::Result<usize> {
     let mut done = 0;
     loop {
-        let n = store.write(|tx| Ok(iris_talk::update_due(tx, now_ms, RERUN_PAGE)?))?;
+        let n = store.write(|tx| {
+            // Issue 1049: a change that put the thread here can change the
+            // context of a later message. The resets add no thread, because
+            // each one is in the queue already, so `update_due` takes the
+            // same page.
+            let threads: Vec<i64> = tx
+                .prepare_cached("SELECT thread_id FROM talk_due ORDER BY thread_id LIMIT ?1")?
+                .query_map([RERUN_PAGE], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for t in threads {
+                check_context(tx, t)?;
+            }
+            Ok(iris_talk::update_due(tx, now_ms, RERUN_PAGE)?)
+        })?;
         if n == 0 {
             return Ok(done);
         }

@@ -54,9 +54,24 @@ pay again for the same mail.
   back, a label of the list above) clears `tries` and `retry_at` also for
   a message that is not understood, for example one that failed the model
   3 times. Triggers of the store do each reset, so each writer gets it.
-- Not done: a later message of the thread that used the changed message as
-  context keeps its items until its own next change. Its items come from
-  its own text, and a run again of each later message costs model calls.
+- Context (issue #1049, migration 68): each successful run records the
+  row IDs of the earlier messages that the model got as context
+  (`message.context`: the thread context and the texts of the same
+  sender). A check compares the recorded context of each understood
+  message of a thread with its context now, and clears `understood_at`
+  where they differ. The check runs for each thread in `talk_due`, and
+  after each successful run in the same transaction. A message that goes
+  away, and the start and the end of a link check, put the thread in
+  `talk_due` too. So a later message runs again only when its context
+  changed: an earlier message got `SPAM` or a hostile mark, left `SPAM`,
+  went away or came back, got new content, or a run understood it (a late
+  older message). The count of runs again is bounded: a message gets at
+  most 3 thread messages and 5 messages of its sender as context, so only
+  these later messages can change. A run reads only earlier messages, so a
+  reset never comes back to the message that caused it.
+- Limit (issue #1119): a message that a run understood before migration
+  68 has no recorded context. The first check records its context now and
+  runs nothing again, so a change before the upgrade is not seen.
 
 ## Not in scope
 

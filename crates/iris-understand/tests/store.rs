@@ -1312,7 +1312,7 @@ fn the_upgrade_drops_the_items_of_a_draft_or_copy() {
     // The store of version 41: no view and no item trigger.
     b.store
         .write(|tx| {
-            tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER IF EXISTS spam_drops_items; DROP TRIGGER IF EXISTS spam_back_drops_items; DROP VIEW item_droppable;")?;
+            tx.execute_batch("DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER IF EXISTS spam_drops_items; DROP TRIGGER IF EXISTS spam_back_drops_items; DROP VIEW item_droppable;")?;
             Ok(())
         })
         .unwrap();
@@ -2708,7 +2708,7 @@ Your one-time code is 918273. It ends in 10 minutes.
             "upgrade" => {
                 sql(
                     &b,
-                    "ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                    "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                      ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
                 );
                 let Box_ {
@@ -2810,7 +2810,7 @@ Your one-time code is 918273. It ends in 10 minutes.
     b.store
         .write(|tx| {
             Ok(tx.execute_batch(
-                "ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                  ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
             )?)
         })
@@ -2886,7 +2886,7 @@ Your one-time code is 918273. It ends in 10 minutes.
     b.store
         .write(|tx| {
             Ok(tx.execute_batch(
-                "ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                "DROP TRIGGER IF EXISTS context_gone; DROP TRIGGER IF EXISTS context_link_check_add; DROP TRIGGER IF EXISTS context_link_check_end; ALTER TABLE message DROP COLUMN context; ALTER TABLE reply_draft DROP COLUMN seen; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
                  ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 57;",
             )?)
         })
@@ -2970,4 +2970,156 @@ fn migration_61_gives_old_mail_with_a_cut_header_the_spoof_mark() {
     assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
     assert!(hostile(big).unwrap_or_default().contains("spoof"));
     assert_eq!(fake.calls.borrow().len(), calls, "no model call");
+}
+
+/// Issue 1049: the text of message `k` of the context tests. Each one has
+/// its own sender, so only the thread context carries it.
+fn context_mail(k: usize) -> String {
+    format!("From: x{k}@example.net\nTo: owner@example.com\nSubject: S\n\nWords k{k}k.\n")
+}
+
+/// Runs the queue and each message that waits for the understanding,
+/// oldest first, until nothing waits. Records the data of the last model
+/// call of each message.
+fn drain(b: &Box_, fake: &Fake, last: &mut std::collections::HashMap<i64, String>) {
+    for _ in 0..20 {
+        // Step 1 of each batch run, then the queue of the threads.
+        iris_understand::store::recheck_links(&b.store, NOW, None).unwrap();
+        iris_understand::store::update_due_talks(&b.store, NOW).unwrap();
+        let waiting: Vec<i64> = b
+            .store
+            .read(|c| {
+                let mut st = c.prepare(
+                    "SELECT id FROM message WHERE understood_at IS NULL AND gone_at IS NULL
+                     ORDER BY internal_date, id",
+                )?;
+                let v = st
+                    .query_map([], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                Ok(v)
+            })
+            .unwrap();
+        if waiting.is_empty() {
+            return;
+        }
+        for m in waiting {
+            let before = fake.calls.borrow().len();
+            understand(&b.store, m, fake, NOW).unwrap();
+            if let Some(c) = fake.calls.borrow().get(before) {
+                last.insert(m, c.1.clone());
+            }
+        }
+    }
+    panic!("the understanding did not end");
+}
+
+/// Issue 1049, generated changes: after each change of the messages of a
+/// thread (SPAM comes or goes, a message goes away or comes back) and the
+/// runs that follow, the last model call of each live message that is not
+/// SPAM had exactly its context now: the newest 3 earlier live messages
+/// without SPAM.
+#[test]
+fn a_change_of_an_earlier_message_runs_the_later_ones_again() {
+    const N: usize = 5;
+    let b = store("context-check");
+    let ids: Vec<i64> = (1..=N)
+        .map(|k| {
+            b.add_in(
+                &k.to_string(),
+                "t",
+                NOW - DAY * (10 - k as i64),
+                &context_mail(k),
+                &["INBOX"],
+            )
+        })
+        .collect();
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    let (mut spam, mut gone) = ([false; N], [false; N]);
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    for step in 0..40 {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        let k = (x % N as u64) as usize;
+        let m = ids[k];
+        let sql = if x % 2 == 0 {
+            spam[k] = !spam[k];
+            if spam[k] {
+                "INSERT INTO message_label(message_id, label_id)
+                 SELECT ?1, id FROM label WHERE provider_id = 'SPAM'"
+            } else {
+                "DELETE FROM message_label WHERE message_id = ?1
+                   AND label_id = (SELECT id FROM label WHERE provider_id = 'SPAM')"
+            }
+        } else {
+            gone[k] = !gone[k];
+            if gone[k] {
+                "UPDATE message SET gone_at = 1 WHERE id = ?1"
+            } else {
+                "UPDATE message SET gone_at = NULL WHERE id = ?1"
+            }
+        };
+        b.store
+            .write(|tx| {
+                tx.execute(sql, [m])?;
+                Ok(())
+            })
+            .unwrap();
+        drain(&b, &fake, &mut last);
+        for j in 0..N {
+            if spam[j] || gone[j] {
+                continue;
+            }
+            let data = &last[&ids[j]];
+            let context: Vec<usize> = (0..j)
+                .rev()
+                .filter(|&i| !spam[i] && !gone[i])
+                .take(3)
+                .collect();
+            for i in 0..N {
+                let has = data.contains(&format!("Words k{}k.", i + 1));
+                let want = i == j || context.contains(&i);
+                assert_eq!(
+                    has,
+                    want,
+                    "step {step}, message {}, context {}",
+                    j + 1,
+                    i + 1
+                );
+            }
+        }
+    }
+}
+
+/// Issue 1049: a message that a run understood before migration 68 has no
+/// recorded context. The first check records its context and runs nothing
+/// again.
+#[test]
+fn a_message_with_no_recorded_context_gets_one_and_does_not_run_again() {
+    let b = store("context-baseline");
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, &context_mail(2), &["INBOX"]);
+    let fake = Fake::default();
+    understand(&b.store, m1, &fake, NOW).unwrap();
+    understand(&b.store, m2, &fake, NOW).unwrap();
+    let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m2);
+    assert_eq!(recorded, format!("t:{m1};s:"));
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE message SET context = NULL", [])?;
+            tx.execute(
+                "INSERT OR IGNORE INTO talk_due(thread_id) SELECT thread_id FROM message WHERE id = ?1",
+                [m2],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    iris_understand::store::update_due_talks(&b.store, NOW).unwrap();
+    let understood: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m2);
+    assert!(understood.is_some());
+    let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m2);
+    assert_eq!(recorded, format!("t:{m1};s:"));
+    assert_eq!(fake.calls.borrow().len(), 2);
 }
