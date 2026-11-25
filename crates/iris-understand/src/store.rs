@@ -517,6 +517,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     };
     let mut decided = None;
     let mut declined = false;
+    let mut gate_read = (false, None);
     let mut after = Inputs::default();
     let seen = store.write(|tx| {
         // Steps 1 and 2 used the state of the message and `first`.
@@ -530,7 +531,8 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         rerun_senders(tx, &d.rerun, now_ms)?;
         decided = Some(d);
         // After the kind of this message: a decline applies only to a stranger.
-        declined = declined_now(tx, from_addr.as_deref())?;
+        gate_read = gate(tx, from_addr.as_deref())?;
+        declined = gate_read.0;
         tx.execute(
             "DELETE FROM model_declined WHERE message_id = ?1",
             [message],
@@ -590,7 +592,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         date: row.internal_date,
         from_name: from_name.clone(),
         from_addr: from_addr.clone(),
-        declined,
+        gate: gate_read,
     };
     // The engine does not understand a draft. It stays not understood, so
     // it runs when it is sent and loses the label DRAFT.
@@ -738,9 +740,10 @@ pub struct Seen {
     date: Option<i64>,
     from_name: Option<String>,
     from_addr: Option<String>,
-    /// The decline of the sender at the gate (decision D29). A decline or a
-    /// reopen during the call is a changed input (#934).
-    declined: bool,
+    /// The gate of the sender (decision D29): its decline, and the row ID
+    /// and `gate_rev` of its row (migration 55). Each decline or reopen
+    /// during the call is a changed input (#934).
+    gate: (bool, Option<(i64, i64)>),
 }
 
 impl Seen {
@@ -752,7 +755,7 @@ impl Seen {
         };
         Ok(state(c, self.message, true)? == self.state
             && kind_now == self.kind
-            && declined_now(c, self.from_addr.as_deref())? == self.declined
+            && gate(c, self.from_addr.as_deref())? == self.gate
             && inputs(
                 c,
                 self.message,
@@ -888,6 +891,25 @@ fn pinned(c: &rusqlite::Connection, message: i64) -> rusqlite::Result<Vec<Value>
 /// True when `from` is a stranger that the person declined at the gate:
 /// `declined_at` is set and the kind is `stranger` or not set yet (the rule
 /// of `kind_sql` in `iris-api`).
+/// The gate state of `from` for [`Seen`]: [`declined_now`], and the row ID
+/// and `gate_rev` of the sender row.
+fn gate(
+    c: &rusqlite::Connection,
+    from: Option<&str>,
+) -> rusqlite::Result<(bool, Option<(i64, i64)>)> {
+    let row = match from {
+        Some(f) => c
+            .query_row(
+                "SELECT id, gate_rev FROM sender WHERE address = ?1",
+                [f],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?,
+        None => None,
+    };
+    Ok((declined_now(c, from)?, row))
+}
+
 fn declined_now(c: &rusqlite::Connection, from: Option<&str>) -> rusqlite::Result<bool> {
     let Some(from) = from else {
         return Ok(false);

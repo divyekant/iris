@@ -19,3 +19,15 @@ UPDATE message SET fixed_rules = (
   WHERE src.message_id = message.id AND src.role = 'origin'
     AND i.form <> 'conversation' AND i.derived_by IN ('rule', 'model'))
 WHERE understood_at IS NOT NULL;
+
+-- The revision of the gate of each sender (issue 934). Each change of
+-- `declined_at` adds one, so a decline and a reopen during one model call
+-- show as a change, also when `declined_at` is NULL again at the end. The
+-- understanding runner compares the revision before and after a call.
+ALTER TABLE sender ADD COLUMN gate_rev INTEGER NOT NULL DEFAULT 0;
+
+CREATE TRIGGER sender_gate_rev AFTER UPDATE OF declined_at ON sender
+  WHEN OLD.declined_at IS NOT NEW.declined_at
+BEGIN
+  UPDATE sender SET gate_rev = gate_rev + 1 WHERE id = NEW.id;
+END;
