@@ -299,6 +299,9 @@ The search reads the lines in order and stops at the first of these:
   `W dniu `, `Em ` and ends with one of the verbs. The client form alone
   never starts the history without a `>` line after it, also with one of
   these first words, because own lines can have a time and an address too.
+  An attribution line is never history when a `>` line after it has an own
+  line (not empty, not a `>` line) after it: that is an inline answer, and
+  the own lines stay.
 
 Before the history (or a forward marker):
 

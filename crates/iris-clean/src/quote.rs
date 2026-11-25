@@ -44,6 +44,14 @@ pub fn strip_quotes(text: &str, is_reply: bool) -> String {
     let mut end = lines.len();
     // The `>` lines of a forwarded message belong to that message, so they stay.
     let mut forward = lines.len();
+    // `inline_from[i]`: from line `i`, a quote line has an own line after it.
+    let mut inline_from = vec![false; lines.len() + 1];
+    let mut own_after = false;
+    for (i, l) in lines.iter().enumerate().rev() {
+        let quote = l.trim_start().starts_with('>');
+        own_after |= !quote && !l.trim().is_empty();
+        inline_from[i] = inline_from[i + 1] || (quote && own_after);
+    }
     for i in 0..lines.len() {
         let t = lines[i].trim();
         if is_forward_marker(t) {
@@ -62,9 +70,12 @@ pub fn strip_quotes(text: &str, is_reply: bool) -> String {
             // after the line, or (in a reply) the start of a client line.
             // The client form alone never cuts: own lines can have a time
             // and an address too.
+            // An own line after a quote line makes an inline answer: the
+            // attribution and the answers stay, also in a reply.
+            let inline = inline_from[i + n];
             let quoted = next.is_some_and(|l| l.trim_start().starts_with('>'));
             let client = ATTRIBUTION_START.iter().any(|p| t.starts_with(p));
-            if quoted || (is_reply && client && verb) {
+            if !inline && (quoted || (is_reply && client && verb)) {
                 end = i;
                 break;
             }
@@ -349,6 +360,15 @@ mod tests {
         // A listed first word does not make the client form history.
         let t = "On Tuesday at 10:00 meet Ana <ana@example.org>:\nPlease discuss the budget.";
         assert_eq!(strip_quotes(t, true), t);
+        // Own lines after an inline quote are an answer: they stay.
+        let t = "Please review our call at 10:00 with Ana <ana@example.org>:\n> Keep the price under $50\nMy answer is yes.";
+        assert_eq!(strip_quotes(t, false), t);
+        assert_eq!(
+            strip_quotes(t, true),
+            "Please review our call at 10:00 with Ana <ana@example.org>:\nMy answer is yes."
+        );
+        let t = "On Mon Ana wrote:\n> Q1?\nA1\n> Q2?\nA2";
+        assert_eq!(strip_quotes(t, true), "On Mon Ana wrote:\nA1\nA2");
         // An own sentence does not join the next line.
         let t = "On Tuesday at 10:00.\nAna <ana@example.org>:\n> example";
         assert_eq!(
