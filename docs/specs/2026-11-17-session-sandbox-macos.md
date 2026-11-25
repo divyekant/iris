@@ -20,7 +20,8 @@ evidence (see [Evidence](#evidence)).
 
 1. On macOS, `system(data_dir)` gives an isolation that passes its check.
 2. Goals 2, 3 and 4 of the Linux spec hold on macOS: the network is only the
-   egress port of the session; the data folder is not visible other than
+   egress port of the session, and the local port that the person lists
+   in `allow_local` of an `agents.toml` adapter (`docs/specs/2026-11-25-agents-read-paths-local-port.md`); the data folder is not visible other than
    the workspace of the job and the private home and `/tmp` of the
    session; a write outside these three folders is refused. The private
    home and `/tmp` are in the data folder (`sessions/se-<id>.home` and
@@ -258,7 +259,7 @@ The profile starts with `(deny default)` and allows only these:
 | `file-read*` | The root folder `/` as a literal (its names only, not the files below it: dyld reads it to find the shared cache, and each program aborts without it); the link `/etc` itself (a program opens `/etc/...`, and Seatbelt refuses the path if it cannot read the link); `/private/var/select/sh` (the link of `/bin/sh`); `/private/etc/ssl/openssl.cnf` (LibreSSL reads it at start); the system folders: `/usr` without `/usr/local`, `/bin`, `/sbin`, `/System/Library`, `/System/Cryptexes`, `/System/Volumes/Preboot/Cryptexes`, `/Library/Apple`, `/private/var/db/dyld` (never all of `/System`: `/System/Volumes/Data` holds the home folders and the data folder); the device files `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`; in `/private/etc` only `hosts`, `passwd`, `group`, `localtime` and the public certificate files (`ssl/cert.pem`, `ssl/certs`); the adapter program file and the `iris` program file (each one a literal real path); the workspace; the private home and `/tmp` of the session |
 | `file-read-metadata` | The paths above, and each folder above them (literal paths), so that a program can resolve its paths |
 | `file-write*` | The workspace, the private home and `/tmp` of the session, `/dev/null` |
-| `network-outbound` | `(remote tcp "localhost:<egress port>")`, if the session has an egress port: TCP only, so a UDP datagram to the same port number (for example to another local service on that UDP port) is refused; and `(remote unix-socket (path-literal "<workspace>/.iris/socket"))`, the session socket (launcher spec, goal 6), which each `iris` verb of the session uses. No other Unix socket |
+| `network-outbound` | `(remote tcp "localhost:<egress port>")`, if the session has an egress port: TCP only, so a UDP datagram to the same port number (for example to another local service on that UDP port) is refused; and `(remote unix-socket (path-literal "<workspace>/.iris/socket"))`, the session socket (launcher spec, goal 6), which each `iris` verb of the session uses; and `(remote tcp "localhost:<allow_local>")`, if the adapter has a local port. No other Unix socket |
 
 Each path in the profile is a real path (`canonicalize`). Seatbelt checks
 real paths, and macOS links `/tmp` and `/etc` to `/private`. The last rule
@@ -289,7 +290,9 @@ The job process needs launchd no more after the handoff.
 ### Egress on macOS
 
 There is no network namespace, so no relay. The agent connects to
-`127.0.0.1:<egress port>` directly, and the profile permits only that port.
+`127.0.0.1:<egress port>` directly, and the profile permits only that port
+and the `allow_local` port of the adapter, if the person lists one
+(`docs/specs/2026-11-25-agents-read-paths-local-port.md`). The agent gets that port in `IRIS_LOCAL_PORT`.
 The proxy of the session takes clients from `127.0.0.1` on macOS: the
 engine passes `Ipv4Addr::LOCALHOST` as the peer (`sessions.rs`). macOS has
 only `127.0.0.1` on the loopback interface, so `session_peer` addresses do

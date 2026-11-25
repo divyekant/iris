@@ -216,7 +216,8 @@ not the agent:
    The helper calls `system(<data dir>)` with it. The data folder is an
    argument of the helper only: the helper does not pass it to the agent,
    whose arguments are the adapter arguments of `command()` and whose
-   environment has no variable of Iris.
+   environment has no variable of Iris, other than `IRIS_LOCAL_PORT` for
+   an adapter with `allow_local` (`docs/specs/2026-11-25-agents-read-paths-local-port.md`).
 2. The helper reads one line from the pipe. It runs no code of the agent
    before the line.
    - `start`: the helper starts the agent as its child, in the isolation,
