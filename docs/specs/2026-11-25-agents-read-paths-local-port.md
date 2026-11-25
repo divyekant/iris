@@ -70,6 +70,16 @@ checks it.
 **Invariant.** No read path shows an object of a protected folder: the
 data folder, a home folder as a whole, or a folder of system state.
 
+**Who the checks hold against.** The checks hold against a wrong or
+careless `agents.toml` and against the agent of a session, which cannot
+rename or mount a host file. A process of the person on the host has the
+rights of the engine: it can read the data folder directly, so a race by
+such a process (for example a rename exchange of a read path and a
+file of the data folder between two checks) gives it nothing new and is
+out of scope. The helper still binds the opened object, and compares its
+current path (`/proc/self/fd/<n>`) with the checked real path, so a
+change of the path between the checks stops the start.
+
 **The home folders.** `HOME` can be absent or wrong (a service, or a data
 folder that `IRIS_DATA` or `--data` sets). So the protected home folders
 are each of these that exists: the real path of `HOME` of the engine, the

@@ -269,3 +269,24 @@ fn a_changed_mountinfo_line_parses_safely_or_not_at_all() {
         }
     }
 }
+
+#[test]
+fn an_object_moved_to_the_checked_name_is_refused() {
+    let (d, tool, data) = setup("moved");
+    // The object opened at a name, then moved: the data of the key now
+    // stands at another name.
+    let key = data.join("key");
+    fs::write(&key, "secret").unwrap();
+    let fd = open_no_links(&key).unwrap();
+    let other = d.0.join("tool-file");
+    fs::rename(&key, &other).unwrap();
+    assert_eq!(path_of(&fd).unwrap(), other);
+    refused(
+        check_open(&tool, tool.clone(), fd, &data, None),
+        "changed while Iris checked",
+    );
+    // A file opened and checked at its own name passes.
+    let f = tool.join("lib/main.js");
+    let fd = open_no_links(&f).unwrap();
+    assert!(check_open(&f, f.clone(), fd, &data, None).is_ok());
+}

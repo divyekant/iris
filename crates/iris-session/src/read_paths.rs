@@ -93,7 +93,25 @@ pub fn check(path: &Path, data_dir: &Path, home: Option<&OsStr>) -> Result<Check
         .map_err(|e| format!("the read path {show} cannot be resolved: {e}"))?;
     let fd =
         open_no_links(&real).map_err(|e| format!("the read path {show} cannot be opened: {e}"))?;
+    check_open(path, real, fd, data_dir, home)
+}
+
+/// The checks of `check` on the object `fd`, opened at the name `real`.
+fn check_open(
+    path: &Path,
+    real: PathBuf,
+    fd: OwnedFd,
+    data_dir: &Path,
+    home: Option<&OsStr>,
+) -> Result<Checked, String> {
+    let show = path.display();
     let refuse = |why: String| format!("the read path {show} is refused: {why}");
+    // The checks below must hold for the opened object, not for the name
+    // that was resolved before the open: another process can move an object
+    // to that name between the two steps.
+    if path_of(&fd).as_deref() != Some(real.as_path()) {
+        return Err(refuse("it changed while Iris checked it".into()));
+    }
     let place = place_of(&fd, &real).map_err(|e| refuse(e.to_string()))?;
     if VIRTUAL.contains(&place.fstype.as_str()) {
         return Err(refuse(format!("it is on a {} file system", place.fstype)));
@@ -130,6 +148,25 @@ pub fn check(path: &Path, data_dir: &Path, home: Option<&OsStr>) -> Result<Check
     let mut count = 0;
     walk(&fd, &real, &mount_of(&fd)?, &mut count).map_err(refuse)?;
     Ok(Checked { real, fd })
+}
+
+/// The current path of the open object `fd`, from the kernel.
+#[cfg(target_os = "linux")]
+fn path_of(fd: &OwnedFd) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd())).ok()
+}
+
+/// The current path of the open object `fd`, from the kernel.
+#[cfg(not(target_os = "linux"))]
+fn path_of(fd: &OwnedFd) -> Option<PathBuf> {
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes at most PATH_MAX bytes into buf.
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0)?;
+    buf.truncate(end);
+    Some(PathBuf::from(OsString::from_vec(buf)))
 }
 
 /// The place of a protected folder. It is opened like a read path, but a
@@ -250,14 +287,15 @@ fn mount_at(dir: RawFd, name: &CStr) -> io::Result<u64> {
 
 #[cfg(not(target_os = "linux"))]
 fn mount_at(dir: RawFd, name: &CStr) -> io::Result<u64> {
-    // SAFETY: fstatat writes into st; name is a valid C string.
+    // SAFETY: fstat and fstatat write into st; name is a valid C string.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let (n, flags) = if name.is_empty() {
-        (c".", 0)
+    // An empty name is the object of `dir` itself, which can be a file.
+    let r = if name.is_empty() {
+        unsafe { libc::fstat(dir, &mut st) }
     } else {
-        (name, libc::AT_SYMLINK_NOFOLLOW)
+        unsafe { libc::fstatat(dir, name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) }
     };
-    if unsafe { libc::fstatat(dir, n.as_ptr(), &mut st, flags) } != 0 {
+    if r != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(st.st_dev as u64)
