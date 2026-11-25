@@ -130,6 +130,10 @@ A Mac app from before this change reads `rule_name`, `title` and `text`,
 and opens `#/brief`, so it shows a `Job due` row with no change. The new
 Mac app opens `#/jobs/<j-id>`.
 
+`app.notices` cuts the `text` of a job row so that `title: text` has at
+most 200 characters: the Mac app shows it as a system notice, and an old
+Mac app does not cut it. `/api/notices` gives the full goal.
+
 `POST /api/notices/<n-id>/done` marks a job row done as a rule row.
 
 ### The web client

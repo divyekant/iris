@@ -1479,4 +1479,24 @@ fn app_notices_give_due_jobs_and_count_questions() {
     assert_eq!(list[0]["text"], json!("Renew the passport."));
     assert_eq!(list[0]["message"], Value::Null);
     assert_eq!(r["result"]["open"], json!(2));
+
+    // A long goal: the system notice of the app (`title: text`) has at most
+    // 200 characters.
+    let long = "é".repeat(1500);
+    let l = iris_job::create(&store, &long, Some(now + 4), now).unwrap();
+    iris_job::move_due(&store, now + 5).unwrap();
+    let r = ask(json!({ "after": 0 }));
+    let n = r["result"]["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["job"] == json!(format!("j-{l}")))
+        .unwrap()
+        .clone();
+    let body = format!(
+        "{}: {}",
+        n["title"].as_str().unwrap(),
+        n["text"].as_str().unwrap()
+    );
+    assert_eq!(body.chars().count(), iris::notify::JOB_TEXT_MAX);
 }

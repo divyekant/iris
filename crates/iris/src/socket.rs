@@ -730,7 +730,20 @@ fn app_notices(store: &Store, after: Option<i64>) -> Result<Value, Failure> {
         None => page.max,
         Some(a) => page.notices.iter().map(|(r, _)| *r).max().unwrap_or(a),
     };
-    let notices: Vec<&iris_api::Notice> = page.notices.iter().map(|(_, n)| n).collect();
+    // The app shows `title: text` as a system notice: a job notice keeps
+    // the full goal in the web client, but a system notice has at most
+    // `JOB_TEXT_MAX` characters, so the cut is here, for each app version.
+    let notices: Vec<iris_api::Notice> = page
+        .notices
+        .into_iter()
+        .map(|(_, mut n)| {
+            if n.job.is_some() {
+                let room = crate::notify::JOB_TEXT_MAX.saturating_sub(n.title.chars().count() + 2);
+                n.text = n.text.chars().take(room).collect();
+            }
+            n
+        })
+        .collect();
     Ok(json!({
         "notices": notices,
         "last": last,
