@@ -225,7 +225,15 @@ not used makes no cut in either case.
   true when a limit can hide a boundary or a type: a `Content-Type` field
   past 8 KiB or with a line past 1,000 bytes, or more than 64 boundaries. The caller then sets `links_cut` too,
   because the rest can hold an HTML part that a mail client shows. The
-  links of an attached message are not in the list.
+  links of an attached message (at each depth) go in a second list,
+  `attached_links`, inside the same `LINK_BYTES` limit for that list. The
+  link check reads them with no sender proof (issue #372). An attached
+  message that Iris does not parse sets `links_cut`. An attached message
+  past `INNER_LIMIT` sets `links_cut` when an HTML part reaches the limit,
+  when the scan above finds an HTML part header in its bytes past the
+  limit, when it is not 7bit, 8bit or binary (Iris does not scan the rest
+  of another encoding), or when it holds an attached message that is not
+  read.
 - Images go out. The `alt` text stays, unless `width` or `height` is `0` or
   `1` (a tracking pixel).
 - Headings, lists, block quotes, `pre`, `hr` and line breaks become Markdown.

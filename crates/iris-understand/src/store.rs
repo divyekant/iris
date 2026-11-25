@@ -413,8 +413,12 @@ pub fn link_read(store: &Store, id: i64) -> Option<LinkRead> {
     let c = iris_clean::clean_cut(&raw, raw_cut);
     let head = crate::Head::parse(&raw, row.authserv);
     // A released `link` mark is no mark (section 6.7).
-    let mark = crate::link_mark(&head, &c.links, c.links_cut || html_after)
-        && !row.released.iter().any(|r| r == "link");
+    let mark = crate::link_mark(
+        &head,
+        &c.links,
+        &c.attached_links,
+        c.links_cut || html_after,
+    ) && !row.released.iter().any(|r| r == "link");
     Some(LinkRead {
         mark,
         sha: row.sha,
