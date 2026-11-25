@@ -13,8 +13,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::read::{
-    declined_list_sql, decode_cursor, doc_of, encode_cursor, head, row_of, section_sql, MATTER,
-    MAX_LIMIT, SHOWN,
+    declined_list_sql, decode_cursor, encode_cursor, head, ready_columns, ready_doc_of, row_of,
+    section_sql, MATTER, MAX_LIMIT, SHOWN,
 };
 use crate::{Error, Result};
 
@@ -127,7 +127,7 @@ pub(crate) fn read_gate(
     declined: bool,
     limit: u32,
     after: Option<&[SqlValue]>,
-) -> rusqlite::Result<GatePage> {
+) -> iris_store::Result<GatePage> {
     let with = parties(now, declined);
     let seek = if after.is_some() {
         "(at, id) < (?1, ?2)"
@@ -183,10 +183,11 @@ pub(crate) fn read_gate(
              r AS (SELECT party.sender AS sid, g.id, g.at,
                           row_number() OVER (PARTITION BY party.sender ORDER BY g.at DESC, g.id DESC) AS k
                      FROM party JOIN g ON g.id = party.item WHERE party.sender IN ({ids}))
-             SELECT item.id, item.form, item.status, item.doc, r.sid, {MATTER} FROM r JOIN item ON item.id = r.id
-              WHERE r.k <= {GATE_ITEMS} ORDER BY r.sid, r.at DESC, r.id DESC"
+             SELECT item.id, item.form, item.status, item.doc, r.sid, {MATTER}, {} FROM r JOIN item ON item.id = r.id
+              WHERE r.k <= {GATE_ITEMS} ORDER BY r.sid, r.at DESC, r.id DESC",
+            ready_columns(c)?
         ))?;
-        for row in st.query_map([], |r| Ok((r.get::<_, i64>(4)?, doc_of(r)?)))? {
+        for row in st.query_map([], |r| Ok((r.get::<_, i64>(4)?, ready_doc_of(r)?)))? {
             let (sid, doc) = row?;
             items.entry(sid).or_default().push(doc);
         }
@@ -223,7 +224,7 @@ pub fn gate_page(
     }
     let name = if declined { "declined" } else { "gate" };
     let after = after.map(|t| decode_cursor(t, name, 2)).transpose()?;
-    Ok(store.read(|c| Ok(read_gate(c, now, declined, limit, after.as_deref())?))?)
+    Ok(store.read(|c| read_gate(c, now, declined, limit, after.as_deref()))?)
 }
 
 /// The answer `answer` (`accept`, `decline`, `reopen` or `trust`) of the

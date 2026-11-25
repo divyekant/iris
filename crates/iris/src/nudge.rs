@@ -56,7 +56,18 @@ pub fn step(store: &Store, connect: Connect, now_ms: i64) -> Result<usize, Strin
         if MAX_PER_TURN - calls < 2 {
             break;
         }
-        let (outcome, made) = call(store, &row, model.as_ref(), &l, now_ms)?;
+        let (outcome, made) = call(
+            store,
+            &row,
+            model.as_ref(),
+            iris_voice::NUDGE_PROMPT,
+            now_ms,
+            |m| match iris_voice::nudge(store, &l, m, now_ms) {
+                Ok(_) => Done::Saved,
+                Err(iris_voice::Error::BadAnswer(_)) => Done::Invalid,
+                Err(_) => Done::Other,
+            },
+        )?;
         calls += made;
         store
             .write(|tx| {
@@ -80,7 +91,16 @@ pub fn step(store: &Store, connect: Connect, now_ms: i64) -> Result<usize, Strin
     Ok(saved)
 }
 
-enum Outcome {
+/// How a call under the budget ended, as the caller of [`call`] reads it.
+pub(crate) enum Done {
+    Saved,
+    /// The model answered, and the answer is not valid.
+    Invalid,
+    /// Nothing saved for another reason.
+    Other,
+}
+
+pub(crate) enum Outcome {
     /// The budget refused a call. No row stays if no call went out.
     Refused,
     Saved,
@@ -93,16 +113,19 @@ enum Outcome {
     ModelFailed,
 }
 
-/// One nudge call under the budget, as `iris write` makes it
-/// (`crate::reply`): an `understand_run` row for the counts of the call,
-/// and the shared model wait at its end. The caller holds the run lock.
-/// Gives the outcome and the count of model calls that went out.
-fn call(
+/// One prepared thing (a nudge, a thread summary) under the budget, as
+/// `iris write` makes it (`crate::reply`): `run` makes the calls through the
+/// budget wrapper. An `understand_run` row with the prompt `prompt` keeps
+/// the counts of the calls, and the shared model wait applies at its end.
+/// The caller holds the run lock. Gives the outcome and the count of model
+/// calls that went out.
+pub(crate) fn call(
     store: &Store,
     row: &ModelRow,
     model: &dyn Model,
-    late: &iris_voice::Late,
+    prompt: &str,
     now_ms: i64,
+    run_with: impl FnOnce(&dyn Model) -> Done,
 ) -> Result<(Outcome, usize), String> {
     let run = store
         .write(|tx| {
@@ -110,18 +133,13 @@ fn call(
                 "INSERT INTO understand_run(started_at, model, prompt, cost_micro_usd,
                                             unknown_cost_micro_usd)
                  VALUES (?1, ?2, ?3, ?4, ?4)",
-                params![
-                    now_ms,
-                    row.model,
-                    iris_voice::NUDGE_PROMPT,
-                    row.price.is_some().then_some(0)
-                ],
+                params![now_ms, row.model, prompt, row.price.is_some().then_some(0)],
             )?;
             Ok(tx.last_insert_rowid())
         })
         .map_err(|e| e.to_string())?;
     let budgeted = Budgeted::new(model, store, run, Some(row));
-    let result = iris_voice::nudge(store, late, &budgeted, now_ms);
+    let result = run_with(&budgeted);
     let s = budgeted.state();
     let stop = if s.refused || s.overrun {
         "budget"
@@ -129,7 +147,7 @@ fn call(
         "unknown"
     } else if s.key_refused || s.server_failed {
         "model"
-    } else if result.is_ok() {
+    } else if matches!(result, Done::Saved) {
         "done"
     } else {
         "error"
@@ -161,9 +179,9 @@ fn call(
     let outcome = match result {
         _ if refused => Outcome::Refused,
         _ if failed => Outcome::ModelFailed,
-        Ok(_) => Outcome::Saved,
-        Err(iris_voice::Error::BadAnswer(_)) => Outcome::Invalid,
-        Err(_) => Outcome::Other,
+        Done::Saved => Outcome::Saved,
+        Done::Invalid => Outcome::Invalid,
+        Done::Other => Outcome::Other,
     };
     Ok((outcome, made))
 }

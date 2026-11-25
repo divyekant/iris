@@ -158,7 +158,7 @@ struct Snapshot {
 /// mail: `may_be_hostile!()` (a mark, or a link check to come), the label
 /// `SPAM`, or a `hostile` sender (spec 1
 /// section 6.7). No hostile mail goes to the model.
-const HOSTILE: &str = concat!(
+pub const HOSTILE: &str = concat!(
     "(",
     iris_store::may_be_hostile!(),
     " OR EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
@@ -188,12 +188,12 @@ const IN_THREAD: &str = in_thread!("?1");
 /// A message that a reply can answer: not in spam and not in the trash, as
 /// `iris_changeset::reply_parent`. The counts of [`snapshot`] keep these
 /// messages, so hostile mail in the trash still stops a draft.
-const ANSWERABLE: &str =
+pub const ANSWERABLE: &str =
     "AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                            WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))";
 
 /// The newest message first: the order of [`snapshot`].
-const NEWEST: &str = "ORDER BY coalesce(m.internal_date, 0) DESC, m.id DESC";
+pub const NEWEST: &str = "ORDER BY coalesce(m.internal_date, 0) DESC, m.id DESC";
 
 /// SQL that is true when one of the threads `threads` (an SQL query that
 /// gives thread IDs) has a draft that the person can use now (card R3-09).
@@ -218,8 +218,32 @@ pub fn ready_item_sql(threads: &str, item: &str, now: (&str, &str)) -> String {
     ready_of(threads, Some(item), now)
 }
 
+/// The `FROM ... WHERE` clause of the messages of the thread `thread` (an
+/// SQL expression) that count: not gone, not a Gmail draft and not a copy.
+/// It names the message `m`, its header `h` and its clean text `b` (a left
+/// join). Add [`ANSWERABLE`] for the messages that a reply can answer.
+pub fn messages_sql(thread: &str) -> String {
+    in_thread!("{thread}").replace("{thread}", thread)
+}
+
+/// SQL that is true when the row `row` (an alias of a table with
+/// `thread_id` and `based_on`) is still true of its thread: `based_on` is
+/// the newest message of the thread that a reply can answer, and no message
+/// that counts is hostile or waits for understanding. A newer message, a
+/// gone newest message or a new hostile mark makes the row stale with no
+/// write. The ready rule of a reply draft, and of each other thing that
+/// Iris prepares from a thread (the thread summary, issue 478).
+pub fn fresh_sql(row: &str) -> String {
+    let in_thread = messages_sql(&format!("{row}.thread_id"));
+    format!(
+        "{row}.based_on = (SELECT m.id {in_thread} {ANSWERABLE} {NEWEST} LIMIT 1)
+           AND NOT EXISTS (SELECT 1 {in_thread}
+                           AND ({HOSTILE} OR b.message_id IS NULL OR m.understood_at IS NULL))"
+    )
+}
+
 fn ready_of(threads: &str, item: Option<&str>, now: (&str, &str)) -> String {
-    let in_thread = in_thread!("d.thread_id");
+    let fresh = fresh_sql("d");
     let key = nudge_key_sql("d.thread_id", now);
     let mine = item.map_or(String::new(), |i| {
         format!(
@@ -229,9 +253,7 @@ fn ready_of(threads: &str, item: Option<&str>, now: (&str, &str)) -> String {
     });
     format!(
         "EXISTS (SELECT 1 FROM reply_draft d WHERE d.thread_id IN ({threads})
-           AND d.based_on = (SELECT m.id {in_thread} {ANSWERABLE} {NEWEST} LIMIT 1)
-           AND NOT EXISTS (SELECT 1 {in_thread}
-                           AND ({HOSTILE} OR b.message_id IS NULL OR m.understood_at IS NULL))
+           AND {fresh}
            AND (d.ask IS NULL OR d.ask = {key}) {mine})"
     )
 }
@@ -527,7 +549,29 @@ struct Nudge<'a> {
     key: &'a str,
 }
 
+/// The snapshot of a thread. Its statements run in one read transaction,
+/// so the counts, the messages and the evidence come from one state of the
+/// store (#841). In a transaction of the caller, they use that one.
 fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
+    let tx = if c.is_autocommit() {
+        Some(c.unchecked_transaction()?)
+    } else {
+        None
+    };
+    let s = snapshot_in(c, thread);
+    // The drop of `tx` ends the read.
+    drop(tx);
+    s
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs between the first two statements of a snapshot, for a test.
+    pub(crate) static BETWEEN: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        std::cell::RefCell::new(None);
+}
+
+fn snapshot_in(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
     let (count, not_ready, hostile) = c
         .prepare_cached(&format!(
             "SELECT count(*),
@@ -536,6 +580,8 @@ fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
              {IN_THREAD}"
         ))?
         .query_row([thread], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    #[cfg(test)]
+    BETWEEN.with(|b| b.borrow_mut().as_mut().map(|f| f()));
     let mut st = c.prepare_cached(&format!(
         "SELECT m.id, h.from_addr, h.from_name, h.to_addrs, h.cc_addrs, b.subject,
            substr(ltrim(b.text, char(32, 9, 10, 13)), 1, ?3),

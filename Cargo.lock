@@ -887,6 +887,7 @@ dependencies = [
  "iris-session",
  "iris-spec",
  "iris-store",
+ "iris-summary",
  "iris-sync",
  "iris-synth",
  "iris-triage",
@@ -920,6 +921,7 @@ dependencies = [
  "iris-senders",
  "iris-spec",
  "iris-store",
+ "iris-summary",
  "iris-synth",
  "iris-triage",
  "iris-understand",
@@ -1240,10 +1242,23 @@ dependencies = [
  "getrandom 0.4.3",
  "iris-synth",
  "jiff",
+ "libc",
  "rusqlite",
  "serde_json",
  "sha2",
  "unicase",
+]
+
+[[package]]
+name = "iris-summary"
+version = "0.0.0"
+dependencies = [
+ "iris-model",
+ "iris-store",
+ "iris-understand",
+ "iris-voice",
+ "rusqlite",
+ "serde_json",
 ]
 
 [[package]]
@@ -1295,6 +1310,7 @@ dependencies = [
 name = "iris-understand"
 version = "0.0.0"
 dependencies = [
+ "idna",
  "idna_adapter",
  "iris-clean",
  "iris-eval",
@@ -1306,6 +1322,7 @@ dependencies = [
  "jsonschema",
  "rusqlite",
  "serde_json",
+ "unicode-general-category",
  "unicode-normalization",
  "url",
 ]

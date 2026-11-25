@@ -151,6 +151,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/items", get(get_items))
         .route("/api/items/{id}", get(get_item))
         .route("/api/items/{id}/job", get(get_start))
+        .route("/api/items/{id}/summary", get(get_summary))
         .route("/api/items/{id}/joinable", get(get_joinable))
         .route("/api/items/{id}/{verb}", post(post_verb))
         .route("/api/search", get(get_search))
@@ -193,6 +194,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/stop", get(get_stop).post(post_stop))
         .route("/api/resume", post(post_resume))
         .route("/api/model/try", post(post_model_try))
+        .route("/api/zone", post(post_zone))
         .route("/api/outbox", get(get_outbox))
         .route("/api/outbox/{draft}/cancel", post(post_outbox_cancel))
         .route("/api/write", post(post_write))
@@ -201,6 +203,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
             post(post_attachment).layer(DefaultBodyLimit::max(ATTACHMENT_LIMIT)),
         )
         .route("/api/write/{id}", get(get_write))
+        .route("/api/drafts/{id}", get(get_draft_content))
         .route("/api/threads/{id}/reply", get(get_reply))
         .route("/api/threads/{id}/draft", get(get_draft))
         .route("/api/matters", get(get_matters).post(post_matter_create))
@@ -652,6 +655,13 @@ async fn get_item(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result
     Ok(item(&s, &id)?.map_or_else(not_found, |d| Json(d).into_response()))
 }
 
+/// The ready summary of the thread of the item (issue 478): text, the
+/// newest message that it reads, the time and the model. 404 when the item
+/// does not need the person, or its thread has no summary that is ready.
+async fn get_summary(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    Ok(read::summary(&s, &id, now_ms())?.map_or_else(not_found, |d| Json(d).into_response()))
+}
+
 /// A state verb of the person on one item: `close`, `decline`, `defer`,
 /// `skip`, `mute` or `dismiss` (specification 2, section 4). The answer is the item after the change.
 async fn post_verb(
@@ -868,6 +878,30 @@ async fn post_mode(
     let b = body(b)?;
     let change = iris_policy::Change::Mode(policy::mode(&b.mode)?);
     Ok(Json(change_blocking(s, b.version, change).await?).into_response())
+}
+
+/// The time zone of the owner (issue 891): an IANA name, or null for the
+/// time zone of the computer.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ZoneBody {
+    #[serde(deserialize_with = "present_text")]
+    zone: Option<String>,
+}
+
+/// The person sets the time zone of the owner, as `iris zone` does
+/// (decision D1). A name that the computer does not know is a 400, and
+/// nothing is written.
+async fn post_zone(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<ZoneBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    s.set_time_zone(b.zone.as_deref()).map_err(|e| match e {
+        iris_store::Error::TimeZone(name) => Error::Query(format!("not a time zone: {name:?}")),
+        e => e.into(),
+    })?;
+    Ok(Json(read::zone(&s)?).into_response())
 }
 
 #[derive(Deserialize)]
@@ -1398,6 +1432,18 @@ async fn get_write(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
         return Ok(not_found());
     };
     Ok(match write::state(&s, row, now_ms())? {
+        Some(v) => Json(v).into_response(),
+        None => not_found(),
+    })
+}
+
+/// The content of a draft (`d-N`) for the form of a change (draft change
+/// spec, section 5). 404 when Iris cannot give it.
+async fn get_draft_content(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+) -> Result<Response> {
+    Ok(match write::draft_content(&s, &id)? {
         Some(v) => Json(v).into_response(),
         None => not_found(),
     })

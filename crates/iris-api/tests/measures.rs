@@ -413,6 +413,7 @@ fn downgrade(s: &Store) {
             "DROP TRIGGER measure_connect;
              DROP TRIGGER person_decision; DROP TABLE person_decision;
              DROP TABLE use_open; DROP TABLE use_day; DROP TABLE measure_time;
+             DROP VIEW ledger_can_undo; CREATE VIEW ledger_can_undo AS SELECT NULL AS ledger_id WHERE 0;
              DROP TABLE write_send; DROP TABLE comment_delivery;
              DROP TABLE changeset_comment; DROP TABLE nudge_try;
              ALTER TABLE reply_draft DROP COLUMN ask;
@@ -845,8 +846,9 @@ async fn sends_after_hostile_mail_count_only_without_a_person() {
     })
     .unwrap();
     // Send 3: no person decided it, after hostile mail. Send 4: the person.
-    // Send 5: no hostile mail at its claim. Send 6 failed.
-    let want = json!({"sent": 4, "unreviewed_after_hostile": 1});
+    // Send 5: no hostile mail at its claim. Send 6 failed. Send 7 has no
+    // record, so it counts in neither field (issue #1059).
+    let want = json!({"sent": 3, "unreviewed_after_hostile": 1});
     assert_eq!(get(&s).await["sends"], want);
     s.remove_account("owner@example.com", now()).unwrap();
     let _ = a;

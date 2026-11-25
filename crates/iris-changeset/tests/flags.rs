@@ -647,3 +647,51 @@ fn marks_agree_with_the_flags_for_random_text() {
         }
     }
 }
+
+/// A copied run of words with combining marks gets the flag (issue #756):
+/// the words of the phrase are the tokens of the index, so a mark inside a
+/// word does not split it in two.
+#[test]
+fn a_copied_run_with_combining_marks_gives_untrusted_content() {
+    let dir = TempDir::new("combining");
+    let s = store(&dir);
+    let a = s
+        .read(|c| Ok(c.query_row("SELECT id FROM account", [], |r| r.get::<_, i64>(0))?))
+        .unwrap();
+    let theirs: String = (0..12)
+        .map(|k| format!("wo\u{301}rd{k} pa\u{308}y{k}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    s.put_messages(
+        a,
+        &[NewMessage {
+            provider_id: "g4".into(),
+            thread_provider_id: "gt4".into(),
+            internal_date: Some(1),
+            header: Header {
+                from_addr: Some("stranger@example.net".into()),
+                subject: Some("Marks".into()),
+                message_id_hdr: Some("<g4@x.org>".into()),
+                ..Default::default()
+            },
+            body: Some(Body {
+                subject: "Marks".into(),
+                sender: "stranger@example.net".into(),
+                text: theirs.clone(),
+            }),
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let got = s
+        .read(|c| {
+            Ok(draft_flags(
+                c,
+                OWNER,
+                &content("priya@example.com", "Plan", &format!("Note: {theirs}")),
+            )
+            .unwrap())
+        })
+        .unwrap();
+    assert_eq!(got, vec!["untrusted_content"]);
+}

@@ -2102,3 +2102,31 @@ fn a_nudge_that_leaves_out_a_commitment_is_not_saved() {
         assert_eq!(saved(&b.store, t).is_some(), ok);
     }
 }
+
+/// A write between the statements of a snapshot does not show in it: the
+/// counts and the messages come from one state of the store (#841).
+#[test]
+fn a_snapshot_reads_one_state_of_the_thread() {
+    let (b, t) = mailbox("one-state");
+    let store = Store::open(&b.dir).unwrap();
+    crate::BETWEEN.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move || {
+            let m = msg(
+                "late",
+                "t1",
+                9000,
+                "INBOX",
+                "ana@example.org",
+                "me@example.com",
+                Some("Late"),
+            );
+            store.put_messages(1, &[m]).unwrap();
+        }))
+    });
+    let s = b.store.read(|c| Ok(snapshot(c, t)?)).unwrap();
+    crate::BETWEEN.with(|h| h.borrow_mut().take());
+    assert_eq!(s.count as usize, s.newest.len(), "{s:?}");
+    // The write is in the store for the next snapshot.
+    let next = b.store.read(|c| Ok(snapshot(c, t)?)).unwrap();
+    assert_eq!(next.count, s.count + 1);
+}

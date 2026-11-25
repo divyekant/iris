@@ -31,6 +31,10 @@ pub struct Head {
     /// The results of the top `Authentication-Results` header of the
     /// provider (the `authserv` of [`Head::parse`]).
     pub auth: Option<Auth>,
+    /// True when the message has [`HEAD_LIMIT`] bytes or more and no empty
+    /// line ends the header block in the first [`HEAD_LIMIT`] bytes, so a
+    /// field past the limit (as `From`) is not read (issue #1033).
+    pub cut: bool,
 }
 
 /// SPF, DKIM and DMARC results, lowercase (`pass`, `fail`, ...).
@@ -82,7 +86,7 @@ impl Head {
     /// provider of the account adds ([`trusted_authserv`]). With `None`, no
     /// `Authentication-Results` header counts.
     pub fn parse(raw: &[u8], authserv: Option<&str>) -> Head {
-        let fields = fields(raw);
+        let (fields, ended) = fields(raw);
         let get = |name: &str| {
             fields
                 .iter()
@@ -123,18 +127,26 @@ impl Head {
             // The same rule as the sender kinds of `iris-senders`.
             automated: iris_senders::head::Head::parse(raw).automated(),
             auth,
+            cut: !ended && raw.len() >= HEAD_LIMIT,
         }
     }
 }
 
-/// The unfolded header fields of the top entity: `(name, value)`, in order.
-fn fields(raw: &[u8]) -> Vec<(String, String)> {
+/// The unfolded header fields of the top entity: `(name, value)`, in order,
+/// and true if the empty line that ends the header block is in the first
+/// [`HEAD_LIMIT`] bytes.
+fn fields(raw: &[u8]) -> (Vec<(String, String)>, bool) {
     let head = &raw[..raw.len().min(HEAD_LIMIT)];
     let text = String::from_utf8_lossy(head);
     let mut out: Vec<(String, String)> = Vec::new();
-    for line in text.split('\n') {
+    let mut ended = false;
+    let mut lines = text.split('\n').peekable();
+    while let Some(line) = lines.next() {
         let line = line.strip_suffix('\r').unwrap_or(line);
         if line.is_empty() {
+            // The empty line ends the block only with its own line break in
+            // the limit: a last piece with no break can be a cut line.
+            ended = lines.peek().is_some();
             break;
         }
         if line.starts_with([' ', '\t']) {
@@ -152,7 +164,7 @@ fn fields(raw: &[u8]) -> Vec<(String, String)> {
             v.remove(0);
         }
     }
-    out
+    (out, ended)
 }
 
 /// The addresses of an address list: `(bare address lowercase, display name)`,

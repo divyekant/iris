@@ -578,3 +578,70 @@ fn the_backup_copies_each_attachment_file() {
     fs::write(&path, b"other").unwrap();
     assert!(store.backup(&tmp.0.join("copy2")).is_err());
 }
+
+#[test]
+fn a_backup_keeps_the_drafts_of_each_job_and_only_safe_files() {
+    use iris_store::{DRAFT_FILES_MAX, DRAFT_FILE_MAX};
+    let dir = TempDir::new("drafts");
+    let dest = TempDir::new("drafts-copy");
+    let store = Store::open(&dir.0).unwrap();
+    let ws = dir.0.join("workspaces");
+    let drafts = ws.join("j-1/drafts");
+    fs::create_dir_all(&drafts).unwrap();
+    fs::write(drafts.join("reply.md"), "Dear Ann").unwrap();
+    fs::write(ws.join("j-1/mail.md"), "MAIL-TEXT").unwrap();
+    fs::write(ws.join("j-1/notes.md"), "notes").unwrap();
+    // Not copied: a link, a subfolder, a file over the limit.
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(dir.0.join("key"), drafts.join("key.md")).unwrap();
+    fs::create_dir_all(drafts.join("sub")).unwrap();
+    fs::write(drafts.join("sub/x.md"), "x").unwrap();
+    fs::write(
+        drafts.join("big.md"),
+        vec![b'a'; DRAFT_FILE_MAX as usize + 1],
+    )
+    .unwrap();
+    // A job whose drafts/ is a link to the data folder.
+    fs::create_dir_all(ws.join("j-2")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&dir.0, ws.join("j-2/drafts")).unwrap();
+    // A job with more files than the limit.
+    let many = ws.join("j-3/drafts");
+    fs::create_dir_all(&many).unwrap();
+    for i in 0..DRAFT_FILES_MAX + 5 {
+        fs::write(many.join(format!("d{i:04}.md")), "d").unwrap();
+    }
+
+    store.backup(&dest.0).unwrap();
+    let copy = dest.0.join("workspaces");
+    assert_eq!(
+        fs::read_to_string(copy.join("j-1/drafts/reply.md")).unwrap(),
+        "Dear Ann"
+    );
+    let names: Vec<String> = fs::read_dir(copy.join("j-1/drafts"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names, ["reply.md"]);
+    // The other files of a workspace come again from the store.
+    assert!(!copy.join("j-1/mail.md").exists());
+    assert!(!copy.join("j-2").exists());
+    assert_eq!(
+        fs::read_dir(copy.join("j-3/drafts")).unwrap().count(),
+        DRAFT_FILES_MAX
+    );
+    #[cfg(unix)]
+    {
+        assert_eq!(mode(&copy.join("j-1/drafts")), 0o700);
+        assert_eq!(mode(&copy.join("j-1/drafts/reply.md")), 0o600);
+    }
+}
+
+#[test]
+fn a_backup_with_no_workspaces_has_no_workspaces_folder() {
+    let dir = TempDir::new("no-ws");
+    let dest = TempDir::new("no-ws-copy");
+    let store = Store::open(&dir.0).unwrap();
+    store.backup(&dest.0).unwrap();
+    assert!(!dest.0.join("workspaces").exists());
+}

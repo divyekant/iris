@@ -325,7 +325,10 @@ fn a_mail_waits_for_its_body_then_gets_one_notice() {
     .unwrap();
     let new = notice::refresh(&s, NOW).unwrap();
     assert_eq!(new.len(), 1);
-    assert_eq!((new[0].rule, new[0].rule_name.as_str()), (4, "From Ann"));
+    assert_eq!(
+        (new[0].rule, new[0].rule_name.as_str()),
+        (Some(4), "From Ann")
+    );
     assert_eq!(
         (new[0].title.as_str(), new[0].text.as_str()),
         ("ann@friends.example", "Lunch?")
@@ -595,6 +598,6 @@ fn notices_now(s: &Store) -> Vec<i64> {
     notice::refresh(s, NOW)
         .unwrap()
         .iter()
-        .map(|n| n.message_id)
+        .filter_map(|n| n.message_id)
         .collect()
 }

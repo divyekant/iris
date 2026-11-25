@@ -1305,6 +1305,7 @@ fn a_press_of_send_wakes_the_waiting_thread() {
             args: &args,
             key: "key-wake-000000000001",
             flags: &flags,
+            draft: None,
         };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

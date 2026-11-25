@@ -691,6 +691,8 @@ fn each_table_with_mail_of_an_account_is_in_the_delete_or_the_record() {
         "sync_seen",
         "talk_due",
         "thread",
+        "thread_summary",
+        "thread_summary_try",
         "use_open",
         "removed_workspace",
         "removed_sender",
@@ -923,4 +925,86 @@ fn no_page_of_the_database_keeps_the_text_of_a_removed_item() {
         .unwrap()
         .unwrap();
     assert!(!has(&dir.0), "a page keeps the text of a removed item");
+}
+
+/// A thread that a draft refers to stays as a bare row, but its summary and
+/// the keys of its tries (mail data) go (issue 478).
+#[test]
+fn the_delete_removes_the_summary_and_the_tries_of_a_thread_that_stays() {
+    let dir = TempDir::new("summary");
+    let store = Store::open(&dir.0).unwrap();
+    let (a, _) = two(&store);
+    store
+        .write(|tx| {
+            let thread: i64 = tx.query_row(
+                "SELECT thread_id FROM message WHERE account_id = ?1 ORDER BY id LIMIT 1",
+                [a],
+                |r| r.get(0),
+            )?;
+            tx.execute(
+                "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+                 VALUES (last_insert_rowid(), 1, 1, 'draft', '{}', '{}')",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO draft(account_id, thread_id, provider_id, message_id_hdr, content,
+                                   hash, raw, action_id, created_at, updated_at)
+                 VALUES (?1, ?2, 'r1', 'iris.1@example.com', '{}', 'h', x'00',
+                         last_insert_rowid(), 0, 0)",
+                rusqlite::params![a, thread],
+            )?;
+            let newest: i64 = tx.query_row(
+                "SELECT max(id) FROM message WHERE thread_id = ?1",
+                [thread],
+                |r| r.get(0),
+            )?;
+            tx.execute(
+                "INSERT INTO thread_summary(thread_id, based_on, basis, text, model, prompt,
+                                            created_at)
+                 VALUES (?1, ?2, 'b', 'Ana asked for the slides.', 'fake', 'summary/0.1', 0)",
+                rusqlite::params![thread, newest],
+            )?;
+            tx.execute(
+                "INSERT INTO thread_summary_try(thread_id, based_on, basis, model_version, invalid,
+                                                at)
+                 VALUES (?1, ?2, 'b', 1, 0, 0)",
+                rusqlite::params![thread, newest],
+            )?;
+            tx.execute(
+                "INSERT INTO nudge_try(thread_id, key, newest, version, blocked, tried_at)
+                 VALUES (?1, '{\"to\": \"ana@example.org\"}', ?2, 1, 0, 0)",
+                rusqlite::params![thread, newest],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(store.remove_account("a@example.org", NOW).unwrap(), a);
+    store
+        .delete_removed(None, &mut none, &mut |_| Ok(()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        n(
+            &store,
+            "SELECT count(*) FROM thread WHERE account_id = ?1",
+            a
+        ),
+        1,
+        "the thread of the draft stays"
+    );
+    for table in ["thread_summary", "thread_summary_try", "nudge_try"] {
+        assert_eq!(
+            n(
+                &store,
+                &format!("SELECT count(*) FROM {table} WHERE ?1 > 0"),
+                a
+            ),
+            0,
+            "{table}"
+        );
+    }
 }

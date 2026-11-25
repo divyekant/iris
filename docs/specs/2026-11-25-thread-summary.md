@@ -124,7 +124,7 @@ A new crate `iris-summary` (no provider client, as `iris-voice`):
   that the SQL filter `items` selects, the oldest try first, as
   `iris_voice::late` orders the nudges. The crate does not depend on
   `iris-api`: the caller gives the filter.
-- `summarize(store, thread, model, now)`: reads a snapshot of the thread (the
+- `summarize(store, candidate, model, now)`: reads a snapshot of the thread (the
   newest 12 answerable messages, oldest first, each cut to 4,000
   characters, with `from`, `by_owner` and `date`), makes one call, checks the
   answer, and saves it in one transaction only if the snapshot is the same
@@ -138,7 +138,9 @@ A new crate `iris-summary` (no provider client, as `iris-voice`):
 - The check refuses an answer that is not that object, an empty summary, and
   a summary longer than 1,500 characters. A refused answer gets one more
   call (decision D7), then the try is `invalid` for that basis and model
-  version.
+  version. A refusal of the model (`Stop::Refused` of `iris-model`) gets
+  no second call, because the same data gets the same refusal. It is an
+  invalid answer at once.
 
 ### The engine step
 
@@ -157,7 +159,8 @@ end of the order and does not stop the others.
   has a summary that is ready. So an item at the stranger gate never shows
   "Summary ready", also when a known person in the same thread has an item
   with a summary. The brief sections, the gate, the bundles and the lists
-  of one form read it from the same column as `"draft"` (`ready_doc_of`).
+  of one form read it with `"draft"`, from the columns of `ready_columns`
+  (`ready_doc_of`).
 - `GET /api/items/{id}/summary`: `{"text", "based_on", "created",
   "model"}` of the summary of the thread of the origin message of the item,
   with the same two conditions as `ready`, or 404. The item page reads it
@@ -214,7 +217,9 @@ clean text, of the account of the item.
 | An older message of the snapshot goes away, or gets new content, a new clean text, a new `SENT` label or a new date under the same ID | The basis changes: the summary is stale, and the thread is a candidate again. | Unit test of `ready` and `candidates`. |
 | The model fails (time-out, 5xx) | No row. The wait after a model error applies (decision D35). | Engine test with a failing fake model. |
 | The answer is not valid twice | `thread_summary_try` with `invalid = 1` for that basis and model version. No more calls until the basis or the model version changes. | Unit test. |
+| The model refuses | No second call. The answer is not valid. | Unit test. |
 | The budget refuses | No call. The try moves the thread to the end. | Engine test. |
+| The item or the summary changes during a read of `GET /api/items/{id}/summary` | One SQL statement reads the item condition and the summary, so both come from one snapshot. | API test with a writer that changes the item and the summary text in one transaction. |
 | A crash during the save | One transaction: no summary, or the whole summary. | Store test. |
 | Another run holds the batch lock | No call in this turn. | Engine test. |
 | Any other input (a thread with no clean text, a thread of another kind) | Not a candidate: no call. | Unit test of `candidates`. |

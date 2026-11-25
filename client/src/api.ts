@@ -39,7 +39,7 @@ export type Item = {
   new?: number;
   your_turn?: boolean;
   summary?: string;
-  /** What Iris prepared for the item (card R3-09): "draft" is a reply draft that is not stale. Only in the brief lists. */
+  /** What Iris prepared for the item (card R3-09): "draft" is a reply draft that is not stale. Only in the lists of items: the brief sections and pages, the gate and /api/items. */
   ready?: "draft"[];
   type?: string;
   issuer?: Party;
@@ -213,7 +213,10 @@ export type Message = Summary & {
   /** The kind of the From sender (spec 1 section 6.7). */
   sender_kind?: "person" | "service" | "stranger" | "hostile";
   /** The sender when only its look-alike domain makes it hostile: you can trust it (issue #49). */
-  near_copy?: { sender: string; of: string | null; trusted: boolean } | null;
+  /** The trust offer: a sender that only the near-copy rule makes hostile (issue 49). */
+  near_copy?: { sender: string; of: string } | null;
+  /** The Undo of a trust: the sender row of this address that the person trusted (issue 1043). */
+  trusted_sender?: string | null;
   items: string[];
 };
 
@@ -330,6 +333,8 @@ export type LedgerEntry = {
   retry: boolean;
   /** A send or a draft: the subject, the first `to` address and the count of all recipients. Null when Iris cannot read it. */
   mail?: { subject: string; to: string | null; recipients: number } | null;
+  /** A draft: true when it changed a draft that exists (with `undo_of`: the undo of a change). An older engine leaves it out. */
+  change?: boolean;
 };
 
 export type LedgerPage = { entries: LedgerEntry[]; next: string | null };
@@ -403,7 +408,23 @@ export type WriteState =
   | { state: "waiting"; draft: string; sending: boolean; bcc_check?: string | null; leaves_at: string | null }
   | { state: "review"; draft: string; reason: string | null }
   | { state: "sent"; draft: string }
-  | { state: "stopped"; reason: string; draft: string | null };
+  | { state: "stopped"; reason: string; draft: string | null; change?: "update" | "new" | null };
+
+/**
+ * GET /api/drafts/{id}: the content of a draft, for the form of "Change and
+ * send" (draft change spec, section 5).
+ */
+export type DraftContent = {
+  draft: string;
+  account: string;
+  thread: string | null;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  body: string;
+  attachments: Attachment[];
+};
 
 /** A message summary, or only the ID of a message that is not in the mirror any more. */
 export type Target = (Summary & { gone?: false }) | { id: string; gone: true };

@@ -53,27 +53,40 @@ fn check(
 }
 
 /// The memory of a process that the budget limits, in KiB, with its limit:
-/// on Linux the anonymous memory (`/proc/<pid>/smaps_rollup`), elsewhere the
-/// RSS (`ps`) with the limit of 50 MB.
+/// on Linux the anonymous memory, elsewhere the RSS (`ps`) with the limit of
+/// 50 MB. Linux reads `Anonymous` of `/proc/<pid>/smaps_rollup` (kernel 4.14
+/// and later), else `RssAnon` of `/proc/<pid>/status` (issue #1035). The
+/// debug RSS of Linux is near 50 MB, so Linux never falls back to the RSS.
 fn memory_kib(pid: u32) -> (u64, u64) {
-    match std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")) {
-        Ok(text) => {
-            let anon = anonymous_kib(&text)
-                .unwrap_or_else(|| panic!("no Anonymous line in smaps_rollup:\n{text}"));
-            eprintln!("RSS {} KiB, anonymous {anon} KiB", rss_kib(pid));
-            (anon, MAX_ANON_KIB)
-        }
-        Err(_) => (rss_kib(pid), MAX_RSS_KIB),
+    if !cfg!(target_os = "linux") {
+        return (rss_kib(pid), MAX_RSS_KIB);
     }
+    let anon = linux_anon_kib(|file| std::fs::read_to_string(format!("/proc/{pid}/{file}")).ok())
+        .unwrap_or_else(|e| panic!("{e}"));
+    eprintln!("RSS {} KiB, anonymous {anon} KiB", rss_kib(pid));
+    (anon, MAX_ANON_KIB)
 }
 
-/// The value of the line `Anonymous: <n> kB` of `/proc/<pid>/smaps_rollup`.
-/// `None` if no such line has a whole number of kB: the caller then fails.
-/// The `procfs` crate also reads this file; one field does not need a new
-/// dependency.
-fn anonymous_kib(text: &str) -> Option<u64> {
+/// The anonymous memory in KiB from the `/proc` files of one process, which
+/// `read` gives by name (`None`: no such file): `Anonymous` of
+/// `smaps_rollup`, else `RssAnon` of `status`. An error if a file has no
+/// such line, or if neither file is there.
+fn linux_anon_kib(read: impl Fn(&str) -> Option<String>) -> Result<u64, String> {
+    for (file, key) in [("smaps_rollup", "Anonymous:"), ("status", "RssAnon:")] {
+        if let Some(text) = read(file) {
+            return kib_line(&text, key).ok_or_else(|| format!("no {key} line in {file}:\n{text}"));
+        }
+    }
+    Err("measure not available: no /proc/<pid>/smaps_rollup and no /proc/<pid>/status".into())
+}
+
+/// The value of the line `<key> <n> kB` of a `/proc` file, for example
+/// `Anonymous:` of `smaps_rollup` or `RssAnon:` of `status`. `None` if no
+/// such line has a whole number of kB: the caller then fails. The `procfs`
+/// crate also reads these files; one field does not need a new dependency.
+fn kib_line(text: &str, key: &str) -> Option<u64> {
     text.lines().find_map(|l| {
-        let mut words = l.strip_prefix("Anonymous:")?.split_whitespace();
+        let mut words = l.strip_prefix(key)?.split_whitespace();
         match (words.next()?.parse().ok()?, words.next(), words.next()) {
             (n, Some("kB"), None) => Some(n),
             _ => None,
@@ -189,7 +202,8 @@ fn serve_stays_inside_the_memory_and_start_budget() {
 }
 
 #[test]
-fn anonymous_kib_reads_only_a_whole_anonymous_line() {
+fn kib_line_reads_only_a_whole_line_of_its_key() {
+    let anonymous_kib = |t: &str| kib_line(t, "Anonymous:");
     assert_eq!(
         anonymous_kib("Rss: 9 kB\nAnonymous:      16924 kB\n"),
         Some(16924)
@@ -229,6 +243,15 @@ fn anonymous_kib_reads_only_a_whole_anonymous_line() {
             noise.replace("Anonymous", "x")
         );
         assert_eq!(anonymous_kib(&text), Some(n), "{text:?}");
+    }
+    // The fallback of issue #1035: `status` has `RssAnon:` in the same form.
+    assert_eq!(
+        kib_line("VmRSS: 9 kB\nRssAnon:\t  812 kB\n", "RssAnon:"),
+        Some(812)
+    );
+    if cfg!(target_os = "linux") {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        assert!(kib_line(&status, "RssAnon:").is_some(), "{status}");
     }
 }
 
@@ -334,4 +357,38 @@ fn serve_stays_inside_the_memory_budget_after_a_first_sync() {
     );
     assert_eq!(fetched, SYNC_MESSAGES as i64);
     check(mem, Duration::ZERO, limit, MAX_START).unwrap();
+}
+
+/// Issue #1035: the choice of the file. With no `smaps_rollup`, the value
+/// is `RssAnon` of `status`, with the anonymous limit. With neither file,
+/// the measure fails: Linux never falls back to the RSS.
+#[test]
+fn linux_anon_kib_falls_back_to_status_and_fails_with_no_file() {
+    let files = |smaps: Option<&str>, status: Option<&str>| {
+        let (smaps, status) = (smaps.map(str::to_string), status.map(str::to_string));
+        move |f: &str| match f {
+            "smaps_rollup" => smaps.clone(),
+            "status" => status.clone(),
+            _ => None,
+        }
+    };
+    let status = "VmRSS:\t 48000 kB\nRssAnon:\t 16100 kB\n";
+    assert_eq!(
+        linux_anon_kib(files(Some("Anonymous: 15900 kB\n"), Some(status))),
+        Ok(15_900)
+    );
+    assert_eq!(linux_anon_kib(files(None, Some(status))), Ok(16_100));
+    assert!(linux_anon_kib(files(None, None))
+        .unwrap_err()
+        .contains("measure not available"));
+    // A file with no line of its key fails; it does not try the next file.
+    assert!(linux_anon_kib(files(Some("Rss: 1 kB\n"), Some(status))).is_err());
+    assert!(linux_anon_kib(files(None, Some("VmRSS: 1 kB\n"))).is_err());
+    // The value of status is checked against the anonymous limit.
+    let (kib, limit) = (
+        linux_anon_kib(files(None, Some(status))).unwrap(),
+        MAX_ANON_KIB,
+    );
+    assert!(check(kib, MAX_START, limit, MAX_START).is_ok());
+    assert!(check(MAX_ANON_KIB + 1, MAX_START, limit, MAX_START).is_err());
 }

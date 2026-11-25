@@ -175,8 +175,9 @@ update lets you roll back.
 
 If you run Iris with another data folder (`--data <path>` or `IRIS_DATA`),
 give the same folder to each `iris` command below, for example
-`iris --data <path> backup <empty-folder>`. The background service uses
-only the default data folder (issue #243).
+`iris --data <path> backup <empty-folder>`. `iris service install` writes
+the data folder of the command into the service file, so the background
+service uses the same folder.
 
 Before each update, run `iris backup <empty-folder>`. Keep the backup until
 you no longer need to roll back. The backup holds your mail and the key, so
@@ -206,11 +207,12 @@ To roll back, do these steps:
    syncs again from the mail provider, but these local changes do not come
    back. Keep the moved data folder until you no longer need it.
 
-   CAUTION: `iris backup` does not copy the `workspaces` folder (issue
-   #350). An agent draft that a job did not submit is only in the
-   `workspaces` folder of the moved data folder, also when the draft is older
-   than the backup. Before you start Iris in step 4, copy the `workspaces`
-   folder from the moved data folder into the restored data folder.
+   CAUTION: `iris backup` copies only the `drafts` folder of each job
+   workspace: each regular file of at most 1 MiB, at most 256 files for each
+   job. An agent draft that a job wrote after the backup, or a larger draft,
+   is only in the `workspaces` folder of the moved data folder (issue #1063). Before you
+   start Iris in step 4, copy such a draft from the moved data folder into
+   the restored data folder.
 
 3. If the bad release migrated the store, move the data folder away and copy
    the backup in its place. Use the data folder of your installation: the
@@ -219,8 +221,7 @@ To roll back, do these steps:
    or `~/.local/share/iris` on Linux.
 4. Run `iris status` (with the same `--data` if you set one). Make sure that
    it shows your accounts.
-5. If you use the default data folder, run `iris service install`. Else
-   start `iris serve` with your data folder.
+5. Run `iris service install`, with the same `--data` if you set one.
 
 The service file points to `~/.local/bin/iris`, so the service runs the old
 program after a restart of the service. To restart it:

@@ -735,6 +735,104 @@ fn ids_of(list: &Value) -> Vec<String> {
     ids(list)
 }
 
+/// Issue 478: an item at the gate shows the reply draft of its thread, as a
+/// brief line does. Both read `ready` from the same column, so the gate and
+/// the sections agree for each item.
+#[tokio::test]
+async fn a_gate_item_shows_a_ready_draft_of_its_thread() {
+    let g = Gate::new("ready");
+    let s = sample(&g);
+    g.exec("DELETE FROM link_check WHERE ?1", [1]);
+    // The clean text of message 1: a draft answers only a fetched message.
+    g.exec(
+        "INSERT INTO body(message_id, subject, sender, text) VALUES (?1, 'Invoice', 'ana', 'Pay?')",
+        [1],
+    );
+    // A draft of the thread of message 1, the source of Ana's ask.
+    g.exec(
+        "INSERT INTO reply_draft(thread_id, based_on, body, model, prompt, samples, created_at)
+         SELECT thread_id, id, 'Yes.', 'fake', 'draft/0.1', 0, 1 FROM message WHERE id = ?1",
+        [1],
+    );
+    let ready = |page: &Value| -> Vec<(String, Value)> {
+        page["senders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|p| p["items"].as_array().unwrap().clone())
+            .map(|d| (d["id"].as_str().unwrap().to_string(), d["ready"].clone()))
+            .collect()
+    };
+    let gate = g.get("/api/gate").await;
+    let marks = ready(&gate);
+    assert!(
+        marks.contains(&(s.ask.clone(), json!(["draft"]))),
+        "{marks:?}"
+    );
+    assert!(marks.contains(&(s.group.clone(), Value::Null)), "{marks:?}");
+    assert!(marks.contains(&(s.reply.clone(), Value::Null)), "{marks:?}");
+    assert_eq!(g.get("/api/brief").await["gate"], gate);
+    // A draft that does not answer the newest message of its thread is stale: no mark.
+    g.exec("UPDATE reply_draft SET based_on = 2 WHERE ?1", [1]);
+    let marks = ready(&g.get("/api/gate").await);
+    assert!(marks.contains(&(s.ask.clone(), Value::Null)), "{marks:?}");
+}
+
+/// Issue 478: an item at the stranger gate never shows "Summary ready",
+/// also when its thread has a summary that is ready. An item of a known
+/// person in the brief does. Red if `ready` does not read the item filter.
+#[tokio::test]
+async fn a_gate_item_shows_no_summary_and_a_brief_item_does() {
+    let g = Gate::new("ready-summary");
+    let s = sample(&g);
+    g.exec("DELETE FROM link_check WHERE ?1", [1]);
+    // Each message is fetched and understood, so each summary is ready.
+    g.exec(
+        "INSERT OR IGNORE INTO body(message_id, subject, sender, text)
+         SELECT id, 'Venue', 'ana', 'Can you book it?' FROM message WHERE ?1",
+        [1],
+    );
+    g.exec("UPDATE message SET understood_at = 1 WHERE ?1", [1]);
+    g.exec("DELETE FROM link_check WHERE ?1", [1]);
+    g.exec(
+        &format!(
+            "INSERT INTO thread_summary(thread_id, based_on, basis, text, model, prompt, created_at)
+             SELECT t.thread_id, (SELECT m.id {} {} {} LIMIT 1), {}, 'A summary.', 'fake',
+                    'summary/0.1', 1
+               FROM (SELECT DISTINCT thread_id FROM message) t WHERE ?1",
+            iris_voice::messages_sql("t.thread_id"),
+            iris_voice::ANSWERABLE,
+            iris_voice::NEWEST,
+            iris_summary::basis_sql("t.thread_id")
+        ),
+        [1],
+    );
+    let gate = g.get("/api/gate").await;
+    let marks: Vec<Value> = gate["senders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p["items"].as_array().unwrap().clone())
+        .map(|d| d["ready"].clone())
+        .collect();
+    assert!(!marks.is_empty());
+    assert!(
+        marks.iter().all(|r| !r.to_string().contains("summary")),
+        "{marks:?}"
+    );
+    let brief = g.get("/api/brief").await;
+    let you_owe: Vec<(String, Value)> = brief["you_owe"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| (d["id"].as_str().unwrap().to_string(), d["ready"].clone()))
+        .collect();
+    assert!(
+        you_owe.contains(&(s.dee_ask.clone(), json!(["summary"]))),
+        "{you_owe:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_gate_sender_with_the_name_of_a_known_person_says_so() {
     // Issue #370: a new address under the name of a known person.
@@ -788,12 +886,19 @@ async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
         "UPDATE sender SET basis = 'near copy of paypal.com' WHERE address = 'alerts@paypa1.com'",
         [],
     );
+    // The state of the mail of message 5: kind, trust offer, Undo.
+    let mail = |m: Value| {
+        (
+            m["sender_kind"].clone(),
+            m["near_copy"].clone(),
+            m["trusted_sender"].clone(),
+        )
+    };
+    let offer = |id: &str| json!({"sender": id, "of": "paypal.com"});
     // Message 5 is from the look-alike: it can be trusted.
-    let m = g.get("/api/messages/m-5").await;
-    assert_eq!(m["sender_kind"], "hostile");
     assert_eq!(
-        m["near_copy"],
-        json!({"sender": look, "of": "paypal.com", "trusted": false})
+        mail(g.get("/api/messages/m-5").await),
+        (json!("hostile"), offer(&look), Value::Null)
     );
     assert_eq!(g.get("/api/messages/m-1").await["near_copy"], Value::Null);
 
@@ -807,15 +912,11 @@ async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
         g.one::<Option<i64>>("SELECT understood_at FROM message WHERE id = 5"),
         None
     );
-    let m = g.get("/api/messages/m-5").await;
     // After a reload the mail still names the trusted sender, so the
     // person can undo the trust.
     assert_eq!(
-        (m["sender_kind"].as_str(), &m["near_copy"]),
-        (
-            Some("person"),
-            &json!({"sender": look, "of": null, "trusted": true})
-        )
+        mail(g.get("/api/messages/m-5").await),
+        (json!("person"), Value::Null, json!(look))
     );
 
     // The trusted look-alike is no reference of the near-copy rule: the
@@ -838,38 +939,46 @@ async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
         "the answer gives the kind after reopen"
     );
     assert_eq!(
-        g.one::<String>("SELECT kind FROM sender WHERE address = 'alerts@paypa1.com'"),
-        "hostile"
-    );
-    assert_eq!(
-        g.get("/api/messages/m-5").await["near_copy"],
-        json!({"sender": look, "of": "paypal.com", "trusted": false})
+        mail(g.get("/api/messages/m-5").await),
+        (json!("hostile"), offer(&look), Value::Null)
     );
 
-    // Rows that differ only in case: `near_copy` names the row of
-    // `sender_kind` (the most cautious kind), never another row.
+    // Rows that differ only in case (issue #1043): the kind and the trust
+    // offer come from the most cautious row, and the Undo of a trusted row
+    // of any case stays. Each other row state gives the same Undo.
     g.answer(&look, "trust").await;
     let upper = g.sender("ALERTS@paypa1.com", Some("hostile"));
-    g.exec(
-        "UPDATE sender SET basis = 'near copy of paypal.com' WHERE address = 'ALERTS@paypa1.com'",
-        [],
-    );
-    let m = g.get("/api/messages/m-5").await;
-    assert_eq!(
-        (m["sender_kind"].as_str(), &m["near_copy"]),
+    let set_upper = |kind: &str, by: &str, basis: Option<&str>| {
+        g.exec(
+            "UPDATE sender SET kind = ?1, decided_by = ?2, basis = ?3
+              WHERE address = 'ALERTS@paypa1.com'",
+            rusqlite::params![kind, by, basis],
+        );
+    };
+    for (kind, by, basis, want_offer) in [
         (
-            Some("hostile"),
-            &json!({"sender": upper, "of": "paypal.com", "trusted": false})
-        )
-    );
-    // A hostile row of another rule wins too, and then no trust is offered.
-    g.exec(
-        "UPDATE sender SET decided_by = 'person' WHERE address = 'ALERTS@paypa1.com'",
-        [],
-    );
-    let m = g.get("/api/messages/m-5").await;
+            "hostile",
+            "engine",
+            Some("near copy of paypal.com"),
+            offer(&upper),
+        ),
+        ("hostile", "person", None, Value::Null),
+        ("stranger", "engine", None, Value::Null),
+        ("person", "engine", None, Value::Null),
+    ] {
+        set_upper(kind, by, basis);
+        assert_eq!(
+            mail(g.get("/api/messages/m-5").await),
+            (json!(kind), want_offer, json!(look)),
+            "{kind} {by}"
+        );
+    }
+    // Undo of the trusted row works: the engine marks it again, and the
+    // offer goes to the lowest hostile row. No Undo stays.
+    set_upper("hostile", "engine", Some("near copy of paypal.com"));
+    assert_eq!(g.answer(&look, "reopen").await.0, StatusCode::OK);
     assert_eq!(
-        (m["sender_kind"].as_str(), &m["near_copy"]),
-        (Some("hostile"), &Value::Null)
+        mail(g.get("/api/messages/m-5").await),
+        (json!("hostile"), offer(&look), Value::Null)
     );
 }
