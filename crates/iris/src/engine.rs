@@ -866,7 +866,8 @@ fn understand_loop(store: Arc<Store>) {
 /// One turn of the understanding thread. The answer is the time until the
 /// next turn. After each run, idle or not, the proposal step of matters
 /// runs with its hourly gate, so a mailbox that is already understood
-/// still gets proposals. Then the nudge step ([`crate::nudge::step`]).
+/// still gets proposals. Then the nudge step ([`crate::nudge::step`]) and
+/// the summary step ([`crate::summary::step`], issue 478).
 pub fn understand_turn(store: &Store, now_ms: i64) -> Duration {
     match crate::cost::after_sync(store, now_ms) {
         Ok(crate::cost::AfterSync::Busy) => return BUSY_RETRY,
@@ -879,6 +880,9 @@ pub fn understand_turn(store: &Store, now_ms: i64) -> Duration {
     let connect = |row: &iris_understand::budget::ModelRow| crate::cost::connect(store, row);
     if let Err(e) = crate::nudge::step(store, &connect, now_ms) {
         say!("iris: nudge: {e}");
+    }
+    if let Err(e) = crate::summary::step(store, &connect, now_ms) {
+        say!("iris: summary: {e}");
     }
     UNDERSTAND_EVERY
 }

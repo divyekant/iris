@@ -801,3 +801,101 @@ fn a_turn_runs_the_nudge_step() {
     assert!(calls.load(Ordering::SeqCst) > before);
     assert_eq!(col(&store, "SELECT count(*) FROM reply_draft"), Some(0));
 }
+
+/// Each turn of the understanding thread runs the summary step (issue
+/// 478): a long thread of an item that needs the person gets a model call
+/// and a try row. Red if `understand_turn` does not call the step.
+#[test]
+fn a_turn_runs_the_summary_step() {
+    let (store, _fake) = synced("summary-turn");
+    let (url, calls) = model_server();
+    let (ok, _, err) = iris(&store, &["model", "set", "local", &url, "local-1"]);
+    assert!(ok, "{err}");
+    let (ok, _, err) = iris(&store, &["understand"]);
+    assert!(ok, "{err}");
+    let (person, ana): (i64, String) = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT id, address FROM sender WHERE kind = 'person' ORDER BY id LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    let now = iris::engine::now_ms();
+    let account = col(&store, "SELECT min(id) FROM account").unwrap();
+    // A thread of 5 messages from a known person: long enough for a summary.
+    let msgs: Vec<iris_store::NewMessage> = (0..5)
+        .map(|i| iris_store::NewMessage {
+            provider_id: format!("summary-{i}"),
+            thread_provider_id: "summary-thread".into(),
+            internal_date: Some(now - (10 - i) * 3_600_000),
+            labels: vec!["INBOX".into()],
+            header: iris_store::Header {
+                from_addr: Some(ana.clone()),
+                ..Default::default()
+            },
+            body: Some(iris_store::Body {
+                subject: "The venue".into(),
+                sender: ana.clone(),
+                text: format!("Part {i} of the plan for the venue."),
+            }),
+            ..Default::default()
+        })
+        .collect();
+    let ids = store.put_messages(account, &msgs).unwrap();
+    store
+        .write(|tx| {
+            for id in &ids {
+                tx.execute("UPDATE message SET understood_at = 1 WHERE id = ?1", [id])?;
+                tx.execute("DELETE FROM link_check WHERE message_id = ?1", [id])?;
+            }
+            tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 VALUES ('commitment', ?1, 'open', json_object('direction', 'owed_to_you',
+                         'owner', json_object('kind', 'sender', 'sender', 's-' || ?2)),
+                         1, 1)",
+                [account, person],
+            )?;
+            tx.execute(
+                "INSERT INTO item_source(item_id, message_id, role)
+                 VALUES (last_insert_rowid(), ?1, 'origin')",
+                [ids[0]],
+            )?;
+            // The hourly gate of matters holds, so its failure does not
+            // start the model wait.
+            tx.execute("INSERT INTO matter_run(id, tried_at) VALUES (1, ?1)", [now])?;
+            Ok(())
+        })
+        .unwrap();
+    let thread: i64 = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT thread_id FROM message WHERE id = ?1",
+                [ids[0]],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    let tries = |s: &Store| {
+        col(
+            s,
+            &format!("SELECT count(*) FROM thread_summary_try WHERE thread_id = {thread}"),
+        )
+    };
+    assert_eq!(tries(&store), Some(0));
+    let before = calls.load(Ordering::SeqCst);
+    iris::engine::understand_turn(&store, now);
+    // The fake server gives no "summary": the step calls, records the try
+    // as invalid and saves no summary.
+    assert_eq!(tries(&store), Some(1));
+    assert_eq!(
+        col(
+            &store,
+            &format!("SELECT invalid FROM thread_summary_try WHERE thread_id = {thread}")
+        ),
+        Some(1)
+    );
+    assert!(calls.load(Ordering::SeqCst) > before);
+    assert_eq!(col(&store, "SELECT count(*) FROM thread_summary"), Some(0));
+}
