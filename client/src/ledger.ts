@@ -91,7 +91,10 @@ export function status(e: LedgerEntry): string {
   if (e.state === "writing") return "Iris makes this change now.";
   if (e.state === "failed") {
     const part = e.messages > 0 ? ` ${e.changed.toLocaleString("en-US")} of ${count(e.messages, "message", "messages")} changed.` : "";
-    return `Failed.${part}${e.error ? ` ${e.error}` : ""}`;
+    // Spec 2 section 7.3: the messages that the recovery cannot confirm. The person checks them in the mailbox.
+    const unknown = e.unknown ?? 0;
+    const open = unknown > 0 ? ` Iris could not confirm ${count(unknown, "message", "messages")}: check ${unknown === 1 ? "it" : "them"} in your mailbox.` : "";
+    return `Failed.${part}${open}${e.error ? ` ${e.error}` : ""}`;
   }
   // An undo that skipped messages or items: an earlier undo restored them, they changed again
   // after the change, or they are gone (decision D18).

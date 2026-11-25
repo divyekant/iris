@@ -4,7 +4,7 @@
   and links its full list. Read only in release 1.
 -->
 <script lang="ts">
-  import { get, loadBrief, newest, readStatus, type Brief, type Item, type Job, type Status } from "../api";
+  import { get, loadBrief, newest, own, post, readStatus, type Brief, type Item, type Job, type Status } from "../api";
   import { poll as every, watch } from "../clock";
   import NoModel from "./NoModel.svelte";
   import ModelWait from "./ModelWait.svelte";
@@ -148,6 +148,23 @@
   let picked = $state("");
   // Else a question with an unsent answer stays on the card while it is open, so a newer question never takes the field away.
   let shown = $derived(questions.find((q) => questionKey(q) === picked) ?? questions.find((q) => drafts[questionKey(q)]?.trim()) ?? questions[0]);
+  // Spec 2 section 7.3: the line of the changes that Iris could not confirm stays until you dismiss it.
+  // The dismissal names the entries that the line showed, so a later failure shows a new line.
+  let dismissing = $state(false);
+  let dismissProblem = $state("");
+  async function dismissUnconfirmed() {
+    const entries = brief.unconfirmed?.entries ?? [];
+    dismissing = true;
+    dismissProblem = "";
+    try {
+      await post("ledger/unconfirmed/dismiss", { entries });
+      brief = { ...brief, unconfirmed: { messages: 0, entries: [] } };
+    } catch (e) {
+      dismissProblem = own(e);
+    } finally {
+      dismissing = false;
+    }
+  }
   function nextQuestion() {
     const at = shown ? questions.indexOf(shown) : -1;
     picked = questionKey(questions[(at + 1) % questions.length]);
@@ -465,6 +482,15 @@
   {#if brief.hostile > 0}
     <p class="warning">Iris found {brief.hostile} hostile messages in the last 7 days. The brief does not show their subject or their sender.</p>
   {/if}
+  {#if (brief.unconfirmed?.messages ?? 0) > 0}
+    {@const n = brief.unconfirmed?.messages ?? 0}
+    <p class="warning unconfirmed">
+      Iris could not confirm a change to {n} {n === 1 ? "message" : "messages"}. Check {n === 1 ? "it" : "them"} in your mailbox.
+      <a class="touch" href="#/history">See what Iris did</a>
+      <button type="button" class="all touch" onclick={dismissUnconfirmed} disabled={dismissing}>Dismiss</button>
+    </p>
+    {#if dismissProblem}<p role="alert">{dismissProblem}</p>{/if}
+  {/if}
   {#if brief.not_understood > 0}
     <p>Iris could not read {brief.not_understood} messages. They stay in your mailbox as they are.</p>
   {/if}
@@ -653,6 +679,10 @@
     color: var(--color-text);
     border-left: 4px solid var(--color-warning);
     padding-left: var(--space-3);
+  }
+  .unconfirmed a,
+  .unconfirmed button {
+    margin-left: var(--space-2);
   }
   @media (max-width: 600px) {
     h1 {

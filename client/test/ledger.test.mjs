@@ -68,6 +68,12 @@ test("a failed or a running entry says so; a done entry needs no words", () => {
   assert.equal(l.status(e({ state: "writing" })), "Iris makes this change now.");
   assert.equal(l.status(e({ state: "failed", messages: 40, changed: 12, error: "Gmail refused one call." })), "Failed. 12 of 40 messages changed. Gmail refused one call.");
   assert.equal(l.status(e({ state: "failed", messages: 0, items: 1, error: null })), "Failed.");
+  // Spec 2 section 7.3 (issue 216): the messages that the recovery cannot confirm.
+  assert.equal(
+    l.status(e({ state: "failed", messages: 3, changed: 1, unknown: 2, error: "Gmail did not answer." })),
+    "Failed. 1 of 3 messages changed. Iris could not confirm 2 messages: check them in your mailbox. Gmail did not answer.",
+  );
+  assert.equal(l.status(e({ state: "failed", messages: 1, changed: 0, unknown: 1, error: null })), "Failed. 0 of 1 message changed. Iris could not confirm 1 message: check it in your mailbox.");
 });
 
 test("an undo that skipped messages says so, and the change keeps its Undo (D18)", () => {
