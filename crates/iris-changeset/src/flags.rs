@@ -82,8 +82,9 @@ const ATTACHMENT_WORDS: [&str; 21] = [
     "enclosing",
 ];
 
-/// The byte ranges of the words of a text, as the full-text index splits
-/// them: runs of letters and digits.
+/// The byte ranges of the words of a text for the word rules (money, date,
+/// attachment): runs of letters and digits. This is not the split of the
+/// full-text index: the copied-run check uses `iris_store::index_tokens`.
 fn word_spans(text: &str) -> Vec<Range<usize>> {
     let mut out = Vec::new();
     let mut start = None;
@@ -103,8 +104,8 @@ fn word_spans(text: &str) -> Vec<Range<usize>> {
     out
 }
 
-/// The words of a text, as the full-text index splits them: runs of
-/// letters and digits, in lower case.
+/// The words of a text for the word rules: runs of letters and digits, in
+/// lower case ([`word_spans`]).
 pub fn words(text: &str) -> Vec<String> {
     word_spans(text)
         .into_iter()
