@@ -311,6 +311,16 @@ to a new mail. A saved form of the draft link does not show.
 If the draft read of the Outbox fails after a cancel, each later poll of
 the Outbox tries it again, until the engine answers.
 
+A send of a request in the review (spec 2 section 5.5, issue 208) whose
+draft Iris can read shows "Deny this send and change it yourself". The
+press denies that send only, with the hash that the review showed, then
+opens the write view of its draft (`#/write/d-N`). The engine gives
+`change` for the draft after the deny. The next press of Send there is a
+new write of the person, with the hold of the Outbox. If the decision is
+refused (409) or has no answer, the review loads the request again and the
+view does not move. A `draft` action that waits has no Gmail draft yet,
+so it has no change link in this version. A limit issue records this.
+
 The write view, in the state `stopped` with `change` not `null`, shows
 "Change and send". The press opens the form with the content of the
 draft. For `"update"`, it keeps `d-N`, and the next press of Send sends

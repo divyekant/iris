@@ -962,3 +962,38 @@ test("a request whose author makes a new revision takes no decision until it is 
     view.destroy();
   }
 });
+
+test("a send with a draft offers its change: the press denies only that send, then opens the draft in the write view (issue 208)", async () => {
+  const cs = fx.changesets.find((c) => c.id === "cs-79");
+  let answer = [200, { ...structuredClone(cs), actions: cs.actions.map((a) => (a.n === 1 ? { ...a, decision: { state: "denied", by: "person" } } : a)) }];
+  const asked = serve({ "changesets/cs-79/decide": () => answer });
+  globalThis.location = window.location;
+  location.hash = "#/review";
+  const view = await mount("/src/views/Request.svelte", { changeset: structuredClone(cs) });
+  try {
+    const change = () => view.target.querySelector("button.change");
+    await until(() => change());
+    // Only the send has it, not the label.
+    assert.equal(view.target.querySelectorAll("button.change").length, 1);
+    change().click();
+    await until(() => location.hash === "#/write/d-21");
+    const [, body] = asked.find((x) => Array.isArray(x) && x[0] === "changesets/cs-79/decide");
+    assert.deepEqual(body.actions, [{ revision: 1, n: 1, approve: false, hash: cs.actions[0].hash }]);
+
+    // A request that changed: no deny, no move, and the request as it is now.
+    location.hash = "#/review";
+    answer = [409, { error: "The changeset has a new revision." }];
+    const again = await mount("/src/views/Request.svelte", { changeset: structuredClone(cs) });
+    try {
+      await until(() => again.target.querySelector("button.change"));
+      again.target.querySelector("button.change").click();
+      await until(() => /did not deny this send/.test(text(again.target)));
+      assert.equal(location.hash, "#/review");
+    } finally {
+      again.destroy();
+    }
+  } finally {
+    view.destroy();
+    delete globalThis.location;
+  }
+});
