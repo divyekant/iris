@@ -43,13 +43,15 @@ INSERT INTO fixed_due(message_id)
   SELECT id FROM message WHERE fixed_rules = 'unknown';
 
 -- The revision of the gate of each sender (issue 934). Each change of
--- `declined_at` adds one, so a decline and a reopen during one model call
--- show as a change, also when `declined_at` is NULL again at the end. The
+-- `declined_at`, `kind` or `address` adds one: these decide if the decline
+-- applies. So a change and its undo during one model call show as a
+-- change, also when the row is the same again at the end. The
 -- understanding runner compares the revision before and after a call.
 ALTER TABLE sender ADD COLUMN gate_rev INTEGER NOT NULL DEFAULT 0;
 
-CREATE TRIGGER sender_gate_rev AFTER UPDATE OF declined_at ON sender
-  WHEN OLD.declined_at IS NOT NEW.declined_at
+CREATE TRIGGER sender_gate_rev AFTER UPDATE OF declined_at, kind, address ON sender
+  WHEN OLD.declined_at IS NOT NEW.declined_at OR OLD.kind IS NOT NEW.kind
+    OR OLD.address IS NOT NEW.address
 BEGIN
   UPDATE sender SET gate_rev = gate_rev + 1 WHERE id = NEW.id;
 END;

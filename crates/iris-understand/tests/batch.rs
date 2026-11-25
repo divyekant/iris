@@ -1463,6 +1463,40 @@ fn a_decline_and_a_reopen_around_a_refused_call_leave_no_mark() {
     }
 }
 
+/// A kind change and its undo during a refused call, for a sender with a
+/// decline (#934): the decline applied for a moment, so the gate changed.
+/// The refusal writes no mark.
+#[test]
+fn a_kind_change_and_its_undo_around_a_refused_call_leave_no_mark() {
+    let b = store("refusal-kind-flip");
+    b.model(false, None);
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    let db = b._dir.0.join("iris.db");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO sender(address, kind, decided_by, declined_at)
+             VALUES ('ana@example.org', 'person', 'person', 1)
+             ON CONFLICT(address) DO UPDATE SET declined_at = 1, kind = 'person',
+               decided_by = 'person'",
+            [],
+        )
+        .unwrap();
+    b.script.push(Err(ModelError::Budget("refused".into())));
+    *b.script.during.borrow_mut() = Some(std::boxed::Box::new(move || {
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.execute("UPDATE sender SET kind = 'stranger'", [])
+            .unwrap();
+        c.execute("UPDATE sender SET kind = 'person'", []).unwrap();
+    }));
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.script.calls(), 1);
+    assert_eq!(
+        b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
+        Some(0)
+    );
+}
+
 /// A change of the thread context during a refused call (a SPAM label on
 /// an earlier message) leaves no mark either (#153).
 #[test]
