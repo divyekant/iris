@@ -403,6 +403,32 @@ fn a_signal_past_its_time_is_not_live() {
     assert!(matches!(p, Err(Error::Bad(_))), "{p:?}");
 }
 
+/// A proposed signal that passes its `expires` time before the confirm,
+/// with no engine tick, makes the proposal not valid for each decision
+/// (issue #985).
+#[test]
+fn a_signal_that_expires_before_the_confirm_is_not_confirmed() {
+    let b = setup("expired-confirm", 4, &FORMS);
+    let p = write(&b.store, |tx| {
+        insert_proposal(tx, "P", "fake", None, &[3, 6], 1)
+    })
+    .unwrap();
+    sql(
+        &b,
+        "UPDATE item SET doc = json_set(doc, '$.expires', '1970-01-01T00:00:01Z') WHERE id = 6",
+    )
+    .unwrap();
+    assert!(matches!(
+        confirm(&b.store, p, "P", &[3, 6], 1_000),
+        Err(Error::Conflict(_))
+    ));
+    // The refusal rolled back the expiry; a decline must expire it too.
+    assert!(matches!(
+        decline(&b.store, p, 1_000),
+        Err(Error::Conflict(_))
+    ));
+}
+
 #[test]
 fn an_agent_proposes_and_the_person_decides() {
     let b = setup("agent", 4, &FORMS);

@@ -67,7 +67,7 @@ export const gate: GatePage = {
   count: 3,
   next: null,
   senders: [
-    { id: "p-71", name: "Maria Ruiz", address: "maria@brightpath.example", count: 2, items: [strangers[1], strangers[0]] },
+    { id: "p-71", name: "Maria Ruiz", address: "maria@brightpath.example", count: 2, items: [{ ...strangers[1], ready: ["draft"] }, strangers[0]] },
     { id: "p-72", name: "Leo Park", address: "leo@quartzlabs.example", count: 1, items: [strangers[2]] },
     { id: "p-73", name: null, address: "billing@vendorhub.example", count: 1, items: [strangers[3]] },
   ],
