@@ -1548,16 +1548,28 @@ fn run_store(cli: Cli) -> Result<(), String> {
         cli.command,
         Command::Mirror { .. } | Command::Understand { .. }
     ) {
+        // Each step runs, also when an earlier one fails (issue #1040).
         let attention = open().and_then(|s| {
-            iris_policy::refresh_attention(&s, engine::now_ms().div_euclid(1000))
-                .map_err(|e| format!("attention: {e}"))?;
-            // The measure "time to the first brief" ends at the first brief with content.
-            iris_api::measures::check_brief(&s, engine::now_ms())
-                .map_err(|e| format!("measures: {e}"))?;
-            // A watch matches with no engine too (issue #260).
-            s.check_watches(engine::now_ms())
-                .map(|_| ())
-                .map_err(|e| format!("watches: {e}"))
+            let now = engine::now_ms();
+            let errors: Vec<String> = [
+                iris_policy::refresh_attention(&s, now.div_euclid(1000))
+                    .map(|_| ())
+                    .map_err(|e| format!("attention: {e}")),
+                // The measure "time to the first brief" ends at the first brief with content.
+                iris_api::measures::check_brief(&s, now).map_err(|e| format!("measures: {e}")),
+                // A watch matches with no engine too (issue #260).
+                s.check_watches(now)
+                    .map(|_| ())
+                    .map_err(|e| format!("watches: {e}")),
+            ]
+            .into_iter()
+            .filter_map(Result::err)
+            .collect();
+            if errors.is_empty() {
+                Ok(())
+            } else {
+                Err(errors.join("\n"))
+            }
         });
         if let Err(e) = attention {
             return Err(match result {
