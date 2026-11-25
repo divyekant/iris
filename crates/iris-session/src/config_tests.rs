@@ -552,3 +552,21 @@ fn read_paths_are_absolute_with_no_dots() {
         .message
         .contains("more than 16"));
 }
+
+#[test]
+fn allow_local_is_one_port_from_1_to_65535() {
+    let ok = parse_agents("[agent.t]\ncommand = [\"/bin/t\"]\nallow_local = 11434\n").unwrap();
+    assert_eq!(ok.agents["t"].allow_local, Some(11434));
+    let none = parse_agents("[agent.t]\ncommand = [\"/bin/t\"]\n").unwrap();
+    assert_eq!(none.agents["t"].allow_local, None);
+    for bad in ["0", "65536", "-1", "\"11434\"", "[11434]", "1.5"] {
+        let text = format!("[agent.t]\ncommand = [\"/bin/t\"]\nallow_local = {bad}\n");
+        let e = parse_agents(&text).unwrap_err();
+        assert_eq!(e.line, 3, "{bad}: {e}");
+        // A value of another type gets the error of the parser.
+        assert!(
+            e.message.contains("allow_local") || e.message.contains("invalid type"),
+            "{bad}: {e}"
+        );
+    }
+}

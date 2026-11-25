@@ -338,7 +338,7 @@ fn migration_40_marks_each_understood_thread() {
             tx.execute_batch(
                 "DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender;
                  DROP TRIGGER talk_due_sender_remove; DROP TRIGGER model_declined_end; DROP TRIGGER model_declined_end_remove; DROP TABLE model_declined; DROP TRIGGER IF EXISTS understand_reset; DROP TRIGGER IF EXISTS understand_new_content; DROP TABLE talk_due; DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
-                 DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 39;",
+                 DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 39;",
             )?;
             Ok(())
         })
@@ -467,6 +467,37 @@ fn a_refused_key_gives_the_reservation_back() {
     assert_eq!((r.calls, r.input_tokens, r.unknown_calls), (1, 0, 0));
     assert_eq!(b.budget(), Some(10_000));
     assert!(!b.understood(m));
+}
+
+/// A priced model stops the run after a refusal for size (the charge is
+/// not known), so the call with the small data budget (#101) cannot go
+/// out. The refusal then counts as a failed try, as before: the message
+/// does not wait for a model change.
+#[test]
+fn a_priced_refusal_for_size_of_large_data_counts_a_failed_try() {
+    let b = store("size");
+    b.model(true, Some(10_000));
+    b.script.push(Err(ModelError::Rejected {
+        status: 413,
+        message: "too large".into(),
+    }));
+    let big = format!(
+        "From: Ana Lee <ana@example.org>\nTo: owner@example.com\nSubject: Big\n\
+         Message-ID: <big@example.org>\nDate: Tue, 30 Dec 2025 08:00:00 +0000\n\
+         Content-Type: text/plain\n\nCan you send the slides?\n{}\n",
+        "Notes. ".repeat(5000)
+    );
+    let m = b.add_raw("big", "a", 1, &big, &["INBOX"]);
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.script.calls(), 1);
+    assert_eq!(
+        b.col(&format!("SELECT tries FROM message WHERE id = {m}")),
+        Some(1)
+    );
+    assert_eq!(
+        b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
+        Some(0)
+    );
 }
 
 #[test]
@@ -1057,7 +1088,7 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                  ALTER TABLE account DROP COLUMN categories_off_at;
                  DROP TRIGGER understand_owner_label_add; DROP TRIGGER understand_owner_label_remove;
                  DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower; DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender; DROP TRIGGER talk_due_sender_remove; DROP TRIGGER model_declined_end; DROP TRIGGER model_declined_end_remove; DROP TABLE model_declined; DROP TRIGGER IF EXISTS understand_reset; DROP TRIGGER IF EXISTS understand_new_content; DROP TABLE talk_due; DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
-                 DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 19;",
+                 DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 19;",
             )?;
             Ok(())
         })

@@ -484,7 +484,7 @@ impl Isolation for Seatbelt {
             data_dir: self.data_dir.clone(),
         };
         let mut argv: Vec<OsString> = vec![SANDBOX_EXEC.into()];
-        argv.extend(sandbox_args(&paths, None));
+        argv.extend(sandbox_args(&paths, &[]));
         argv.push("/usr/bin/true".into());
         let sandbox = "the macOS sandbox (sandbox-exec) does not work";
         match self.sys.run(&argv, left()) {
@@ -528,6 +528,7 @@ impl Isolation for Seatbelt {
         program: &Path,
         args: &[String],
         reads: &[PathBuf],
+        local_port: Option<u16>,
     ) -> Command {
         let real = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         let program = real(program);
@@ -543,7 +544,10 @@ impl Isolation for Seatbelt {
             reads: reads.to_vec(),
             data_dir: self.data_dir.clone(),
         };
-        let mut a = sandbox_args(&paths, egress_port);
+        // The egress port and the local port of the adapter: TCP on
+        // localhost only.
+        let ports: Vec<u16> = egress_port.into_iter().chain(local_port).collect();
+        let mut a = sandbox_args(&paths, &ports);
         a.push("/usr/bin/env".into());
         let var = |k: &str, v: &Path| {
             let mut s = OsString::from(format!("{k}="));
@@ -559,6 +563,9 @@ impl Isolation for Seatbelt {
                 path.push(p);
             }
             a.push(path);
+        }
+        if let Some(port) = local_port {
+            a.push(format!("{}={port}", crate::LOCAL_PORT_VAR).into());
         }
         a.push(program.into_os_string());
         a.extend(args.iter().map(OsString::from));
@@ -592,8 +599,8 @@ impl Isolation for Seatbelt {
 
 /// The options of `sandbox-exec` for the profile of `paths`: each
 /// parameter, then the profile text.
-fn sandbox_args(paths: &Paths, egress_port: Option<u16>) -> Vec<OsString> {
-    let (text, params) = profile(paths, egress_port);
+fn sandbox_args(paths: &Paths, ports: &[u16]) -> Vec<OsString> {
+    let (text, params) = profile(paths, ports);
     let mut a: Vec<OsString> = Vec::new();
     for (k, v) in params {
         let mut d = OsString::from(format!("{k}="));
@@ -686,8 +693,9 @@ const SYSCTL_NAMES: &[&str] = &[
 
 /// The Seatbelt profile of a session, and its parameters (`-D`). Each path
 /// of the session goes in a parameter, never in the profile text, so no
-/// path can change the profile.
-pub fn profile(p: &Paths, egress_port: Option<u16>) -> (String, Vec<(String, PathBuf)>) {
+/// path can change the profile. `ports` are the TCP ports on localhost that
+/// the session can connect to: the egress port and the local port.
+pub fn profile(p: &Paths, ports: &[u16]) -> (String, Vec<(String, PathBuf)>) {
     let mut params: Vec<(String, PathBuf)> = Vec::new();
     let mut param = |path: &Path| {
         let k = format!("P{}", params.len());
@@ -744,7 +752,7 @@ pub fn profile(p: &Paths, egress_port: Option<u16>) -> (String, Vec<(String, Pat
     s.push_str(&format!("(allow file-read* {})\n", reads.join(" ")));
     s.push_str(&format!("(allow file-read-metadata {})\n", above.join(" ")));
     s.push_str("(allow file-write* (literal \"/dev/null\"))\n");
-    if let Some(port) = egress_port {
+    for port in ports {
         s.push_str(&format!(
             "(allow network-outbound (remote tcp \"localhost:{port}\"))\n"
         ));

@@ -61,6 +61,9 @@ pub struct Custom {
     /// (`docs/specs/2026-11-25-agents-read-paths-local-port.md`). The
     /// launch checks them with [`crate::read_paths::check`].
     pub read_paths: Vec<PathBuf>,
+    /// One TCP port on `127.0.0.1` that the session can connect to (same
+    /// spec).
+    pub allow_local: Option<u16>,
 }
 
 /// An error of the file, with its line (from 1; 0 if no line applies).
@@ -100,6 +103,8 @@ struct RawAgent {
     allow_hosts: Option<Spanned<Vec<Spanned<String>>>>,
     #[serde(default)]
     read_paths: Option<Spanned<Vec<Spanned<String>>>>,
+    #[serde(default)]
+    allow_local: Option<Spanned<i64>>,
 }
 
 #[derive(Deserialize)]
@@ -259,6 +264,18 @@ fn check_agent(name: &str, raw: RawAgent, table: usize) -> Result<Custom, (usize
     for r in &reads {
         check_read_path(r.get_ref()).map_err(|m| (r.span().start, m))?;
     }
+    let allow_local = match raw.allow_local {
+        Some(p) => Some(
+            u16::try_from(*p.get_ref())
+                .ok()
+                .filter(|p| *p != 0)
+                .ok_or((
+                    p.span().start,
+                    format!("allow_local {} is not a port from 1 to 65535", p.get_ref()),
+                ))?,
+        ),
+        None => None,
+    };
     Ok(Custom {
         command: command.into_iter().map(Spanned::into_inner).collect(),
         pass_env: raw.pass_env.into_iter().map(Spanned::into_inner).collect(),
@@ -267,6 +284,7 @@ fn check_agent(name: &str, raw: RawAgent, table: usize) -> Result<Custom, (usize
             .into_iter()
             .map(|r| PathBuf::from(r.into_inner()))
             .collect(),
+        allow_local,
     })
 }
 
@@ -358,6 +376,8 @@ pub struct Adapter {
     /// The read paths of the file, as written. The built-in adapters have
     /// none.
     pub read_paths: Vec<PathBuf>,
+    /// The local port of the file. The built-in adapters have none.
+    pub allow_local: Option<u16>,
 }
 
 /// Resolves the adapter `name`: a built-in adapter or one of the file. The
@@ -367,6 +387,7 @@ pub struct Adapter {
 pub fn adapter(file: &AgentsFile, name: &str, path: Option<&OsStr>) -> Result<Adapter, String> {
     let prompt = PROMPT.to_string();
     let mut read_paths = Vec::new();
+    let mut allow_local = None;
     let (program, args, pass_env, allow_hosts) = match name {
         "claude-code" => (
             "claude".to_string(),
@@ -408,6 +429,7 @@ pub fn adapter(file: &AgentsFile, name: &str, path: Option<&OsStr>) -> Result<Ad
             let mut args: Vec<String> = c.command[1..].to_vec();
             args.push(prompt);
             read_paths = c.read_paths.clone();
+            allow_local = c.allow_local;
             (
                 c.command[0].clone(),
                 args,
@@ -425,6 +447,7 @@ pub fn adapter(file: &AgentsFile, name: &str, path: Option<&OsStr>) -> Result<Ad
         pass_env,
         allow_hosts,
         read_paths,
+        allow_local,
     })
 }
 

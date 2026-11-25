@@ -197,7 +197,7 @@ engine computes them from the store. Nothing leaves the machine.
 
 | Endpoint | Does |
 |---|---|
-| `GET /api/measures` | `{"days", "first_brief", "mirror", "memory", "approvals", "undo"}`. See below. |
+| `GET /api/measures` | `{"days", "first_brief", "mirror", "memory", "approvals", "undo", "sends"}`. See below. |
 
 - `days`: the newest 28 days of use, the newest first, each
   `{"day", "opens"}`. `opens` counts the different source mails that the
@@ -228,6 +228,11 @@ engine computes them from the store. Nothing leaves the machine.
   the count.
 - `undo`: `{"applied", "undone"}`. `applied` counts the applied actions, and
   not an undo. `undone` counts the actions of them that an undo reversed.
+- `sends`: `{"sent", "unreviewed_after_hostile"}` (issue 472). `sent` counts
+  the applied sends. `unreviewed_after_hostile` counts the applied sends
+  that no person decided and whose draft thread had hostile evidence at the
+  claim of the send (`ledger.hostile_before`, migration 59). A send from
+  before migration 59 has no record and does not count. The target is zero.
 
 Each request of the web client while the person is active (an input of the
 person in the last 5 minutes) has the header `x-iris-day: YYYY-MM-DD`, the

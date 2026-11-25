@@ -209,8 +209,10 @@ object, and JSON Lines for a list.
 ## Changesets from the terminal
 
 These commands talk to the running engine through the socket `iris.sock` in
-the data folder. They do not read the store. Start the engine with
-`iris serve` first. With no engine, they exit with code 4.
+the data folder. They do not read the store. They need a running engine.
+After `install.sh`, the background service runs the engine. For a source
+build, or an install with no service, run `iris serve` first (see "Connect a
+Gmail account", step 4). With no engine, they exit with code 4.
 
 | Command | Does |
 |---|---|
@@ -255,8 +257,9 @@ that adds an action gives the JSON `{"changeset": ..., "n": ...}`.
 
 The tools take the same path as the command, with the same author (`local`),
 the same policy and the same review. The read tools and the watch tools use
-the store directly. The other tools need the engine: start `iris serve`
-first. A failed tool call
+the store directly. The other tools need a running engine: the background
+service after `install.sh`, or `iris serve` (see "Connect a Gmail account",
+step 4). A failed tool call
 gives the error line and the exit code of the command. MCP has no tool to
 approve, to deny or to change the policy. Only the web client does these
 steps.
@@ -316,6 +319,10 @@ max_minutes = 60
 
 Iris adds the fixed prompt as the last argument of `command`.
 
+CAUTION: The agent can read each file in a read path and send it to its
+hosts. List only folders of programs. Do not list a folder with keys,
+logins or mail.
+
 If the program of an agent needs files outside the system folders (for
 example a Node.js program in `~/.nvm`), list the folders in `read_paths`:
 
@@ -324,10 +331,6 @@ example a Node.js program in `~/.nvm`), list the folders in `read_paths`:
 command = ["/home/me/.nvm/versions/node/v22.11.0/bin/node", "/home/me/tools/agent.js"]
 read_paths = ["/home/me/.nvm/versions/node/v22.11.0", "/home/me/tools"]
 ```
-
-CAUTION: The agent can read each file in a read path and send it to its
-hosts. List only folders of programs. Do not list a folder with keys,
-logins or mail.
 
 - The session can read a read path, not write it. Each path is absolute, at
   most 16 paths.
@@ -339,6 +342,24 @@ logins or mail.
   the data folder or of a home folder.
 - The built-in agents get no read paths. They sign in only with their
   variables.
+
+CAUTION: The agent can send the files of the job to the program on the
+local port. Give only the port of a model server. Do not give the port of
+a service that runs commands or holds data (for example a Docker API or a
+database).
+
+If the agent uses a model server on this machine (for example a local
+model on port 11434), give its port in `allow_local`:
+
+```toml
+[agent.my-agent]
+command = ["/usr/local/bin/my-agent"]
+allow_local = 11434
+```
+
+- The session can connect to `127.0.0.1:<allow_local>` over TCP, and to
+  no other local port. The agent gets the port in `IRIS_LOCAL_PORT`.
+- One port from 1 to 65535 for each agent. The built-in agents get none.
 
 On Linux, the sandbox needs `bwrap`. [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 gives the prerequisites of the sandbox on Linux and on macOS.
@@ -377,7 +398,8 @@ A watch tells you one time when a new mail matches a search text.
 | `iris watch remove <id>` | Removes the watch (`w-3`). |
 
 Test the text with `iris search` first. Only mail that arrives after the
-watch can match. `iris serve` checks each minute. Mail that you send, drafts
+watch can match. The engine checks each minute, and `iris mirror` and
+`iris understand` check before they end. Mail that you send, drafts
 and hostile mail never match.
 
 ## Understand the mail

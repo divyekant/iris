@@ -2,7 +2,7 @@
 
 - Date: 2026-11-25
 - Card: none (open-issues sweep of 2026-11-25, session group: issues #505 and #406)
-- Status: Built (read paths); allow_local to come
+- Status: Built
 
 ## Problem
 
@@ -147,8 +147,9 @@ A link inside a read path that points outside it stays a link in the
 view. Its target is visible only if the view holds the target.
 
 The launch refuses `allow_local` when it is the same port as the egress
-port of the session. The egress port comes from the system, so the
-launch takes a new egress port in that case.
+port of the session: the start stops with a reason. The egress port comes
+from the system, so this is rare, and the next run of the job gets a new
+egress port.
 
 ### Linux
 
@@ -176,6 +177,9 @@ launch takes a new egress port in that case.
   child process as the egress listener (sandbox spec, "Egress on Linux",
   step 1). A second relay thread accepts each connection and connects to
   `127.0.0.1:<allow_local>` on the host, with the limit of 8 connections.
+  The helper reads the port from the pair `--setenv IRIS_LOCAL_PORT <port>`
+  in the options of `bwrap` (before `--`), which `command()` writes. The
+  agent gets the same variable.
   The relay copies bytes only. The local relay connects from the address
   `127.0.0.1`, not the session address: the server on the port is a
   program of the person, not an Iris proxy.
@@ -199,7 +203,9 @@ launch takes a new egress port in that case.
 
 ### Effect on the agent
 
-The variables of the session do not change. The person sets the address
+A session with `allow_local` gets one new variable, `IRIS_LOCAL_PORT`,
+with the port. A session without the key gets no new variable. The
+person sets the address
 of the model server in the arguments or the settings of the tool, for
 example `http://127.0.0.1:11434/v1`. The local relay has no proxy step,
 so a client must not send the request to `HTTPS_PROXY`; a tool that does

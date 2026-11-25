@@ -785,6 +785,43 @@ fn a_removed_account_ends_its_new_mail_drafts() {
     }
 }
 
+/// No new action targets mail of an account in state `removing`, while
+/// the removal deletes its rows (issue 1041): a reply to a thread, a
+/// mailbox verb on a thread or a message.
+#[test]
+fn no_new_action_targets_mail_of_a_removing_account() {
+    let dir = TempDir::new("removing");
+    let s = store(&dir);
+    s.write(|tx| Ok(tx.execute("UPDATE account SET state = 'removing' WHERE id = 1", [])?))
+        .unwrap();
+    let cases: [(Verb, &str, Value); 3] = [
+        (Verb::Draft, "t-1", REPLY()),
+        (Verb::Archive, "t-1", json!({})),
+        (Verb::Archive, "m-1", json!({})),
+    ];
+    for (verb, target, a) in cases {
+        let who = author(AuthorKind::Agent);
+        let cs = create(&s, &who, NOW).unwrap();
+        if add_action(&s, cs, &who, verb, &[target], &args(a), None).is_ok() {
+            let _ = submit(&s, cs, &who, "Do it.", NOW);
+        }
+        let open: i64 = s
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM changeset_action
+                     WHERE changeset_id = ?1 AND state IN ('proposed', 'approved')",
+                    [cs],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            open, 0,
+            "{verb:?} {target}: a new action targets a removing account"
+        );
+    }
+}
+
 /// No new action can name a kept draft of a removed account (issue 1014).
 #[test]
 fn a_kept_draft_of_a_removed_account_is_no_target() {
