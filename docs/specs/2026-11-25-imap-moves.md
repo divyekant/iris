@@ -139,9 +139,15 @@ verbs `archive`, `inbox`, `trash` and `untrash`:
 
 - Step 2 (the read before the claim) calls `move_plan` for the messages
   that are not gone. It skips each message with `false`, as it skips a
-  message that already has the target state today. A refusal ends the
-  action `failed` before the claim, so no message moves and no ledger
-  message row says that one did. The label read of step 2 stays for the
+  message that already has the target state today. A definite refusal
+  ends the action with `Run::fail_unclaimed`, as a refused label create
+  does today: one transaction, with the checks of the claim (the mode and
+  the expiry), makes a ledger entry with no message in `failed`, so the
+  `action_state` trigger moves the action to `failed`. No message moves,
+  and no ledger message row says that one did. An unknown error of the
+  plan read (`Transport`) stops the apply before the claim, with no ledger
+  entry; the action stays approved, and the next apply reads again,
+  because the plan writes nothing. The label read of step 2 stays for the
   `pre` labels of the ledger.
 - Step 4 calls `relocate` in place of `modify`, `trash` and `untrash`: one
   call for each batch of the moved messages.
@@ -247,7 +253,8 @@ write, or `Transport` (unknown) after the first write.
 | No archive folder, for `archive` or `inbox` | `Api` 400 `noArchive`, nothing sent | `move_without_folder` |
 | No trash folder | `Api` 400 `noTrash`, nothing sent | `move_without_folder` |
 | Two archive folders or two trash folders | `Api` 400 `ambiguousArchive` or `ambiguousTrash`, nothing sent | `move_ambiguous_folder` |
-| An action with one message in `INBOX` and one in a user folder, `\Sent`, `\Drafts` or `\Junk` | the plan refuses, the action is `failed` before the claim, nothing moves | `move_from_other_folder_refuses` |
+| An action with one message in `INBOX` and one in a user folder, `\Sent`, `\Drafts` or `\Junk` | the plan refuses; `fail_unclaimed` gives a `failed` ledger entry with no message and a `failed` action; nothing moves | `move_from_other_folder_refuses` |
+| A lost connection during the plan read | no ledger entry, the action stays approved, nothing moves | `move_plan_transport_error` |
 | A new `UIDVALIDITY` before the first `UID MOVE` | `NotFound`, nothing sent | `move_uidvalidity` |
 | A new `UIDVALIDITY` after a `UID MOVE` of another folder | `Transport`, no more writes | `move_uidvalidity` |
 | `OK` with no `COPYUID`, or without each asked UID | `Transport` | `move_partial_copyuid` |
