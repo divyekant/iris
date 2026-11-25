@@ -409,7 +409,7 @@ fn paths(work: &str) -> Paths {
 
 #[test]
 fn the_profile_denies_by_default_and_allows_only_the_session() {
-    let (text, params) = profile(&paths("/data/jobs/1/work"), Some(4000));
+    let (text, params) = profile(&paths("/data/jobs/1/work"), &[4000]);
     assert!(text.starts_with("(version 1)\n(deny default)\n"));
     assert!(text.contains("(remote tcp \"localhost:4000\")"));
     assert!(!text.contains("remote ip"), "UDP must stay refused");
@@ -454,7 +454,7 @@ fn the_profile_denies_by_default_and_allows_only_the_session() {
         p("/Users/a/.local/bin")
     )));
     // No egress port: no TCP rule.
-    let (text, _) = profile(&paths("/w"), None);
+    let (text, _) = profile(&paths("/w"), &[]);
     assert!(!text.contains("remote tcp"));
 }
 
@@ -490,7 +490,7 @@ fn strip_params(text: &str) -> String {
 fn no_path_reaches_the_profile_text() {
     let mut seed = 0x9e37_79b9_7f4a_7c15u64;
     let chars: Vec<char> = "a/\")( \n\\;#|.".chars().collect();
-    let (base, _) = profile(&paths("/w"), Some(1));
+    let (base, _) = profile(&paths("/w"), &[1]);
     let base = strip_params(&base);
     for _ in 0..300 {
         let mut w = String::from("/");
@@ -500,7 +500,7 @@ fn no_path_reaches_the_profile_text() {
                 .wrapping_add(1442695040888963407);
             w.push(chars[(seed >> 33) as usize % chars.len()]);
         }
-        let (text, params) = profile(&paths(&w), Some(1));
+        let (text, params) = profile(&paths(&w), &[1]);
         assert_eq!(strip_params(&text), base, "{w:?}");
         assert!(params.iter().any(|(_, v)| v == Path::new(&w)));
     }
@@ -706,6 +706,7 @@ fn the_command_runs_the_program_in_the_profile_with_the_private_folders() {
         &program,
         &["--task".to_string(), "a b".to_string()],
         &[],
+        Some(11434),
     );
     assert_eq!(c.program, PathBuf::from(SANDBOX_EXEC));
     let a: Vec<String> = c
@@ -719,6 +720,13 @@ fn the_command_runs_the_program_in_the_profile_with_the_private_folders() {
     assert_eq!(p + 2, env);
     assert!(a[p + 1].starts_with("(version 1)\n(deny default)"));
     assert!(a[p + 1].contains("localhost:4100"));
+    // The local port of the adapter, and no other TCP rule.
+    assert!(a[p + 1].contains("(remote tcp \"localhost:11434\")"));
+    assert_eq!(a[p + 1].matches("(remote tcp ").count(), 2);
+    assert!(
+        a[env..].contains(&"IRIS_LOCAL_PORT=11434".to_string()),
+        "{a:?}"
+    );
     assert!(a[..p]
         .chunks(2)
         .all(|o| o[0] == "-D" && o[1].starts_with('P')));
@@ -742,7 +750,12 @@ fn the_command_runs_the_program_in_the_profile_with_the_private_folders() {
     );
     assert_eq!(
         a[env + 4..],
-        [real(&program), "--task".into(), "a b".into()]
+        [
+            "IRIS_LOCAL_PORT=11434".into(),
+            real(&program),
+            "--task".into(),
+            "a b".into()
+        ]
     );
 }
 
@@ -806,7 +819,7 @@ fn the_real_profile_starts_programs_and_hides_launchd() {
     };
     let run = |script: &str| {
         let mut c = std::process::Command::new("/usr/bin/sandbox-exec");
-        c.args(sandbox_args(&paths, None))
+        c.args(sandbox_args(&paths, &[]))
             .args(["/bin/sh", "-c", script])
             .current_dir(&paths.workspace);
         // SAFETY: the hook makes one Mach call and allocates nothing.
@@ -835,10 +848,10 @@ fn the_real_profile_starts_programs_and_hides_launchd() {
 #[test]
 fn a_read_path_is_readable_and_the_data_folder_stays_denied() {
     let mut p = paths("/data/workspaces/j-1");
-    let (no_reads, _) = profile(&p, None);
+    let (no_reads, _) = profile(&p, &[]);
     assert!(!no_reads.contains("(deny file-read* file-write* (subpath (param"));
     p.reads = vec!["/Users/a/.nvm/v22".into()];
-    let (text, params) = profile(&p, None);
+    let (text, params) = profile(&p, &[]);
     let k = |v: &str| {
         let k = &params.iter().find(|(_, x)| x == Path::new(v)).unwrap().0;
         format!("(param \"{k}\")")
