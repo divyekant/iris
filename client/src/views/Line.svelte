@@ -49,8 +49,8 @@
     // A failure or a 404 (the draft became stale) keeps "Draft ready".
     get<ThreadDraft>(`threads/${encodeURIComponent(thread)}/draft`).then(
       (d) => {
-        // A thread can hold two commitments: the nudge is for one of them only.
-        if (live && d.nudge && d.item === item.id) nudge = d;
+        // A nudge names the late commitments of one person only.
+        if (live && d.nudge && d.items.includes(item.id)) nudge = d;
       },
       () => {},
     );

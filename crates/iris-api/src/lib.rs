@@ -1357,7 +1357,7 @@ async fn get_write(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
 
 /// The draft of a thread (`t-N`) that the person can use now: a reply in
 /// the voice of the owner (R3-05) or a nudge (R3-07), with the address of
-/// the person that owes (`to`) and its commitment (`item`). 404 when there is none, or when it is
+/// the person that owes (`to`) and its late commitments (`items`). 404 when there is none, or when it is
 /// stale ([`iris_voice::ready_sql`]): a newer mail, or for a nudge, a
 /// change of its commitment or its person. Nothing is sent.
 async fn get_draft(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
@@ -1365,7 +1365,7 @@ async fn get_draft(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
         return Ok(not_found());
     };
     let draft = s
-        .read(|c| Ok(iris_voice::ready(c, thread)?))
+        .read(|c| Ok(iris_voice::ready(c, thread, now_ms())?))
         .map_err(Error::from)?;
     Ok(match draft {
         Some(d) => Json(serde_json::json!({
@@ -1373,7 +1373,9 @@ async fn get_draft(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
             "based_on": iris_store::format_id(iris_store::Kind::Message, d.based_on),
             "nudge": d.to.is_some(),
             "to": d.to,
-            "item": d.item.map(|i| iris_store::format_id(iris_store::Kind::Commitment, i)),
+            "items": d.items.iter()
+                .map(|&i| iris_store::format_id(iris_store::Kind::Commitment, i))
+                .collect::<Vec<_>>(),
             "body": d.body,
         }))
         .into_response(),

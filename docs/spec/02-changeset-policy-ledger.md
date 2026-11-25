@@ -75,7 +75,7 @@ not have the label `SPAM` or `TRASH`.
 | `dismiss` | signal | reason | none (Iris state) | set the old value (below) | 5 |
 | `draft` | one thread (a reply), one account (`a-N`, a new mail), or one Gmail draft of Iris (`d-N`, a change by the person) | recipients, subject, text | `drafts.create`, or `drafts.update` for a change (section 7.5) | a create: none, because Iris never deletes a draft. A change: `drafts.update` with the old content (`docs/specs/2026-11-25-draft-change.md`) | 3 |
 | `send` | one draft (`d-N`) | none | `drafts.send`, after the hold (section 7.5) | none: final after the hold | 3 |
-| `nudge` | commitment `owed_to_you` | none | makes a `draft` action, then a `send` action | as `draft` and `send` | 3 |
+| `nudge` | commitment `owed_to_you` | none | makes a `draft` action, then a `send` action | as `draft` and `send` | not built (decision D8, section 7.5) |
 | `wait` | thread, or a date | until | none | not applicable | 5 |
 | `ask` | none | question, options | none | not applicable | 5 |
 
@@ -1033,8 +1033,12 @@ voice of the owner, through the budget of understanding, and saves it as
 the reply draft of the thread (`iris_voice::late` gives the rule,
 `crates/iris/src/nudge.rs` runs the step). It makes no changeset action and
 sends nothing. The person sends it as a reply (`draft` and `send`, through
-the held outbox). The verb `nudge` and `iris nudge <c-id>` are not built
-yet.
+the held outbox). One nudge goes to one person: the person of the late
+commitment with the lowest row ID. It names each late commitment of that
+person in the thread, at most 10. A late commitment of another person
+waits for the next nudge. The owner decided that the nudge stays a
+prepared reply (decision D8, `docs/decisions.md` entry D12). So the verb
+`nudge` and `iris nudge <c-id>` are not built.
 
 A later specification defines the verbs `draft`, `send` and `nudge`, and the
 held outbox. `docs/specs/2026-11-16-send.md` (R3-01) defines `draft`, `send`
@@ -1189,8 +1193,8 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris submit <cs-id> --why <text>` | Submits a draft changeset, and prints one result for each action. | both | 2 |
 | `iris withdraw <cs-id>` | Withdraws a changeset of the same author (section 5.5). Applied actions stay. | both | 2 |
 | `iris ledger [filters]` | Lists ledger entries. | host | 2 |
-| `iris draft <thread> <file>`, `iris send <draft>`, `iris nudge <c-id>` | Adds write actions. | both | 3 |
-| `iris write <t-id or m-id> [--intent <text>]` | Writes a draft of a reply in the voice of the owner with one model call, saves it in the store and prints it. It sends nothing and adds no action. It opens the store directly (section 8.1). | host | 3 |
+| `iris draft <thread> <file>`, `iris send <draft>` | Adds write actions. `iris nudge <c-id>` is not built (decision D8, section 7.5). | both | 3 |
+| `iris write <t-id or m-id> [--intent <text>]` | Writes a draft of a reply in the voice of the owner with one model call, and one more call if the answer is not a valid draft and not a refusal (decision D7). It saves the draft in the store and prints it. It sends nothing and adds no action. It opens the store directly (section 8.1). | host | 3 |
 | `iris wait`, `iris ask` | Ends the session and waits, or asks the person. | session | 5 |
 
 Without `--changeset`, a command that adds an action makes a new draft

@@ -8,7 +8,8 @@ use super::*;
 /// A model that records each call and gives a fixed answer. `during` runs
 /// inside the call, as a sync would.
 struct Fake<'a> {
-    answer: String,
+    /// The answer of each call in turn. The last answer repeats.
+    answers: Vec<String>,
     stop: Stop,
     calls: RefCell<Vec<(String, String)>>,
     during: Option<Box<dyn Fn() + 'a>>,
@@ -17,7 +18,7 @@ struct Fake<'a> {
 impl<'a> Fake<'a> {
     fn new(answer: &str) -> Self {
         Fake {
-            answer: answer.into(),
+            answers: vec![answer.into()],
             stop: Stop::End,
             calls: RefCell::new(Vec::new()),
             during: None,
@@ -31,14 +32,16 @@ impl Model for Fake<'_> {
     }
 
     fn ask(&self, instruction: &str, data: &str) -> std::result::Result<Reply, iris_model::Error> {
-        self.calls
-            .borrow_mut()
-            .push((instruction.to_string(), data.to_string()));
+        let n = {
+            let mut calls = self.calls.borrow_mut();
+            calls.push((instruction.to_string(), data.to_string()));
+            calls.len() - 1
+        };
         if let Some(f) = &self.during {
             f();
         }
         Ok(Reply {
-            text: self.answer.clone(),
+            text: self.answers[n.min(self.answers.len() - 1)].clone(),
             usage: Usage::default(),
             stop: self.stop,
         })
@@ -453,8 +456,39 @@ fn invalid_answers_save_nothing() {
             write(&b.store, t, None, &fake, 1),
             Err(Error::BadAnswer(_))
         ));
+        // A refusal gets no second call (decision D7, issue #278).
+        let calls = if stop == Stop::Refused { 1 } else { 2 };
+        assert_eq!(fake.calls.borrow().len(), calls, "{stop:?}");
     }
     assert_eq!(saved(&b.store, t), None);
+}
+
+#[test]
+fn an_invalid_answer_gets_one_more_call_with_the_same_data() {
+    let (b, t) = mailbox("retry");
+    for (first, then, ok) in [
+        ("not json", r#"{"body": "Second try."}"#, true),
+        (r#"{"text": "x"}"#, "still not json", false),
+    ] {
+        let mut fake = Fake::new(first);
+        fake.answers.push(then.into());
+        let r = write(&b.store, t, None, &fake, 1);
+        assert_eq!(r.is_ok(), ok, "{first} then {then}: {r:?}");
+        let calls = fake.calls.borrow();
+        assert_eq!(calls.len(), 2, "one retry only");
+        assert_eq!(
+            calls[0], calls[1],
+            "the retry sends the same instruction and data"
+        );
+    }
+    assert_eq!(
+        saved(&b.store, t).map(|s| s.0).as_deref(),
+        Some("Second try.")
+    );
+    // A valid first answer makes one call only.
+    let fake = Fake::new(r#"{"body": "Fine."}"#);
+    write(&b.store, t, None, &fake, 2).unwrap();
+    assert_eq!(fake.calls.borrow().len(), 1);
 }
 
 #[test]
@@ -1028,17 +1062,30 @@ fn a_sample_marked_spam_during_the_call_saves_nothing() {
     assert_eq!(saved(store, t), None);
 }
 
-/// What [`ready_sql`] says of thread `t`.
+/// What [`ready_sql`] says of thread `t`, at the time of its draft.
 fn ready(store: &Store, t: i64) -> bool {
     store
         .read(|c| {
-            Ok(
-                c.query_row(&format!("SELECT {}", ready_sql("SELECT ?1")), [t], |r| {
-                    r.get(0)
-                })?,
-            )
+            let now = saved_at(c, t)?;
+            Ok(c.query_row(
+                &format!("SELECT {}", ready_sql("SELECT ?1", ("?2", "?3"))),
+                params![t, now, iris_store::today(c, now)?],
+                |r| r.get(0),
+            )?)
         })
         .unwrap()
+}
+
+/// The time of the draft of thread `t`, or 0: the tests read a draft at
+/// the time it was saved.
+fn saved_at(c: &Connection, t: i64) -> rusqlite::Result<i64> {
+    Ok(c.query_row(
+        "SELECT created_at FROM reply_draft WHERE thread_id = ?1",
+        [t],
+        |r| r.get(0),
+    )
+    .optional()?
+    .unwrap_or(0))
 }
 
 /// What the checks of [`write`] say of thread `t`: they pass, and the
@@ -1370,7 +1417,7 @@ fn evidence(store: &Store, provider: &str, to: &str) {
 /// The person of the ready nudge of thread `t`, or `None`.
 fn ready_to(store: &Store, t: i64) -> Option<String> {
     store
-        .read(|c| Ok(super::ready(c, t)?.and_then(|r| r.to)))
+        .read(|c| Ok(super::ready(c, t, saved_at(c, t)?)?.and_then(|r| r.to)))
         .unwrap()
 }
 
@@ -1407,13 +1454,13 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
     assert_eq!(data["intent"], NUDGE_INTENT);
     assert_eq!(data["reply_to"], "ana@example.org");
     assert_eq!(
-        data["commitment"],
-        json!({"title": "Send the slides", "kind": null, "amount": null, "due": null,
-               "quote": "can you send the slides?"})
+        data["commitments"],
+        json!([{"title": "Send the slides", "kind": null, "amount": null, "due": null,
+                "quote": "can you send the slides?"}])
     );
     assert!(fake.calls.borrow()[0]
         .0
-        .contains("\"commitment\": only in a reminder"));
+        .contains("\"commitments\": only in a reminder"));
     assert_eq!(saved(&b.store, t).unwrap().1.as_deref(), Some(NUDGE_INTENT));
     let prompt: String = b
         .store
@@ -1476,7 +1523,7 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
     nudge(&b.store, &l, &fake, 1008 + LATE_AFTER_MS).unwrap();
     let data: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
     assert_eq!(data["thread"].as_array().unwrap().len(), 6);
-    assert_eq!(data["commitment"]["quote"], "can you send the slides?");
+    assert_eq!(data["commitments"][0]["quote"], "can you send the slides?");
 
     // A thread that is not late gets no call.
     let (b, _) = asked("nudge-not-late");
@@ -1516,7 +1563,50 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
 }
 
 #[test]
-fn a_nudge_is_stale_when_its_person_changes_and_a_second_commitment_waits() {
+fn a_saved_nudge_is_ready_while_a_later_commitment_is_not_due_yet() {
+    let now = 1000 + LATE_AFTER_MS;
+    let (b, t) = asked("nudge-later");
+    // A second commitment of Ana, due on 5 January 1970: not late at `now` (3 January).
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 SELECT form, account_id, status,
+                        json_set(doc, '$.title', 'Send the notes', '$.due', json('{\"date\":\"1970-01-05\"}')),
+                        2, 2 FROM item WHERE id = 1",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO item_source(item_id, message_id, role)
+                 SELECT 2, message_id, role FROM item_source WHERE item_id = 1",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let l = one_late(&b.store, now);
+    let fake = Fake::new(r#"{"body": "Hi Ana"}"#);
+    nudge(&b.store, &l, &fake, now).unwrap();
+    let ready_at = |at: i64| {
+        b.store
+            .read(|c| Ok(super::ready(c, t, at)?.map(|r| r.items)))
+            .unwrap()
+    };
+    // Ready at once, with only the late commitment, and no new call.
+    assert_eq!(ready_at(now), Some(vec![1]));
+    assert!(late_threads(&b.store, now).is_empty());
+    // After the due date, the key names both: the nudge is stale, and the
+    // next nudge names both commitments.
+    let after = 6 * 86_400_000;
+    assert_eq!(ready_at(after), None);
+    assert_eq!(late_threads(&b.store, after), [t]);
+    let key: Value = serde_json::from_str(&one_late(&b.store, after).key).unwrap();
+    assert_eq!(key["items"].as_array().unwrap().len(), 2);
+    let _ = std::fs::remove_dir_all(&b.dir);
+}
+
+#[test]
+fn one_nudge_names_each_late_commitment_of_its_person_and_another_person_waits() {
     let now = 1000 + LATE_AFTER_MS;
     let (b, t) = asked("nudge-group");
     let set = |sql: &str| {
@@ -1548,6 +1638,41 @@ fn a_nudge_is_stale_when_its_person_changes_and_a_second_commitment_waits() {
 
     // The first is done: the nudge to Ana is stale, and the thread is late
     // for Bo.
+    // A third late commitment, owed by Ana again: the key changes, the
+    // nudge is stale, and the next nudge names both of Ana's (decision D8).
+    set(
+        "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+         SELECT form, account_id, status, json_set(doc, '$.title', 'Send the notes'), 3, 3
+           FROM item WHERE id = 1",
+    );
+    set("INSERT INTO item_source(item_id, message_id, role)
+         SELECT 3, message_id, role FROM item_source WHERE item_id = 1");
+    assert_eq!(ready_to(&b.store, t), None);
+    let l = one_late(&b.store, now);
+    assert_eq!(l.to(), "ana@example.org");
+    let fake = Fake::new(r#"{"body": "Hi Ana, the slides and the notes?"}"#);
+    nudge(&b.store, &l, &fake, now).unwrap();
+    let data: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
+    let titles: Vec<&str> = data["commitments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, ["Send the slides", "Send the notes"]);
+    assert!(
+        data["commitments"][0].get("item").is_none(),
+        "no row ID in the data"
+    );
+    let items = b
+        .store
+        .read(|c| Ok(super::ready(c, t, saved_at(c, t)?)?.unwrap().items))
+        .unwrap();
+    assert_eq!(items, [1, 3]);
+    // One of the two is done: the key changes, so the nudge is stale.
+    set("UPDATE item SET status = 'done' WHERE id = 3");
+    assert_eq!(ready_to(&b.store, t), None);
+
     set("UPDATE item SET status = 'done' WHERE id = 1");
     assert_eq!(ready_to(&b.store, t), None);
     assert_eq!(one_late(&b.store, now).to(), "bo@example.org");
@@ -1834,4 +1959,36 @@ fn a_new_mail_that_understanding_did_not_read_gives_changed_not_not_ready() {
     ));
     assert!(fake.calls.borrow().is_empty());
     assert_eq!(saved(&b.store, t), None);
+}
+
+#[test]
+fn a_nudge_names_at_most_the_limit_of_commitments() {
+    let now = 1000 + LATE_AFTER_MS;
+    let (b, _) = asked("nudge-cap");
+    b.store
+        .write(|tx| {
+            for i in 0..MAX_NUDGE_ITEMS + 2 {
+                tx.execute(
+                    "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                     SELECT form, account_id, status, json_set(doc, '$.title', ?1), 5, 5
+                       FROM item WHERE id = 1",
+                    [format!("More {i}")],
+                )?;
+                tx.execute(
+                    "INSERT INTO item_source(item_id, message_id, role)
+                     SELECT last_insert_rowid(), message_id, role FROM item_source WHERE item_id = 1",
+                    [],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let key: Value = serde_json::from_str(&one_late(&b.store, now).key).unwrap();
+    let items: Vec<i64> = key["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["item"].as_i64().unwrap())
+        .collect();
+    assert_eq!(items, (1..=MAX_NUDGE_ITEMS as i64).collect::<Vec<_>>());
 }

@@ -974,7 +974,7 @@ fn read_section(
         "SELECT id, form, status, doc, {list}, {MATTER}, {} FROM item
          WHERE ({shown}) AND ({seek})
          ORDER BY {order} LIMIT {limit}",
-        ready_draft()
+        ready_draft(c)?
     ))?;
     let (items, page_keys): (Vec<_>, Vec<_>) = st
         .query_map(rusqlite::params_from_iter(after.unwrap_or_default()), |r| {
@@ -1314,16 +1314,20 @@ pub(crate) const MATTER: &str = "(SELECT mi.matter_id FROM matter_item mi
 /// The column `ready_draft` of an item row: true when the thread of the
 /// mail that made the item has a reply draft that the person can use now
 /// (card R3-09, [`iris_voice::ready_item_sql`]). A nudge (card R3-07)
-/// marks only its own commitment.
-fn ready_draft() -> String {
-    format!(
+/// marks only the commitments of its key, at the time of this read.
+fn ready_draft(c: &Connection) -> iris_store::Result<String> {
+    let now = crate::now_ms();
+    // `today` gives `YYYY-MM-DD`, so the quoted literal is safe.
+    let today = format!("'{}'", iris_store::today(c, now)?);
+    Ok(format!(
         "{} AS ready_draft",
         iris_voice::ready_item_sql(
             "SELECT om.thread_id FROM item_source os JOIN message om ON om.id = os.message_id
              WHERE os.item_id = item.id AND os.role = 'origin'",
-            "item.id"
+            "item.id",
+            (&now.to_string(), &today)
         )
-    )
+    ))
 }
 
 /// The document of an item row (id, form, status, doc, and the column

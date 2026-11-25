@@ -2363,6 +2363,198 @@ fn a_correction_of_the_expiry_of_a_signal_sets_its_status() {
     assert_eq!(status(&b), "used");
 }
 
+/// Decision D31 (issue 111): after a sender becomes or stops being a
+/// service, or a known name comes or goes, the fixed rules run again on the
+/// queued mail with no model call. Mail that the model read keeps its items
+/// while no fixed result changes.
+#[test]
+fn a_kind_or_name_change_runs_the_fixed_rules_again_with_no_model() {
+    use iris_understand::store::recheck_fixed;
+    let b = store("fixed-due");
+    let fake = Fake::default();
+    let code = "From: Bank <no-reply@bank.example.com>
+To: owner@example.com
+Subject: Your sign-in
+
+Your one-time code is 918273. It ends in 10 minutes.
+";
+    let m = b.add("1", code, &["INBOX"]);
+    understand(&b.store, m, &fake, NOW).unwrap();
+    assert_eq!(
+        fake.calls.borrow().len(),
+        1,
+        "a stranger: the model reads it"
+    );
+    let set = |addr: &str, kind: &str| {
+        b.store
+            .write(|tx| {
+                Ok(tx.execute(
+                    // A kind of the person: the engine rules do not change it.
+                    "UPDATE sender SET kind = ?2, decided_by = 'person' WHERE address = ?1",
+                    [addr, kind],
+                )?)
+            })
+            .unwrap();
+    };
+    let rule = |id: i64| {
+        b.col::<Option<String>>(
+            "SELECT max(json_extract(doc, '$.derived.rule')) FROM item i
+               JOIN item_source s ON s.item_id = i.id
+              WHERE s.message_id = ?1 AND i.form <> 'conversation'",
+            id,
+        )
+    };
+    let pending = |id: i64| {
+        b.col::<bool>(
+            "SELECT understood_at IS NULL FROM message WHERE id = ?1",
+            id,
+        )
+    };
+
+    // A service now: the code rule gives the signal, with no model.
+    set("no-reply@bank.example.com", "service");
+    assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
+    assert_eq!(rule(m).as_deref(), Some("code"));
+    assert!(!pending(m));
+    // The queue is empty: a second check does nothing.
+    assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 0);
+    // Not a service: the rule item does not hold, the mail waits for the model.
+    set("no-reply@bank.example.com", "stranger");
+    assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
+    assert!(pending(m));
+    assert_eq!(rule(m), None);
+    assert_eq!(fake.calls.borrow().len(), 1, "the check called no model");
+
+    // A known name: a forged From gets the spoof mark, with no model.
+    let forged = "From: Ana Lee <ana@evil.example.net>
+To: owner@example.com
+Subject: Hi
+
+Call me.
+";
+    let f = b.add("2", forged, &["INBOX"]);
+    understand(&b.store, f, &fake, NOW).unwrap();
+    let calls = fake.calls.borrow().len();
+    b.kind("ana@example.org", "Ana Lee", "person");
+    recheck_fixed(&b.store, NOW, None).unwrap();
+    assert_eq!(
+        b.col::<String>("SELECT hostile FROM message WHERE id = ?1", f),
+        r#"["spoof"]"#
+    );
+    assert!(!pending(f));
+    // The name goes: the mark goes, and the mail waits for the model.
+    b.store
+        .write(|tx| Ok(tx.execute("DELETE FROM sender WHERE address = 'ana@example.org'", [])?))
+        .unwrap();
+    recheck_fixed(&b.store, NOW, None).unwrap();
+    assert!(pending(f));
+    assert_eq!(
+        fake.calls.borrow().len(),
+        calls,
+        "the check called no model"
+    );
+}
+
+/// The fixed check reads mail past the read limit as cut text, as
+/// understanding does, so the code rule does not match it there either.
+/// It also stops at the message limit of the run, and the rest of the
+/// queue waits.
+#[test]
+fn the_fixed_check_keeps_the_cut_rule_and_the_run_limit() {
+    use iris_understand::store::{recheck_fixed, RAW_LIMIT};
+    let b = store("fixed-limit");
+    let fake = Fake::default();
+    let code = "From: Bank <no-reply@bank.example.com>
+To: owner@example.com
+Subject: Your sign-in
+
+Your one-time code is 918273. It ends in 10 minutes.
+";
+    let big = format!("{code}{}\n", " ".repeat(RAW_LIMIT as usize + 1024));
+    let cut = b.add("1", &big, &["INBOX"]);
+    let a = b.add("2", code, &["INBOX"]);
+    let c = b.add_in("3", "t3", NOW - DAY, code, &["INBOX"]);
+    for m in [cut, a, c] {
+        understand(&b.store, m, &fake, NOW).unwrap();
+    }
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE sender SET kind = 'service', decided_by = 'person'
+                  WHERE address = 'no-reply@bank.example.com'",
+                [],
+            )?)
+        })
+        .unwrap();
+    let queued = |id: i64| {
+        b.col::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM fixed_due WHERE message_id = ?1)",
+            id,
+        )
+    };
+    // The limit: one message now, the other waits in the queue.
+    assert_eq!(recheck_fixed(&b.store, NOW, Some(1)).unwrap(), 1);
+    assert!(queued(a) != queued(c), "one of the two waits");
+    // The cut message needs the model as before: no change, no new run.
+    assert!(!queued(cut));
+    assert_eq!(
+        b.col::<i64>(
+            "SELECT count(*) FROM item i JOIN item_source s ON s.item_id = i.id
+                      WHERE s.message_id = ?1 AND i.form <> 'conversation'",
+            cut
+        ),
+        0
+    );
+    assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
+    assert!(!queued(a) && !queued(c));
+}
+
+/// Decision D31: mail that a model try limit holds (3 failed tries, still
+/// pending) gets the fixed check too. When its sender becomes a service,
+/// the code rule completes it with no model.
+#[test]
+fn a_held_pending_message_gets_the_fixed_check() {
+    use iris_understand::store::recheck_fixed;
+    let b = store("fixed-held");
+    let code = "From: Bank <no-reply@bank.example.com>
+To: owner@example.com
+Subject: Your sign-in
+
+Your one-time code is 918273. It ends in 10 minutes.
+";
+    let m = b.add("1", code, &["INBOX"]);
+    // No model: write 1 saves the header, and the mail stays pending.
+    assert!(understand(&b.store, m, &iris_understand::budget::NoModel, NOW).is_err());
+    b.store
+        .write(|tx| Ok(tx.execute("UPDATE message SET tries = 3 WHERE id = ?1", [m])?))
+        .unwrap();
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE sender SET kind = 'service', decided_by = 'person'
+                  WHERE address = 'no-reply@bank.example.com'",
+                [],
+            )?)
+        })
+        .unwrap();
+    assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
+    assert!(!b.col::<bool>("SELECT understood_at IS NULL FROM message WHERE id = ?1", m));
+    assert_eq!(
+        b.col::<Option<String>>(
+            "SELECT max(json_extract(doc, '$.derived.rule')) FROM item i
+               JOIN item_source s ON s.item_id = i.id
+              WHERE s.message_id = ?1 AND i.form <> 'conversation'",
+            m,
+        )
+        .as_deref(),
+        Some("code")
+    );
+    assert_eq!(
+        b.col::<i64>("SELECT count(*) FROM fixed_due WHERE ?1", 1),
+        0
+    );
+}
+
 /// Decision D29 (issue 263): mail from a declined sender gets no model call.
 /// The fixed steps still run. When the decline ends (a reopen, or a kind
 /// other than `stranger`), the mail is pending again for the model.
