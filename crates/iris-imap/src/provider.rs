@@ -1200,6 +1200,8 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
             sources.sort_by(|a, b| order(a.0).cmp(&order(b.0)));
             let mut new: BTreeMap<(&str, u32), String> = BTreeMap::new();
             let mut sent = false;
+            // The target UIDVALIDITY of the first COPYUID: each new ID uses it.
+            let mut to_validity: Option<u32> = None;
             let unknown = |e: Error| Error::Transport(format!("unknown result: {e}"));
             for (folder, (validity, uids)) in &sources {
                 let e = s.select(folder).map_err(|e| {
@@ -1223,6 +1225,12 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
                     .move_uids(uids, &to.name)
                     .map_err(|e| unknown(read_error(e)))?
                     .ok_or_else(|| Error::Transport("unknown result: no COPYUID".into()))?;
+                // A new target UIDVALIDITY makes the earlier new IDs stale (#1024).
+                if *to_validity.get_or_insert(copy.validity) != copy.validity {
+                    return Err(Error::Transport(
+                        "unknown result: the target UIDVALIDITY changed".into(),
+                    ));
+                }
                 for uid in uids {
                     let (_, n) = copy.pairs.iter().find(|(f, _)| f == uid).ok_or_else(|| {
                         Error::Transport("unknown result: a UID is not in COPYUID".into())
