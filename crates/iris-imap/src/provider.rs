@@ -1186,15 +1186,18 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
                 return Err(not_supported());
             };
             // The UIDs of each source folder, with its UIDVALIDITY.
-            let mut sources: BTreeMap<&str, (u32, Vec<u32>)> = BTreeMap::new();
+            let mut by_folder: BTreeMap<&str, (u32, Vec<u32>)> = BTreeMap::new();
             for id in ids {
                 let (validity, uid, folder) = parse_id(id).ok_or(Error::NotFound)?;
-                let t = sources.entry(folder).or_insert((validity, Vec::new()));
+                let t = by_folder.entry(folder).or_insert((validity, Vec::new()));
                 if t.0 != validity || t.1.contains(&uid) {
                     return Err(Error::NotFound);
                 }
                 t.1.push(uid);
             }
+            // The page order of the IMAP provider spec, section 2: INBOX first.
+            let mut sources: Vec<_> = by_folder.into_iter().collect();
+            sources.sort_by(|a, b| order(a.0).cmp(&order(b.0)));
             let mut new: BTreeMap<(&str, u32), String> = BTreeMap::new();
             let mut sent = false;
             let unknown = |e: Error| Error::Transport(format!("unknown result: {e}"));

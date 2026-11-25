@@ -113,22 +113,26 @@ fn moves_give_new_ids() {
 
 #[test]
 fn move_needs_move_and_uidplus() {
-    let fake = FakeImap::start(Caps {
-        moves: false,
-        ..Caps::ALL
-    });
-    fake.create("Archive", Some("\\Archive"));
-    let mail = provider(&fake);
-    let a = add(&fake, "INBOX", 1);
-    assert_eq!(
-        reason(mail.move_plan(PASSWORD, &[&a], Move::Archive)),
-        "notSupported"
-    );
-    assert_eq!(
-        reason(mail.relocate(PASSWORD, &[&a], Move::Archive)),
-        "notSupported"
-    );
-    assert_eq!(moves_sent(&fake), 0);
+    for caps in [
+        Caps {
+            moves: false,
+            ..Caps::ALL
+        },
+        Caps {
+            uidplus: false,
+            ..Caps::ALL
+        },
+    ] {
+        let fake = FakeImap::start(caps);
+        fake.create("Archive", Some("\\Archive"));
+        let mail = provider(&fake);
+        let a = add(&fake, "INBOX", 1);
+        let r = mail.move_plan(PASSWORD, &[&a], Move::Archive);
+        assert_eq!(reason(r), "notSupported");
+        let r = mail.relocate(PASSWORD, &[&a], Move::Archive);
+        assert_eq!(reason(r), "notSupported");
+        assert_eq!(moves_sent(&fake), 0);
+    }
 }
 
 /// A message that is done already skips in the plan, and `relocate`
@@ -290,17 +294,25 @@ fn move_uidvalidity() {
     let a = add(&fake, "INBOX", 1);
     let b = add(&fake, "Archive", 2);
     let ids = [b.as_str(), a.as_str()];
-    // Folders move in name order: Archive, then INBOX.
-    fake.renew_at_select("INBOX", 2);
+    // Folders move in page order: INBOX first, then Archive.
+    fake.renew_at_select("Archive", 2);
     let r = mail.relocate(PASSWORD, &ids, Move::Trash);
     assert!(matches!(&r, Err(e) if e.write_result_unknown()), "{r:?}");
     assert_eq!(moves_sent(&fake), 1);
+    // INBOX moved; Archive did not.
+    assert!(fake.uids("INBOX").is_empty());
+    assert_eq!(fake.uids("Archive").len(), 1);
 }
 
 /// An answer that does not name each moved UID is unknown.
 #[test]
 fn move_partial_copyuid() {
-    for mode in [Moving::NoCopyuid, Moving::RefuseAfterOne, Moving::Close] {
+    for mode in [
+        Moving::NoCopyuid,
+        Moving::PartialCopyuid,
+        Moving::RefuseAfterOne,
+        Moving::Close,
+    ] {
         let fake = server();
         fake.set_moving(mode);
         let mail = provider(&fake);

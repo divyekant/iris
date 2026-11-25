@@ -40,8 +40,10 @@ pub struct Caps {
     pub uidnext: bool,
     /// `X-GM-EXT-1`: the fake says that it is Gmail. Off in [`Caps::ALL`].
     pub gmail: bool,
-    /// `MOVE` (RFC 6851) and `UIDPLUS` (RFC 4315): `UID MOVE` with `COPYUID`.
+    /// `MOVE` (RFC 6851): `UID MOVE`.
     pub moves: bool,
+    /// `UIDPLUS` (RFC 4315): `COPYUID` in the answer of a `UID MOVE`.
+    pub uidplus: bool,
 }
 
 impl Caps {
@@ -53,6 +55,7 @@ impl Caps {
         uidnext: true,
         gmail: false,
         moves: true,
+        uidplus: true,
     };
 }
 
@@ -96,6 +99,8 @@ pub enum Moving {
     Tagged,
     /// Move each UID, and send no `COPYUID`.
     NoCopyuid,
+    /// Move each UID, with a `COPYUID` of the first UID only.
+    PartialCopyuid,
     /// Move the first UID only, then answer `NO`.
     RefuseAfterOne,
     /// Move each UID, then close the connection with no answer.
@@ -433,7 +438,8 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
             (c.condstore, " CONDSTORE"),
             (c.qresync, " QRESYNC"),
             (c.gmail, " X-GM-EXT-1"),
-            (c.moves, " MOVE UIDPLUS"),
+            (c.moves, " MOVE"),
+            (c.uidplus, " UIDPLUS"),
         ] {
             if on {
                 s.push_str(name);
@@ -698,8 +704,14 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                             dst.messages.insert(new, m);
                             pairs.push((uid, new));
                         }
+                        let shown = if mode == Moving::PartialCopyuid {
+                            1
+                        } else {
+                            pairs.len()
+                        };
+                        let uidplus = s.caps.uidplus;
                         let list = |i: usize| {
-                            pairs
+                            pairs[..shown]
                                 .iter()
                                 .map(|p| [p.0, p.1][i].to_string())
                                 .collect::<Vec<_>>()
@@ -717,7 +729,8 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                             _ if pairs.is_empty() => "OK nothing moved".to_owned(),
                             Moving::Tagged => format!("OK {code} done"),
                             Moving::NoCopyuid => "OK done".to_owned(),
-                            Moving::Normal => {
+                            _ if !uidplus => "OK done".to_owned(),
+                            Moving::Normal | Moving::PartialCopyuid => {
                                 reply.push_str(&format!("* OK {code} moved\r\n"));
                                 "OK done".to_owned()
                             }
