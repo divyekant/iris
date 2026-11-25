@@ -82,8 +82,9 @@ const ATTACHMENT_WORDS: [&str; 21] = [
     "enclosing",
 ];
 
-/// The byte ranges of the words of a text, as the full-text index splits
-/// them: runs of letters and digits.
+/// The byte ranges of the words of a text for the word rules (money, date,
+/// attachment): runs of letters and digits. This is not the split of the
+/// full-text index: the copied-run check uses `iris_store::index_tokens`.
 fn word_spans(text: &str) -> Vec<Range<usize>> {
     let mut out = Vec::new();
     let mut start = None;
@@ -103,8 +104,8 @@ fn word_spans(text: &str) -> Vec<Range<usize>> {
     out
 }
 
-/// The words of a text, as the full-text index splits them: runs of
-/// letters and digits, in lower case.
+/// The words of a text for the word rules: runs of letters and digits, in
+/// lower case ([`word_spans`]).
 pub fn words(text: &str) -> Vec<String> {
     word_spans(text)
         .into_iter()
@@ -487,7 +488,12 @@ fn merge(mut marks: Vec<Mark>) -> Vec<Mark> {
 /// start. Gives the byte range of the run and one such message. With
 /// `all` false, it stops at the first run.
 fn copied(c: &Connection, text: &str, all: bool) -> Result<Vec<(Range<usize>, i64)>> {
-    let (w, spans) = spanned(text);
+    // The words of the index, not of `word_spans`: the phrase must hold the
+    // tokens that `message_fts` holds (issue #756).
+    let (w, spans): (Vec<String>, Vec<Range<usize>>) = iris_store::index_tokens(c, text)?
+        .into_iter()
+        .map(|t| (t.word, t.range))
+        .unzip();
     let mut st = c.prepare_cached(
         "SELECT f.rowid FROM message_fts f
          WHERE message_fts MATCH ?1
@@ -499,7 +505,7 @@ fn copied(c: &Connection, text: &str, all: bool) -> Result<Vec<(Range<usize>, i6
     )?;
     let mut out = Vec::new();
     for (k, run) in w.as_chunks::<RUN>().0.iter().enumerate() {
-        // The words are letters and digits only: no FTS5 syntax inside.
+        // The tokens of the index hold no `"`: no FTS5 syntax inside.
         let phrase = format!("text : \"{}\"", run.join(" "));
         if let Some(id) = st.query_row([phrase], |r| r.get::<_, i64>(0)).optional()? {
             out.push((spans[k * RUN].start..spans[k * RUN + RUN - 1].end, id));

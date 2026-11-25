@@ -18,7 +18,7 @@ The steps:
  5a. A change to a spec file (review.spec_paths) adds the spec rules of spec.md.
  6. Decide the verdict in Python: any P0, P1 or P2 finding blocks. P3 is advice.
     After the first round, a P2 finding on code that did not change since the last
-    reviewed head does not block. It goes to a follow-up card.
+    reviewed head does not block. AGENTS.md says how to track it.
  7. Read the PR again. If the head, the base branch or the body changed, post nothing.
  8. Post one comment with the verdict and the findings.
  9. With --merge and a clean verdict: mark the PR ready and merge the reviewed head SHA.
@@ -177,6 +177,8 @@ def changed_since(root: Path, last: Optional[str], head: str) -> Callable[[Dict[
         path, line = finding["path"], finding.get("line") or 0
         if run("cat-file", "-e", f"{head}:{path}").returncode != 0:
             return True  # not a file of the head, for example the PR description
+        if run("cat-file", "-e", f"{last}:{path}").returncode != 0:
+            return True  # a new path (a rename or a copy): blame would follow the old path
         counts = run("diff", "--numstat", last, head, "--", path).stdout.split()[:2]
         if not counts:
             return False  # the file did not change
@@ -316,7 +318,7 @@ def render_comment(result: Dict[str, Any], verdict: str, mark: str, repair: bool
     lines.append("P0, P1 and P2 findings block the merge. P3 findings are advice.")
     if any(f.get("older") for f in findings):
         lines.append("A P2 finding on older code (code that did not change since the last review) does "
-                     "not block. Put these findings on one follow-up card.")
+                     "not block. Track each of these findings as AGENTS.md says.")
     if repair:
         lines.append("Repair signal: this round and the round before found a defect in the fix code. "
                      "Do not patch one more case. Name the invariant and redesign the part "

@@ -73,12 +73,19 @@ Words match with no case difference and on word bounds. A match inside a
 longer word does not count (`attachments` counts, `reattach` does not).
 
 Each rule reads the subject and the body, each as its own text. The
-`untrusted_content` check splits each of the two into words as the full-text
-index does (letters and digits; each other character ends a word). It
-queries each run of 8 words that starts at word 0, 8, 16 and so on, as an
-FTS5 phrase, and stops at the first match. So a copied run of 15 words or
-more always matches. A shorter copied run can match or not. The words are
-letters and digits only, so the phrase text needs no escape.
+`untrusted_content` check splits each of the two into the tokens of the
+full-text index: it calls the tokenizer of `message_fts` (`unicode61
+remove_diacritics 2`) through the FTS5 C API (`iris_store::index_tokens`,
+issue #756). So the words agree with the index by construction. For
+example, `a` + U+0301 + `b` is one token `ab` (the tokenizer removes the
+combining mark), and `a` + U+0345 + `b` is two tokens. It queries each run
+of 8 tokens that starts at token 0, 8, 16 and so on, as an FTS5 phrase,
+and stops at the first match. So a copied run of 15 tokens or more always
+matches. A shorter copied run can match or not. A token never holds `"`,
+so the phrase text needs no escape.
+
+The other word rules (money, date, attachment) split the text into runs of
+letters and digits (`word_spans`). They do not query the index.
 
 ### 3. Submit
 

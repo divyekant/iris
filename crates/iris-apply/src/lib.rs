@@ -36,8 +36,8 @@ mod stop;
 
 pub use send::{
     bcc_open, bcc_test, bcc_waits, is_sent_by_iris, release, sending, sent_by_iris, set_sending,
-    CHANGE_CHANGED, CHANGE_DURING, CHANGE_GONE, CHANGE_NEW_MAIL, CHANGE_OLD_FILE, CHANGE_UNKNOWN,
-    HOLD_MS, NO_BCC, SENT_OTHER, SENT_OTHER_END,
+    CHANGE_CHANGED, CHANGE_DURING, CHANGE_GONE, CHANGE_NEW_MAIL, CHANGE_OLD_FILE, CHANGE_UNDO_FILE,
+    CHANGE_UNKNOWN, HOLD_MS, NO_BCC, SENT_OTHER, SENT_OTHER_END,
 };
 pub use state::{apply_state, apply_states};
 pub use step::{recover_step, step, step_clock, Step};
@@ -47,13 +47,13 @@ pub use stop::{
 };
 
 use iris_policy::Mode;
-use iris_provider::{Provider, BATCH_LIMIT};
+use iris_provider::{Move, Provider, BATCH_LIMIT};
 use iris_store::Store;
 use rusqlite::{params, Connection, OptionalExtension};
 use unicase::UniCase;
 
 mod undo;
-pub use undo::undo;
+pub use undo::{undo, CHANGE_LATER};
 
 #[derive(Debug)]
 pub enum Error {
@@ -237,6 +237,19 @@ impl Change {
     /// One provider call for each message.
     fn single(&self) -> bool {
         self.call != BATCH
+    }
+
+    /// The folder move of the change, on a provider with location IDs
+    /// (IMAP moves spec, section 3). Works on a change of the ledger too.
+    fn mv(&self) -> Option<Move> {
+        let inbox = |v: &[String]| v.len() == 1 && v[0] == "INBOX";
+        match self.call {
+            "trash" => Some(Move::Trash),
+            "untrash" => Some(Move::Untrash),
+            _ if self.add.is_empty() && inbox(&self.remove) => Some(Move::Archive),
+            _ if self.remove.is_empty() && inbox(&self.add) => Some(Move::Inbox),
+            _ => None,
+        }
     }
 
     /// The change that a ledger row recorded in `ops` (see [`Change::ops`]).
@@ -568,6 +581,7 @@ pub fn apply(
         )?;
         Ok(())
     })?;
+    let mv = run.relocates(&change);
     let mut after = 0;
     loop {
         // A gone message has no provider ID here. An undo of the entry `o`
@@ -619,6 +633,9 @@ pub fn apply(
         after = last;
         let mut seen: Vec<(i64, Vec<String>)> = Vec::new();
         let mut todo: Vec<(i64, String)> = Vec::new();
+        // A move with location IDs: the messages for `move_plan`, with
+        // their `pre` labels.
+        let mut plan: Vec<(i64, String, String)> = Vec::new();
         for (id, provider_id, eligible) in page {
             if !eligible {
                 run.counts.unchanged += 1;
@@ -630,7 +647,9 @@ pub fn apply(
             };
             match run.call(|g, t| g.minimal(t, &provider_id)) {
                 Ok(m) => {
-                    if change.needed(&m.label_ids) {
+                    if mv.is_some() {
+                        plan.push((id, provider_id, change.pre(&m.label_ids)));
+                    } else if change.needed(&m.label_ids) {
                         todo.push((id, change.pre(&m.label_ids)));
                     } else {
                         run.counts.unchanged += 1;
@@ -645,6 +664,34 @@ pub fn apply(
             }
         }
         mirror(store, account, &seen);
+        if let (Some(mv), false) = (mv, plan.is_empty()) {
+            // The folder of each ID decides; the plan only reads.
+            let ids: Vec<&str> = plan.iter().map(|(_, p, _)| p.as_str()).collect();
+            match run.call(|g, t| g.move_plan(t, &ids, mv)) {
+                Ok(moves) if moves.len() == plan.len() => {
+                    for ((id, _, pre), m) in plan.into_iter().zip(moves) {
+                        if m {
+                            todo.push((id, pre));
+                        } else {
+                            run.counts.unchanged += 1;
+                        }
+                    }
+                }
+                Ok(_) => {
+                    let e = iris_provider::Error::Transport("move plan: wrong length".into());
+                    return Err(Error::Provider(e));
+                }
+                // Nothing was written: the next apply reads again.
+                Err(e)
+                    if e.write_result_unknown()
+                        || matches!(e, iris_provider::Error::Unauthorized) =>
+                {
+                    return Err(Error::Provider(e))
+                }
+                // A definite refusal: no message moves (section 3).
+                Err(e) => return run.fail_unclaimed(action, &change, e.to_string()),
+            }
+        }
         store.write(|tx| {
             let mut add =
                 tx.prepare_cached("INSERT INTO temp.apply_todo(message_id, pre) VALUES (?1, ?2)")?;
@@ -753,6 +800,12 @@ impl<'a, 'b> Run<'a, 'b> {
         })
     }
 
+    /// The move of `change` if the provider gives a moved message a new
+    /// ID: the apply then uses `move_plan` and `relocate`.
+    fn relocates(&self, change: &Change) -> Option<Move> {
+        self.mail.location_ids().then(|| change.mv()).flatten()
+    }
+
     /// Gmail message IDs belong to one mailbox: the token must be of the
     /// mailbox of the account.
     fn mailbox(&mut self) -> Result<()> {
@@ -799,6 +852,8 @@ impl<'a, 'b> Run<'a, 'b> {
     /// expiry or the mode.
     fn claim(&mut self, action: i64, change: &Change) -> Result<std::result::Result<i64, Outcome>> {
         let account = self.account;
+        // A move with location IDs is one call for each batch.
+        let single = change.single() && self.relocates(change).is_none();
         let claimed = self.store.write(|tx| {
             if let Some(o) = gate(tx, action)? {
                 return Ok(Err(o));
@@ -812,7 +867,7 @@ impl<'a, 'b> Run<'a, 'b> {
                 return Ok(Ok(None));
             }
             let n: i64 = tx.query_row("SELECT count(*) FROM temp.apply_todo", [], |r| r.get(0))?;
-            let calls = if change.single() {
+            let calls = if single {
                 n
             } else {
                 (n + BATCH_LIMIT as i64 - 1) / BATCH_LIMIT as i64
@@ -830,7 +885,7 @@ impl<'a, 'b> Run<'a, 'b> {
                  SELECT ?1, message_id, CASE WHEN ?2 THEN n ELSE (n - 1) / ?3 + 1 END, pre, ?4
                  FROM (SELECT message_id, pre, row_number() OVER (ORDER BY message_id) AS n
                        FROM temp.apply_todo)",
-                params![ledger, change.single(), BATCH_LIMIT as i64, labels_json(&change.add)],
+                params![ledger, single, BATCH_LIMIT as i64, labels_json(&change.add)],
             )?;
             tx.execute("DELETE FROM temp.apply_todo", [])?;
             Ok(Ok(Some(ledger)))
@@ -908,6 +963,33 @@ impl<'a, 'b> Run<'a, 'b> {
             }
             if live.is_empty() {
                 continue;
+            }
+            if let Some(mv) = self.relocates(change) {
+                let ids: Vec<&str> = live.iter().map(|(_, p)| p.as_str()).collect();
+                match self.call(|g, t| g.relocate(t, &ids, mv)) {
+                    Ok(new) if new.len() == live.len() => {
+                        // `done` and the rebind in one transaction (section 3).
+                        self.store.write(|tx| {
+                            tx.execute(
+                                "UPDATE ledger_message SET done = 1
+                                 WHERE ledger_id = ?1 AND call = ?2 AND listed IS NULL",
+                                params![ledger, k],
+                            )?;
+                            for ((id, _), n) in live.iter().zip(&new) {
+                                iris_store::rebind(tx, *id, n)?;
+                            }
+                            Ok(())
+                        })?;
+                        let moved: Vec<(i64, String)> =
+                            live.iter().map(|(id, _)| *id).zip(new).collect();
+                        self.mirror_read(&moved);
+                        continue;
+                    }
+                    // The server moved, but the new IDs are not known.
+                    Ok(_) => return self.recover(ledger),
+                    Err(e) if e.write_result_unknown() => return self.recover(ledger),
+                    Err(e) => return self.end(ledger, Some(e.to_string())),
+                }
             }
             let result = if change.single() {
                 let (id, p) = &live[0];
@@ -1105,6 +1187,9 @@ impl<'a, 'b> Run<'a, 'b> {
                 })?;
             Ok((call, Change::of_ledger(c, ledger)?))
         })?;
+        // A started move with location IDs is never confirmed by a read:
+        // the old ID is not found after a move too (section 4).
+        let relocates = self.relocates(&change).is_some();
         let mut after = 0;
         loop {
             let page: Vec<(i64, Option<String>, i64)> = self.store.read(|c| {
@@ -1133,6 +1218,10 @@ impl<'a, 'b> Run<'a, 'b> {
                 // messages of a call that never started: the recovery after
                 // a write sign-in reads them (Run::calls).
                 if self.read_only && !started {
+                    continue;
+                }
+                if started && relocates {
+                    found.push((id, Found::Listed("unknown")));
                     continue;
                 }
                 let Some(provider_id) = provider_id else {

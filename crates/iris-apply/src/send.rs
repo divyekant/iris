@@ -20,7 +20,8 @@ use iris_store::Store;
 mod change;
 pub use change::{
     CHANGED as CHANGE_CHANGED, DURING as CHANGE_DURING, GONE as CHANGE_GONE,
-    NEW_MAIL as CHANGE_NEW_MAIL, OLD_FILE as CHANGE_OLD_FILE, UNKNOWN as CHANGE_UNKNOWN,
+    NEW_MAIL as CHANGE_NEW_MAIL, OLD_FILE as CHANGE_OLD_FILE, UNDO_FILE as CHANGE_UNDO_FILE,
+    UNKNOWN as CHANGE_UNKNOWN,
 };
 
 /// The hold delay of a send after its approval (spec 2, section 7.5).
@@ -148,6 +149,7 @@ pub(crate) fn draft(run: &mut Run<'_, '_>, action: i64) -> Result<Outcome> {
         Ok(c.query_row(
             "SELECT args, json_type(targets, '$.threads') IS NOT NULL,
                     json_type(targets, '$.drafts') IS NOT NULL
+                      OR json_type(targets, '$.ledger') IS NOT NULL
              FROM changeset_action WHERE id = ?1",
             [action],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
@@ -391,10 +393,16 @@ fn claim(
         if !free {
             return Ok(None);
         }
+        // A send keeps its hostile evidence of now, for the measure of
+        // sends without review after hostile mail (issue #472).
+        let hostile_before = match draft {
+            Some(_) => Some(iris_changeset::hostile_evidence(tx, action).map_err(changeset_error)?),
+            None => None,
+        };
         tx.execute(
-            "INSERT INTO ledger(action_id, account_id, ops, post, state, undo, at)
-             VALUES (?1, ?2, ?3, ?4, 'writing', 'none', ?5)",
-            params![action, account, ops, post, now()],
+            "INSERT INTO ledger(action_id, account_id, ops, post, state, undo, at, hostile_before)
+             VALUES (?1, ?2, ?3, ?4, 'writing', 'none', ?5, ?6)",
+            params![action, account, ops, post, now(), hostile_before],
         )?;
         let ledger = tx.last_insert_rowid();
         // The call starts now: the claim records it before the call.

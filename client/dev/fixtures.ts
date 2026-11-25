@@ -863,6 +863,7 @@ export const measures: Measures = {
   memory: { rss_kib: 31_744, messages: 18_402 },
   approvals: { decided: 50, approved: 47 },
   undo: { applied: 48, undone: 1 },
+  sends: { sent: 0, unreviewed_after_hostile: 0 },
 };
 
 /** GET /api/threads/t-8700/draft: the nudge to Alex, who is late with the SDK examples (R3-07). */

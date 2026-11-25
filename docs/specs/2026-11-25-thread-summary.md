@@ -138,7 +138,9 @@ A new crate `iris-summary` (no provider client, as `iris-voice`):
 - The check refuses an answer that is not that object, an empty summary, and
   a summary longer than 1,500 characters. A refused answer gets one more
   call (decision D7), then the try is `invalid` for that basis and model
-  version.
+  version. A refusal of the model (`Stop::Refused` of `iris-model`) gets
+  no second call, because the same data gets the same refusal. It is an
+  invalid answer at once.
 
 ### The engine step
 
@@ -215,6 +217,7 @@ clean text, of the account of the item.
 | An older message of the snapshot goes away, or gets new content, a new clean text, a new `SENT` label or a new date under the same ID | The basis changes: the summary is stale, and the thread is a candidate again. | Unit test of `ready` and `candidates`. |
 | The model fails (time-out, 5xx) | No row. The wait after a model error applies (decision D35). | Engine test with a failing fake model. |
 | The answer is not valid twice | `thread_summary_try` with `invalid = 1` for that basis and model version. No more calls until the basis or the model version changes. | Unit test. |
+| The model refuses | No second call. The answer is not valid. | Unit test. |
 | The budget refuses | No call. The try moves the thread to the end. | Engine test. |
 | A crash during the save | One transaction: no summary, or the whole summary. | Store test. |
 | Another run holds the batch lock | No call in this turn. | Engine test. |

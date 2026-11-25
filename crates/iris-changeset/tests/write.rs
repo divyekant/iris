@@ -38,9 +38,6 @@ fn author(kind: AuthorKind) -> Author {
 /// Account 1. Thread 1: messages 1 and 2, with Message-IDs (2 is newer).
 /// Thread 2 (message 3's thread): one message with no Message-ID. Draft 1, a reply in thread 1.
 fn store(dir: &TempDir) -> Store {
-    // Each test of this binary sees a change of a draft: the switch is
-    // global to the process, and the test order is not fixed.
-    iris_changeset::allow_draft_change(true);
     let s = Store::open(&dir.0).unwrap();
     let a = s.add_account("gmail", "owner@example.com").unwrap();
     let m = |id: &str, t: &str, date: i64, mid: Option<&str>| NewMessage {
@@ -782,5 +779,88 @@ fn a_removed_account_ends_its_new_mail_drafts() {
             Some("approved"),
             "a new action targets the tombstone"
         );
+    }
+}
+
+/// No new action targets mail of an account in state `removing`, while
+/// the removal deletes its rows (issue 1041): a reply to a thread, a
+/// mailbox verb on a thread or a message.
+#[test]
+fn no_new_action_targets_mail_of_a_removing_account() {
+    let dir = TempDir::new("removing");
+    let s = store(&dir);
+    s.write(|tx| Ok(tx.execute("UPDATE account SET state = 'removing' WHERE id = 1", [])?))
+        .unwrap();
+    let cases: [(Verb, &str, Value); 3] = [
+        (Verb::Draft, "t-1", REPLY()),
+        (Verb::Archive, "t-1", json!({})),
+        (Verb::Archive, "m-1", json!({})),
+    ];
+    for (verb, target, a) in cases {
+        let who = author(AuthorKind::Agent);
+        let cs = create(&s, &who, NOW).unwrap();
+        if add_action(&s, cs, &who, verb, &[target], &args(a), None).is_ok() {
+            let _ = submit(&s, cs, &who, "Do it.", NOW);
+        }
+        let open: i64 = s
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM changeset_action
+                     WHERE changeset_id = ?1 AND state IN ('proposed', 'approved')",
+                    [cs],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            open, 0,
+            "{verb:?} {target}: a new action targets a removing account"
+        );
+    }
+}
+
+/// No new action can name a kept draft of a removed account (issue 1014).
+#[test]
+fn a_kept_draft_of_a_removed_account_is_no_target() {
+    for gone in ["removing", "removed"] {
+        let dir = TempDir::new("kept");
+        let s = store(&dir);
+        let draft: i64 = s
+            .read(|c| Ok(c.query_row("SELECT count(*) FROM draft WHERE id = 1", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(draft, 1);
+        if gone == "removed" {
+            let address: String = s
+                .read(|c| {
+                    Ok(c.query_row("SELECT address FROM account WHERE id = 1", [], |r| r.get(0))?)
+                })
+                .unwrap();
+            s.remove_account(&address, NOW).unwrap();
+        } else {
+            s.write(|tx| Ok(tx.execute("UPDATE account SET state = 'removing' WHERE id = 1", [])?))
+                .unwrap();
+        }
+        let kept: i64 = s
+            .read(|c| Ok(c.query_row("SELECT count(*) FROM draft WHERE id = 1", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(kept, 1, "{gone}: the removal keeps the draft");
+        let who = author(AuthorKind::Agent);
+        let cs = create(&s, &who, NOW).unwrap();
+        let added = add_action(&s, cs, &who, Verb::Send, &["d-1"], &args(json!({})), None);
+        if added.is_ok() {
+            let _ = submit(&s, cs, &who, "Send.", NOW);
+        }
+        let open: i64 = s
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM changeset_action a JOIN action_draft d
+                       ON d.action_id = a.id
+                     WHERE d.draft_id = 1 AND a.state IN ('proposed', 'approved')",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(open, 0, "{gone}: a new send names the kept draft");
     }
 }

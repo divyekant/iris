@@ -1,34 +1,57 @@
--- Issue 478: the summary of a long thread ("Summary ready",
--- docs/specs/2026-11-25-thread-summary.md). One summary for each thread: a
--- new summary replaces the old one. The summary is ready only while
--- `based_on` is the newest answerable message of the thread, no message of
--- the thread is hostile or waits for understanding (the ready rule of a
--- reply draft), and `basis` is the basis of the thread now: each message of
--- the snapshot as "id:content_sha256". So a change of the mail that the
--- summary read makes it stale with no write.
+-- Migration 57 (issue 972): a signal past its `expires` time is not live,
+-- also while its stored status is still `active`. The views `matter_live`
+-- and `matter_add_live` of migration 46 read the status only, and the
+-- engine moves the status to `expired` one tick later. These views also
+-- compare `expires` with the clock, so each reader (the matter views, the
+-- valid rule of a proposal, the decide trigger) agrees at once. The rule
+-- `live_item!` of iris-matters has the same condition.
 
-CREATE TABLE IF NOT EXISTS thread_summary (
-  thread_id INTEGER PRIMARY KEY REFERENCES thread(id) ON DELETE CASCADE,
-  -- The newest answerable message that the summary covers.
-  based_on INTEGER NOT NULL REFERENCES message(id) ON DELETE CASCADE,
-  -- Each message of the snapshot, newest first, as "id:content_sha256",
-  -- joined with "," (iris_summary::basis_sql).
-  basis TEXT NOT NULL,
-  text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 1500),
-  model TEXT NOT NULL,
-  prompt TEXT NOT NULL,
-  created_at INTEGER NOT NULL
-);
+DROP VIEW IF EXISTS matter_live;
 
--- The last try of each thread. `invalid` = 1: the model gave no valid
--- summary twice, so the same basis and model version get no call.
--- The order of the candidates reads `at`: a thread that the budget cannot
--- pay moves to the end.
-CREATE TABLE IF NOT EXISTS thread_summary_try (
-  thread_id INTEGER PRIMARY KEY REFERENCES thread(id) ON DELETE CASCADE,
-  based_on INTEGER NOT NULL,
-  basis TEXT NOT NULL,
-  model_version INTEGER NOT NULL,
-  invalid INTEGER NOT NULL CHECK (invalid IN (0, 1)),
-  at INTEGER NOT NULL
-);
+CREATE VIEW matter_live AS
+  SELECT mi.matter_id, mi.item_id, i.form, msg.thread_id
+  FROM matter_item mi
+  JOIN item i ON i.id = mi.item_id
+  JOIN item_source s ON s.item_id = i.id AND s.role = 'origin'
+  JOIN message msg ON msg.id = s.message_id
+  WHERE mi.kept = 1
+    AND i.form IN ('commitment', 'conversation', 'record', 'signal')
+    AND i.status NOT IN ('gone', 'cancelled', 'declined')
+    AND (i.form <> 'signal' OR i.status = 'active')
+    AND (i.form <> 'signal'
+         OR coalesce(unixepoch(json_extract(i.doc, '$.expires'), 'subsec')
+                     > unixepoch('now', 'subsec'), 1))
+    AND i.duplicate_of IS NULL
+    AND coalesce(json_extract(i.doc, '$.attention.state'), 'shown') <> 'hidden'
+    AND NOT (msg.hostile IS NOT NULL AND msg.hostile NOT IN ('', '[]'))
+    AND NOT EXISTS (SELECT 1 FROM message_label hml JOIN label hl ON hl.id = hml.label_id
+                    WHERE hml.message_id = msg.id AND hl.provider_id = 'SPAM')
+    AND NOT EXISTS (SELECT 1 FROM header hh JOIN sender hs
+                      ON hs.address = hh.from_addr COLLATE NOCASE
+                    WHERE hh.message_id = msg.id AND hs.kind = 'hostile');
+
+-- The additions that the person can decide: the item is live and the
+-- matter is confirmed.
+DROP VIEW IF EXISTS matter_add_live;
+
+CREATE VIEW matter_add_live AS
+  SELECT a.matter_id, a.item_id, a.created_at, i.form
+  FROM matter_add a
+  JOIN matter m ON m.id = a.matter_id AND m.status = 'confirmed'
+  JOIN item i ON i.id = a.item_id
+  JOIN item_source s ON s.item_id = i.id AND s.role = 'origin'
+  JOIN message msg ON msg.id = s.message_id
+  WHERE i.form IN ('commitment', 'conversation', 'record', 'signal')
+    AND i.status NOT IN ('gone', 'cancelled', 'declined')
+    AND (i.form <> 'signal' OR i.status = 'active')
+    AND (i.form <> 'signal'
+         OR coalesce(unixepoch(json_extract(i.doc, '$.expires'), 'subsec')
+                     > unixepoch('now', 'subsec'), 1))
+    AND i.duplicate_of IS NULL
+    AND coalesce(json_extract(i.doc, '$.attention.state'), 'shown') <> 'hidden'
+    AND NOT (msg.hostile IS NOT NULL AND msg.hostile NOT IN ('', '[]'))
+    AND NOT EXISTS (SELECT 1 FROM message_label hml JOIN label hl ON hl.id = hml.label_id
+                    WHERE hml.message_id = msg.id AND hl.provider_id = 'SPAM')
+    AND NOT EXISTS (SELECT 1 FROM header hh JOIN sender hs
+                      ON hs.address = hh.from_addr COLLATE NOCASE
+                    WHERE hh.message_id = msg.id AND hs.kind = 'hostile');

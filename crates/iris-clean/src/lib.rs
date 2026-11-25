@@ -27,6 +27,7 @@
 //! time is linear in the size of the message. The largest use is a PDF of
 //! 10 MiB with one decompressed stream of at most 4 MiB.
 
+mod glyphs;
 mod html;
 mod mime;
 mod pdf;

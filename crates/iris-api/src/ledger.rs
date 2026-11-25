@@ -59,6 +59,106 @@ pub struct LedgerEntry {
     /// For an undo: true when an undo of the undone entry can
     /// start now (`ledger_can_undo`). False for each other entry.
     pub retry: bool,
+    /// For a `send` or a `draft` entry: the subject and the recipients of
+    /// its draft (issue 490). `None` for each other entry, and for a mail
+    /// whose content Iris cannot read.
+    pub mail: Option<Mail>,
+    /// For a `draft` entry: true when it changed a draft that exists
+    /// (`drafts.update`), not a create. An undo of a change is a change
+    /// with `undo_of`.
+    pub change: bool,
+    /// The action of the entry, to read the content of its draft.
+    #[serde(skip)]
+    action: i64,
+}
+
+/// The words of the mail of a `send` or a `draft` entry.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct Mail {
+    /// At most 200 characters.
+    pub subject: String,
+    /// The first recipient of `to`. A checked draft has one or more.
+    pub to: Option<String>,
+    /// The number of all recipients (to, cc and bcc).
+    pub recipients: usize,
+}
+
+/// The longest subject that an entry gives, in characters.
+const SUBJECT: usize = 200;
+
+/// Read the mail of a `send` or a `draft` entry, as it was at that entry
+/// (issue 490). A later change of the draft, at Gmail or in Iris, never
+/// changes the words of an older entry. An entry whose content Iris cannot
+/// read keeps no mail.
+fn with_mail(c: &Connection, mut e: LedgerEntry) -> LedgerEntry {
+    if e.verb == "send" || e.verb == "draft" {
+        e.mail = entry_content(c, e.action).ok().flatten().map(|m| Mail {
+            subject: m.subject.chars().take(SUBJECT).collect(),
+            to: m.to.first().cloned(),
+            recipients: m.to.len() + m.cc.len() + m.bcc.len(),
+        });
+    }
+    e
+}
+
+/// The `post` of a ledger row of a draft create or change: the content
+/// that the row wrote (`iris-apply`, `Stored`).
+#[derive(serde::Deserialize)]
+struct Post {
+    content: iris_compose::Content,
+}
+
+/// The content of the mail of the ledger entry of `action`. A create or a
+/// change of a draft keeps its content in `post`. A send keeps only the
+/// hash of the content that it sent (`ops.hash`). Each row with the same
+/// hash in its ops wrote the same content, so the post of such a row
+/// gives it. With no such row, the stored draft gives it only while its
+/// content has that hash.
+fn entry_content(c: &Connection, action: i64) -> rusqlite::Result<Option<iris_compose::Content>> {
+    let from_post = |p: &str| serde_json::from_str::<Post>(p).ok().map(|p| p.content);
+    let Some((ops, post)) = c
+        .query_row(
+            "SELECT ops, post FROM ledger WHERE action_id = ?1",
+            [action],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    if let Some(post) = post {
+        return Ok(from_post(&post));
+    }
+    let Some(hash) = serde_json::from_str::<Value>(&ops)
+        .ok()
+        .and_then(|o| o["hash"].as_str().map(String::from))
+    else {
+        return Ok(None);
+    };
+    let post: Option<String> = c
+        .query_row(
+            "SELECT post FROM ledger
+              WHERE post IS NOT NULL AND json_valid(ops) AND json_extract(ops, '$.hash') = ?1
+              ORDER BY id DESC LIMIT 1",
+            [&hash],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(post) = post {
+        return Ok(from_post(&post));
+    }
+    let draft: Option<(String, Vec<u8>)> = c
+        .query_row(
+            "SELECT a.address, d.raw FROM action_draft ad JOIN draft d ON d.id = ad.draft_id
+               JOIN account a ON a.id = d.account_id WHERE ad.action_id = ?1",
+            [action],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(draft.and_then(|(address, raw)| {
+        let read = iris_compose::read(&raw, &address)?;
+        (iris_compose::hash(&read.content, read.reply.as_ref()) == hash).then_some(read.content)
+    }))
 }
 
 /// The author of the changeset of an entry. `goal` is the goal of the job of
@@ -132,7 +232,9 @@ const ENTRY: &str = "SELECT l.id, a.verb, {args}, l.state, l.at, substr(l.error,
                        - (SELECT count(*) FROM json_each(coalesce(l.post, '{}'))))
              ELSE 0 END,
         coalesce({tried}, 0),
-        EXISTS (SELECT 1 FROM ledger_can_undo v WHERE v.ledger_id = {undone})
+        EXISTS (SELECT 1 FROM ledger_can_undo v WHERE v.ledger_id = {undone}),
+        a.id,
+        json_valid(l.ops) AND json_extract(l.ops, '$.call') IS 'drafts.update'
      FROM ledger l
      JOIN changeset_action a ON a.id = l.action_id
      JOIN changeset c ON c.id = a.changeset_id
@@ -181,6 +283,9 @@ fn entry(r: &rusqlite::Row) -> rusqlite::Result<LedgerEntry> {
         skipped: r.get(24)?,
         tried: r.get(25)?,
         retry: r.get(26)?,
+        mail: None,
+        change: r.get(28)?,
+        action: r.get(27)?,
     })
 }
 
@@ -202,7 +307,8 @@ pub fn ledger(store: &Store, limit: u32, after: Option<&str>) -> Result<LedgerPa
     let mut entries: Vec<LedgerEntry> = store.read(|c| {
         let mut st = c.prepare_cached(&entry_sql("WHERE l.id < ?1 ORDER BY l.id DESC LIMIT ?2"))?;
         let rows = st.query_map(params![before, limit + 1], entry)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let rows: Vec<LedgerEntry> = rows.collect::<rusqlite::Result<_>>()?;
+        Ok(rows.into_iter().map(|e| with_mail(c, e)).collect())
     })?;
     let more = entries.len() > limit as usize;
     entries.truncate(limit as usize);
@@ -213,8 +319,9 @@ pub fn ledger(store: &Store, limit: u32, after: Option<&str>) -> Result<LedgerPa
 }
 
 fn one(c: &Connection, id: i64) -> rusqlite::Result<Option<LedgerEntry>> {
-    c.query_row(&entry_sql("WHERE l.id = ?1"), [id], entry)
-        .optional()
+    Ok(c.query_row(&entry_sql("WHERE l.id = ?1"), [id], entry)
+        .optional()?
+        .map(|e| with_mail(c, e)))
 }
 
 /// The row ID of `l-<n>`, only in its canonical form.

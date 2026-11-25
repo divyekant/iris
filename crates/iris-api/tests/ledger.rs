@@ -668,3 +668,248 @@ const HOSTILE: [(&str, &str); 3] = [
         "UPDATE sender SET kind = 'person' WHERE address = 'bad@example.com'",
     ),
 ];
+
+/// A `draft` action of account 1 with `content` as its arguments, its
+/// draft row, and a `send` action of that draft, each with an applied
+/// ledger entry as `iris-apply` writes it: the create keeps the content in
+/// its `post` (only with `post`), and the send keeps only the hash in its
+/// ops. Gives the ledger row IDs (draft, send) and the draft row ID.
+fn mailed(s: &Store, content: &iris_compose::Content, post: bool) -> (i64, i64, i64) {
+    let c = content.clone().check().unwrap();
+    let raw = iris_compose::compose("owner@example.com", "iris.1@example.com", &c, None, 1);
+    let hash = iris_compose::hash(&c, None);
+    s.write(|tx| {
+        tx.execute("INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0)", [])?;
+        let cs = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+             VALUES (?1, 1, 1, 'draft', '{\"accounts\":[\"a-1\"]}', ?2)",
+            params![cs, serde_json::to_string(&c).unwrap()],
+        )?;
+        let draft_action = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO draft(account_id, provider_id, message_id_hdr, content, hash, raw,
+                               action_id, created_at, updated_at)
+             VALUES (1, 'r' || ?3, 'iris.' || ?3 || '@example.com', '{}', ?1, ?2, ?3, 0, 0)",
+            params![hash, raw, draft_action],
+        )?;
+        let draft = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+             VALUES (?1, 1, 2, 'send', ?2, '{}')",
+            params![cs, format!("{{\"drafts\":[\"d-{draft}\"]}}")],
+        )?;
+        let send_action = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO action_draft(action_id, draft_id) VALUES (?1, ?2)",
+            [send_action, draft],
+        )?;
+        for a in [draft_action, send_action] {
+            let (_, h) = iris_changeset::hash(tx, a).unwrap();
+            tx.execute("UPDATE changeset_action SET hash = ?2 WHERE id = ?1", params![a, h])?;
+        }
+        tx.execute(
+            "UPDATE changeset SET why = 'Write to Dana.', submitted_at = ?2 WHERE id = ?1",
+            params![cs, NOW],
+        )?;
+        let create = json!({"call": "drafts.create", "message_id": "iris.1@example.com",
+                            "date": 1, "hash": hash, "thread": null});
+        let stored = post.then(|| json!({"content": c, "reply": null}).to_string());
+        let send = json!({"call": "drafts.send", "draft": draft, "provider_id": "r1",
+                          "message_id": "iris.1@example.com", "hash": hash});
+        let mut ids = vec![];
+        for (a, ops, post) in [(draft_action, create, stored), (send_action, send, None)] {
+            tx.execute(
+                "UPDATE changeset_action SET state = 'approved', decided_by = 'person', decided_at = 1
+                 WHERE id = ?1",
+                [a],
+            )?;
+            tx.execute(
+                "INSERT INTO ledger(action_id, account_id, ops, post, state, undo, at)
+                 VALUES (?1, 1, ?2, ?3, 'writing', 'none', ?4)",
+                params![a, ops.to_string(), post, NOW],
+            )?;
+            let l = tx.last_insert_rowid();
+            tx.execute("UPDATE ledger SET state = 'applied' WHERE id = ?1", [l])?;
+            ids.push(l);
+        }
+        Ok((ids[0], ids[1], draft))
+    })
+    .unwrap()
+}
+
+/// Write `content` into the draft row `draft`, as a refresh of a draft that
+/// the person changed at Gmail does (`changed_at_gmail`): new bytes, and
+/// with `rehash` also the new hash.
+fn rewrite(s: &Store, draft: i64, content: &iris_compose::Content, rehash: bool) {
+    let c = content.clone().check().unwrap();
+    let raw = iris_compose::compose("owner@example.com", "iris.1@example.com", &c, None, 1);
+    let hash = iris_compose::hash(&c, None);
+    s.write(|tx| {
+        tx.execute(
+            "UPDATE draft SET raw = ?2 WHERE id = ?1",
+            params![draft, raw],
+        )?;
+        if rehash {
+            tx.execute(
+                "UPDATE draft SET hash = ?2 WHERE id = ?1",
+                params![draft, hash],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// A send and a draft entry name the subject and the recipients of their
+/// mail as it was at that entry (issue 490). The subject is bounded, the
+/// first recipient comes from to, and the count covers to, cc and bcc. A
+/// later change of the draft, with or without a new hash, never changes
+/// the words of an older entry. Each other entry has no mail.
+#[tokio::test]
+async fn a_send_names_its_subject_and_recipients() {
+    let dir = temp("mail");
+    let s = store(&dir);
+    let archive = archived(&s, "person", &[1], PERSON);
+    let long = "A".repeat(250);
+    let mail = |to: &str, subject: &str| iris_compose::Content {
+        to: vec![to.into()],
+        subject: subject.into(),
+        body: "Hello".into(),
+        ..Default::default()
+    };
+    let (draft, send, row) = mailed(
+        &s,
+        &iris_compose::Content {
+            cc: vec!["lee@example.com".into()],
+            bcc: vec!["sam@example.com".into()],
+            ..mail("dana@example.com", &long)
+        },
+        true,
+    );
+    // A send whose draft Iris did not create keeps no post: only its draft row.
+    let (_, kept, kept_row) = mailed(&s, &mail("priya@example.com", "Q4 plan"), false);
+    let (_, lost, lost_row) = mailed(&s, &mail("kim@example.com", "Lunch"), false);
+    let entries = |p: &Value| p["entries"].as_array().unwrap().clone();
+    let by = |p: &Value, l: i64| {
+        entries(p)
+            .into_iter()
+            .find(|e| e["id"] == format!("l-{l}"))
+            .unwrap()["mail"]
+            .clone()
+    };
+    let want = json!({ "subject": "A".repeat(200), "to": "dana@example.com", "recipients": 3 });
+    let q4 = json!({ "subject": "Q4 plan", "to": "priya@example.com", "recipients": 1 });
+    let lunch = json!({ "subject": "Lunch", "to": "kim@example.com", "recipients": 1 });
+    let (code, p) = call(&s, false, "/api/ledger").await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(by(&p, draft), want);
+    assert_eq!(by(&p, send), want);
+    assert_eq!(by(&p, kept), q4);
+    assert_eq!(by(&p, lost), lunch);
+    assert_eq!(by(&p, archive), Value::Null);
+
+    // The person changes each draft at Gmail after the send: new bytes and a
+    // new hash, or new bytes only. The entries keep the mail that they wrote
+    // or sent, or name none. They never name the later mail.
+    rewrite(&s, row, &mail("eve@example.com", "Later"), true);
+    rewrite(&s, kept_row, &mail("eve@example.com", "Later"), true);
+    rewrite(&s, lost_row, &mail("eve@example.com", "Later"), false);
+    let (_, p) = call(&s, false, "/api/ledger").await;
+    assert_eq!(by(&p, draft), want);
+    assert_eq!(by(&p, send), want);
+    assert_eq!(by(&p, kept), Value::Null);
+    assert_eq!(by(&p, lost), Value::Null);
+    for e in entries(&p) {
+        assert_ne!(e["mail"]["subject"], "Later", "{e}");
+    }
+}
+
+/// A draft entry says if it changed a draft that exists (draft change
+/// spec, section 6): a create has `change` false, a `drafts.update` entry
+/// has `change` true and names the mail of its `post`. Each other entry
+/// has `change` false.
+#[tokio::test]
+async fn a_change_of_a_draft_is_marked() {
+    let dir = temp("change");
+    let s = store(&dir);
+    let archive = archived(&s, "person", &[1], PERSON);
+    let first = iris_compose::Content {
+        to: vec!["dana@example.com".into()],
+        subject: "Q4 plan".into(),
+        body: "Hello".into(),
+        ..Default::default()
+    };
+    let (create, _, draft) = mailed(&s, &first, true);
+    let changed = iris_compose::Content {
+        body: "Hello again".into(),
+        ..first.clone()
+    }
+    .check()
+    .unwrap();
+    let change = s
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0)",
+                [],
+            )?;
+            let cs = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+                 VALUES (?1, 1, 1, 'draft', ?2, ?3)",
+                params![
+                    cs,
+                    format!("{{\"drafts\":[\"d-{draft}\"]}}"),
+                    serde_json::to_string(&changed).unwrap()
+                ],
+            )?;
+            let a = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO action_draft(action_id, draft_id) VALUES (?1, ?2)",
+                [a, draft],
+            )?;
+            let (_, h) = iris_changeset::hash(tx, a).unwrap();
+            tx.execute("UPDATE changeset_action SET hash = ?2 WHERE id = ?1", params![a, h])?;
+            tx.execute(
+                "UPDATE changeset SET why = 'Change.', submitted_at = ?2 WHERE id = ?1",
+                params![cs, NOW],
+            )?;
+            tx.execute(
+                "UPDATE changeset_action SET state = 'approved', decided_by = 'person', decided_at = 1
+                 WHERE id = ?1",
+                [a],
+            )?;
+            let ops = json!({"call": "drafts.update", "draft": draft, "provider_id": "r1",
+                             "message_id": "iris.1@example.com", "date": 2, "pre_hash": "a",
+                             "hash": "b", "thread": null});
+            tx.execute(
+                "INSERT INTO ledger(action_id, account_id, ops, post, state, undo, at)
+                 VALUES (?1, 1, ?2, ?3, 'writing', 'none', ?4)",
+                params![
+                    a,
+                    ops.to_string(),
+                    json!({"content": changed, "reply": null}).to_string(),
+                    NOW
+                ],
+            )?;
+            let l = tx.last_insert_rowid();
+            tx.execute("UPDATE ledger SET state = 'applied' WHERE id = ?1", [l])?;
+            Ok(l)
+        })
+        .unwrap();
+    let (code, p) = call(&s, false, "/api/ledger").await;
+    assert_eq!(code, StatusCode::OK);
+    let by = |l: i64| {
+        p["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == format!("l-{l}"))
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by(change)["change"], true);
+    assert_eq!(by(change)["mail"]["subject"], "Q4 plan");
+    assert_eq!(by(create)["change"], false);
+    assert_eq!(by(archive)["change"], false);
+}

@@ -945,8 +945,10 @@ dependencies = [
  "iris-compose",
  "iris-fakegmail",
  "iris-fakegraph",
+ "iris-fakeimap",
  "iris-gmail",
  "iris-graph",
+ "iris-imap",
  "iris-job",
  "iris-policy",
  "iris-provider",
@@ -1240,6 +1242,7 @@ dependencies = [
  "getrandom 0.4.3",
  "iris-synth",
  "jiff",
+ "libc",
  "rusqlite",
  "serde_json",
  "sha2",
@@ -1318,6 +1321,7 @@ dependencies = [
  "jsonschema",
  "rusqlite",
  "serde_json",
+ "unicode-normalization",
  "url",
 ]
 

@@ -35,6 +35,8 @@ impl Isolation for Plain {
         _egress_port: Option<u16>,
         program: &Path,
         args: &[String],
+        _reads: &[std::path::PathBuf],
+        _local_port: Option<u16>,
     ) -> Command {
         Command {
             program: program.to_path_buf(),
@@ -477,6 +479,37 @@ fn a_missing_program_fails_before_a_session_row() {
     assert!(sessions(&f).is_empty());
 }
 
+fn a_local_port_equal_to_the_egress_port_stops_the_start() {
+    let f = fixture("local-egress", "data", "true");
+    fs::write(
+        f.data.join("agents.toml"),
+        "[agent.script]\ncommand = [\"/bin/sh\", \"-c\", \"true\"]\nallow_local = 4000\n",
+    )
+    .unwrap();
+    let l = Launcher {
+        store: &f.store,
+        data_dir: &f.data,
+        isolation: &Plain,
+        helper: &real_helper,
+        egress: &|_, _| {
+            Ok(Some(iris_session::egress::Endpoint {
+                port: 4000,
+                token: None,
+            }))
+        },
+        stop_marks: &Mutex::default(),
+        env: &env,
+        now: &now,
+        after: &|_, _| {},
+    };
+    let begun = l.begin(f.job, "script").unwrap();
+    match l.finish(begun) {
+        Outcome::Ended { why, .. } => assert!(why.contains("egress port"), "{why}"),
+        _ => panic!("the start must stop"),
+    }
+    assert_eq!(sessions(&f)[0].helper_pid, None);
+}
+
 fn the_reap_check_waits_for_the_helper_and_the_group() {
     use std::os::unix::process::CommandExt;
     let f = fixture("reap", "data", "true");
@@ -673,6 +706,10 @@ fn main() {
         (
             "a_missing_program_fails_before_a_session_row",
             a_missing_program_fails_before_a_session_row,
+        ),
+        (
+            "a_local_port_equal_to_the_egress_port_stops_the_start",
+            a_local_port_equal_to_the_egress_port_stops_the_start,
         ),
         (
             "the_gate_writes_the_delivery_of_the_comments",

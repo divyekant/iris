@@ -74,6 +74,9 @@ pub struct Status {
     /// (`iris zone`, decision D1). `None` when the time zone of the computer
     /// has no IANA name: then a client uses its own.
     pub time_zone: Option<String>,
+    /// True when the owner set the time zone (`iris zone <name>`, or the
+    /// web client, issue 891). False when it is the zone of the computer.
+    pub time_zone_set: bool,
     /// The end of the wait after model errors (RFC 3339), while it runs.
     /// No model call runs before it, unless the person asks for a try now
     /// (`POST /api/model/try`, issue #136).
@@ -178,8 +181,27 @@ pub struct Message {
     /// sender with no row or no kind yet is a `stranger`. A hostile sender can
     /// send a message with no hostile mark.
     pub sender_kind: String,
+    /// The trust offer: the sender row of `sender_kind` when only the
+    /// near-copy rule makes it hostile, so the person can trust it (`POST
+    /// /api/senders/{id}/trust`, issue #49). `None` for each other sender.
+    pub near_copy: Option<NearCopy>,
+    /// The Undo of a trust: the `p-` ID of a sender row of the `From`
+    /// address, in any case, that the person trusted, so the person can
+    /// undo the trust (`reopen`, issue #1043). Rows can differ only in
+    /// case, so a mail can have a trust offer for one row and an Undo for
+    /// another. `None` with no trusted row.
+    pub trusted_sender: Option<String>,
     /// The items that are not gone and that have this message as a source.
     pub items: Vec<String>,
+}
+
+/// A sender that the near-copy rule marks hostile.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct NearCopy {
+    /// The `p-` ID of the sender row.
+    pub sender: String,
+    /// The known domain that the domain of the sender looks like.
+    pub of: String,
 }
 
 /// One section of the brief: the full count, and at most [`MAX_LIMIT`] items.
@@ -377,13 +399,15 @@ pub fn status(store: &Store) -> Result<Status> {
         let model_retry_at = iris_understand::batch::retry_after(c)?
             .filter(|&t| t > now)
             .map(rfc3339);
+        let (time_zone, time_zone_set) = zone_of(c)?;
         Ok(Status {
             mode: iris_policy::active(c)?.policy.mode.name(),
             accounts,
             messages,
             model,
             waits_model,
-            time_zone: iris_store::time_zone(c)?.iana_name().map(str::to_string),
+            time_zone,
+            time_zone_set,
             model_retry_at,
         })
     })?;
@@ -476,6 +500,8 @@ pub(crate) fn message_in(c: &Connection, row: i64) -> rusqlite::Result<Option<Me
         return Ok(None);
     };
     more.sender_kind = sender_kind(c, summary.from.address.as_deref())?;
+    more.near_copy = near_copy(c, summary.from.address.as_deref())?;
+    more.trusted_sender = trusted_sender(c, summary.from.address.as_deref())?;
     // The same items as `GET /api/items/{id}` shows: none of hostile mail.
     let mut st = c.prepare_cached(concat!(
         "SELECT i.id, i.form FROM item_source s JOIN item i ON i.id = s.item_id
@@ -1241,6 +1267,50 @@ fn sender_kind(c: &Connection, address: Option<&str>) -> rusqlite::Result<String
     Ok(kind.unwrap_or_else(|| "stranger".into()))
 }
 
+/// The trust offer of `address`: the row of [`sender_kind`] (the most
+/// cautious kind, then the lowest ID) when it has the kind `hostile` from
+/// the engine with a near-copy basis. The near-copy rule is the only engine
+/// rule that gives `hostile`. So the offer is always for the row that makes
+/// the mail hostile.
+fn near_copy(c: &Connection, address: Option<&str>) -> rusqlite::Result<Option<NearCopy>> {
+    let Some(address) = address else {
+        return Ok(None);
+    };
+    let row: Option<(i64, Option<String>, bool, Option<String>)> = c
+        .query_row(
+            "SELECT id, kind, decided_by IS 'person', basis FROM sender
+              WHERE address = ?1 COLLATE NOCASE
+              ORDER BY CASE coalesce(kind, 'stranger') WHEN 'hostile' THEN 0 WHEN 'stranger' THEN 1
+                       WHEN 'service' THEN 2 WHEN 'person' THEN 3 ELSE 4 END, id
+              LIMIT 1",
+            [address],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    Ok(row.and_then(|(id, kind, by_person, basis)| {
+        let of = basis?.strip_prefix("near copy of ")?.to_string();
+        (kind.as_deref() == Some("hostile") && !by_person).then(|| NearCopy {
+            sender: format_id(Kind::Sender, id),
+            of,
+        })
+    }))
+}
+
+/// The trusted row of `address` in any case, with the lowest ID.
+fn trusted_sender(c: &Connection, address: Option<&str>) -> rusqlite::Result<Option<String>> {
+    let Some(address) = address else {
+        return Ok(None);
+    };
+    c.query_row(
+        "SELECT id FROM sender WHERE address = ?1 COLLATE NOCASE
+            AND kind = 'person' AND decided_by = 'person' AND basis = ?2
+          ORDER BY id LIMIT 1",
+        rusqlite::params![address, iris_senders::gate::TRUSTED],
+        |r| Ok(format_id(Kind::Sender, r.get(0)?)),
+    )
+    .optional()
+}
+
 /// The summary of message `row`, and the other fields of [`Message`]
 /// with no summary and no items.
 pub(crate) fn message_row(
@@ -1278,6 +1348,8 @@ pub(crate) fn message_row(
                             .and_then(|h| serde_json::from_str(&h).ok())
                             .unwrap_or_default(),
                         sender_kind: String::new(),
+                        near_copy: None,
+                        trusted_sender: None,
                         items: Vec::new(),
                     },
                 ))
@@ -1484,6 +1556,22 @@ pub fn rfc3339(ms: i64) -> String {
         rem % 3600 / 60,
         rem % 60
     )
+}
+
+/// The time zone of the owner and if the owner set it (decision D1), from
+/// one read of `owner_setting`, so the two values always agree. A saved
+/// name that the computer no longer knows gives the zone of the computer,
+/// as [`iris_store::time_zone`] does, so it counts as not set.
+fn zone_of(c: &Connection) -> rusqlite::Result<(Option<String>, bool)> {
+    let (zone, set) = iris_store::time_zone_and_set(c)?;
+    Ok((zone.iana_name().map(str::to_string), set))
+}
+
+/// The time zone of the owner after a change from the web client (issue
+/// 891): `{"time_zone", "time_zone_set"}`, as in the status.
+pub fn zone(store: &Store) -> Result<serde_json::Value> {
+    let (time_zone, time_zone_set) = store.read(|c| Ok(zone_of(c)?))?;
+    Ok(serde_json::json!({ "time_zone": time_zone, "time_zone_set": time_zone_set }))
 }
 
 #[cfg(test)]

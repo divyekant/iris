@@ -135,15 +135,29 @@ fn attribution(lines: &[&str]) -> Option<(usize, bool)> {
     (dated(&joined) && !dated(second)).then_some((2, false))
 }
 
-/// The form of the attribution line of a client in any language: a time
-/// (`10:00`) and an address in `<>`, and a `:` at the end. Gmail writes
+/// The form of the attribution line of a client in any language: a year
+/// (`2025`), a time (`10:00`) and an address in `<>`, and a `:` at the end. Gmail writes
 /// "Am 3. Feb. 2025 um 10:00 schrieb Ana <ana@example.org>:".
 fn dated(s: &str) -> bool {
     let s = s.trim();
     if s.len() >= 400 || !(s.ends_with(':') || s.ends_with('：')) {
         return false;
     }
-    let b = s.as_bytes();
+    // The time and the year count only outside `<>`, so an address such as
+    // `<ana2025@example.org>` is not a date.
+    let outside: Vec<u8> = s
+        .split('<')
+        .enumerate()
+        .flat_map(|(i, part)| {
+            let text = if i == 0 {
+                part
+            } else {
+                part.split_once('>').map_or("", |p| p.1)
+            };
+            text.bytes().chain(*b" ")
+        })
+        .collect();
+    let b = &outside[..];
     let time = b.windows(4).any(|w| {
         w[0].is_ascii_digit() && w[1] == b':' && w[2].is_ascii_digit() && w[3].is_ascii_digit()
     });
@@ -151,7 +165,15 @@ fn dated(s: &str) -> bool {
         r.split_once('>')
             .is_some_and(|(a, _)| a.contains('@') && !a.contains(char::is_whitespace))
     });
-    time && address
+    // Clients write the date with its year. An own line with a time and an
+    // address seldom has a year too.
+    let year = b.windows(4).enumerate().any(|(i, w)| {
+        (w.starts_with(b"19") || w.starts_with(b"20"))
+            && w.iter().all(u8::is_ascii_digit)
+            && !b.get(i + 4).is_some_and(u8::is_ascii_digit)
+            && !(i > 0 && b[i - 1].is_ascii_digit())
+    });
+    time && address && year
 }
 
 fn is_original_marker(t: &str) -> bool {
@@ -369,6 +391,16 @@ mod tests {
         );
         let t = "On Mon Ana wrote:\n> Q1?\nA1\n> Q2?\nA2";
         assert_eq!(strip_quotes(t, true), "On Mon Ana wrote:\nA1\nA2");
+        // An own line with a time and an address but no year, before a
+        // quote at the end.
+        let t = "Let's meet at 10:00 with Ana <ana@example.org>:\n> The proposed time works";
+        assert_eq!(
+            strip_quotes(t, false),
+            "Let's meet at 10:00 with Ana <ana@example.org>:"
+        );
+        // A year or a time inside the address does not count.
+        let t = "Let's meet at 10:00 with Ana <ana2025@example.org>:\n> The proposed time works";
+        assert_eq!(strip_quotes(t, false), t.lines().next().unwrap());
         // An own sentence does not join the next line.
         let t = "On Tuesday at 10:00.\nAna <ana@example.org>:\n> example";
         assert_eq!(

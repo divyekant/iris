@@ -249,28 +249,56 @@ pub fn send_written(store: &Store, account: i64, clock: &dyn Fn() -> i64) -> Res
     Ok(made)
 }
 
+/// The draft of the `draft` action `a`, as a join condition on `draft d`
+/// (change spec, section 2): the row that the action made (a create), or
+/// the row that its `drafts` target names once the action is `applied` (a
+/// change). Each query that joins a draft to a send mark uses it.
+#[macro_export]
+macro_rules! draft_of_action {
+    () => {
+        "(d.action_id = a.id OR (a.verb = 'draft' AND a.state = 'applied' AND d.id IN
+           (SELECT ad.draft_id FROM action_draft ad WHERE ad.action_id = a.id)))"
+    };
+}
+
 /// The marks that wait for their send: no send yet, a draft row that
 /// Gmail did not send or change, a changeset that the person did not
 /// withdraw, and a press after `?2` (the time [`MARK_MS`] ago). A mark
 /// that fails one of these never gets a send.
-const OPEN: &str = "FROM write_send w
-    JOIN draft d ON d.action_id = w.action_id
+const OPEN: &str = concat!(
+    "FROM write_send w
     JOIN changeset_action a ON a.id = w.action_id
+    JOIN draft d ON ",
+    draft_of_action!(),
+    "
     JOIN changeset c ON c.id = a.changeset_id
     WHERE w.send_action_id IS NULL AND c.state <> 'withdrawn'
-      AND d.foreign_at IS NULL AND d.sent_at IS NULL AND w.created_at > ?2";
+      AND d.foreign_at IS NULL AND d.sent_at IS NULL AND w.created_at > ?2"
+);
+
+/// The reason of a send mark whose draft has other content than the press
+/// (change spec, section 2): the mark makes no send of it.
+pub const DRAFT_CHANGED: &str =
+    "The draft changed after you pressed Send. Look at it, then send again.";
 
 /// One mark: read it again in the write transaction, so a second run
 /// finds the send and makes nothing.
 fn send_one(c: &Connection, mark: i64, now_ms: i64) -> Result<bool> {
-    let row: Option<(i64, String)> = c
+    // `pressed`: the content hash of the press, from the ledger entry of
+    // the action of the mark (a create or a change).
+    let row: Option<(i64, String, bool)> = c
         .query_row(
-            &format!("SELECT d.id, w.flags {OPEN} AND w.action_id = ?1"),
+            &format!(
+                "SELECT d.id, w.flags,
+                        d.hash IS (SELECT json_extract(l.ops, '$.hash') FROM ledger l
+                                   WHERE l.action_id = w.action_id AND l.state = 'applied')
+                 {OPEN} AND w.action_id = ?1"
+            ),
             [mark, now_ms - MARK_MS],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let Some((draft, seen)) = row else {
+    let Some((draft, seen, pressed)) = row else {
         return Ok(false);
     };
     let author = person();
@@ -285,7 +313,23 @@ fn send_one(c: &Connection, mark: i64, now_ms: i64) -> Result<bool> {
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
     // A denied send stays, with its reason, for the state of the write.
-    if state.as_deref() == Some("proposed") {
+    if state.as_deref() == Some("proposed") && !pressed {
+        // The draft has other content than the press: a stale mark never
+        // sends the content of another press.
+        let action = ActionId {
+            changeset: cs,
+            revision,
+            n,
+        };
+        decide_in(
+            c,
+            action,
+            State::Denied,
+            By::Engine,
+            Some(DRAFT_CHANGED),
+            now_ms,
+        )?;
+    } else if state.as_deref() == Some("proposed") {
         let action = ActionId {
             changeset: cs,
             revision,
