@@ -797,9 +797,7 @@ fn an_error_of_an_ended_process_means_ended() {
 /// A tool folder outside `/tmp` (a folder of system state), for the read
 /// path tests.
 fn tool_dir(name: &str) -> PathBuf {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/read-paths-tests")
-        .join(format!("sbx-{name}-{}", std::process::id()));
+    let p = crate::read_paths::test_root().join(format!("sbx-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&p);
     fs::create_dir_all(&p).unwrap();
     fs::write(p.join("main.js"), "TOOL-MARKER").unwrap();

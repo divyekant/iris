@@ -3,14 +3,12 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixListener;
 
-/// A folder for one test, outside `/tmp` (a folder of system state).
+/// A folder for one test, in a folder that the rules allow (`test_root`).
 struct Dir(PathBuf);
 
 impl Dir {
     fn new(name: &str) -> Dir {
-        let p = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/read-paths-tests")
-            .join(format!("{name}-{}", std::process::id()));
+        let p = test_root().join(format!("{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         Dir(fs::canonicalize(&p).unwrap())
@@ -306,4 +304,17 @@ fn a_hard_link_to_a_file_of_the_data_folder_is_refused() {
     // A file with one link passes.
     fs::remove_file(tool.join("lib/key")).unwrap();
     assert!(check(&tool, &data, None).is_ok());
+}
+
+#[test]
+fn the_test_folder_leaves_a_checkout_in_a_folder_of_system_state() {
+    let home = Path::new("/home/a");
+    assert_eq!(
+        test_root_of(Path::new("/tmp/r/iris/target"), home),
+        Path::new("/home/a/.cache/iris-read-paths-tests")
+    );
+    assert_eq!(
+        test_root_of(Path::new("/srv/iris/target"), home),
+        Path::new("/srv/iris/target/read-paths-tests")
+    );
 }
