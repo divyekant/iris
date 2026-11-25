@@ -333,3 +333,34 @@ test("an item at the gate with a reply draft shows Draft ready, as a brief line 
     view.destroy();
   }
 });
+
+test("a sender with the name of a person you know shows a warning (issue #370)", async () => {
+  serve(() => [200, {}]);
+  const senders = fx.gate.senders.map((s, i) => (i === 1 ? { ...s, known_as: "leo@quartz.example" } : s));
+  const view = await mount("/src/views/Gate.svelte", { page: { ...fx.gate, senders } });
+  try {
+    const notes = [...view.target.querySelectorAll(".known")];
+    assert.equal(notes.length, 1);
+    assert.match(text(notes[0]), /You know a person with this name at leo@quartz\.example/);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("Trust in a mail answers the near-copy sender, and Undo reopens it (issue #49)", async () => {
+  const asked = serve((path) => [200, rowFor(path)]);
+  const message = { ...fx.message("m-55210"), sender_kind: "hostile", near_copy: { sender: "p-90", of: "northwind.example" } };
+  const view = await mount("/src/views/Mail.svelte", { message });
+  try {
+    button(view, "Trust this sender").click();
+    await until(() => text(view.target).includes("You trust this sender."));
+    button(view, "Undo").click();
+    await until(() => button(view, "Trust this sender"));
+    assert.deepEqual(asked, [
+      ["POST", "senders/p-90/trust"],
+      ["POST", "senders/p-90/reopen"],
+    ]);
+  } finally {
+    view.destroy();
+  }
+});
