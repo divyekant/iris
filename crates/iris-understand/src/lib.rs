@@ -240,11 +240,12 @@ pub fn name_address_spoof(name: &str, from: &str) -> bool {
         .filter_map(|w| {
             let (local, domain) = w.split_once('@')?;
             // The domain ends at the first ASCII character that a domain
-            // cannot hold (#911): "a@bank.example/help". A character
-            // outside ASCII stays, so a mixed-script domain still differs.
-            let end = domain
-                .find(|c: char| c.is_ascii() && !(c.is_ascii_alphanumeric() || "-.@".contains(c)))
-                .unwrap_or(domain.len());
+            // cannot hold (#911): "a@bank.example/help", and at Unicode
+            // punctuation (#982): "a@bank.example—help". All other
+            // characters stay (letters, marks, format characters and the
+            // dots that IDNA reads as "."), so a mixed-script, reversed or
+            // longer domain still differs.
+            let end = domain.find(ends_domain).unwrap_or(domain.len());
             let domain = domain[..end].trim_end_matches('.');
             let w = format!("{local}@{domain}");
             let ok = !local.is_empty()
@@ -254,6 +255,24 @@ pub fn name_address_spoof(name: &str, from: &str) -> bool {
             ok.then(|| w.to_lowercase())
         })
         .any(|a| a != from.to_lowercase() && owner(&a) != from_owner)
+}
+
+/// A character that ends the domain of an address in a display name.
+fn ends_domain(c: char) -> bool {
+    use unicode_general_category::{get_general_category, GeneralCategory as G};
+    if c.is_ascii() {
+        return !(c.is_ascii_alphanumeric() || "-.@".contains(c));
+    }
+    !matches!(c, '\u{3002}' | '\u{FF0E}' | '\u{FF61}')
+        && matches!(
+            get_general_category(c),
+            G::DashPunctuation
+                | G::OtherPunctuation
+                | G::OpenPunctuation
+                | G::ClosePunctuation
+                | G::InitialPunctuation
+                | G::FinalPunctuation
+        )
 }
 
 /// True when the links of a received message give the mark `link`

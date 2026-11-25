@@ -490,3 +490,49 @@ fn an_address_in_the_name_ends_at_a_character_that_a_domain_cannot_hold() {
     // domain still differs from the owner.
     assert!(spoof("support@bank.example\u{202E}x.y", from));
 }
+
+/// Property (#982): Unicode punctuation (classes Pd, Po, Ps, Pe, Pi and Pf)
+/// ends the domain of an address in the display name, as ASCII punctuation
+/// does. A format character, a mark and a dot that IDNA reads as a dot stay
+/// in the domain, so a reversed, combined or longer domain keeps its mark.
+#[test]
+fn unicode_punctuation_ends_an_address_in_the_name() {
+    use iris_understand::name_address_spoof as spoof;
+    use unicode_general_category::{get_general_category, GeneralCategory as G};
+    let from = "noreply@bank.example";
+    // U+FE6B and U+FF20 read as "@" (a second "@" is no address).
+    let idna_dots = ['\u{3002}', '\u{FF0E}', '\u{FF61}'];
+    let mut n = 0;
+    for c in (0x80u32..0x3_0000).filter_map(char::from_u32) {
+        let punct = matches!(
+            get_general_category(c),
+            G::DashPunctuation
+                | G::OtherPunctuation
+                | G::OpenPunctuation
+                | G::ClosePunctuation
+                | G::InitialPunctuation
+                | G::FinalPunctuation
+        );
+        if !punct || idna_dots.contains(&c) || ['\u{FE6B}', '\u{FF20}'].contains(&c) {
+            continue;
+        }
+        n += 1;
+        for t in ["help", ""] {
+            let own = format!("support@bank.example{c}{t}");
+            assert!(!spoof(&own, from), "{own:?}");
+            let foreign = format!("support@other.example{c}{t}");
+            assert!(spoof(&foreign, from), "{foreign:?}");
+        }
+    }
+    assert!(n > 500, "{n}");
+    assert!(!spoof("support@bank.example\u{2014}help", from));
+    // These stay in the domain: the domain then differs from the owner.
+    for c in ['\u{202E}', '\u{200D}', '\u{0301}', '\u{FE0F}'] {
+        let w = format!("support@bank.example{c}x.y");
+        assert!(spoof(&w, from), "{w:?}");
+    }
+    for dot in idna_dots {
+        let w = format!("support@bank.example{dot}evil.test");
+        assert!(spoof(&w, from), "{w:?}");
+    }
+}
