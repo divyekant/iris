@@ -39,7 +39,7 @@ fn address(r: &mut Rng) -> String {
     local = format!("a{local}z");
     // A quoted local part with the signs of list syntax (issue #980).
     if r.below(5) == 0 {
-        local = format!("\"{local} <x>, y;\"");
+        local = format!("\"{local} <x>, (y);\"");
     }
     format!("{local}@{}", r.pick(DOMAINS))
 }
@@ -71,6 +71,8 @@ fn entry(r: &mut Rng, a: &str) -> String {
         7 => format!("\"Ana \\\", x@evil.example\" <{a}>"),
         // A quoted pair in a comment: `\)` does not end the comment.
         8 => format!("{a} (x\\), <b@evil.example>, tail)"),
+        // White space and a comment before the address in `<>`.
+        9 if r.below(2) == 0 => format!("Ana < (note, <x>) {a}>"),
         _ => format!("=?UTF-8?Q?Ana_Lee?= <{a}>"),
     }
 }
@@ -264,5 +266,19 @@ fn open_quoted_local_parts_are_linear() {
         start.elapsed() < std::time::Duration::from_secs(5),
         "{:?}",
         start.elapsed()
+    );
+}
+
+/// A comment and white space can come before a quoted local part in `<>`.
+#[test]
+fn a_comment_before_a_quoted_local_part() {
+    let got = |l: &str| addresses(l).into_iter().map(|(a, _)| a).collect::<Vec<_>>();
+    assert_eq!(
+        got("<(note)\"a<b\"@example.org>, c@example.org"),
+        ["\"a<b\"@example.org", "c@example.org"]
+    );
+    assert_eq!(
+        got("Ana < (x) (y\\)) \"a>, b\"@example.org>"),
+        ["\"a>, b\"@example.org"]
     );
 }

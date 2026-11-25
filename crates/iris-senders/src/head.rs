@@ -227,7 +227,7 @@ pub fn each_address(v: &str, mut f: impl FnMut(String, Option<String>)) {
     // The `<` and `>` of the open entry that the scan found outside quotes
     // and comments. A `<` or `>` in a quoted local part is text (issue #980).
     let (mut open, mut shut): (Option<usize>, Option<usize>) = (None, None);
-    // True from a `<` up to the first sign that is not white space.
+    // True from a `<` up to the first sign outside white space and comments.
     let mut fresh = false;
     let mut push = |entry: std::ops::Range<usize>,
                     open: Option<usize>,
@@ -268,7 +268,8 @@ pub fn each_address(v: &str, mut f: impl FnMut(String, Option<String>)) {
     for (i, c) in v.char_indices() {
         let after_at = std::mem::replace(&mut prev, c) == '@';
         let at_start = fresh;
-        fresh = fresh && c.is_whitespace();
+        // White space and comments (CFWS) can come before the local part.
+        fresh = fresh && (c.is_whitespace() || c == '(' || c == ')' || comment > 0);
         // The sign after `\\` in a quoted string or a comment is text.
         if std::mem::take(&mut escaped) {
             continue;

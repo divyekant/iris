@@ -491,7 +491,11 @@ client. They are not defects of this design:
   the display name. These limits stay:
   - An address with two `@` outside a quoted local part (`a@b@example.org`)
     gives no address.
-  - A `<` or `>` inside a quoted local part breaks the list (issue #980).
+  - In `<>`, a quoted local part counts only at the start of the address
+    (after white space and comments) and only when its closing `"` comes
+    right before an `@` inside 256 bytes. There, a `<`, `>`, `,` or `;` is
+    text (issue #980). A longer quoted local part, or one with no `@` right
+    after its closing quote, is read as before: its `<` and `>` count.
   - Mail that Iris understood before the change to the scanner keeps the
     recipients that `mail-parser` read, so a domain-literal recipient of
     that mail is not in the profiles (issue #1003).
