@@ -901,5 +901,32 @@ async fn a_member_shows_a_ready_draft_of_its_thread() {
     .unwrap();
     let (_, v) = call(&s, Method::GET, "/api/matters/g-1", "").await;
     assert!(marks(&v).contains(&("c-3".into(), Value::Null)), "{v}");
+    // A conversation that needs the person, with a fresh summary of its
+    // thread: the summary mark.
+    s.write(|tx| {
+        tx.execute_batch(&format!(
+            "UPDATE item SET status = 'active', doc = json_set(doc, '$.new', 1) WHERE id = 2;
+             UPDATE message SET understood_at = 1 WHERE thread_id = ({thread});
+             INSERT OR IGNORE INTO body(message_id, subject, sender, text)
+               SELECT id, 'Trip', 'ana', 'Book?' FROM message WHERE thread_id = ({thread});
+             INSERT INTO thread_summary(thread_id, based_on, basis, text, model, prompt, created_at)
+             SELECT t.thread_id, (SELECT m.id {} {} {} LIMIT 1), {}, 'Ana asked to book.',
+                    'fake', 'summary/0.1', 1
+               FROM ({thread}) t",
+            iris_voice::messages_sql("t.thread_id"),
+            iris_voice::ANSWERABLE,
+            iris_voice::NEWEST,
+            iris_summary::basis_sql("t.thread_id"),
+            thread = "SELECT m.thread_id FROM item_source s JOIN message m ON m.id = s.message_id
+                      WHERE s.item_id = 2 AND s.role = 'origin'"
+        ))?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, v) = call(&s, Method::GET, "/api/matters/g-1", "").await;
+    assert!(
+        marks(&v).contains(&("v-2".into(), json!(["summary"]))),
+        "{v}"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
