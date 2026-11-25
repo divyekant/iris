@@ -1242,6 +1242,7 @@ dependencies = [
  "getrandom 0.4.3",
  "iris-synth",
  "jiff",
+ "libc",
  "rusqlite",
  "serde_json",
  "sha2",

@@ -213,7 +213,10 @@ export type Message = Summary & {
   /** The kind of the From sender (spec 1 section 6.7). */
   sender_kind?: "person" | "service" | "stranger" | "hostile";
   /** The sender when only its look-alike domain makes it hostile: you can trust it (issue #49). */
-  near_copy?: { sender: string; of: string | null; trusted: boolean } | null;
+  /** The trust offer: a sender that only the near-copy rule makes hostile (issue 49). */
+  near_copy?: { sender: string; of: string } | null;
+  /** The Undo of a trust: the sender row of this address that the person trusted (issue 1043). */
+  trusted_sender?: string | null;
   items: string[];
 };
 
@@ -330,6 +333,8 @@ export type LedgerEntry = {
   retry: boolean;
   /** A send or a draft: the subject, the first `to` address and the count of all recipients. Null when Iris cannot read it. */
   mail?: { subject: string; to: string | null; recipients: number } | null;
+  /** A draft: true when it changed a draft that exists (with `undo_of`: the undo of a change). An older engine leaves it out. */
+  change?: boolean;
 };
 
 export type LedgerPage = { entries: LedgerEntry[]; next: string | null };
