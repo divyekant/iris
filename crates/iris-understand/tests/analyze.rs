@@ -554,6 +554,24 @@ fn a_from_past_the_header_limit_is_a_spoof() {
     assert!(a.head.cut, "the header goes on past the limit");
     assert!(a.marks.contains(&Mark::Spoof));
 
+    // A message of exactly the limit, all header, with no From: Iris cannot
+    // know what a mail program shows, so it is a spoof.
+    let mut raw = String::from("Subject: Hi\nX-Pad: a\n");
+    while HEAD_LIMIT - crlf_len(&raw) > 200 {
+        raw.push_str(&format!(" {}\n", "a".repeat(75)));
+    }
+    let rest = HEAD_LIMIT - crlf_len(&raw);
+    raw.push_str(&format!(" {}", "a".repeat(rest - 1)));
+    assert_eq!(crlf_len(&raw), HEAD_LIMIT);
+    let a = analysis(&raw, &[], &[], &[]);
+    assert!(a.head.from_addr.is_none() && a.head.cut);
+    assert!(a.marks.contains(&Mark::Spoof));
+    // One byte less is a whole message with no From: no mark from this rule.
+    let short = &raw[..raw.len() - 1];
+    let a = analysis(short, &[], &[], &[]);
+    assert!(!a.head.cut);
+    assert!(!a.marks.contains(&Mark::Spoof));
+
     // A long header that ends in the limit, with a From of its own owner,
     // is no spoof.
     let mut raw = String::from("Subject: Hi\nFrom: Ana <ana@example.org>\nX-Pad: a\n");

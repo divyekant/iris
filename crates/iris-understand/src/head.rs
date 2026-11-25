@@ -31,9 +31,9 @@ pub struct Head {
     /// The results of the top `Authentication-Results` header of the
     /// provider (the `authserv` of [`Head::parse`]).
     pub auth: Option<Auth>,
-    /// True when the header block does not end in the first [`HEAD_LIMIT`]
-    /// bytes, so a field past the limit (as `From`) is not read (issue
-    /// #1033).
+    /// True when the message has [`HEAD_LIMIT`] bytes or more and no empty
+    /// line ends the header block in the first [`HEAD_LIMIT`] bytes, so a
+    /// field past the limit (as `From`) is not read (issue #1033).
     pub cut: bool,
 }
 
@@ -127,7 +127,7 @@ impl Head {
             // The same rule as the sender kinds of `iris-senders`.
             automated: iris_senders::head::Head::parse(raw).automated(),
             auth,
-            cut: !ended && raw.len() > HEAD_LIMIT,
+            cut: !ended && raw.len() >= HEAD_LIMIT,
         }
     }
 }
