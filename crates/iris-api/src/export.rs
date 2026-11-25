@@ -8,7 +8,7 @@ use std::path::Path;
 
 use iris_store::{format_id, new_private_dir, Kind, Store};
 
-use crate::read::{doc_of, message_in, MATTER};
+use crate::read::{doc_of, item_id, message_in, MATTER};
 use crate::Result;
 
 /// What [`export`] wrote.
@@ -34,7 +34,11 @@ fn line(out: &mut impl Write, v: &impl serde::Serialize) -> io::Result<()> {
 /// - `items.jsonl`: one item document of the open model on each line.
 /// - `messages.jsonl`: one message on each line, as `/api/messages/{id}`
 ///   gives it, with `file`: the path of its raw message in the export, or
-///   `null` when the message has no content (`content_sha256` is null).
+///   `null` when the message has no content (`content_sha256` is null), and
+///   `hostile_mail`: `true` if the message has a hostile mark, the label
+///   SPAM or a hostile sender. The other reads of the API hide the items of
+///   such a message; the export keeps them, and `items` of the message names
+///   them (#819).
 /// - `mail/<m-id>.eml`: the raw message (RFC 5322) of each message.
 ///
 /// All files come from one read transaction, so each reference in them
@@ -42,14 +46,51 @@ fn line(out: &mut impl Write, v: &impl serde::Serialize) -> io::Result<()> {
 /// from SQLite, so memory does not grow with the mailbox. A message that
 /// refers to a content file that is not there is an error
 /// ([`iris_store::Error::MissingContent`]): the export is not complete.
+///
+/// The files go to a new folder `.<name>.partial-<process>-<time>` next to
+/// `dest` first, and a rename moves them into `dest` at the end. The export
+/// makes that folder itself and fails if the name is taken, so it never
+/// writes into or removes a folder that it did not make. After an error,
+/// `dest` stays empty and the export removes its partial folder. After a
+/// crash, only a folder with `.partial` in its name holds files (#245).
 pub fn export(store: &Store, dest: &Path) -> Result<Exported> {
-    Ok(write(store, dest)?)
-}
-
-fn write(store: &Store, dest: &Path) -> iris_store::Result<Exported> {
     // The content cleanup cannot delete a raw message during the export.
     let _lock = store.backup_lock()?;
     new_private_dir(dest)?;
+    let Some(name) = dest.file_name() else {
+        return Err(crate::Error::Query(
+            "the export folder must have a name".into(),
+        ));
+    };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let partial = dest.with_file_name(format!(
+        ".{}.partial-{}-{nanos}",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    // Not recursive: an existing folder of that name is an error, never ours.
+    let mut b = fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+    b.create(&partial).map_err(iris_store::Error::from)?;
+    let n = match write(store, &partial) {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&partial);
+            return Err(e.into());
+        }
+    };
+    // `dest` is an empty folder: a rename replaces it.
+    if let Err(e) = fs::rename(&partial, dest) {
+        let _ = fs::remove_dir_all(&partial);
+        return Err(iris_store::Error::from(e).into());
+    }
+    Ok(n)
+}
+
+fn write(store: &Store, dest: &Path) -> iris_store::Result<Exported> {
     let mail = dest.join("mail");
     fs::create_dir(&mail)?;
     let mut items = BufWriter::new(File::create(dest.join("items.jsonl"))?);
@@ -70,10 +111,18 @@ fn write(store: &Store, dest: &Path) -> iris_store::Result<Exported> {
             line(&mut items, &doc_of(r)?)?;
             n.items += 1;
         }
-        let mut st = tx.prepare("SELECT id, content_sha256 FROM message ORDER BY id")?;
+        let mut st = tx.prepare(&format!(
+            "SELECT m.id, m.content_sha256, {} FROM message m ORDER BY m.id",
+            iris_store::hostile_mail!()
+        ))?;
+        let mut links = tx.prepare(
+            "SELECT i.id, i.form FROM item_source s JOIN item i ON i.id = s.item_id
+             WHERE s.message_id = ?1 ORDER BY i.id",
+        )?;
         let mut rows = st.query([])?;
         while let Some(r) = rows.next()? {
-            let (row, sha): (i64, Option<String>) = (r.get(0)?, r.get(1)?);
+            let (row, sha, hostile): (i64, Option<String>, bool) =
+                (r.get(0)?, r.get(1)?, r.get(2)?);
             let Some(m) = message_in(&tx, row)? else {
                 continue;
             };
@@ -96,7 +145,15 @@ fn write(store: &Store, dest: &Path) -> iris_store::Result<Exported> {
                 None => None,
             };
             let mut v = serde_json::to_value(&m).map_err(io::Error::from)?;
+            // Each item of the message, as `items.jsonl` has them: also a
+            // gone item and an item of hostile mail, which the API hides.
+            v["items"] = links
+                .query_map([row], |r| Ok(item_id(r.get(0)?, &r.get::<_, String>(1)?)))?
+                .filter_map(|i| i.transpose())
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .into();
             v["file"] = file.into();
+            v["hostile_mail"] = hostile.into();
             line(&mut messages, &v)?;
             n.messages += 1;
         }
