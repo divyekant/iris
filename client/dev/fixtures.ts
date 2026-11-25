@@ -77,11 +77,14 @@ export const ignored: GatePage = {
   senders: [{ id: "p-74", name: "Dana Brooks", address: "dana@leadgen.example", count: 1, items: [ask("c-405", "Book a call about your Q1 plans", stranger("p-74", "Dana Brooks", "dana@leadgen.example"), null, "m-60001", "Do you have 15 minutes this week?")] }],
 };
 
+/** A second late promise of Alex in the same thread: the one nudge names it too (decision D8). */
+const alexNotes = { ...(owedToYou as unknown as Item), id: "c-208", title: "Release notes", model: "iris/1.1", account: "a-2", ready: ["draft"], sources: [{ message: "m-54001", thread: "t-8700", role: "origin", quote: "I will also send the release notes." }] } as unknown as Item;
+
 export const brief: Brief = {
   // Iris prepared a reply for the first item (card R3-09).
   you_owe: of(byForm("commitment").filter((i) => i.direction === "you_owe").map((i, n) => (n ? i : { ...i, ready: ["draft"] }))),
   // Alex is late: Iris prepared a nudge (card R3-07).
-  owed_to_you: of(byForm("commitment").filter((i) => i.direction === "owed_to_you").map((i, n) => (n ? i : { ...i, ready: ["draft"] }))),
+  owed_to_you: of([...byForm("commitment").filter((i) => i.direction === "owed_to_you").map((i, n) => (n ? i : { ...i, ready: ["draft"] })), alexNotes]),
   conversations: of(byForm("conversation")),
   records: { receipt: 1, booking: 1 },
   // The feed example is bundled by rule 3 ("Bundle the feed"), so it is only in its bundle.
@@ -841,7 +844,7 @@ export const nudgeDraft = {
   based_on: "m-54001",
   nudge: true,
   to: "alex@example.com",
-  items: ["c-207"],
+  items: ["c-207", "c-208"],
   body: "Hi Alex,\n\nA quick check on the SDK examples. When can you send them?\n\nThanks",
 };
 
