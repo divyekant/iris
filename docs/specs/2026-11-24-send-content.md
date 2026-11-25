@@ -39,8 +39,9 @@ The owner decided (`docs/decisions.md`, entry D12, items D4 and D5):
   person, so an agent cannot name a file of the folder by its hash. A
   limit issue records this.
 - A forward of an attachment of a received message.
-- A setting for the display name. Iris takes the name from the sent mail
-  of the owner (section 3). A limit issue records this.
+- A setting for the display name. Iris takes the name from Graph for an
+  Outlook account, and from the sent mail of the owner for a Gmail
+  account (section 3). A limit issue records this.
 - Display names of the recipients. `To`, `Cc` and `Bcc` stay bare
   addresses.
 - A cleanup of attachment files that no draft uses. A limit issue
@@ -313,8 +314,8 @@ The MCP tool `draft` names `bcc` in its text, and not `attachments`
 - A new attachment table with a migration: the content folder is already
   content addressed, and the content JSON holds the entries. No stored
   row changes.
-- A display name setting: the sent mail of the owner already has the
-  name, and a setting adds a screen and an API. A limit issue records
+- A display name setting: Graph (Outlook) and the sent mail of the owner
+  (Gmail) already have the name, and a setting adds a screen and an API. A limit issue records
   the setting for later.
 - Libraries: `mail-builder` (already in use) writes the multipart
   message and encodes the file names (RFC 2231). `mail-parser` (already
