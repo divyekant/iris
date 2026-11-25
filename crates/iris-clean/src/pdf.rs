@@ -1666,6 +1666,30 @@ fn entries(d: &[u8]) -> impl Iterator<Item = (&[u8], Val<'_>)> {
     })
 }
 
+/// The object number and generation of the reference `key` (with its `/`)
+/// in the dictionary `d`: `<n> <g> R`. [`Val::Ref`] keeps the number only.
+fn reference(d: &[u8], key: &[u8]) -> Option<(u32, u32)> {
+    let mut lx = Lexer::new(d);
+    while lx.next()? != Tok::Open {}
+    loop {
+        match lx.next()? {
+            Tok::Close => return None,
+            Tok::Name(k) if k == key => {
+                return match (lx.next()?, lx.next()?, lx.next()?) {
+                    (Tok::Word(n), Tok::Word(g), Tok::Word(b"R")) => {
+                        Some((u32::try_from(int(n)?).ok()?, u32::try_from(int(g)?).ok()?))
+                    }
+                    _ => None,
+                };
+            }
+            Tok::Name(_) => {
+                value(&mut lx)?;
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The value of `key` (with its `/`) in the dictionary `d`.
 fn get<'a>(d: &'a [u8], key: &[u8]) -> Option<Val<'a>> {
     entries(d).find(|e| e.0 == key).map(|e| e.1)

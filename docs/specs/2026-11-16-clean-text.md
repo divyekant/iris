@@ -482,6 +482,8 @@ client. They are not defects of this design:
   user password, or that has another handler, gives no text. Iris reads
   the encryption only from the trailer that the last `startxref` (in the
   last 1 KiB) names: a `trailer` dictionary or a cross-reference stream.
+  An `/Encrypt` reference resolves to the last object with the same number
+  and generation (`<n> <g> obj`, with any white space between the tokens).
   `/Encrypt` text in other places does not count. Iris decrypts each
   stream in place, so the decryption adds no copy of the file when the
   file is base64 or quoted-printable (a 7bit, 8bit or binary attachment

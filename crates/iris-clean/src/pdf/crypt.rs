@@ -17,7 +17,7 @@ use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use md5::{Digest, Md5};
 use sha2::{Sha256, Sha384, Sha512};
 
-use super::{direct_name, find, get, hex, literal, value, Lexer, Val};
+use super::{direct_name, find, get, hex, literal, reference, value, Lexer, Val};
 
 /// The padding string of the password (Algorithm 2, step a).
 const PAD: [u8; 32] = [
@@ -68,7 +68,9 @@ pub(super) fn setup(pdf: &[u8]) -> Setup {
     let dict = match get(trailer, b"/Encrypt") {
         None => return Setup::Plain,
         Some(Val::Dict(d)) => Some(d),
-        Some(Val::Ref(n)) => object_dict(pdf, n),
+        Some(Val::Ref(_)) => {
+            reference(trailer, b"/Encrypt").and_then(|(n, g)| object_dict(pdf, n, g))
+        }
         Some(_) => None,
     };
     let Some(dict) = dict else {
@@ -125,22 +127,63 @@ fn trailer(pdf: &[u8]) -> Option<&[u8]> {
     }
 }
 
-/// The dictionary of the last object `n 0 obj` of the file.
-fn object_dict(pdf: &[u8], n: u32) -> Option<&[u8]> {
-    let head = format!("{n} 0 obj");
+/// The dictionary of the last object `n g obj` of the file, with any white
+/// space between the tokens. Each step reads back from the last match, so
+/// the search reads each byte of the file at most a bounded count of times.
+fn object_dict(pdf: &[u8], n: u32, g: u32) -> Option<&[u8]> {
     let mut end = pdf.len();
     let at = loop {
-        let at = rfind(&pdf[..end], head.as_bytes())?;
-        if at == 0 || pdf[at - 1].is_ascii_whitespace() {
+        let at = rfind(&pdf[..end], b"obj")?;
+        end = at;
+        let after = pdf.get(at + 3);
+        if after.is_some_and(|b| !b.is_ascii_whitespace() && !b"<[(/%".contains(b)) {
+            continue;
+        }
+        if header_before(&pdf[..at]) == Some((n, g)) {
             break at;
         }
-        end = at;
     };
-    let body = &pdf[at + head.len()..pdf.len().min(at + head.len() + DICT_BYTES)];
+    let body = &pdf[at + 3..pdf.len().min(at + 3 + DICT_BYTES)];
     match value(&mut Lexer::new(body))? {
         Val::Dict(d) => Some(d),
         _ => None,
     }
+}
+
+/// The most white space bytes between two tokens of an object header.
+const HEADER_SPACE: usize = 32;
+
+/// The object number and generation of `<n> <g> ` at the end of `b`, the
+/// bytes before an `obj` token.
+fn header_before(b: &[u8]) -> Option<(u32, u32)> {
+    let mut i = b.len();
+    let mut back = |need_space: bool| -> Option<u32> {
+        let ws = b[..i]
+            .iter()
+            .rev()
+            .take(HEADER_SPACE + 1)
+            .take_while(|c| c.is_ascii_whitespace())
+            .count();
+        if ws > HEADER_SPACE || (need_space && ws == 0) {
+            return None;
+        }
+        i -= ws;
+        let digits = b[..i]
+            .iter()
+            .rev()
+            .take(11)
+            .take_while(|c| c.is_ascii_digit())
+            .count();
+        if digits == 0 || digits > 10 {
+            return None;
+        }
+        i -= digits;
+        std::str::from_utf8(&b[i..i + digits]).ok()?.parse().ok()
+    };
+    let g = back(true)?;
+    let n = back(true)?;
+    // The number starts a token.
+    (i == 0 || b[i - 1].is_ascii_whitespace()).then_some((n, g))
 }
 
 fn rfind(hay: &[u8], needle: &[u8]) -> Option<usize> {
@@ -442,6 +485,54 @@ fn aes_cbc(key: &[u8], data: &mut [u8]) -> Option<std::ops::Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Invariant: an `/Encrypt` reference resolves only to the object with
+    /// the same number and generation, with any white space between the
+    /// tokens (review finding on #1148).
+    #[test]
+    fn the_encrypt_reference_resolves_its_number_and_generation() {
+        let base = include_bytes!("../../tests/pdf/rc4-128.pdf");
+        let swap = |pdf: &[u8], from: &str, to: &str| -> Vec<u8> {
+            let at = pdf
+                .windows(from.len())
+                .position(|w| w == from.as_bytes())
+                .unwrap();
+            let out = [&pdf[..at], to.as_bytes(), &pdf[at + from.len()..]].concat();
+            // The swap moves the bytes after it, so it moves the offset that
+            // `startxref` gives too when the swap is before the xref table.
+            let sx = rfind(&out, b"startxref").unwrap() + 9;
+            let text = std::str::from_utf8(&out[sx..]).unwrap();
+            let old: usize = text.split_whitespace().next().unwrap().parse().unwrap();
+            let moved = if at < old {
+                old + to.len() - from.len()
+            } else {
+                old
+            };
+            let tail = text.replacen(&old.to_string(), &moved.to_string(), 1);
+            [&out[..sx], tail.as_bytes()].concat()
+        };
+        for gen in ["0", "1", "7", "65535"] {
+            for sep in [" ", "\n", "  \r\n"] {
+                let head = format!("6{sep}{gen}{sep}obj");
+                let pdf = swap(base, "6 0 obj", &head);
+                let pdf = swap(&pdf, "/Encrypt 6 0 R", &format!("/Encrypt 6 {gen} R"));
+                assert!(matches!(setup(&pdf), Setup::Open(_)), "{gen} {sep:?}");
+                // A reference with another generation does not resolve.
+                let other = if gen == "0" { "2" } else { "0" };
+                let pdf = swap(
+                    &pdf,
+                    &format!("/Encrypt 6 {gen} R"),
+                    &format!("/Encrypt 6 {other} R"),
+                );
+                assert!(matches!(setup(&pdf), Setup::Locked), "{gen} {sep:?}");
+            }
+        }
+        // `16 0 obj` is not `6 0 obj`.
+        assert!(matches!(
+            setup(&swap(base, "6 0 obj", "16 0 obj")),
+            Setup::Locked
+        ));
+    }
 
     #[test]
     fn rc4_gives_the_known_vector() {
