@@ -160,7 +160,7 @@ struct Snapshot {
 /// SQL that gives the row IDs of the messages of `in_thread` that a reply
 /// can answer, in the order of the IDs, as one text: "4,7,9", or "" for
 /// none. The same text means the same set (#479).
-fn seen_sql(in_thread: &str) -> String {
+pub fn seen_sql(in_thread: &str) -> String {
     format!("SELECT coalesce(group_concat(m.id, ',' ORDER BY m.id), '') {in_thread} {ANSWERABLE}")
 }
 
@@ -264,12 +264,13 @@ fn ready_of(threads: &str, item: Option<&str>, now: (&str, &str)) -> String {
     // The messages that a reply can answer are the set of the save (#479).
     // A late sync of an older message, a message back from the trash or
     // spam, or a message that moves into or out of the thread changes the
-    // set. A row of an older build (NULL) keeps only the rules of `based_on`.
+    // set. A row of an older build (NULL) is not ready: it cannot show the
+    // set that it read (#1107). The next draft of the thread replaces it.
     let seen = seen_sql(&messages_sql("d.thread_id"));
     format!(
         "EXISTS (SELECT 1 FROM reply_draft d WHERE d.thread_id IN ({threads})
            AND {fresh}
-           AND (d.seen IS NULL OR ({seen}) = d.seen)
+           AND ({seen}) = d.seen
            AND (d.ask IS NULL OR d.ask = {key}) {mine})"
     )
 }

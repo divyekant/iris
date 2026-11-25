@@ -2229,8 +2229,9 @@ fn a_change_of_the_answerable_set_makes_the_draft_stale() {
             "{name}: the newest message is the same"
         );
         assert!(!ready(&b.store, t), "{name}");
+        // A draft of an older build (NULL) is not ready either (#1107).
         sql(&b, "UPDATE reply_draft SET seen = NULL");
-        assert!(ready(&b.store, t), "{name}: an older draft");
+        assert!(!ready(&b.store, t), "{name}: an older draft");
 
         // A change during the model call: no draft.
         let (b, t) = setup(&format!("call-{}", name.replace(' ', "-")));
