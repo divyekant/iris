@@ -48,6 +48,11 @@ fn store(name: &str, budget: Option<i64>) -> Arc<Store> {
         provider_id: "g1".into(),
         thread_provider_id: "gt1".into(),
         internal_date: Some(1_794_000_000_000),
+        // Raw content: the parsed header comes from it (migration 70).
+        content_sha256: Some(
+            s.put_content(b"Subject: Lunch\r\n\r\nLunch on Thursday?")
+                .unwrap(),
+        ),
         header: Header {
             from_addr: Some("ana@example.org".into()),
             from_name: Some("Ana Lee".into()),
@@ -65,6 +70,7 @@ fn store(name: &str, budget: Option<i64>) -> Arc<Store> {
     s.put_messages(a, &[m]).unwrap();
     s.write(|tx| {
         tx.execute("UPDATE message SET understood_at = 1", [])?;
+        tx.execute("DELETE FROM link_check", [])?;
         tx.execute(
             "INSERT INTO model_setting(id, provider, base_url, model, version, price_in,
                price_out, max_tokens, timeout_s, budget_micro_usd)
@@ -340,21 +346,26 @@ async fn property_a_draft_answers_the_parent_of_the_form() {
             for i in 0..n {
                 let id: i64 = {
                     tx.execute(
-                        "INSERT INTO message(account_id, thread_id, provider_id, internal_date, understood_at)
-                           VALUES (1, 1, ?1, ?2, 1)",
+                        // Understanding read the header from the raw
+                        // content (migration 70).
+                        "INSERT INTO message(account_id, thread_id, provider_id, internal_date, understood_at, content_sha256)
+                           VALUES (1, 1, ?1, ?2, 1, 'c' || ?1)",
                         rusqlite::params![format!("p{case}-{i}"), 1_794_000_000_000 + next(4) as i64 * 1000],
                     )?;
                     tx.last_insert_rowid()
                 };
                 tx.execute(
-                    "INSERT INTO header(message_id, from_addr, to_addrs, subject)
-                       VALUES (?1, 'ana@example.org', 'owner@example.com', 'Lunch')",
+                    "INSERT INTO header(message_id, from_addr, to_addrs, subject, content_sha256)
+                       SELECT ?1, 'ana@example.org', 'owner@example.com', 'Lunch', content_sha256
+                         FROM message WHERE id = ?1",
                     [id],
                 )?;
                 tx.execute(
                     "INSERT INTO body(message_id, subject, sender, text) VALUES (?1, 'Lunch', 'ana', 'Lunch?')",
                     [id],
                 )?;
+                // The link check of the new content is done.
+                tx.execute("DELETE FROM link_check WHERE message_id = ?1", [id])?;
                 let label = ["", "TRASH", "DRAFT", "SENT"][next(4) as usize];
                 if !label.is_empty() {
                     tx.execute(

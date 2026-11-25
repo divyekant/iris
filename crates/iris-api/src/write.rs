@@ -513,28 +513,85 @@ fn reply_in(c: &Connection, thread: i64) -> Result<Option<Value>> {
     };
     // `sent`: the label `SENT` is the evidence that the person wrote the
     // mail. From is not: anyone can put the address of the person there.
-    let (account, subject, to, sent): (i64, Option<String>, Option<String>, bool) = c
+    type Row = (
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+        bool,
+        bool,
+    );
+    let (account, subject, to, cc, reply_to, me, sent, current): Row = c
         .query_row(
-            "SELECT m.account_id, h.subject, h.to_addrs,
+            "SELECT m.account_id, h.subject, h.to_addrs, h.cc_addrs, h.reply_to, a.address,
                     EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                            WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
-             FROM message m LEFT JOIN header h ON h.message_id = m.id WHERE m.id = ?1",
+                            WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
+                    coalesce(m.content_sha256 IS NOT NULL AND h.content_sha256 = m.content_sha256, 0)
+             FROM message m JOIN account a ON a.id = m.account_id
+             LEFT JOIN header h ON h.message_id = m.id WHERE m.id = ?1",
             [parent],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                ))
+            },
         )
         .map_err(iris_store::Error::from)?;
+    // The recipients come from the header row. After a sync of new content
+    // and before understanding reads it, the row is empty or of the old
+    // content (migration 70). A message with no raw content has no parsed
+    // header at all.
+    if !current {
+        return Err(Error::Conflict(
+            "Iris has not read the newest mail of this thread yet. Try again in a moment.".into(),
+        ));
+    }
     let m = message_in(c, parent)
         .map_err(iris_store::Error::from)?
         .expect("reply_parent gives a message");
-    // The person wrote the newest mail: the reply goes to its recipients.
-    let to: Vec<String> = if sent {
+    let list = |v: Option<&str>| {
         let mut out = vec![];
-        iris_senders::head::each_address(to.as_deref().unwrap_or(""), |a, _| out.push(a));
-        out
-    } else {
-        vec![m.summary.from.address.clone().unwrap_or_default()]
+        iris_senders::head::each_address(v.unwrap_or(""), |a, _| out.push(a));
+        out.into_iter()
+            .filter(|a| valid_address(a))
+            .collect::<Vec<String>>()
     };
-    let to: Vec<String> = to.into_iter().filter(|a| valid_address(a)).collect();
+    let from = m.summary.from.address.clone().unwrap_or_default();
+    // `to`: the person wrote the newest mail, so the reply goes to its
+    // recipients. Else the `Reply-To` addresses of the parent, or its
+    // `From` address (issue #455). `others`: the other people of the
+    // parent, for reply all.
+    let (to, others) = if sent {
+        (list(to.as_deref()), list(cc.as_deref()))
+    } else {
+        let wanted = list(reply_to.as_deref());
+        let to_list = if wanted.is_empty() {
+            list(Some(&from))
+        } else {
+            wanted
+        };
+        let mut others = list(Some(&from));
+        others.extend(list(to.as_deref()));
+        others.extend(list(cc.as_deref()));
+        (to_list, others)
+    };
+    // Reply all adds each other address once, and never the address of
+    // the account or an address that `to` has.
+    let mut seen: std::collections::HashSet<String> = to.iter().map(|a| a.to_lowercase()).collect();
+    seen.insert(me.to_lowercase());
+    let all: Vec<String> = others
+        .into_iter()
+        .filter(|a| seen.insert(a.to_lowercase()))
+        .collect();
     let text = m.text.as_deref().map(|t| cut(t, PARENT_TEXT));
     let (mails, earlier) = conversation(c, thread).map_err(iris_store::Error::from)?;
     Ok(Some(json!({
@@ -547,6 +604,7 @@ fn reply_in(c: &Connection, thread: i64) -> Result<Option<Value>> {
         },
         "to": to,
         "cc": [],
+        "all": all,
         "subject": iris_compose::reply_subject(subject.as_deref().unwrap_or("")),
         "topic": subject.unwrap_or_default(),
         "conversation": mails,

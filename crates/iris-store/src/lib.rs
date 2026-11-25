@@ -218,6 +218,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_67.sql"),
     include_str!("schema_68.sql"),
     include_str!("schema_69.sql"),
+    include_str!("schema_70.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
@@ -784,13 +785,14 @@ impl Store {
             )?;
             let mut header = tx.prepare_cached(
                 "INSERT INTO header(message_id, date, from_addr, from_name, to_addrs, cc_addrs, subject,
-                   message_id_hdr, in_reply_to, list_id, auth)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                   message_id_hdr, in_reply_to, list_id, auth, reply_to, content_sha256)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12)
                  ON CONFLICT(message_id) DO UPDATE SET
                    date = excluded.date, from_addr = excluded.from_addr, from_name = excluded.from_name,
                    to_addrs = excluded.to_addrs, cc_addrs = excluded.cc_addrs, subject = excluded.subject,
                    message_id_hdr = excluded.message_id_hdr, in_reply_to = excluded.in_reply_to,
-                   list_id = excluded.list_id, auth = excluded.auth",
+                   list_id = excluded.list_id, auth = excluded.auth, reply_to = NULL,
+                   content_sha256 = excluded.content_sha256",
             )?;
             let mut same_content = tx.prepare_cached(
                 "SELECT 1 FROM message WHERE account_id = ?1 AND provider_id = ?2
@@ -851,7 +853,11 @@ impl Store {
                     h.message_id_hdr,
                     h.in_reply_to,
                     h.list_id,
-                    h.auth
+                    h.auth,
+                    // A parsed header comes from this content; an empty one
+                    // waits for understanding (migration 70). `Header` has
+                    // no `Reply-To`, so the row has none.
+                    (!h.is_empty()).then_some(m.content_sha256.as_deref()).flatten()
                 ])?; }
                 if let Some(b) = &m.body {
                     put_body(tx, id, b)?;
