@@ -1,6 +1,6 @@
 # Specification 3: the job workspace layout
 
-- Open model version: 1.3
+- Open model version: 1.4
 - Release: 4
 - Input: `docs/specs/2026-11-16-job-workspace.md` (the design and the
   reasons)
@@ -174,7 +174,7 @@ from the messages in the thread files where the address is a party:
 
 | Field | Value |
 |---|---|
-| `model` | `"iris/1.3"`. |
+| `model` | `"iris/1.4"`. |
 | `id` | The `p-` ID of the sender row. |
 | `address` | The address (section 2). |
 | `names` | Each display name of `From` in the messages that the person sent, in UTF-8 byte order, each name one time. |
