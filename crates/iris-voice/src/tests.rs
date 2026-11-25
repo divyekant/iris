@@ -2283,7 +2283,8 @@ fn a_body_names_a_commitment_only_with_its_words() {
         assert_eq!(names(body, &ask), ok, "{body}");
     }
     // An amount is an object: its values are words, its field names are not.
-    let pay = serde_json::json!({"title": "Pay it", "amount": {"value": 312.77, "currency": "USD"}});
+    let pay =
+        serde_json::json!({"title": "Pay it", "amount": {"value": 312.77, "currency": "USD"}});
     assert!(!names("Can you confirm the value and the currency?", &pay));
     assert!(names("Hi Bo, the 312.77? D", &pay));
     // A commitment with no key word passes any body.
