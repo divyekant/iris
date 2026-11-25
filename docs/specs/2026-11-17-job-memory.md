@@ -36,8 +36,8 @@ notes. The agent does the work again, or asks the person again.
 
 - Show the notes to the person in the web client or the job page.
 - A history of the notes: the store keeps the last copy only.
-- A backup of `drafts/` (issue #350 stays open for it). Drafts that matter
-  go into the store with `iris draft` (R3-01).
+- A backup of `drafts/`. `iris backup` copies `drafts/` of each workspace
+  (issue #350, specification 1 section 5.1).
 - A change to `iris job` verbs or to the session socket.
 
 ## Design

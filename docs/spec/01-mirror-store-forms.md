@@ -406,14 +406,17 @@ is never lost.
 New content files after step 2 are not in the backup, and the copy of
 `iris.db` does not refer to them.
 
-`iris backup` does not copy `workspaces/`. A copy of the whole folder while
-the engine is stopped copies `workspaces/` too, with the files of the agent.
-The build makes the files of a
-workspace again from the store, before each session. The folder `drafts/` of the
-agent is not in a copy of `iris backup`: after a restore from it, the next
-build makes it empty. A draft that the agent submits is in the store
-(specification 2), so only work that the agent did not submit is lost. This
-is a known limit, with a GitHub issue. The store keeps a copy of `notes.md`
+`iris backup` copies only the folder `drafts/` of each workspace
+(`workspaces/<job>/drafts/`). The build makes the other files of a workspace
+again from the store, before each session, and keeps a `drafts/` folder that
+is there. A program of a session writes `drafts/`, so the copy takes only
+regular files that are not links, opens each one with no link and no wait
+on a FIFO, and skips a subfolder. It copies a file of at most 1 MiB (a body
+has at most 256 KiB), and at most 256 files of each job, by name. So a
+session cannot make the backup large or make it read a file outside the
+folder. A draft that the agent submits is in the store (specification 2)
+too. A copy of the whole folder while the engine is stopped copies
+`workspaces/` with all the files of the agent. The store keeps a copy of `notes.md`
 of each open job (R5-06, `docs/specs/2026-11-17-job-memory.md`), so
 `iris.db` in the backup holds it: after a restore, the next build writes the
 copy. The copy holds the notes of the last save (the last reap or build),

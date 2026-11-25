@@ -15,6 +15,13 @@ use crate::{
 /// How long the store keeps the content of a gone message (section 4.5).
 pub const GONE_KEEP_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
+/// The largest file of `drafts/` that a backup copies. A larger file is not
+/// a draft of mail (a body has at most 256 KiB, `iris-compose`).
+pub const DRAFT_FILE_MAX: u64 = 1024 * 1024;
+
+/// The most files of one `drafts/` folder that a backup copies.
+pub const DRAFT_FILES_MAX: usize = 256;
+
 /// The most messages in one transaction of the cleanup.
 const CLEAN_BATCH: i64 = 500;
 
@@ -134,6 +141,10 @@ impl Store {
             &self.dir.join(crate::ATTACHMENTS),
             &dest.join(crate::ATTACHMENTS),
         )?;
+
+        // The drafts of each job workspace (issue #350): the build makes the
+        // other files of a workspace again from the store.
+        copy_drafts(&self.dir.join("workspaces"), &dest.join("workspaces"))?;
 
         // Without the key, the copy cannot decrypt the secrets.
         copy_private(&self.dir.join("key"), &dest.join("key"))?;
@@ -405,6 +416,89 @@ fn copy_attachments(src: &Path, dest: &Path) -> Result<()> {
     }
     sync_dir(dest)?;
     Ok(())
+}
+
+/// Copy `<src>/<job>/drafts/<file>` of each job workspace to the same path
+/// under `dest`, with mode 0600 and folders of mode 0700. Only a folder or a
+/// regular file that is not a link: a program in a session writes these
+/// folders, so the copy reads nothing through a link and opens no FIFO. A
+/// file over [`DRAFT_FILE_MAX`], a subfolder of `drafts/` and the files after
+/// the first [`DRAFT_FILES_MAX`] (by name) are not copied, so a session cannot
+/// make the backup large. A file that goes away during the copy is not
+/// copied.
+fn copy_drafts(src: &Path, dest: &Path) -> Result<()> {
+    let jobs = match fs::read_dir(src) {
+        Ok(d) => d,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    for job in jobs {
+        let job = job?;
+        if !job.file_type()?.is_dir() {
+            continue;
+        }
+        let drafts = job.path().join("drafts");
+        match fs::symlink_metadata(&drafts) {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => continue,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        }
+        let mut files: Vec<fs::DirEntry> = fs::read_dir(&drafts)?
+            .collect::<io::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|f| f.file_type().is_ok_and(|t| t.is_file()))
+            .collect();
+        files.sort_by_key(|f| f.file_name());
+        files.truncate(DRAFT_FILES_MAX);
+        let to_dir = dest.join(job.file_name()).join("drafts");
+        for f in files {
+            let Some(bytes) = read_draft(&f.path())? else {
+                continue;
+            };
+            make_private_dir(dest)?;
+            make_private_dir(&dest.join(job.file_name()))?;
+            make_private_dir(&to_dir)?;
+            let to = to_dir.join(f.file_name());
+            private_file(&to, true)?.write_all(&bytes)?;
+            sync_file(&to)?;
+        }
+        if to_dir.exists() {
+            sync_dir(&to_dir)?;
+        }
+    }
+    if dest.exists() {
+        sync_dir(dest)?;
+    }
+    Ok(())
+}
+
+/// The bytes of one draft file, or `None` if it is gone, is not a regular
+/// file now, or has more than [`DRAFT_FILE_MAX`] bytes.
+fn read_draft(path: &Path) -> Result<Option<Vec<u8>>> {
+    use std::io::Read as _;
+    let mut o = fs::OpenOptions::new();
+    o.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut o, libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let file = match o.open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        // A link that took the place of the file (ELOOP).
+        #[cfg(unix)]
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let m = file.metadata()?;
+    if !m.is_file() || m.len() > DRAFT_FILE_MAX {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    file.take(DRAFT_FILE_MAX + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > DRAFT_FILE_MAX {
+        return Ok(None);
+    }
+    Ok(Some(bytes))
 }
 
 fn copy_private(from: &Path, to: &Path) -> io::Result<()> {
