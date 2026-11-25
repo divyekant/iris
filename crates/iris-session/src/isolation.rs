@@ -50,7 +50,9 @@ pub trait Isolation: Send + Sync {
 
     /// The program and arguments that run `program args` inside the
     /// isolation of `session`, in `workspace`, with `egress_port` as the
-    /// only network that it permits (none if `None`).
+    /// only network that it permits (none if `None`). `reads` are the real
+    /// paths of the read paths of the adapter, which the launch checked
+    /// (`crate::read_paths`): the session can read them, not write them.
     fn command(
         &self,
         session: i64,
@@ -58,6 +60,7 @@ pub trait Isolation: Send + Sync {
         egress_port: Option<u16>,
         program: &Path,
         args: &[String],
+        reads: &[PathBuf],
     ) -> Command;
 
     /// The durable identity of the isolation of one session. It depends
@@ -154,6 +157,7 @@ pub mod test {
             _egress_port: Option<u16>,
             program: &Path,
             args: &[String],
+            _reads: &[PathBuf],
         ) -> Command {
             Command {
                 program: program.to_path_buf(),

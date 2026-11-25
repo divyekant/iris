@@ -2,7 +2,7 @@
 
 - Date: 2026-11-25
 - Card: none (open-issues sweep of 2026-11-25, session group: issues #505 and #406)
-- Status: Draft
+- Status: Built (read paths); allow_local to come
 
 ## Problem
 
@@ -145,8 +145,8 @@ launch takes a new egress port in that case.
   then gives the file descriptor to `bwrap` with `--ro-bind-fd <fd>
   <real>`. `bwrap` mounts the object of the descriptor, not a path. If
   an open or a check fails, no session starts. `bwrap` has
-  `--ro-bind-fd` since version 0.5.0; the check of the isolation refuses
-  an older `bwrap` when an adapter has read paths.
+  `--ro-bind-fd` since version 0.5.0. An older `bwrap` refuses the
+  unknown option and exits, so no session starts (fail closed).
 - The binds come after the system folders, the private home and the
   program files, and before the empty mount of the data folder. So a read
   path that holds a part of the data folder cannot show it (the check
@@ -214,7 +214,7 @@ fails at its first call.
 | A tree of more than 200,000 entries | The run is refused | launch test |
 | A part of a read path that changes into a link after the launch checks | Linux: the open of the helper fails, and no session starts. macOS: Seatbelt checks the real path at each access | Linux helper test with a swap between the check and the open |
 | A read path that changes to another object (other device or inode) after the launch checks | The helper refuses it, and no session starts | Linux helper test |
-| `bwrap` older than 0.5.0 and an adapter with read paths | The check refuses the run | unit test of the version parse |
+| `bwrap` older than 0.5.0 and an adapter with read paths | `bwrap` refuses the option and exits; no session starts | not testable in CI (the CI has 0.9) |
 | A write to a read path | The system refuses it (read-only bind) | Linux sandbox test |
 | A connection to a local port other than `allow_local` | Refused: no listener in the namespace (Linux), the profile denies it (macOS) | Linux sandbox test |
 | `allow_local` with no server on the port | The relay closes the connection | Linux sandbox test |
