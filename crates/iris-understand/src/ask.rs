@@ -469,44 +469,66 @@ const SCAN: usize = 64 * MAX_TEXT;
 
 /// The part of `text` that the model reads (issue #272): all of a text of
 /// up to [`MAX_TEXT`] characters. Of a longer text, the [`MAX_TEXT`]
-/// characters with the most index tokens that start with a stem of
+/// characters with the most whole index tokens that start with a stem of
 /// `stems`, the first such part if two have the same count. The part starts
-/// and ends at a space, and a mark `[…]` stands for each cut.
+/// and ends at a space where it can without a cut into one of its matches,
+/// and a mark `[…]` stands for each cut.
 fn near(c: &Connection, text: &str, stems: &[String]) -> iris_store::Result<String> {
     if text.chars().nth(MAX_TEXT).is_none() {
         return Ok(text.to_string());
     }
     let scan = &text[..text.char_indices().nth(SCAN).map_or(text.len(), |(i, _)| i)];
-    // The character offset of each match, in order.
-    let mut hits = Vec::new();
+    // Each match, in order: its start and end as character offsets, and
+    // as byte offsets.
+    let mut hits: Vec<(usize, usize, usize, usize)> = Vec::new();
     let (mut n, mut last) = (0, 0);
     for t in iris_store::index_tokens(c, scan)? {
         if stems.iter().any(|s| t.word.starts_with(s.as_str())) {
             n += scan[last..t.range.start].chars().count();
             last = t.range.start;
-            hits.push(n);
+            let len = scan[t.range.clone()].chars().count();
+            hits.push((n, n + len, t.range.start, t.range.end));
         }
     }
-    let count = |s: usize| hits.iter().filter(|&&h| h >= s && h < s + MAX_TEXT).count();
-    let mut best = (0, count(0));
-    for &h in &hits {
-        let s = h.saturating_sub(LEAD);
-        let k = count(s);
-        if k > best.1 {
-            best = (s, k);
+    // The most matches that fit whole in one part: two moving indexes, so
+    // linear in the count of matches. `run` is the first and the last
+    // match of the best run, the first run if two have the same count.
+    let mut run: Option<(usize, usize)> = None;
+    let mut j = 0;
+    for i in 0..hits.len() {
+        j = j.max(i);
+        while j < hits.len() && hits[j].1 - hits[i].0 <= MAX_TEXT {
+            j += 1;
+        }
+        if j > i && run.is_none_or(|(a, b)| j - i > b + 1 - a) {
+            run = Some((i, j - 1));
         }
     }
+    let total = text.chars().count();
+    // The part starts LEAD characters before its first match where it can,
+    // and always holds its last match whole.
+    let start = match run {
+        Some((a, b)) => hits[a]
+            .0
+            .saturating_sub(LEAD)
+            .max(hits[b].1.saturating_sub(MAX_TEXT))
+            .min(total - MAX_TEXT),
+        None => 0,
+    };
     let at = |k: usize| text.char_indices().nth(k).map_or(text.len(), |(i, _)| i);
-    let (mut from, mut to) = (at(best.0), at(best.0 + MAX_TEXT));
+    let (mut from, mut to) = (at(start), at(start + MAX_TEXT));
+    // The cuts go to a space, but never into a match of the run.
+    let (keep_from, keep_to) = run.map_or((to, from), |(a, b)| (hits[a].2, hits[b].3));
     if from > 0 {
-        from = text[from..to]
+        from = text[from..keep_from.max(from)]
             .find(char::is_whitespace)
             .map_or(from, |i| from + i);
     }
     if to < text.len() {
-        to = text[from..to]
+        let low = keep_to.min(to).max(from);
+        to = text[low..to]
             .rfind(char::is_whitespace)
-            .map_or(to, |i| from + i);
+            .map_or(to, |i| low + i);
     }
     let mut out = String::new();
     if from > 0 {
@@ -954,6 +976,78 @@ mod tests {
             part.starts_with("w0 w1 ") && part.ends_with(" […]"),
             "{part:?}"
         );
+    }
+
+    /// The part holds the most matches that fit whole in one part, and
+    /// every match of it whole (review of #1106): random texts with many
+    /// matches, against a brute-force count.
+    #[test]
+    fn property_the_part_holds_the_most_whole_matches() {
+        let c = Connection::open_in_memory().unwrap();
+        let stems = vec!["zebra".to_string()];
+        let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+        for _ in 0..100 {
+            let n = 800 + rng.below(2000);
+            let mut words: Vec<String> = (0..n).map(|i| format!("w{i}")).collect();
+            for _ in 0..1 + rng.below(8) {
+                let at = rng.below(n);
+                words[at] = "zebra".into();
+            }
+            let text = words.join(" ");
+            // The character start and end of each match.
+            let mut hits = Vec::new();
+            let mut at = 0;
+            for w in &words {
+                if w == "zebra" {
+                    hits.push((at, at + 5));
+                }
+                at += w.chars().count() + 1;
+            }
+            let best = (0..hits.len())
+                .map(|i| {
+                    hits[i..]
+                        .iter()
+                        .filter(|h| h.1 - hits[i].0 <= MAX_TEXT)
+                        .count()
+                })
+                .max()
+                .unwrap_or(0);
+            let part = near(&c, &text, &stems).unwrap();
+            let got = part.split(' ').filter(|w| *w == "zebra").count();
+            if text.chars().count() > MAX_TEXT {
+                assert_eq!(got, best, "{hits:?}");
+            }
+        }
+    }
+
+    /// A match that ends at the end of the first part stays whole, and
+    /// three matches that fit in one part all show (review of #1106).
+    #[test]
+    fn a_match_at_the_edge_of_a_part_stays_whole() {
+        let c = Connection::open_in_memory().unwrap();
+        let stems = vec!["zebra".to_string()];
+        let text = "x ".repeat(1497) + " zebra" + &" x".repeat(100);
+        assert_eq!(text.find("zebra").map(|i| i + 5), Some(3000));
+        let part = near(&c, &text, &stems).unwrap();
+        assert!(part.contains(" zebra"), "{part}");
+        let mut words = vec!["y"; 1600];
+        for at in [50, 750, 1525] {
+            words[at] = "zebra";
+        }
+        let text = words.join(" ");
+        let part = near(&c, &text, &stems).unwrap();
+        assert_eq!(part.matches("zebra").count(), 3, "{part}");
+    }
+
+    /// Many matches: the choice is linear in the count of matches.
+    #[test]
+    fn many_matches_are_fast() {
+        let c = Connection::open_in_memory().unwrap();
+        let text = "go ".repeat(10_700);
+        let start = std::time::Instant::now();
+        let part = near(&c, &text, &["go".to_string()]).unwrap();
+        assert!(part.starts_with("go go"), "{part}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
     }
 
     struct Rng(u64);
