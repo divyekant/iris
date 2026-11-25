@@ -292,14 +292,16 @@ lose a rerun:
    with no model: a message whose fixed result changed is understood again
    at once, and counts in `messages` and toward `Limits::max_messages`.
    The check stops before the limit. The rest of the queue waits for a
-   later check. A message that the check makes pending gets one more pass
-   (step 4).
+   later check. This step comes before step 3, so a model that cannot be
+   made does not hold it back.
 3. Read `model_setting` and make the `Budgeted` model.
 4. For each thread in order, and for each pending message of it: check the
    stop conditions, then call `store::understand`.
 5. After each `Limits::batch` (default 50) messages, run step 2 again.
-   After the last thread, run the fixed check again, for the kind and name
-   changes of the main pass.
+   After the last thread of each pass, run the fixed check again, for the
+   kind and name changes of that pass. A message that a sender rerun or the
+   fixed check of the main pass makes pending gets one more pass. The
+   resets of the second pass wait for the next run.
 6. At the end, write `ended_at` and `stop`. The run after a sync
    (`Limits::keep_idle` false, R1-28) deletes its row in the same write if
    it read no message, made no call and holds no reservation, so a run

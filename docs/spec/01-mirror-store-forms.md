@@ -771,8 +771,9 @@ of the known persons. So when a sender becomes or stops being a `service`, or
 the name of a known person comes, goes or changes, store triggers queue the
 affected mail in `fixed_due`: the mail from that address, or the mail under the
 old or the new name. Each understanding run runs the fixed steps again on the
-queued mail, with no model call: after each sender refresh, and after the last
-thread. Only a message whose fixed result changed
+queued mail, with no model call: after each sender refresh and before the model
+is made, and after the last thread of each pass. Mail that the check of the main
+pass makes pending gets the second pass of the same run. Only a message whose fixed result changed
 is understood again with no model: a new mark makes it hostile mail, and a rule
 that matches now gives its items. A message that no fixed rule covers now, and
 that the model never read (it was hostile mail, or a rule made its items),
