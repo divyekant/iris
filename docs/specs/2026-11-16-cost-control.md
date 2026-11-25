@@ -36,7 +36,9 @@ pay again for the same mail.
 - A change of the label `SPAM` (it comes or goes) clears `understood_at`,
   as a change of `SENT`, `DRAFT`, `UNSENT` or `SENT_COPY` does. Mail that
   leaves `SPAM` gets its items at the next run. Mail that gets `SPAM` drops
-  its items at the next run; each read hides them before that.
+  its droppable items at once (trigger `spam_drops_items`, as for
+  `DRAFT` in migration 42), so an old item does not show again when
+  `SPAM` goes before the next run. A pinned item stays.
 - Each reset of `understood_at` by a change (new content, a gone message
   that comes back, a label of the list above, a new hostile mark) clears
   `tries` and `retry_at`, and puts the thread in `talk_due`. A failed try

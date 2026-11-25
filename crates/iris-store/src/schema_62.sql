@@ -12,6 +12,10 @@
 --    items. A message that gets SPAM drops its items at the next run; the
 --    reads hide them before that (`hostile_mail!`). The label triggers of
 --    migration 42 get SPAM, and clear `tries` and `retry_at` too.
+--    When SPAM comes, the droppable items of the message go at once (as
+--    for DRAFT, UNSENT and SENT_COPY in migration 42), so an old item does
+--    not show again when SPAM goes before the next run (trigger
+--    `spam_drops_items`). A pinned item stays.
 -- 2. A gone message that comes back, and new content, clear
 --    `understood_at`, `tries` and `retry_at` for each writer (triggers
 --    `understand_come_back` and `understand_new_content`). The content
@@ -72,4 +76,13 @@ CREATE TRIGGER understand_come_back AFTER UPDATE OF gone_at ON message
    AND (NEW.understood_at IS NOT NULL OR NEW.tries <> 0 OR NEW.retry_at IS NOT NULL)
 BEGIN
   UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL WHERE id = NEW.id;
+END;
+
+DROP TRIGGER IF EXISTS spam_drops_items;
+
+CREATE TRIGGER spam_drops_items AFTER INSERT ON message_label
+  WHEN (SELECT provider_id FROM label WHERE id = NEW.label_id) = 'SPAM'
+BEGIN
+  DELETE FROM item WHERE id IN
+    (SELECT item_id FROM item_droppable WHERE message_id = NEW.message_id);
 END;

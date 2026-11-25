@@ -1453,3 +1453,57 @@ fn each_reset_change_gives_each_state_a_new_budget() {
     set(&label("Work", false));
     assert_eq!(state(), (None, 3, Some(9)));
 }
+
+/// Issue #110: when SPAM comes, the droppable items of the message go at
+/// once. So when SPAM goes before the next run, no old item shows again;
+/// the next run makes the items. A conversation item stays.
+#[test]
+fn spam_drops_the_items_of_its_message() {
+    let dir = TempDir::new("spam-drops");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(acc, &[("SPAM", "SPAM", "system")])
+        .unwrap();
+    let id = store
+        .put_messages(acc, &[msg("a", "t1", 1, &["INBOX"], "Hi", "x")])
+        .unwrap()[0];
+    let items = |sql: &str| -> i64 {
+        store
+            .read(|c| Ok(c.query_row(sql, [id], |r| r.get(0))?))
+            .unwrap()
+    };
+    store
+        .write(|tx| {
+            for form in ["commitment", "conversation"] {
+                tx.execute(
+                    "INSERT INTO item(form, account_id, status, doc, created_at, updated_at, derived_by)
+                     VALUES (?1, ?2, 'open', '{}', 0, 0, 'model')",
+                    rusqlite::params![form, acc],
+                )?;
+                tx.execute(
+                    "INSERT INTO item_source(item_id, message_id, role)
+                     VALUES (last_insert_rowid(), ?1, 'origin')",
+                    [id],
+                )?;
+            }
+            tx.execute("UPDATE message SET understood_at = 5 WHERE id = ?1", [id])?;
+            Ok(())
+        })
+        .unwrap();
+    let count = "SELECT count(*) FROM item_source s JOIN item i ON i.id = s.item_id
+                 WHERE s.message_id = ?1 AND i.form = 'commitment'";
+    let talk = "SELECT count(*) FROM item_source s JOIN item i ON i.id = s.item_id
+                WHERE s.message_id = ?1 AND i.form = 'conversation'";
+    assert_eq!(items(count), 1);
+    let mut m = msg("a", "t1", 1, &["INBOX", "SPAM"], "Hi", "x");
+    store.put_messages(acc, &[m.clone()]).unwrap();
+    assert_eq!(items(count), 0);
+    m.labels = vec!["INBOX".into()];
+    store.put_messages(acc, &[m]).unwrap();
+    assert_eq!(items(count), 0);
+    assert_eq!(items(talk), 1);
+    assert_eq!(
+        items("SELECT understood_at IS NULL FROM message WHERE id = ?1"),
+        1
+    );
+}
