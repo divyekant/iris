@@ -18,7 +18,7 @@
 -->
 <script lang="ts">
   import { onDestroy, untrack } from "svelte";
-  import { get, NEWER_MAIL, own, post, upload, type Account, type Attachment, type DraftContent, type ReplyStart, type ThreadDraft, type WriteState } from "../api";
+  import { get, NEWER_MAIL, own, post, upload, writePlace, type Account, type Attachment, type DraftContent, type ReplyStart, type ThreadDraft, type WriteState } from "../api";
   import { chips, unique } from "../chips";
   import { bytes, initials, PROVIDER, when } from "../format";
   import { FLAGS } from "../review";
@@ -39,7 +39,7 @@
   const opened = start.change;
   // A draft link (#/write/d-N) keeps its form in its own place, so it never
   // replaces the unfinished form of a new mail or of a reply.
-  const place = `iris.write.${opened?.draft ?? thread ?? "new"}`;
+  const place = writePlace(opened?.draft ?? thread ?? "new");
 
   type Changing = { draft: string; account: string };
   type Saved = {
@@ -355,8 +355,10 @@
       if (v.state === "sent" || v.state === "stopped") {
         keep(null, id);
         // A draft link that resumed an earlier write of its place: that write
-        // ended, so the form of the draft shows again (issue 941).
-        if (id === resumed) [write, resumed, ws] = ["", "", { state: "saving" }];
+        // ended, so the form of the draft shows again (issue 941), only for a
+        // draft that could change when the link opened. Else the view keeps
+        // the end of the write (issue 1098).
+        if (id === resumed && opened?.change) [write, resumed, ws] = ["", "", { state: "saving" }];
       }
     } catch {
       // The engine can restart. The next read tries again.
@@ -407,6 +409,13 @@
   async function changeIt() {
     if (ws.state !== "stopped" || !ws.draft || !ws.change) return;
     const draft = ws.draft;
+    // A draft link shows only its own draft: the form of another draft (a new
+    // draft of a `new` change) opens at the link of that draft (issue 1102).
+    if (opened && draft !== opened.draft) {
+      keep(null, write);
+      location.hash = href.change(draft);
+      return;
+    }
     const update = ws.change === "update";
     const id = write;
     busy = true;
@@ -434,7 +443,9 @@
   }
 
   function again() {
-    keep(null, write);
+    // A write of a draft link that can still leave keeps its record: the next
+    // open of the link shows that write, not a form of the same draft (issue 1101).
+    if (!opened || ws.state === "sent" || ws.state === "stopped") keep(null, write);
     changing = null;
     changeNote = "";
     if (thread || opened) return void (location.hash = "#/write");

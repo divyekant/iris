@@ -390,9 +390,24 @@ export type ChangeStart =
   | ({ change: DraftContent } & ({ thread: string; reply: ReplyStart } | { accounts: Status["accounts"] }))
   | { closed: DraftContent };
 
+/** The session storage place of a form of the write view: a draft link (`d-N`), a reply (`t-N`) or `new`. */
+export const writePlace = (of: string) => `iris.write.${of}`;
+
+/** True while the write view keeps a write that the engine took from the place `place`: the write can still leave. */
+export function keepsWrite(place: string): boolean {
+  try {
+    const v = JSON.parse(globalThis.sessionStorage?.getItem(`${place}.taken`) ?? "null");
+    return !!v && typeof v.write === "string";
+  } catch {
+    return false;
+  }
+}
+
 export async function loadChange(id: string): Promise<ChangeStart> {
   const change = await get<DraftContent>(`drafts/${encodeURIComponent(id)}`);
-  if (!change.change) return { closed: change };
+  // A write of this draft link that can still leave shows its state, also when its
+  // own send stops the change of the draft now (issue 1098).
+  if (!change.change && !keepsWrite(writePlace(id))) return { closed: change };
   if (change.thread) return { thread: change.thread, reply: await get<ReplyStart>(`threads/${encodeURIComponent(change.thread)}/reply`), change };
   return { accounts: (await get<Status>("status")).accounts, change };
 }
