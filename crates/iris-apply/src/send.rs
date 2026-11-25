@@ -299,9 +299,27 @@ fn compose_as(
 
 /// True if the attachment folder has the file of each attachment of
 /// `content`, with the SHA-256 and the size of its entry. The write view
-/// offers a change of a draft only then (draft change spec, section 5).
+/// and the draft answer offer a change of a draft only then (draft change
+/// spec, section 5). It reads each file in parts
+/// ([`iris_compose::FILE_CHUNK`]): the memory holds one part, not the files.
 pub fn has_files(store: &Store, content: &Content) -> Result<bool> {
-    Ok(files(store, content)?.is_some())
+    for a in &content.attachments {
+        let Some(path) = store.attachment_path(&a.sha256) else {
+            return Ok(false);
+        };
+        let file = match std::fs::File::open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(Error::Store(iris_store::Error::Io(e))),
+        };
+        if !a
+            .is_file_in(file)
+            .map_err(|e| Error::Store(iris_store::Error::Io(e)))?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// The file of each attachment of `content`, from the attachment folder
