@@ -255,7 +255,7 @@ None. Both keys are opt-in.
 
 - A program of the person can make a socket in a read path after the
   launch checks. Linux: the bind shows it, and a process of the session
-  can connect to it. Known limit, with an issue: the docs tell the person
+  can connect to it. Known limit, issue #996: the docs tell the person
   to list only folders of programs.
 - A person can list a folder with credentials. The session can then send
   them to an allowed host. The docs say so next to the key. The checks
