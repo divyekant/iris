@@ -1420,3 +1420,35 @@ test("a kept write of a reply draft link shows also when its thread has no mail 
     net.restore();
   }
 });
+
+test("a kept write of a draft link shows also when the draft of the link is gone (issue 1098)", async () => {
+  const api = await load("/src/api.ts");
+  let answer = [404, { error: "Not found." }];
+  const net = serve((path) => {
+    if (path === "write/cs-1") return [200, { state: "waiting", draft: "d-9", sending: true, leaves_at: null }];
+    if (path === "drafts/d-7") return answer;
+    return [404, { error: "Not found." }];
+  });
+  try {
+    await assert.rejects(api.loadChange("d-7"), /Not found/, "no kept write: the error shows");
+    window.sessionStorage.setItem("iris.write.d-7.taken", JSON.stringify({ write: "cs-1", to: ["sam@okafor.example"], subject: "Dinner on Saturday?", body: "Hi Sam,\n" }));
+    // No definite answer: the error shows, and the next open reads again.
+    answer = [503, { error: "The store is busy." }];
+    await assert.rejects(api.loadChange("d-7"), /The store is busy/);
+    answer = [404, { error: "Not found." }];
+    const start = await api.loadChange("d-7");
+    assert.deepEqual(start.accounts, []);
+    assert.equal(start.change.draft, "d-7");
+    assert.equal(start.change.change, null);
+    const app = await mount("/src/views/Write.svelte", { start, every: 20 });
+    try {
+      await until(() => /Cancel the send/.test(text(app.target)));
+      assert.equal(app.target.querySelector("form"), null);
+      assert.match(text(app.target), /Hi Sam,/);
+    } finally {
+      app.destroy();
+    }
+  } finally {
+    net.restore();
+  }
+});
