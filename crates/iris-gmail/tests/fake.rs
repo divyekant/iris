@@ -398,6 +398,15 @@ fn a_draft_update_keeps_the_draft_id_and_replaces_its_message() {
         .count();
     assert_eq!(puts, 1);
 
+    // A reply update with no thread ID leaves the thread, as a create
+    // with no thread ID: the client must send it.
+    let away = gmail.update_draft(TOKEN, &d.id, new, None).unwrap();
+    assert_ne!(away.message.thread_id, thread, "no threadId, no thread");
+    let back = gmail
+        .update_draft(TOKEN, &d.id, new, Some(&thread))
+        .unwrap();
+    assert_eq!(back.message.thread_id, thread);
+
     // A draft that does not exist.
     assert!(matches!(
         gmail.update_draft(TOKEN, "r999", new, None),
@@ -419,7 +428,7 @@ fn a_draft_update_keeps_the_draft_id_and_replaces_its_message() {
         .iter()
         .filter(|r| r.starts_with("PUT "))
         .count();
-    assert_eq!(puts, 4, "one request for each call");
+    assert_eq!(puts, 6, "one request for each call");
     let got = String::from_utf8(gmail.draft_raw(TOKEN, &d.id).unwrap().raw.unwrap()).unwrap();
     assert!(
         got.ends_with("\r\n\r\nHello\r\n"),

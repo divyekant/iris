@@ -300,13 +300,19 @@ impl Store {
         let Some(pos) = self.drafts.iter().position(|(d, _)| d == id) else {
             return false;
         };
+        let thread = self.msgs[self.drafts[pos].1].thread.clone();
+        self.put_draft(pos, raw, Some(thread));
+        true
+    }
+
+    /// The draft at `pos` gets a new message `raw` in `thread`, or in a
+    /// new thread for `None`, as a create puts it.
+    fn put_draft(&mut self, pos: usize, raw: Vec<u8>, thread: Option<String>) {
         let old = self.drafts[pos].1;
-        let thread = self.msgs[old].thread.clone();
         self.msgs[old].deleted = true;
         self.record(old, Kind::Deleted, Vec::new());
-        let i = self.add(raw, Some(thread), BTreeSet::from(["DRAFT".to_string()]));
+        let i = self.add(raw, thread, BTreeSet::from(["DRAFT".to_string()]));
         self.drafts[pos].1 = i;
-        true
     }
 
     fn draft_json(&self, id: &str, i: usize) -> Value {
@@ -1277,7 +1283,8 @@ async fn create_draft(
 }
 
 /// `PUT drafts/{id}` (`drafts.update`): the draft keeps its ID and gets a
-/// new message, in the Gmail form of a new draft. The body must name the
+/// new message, in the Gmail form of a new draft, in the thread of
+/// `message.threadId` (a new thread with no `threadId`). The body must name the
 /// same draft ID, as Gmail asks.
 async fn update_draft(
     State(s): State<Shared>,
@@ -1297,6 +1304,7 @@ async fn update_draft(
             "The draft ID of the body is not the ID of the path.",
         );
     }
+    let thread = body.message.thread_id.clone();
     let raw = match draft_raw(&DraftBody {
         message: body.message,
     }) {
@@ -1304,12 +1312,14 @@ async fn update_draft(
         Err(e) => return e,
     };
     let mut s = s.lock().unwrap();
-    if s.draft(&id).is_none() {
+    let Some(pos) = s.drafts.iter().position(|(d, _)| *d == id) else {
         return error(StatusCode::NOT_FOUND, "Requested entity was not found.");
-    }
+    };
     let n = s.next_draft;
     s.next_draft += 1;
-    s.replace_draft(&id, gmail_draft_form(&raw, n));
+    // As a create: the new message is in the thread of `threadId`, and in
+    // a new thread with no `threadId`. So a reply update needs the field.
+    s.put_draft(pos, gmail_draft_form(&raw, n), thread);
     let i = s.draft(&id).expect("replaced");
     Json(s.draft_json(&id, i)).into_response()
 }
