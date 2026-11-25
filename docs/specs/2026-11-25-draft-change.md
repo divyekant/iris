@@ -84,7 +84,7 @@ The submit denies a change, with the reason, when one of these is true:
 | The draft has `foreign_at` | "The draft has a form that Iris does not write. Change it in Gmail." |
 | An attachment of the content of the draft row has no file in the attachment folder with its SHA-256 and size (for example, a file that the person added in Gmail, send content spec) | "A file of the draft is not in Iris. Change it in Gmail." |
 | A `send` action of the draft is `proposed`, `in_review`, `approved` or `held`, or a `ledger_send` row claims it | "The draft waits to send. Cancel it first." |
-| A send mark of a write (write spec, section 3) whose `draft` action made or names this draft has no send action yet, and its write is not `stopped` | "The draft waits to send. Cancel it first." |
+| A send mark of another write (write spec, section 3) whose `draft` action made or names this draft has no send action yet, and that write is not `stopped`. The mark of the action that runs the check (its own write) does not count | "The draft waits to send. Cancel it first." |
 | Another `draft` action that names the same draft is `approved` or `held`, or has a ledger row in `writing` | "Iris changes this draft now. Try again in a minute." |
 
 The parent of a change of a reply: the submit resolves the target `d-N`
@@ -423,5 +423,8 @@ for Gmail) during one change. A create holds one copy.
 9. A crash test: the update applied, the answer was lost, and the text
    at Gmail is the old text again. Recovery makes no call. Red if it
    calls `drafts.update`.
+10. One press of "Change and send" reaches `waiting`: the check of open
+    marks skips the mark of its own action. Red if the apply denies the
+    change because of its own mark.
 8. A change of a reply in a thread with two messages binds the newest
    message as its parent. Red if the write gets a 409 with no new mail.
