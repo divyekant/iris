@@ -862,14 +862,32 @@ async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
             &json!({"sender": upper, "of": "paypal.com", "trusted": false})
         )
     );
-    // A hostile row of another rule wins too, and then no trust is offered.
+    // A hostile row of another rule wins the kind and gives no trust
+    // offer. The trusted row keeps its Undo, under the hostile warning
+    // (issue #1043).
     g.exec(
         "UPDATE sender SET decided_by = 'person' WHERE address = 'ALERTS@paypa1.com'",
+        [],
+    );
+    let trusted = json!({"sender": look, "of": null, "trusted": true});
+    let m = g.get("/api/messages/m-5").await;
+    assert_eq!(
+        (m["sender_kind"].as_str(), &m["near_copy"]),
+        (Some("hostile"), &trusted)
+    );
+    // A stranger row of another case: the same.
+    g.exec(
+        "UPDATE sender SET kind = 'stranger', decided_by = 'engine', basis = NULL
+          WHERE address = 'ALERTS@paypa1.com'",
         [],
     );
     let m = g.get("/api/messages/m-5").await;
     assert_eq!(
         (m["sender_kind"].as_str(), &m["near_copy"]),
-        (Some("hostile"), &Value::Null)
+        (Some("stranger"), &trusted)
     );
+    // Undo of that row works: the engine decides it again.
+    assert_eq!(g.answer(&look, "reopen").await.0, StatusCode::OK);
+    let m = g.get("/api/messages/m-5").await;
+    assert_ne!(m["near_copy"]["trusted"], json!(true));
 }

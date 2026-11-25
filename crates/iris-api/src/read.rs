@@ -1257,7 +1257,10 @@ fn sender_kind(c: &Connection, address: Option<&str>) -> rusqlite::Result<String
 /// (the near-copy rule is the only engine rule that gives `hostile`), or a
 /// row that the person trusted after that mark. Rows can differ only in
 /// case: this reads the row of [`sender_kind`] (the most cautious kind,
-/// then the lowest ID), so the two fields always tell of one row.
+/// then the lowest ID), so a trust offer is always for the row that makes
+/// the mail hostile. If that row gives no trust offer, a trusted row of
+/// another case still gives its Undo (issue #1043): [`sender_kind`] keeps
+/// the warning of the more cautious row.
 fn near_copy(c: &Connection, address: Option<&str>) -> rusqlite::Result<Option<NearCopy>> {
     let Some(address) = address else {
         return Ok(None);
@@ -1289,8 +1292,27 @@ fn near_copy(c: &Connection, address: Option<&str>) -> rusqlite::Result<Option<N
             }))
         },
     )
+    .optional()?
+    .flatten()
+    .map_or_else(|| trusted_row(c, address), |near| Ok(Some(near)))
+}
+
+/// The trusted row of `address` in any case, with the lowest ID.
+fn trusted_row(c: &Connection, address: &str) -> rusqlite::Result<Option<NearCopy>> {
+    c.query_row(
+        "SELECT id FROM sender WHERE address = ?1 COLLATE NOCASE
+            AND kind = 'person' AND decided_by = 'person' AND basis = ?2
+          ORDER BY id LIMIT 1",
+        rusqlite::params![address, iris_senders::gate::TRUSTED],
+        |r| {
+            Ok(NearCopy {
+                sender: format_id(Kind::Sender, r.get(0)?),
+                of: None,
+                trusted: true,
+            })
+        },
+    )
     .optional()
-    .map(Option::flatten)
 }
 
 /// The summary of message `row`, and the other fields of [`Message`]
