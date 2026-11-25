@@ -1365,7 +1365,7 @@ async fn get_draft(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
         return Ok(not_found());
     };
     let draft = s
-        .read(|c| Ok(iris_voice::ready(c, thread)?))
+        .read(|c| Ok(iris_voice::ready(c, thread, now_ms())?))
         .map_err(Error::from)?;
     Ok(match draft {
         Some(d) => Json(serde_json::json!({

@@ -202,21 +202,25 @@ const NEWEST: &str = "ORDER BY coalesce(m.internal_date, 0) DESC, m.id DESC";
 /// understanding. A newer message, a gone newest message or a new hostile
 /// mark makes the draft stale, and the draft is not ready. A nudge (card
 /// R3-07, a draft with `ask`) is ready only while its `ask` is the
-/// [`nudge_key_sql`] of its thread: the same commitments, to the same person.
-pub fn ready_sql(threads: &str) -> String {
-    ready_of(threads, None)
+/// [`nudge_key_sql`] of its thread at the time `now` (SQL expressions of the
+/// time and the day, as for [`nudge_key_sql`]): the same late commitments,
+/// to the same person. [`late`] makes the key at the same time, so a saved
+/// nudge is ready at once. A commitment that becomes late later changes the
+/// key, so the next nudge names it too.
+pub fn ready_sql(threads: &str, now: (&str, &str)) -> String {
+    ready_of(threads, None, now)
 }
 
 /// As [`ready_sql`], for the line of item row `item` (an SQL value): a
 /// nudge marks only the commitments of its key, not the other items of its
 /// thread. A draft of the owner marks each item of its thread.
-pub fn ready_item_sql(threads: &str, item: &str) -> String {
-    ready_of(threads, Some(item))
+pub fn ready_item_sql(threads: &str, item: &str, now: (&str, &str)) -> String {
+    ready_of(threads, Some(item), now)
 }
 
-fn ready_of(threads: &str, item: Option<&str>) -> String {
+fn ready_of(threads: &str, item: Option<&str>, now: (&str, &str)) -> String {
     let in_thread = in_thread!("d.thread_id");
-    let key = nudge_key_sql("d.thread_id", None);
+    let key = nudge_key_sql("d.thread_id", now);
     let mine = item.map_or(String::new(), |i| {
         format!(
             "AND (d.ask IS NULL OR EXISTS (SELECT 1 FROM json_each(d.ask, '$.items') e
@@ -275,31 +279,28 @@ pub const MAX_NUDGE_ITEMS: usize = 10;
 ///   the person (its `From`), not `SENT`, and the commitment has a due
 ///   date.
 ///
-/// With `now` (SQL expressions of the time in milliseconds and of the day
-/// `YYYY-MM-DD` of that time in the zone of the owner, [`iris_store::today`]),
-/// the time rules apply too: the due date passed (a `due.at` at its instant,
-/// a `due.date` at the end of that day in the time zone of the owner), and an ask is at least [`LATE_AFTER_MS`] old,
-/// so a nudge that the owner sent starts the wait again. With no `now`,
-/// they do not count: what passed stays passed.
+/// The time rules apply at the time `now` (SQL expressions of the time in
+/// milliseconds and of the day `YYYY-MM-DD` of that time in the zone of the
+/// owner, [`iris_store::today`]): the due date passed (a `due.at` at its
+/// instant, a `due.date` at the end of that day in the time zone of the
+/// owner), and an ask is at least [`LATE_AFTER_MS`] old, so a nudge that the
+/// owner sent starts the wait again.
 ///
 /// One draft goes to one person: the person of the late commitment with
 /// the lowest row ID. The late commitments of another person in the same
 /// thread wait for the next nudge. `items` holds at most
 /// [`MAX_NUDGE_ITEMS`] entries, lowest row ID first.
-/// A change of a commitment, its person or the newest message changes
-/// the key or makes it NULL, so a saved nudge with the old key is stale.
-pub fn nudge_key_sql(thread: &str, now: Option<(&str, &str)>) -> String {
+/// A change of a commitment, its person or the newest message, or a
+/// commitment that becomes late, changes the key or makes it NULL, so a
+/// saved nudge with the old key is stale.
+pub fn nudge_key_sql(thread: &str, (now, today): (&str, &str)) -> String {
     let in_thread = in_thread!("om.thread_id");
     let at = "unixepoch(json_extract(ki.doc, '$.due.at'), 'subsec')";
     let date = "date(json_extract(ki.doc, '$.due.date'))";
     let due_at = format!("coalesce({at}, {date})");
-    let (due, wait) = now.map_or((String::new(), String::new()), |(now, today)| {
-        (
-            // No valid due date: no time rule of the due date.
-            format!("AND coalesce({at} * 1000 <= {now}, {date} < {today}, 1)"),
-            format!("AND coalesce(km.internal_date, 0) <= {now} - {LATE_AFTER_MS}"),
-        )
-    });
+    // No valid due date: no time rule of the due date.
+    let due = format!("AND coalesce({at} * 1000 <= {now}, {date} < {today}, 1)");
+    let wait = format!("AND coalesce(km.internal_date, 0) <= {now} - {LATE_AFTER_MS}");
     let sent = "EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                          WHERE ml.message_id = km.id AND l.provider_id = 'SENT')";
     let person = "lower(trim(ks.address))";
@@ -366,8 +367,8 @@ pub fn late(
 ) -> rusqlite::Result<Vec<Late>> {
     let newest = in_thread!("t.thread");
     let all = in_thread!("k.thread");
-    let key = nudge_key_sql("n.thread", Some(("?1", "?4")));
-    let ready = ready_sql("SELECT k.thread");
+    let key = nudge_key_sql("n.thread", ("?1", "?4"));
+    let ready = ready_sql("SELECT k.thread", ("?1", "?4"));
     let mut st = c.prepare_cached(&format!(
         "WITH t(thread) AS (
            SELECT DISTINCT om.thread_id FROM item
@@ -440,18 +441,18 @@ impl Late {
     }
 }
 
-/// The draft of `thread` that the person can use now ([`ready_sql`]), or
-/// `None`.
-pub fn ready(c: &Connection, thread: i64) -> rusqlite::Result<Option<Ready>> {
+/// The draft of `thread` that the person can use at the time `now_ms`
+/// ([`ready_sql`]), or `None`.
+pub fn ready(c: &Connection, thread: i64, now_ms: i64) -> rusqlite::Result<Option<Ready>> {
     c.query_row(
         &format!(
             "SELECT based_on, intent, body, json_extract(ask, '$.to'),
                     (SELECT json_group_array(json_extract(e.value, '$.item'))
                        FROM json_each(ask, '$.items') e)
                FROM reply_draft WHERE thread_id = ?1 AND {}",
-            ready_sql("SELECT ?1")
+            ready_sql("SELECT ?1", ("?2", "?3"))
         ),
-        [thread],
+        params![thread, now_ms, iris_store::today(c, now_ms)?],
         |r| {
             Ok(Ready {
                 based_on: r.get(0)?,

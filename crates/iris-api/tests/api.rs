@@ -1620,7 +1620,7 @@ async fn the_draft_route_gives_a_ready_nudge_with_its_person() {
     let second = add_item(&store, "commitment", "open", 1, 20, owed(&eli));
     let third = add_item(&store, "commitment", "open", 1, 30, owed(&dana));
     // The nudge that the engine saved: its `ask` is the key of now.
-    let key = iris_voice::nudge_key_sql("?1", None);
+    let key = iris_voice::nudge_key_sql("?1", ("unixepoch('subsec') * 1000", "date('now')"));
     exec(
         &store,
         &format!(

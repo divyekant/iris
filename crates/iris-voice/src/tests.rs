@@ -1028,17 +1028,30 @@ fn a_sample_marked_spam_during_the_call_saves_nothing() {
     assert_eq!(saved(store, t), None);
 }
 
-/// What [`ready_sql`] says of thread `t`.
+/// What [`ready_sql`] says of thread `t`, at the time of its draft.
 fn ready(store: &Store, t: i64) -> bool {
     store
         .read(|c| {
-            Ok(
-                c.query_row(&format!("SELECT {}", ready_sql("SELECT ?1")), [t], |r| {
-                    r.get(0)
-                })?,
-            )
+            let now = saved_at(c, t)?;
+            Ok(c.query_row(
+                &format!("SELECT {}", ready_sql("SELECT ?1", ("?2", "?3"))),
+                params![t, now, iris_store::today(c, now)?],
+                |r| r.get(0),
+            )?)
         })
         .unwrap()
+}
+
+/// The time of the draft of thread `t`, or 0: the tests read a draft at
+/// the time it was saved.
+fn saved_at(c: &Connection, t: i64) -> rusqlite::Result<i64> {
+    Ok(c.query_row(
+        "SELECT created_at FROM reply_draft WHERE thread_id = ?1",
+        [t],
+        |r| r.get(0),
+    )
+    .optional()?
+    .unwrap_or(0))
 }
 
 /// What the checks of [`write`] say of thread `t`: they pass, and the
@@ -1370,7 +1383,7 @@ fn evidence(store: &Store, provider: &str, to: &str) {
 /// The person of the ready nudge of thread `t`, or `None`.
 fn ready_to(store: &Store, t: i64) -> Option<String> {
     store
-        .read(|c| Ok(super::ready(c, t)?.and_then(|r| r.to)))
+        .read(|c| Ok(super::ready(c, t, saved_at(c, t)?)?.and_then(|r| r.to)))
         .unwrap()
 }
 
@@ -1516,6 +1529,49 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
 }
 
 #[test]
+fn a_saved_nudge_is_ready_while_a_later_commitment_is_not_due_yet() {
+    let now = 1000 + LATE_AFTER_MS;
+    let (b, t) = asked("nudge-later");
+    // A second commitment of Ana, due on 5 January 1970: not late at `now` (3 January).
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 SELECT form, account_id, status,
+                        json_set(doc, '$.title', 'Send the notes', '$.due', json('{\"date\":\"1970-01-05\"}')),
+                        2, 2 FROM item WHERE id = 1",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO item_source(item_id, message_id, role)
+                 SELECT 2, message_id, role FROM item_source WHERE item_id = 1",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let l = one_late(&b.store, now);
+    let fake = Fake::new(r#"{"body": "Hi Ana"}"#);
+    nudge(&b.store, &l, &fake, now).unwrap();
+    let ready_at = |at: i64| {
+        b.store
+            .read(|c| Ok(super::ready(c, t, at)?.map(|r| r.items)))
+            .unwrap()
+    };
+    // Ready at once, with only the late commitment, and no new call.
+    assert_eq!(ready_at(now), Some(vec![1]));
+    assert!(late_threads(&b.store, now).is_empty());
+    // After the due date, the key names both: the nudge is stale, and the
+    // next nudge names both commitments.
+    let after = 6 * 86_400_000;
+    assert_eq!(ready_at(after), None);
+    assert_eq!(late_threads(&b.store, after), [t]);
+    let key: Value = serde_json::from_str(&one_late(&b.store, after).key).unwrap();
+    assert_eq!(key["items"].as_array().unwrap().len(), 2);
+    let _ = std::fs::remove_dir_all(&b.dir);
+}
+
+#[test]
 fn one_nudge_names_each_late_commitment_of_its_person_and_another_person_waits() {
     let now = 1000 + LATE_AFTER_MS;
     let (b, t) = asked("nudge-group");
@@ -1576,7 +1632,7 @@ fn one_nudge_names_each_late_commitment_of_its_person_and_another_person_waits()
     );
     let items = b
         .store
-        .read(|c| Ok(super::ready(c, t)?.unwrap().items))
+        .read(|c| Ok(super::ready(c, t, saved_at(c, t)?)?.unwrap().items))
         .unwrap();
     assert_eq!(items, [1, 3]);
     // One of the two is done: the key changes, so the nudge is stale.
