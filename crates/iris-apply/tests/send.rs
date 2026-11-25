@@ -2446,3 +2446,19 @@ fn no_undo_while_a_send_of_the_draft_waits() {
         );
     }
 }
+
+/// A change of a draft of an account that Iris removes has no undo (issue
+/// 1014): the view hides it, and the undo is refused. Each path that the
+/// checks of a change guard (submit, the apply, the claim) refuses it too.
+#[test]
+fn no_undo_while_the_account_is_removed() {
+    let b = setup("undo-removed");
+    let (change, _, _) = b.changed(new_text());
+    assert!(matches!(b.apply(change), Ok(Outcome::Applied(_))));
+    b.sql(
+        "UPDATE account SET state = 'removing' WHERE id = ?1",
+        [b.account],
+    );
+    assert!(!b.can_undo(change));
+    assert!(matches!(b.undo(change), Err(iris_apply::Error::Undo(_))));
+}

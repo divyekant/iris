@@ -7,7 +7,8 @@
 -- 2. The view ledger_can_undo lists such an entry while it is the newest
 --    entry of its draft that counts, and the draft passes the checks of a
 --    change (iris_changeset::change_denied): not sent, in a form that Iris
---    writes, no send that waits, and no open change. A failed later
+--    writes, an account that Iris does not remove, no send that waits, and
+--    no open change. A failed later
 --    change counts only with the two errors of an unknown result (the
 --    constants CHANGE_UNKNOWN and CHANGE_DURING of iris-apply; a test
 --    compares them). Each rule of migration 29 stays.
@@ -79,8 +80,10 @@ CREATE VIEW ledger_can_undo AS
          OR (json_extract(l.ops, '$.call') = 'drafts.update' AND l.state = 'applied' AND l.call = 1
              -- Checks of section 1 that the store shows: the draft is not
              -- sent, is in a form that Iris writes, and has no claimed send.
-             AND EXISTS (SELECT 1 FROM draft d WHERE d.id = json_extract(l.ops, '$.draft')
-                           AND d.sent_at IS NULL AND d.foreign_at IS NULL)
+             AND EXISTS (SELECT 1 FROM draft d JOIN account ac ON ac.id = d.account_id
+                         WHERE d.id = json_extract(l.ops, '$.draft')
+                           AND d.sent_at IS NULL AND d.foreign_at IS NULL
+                           AND (ac.state IS NULL OR ac.state NOT IN ('removing', 'removed')))
              -- The checks of iris_changeset::change_denied, for no action:
              -- no claimed send, no open send action, no send mark of a
              -- press with no send yet (younger than MARK_MS, 24 hours),

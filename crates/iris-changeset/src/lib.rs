@@ -1473,7 +1473,9 @@ fn resolve_undo(c: &Connection, action: i64, ids: &[Value]) -> Result<Option<Str
         .optional()?;
     if let Some(draft) = draft {
         let found = c.execute(
-            "INSERT INTO action_draft(action_id, draft_id) SELECT ?1, id FROM draft WHERE id = ?2",
+            "INSERT INTO action_draft(action_id, draft_id)
+             SELECT ?1, d.id FROM draft d JOIN account a ON a.id = d.account_id
+             WHERE d.id = ?2 AND (a.state IS NULL OR a.state NOT IN ('removing', 'removed'))",
             params![action, draft],
         )? == 1;
         if !found {
@@ -1722,18 +1724,19 @@ pub fn change_denied(
     draft: i64,
     now_ms: i64,
 ) -> Result<Option<String>> {
-    let row: Option<(bool, String, bool, bool)> = c
+    let row: Option<(bool, String, bool, bool, bool)> = c
         .query_row(
             "SELECT cs.author_kind = 'person', ac.provider, d.sent_at IS NOT NULL,
-                    d.foreign_at IS NOT NULL
+                    d.foreign_at IS NOT NULL, coalesce(ac.state IN ('removing', 'removed'), 0)
              FROM changeset_action a JOIN changeset cs ON cs.id = a.changeset_id
              JOIN draft d ON d.id = ?2 JOIN account ac ON ac.id = d.account_id
              WHERE a.id = ?1",
             params![action, draft],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()?;
-    let Some((person, provider, sent, foreign)) = row else {
+    // A kept draft of a tombstone is no target (issue 1014).
+    let Some((person, provider, sent, foreign, false)) = row else {
         return Ok(Some("The draft does not exist.".into()));
     };
     if !person {
