@@ -287,11 +287,19 @@ lose a rerun:
    message is understood at once with no model call, and counts in
    `messages` and toward `Limits::max_messages`.
 2. In one write: `iris_senders::refresh`, then `rerun_senders` for the rows
-   that became or stopped being hostile. No model call.
+   that became or stopped being hostile. No model call. Then the fixed
+   check of each row of `fixed_due` (spec 1, migration 54, decision D31),
+   with no model: a message whose fixed result changed is understood again
+   at once, and counts in `messages` and toward `Limits::max_messages`.
+   The check stops before the limit. The rest of the queue waits for a
+   later check. A message that the check makes pending gets one more pass
+   (step 4).
 3. Read `model_setting` and make the `Budgeted` model.
 4. For each thread in order, and for each pending message of it: check the
    stop conditions, then call `store::understand`.
 5. After each `Limits::batch` (default 50) messages, run step 2 again.
+   After the last thread, run the fixed check again, for the kind and name
+   changes of the main pass.
 6. At the end, write `ended_at` and `stop`. The run after a sync
    (`Limits::keep_idle` false, R1-28) deletes its row in the same write if
    it read no message, made no call and holds no reservation, so a run

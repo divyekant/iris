@@ -347,10 +347,6 @@ fn run_messages(
     // that it understands counts toward the run limit.
     let done =
         store::recheck_links(store, now_ms, limits.max_messages).map_err(Error::Understand)?;
-    // The fixed check after a kind or name change (decision D31), also with
-    // no model.
-    let left = limits.max_messages.map(|n| n.saturating_sub(done));
-    let done = done + store::recheck_fixed(store, now_ms, left).map_err(Error::Understand)?;
     store.write(|tx| {
         tx.execute(
             "UPDATE understand_run SET messages = messages + ?2 WHERE id = ?1",
@@ -382,6 +378,9 @@ fn run_messages(
         since_refresh: 0,
         rerun: false,
     };
+    // The fixed check after a kind or name change (decision D31), with no
+    // model, after each sender refresh and at the end of the run.
+    r.fixed()?;
     // Main pass, then one more pass if a sender rerun reset mail. Reruns of
     // the second pass wait for the next run, so a message gets at most 2
     // calls of `store::understand` in one run.
@@ -405,6 +404,9 @@ fn run_messages(
             }
         }
     }
+    // The kind and name changes of the main pass (the sender step of each
+    // message, and the last refresh).
+    r.fixed()?;
     let s = model.state();
     Ok(if !s.refused {
         Stop::Done
@@ -446,6 +448,30 @@ impl Runner<'_> {
         let reset = refresh_senders(self.store, self.now_ms)?;
         self.since_refresh = 0;
         self.rerun |= reset > 0;
+        self.fixed()
+    }
+
+    /// The fixed check of the queue `fixed_due` (decision D31). Each message
+    /// that it understands again counts toward the run limit. Mail that it
+    /// makes pending gets one more pass.
+    fn fixed(&mut self) -> Result<(), Error> {
+        let left = self
+            .limits
+            .max_messages
+            .map(|n| n.saturating_sub(self.done));
+        let n = store::recheck_fixed(self.store, self.now_ms, left).map_err(Error::Understand)?;
+        if n == 0 {
+            return Ok(());
+        }
+        self.done += n;
+        self.rerun = true;
+        self.store.write(|tx| {
+            tx.execute(
+                "UPDATE understand_run SET messages = messages + ?2 WHERE id = ?1",
+                params![self.run, i64_of(n)],
+            )?;
+            Ok(())
+        })?;
         Ok(())
     }
 

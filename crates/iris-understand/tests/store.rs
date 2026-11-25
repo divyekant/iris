@@ -2509,6 +2509,52 @@ Your one-time code is 918273. It ends in 10 minutes.
     assert!(!queued(a) && !queued(c));
 }
 
+/// Decision D31: mail that a model try limit holds (3 failed tries, still
+/// pending) gets the fixed check too. When its sender becomes a service,
+/// the code rule completes it with no model.
+#[test]
+fn a_held_pending_message_gets_the_fixed_check() {
+    use iris_understand::store::recheck_fixed;
+    let b = store("fixed-held");
+    let code = "From: Bank <no-reply@bank.example.com>
+To: owner@example.com
+Subject: Your sign-in
+
+Your one-time code is 918273. It ends in 10 minutes.
+";
+    let m = b.add("1", code, &["INBOX"]);
+    // No model: write 1 saves the header, and the mail stays pending.
+    assert!(understand(&b.store, m, &iris_understand::budget::NoModel, NOW).is_err());
+    b.store
+        .write(|tx| Ok(tx.execute("UPDATE message SET tries = 3 WHERE id = ?1", [m])?))
+        .unwrap();
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE sender SET kind = 'service', decided_by = 'person'
+                  WHERE address = 'no-reply@bank.example.com'",
+                [],
+            )?)
+        })
+        .unwrap();
+    assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
+    assert!(!b.col::<bool>("SELECT understood_at IS NULL FROM message WHERE id = ?1", m));
+    assert_eq!(
+        b.col::<Option<String>>(
+            "SELECT max(json_extract(doc, '$.derived.rule')) FROM item i
+               JOIN item_source s ON s.item_id = i.id
+              WHERE s.message_id = ?1 AND i.form <> 'conversation'",
+            m,
+        )
+        .as_deref(),
+        Some("code")
+    );
+    assert_eq!(
+        b.col::<i64>("SELECT count(*) FROM fixed_due WHERE ?1", 1),
+        0
+    );
+}
+
 /// Decision D29 (issue 263): mail from a declined sender gets no model call.
 /// The fixed steps still run. When the decline ends (a reopen, or a kind
 /// other than `stranger`), the mail is pending again for the model.

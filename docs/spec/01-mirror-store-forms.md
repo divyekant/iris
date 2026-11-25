@@ -770,13 +770,16 @@ code-signal rule reads the kind `service`, and the spoof check reads the names
 of the known persons. So when a sender becomes or stops being a `service`, or
 the name of a known person comes, goes or changes, store triggers queue the
 affected mail in `fixed_due`: the mail from that address, or the mail under the
-old or the new name. Each understanding run first runs the fixed steps again on
-the queued mail, with no model call. Only a message whose fixed result changed
+old or the new name. Each understanding run runs the fixed steps again on the
+queued mail, with no model call: after each sender refresh, and after the last
+thread. Only a message whose fixed result changed
 is understood again with no model: a new mark makes it hostile mail, and a rule
 that matches now gives its items. A message that no fixed rule covers now, and
 that the model never read (it was hostile mail, or a rule made its items),
 waits for the model as new mail does. A message whose model items still hold
-keeps them.
+keeps them. Mail that is not understood yet (pending, or held by the try limit
+of the model) is understood again only when the fixed steps alone complete it
+now: it is hostile, or a rule covers it.
 
 A message with the label `SENT` is from you (`self`), also when its `From` is
 an alias. The engine does not understand a message with the label `DRAFT`,

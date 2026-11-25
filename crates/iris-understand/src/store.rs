@@ -201,7 +201,7 @@ pub fn recheck_links(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Resu
 /// Rows of `fixed_due` in one read of [`recheck_fixed`].
 pub const FIXED_CHECKS: i64 = 200;
 
-/// The fixed check of each message in `fixed_due` (store migration 46,
+/// The fixed check of each message in `fixed_due` (store migration 54,
 /// decision D31): mail whose sender became or stopped being a `service`, or
 /// whose display name is the old or the new name of a known person. It runs
 /// the fixed steps again with no model: the hostile marks (the spoof check
@@ -281,7 +281,8 @@ fn analysis(raw: &[u8], raw_cut: bool, html_after: bool, cx: &Context, phishing:
 
 /// True when the fixed result of the understood received message `id` now
 /// (its hostile marks, or the rules of its rule items) is not the stored
-/// one. False for mail that is gone, not understood, or your own.
+/// one. False for mail that is gone or your own. For mail that is not
+/// understood: true when the fixed steps alone complete it now.
 fn fixed_differs(store: &Store, id: i64, now_ms: i64) -> Result<bool> {
     let row = read_row(store, id)?;
     let own = row
@@ -295,7 +296,7 @@ fn fixed_differs(store: &Store, id: i64, now_ms: i64) -> Result<bool> {
             |r| r.get(0),
         )?)
     })?;
-    if row.gone || own || !understood || row.sha.is_none() {
+    if row.gone || own || row.sha.is_none() {
         return Ok(false);
     }
     let path = row
@@ -358,6 +359,11 @@ fn fixed_differs(store: &Store, id: i64, now_ms: i64) -> Result<bool> {
         known: &inputs_now.parties,
     };
     let a = analysis(&raw, raw_cut, html_after, &cx, row.phishing);
+    if !understood {
+        // Pending mail, or mail that a model try limit or a refusal holds:
+        // understood again only when the fixed steps alone complete it now.
+        return Ok(decide(&a, &cx, None).is_ok_and(|d| d.hostile || !d.waiting));
+    }
     if marks_json(&a.marks, false) != stored_marks {
         return Ok(true);
     }

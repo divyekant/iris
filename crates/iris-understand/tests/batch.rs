@@ -1542,3 +1542,52 @@ fn the_mail_of_a_declined_stranger_does_not_wait_for_the_model() {
         assert!(b.understood(m), "message {m}");
     }
 }
+
+/// Decision D31: a kind or name change that the sender refresh of a run
+/// makes gets its fixed check before the run ends. Here the refresh makes
+/// Bo Smith a known person, and the mail of another address under the same
+/// name gets the spoof mark in the same run.
+#[test]
+fn a_name_change_of_the_refresh_gets_the_fixed_check_in_the_same_run() {
+    let b = store("refresh-fixed");
+    b.model(false, None);
+    let bo = "From: Bo Smith <bo@example.org>\nTo: owner@example.com\nSubject: Hi\n\nCall me.\n";
+    b.add_raw("1", "x", 1, bo, &["INBOX"]);
+    let other =
+        "From: Bo Smith <bo@elsewhere.example>\nTo: owner@example.com\nSubject: Pay\n\nPay now.\n";
+    let spoof = b.add_raw("2", "y", 2, other, &["INBOX"]);
+    b.run(&Limits::default()).unwrap();
+    let marks = |b: &Box_| -> String {
+        b.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT coalesce(hostile, '[]') FROM message WHERE id = ?1",
+                    [spoof],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    assert_eq!(marks(&b), "[]", "no known name yet");
+    // Evidence that bo@example.org is a person, with no run since.
+    let raw = "From: owner@example.com\nTo: bo@example.org\nSubject: Re: Hi\n\nSure.\n"
+        .replace('\n', "\r\n");
+    let sent = b.add_raw("3", "x", 3, &raw, &["SENT"]);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sender_evidence(message_id, address, rule, content_sha256)
+                 SELECT id, 'bo@example.org', 'sent', content_sha256 FROM message WHERE id = ?1",
+                [sent],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    b.run(&Limits::default()).unwrap();
+    assert!(
+        marks(&b).contains("spoof"),
+        "the run made the spoof mark: {:?}",
+        marks(&b)
+    );
+    assert_eq!(b.col("SELECT count(*) FROM fixed_due"), Some(0));
+}
