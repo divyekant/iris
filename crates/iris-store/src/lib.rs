@@ -87,6 +87,26 @@ macro_rules! removed_account {
     };
 }
 
+/// SQL: the message `m` is not mail that you got, for a watch (card R5-07):
+/// hostile mail, mail that may be hostile, your own sent mail (`SENT`), or
+/// a draft or a copy. The first arrival, the read gate of a stored match
+/// and the content cleanup read this one rule, so a match that changes
+/// later stops in each place (issue #931).
+macro_rules! not_received {
+    () => {
+        concat!(
+            "(",
+            crate::hostile_mail!(),
+            " OR ",
+            crate::may_be_hostile!(),
+            " OR EXISTS (SELECT 1 FROM message_label sml JOIN label sl ON sl.id = sml.label_id
+               WHERE sml.message_id = m.id AND sl.provider_id = 'SENT') OR ",
+            crate::draft_or_copy!("m"),
+            ")"
+        )
+    };
+}
+
 /// The labels of [`draft_or_copy!`], for a check in Rust.
 pub const DRAFT_OR_COPY: [&str; 3] = ["DRAFT", "UNSENT", "SENT_COPY"];
 
