@@ -604,3 +604,68 @@ async fn the_list_names_the_newest_session_of_each_working_job() {
         );
     }
 }
+
+/// The page and its sessions come from one snapshot. A writer moves a job
+/// between `working` with an open session and `needs_you` with an ended
+/// session, in one transaction each time. No read may show the job working
+/// with an ended session.
+#[test]
+fn the_list_and_its_sessions_always_agree_while_the_job_moves() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = temp("list-snapshot");
+    let s = store(&dir);
+    let job = iris_job::create(&s, "Get the contract.", None, NOW).unwrap();
+    let first = iris_job::register(&s, job, "codex", NOW + 1).unwrap();
+    let key = iris_job::format_job_id(job);
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let (s, stop) = (s.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut session = first;
+            let mut at = NOW + 10;
+            while !stop.load(Ordering::Relaxed) {
+                at += 10;
+                s.write(|tx| {
+                    let move_ = || -> iris_job::Result<i64> {
+                        if iris_job::get_in(tx, job)?.state == iris_job::State::Working {
+                            iris_job::end_in(
+                                tx,
+                                session,
+                                iris_job::EndReason::LaunchFailed,
+                                None,
+                                at,
+                            )?;
+                            iris_job::reap_in(tx, session, at)?;
+                            iris_job::ask_in(tx, job, "Which card?", None, at)?;
+                            Ok(session)
+                        } else {
+                            iris_job::answer_in(tx, job, "The blue card.", None, at)?;
+                            iris_job::register_in(tx, job, "codex", at)
+                        }
+                    };
+                    move_().map_err(|e| iris_store::Error::Query(e.to_string()))
+                })
+                .map(|s| session = s)
+                .unwrap();
+            }
+        })
+    };
+    for _ in 0..300 {
+        let page = iris_api::jobs(&s, "open", 50, None).unwrap();
+        let v = serde_json::to_value(&page).unwrap();
+        let working = v["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|j| j["id"] == key && j["state"] == "working");
+        if working {
+            assert_eq!(
+                v["sessions"][&key]["end"],
+                Value::Null,
+                "a working job shows an open session: {v}"
+            );
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    writer.join().unwrap();
+}
