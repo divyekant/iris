@@ -221,10 +221,13 @@ fn the_session_socket_answers_status_and_refuses_other_verbs() {
     assert_eq!(v["result"]["job"], format!("j-{}", f.job), "{v}");
     assert_eq!(v["result"]["goal"], "Get the contract.", "{v}");
     assert_eq!(v["result"]["state"], "working", "{v}");
-    for verb in ["job.run", "brief", "drafts", "status.all"] {
+    for verb in ["job.run", "brief", "status.all"] {
         let v = ask(&f, verb, serde_json::json!({})).unwrap();
         assert_eq!(v["code"], 3, "{verb}: {v}");
     }
+    // `drafts` gives only the draft of the job (issue #440): none yet.
+    let v = ask(&f, "drafts", serde_json::json!({})).unwrap();
+    assert_eq!(v["result"]["changesets"], serde_json::json!([]), "{v}");
     // The read verbs of the session (R4-04f) answer on the socket.
     let v = ask(&f, "list", serde_json::json!({})).unwrap();
     assert_eq!(v["ok"], true, "{v}");
