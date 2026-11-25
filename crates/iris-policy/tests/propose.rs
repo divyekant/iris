@@ -60,13 +60,26 @@ fn message(store: &Store, from: &str, hostile: bool) -> i64 {
 }
 
 /// An action of `verb` on `messages` by an agent, that the person decided:
-/// `approved` or `denied`.
+/// `approved` or `denied`. The agent works in job `j-1`, whose scope is
+/// empty, so the agent is not marked.
 fn decided(store: &Store, verb: &str, messages: &[i64], state: &str) {
+    decided_by(store, "agent", Some("j-1"), verb, messages, state)
+}
+
+/// [`decided`], by an author of the kind `kind` in the job `job`.
+fn decided_by(
+    store: &Store,
+    kind: &str,
+    job: Option<&str>,
+    verb: &str,
+    messages: &[i64],
+    state: &str,
+) {
     store
         .write(|tx| {
             tx.execute(
-                "INSERT INTO changeset(author_kind, created_at) VALUES ('agent', 0)",
-                [],
+                "INSERT INTO changeset(author_kind, author_job, created_at) VALUES (?1, ?2, 0)",
+                params![kind, job],
             )?;
             let cs = tx.last_insert_rowid();
             let ids: Vec<String> = messages.iter().map(|m| format!("\"m-{m}\"")).collect();
@@ -527,5 +540,31 @@ fn a_refusal_for_one_address_stops_the_domain() {
     assert!(
         find(&ps, "deals@shop.example").is_some(),
         "the other address keeps its proposal: {ps:?}"
+    );
+}
+
+/// #916: the policy decides each trash of a marked author as review
+/// (decision D14), so the approvals of a marked author give no trash rule.
+/// Triage and an agent with no job are always marked. Other verbs count.
+#[test]
+fn the_trash_of_a_marked_author_gives_no_proposal() {
+    let (_dir, store) = store("marked");
+    for _ in 0..MIN_APPROVALS {
+        let m = message(&store, "deals@shop.example", false);
+        decided_by(&store, "triage", None, "trash", &[m], "approved");
+        let m = message(&store, "deals@shop.example", false);
+        decided_by(&store, "agent", None, "trash", &[m], "approved");
+    }
+    let ps = refresh(&store);
+    assert!(ps.iter().all(|p| p.verb != Some(Verb::Trash)), "{ps:?}");
+    for _ in 0..MIN_APPROVALS {
+        let m = message(&store, "news@shop.example", false);
+        decided_by(&store, "triage", None, "archive", &[m], "approved");
+    }
+    let ps = refresh(&store);
+    assert_eq!(
+        find(&ps, "news@shop.example").and_then(|p| p.verb),
+        Some(Verb::Archive),
+        "{ps:?}"
     );
 }

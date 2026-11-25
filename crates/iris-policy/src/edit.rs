@@ -27,6 +27,9 @@ pub enum Change {
     Mode(Mode),
     /// Remove the rule with this ID. Iris never uses the ID again.
     Remove(u32),
+    /// Remove each rule with these IDs, in one policy version. The change
+    /// does nothing if one ID names no rule.
+    RemoveAll(Vec<u32>),
     /// Add the rule of the open proposal with this ID (spec 2, section 6.6),
     /// with `by = "proposal"` and the next rule ID.
     Accept(i64),
@@ -127,32 +130,33 @@ pub fn end_grants(store: &Store, now: i64) -> Result<usize> {
     let Some(lock) = store.try_backup_lock()? else {
         return Ok(0);
     };
-    let mut removed = 0;
-    loop {
-        let (version, ended) = store.read(|c| {
-            let active = active(c)?;
-            let mut done = c.prepare("SELECT 1 FROM job WHERE id = ?1 AND state = 'done'")?;
-            let mut ended = None;
-            for rule in &active.policy.rules {
-                // Only the form of a job ID ("j-12", not "j-012" or "j-+12")
-                // names a job: the session matches the same text.
-                if let Some(id) = rule.job.as_deref().and_then(iris_job::parse_job_id) {
-                    if done.exists([id])? {
-                        ended = Some(rule.id);
-                        break;
-                    }
+    let (version, ended) = store.read(|c| {
+        let active = active(c)?;
+        let mut done = c.prepare("SELECT 1 FROM job WHERE id = ?1 AND state = 'done'")?;
+        let mut ended = Vec::new();
+        for rule in &active.policy.rules {
+            // Only the form of a job ID ("j-12", not "j-012" or "j-+12")
+            // names a job: the session matches the same text.
+            if let Some(id) = rule.job.as_deref().and_then(iris_job::parse_job_id) {
+                if done.exists([id])? {
+                    ended.push(rule.id);
                 }
             }
-            Ok((active.version, ended))
-        })?;
-        let Some(id) = ended else {
-            return Ok(removed);
-        };
-        match change_locked(store, &lock, version, Change::Remove(id), now)? {
-            Edited::Done { .. } => removed += 1,
-            _ => return Ok(removed),
         }
+        Ok((active.version, ended))
+    })?;
+    if ended.is_empty() {
+        return Ok(0);
     }
+    // One change for all ended grants: one file write, one version and one
+    // attention pass (#825).
+    let n = ended.len();
+    Ok(
+        match change_locked(store, &lock, version, Change::RemoveAll(ended), now)? {
+            Edited::Done { .. } => n,
+            _ => 0,
+        },
+    )
 }
 
 fn change_locked(
@@ -286,6 +290,16 @@ pub fn edit_text(text: &str, change: Change) -> std::result::Result<Option<Strin
             *v.decor_mut() = decor;
         }
         Change::Accept(_) | Change::Grant { .. } => return Ok(None),
+        Change::RemoveAll(ids) => {
+            let mut text = text.to_string();
+            for id in ids {
+                match edit_text(&text, Change::Remove(id))? {
+                    Some(t) => text = t,
+                    None => return Ok(None),
+                }
+            }
+            return Ok(Some(text));
+        }
         Change::Remove(id) => {
             // The parser accepts the rules as an array of inline tables too.
             if let Some(rules) = doc.get_mut("rule").and_then(Item::as_array_mut) {

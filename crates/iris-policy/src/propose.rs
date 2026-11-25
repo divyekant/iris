@@ -431,6 +431,19 @@ pub(crate) fn pass(conn: &Connection, now: i64) -> Result<Found> {
         if bulk {
             continue;
         }
+        // The mark of the author now (spec R4-06): the policy decides each
+        // trash of a marked author as review (decision D14), so a rule must
+        // not count it as an action it would allow (#916). The person is
+        // never an author here; an agent is not marked only when its job
+        // scope is your own mail.
+        let marked = verb == "trash"
+            && match (
+                author.as_str(),
+                job.as_deref().and_then(iris_job::parse_job_id),
+            ) {
+                ("agent", Some(j)) => iris_job::reads_outside_in(conn, j)?,
+                _ => true,
+            };
         let (Some(verb), Some(author)) = (Verb::from_name(&verb), Author::from_name(&author))
         else {
             continue;
@@ -451,7 +464,7 @@ pub(crate) fn pass(conn: &Connection, now: i64) -> Result<Found> {
             bulk: false,
             warning: false,
             in_thread: false,
-            marked: false,
+            marked,
             now,
         };
         let base = allows(&policy, &action, &messages);
