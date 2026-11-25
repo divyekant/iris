@@ -15,7 +15,11 @@
 --    When SPAM comes, the droppable items of the message go at once (as
 --    for DRAFT, UNSENT and SENT_COPY in migration 42), so an old item does
 --    not show again when SPAM goes before the next run (trigger
---    `spam_drops_items`). A pinned item stays.
+--    `spam_drops_items`). A pinned item stays. The same holds for a gone
+--    message that comes back with SPAM (`spam_back_drops_items`), and for
+--    each message that has SPAM at this migration (the DELETE below).
+--    Invariant: a message that is not gone and has SPAM has no droppable
+--    item.
 -- 2. A gone message that comes back, and new content, clear
 --    `understood_at`, `tries` and `retry_at` for each writer (triggers
 --    `understand_come_back` and `understand_new_content`). The content
@@ -86,3 +90,28 @@ BEGIN
   DELETE FROM item WHERE id IN
     (SELECT item_id FROM item_droppable WHERE message_id = NEW.message_id);
 END;
+
+DROP TRIGGER IF EXISTS spam_back_drops_items;
+
+CREATE TRIGGER spam_back_drops_items AFTER UPDATE OF gone_at ON message
+  WHEN OLD.gone_at IS NOT NULL AND NEW.gone_at IS NULL
+  AND EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+    WHERE ml.message_id = NEW.id AND l.provider_id = 'SPAM')
+BEGIN
+  DELETE FROM item WHERE id IN
+    (SELECT item_id FROM item_droppable WHERE message_id = NEW.id);
+END;
+
+-- The messages that have SPAM now: their thread is computed again, and
+-- their droppable items go.
+INSERT OR IGNORE INTO talk_due(thread_id)
+  SELECT DISTINCT m.thread_id FROM item_droppable d
+    JOIN message m ON m.id = d.message_id
+    JOIN message_label ml ON ml.message_id = d.message_id
+    JOIN label l ON l.id = ml.label_id
+  WHERE l.provider_id = 'SPAM' AND m.thread_id IS NOT NULL;
+DELETE FROM item WHERE id IN
+  (SELECT d.item_id FROM item_droppable d
+     JOIN message_label ml ON ml.message_id = d.message_id
+     JOIN label l ON l.id = ml.label_id
+   WHERE l.provider_id = 'SPAM');

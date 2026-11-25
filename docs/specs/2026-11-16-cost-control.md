@@ -38,7 +38,9 @@ pay again for the same mail.
   leaves `SPAM` gets its items at the next run. Mail that gets `SPAM` drops
   its droppable items at once (trigger `spam_drops_items`, as for
   `DRAFT` in migration 42), so an old item does not show again when
-  `SPAM` goes before the next run. A pinned item stays.
+  `SPAM` goes before the next run. A pinned item stays. A gone message
+  that comes back with `SPAM`, and each message with `SPAM` at the
+  upgrade (migration 62), drop their droppable items too.
 - Each reset of `understood_at` by a change (new content, a gone message
   that comes back, a label of the list above, a new hostile mark) clears
   `tries` and `retry_at`, and puts the thread in `talk_due`. A failed try

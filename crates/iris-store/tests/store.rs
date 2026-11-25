@@ -1507,3 +1507,76 @@ fn spam_drops_the_items_of_its_message() {
         1
     );
 }
+
+/// Issue #110, the invariant for each path: a message that is not gone and
+/// has SPAM has no droppable item. The paths: a gone message that comes back
+/// with SPAM, and a SPAM message of an older store at the upgrade.
+#[test]
+fn no_spam_message_keeps_a_droppable_item() {
+    let dir = TempDir::new("spam-paths");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(acc, &[("SPAM", "SPAM", "system")])
+        .unwrap();
+    let id = store
+        .put_messages(acc, &[msg("a", "t1", 1, &["INBOX", "SPAM"], "Hi", "x")])
+        .unwrap()[0];
+    let add_item = |store: &Store| {
+        store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO item(form, account_id, status, doc, created_at, updated_at, derived_by)
+                     VALUES ('commitment', ?1, 'open', '{}', 0, 0, 'model')",
+                    [acc],
+                )?;
+                tx.execute(
+                    "INSERT INTO item_source(item_id, message_id, role)
+                     VALUES (last_insert_rowid(), ?1, 'origin')",
+                    [id],
+                )?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    let items = |store: &Store| -> i64 {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM item_source WHERE message_id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    // A gone message keeps its items. It comes back with SPAM: they go.
+    store
+        .write(|tx| Ok(tx.execute("UPDATE message SET gone_at = 1 WHERE id = ?1", [id])?))
+        .unwrap();
+    add_item(&store);
+    assert_eq!(items(&store), 1);
+    store
+        .write(|tx| Ok(tx.execute("UPDATE message SET gone_at = NULL WHERE id = ?1", [id])?))
+        .unwrap();
+    assert_eq!(items(&store), 0);
+    // An older store (version 61): a SPAM message with an item. The
+    // upgrade deletes the item and puts the thread in talk_due.
+    store
+        .write(|tx| {
+            tx.execute_batch(
+                "DROP TRIGGER spam_drops_items; DROP TRIGGER spam_back_drops_items;
+                 DELETE FROM talk_due; PRAGMA user_version = 61;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    add_item(&store);
+    assert_eq!(items(&store), 1);
+    drop(store);
+    let store = Store::open(&dir.0).unwrap();
+    assert_eq!(items(&store), 0);
+    let due: i64 = store
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM talk_due", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(due, 1);
+}
