@@ -873,3 +873,65 @@ async fn trust_takes_a_near_copy_out_of_quarantine_and_reopen_undoes_it() {
         (Some("hostile"), &Value::Null)
     );
 }
+
+/// Issues 369, 373 and 374: `POST /api/messages/{id}/release` releases the
+/// marks `dmarc`, `spoof` and `link` of a message, and queues the fixed
+/// check. `DELETE` ends the release. `GET /api/messages/{id}` names the
+/// released marks, so the client can offer Undo after a reload.
+#[tokio::test]
+async fn release_takes_a_message_out_of_quarantine_and_delete_undoes_it() {
+    let g = Gate::new("release");
+    g.exec(
+        r#"UPDATE message SET hostile = '["link","spoof"]' WHERE id = 3"#,
+        [],
+    );
+    g.exec(
+        r#"UPDATE message SET hostile = '["phishing"]' WHERE id = 4"#,
+        [],
+    );
+    let due = || g.one::<i64>("SELECT count(*) FROM fixed_due WHERE message_id = 3");
+    assert_eq!(due(), 0);
+    assert_eq!(g.get("/api/messages/m-3").await["released"], json!([]));
+
+    let (code, v) = g.call("POST", "/api/messages/m-3/release").await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["released"], json!(["link", "spoof"]));
+    assert_eq!(v["id"], "m-3");
+    assert_eq!(due(), 1);
+    assert_eq!(
+        g.get("/api/messages/m-3").await["released"],
+        json!(["link", "spoof"])
+    );
+    // Nothing more to release.
+    let (code, v) = g.call("POST", "/api/messages/m-3/release").await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+
+    // `phishing` alone: no release, no write.
+    let (code, v) = g.call("POST", "/api/messages/m-4/release").await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+    assert_eq!(
+        g.one::<Option<String>>("SELECT released FROM message WHERE id = 4"),
+        None
+    );
+    let (code, _) = g.call("DELETE", "/api/messages/m-4/release").await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert_eq!(
+        g.call("POST", "/api/messages/m-999/release").await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        g.call("POST", "/api/messages/p-3/release").await.0,
+        StatusCode::BAD_REQUEST
+    );
+
+    // Undo.
+    let (code, v) = g.call("DELETE", "/api/messages/m-3/release").await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["released"], json!([]));
+    assert_eq!(due(), 1, "the undo queues the check again, in one row");
+
+    // Gone mail cannot be released.
+    g.exec("UPDATE message SET gone_at = 1 WHERE id = 3", []);
+    let (code, v) = g.call("POST", "/api/messages/m-3/release").await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+}

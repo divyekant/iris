@@ -271,6 +271,46 @@ pub fn answer(store: &Store, id: &str, answer: &str, now_ms: i64) -> Result<Opti
     result.map_err(|e| Error::Conflict(e.into()))
 }
 
+/// The person releases the message `id` from quarantine (`on`), or ends
+/// the release (issues 369, 373 and 374). A release covers the marks
+/// `dmarc`, `spoof` and `link` of the current content
+/// (`iris_understand::store::release`); the understanding worker reads the
+/// message again. Gives the message after the change, or `None` when no
+/// message has the ID. [`Error::Conflict`] when the message is gone, has no
+/// mark that the person can release, or has no release to end.
+pub fn release(store: &Store, id: &str, on: bool) -> Result<Option<crate::read::Message>> {
+    use iris_understand::store::{release, unrelease, Release};
+    let row = row_of(id, Kind::Message)?;
+    let result = store.write(|tx| {
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM message WHERE id = ?1)",
+            [row],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Ok(Ok(None));
+        }
+        let done = if on {
+            match release(tx, row)? {
+                Release::Done { .. } => Ok(()),
+                Release::NoMessage => Err("This mail is gone."),
+                Release::Nothing => {
+                    Err("Iris holds this mail for a reason that you cannot release here.")
+                }
+            }
+        } else if unrelease(tx, row)? {
+            Ok(())
+        } else {
+            Err("You did not release this mail.")
+        };
+        Ok(match done {
+            Ok(()) => Ok(crate::read::message_in(tx, row)?),
+            Err(e) => Err(e),
+        })
+    })?;
+    result.map_err(|e| Error::Conflict(e.into()))
+}
+
 /// The sender row `row` as the answer of the API.
 fn sender(c: &Connection, row: i64) -> rusqlite::Result<Value> {
     c.query_row(

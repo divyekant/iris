@@ -338,7 +338,7 @@ fn migration_40_marks_each_understood_thread() {
             tx.execute_batch(
                 "DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender;
                  DROP TRIGGER talk_due_sender_remove; DROP TRIGGER model_declined_end; DROP TRIGGER model_declined_end_remove; DROP TABLE model_declined; DROP TABLE talk_due; DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
-                 DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 39;",
+                 DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 39;",
             )?;
             Ok(())
         })
@@ -1088,7 +1088,7 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                  ALTER TABLE account DROP COLUMN categories_off_at;
                  DROP TRIGGER understand_owner_label_add; DROP TRIGGER understand_owner_label_remove;
                  DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower; DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender; DROP TRIGGER talk_due_sender_remove; DROP TRIGGER model_declined_end; DROP TRIGGER model_declined_end_remove; DROP TABLE model_declined; DROP TABLE talk_due; DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
-                 DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 19;",
+                 DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 19;",
             )?;
             Ok(())
         })
@@ -1792,4 +1792,138 @@ fn mail_that_the_fixed_check_of_the_main_pass_resets_gets_the_second_pass() {
     );
     assert_eq!(hostile_of(&b, spoof), "[]");
     assert!(b.understood(spoof), "the same run read the reset mail");
+}
+
+/// Issues 369, 373 and 374: the person releases a message that the mark
+/// `link` holds in quarantine. The fixed check reads it again without the
+/// mark, the model reads it as new mail, and its items show. The end of the
+/// release gives the mark back, and the items go. New content ends the
+/// release. A mark that the person cannot release (`phishing`) stays.
+#[test]
+fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
+    use iris_understand::store::{release, unrelease, Release};
+    let b = store("release");
+    b.model(false, None);
+    let m = b.add_raw(
+        "m",
+        "t",
+        1,
+        &bank("https://evil.example.net/pay"),
+        &["INBOX"],
+    );
+    b.run(&Limits::default()).unwrap();
+    let hostile = |b: &Box_| {
+        b.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT coalesce(hostile, '[]') FROM message WHERE id = ?1",
+                    [m],
+                    |r| r.get::<_, String>(0),
+                )?)
+            })
+            .unwrap()
+    };
+    let items = |b: &Box_| {
+        b.col(&format!(
+            "SELECT count(*) FROM item_source s JOIN item i ON i.id = s.item_id
+             WHERE s.message_id = {m} AND s.role = 'origin' AND i.form <> 'conversation'"
+        ))
+        .unwrap()
+    };
+    assert_eq!(hostile(&b), r#"["link"]"#);
+    assert_eq!((b.script.calls(), items(&b)), (0, 0));
+
+    // The release: the next run reads the mail with the model.
+    let r = b.store.write(|tx| Ok(release(tx, m)?)).unwrap();
+    assert_eq!(
+        r,
+        Release::Done {
+            released: vec!["link".into()],
+            kept: vec![]
+        }
+    );
+    // A second release has nothing more to release.
+    assert_eq!(
+        b.store.write(|tx| Ok(release(tx, m)?)).unwrap(),
+        Release::Nothing
+    );
+    let feed = || {
+        Ok((
+            r#"{"items": [{"form": "feed", "status": "new", "title": "Invoice",
+              "quote": "Pay the invoice by Friday.", "confidence": 0.5}], "phishing": false}"#
+                .to_string(),
+            usage(100, 10),
+        ))
+    };
+    b.script.push(feed());
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(hostile(&b), "[]");
+    assert_eq!((b.script.calls(), items(&b)), (1, 1));
+    // The link check of the same content keeps the release.
+    iris_understand::store::recheck_links(&b.store, NOW, None).unwrap();
+    assert_eq!(hostile(&b), "[]");
+
+    // The end of the release: the mark comes back with no model call.
+    assert!(b.store.write(|tx| Ok(unrelease(tx, m)?)).unwrap());
+    assert!(!b.store.write(|tx| Ok(unrelease(tx, m)?)).unwrap());
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(hostile(&b), r#"["link"]"#);
+    assert_eq!((b.script.calls(), items(&b)), (1, 0));
+
+    // New content ends a release.
+    b.store.write(|tx| Ok(release(tx, m)?)).unwrap();
+    let other = bank("https://evil2.example.net/pay").replace('\n', "\r\n");
+    let sha = b.store.put_content(other.as_bytes()).unwrap();
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET content_sha256 = ?2 WHERE id = ?1",
+                rusqlite::params![m, sha],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        b.col(&format!(
+            "SELECT released IS NULL FROM message WHERE id = {m}"
+        )),
+        Some(1)
+    );
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(hostile(&b), r#"["link"]"#);
+    assert_eq!(b.script.calls(), 1);
+
+    // Only `phishing`: nothing to release. With `link` too, `phishing` stays.
+    b.store
+        .write(|tx| {
+            tx.execute(
+                r#"UPDATE message SET hostile = '["phishing"]' WHERE id = ?1"#,
+                [m],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        b.store.write(|tx| Ok(release(tx, m)?)).unwrap(),
+        Release::Nothing
+    );
+    b.store
+        .write(|tx| {
+            tx.execute(
+                r#"UPDATE message SET hostile = '["link","phishing"]' WHERE id = ?1"#,
+                [m],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        b.store.write(|tx| Ok(release(tx, m)?)).unwrap(),
+        Release::Done {
+            released: vec!["link".into()],
+            kept: vec!["phishing".into()]
+        }
+    );
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(hostile(&b), r#"["phishing"]"#);
+    assert_eq!((b.script.calls(), items(&b)), (1, 0));
 }
