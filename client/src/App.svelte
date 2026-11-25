@@ -28,7 +28,7 @@
   import PolicyNotice from "./views/PolicyNotice.svelte";
   import SignInNotice from "./views/SignInNotice.svelte";
   import Notices from "./views/Notices.svelte";
-  import Stop, { refresh as refreshStop } from "./views/Stop.svelte";
+  import Stop, { refresh as refreshStop, watch as watchStop } from "./views/Stop.svelte";
   import Accounts from "./views/Accounts.svelte";
 
   let hash = $state(typeof location === "undefined" ? "" : location.hash);
@@ -48,9 +48,12 @@
     // A stop from the terminal shows when the tab comes back.
     addEventListener("focus", refreshStop);
     refreshStop();
+    // A stop from the terminal also shows in a tab that stays open and focused.
+    const unwatch = watchStop();
     return () => {
       removeEventListener("hashchange", update);
       removeEventListener("focus", refreshStop);
+      unwatch();
     };
   });
 

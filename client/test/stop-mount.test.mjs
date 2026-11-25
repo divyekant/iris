@@ -5,7 +5,7 @@ import { load, mount, until } from "./mount.mjs";
 
 const text = (el) => el.textContent.replace(/\s+/g, " ");
 const since = "2026-11-17T09:00:00Z";
-const { act, refresh, reread, stopState } = await load("/src/views/Stop.svelte");
+const { act, refresh, reread, stopState, watch } = await load("/src/views/Stop.svelte");
 
 /**
  * A fake engine. `state` is the stop switch. `hold` keeps the answer of a
@@ -227,6 +227,24 @@ test("a Resume when Iris already runs does not say that a new hold started", asy
     assert.equal(stopState.stopped, false);
     assert.equal(stopState.note, "");
   } finally {
+    v.done();
+  }
+});
+
+test("a stop or a resume at the terminal shows in an open tab with no new view or focus (issue 589)", async () => {
+  const e = engine();
+  const v = await start(e);
+  const end = watch(20);
+  try {
+    assert.equal(v.band.target.querySelector("[aria-label='Iris is stopped']"), null);
+    // `iris stop` at the terminal.
+    e.state = { stopped: true, since, live: 0, busy: false };
+    await until(() => (v.flush(), v.band.target.querySelector("[aria-label='Iris is stopped']")));
+    // `iris resume` at the terminal.
+    e.state = { stopped: false, since: null, live: 0, busy: false };
+    await until(() => (v.flush(), !v.band.target.querySelector("[aria-label='Iris is stopped']")));
+  } finally {
+    end();
     v.done();
   }
 });
