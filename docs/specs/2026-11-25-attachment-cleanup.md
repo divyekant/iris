@@ -43,6 +43,13 @@ A file is live when its SHA-256 is in one of these places:
 | `changeset_action.args`, `$.attachments[*].sha256`, of a `draft` action whose state is open: `NULL` (a draft revision), `proposed`, `in_review`, `approved` or `held` | The apply reads each file. |
 | `ledger.post`, `$.content.attachments[*].sha256`, of a ledger row in the state `writing` | Recovery makes the same bytes again (send spec, section 4, step 2). |
 | `draft.content`, `$.content.attachments[*].sha256`, of a draft row with `sent_at IS NULL` and `foreign_at IS NULL` | The client can edit the draft. The edit submits a new `draft` action with the same entries, and its apply reads the files. |
+| `ledger.pre`, `$.draft.content.attachments[*].sha256`, of a draft change entry whose undo is available (view `ledger_can_undo`) | The undo of the change makes the old content again, and its apply reads the files (draft change spec). |
+
+The JSON of these places is input that Iris does not control: `iris
+draft` saves a draft revision before submit checks its content. The
+cleanup reads a place only when it is valid JSON with an array at the
+path, and an entry only when it is an object with a text `sha256`. Any
+other value names no file and does not stop the cleanup.
 
 A decided action (`applied`, `failed`, `denied`, `expired`, `cancelled`,
 `replaced`, `undone`) never applies again, so it does not keep a file. A

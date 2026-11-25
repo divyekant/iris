@@ -390,24 +390,44 @@ impl Store {
     }
 }
 
-/// The SHA-256 of each attachment file that a live reference names: an
-/// open action (a draft revision, `proposed`, `in_review`, `approved` or
-/// `held`), a ledger claim in `writing`, and a draft row that is not sent
-/// and not foreign. Each such file can be read again by an apply or a
-/// recovery. The match does not filter by verb, so each place that holds
-/// the content keeps its files.
+/// The SHA-256 of each attachment file that a live reference names (spec
+/// section 1): an open action (a draft revision, `proposed`, `in_review`,
+/// `approved` or `held`), a ledger claim in `writing`, the content before
+/// a draft change whose undo is available (view `ledger_can_undo`), and a
+/// draft row that is not sent and not foreign. Each such file can be read
+/// again by an apply, a recovery or an undo. The match does not filter by
+/// verb, so each place that holds the content keeps its files.
+///
+/// The JSON is input that Iris does not control (`iris draft` saves a
+/// revision before its check). So each document is read only when it is
+/// valid JSON with an array at the path, and each entry only when it is an
+/// object with a text `sha256`. Any other value names no file and does not
+/// stop the cleanup.
 const LIVE_ATTACHMENTS: &str = "
-SELECT json_extract(j.value, '$.sha256') FROM changeset_action a,
-  json_each(CASE WHEN json_valid(a.args) THEN a.args END, '$.attachments') j
-WHERE a.state IS NULL OR a.state IN ('proposed', 'in_review', 'approved', 'held')
-UNION
-SELECT json_extract(j.value, '$.sha256') FROM ledger l,
-  json_each(l.post, '$.content.attachments') j
-WHERE l.state = 'writing'
-UNION
-SELECT json_extract(j.value, '$.sha256') FROM draft d,
-  json_each(d.content, '$.content.attachments') j
-WHERE d.sent_at IS NULL AND d.foreign_at IS NULL";
+WITH refs(doc, path) AS (
+  SELECT a.args, '$.attachments' FROM changeset_action a
+  WHERE a.state IS NULL OR a.state IN ('proposed', 'in_review', 'approved', 'held')
+  UNION ALL
+  SELECT l.post, '$.content.attachments' FROM ledger l WHERE l.state = 'writing'
+  UNION ALL
+  SELECT l.pre, '$.draft.content.attachments' FROM ledger l
+  WHERE l.id IN (SELECT ledger_id FROM ledger_can_undo)
+  UNION ALL
+  SELECT d.content, '$.content.attachments' FROM draft d
+  WHERE d.sent_at IS NULL AND d.foreign_at IS NULL
+),
+arrays(doc, path) AS (
+  SELECT CASE WHEN json_valid(doc) THEN
+           CASE WHEN json_type(doc, path) = 'array' THEN doc END END, path
+  FROM refs
+),
+hashes(sha) AS (
+  SELECT CASE WHEN j.type = 'object' THEN
+           CASE WHEN json_type(j.value, '$.sha256') = 'text'
+             THEN json_extract(j.value, '$.sha256') END END
+  FROM arrays r, json_each(r.doc, r.path) j
+)
+SELECT DISTINCT sha FROM hashes WHERE sha IS NOT NULL";
 
 /// Before the cleanup deletes the evidence of gone mail (the header that
 /// names the sender, then the message row with its marks and labels), it

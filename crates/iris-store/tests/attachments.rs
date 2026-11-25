@@ -230,3 +230,156 @@ fn no_folder_is_no_work() {
     let s = Store::open(&dir.0).unwrap();
     assert_eq!(s.clean_attachments(NOW).unwrap(), Some(0));
 }
+
+/// Issue #853, pre-review: the content before a draft change stays live
+/// while the undo of the change is available (view `ledger_can_undo`). A
+/// later change ends the undo, and then the old file goes.
+#[test]
+fn a_draft_change_keeps_the_file_of_its_undo() {
+    let dir = TempDir::new("undo");
+    let s = Store::open(&dir.0).unwrap();
+    let account = s.add_account("gmail", "owner@example.com").unwrap();
+    let before = file(&s, b"before", OLD);
+    let after = file(&s, b"after", OLD);
+    let entry = |tx: &Connection, draft: i64, pre: &str| -> rusqlite::Result<i64> {
+        let a = action(tx, "{}", Some("approved"))?;
+        tx.execute(
+            "INSERT INTO ledger(action_id, account_id, ops, pre, post, state, undo, at)
+             VALUES (?1, ?2, ?3, ?4, '{}', 'writing', 'inverse', 0)",
+            params![
+                a,
+                account,
+                serde_json::json!({"call": "drafts.update", "draft": draft}).to_string(),
+                pre
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.execute(
+            "UPDATE ledger SET state = 'applied', call = 1 WHERE id = ?1",
+            [id],
+        )?;
+        Ok(id)
+    };
+    let (draft, first) = s
+        .write(|tx| {
+            let a = action(tx, "{}", Some("denied"))?;
+            tx.execute(
+                "INSERT INTO draft(account_id, provider_id, message_id_hdr, content, hash, raw,
+                                   action_id, created_at, updated_at)
+                 VALUES (?1, 'r', 'iris.r@example.com', ?2, 'h', x'00', ?3, 0, 0)",
+                params![account, format!("{{\"content\":{}}}", content(&after)), a],
+            )?;
+            let draft = tx.last_insert_rowid();
+            let pre = format!(
+                "{{\"draft\":{{\"content\":{}}},\"date\":null}}",
+                content(&before)
+            );
+            Ok((draft, entry(tx, draft, &pre)?))
+        })
+        .unwrap();
+    let can_undo = |id: i64| -> bool {
+        s.read(|c| {
+            Ok(c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM ledger_can_undo WHERE ledger_id = ?1)",
+                [id],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap()
+    };
+    assert!(can_undo(first));
+    assert_eq!(s.clean_attachments(NOW).unwrap(), Some(0));
+    assert!(exists(&s, &before), "the undo can read the old file");
+    assert!(exists(&s, &after), "the draft names the new file");
+    // A later change with no attachment in its pre: the first undo ends.
+    s.write(|tx| {
+        entry(tx, draft, "{\"draft\":{\"content\":{}},\"date\":null}")?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(!can_undo(first));
+    assert_eq!(s.clean_attachments(NOW).unwrap(), Some(1));
+    assert!(!exists(&s, &before));
+    assert!(exists(&s, &after));
+}
+
+/// A small deterministic generator of JSON values (a linear congruential
+/// generator), for the property test below.
+struct Gen(u64);
+
+impl Gen {
+    fn next(&mut self, n: u64) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.0 >> 33) % n
+    }
+
+    fn value(&mut self, depth: u32, sha: &str) -> serde_json::Value {
+        use serde_json::json;
+        match self.next(if depth == 0 { 6 } else { 9 }) {
+            0 => json!(null),
+            1 => json!(self.next(2) == 1),
+            2 => json!(self.next(1000) as i64 - 500),
+            3 => json!("foo"),
+            4 => json!(sha),
+            5 => json!(1.5),
+            6 => (0..self.next(3))
+                .map(|_| self.value(depth - 1, sha))
+                .collect(),
+            7 => json!({"sha256": self.value(depth - 1, sha)}),
+            _ => json!({"name": "f", "attachments": self.value(depth - 1, sha)}),
+        }
+    }
+}
+
+/// Property: for any args of an open action, the cleanup does not fail.
+/// A file that a valid entry (an object with a text `sha256`) of the
+/// attachments array names stays; any other value names no file. The
+/// args come from the generator.
+#[test]
+fn any_draft_args_leave_the_cleanup_working() {
+    let dir = TempDir::new("prop");
+    let s = Store::open(&dir.0).unwrap();
+    let kept = file(&s, b"kept", OLD);
+    s.write(|tx| {
+        action(tx, &content(&kept), None)?;
+        Ok(())
+    })
+    .unwrap();
+    let mut g = Gen(853);
+    for case in 0..300 {
+        let other = file(&s, format!("other {case}").as_bytes(), OLD);
+        let attachments = g.value(3, &other);
+        let mut args = serde_json::json!({"attachments": attachments}).to_string();
+        match case % 10 {
+            // The args are the generated value itself, not an object. (The
+            // store refuses args that are not JSON.)
+            0 => args = attachments.to_string(),
+            // A valid entry next to the generated values.
+            1 => {
+                let mut list = match attachments {
+                    serde_json::Value::Array(a) => a,
+                    v => vec![v],
+                };
+                list.push(serde_json::json!({"sha256": kept}));
+                args = serde_json::json!({"attachments": list}).to_string();
+            }
+            _ => {}
+        }
+        s.write(|tx| {
+            action(tx, &args, None)?;
+            Ok(())
+        })
+        .unwrap();
+        let named = serde_json::from_str::<serde_json::Value>(&args)
+            .ok()
+            .and_then(|v| v["attachments"].as_array().cloned())
+            .is_some_and(|a| a.iter().any(|e| e["sha256"].as_str() == Some(&*other)));
+        let got = s.clean_attachments(NOW);
+        assert!(got.is_ok(), "case {case}: {args}: {got:?}");
+        assert_eq!(exists(&s, &other), named, "case {case}: {args}");
+        assert!(exists(&s, &kept), "case {case}");
+    }
+}
