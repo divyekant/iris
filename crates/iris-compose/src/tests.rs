@@ -919,3 +919,22 @@ fn the_size_bound_holds_for_large_content() {
         assert_eq!(read(&raw, ME).unwrap().content, c);
     }
 }
+
+/// Raw mail with an empty or blank body, as an older build could write
+/// it, gives no content on both read paths, so it cannot send (#774).
+#[test]
+fn a_raw_draft_with_an_empty_body_does_not_read_back() {
+    let c = content(&["p@x.org"], "Hi", "Body").check().unwrap();
+    let raw =
+        String::from_utf8(compose(ME, "iris.9@example.com", &c, None, 1_800_000_000)).unwrap();
+    assert!(read(raw.as_bytes(), ME).is_some());
+    for blank in ["", " ", "\r\n", " \t\r\n\r\n"] {
+        let changed = raw.replacen("Body", blank, 1);
+        assert_ne!(changed, raw);
+        assert!(read(changed.as_bytes(), ME).is_none(), "{changed:?}");
+        assert!(
+            read_sent(changed.as_bytes(), ME, &[]).is_none(),
+            "{changed:?}"
+        );
+    }
+}
