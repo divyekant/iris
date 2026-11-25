@@ -1295,9 +1295,9 @@ agent that does not work in a folder. The rules for the MCP interface:
 
   | Tools | Path |
   |---|---|
-  | `status`, `search`, `show`, `list` | A read verb of the session socket. `list` takes only a form: another filter is a usage error (code 2). |
+  | `status`, `search`, `show`, `list` | A read verb of the session socket. `list` takes only a form: another filter, also an explicit `limit`, is a usage error (code 2). |
   | `send`, `skip`, `mute`, `dismiss` | Refused (code 3), with the text of the command. |
-  | The tools of `add`, `submit`, `changeset`, `withdraw`, `revise`, `matters_propose` | A request on the session socket. |
+  | The tools of `add`, `submit`, `changeset`, `drafts`, `withdraw`, `revise`, `matters_propose` | A request on the session socket. `drafts` gives only the draft of the job, so after a lost `add` answer the client finds the changeset with `drafts` before a retry. |
   | All other tools | Refused (code 3): they are host verbs. |
 
   The tools never open the data folder in session mode.

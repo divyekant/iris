@@ -890,10 +890,11 @@ fn session_refusal(verb: &str) -> Option<&'static str> {
     }
 }
 
-/// Only the write verbs of a session (R4-03): `drafts`, for example, is a
-/// host verb of the socket.
-const SESSION_VERBS: [&str; 6] = [
+/// Only the write verbs of a session (R4-03). `drafts` gives only the draft
+/// of the job of the session, so a lost `add` answer can be found again.
+const SESSION_VERBS: [&str; 7] = [
     "add",
+    "drafts",
     "submit",
     "show",
     "withdraw",
@@ -1418,7 +1419,7 @@ fn mcp(dir: PathBuf) -> Result<(), String> {
                 };
                 match open() {
                     Err(e) => Outcome::fail(socket::code::ERROR, e),
-                    Ok(s) => match verbs::list(&s, &filter, limit, true) {
+                    Ok(s) => match verbs::list(&s, &filter, limit.unwrap_or(50), true) {
                         Ok(text) => Outcome::ok(text),
                         Err(e) => fail(list_failure(e)),
                     },
@@ -1497,7 +1498,7 @@ fn mcp_session(path: &std::path::Path) -> Result<(), String> {
                 status: None,
                 kind: None,
                 before: None,
-                ..
+                limit: None,
             } => read("list", serde_json::json!({ "form": form }), false),
             Call::List { .. } => Outcome::fail(
                 socket::code::USAGE,
