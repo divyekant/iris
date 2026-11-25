@@ -17,6 +17,9 @@ use super::{
 use iris_provider::Provider;
 use iris_store::Store;
 
+mod change;
+pub use change::{CHANGED as CHANGE_CHANGED, GONE as CHANGE_GONE, UNKNOWN as CHANGE_UNKNOWN};
+
 /// The hold delay of a send after its approval (spec 2, section 7.5).
 pub const HOLD_MS: i64 = 60_000;
 /// A send claim with no sent message at Gmail after this time ends as
@@ -62,6 +65,21 @@ enum Ops {
         message_id: String,
         /// Seconds since 1970: compose makes the same bytes again.
         date: i64,
+        hash: String,
+        /// The Gmail thread ID of a reply.
+        thread: Option<String>,
+    },
+    /// A change of a draft in place (docs/specs/2026-11-25-draft-change.md,
+    /// section 2). A no-op change (the same content again) has no call:
+    /// `pre_hash` is `hash`, and the ledger row has `call` 0.
+    #[serde(rename = "drafts.update")]
+    Update {
+        draft: i64,
+        provider_id: String,
+        message_id: String,
+        /// Seconds since 1970: recovery composes the same bytes again.
+        date: i64,
+        pre_hash: String,
         hash: String,
         /// The Gmail thread ID of a reply.
         thread: Option<String>,
@@ -136,11 +154,8 @@ pub(crate) fn draft(run: &mut Run<'_, '_>, action: i64) -> Result<Outcome> {
         decide(store, action, "denied", why)?;
         Ok(Outcome::Denied(why.into()))
     };
-    // shortcut: the apply of a change (docs/specs/2026-11-25-draft-change.md,
-    // section 2) is the next part of the build. Until then, a change is
-    // denied with no provider call, never applied as a new draft.
     if change {
-        return deny(iris_changeset::CHANGE_OFF);
+        return change::apply(run, action, &args);
     }
     let Ok(mut content) = serde_json::from_str::<Content>(&args) else {
         return deny("the arguments are not a draft content");
@@ -547,6 +562,7 @@ pub(crate) fn recover(run: &mut Run<'_, '_>, ledger: i64) -> Result<Outcome> {
                 ),
             }
         }
+        Ops::Update { .. } => change::recover(run, ledger, at),
         Ops::Send {
             draft,
             provider_id,
@@ -829,7 +845,11 @@ pub fn release(
     });
     if !same {
         let new_ids = run.mail.sets_draft_message_id();
-        return changed_at_gmail(store, action, &d, read, &raw, run.mail.name(), new_ids);
+        let why = format!(
+            "the draft changed at {} after the approval",
+            run.mail.name()
+        );
+        return changed_at_gmail(store, action, d.id, &d.message_id, read, &raw, why, new_ids);
     }
     // The flags of the mail that Gmail holds, the same bytes as the draft
     // row (docs/specs/2026-11-17-send-checks.md, section 4).
@@ -865,37 +885,18 @@ pub fn release(
 /// The draft changed at Gmail (section 4.1): in one transaction, the
 /// engine denies the send and refreshes the `draft` row from Gmail, or
 /// marks it `foreign_at` if Iris does not write its form.
+#[allow(clippy::too_many_arguments)]
 fn changed_at_gmail(
     store: &Store,
     action: i64,
-    d: &Draft,
+    draft: i64,
+    message_id: &str,
     read: Option<iris_compose::Read>,
     raw: &[u8],
-    provider: &str,
+    why: String,
     new_ids: bool,
 ) -> Result<Outcome> {
-    let why = format!("the draft changed at {provider} after the approval");
     let t = now();
-    // A draft that reads back refreshes the row. With another Message-ID
-    // only if the provider sets its own ID on a draft (Gmail, spec
-    // assumption 3); else another ID means another client: `foreign_at`.
-    // The ID is not in the content hash, so a new send still needs a new
-    // approval.
-    let refresh = read
-        .filter(|r| new_ids || r.message_id == d.message_id)
-        .map(|r| {
-            let hash = iris_compose::hash(&r.content, r.reply.as_ref());
-            let stored = Stored {
-                content: r.content,
-                reply: r.reply,
-                name: None,
-            };
-            (
-                serde_json::to_string(&stored).expect("plain data"),
-                hash,
-                r.message_id,
-            )
-        });
     let n = store.write(|tx| {
         let n = tx.execute(
             "UPDATE changeset_action SET state = 'denied', decided_by = 'engine', rule = NULL,
@@ -904,18 +905,7 @@ fn changed_at_gmail(
             params![action, why, t],
         )?;
         if n == 1 {
-            match &refresh {
-                Some((content, hash, message_id)) => tx.execute(
-                    "UPDATE draft SET content = ?2, hash = ?3, raw = ?4, updated_at = ?5,
-                       message_id_hdr = ?6
-                     WHERE id = ?1",
-                    params![d.id, content, hash, raw, t, message_id],
-                )?,
-                None => tx.execute(
-                    "UPDATE draft SET foreign_at = ?2, updated_at = ?2 WHERE id = ?1",
-                    params![d.id, t],
-                )?,
-            };
+            refresh(tx, draft, message_id, read, raw, new_ids, t)?;
         }
         Ok(n)
     })?;
@@ -923,6 +913,50 @@ fn changed_at_gmail(
         return Err(Error::NotApproved(action));
     }
     Ok(Outcome::Denied(why))
+}
+
+/// The `draft` row after a change at the provider (section 4.1): a draft
+/// that reads back refreshes the row, else the row gets `foreign_at`. With
+/// another Message-ID only if the provider sets its own ID on a draft
+/// (Gmail, spec assumption 3); else another ID means another client. The
+/// ID is not in the content hash, so a new send still needs a new approval.
+fn refresh(
+    tx: &rusqlite::Connection,
+    draft: i64,
+    message_id: &str,
+    read: Option<iris_compose::Read>,
+    raw: &[u8],
+    new_ids: bool,
+    t: i64,
+) -> rusqlite::Result<()> {
+    match read.filter(|r| new_ids || r.message_id == message_id) {
+        Some(r) => {
+            let hash = iris_compose::hash(&r.content, r.reply.as_ref());
+            let stored = Stored {
+                content: r.content,
+                reply: r.reply,
+                name: None,
+            };
+            tx.execute(
+                "UPDATE draft SET content = ?2, hash = ?3, raw = ?4, updated_at = ?5,
+                   message_id_hdr = ?6
+                 WHERE id = ?1",
+                params![
+                    draft,
+                    serde_json::to_string(&stored).expect("plain data"),
+                    hash,
+                    raw,
+                    t,
+                    r.message_id
+                ],
+            )?
+        }
+        None => tx.execute(
+            "UPDATE draft SET foreign_at = ?2, updated_at = ?2 WHERE id = ?1",
+            params![draft, t],
+        )?,
+    };
+    Ok(())
 }
 
 pub(crate) fn changeset_error(e: iris_changeset::Error) -> iris_store::Error {
