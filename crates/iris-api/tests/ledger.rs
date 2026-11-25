@@ -913,3 +913,331 @@ async fn a_change_of_a_draft_is_marked() {
     assert_eq!(by(create)["change"], false);
     assert_eq!(by(archive)["change"], false);
 }
+
+/// A failed `archive` entry: the recovery cannot confirm `unknown`, and
+/// Gmail confirmed `done`. Gives the ledger row ID.
+fn unconfirmed(s: &Store, unknown: &[i64], done: &[i64]) -> i64 {
+    unconfirmed_in(s, unknown, done, &[], true)
+}
+
+/// As `unconfirmed`, with the messages `pending` that the recovery did not
+/// check yet. With `end` false, the entry stays in `writing`: its recovery
+/// did not end.
+fn unconfirmed_in(s: &Store, unknown: &[i64], done: &[i64], pending: &[i64], end: bool) -> i64 {
+    let all: Vec<i64> = unknown.iter().chain(done).chain(pending).copied().collect();
+    s.write(|tx| {
+        tx.execute("INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0)", [])?;
+        let cs = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+             VALUES (?1, 1, 1, 'archive', '{\"messages\":[]}', '{}')",
+            [cs],
+        )?;
+        let a = tx.last_insert_rowid();
+        for m in &all {
+            tx.execute(
+                "INSERT INTO action_message(action_id, message_id) VALUES (?1, ?2)",
+                params![a, m],
+            )?;
+        }
+        let (_, h) = iris_changeset::hash(tx, a).unwrap();
+        tx.execute("UPDATE changeset_action SET hash = ?2 WHERE id = ?1", params![a, h])?;
+        tx.execute(
+            "UPDATE changeset SET why = 'Tidy up.', submitted_at = ?2 WHERE id = ?1",
+            params![cs, NOW],
+        )?;
+        tx.execute(
+            &format!("UPDATE changeset_action SET state = 'approved', {PERSON} WHERE id = ?1"),
+            [a],
+        )?;
+        tx.execute(
+            "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+             VALUES (?1, 1, '{\"call\":\"batchModify\",\"add\":[],\"remove\":[\"INBOX\"],\"calls\":1}',
+                     'writing', 'inverse', ?2)",
+            params![a, NOW],
+        )?;
+        let l = tx.last_insert_rowid();
+        for m in &all {
+            tx.execute(
+                "INSERT INTO ledger_message(ledger_id, message_id, call, pre, post)
+                 VALUES (?1, ?2, 1, '[\"INBOX\"]', '[]')",
+                params![l, m],
+            )?;
+        }
+        tx.execute("UPDATE ledger SET call = 1 WHERE id = ?1", [l])?;
+        for m in done {
+            tx.execute(
+                "UPDATE ledger_message SET done = 1 WHERE ledger_id = ?1 AND message_id = ?2",
+                params![l, m],
+            )?;
+        }
+        for m in unknown {
+            tx.execute(
+                "UPDATE ledger_message SET listed = 'unknown' WHERE ledger_id = ?1 AND message_id = ?2",
+                params![l, m],
+            )?;
+        }
+        if end {
+            tx.execute(
+                "UPDATE ledger SET state = 'failed', error = 'Gmail did not answer.' WHERE id = ?1",
+                [l],
+            )?;
+        }
+        Ok(l)
+    })
+    .unwrap()
+}
+
+async fn dismiss(store: &Arc<Store>, body: Value) -> (StatusCode, Value) {
+    let auth = Arc::new(Auth::new("127.0.0.1:4800".parse().unwrap()).unwrap());
+    let req = Request::post("/api/ledger/unconfirmed/dismiss")
+        .header("host", "127.0.0.1:4800")
+        .header("authorization", auth.bearer())
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let res = iris_api::router(store.clone(), auth)
+        .oneshot(req)
+        .await
+        .unwrap();
+    let code = res.status();
+    let body = to_bytes(res.into_body(), 1 << 20).await.unwrap();
+    (code, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+/// Issue #216 (specification 2, section 7.3): the brief shows the messages
+/// that the recovery cannot confirm in one line, until the person
+/// dismisses it. A dismissal covers only the entries that the line showed,
+/// so a later entry shows a new line.
+#[tokio::test]
+async fn the_brief_shows_unconfirmed_messages_until_dismissed() {
+    let dir = temp("unconfirmed");
+    let s = store(&dir);
+    let ok = archived(&s, "person", &[3], PERSON);
+    let first = unconfirmed(&s, &[1, 2], &[3]);
+    let (_, page) = call(&s, false, "/api/ledger").await;
+    let entry = |id: i64| {
+        page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == format!("l-{id}"))
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(entry(first)["unknown"], 2);
+    assert_eq!(entry(first)["changed"], 1);
+    assert_eq!(entry(ok)["unknown"], 0);
+    let (code, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 2, "entries": [format!("l-{first}")], "more": 0, "waiting": 0})
+    );
+
+    // The line showed `first`. A later failure comes before the dismissal.
+    let second = unconfirmed(&s, &[3], &[]);
+    let (code, b) = dismiss(
+        &s,
+        json!({"entries": [format!("l-{first}"), format!("l-{ok}")]}),
+    )
+    .await;
+    assert_eq!((code, b), (StatusCode::OK, json!({"dismissed": 1})));
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 1, "entries": [format!("l-{second}")], "more": 0, "waiting": 0})
+    );
+    // A second dismissal of the same entry changes nothing.
+    let (_, b) = dismiss(&s, json!({"entries": [format!("l-{first}")]})).await;
+    assert_eq!(b, json!({"dismissed": 0}));
+    // An ID that is not `l-<n>` writes nothing.
+    for bad in [
+        json!({"entries": ["x"]}),
+        json!({"entries": [format!("l-{second}"), "l-01"]}),
+        json!({}),
+    ] {
+        let (code, _) = dismiss(&s, bad).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+    }
+    let (_, b) = dismiss(&s, json!({"entries": [format!("l-{second}")]})).await;
+    assert_eq!(b, json!({"dismissed": 1}));
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 0, "entries": [], "more": 0, "waiting": 0})
+    );
+}
+
+/// Issue #216, review: the line is the entries that it lists. With more
+/// entries than `MAX_LIMIT`, the count covers only the listed entries, so
+/// one dismissal of them ends the line; the older entries then show in the
+/// next line.
+#[tokio::test]
+async fn one_dismissal_ends_a_full_line() {
+    let dir = temp("unconfirmed-full");
+    let s = store(&dir);
+    let max = iris_api::MAX_LIMIT as usize;
+    let ids: Vec<i64> = (0..=max).map(|_| unconfirmed(&s, &[1, 2], &[])).collect();
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    let line = &brief["unconfirmed"];
+    let shown: Vec<Value> = line["entries"].as_array().unwrap().clone();
+    assert_eq!(shown.len(), max);
+    assert_eq!(line["messages"], 2 * max as i64);
+    assert_eq!(line["more"], 1);
+    assert_eq!(shown[0], format!("l-{}", ids[max]));
+    let (code, b) = dismiss(&s, json!({ "entries": shown })).await;
+    assert_eq!((code, b), (StatusCode::OK, json!({"dismissed": max})));
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 2, "entries": [format!("l-{}", ids[0])], "more": 0, "waiting": 0})
+    );
+}
+
+/// Issue #216, review: the brief shows nothing of an account in
+/// `removing` or `removed`, also no unconfirmed line.
+#[tokio::test]
+async fn a_removed_account_has_no_unconfirmed_line() {
+    for state in ["removing", "removed"] {
+        let dir = temp(&format!("unconfirmed-{state}"));
+        let s = store(&dir);
+        unconfirmed(&s, &[1], &[]);
+        s.write(|tx| {
+            tx.execute("UPDATE account SET state = ?1 WHERE id = 1", [state])?;
+            Ok(())
+        })
+        .unwrap();
+        let (_, brief) = call(&s, false, "/api/brief").await;
+        assert_eq!(
+            brief["unconfirmed"],
+            json!({"messages": 0, "entries": [], "more": 0, "waiting": 0}),
+            "{state}"
+        );
+    }
+}
+
+/// Issue #216, pre-review: the recovery of an entry in `writing` can list
+/// more messages `unknown` later, for example after a failed read that it
+/// tries again. The line warns of the messages that it listed at once
+/// (`waiting`), but a dismissal waits for the final state `failed`, so
+/// that it covers the final list.
+#[tokio::test]
+async fn the_line_waits_for_the_end_of_the_recovery() {
+    let dir = temp("unconfirmed-writing");
+    let s = store(&dir);
+    // Message 2 is not checked yet.
+    let l = unconfirmed_in(&s, &[1], &[3], &[2], false);
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 0, "entries": [], "more": 0, "waiting": 1})
+    );
+    let (_, b) = dismiss(&s, json!({"entries": [format!("l-{l}")]})).await;
+    assert_eq!(b, json!({"dismissed": 0}));
+    // The recovery lists one more message, and the entry fails.
+    s.write(|tx| {
+        tx.execute_batch(&format!(
+            "UPDATE ledger_message SET listed = 'unknown'
+               WHERE ledger_id = {l} AND message_id = 2;
+             UPDATE ledger SET state = 'failed', error = 'Gmail did not answer.' WHERE id = {l};"
+        ))?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 2, "entries": [format!("l-{l}")], "more": 0, "waiting": 0})
+    );
+}
+
+/// Issue #216, pre-review: an undo restores only the confirmed messages,
+/// so an `undone` entry keeps its line until the person dismisses it.
+#[tokio::test]
+async fn an_undone_entry_keeps_its_line() {
+    let dir = temp("unconfirmed-undone");
+    let s = store(&dir);
+    let l = unconfirmed(&s, &[1], &[2]);
+    // The undo of the confirmed message 2 ends as the apply ends it
+    // (section 7.4, step 5).
+    call(&s, true, &format!("/api/ledger/l-{l}/undo")).await;
+    s.write(|tx| {
+        let a: i64 = tx.query_row(
+            "SELECT action_id FROM ledger_undo WHERE ledger_id = ?1",
+            [l],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+             VALUES (?1, 1, '{\"call\":\"batchModify\",\"add\":[\"INBOX\"],\"remove\":[],\"calls\":1}', 'writing', 'inverse', ?2)",
+            params![a, NOW + 1],
+        )?;
+        let u = tx.last_insert_rowid();
+        tx.execute("UPDATE ledger SET state = 'applied' WHERE id = ?1", [u])?;
+        tx.execute(
+            "UPDATE ledger SET state = 'undone', undone_by = ?2 WHERE id = ?1",
+            [l, u],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, p) = call(&s, false, "/api/ledger").await;
+    assert_eq!(p["entries"][1]["state"], "undone");
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 1, "entries": [format!("l-{l}")], "more": 0, "waiting": 0})
+    );
+    let (_, b) = dismiss(&s, json!({"entries": [format!("l-{l}")]})).await;
+    assert_eq!(b, json!({"dismissed": 1}));
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(brief["unconfirmed"]["entries"], json!([]));
+}
+
+/// Issue #216: the person can read which messages of an entry the
+/// recovery cannot confirm, a page at a time. A confirmed message of the
+/// same entry is not in the list.
+#[tokio::test]
+async fn an_entry_lists_its_unconfirmed_messages() {
+    let dir = temp("unknown-list");
+    let s = store(&dir);
+    let l = unconfirmed(&s, &[1, 2], &[3]);
+    let ids = |v: &Value| -> Vec<String> {
+        v["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (code, all) = call(&s, false, &format!("/api/ledger/l-{l}/unknown")).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(ids(&all), ["m-1", "m-2"]);
+    assert_eq!(all["next"], Value::Null);
+    assert_eq!(all["messages"][0]["subject"], "Hi");
+
+    let (_, first) = call(&s, false, &format!("/api/ledger/l-{l}/unknown?limit=1")).await;
+    assert_eq!(ids(&first), ["m-1"]);
+    assert_eq!(first["next"], "m-1");
+    let (_, second) = call(
+        &s,
+        false,
+        &format!("/api/ledger/l-{l}/unknown?limit=1&after=m-1"),
+    )
+    .await;
+    assert_eq!(ids(&second), ["m-2"]);
+    assert_eq!(second["next"], Value::Null);
+
+    let ok = archived(&s, "person", &[3], PERSON);
+    let (code, none) = call(&s, false, &format!("/api/ledger/l-{ok}/unknown")).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(none, json!({"messages": [], "next": null}));
+
+    let (code, _) = call(&s, false, &format!("/api/ledger/l-{l}/unknown?after=x-1")).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let (code, _) = call(&s, false, &format!("/api/ledger/l-{l}/unknown?limit=0")).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let (code, _) = call(&s, false, "/api/ledger/l-999/unknown").await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+}

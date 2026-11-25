@@ -86,13 +86,22 @@ export function who(e: LedgerEntry): string {
   return a.kind !== "person" && e.decided_by === "person" ? `${author}, approved by you` : author;
 }
 
+/** Spec 2 section 7.3: the messages that the recovery cannot confirm, with a leading space, or "".
+ * The person checks them in the mailbox. */
+function unconfirmed(e: LedgerEntry): string {
+  const unknown = e.unknown ?? 0;
+  return unknown > 0 ? ` Iris could not confirm ${count(unknown, "message", "messages")}: check ${unknown === 1 ? "it" : "them"} in your mailbox.` : "";
+}
+
 /** The state of an entry that is not plainly done, or "". */
 export function status(e: LedgerEntry): string {
   if (e.state === "writing") return "Iris makes this change now.";
   if (e.state === "failed") {
     const part = e.messages > 0 ? ` ${e.changed.toLocaleString("en-US")} of ${count(e.messages, "message", "messages")} changed.` : "";
-    return `Failed.${part}${e.error ? ` ${e.error}` : ""}`;
+    return `Failed.${part}${unconfirmed(e)}${e.error ? ` ${e.error}` : ""}`;
   }
+  // An undo restores only the confirmed messages: the others stay to check.
+  if (e.state === "undone" && (e.unknown ?? 0) > 0) return `Undone.${unconfirmed(e)}`;
   // An undo that skipped messages or items: an earlier undo restored them, they changed again
   // after the change, or they are gone (decision D18).
   if (e.undo_of && e.state === "applied" && e.skipped > 0) {

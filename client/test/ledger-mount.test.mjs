@@ -196,3 +196,87 @@ test("a read of the list again does not drop a page that Show more added", async
     net.restore();
   }
 });
+
+test("an entry with messages that Iris could not confirm lists them, a page at a time", async () => {
+  let release = () => {};
+  const held = new Promise((r) => (release = r));
+  const e = { ...fx.ledger.entries[0], id: "l-41", state: "failed", unknown: 2, can_undo: false, undo_open: false };
+  const msg = (id, subject) => ({ id, thread: "t-1", from: { name: "Dana", address: "dana@example.com" }, to: [], subject, snippet: "", date: "2026-11-15T09:00:00Z", labels: [], unread: false, gone: false });
+  const net = serve({
+    "GET ledger/l-41/unknown?limit=50": async () => (await held, [200, { messages: [msg("m-7", "Invoice 7")], next: "m-7" }]),
+    "GET ledger/l-41/unknown?limit=50&after=m-7": [200, { messages: [{ id: "m-8", gone: true }], next: null }],
+  });
+  const app = await mount("/src/views/Ledger.svelte", { page: { entries: [e], next: null } });
+  try {
+    const button = () => [...app.target.querySelectorAll("button.check")][0];
+    assert.match(text(app.target), /Iris could not confirm 2 messages: check them in your mailbox\./);
+    button().click();
+    // While the first read runs, the button stays, disabled, and says so.
+    await until(() => button()?.disabled === true);
+    assert.equal(text(button()), "Loading");
+    release();
+    await until(() => app.target.querySelector("ul.unknown a") !== null);
+    const link = app.target.querySelector("ul.unknown a");
+    assert.match(text(link), /Dana Invoice 7/);
+    assert.match(link.getAttribute("href"), /m-7/);
+    assert.equal(text(button()), "Show more");
+    button().click();
+    await until(() => /not in Iris any more/.test(text(app.target)));
+    assert.equal(button(), undefined);
+    assert.deepEqual(net.asked.filter((k) => k.includes("unknown")), ["GET ledger/l-41/unknown?limit=50", "GET ledger/l-41/unknown?limit=50&after=m-7"]);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("a failed read of the messages to check keeps a button to try again", async () => {
+  const e = { ...fx.ledger.entries[0], id: "l-42", state: "failed", unknown: 1, can_undo: false, undo_open: false };
+  let tries = 0;
+  const net = serve({
+    // The first read gets no answer, and the second a 500 with words: each keeps the button.
+    "GET ledger/l-42/unknown?limit=50": () => (++tries === 1 ? [0, null] : tries === 2 ? [500, { error: "The store is busy." }] : [200, { messages: [{ id: "m-9", gone: true }], next: null }]),
+  });
+  const app = await mount("/src/views/Ledger.svelte", { page: { entries: [e], next: null } });
+  try {
+    const button = () => app.target.querySelector("button.check");
+    button().click();
+    await until(() => button() !== null && text(button()) === "Try again");
+    button().click();
+    await until(() => /The store is busy\./.test(text(app.target)) && text(button()) === "Try again");
+    button().click();
+    await until(() => /not in Iris any more/.test(text(app.target)));
+    assert.equal(button(), null);
+    assert.equal(tries, 3);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("a recovery that lists one more message starts the list of messages to check again", async () => {
+  const e = { ...fx.ledger.entries[0], id: "l-43", state: "writing", unknown: 1, can_undo: false, undo_open: false };
+  const msg = (id, subject) => ({ id, thread: "t-1", from: { name: "Dana", address: "dana@example.com" }, to: [], subject, snippet: "", date: "2026-11-15T09:00:00Z", labels: [], unread: false, gone: false });
+  let listed = [msg("m-5", "Invoice 5")];
+  let entry = e;
+  const net = serve({
+    "GET ledger/l-43/unknown?limit=50": () => [200, { messages: listed, next: null }],
+    "GET ledger?limit=200": () => [200, { entries: [entry], next: null }],
+  });
+  const app = await mount("/src/views/Ledger.svelte", { page: { entries: [e], next: null }, wait: 20 });
+  try {
+    const button = () => app.target.querySelector("button.check");
+    button().click();
+    await until(() => button() === null && /Invoice 5/.test(text(app.target)));
+    // The recovery lists a message with an earlier ID, and the next read of the list shows the new count.
+    listed = [msg("m-2", "Invoice 2"), msg("m-5", "Invoice 5")];
+    entry = { ...e, unknown: 2 };
+    await until(() => button() !== null);
+    button().click();
+    await until(() => /Invoice 2/.test(text(app.target)));
+    assert.equal(app.target.querySelectorAll("ul.unknown a").length, 2);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});

@@ -292,6 +292,9 @@ pub struct Brief {
     pub hostile: i64,
     /// The count of messages that the model failed 3 times.
     pub not_understood: i64,
+    /// The ledger entries with messages that the recovery cannot confirm,
+    /// until the person dismisses them (specification 2, section 7.3).
+    pub unconfirmed: crate::ledger::Unconfirmed,
     /// The date of the oldest fetched message that is not gone: the brief
     /// covers the mail from this date (specification 1, section 4.2).
     pub oldest_fetched: Option<String>,
@@ -1162,6 +1165,7 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
             declined: crate::gate::count_gate(c, now, true)?,
             hostile,
             not_understood,
+            unconfirmed: crate::ledger::unconfirmed(c)?,
             oldest_fetched,
             proposal: Some(verb_counts(c, TRIAGE_OPEN)?),
             handled: Handled {

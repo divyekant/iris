@@ -94,6 +94,8 @@ export type Brief = {
   strangers: Section;
   hostile: number;
   not_understood: number;
+  /** The changes that Iris could not confirm (spec 2 section 7.3): the count of their messages, and their entries, until you dismiss the line. */
+  unconfirmed?: { messages: number; entries: string[]; more?: number; waiting?: number };
   /** While the first sync runs: the brief covers the mail from this date (spec 1 section 4.2). */
   oldest_fetched?: string | null;
   /** The stored triage proposal: the messages of the triage actions that wait for your review, for each verb. */
@@ -327,6 +329,8 @@ export type LedgerEntry = {
   /** The messages of the entry, and the messages that Gmail confirmed. */
   messages: number;
   changed: number;
+  /** The messages whose change Iris could not confirm after an unknown answer of the mail provider. */
+  unknown?: number;
   /** The items of a state verb, and the title of the first item. */
   items: number;
   title: string | null;

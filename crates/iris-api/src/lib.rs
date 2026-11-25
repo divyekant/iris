@@ -45,7 +45,9 @@ pub use auth::{Auth, CODE_LIFE, SIGN_IN};
 pub use drafts::write_drafts;
 pub use export::{export, Exported};
 pub use jobs::*;
-pub use ledger::{ledger, undo_entry, LedgerEntry, LedgerPage};
+pub use ledger::{
+    dismiss_unconfirmed, ledger, undo_entry, unknown_messages, LedgerEntry, LedgerPage, Unconfirmed,
+};
 pub use matters::{
     confirm_matter, create_matter, decline_matter, delete_matter, edit_matter, matter, matters,
 };
@@ -144,6 +146,11 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/handled", get(get_handled))
         .route("/api/ledger", get(get_ledger))
         .route("/api/ledger/{id}/undo", post(post_undo))
+        .route("/api/ledger/{id}/unknown", get(get_unknown))
+        .route(
+            "/api/ledger/unconfirmed/dismiss",
+            post(post_dismiss_unconfirmed),
+        )
         .route("/api/gate", get(get_gate))
         .route("/api/gate/declined", get(get_declined))
         .route("/api/senders/{id}/{answer}", post(post_answer))
@@ -343,6 +350,20 @@ async fn get_ledger(
     Ok(Json(ledger(&s, q.limit.unwrap_or(50), q.after.as_deref())?).into_response())
 }
 
+/// The messages of a ledger entry that the recovery cannot confirm
+/// (specification 2, section 7.3), a page at a time.
+async fn get_unknown(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    q: std::result::Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
+    Ok(
+        unknown_messages(&s, &id, q.limit.unwrap_or(50), q.after.as_deref())?
+            .map_or_else(not_found, |v| Json(v).into_response()),
+    )
+}
+
 /// The person undoes a ledger entry (specification 2, section 7.4).
 async fn post_undo(
     State(s): State<Arc<Store>>,
@@ -350,6 +371,22 @@ async fn post_undo(
     _: NoBody,
 ) -> Result<Response> {
     Ok(undo_entry(&s, &id, now_ms())?.map_or_else(not_found, |e| Json(e).into_response()))
+}
+
+#[derive(Deserialize)]
+struct UnconfirmedBody {
+    entries: Vec<String>,
+}
+
+/// The person dismisses the line of the brief for the entries that it
+/// showed (specification 2, section 7.3).
+async fn post_dismiss_unconfirmed(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<UnconfirmedBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let n = dismiss_unconfirmed(&s, &b.entries, now_ms())?;
+    Ok(Json(serde_json::json!({ "dismissed": n })).into_response())
 }
 
 async fn get_changesets(State(s): State<Arc<Store>>) -> Response {
