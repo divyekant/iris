@@ -2271,7 +2271,10 @@ fn a_body_names_a_commitment_only_with_its_words() {
         assert_eq!(names(body, &ask), ok, "{body}");
     }
     // A commitment with no key word passes any body.
-    assert!(names("Hi", &serde_json::json!({"title": "Do it", "quote": null})));
+    assert!(names(
+        "Hi",
+        &serde_json::json!({"title": "Do it", "quote": null})
+    ));
 }
 
 /// Issue #1075: for any commitment, a body that holds one of its key words
@@ -2279,19 +2282,28 @@ fn a_body_names_a_commitment_only_with_its_words() {
 /// key word.
 #[test]
 fn a_body_with_a_key_word_names_its_commitment() {
-    let words = ["slides", "deck", "the", "send", "report", "Q3", "2026", "ok", "contract", "you"];
+    let words = [
+        "slides", "deck", "the", "send", "report", "Q3", "2026", "ok", "contract", "you",
+    ];
     let mut seed = 7u64;
     let mut next = |n: usize| {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (seed >> 33) as usize % n
     };
     for _ in 0..2000 {
         let title: Vec<&str> = (0..1 + next(4)).map(|_| words[next(words.len())]).collect();
         let ask = serde_json::json!({"title": title.join(" "), "quote": null});
         let keys = key_words(&ask);
-        assert!(keys.iter().all(|k| title.iter().any(|w| w.to_lowercase() == *k)));
+        assert!(keys
+            .iter()
+            .all(|k| title.iter().any(|w| w.to_lowercase() == *k)));
         if let Some(k) = keys.first() {
-            assert!(names(&format!("Hi, any news on the {}? D", k.to_uppercase()), &ask));
+            assert!(names(
+                &format!("Hi, any news on the {}? D", k.to_uppercase()),
+                &ask
+            ));
             assert!(!names("Hi, any news? D", &ask), "{ask}");
         } else {
             assert!(names("Hi", &ask));

@@ -823,9 +823,9 @@ fn data(
 /// Words that say nothing about one commitment: a key word of a
 /// commitment is none of these.
 const COMMON: &[&str] = &[
-    "about", "after", "again", "also", "before", "could", "from", "have", "just", "know",
-    "let", "like", "need", "please", "send", "sent", "that", "them", "then", "there", "they",
-    "this", "what", "when", "will", "with", "would", "your", "yours", "thanks", "thank",
+    "about", "after", "again", "also", "before", "could", "from", "have", "just", "know", "let",
+    "like", "need", "please", "send", "sent", "that", "them", "then", "there", "they", "this",
+    "what", "when", "will", "with", "would", "your", "yours", "thanks", "thank",
 ];
 
 /// The key words of a commitment of a nudge: the words of its title, its
