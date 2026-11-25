@@ -579,3 +579,40 @@ From: c@example.com\r\nSubject: z\r\nContent-Type: text/plain\r\n\r\nHi.\r\n--i-
         - 14;
     assert!(html_part_in(&raw[..start], &raw[start..]).unwrap());
 }
+
+/// Invariant: each attached message of the MIME tree gets its links
+/// checked, whichever version of a `multipart/alternative` gives the clean
+/// text. A version that the text does not use adds no attachment (review
+/// finding on #1122, issue #1140).
+#[test]
+fn an_attached_message_in_each_version_of_an_alternative_is_checked() {
+    let inner = "From: b@bank.example.com\r\nSubject: y\r\nContent-Type: text/html\r\n\r\n\
+<a href=\"https://evil.example.net/\">bank.example.com</a>";
+    let plain = "Content-Type: text/plain\r\n\r\nSee the mail.\r\n";
+    let attached = format!("Content-Type: message/rfc822\r\n\r\n{inner}\r\n");
+    // The attached message as the last version (no text, so the text uses
+    // the plain version), as the first version (the plain version is used
+    // first), and inside a nested multipart of a version that is not used.
+    let nested =
+        format!("Content-Type: multipart/mixed; boundary=n\r\n\r\n--n\r\n{attached}--n--\r\n");
+    for versions in [
+        vec![plain.to_string(), attached.clone()],
+        vec![attached.clone(), plain.to_string()],
+        vec![plain.to_string(), nested.clone()],
+        vec![nested.clone(), plain.to_string()],
+    ] {
+        let body: String = versions.iter().map(|v| format!("--a\r\n{v}")).collect();
+        let raw = format!(
+            "From: a@example.com\r\nSubject: x\r\n\
+Content-Type: multipart/alternative; boundary=a\r\n\r\n{body}--a--\r\n"
+        );
+        let c = clean(raw.as_bytes());
+        assert_eq!(c.text, "See the mail.", "{versions:?}");
+        assert_eq!(
+            c.attached_links,
+            vec![link("bank.example.com", "https://evil.example.net/")],
+            "{versions:?}"
+        );
+        assert!(c.attachments.is_empty(), "{versions:?}");
+    }
+}

@@ -73,7 +73,8 @@ Each budget only goes down. No step gives budget back.
   with `Content-Disposition: attachment` is one attachment too.
 - `multipart/alternative`: the walker reads the versions from the last one.
   It uses the first version with clean text that is not empty. A version that
-  it does not use adds no text, no attachment and no cut.
+  it does not use adds no text, no attachment and no cut. Its attached
+  messages still add their links to `attached_links` (issue #1140).
 - Each other multipart: each part, in order.
 - The `mail-parser` crate (1.0.1) reads the MIME tree, the headers and the
   transfer encodings (decision D3). Iris sets its limits: at most
@@ -206,7 +207,9 @@ not used makes no cut in either case.
   part that the walker reads adds its links. Each HTML version of a
   `multipart/alternative` adds its links too, also a version that the text
   does not use, because a mail client can show it. The walker reads these
-  versions for their links only: they add no text and no attachment.
+  versions for their links only: they add no text and no attachment. An
+  attached message in such a version adds its links to `attached_links`,
+  with no attachment and no part of the attachment text budget.
   A hidden link has no text, so it is not in the list. The texts and hrefs have at most `LINK_BYTES` (1 MiB) in all. `links_cut` is
   true when a limit can skip a link: past `LINK_BYTES`; an HTML part past
   its output limit or past `PART_LIMIT`; a shown HTML element past the
