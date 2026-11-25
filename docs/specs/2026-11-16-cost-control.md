@@ -41,8 +41,10 @@ pay again for the same mail.
   that comes back, a label of the list above, a new hostile mark) clears
   `tries` and `retry_at`, and puts the thread in `talk_due`. A failed try
   adds 1 to `tries` and keeps its count.
-- New content clears `tries` and `retry_at` also for a message that was
-  never understood.
+- A change of the list above (new content, a gone message that comes
+  back, a label of the list above) clears `tries` and `retry_at` also for
+  a message that is not understood, for example one that failed the model
+  3 times. Triggers of the store do each reset, so each writer gets it.
 - Not done: a later message of the thread that used the changed message as
   context keeps its items until its own next change. Its items come from
   its own text, and a run again of each later message costs model calls.

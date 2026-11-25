@@ -1355,3 +1355,86 @@ fn a_reset_gives_a_new_try_budget() {
     assert_eq!(state().1, 0);
     assert_eq!(state().2, None);
 }
+
+/// Issue #110, the invariant for each start state: after each change that
+/// needs the understanding again, `tries` is 0 and `retry_at` is NULL. This
+/// holds also for mail that failed the model 3 times (`understood_at` is
+/// NULL already). A label that is not a reset label changes nothing.
+#[test]
+fn each_reset_change_gives_each_state_a_new_budget() {
+    let dir = TempDir::new("reset-each");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(
+            acc,
+            &[("SPAM", "SPAM", "system"), ("SENT", "SENT", "system"), ("Work", "Work", "user")],
+        )
+        .unwrap();
+    let mut m = msg("a", "t1", 1, &["INBOX"], "Hi", "x");
+    m.content_sha256 = Some(store.put_content(b"raw a").unwrap());
+    let id = store.put_messages(acc, &[m]).unwrap()[0];
+    let set = |sql: &str| {
+        store.write(|tx| Ok(tx.execute_batch(&sql.replace("?id", &id.to_string()))?)).unwrap();
+    };
+    let state = || -> (Option<i64>, i64, Option<i64>) {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT understood_at, tries, retry_at FROM message WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    let label = |name: &str, on: bool| {
+        if on {
+            format!(
+                "INSERT INTO message_label(message_id, label_id)
+                 SELECT ?id, id FROM label WHERE provider_id = '{name}';"
+            )
+        } else {
+            format!(
+                "DELETE FROM message_label WHERE message_id = ?id
+                   AND label_id = (SELECT id FROM label WHERE provider_id = '{name}');"
+            )
+        }
+    };
+    let content = |raw: &[u8]| {
+        format!(
+            "UPDATE message SET content_sha256 = '{}' WHERE id = ?id;",
+            store.put_content(raw).unwrap()
+        )
+    };
+    // Each change, with the SQL that makes the state before it.
+    let changes: Vec<(&str, String, String)> = vec![
+        ("SPAM comes", String::new(), label("SPAM", true)),
+        ("SPAM goes", label("SPAM", true), label("SPAM", false)),
+        ("SENT comes", String::new(), label("SENT", true)),
+        ("SENT goes", label("SENT", true), label("SENT", false)),
+        ("comes back", "UPDATE message SET gone_at = 1 WHERE id = ?id;".into(),
+         "UPDATE message SET gone_at = NULL WHERE id = ?id;".into()),
+        ("new content", content(b"raw a"), content(b"raw b")),
+    ];
+    // The start states: failed 3 times, and understood after 2 failures.
+    let starts = [
+        ("failed", "UPDATE message SET understood_at = NULL, tries = 3, retry_at = 9 WHERE id = ?id;"),
+        ("understood", "UPDATE message SET understood_at = 5, tries = 2, retry_at = 9 WHERE id = ?id;"),
+    ];
+    for (change, before, sql) in &changes {
+        for (start, start_sql) in starts {
+            set("DELETE FROM message_label WHERE message_id = ?id
+                   AND label_id IN (SELECT id FROM label WHERE provider_id IN ('SPAM', 'SENT'));
+                 UPDATE message SET gone_at = NULL WHERE id = ?id;");
+            set(before);
+            set(start_sql);
+            set(sql);
+            assert_eq!(state(), (None, 0, None), "{change} from {start}");
+        }
+    }
+    // A user label is not a reset: the failed state stays.
+    set(starts[0].1);
+    set(&label("Work", true));
+    set(&label("Work", false));
+    assert_eq!(state(), (None, 3, Some(9)));
+}
