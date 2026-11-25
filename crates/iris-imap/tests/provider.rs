@@ -935,3 +935,71 @@ fn modify_bad_labels() {
     }
     assert_eq!(fake.commands().len(), before);
 }
+
+/// Folder names in other languages, in modified UTF-7, give the special
+/// labels too, and a folder label shows the decoded name (issue #648).
+#[test]
+fn special_folders_by_name_in_other_languages() {
+    let fake = FakeImap::start(Caps::ALL);
+    let folders = [
+        "Gesendet",
+        "Entw&APw-rfe",
+        "Courrier ind&AOk-sirable",
+        "Papierkorb",
+    ];
+    for f in folders {
+        fake.create(f, None);
+    }
+    let mail = provider(&fake);
+    let mut seen = Vec::new();
+    for (i, f) in folders.iter().enumerate() {
+        let uid = fake.add(f, Mailbox::new(70 + i as u64, 1).raw(0), &["\\Seen"]);
+        let validity = cursor(&mail)
+            .lines()
+            .find(|l| l.ends_with(&format!(" {f}")))
+            .unwrap()
+            .split(' ')
+            .next()
+            .unwrap()
+            .to_owned();
+        seen.push(
+            mail.minimal(PASSWORD, &format!("{validity}:{uid}:{f}"))
+                .unwrap()
+                .label_ids,
+        );
+    }
+    assert_eq!(seen[0], vec!["folder:Gesendet", SENT_COPY]);
+    assert_eq!(seen[1], vec!["folder:Entw&APw-rfe", UNSENT]);
+    assert_eq!(seen[2], vec!["SPAM"]);
+    assert_eq!(seen[3], vec!["TRASH"]);
+    let drafts = mail
+        .labels(PASSWORD)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.id == "folder:Entw&APw-rfe")
+        .unwrap();
+    assert_eq!(drafts.name, "Entwürfe");
+}
+
+/// Gmail over IMAP keeps archived mail only in a `\All` folder, so each
+/// call refuses before the mirror misses that mail (issue #633).
+#[test]
+fn gmail_over_imap_refuses() {
+    let (fake, _) = filled(
+        Caps {
+            gmail: true,
+            ..Caps::ALL
+        },
+        1,
+    );
+    let mail = provider(&fake);
+    for r in [
+        mail.profile(PASSWORD).map(|_| ()),
+        mail.labels(PASSWORD).map(|_| ()),
+    ] {
+        assert!(
+            matches!(&r, Err(Error::Api { status: 400, reason, .. }) if reason == "gmailImap"),
+            "{r:?}"
+        );
+    }
+}
