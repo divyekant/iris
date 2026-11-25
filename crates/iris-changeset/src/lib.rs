@@ -1761,6 +1761,8 @@ fn changing(c: &Connection, action: i64, draft: i64) -> Result<bool> {
 /// passes. Submit runs them,
 /// and the apply runs them again before its read and in its claim. The
 /// apply also checks the attachment files, which need the store folder.
+/// With `action` 0, the checks of a change that the person can press now
+/// (the state of a write, change spec section 5).
 pub fn change_denied(
     c: &Connection,
     action: i64,
@@ -1769,11 +1771,13 @@ pub fn change_denied(
 ) -> Result<Option<String>> {
     let row: Option<(bool, String, bool, bool, bool)> = c
         .query_row(
-            "SELECT cs.author_kind = 'person', ac.provider, d.sent_at IS NOT NULL,
-                    d.foreign_at IS NOT NULL, coalesce(ac.state IN ('removing', 'removed'), 0)
-             FROM changeset_action a JOIN changeset cs ON cs.id = a.changeset_id
-             JOIN draft d ON d.id = ?2 JOIN account ac ON ac.id = d.account_id
-             WHERE a.id = ?1",
+            "SELECT coalesce(cs.author_kind = 'person', ?1 = 0), ac.provider,
+                    d.sent_at IS NOT NULL, d.foreign_at IS NOT NULL,
+                    coalesce(ac.state IN ('removing', 'removed'), 0)
+             FROM draft d JOIN account ac ON ac.id = d.account_id
+             LEFT JOIN changeset_action a ON a.id = ?1
+             LEFT JOIN changeset cs ON cs.id = a.changeset_id
+             WHERE d.id = ?2 AND (?1 = 0 OR a.id IS NOT NULL)",
             params![action, draft],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )

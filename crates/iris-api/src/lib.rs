@@ -202,6 +202,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
             post(post_attachment).layer(DefaultBodyLimit::max(ATTACHMENT_LIMIT)),
         )
         .route("/api/write/{id}", get(get_write))
+        .route("/api/drafts/{id}", get(get_draft_content))
         .route("/api/threads/{id}/reply", get(get_reply))
         .route("/api/threads/{id}/draft", get(get_draft))
         .route("/api/matters", get(get_matters).post(post_matter_create))
@@ -1423,6 +1424,18 @@ async fn get_write(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
         return Ok(not_found());
     };
     Ok(match write::state(&s, row, now_ms())? {
+        Some(v) => Json(v).into_response(),
+        None => not_found(),
+    })
+}
+
+/// The content of a draft (`d-N`) for the form of a change (draft change
+/// spec, section 5). 404 when Iris cannot give it.
+async fn get_draft_content(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+) -> Result<Response> {
+    Ok(match write::draft_content(&s, &id)? {
         Some(v) => Json(v).into_response(),
         None => not_found(),
     })

@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use iris_store::{format_id, Kind, Store};
+use iris_store::{format_id, parse_id, Kind, Store};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -54,6 +54,11 @@ pub struct Press<'a> {
     pub key: &'a str,
     /// The warnings (flags) that the person saw at the press.
     pub flags: &'a [String],
+    /// The draft (`d-N`) that the press changes (change spec, section 5).
+    /// It must be a draft of the account or the thread of `mail`. A draft
+    /// of an account that is not Gmail is ignored: the press makes a new
+    /// draft.
+    pub draft: Option<&'a str>,
 }
 
 /// What [`write_mail`] did.
@@ -87,7 +92,12 @@ fn press_hash(p: &Press<'_>) -> String {
         Mail::New { account } => Value::from(account),
         Mail::Reply { thread, parent } => serde_json::json!([thread, parent]),
     };
-    let text = serde_json::json!({ "target": target, "args": p.args }).to_string();
+    // Only with a draft: the hash of each other press stays as before.
+    let text = match p.draft {
+        None => serde_json::json!({ "target": target, "args": p.args }),
+        Some(d) => serde_json::json!({ "target": target, "args": p.args, "draft": d }),
+    }
+    .to_string();
     Sha256::digest(text.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -125,11 +135,16 @@ pub fn write_mail(
             };
         }
         let author = person();
-        let cs = create_in(c, &author, now_ms)?;
-        let target = match press.mail {
+        let mut target = match press.mail {
             Mail::New { account } => account,
             Mail::Reply { thread, .. } => thread,
         };
+        if let Some(d) = press.draft {
+            if change_target(c, d, &press.mail).map_err(|why| refuse(Refusal::Denied(why)))? {
+                target = d;
+            }
+        }
+        let cs = create_in(c, &author, now_ms)?;
         let n = add_action_in(c, cs, &author, Verb::Draft, &[target], press.args, None)?;
         submit_in(c, cs, &author, WRITTEN, now_ms)?;
         let (id, revision, state, reason, flags): (
@@ -194,6 +209,43 @@ pub fn write_mail(
         (Err(Error::Refused(_)), Some(why)) => Ok(Err(why)),
         (r, _) => r.map(Ok),
     }
+}
+
+/// True if the press changes the draft `draft` (a Gmail draft), false if
+/// it makes a new draft (another provider). Refuses a draft that does not
+/// exist, that is of an account that Iris removes, or that is not of the
+/// account (a new mail) or the thread (a reply) of `mail`.
+fn change_target(
+    c: &Connection,
+    draft: &str,
+    mail: &Mail<'_>,
+) -> std::result::Result<bool, String> {
+    let gone = || "The draft does not exist.".to_string();
+    let Some((Kind::Draft, row)) = parse_id(draft) else {
+        return Err(gone());
+    };
+    let found: Option<(i64, Option<i64>, String)> = c
+        .query_row(
+            "SELECT d.account_id, d.thread_id, a.provider FROM draft d
+             JOIN account a ON a.id = d.account_id
+             WHERE d.id = ?1 AND (a.state IS NULL OR a.state NOT IN ('removing', 'removed'))",
+            [row],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((account, thread, provider)) = found else {
+        return Err(gone());
+    };
+    let same = match (mail, thread) {
+        (Mail::New { account: a }, None) => *a == format_id(Kind::Account, account),
+        (Mail::Reply { thread: t, .. }, Some(th)) => *t == format_id(Kind::Thread, th),
+        _ => false,
+    };
+    if !same {
+        return Err("The draft is not of this account or thread.".into());
+    }
+    Ok(provider == "gmail")
 }
 
 /// The newest send mark: its action row ID, or 0 if there is none. A mark

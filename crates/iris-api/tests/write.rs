@@ -115,7 +115,7 @@ fn made(s: &Store) {
             rusqlite::params![
                 iris_compose::hash(&c, None),
                 raw,
-                serde_json::to_string(&c).unwrap(),
+                json!({"content": c, "reply": null}).to_string(),
                 action
             ],
         )?;
@@ -193,7 +193,8 @@ async fn a_press_writes_the_mail_after_its_warnings() {
     let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
     assert_eq!(
         st,
-        json!({"state": "stopped", "reason": "Cancelled in the outbox.", "draft": "d-1"})
+        json!({"state": "stopped", "reason": "Cancelled in the outbox.", "draft": "d-1",
+               "change": "update"})
     );
 }
 
@@ -669,13 +670,15 @@ async fn an_old_write_is_stopped() {
         Ok(())
     })
     .unwrap();
-    let old = json!({"state": "stopped", "reason": "Iris did not send this mail in 24 hours, so it stopped. Look for the draft in your Gmail drafts.", "draft": "d-1"});
+    let mut old = json!({"state": "stopped", "reason": "Iris did not send this mail in 24 hours, so it stopped. Look for the draft in your Gmail drafts.", "draft": "d-1", "change": "update"});
     let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
     assert_eq!(st, old);
-    // A second stop cause does not hide the age: the draft also changed in Gmail.
+    // A second stop cause does not hide the age: the draft also changed in
+    // Gmail, so Iris cannot change it.
     s.write(|tx| Ok(tx.execute("UPDATE draft SET foreign_at = 1", [])?))
         .unwrap();
     let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    old["change"] = Value::Null;
     assert_eq!(st, old);
 }
 
@@ -890,6 +893,148 @@ async fn a_write_of_a_change_stops_on_other_content() {
     let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
     assert_eq!(
         st,
-        json!({"state": "stopped", "reason": iris_changeset::DRAFT_CHANGED, "draft": "d-1"})
+        json!({"state": "stopped", "reason": iris_changeset::DRAFT_CHANGED, "draft": "d-1",
+               "change": "update"})
     );
+}
+
+/// A write of a new mail that made d-1, then was withdrawn: no send of
+/// d-1 waits. Gives its changeset ID.
+async fn stopped_write(s: &Arc<Store>) -> String {
+    let (_, v) = call(
+        s,
+        "POST",
+        "/api/write",
+        Some(new_mail(KEY, json!(["new_recipient"]))),
+    )
+    .await;
+    let cs = v["write"].as_str().unwrap().to_string();
+    made(s);
+    let (code, _) = call(s, "POST", &format!("/api/changesets/{cs}/withdraw"), None).await;
+    assert_eq!(code, StatusCode::OK);
+    cs
+}
+
+/// A stopped write with a Gmail draft offers a change in place, and the
+/// form reads the content of the draft (draft change spec, section 5).
+/// A press with the draft targets the draft, not the account.
+#[tokio::test]
+async fn a_stopped_write_changes_its_draft() {
+    let dir = temp("change-press");
+    let s = store(&dir);
+    let cs = stopped_write(&s).await;
+    let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    assert_eq!(st["change"], "update", "{st}");
+    let (code, d) = call(&s, "GET", "/api/drafts/d-1", None).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(
+        d,
+        json!({"draft": "d-1", "account": "a-1", "thread": null, "to": ["priya@example.com"],
+               "cc": [], "bcc": [], "subject": "Q4", "body": "Hi.\n", "attachments": []})
+    );
+    let mut body = new_mail("0123456789abcdef-2", json!(["new_recipient"]));
+    body["body"] = json!("Changed.\n");
+    body["draft"] = json!("d-1");
+    let (code, v) = call(&s, "POST", "/api/write", Some(body)).await;
+    assert_eq!(code, StatusCode::CREATED, "{v}");
+    let targets: String = s
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT a.targets FROM write_send w JOIN changeset_action a ON a.id = w.action_id
+                 ORDER BY w.action_id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(targets, r#"{"drafts":["d-1"]}"#);
+    // The draft waits for the change now: the first write offers none.
+    let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    assert_eq!(st["change"], Value::Null, "{st}");
+}
+
+/// A draft field that is not a draft of the account or the thread of the
+/// press: 400, nothing written. The key and the draft are in the request
+/// hash: the same key with another draft is a 409.
+#[tokio::test]
+async fn a_press_names_a_draft_of_its_own_mail() {
+    let dir = temp("change-other");
+    let s = store(&dir);
+    stopped_write(&s).await;
+    s.add_account("gmail", "other@example.com").unwrap();
+    let before = count(&s, "SELECT count(*) FROM changeset");
+    for (account, draft) in [("a-2", "d-1"), ("a-1", "d-9"), ("a-1", "t-1")] {
+        let mut body = new_mail("0123456789abcdef-3", json!(["new_recipient"]));
+        body["account"] = json!(account);
+        body["draft"] = json!(draft);
+        let (code, v) = call(&s, "POST", "/api/write", Some(body)).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{account} {draft} {v}");
+    }
+    let reply = json!({"thread": "t-1", "parent": "m-2", "to": ["priya@example.com"],
+                           "cc": [], "body": "Hi.\n", "key": "0123456789abcdef-4",
+                           "flags": [], "draft": "d-1"});
+    let (code, v) = call(&s, "POST", "/api/write", Some(reply.clone())).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(count(&s, "SELECT count(*) FROM changeset"), before);
+    let mut body = new_mail("0123456789abcdef-5", json!(["new_recipient"]));
+    body["draft"] = json!("d-1");
+    let (code, _) = call(&s, "POST", "/api/write", Some(body.clone())).await;
+    assert_eq!(code, StatusCode::CREATED);
+    body.as_object_mut().unwrap().remove("draft");
+    let (code, v) = call(&s, "POST", "/api/write", Some(body)).await;
+    assert_eq!(
+        (code, &v["error"]),
+        (StatusCode::CONFLICT, &json!(KEY_TAKEN))
+    );
+}
+
+const KEY_TAKEN: &str = "This key belongs to another mail.";
+
+/// The `change` of a stopped write (draft change spec, section 5): none
+/// for a sent draft, `new` for a draft of an account that is not Gmail,
+/// and none for a reply whose thread has a newer mail.
+#[tokio::test]
+async fn a_stopped_write_says_how_its_draft_can_change() {
+    let dir = temp("change-kinds");
+    let s = store(&dir);
+    let cs = stopped_write(&s).await;
+    let change = |s: Arc<Store>, cs: String| async move {
+        call(&s, "GET", &format!("/api/write/{cs}"), None).await.1["change"].clone()
+    };
+    s.write(|tx| Ok(tx.execute("UPDATE draft SET sent_at = 1, sent_message = 's1' WHERE id = 1", [])?))
+        .unwrap();
+    assert_eq!(change(s.clone(), cs.clone()).await, Value::Null);
+    s.write(|tx| {
+        tx.execute("UPDATE draft SET sent_at = NULL, sent_message = NULL WHERE id = 1", [])?;
+        Ok(tx.execute("UPDATE account SET provider = 'outlook' WHERE id = 1", [])?)
+    })
+    .unwrap();
+    assert_eq!(change(s.clone(), cs.clone()).await, "new");
+    // A reply draft that answers m-2: `update` while m-2 is the newest mail.
+    s.write(|tx| {
+        tx.execute("UPDATE account SET provider = 'gmail' WHERE id = 1", [])?;
+        tx.execute(
+            "UPDATE header SET message_id_hdr = '<m2@example.com>' WHERE message_id = 2",
+            [],
+        )?;
+        let content = json!({"content": {"to": ["priya@example.com"], "cc": [], "subject": "Re: Q4",
+                                         "body": "Hi.\n"},
+                             "reply": {"in_reply_to": "<m2@example.com>", "references": "<m2@example.com>"}});
+        Ok(tx.execute(
+            "UPDATE draft SET thread_id = 1, content = ?1 WHERE id = 1",
+            [content.to_string()],
+        )?)
+    })
+    .unwrap();
+    assert_eq!(change(s.clone(), cs.clone()).await, "update");
+    s.write(|tx| {
+        Ok(tx.execute_batch(
+            "INSERT INTO message(account_id, thread_id, provider_id, internal_date)
+               VALUES (1, 1, 'p3', 3000);
+             INSERT INTO header(message_id, from_addr, to_addrs, subject, message_id_hdr)
+               VALUES (3, 'priya@example.com', 'owner@example.com', 'Q4', '<m3@example.com>');",
+        )?)
+    })
+    .unwrap();
+    assert_eq!(change(s.clone(), cs).await, Value::Null);
 }
