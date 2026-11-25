@@ -1210,12 +1210,15 @@ fn context_key(
                 None => format!("{id}:{:016x}", fnv(&[text])),
                 Some(h) => {
                     // The bytes that the data held, or fewer if the text is
-                    // shorter now: the count is part of the entry.
+                    // shorter now: the count is part of the entry. "+" marks
+                    // a cut text, so a text that shrinks to the held bytes
+                    // (the data then has no cut mark) changes the entry.
                     let mut n = h.get(i).copied().unwrap_or(0).min(text.len());
                     while !text.is_char_boundary(n) {
                         n -= 1;
                     }
-                    format!("{id}:{:016x}:{n}", fnv(&[&text[..n]]))
+                    let more = if n < text.len() { "+" } else { "" };
+                    format!("{id}:{:016x}:{n}{more}", fnv(&[&text[..n]]))
                 }
             });
         }
@@ -1249,7 +1252,7 @@ fn held_of(recorded: &str) -> Option<Vec<usize>> {
             .map(|e| {
                 e.rsplit(':')
                     .next()
-                    .and_then(|n| n.parse().ok())
+                    .and_then(|n| n.trim_end_matches('+').parse().ok())
                     .unwrap_or(0)
             })
             .collect(),

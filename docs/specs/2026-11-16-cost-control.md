@@ -62,8 +62,10 @@ pay again for the same mail.
   texts of the same sender, with a hash of the clean text, which shapes
   the clean text of the message. When the budget of the data cut the
   thread context, or no model call ran, the record holds a hash of only
-  the bytes that the data held. So a change of an earlier text that the
-  run did not read runs nothing again. A check compares the
+  the bytes that the data held, and if the text had more bytes (the data
+  had a cut mark). So a change of an earlier text that the run did not
+  read runs nothing again, and a text that shrinks to the held bytes (the
+  data then has no cut mark) runs the later message again. A check compares the
   recorded context of an understood message with its context now, and
   clears `understood_at` where they differ. So a later message runs again
   only when the context that its last run used changed: an earlier

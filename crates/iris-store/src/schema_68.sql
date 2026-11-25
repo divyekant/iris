@@ -12,8 +12,8 @@
 --    same sender, each with a hash of its clean text. "t!:" marks a run
 --    whose model data held only part of the thread context (the budget
 --    cut it, or no model call ran): each entry then also holds the count
---    of the bytes that the data held, and the hash covers only those
---    bytes. "-" marks hostile mail: no context shaped it.
+--    of the bytes that the data held, and "+" if the text had more bytes.
+--    The hash covers only the held bytes. "-" marks hostile mail: no context shaped it.
 --    NULL for a message that no run understood
 --    since this migration. The first check of such a row records its
 --    context now and runs nothing again (limit issue #1119: a change

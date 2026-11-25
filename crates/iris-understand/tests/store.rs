@@ -3428,3 +3428,75 @@ fn a_change_beyond_the_text_that_the_run_read_runs_nothing_again() {
     drain(&b, &fake, &mut last);
     assert_eq!(later(&fake), runs + 1);
 }
+
+/// Issue 1049, pre-review: the budget cut an earlier text. When that text
+/// shrinks to exactly the bytes that the data held, the next data has no
+/// cut mark, so the later message runs again.
+#[test]
+fn an_earlier_text_that_shrinks_to_the_held_bytes_runs_the_later_one_again() {
+    let b = store("context-shrink");
+    let words = "x".repeat(1_500);
+    let raw1 =
+        |text: &str| format!("From: x1@example.net\nTo: owner@example.com\nSubject: S\n\n{text}\n");
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &raw1(&words), &["INBOX"]);
+    let raw2 = |k: usize| {
+        format!(
+            "From: y@example.net\nTo: owner@example.com\nSubject: S\n\n{}\n",
+            "漢".repeat(k)
+        )
+    };
+    let m2 = b.add_in("2", "t", NOW - DAY, &raw2(1_000), &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    // Find a size of the current text that leaves room for only a part of
+    // the earlier text: a larger current text leaves less room. The clean
+    // text has at most 32,000 characters, so each one takes 3 bytes.
+    let record = |b: &Box_| -> String { b.col("SELECT context FROM message WHERE id = ?1", m2) };
+    let (mut lo, mut hi) = (1_000, iris_understand::prompt::MAX_DATA / 3);
+    loop {
+        let k = (lo + hi) / 2;
+        new_content(&b, m2, &raw2(k));
+        drain(&b, &fake, &mut last);
+        let r = record(&b);
+        // "t:": the data held the whole earlier text. "t!:": a part or none.
+        let Some(e) = r.strip_prefix("t!:") else {
+            lo = k;
+            assert!(hi - lo > 1, "no size with a cut earlier text");
+            continue;
+        };
+        let e = e.split(';').next().unwrap();
+        let n: usize = e
+            .rsplit(':')
+            .next()
+            .map_or(0, |n| n.trim_end_matches('+').parse().unwrap_or(0));
+        // The whole entry has more than 1,500 bytes.
+        if (200..1_500).contains(&n) {
+            break;
+        }
+        if n < 200 {
+            hi = k;
+        } else {
+            lo = k;
+        }
+        assert!(hi - lo > 1, "no size with a cut earlier text");
+    }
+    // The data holds the start of the entry and the cut mark.
+    let data = last[&m2].clone();
+    let head = "Earlier message in the thread:\n";
+    let start = data.find(head).unwrap() + head.len();
+    // The cut mark of the data (`prompt::CUT_MARK`).
+    let mark = data[start..].find("\n[cut]").unwrap();
+    let held = &data[start..start + mark];
+    let text = held.split_once("Subject: S\n").unwrap().1.to_string();
+    assert!(text.len() < words.len() && !text.is_empty());
+    let calls = fake.calls.borrow().len();
+    new_content(&b, m1, &raw1(&text));
+    drain(&b, &fake, &mut last);
+    let later: Vec<_> = fake.calls.borrow()[calls..]
+        .iter()
+        .filter(|c| c.1.contains("漢漢漢"))
+        .map(|c| c.1.clone())
+        .collect();
+    assert_eq!(later.len(), 1, "the later message runs again");
+}
