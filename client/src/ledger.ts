@@ -51,11 +51,24 @@ export function did(e: LedgerEntry): string {
 
 /** What the entry changed: its messages, its item, or its mail. */
 export function what(e: LedgerEntry): string {
-  if (e.verb === "send" || e.verb === "draft") return "a mail";
+  if (e.verb === "send" || e.verb === "draft") return mail(e);
   if (e.items === 1 && e.title) return `“${e.title}”`;
   if (e.items > 0) return count(e.items, "item", "items");
   // An undo counts each message that the change it undoes changed, also a gone one (decision D18).
   return count(e.undo_of && e.tried > 0 ? e.tried : e.messages, "message", "messages");
+}
+
+/**
+ * The mail of a send or a draft (issue 490): its subject and its first recipient, so that two sends
+ * differ. The engine gives them only when it can read the content of the draft: else "a mail".
+ */
+function mail(e: LedgerEntry): string {
+  const m = e.mail;
+  if (!m) return "a mail";
+  const what = m.subject.trim() ? `“${m.subject.trim()}”` : "a mail with no subject";
+  if (!m.to) return what;
+  const more = m.recipients - 1;
+  return `${what} to ${m.to}${more > 0 ? ` and ${count(more, "other", "others")}` : ""}`;
 }
 
 /**

@@ -323,6 +323,8 @@ export type LedgerEntry = {
   tried: number;
   /** For an undo: true when the change that it undoes can be undone now. */
   retry: boolean;
+  /** A send or a draft: the subject, the first `to` address and the count of all recipients. Null when Iris cannot read it. */
+  mail?: { subject: string; to: string | null; recipients: number } | null;
 };
 
 export type LedgerPage = { entries: LedgerEntry[]; next: string | null };
