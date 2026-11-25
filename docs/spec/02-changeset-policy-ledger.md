@@ -694,7 +694,9 @@ changes:
 - The candidate rule is added to the active policy. An action counts for it
   only when the rule changes the decision of that action to approved
   (section 6.4), with the author, the job and the flag `bulk` of the
-  action. The engine proposes the rule when 10 or more approvals count and
+  action, and the mark of the author now (`trash` only, decision D14,
+  issue #916): a `trash` of a marked author goes to review, so it never
+  counts. The engine proposes the rule when 10 or more approvals count and
   no refusal counts.
 - A domain candidate also needs counted approvals on two or more
   addresses. With one address, the address proposal covers it. When the
