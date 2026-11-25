@@ -49,6 +49,9 @@ pub const RETRY_NOTE: &str =
 /// items, attachment text, then the earlier messages of the thread, newest
 /// first, fill the rest.
 pub const MAX_DATA: usize = 96_000;
+/// The budget of the one more call after a refusal for size (HTTP 400 or
+/// 413, #101): about 6,000 tokens, for a local model with a small window.
+pub const SMALL_DATA: usize = 24_000;
 /// The most known parties in the data.
 pub const MAX_KNOWN: usize = 50;
 /// The most bytes of one header value in the data.
@@ -59,6 +62,11 @@ const CUT_MARK: &str = "\n[cut]";
 /// The data block text: the headers that the model needs, the sender kind,
 /// the clean text and the attachment names, in at most about `MAX_DATA` bytes.
 pub fn data(a: &Analysis, cx: &Context) -> String {
+    data_in(a, cx, MAX_DATA)
+}
+
+/// [`data`] in at most about `budget` bytes.
+pub fn data_in(a: &Analysis, cx: &Context, budget: usize) -> String {
     let h = &a.head;
     let mut d = String::new();
     let from = match (&h.from_name, &h.from_addr) {
@@ -66,10 +74,16 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
         (None, Some(ad)) => ad.clone(),
         _ => String::new(),
     };
+    // The headers take at most half of the budget, so the current message
+    // text always has room (#101). The full budget never reaches the limit.
+    let room = budget / 2;
     let mut field = |name: &str, value: &str| {
+        let Some(max) = room.checked_sub(d.len() + name.len() + 3) else {
+            return;
+        };
         d.push_str(name);
         d.push_str(": ");
-        push_cut(&mut d, value, MAX_FIELD);
+        push_cut(&mut d, value, max.min(MAX_FIELD));
         d.push('\n');
     };
     field("From", &from);
@@ -95,13 +109,14 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
     for (name, mime, size) in a.text.attachments.iter().take(MAX_ATTACHMENTS) {
         field("Attachment", &format!("{name} ({mime}, {size} bytes)"));
     }
-    // The headers take at most about 30,000 bytes. The clean text takes the
-    // rest if it needs it: 32,000 characters can be 128,000 bytes.
+    // With the full budget, the headers take at most about 30,000 bytes. The
+    // clean text takes the rest if it needs it: 32,000 characters can be
+    // 128,000 bytes.
     let mut current = String::from("\nThe current message:\n");
     // The budget holds the whole block that the client sends: the
     // delimiter lines and their line breaks too.
     let wrap = iris_model::DATA_START.len() + iris_model::DATA_END.len() + 2;
-    let mut left = MAX_DATA.saturating_sub(wrap + d.len() + current.len());
+    let mut left = budget.saturating_sub(wrap + d.len() + current.len());
     left -= push_cut(&mut current, &a.text.text, left);
     // An existing item that does not fit is left out: the model can then
     // find it again, and the store keeps the pinned item (section 7.5).
@@ -387,7 +402,7 @@ fn in_mail(quote: &str, a: &Analysis) -> bool {
 
 /// `s` in lowercase, with each run of white space as one space, and the
 /// typographic forms of a quote mark, an apostrophe, a dash and an ellipsis
-/// as their plain forms. Models often change these forms (#102). The fold
+/// as their plain forms, in the composed Unicode form (NFC). Models often change these forms (#102). The fold
 /// is the same on both sides and changes no letter or digit, so a made-up
 /// quote still fails.
 pub(crate) fn squash(s: &str) -> String {
@@ -402,7 +417,11 @@ pub(crate) fn squash(s: &str) -> String {
 pub(crate) fn fold(s: &str) -> (String, Vec<(usize, char)>) {
     // Lowercase the whole text first, as before the fold: a final sigma
     // needs the context of the word. The marks and white space have no case.
-    let s = s.to_lowercase();
+    // The composed form (NFC) on both sides: a model often writes "é" as
+    // one character where the mail has "e" and a combining mark (#102).
+    // NFC changes no letter: canonical forms show the same text.
+    let s: String =
+        unicode_normalization::UnicodeNormalization::nfc(s.to_lowercase().as_str()).collect();
     let mut out = String::with_capacity(s.len());
     let mut from = Vec::new();
     let mut space = false;
