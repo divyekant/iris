@@ -122,6 +122,12 @@ The launch refuses the run, with the path and the reason, if:
   through a read-only bind, because a network namespace does not block a
   Unix socket. The walk does not follow links, and it stops with a
   refusal after 200,000 entries;
+- the tree of the path holds a regular file with more than one hard link
+  on the device of the data folder or of a home folder. A hard link shows
+  a file of a protected folder under a second name, and the place checks
+  compare names. A hard link stays on one device, so a file on another
+  device passes. A tool folder that a package manager filled with hard
+  links (for example the store of `pnpm`) on that device is refused;
 - the tree of the path holds a mount point. `bwrap` binds a tree with its
   mounts, and a nested mount has a place of its own that the checks above
   do not compare. The walk compares the mount ID of each entry (`statx`
@@ -223,6 +229,7 @@ fails at its first call.
 | `HOME` absent or wrong, and a read path that is or holds the home folder of the user database (for example `/home/alice`) | The run is refused, with the path | launch test with `HOME` unset |
 | The user database gives no home folder for the user of the engine | The run of an adapter with read paths is refused | unit test |
 | A read path with a socket, a FIFO or a device in its tree | The run is refused, with the path of the entry | launch test |
+| A read path with a hard link to a file of the data folder | The run is refused, with the path of the entry | unit test |
 | A read path with a mount point in its tree, also a bind mount on the same device | The run is refused, with the path of the entry | launch test (Linux: a bind mount in a private mount namespace of the test, if the test can make one; else a unit test of the mount ID compare) |
 | A kernel that gives no mount ID (`STATX_MNT_ID`) | The run of an adapter with read paths is refused | unit test |
 | A tree of more than 200,000 entries | The run is refused | launch test |

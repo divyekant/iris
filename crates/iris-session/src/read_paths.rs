@@ -13,6 +13,7 @@ use std::ffi::{CStr, CString, OsStr, OsString};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -122,8 +123,9 @@ fn check_open(
             "it is the data folder, is inside it or holds it".into(),
         ));
     }
-    for h in homes(home).map_err(refuse)? {
-        if let Ok(p) = protected_place(&h) {
+    let homes = homes(home).map_err(refuse)?;
+    for h in &homes {
+        if let Ok(p) = protected_place(h) {
             if place.holds(&p) {
                 return Err(refuse(format!(
                     "it is the home folder {} or holds it",
@@ -145,8 +147,20 @@ fn check_open(
             return Err(refuse(format!("it is, is inside or holds {}", s.display())));
         }
     }
+    // A hard link shows a file under a second name, and a hard link stays on
+    // one device: a linked file on the device of a protected folder can be
+    // a file of that folder.
+    let linked: Vec<u64> = std::iter::once(data_dir)
+        .chain(homes.iter().map(PathBuf::as_path))
+        .filter_map(|p| std::fs::metadata(p).ok())
+        .map(|m| m.dev())
+        .collect();
+    let walker = Walker {
+        mount: mount_of(&fd)?,
+        linked,
+    };
     let mut count = 0;
-    walk(&fd, &real, &mount_of(&fd)?, &mut count).map_err(refuse)?;
+    walker.walk(&fd, &real, &mut count).map_err(refuse)?;
     Ok(Checked { real, fd })
 }
 
@@ -395,121 +409,157 @@ fn unescape(s: &str) -> Option<PathBuf> {
     p.is_absolute().then_some(p)
 }
 
-/// Walks the tree of the open object `fd` with no link followed. Refuses a
-/// socket, a FIFO, a device, an entry of another mount than `mount`, a
-/// folder that cannot be read, and more than [`MAX_ENTRIES`] entries.
-fn walk(fd: &OwnedFd, path: &Path, mount: &u64, count: &mut usize) -> Result<(), String> {
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: fstat writes into st.
-    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
-        return Err(format!(
-            "{} cannot be read: {}",
-            path.display(),
-            io::Error::last_os_error()
-        ));
-    }
-    if st.st_mode & libc::S_IFMT != libc::S_IFDIR {
-        return kind_ok(st.st_mode, path);
-    }
-    // A descriptor to read the names: O_PATH (Linux) cannot list.
-    // SAFETY: openat with a valid C string.
-    let dir = unsafe {
-        libc::openat(
-            fd.as_raw_fd(),
-            c".".as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        )
-    };
-    if dir < 0 {
-        return Err(format!(
-            "the folder {} cannot be read: {}",
-            path.display(),
-            io::Error::last_os_error()
-        ));
-    }
-    // SAFETY: dir is a new descriptor; fdopendir takes it, closedir closes it.
-    let d = unsafe { libc::fdopendir(dir) };
-    if d.is_null() {
-        unsafe { libc::close(dir) };
-        return Err(format!("the folder {} cannot be read", path.display()));
-    }
-    struct Dir(*mut libc::DIR);
-    impl Drop for Dir {
-        fn drop(&mut self) {
-            // SAFETY: the pointer came from fdopendir and is closed once.
-            unsafe { libc::closedir(self.0) };
-        }
-    }
-    let d = Dir(d);
-    loop {
-        // readdir gives null at the end and on an error; only errno tells
-        // them apart. An error refuses the read path (fail closed).
-        set_errno(0);
-        // SAFETY: readdir on an open DIR; the entry is valid until the
-        // next call, and the name is copied before it.
-        let e = unsafe { libc::readdir(d.0) };
-        if e.is_null() {
-            let err = io::Error::last_os_error();
-            if err.raw_os_error().unwrap_or(0) != 0 {
-                return Err(format!(
-                    "the folder {} cannot be read: {err}",
-                    path.display()
-                ));
-            }
-            break;
-        }
-        let name = unsafe { CStr::from_ptr((*e).d_name.as_ptr()) }.to_owned();
-        if name.as_bytes() == b"." || name.as_bytes() == b".." {
-            continue;
-        }
-        *count += 1;
-        let child = path.join(OsStr::from_bytes(name.as_bytes()));
-        if *count > MAX_ENTRIES {
-            return Err(format!("its tree has more than {MAX_ENTRIES} entries"));
-        }
-        let fdir = unsafe { libc::dirfd(d.0) };
-        let mut cs: libc::stat = unsafe { std::mem::zeroed() };
-        // SAFETY: fstatat writes into cs; name is a valid C string.
-        if unsafe { libc::fstatat(fdir, name.as_ptr(), &mut cs, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+/// The rules of the walk of one read path.
+struct Walker {
+    /// The mount ID of the read path. Each entry must be on it.
+    mount: u64,
+    /// The devices of the protected folders. A file with more than one hard
+    /// link on one of them is refused.
+    linked: Vec<u64>,
+}
+
+impl Walker {
+    /// Walks the tree of the open object `fd` with no link followed. Refuses a
+    /// socket, a FIFO, a device, a file with a hard link on the device of a
+    /// protected folder, an entry of another mount, a folder that cannot be
+    /// read, and more than [`MAX_ENTRIES`] entries.
+    fn walk(&self, fd: &OwnedFd, path: &Path, count: &mut usize) -> Result<(), String> {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: fstat writes into st.
+        if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
             return Err(format!(
                 "{} cannot be read: {}",
-                child.display(),
+                path.display(),
                 io::Error::last_os_error()
             ));
         }
-        let kind = cs.st_mode & libc::S_IFMT;
-        if kind == libc::S_IFLNK {
-            continue;
+        if st.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return self.kind_ok(&st, path);
         }
-        kind_ok(cs.st_mode, &child)?;
-        let m = mount_at(fdir, &name)
-            .map_err(|e| format!("the mount of {} cannot be read: {e}", child.display()))?;
-        if m != *mount {
-            return Err(format!("{} is a mount point", child.display()));
+        // A descriptor to read the names: O_PATH (Linux) cannot list.
+        // SAFETY: openat with a valid C string.
+        let dir = unsafe {
+            libc::openat(
+                fd.as_raw_fd(),
+                c".".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if dir < 0 {
+            return Err(format!(
+                "the folder {} cannot be read: {}",
+                path.display(),
+                io::Error::last_os_error()
+            ));
         }
-        if kind == libc::S_IFDIR {
-            // SAFETY: openat with a valid C string; O_NOFOLLOW keeps a link
-            // that replaced the folder out.
-            let sub = unsafe {
-                libc::openat(
-                    fdir,
-                    name.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                )
-            };
-            if sub < 0 {
+        // SAFETY: dir is a new descriptor; fdopendir takes it, closedir closes it.
+        let d = unsafe { libc::fdopendir(dir) };
+        if d.is_null() {
+            unsafe { libc::close(dir) };
+            return Err(format!("the folder {} cannot be read", path.display()));
+        }
+        struct Dir(*mut libc::DIR);
+        impl Drop for Dir {
+            fn drop(&mut self) {
+                // SAFETY: the pointer came from fdopendir and is closed once.
+                unsafe { libc::closedir(self.0) };
+            }
+        }
+        let d = Dir(d);
+        loop {
+            // readdir gives null at the end and on an error; only errno tells
+            // them apart. An error refuses the read path (fail closed).
+            set_errno(0);
+            // SAFETY: readdir on an open DIR; the entry is valid until the
+            // next call, and the name is copied before it.
+            let e = unsafe { libc::readdir(d.0) };
+            if e.is_null() {
+                let err = io::Error::last_os_error();
+                if err.raw_os_error().unwrap_or(0) != 0 {
+                    return Err(format!(
+                        "the folder {} cannot be read: {err}",
+                        path.display()
+                    ));
+                }
+                break;
+            }
+            let name = unsafe { CStr::from_ptr((*e).d_name.as_ptr()) }.to_owned();
+            if name.as_bytes() == b"." || name.as_bytes() == b".." {
+                continue;
+            }
+            *count += 1;
+            let child = path.join(OsStr::from_bytes(name.as_bytes()));
+            if *count > MAX_ENTRIES {
+                return Err(format!("its tree has more than {MAX_ENTRIES} entries"));
+            }
+            let fdir = unsafe { libc::dirfd(d.0) };
+            let mut cs: libc::stat = unsafe { std::mem::zeroed() };
+            // SAFETY: fstatat writes into cs; name is a valid C string.
+            if unsafe { libc::fstatat(fdir, name.as_ptr(), &mut cs, libc::AT_SYMLINK_NOFOLLOW) }
+                != 0
+            {
                 return Err(format!(
-                    "the folder {} cannot be read: {}",
+                    "{} cannot be read: {}",
                     child.display(),
                     io::Error::last_os_error()
                 ));
             }
-            // SAFETY: sub is a new descriptor that nothing else owns.
-            let sub = unsafe { OwnedFd::from_raw_fd(sub) };
-            walk(&sub, &child, mount, count)?;
+            let kind = cs.st_mode & libc::S_IFMT;
+            if kind == libc::S_IFLNK {
+                continue;
+            }
+            self.kind_ok(&cs, &child)?;
+            let m = mount_at(fdir, &name)
+                .map_err(|e| format!("the mount of {} cannot be read: {e}", child.display()))?;
+            if m != self.mount {
+                return Err(format!("{} is a mount point", child.display()));
+            }
+            if kind == libc::S_IFDIR {
+                // SAFETY: openat with a valid C string; O_NOFOLLOW keeps a link
+                // that replaced the folder out.
+                let sub = unsafe {
+                    libc::openat(
+                        fdir,
+                        name.as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    )
+                };
+                if sub < 0 {
+                    return Err(format!(
+                        "the folder {} cannot be read: {}",
+                        child.display(),
+                        io::Error::last_os_error()
+                    ));
+                }
+                // SAFETY: sub is a new descriptor that nothing else owns.
+                let sub = unsafe { OwnedFd::from_raw_fd(sub) };
+                self.walk(&sub, &child, count)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A folder, a link or a regular file passes. A socket, a FIFO or a device
+    /// does not. A regular file with more than one hard link on the device of
+    /// a protected folder does not.
+    // st_dev is u64 on Linux and i32 on macOS.
+    #[allow(clippy::unnecessary_cast)]
+    fn kind_ok(&self, st: &libc::stat, path: &Path) -> Result<(), String> {
+        match st.st_mode & libc::S_IFMT {
+            libc::S_IFDIR | libc::S_IFLNK => Ok(()),
+            libc::S_IFREG if st.st_nlink > 1 && self.linked.contains(&(st.st_dev as u64)) => {
+                Err(format!(
+                    "{} has more than one hard link, on the device of a protected folder",
+                    path.display()
+                ))
+            }
+            libc::S_IFREG => Ok(()),
+            _ => Err(format!(
+                "{} is a socket, a FIFO or a device",
+                path.display()
+            )),
         }
     }
-    Ok(())
 }
 
 /// Sets `errno` of this thread.
@@ -523,18 +573,6 @@ fn set_errno(v: i32) {
     unsafe {
         *libc::__error() = v
     };
-}
-
-/// A regular file, a folder or a link passes. A socket, a FIFO or a device
-/// does not.
-fn kind_ok(mode: libc::mode_t, path: &Path) -> Result<(), String> {
-    match mode & libc::S_IFMT {
-        libc::S_IFREG | libc::S_IFDIR | libc::S_IFLNK => Ok(()),
-        _ => Err(format!(
-            "{} is a socket, a FIFO or a device",
-            path.display()
-        )),
-    }
 }
 
 #[cfg(test)]

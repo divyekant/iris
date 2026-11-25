@@ -333,8 +333,9 @@ logins or mail.
 - Iris refuses a run if a read path is the data folder, is in it or holds
   it; is a home folder or holds one (`~/.nvm` is allowed, `~` and `/home`
   are not); is, is in or holds a folder of system state (`/proc`, `/sys`,
-  `/dev`, `/run`, `/tmp` and others); or holds a socket, a FIFO, a device
-  or a mount point.
+  `/dev`, `/run`, `/tmp` and others); or holds a socket, a FIFO, a device,
+  a mount point, or a file with more than one hard link on the device of
+  the data folder or of a home folder.
 - The built-in agents get no read paths. They sign in only with their
   variables.
 

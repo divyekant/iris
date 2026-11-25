@@ -163,7 +163,11 @@ fn a_nested_mount_is_refused_by_the_walk() {
         return;
     }
     let mut n = 0;
-    let e = walk(&fs_dir, Path::new("/sys/fs"), &own, &mut n).unwrap_err();
+    let w = Walker {
+        mount: own,
+        linked: vec![],
+    };
+    let e = w.walk(&fs_dir, Path::new("/sys/fs"), &mut n).unwrap_err();
     assert!(
         e.contains("mount point") || e.contains("cannot be read"),
         "{e}"
@@ -289,4 +293,17 @@ fn an_object_moved_to_the_checked_name_is_refused() {
     let f = tool.join("lib/main.js");
     let fd = open_no_links(&f).unwrap();
     assert!(check_open(&f, f.clone(), fd, &data, None).is_ok());
+}
+
+#[test]
+fn a_hard_link_to_a_file_of_the_data_folder_is_refused() {
+    let (_d, tool, data) = setup("hardlink");
+    fs::write(data.join("key"), "secret").unwrap();
+    fs::hard_link(data.join("key"), tool.join("lib/key")).unwrap();
+    refused(check(&tool, &data, None), "hard link");
+    // The read path that names the linked file.
+    refused(check(&tool.join("lib/key"), &data, None), "hard link");
+    // A file with one link passes.
+    fs::remove_file(tool.join("lib/key")).unwrap();
+    assert!(check(&tool, &data, None).is_ok());
 }
