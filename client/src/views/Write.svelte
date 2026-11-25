@@ -113,9 +113,6 @@
     account: d.account, to: d.to, cc: d.cc, bcc: d.bcc, files: d.attachments, subject: d.subject, body: d.body,
     key: "", sig: "", flags: [], draft: d.change === "update" ? { draft: d.draft, account: d.account } : null,
   });
-  // A draft link opens only for a draft that can change now, so no send of it
-  // waits: a kept write of this place has ended. The form shows, not that write.
-  if (opened) keep(null);
   let changeNote = $state(opened ? "This is the draft that you cancelled. Change it, then press Send." : "");
   // A draft link (only for a draft that can change now) opens its own saved
   // form after a reload, else the draft. The next press changes the draft
@@ -355,7 +352,12 @@
       if (mine <= applied || id !== write) return;
       applied = mine;
       ws = v;
-      if (v.state === "sent" || v.state === "stopped") keep(null, id);
+      if (v.state === "sent" || v.state === "stopped") {
+        keep(null, id);
+        // A draft link that resumed an earlier write of its place: that write
+        // ended, so the form of the draft shows again (issue 941).
+        if (id === resumed) [write, resumed, ws] = ["", "", { state: "saving" }];
+      }
     } catch {
       // The engine can restart. The next read tries again.
     }
@@ -461,6 +463,9 @@
 
   // After a reload: show the write that the engine took, and follow its state.
   const kept = taken();
+  // A draft link resumes a write of its place until that write ends: the form
+  // never hides a write that may still leave.
+  let resumed = opened && kept ? kept.write : "";
   if (kept) {
     write = kept.write;
     sentTo = kept.to;

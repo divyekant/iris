@@ -296,7 +296,11 @@ the conversation of its thread. The form of a draft link has its own
 place in the session storage (`iris.write.d-N`), so it never replaces
 the unfinished form of a new mail or of a reply, and a reload keeps its
 changes. The form never takes an automatic draft of the thread. The next
-press sends `draft` only when `change` is `"update"` now.
+press sends `draft` only when `change` is `"update"` now. A write that
+the engine took from a draft link stays in that place until it ends: a
+reload or a new link of the same draft shows the state of that write,
+not the form, while it can still leave (for `"new"`, the old draft can
+still change). When the write ends (sent or stopped), the form shows.
 
 If `change` is `null` when the link opens, the view shows no form. It
 says why and links to a new write: "A new mail came into this thread.

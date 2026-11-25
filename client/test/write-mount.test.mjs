@@ -1193,10 +1193,12 @@ test("loadChange: a draft that cannot change opens no form, and reads nothing mo
   }
 });
 
-test("a draft link keeps its own form: the unfinished new mail stays, and a reload keeps the changes (issue 941)", async () => {
+test("a draft link keeps its own form: the unfinished new mail stays, a reload keeps the changes, and a write of the link is never hidden (issue 941)", async () => {
   const DRAFT = { draft: "d-7", account: "a-1", thread: null, to: ["sam@okafor.example"], cc: [], bcc: [],
                   subject: "Dinner on Saturday?", body: "Hi Sam,\n", attachments: [], change: "update" };
-  const net = serve((path, method) => (method === "POST" && path === "write" ? [201, { write: "cs-1" }] : path === "write/cs-1" ? [200, { state: "saving" }] : [404, { error: "Not found." }]));
+  let state = { state: "waiting", draft: "d-9", sending: true, leaves_at: null };
+  const net = serve((path, method) => (method === "POST" && path === "write" ? [201, { write: "cs-1" }] : path === "write/cs-1" ? [200, state] : [404, { error: "Not found." }]));
+  const form = (app) => app.target.querySelector("form");
   try {
     // An unfinished new mail.
     let app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
@@ -1215,20 +1217,39 @@ test("a draft link keeps its own form: the unfinished new mail stays, and a relo
     app.flushSync();
     assert.equal(app.target.querySelector("textarea").value, "Hi Sam, changed.\n", "a reload keeps the changes");
     app.destroy();
-    // The draft can change now only as a new draft: the kept form does not send the old draft.
-    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: { ...DRAFT, change: "new" } }, every: 20 });
+    // The draft can change now only as a new draft (Outlook): the kept form does not send the old draft.
+    const NEW = { ...DRAFT, change: "new" };
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: NEW }, every: 20 });
     app.flushSync();
     assert.equal(app.target.querySelector("textarea").value, "Hi Sam, changed.\n");
     press(app);
     await until(() => net.posts().length === 1);
     assert.equal(net.posts()[0].body.draft, undefined, "a new draft");
+    await until(() => !form(app));
     app.destroy();
-    // The person cancels that send in the Outbox and follows the new link: the form shows, not the old write.
-    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: { ...DRAFT, change: "update" } }, every: 20 });
-    app.flushSync();
-    assert.ok(app.target.querySelector("form"), "the form of the draft");
-    assert.match(text(app.target), /This is the draft that you cancelled\./);
-    app.destroy();
+    // A reload while that send waits: the old draft can still change, but the view shows the write, not a form.
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: NEW }, every: 20 });
+    try {
+      app.flushSync();
+      assert.equal(form(app), null, "no form while the write waits");
+      await until(() => /Cancel the send/.test(text(app.target)));
+      await new Promise((r) => setTimeout(r, 60));
+      assert.equal(form(app), null);
+      assert.equal(net.posts().length, 1, "no second send");
+    } finally {
+      app.destroy();
+    }
+    // The person cancels that send in the Outbox and follows the link again: the write ended, the form shows.
+    state = { state: "stopped", reason: "Cancelled in the outbox.", draft: "d-9", change: "new" };
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: NEW }, every: 20 });
+    try {
+      await until(() => form(app));
+      assert.match(text(app.target), /This is the draft that you cancelled\./);
+      await new Promise((r) => setTimeout(r, 60));
+      assert.ok(form(app), "the form stays");
+    } finally {
+      app.destroy();
+    }
     // Back to the new mail: it is still there.
     app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
     app.flushSync();
