@@ -470,7 +470,7 @@
     return m?.from.name || a;
   };
   const named = $derived(to.map(name).join(", "));
-  // Reply all is a choice (issue #455): the others of the parent that the form does not have yet.
+  // Reply all is a choice (issue 455): the others of the parent that the form does not have yet.
   const others = $derived.by(() => {
     const have = new Set([...to, ...cc, ...bcc].map((a) => a.toLowerCase()));
     return (reply?.all ?? []).filter((a) => !have.has(a.toLowerCase()));
