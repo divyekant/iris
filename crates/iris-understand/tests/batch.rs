@@ -1879,6 +1879,16 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
     iris_understand::store::recheck_links(&b.store, NOW, None).unwrap();
     assert_eq!(hostile(&b), "[]");
 
+    // A link check reads the release, and the undo comes before its write.
+    b.store
+        .write(|tx| {
+            tx.execute("INSERT INTO link_check(message_id) VALUES (?1)", [m])?;
+            Ok(())
+        })
+        .unwrap();
+    let read = iris_understand::store::link_read(&b.store, m).unwrap();
+    assert!(!read.mark);
+
     // The end of the release: the mark comes back with no model call.
     assert!(matches!(
         b.store.write(|tx| unrelease(tx, m)).unwrap(),
@@ -1891,6 +1901,21 @@ fn a_released_message_leaves_quarantine_and_the_undo_brings_it_back() {
     // The undo holds the mail at once, before the fixed check runs: each
     // gate reads `message.hostile`.
     assert_eq!(hostile(&b), r#"["link"]"#);
+    // The write of that link check keeps its queue row and the mark.
+    let row = b
+        .col(&format!("SELECT id FROM link_check WHERE message_id = {m}"))
+        .unwrap();
+    assert!(!b
+        .store
+        .write(|tx| iris_understand::store::link_check_done(tx, row, m, &read))
+        .unwrap());
+    assert_eq!(hostile(&b), r#"["link"]"#);
+    assert_eq!(
+        b.col(&format!(
+            "SELECT count(*) FROM link_check WHERE message_id = {m}"
+        )),
+        Some(1)
+    );
     assert_eq!(
         b.col(&format!(
             "SELECT count(*) FROM message m WHERE m.id = {m} AND {}",

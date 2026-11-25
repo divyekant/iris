@@ -156,9 +156,10 @@ pub fn recheck_links(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Resu
         for (row, id) in rows {
             // The row ID first: a trigger that queues the message again
             // after this read gives it a new row, which this check keeps.
-            let Some((mark, sha)) = link_mark_of(store, id) else {
+            let Some(read) = link_read(store, id) else {
                 continue;
             };
+            let mark = read.mark;
             if mark && max_marks.is_some_and(|n| marked >= n) {
                 // The message limit of the run: the rest waits.
                 return Ok(marked);
@@ -168,34 +169,7 @@ pub fn recheck_links(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Resu
                 // error leaves the row for the next run.
                 let _ = understand(store, id, &crate::budget::NoModel, now_ms);
             }
-            // The row goes only for the state that the check read (the same
-            // row, the same content), and, for a deceptive link, only when
-            // the message has the mark.
-            let done = store.write(|tx| {
-                let n = tx.execute(
-                    "DELETE FROM link_check WHERE id = ?1 AND EXISTS (
-                       SELECT 1 FROM message m WHERE m.id = ?2
-                         AND (m.content_sha256 IS ?3 OR m.gone_at IS NOT NULL)
-                         AND (NOT ?4 OR EXISTS (
-                           SELECT 1 FROM json_each(coalesce(m.hostile, '[]'))
-                           WHERE value = 'link')))",
-                    params![row, id, sha, mark],
-                )?;
-                if n > 0 && !mark {
-                    // A mark of earlier content goes: the check of this
-                    // content found no deceptive link.
-                    tx.execute(
-                        "UPDATE message SET hostile = (
-                           SELECT json_group_array(value) FROM json_each(hostile)
-                           WHERE value <> 'link')
-                         WHERE id = ?1 AND content_sha256 IS ?2 AND EXISTS (
-                           SELECT 1 FROM json_each(coalesce(hostile, '[]'))
-                           WHERE value = 'link')",
-                        params![id, sha],
-                    )?;
-                }
-                Ok(n > 0)
-            })?;
+            let done = store.write(|tx| Ok(link_check_done(tx, row, id, &read)?))?;
             marked += u64::from(mark && done);
         }
     }
@@ -407,15 +381,32 @@ fn fixed_rules(d: &crate::Decision) -> Option<String> {
     Some(serde_json::to_string(&rules).expect("strings serialize"))
 }
 
-/// For the received message `id`: true when it has a deceptive link, with
-/// the content hash that the check read. False when it has none, is gone,
-/// is your own mail or has no content. `None` when Iris cannot read the
-/// row or the file now.
-fn link_mark_of(store: &Store, id: i64) -> Option<(bool, Option<String>)> {
+/// What the link check read of one message: the mark, and the state that
+/// the mark depends on (the content and the release). The write of the
+/// check ([`link_check_done`]) needs the same state.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct LinkRead {
+    pub mark: bool,
+    sha: Option<String>,
+    released: String,
+}
+
+/// The link mark of message `id` (its row ID) for the link check, or None
+/// when Iris cannot read the message now. Sent mail, drafts and gone mail
+/// get no mark.
+#[doc(hidden)]
+pub fn link_read(store: &Store, id: i64) -> Option<LinkRead> {
     let row = read_row(store, id).ok()?;
+    // As `release` writes it: a sorted JSON array; NULL reads as `[]`.
+    let released = serde_json::to_string(&row.released).expect("strings serialize");
     let own = row.labels.iter().any(|l| l == "SENT" || l == "DRAFT");
     if row.gone || own || row.sha.is_none() {
-        return Some((false, row.sha));
+        return Some(LinkRead {
+            mark: false,
+            sha: row.sha,
+            released,
+        });
     }
     let path = row.sha.as_deref().and_then(|s| store.content_path(s))?;
     let (raw, raw_cut, html_after) = read_raw(&path).ok()?;
@@ -424,7 +415,51 @@ fn link_mark_of(store: &Store, id: i64) -> Option<(bool, Option<String>)> {
     // A released `link` mark is no mark (section 6.7).
     let mark = crate::link_mark(&head, &c.links, c.links_cut || html_after)
         && !row.released.iter().any(|r| r == "link");
-    Some((mark, row.sha))
+    Some(LinkRead {
+        mark,
+        sha: row.sha,
+        released,
+    })
+}
+
+/// The write of the link check of queue row `row` for message `id`, from
+/// `read`. The row goes only for the state that the check read: the same
+/// row, the same content and the same release (an undo after the read
+/// keeps the row and the restored mark). For a deceptive link, the row goes
+/// only when the message has the mark. With no deceptive link, a `link`
+/// mark of earlier content goes. True when the row went.
+#[doc(hidden)]
+pub fn link_check_done(
+    tx: &Transaction,
+    row: i64,
+    id: i64,
+    read: &LinkRead,
+) -> iris_store::Result<bool> {
+    let n = tx.execute(
+        "DELETE FROM link_check WHERE id = ?1 AND EXISTS (
+           SELECT 1 FROM message m WHERE m.id = ?2
+             AND (m.gone_at IS NOT NULL OR (m.content_sha256 IS ?3
+                  AND coalesce(m.released, '[]') = ?5))
+             AND (NOT ?4 OR EXISTS (
+               SELECT 1 FROM json_each(coalesce(m.hostile, '[]'))
+               WHERE value = 'link')))",
+        params![row, id, read.sha, read.mark, read.released],
+    )?;
+    if n > 0 && !read.mark {
+        // A mark of earlier content goes: the check of this content found
+        // no deceptive link, or the person released it.
+        tx.execute(
+            "UPDATE message SET hostile = (
+               SELECT json_group_array(value) FROM json_each(hostile)
+               WHERE value <> 'link')
+             WHERE id = ?1 AND content_sha256 IS ?2 AND coalesce(released, '[]') = ?3
+               AND EXISTS (
+               SELECT 1 FROM json_each(coalesce(hostile, '[]'))
+               WHERE value = 'link')",
+            params![id, read.sha, read.released],
+        )?;
+    }
+    Ok(n > 0)
 }
 
 /// Run understanding on message `message` (its row ID): steps 1 to 8. Run
