@@ -83,9 +83,18 @@ refuses the run, with the path and the reason, if:
   through a read-only bind, because a network namespace does not block a
   Unix socket. The walk does not follow links, and it stops with a
   refusal after 200,000 entries;
-- the tree of the path holds a mount point (an entry on another device
-  than the read path itself). A mount can bring a virtual file system,
-  such as a `/proc`, into the view.
+- the tree of the path holds a mount point. A mount can bring a virtual
+  file system, such as a `/proc`, or a bind mount of another folder (also
+  of the data folder) into the view, and `bwrap` binds a tree with its
+  mounts. A bind mount can have the same device number as its parent, so
+  the device number is not enough. On Linux the walk compares the mount
+  ID of each entry (`statx` with `STATX_MNT_ID`, Linux 5.8 or later) with
+  the mount ID of the read path, and refuses a read path that is itself a
+  mount root (`STATX_ATTR_MOUNT_ROOT`) other than a mount of a system
+  folder the view already shows. If the kernel gives no mount ID, the run
+  is refused. On macOS there are no bind mounts; the walk compares the
+  device number (`st_dev`), and Seatbelt checks the real path of each
+  access.
 
 A link inside a read path that points outside it stays a link in the
 view. Its target is visible only if the view holds the target.
@@ -165,7 +174,8 @@ fails at its first call.
 | A read path that is `/proc`, `/sys`, `/dev`, `/run`, `/tmp` or another folder of system state, inside one, or holds one | The run is refused, with the path | launch test |
 | A read path that holds `HOME` (for example `/home`) | The run is refused, with the path | launch test |
 | A read path with a socket, a FIFO or a device in its tree | The run is refused, with the path of the entry | launch test |
-| A read path with a mount point in its tree | The run is refused, with the path of the entry | launch test |
+| A read path with a mount point in its tree, also a bind mount on the same device | The run is refused, with the path of the entry | launch test (Linux: a bind mount in a private mount namespace of the test, if the test can make one; else a unit test of the mount ID compare) |
+| A kernel that gives no mount ID (`STATX_MNT_ID`) | The run of an adapter with read paths is refused | unit test |
 | A tree of more than 200,000 entries | The run is refused | launch test |
 | A part of a read path that changes into a link after the launch checks | Linux: the open of the helper fails, and no session starts. macOS: Seatbelt checks the real path at each access | Linux helper test with a swap between the check and the open |
 | A read path that changes to another object (other device or inode) after the launch checks | The helper refuses it, and no session starts | Linux helper test |
