@@ -41,6 +41,53 @@ export function today(now: Date, zone?: string | null): string {
   return ymd(now);
 }
 
+const DAY = 86_400_000;
+const clocks = new Map<string, Intl.DateTimeFormat>();
+
+/** The UTC offset of the zone `zone` at the instant `t`, in milliseconds, or null for no zone or a zone that the browser does not know. */
+export function offsetOf(t: number, zone?: string | null): number | null {
+  if (!zone) return null;
+  try {
+    let f = clocks.get(zone);
+    if (!f) {
+      f = new Intl.DateTimeFormat("en-US", { timeZone: zone, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric" });
+      clocks.set(zone, f);
+    }
+    const parts = f.formatToParts(t);
+    const n = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0);
+    const wall = new Date(0);
+    wall.setUTCFullYear(n("year"), n("month") - 1, n("day"));
+    wall.setUTCHours(n("hour"), n("minute"), n("second"));
+    return wall.getTime() - Math.floor(t / 1000) * 1000;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The instant of the wall time `ms` after the start of `date` (`YYYY-MM-DD`)
+ * in the zone `zone`, or null for no zone or an unknown zone. For a wall time
+ * that the clock skips, the first instant after the gap. For a wall time that
+ * comes two times, the first one, or the last one with `last`.
+ */
+export function instantOf(date: string, ms: number, zone?: string | null, last = false): number | null {
+  const [y, m, d] = date.split("-").map(Number);
+  const start = new Date(0);
+  start.setUTCFullYear(y, m - 1, d);
+  const wall = start.getTime() + ms;
+  // A clock change is days away from another one: the offsets a day before and a day after are the two that can apply.
+  const before = offsetOf(wall - DAY, zone);
+  const after = offsetOf(wall + DAY, zone);
+  if (before === null || after === null) return null;
+  const fits = [wall - before, wall - after].sort((a, b) => (last ? b - a : a - b)).find((t) => t + (offsetOf(t, zone) ?? 0) === wall);
+  return fits ?? wall - before;
+}
+
+/** The first instant of the day after `now` in the zone `zone`, or null for no zone or an unknown zone. */
+export function startOfNextDay(now: Date, zone?: string | null): number | null {
+  return instantOf(plus(today(now, zone), 1).date, 0, zone);
+}
+
 /** The day `days` after `date` (`YYYY-MM-DD`), and its weekday (0 is Sunday). */
 function plus(date: string, days: number): { date: string; weekday: number } {
   const [y, m, d] = date.split("-").map(Number);
