@@ -1737,6 +1737,13 @@ async fn an_item_shows_a_ready_draft_of_its_thread_until_the_draft_is_stale() {
     assert_eq!(ready_marks(&brief["you_owe"]), want);
     let (_, page) = get(&store, "/api/brief/you_owe").await;
     assert_eq!(ready_marks(&page), want);
+    // The list of one form shows the same marks (issue 478).
+    let (_, list) = get(&store, "/api/items?form=commitment").await;
+    let mut marks = ready_marks(&list);
+    marks.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut sorted = want.clone();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(marks, sorted);
     // The open model allows the field: the item with it passes its schema.
     let schema = iris_spec::validator("commitment");
     let marked = &brief["you_owe"]["items"][0];
