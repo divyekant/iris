@@ -2068,7 +2068,54 @@ async fn status_gives_the_time_zone_of_the_owner() {
     let (_, v) = get(&store, "/api/status").await;
     let computer = jiff::tz::TimeZone::system();
     assert_eq!(v["time_zone"], serde_json::json!(computer.iana_name()));
+    assert_eq!(v["time_zone_set"], false);
     store.set_time_zone(Some("Asia/Kolkata")).unwrap();
     let (_, v) = get(&store, "/api/status").await;
     assert_eq!(v["time_zone"], "Asia/Kolkata");
+    assert_eq!(v["time_zone_set"], true);
+}
+
+/// Issue 891: the web client sets the time zone of the owner, as `iris
+/// zone` does. A name that the computer does not know, a missing key and
+/// another key are a 400, and nothing is written. Null goes back to the
+/// time zone of the computer.
+#[tokio::test]
+async fn the_person_sets_the_time_zone_from_the_web_client() {
+    let dir = temp("zone-set");
+    let (store, _) = filled_n(&dir, 1);
+    let computer = serde_json::json!(jiff::tz::TimeZone::system().iana_name());
+
+    let (code, v) = post(
+        &store,
+        "/api/zone",
+        serde_json::json!({ "zone": "Asia/Kolkata" }),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(
+        v,
+        serde_json::json!({ "time_zone": "Asia/Kolkata", "time_zone_set": true })
+    );
+    let (_, s) = get(&store, "/api/status").await;
+    assert_eq!(s["time_zone"], "Asia/Kolkata");
+
+    for bad in [
+        serde_json::json!({ "zone": "Mars/Olympus" }),
+        serde_json::json!({ "zone": "" }),
+        serde_json::json!({ "zone": 5 }),
+        serde_json::json!({}),
+        serde_json::json!({ "zone": "Europe/Berlin", "more": 1 }),
+    ] {
+        let (code, _) = post(&store, "/api/zone", bad.clone()).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{bad}");
+        let (_, s) = get(&store, "/api/status").await;
+        assert_eq!(s["time_zone"], "Asia/Kolkata", "nothing written for {bad}");
+    }
+
+    let (code, v) = post(&store, "/api/zone", serde_json::json!({ "zone": null })).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(
+        v,
+        serde_json::json!({ "time_zone": computer, "time_zone_set": false })
+    );
 }

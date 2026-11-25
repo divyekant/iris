@@ -1059,12 +1059,17 @@ fn migrate(conn: &mut Connection, db: &Path) -> Result<()> {
 /// else the time zone of the computer. A saved name that the computer no
 /// longer knows gives the time zone of the computer too.
 pub fn time_zone(c: &Connection) -> rusqlite::Result<jiff::tz::TimeZone> {
+    Ok(owner_time_zone(c)?.unwrap_or_else(jiff::tz::TimeZone::system))
+}
+
+/// The time zone that the owner set (`owner_setting`), or `None` when the
+/// owner set none, or set a name that the computer no longer knows. Then
+/// [`time_zone`] gives the time zone of the computer.
+pub fn owner_time_zone(c: &Connection) -> rusqlite::Result<Option<jiff::tz::TimeZone>> {
     let name: Option<String> = c
         .query_row("SELECT time_zone FROM owner_setting", [], |r| r.get(0))
         .optional()?;
-    Ok(name
-        .and_then(|n| jiff::tz::TimeZone::get(&n).ok())
-        .unwrap_or_else(jiff::tz::TimeZone::system))
+    Ok(name.and_then(|n| jiff::tz::TimeZone::get(&n).ok()))
 }
 
 /// The day of the instant `now_ms` (milliseconds since the epoch) in the

@@ -74,6 +74,9 @@ pub struct Status {
     /// (`iris zone`, decision D1). `None` when the time zone of the computer
     /// has no IANA name: then a client uses its own.
     pub time_zone: Option<String>,
+    /// True when the owner set the time zone (`iris zone <name>`, or the
+    /// web client, issue 891). False when it is the zone of the computer.
+    pub time_zone_set: bool,
     /// The end of the wait after model errors (RFC 3339), while it runs.
     /// No model call runs before it, unless the person asks for a try now
     /// (`POST /api/model/try`, issue #136).
@@ -384,6 +387,7 @@ pub fn status(store: &Store) -> Result<Status> {
             model,
             waits_model,
             time_zone: iris_store::time_zone(c)?.iana_name().map(str::to_string),
+            time_zone_set: zone_set(c)?,
             model_retry_at,
         })
     })?;
@@ -1650,4 +1654,22 @@ mod tests {
         assert_eq!(rfc3339(1_763_283_731_999), "2025-11-16T09:02:11Z");
         assert_eq!(rfc3339(-1000), "1969-12-31T23:59:59Z");
     }
+}
+
+/// True when the owner set a time zone that the computer knows (decision
+/// D1). A saved name that the computer no longer knows gives the zone of
+/// the computer, as [`iris_store::time_zone`] does, so it counts as not set.
+fn zone_set(c: &Connection) -> rusqlite::Result<bool> {
+    Ok(iris_store::owner_time_zone(c)?.is_some())
+}
+
+/// The time zone of the owner after a change from the web client (issue
+/// 891): `{"time_zone", "time_zone_set"}`, as in the status.
+pub fn zone(store: &Store) -> Result<serde_json::Value> {
+    Ok(store.read(|c| {
+        Ok(serde_json::json!({
+            "time_zone": iris_store::time_zone(c)?.iana_name(),
+            "time_zone_set": zone_set(c)?,
+        }))
+    })?)
 }
