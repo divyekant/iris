@@ -5,8 +5,9 @@
   shows as text only.
 -->
 <script lang="ts">
-  import { get, own, type JobDetail } from "../api";
-  import { agent, asker, clock, day, due, editJob, loadJob, now, sameDue, steps, waitMail } from "../jobs";
+  import { own, type JobDetail } from "../api";
+  import { agent, asker, clock, day, due, editJob, endJob, loadJob, now, sameDue, steps, waitMail } from "../jobs";
+  import AnswerForm from "./AnswerForm.svelte";
   import Grants from "./Grants.svelte";
   import JobForm from "./JobForm.svelte";
   import Scope from "./Scope.svelte";
@@ -15,6 +16,28 @@
   let { detail: first, every = 5000 }: { detail: JobDetail; every?: number } = $props();
   // svelte-ignore state_referenced_locally
   let detail = $state(first);
+  // Each request of this page about the job (a read, an edit, an end, an answer, a scope change) runs
+  // in one queue, one at a time, and a job that it gives shows before the next request starts. So the page
+  // shows the job of the last request, and a late answer never puts back an older job (issue 322).
+  let chain: Promise<unknown> = Promise.resolve();
+  let queued = 0;
+  function queue<T>(work: () => Promise<T>): Promise<T> {
+    queued++;
+    const step = chain.then(async () => {
+      try {
+        const out = await work();
+        if (isDetail(out)) detail = out;
+        return out;
+      } finally {
+        queued--;
+      }
+    });
+    chain = step.catch(() => {});
+    return step;
+  }
+  const isDetail = (x: unknown): x is JobDetail => typeof (x as JobDetail)?.job?.id === "string";
+  // Read the job again and show it. It throws if the read fails.
+  const reload = () => queue(() => loadJob(detail.job.id));
   // A failed read counts here, so the next read is planned again.
   let misses = $state(0);
   // While the job works, its session can start, fail or end at any time, also
@@ -22,17 +45,13 @@
   $effect(() => {
     void misses;
     if (detail.job.state !== "working") return;
-    const id = detail.job.id;
     let live = true;
     const timer = setTimeout(() => {
-      get<JobDetail>(`jobs/${encodeURIComponent(id)}`).then(
-        (d) => {
-          if (live) detail = d;
-        },
-        () => {
-          if (live) misses++;
-        },
-      );
+      // A request of the person runs: its answer shows the job, and the next poll reads after it.
+      if (queued > 0) return void misses++;
+      reload().catch(() => {
+        if (live) misses++;
+      });
     }, every);
     return () => {
       live = false;
@@ -51,14 +70,13 @@
   let editing = $state(false);
   async function save(goal: string, dueAt: string | null): Promise<string> {
     try {
-      detail = await editJob(job.id, goal, dueAt);
+      await queue(() => editJob(job.id, goal, dueAt));
       editing = false;
       return "";
     } catch (e) {
       // The edit can have arrived (a lost answer, or a failed read after it): show the job as the engine has it.
-      const fresh = await loadJob(job.id).catch(() => null);
+      const fresh = await reload().catch(() => null);
       if (fresh) {
-        detail = fresh;
         if (fresh.job.goal === goal && sameDue(fresh.job.due, dueAt)) {
           editing = false;
           return "";
@@ -67,6 +85,29 @@
       return own(e) || (e as Error).message;
     }
   }
+
+  // End the job (issue 322): one question in place, as the remove of an account.
+  let ending = $state(false);
+  let endBusy = $state(false);
+  let endError = $state("");
+  async function end(kind: "complete" | "cancel") {
+    endBusy = true;
+    endError = "";
+    try {
+      await queue(() => endJob(job.id, kind));
+    } catch (e) {
+      const status = (e as { status?: number }).status;
+      // A refusal (4xx, not a conflict) wrote nothing. Any other failure can come after the end: no answer,
+      // a body that the client cannot read, a 5xx, or a 409 because the job ended already. Read the job again.
+      if (status !== undefined && status >= 400 && status < 500 && status !== 409) endError = own(e) || (e as Error).message;
+      else await reload().catch(() => {});
+    } finally {
+      endBusy = false;
+    }
+    if (detail.job.state === "done") ending = editing = false;
+    else endError ||= "Iris does not know if the job ended. Try again, or open the job again later.";
+  }
+
 </script>
 
 <p class="eyebrow">Job</p>
@@ -77,14 +118,39 @@
   <p class="limits">
     {#if limit}<span class={limit.tone}>{limit.text}{#if limit.tone}<span class="dot" aria-hidden="true"></span>{/if}</span>{/if}
     <span>Started {day(job.created)}</span>
-    {#if job.state !== "done"}<button class="edit" type="button" onclick={() => (editing = true)}>Edit</button>{/if}
+    {#if job.state !== "done"}
+      <button class="edit" type="button" onclick={() => ((editing = true), (ending = false))}>Edit</button>
+      <button class="edit" type="button" onclick={() => ((ending = true), (endError = ""))} disabled={ending}>End</button>
+    {/if}
   </p>
+{/if}
+
+{#if ending && job.state !== "done"}
+  <div class="ask" role="group" aria-label="End the job">
+    <p>End this job? The agent stops, and the copy of the mail for the agent goes. The steps stay on this page.</p>
+    <p class="actions">
+      <button type="button" class="primary" onclick={() => end("complete")} disabled={endBusy}>Mark as done</button>
+      <button type="button" class="quiet" onclick={() => end("cancel")} disabled={endBusy}>Cancel the job</button>
+      <button type="button" class="quiet" onclick={() => ((ending = false), (endError = ""))} disabled={endBusy}>Keep the job</button>
+    </p>
+    {#if endError}<p class="error" role="alert">{endError}</p>{/if}
+  </div>
 {/if}
 
 <section class="now {job.state}" class:idle aria-label="Now">
   {#if job.state === "needs_you"}
     <p class="label">{asker(job)} asks you</p>
     <p class="question">{job.question}</p>
+    {#key job.updated}
+      <AnswerForm
+        {job}
+        {queue}
+        onanswered={() => {}}
+        onchanged={() => reload().catch(() => {})}
+        onunknown={() => reload().catch(() => {})}
+        lost="Iris does not know if your answer arrived. Open the job again to see."
+      />
+    {/key}
   {:else}
     <p class="said">{idle ? idle.said : now(job)}</p>
     {#if idle}
@@ -97,7 +163,8 @@
   {/if}
 </section>
 
-<Scope {detail} onchange={(d) => (detail = d)} />
+<!-- The queue shows the job of each scope request, so `onchange` has nothing to do here. -->
+<Scope {detail} {queue} onchange={() => {}} />
 
 <Grants {job} />
 
@@ -154,6 +221,56 @@
   .edit:focus-visible {
     outline: 2px solid var(--color-primary);
     outline-offset: 2px;
+  }
+  .edit:disabled {
+    color: var(--color-text-faint);
+    cursor: default;
+    text-decoration: none;
+  }
+  .ask {
+    margin: calc(-1 * var(--space-4)) 0 var(--space-8);
+    padding: var(--space-4);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-3);
+    margin-top: var(--space-3);
+  }
+  .actions button {
+    padding: var(--space-2) var(--space-4);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-full);
+    background: transparent;
+    color: var(--color-text);
+    font: inherit;
+    cursor: pointer;
+    transition: border-color var(--transition-fast);
+  }
+  .actions button:hover:not(:disabled) {
+    border-color: var(--color-text-muted);
+  }
+  .actions .primary {
+    border-color: var(--color-primary);
+    background: var(--color-primary);
+    color: var(--color-on-primary);
+    font-weight: 500;
+  }
+  .actions button:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  .actions button:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+  .ask .error {
+    margin-top: var(--space-3);
+    border-left: 4px solid var(--color-error);
+    padding-left: var(--space-2);
+    font-size: var(--font-size--1);
   }
   .dot {
     display: inline-block;
@@ -327,6 +444,17 @@
     }
     .now {
       padding: var(--space-4);
+    }
+  }
+  @media (max-width: 600px), (any-pointer: coarse) {
+    .actions button,
+    .edit {
+      min-height: var(--size-touch);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .actions button {
+      transition: none;
     }
   }
 </style>
