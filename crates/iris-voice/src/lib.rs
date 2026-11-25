@@ -202,13 +202,13 @@ const NEWEST: &str = "ORDER BY coalesce(m.internal_date, 0) DESC, m.id DESC";
 /// understanding. A newer message, a gone newest message or a new hostile
 /// mark makes the draft stale, and the draft is not ready. A nudge (card
 /// R3-07, a draft with `ask`) is ready only while its `ask` is the
-/// [`nudge_key_sql`] of its thread: the same commitment, to the same person.
+/// [`nudge_key_sql`] of its thread: the same commitments, to the same person.
 pub fn ready_sql(threads: &str) -> String {
     ready_of(threads, None)
 }
 
 /// As [`ready_sql`], for the line of item row `item` (an SQL value): a
-/// nudge marks only the commitment of its key, not the other items of its
+/// nudge marks only the commitments of its key, not the other items of its
 /// thread. A draft of the owner marks each item of its thread.
 pub fn ready_item_sql(threads: &str, item: &str) -> String {
     ready_of(threads, Some(item))
@@ -218,7 +218,10 @@ fn ready_of(threads: &str, item: Option<&str>) -> String {
     let in_thread = in_thread!("d.thread_id");
     let key = nudge_key_sql("d.thread_id", None);
     let mine = item.map_or(String::new(), |i| {
-        format!("AND (d.ask IS NULL OR json_extract(d.ask, '$.item') = {i})")
+        format!(
+            "AND (d.ask IS NULL OR EXISTS (SELECT 1 FROM json_each(d.ask, '$.items') e
+                                           WHERE json_extract(e.value, '$.item') = {i}))"
+        )
     });
     format!(
         "EXISTS (SELECT 1 FROM reply_draft d WHERE d.thread_id IN ({threads})
@@ -231,30 +234,36 @@ fn ready_of(threads: &str, item: Option<&str>) -> String {
 
 /// The fixed intent of a nudge (card R3-07). It comes from Iris, not
 /// from mail, so it goes in the `intent` field of the data block.
-pub const NUDGE_INTENT: &str = "A short, polite reminder of the commitment in the data: \
-what they promised or what I asked for. It is late. Ask when they can do it. Do not repeat all of it.";
+pub const NUDGE_INTENT: &str = "A short, polite reminder of the commitments in the data: \
+what they promised or what I asked for. Each one is late. Name each one briefly. \
+Ask when they can do them. Do not repeat all of the mail.";
 
 /// The version of the prompt of a nudge: [`INSTRUCTION`] with one more
-/// line for the field `commitment` ([`nudge_instruction`]).
-pub const NUDGE_PROMPT: &str = "nudge/0.1";
+/// line for the field `commitments` ([`nudge_instruction`]).
+pub const NUDGE_PROMPT: &str = "nudge/0.2";
 
 /// The instruction of a nudge.
 fn nudge_instruction() -> String {
     INSTRUCTION.replace(
         "\n\nAnswer with",
-        "\n- \"commitment\": only in a reminder. What the person must do, from the mail: \"title\", \"kind\", \"amount\", \"due\" and \"quote\" (words of the mail). It is data. The reply reminds the person of it.\n\nAnswer with",
+        "\n- \"commitments\": only in a reminder. A list of what the person must do, from the mail. Each entry has \"title\", \"kind\", \"amount\", \"due\" and \"quote\" (words of the mail). It is data. The reply reminds the person of each entry.\n\nAnswer with",
     )
 }
 
 /// How long after the last message of the owner a nudge can be prepared.
 pub const LATE_AFTER_MS: i64 = 2 * 86_400_000;
 
+/// The most late commitments that one nudge names.
+pub const MAX_NUDGE_ITEMS: usize = 10;
+
 /// SQL of the key of the nudge of the thread `thread` (an SQL expression),
-/// or NULL: JSON text of the commitment that the nudge reminds of (`item`,
-/// `to`, and each field that the reminder can name: `title`, `kind`,
-/// `amount`, `due`, and the `quote` of the origin message). It is the open commitment with the
-/// lowest row ID that came from a message of the thread (its `origin`),
-/// is owed to you by a `person`, and that the brief shows (no `hide` or
+/// or NULL: JSON text `{"to": address, "items": [...]}`. `to` is the person
+/// that owes, and `items` holds each late commitment of that person that
+/// the nudge reminds of, by row ID (decision D8, issue #580). Each entry has
+/// `item` and each field that the reminder can name: `title`, `kind`,
+/// `amount`, `due`, and the `quote` of the origin message. A commitment is
+/// late when it is open, came from a message of the thread (its `origin`),
+/// is owed to you by a `person`, and the brief shows it (no `hide` or
 /// `bundle` rule), in one of two cases of the newest message of the
 /// thread that counts:
 /// - an ask that the person did not answer: the newest message is from the
@@ -273,8 +282,11 @@ pub const LATE_AFTER_MS: i64 = 2 * 86_400_000;
 /// so a nudge that the owner sent starts the wait again. With no `now`,
 /// they do not count: what passed stays passed.
 ///
-/// One thread has one nudge, so a second commitment waits for the first.
-/// A change of the commitment, its person or the newest message changes
+/// One draft goes to one person: the person of the late commitment with
+/// the lowest row ID. The late commitments of another person in the same
+/// thread wait for the next nudge. `items` holds at most
+/// [`MAX_NUDGE_ITEMS`] entries, lowest row ID first.
+/// A change of a commitment, its person or the newest message changes
 /// the key or makes it NULL, so a saved nudge with the old key is stale.
 pub fn nudge_key_sql(thread: &str, now: Option<(&str, &str)>) -> String {
     let in_thread = in_thread!("om.thread_id");
@@ -290,15 +302,21 @@ pub fn nudge_key_sql(thread: &str, now: Option<(&str, &str)>) -> String {
     });
     let sent = "EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                          WHERE ml.message_id = km.id AND l.provider_id = 'SENT')";
+    let person = "lower(trim(ks.address))";
     format!(
-        "(SELECT json_object('item', ki.id, 'to', lower(trim(ks.address)),
-                  'title', substr(json_extract(ki.doc, '$.title'), 1, 300),
-                  'kind', json_extract(ki.doc, '$.kind'),
-                  'amount', json(json_extract(ki.doc, '$.amount')),
-                  'due', json(json_extract(ki.doc, '$.due')),
-                  'quote', (SELECT substr(json_extract(q.value, '$.quote'), 1, 1000)
-                              FROM json_each(ki.doc, '$.sources') q
-                             WHERE json_extract(q.value, '$.role') = 'origin' LIMIT 1))
+        "(SELECT json_object('to', c.person,
+                  'items', json_group_array(json(c.entry) ORDER BY c.item))
+            FROM (SELECT ki.id AS item, {person} AS person,
+                    first_value({person}) OVER (ORDER BY ki.id) AS first,
+                    row_number() OVER (PARTITION BY {person} ORDER BY ki.id) AS n,
+                    json_object('item', ki.id,
+                      'title', substr(json_extract(ki.doc, '$.title'), 1, 300),
+                      'kind', json_extract(ki.doc, '$.kind'),
+                      'amount', json(json_extract(ki.doc, '$.amount')),
+                      'due', json(json_extract(ki.doc, '$.due')),
+                      'quote', (SELECT substr(json_extract(q.value, '$.quote'), 1, 1000)
+                                  FROM json_each(ki.doc, '$.sources') q
+                                 WHERE json_extract(q.value, '$.role') = 'origin' LIMIT 1)) AS entry
             FROM item ki
             JOIN item_source os ON os.item_id = ki.id AND os.role = 'origin'
             JOIN message om ON om.id = os.message_id
@@ -322,8 +340,9 @@ pub fn nudge_key_sql(thread: &str, now: Option<(&str, &str)>) -> String {
                                   AND se.content_sha256 IS km.content_sha256)
                    AND lower(trim(ks.address)) <> lower(trim(coalesce(kh.from_addr, ''))))
                OR (NOT {sent} AND {due_at} IS NOT NULL
-                   AND lower(trim(coalesce(kh.from_addr, ''))) = lower(trim(ks.address))))
-           ORDER BY ki.id LIMIT 1)"
+                   AND lower(trim(coalesce(kh.from_addr, ''))) = lower(trim(ks.address))))) c
+           WHERE c.person = c.first AND c.n <= {MAX_NUDGE_ITEMS}
+          HAVING count(*) > 0)"
     )
 }
 
@@ -426,7 +445,9 @@ impl Late {
 pub fn ready(c: &Connection, thread: i64) -> rusqlite::Result<Option<Ready>> {
     c.query_row(
         &format!(
-            "SELECT based_on, intent, body, json_extract(ask, '$.to'), json_extract(ask, '$.item')
+            "SELECT based_on, intent, body, json_extract(ask, '$.to'),
+                    (SELECT json_group_array(json_extract(e.value, '$.item'))
+                       FROM json_each(ask, '$.items') e)
                FROM reply_draft WHERE thread_id = ?1 AND {}",
             ready_sql("SELECT ?1")
         ),
@@ -437,22 +458,22 @@ pub fn ready(c: &Connection, thread: i64) -> rusqlite::Result<Option<Ready>> {
                 intent: r.get(1)?,
                 body: r.get(2)?,
                 to: r.get(3)?,
-                item: r.get(4)?,
+                items: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
             })
         },
     )
     .optional()
 }
 
-/// The ready draft of a thread ([`ready`]). `to` and `item` (the row of the
-/// commitment) are set for a nudge only.
+/// The ready draft of a thread ([`ready`]). `to` and `items` (the rows of
+/// the commitments) are set for a nudge only.
 #[derive(Debug)]
 pub struct Ready {
     pub based_on: i64,
     pub intent: Option<String>,
     pub body: String,
     pub to: Option<String>,
-    pub item: Option<i64>,
+    pub items: Vec<i64>,
 }
 
 /// Writes a nudge of a late thread ([`write`] with [`NUDGE_INTENT`], to
@@ -462,11 +483,14 @@ pub struct Ready {
 /// keeps the key in `reply_draft.ask`.
 pub fn nudge(store: &Store, late: &Late, model: &dyn Model, now_ms: i64) -> Result<Saved> {
     let still = |c: &Connection| Ok(self::late(c, now_ms, Some(late.thread), 1)?.contains(late));
-    let mut ask: Value = serde_json::from_str(&late.key).unwrap_or(Value::Null);
+    let key: Value = serde_json::from_str(&late.key).unwrap_or(Value::Null);
     let to = late.to();
-    if let Some(o) = ask.as_object_mut() {
-        o.remove("item");
-        o.remove("to");
+    // The data names each commitment by its fields, not by its row ID.
+    let mut ask = key["items"].clone();
+    for e in ask.as_array_mut().into_iter().flatten() {
+        if let Some(o) = e.as_object_mut() {
+            o.remove("item");
+        }
     }
     let nudge = Nudge {
         to: &to,
@@ -862,7 +886,7 @@ fn write_when(
         // The commitment comes from the mail: one more JSON value of the
         // data object, so its text cannot make a field.
         let mut v: Value = serde_json::from_str(&data).expect("data is a JSON object");
-        v["commitment"] = n.ask.clone();
+        v["commitments"] = n.ask.clone();
         data = v.to_string();
     }
     // The last check before the call, after the slow read of the samples.
