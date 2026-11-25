@@ -2653,7 +2653,7 @@ fn a_declined_sender_gets_no_model_call_until_the_decline_ends() {
 /// (a correction) stays, and the mail waits for the model when the rule
 /// stops applying, as for an item that is not pinned. This holds right
 /// after the pin, after a new understanding of the message with the pinned
-/// item, and after the upgrade of a version 55 store (the backfill).
+/// item, and after the upgrade of a version 56 store (the backfill).
 #[test]
 fn a_pinned_rule_item_whose_rule_stops_applying_makes_the_mail_wait() {
     use iris_understand::store::recheck_fixed;
@@ -2709,7 +2709,7 @@ Your one-time code is 918273. It ends in 10 minutes.
                 sql(
                     &b,
                     "ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
-                     ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 55;",
+                     ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 56;",
                 );
                 let Box_ {
                     _dir,

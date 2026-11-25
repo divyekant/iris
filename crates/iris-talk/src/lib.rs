@@ -684,17 +684,18 @@ fn addresses(list: &str) -> Vec<String> {
     out
 }
 
-/// The display name with its RFC 2047 encoded words decoded, by the scanner
-/// of the people step.
-// shortcut: decodes through a made-up mailbox, so a name with an encoded word and a
-// bare comma stays as it is; upgrade when iris-people gives its decoder.
+/// The display name with its RFC 2047 encoded words decoded, by the decoder
+/// that `iris-clean` uses for the `Subject` (as `iris_senders::head`
+/// does). A name is one value, so a bare comma in it stays text.
 fn decode_name(name: &str) -> String {
     if !name.contains("=?") {
         return name.to_string();
     }
-    match iris_people::mailboxes(&format!("{name} <x@x.example>")).as_slice() {
-        [(_, Some(decoded))] => decoded.clone(),
-        _ => name.to_string(),
+    let one = name.replace(['\r', '\n'], " ");
+    let decoded = iris_clean::clean(format!("Subject: {one}\r\n\r\n").as_bytes()).subject;
+    match line(&decoded) {
+        d if d.is_empty() => name.to_string(),
+        d => d,
     }
 }
 
@@ -785,6 +786,16 @@ mod tests {
             ["a@x.example", "b@y.example"]
         );
         assert!(addresses("a@b@c.d, @x.org, y@").is_empty());
+    }
+
+    #[test]
+    fn names_with_encoded_words() {
+        // Issue 71: a bare comma does not stop the decode.
+        assert_eq!(decode_name("Lee, =?UTF-8?Q?Ren=C3=A9e?="), "Lee, Renée");
+        assert_eq!(decode_name("=?UTF-8?B?QW5hIExlZQ==?="), "Ana Lee");
+        assert_eq!(decode_name("Ana Lee"), "Ana Lee");
+        // Folded header text is one line.
+        assert_eq!(decode_name("=?UTF-8?Q?Ana?=\r\n Lee"), "Ana Lee");
     }
 
     #[test]

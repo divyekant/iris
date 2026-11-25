@@ -336,13 +336,9 @@ fn settle_hostile(tx: &rusqlite::Transaction, cutoff: i64, now: i64) -> Result<(
             "UPDATE watch SET message_id = NULL, arrived_at = NULL
              WHERE message_id IS NOT NULL AND EXISTS (
                SELECT 1 FROM message m WHERE m.id = watch.message_id AND m.gone_at <= ?1
-                 AND (",
-            crate::hostile_mail!(),
-            " OR ",
-            crate::may_be_hostile!(),
-            " OR ",
-            crate::draft_or_copy!("m"),
-            "))"
+                 AND ",
+            not_received!(),
+            ")"
         ),
         [cutoff],
     )?;

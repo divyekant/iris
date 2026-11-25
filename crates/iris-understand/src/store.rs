@@ -324,7 +324,7 @@ fn fixed_differs(store: &Store, id: i64, now_ms: i64) -> Result<bool> {
             [id],
             |r| r.get(0),
         )?;
-        // The rules that completed the last understanding (migration 56),
+        // The rules that completed the last understanding (migration 57),
         // also of pinned items; `None` when the model made an item.
         let rules: Option<String> =
             c.query_row("SELECT fixed_rules FROM message WHERE id = ?1", [id], |r| {
@@ -732,7 +732,7 @@ pub struct Seen {
     from_name: Option<String>,
     from_addr: Option<String>,
     /// The gate of the sender (decision D29): its decline, and the row ID
-    /// and `gate_rev` of its row (migration 56). Each decline or reopen
+    /// and `gate_rev` of its row (migration 57). Each decline or reopen
     /// during the call is a changed input (#934).
     gate: (bool, Option<(i64, i64)>),
 }

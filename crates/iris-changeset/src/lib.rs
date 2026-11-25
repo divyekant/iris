@@ -1321,8 +1321,10 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
                         |r| r.get(0),
                     )?
             }
+            // A tombstone is no target (issue 904).
             (Kind::Account, "accounts") => c.query_row(
-                "SELECT EXISTS (SELECT 1 FROM account WHERE id = ?1)",
+                "SELECT EXISTS (SELECT 1 FROM account WHERE id = ?1
+                   AND (state IS NULL OR state NOT IN ('removing', 'removed')))",
                 [row],
                 |r| r.get(0),
             )?,

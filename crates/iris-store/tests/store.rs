@@ -82,7 +82,7 @@ fn open_makes_the_data_folder() {
     }
     store
         .read(|c| {
-            assert_eq!(iris_store::schema_version(c)?, 56);
+            assert_eq!(iris_store::schema_version(c)?, 57);
             let journal: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
             assert_eq!(journal, "wal");
             let cache: i64 = c.query_row("PRAGMA cache_size", [], |r| r.get(0))?;
@@ -138,6 +138,42 @@ fn refuses_an_unknown_schema() {
     conn.pragma_update(None, "user_version", -1).unwrap();
     drop(conn);
     assert!(matches!(Store::open(&dir.0), Err(Error::UnknownSchema(-1))));
+}
+
+/// `label:` folds the case of each letter, not only ASCII (issue #965).
+#[test]
+fn a_label_filter_folds_unicode_case() {
+    let dir = TempDir::new("label-fold");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(
+            acc,
+            &[
+                ("Label_2", "Entwürfe", "user"),
+                ("Label_3", "ΣΧΈΔΙΑ", "user"),
+            ],
+        )
+        .unwrap();
+    let ids = store
+        .put_messages(
+            acc,
+            &[
+                msg("a", "t1", 1, &["Label_2"], "One", "x"),
+                msg("b", "t2", 2, &["Label_3"], "Two", "y"),
+            ],
+        )
+        .unwrap();
+    let s = |q: &str| store.search(q, 10).unwrap();
+    for q in [
+        "label:Entwürfe",
+        "label:ENTWÜRFE",
+        "label:entwürfe",
+        "label:Label_2",
+    ] {
+        assert_eq!(s(q), [ids[0]], "{q}");
+    }
+    assert_eq!(s("label:σχέδια"), [ids[1]]);
+    assert_eq!(s("label:Entwurfe"), Vec::<i64>::new(), "a letter differs");
 }
 
 #[test]

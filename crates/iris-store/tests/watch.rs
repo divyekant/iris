@@ -442,3 +442,33 @@ fn the_cleanup_keeps_a_hostile_match_hidden() {
         assert_eq!(open(m), safe, "{name}");
     }
 }
+
+/// A stored match follows the same rule as a new arrival (issue #931): a
+/// match that gets the label `SENT` later is not mail that you got, so the
+/// watch waits again, also after the content cleanup of the gone message.
+#[test]
+fn a_match_that_gets_sent_later_waits_again() {
+    let dir = TempDir::new("sent-later");
+    let (store, acc) = setup(&dir);
+    let w = store.add_watch("visa", NOW).unwrap();
+    let m = put(&store, acc, msg("a", NOW, &["INBOX"], "visa", true));
+    assert_eq!(store.check_watches(NOW).unwrap(), [(w, m)]);
+    put(&store, acc, msg("a", NOW, &["INBOX", "SENT"], "visa", true));
+    assert_eq!(store.watch(w).unwrap().unwrap().message, None);
+    let later = put(&store, acc, msg("b", NOW, &["INBOX"], "visa", true));
+    assert_eq!(store.check_watches(NOW + 1).unwrap(), [(w, later)]);
+    // The cleanup of the gone match keeps the watch waiting.
+    let w2 = store.add_watch("lunch", NOW).unwrap();
+    let m2 = put(&store, acc, msg("c", NOW, &["INBOX"], "lunch", true));
+    assert_eq!(store.check_watches(NOW).unwrap(), [(w2, m2)]);
+    put(
+        &store,
+        acc,
+        msg("c", NOW, &["INBOX", "SENT"], "lunch", true),
+    );
+    store
+        .write(|tx| Ok(tx.execute("UPDATE message SET gone_at = 1 WHERE id = ?1", [m2])?))
+        .unwrap();
+    store.clean_gone(NOW).unwrap();
+    assert_eq!(store.watch(w2).unwrap().unwrap().message, None);
+}

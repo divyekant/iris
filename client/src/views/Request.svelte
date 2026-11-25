@@ -13,8 +13,9 @@
   import Comments from "./Comments.svelte";
   import { author, detail, FLAGS, itemRow, mail, TAGS, to, unmarked, key, messageRow, outcome, pages, plan, short, shown, target, targets, verb, waits, would, type Row } from "../review";
 
-  // `onchange` gets the changeset after a decision, so that the review shows it as it is now.
-  let { changeset: c, onchange = () => {} }: { changeset: Changeset; onchange?: (c: Changeset) => void } = $props();
+  // `read` runs each read and write that gives the request back, so that the review shows it as it is now.
+  // The review runs them one at a time, in its queue.
+  let { changeset: c, read = (work) => work() }: { changeset: Changeset; read?: (work: () => Promise<Changeset>) => Promise<Changeset> } = $props();
 
   // The messages endpoint takes at most 200 IDs, and the engine at most 500 decisions (issue 197).
   const PAGE = 200;
@@ -66,13 +67,16 @@
   // The reason of each submitted revision (issue 189): an open change of an older revision
   // shows the reason of its own revision, not the quote above, which is the reason of the newest.
   let reasons: Record<number, string> = $state({});
-  let older = $derived(open.some((a) => a.revision < c.revision));
-  let askedReasons = false;
+  // Each document of the request can bring new older revisions: the reasons load again for each
+  // revision that has no reason yet, once for each set of revisions.
+  let reasonsNeed = $derived([...new Set(open.filter((a) => a.revision < c.revision && !(a.revision in reasons)).map((a) => a.revision))].join(","));
+  let reasonsAsked = "";
   $effect(() => {
-    if (!older || askedReasons) return;
-    askedReasons = true;
+    const need = reasonsNeed;
+    if (!need || need === reasonsAsked) return;
+    reasonsAsked = need;
     get<{ revisions: { revision: number; why: string }[] }>(`changesets/${encodeURIComponent(c.id)}/revisions`).then(
-      (got) => (reasons = Object.fromEntries(got.revisions.map((r) => [r.revision, r.why]))),
+      (got) => (reasons = { ...reasons, ...Object.fromEntries(got.revisions.map((r) => [r.revision, r.why])) }),
       // Without the reasons, each older change still says which revision it comes from.
       () => {},
     );
@@ -105,24 +109,26 @@
   let failed: Record<string, boolean> = $state({});
   let problem = $state("");
   // The draft of each draft and send action that waits (card R4-07), by the key of the action.
+  // A key names one action of one revision, so a draft never changes under its key. Each document
+  // of the request can bring new mail actions: the drafts load again for each set of keys that has
+  // no draft yet. A failed load waits for Try again.
   let drafts: Record<string, DraftView> | null = $state(null);
-  let draftsFailed = $state(false);
-  let mails = $derived(open.some(mail));
+  let draftsNeed = $derived(open.filter((a) => mail(a) && !drafts?.[key(a)]).map(key).join(","));
+  let draftsAsked = "";
+  let draftsTry = $state(0);
   $effect(() => {
-    if (!mails || drafts || draftsFailed) return;
+    void draftsTry;
+    const need = draftsNeed;
+    if (!need || need === draftsAsked) return;
+    draftsAsked = need;
     get<{ drafts: DraftView[] }>(`changesets/${encodeURIComponent(c.id)}/drafts`).then(
       (got) => {
-        const map: Record<string, DraftView> = Object.fromEntries(got.drafts.map((d) => [`${d.revision}.${d.n}`, d]));
-        // The answer leaves out an action that is not open now: the request changed after it loaded.
-        if (open.some((a) => mail(a) && !map[key(a)])) {
-          draftsFailed = true;
-          refresh("This request changed after you opened it. Here it is as it is now.");
-        } else drafts = map;
+        const map: Record<string, DraftView> = { ...drafts, ...Object.fromEntries(got.drafts.map((d) => [`${d.revision}.${d.n}`, d])) };
+        drafts = map;
+        // The answer leaves out an action that is open now: the request changed after it loaded.
+        if (need.split(",").some((k) => !map[k])) refresh("This request changed after you opened it. Here it is as it is now.");
       },
-      (e) => {
-        draftsFailed = true;
-        problem = e instanceof Error ? e.message : String(e);
-      },
+      (e) => (problem = e instanceof Error ? e.message : String(e)),
     );
   });
   // An action is complete when each of its rows loaded, and for a mail action its draft too:
@@ -150,8 +156,8 @@
   function retry() {
     problem = "";
     failed = {};
-    drafts = null;
-    draftsFailed = false;
+    draftsAsked = "";
+    draftsTry++;
   }
 
   let ready = $derived(!busy && !stale && !missing.length);
@@ -160,7 +166,7 @@
   async function refresh(why: string) {
     stale = true;
     try {
-      onchange(await get<Changeset>(`changesets/${encodeURIComponent(c.id)}`));
+      await read(() => get<Changeset>(`changesets/${encodeURIComponent(c.id)}`));
       stale = false;
       problem = why;
     } catch {
@@ -181,8 +187,7 @@
     problem = saved = "";
     const before = new Set(c.actions.filter((a) => a.decision?.state === "cancelled").map(key));
     try {
-      const after = await post<Changeset>(`changesets/${encodeURIComponent(c.id)}/withdraw`, {});
-      onchange(after);
+      const after = await read(() => post<Changeset>(`changesets/${encodeURIComponent(c.id)}/withdraw`, {}));
       asking = false;
       const gone = after.actions.filter((a) => a.decision?.state === "cancelled" && !before.has(key(a))).length;
       const going = after.actions.filter((a) => a.decision?.state === "approved").length;
@@ -212,7 +217,7 @@
     let done = 0;
     try {
       for (; done < all.length; done += BATCH) {
-        onchange(await post<Changeset>(`changesets/${encodeURIComponent(c.id)}/decide`, { actions: all.slice(done, done + BATCH) }));
+        await read(() => post<Changeset>(`changesets/${encodeURIComponent(c.id)}/decide`, { actions: all.slice(done, done + BATCH) }));
       }
       saved = [yes && `You approved ${yes === 1 ? "one change" : `${yes} changes`}.`, no && `You denied ${no === 1 ? "one change" : `${no} changes`}.`].filter(Boolean).join(" ");
     } catch (e) {
