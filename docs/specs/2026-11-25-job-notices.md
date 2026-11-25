@@ -29,14 +29,20 @@ UNIQUE`), so a job cannot have a row today.
   the job waits on that question. The row closes by itself when the job
   leaves that question (an answer, an end), or when the person marks it
   done.
-- The engine or the Mac app shows one system notice for each new row, with
-  the rules of the notices by rule (one owner for each notice).
+- The engine or the Mac app shows one system notice for each new `Job due`
+  row, with the rules of the notices by rule (one owner for each notice).
+- A `Job question` row gives no system notice. Iris interrupts only by a
+  rule that the person wrote, or on the due date of a job (`PRODUCT.md`,
+  "Do not interrupt"; `docs/manifesto.md`, principle 3). An agent can ask
+  at any time, so its question waits quietly in the notice list.
 - The words of a job notice are the words of the person (the goal), never
   the text of an agent or of a mail.
 
 ## Not in scope
 
 - A notice for a move to `waiting` or `done`. They need no act.
+- A system notice for a question of an agent. It needs a change of the
+  interrupt rule of `PRODUCT.md`, and that is a product decision.
 - The text of the question in a notice. The job page shows it.
 - A new screen. The notice list gets the job rows in its present design.
 
@@ -82,14 +88,19 @@ mail do not change: a job row has no mail.
 
 ### The system notice
 
+A row "interrupts" when it is a rule row, or a job row of a move by the
+engine (`Job due`). A `Job question` row never interrupts. The term reads
+`job_event.by` of the event of the row, not the name, because a rule name
+is text of the person and can be any words.
+
 The engine keeps the largest job notice ID that it saw, in memory. It starts
 at the largest notice ID at the start of the attention thread, so a restart
-shows no old notice. Each turn reads the open job rows above it, oldest
-first, and gives them to `notify::for_system` with the rule rows. So the
-Mac app or the engine shows each one, never both, as for the notices by
+shows no old notice. Each turn reads the open `Job due` rows above it,
+oldest first, and gives them to `notify::for_system` with the rule rows. So
+the Mac app or the engine shows each one, never both, as for the notices by
 rule.
 
-- Title: `Iris: <rule_name>` (`Iris: Job due`, `Iris: Job question`).
+- Title: `Iris: Job due`.
 - Text: `j-<n>: <goal>`, one line, cut to 200 characters.
 
 `Shown::job_due` and the notice of `DueTurn::moved` go: the row is the one
@@ -108,9 +119,16 @@ still sees the job (#845).
 - `rule_name`, `title`, `text`, `created`, `message` as before (`message`
   is `null` for a job row).
 
+`app.notices` gives in `notices` only the rows that interrupt: the Mac app
+shows a system notice for each row of that list. `open` counts each open
+row, the `Job question` rows too, so the count of the menu bar includes
+them. `last` stays the largest row ID of the answer, or `after`, so the
+cursor of the app passes a `Job question` row with no system notice only
+when a later row that interrupts comes.
+
 A Mac app from before this change reads `rule_name`, `title` and `text`,
-and opens `#/brief`, so it shows a job row with no change. The new Mac app
-opens `#/jobs/<j-id>`.
+and opens `#/brief`, so it shows a `Job due` row with no change. The new
+Mac app opens `#/jobs/<j-id>`.
 
 `POST /api/notices/<n-id>/done` marks a job row done as a rule row.
 
@@ -143,7 +161,9 @@ job. No new token and no new part.
 | A second question later | A second row; the first stays closed | policy test |
 | A crash after the commit | The row is in the list; the engine shows no old row after the restart | engine test |
 | A full queue of system notices | The row stays in the list and in the Mac app | known behavior of the queue |
-| The Mac app is live | The app shows the row; the engine does not | engine test with `for_system` |
+| The Mac app is live | The app shows the `Job due` row; the engine does not | engine test with `for_system` |
+| A question of an agent | One open `Job question` row in the list and in the count of `app.notices`; no system notice from the engine or the Mac app | engine test, socket test |
+| A rule whose name is `Job due` or `Job question` | It interrupts as each rule row; the name changes nothing | policy test |
 | Old rule notices at the migration | Same IDs, same columns, same open state | migration test |
 | A `notice` table whose largest row was deleted | `sqlite_sequence` keeps the old value | migration test |
 | A row with both a mail and a job, or neither | The `CHECK` refuses it | migration test |
@@ -151,7 +171,7 @@ job. No new token and no new part.
 ## Impact
 
 - `crates/iris-store`: the migration.
-- `crates/iris-policy/src/notice.rs`: the open term, the read of new job rows, the optional rule.
+- `crates/iris-policy/src/notice.rs`: the open term, the interrupt term, the read of new `Job due` rows, the optional rule.
 - `crates/iris-job`: no change of code (the trigger), tests.
 - `crates/iris/src/engine.rs`, `notify.rs`: the system notice from the row.
 - `crates/iris-api/src/notice.rs`, `crates/iris/src/socket.rs`: the `job` field, the optional `rule`.

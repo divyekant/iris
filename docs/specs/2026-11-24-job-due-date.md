@@ -27,9 +27,15 @@ moves to "needs you", with a notice. Ending the job is too strong.
 
 - A change of the due date after the start. Card P9-D25 (decision D25)
   adds the edit. This spec says how an edit and this move work together.
-- A notice for the questions of an agent (`iris ask`), and a row in the
-  notice list for the move: `docs/specs/2026-11-25-job-notices.md` adds
-  both (issues #844, #845).
+- The row in the notice list for the move, and a row with no system notice
+  for the questions of an agent (`iris ask`):
+  `docs/specs/2026-11-25-job-notices.md` adds both (issues #844, #845).
+
+Superseded parts: `docs/specs/2026-11-25-job-notices.md` replaces the
+system notice of this spec. The system notice of a due move now comes from
+its row in the table `notice`, not from `DueTurn::moved`. The sections "The
+engine step", "Options not chosen", "Failure list", "Acceptance criteria"
+and "Known limits" below describe the row-backed path.
 
 ## Design
 
@@ -98,12 +104,16 @@ passed, and the person decides. `Due` holds the job ID and its goal.
 `DueTurn` has two fields. `moved` holds the `Due` of each committed move.
 `failed` holds the ID and the error of each job whose move failed. A
 failure of one job does not stop the moves of the others. The read of the
-due jobs is the only error of the whole step. The engine gives one notice
-for each entry of `moved`, and one log line for each entry of `failed`.
+due jobs is the only error of the whole step. The engine writes one log
+line for each entry of `failed`. `moved` is for the log and the tests only.
 
-The attention loop of the engine (`crates/iris/src/engine.rs`, each 10
-seconds) runs the step, then gives one system notice for each moved job to
-the notice thread (`crates/iris/src/notify.rs`):
+Each move inserts a `job_event` row with the state `needs_you`. A trigger of
+the store inserts a notice row with the name `Job due` in the same write
+transaction (`docs/specs/2026-11-25-job-notices.md`). The attention loop of
+the engine (`crates/iris/src/engine.rs`, each 10 seconds) runs the step,
+then reads the new open `Job due` rows and gives one system notice for each
+row, with the same owner rules as the notices by rule (the Mac app or the
+engine):
 
 - Title: `Iris: Job due`
 - Text: `j-<n>: <goal>`, cut to 200 characters on a character boundary.
@@ -111,18 +121,13 @@ the notice thread (`crates/iris/src/notify.rs`):
 The goal is the words of the person, never mail text. The notice command
 gets it as an argument, as for the notices by rule.
 
-The notice thread gets a plain title and text in place of
-`iris_policy::notice::Notice`, so the notices by rule and the job notices use
-one queue.
-
 ## Options not chosen
 
 - End the job on its due date (option B of D24): dk chose A.
-- A row in the `notice` table for the move: the table has one row for each
-  message (`message_id NOT NULL UNIQUE`). A job notice needs a new kind of
-  row, a change of `/api/notices`, the notice list of the web client and the
-  Mac app. The job page and the "Needs you" group of the jobs page show the
-  state. See "Known limits".
+- A system notice straight from `DueTurn::moved`, with no row (the first
+  build of this spec): a crash or a full queue lost the notice, and the
+  notice list did not show the move (issues #844, #845).
+  `docs/specs/2026-11-25-job-notices.md` replaces it with the row.
 - A fixed time of the day for the move: the due date of the start page is a
   time already (the end of the day of the person).
 
@@ -137,12 +142,12 @@ one queue.
 | The person answered or woke the job after the due date | No move | Unit test |
 | The move of one due job fails (for example a goal that is not UTF-8 from raw SQL) | That job does not move and stays in its state. The other due jobs still move and get their notices. Each turn writes one log line that names the job | Unit test (`a_job_whose_goal_is_not_utf8_does_not_stop_the_others`) |
 | A job that starts after its due date | One move on the next turn | Unit test (`a_job_that_starts_after_its_due_date_moves_once`) |
-| The engine turn with a due job | The move and one notice; the next turn gives no second notice | Engine test (`the_attention_turn_moves_a_due_job_once`) |
+| The engine turn with a due job | The move, one `Job due` row and one system notice; the next turn gives no second notice | Engine test (`the_attention_turn_moves_a_due_job_once`) |
 | A move between the read and the write that makes rule 1, 2 or 3 false | The write sees it and makes no move | Unit test (`a_move_after_the_read_wins`) |
 | A wait of the agent between the read and the write | The job still moves | Rules 1 to 3 hold |
 | A `due` move by the agent or the person, with no due date, before `due_at`, or with another `why` | The trigger refuses it | Unit test |
-| A crash after the commit of the move and before the notice | The job stays in `needs_you`. No notice is shown. The jobs page shows it | Known limit |
-| The queue of system notices is full | The notice is dropped. The jobs page shows the job | Known limit |
+| A crash after the commit of the move and before the system notice | The job stays in `needs_you`. The `Job due` row is in the notice list and in the Mac app | Store test of `docs/specs/2026-11-25-job-notices.md` |
+| The queue of system notices is full | The system notice is dropped. The `Job due` row stays in the notice list and in the Mac app | Known behavior of the queue |
 | No notice command on the system | One log line. The jobs page shows the job | Existing behavior of `notify::show` |
 
 ## Impact
@@ -182,8 +187,9 @@ None.
    skips the job.
 2. The move happens once: the next steps make no move, also after the
    answer of the person. Red if rule 3 is missing.
-3. The engine gives one system notice for each move. Red if the step gives
-   no notice.
+3. Each move adds one open `Job due` notice row in its transaction, and the
+   engine gives one system notice for each new row. Red if the move adds no
+   row or the engine gives no notice.
 4. After the answer, a job with a session gets a new session, and a job
    with no session stays in `working` with no session. Red if the answer
    of a due job with no session fails or starts a session with no agent.
@@ -200,10 +206,10 @@ cargo test -p iris-store
 
 ## Known limits
 
-- The move has no row in the notice list of the web client and of the Mac
-  app. The system notice and the jobs page show it (issue #844).
-- A crash between the commit of the move and the system notice loses the
-  notice. A full queue of system notices (100) drops it too. The job stays in `needs_you` (issue #845).
+- A crash between the commit of the move and the system notice, or a full
+  queue of system notices (100), loses the system notice. The `Job due` row
+  stays in the notice list and in the Mac app
+  (`docs/specs/2026-11-25-job-notices.md`, issues #844, #845).
 
 ## Rollout
 
