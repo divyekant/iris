@@ -835,3 +835,60 @@ async fn joinable_agrees_with_create() {
     assert_eq!(code, StatusCode::BAD_REQUEST);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Issue #1015: a member of a matter shows the reply draft of its thread,
+/// as a brief line does, on the matter page and on the answer of a confirm.
+#[tokio::test]
+async fn a_member_shows_a_ready_draft_of_its_thread() {
+    let (dir, s) = setup("ready");
+    // Message 3 (thread gt2) is the origin of c-3: its clean text and a
+    // draft that answers it, with the set of the messages that it read.
+    s.write(|tx| {
+        tx.execute_batch(&format!(
+            "UPDATE message SET understood_at = 1 WHERE id = 3;
+             INSERT INTO body(message_id, subject, sender, text) VALUES (3, 'Trip', 'ana', 'Book?');
+             INSERT INTO reply_draft(thread_id, based_on, body, model, prompt, samples, created_at)
+               SELECT thread_id, id, 'Yes.', 'fake', 'draft/0.1', 0, 1 FROM message WHERE id = 3;
+             UPDATE reply_draft SET seen = ({});",
+            iris_voice::seen_sql(&iris_voice::messages_sql("reply_draft.thread_id"))
+        ))?;
+        Ok(())
+    })
+    .unwrap();
+    let marks = |v: &Value| -> Vec<(String, Value)> {
+        ["commitment", "conversation", "record"]
+            .iter()
+            .flat_map(|f| v["items"][*f].as_array().unwrap().clone())
+            .map(|d| (d["id"].as_str().unwrap().to_string(), d["ready"].clone()))
+            .collect()
+    };
+    let (code, v) = call(&s, Method::GET, "/api/matters/g-1", "").await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    let got = marks(&v);
+    assert!(got.contains(&("c-3".into(), json!(["draft"]))), "{got:?}");
+    assert!(got.contains(&("r-1".into(), Value::Null)), "{got:?}");
+    assert!(got.contains(&("v-2".into(), Value::Null)), "{got:?}");
+    // The list of one form gives the same mark for the same item.
+    let (_, list) = call(&s, Method::GET, "/api/items?form=commitment", "").await;
+    let c3 = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == "c-3")
+        .unwrap();
+    assert_eq!(c3["ready"], json!(["draft"]), "{list}");
+    // The answer of a confirm is the same view.
+    let body = json!({ "title": "Tokyo trip", "items": ["r-1", "v-2", "c-3"] }).to_string();
+    let (code, v) = call(&s, Method::POST, "/api/matters/g-1/confirm", &body).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert!(marks(&v).contains(&("c-3".into(), json!(["draft"]))), "{v}");
+    // A stale draft: no mark.
+    s.write(|tx| {
+        tx.execute("UPDATE reply_draft SET based_on = 1", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, v) = call(&s, Method::GET, "/api/matters/g-1", "").await;
+    assert!(marks(&v).contains(&("c-3".into(), Value::Null)), "{v}");
+    let _ = std::fs::remove_dir_all(dir);
+}

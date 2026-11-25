@@ -8,7 +8,7 @@ use iris_store::{format_id, parse_id, Kind, Store};
 use rusqlite::Connection;
 use serde_json::{json, Map, Value};
 
-use crate::read::{doc_at, rfc3339, row_of, MATTER};
+use crate::read::{doc_at, ready_columns, ready_into, rfc3339, row_of, MATTER};
 use crate::{Error, Result};
 
 /// The forms of a member, with the ID kind of each (signals since
@@ -28,11 +28,12 @@ const MEMBER_FORMS: [(&str, Kind); 4] = [
 /// member of a declined matter (the full grouping that the person
 /// declined). A proposal that is not valid now is not read. A member that
 /// comes from hostile mail is not read (issue 112), and [`load`] leaves out
-/// a matter with too few members to show.
-fn select(filter: &str, order: &str) -> String {
+/// a matter with too few members to show. `ready` is "" or the columns of
+/// [`ready_columns`] with a leading comma, for the member documents.
+fn select(filter: &str, order: &str, ready: &str) -> String {
     format!(
         "SELECT m.id, m.title, m.status, m.model, m.prompt, m.created_at, m.updated_at,
-                m.decided_at, item.id, item.form, item.status, item.doc, {MATTER}, m.author
+                m.decided_at, item.id, item.form, item.status, item.doc, {MATTER}, m.author{ready}
            FROM matter m
            LEFT JOIN matter_item mi ON mi.matter_id = m.id AND CASE m.status
                 WHEN 'proposed' THEN mi.item_id IN
@@ -48,7 +49,8 @@ fn select(filter: &str, order: &str) -> String {
 }
 
 /// The matters of one statement of [`select`], in its order: each matter
-/// document with the documents of its members by form (when `members`).
+/// document with the documents of its members by form (when `members`;
+/// the statement then has the ready columns).
 fn load(
     c: &Connection,
     sql: &str,
@@ -105,7 +107,9 @@ fn load(
         doc["counts"][*f] = n.into();
         if members {
             if let Some(Value::Array(list)) = by_form.get_mut(*f) {
-                list.push(doc_at(r, 8)?);
+                let mut d = doc_at(r, 8)?;
+                ready_into(r, &mut d)?;
+                list.push(d);
             }
         }
     }
@@ -127,6 +131,7 @@ pub fn matters(store: &Store) -> Result<Value> {
         "m.status IN ('proposed', 'confirmed')",
         "m.status = 'confirmed',
          CASE m.status WHEN 'proposed' THEN m.created_at ELSE m.updated_at END DESC",
+        "",
     );
     let all = store.read(|c| {
         let mut all = load(c, &sql, [], false)?;
@@ -213,14 +218,16 @@ fn member(id: &str) -> Result<(i64, &'static str)> {
 }
 
 /// The matter document with its member documents, or `None`. One
-/// statement.
-fn view(c: &Connection, row: i64) -> rusqlite::Result<Option<Value>> {
-    let sql = select("m.id = ?1", "m.id");
+/// statement. Each member and each addition has `ready`, as a brief line
+/// (issue #1015).
+fn view(c: &Connection, row: i64) -> iris_store::Result<Option<Value>> {
+    let ready = format!(", {}", ready_columns(c)?);
+    let sql = select("m.id = ?1", "m.id", &ready);
     let Some((mut doc, items)) = load(c, &sql, [row], true)?.pop() else {
         return Ok(None);
     };
     let mut docs = Vec::new();
-    additions(c, &mut doc, Some(&mut docs))?;
+    additions(c, &mut doc, Some((&mut docs, &ready)))?;
     Ok(Some(
         json!({ "matter": doc, "items": items, "additions": docs }),
     ))
@@ -228,11 +235,12 @@ fn view(c: &Connection, row: i64) -> rusqlite::Result<Option<Value>> {
 
 /// Sets the field `additions` of a confirmed matter document: the item IDs
 /// of its live additions (the view `matter_add_live`), newest first, with
-/// no item of hostile mail. With `docs`, also the item documents.
+/// no item of hostile mail. With `docs`, also the item documents, with
+/// the ready columns (`ready`, as for [`select`]).
 fn additions(
     c: &Connection,
     doc: &mut Value,
-    mut docs: Option<&mut Vec<Value>>,
+    mut docs: Option<(&mut Vec<Value>, &str)>,
 ) -> rusqlite::Result<()> {
     if doc["status"] != "confirmed" {
         return Ok(());
@@ -240,8 +248,9 @@ fn additions(
     let Some((_, row)) = doc["id"].as_str().and_then(parse_id) else {
         return Ok(());
     };
+    let ready = docs.as_ref().map_or("", |(_, r)| *r);
     let mut st = c.prepare_cached(&format!(
-        "SELECT item.id, item.form, item.status, item.doc, {MATTER}
+        "SELECT item.id, item.form, item.status, item.doc, {MATTER}{ready}
            FROM matter_add_live a JOIN item ON item.id = a.item_id
           WHERE a.matter_id = ?1 AND NOT {from_hostile}
           ORDER BY a.created_at DESC, item.id DESC LIMIT 50",
@@ -255,8 +264,10 @@ fn additions(
             continue;
         };
         ids.push(Value::from(format_id(*kind, r.get(0)?)));
-        if let Some(d) = docs.as_deref_mut() {
-            d.push(doc_at(r, 0)?);
+        if let Some((d, _)) = docs.as_mut() {
+            let mut one = doc_at(r, 0)?;
+            ready_into(r, &mut one)?;
+            d.push(one);
         }
     }
     if !ids.is_empty() {
