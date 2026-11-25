@@ -2416,9 +2416,12 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
 
     // One thread: the lightest memory footprint has priority.
     // The time driver: the socket waits at most READ_WAIT for a request.
+    // The blocking threads: the API and its stream writers, and one for each
+    // connection of the command socket (#814).
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
+        .max_blocking_threads(iris_api::BLOCKING_THREADS + socket::MAX_CONNECTIONS)
         .build()?;
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;
