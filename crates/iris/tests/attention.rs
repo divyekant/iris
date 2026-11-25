@@ -33,7 +33,11 @@ fn a_turn_updates_the_conversations_that_a_kind_change_marked() {
                 [],
             )?;
             // The mark of an understanding run that stopped before its end.
-            tx.execute("INSERT INTO talk_due(thread_id) VALUES (1)", [])?;
+            // The header trigger (migration 69) can queue the thread first.
+            tx.execute(
+                "INSERT OR IGNORE INTO talk_due(thread_id) VALUES (1)",
+                [],
+            )?;
             Ok(())
         })
         .unwrap();
