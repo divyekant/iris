@@ -120,7 +120,9 @@ and it is not the source (`item_source`) of a `signal` item. A signal can
 hold a security code, and the source text holds the same code, so no part
 of that message goes into a workspace.
 The rule of hostile mail is the rule of spec 1 section 6.7: a hostile mark,
-or a sender of the kind `hostile` on a message that you did not send. A
+the label `SPAM`, or a sender of the kind `hostile` on a message that you
+did not send. A message that waits for its link check is not clean either
+(`iris_store::may_be_hostile!()`). A
 message that is not understood yet is not clean, because the engine has not
 checked it for hostile marks. The build checks each message again on each
 build, so a message that became hostile mail after the grant leaves the
