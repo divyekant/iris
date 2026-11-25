@@ -134,7 +134,8 @@ The apply module (`crates/iris-apply/src/send.rs`) gets a branch for a
    - The new content hash is the `hash` of the draft row (the person
      sent the same content again): no provider call. In one transaction,
      the action becomes `applied` with a ledger row `applied`, `undo`
-     `none` and no `pre`. The send of the write then goes as in the write
+     `none`, no `pre`, and `post` set to the content of the press (so its
+     hash is the hash of the press). The send of the write then goes as in the write
      spec. So a claim with a call always has a new hash that is not the
      old hash, and recovery can tell the two apart (section 4).
 4. Claim the ledger row in `writing`, in one transaction that runs the
@@ -145,11 +146,16 @@ The apply module (`crates/iris-apply/src/send.rs`) gets a branch for a
    draft row before the change (its `content` JSON and its `Date` in
    seconds), and `post` is the new stored content. `undo` is `inverse`.
 5. Call `drafts.update` with the new bytes and the thread ID of a reply.
-6. On success, in one transaction: set the row `applied`, and set
-   `content`, `hash`, `raw` and `updated_at` of the draft row. The
-   `Message-ID` of the row follows the read back of the answer, with the
-   rule of `changed_at_gmail` (`sets_draft_message_id`). The action
-   becomes `applied`.
+6. On success, read the draft back (section 7). In one transaction: set
+   the row `applied`, and set `content`, `hash`, `raw` and `updated_at`
+   of the draft row. The `Message-ID` of the row follows the read back,
+   with the rule of `changed_at_gmail` (`sets_draft_message_id`). If the
+   read back has another `Message-ID` than the bytes of step 2, `raw` is
+   composed again with the `Message-ID` of the read back, as the create
+   path does after Gmail sets its own ID, so the release sends and the
+   send recovery searches the same ID. The action becomes `applied`. If
+   the read back fails, the row stays in `writing`, and recovery
+   (section 4) completes it.
 7. On a definite rejection: the row is `failed` with the error. The
    draft row does not change.
 8. On an unknown result: recovery (section 4).
