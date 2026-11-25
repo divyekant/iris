@@ -34,7 +34,11 @@ fn line(out: &mut impl Write, v: &impl serde::Serialize) -> io::Result<()> {
 /// - `items.jsonl`: one item document of the open model on each line.
 /// - `messages.jsonl`: one message on each line, as `/api/messages/{id}`
 ///   gives it, with `file`: the path of its raw message in the export, or
-///   `null` when the message has no content (`content_sha256` is null).
+///   `null` when the message has no content (`content_sha256` is null), and
+///   `hostile_mail`: `true` if the message has a hostile mark, the label
+///   SPAM or a hostile sender. The other reads of the API hide the items of
+///   such a message; the export keeps them, and `items` of the message names
+///   them (#819).
 /// - `mail/<m-id>.eml`: the raw message (RFC 5322) of each message.
 ///
 /// All files come from one read transaction, so each reference in them
@@ -42,14 +46,45 @@ fn line(out: &mut impl Write, v: &impl serde::Serialize) -> io::Result<()> {
 /// from SQLite, so memory does not grow with the mailbox. A message that
 /// refers to a content file that is not there is an error
 /// ([`iris_store::Error::MissingContent`]): the export is not complete.
+///
+/// The files go to the folder `.<name>.partial` next to `dest` first, and a
+/// rename moves them into `dest` at the end. After an error, `dest` stays
+/// empty and the partial folder is removed. After a crash, only the folder
+/// with `.partial` in its name holds files (#245).
 pub fn export(store: &Store, dest: &Path) -> Result<Exported> {
-    Ok(write(store, dest)?)
-}
-
-fn write(store: &Store, dest: &Path) -> iris_store::Result<Exported> {
     // The content cleanup cannot delete a raw message during the export.
     let _lock = store.backup_lock()?;
     new_private_dir(dest)?;
+    let Some(name) = dest.file_name() else {
+        return Err(crate::Error::Query(
+            "the export folder must have a name".into(),
+        ));
+    };
+    let partial = dest.with_file_name(format!(".{}.partial", name.to_string_lossy()));
+    // The folder of an export that stopped: Iris made it, and it is not complete.
+    match fs::remove_dir_all(&partial) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+            return Err(iris_store::Error::from(e).into())
+        }
+        _ => {}
+    }
+    new_private_dir(&partial)?;
+    let n = match write(store, &partial) {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&partial);
+            return Err(e.into());
+        }
+    };
+    // `dest` is an empty folder: a rename replaces it.
+    if let Err(e) = fs::rename(&partial, dest) {
+        let _ = fs::remove_dir_all(&partial);
+        return Err(iris_store::Error::from(e).into());
+    }
+    Ok(n)
+}
+
+fn write(store: &Store, dest: &Path) -> iris_store::Result<Exported> {
     let mail = dest.join("mail");
     fs::create_dir(&mail)?;
     let mut items = BufWriter::new(File::create(dest.join("items.jsonl"))?);
@@ -70,10 +105,14 @@ fn write(store: &Store, dest: &Path) -> iris_store::Result<Exported> {
             line(&mut items, &doc_of(r)?)?;
             n.items += 1;
         }
-        let mut st = tx.prepare("SELECT id, content_sha256 FROM message ORDER BY id")?;
+        let mut st = tx.prepare(&format!(
+            "SELECT m.id, m.content_sha256, {} FROM message m ORDER BY m.id",
+            iris_store::hostile_mail!()
+        ))?;
         let mut rows = st.query([])?;
         while let Some(r) = rows.next()? {
-            let (row, sha): (i64, Option<String>) = (r.get(0)?, r.get(1)?);
+            let (row, sha, hostile): (i64, Option<String>, bool) =
+                (r.get(0)?, r.get(1)?, r.get(2)?);
             let Some(m) = message_in(&tx, row)? else {
                 continue;
             };
@@ -97,6 +136,7 @@ fn write(store: &Store, dest: &Path) -> iris_store::Result<Exported> {
             };
             let mut v = serde_json::to_value(&m).map_err(io::Error::from)?;
             v["file"] = file.into();
+            v["hostile_mail"] = hostile.into();
             line(&mut messages, &v)?;
             n.messages += 1;
         }

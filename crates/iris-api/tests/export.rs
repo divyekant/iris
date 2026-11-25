@@ -220,6 +220,34 @@ fn a_missing_raw_message_fails_the_export() {
         matches!(e, iris_api::Error::Store(iris_store::Error::MissingContent(ref s)) if *s == shas[1]),
         "{e}"
     );
+    // #245: no file of the stopped export stays, and nothing looks complete.
+    assert_eq!(fs::read_dir(&dest.0).unwrap().count(), 0);
+    let name = dest.0.file_name().unwrap().to_string_lossy();
+    assert!(!dest.0.with_file_name(format!(".{name}.partial")).exists());
+    // The same folder takes the next export.
+    fs::write(store.content_path(&shas[1]).unwrap(), raw(1)).unwrap();
+    assert_eq!(iris_api::export(&store, &dest.0).unwrap().files, 3);
+}
+
+/// #819: each message line says if the message is hostile mail, so that a
+/// tool that reads the export can tell the items of hostile mail.
+#[test]
+fn each_message_says_if_it_is_hostile_mail() {
+    let dir = temp("hostile");
+    let dest = temp("hostile-out");
+    let store = Store::open(&dir.0).unwrap();
+    mailbox(&store, 2);
+    exec(
+        &store,
+        "UPDATE message SET hostile = '[\"x\"]' WHERE id = 2",
+        [],
+    );
+    iris_api::export(&store, &dest.0).unwrap();
+    let got: Vec<_> = lines(&dest.0.join("messages.jsonl"))
+        .iter()
+        .map(|m| m["hostile_mail"].clone())
+        .collect();
+    assert_eq!(got, [Value::Bool(false), Value::Bool(true)]);
 }
 
 #[test]

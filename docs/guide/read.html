@@ -112,7 +112,7 @@ the mail.</p>
 <table>
 <tr><th>Path</th><th>Content</th></tr>
 <tr><td><code>items.jsonl</code></td><td>Each item, one item document on each line. The gone items are also in the file. The <code>form</code> of each line selects the schema.</td></tr>
-<tr><td><code>messages.jsonl</code></td><td>Each message, one on each line, with <code>file</code>: the path of its raw message, or <code>null</code>. Version 1.2 has no schema for a message.</td></tr>
+<tr><td><code>messages.jsonl</code></td><td>Each message, one on each line, with <code>file</code>: the path of its raw message, or <code>null</code>, and <code>hostile_mail</code>: <code>true</code> for hostile mail (a hostile mark, the label SPAM or a hostile sender). Version 1.2 has no schema for a message.</td></tr>
 <tr><td><code>mail/&lt;m-id&gt;.eml</code></td><td>The raw message (RFC 5322) of each message.</td></tr>
 </table>
 <p>All files come from one read of the store, so each reference agrees: a
