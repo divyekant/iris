@@ -38,6 +38,8 @@ pub struct Caps {
     pub plain: bool,
     /// `UIDNEXT` in each `EXAMINE` answer.
     pub uidnext: bool,
+    /// `X-GM-EXT-1`: the fake says that it is Gmail. Off in [`Caps::ALL`].
+    pub gmail: bool,
 }
 
 impl Caps {
@@ -47,6 +49,7 @@ impl Caps {
         qresync: true,
         plain: true,
         uidnext: true,
+        gmail: false,
     };
 }
 
@@ -395,6 +398,7 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
             (c.plain, " AUTH=PLAIN"),
             (c.condstore, " CONDSTORE"),
             (c.qresync, " QRESYNC"),
+            (c.gmail, " X-GM-EXT-1"),
         ] {
             if on {
                 s.push_str(name);
