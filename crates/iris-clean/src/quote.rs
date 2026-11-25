@@ -56,13 +56,14 @@ pub fn strip_quotes(text: &str, is_reply: bool) -> String {
             end = i;
             break;
         }
-        if let Some((n, dated)) = attribution(&lines[i..]) {
+        if let Some(n) = attribution(&lines[i..]) {
             let next = lines[i + n..].iter().find(|l| !l.trim().is_empty());
             // "Here is what I wrote:" is not history. A cut needs a quote
-            // after the line, or (in a reply) the start or the form of a
-            // client line.
+            // after the line, or (in a reply) the start of a client line.
+            // The client form alone never cuts: own lines can have a time
+            // and an address too.
             let quoted = next.is_some_and(|l| l.trim_start().starts_with('>'));
-            let client = dated || ATTRIBUTION_START.iter().any(|p| t.starts_with(p));
+            let client = ATTRIBUTION_START.iter().any(|p| t.starts_with(p));
             if quoted || (is_reply && client) {
                 end = i;
                 break;
@@ -97,15 +98,14 @@ pub fn strip_quotes(text: &str, is_reply: bool) -> String {
     kept.join("\n")
 }
 
-/// An "On ... wrote:" line at the start: the count of its lines (1 or 2),
-/// and true if it is the form of a client in any language (see [`dated`]).
-fn attribution(lines: &[&str]) -> Option<(usize, bool)> {
+/// The count of lines (1 or 2) of an "On ... wrote:" line at the start.
+fn attribution(lines: &[&str]) -> Option<usize> {
     let ends = |s: &str| {
         let l = s.trim().to_lowercase();
         (l.len() < 400 && WROTE.iter().any(|w| l.ends_with(w))) || dated(s)
     };
     if ends(lines[0]) {
-        return Some((1, dated(lines[0])));
+        return Some(1);
     }
     let first = lines[0].trim();
     let second = lines.get(1)?.trim();
@@ -114,14 +114,11 @@ fn attribution(lines: &[&str]) -> Option<(usize, bool)> {
     }
     // Clients wrap a long "On ... wrote:" line.
     let joined = format!("{first} {second}");
-    // A wrap of the client form: the first line ends with no sentence
-    // mark and has no address, and the second line alone is not the form.
-    let dated_wrap = dated(&joined)
-        && !first.ends_with(['.', '!', '?'])
-        && !first.contains('<')
-        && !ends(second);
+    // A wrap of the client form: the first line ends with no sentence mark,
+    // and the second line alone is not the client form.
+    let dated_wrap = dated(&joined) && !first.ends_with(['.', '!', '?']) && !dated(second);
     let wrapped = ATTRIBUTION_START.iter().any(|p| first.starts_with(p)) || dated_wrap;
-    (wrapped && !second.is_empty() && ends(&joined)).then_some((2, dated_wrap))
+    (wrapped && !second.is_empty() && ends(&joined)).then_some(2)
 }
 
 /// The form of the attribution line of a client in any language: a time
@@ -256,21 +253,26 @@ mod tests {
             "Ana Bel <ana@example.org> 于2025年2月3日周一 10:00写道：",
         ];
         for l in lines {
-            // With a quote after it, and in a reply without a quote.
             assert_eq!(
                 strip_quotes(&format!("Ja.\n\n{l}\n> Frage?"), false),
                 "Ja.",
                 "{l}"
             );
+        }
+        // A wrap of two lines, with the address on either line.
+        for l in [
+            "Am Mo., 3. Feb. 2025 um 10:00 Uhr schrieb Ana Bel\n<ana@example.org>:",
+            "2025年2月3日(月) Ana <ana@example.org>\n10:00 写道：",
+        ] {
             assert_eq!(
-                strip_quotes(&format!("Ja.\n\n{l}\nFrage?"), true),
+                strip_quotes(&format!("Ja.\n\n{l}\n> Frage?"), true),
                 "Ja.",
                 "{l}"
             );
         }
-        // Gmail wraps a long line.
+        // In a reply without a quote, a client start is enough.
         let t =
-            "Ja.\n\nAm Mo., 3. Feb. 2025 um 10:00 Uhr schrieb Ana Bel\n<ana@example.org>:\nFrage?";
+            "Ja.\n\nAm Mo., 3. Feb. 2025 um 10:00 Uhr schrieb Ana Bel <ana@example.org>:\nFrage?";
         assert_eq!(strip_quotes(t, true), "Ja.");
     }
 
@@ -304,10 +306,24 @@ mod tests {
             for _ in 0..next(8) {
                 lines.push(PIECES[next(PIECES.len())]);
             }
+            // Own lines with a time and an address, with no quote after them.
+            let own = [
+                "Can we meet at 10:00",
+                "with Ana <ana@example.org>:",
+                "Bring it.",
+            ];
+            let head = lines.len();
+            lines.extend(own);
             let input = lines.join("\n");
             for reply in [false, true] {
                 let out = strip_quotes(&input, reply);
                 assert!(out.starts_with("Keep this line."), "{input:?}");
+                // No `>` line comes after the own lines, so they stay when
+                // no history starts before them.
+                let before = strip_quotes(&lines[..head].join("\n"), reply);
+                if before.split('\n').count() == head {
+                    assert!(out.ends_with(&own.join("\n")), "{input:?} gave {out:?}");
+                }
                 let mut rest = lines.iter();
                 for l in out.split('\n') {
                     assert!(rest.any(|x| *x == l), "{input:?} gave {out:?}");
@@ -322,6 +338,11 @@ mod tests {
         assert_eq!(strip_quotes(t, true), t);
         // A time and an address, but not at the end.
         let t = "At 10:00 call Ana <ana@example.org>: then go.\nok";
+        assert_eq!(strip_quotes(t, true), t);
+        // Own lines with the client form, without a quote after them.
+        let t = "Can we meet at 10:00\nwith Ana <ana@example.org>:\nPlease bring the contract.";
+        assert_eq!(strip_quotes(t, true), t);
+        let t = "Call at 10:00 with Ana <ana@example.org>:\nthe plan.";
         assert_eq!(strip_quotes(t, true), t);
     }
 

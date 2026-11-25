@@ -288,13 +288,16 @@ The search reads the lines in order and stops at the first of these:
   first words below, that end with `wrote:` or the same word in French,
   German, Spanish, Italian, Danish or Norwegian or Swedish, Dutch, Polish,
   Portuguese, Czech, Finnish, Turkish, Russian or Chinese. The client form
-  in any language is an attribution line too: a line, or two lines, of less
-  than 400 bytes with a time (`10:00`), an address in `<>` and a `:` (or
-  `：`) at the end. Gmail writes "Am 3. Feb. 2025 um 10:00 schrieb Ana
-  <ana@example.org>:". An attribution line is history only if the next line
-  that is not empty starts with `>`, or if the message is a reply and the
-  line has the client form or starts with one of `On `, `Le `, `Am `, `El `,
-  `Il `, `Op `, `Den `, `W dniu `, `Em `.
+  in any language is an attribution line too: a line of less than 400 bytes
+  with a time (`10:00`), an address in `<>` and a `:` (or `：`) at the end.
+  Gmail writes "Am 3. Feb. 2025 um 10:00 schrieb Ana <ana@example.org>:".
+  Two lines join into the client form only if the first line does not end
+  with `.`, `!` or `?` and the second line alone is not the client form. An
+  attribution line is history only if the next line that is not empty
+  starts with `>`, or if the message is a reply and the line starts with one
+  of `On `, `Le `, `Am `, `El `, `Il `, `Op `, `Den `, `W dniu `, `Em `. The
+  client form alone never starts the history without a `>` line after it,
+  because own lines can have a time and an address too.
 
 Before the history (or a forward marker):
 
@@ -433,11 +436,10 @@ client. They are not defects of this design:
   apply. So both of these can occur: hidden text stays, and text that such a
   rule shows again stays hidden.
 - Rules inside `@media` do not apply, also for the screen of the person.
-- A reply in a language or a client that the lists above do not name, and
-  that has no client form, keeps its quoted history. In a reply, an own
-  line with a time, an address in `<>` and a `:` at the end starts the
-  history, so the text after it goes out. A message that is not a reply keeps the quotes between
-  its own lines.
+- A reply in a language or a client that the lists above do not name keeps
+  its quoted history, unless its attribution line has the client form and a
+  `>` line comes after it (issue #968). A message that is not a reply keeps
+  the quotes between its own lines.
 - A signature without a `--` line or a phone line stays, until
   `remove_repeated_end` finds it in a thread.
 - PDF: text hidden by a white fill, by clipping, by a position off the page,
