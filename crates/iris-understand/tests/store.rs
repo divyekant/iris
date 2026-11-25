@@ -2717,11 +2717,15 @@ Your one-time code is 918273. It ends in 10 minutes.
                     account,
                 } = b;
                 drop(store);
-                Box_ {
+                let b = Box_ {
                     store: Store::open(&_dir.0).unwrap(),
                     _dir,
                     account,
-                }
+                };
+                // The last run is not known: the queued fixed check runs the
+                // code rule again, with no model, and writes the record.
+                assert_eq!(recheck_fixed(&b.store, NOW, None).unwrap(), 1);
+                b
             }
             _ => b,
         };
@@ -2827,5 +2831,85 @@ Your one-time code is 918273. It ends in 10 minutes.
     assert!(
         b.col::<bool>("SELECT understood_at IS NULL FROM message WHERE id = ?1", m),
         "the mail waits for the model"
+    );
+}
+
+/// Issue #946, the backfill of migration 57: a pinned code item, then a
+/// model run as a stranger with no item. The queued fixed check after the
+/// upgrade finds no rule that applies now: the message keeps the result of
+/// the model, with no new model call.
+#[test]
+fn the_backfill_keeps_a_model_result_next_to_a_pinned_rule_item() {
+    use iris_understand::store::recheck_fixed;
+    let b = store("fixed-backfill-model");
+    let fake = Fake::default();
+    let code = "From: Bank <no-reply@bank.example.com>
+To: owner@example.com
+Subject: Your sign-in
+
+Your one-time code is 918273. It ends in 10 minutes.
+";
+    let m = b.add("1", code, &["INBOX"]);
+    understand(&b.store, m, &fake, NOW).unwrap();
+    let set = |b: &Box_, kind: &str| {
+        b.store
+            .write(|tx| {
+                Ok(tx.execute(
+                    "UPDATE sender SET kind = ?1, decided_by = 'person'
+                     WHERE address = 'no-reply@bank.example.com'",
+                    [kind],
+                )?)
+            })
+            .unwrap();
+    };
+    set(&b, "service");
+    recheck_fixed(&b.store, NOW, None).unwrap();
+    let row: i64 = b.col(
+        "SELECT i.id FROM item i JOIN item_source s ON s.item_id = i.id
+          WHERE s.message_id = ?1 AND json_extract(i.doc, '$.derived.rule') = 'code'",
+        m,
+    );
+    correct(
+        &b.store,
+        &format!("s-{row}"),
+        "expires",
+        json!("2026-02-01T00:00:00Z"),
+        NOW,
+    )
+    .unwrap();
+    set(&b, "stranger");
+    recheck_fixed(&b.store, NOW, None).unwrap();
+    understand(&b.store, m, &fake, NOW).unwrap();
+    assert!(!b.col::<bool>("SELECT understood_at IS NULL FROM message WHERE id = ?1", m));
+    b.store
+        .write(|tx| {
+            Ok(tx.execute_batch(
+                "ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev;
+                 ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 56;",
+            )?)
+        })
+        .unwrap();
+    let Box_ {
+        _dir,
+        store,
+        account,
+    } = b;
+    drop(store);
+    let b = Box_ {
+        store: Store::open(&_dir.0).unwrap(),
+        _dir,
+        account,
+    };
+    let calls = fake.calls.borrow().len();
+    assert_eq!(
+        recheck_fixed(&b.store, NOW, None).unwrap(),
+        0,
+        "no rule applies now"
+    );
+    assert!(!b.col::<bool>("SELECT understood_at IS NULL FROM message WHERE id = ?1", m));
+    assert_eq!(fake.calls.borrow().len(), calls);
+    assert_eq!(
+        b.col::<i64>("SELECT count(*) FROM fixed_due WHERE message_id = ?1", m),
+        0
     );
 }

@@ -13,23 +13,36 @@
 ALTER TABLE message ADD COLUMN fixed_rules TEXT;
 
 -- The backfill cannot see which run made each item. An item that is not
--- pinned comes from the last run, so a model item that is not pinned makes
--- the record NULL. A pinned model item can come from an earlier run: it
--- does not. Each rule item counts, pinned or not. When the record is not
--- sure, it says that a rule completed the message: the safe result, since
--- a fixed check then sends the mail to the model when the rule stops.
-UPDATE message SET fixed_rules = (
-  SELECT CASE WHEN max(i.derived_by = 'model'
-                       AND NOT EXISTS (SELECT 1 FROM item_pin p WHERE p.item_id = i.id))
-    THEN NULL
-    ELSE coalesce((SELECT json_group_array(json_extract(r.doc, '$.derived.rule'))
-                     FROM item_source rs JOIN item r ON r.id = rs.item_id
-                    WHERE rs.message_id = message.id AND rs.role = 'origin'
-                      AND r.form <> 'conversation' AND r.derived_by = 'rule'), '[]') END
-  FROM item_source src JOIN item i ON i.id = src.item_id
-  WHERE src.message_id = message.id AND src.role = 'origin'
-    AND i.form <> 'conversation' AND i.derived_by IN ('rule', 'model'))
+-- pinned (`item_droppable`) comes from the last run:
+-- - a model item that is not pinned: the model completed it (NULL);
+-- - a rule item that is not pinned: the rules completed it (the rule of
+--   each rule item, pinned or not);
+-- - else, with a pinned rule item: not known. The last run can be a rule
+--   whose draft the pinned item holds, or a model run with no item. The
+--   record is NULL, and the message goes to the fixed check
+--   (`fixed_due`), which runs the fixed rules again with no model call and
+--   writes the record when a rule applies now;
+-- - else: no item of a rule or the model (`[]`).
+UPDATE message SET fixed_rules = CASE
+  WHEN EXISTS (SELECT 1 FROM item_droppable d JOIN item i ON i.id = d.item_id
+               WHERE d.message_id = message.id AND i.derived_by = 'model') THEN NULL
+  WHEN EXISTS (SELECT 1 FROM item_droppable d JOIN item i ON i.id = d.item_id
+               WHERE d.message_id = message.id AND i.derived_by = 'rule')
+    THEN (SELECT json_group_array(json_extract(r.doc, '$.derived.rule'))
+            FROM item_source rs JOIN item r ON r.id = rs.item_id
+           WHERE rs.message_id = message.id AND rs.role = 'origin'
+             AND r.form <> 'conversation' AND r.derived_by = 'rule')
+  WHEN EXISTS (SELECT 1 FROM item_source rs JOIN item r ON r.id = rs.item_id
+               WHERE rs.message_id = message.id AND rs.role = 'origin'
+                 AND r.form <> 'conversation' AND r.derived_by = 'rule') THEN NULL
+  ELSE '[]' END
 WHERE understood_at IS NOT NULL;
+
+INSERT INTO fixed_due(message_id)
+  SELECT m.id FROM message m
+  WHERE m.understood_at IS NOT NULL AND m.fixed_rules IS NULL
+    AND NOT EXISTS (SELECT 1 FROM item_droppable d JOIN item i ON i.id = d.item_id
+                    WHERE d.message_id = m.id AND i.derived_by = 'model');
 
 -- The revision of the gate of each sender (issue 934). Each change of
 -- `declined_at` adds one, so a decline and a reopen during one model call
