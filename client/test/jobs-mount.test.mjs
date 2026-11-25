@@ -85,3 +85,34 @@ test("the brief names each working job that no agent works on, with a link to it
     view.destroy();
   }
 });
+
+test("Show more adds the sessions of the new page and keeps the sessions of the first page (issue 791)", async () => {
+  const first = { ...fx.jobs["j-15"], id: "j-80", goal: "Book the room." };
+  const stopped = { ...fx.jobs["j-15"], id: "j-82", goal: "Ask for the quote." };
+  const never = { ...fx.jobs["j-15"], id: "j-83", goal: "Pay the bill." };
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        jobs: [stopped, never],
+        next: null,
+        sessions: { "j-82": { id: "se-5", agent: "codex", state: "ended", end: "exit", exit: 2, ended: "2026-11-16T11:01:00Z" }, "j-83": null },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  const none = { jobs: [], next: null };
+  const working = { jobs: [first], next: "c1", sessions: { "j-80": { id: "se-9", agent: "codex", state: "running", end: null, exit: null, ended: null } } };
+  const view = await mount("/src/views/Jobs.svelte", { pages: { needs_you: none, working, waiting: none, done: none } });
+  try {
+    const line = (id) => view.target.querySelector(`a[href="#/jobs/${id}"]`);
+    [...view.target.querySelectorAll("button")].find((b) => b.textContent.includes("Show more")).click();
+    await until(() => line("j-83"));
+    assert.match(line("j-82").textContent, /No agent works on it now\. The last session \(se-5, codex\) ended with exit code 2\./);
+    assert.equal(line("j-82").querySelector(".mark").classList.contains("idle"), true);
+    assert.match(line("j-83").textContent, /No agent works on it now\./);
+    assert.equal(line("j-83").querySelector(".mark").classList.contains("idle"), true);
+    assert.match(line("j-80").textContent, /The agent works on it\./);
+    assert.equal(line("j-80").querySelector(".mark").classList.contains("idle"), false);
+  } finally {
+    view.destroy();
+  }
+});
