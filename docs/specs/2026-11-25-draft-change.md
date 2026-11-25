@@ -84,6 +84,7 @@ The submit denies a change, with the reason, when one of these is true:
 | The draft has `foreign_at` | "The draft has a form that Iris does not write. Change it in Gmail." |
 | An attachment of the content of the draft row has no file in the attachment folder with its SHA-256 and size (for example, a file that the person added in Gmail, send content spec) | "A file of the draft is not in Iris. Change it in Gmail." |
 | A `send` action of the draft is `proposed`, `in_review`, `approved` or `held`, or a `ledger_send` row claims it | "The draft waits to send. Cancel it first." |
+| A send mark of a write (write spec, section 3) whose `draft` action made or names this draft has no send action yet, and its write is not `stopped` | "The draft waits to send. Cancel it first." |
 | Another `draft` action that names the same draft is `approved` or `held`, or has a ledger row in `writing` | "Iris changes this draft now. Try again in a minute." |
 
 The parent of a change of a reply: the submit resolves the target `d-N`
@@ -153,8 +154,11 @@ The apply module (`crates/iris-apply/src/send.rs`) gets a branch for a
    draft row does not change.
 8. On an unknown result: recovery (section 4).
 
-A change keeps the `id` and the `provider_id` of the draft row. The
-`action_id` column keeps the action that made the draft. A send after
+A change keeps the `id` of the draft row. The `provider_id` of the row
+is the draft ID of the answer of `drafts.update`, in step 6 and in
+recovery, whether or not it is the old ID, so each later read and send
+uses the ID that Gmail gave last. The `action_id` column keeps the
+action that made the draft. A send after
 the change binds to the new `hash` (write spec, section 3).
 
 The draft of an action is one rule, used by the send step of a write
@@ -164,6 +168,16 @@ action (a create), or the `draft` row that the `drafts` target of the
 action names, once the action is `applied` (a change). Each query that
 joins `draft.action_id` to a send mark uses this rule. A test runs the
 write of a change to its `waiting` state.
+
+A send mark binds to the content of its own press: `send_written` makes
+the send of a mark only while the `hash` of the draft row is the hash of
+the `post` of the ledger entry of the action of the mark (for a create,
+the hash of the create). Another hash means that the draft changed
+after the press, and the mark stops with "The draft changed after you
+pressed Send. Look at it, then send again.". With the check of section
+1 on open marks, a second write cannot change the draft while the mark
+of the first one waits, and a stale mark cannot send the content of
+another press.
 
 ### 3. The undo of a change
 
@@ -311,6 +325,7 @@ This is the same class of risk that spec 2 accepts for a label change
 | A send submit and a change claim of one draft at the same time | The first transaction that commits wins. The other is denied | Changeset test |
 | The undo of a change that has a later entry of its draft | 409, nothing written | API test |
 | The write of a change | Its send step finds the draft by the target and reaches `waiting` | Apply and API test |
+| Two writes of one draft: the first change applies, and a second change comes before the send step of the first | The second submit is denied (an open mark). If the draft row changes anyway, the mark of the first stops on the hash | Changeset test, apply test |
 | The person changed the draft in Gmail before the apply | Denied, the row refreshes or gets `foreign_at`, Gmail keeps the text of the person | Fake server test |
 | The draft is gone at Gmail (deleted or sent outside Iris) | Denied, nothing written at Gmail | Fake server test |
 | A send of the draft waits in the outbox, or a send is claimed | Submit and apply deny the change. The undo is a 409 | Changeset test, apply test |
@@ -347,9 +362,9 @@ for Gmail) during one change. A create holds one copy.
 
 - Gmail `drafts.update` replaces the message of a draft and keeps the
   draft ID (Gmail API reference, `users.drafts.update`). Pending: check
-  on the owner's Mac before the change is on for a real mailbox. If Gmail
-  gives a new draft ID, step 6 stores the ID of the answer, and the read
-  back still checks the content.
+  on the owner's Mac before the change is on for a real mailbox. The
+  design does not depend on it: step 6 always stores the ID of the
+  answer (section 2).
 - Gmail can set its own `Message-ID` on a changed draft, as on a created
   draft (send spec, assumption 3). The rule of `changed_at_gmail`
   already covers this. Evidence: `sets_draft_message_id` in
