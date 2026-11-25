@@ -37,6 +37,10 @@ fn address(r: &mut Rng) -> String {
     let mut local: String = (0..n).map(|_| *r.pick(LOCAL)).collect();
     // A local part does not start or end with a dot.
     local = format!("a{local}z");
+    // A quoted local part with the signs of list syntax (issue #980).
+    if r.below(5) == 0 {
+        local = format!("\"{local} <x>, y;\"");
+    }
     format!("{local}@{}", r.pick(DOMAINS))
 }
 
@@ -212,6 +216,50 @@ fn open_domain_literals_are_linear() {
     let start = std::time::Instant::now();
     let got = addresses(&list);
     assert_eq!(got.len(), 200_000);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+/// A quoted local part in `<>` can hold `<`, `>` and `,`: they are text, not
+/// list syntax (issue #980). A quote in `<>` with no closing `"@` is text,
+/// so an open quote cannot hide the rest of the list.
+#[test]
+fn quoted_local_parts_in_angle_brackets() {
+    let got = |l: &str| addresses(l).into_iter().map(|(a, _)| a).collect::<Vec<_>>();
+    assert_eq!(
+        got("Ana <\"a<b\"@example.org>, c@example.org"),
+        ["\"a<b\"@example.org", "c@example.org"]
+    );
+    assert_eq!(
+        got("<\"a>, b\"@example.org>, c@example.org"),
+        ["\"a>, b\"@example.org", "c@example.org"]
+    );
+    assert_eq!(
+        got("< \"x\\\"<y\"@example.org>; d@example.org"),
+        ["\"x\\\"<y\"@example.org", "d@example.org"]
+    );
+    // An open quote: the rest of the list stays.
+    assert_eq!(
+        got("<\"a@example.org>, c@example.org, \"Bo\" <d@example.org>"),
+        ["\"a@example.org", "c@example.org", "d@example.org"]
+    );
+    // The display name of a quoted local part is kept.
+    assert_eq!(
+        addresses("Ana Lee <\"a>b\"@example.org>")[0].1.as_deref(),
+        Some("Ana Lee")
+    );
+}
+
+/// Many `<"` with no closing quote cost one bounded scan each, not a scan
+/// of the whole list.
+#[test]
+fn open_quoted_local_parts_are_linear() {
+    let list = "<\"a, ".repeat(200_000);
+    let start = std::time::Instant::now();
+    let _ = addresses(&list);
     assert!(
         start.elapsed() < std::time::Duration::from_secs(5),
         "{:?}",
