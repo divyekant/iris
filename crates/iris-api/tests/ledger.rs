@@ -1032,7 +1032,7 @@ async fn the_brief_shows_unconfirmed_messages_until_dismissed() {
     assert_eq!(code, StatusCode::OK);
     assert_eq!(
         brief["unconfirmed"],
-        json!({"messages": 2, "entries": [format!("l-{first}")], "more": 0})
+        json!({"messages": 2, "entries": [format!("l-{first}")], "more": 0, "waiting": 0})
     );
 
     // The line showed `first`. A later failure comes before the dismissal.
@@ -1046,7 +1046,7 @@ async fn the_brief_shows_unconfirmed_messages_until_dismissed() {
     let (_, brief) = call(&s, false, "/api/brief").await;
     assert_eq!(
         brief["unconfirmed"],
-        json!({"messages": 1, "entries": [format!("l-{second}")], "more": 0})
+        json!({"messages": 1, "entries": [format!("l-{second}")], "more": 0, "waiting": 0})
     );
     // A second dismissal of the same entry changes nothing.
     let (_, b) = dismiss(&s, json!({"entries": [format!("l-{first}")]})).await;
@@ -1065,7 +1065,7 @@ async fn the_brief_shows_unconfirmed_messages_until_dismissed() {
     let (_, brief) = call(&s, false, "/api/brief").await;
     assert_eq!(
         brief["unconfirmed"],
-        json!({"messages": 0, "entries": [], "more": 0})
+        json!({"messages": 0, "entries": [], "more": 0, "waiting": 0})
     );
 }
 
@@ -1091,7 +1091,7 @@ async fn one_dismissal_ends_a_full_line() {
     let (_, brief) = call(&s, false, "/api/brief").await;
     assert_eq!(
         brief["unconfirmed"],
-        json!({"messages": 2, "entries": [format!("l-{}", ids[0])], "more": 0})
+        json!({"messages": 2, "entries": [format!("l-{}", ids[0])], "more": 0, "waiting": 0})
     );
 }
 
@@ -1111,24 +1111,28 @@ async fn a_removed_account_has_no_unconfirmed_line() {
         let (_, brief) = call(&s, false, "/api/brief").await;
         assert_eq!(
             brief["unconfirmed"],
-            json!({"messages": 0, "entries": [], "more": 0}),
+            json!({"messages": 0, "entries": [], "more": 0, "waiting": 0}),
             "{state}"
         );
     }
 }
 
 /// Issue #216, pre-review: the recovery of an entry in `writing` can list
-/// more messages `unknown` later. So the line and a dismissal wait for the
-/// final state `failed`, and a dismissal covers the final list.
+/// more messages `unknown` later, for example after a failed read that it
+/// tries again. The line warns of the messages that it listed at once
+/// (`waiting`), but a dismissal waits for the final state `failed`, so
+/// that it covers the final list.
 #[tokio::test]
 async fn the_line_waits_for_the_end_of_the_recovery() {
     let dir = temp("unconfirmed-writing");
     let s = store(&dir);
     // Message 2 is not checked yet.
     let l = unconfirmed_in(&s, &[1], &[3], &[2], false);
-    let none = json!({"messages": 0, "entries": [], "more": 0});
     let (_, brief) = call(&s, false, "/api/brief").await;
-    assert_eq!(brief["unconfirmed"], none);
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 0, "entries": [], "more": 0, "waiting": 1})
+    );
     let (_, b) = dismiss(&s, json!({"entries": [format!("l-{l}")]})).await;
     assert_eq!(b, json!({"dismissed": 0}));
     // The recovery lists one more message, and the entry fails.
@@ -1144,7 +1148,7 @@ async fn the_line_waits_for_the_end_of_the_recovery() {
     let (_, brief) = call(&s, false, "/api/brief").await;
     assert_eq!(
         brief["unconfirmed"],
-        json!({"messages": 2, "entries": [format!("l-{l}")], "more": 0})
+        json!({"messages": 2, "entries": [format!("l-{l}")], "more": 0, "waiting": 0})
     );
 }
 
@@ -1183,7 +1187,7 @@ async fn an_undone_entry_keeps_its_line() {
     let (_, brief) = call(&s, false, "/api/brief").await;
     assert_eq!(
         brief["unconfirmed"],
-        json!({"messages": 1, "entries": [format!("l-{l}")], "more": 0})
+        json!({"messages": 1, "entries": [format!("l-{l}")], "more": 0, "waiting": 0})
     );
     let (_, b) = dismiss(&s, json!({"entries": [format!("l-{l}")]})).await;
     assert_eq!(b, json!({"dismissed": 1}));

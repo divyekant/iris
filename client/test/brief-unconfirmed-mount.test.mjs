@@ -109,9 +109,22 @@ test("a refused dismissal keeps the line and says why", async () => {
   }
 });
 
+test("a change whose check did not end shows at once, with no Dismiss", async () => {
+  const net = serve({});
+  const app = await mount("/src/views/Brief.svelte", { brief: { ...fx.brief, unconfirmed: { messages: 0, entries: [], more: 0, waiting: 1 } }, now: NOW, poll: 0 });
+  try {
+    const line = app.target.querySelector("p.unconfirmed");
+    assert.match(text(line), /Iris could not confirm a change to 1 message\. Check it in your mailbox\. Iris still checks the change\./);
+    assert.equal(line.querySelector("button"), null);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
 test("no line when nothing waits", async () => {
   const net = serve({});
-  const app = await mount("/src/views/Brief.svelte", { brief: { ...fx.brief, unconfirmed: { messages: 0, entries: [] } }, now: NOW, poll: 0 });
+  const app = await mount("/src/views/Brief.svelte", { brief: { ...fx.brief, unconfirmed: { messages: 0, entries: [], waiting: 0 } }, now: NOW, poll: 0 });
   try {
     assert.equal(app.target.querySelector("p.unconfirmed"), null);
   } finally {

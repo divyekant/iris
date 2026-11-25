@@ -473,27 +473,38 @@ pub struct Unconfirmed {
     /// At most [`crate::MAX_LIMIT`] entries, as `l-<n>`, newest first.
     pub entries: Vec<String>,
     pub more: i64,
+    /// The messages that the recovery listed `unknown` in entries whose
+    /// recovery did not end yet (`writing`): for example, a later read of
+    /// the recovery failed, and it waits to try again. The line warns of
+    /// them at once, but a dismissal waits for the final list.
+    pub waiting: i64,
 }
 
 pub(crate) fn unconfirmed(c: &Connection) -> rusqlite::Result<Unconfirmed> {
     // The brief shows nothing of an account in `removing` or `removed`
     // (remove account spec).
-    const OPEN: &str = "FROM ledger_message lm
+    const UNKNOWN: &str = "FROM ledger_message lm
            JOIN ledger l ON l.id = lm.ledger_id
            JOIN account a ON a.id = l.account_id
-         WHERE lm.listed = 'unknown' AND l.state <> 'writing'
+         WHERE lm.listed = 'unknown'
            AND (a.state IS NULL OR a.state NOT IN ('removing', 'removed'))
            AND NOT EXISTS (SELECT 1 FROM ledger_unknown_seen s
                            WHERE s.ledger_id = lm.ledger_id)";
+    let open = format!("{UNKNOWN} AND l.state <> 'writing'");
+    let waiting: i64 = c.query_row(
+        &format!("SELECT count(*) {UNKNOWN} AND l.state = 'writing'"),
+        [],
+        |r| r.get(0),
+    )?;
     let rows: Vec<(i64, i64)> = c
         .prepare(&format!(
-            "SELECT lm.ledger_id, count(*) {OPEN}
+            "SELECT lm.ledger_id, count(*) {open}
              GROUP BY lm.ledger_id ORDER BY lm.ledger_id DESC LIMIT ?1"
         ))?
         .query_map([crate::MAX_LIMIT], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     let all: i64 = c.query_row(
-        &format!("SELECT count(DISTINCT lm.ledger_id) {OPEN}"),
+        &format!("SELECT count(DISTINCT lm.ledger_id) {open}"),
         [],
         |r| r.get(0),
     )?;
@@ -501,6 +512,7 @@ pub(crate) fn unconfirmed(c: &Connection) -> rusqlite::Result<Unconfirmed> {
         messages: rows.iter().map(|r| r.1).sum(),
         more: all - rows.len() as i64,
         entries: rows.iter().map(|r| format!("l-{}", r.0)).collect(),
+        waiting,
     })
 }
 

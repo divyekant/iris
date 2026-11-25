@@ -921,9 +921,14 @@ it. The line lists the newest 200 entries with such messages that the
 person did not dismiss, and counts the messages of these entries. A
 dismissal covers the entries that the line listed; an older entry then
 shows in the next line, and an entry that fails later shows in a new line.
-The line leaves out an account in `removing` or `removed`. The line shows an entry only after its recovery ended (any state but
-`writing`): while the row is `writing`, the recovery can still list more
-messages, and a dismissal is for the final list. An `undone` entry keeps
+The line leaves out an account in `removing` or `removed`. While an
+entry is `writing` (for example, a later read of the recovery failed, and
+the recovery waits to try again), the line counts the messages that the
+recovery listed already (`waiting`), so the warning shows at once. A
+dismissal covers an entry only after its recovery ended (any state but
+`writing`), because the recovery can still list more messages, and a
+dismissal is for the final list. A line of `waiting` messages only has no
+Dismiss. An `undone` entry keeps
 its line, because the undo restores only the confirmed messages. The
 history view lists the messages of each such entry, a page at a time
 (`GET /api/ledger/{id}/unknown`), so that the person can check each one

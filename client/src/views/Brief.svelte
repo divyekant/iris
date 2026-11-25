@@ -161,7 +161,7 @@
       // Hide the line only if it is still the line that you dismissed: a poll during the dismissal can
       // show a newer entry, and that line stays.
       const line = brief.unconfirmed?.entries ?? [];
-      if (line.length === entries.length && line.every((id, i) => id === entries[i])) brief = { ...brief, unconfirmed: { messages: 0, entries: [], more: 0 } };
+      if (line.length === entries.length && line.every((id, i) => id === entries[i])) brief = { ...brief, unconfirmed: { messages: 0, entries: [], more: 0, waiting: brief.unconfirmed?.waiting ?? 0 } };
       // Then load the brief again: older entries than the line listed, or a newer failure, show in the
       // next line. The ticket keeps a poll that started before the dismissal from putting the old line back.
       const fresh = briefTicket();
@@ -489,13 +489,16 @@
   {#if brief.hostile > 0}
     <p class="warning">Iris found {brief.hostile} hostile messages in the last 7 days. The brief does not show their subject or their sender.</p>
   {/if}
-  {#if (brief.unconfirmed?.messages ?? 0) > 0}
-    {@const n = brief.unconfirmed?.messages ?? 0}
+  <!-- `waiting`: messages of a change whose check did not end. They show at once, but a dismissal waits for the end. -->
+  {#if (brief.unconfirmed?.messages ?? 0) + (brief.unconfirmed?.waiting ?? 0) > 0}
+    {@const n = (brief.unconfirmed?.messages ?? 0) + (brief.unconfirmed?.waiting ?? 0)}
+    {@const dismissable = (brief.unconfirmed?.entries.length ?? 0) > 0}
     <p class="warning unconfirmed">
       Iris could not confirm a change to {n} {n === 1 ? "message" : "messages"}. Check {n === 1 ? "it" : "them"} in your mailbox.
+      {#if !dismissable}Iris still checks the change. You can dismiss this line when the check ends.{/if}
       <span class="acts">
         <a class="touch" href="#/history">See what Iris did</a>
-        <button type="button" class="all touch" onclick={dismissUnconfirmed} disabled={dismissing}>Dismiss</button>
+        {#if dismissable}<button type="button" class="all touch" onclick={dismissUnconfirmed} disabled={dismissing}>Dismiss</button>{/if}
       </span>
     </p>
     {#if dismissProblem}<p role="alert">{dismissProblem}</p>{/if}
