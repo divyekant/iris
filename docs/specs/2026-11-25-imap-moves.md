@@ -52,10 +52,12 @@ hostile mail) cannot apply. Triage is the main work of Iris.
 | Trash | the folder with `\Trash`, else a folder by a trash name (section 4 of the IMAP provider spec) |
 
 The plan first sorts each message by the role of its folder (the table
-below): moves, skip, or refused. A folder of a role is any folder with the
-attribute of the role, or with no attribute of any folder, a folder whose
-name matches; so a message in either of two trash folders counts as in the
-trash. Only if at least one message moves does the plan need the target
+below): moves, skip, or refused. The role of a folder is the role that the
+reads already give it (`Folder::special` after `by_name`, IMAP provider
+spec section 4): a folder with the attribute of the role, and a folder by
+name only if no folder has that attribute. So the plan and the labels
+agree: a message counts as in the trash only if it has the label `TRASH`.
+A message in either of two trash folders counts as in the trash. Only if at least one message moves does the plan need the target
 folder: exactly one folder of the target role. Two such folders give
 `Api` 400 `ambiguousArchive` or `ambiguousTrash`, and none gives `noArchive`
 or `noTrash`, before any write. An action whose messages all skip needs no
@@ -257,6 +259,7 @@ write, or `Transport` (unknown) after the first write.
 | No archive folder, for `archive` or `inbox` | `Api` 400 `noArchive`, nothing sent | `move_without_folder` |
 | No trash folder | `Api` 400 `noTrash`, nothing sent | `move_without_folder` |
 | Two archive folders or two trash folders as the target of a message that moves | `Api` 400 `ambiguousArchive` or `ambiguousTrash`, nothing sent | `move_ambiguous_folder` |
+| A server with a `\Trash` folder and also an ordinary folder named `Trash`: `untrash` of a message in the ordinary folder | the ordinary folder has no role; the plan refuses with `notSupported`, nothing sent | `move_role_follows_the_attribute` |
 | `archive` of a message in the trash, or `inbox` of a message in `INBOX`, on a server with no archive folder | the plan gives false (skip); no refusal, nothing sent | `move_skip_needs_no_target` |
 | An action with one message in `INBOX` and one in a user folder, `\Sent`, `\Drafts` or `\Junk` | the plan refuses; `fail_unclaimed` gives a `failed` ledger entry with no message and a `failed` action; nothing moves | `move_from_other_folder_refuses` |
 | A lost connection during the plan read | no ledger entry, the action stays approved, nothing moves | `move_plan_transport_error` |
