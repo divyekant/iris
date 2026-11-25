@@ -73,7 +73,7 @@ not have the label `SPAM` or `TRASH`.
 | `skip` | feed item | reason | none (Iris state) | set the old value (below) | 5 |
 | `mute` | conversation | reason | none (Iris state) | set the old value (below) | 5 |
 | `dismiss` | signal | reason | none (Iris state) | set the old value (below) | 5 |
-| `draft` | one thread (a reply) or one account (`a-N`, a new mail) | recipients, subject, text | `drafts.create` (section 7.5) | none: Iris never deletes a draft. The change of a draft and its undo come in a later card | 3 |
+| `draft` | one thread (a reply), one account (`a-N`, a new mail), or one Gmail draft of Iris (`d-N`, a change by the person) | recipients, subject, text | `drafts.create`, or `drafts.update` for a change (section 7.5) | a create: none, because Iris never deletes a draft. A change: `drafts.update` with the old content (`docs/specs/2026-11-25-draft-change.md`) | 3 |
 | `send` | one draft (`d-N`) | none | `drafts.send`, after the hold (section 7.5) | none: final after the hold | 3 |
 | `nudge` | commitment `owed_to_you` | none | makes a `draft` action, then a `send` action | as `draft` and `send` | 3 |
 | `wait` | thread, or a date | until | none | not applicable | 5 |
@@ -1060,8 +1060,9 @@ and the release step. That specification must meet these constraints:
   send of the same draft.
 - The undo of a `draft` action that changes a draft restores the old
   content of the draft. It never deletes a draft of the person. So a
-  draft create has no undo, and no `draft` action can change a draft
-  until its undo exists (R3-01 makes only creates).
+  draft create has no undo. `docs/specs/2026-11-25-draft-change.md`
+  (decision D6) defines the change of a Gmail draft and its undo
+  together.
 - Each verb records its result in the ledger and has a crash test.
 
 ## 8. The iris command
