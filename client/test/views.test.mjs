@@ -1191,7 +1191,7 @@ test("the Records view counts from /api/records, so a record type that a rule hi
 });
 
 test("a mail from a near-copy sender offers Trust, with the domain it looks like", async () => {
-  const message = { ...fx.message("m-55210"), sender_kind: "hostile", near_copy: { sender: "p-90", of: "northwind.example", trusted: false } };
+  const message = { ...fx.message("m-55210"), sender_kind: "hostile", near_copy: { sender: "p-90", of: "northwind.example" } };
   const shown = text(await render("/src/views/Mail.svelte", { message }));
   assert.match(shown, /its domain looks like northwind\.example/);
   assert.match(shown, /Trust this sender/);
