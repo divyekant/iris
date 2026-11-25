@@ -515,7 +515,7 @@ fn an_item_file_holds_no_text_of_the_model() {
             .unwrap();
     assert_eq!(
         c3,
-        serde_json::json!({"model": "iris/1.2", "id": "c-3", "form": "commitment", "sources": ["m-8"]})
+        serde_json::json!({"model": "iris/1.3", "id": "c-3", "form": "commitment", "sources": ["m-8"]})
     );
     assert!(iris_spec::validator("jobitem").is_valid(&c3));
 }

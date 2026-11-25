@@ -1,0 +1,65 @@
+{
+  "model": "iris/1.2",
+  "id": "cs-78",
+  "revision": 1,
+  "author": {
+    "kind": "person"
+  },
+  "why": "Change the draft before the send.",
+  "created": "2026-11-25T09:17:02Z",
+  "submitted": "2026-11-25T09:17:40Z",
+  "state": "open",
+  "actions": [
+    {
+      "n": 1,
+      "revision": 1,
+      "verb": "draft",
+      "targets": {
+        "drafts": [
+          "d-4"
+        ]
+      },
+      "resolved": {
+        "messages": [
+          "m-55211"
+        ]
+      },
+      "args": {
+        "to": [
+          "priya@example.com"
+        ],
+        "body": "Thanks, the new numbers are attached."
+      },
+      "flags": [],
+      "hash": "4f8a0c2e7b13d95a6e0f1b8c3d72a4e95b6c0d1f8e3a7b29c4d05e6f1a8b3c72",
+      "decision": {
+        "state": "proposed"
+      }
+    },
+    {
+      "n": 2,
+      "revision": 1,
+      "verb": "draft",
+      "targets": {
+        "drafts": [
+          "d-5"
+        ]
+      },
+      "resolved": {
+        "messages": []
+      },
+      "args": {
+        "to": [
+          "sam@example.com"
+        ],
+        "subject": "Q4 plan",
+        "body": "Here is the plan."
+      },
+      "flags": [],
+      "hash": "4f8a0c2e7b13d95a6e0f1b8c3d72a4e95b6c0d1f8e3a7b29c4d05e6f1a8b3c72",
+      "decision": {
+        "state": "proposed"
+      }
+    }
+  ]
+}

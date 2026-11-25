@@ -107,6 +107,11 @@
       "then": { "allOf": [ { "not": { "required": ["withdrawn_by"] } }, { "not": { "required": ["comments"] } } ] }
     },
     {
+      "$comment": "A draft action with a drafts target (a change of a draft, docs/specs/2026-11-25-draft-change.md): since 1.3 (specification 4, rule 2.8).",
+      "if": { "properties": { "model": { "enum": ["iris/1.0", "iris/1.1", "iris/1.2"] } }, "required": ["model"] },
+      "then": { "properties": { "actions": { "items": { "not": { "properties": { "verb": { "const": "draft" }, "targets": { "required": ["drafts"] } }, "required": ["verb", "targets"] } } } } }
+    },
+    {
       "$comment": "Only a withdrawn changeset names who withdrew it (decision D16).",
       "if": { "required": ["withdrawn_by"] },
       "then": { "properties": { "state": { "const": "withdrawn" } } }
