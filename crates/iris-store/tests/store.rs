@@ -747,6 +747,49 @@ fn dry_write_gives_the_result_and_writes_nothing() {
     assert_eq!(after, 0);
 }
 
+/// A signal expires at its `expires` time in the status column and the
+/// document (issue #927). A signal with no time, and a gone one, stay.
+#[test]
+fn a_signal_expires_at_its_time() {
+    let dir = TempDir::new("signal-expiry");
+    let (store, acc) = setup(&dir);
+    let add = |status: &str, doc: &str| -> i64 {
+        store
+            .write(|tx| {
+                Ok(tx.query_row(
+                    "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                     VALUES ('signal', ?1, ?2, ?3, 0, 0) RETURNING id",
+                    rusqlite::params![acc, status, doc],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    // 2026-11-16T00:00:00Z
+    let t = 1_794_787_200_000;
+    let at = r#"{"status":"active","expires":"2026-11-16T00:00:00.000Z"}"#;
+    let timed = add("active", at);
+    let none = add("active", r#"{"status":"active"}"#);
+    let gone = add("gone", at);
+    assert_eq!(store.expire_signals(t - 1).unwrap(), 0);
+    assert_eq!(store.expire_signals(t).unwrap(), 1);
+    let row = |id: i64| -> (String, String, i64) {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT status, json_extract(doc, '$.status'), updated_at FROM item WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default(), r.get(2)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    assert_eq!(row(timed), ("expired".into(), "expired".into(), t));
+    assert_eq!(row(none).0, "active");
+    assert_eq!(row(gone).0, "gone");
+    assert_eq!(store.expire_signals(t + 1).unwrap(), 0);
+}
+
 #[test]
 fn a_deferred_commitment_opens_at_midnight_of_the_owner() {
     let dir = TempDir::new("deferred-zone");

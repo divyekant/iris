@@ -351,7 +351,9 @@ fn usable(r: &Reply) -> bool {
 }
 
 /// Runs the step with `model`, and gives the outcome, the call, and the
-/// pair score of the proposals against the true matters.
+/// pair score of the proposals against the true matters. It prints
+/// nothing: the caller prints the score ([`print`]) only after the answer
+/// check, so a failed run shows no score (issue #810).
 fn measure(name: &str, model: impl Fn() -> Box<dyn Model>) -> (Outcome, Call, Count) {
     let dir = std::env::temp_dir().join(format!("iris-quality-{name}-{}", std::process::id()));
     let cases = set();
@@ -381,14 +383,18 @@ fn measure(name: &str, model: impl Fn() -> Box<dyn Model>) -> (Outcome, Call, Co
         .unwrap();
     let got = groups(got.into_iter());
     let score = pair_scores(&truth, &got);
+    let _ = std::fs::remove_dir_all(&dir);
+    let call = std::mem::take(&mut *call.borrow_mut());
+    (out, call, score)
+}
+
+/// Prints the score of a run that passed the answer check.
+fn print(name: &str, out: &Outcome, score: &Count) {
     eprintln!(
         "matters {name}: {out:?}\n  pairs {score:?} precision {:?} recall {:?}",
         score.precision(),
         score.recall()
     );
-    let _ = std::fs::remove_dir_all(&dir);
-    let call = std::mem::take(&mut *call.borrow_mut());
-    (out, call, score)
 }
 
 /// Each item of the set went to the model, the items of no matter too, so
@@ -423,9 +429,10 @@ fn groups(pairs: impl Iterator<Item = (String, i64)>) -> Vec<Vec<i64>> {
 /// valid matter.
 #[test]
 fn the_oracle_scores_one() {
-    let (_, call, s) = measure("oracle", || Box::new(Oracle(set())));
+    let (out, call, s) = measure("oracle", || Box::new(Oracle(set())));
     assert_all_sent(&call);
     assert!(call.usable);
+    print("oracle", &out, &s);
     assert_eq!(s.expected, 6 + 3 + 3 + 3);
     assert_eq!((s.precision(), s.recall()), (Some(1.0), Some(1.0)), "{s:?}");
 }
@@ -439,7 +446,7 @@ fn a_local_model_gives_a_score() {
     };
     let (url, model) = v.split_once('|').expect("<base URL>|<model>");
     let (url, model) = (url.to_string(), model.to_string());
-    let (_, call, _) = measure("local", || {
+    let (out, call, s) = measure("local", || {
         Box::new(iris_understand::Named {
             client: iris_model::Client::new(iris_model::Config {
                 provider: iris_model::Provider::OpenAiCompatible,
@@ -459,6 +466,7 @@ fn a_local_model_gives_a_score() {
         call.usable,
         "the model gave no complete answer of the format"
     );
+    print("local", &out, &s);
 }
 
 /// A cut, refused or empty answer is not usable: the local test fails on
