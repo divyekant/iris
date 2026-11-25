@@ -237,26 +237,45 @@ pub const MAX_REQUESTS: usize = 64;
 /// streamed answer can wait for a thread that never comes (#814).
 pub const BLOCKING_THREADS: usize = 2 * MAX_REQUESTS;
 
-/// The slots of [`MAX_REQUESTS`], one for each runtime.
-static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+/// The slots of [`MAX_REQUESTS`]: one for `POST /api/stop` alone, so that
+/// the Stop control of the web client answers when the other requests hold
+/// each other slot (`docs/specs/2026-11-17-stop.md`), and the rest for all
+/// other requests. One static for each process.
+static SLOTS: std::sync::OnceLock<[Arc<tokio::sync::Semaphore>; 2]> = std::sync::OnceLock::new();
 
 /// Runs the rest of the request (the measure count and the handler) on a
 /// blocking thread. `iris serve` has one runtime thread, which also answers
 /// the command socket: a handler that waits for a store connection there
 /// stops each other request (#700). The runtime thread keeps the drivers of
 /// I/O and time, so the handler can still await them. The request holds one
-/// of the [`MAX_REQUESTS`] slots until the end of its body, so the requests
-/// and their stream writers never hold more than [`BLOCKING_THREADS`].
+/// of the [`MAX_REQUESTS`] slots until its handler ends and its body ends,
+/// so the requests and their stream writers never hold more than
+/// [`BLOCKING_THREADS`]. A client that goes away does not free the slot
+/// while the handler still runs.
 async fn off_runtime(req: axum::extract::Request, next: middleware::Next) -> Response {
-    let slots = SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_REQUESTS)));
+    let [stop, other] = SLOTS.get_or_init(|| {
+        [
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            Arc::new(tokio::sync::Semaphore::new(MAX_REQUESTS - 1)),
+        ]
+    });
+    let slots = if req.method() == axum::http::Method::POST && req.uri().path() == "/api/stop" {
+        stop
+    } else {
+        other
+    };
     let Ok(slot) = slots.clone().acquire_owned().await else {
         return error(StatusCode::INTERNAL_SERVER_ERROR, "the request failed");
     };
     let rt = tokio::runtime::Handle::current();
-    match tokio::task::spawn_blocking(move || rt.block_on(next.run(req))).await {
-        Ok(res) => res.map(|body| Body::new(Held { body, _slot: slot })),
-        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "the request failed"),
-    }
+    // The slot goes into the blocking task: it stays held until the handler
+    // ends, also when the client goes away and this future drops.
+    let task = tokio::task::spawn_blocking(move || {
+        let res = rt.block_on(next.run(req));
+        res.map(|body| Body::new(Held { body, _slot: slot }))
+    });
+    task.await
+        .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "the request failed"))
 }
 
 /// A body that holds the slot of its request until the body ends or drops.
