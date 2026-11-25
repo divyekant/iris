@@ -391,10 +391,47 @@ export type ChangeStart =
   | ({ change: DraftContent } & ({ thread: string; reply: ReplyStart } | { accounts: Status["accounts"] }))
   | { closed: DraftContent };
 
+/** The session storage place of a form of the write view: a draft link (`d-N`), a reply (`t-N`) or `new`. */
+export const writePlace = (of: string) => `iris.write.${of}`;
+
+/** True while the write view keeps a write that the engine took from the place `place`: the write can still leave. */
+export function keepsWrite(place: string): boolean {
+  try {
+    const v = JSON.parse(globalThis.sessionStorage?.getItem(`${place}.taken`) ?? "null");
+    return !!v && typeof v.write === "string";
+  } catch {
+    return false;
+  }
+}
+
 export async function loadChange(id: string): Promise<ChangeStart> {
-  const change = await get<DraftContent>(`drafts/${encodeURIComponent(id)}`);
-  if (!change.change) return { closed: change };
-  if (change.thread) return { thread: change.thread, reply: await get<ReplyStart>(`threads/${encodeURIComponent(change.thread)}/reply`), change };
+  // A write of this draft link that can still leave shows its state (issue 1098). It
+  // needs only its own record: a missing draft or reply start does not hide it. Such a
+  // start has no conversation and no change, so no form follows the write.
+  const kept = keepsWrite(writePlace(id));
+  const only = (d: DraftContent): ChangeStart => ({ accounts: [], change: { ...d, change: null } });
+  // Only a definite answer ends a read for a kept write: 404 (no such draft now) or
+  // 409 (no mail to reply to). Another error shows, and the next open reads again.
+  const gone = (e: unknown, status: number) => kept && (e as { status?: number }).status === status;
+  let change: DraftContent;
+  try {
+    change = await get<DraftContent>(`drafts/${encodeURIComponent(id)}`);
+  } catch (e) {
+    if (!gone(e, 404)) throw e;
+    // The draft of a "new" change can lose its form (Iris does not write it) while the new draft waits.
+    return only({ draft: id, account: "", thread: null, to: [], cc: [], bcc: [], subject: "", body: "", attachments: [], change: null });
+  }
+  if (!change.change && !kept) return { closed: change };
+  if (change.thread) {
+    try {
+      return { thread: change.thread, reply: await get<ReplyStart>(`threads/${encodeURIComponent(change.thread)}/reply`), change };
+    } catch (e) {
+      // With no mail to reply to (its parent can be in Trash now), the engine
+      // offers no change of the reply.
+      if (!gone(e, 409)) throw e;
+      return only(change);
+    }
+  }
   return { accounts: (await get<Status>("status")).accounts, change };
 }
 

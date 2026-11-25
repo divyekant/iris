@@ -300,9 +300,23 @@ press sends `draft` only when `change` is `"update"` now. A write that
 the engine took from a draft link stays in that place until it ends: a
 reload or a new link of the same draft shows the state of that write,
 not the form, while it can still leave (for `"new"`, the old draft can
-still change). When the write ends (sent or stopped), the form shows.
+still change). This is also true when the send of that write stops the
+change of the draft (`change` is `null`, issue 1098), and after "Write
+another" (issue 1101): only the end of the write (sent or stopped) ends
+the record. The write needs only its own record: it shows also when
+the draft of the link is gone (404, for example it has a form that Iris
+does not write) or the thread of a reply has no mail to reply to now
+(409, its parent is in Trash). Then it shows with no conversation and no
+form. Another error of these reads shows, and the next open reads again. When the write ends, the form shows if the draft could change
+when the link opened. Else the view shows the end of the write.
 
-If `change` is `null` when the link opens, the view shows no form. It
+"Change and send" in a draft link view opens the form in place only for
+the draft of the link. For another draft (the new draft of a `"new"`
+change), it opens the link of that draft, so each form stays in the place
+of its own draft (issue 1102).
+
+If `change` is `null` when the link opens and no write of the link can
+still leave, the view shows no form. It
 says why and links to a new write: "A new mail came into this thread.
 Write a new reply." with a link to the reply of the thread when
 `newer_mail` is true, else "This draft cannot change now." with a link
