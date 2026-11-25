@@ -256,8 +256,9 @@ write, or `Transport` (unknown) after the first write.
 | Input or event | Result | Test |
 |---|---|---|
 | No `MOVE` or no `UIDPLUS` | `Api` 400 `notSupported`, nothing sent | `move_needs_move_and_uidplus` |
-| No archive folder, for `archive` or `inbox` | `Api` 400 `noArchive`, nothing sent | `move_without_folder` |
-| No trash folder | `Api` 400 `noTrash`, nothing sent | `move_without_folder` |
+| No archive folder, and `archive` of a message in `INBOX` (a message that must move) | `Api` 400 `noArchive`, nothing sent | `move_without_folder` |
+| No trash folder, and `trash` of a message in `INBOX` or an archive folder (a message that must move) | `Api` 400 `noTrash`, nothing sent | `move_without_folder` |
+| No archive folder, and `inbox` of a message in `INBOX`; or no trash folder, and `untrash` of a message in `INBOX` | the plan gives false (skip): `inbox` and `untrash` move to `INBOX`, which each server has; nothing sent | `move_skip_needs_no_target` |
 | Two archive folders or two trash folders as the target of a message that moves | `Api` 400 `ambiguousArchive` or `ambiguousTrash`, nothing sent | `move_ambiguous_folder` |
 | A server with a `\Trash` folder and also an ordinary folder named `Trash`: `untrash` of a message in the ordinary folder | the ordinary folder has no role; the plan refuses with `notSupported`, nothing sent | `move_role_follows_the_attribute` |
 | `archive` of a message in the trash, or `inbox` of a message in `INBOX`, on a server with no archive folder | the plan gives false (skip); no refusal, nothing sent | `move_skip_needs_no_target` |
