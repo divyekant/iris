@@ -465,24 +465,33 @@ pub(super) fn recover(run: &mut Run<'_, '_>, ledger: i64, at: i64) -> Result<Out
             let Ok(found) = run.call(|g, t| g.drafts_with_id(t, &message_id)) else {
                 return read_failed(run);
             };
-            let mut all = Vec::with_capacity(found.len());
+            // Keep at most two messages in memory: the first draft, and the
+            // first draft with the new hash.
+            let (mut count, mut first, mut hits, mut hit) = (0, None, 0, None);
             for f in found {
                 let Ok(back) = run.call(|g, t| g.draft_raw(t, &f.id)) else {
                     return read_failed(run);
                 };
-                all.push((f.id, back.raw.unwrap_or_default()));
-            }
-            let same = |raw: &[u8]| {
-                iris_compose::read(raw, &run.address)
+                let raw = back.raw.unwrap_or_default();
+                count += 1;
+                if iris_compose::read(&raw, &run.address)
                     .is_some_and(|r| iris_compose::hash(&r.content, r.reply.as_ref()) == hash)
-            };
-            let hits: Vec<&(String, Vec<u8>)> = all.iter().filter(|(_, r)| same(r)).collect();
-            let one = match (all.as_slice(), hits.as_slice()) {
-                ([only], _) => Some(only),
-                (_, [only]) => Some(*only),
+                {
+                    hits += 1;
+                    if hit.is_none() {
+                        hit = Some((f.id.clone(), raw.clone()));
+                    }
+                }
+                if first.is_none() {
+                    first = Some((f.id, raw));
+                }
+            }
+            let one = match (count, hits) {
+                (1, _) => first,
+                (_, 1) => hit,
                 _ => None,
             };
-            match one.cloned() {
+            match one {
                 Some((id, raw)) => settle(run, ledger, &id, &raw, UNKNOWN),
                 None => end(run, ledger, "failed", Some(UNKNOWN.into()), false),
             }

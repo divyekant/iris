@@ -2314,8 +2314,8 @@ fn only_the_newest_change_has_an_undo() {
 }
 
 /// The view `ledger_can_undo` names the two errors of an unknown result
-/// of a change (migration 57). A new text of either one must change the
-/// view too.
+/// of a change and the age of a send mark (migration 57). A new value of
+/// either one must change the view too.
 #[test]
 fn the_undo_view_names_the_errors_of_an_unknown_result() {
     let b = setup("undo-view");
@@ -2332,6 +2332,8 @@ fn the_undo_view_names_the_errors_of_an_unknown_result() {
     for why in [iris_apply::CHANGE_UNKNOWN, iris_apply::CHANGE_DURING] {
         assert!(sql.contains(&format!("'{why}'")), "{why}");
     }
+    // The age of a send mark with no send: MARK_MS.
+    assert!(sql.contains(&format!("- {}", iris_changeset::MARK_MS)));
 }
 
 /// Recovery after Gmail gave the changed draft a new ID, and the person
@@ -2418,4 +2420,29 @@ fn the_store_refuses_an_undo_with_other_text() {
     });
     assert!(r.is_err(), "the link is refused");
     assert!(b.undo(change).is_ok(), "the undo of the content of pre");
+}
+
+/// The view `ledger_can_undo` agrees with the undo: while a send of the
+/// draft waits (an approved send in its hold, before its claim, or the
+/// send mark of a press with no send yet), the view hides the undo, and
+/// the undo is refused.
+#[test]
+fn no_undo_while_a_send_of_the_draft_waits() {
+    for marked in [false, true] {
+        let b = setup(&format!("undo-send-{marked}"));
+        let (change, d, _) = b.changed(new_text());
+        if marked {
+            b.mark(change);
+        }
+        assert!(matches!(b.apply(change), Ok(Outcome::Applied(_))));
+        if !marked {
+            let send = b.approved(Verb::Send, &d, json!({}), 0);
+            assert_eq!(b.state(send), "approved");
+        }
+        assert!(!b.can_undo(change), "marked {marked}");
+        assert!(
+            matches!(b.undo(change), Err(iris_apply::Error::Undo(_))),
+            "marked {marked}"
+        );
+    }
 }

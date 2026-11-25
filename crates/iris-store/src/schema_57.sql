@@ -5,8 +5,9 @@
 --    an applied change of a draft (`drafts.update`) whose call started. Its
 --    arguments are the content of `pre`. Each rule of migration 29 stays.
 -- 2. The view ledger_can_undo lists such an entry while it is the newest
---    entry of its draft that counts, and the draft is not sent, not in a
---    form that Iris does not write, and has no claimed send. A failed later
+--    entry of its draft that counts, and the draft passes the checks of a
+--    change (iris_changeset::change_denied): not sent, in a form that Iris
+--    writes, no send that waits, and no open change. A failed later
 --    change counts only with the two errors of an unknown result (the
 --    constants CHANGE_UNKNOWN and CHANGE_DURING of iris-apply; a test
 --    compares them). Each rule of migration 29 stays.
@@ -80,8 +81,31 @@ CREATE VIEW ledger_can_undo AS
              -- sent, is in a form that Iris writes, and has no claimed send.
              AND EXISTS (SELECT 1 FROM draft d WHERE d.id = json_extract(l.ops, '$.draft')
                            AND d.sent_at IS NULL AND d.foreign_at IS NULL)
+             -- The checks of iris_changeset::change_denied, for no action:
+             -- no claimed send, no open send action, no send mark of a
+             -- press with no send yet (younger than MARK_MS, 24 hours),
+             -- and no open change or undo of the draft.
              AND NOT EXISTS (SELECT 1 FROM ledger_send s
                              WHERE s.draft_id = json_extract(l.ops, '$.draft'))
+             AND NOT EXISTS (SELECT 1 FROM action_draft o JOIN changeset_action b ON b.id = o.action_id
+                             LEFT JOIN ledger bl ON bl.action_id = b.id
+                             WHERE o.draft_id = json_extract(l.ops, '$.draft')
+                               AND ((b.verb = 'send'
+                                     AND b.state IN ('proposed', 'in_review', 'approved', 'held'))
+                                    OR (b.verb = 'draft'
+                                        AND (b.state IN ('approved', 'held') OR bl.state = 'writing'))))
+             AND NOT EXISTS (SELECT 1 FROM write_send w
+                             JOIN changeset_action b ON b.id = w.action_id
+                             JOIN changeset c ON c.id = b.changeset_id
+                             WHERE w.send_action_id IS NULL AND c.state <> 'withdrawn'
+                               AND b.state IN ('approved', 'held', 'applied')
+                               AND w.created_at > (julianday('now') - 2440587.5) * 86400000 - 86400000
+                               AND (EXISTS (SELECT 1 FROM draft d
+                                            WHERE d.id = json_extract(l.ops, '$.draft')
+                                              AND d.action_id = b.id)
+                                    OR EXISTS (SELECT 1 FROM action_draft o
+                                               WHERE o.action_id = b.id
+                                                 AND o.draft_id = json_extract(l.ops, '$.draft'))))
              -- The newest entry of the draft. A later change or undo
              -- counts after its call started, unless Gmail rejected it.
              AND NOT EXISTS (SELECT 1 FROM ledger n
