@@ -24,6 +24,11 @@ reads them (a reader). Iris is a producer and a reader.
    - an optional field;
    - a new value of an enum;
    - a new verb, with its arguments;
+   - a new target kind of a verb, for a new action of that verb (for
+     example, the `drafts` target of `draft` in 1.3, a change of a draft).
+     The actions of the older targets keep their meaning. Rule 8 applies:
+     a document that claims an older minor version and holds the new
+     target is not valid;
    - a new schema (a new document).
 3. A minor version never removes or renames a field or an enum value. It
    never changes the type or the meaning of a field. It never makes an

@@ -112,6 +112,11 @@
       "then": { "properties": { "actions": { "items": { "not": { "properties": { "verb": { "const": "draft" }, "targets": { "required": ["drafts"] } }, "required": ["verb", "targets"] } } } } }
     },
     {
+      "$comment": "Only the person changes a draft (docs/specs/2026-11-25-draft-change.md, section 1): a checked draft action with a drafts target is in a changeset of the person.",
+      "if": { "not": { "properties": { "author": { "properties": { "kind": { "const": "person" } }, "required": ["kind"] } }, "required": ["author"] } },
+      "then": { "properties": { "actions": { "items": { "not": { "properties": { "verb": { "const": "draft" }, "targets": { "required": ["drafts"] }, "decision": { "properties": { "state": { "enum": ["proposed", "in_review", "approved", "held", "applied", "failed", "undone", "expired", "replaced"] } }, "required": ["state"] } }, "required": ["verb", "targets", "decision"] } } } } }
+    },
+    {
       "$comment": "Only a withdrawn changeset names who withdrew it (decision D16).",
       "if": { "required": ["withdrawn_by"] },
       "then": { "properties": { "state": { "const": "withdrawn" } } }
