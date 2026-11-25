@@ -180,8 +180,11 @@ fn the_grants_of_an_ended_job_go() {
     std::fs::write(&path, format!("{text}\n# an edit\n")).unwrap();
     assert_eq!(end_grants(&store, NOW).unwrap(), 0);
     std::fs::write(&path, &text).unwrap();
-    // Both rules of the ended job go; the rule of the working job stays.
+    // Both rules of the ended job go in one policy change (#825); the rule
+    // of the working job stays.
+    let before = version(&store).unwrap();
     assert_eq!(end_grants(&store, NOW).unwrap(), 2);
+    assert_eq!(version(&store), Some(before + 1));
     let rules = store.read(active).unwrap().policy.rules;
     let jobs: Vec<_> = rules.iter().map(|r| r.job.clone()).collect();
     assert_eq!(

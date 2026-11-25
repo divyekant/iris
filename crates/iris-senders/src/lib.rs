@@ -301,12 +301,14 @@ fn decide_message(
                         now_ms,
                     )?;
                     // A row that a person set keeps its kind: only a known
-                    // sender adds its domain.
-                    let kind: Option<String> =
-                        conn.query_row("SELECT kind FROM sender WHERE address = ?1", [to], |r| {
-                            r.get(0)
-                        })?;
-                    if matches!(kind.as_deref(), Some("person" | "service")) {
+                    // sender adds its domain, as in `known_domains`.
+                    let known_row: bool = conn.query_row(
+                        "SELECT kind IN ('person', 'service') AND basis IS NOT ?2
+                           FROM sender WHERE address = ?1",
+                        params![to, gate::TRUSTED],
+                        |r| r.get(0),
+                    )?;
+                    if known_row {
                         known.push(domain_of(to).to_string());
                     }
                 }
@@ -590,9 +592,12 @@ fn upsert(
 fn known_domains(conn: &Connection, but: &str) -> rusqlite::Result<Vec<String>> {
     conn.prepare_cached(
         "SELECT DISTINCT substr(address, instr(address, '@') + 1) FROM sender
-          WHERE kind IN ('person', 'service') AND address != ?1",
+          WHERE kind IN ('person', 'service') AND address != ?1 AND basis IS NOT ?2",
     )?
-    .query_map([but], |r| r.get(0))?
+    // A trusted near copy is a known sender, but its domain is no reference
+    // of the near-copy rule: else the real domain that it looks like
+    // becomes a near copy of it (issue #49).
+    .query_map([but, gate::TRUSTED], |r| r.get(0))?
     .collect()
 }
 

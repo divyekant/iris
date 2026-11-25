@@ -312,9 +312,11 @@ each adapter program is.
   such as the home of the person, or `~/.local/bin`, can hold credentials
   and other files of the person. So an adapter program that needs other
   files outside the system folders (for example a Node.js program of
-  `nvm` in the home folder) does not run in a session. Known limit, with
-  an issue: a later card can add a list of read paths to `agents.toml`,
-  which the person sets.
+  `nvm` in the home folder) runs in a session only if the person lists
+  its folders in `read_paths` of `agents.toml`
+  (`docs/specs/2026-11-25-agents-read-paths-local-port.md`). Each read
+  path is read only, and the checks of that spec keep the data folder,
+  the home folders and the folders of system state out.
 - Each mount point of the view is a real path. `bwrap` mounts at a path
   as it is given, and does not resolve a link in it. So `system()`
   resolves the data folder (`canonicalize`) and fails if it cannot, and

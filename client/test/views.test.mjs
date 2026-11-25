@@ -32,7 +32,7 @@ test("the stranger gate shows each sender once, with what they ask and the answe
   const gate = html.split('id="strangers"')[1].split("</section>")[0];
   const t = text(gate);
   assert.match(t, /From senders you do not know 3/);
-  assert.match(t, /Maria Ruiz maria@brightpath\.example Intro from Sam Ortiz Review the pitch deck before Friday/);
+  assert.match(t, /Maria Ruiz maria@brightpath\.example Intro from Sam Ortiz Draft ready Review the pitch deck before Friday/);
   assert.match(t, /billing@vendorhub\.example Confirm the address for the invoice/);
   assert.equal((gate.match(/>Accept</g) ?? []).length, 3);
   assert.equal((gate.match(/>Ignore</g) ?? []).length, 3);
@@ -247,11 +247,44 @@ test("setup and the brief say how to set a model while mail waits for one (issue
   ]) {
     assert.match(text(html), /Iris needs a model to read the rest of your mail\./);
     assert.match(text(html), /iris model set local/);
+    // Spec 1 section 7.4 (issue 826): the note says where mail text goes.
+    assert.match(text(html), /No mail text leaves this machine\./);
+    assert.match(text(html), /Iris sends the text of your mail to Anthropic\./);
   }
+  // The copy stopped (issue 827): the note still shows the model step.
+  const stopped = { ...status, accounts: [{ ...fx.status.accounts[0], state: "needs_sign_in", mirror_ready_at: null }], messages: { ...messages, fetched: 200 } };
+  const halt = text(await render("/src/views/Setup.svelte", { status: stopped, poll: 0 }));
+  assert.match(halt, /The copy stopped/);
+  assert.match(halt, /Iris needs a model to read the rest of your mail\./);
   // A model is set, an older engine says nothing, or no live mail waits (a draft or gone mail is not read): no note.
   for (const s of [{ ...status, model: true }, { ...status, model: undefined }, { ...status, waits_model: 0 }, { ...status, waits_model: undefined }]) {
     assert.doesNotMatch(text(await render("/src/views/Setup.svelte", { status: s, poll: 0 })), /needs a model/);
     assert.doesNotMatch(text(await render("/src/views/Brief.svelte", { brief: fx.brief, status: s, now: NOW, poll: 0 })), /needs a model/);
+  }
+});
+
+test("each setup step says that a hosted model receives the mail text, whatever the model state (spec 1 section 7.4)", async () => {
+  const account = fx.status.accounts[0];
+  const messages = { total: 400, fetched: 200, understood: 0, gone: 0 };
+  const steps = {
+    "connect": { accounts: [] },
+    "copy": { accounts: [{ ...account, mirror_ready_at: null }] },
+    "stopped": { accounts: [{ ...account, state: "needs_sign_in", mirror_ready_at: null }] },
+    "ready": { accounts: [account], messages: { ...messages, fetched: 400 } },
+  };
+  const models = {
+    "no model, mail waits": { model: false, waits_model: 394 },
+    "no model, nothing waits": { model: false, waits_model: 0 },
+    "a model set before the copy": { model: true, waits_model: 0 },
+    "an older engine": { model: undefined, waits_model: undefined },
+  };
+  for (const [step, part] of Object.entries(steps)) {
+    for (const [name, model] of Object.entries(models)) {
+      const status = { ...fx.status, messages, ...part, ...model };
+      const t = text(await render("/src/views/Setup.svelte", { status, poll: 0 }));
+      assert.match(t, /Iris sends the text of your mail to (Anthropic|that model)/, `${step}, ${name}`);
+      assert.match(t, /no mail text leaves/i, `${step}, ${name}`);
+    }
   }
 });
 
@@ -1155,4 +1188,13 @@ test("the Records view counts from /api/records, so a record type that a rule hi
     globalThis.fetch = saved;
     delete globalThis.location;
   }
+});
+
+test("a mail from a near-copy sender offers Trust, with the domain it looks like", async () => {
+  const message = { ...fx.message("m-55210"), sender_kind: "hostile", near_copy: { sender: "p-90", of: "northwind.example", trusted: false } };
+  const shown = text(await render("/src/views/Mail.svelte", { message }));
+  assert.match(shown, /its domain looks like northwind\.example/);
+  assert.match(shown, /Trust this sender/);
+  const plain = { ...fx.message("m-55210"), sender_kind: "hostile", near_copy: null };
+  assert.doesNotMatch(await render("/src/views/Mail.svelte", { message: plain }), /Trust this sender/);
 });

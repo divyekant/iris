@@ -1553,7 +1553,11 @@ fn run_store(cli: Cli) -> Result<(), String> {
                 .map_err(|e| format!("attention: {e}"))?;
             // The measure "time to the first brief" ends at the first brief with content.
             iris_api::measures::check_brief(&s, engine::now_ms())
-                .map_err(|e| format!("measures: {e}"))
+                .map_err(|e| format!("measures: {e}"))?;
+            // A watch matches with no engine too (issue #260).
+            s.check_watches(engine::now_ms())
+                .map(|_| ())
+                .map_err(|e| format!("watches: {e}"))
         });
         if let Err(e) = attention {
             return Err(match result {
@@ -2416,9 +2420,12 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
 
     // One thread: the lightest memory footprint has priority.
     // The time driver: the socket waits at most READ_WAIT for a request.
+    // The blocking threads: the API and its stream writers, and one for each
+    // connection of the command socket (#814).
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
+        .max_blocking_threads(iris_api::BLOCKING_THREADS + socket::MAX_CONNECTIONS)
         .build()?;
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;

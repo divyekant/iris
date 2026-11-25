@@ -45,7 +45,7 @@ impl Drop for Data {
 fn run(d: &Data, session: i64, port: Option<u16>, program: &str, args: &[&str]) -> String {
     let iso = d.iso();
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    let c = iso.command(session, &d.ws, port, Path::new(program), &args);
+    let c = iso.command(session, &d.ws, port, Path::new(program), &args, &[]);
     let mut cmd = std::process::Command::new(&c.program);
     cmd.args(&c.args)
         .process_group(0)
@@ -213,7 +213,7 @@ fn a_program_inside_the_data_folder_does_not_show_the_data_folder() {
     fs::write(&tool, "#!/bin/sh\necho tool-ran\n").unwrap();
     fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let iso = d.iso();
-    let c = iso.command(13, &d.ws, None, &tool, &[]);
+    let c = iso.command(13, &d.ws, None, &tool, &[], &[]);
     let mut cmd = std::process::Command::new(&c.program);
     cmd.args(&c.args)
         .process_group(0)
@@ -295,6 +295,7 @@ fn stop_ends_a_process_that_left_the_group_and_ended_agrees() {
             "-c".into(),
             "setsid sleep 100 & echo up > up; exec sleep 100".into(),
         ],
+        &[],
     );
     let mut cmd = std::process::Command::new(&c.program);
     cmd.args(&c.args).process_group(0).stdin(Stdio::null());
@@ -390,6 +391,7 @@ fn a_failed_record_stops_the_sandbox_before_the_program_runs() {
         None,
         Path::new("/bin/sh"),
         &["-c".into(), "echo ran > ran".into()],
+        &[],
     );
     let mut cmd = std::process::Command::new(&c.program);
     cmd.args(&c.args).process_group(0).stdin(Stdio::null());
@@ -417,6 +419,7 @@ fn lifetime_helper() {
             "-c".into(),
             "setsid sleep 100 & echo up > up; exec sleep 100".into(),
         ],
+        &[],
     );
     let mut cmd = std::process::Command::new(&c.program);
     cmd.args(&c.args).process_group(0).stdin(Stdio::null());
@@ -673,7 +676,7 @@ fn a_linked_data_folder_is_hidden_at_its_real_path() {
     let iso = Bwrap::new(&link).unwrap();
     assert_eq!(iso.data_dir, real);
     let ws_link = link.join("workspaces/j-1");
-    let c = iso.command(9, &ws_link, None, Path::new("/bin/true"), &[]);
+    let c = iso.command(9, &ws_link, None, Path::new("/bin/true"), &[], &[]);
     let args: Vec<&OsStr> = c.args.iter().map(|a| a.as_os_str()).collect();
     let after = |flag: &str| -> Vec<&OsStr> {
         args.windows(2)
@@ -695,7 +698,7 @@ fn a_linked_data_folder_is_hidden_at_its_real_path() {
                 real.display()
             ),
         ];
-        let c = iso.command(9, &ws_link, None, Path::new("/bin/sh"), &args);
+        let c = iso.command(9, &ws_link, None, Path::new("/bin/sh"), &args, &[]);
         let mut cmd = std::process::Command::new(&c.program);
         cmd.args(&c.args)
             .process_group(0)
@@ -722,7 +725,7 @@ fn a_linked_home_is_usable() {
     fs::create_dir_all(real.join("user")).unwrap();
     std::os::unix::fs::symlink(&real, &link).unwrap();
     let iso = d.iso();
-    let mut args = iso.view(Some(&link.join("user")), &[], &d.ws);
+    let mut args = iso.view(Some(&link.join("user")), &[], &[], &d.ws);
     args.extend([
         "--".into(),
         "/bin/sh".into(),
@@ -755,7 +758,7 @@ fn the_agent_can_always_write_its_home_and_tmpdir() {
     let d = Data::new();
     let iso = d.iso();
     for home in [None, Some(Path::new("/")), Some(Path::new("relative"))] {
-        let mut args = iso.view(home, &[], &d.ws);
+        let mut args = iso.view(home, &[], &[], &d.ws);
         args.extend([
             "--".into(),
             "/bin/sh".into(),
@@ -786,4 +789,110 @@ fn an_error_of_an_ended_process_means_ended() {
     assert!(exited(&io::Error::from_raw_os_error(libc::ESRCH)));
     assert!(exited(&io::Error::from(io::ErrorKind::NotFound)));
     assert!(!exited(&io::Error::from_raw_os_error(libc::EACCES)));
+}
+
+/// A tool folder outside `/tmp` (a folder of system state), for the read
+/// path tests.
+fn tool_dir(name: &str) -> PathBuf {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/read-paths-tests")
+        .join(format!("sbx-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&p);
+    fs::create_dir_all(&p).unwrap();
+    fs::write(p.join("main.js"), "TOOL-MARKER").unwrap();
+    fs::canonicalize(&p).unwrap()
+}
+
+#[test]
+fn a_read_path_is_readable_and_not_writable() {
+    let d = Data::new();
+    let iso = d.iso();
+    let tool = tool_dir("read");
+    let script = format!(
+        "cat {t}/main.js; echo; echo x > {t}/new && echo WROTE; cat {k} 2>/dev/null",
+        t = tool.display(),
+        k = d.dir.join("key").display()
+    );
+    let c = iso.command(
+        21,
+        &d.ws,
+        None,
+        Path::new("/bin/sh"),
+        &["-c".into(), script],
+        std::slice::from_ref(&tool),
+    );
+    assert!(c.args.iter().any(|a| a == RO_BIND_FD));
+    let mut cmd = std::process::Command::new(&c.program);
+    cmd.args(&c.args)
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let out = iso
+        .spawn_with(21, &mut cmd, None)
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&out.stdout);
+    assert!(out.contains("TOOL-MARKER"), "{out}");
+    assert!(!out.contains("WROTE"), "{out}");
+    assert!(!out.contains("KEY-MARKER"), "{out}");
+    assert!(!tool.join("new").exists());
+    let _ = fs::remove_dir_all(&tool);
+}
+
+#[test]
+fn a_read_path_that_changes_after_the_launch_stops_the_start() {
+    let d = Data::new();
+    let iso = d.iso();
+    let tool = tool_dir("swap");
+    let c = iso.command(
+        22,
+        &d.ws,
+        None,
+        Path::new("/bin/sh"),
+        &["-c".into(), "echo ran > ran".into()],
+        std::slice::from_ref(&tool),
+    );
+    // A process of the person puts a link to the data folder in its place.
+    let old = tool.with_extension("old");
+    fs::rename(&tool, &old).unwrap();
+    std::os::unix::fs::symlink(&d.dir, &tool).unwrap();
+    let mut cmd = std::process::Command::new(&c.program);
+    cmd.args(&c.args).process_group(0).stdin(Stdio::null());
+    let e = iso.spawn_with(22, &mut cmd, None).unwrap_err();
+    assert!(e.to_string().contains("read path"), "{e}");
+    thread::sleep(Duration::from_millis(200));
+    assert!(!d.ws.join("ran").exists());
+    let _ = fs::remove_file(&tool);
+    let _ = fs::remove_dir_all(&old);
+}
+
+#[test]
+fn a_read_path_replaced_by_an_unsafe_folder_stops_the_start() {
+    let d = Data::new();
+    let iso = d.iso();
+    let tool = tool_dir("swap-dir");
+    let c = iso.command(
+        23,
+        &d.ws,
+        None,
+        Path::new("/bin/sh"),
+        &["-c".into(), "echo ran > ran".into()],
+        std::slice::from_ref(&tool),
+    );
+    // A plain folder takes the path, with a socket in it: the helper checks
+    // the new folder again, not only its name.
+    let old = tool.with_extension("old");
+    fs::rename(&tool, &old).unwrap();
+    fs::create_dir(&tool).unwrap();
+    let _l = std::os::unix::net::UnixListener::bind(tool.join("agent.sock")).unwrap();
+    let mut cmd = std::process::Command::new(&c.program);
+    cmd.args(&c.args).process_group(0).stdin(Stdio::null());
+    let e = iso.spawn_with(23, &mut cmd, None).unwrap_err();
+    assert!(e.to_string().contains("socket"), "{e}");
+    thread::sleep(Duration::from_millis(200));
+    assert!(!d.ws.join("ran").exists());
+    let _ = fs::remove_dir_all(&tool);
+    let _ = fs::remove_dir_all(&old);
 }

@@ -1057,6 +1057,9 @@ impl Engine {
         if let Err(e) = self.store.reopen_deferred(now_ms()) {
             say!("iris: deferred commitments: {e}");
         }
+        if let Err(e) = self.store.expire_signals(now_ms()) {
+            say!("iris: signal expiry: {e}");
+        }
         if let Err(e) = iris_changeset::expire(&self.store, now_ms()) {
             say!("iris: changeset expiry: {e}");
         }

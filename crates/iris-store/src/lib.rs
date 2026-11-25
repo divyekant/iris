@@ -87,6 +87,26 @@ macro_rules! removed_account {
     };
 }
 
+/// SQL: the message `m` is not mail that you got, for a watch (card R5-07):
+/// hostile mail, mail that may be hostile, your own sent mail (`SENT`), or
+/// a draft or a copy. The first arrival, the read gate of a stored match
+/// and the content cleanup read this one rule, so a match that changes
+/// later stops in each place (issue #931).
+macro_rules! not_received {
+    () => {
+        concat!(
+            "(",
+            crate::hostile_mail!(),
+            " OR ",
+            crate::may_be_hostile!(),
+            " OR EXISTS (SELECT 1 FROM message_label sml JOIN label sl ON sl.id = sml.label_id
+               WHERE sml.message_id = m.id AND sl.provider_id = 'SENT') OR ",
+            crate::draft_or_copy!("m"),
+            ")"
+        )
+    };
+}
+
 /// The labels of [`draft_or_copy!`], for a check in Rust.
 pub const DRAFT_OR_COPY: [&str; 3] = ["DRAFT", "UNSENT", "SENT_COPY"];
 
@@ -177,6 +197,10 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_52.sql"),
     include_str!("schema_53.sql"),
     include_str!("schema_54.sql"),
+    include_str!("schema_55.sql"),
+    include_str!("schema_56.sql"),
+    include_str!("schema_57.sql"),
+    include_str!("schema_58.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
@@ -212,6 +236,9 @@ pub enum Error {
     Account(&'static str),
     /// The time zone name is not in the time zone database of the computer.
     TimeZone(String),
+    /// Another message row of the account has the new provider ID
+    /// ([`rebind`]).
+    Taken(String),
 }
 
 impl fmt::Display for Error {
@@ -233,6 +260,7 @@ impl fmt::Display for Error {
                 f,
                 "time zone: {name} is not a time zone of this computer (use an IANA name, for example Europe/Berlin)"
             ),
+            Error::Taken(id) => write!(f, "another message has the provider ID {id}"),
         }
     }
 }
@@ -554,6 +582,12 @@ impl Store {
                 rusqlite::params![now, today(tx, now)?],
             )?)
         })
+    }
+
+    /// Mark each active signal whose `expires` time is at or before `now`
+    /// as `expired` ([`expire_signals`]).
+    pub fn expire_signals(&self, now: i64) -> Result<usize> {
+        self.write(|tx| expire_signals(tx, now))
     }
 
     /// Take the run lock of the `sync_log` row `row`, and create its file.
@@ -921,6 +955,22 @@ pub(crate) fn settings(conn: &Connection) -> Result<()> {
         }
     }
     conn.execute_batch(PRAGMAS)?;
+    // `iris_same_name(a, b)`: the two names are equal with Unicode case
+    // folding, as the label rules of submit and apply (`unicase`). SQLite
+    // `COLLATE NOCASE` folds only ASCII (issue #965).
+    conn.create_scalar_function(
+        "iris_same_name",
+        2,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let (a, b) = (ctx.get::<Option<String>>(0)?, ctx.get::<Option<String>>(1)?);
+            Ok(match (a, b) {
+                (Some(a), Some(b)) => unicase::UniCase::new(a) == unicase::UniCase::new(b),
+                _ => false,
+            })
+        },
+    )?;
     Ok(())
 }
 
@@ -1037,6 +1087,24 @@ pub fn day_in(zone: &jiff::tz::TimeZone, now_ms: i64) -> String {
     zone.to_datetime(at).date().to_string()
 }
 
+/// Mark each active signal whose `expires` time is at or before `now_ms` as
+/// `expired`, in the status column and the document (specification 1,
+/// section 6.8). The status rule of `iris_understand` sets it only when it
+/// writes the item, so the store would keep `active` after the time (issue
+/// #927). A signal with no `expires` stays active. Gives the number of
+/// signals that expired.
+pub fn expire_signals(c: &Connection, now_ms: i64) -> Result<usize> {
+    Ok(c.execute(
+        "UPDATE item SET status = 'expired', updated_at = ?1,
+           doc = json_set(doc, '$.status', 'expired', '$.updated',
+             strftime('%Y-%m-%dT%H:%M:%S', ?1 / 1000, 'unixepoch')
+               || printf('.%03dZ', ?1 % 1000))
+         WHERE form = 'signal' AND status = 'active'
+           AND unixepoch(json_extract(doc, '$.expires'), 'subsec') * 1000 <= ?1",
+        [now_ms],
+    )?)
+}
+
 /// The schema version of an open database.
 pub fn schema_version(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
@@ -1051,6 +1119,39 @@ pub fn stopped(conn: &Connection) -> Result<Option<i64>> {
             r.get(0)
         })?,
     )
+}
+
+/// Give the message row `message` the provider ID `new`, after a move
+/// that gave the message a new location ID (IMAP moves spec, section 3).
+/// The row, its raw file, its forms and its ledger rows stay. A thread
+/// whose provider ID is the old message ID (the fallback thread ID of a
+/// message with no thread headers) gets `new` too. Refuses with
+/// [`Error::Taken`] if another row of the account has `new`. Run it in the
+/// transaction that saves the move.
+pub fn rebind(tx: &Connection, message: i64, new: &str) -> Result<()> {
+    let (account, old, thread): (i64, String, i64) = tx.query_row(
+        "SELECT account_id, provider_id, thread_id FROM message WHERE id = ?1",
+        [message],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let taken: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM message
+                        WHERE account_id = ?1 AND provider_id = ?2 AND id != ?3)",
+        params![account, new, message],
+        |r| r.get(0),
+    )?;
+    if taken {
+        return Err(Error::Taken(new.to_string()));
+    }
+    tx.execute(
+        "UPDATE message SET provider_id = ?2 WHERE id = ?1",
+        params![message, new],
+    )?;
+    tx.execute(
+        "UPDATE thread SET provider_id = ?3 WHERE id = ?1 AND provider_id = ?2",
+        params![thread, old, new],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

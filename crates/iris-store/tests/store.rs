@@ -82,7 +82,7 @@ fn open_makes_the_data_folder() {
     }
     store
         .read(|c| {
-            assert_eq!(iris_store::schema_version(c)?, 54);
+            assert_eq!(iris_store::schema_version(c)?, 58);
             let journal: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
             assert_eq!(journal, "wal");
             let cache: i64 = c.query_row("PRAGMA cache_size", [], |r| r.get(0))?;
@@ -138,6 +138,42 @@ fn refuses_an_unknown_schema() {
     conn.pragma_update(None, "user_version", -1).unwrap();
     drop(conn);
     assert!(matches!(Store::open(&dir.0), Err(Error::UnknownSchema(-1))));
+}
+
+/// `label:` folds the case of each letter, not only ASCII (issue #965).
+#[test]
+fn a_label_filter_folds_unicode_case() {
+    let dir = TempDir::new("label-fold");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(
+            acc,
+            &[
+                ("Label_2", "Entwürfe", "user"),
+                ("Label_3", "ΣΧΈΔΙΑ", "user"),
+            ],
+        )
+        .unwrap();
+    let ids = store
+        .put_messages(
+            acc,
+            &[
+                msg("a", "t1", 1, &["Label_2"], "One", "x"),
+                msg("b", "t2", 2, &["Label_3"], "Two", "y"),
+            ],
+        )
+        .unwrap();
+    let s = |q: &str| store.search(q, 10).unwrap();
+    for q in [
+        "label:Entwürfe",
+        "label:ENTWÜRFE",
+        "label:entwürfe",
+        "label:Label_2",
+    ] {
+        assert_eq!(s(q), [ids[0]], "{q}");
+    }
+    assert_eq!(s("label:σχέδια"), [ids[1]]);
+    assert_eq!(s("label:Entwurfe"), Vec::<i64>::new(), "a letter differs");
 }
 
 #[test]
@@ -747,6 +783,49 @@ fn dry_write_gives_the_result_and_writes_nothing() {
     assert_eq!(after, 0);
 }
 
+/// A signal expires at its `expires` time in the status column and the
+/// document (issue #927). A signal with no time, and a gone one, stay.
+#[test]
+fn a_signal_expires_at_its_time() {
+    let dir = TempDir::new("signal-expiry");
+    let (store, acc) = setup(&dir);
+    let add = |status: &str, doc: &str| -> i64 {
+        store
+            .write(|tx| {
+                Ok(tx.query_row(
+                    "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                     VALUES ('signal', ?1, ?2, ?3, 0, 0) RETURNING id",
+                    rusqlite::params![acc, status, doc],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    // 2026-11-16T00:00:00Z
+    let t = 1_794_787_200_000;
+    let at = r#"{"status":"active","expires":"2026-11-16T00:00:00.000Z"}"#;
+    let timed = add("active", at);
+    let none = add("active", r#"{"status":"active"}"#);
+    let gone = add("gone", at);
+    assert_eq!(store.expire_signals(t - 1).unwrap(), 0);
+    assert_eq!(store.expire_signals(t).unwrap(), 1);
+    let row = |id: i64| -> (String, String, i64) {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT status, json_extract(doc, '$.status'), updated_at FROM item WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default(), r.get(2)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    assert_eq!(row(timed), ("expired".into(), "expired".into(), t));
+    assert_eq!(row(none).0, "active");
+    assert_eq!(row(gone).0, "gone");
+    assert_eq!(store.expire_signals(t + 1).unwrap(), 0);
+}
+
 #[test]
 fn a_deferred_commitment_opens_at_midnight_of_the_owner() {
     let dir = TempDir::new("deferred-zone");
@@ -1136,4 +1215,89 @@ fn read_to_limits_the_open_spools() {
         .unwrap();
         assert_eq!(refused_at.get(), Some(iris_store::MAX_SPOOLS + 1));
     }
+}
+
+#[test]
+fn the_mail_under_one_name_uses_an_index() {
+    // Issue 812: the name triggers of migration 54 find the mail under a
+    // known person name with `h.from_name = name COLLATE NOCASE`. The
+    // lookup is an index search, not a scan of the header table.
+    let dir = std::env::temp_dir().join(format!("iris-store-from-name-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    for sql in [
+        "EXPLAIN QUERY PLAN SELECT h.message_id FROM header h WHERE h.from_name = ?1 COLLATE NOCASE",
+        "EXPLAIN QUERY PLAN SELECT h.message_id FROM header h JOIN message m ON m.id = h.message_id
+          WHERE m.gone_at IS NULL AND h.from_name = ?1 COLLATE NOCASE",
+    ] {
+        let plan: Vec<String> = store
+            .read(|c| {
+                Ok(c.prepare(sql)?
+                    .query_map(["Ana Lee"], |r| r.get(3))?
+                    .collect::<rusqlite::Result<_>>()?)
+            })
+            .unwrap();
+        assert!(
+            plan.iter().any(|p| p.contains("INDEX header_from_name_nocase")),
+            "{sql}: {plan:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The rebind of a move (IMAP moves spec, section 3): the row keeps its ID,
+/// a fallback thread ID follows the message, a thread of other messages
+/// keeps its ID, and an ID that another row has is refused.
+#[test]
+fn rebind_refuses_a_taken_id() {
+    let dir = TempDir::new("rebind");
+    let (store, acc) = setup(&dir);
+    let ids = store
+        .put_messages(
+            acc,
+            &[
+                // A message with no thread headers: its thread ID is its own ID.
+                msg("1:1:INBOX", "1:1:INBOX", 1, &["INBOX"], "a", "a"),
+                msg("1:2:INBOX", "<t@example.com>", 2, &["INBOX"], "b", "b"),
+                msg("1:3:INBOX", "<t@example.com>", 3, &["INBOX"], "c", "c"),
+            ],
+        )
+        .unwrap();
+    let thread = |m: i64| -> String {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT t.provider_id FROM message m JOIN thread t ON t.id = m.thread_id
+                     WHERE m.id = ?1",
+                    [m],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    let provider = |m: i64| -> String {
+        store
+            .read(|c| {
+                Ok(
+                    c.query_row("SELECT provider_id FROM message WHERE id = ?1", [m], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap()
+    };
+    store
+        .write(|tx| iris_store::rebind(tx, ids[0], "2:1:Archive"))
+        .unwrap();
+    assert_eq!(provider(ids[0]), "2:1:Archive");
+    assert_eq!(thread(ids[0]), "2:1:Archive");
+    store
+        .write(|tx| iris_store::rebind(tx, ids[1], "2:2:Archive"))
+        .unwrap();
+    assert_eq!(provider(ids[1]), "2:2:Archive");
+    assert_eq!(thread(ids[1]), "<t@example.com>");
+    // The ID of another row: refused, and nothing changes.
+    let r = store.write(|tx| iris_store::rebind(tx, ids[2], "2:2:Archive"));
+    assert!(matches!(r, Err(Error::Taken(_))), "{r:?}");
+    assert_eq!(provider(ids[2]), "1:3:INBOX");
 }

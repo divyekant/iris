@@ -42,8 +42,8 @@ pub use flags::{
 };
 pub use outbox::{cancel, cancel_draft, hold, send_of_draft, Cancel, CANCELLED};
 pub use written::{
-    last_mark, send_written, write_mail, written_since, Mail, Press, Refusal, Written, MARK_MS,
-    NEW_WARNINGS, WRITTEN,
+    last_mark, send_written, write_mail, written_since, Mail, Press, Refusal, Written,
+    DRAFT_CHANGED, MARK_MS, NEW_WARNINGS, WRITTEN,
 };
 
 /// The flag `bulk`: more than this count of messages in one action, or in
@@ -1321,15 +1321,20 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
                         |r| r.get(0),
                     )?
             }
+            // A tombstone is no target (issue 904).
             (Kind::Account, "accounts") => c.query_row(
-                "SELECT EXISTS (SELECT 1 FROM account WHERE id = ?1)",
+                "SELECT EXISTS (SELECT 1 FROM account WHERE id = ?1
+                   AND (state IS NULL OR state NOT IN ('removing', 'removed')))",
                 [row],
                 |r| r.get(0),
             )?,
+            // A kept draft of a tombstone is no target (issue 1014).
             (Kind::Draft, "drafts") => {
                 let found = c.execute(
                     "INSERT INTO action_draft(action_id, draft_id)
-                     SELECT ?1, id FROM draft WHERE id = ?2",
+                     SELECT ?1, d.id FROM draft d JOIN account a ON a.id = d.account_id
+                     WHERE d.id = ?2
+                       AND (a.state IS NULL OR a.state NOT IN ('removing', 'removed'))",
                     params![action, row],
                 )? == 1;
                 if verb == Verb::Draft {

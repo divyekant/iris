@@ -728,3 +728,105 @@ fn a_reply_change_needs_a_parent() {
     assert_eq!(state, "denied");
     assert!(why.is_some(), "a reason");
 }
+
+/// Issue 904: the removal of an account denies an open new-mail draft that
+/// targets the account, and a tombstone is no target after the removal.
+#[test]
+fn a_removed_account_ends_its_new_mail_drafts() {
+    let dir = TempDir::new("removed");
+    let s = store(&dir);
+    let open = one(&s, AuthorKind::Agent, Verb::Draft, &["a-1"], MAIL());
+    assert_eq!(state(&open), "proposed", "{open}");
+    let address: String = s
+        .read(|c| Ok(c.query_row("SELECT address FROM account WHERE id = 1", [], |r| r.get(0))?))
+        .unwrap();
+    s.remove_account(&address, NOW).unwrap();
+    let after: Vec<(Option<String>, Option<String>)> = s
+        .read(|c| {
+            let mut q = c.prepare("SELECT state, reason FROM changeset_action ORDER BY id")?;
+            let rows = q
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })
+        .unwrap();
+    assert!(
+        after.contains(&(
+            Some("denied".into()),
+            Some("the account was removed".into())
+        )),
+        "{after:?}"
+    );
+    let who = author(AuthorKind::Agent);
+    let cs = create(&s, &who, NOW).unwrap();
+    // The target resolver finds no account: the add or the submit refuses it.
+    let added = add_action(&s, cs, &who, Verb::Draft, &["a-1"], &args(MAIL()), None);
+    if added.is_ok() {
+        let _ = submit(&s, cs, &who, "Write.", NOW);
+        let last: Option<String> = s
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT state FROM changeset_action ORDER BY id DESC LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_ne!(
+            last.as_deref(),
+            Some("proposed"),
+            "a new action targets the tombstone"
+        );
+        assert_ne!(
+            last.as_deref(),
+            Some("approved"),
+            "a new action targets the tombstone"
+        );
+    }
+}
+
+/// No new action can name a kept draft of a removed account (issue 1014).
+#[test]
+fn a_kept_draft_of_a_removed_account_is_no_target() {
+    for gone in ["removing", "removed"] {
+        let dir = TempDir::new("kept");
+        let s = store(&dir);
+        let draft: i64 = s
+            .read(|c| Ok(c.query_row("SELECT count(*) FROM draft WHERE id = 1", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(draft, 1);
+        if gone == "removed" {
+            let address: String = s
+                .read(|c| {
+                    Ok(c.query_row("SELECT address FROM account WHERE id = 1", [], |r| r.get(0))?)
+                })
+                .unwrap();
+            s.remove_account(&address, NOW).unwrap();
+        } else {
+            s.write(|tx| Ok(tx.execute("UPDATE account SET state = 'removing' WHERE id = 1", [])?))
+                .unwrap();
+        }
+        let kept: i64 = s
+            .read(|c| Ok(c.query_row("SELECT count(*) FROM draft WHERE id = 1", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(kept, 1, "{gone}: the removal keeps the draft");
+        let who = author(AuthorKind::Agent);
+        let cs = create(&s, &who, NOW).unwrap();
+        let added = add_action(&s, cs, &who, Verb::Send, &["d-1"], &args(json!({})), None);
+        if added.is_ok() {
+            let _ = submit(&s, cs, &who, "Send.", NOW);
+        }
+        let open: i64 = s
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM changeset_action a JOIN action_draft d
+                       ON d.action_id = a.id
+                     WHERE d.draft_id = 1 AND a.state IN ('proposed', 'approved')",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(open, 0, "{gone}: a new send names the kept draft");
+    }
+}

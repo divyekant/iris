@@ -654,8 +654,10 @@ pub fn readable(c: &Connection, id: i64) -> rusqlite::Result<bool> {
 
 /// True if `m` can go into a workspace: clean for the conversation rule, not
 /// gone, not mail that can be hostile (`iris_store::may_be_hostile!()`: also
-/// mail that waits for its link check), and not the source of a signal, which
-/// can hold a security code.
+/// mail that waits for its link check), not mail with the label `SPAM`
+/// (it makes `iris_store::hostile_mail!()`, issue 821), and not the source
+/// of a signal, which can hold a security code. The grant, the build and the
+/// session reads all use this one gate.
 fn clean(c: &Connection, m: &iris_talk::Mail) -> rusqlite::Result<bool> {
     if !m.for_reader() {
         return Ok(false);
@@ -664,7 +666,12 @@ fn clean(c: &Connection, m: &iris_talk::Mail) -> rusqlite::Result<bool> {
         concat!(
             "SELECT ",
             iris_store::may_be_hostile!(),
-            " OR EXISTS (SELECT 1 FROM item_source s JOIN item i ON i.id = s.item_id
+            // The label SPAM alone is hostile mail (issue 821). The sender
+            // part of `hostile_mail!()` is in `for_reader` above, with its
+            // rule for your sent mail.
+            " OR EXISTS (SELECT 1 FROM message_label sml JOIN label sl ON sl.id = sml.label_id
+               WHERE sml.message_id = m.id AND sl.provider_id = 'SPAM')
+             OR EXISTS (SELECT 1 FROM item_source s JOIN item i ON i.id = s.item_id
                WHERE s.message_id = m.id AND i.form = 'signal')
              FROM message m WHERE m.id = ?1"
         ),

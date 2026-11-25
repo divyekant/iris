@@ -147,9 +147,9 @@ impl Query {
 
     /// The first message that matches and arrived for a watch (card R5-07):
     /// a row ID above `after`, a date from `since`, clean text and no
-    /// `link_check` row (so the hostile checks ran), not hostile mail
-    /// ([`crate::hostile_mail!`]: a hostile mark, the label `SPAM` or a
-    /// hostile sender), no label `SENT`, and not [`crate::draft_or_copy!`].
+    /// `link_check` row (so the hostile checks ran), and mail that you got
+    /// (`not_received!` in `lib.rs`: not hostile, no label `SENT`, not a
+    /// draft or a copy).
     /// The lowest row ID is the first arrival.
     pub(crate) fn first_arrival(
         &self,
@@ -164,14 +164,9 @@ impl Query {
         sql.push_str(&format!(
             " AND m.id > ?{a} AND m.internal_date >= ?{s}
               AND EXISTS (SELECT 1 FROM body b WHERE b.message_id = m.id)
-              AND NOT {may_be_hostile} AND NOT {hostile_mail}
-              AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                  WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
-              AND NOT {draft_or_copy}
+              AND NOT {not_received}
              ORDER BY m.id LIMIT 1",
-            may_be_hostile = crate::may_be_hostile!(),
-            hostile_mail = crate::hostile_mail!(),
-            draft_or_copy = crate::draft_or_copy!("m"),
+            not_received = not_received!(),
         ));
         let mut st = conn.prepare(&sql)?;
         let mut rows = st.query_map(rusqlite::params_from_iter(args), |r| r.get(0))?;
@@ -214,7 +209,7 @@ impl Query {
                 Filter::Label(v) => arg(
                     &mut sql,
                     " AND EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                       WHERE ml.message_id = m.id AND (l.name = ? COLLATE NOCASE OR l.provider_id = ?))",
+                       WHERE ml.message_id = m.id AND (iris_same_name(l.name, ?) OR l.provider_id = ?))",
                     v.clone().into(),
                 ),
                 Filter::Form(v) => {

@@ -98,13 +98,13 @@ test("a job that asks no question now loads the questions again", async () => {
 });
 
 test("a refusal keeps the answer, and no answer says that Iris does not know", async () => {
-  serve(() => [500, { error: "database: locked" }]);
+  serve(() => [400, { error: "The answer is empty." }]);
   const view = await mount("/src/views/Question.svelte", { job: job(), onanswered: () => {}, onchanged: () => {} });
   try {
     await type(view, "Yes.");
     button(view).click();
     await until(() => view.target.querySelector("[role=alert]"));
-    assert.match(text(view.target), /database: locked/);
+    assert.match(text(view.target), /The answer is empty\./);
     assert.equal(view.target.querySelector("textarea").value, "Yes.");
     globalThis.fetch = async () => {
       throw new TypeError("Failed to fetch");
@@ -119,6 +119,14 @@ test("a refusal keeps the answer, and no answer says that Iris does not know", a
     await new Promise((r) => setTimeout(r, 20));
     assert.match(text(view.target), /Iris does not know if your answer arrived\. Open the job to see\./);
     assert.doesNotMatch(text(view.target), /undefined|properties/);
+    // A 5xx can come after the engine stored the answer: Iris does not know either.
+    let asked = 0;
+    globalThis.fetch = async () => (asked++, new Response(JSON.stringify({ error: "database: locked" }), { status: 500, headers: { "content-type": "application/json" } }));
+    button(view).click();
+    await until(() => asked === 1 && !view.target.querySelector("button[disabled]"));
+    await new Promise((r) => setTimeout(r, 20));
+    assert.match(text(view.target), /Iris does not know if your answer arrived\./);
+    assert.doesNotMatch(text(view.target), /database: locked/);
   } finally {
     view.destroy();
   }
@@ -151,7 +159,7 @@ test("the questions come newest question first, not newest job first", async () 
 test("after an answer, the brief says so and shows the next question at once", async () => {
   const second = { ...job(), id: "j-13", goal: "Renew the passport.", question: "Which photo?", updated: "2026-11-15T09:00:00.000Z" };
   let left = [second];
-  const asked = serve((path) => (path.endsWith("/answer") ? [200, {}] : [200, { jobs: left, next: null }]));
+  const asked = serve((path) => (path.endsWith("/answer") ? [200, { job: { ...fx.jobs["j-14"], state: "working" }, changesets: [], threads: {} }] : [200, { jobs: left, next: null }]));
   const view = await mount("/src/views/Brief.svelte", { watches: [], proposed: null, questions: [job(), second], brief: fx.brief, now: new Date("2026-11-16T09:05:00Z"), poll: 0 });
   try {
     await type(view, "Ask Brightline first.");

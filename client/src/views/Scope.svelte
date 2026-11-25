@@ -11,7 +11,16 @@
   import { addThread, loadJob, removeRef } from "../jobs";
   import { byThread, reads, subjectOf, threadsOf, type Preview } from "../start";
 
-  let { detail, onchange }: { detail: JobDetail; onchange: (d: JobDetail) => void } = $props();
+  let {
+    detail,
+    onchange,
+    queue = (work) => work(),
+  }: {
+    detail: JobDetail;
+    onchange: (d: JobDetail) => void;
+    /** Runs each request of this part: the job page runs them in its queue of job requests. */
+    queue?: <T>(work: () => Promise<T>) => Promise<T>;
+  } = $props();
 
   let job = $derived(detail.job);
   let open = $derived(job.state !== "done");
@@ -30,7 +39,7 @@
     note = "";
     unknown = false;
     try {
-      return await work();
+      return await queue(work);
     } catch (e) {
       note = own(e) || (e as Error).message;
       unknown = (e as { status?: number }).status === undefined;
@@ -103,7 +112,7 @@
 
   /** Read the job again after a change whose result is not known, and show it. */
   async function refresh(): Promise<JobDetail | null> {
-    const fresh = await loadJob(job.id).catch(() => null);
+    const fresh = await queue(() => loadJob(job.id)).catch(() => null);
     if (fresh) onchange(fresh);
     return fresh;
   }

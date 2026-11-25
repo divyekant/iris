@@ -479,7 +479,7 @@ fn backup_copies_the_data_folder_with_the_sign_in() {
 }
 
 #[test]
-fn a_tick_opens_a_deferred_commitment_on_its_date() {
+fn a_tick_opens_a_deferred_commitment_and_expires_a_signal() {
     let store = Arc::new(Store::open(&data_dir("deferred")).unwrap());
     // No token: the tick starts no sync worker.
     let account = store.add_account("gmail", "owner@example.com").unwrap();
@@ -491,15 +491,31 @@ fn a_tick_opens_a_deferred_commitment_on_its_date() {
                    '{\"status\":\"deferred\",\"deferred_until\":\"2000-01-01\"}', 0, 0)",
                 [account],
             )?;
+            // An active signal past its `expires` time (issue #927).
+            tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 VALUES ('signal', ?1, 'active',
+                   '{\"status\":\"active\",\"expires\":\"2000-01-01T00:00:00Z\"}', 0, 0)",
+                [account],
+            )?;
             Ok(())
         })
         .unwrap();
     let mut e = Engine::new(store.clone(), config("http://127.0.0.1:9".into()), None);
     assert!(e.tick().unwrap().is_empty());
-    let status: String = store
-        .read(|c| Ok(c.query_row("SELECT status FROM item", [], |r| r.get(0))?))
-        .unwrap();
-    assert_eq!(status, "open");
+    let status = |form: &str| -> (String, String) {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT status, json_extract(doc, '$.status') FROM item WHERE form = ?1",
+                    [form],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    assert_eq!(status("commitment"), ("open".into(), "open".into()));
+    assert_eq!(status("signal"), ("expired".into(), "expired".into()));
 }
 
 #[test]
@@ -1453,10 +1469,25 @@ fn remove_one_account_and_add_it_again() {
         .unwrap();
     assert_eq!(done.accounts, 1);
     assert_eq!((per_account(s.account), per_account(second)), (30, 0));
-    // The late worker writes nothing for the removed account.
+    // The late worker writes nothing for the removed account: no mail, no
+    // sync row and no sync column of the tombstone (issue 910).
     other.modify_labels(&FakeGmail::id_of(1), &["STARRED"], &[]);
     assert!(late.sync().is_err());
+    assert!(late.verify().is_err());
     assert_eq!(per_account(second), 0);
+    assert_eq!(
+        count(
+            &s.store,
+            &format!(
+                "SELECT (SELECT count(*) FROM sync_log WHERE account_id = {second})
+                      + (SELECT count(*) FROM sync_seen WHERE account_id = {second})
+                      + (SELECT count(*) FROM account WHERE id = {second}
+                           AND coalesce(history_id, token, mirror_ready_at, sync_kind,
+                                        sync_start, sync_step) IS NOT NULL)"
+            ),
+        ),
+        0
+    );
     assert_eq!(worker_of(s.account, &s.fake).verify().unwrap().total, 0);
 
     // The same address again: a new account and a full first copy. The

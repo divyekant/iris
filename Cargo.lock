@@ -908,6 +908,7 @@ dependencies = [
  "axum",
  "futures-util",
  "getrandom 0.4.3",
+ "http-body",
  "iris-apply",
  "iris-changeset",
  "iris-compose",
@@ -942,8 +943,10 @@ dependencies = [
  "iris-compose",
  "iris-fakegmail",
  "iris-fakegraph",
+ "iris-fakeimap",
  "iris-gmail",
  "iris-graph",
+ "iris-imap",
  "iris-job",
  "iris-policy",
  "iris-provider",
@@ -1155,6 +1158,7 @@ version = "0.0.0"
 dependencies = [
  "iris-fakegmail",
  "iris-gmail",
+ "iris-senders",
  "iris-store",
  "iris-sync",
  "iris-synth",
@@ -1239,6 +1243,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "sha2",
+ "unicase",
 ]
 
 [[package]]

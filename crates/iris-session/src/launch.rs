@@ -180,7 +180,13 @@ impl Launcher<'_> {
     pub fn begin(&self, job: i64, agent: &str) -> Result<Begun, String> {
         let file = config::read_agents(self.data_dir).map_err(|e| e.to_string())?;
         let path = (self.env)("PATH");
-        let adapter = config::adapter(&file, agent, path.as_deref())?;
+        let mut adapter = config::adapter(&file, agent, path.as_deref())?;
+        // The read paths go to the isolation by their real path. The hold
+        // helper on Linux checks each one again just before the bind.
+        let home = (self.env)("HOME");
+        for p in adapter.read_paths.iter_mut() {
+            *p = crate::read_paths::check(p, self.data_dir, home.as_deref())?.real;
+        }
         self.isolation
             .check()
             .map_err(|e| format!("the isolation does not work on this system: {e}"))?;
@@ -448,9 +454,14 @@ impl Launcher<'_> {
             .mode(0o600)
             .open(logs.join(format!("{}.log", format_session_id(session))))
             .map_err(|e| format!("cannot make the session log: {e}"))?;
-        let command =
-            self.isolation
-                .command(session, dir, egress_port, &adapter.program, &adapter.args);
+        let command = self.isolation.command(
+            session,
+            dir,
+            egress_port,
+            &adapter.program,
+            &adapter.args,
+            &adapter.read_paths,
+        );
         let mut args: Vec<OsString> = vec![session.to_string().into(), command.program.into()];
         args.extend(command.args);
         let env = config::agent_env(adapter, egress, |n| (self.env)(n));

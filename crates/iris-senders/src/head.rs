@@ -190,8 +190,23 @@ fn comment_name(entry: &str, addr: &str) -> Option<String> {
     let at = low.find(addr)? + addr.len();
     let rest = entry.get(at..)?.trim_start();
     let inner = rest.strip_prefix('(')?;
-    let end = inner.find(')')?;
-    Some(inner[..end].trim().to_string()).filter(|n| !n.is_empty())
+    // A quoted pair (`\)`) is text and a nested comment stays in the name
+    // (RFC 5322 section 3.2.2). The name ends at the `)` of depth 0.
+    let (mut name, mut depth, mut escaped) = (String::new(), 0u32, false);
+    for c in inner.chars() {
+        match c {
+            _ if std::mem::take(&mut escaped) => name.push(c),
+            '\\' => escaped = true,
+            ')' if depth == 0 => {
+                let name = name.trim().to_string();
+                return (!name.is_empty()).then_some(name);
+            }
+            '(' => (depth += 1, name.push(c)).1,
+            ')' => (depth -= 1, name.push(c)).1,
+            _ => name.push(c),
+        }
+    }
+    None
 }
 
 /// Split an address list at the commas that are outside quotes and angle
@@ -206,7 +221,9 @@ pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
 /// with each (lowercase address, display name).
 pub fn each_address(v: &str, mut f: impl FnMut(String, Option<String>)) {
     let (mut quoted, mut angle, mut start, mut comment) = (false, false, 0, 0u32);
-    let mut escaped = false;
+    let (mut escaped, mut literal, mut prev) = (false, false, '\0');
+    // The last `]` of the list, found once, so the literal check stays linear.
+    let close = v.rfind(']');
     let mut push = |entry: &str| {
         let s = strip_comments(entry);
         let s = s.trim();
@@ -229,11 +246,21 @@ pub fn each_address(v: &str, mut f: impl FnMut(String, Option<String>)) {
         }
     };
     for (i, c) in v.char_indices() {
+        let after_at = std::mem::replace(&mut prev, c) == '@';
         // The sign after `\\` in a quoted string or a comment is text.
         if std::mem::take(&mut escaped) {
             continue;
         }
         match c {
+            // A domain literal (`user@[IPv6:2001:db8::1]`, RFC 5322 section
+            // 3.4.1) holds `:` that is not group syntax. It opens only right
+            // after `@`, so a `[` in a display name cannot hide the rest of
+            // the list, and an open `[` with no `]` after it is text.
+            '[' if after_at && !quoted && comment == 0 && close.is_some_and(|c| c > i) => {
+                literal = true
+            }
+            ']' if literal => literal = false,
+            _ if literal => {}
             '\\' if quoted || comment > 0 => escaped = true,
             '(' if !quoted => comment += 1,
             ')' if !quoted => comment = comment.saturating_sub(1),

@@ -18,7 +18,8 @@ pub const WAIT_MAX: i64 = 100;
 pub const SINCE_MARGIN_MS: i64 = 3_600_000;
 
 /// The SQL condition "the watch `watch` has a match that is still a safe
-/// arrival": not hostile mail now, and not a draft or a copy. A match that
+/// arrival": the same rule as a new arrival (`not_received!`), so not
+/// hostile mail now, not your own sent mail, and not a draft or a copy. A match that
 /// became hostile mail after the check (a model `phishing` mark, a `hostile`
 /// sender, the label `SPAM`) gives no notice: the watch waits again, and a
 /// later safe arrival can match (decision D33).
@@ -26,13 +27,9 @@ macro_rules! safe_match {
     () => {
         concat!(
             "(watch.message_id IS NOT NULL AND NOT EXISTS (
-               SELECT 1 FROM message m WHERE m.id = watch.message_id AND (",
-            crate::hostile_mail!(),
-            " OR ",
-            crate::may_be_hostile!(),
-            " OR ",
-            crate::draft_or_copy!("m"),
-            ")))"
+               SELECT 1 FROM message m WHERE m.id = watch.message_id AND ",
+            not_received!(),
+            "))"
         )
     };
 }

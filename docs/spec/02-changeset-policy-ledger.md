@@ -496,7 +496,7 @@ Conditions in `when`:
 | `commitment_kind` | The kind of a commitment. |
 | `author` | `person`, `agent`, `triage` or `local`. Each value matches only that author. |
 | `older_than_days` | The age of the message in days. |
-| `recipients` | `thread`: the action is a reply `draft`, and each address in To and Cc of the draft is in its thread, or is one of your addresses. An address is in the thread only if it is the From of a live message of the thread, or in To or Cc of a live message of the thread that you sent (decision D13, issue #435). A new mail has no thread, so it never matches. A rule with `recipients` has only the verb `draft` (decision D3, issue #386). |
+| `recipients` | `thread`: the action is a reply `draft`, and each address in To, Cc and Bcc of the draft is in its thread (issue #880), or is one of your addresses. An address is in the thread only if it is the From of a live message of the thread, or in To or Cc of a live message of the thread that you sent (decision D13, issue #435). A new mail has no thread, so it never matches. A rule with `recipients` has only the verb `draft` (decision D3, issue #386). |
 
 Version 1 has no other condition, and no expression language. A new condition
 needs a change to this specification.
@@ -694,7 +694,9 @@ changes:
 - The candidate rule is added to the active policy. An action counts for it
   only when the rule changes the decision of that action to approved
   (section 6.4), with the author, the job and the flag `bulk` of the
-  action. The engine proposes the rule when 10 or more approvals count and
+  action, and the mark of the author now (`trash` only, decision D14,
+  issue #916): a `trash` of a marked author goes to review, so it never
+  counts. The engine proposes the rule when 10 or more approvals count and
   no refusal counts.
 - A domain candidate also needs counted approvals on two or more
   addresses. With one address, the address proposal covers it. When the
@@ -1198,6 +1200,12 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris draft <thread> <file>`, `iris send <draft>` | Adds write actions. `iris nudge <c-id>` is not built (decision D8, section 7.5). | both | 3 |
 | `iris write <t-id or m-id> [--intent <text>]` | Writes a draft of a reply in the voice of the owner with one model call, and one more call if the answer is not a valid draft and not a refusal (decision D7). It saves the draft in the store and prints it. It sends nothing and adds no action. It opens the store directly (section 8.1). | host | 3 |
 | `iris wait`, `iris ask` | Ends the session and waits, or asks the person. | session | 5 |
+
+Each form of `iris mirror` and `iris understand` (also `iris mirror verify`
+and `iris understand --estimate`) writes two more local changes before its
+exit, also after an error: the attention of each changed item (section 6.4),
+and the match of each watch whose mail came (`docs/specs/2026-11-16-watch.md`,
+issue #260).
 
 Without `--changeset`, a command that adds an action makes a new draft
 changeset, and prints its ID. Two callers in host mode look the same to the

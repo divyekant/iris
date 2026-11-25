@@ -2,6 +2,7 @@
 // step of its timeline, as plain sentences. Pure functions, so the tests need
 // no DOM. Text from an agent or from mail is data: the view shows it as text.
 import { get, post, type Job, type JobChangeset, type JobDetail, type JobEvent, type JobPage, type JobSession, type Target } from "./api";
+import { access } from "./access.svelte.ts";
 import { daysFrom } from "./format";
 import { href } from "./route";
 
@@ -9,6 +10,15 @@ const n = (count: number, one: string, many: string) => `${count.toLocaleString(
 
 /** A short day: "Wed 18 Nov". */
 export const day = (value: string) => new Date(value).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+/** The short day of a due date, in the time zone of the owner (issue 892). An unknown zone: the zone of the browser. */
+export function dueDay(value: string, zone: string | null | undefined = access.zone): string {
+  try {
+    if (zone) return new Date(value).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: zone });
+  } catch {
+    // An unknown zone.
+  }
+  return day(value);
+}
 /** A time of day: "09:20". */
 export const clock = (value: string) => new Date(value).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 
@@ -23,12 +33,12 @@ export const pageSize = (state: Job["state"]) => (state === "done" ? 20 : 50);
  */
 export function due(job: Job, now = new Date()): { text: string; tone: "late" | "soon" | "" } | null {
   if (!job.due) return null;
-  if (job.state === "done") return { text: `Was due ${day(job.due)}`, tone: "" };
-  // A job due date is a day of the browser (start.ts, issue #892), not of the owner zone.
-  const days = daysFrom(job.due, now, null);
+  if (job.state === "done") return { text: `Was due ${dueDay(job.due)}`, tone: "" };
+  // A job due date is a day of the owner zone, as the start gives it (start.ts, issue 892).
+  const days = daysFrom(job.due, now);
   // The words say "late" each time the tone does, so color is not the only sign.
-  if (Date.parse(job.due) <= now.getTime()) return { text: `Was due ${day(job.due)}, ${days < 0 ? relative.format(days, "day") : "earlier today"}`, tone: "late" };
-  return { text: `Due ${day(job.due)}, ${relative.format(days, "day")}`, tone: days <= 2 ? "soon" : "" };
+  if (Date.parse(job.due) <= now.getTime()) return { text: `Was due ${dueDay(job.due)}, ${days < 0 ? relative.format(days, "day") : "earlier today"}`, tone: "late" };
+  return { text: `Due ${dueDay(job.due)}, ${relative.format(days, "day")}`, tone: days <= 2 ? "soon" : "" };
 }
 
 /**
@@ -85,6 +95,35 @@ export function agent(d: Pick<JobDetail, "job" | "session">): { said: string; en
   if (!s || !s.end) return { said, run };
   const code = s.end === "exit" && s.exit !== null && s.exit !== 0 ? ` with exit code ${s.exit}` : "";
   return { said, ended: `The last session (${s.id}, ${s.agent}) ${ENDED[s.end]}${code}.`, run };
+}
+
+/**
+ * The words of a working job of a list when no agent works on it (issue 791), from the session that the page gives.
+ * Null when an agent works on it, when the job does not work, or when the engine gave no session for it.
+ */
+export function idle(page: Pick<JobPage, "sessions">, job: Job): { said: string; ended?: string } | null {
+  const sessions = page.sessions;
+  if (!sessions || !Object.hasOwn(sessions, job.id)) return null;
+  const a = agent({ job: { ...job, events: [] }, session: sessions[job.id] });
+  return a && { said: a.said, ended: a.ended };
+}
+
+/** A working job that no agent works on now, with the words of `idle`. */
+export type Idle = { job: Job; said: string; ended?: string };
+
+/** The working jobs that no agent works on now (issue 791), for the brief: each page of working jobs. */
+export async function loadIdle(): Promise<Idle[]> {
+  const out: Idle[] = [];
+  let next: string | null = null;
+  do {
+    const page: JobPage = await get<JobPage>(`jobs?state=working&limit=200${next ? `&after=${encodeURIComponent(next)}` : ""}`);
+    for (const job of page.jobs) {
+      const i = job.state === "working" ? idle(page, job) : null;
+      if (i) out.push({ job, ...i });
+    }
+    next = page.next;
+  } while (next);
+  return out;
 }
 
 /** One step of the timeline. `quote` is text of the agent or the person, shown as text. */
@@ -193,9 +232,25 @@ export async function editJob(id: string, goal: string, due: string | null): Pro
   return loadJob(id);
 }
 
+/**
+ * A job document from the engine. A response with no job (a body that the client
+ * cannot read, for example a stream that stopped) is an error with no status, as a
+ * lost answer: a write before it can have committed.
+ */
+async function detailOf(answer: Promise<JobDetail | null>): Promise<JobDetail> {
+  const d = await answer;
+  if (!d || typeof d.job?.id !== "string") throw new Error("The engine gave no job.");
+  return d;
+}
+
+/** End the job `id` (issue 322): `complete` (done) or `cancel`. The answer is the job, as `loadJob` gives it. */
+export function endJob(id: string, end: "complete" | "cancel"): Promise<JobDetail> {
+  return detailOf(post<JobDetail>(`jobs/${encodeURIComponent(id)}/finish`, { end }));
+}
+
 /** The job page of `id`, read again: for example after a change whose answer did not come. */
 export function loadJob(id: string): Promise<JobDetail> {
-  return get<JobDetail>(`jobs/${encodeURIComponent(id)}`);
+  return detailOf(get<JobDetail>(`jobs/${encodeURIComponent(id)}`));
 }
 
 /** True when two due dates name the same instant, or both are empty. */
@@ -229,5 +284,5 @@ export async function loadQuestions(): Promise<Job[]> {
 /** Your answer to the question of a job (card R5-05). The engine starts a new session of the job with it. */
 export function answerJob(job: Pick<Job, "id" | "question" | "updated">, answer: string): Promise<JobDetail> {
   // The question and the time that the person saw: the engine refuses (409) an answer to an older question.
-  return post<JobDetail>(`jobs/${encodeURIComponent(job.id)}/answer`, { answer, question: job.question, updated: job.updated });
+  return detailOf(post<JobDetail>(`jobs/${encodeURIComponent(job.id)}/answer`, { answer, question: job.question, updated: job.updated }));
 }
