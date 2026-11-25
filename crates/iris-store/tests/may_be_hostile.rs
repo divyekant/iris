@@ -24,8 +24,8 @@ const ALLOWED: [(&str, usize, &str); 10] = [
     ),
     (
         "iris-understand/src/store.rs",
-        11,
-        "the writer of the marks, the queue of the link check, and the fixed check that compares the stored marks",
+        12,
+        "the writer of the marks, the queue of the link check, the fixed check that compares the stored marks, and the release that reads the marks of the person",
     ),
     ("iris-api/src/read.rs", 1, "shows the marks"),
     (
