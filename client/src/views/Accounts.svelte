@@ -26,7 +26,9 @@
   let removed = $state("");
   // Each removal that the person asked for and whose end the page does not know yet. `sent`: the
   // engine took it. `unsure`: the answer was lost, so the removal can still run at the engine, and
-  // only a status that shows the account in a removal or gone ends the doubt.
+  // only a status that shows the account in a removal or gone ends the doubt. Only a status that no
+  // longer lists the account says that it is removed: the engine can answer while its delete runs,
+  // and a newer poll can hide that answer (issue 932).
   let removals: Record<number, { account: Account; outcome: "sent" | "unsure" }> = $state({});
 
   // Each status: an account that the status no longer lists while the person follows it (its
@@ -144,7 +146,7 @@
         {/if}
         {#if removals[a.id] && a.state !== "removing"}
           <p class="state unsure" role="status">
-            {removals[a.id].outcome === "unsure" ? "Iris could not tell if this account is removed. The removal can still run." : "Iris removed this account."}
+            {removals[a.id].outcome === "unsure" ? "Iris could not tell if this account is removed. The removal can still run." : "Iris removes this account and deletes its mail from this machine."}
             <button type="button" class="quiet" onclick={check} disabled={busy}>{busy ? "Checking…" : "Check again"}</button>
           </p>
         {/if}
