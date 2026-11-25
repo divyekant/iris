@@ -653,6 +653,17 @@ const RECORD: &str = concat!(
     iris_store::from_hostile_mail!("item")
 );
 
+/// The filter of the items that need the person at the time `now`: the
+/// items that the brief shows in You owe, Owed to you and Conversations
+/// ([`section_sql`]: the head of each pair, attention `shown`, from no
+/// hostile mail, and no item at the stranger gate). The thread summary
+/// (issue 478) reads it for its candidates and for `ready`, so the two use
+/// one rule.
+pub fn needs_you_sql(now: i64) -> String {
+    let [you_owe, owed, conversations, ..] = section_sql(now);
+    format!("(({}) OR ({}) OR ({}))", you_owe.0, owed.0, conversations.0)
+}
+
 /// The filter of the head of each pair in the place `filter`: an item of the
 /// place that is not a possible duplicate of an item of the same place
 /// (specification 1, section 7.5). The attention of the head decides where
