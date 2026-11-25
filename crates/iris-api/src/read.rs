@@ -1459,6 +1459,13 @@ fn summary_sql(now: i64) -> String {
 /// gate, and the lists of one form (`/api/items`).
 pub(crate) fn ready_doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     let mut doc = doc_of(r)?;
+    ready_into(r, &mut doc)?;
+    Ok(doc)
+}
+
+/// Sets `ready` of `doc` from the columns [`ready_columns`] of the row `r`.
+/// The members of a matter use it too (issue #1015).
+pub(crate) fn ready_into(r: &rusqlite::Row, doc: &mut Value) -> rusqlite::Result<()> {
     let ready: Vec<&str> = [("ready_draft", "draft"), ("ready_summary", "summary")]
         .into_iter()
         .filter_map(|(col, name)| r.get::<_, bool>(col).map(|b| b.then_some(name)).transpose())
@@ -1466,7 +1473,7 @@ pub(crate) fn ready_doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     if !ready.is_empty() {
         doc["ready"] = Value::from(ready);
     }
-    Ok(doc)
+    Ok(())
 }
 
 /// The summary of the thread of the origin of the item `id` that is ready,
