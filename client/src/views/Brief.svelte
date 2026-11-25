@@ -486,8 +486,10 @@
     {@const n = brief.unconfirmed?.messages ?? 0}
     <p class="warning unconfirmed">
       Iris could not confirm a change to {n} {n === 1 ? "message" : "messages"}. Check {n === 1 ? "it" : "them"} in your mailbox.
-      <a class="touch" href="#/history">See what Iris did</a>
-      <button type="button" class="all touch" onclick={dismissUnconfirmed} disabled={dismissing}>Dismiss</button>
+      <span class="acts">
+        <a class="touch" href="#/history">See what Iris did</a>
+        <button type="button" class="all touch" onclick={dismissUnconfirmed} disabled={dismissing}>Dismiss</button>
+      </span>
     </p>
     {#if dismissProblem}<p role="alert">{dismissProblem}</p>{/if}
   {/if}
@@ -680,9 +682,11 @@
     border-left: 4px solid var(--color-warning);
     padding-left: var(--space-3);
   }
-  .unconfirmed a,
-  .unconfirmed button {
-    margin-left: var(--space-2);
+  .unconfirmed .acts {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-4);
   }
   @media (max-width: 600px) {
     h1 {
