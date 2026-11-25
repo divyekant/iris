@@ -294,9 +294,11 @@ of the owner.
 
 ### 6. The ledger view
 
-A change entry shows "Changed a draft" with the subject of the draft,
-and Undo while `can_undo` is true (the checks of section 3). The undo
-entry shows "Restored a draft". `ledger_can_undo` lists a change entry
+A change entry shows "Changed the draft of" with the subject and the
+first recipient of the draft, and Undo while `can_undo` is true (the
+checks of section 3). The undo entry shows "Restored the old text of"
+with the same words. The API marks both entries with `change` (an entry
+of `drafts.update`); the undo also has `undo_of`. `ledger_can_undo` lists a change entry
 only while its draft passes the checks of section 1 and the entry is
 the newest entry of its draft.
 
