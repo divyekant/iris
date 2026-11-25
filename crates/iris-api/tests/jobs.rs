@@ -701,7 +701,10 @@ async fn the_person_wakes_a_waiting_job_once() {
     // A wake for a wait that the person did not see changes nothing.
     let (code, _) = post(&s, &uri, json!({ "updated": "2026-01-01T00:00:00.000Z" })).await;
     assert_eq!(code, StatusCode::CONFLICT);
-    assert_eq!(iris_job::get(&s, job).unwrap().state, iris_job::State::Waiting);
+    assert_eq!(
+        iris_job::get(&s, job).unwrap().state,
+        iris_job::State::Waiting
+    );
     let (code, doc) = post(&s, &uri, json!({ "updated": seen() })).await;
     assert_eq!(code, StatusCode::OK, "{doc}");
     assert_eq!(doc["job"]["state"], "working");
