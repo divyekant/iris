@@ -284,8 +284,10 @@ difference of step 7 starts a full resync (section 4.4).
 If another process runs the first copy of the account (section 4.2),
 no full mirror exists to compare. Verify of that account prints that the
 first copy runs, and the command does not fail for that account. Verify
-checks this before any token or provider call. If another process runs a
-later sync of the account, verify of that account fails.
+takes the sync lock of the account before any token or provider call, and
+holds it to its end, so no first copy can start after this check. If
+another process runs a later sync of the account, verify of that account
+fails.
 
 #### Failure list of a verify during another sync
 
@@ -298,9 +300,8 @@ and `account.mirror_ready_at`.
 | Lock held, no full mirror, the token endpoint fails | The same: the check comes before the token call. |
 | No lock file, or the lock is free, no full mirror | Verify takes the lock, finishes the first copy (step 1), then compares. |
 | Lock held, full mirror | Error "another sync of the account runs". The command fails. |
-| A first copy starts between the check and the lock of verify | The same line as a held lock, from the lock error. |
-| A sync tries the lock while the check probes it | That sync gets "another sync of the account runs" once. The engine tries again at its next sync turn. |
-| The probe or the store read fails | Error. The command fails. Nothing changes. |
+| A first copy tries to start after verify took the lock (also during its token call) | That sync gets "another sync of the account runs". The engine tries again at its next sync turn. |
+| The lock or the store read fails | Error. The command fails. Nothing changes. |
 
 All other states: verify takes the lock as before, or fails for the account
 with the error.

@@ -526,6 +526,12 @@ impl Worker {
         self.call(iris_sync::verify)
     }
 
+    /// [`Worker::verify`] under `held`, the sync lock of the account that
+    /// the caller took before any token call (issue #836).
+    pub fn verify_held(&mut self, held: &iris_sync::SyncLock) -> Result<iris_sync::Report> {
+        self.call(|s, m, a, t| iris_sync::verify_held(held, s, m, a, t))
+    }
+
     /// Call `f` with an access token. On HTTP 401, get a new access token
     /// and call again. A 401 from a token that ran out during the call (a
     /// call of a long first sync can run for hours) is not a refusal: the

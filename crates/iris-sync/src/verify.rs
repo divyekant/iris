@@ -112,7 +112,21 @@ impl Report {
 /// After an error, that row holds the differences found before the error,
 /// and a difference of step 7 among them still starts the resync.
 pub fn verify(store: &Store, mail: &dyn Provider, account: i64, token: &str) -> Result<Report> {
-    let _lock = lock(store, account)?;
+    let held = lock(store, account)?;
+    verify_held(&held, store, mail, account, token)
+}
+
+/// [`verify`] for a caller that holds `held`, the sync lock of `account`.
+/// `iris mirror verify` takes the lock before its token call, so a first
+/// copy that starts after its check cannot run under it (issue #836).
+pub fn verify_held(
+    held: &SyncLock,
+    store: &Store,
+    mail: &dyn Provider,
+    account: i64,
+    token: &str,
+) -> Result<Report> {
+    let _ = held;
     // Step 1.
     let v = sync_locked(store, mail, account, token)?.history_id;
     let started = now_ms();

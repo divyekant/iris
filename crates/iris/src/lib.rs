@@ -1984,16 +1984,25 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
             say!("iris: account {account}: {}", engine::Error::NeedsSignIn);
             continue;
         }
-        // Another process runs the first copy: no full mirror exists to
-        // compare (issue #679). The check comes before any token or
-        // provider call, so their errors cannot hide it.
-        if matches!(command, MirrorCommand::Verify)
-            && !mirror_ready(&store, account)?
-            && iris_sync::other_sync_runs(&store, account).map_err(|e| e.to_string())?
-        {
-            println!("account {account}: {FIRST_COPY_RUNS}");
-            continue;
-        }
+        // Verify takes the sync lock before any token or provider call, and
+        // holds it to the end: a first copy cannot start after this check,
+        // and their errors cannot hide the line of a first copy in another
+        // process (issues #679, #836). No full mirror exists to compare then.
+        let held = match command {
+            MirrorCommand::Sync => None,
+            MirrorCommand::Verify => match iris_sync::lock(&store, account) {
+                Ok(l) => Some(l),
+                Err(iris_sync::Error::OtherSync) if !mirror_ready(&store, account)? => {
+                    println!("account {account}: {FIRST_COPY_RUNS}");
+                    continue;
+                }
+                Err(e) => {
+                    failed = true;
+                    say!("iris: account {account}: {e}");
+                    continue;
+                }
+            },
+        };
         let mail = match engine::provider_for(&store, account, &config) {
             Ok(m) => m,
             Err(e) => {
@@ -2019,32 +2028,28 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
                     if s.resync { ", full resync" } else { "" }
                 )
             }),
-            MirrorCommand::Verify => worker.verify().map(|r| {
-                let mut text = format!(
-                    "verified at history {}: {} differences, {} skipped{}",
-                    r.history_id,
-                    r.total,
-                    r.skipped,
-                    if r.resync {
-                        ", the next sync runs a full resync"
-                    } else {
-                        ""
+            MirrorCommand::Verify => worker
+                .verify_held(held.as_ref().expect("verify holds the sync lock"))
+                .map(|r| {
+                    let mut text = format!(
+                        "verified at history {}: {} differences, {} skipped{}",
+                        r.history_id,
+                        r.total,
+                        r.skipped,
+                        if r.resync {
+                            ", the next sync runs a full resync"
+                        } else {
+                            ""
+                        }
+                    );
+                    for d in &r.differences {
+                        text.push_str(&format!("\n  {}", verbs::field(&d.to_string())));
                     }
-                );
-                for d in &r.differences {
-                    text.push_str(&format!("\n  {}", verbs::field(&d.to_string())));
-                }
-                text
-            }),
+                    text
+                }),
         };
         match line {
             Ok(text) => println!("account {account}: {text}"),
-            // A first copy that started after the check above.
-            Err(engine::Error::Sync(iris_sync::Error::OtherSync))
-                if matches!(command, MirrorCommand::Verify) && !mirror_ready(&store, account)? =>
-            {
-                println!("account {account}: {FIRST_COPY_RUNS}")
-            }
             Err(e) => {
                 failed = true;
                 say!("iris: account {account}: {e}");

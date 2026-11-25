@@ -286,3 +286,38 @@ fn mirror_verify_during_a_first_copy_says_so_and_does_not_fail() {
     assert!(!ok);
     assert!(err.contains("another sync of the account runs"), "{err}");
 }
+
+/// Issue #836: verify takes the sync lock before its token call. A first
+/// copy that starts while the token request runs cannot take the lock, so
+/// a failed token request cannot hide a first copy that runs under it.
+#[test]
+fn mirror_verify_holds_the_sync_lock_during_its_token_call() {
+    let fake = FakeGmail::start(Mailbox::new(5, 3)).unwrap();
+    let tokens = token_server();
+    let dir = data_dir("mirror-verify-lock");
+    let store = Store::open(&dir).unwrap();
+    let account = add_account(&store, &gmail(fake.base_url()));
+    // Each token request stalls.
+    *tokens.stall.lock().unwrap() = Some(String::new());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_iris"))
+        .args(["mirror", "verify", "--data"])
+        .arg(&dir)
+        .env("IRIS_TEST_GMAIL_URL", fake.base_url())
+        .env("IRIS_TEST_TOKEN_URI", &tokens.uri)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let start = std::time::Instant::now();
+    while tokens.calls.lock().unwrap().is_empty() {
+        assert!(start.elapsed().as_secs() < 60, "no token call");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let first_copy = iris_sync::lock(&store, account);
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        matches!(first_copy, Err(iris_sync::Error::OtherSync)),
+        "a first copy could start during the token call of verify"
+    );
+}
