@@ -71,10 +71,10 @@ message.
 
 | Verb | Moves from | Already done (skip) | Target |
 |---|---|---|---|
-| `archive` | `INBOX` | the archive folder, the trash folder | archive |
-| `inbox` | the archive folder | `INBOX` | `INBOX` |
-| `trash` | `INBOX`, the archive folder | the trash folder | trash |
-| `untrash` | a trash folder | `INBOX`, the archive folder | `INBOX` |
+| `archive` | `INBOX` | an archive folder, a trash folder | archive |
+| `inbox` | an archive folder | `INBOX` | `INBOX` |
+| `trash` | `INBOX`, an archive folder | a trash folder | trash |
+| `untrash` | a trash folder | `INBOX`, an archive folder | `INBOX` |
 
 A message in any other folder (a user folder, `\Sent`, `\Drafts`,
 `\Junk`) refuses the whole action with `Api` 400
