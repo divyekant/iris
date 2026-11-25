@@ -13,7 +13,9 @@
 --    whose model data held only part of the thread context (the budget
 --    cut it, or no model call ran): each entry then also holds the count
 --    of the bytes that the data held, and "+" if the text had more bytes.
---    The hash covers only the held bytes. "-" marks hostile mail: no context shaped it.
+--    The hash covers only the held bytes. "p:" holds a hash of the known
+--    parties of the thread up to the message (limit #1135: a known person
+--    only in To or Cc puts no thread in `talk_due`). "-" marks hostile mail: no context shaped it.
 --    NULL for a message that no run understood. "?" for an understood
 --    message from before this migration (step 3; limit issue #1119: a
 --    change before the migration is not seen).
@@ -104,8 +106,9 @@ BEGIN
       AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = m.thread_id);
 END;
 
-CREATE TRIGGER context_header AFTER UPDATE OF from_addr, message_id ON header
-  WHEN OLD.from_addr IS NOT NEW.from_addr OR OLD.message_id IS NOT NEW.message_id
+CREATE TRIGGER context_header AFTER UPDATE OF from_addr, to_addrs, cc_addrs, message_id ON header
+  WHEN OLD.from_addr IS NOT NEW.from_addr OR OLD.to_addrs IS NOT NEW.to_addrs
+    OR OLD.cc_addrs IS NOT NEW.cc_addrs OR OLD.message_id IS NOT NEW.message_id
 BEGIN
   INSERT INTO talk_due(thread_id) SELECT m.thread_id FROM message m
     WHERE m.id IN (OLD.message_id, NEW.message_id) AND m.thread_id IS NOT NULL
@@ -117,4 +120,16 @@ BEGIN
   INSERT INTO talk_due(thread_id) SELECT m.thread_id FROM message m
     WHERE m.id = OLD.message_id AND m.thread_id IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = m.thread_id);
+END;
+
+-- The known parties of a thread (`known_parties`) show the name of each
+-- known person: a new name changes the data of the model. The kind and
+-- the address have the triggers of migration 40.
+CREATE TRIGGER context_sender_name AFTER UPDATE OF name ON sender
+  WHEN OLD.name IS NOT NEW.name AND NEW.kind = 'person'
+BEGIN
+  INSERT INTO talk_due(thread_id)
+    SELECT DISTINCT m.thread_id FROM header h JOIN message m ON m.id = h.message_id
+    WHERE h.from_addr = lower(NEW.address) AND m.thread_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM talk_due d WHERE d.thread_id = m.thread_id);
 END;

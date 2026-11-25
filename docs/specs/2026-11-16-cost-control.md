@@ -65,7 +65,13 @@ pay again for the same mail.
   the bytes that the data held, and if the text had more bytes (the data
   had a cut mark). So a change of an earlier text that the run did not
   read runs nothing again, and a text that shrinks to the held bytes (the
-  data then has no cut mark) runs the later message again. A check compares the
+  data then has no cut mark) runs the later message again. The record
+  also holds a hash of the known parties of the thread, which the model
+  gets: the known persons in the headers of the messages up to the
+  current one. Later mail does not change them. A new kind or name of a
+  sender puts the threads of that sender in `talk_due`.
+- Limit (issue #1135): a known person who is only in `To` or `Cc` of a
+  thread does not put the thread in `talk_due`. A check compares the
   recorded context of an understood message with its context now, and
   clears `understood_at` where they differ. So a later message runs again
   only when the context that its last run used changed: an earlier

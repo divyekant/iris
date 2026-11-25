@@ -1043,7 +1043,7 @@ fn inputs(
             .unwrap_or_default(),
         same: same_sender(c, message, thread, date, from_addr)?,
         context: thread_context(c, message, thread, date)?,
-        parties: known_parties(c, thread)?,
+        parties: known_parties(c, thread, date)?,
         pinned: pinned(c, message)?,
     })
 }
@@ -1235,8 +1235,16 @@ fn context_key(
                 .collect::<rusqlite::Result<_>>()?;
         }
     }
+    // The known parties of the data. The record holds the whole list: a
+    // party that the budget left out can only cost one more run.
+    let parties = known_parties(c, thread, date)?;
+    let p = fnv(&parties.iter().map(String::as_str).collect::<Vec<_>>());
     let cut = if held.is_some() { "!" } else { "" };
-    Ok(Some(format!("t{cut}:{};s:{}", t.join(","), s.join(","))))
+    Ok(Some(format!(
+        "t{cut}:{};s:{};p:{p:016x}",
+        t.join(","),
+        s.join(",")
+    )))
 }
 
 /// The `held` of a recorded context: `None` for the full window, or the
@@ -1440,8 +1448,14 @@ const KNOWN_PARTIES: i64 = crate::prompt::MAX_KNOWN as i64;
 /// The known persons in the headers (From, To, Cc) of the messages of the
 /// thread, also the current one, as `Name <address>`, for the model
 /// (section 7.4).
-fn known_parties(c: &rusqlite::Connection, thread: i64) -> rusqlite::Result<Vec<String>> {
+fn known_parties(
+    c: &rusqlite::Connection,
+    thread: i64,
+    date: Option<i64>,
+) -> rusqlite::Result<Vec<String>> {
     {
+        // Only the messages up to the current one (issue 1049): later mail
+        // does not change the data of an earlier run.
         let mut st = c.prepare_cached(
             "SELECT DISTINCT s.name, s.address FROM message m
              JOIN header h ON h.message_id = m.id
@@ -1449,10 +1463,11 @@ fn known_parties(c: &rusqlite::Connection, thread: i64) -> rusqlite::Result<Vec<
                OR instr(',' || coalesce(h.to_addrs, '') || ',', ',' || s.address || ',') > 0
                OR instr(',' || coalesce(h.cc_addrs, '') || ',', ',' || s.address || ',') > 0)
              WHERE m.thread_id = ?1 AND m.gone_at IS NULL
+               AND (?3 IS NULL OR m.internal_date <= ?3)
              ORDER BY s.address LIMIT ?2",
         )?;
         let v = st
-            .query_map(params![thread, KNOWN_PARTIES], |r| {
+            .query_map(params![thread, KNOWN_PARTIES, date], |r| {
                 let (name, addr): (Option<String>, String) = (r.get(0)?, r.get(1)?);
                 Ok(match name.filter(|n| !n.is_empty()) {
                     Some(n) => format!("{n} <{addr}>"),
