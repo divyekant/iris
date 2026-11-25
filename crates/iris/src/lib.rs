@@ -877,6 +877,30 @@ pub fn session_socket() -> Option<PathBuf> {
     }
 }
 
+/// Why a session cannot add the action `verb`, or `None` if it can. Only a
+/// person sends (decision D2). A session drafts a reply in a granted
+/// thread: submit checks the grant (docs/specs/2026-11-17-job-verbs.md).
+fn session_refusal(verb: &str) -> Option<&'static str> {
+    match verb {
+        "send" => Some("a session cannot send or nudge: only a person sends mail"),
+        "skip" | "mute" | "dismiss" => Some(
+            "a session cannot skip, mute or dismiss: a job grants no feed, conversation or signal item",
+        ),
+        _ => None,
+    }
+}
+
+/// Only the write verbs of a session (R4-03): `drafts`, for example, is a
+/// host verb of the socket.
+const SESSION_VERBS: [&str; 6] = [
+    "add",
+    "submit",
+    "show",
+    "withdraw",
+    "revise",
+    "matters.propose",
+];
+
 /// One command in session mode
 /// (docs/specs/2026-11-17-session-launcher.md, "The command"): each verb
 /// goes to the session socket at `path`, and the command never opens the
@@ -904,6 +928,13 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
             error: String::new(),
         }));
     }
+    if let Command::Mcp = c {
+        // The tools of a session: the same paths as the commands below.
+        return mcp_session(path).map_err(|error| socket::Failure {
+            code: socket::code::ERROR,
+            error,
+        });
+    }
     if let Command::Status { json } = c {
         let r = socket::request_at(
             path,
@@ -916,20 +947,15 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
         print!("{}", session_status_text(&r, *json));
         return Ok(());
     }
-    // Only a person sends (decision D2). A session drafts a reply in a
-    // granted thread: submit checks the grant (docs/specs/2026-11-17-job-verbs.md).
-    if matches!(c, Command::Send { .. }) {
-        return Err(denied(
-            "a session cannot send or nudge: only a person sends mail",
-        ));
-    }
-    if matches!(
-        c,
-        Command::Skip { .. } | Command::Mute { .. } | Command::Dismiss { .. }
-    ) {
-        return Err(denied(
-            "a session cannot skip, mute or dismiss: a job grants no feed, conversation or signal item",
-        ));
+    let action = match c {
+        Command::Send { .. } => Some("send"),
+        Command::Skip { .. } => Some("skip"),
+        Command::Mute { .. } => Some("mute"),
+        Command::Dismiss { .. } => Some("dismiss"),
+        _ => None,
+    };
+    if let Some(why) = action.and_then(session_refusal) {
+        return Err(denied(why));
     }
     if let Command::Wait { until, reply, why } = c {
         // The wait ends this session: after a lost answer, `iris status`
@@ -996,16 +1022,6 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
         print!("{}", session_read_text(&r, json));
         return Ok(());
     }
-    // Only the write verbs of a session (R4-03): `drafts`, for example, is
-    // a host verb of the socket.
-    const SESSION_VERBS: [&str; 6] = [
-        "add",
-        "submit",
-        "show",
-        "withdraw",
-        "revise",
-        "matters.propose",
-    ];
     let request = socket_request(c)?.filter(|(verb, ..)| SESSION_VERBS.contains(verb));
     let Some((verb, args, json)) = request else {
         return Err(denied("this verb is not a verb of a session"));
@@ -1424,6 +1440,84 @@ fn mcp(dir: PathBuf) -> Result<(), String> {
             ),
         }
     };
+    mcp_serve(run)
+}
+
+/// `iris mcp` in a job workspace (issue #440): each tool call takes the
+/// path of its command in session mode, on the session socket at `path`.
+/// The session limits apply: the grant of the job, and only the verbs of a
+/// session. The tools never open the store.
+fn mcp_session(path: &std::path::Path) -> Result<(), String> {
+    use iris_mcp::{Call, Outcome};
+    let path = path.to_path_buf();
+    let run = move |c: Call| -> Outcome {
+        let fail = |f: socket::Failure| Outcome::fail(f.code, f.error);
+        let read = |verb: &str, args: serde_json::Value, status: bool| {
+            // A read changes nothing: after a lost answer, run it again.
+            match socket::request_at(&path, verb, args, socket::ANSWER_WAIT, "the same call") {
+                Ok(r) if status => Outcome::ok(session_status_text(&r, true)),
+                Ok(r) => Outcome::ok(session_read_text(&r, true)),
+                Err(f) => fail(f),
+            }
+        };
+        let denied = || {
+            Outcome::fail(
+                socket::code::DENIED,
+                "this tool is not a tool of a session".into(),
+            )
+        };
+        match c {
+            Call::Socket { verb: "add", args }
+                if args["verb"].as_str().and_then(session_refusal).is_some() =>
+            {
+                let why = args["verb"]
+                    .as_str()
+                    .and_then(session_refusal)
+                    .unwrap_or_default();
+                Outcome::fail(socket::code::DENIED, why.into())
+            }
+            Call::Socket { verb, args } if SESSION_VERBS.contains(&verb) => {
+                match socket_verb_at(&path, verb, args, true) {
+                    Ok(p) => Outcome {
+                        text: p.text,
+                        failure: p.failure.map(|f| (f.code, f.error)),
+                    },
+                    Err(f) => fail(f),
+                }
+            }
+            Call::Status => read("status", serde_json::json!({}), true),
+            Call::Search { text, limit } => read(
+                "search",
+                serde_json::json!({ "text": text, "limit": limit }),
+                false,
+            ),
+            Call::Show { id } => read("show", serde_json::json!({ "id": id }), false),
+            Call::List {
+                form,
+                status: None,
+                kind: None,
+                before: None,
+                ..
+            } => read("list", serde_json::json!({ "form": form }), false),
+            Call::List { .. } => Outcome::fail(
+                socket::code::USAGE,
+                "in a job workspace, list takes only a form".into(),
+            ),
+            Call::Socket { .. }
+            | Call::WatchAdd { .. }
+            | Call::WatchList
+            | Call::WatchRemove { .. }
+            | Call::MattersList
+            | Call::MattersShow { .. } => denied(),
+        }
+    };
+    mcp_serve(run)
+}
+
+/// Serve the MCP tools on standard input and output with `run`.
+fn mcp_serve(
+    run: impl Fn(iris_mcp::Call) -> iris_mcp::Outcome + Send + Sync + 'static,
+) -> Result<(), String> {
     // rmcp uses timers for its time limits. At most MCP_CALLS calls run at
     // the same time; the others wait in the queue of the runtime.
     tokio::runtime::Builder::new_current_thread()

@@ -1289,10 +1289,18 @@ agent that does not work in a folder. The rules for the MCP interface:
   | `watch_add`, `watch_list`, `watch_remove` | Read and write the watch rows of the store directly, as `iris watch` does. A watch changes no mailbox, so it does not go through the policy. |
   | All other tools | A request on `iris.sock`, with the author `local`. |
 
-  In
-  session mode, the MCP interface uses the session socket, so the session
-  limits apply. The command has no session mode yet, so `iris mcp` has
-  host mode only (issue #440).
+  In session mode (a `.iris/` folder in the current folder or above it,
+  as for the command), each tool takes the path of its command in session
+  mode, so the session limits apply (issue #440):
+
+  | Tools | Path |
+  |---|---|
+  | `status`, `search`, `show`, `list` | A read verb of the session socket. `list` takes only a form: another filter is a usage error (code 2). |
+  | `send`, `skip`, `mute`, `dismiss` | Refused (code 3), with the text of the command. |
+  | The tools of `add`, `submit`, `changeset`, `withdraw`, `revise`, `matters_propose` | A request on the session socket. |
+  | All other tools | Refused (code 3): they are host verbs. |
+
+  The tools never open the data folder in session mode.
 - The result of a call is what its verb prints on standard output: with
   `--json` where the verb has it (section 8.3), else the text of the verb.
   Two exceptions:

@@ -264,6 +264,10 @@ gives the error line and the exit code of the command. MCP has no tool to
 approve, to deny or to change the policy. Only the web client does these
 steps.
 
+In a job workspace (a folder with `.iris/` in it or above it), `iris mcp`
+uses the session socket of the job, as the command does. The tools then see
+only the mail of the job, and a session cannot send, skip, mute or dismiss.
+
 Add Iris to the MCP settings of the agent. For example:
 
 ```json
