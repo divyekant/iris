@@ -1244,6 +1244,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-summary"
+version = "0.0.0"
+dependencies = [
+ "iris-model",
+ "iris-store",
+ "iris-understand",
+ "iris-voice",
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
 name = "iris-sync"
 version = "0.0.0"
 dependencies = [
