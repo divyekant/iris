@@ -769,3 +769,30 @@ test("a request on the screen that closes elsewhere shows its state, and an unkn
     }
   }
 });
+
+test("a request on the screen that leaves the open list for a draft and comes back shows its new revision (issue 184)", async () => {
+  const first = changeset([act({ resolved: { messages: [] } })]);
+  const draft = { ...first, state: "draft" };
+  const next = { ...first, revision: (first.revision ?? 1) + 1, actions: [...first.actions.map((a) => ({ ...a, revision: 2 })), { ...first.actions[0], n: 2, revision: 2 }] };
+  for (const readWorks of [true, false]) {
+    let open = [first];
+    let reads = 0;
+    serve({ changesets: () => [200, { changesets: open }], "changesets/cs-9": () => (reads++, readWorks ? [200, draft] : [500, { error: "database: locked" }]) });
+    const view = await mount("/src/views/Review.svelte", { changesets: [first], every: 20 });
+    const one = () => view.target.querySelector("[data-changeset=cs-9]");
+    try {
+      assert.match(text(view.target), /asks for one change/);
+      // The author starts a new revision: the request leaves the open list.
+      open = [];
+      await until(() => reads > 0);
+      if (!readWorks) await until(() => (view.flushSync(), one().hasAttribute("inert")));
+      // The author submits it: the same request is open again, with two changes.
+      open = [next];
+      await until(() => (view.flushSync(), /asks for 2 changes/.test(text(view.target))));
+      assert.equal(one().hasAttribute("inert"), false);
+      assert.doesNotMatch(text(view.target), /could not read/);
+    } finally {
+      view.destroy();
+    }
+  }
+});

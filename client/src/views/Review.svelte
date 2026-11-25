@@ -33,6 +33,12 @@
         const fresh = open.filter((c) => !list.some((x) => x.id === c.id) && !later.some((x) => x.id === c.id));
         later = [...later.map((c) => open.find((x) => x.id === c.id) ?? c), ...fresh];
         order = open.map((c) => c.id);
+        // A request on the screen that is open again (a new revision after a draft): take the new document.
+        for (const c of open) {
+          const shownAs = all.find((x) => x.id === c.id);
+          if (shownAs && (shownAs.state !== "open" || unknown.includes(c.id))) now[c.id] = c;
+        }
+        unknown = unknown.filter((id) => !order.includes(id));
         // A request on the screen or announced that the engine no longer lists as open: read its state,
         // so that it never keeps the controls of an open request.
         void settle([...all, ...later].filter((c) => c.state === "open" && !order.includes(c.id)).map((c) => c.id));
