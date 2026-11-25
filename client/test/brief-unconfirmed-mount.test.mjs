@@ -39,6 +39,22 @@ test("the line shows until you dismiss it, and the dismissal names the entries i
   }
 });
 
+test("with more entries than the line listed, the dismissal shows the next line", async () => {
+  const brief = { ...fx.brief, unconfirmed: { messages: 2, entries: ["l-9"], more: 1 } };
+  const next = { ...fx.brief, unconfirmed: { messages: 1, entries: ["l-4"], more: 0 } };
+  const net = serve({ "POST ledger/unconfirmed/dismiss": [200, { dismissed: 1 }], "GET brief": [200, next] });
+  const app = await mount("/src/views/Brief.svelte", { brief, now: NOW, poll: 0 });
+  try {
+    const line = () => app.target.querySelector("p.unconfirmed");
+    line().querySelector("button").click();
+    await until(() => line() !== null && /1 message\./.test(text(line())));
+    assert.ok(net.asked.some((a) => a.key === "GET brief"));
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
 test("a refused dismissal keeps the line and says why", async () => {
   const brief = { ...fx.brief, unconfirmed: { messages: 1, entries: ["l-9"] } };
   const net = serve({ "POST ledger/unconfirmed/dismiss": [400, { error: "no such entry form" }] });

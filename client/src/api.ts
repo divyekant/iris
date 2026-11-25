@@ -95,7 +95,7 @@ export type Brief = {
   hostile: number;
   not_understood: number;
   /** The changes that Iris could not confirm (spec 2 section 7.3): the count of their messages, and their entries, until you dismiss the line. */
-  unconfirmed?: { messages: number; entries: string[] };
+  unconfirmed?: { messages: number; entries: string[]; more?: number };
   /** While the first sync runs: the brief covers the mail from this date (spec 1 section 4.2). */
   oldest_fetched?: string | null;
   /** The stored triage proposal: the messages of the triage actions that wait for your review, for each verb. */

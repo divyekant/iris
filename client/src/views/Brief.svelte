@@ -158,7 +158,10 @@
     dismissProblem = "";
     try {
       await post("ledger/unconfirmed/dismiss", { entries });
-      brief = { ...brief, unconfirmed: { messages: 0, entries: [] } };
+      const more = brief.unconfirmed?.more ?? 0;
+      brief = { ...brief, unconfirmed: { messages: 0, entries: [], more: 0 } };
+      // Older entries than the line listed show in the next line.
+      if (more > 0) loadBrief().then((b) => void (brief = b), () => {});
     } catch (e) {
       dismissProblem = own(e);
     } finally {
