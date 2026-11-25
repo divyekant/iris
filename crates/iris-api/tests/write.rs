@@ -119,6 +119,17 @@ fn made(s: &Store) {
                 action
             ],
         )?;
+        // The ledger entry of the create: the send of the mark binds to its
+        // hash (draft change spec, section 2).
+        let ops = serde_json::json!({"call": "drafts.create", "message_id": "iris.1@example.com",
+                                     "date": 1, "hash": iris_compose::hash(&c, None), "thread": null});
+        tx.execute(
+            "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+             VALUES (?1, 1, ?2, 'writing', 'none', 0)",
+            rusqlite::params![action, ops.to_string()],
+        )?;
+        tx.execute("UPDATE ledger SET call = 1 WHERE action_id = ?1", [action])?;
+        tx.execute("UPDATE ledger SET state = 'applied' WHERE action_id = ?1", [action])?;
         Ok(())
     })
     .unwrap();
@@ -733,4 +744,153 @@ async fn a_file_goes_into_the_folder_and_into_the_press() {
     let (code, v) = call(&s, "POST", "/api/write", Some(body)).await;
     assert_eq!(code, StatusCode::CONFLICT);
     assert_eq!(v["error"], "This key belongs to another mail.");
+}
+
+/// The write of a change of d-1 (draft change spec, section 2), with
+/// `body` as the new text: the first write is withdrawn after its draft,
+/// the change is approved and applied, and the person pressed Send. The
+/// draft row gets the new content, as the apply writes it. Gives the
+/// changeset ID of the change.
+fn changed_write(s: &Store, body: &str) -> String {
+    use iris_changeset::{Author, AuthorKind, Verb};
+    let who = Author {
+        kind: AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    iris_changeset::allow_draft_change(true);
+    let mut args = new_mail(KEY, json!([]));
+    let args = args.as_object_mut().unwrap();
+    for k in ["account", "key", "flags"] {
+        args.remove(k);
+    }
+    args.insert("body".into(), json!(body));
+    let cs = iris_changeset::create(s, &who, now()).unwrap();
+    iris_changeset::add_action(s, cs, &who, Verb::Draft, &["d-1"], args, None).unwrap();
+    iris_changeset::submit(s, cs, &who, "Change.", now()).unwrap();
+    s.write(|tx| {
+        let (action, state, reason): (i64, String, Option<String>) = tx.query_row(
+            "SELECT id, state, reason FROM changeset_action WHERE changeset_id = ?1",
+            [cs],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        assert!(
+            ["proposed", "in_review"].contains(&state.as_str()),
+            "{state} {reason:?}"
+        );
+        tx.execute(
+            "UPDATE changeset_action SET state = 'approved', decided_by = 'person',
+               decided_at = ?2 WHERE id = ?1",
+            rusqlite::params![action, now()],
+        )?;
+        // The press marks the approved action, before its apply.
+        tx.execute(
+            "INSERT INTO write_send(action_id, request_key, request_hash, flags, created_at)
+             VALUES (?1, ?2, ?3, '[\"new_recipient\"]', ?4)",
+            rusqlite::params![action, "fedcba9876543210-2", "a".repeat(64), now()],
+        )?;
+        let old: String = tx.query_row("SELECT hash FROM draft WHERE id = 1", [], |r| r.get(0))?;
+        let c = iris_compose::Content {
+            to: vec!["priya@example.com".into()],
+            cc: vec![],
+            subject: "Q4".into(),
+            body: body.into(),
+            ..Default::default()
+        }
+        .check()
+        .unwrap();
+        let hash = iris_compose::hash(&c, None);
+        let raw = iris_compose::compose(OWNER, "iris.1@example.com", &c, None, 2);
+        let ops = json!({"call": "drafts.update", "draft": 1, "provider_id": "r1",
+                         "message_id": "iris.1@example.com", "date": 2, "pre_hash": old,
+                         "hash": hash, "thread": null});
+        tx.execute(
+            "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+             VALUES (?1, 1, ?2, 'writing', 'inverse', 0)",
+            rusqlite::params![action, ops.to_string()],
+        )?;
+        tx.execute("UPDATE ledger SET call = 1 WHERE action_id = ?1", [action])?;
+        tx.execute(
+            "UPDATE ledger SET state = 'applied' WHERE action_id = ?1",
+            [action],
+        )?;
+        tx.execute(
+            "UPDATE draft SET content = ?1, hash = ?2, raw = ?3 WHERE id = 1",
+            rusqlite::params![json!({"content": c, "reply": null}).to_string(), hash, raw],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    format!("cs-{cs}")
+}
+
+/// A first write that made d-1 and then was withdrawn, so that d-1 has no
+/// send that waits.
+async fn first_write(s: &Arc<Store>) {
+    let (_, v) = call(
+        s,
+        "POST",
+        "/api/write",
+        Some(new_mail(KEY, json!(["new_recipient"]))),
+    )
+    .await;
+    let cs = v["write"].as_str().unwrap().to_string();
+    made(s);
+    let (code, _) = call(s, "POST", &format!("/api/changesets/{cs}/withdraw"), None).await;
+    assert_eq!(code, StatusCode::OK);
+}
+
+/// The state of the write of a change names the draft that the change
+/// names, once the change applied, and reaches `waiting` after step 2a.
+#[tokio::test]
+async fn a_write_of_a_change_waits_with_its_draft() {
+    let dir = temp("change-wait");
+    let s = store(&dir);
+    first_write(&s).await;
+    let cs = changed_write(&s, "Changed.\n");
+    let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    assert_eq!(st, json!({"state": "saving"}));
+    assert_eq!(iris_changeset::send_written(&s, 1, &now).unwrap(), 1);
+    let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    assert_eq!(st["state"], "waiting", "{st}");
+    assert_eq!(st["draft"], "d-1");
+}
+
+/// The send of a change binds to the content of the press: a draft row
+/// with other content stops the write with the reason, and the draft.
+#[tokio::test]
+async fn a_write_of_a_change_stops_on_other_content() {
+    let dir = temp("change-other");
+    let s = store(&dir);
+    first_write(&s).await;
+    let cs = changed_write(&s, "Changed.\n");
+    // The row then holds other valid content, as a refresh from Gmail
+    // writes it.
+    let c = iris_compose::Content {
+        to: vec!["priya@example.com".into()],
+        cc: vec![],
+        subject: "Q4".into(),
+        body: "Other.\n".into(),
+        ..Default::default()
+    }
+    .check()
+    .unwrap();
+    s.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE draft SET content = ?1, hash = ?2, raw = ?3 WHERE id = 1",
+            rusqlite::params![
+                json!({"content": c, "reply": null}).to_string(),
+                iris_compose::hash(&c, None),
+                iris_compose::compose(OWNER, "iris.1@example.com", &c, None, 3)
+            ],
+        )?)
+    })
+    .unwrap();
+    assert_eq!(iris_changeset::send_written(&s, 1, &now).unwrap(), 1);
+    let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    assert_eq!(
+        st,
+        json!({"state": "stopped", "reason": iris_changeset::DRAFT_CHANGED, "draft": "d-1"})
+    );
 }

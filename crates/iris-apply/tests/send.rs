@@ -2054,3 +2054,80 @@ fn a_failed_lookup_ends_after_a_day() {
     assert_eq!(error.as_deref(), Some(iris_apply::CHANGE_UNKNOWN));
     assert_eq!(b.puts(), 1);
 }
+
+impl Box {
+    /// A send mark of the person on the approved `draft` action `action`,
+    /// as a press of Send makes it.
+    fn mark(&self, action: i64) {
+        self.sql(
+            "INSERT INTO write_send(action_id, request_key, request_hash, flags, created_at)
+             VALUES (?1, ?2, ?3, '[\"new_recipient\"]', ?4)",
+            rusqlite::params![action, format!("key-{action:0>16}"), "a".repeat(64), now()],
+        );
+    }
+
+    /// Step 2a of the apply step: the send of each marked draft. Gives the
+    /// state, the reason and the target of the newest send action.
+    fn send_marks(&self) -> (String, Option<String>, String) {
+        assert_eq!(
+            iris_changeset::send_written(&self.store, self.account, &now).unwrap(),
+            1
+        );
+        self.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT state, reason, targets FROM changeset_action
+                     WHERE verb = 'send' ORDER BY id DESC LIMIT 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?)
+            })
+            .unwrap()
+    }
+}
+
+/// The draft of an action (change spec, section 2): the mark of a write
+/// of a change gets the send of the draft that the change names, once the
+/// change is applied.
+#[test]
+fn a_write_of_a_change_gets_its_send() {
+    let b = setup("change-mark");
+    let (change, d, _) = b.changed(new_text());
+    b.mark(change);
+    let o = b.apply(change);
+    assert!(matches!(o, Ok(Outcome::Applied(_))), "{o:?}");
+    let (state, why, targets) = b.send_marks();
+    assert!(
+        ["approved", "in_review"].contains(&state.as_str()),
+        "{state} {why:?}"
+    );
+    assert_eq!(targets, json!({"drafts": [d]}).to_string());
+}
+
+/// A send mark binds to the content of its press: a draft row with
+/// another hash (here, after a refresh from Gmail) gets a denied send.
+#[test]
+fn a_mark_does_not_send_other_content() {
+    let b = setup("mark-other");
+    let a = b.approved(Verb::Draft, "a-1", mail(), 0);
+    b.mark(a);
+    let o = b.apply(a);
+    assert!(matches!(o, Ok(Outcome::Applied(_))), "{o:?}");
+    // The row now holds other valid content, as a refresh from Gmail
+    // writes it.
+    let raw: Vec<u8> = b
+        .store
+        .read(|c| Ok(c.query_row("SELECT raw FROM draft WHERE id = 1", [], |r| r.get(0))?))
+        .unwrap();
+    let raw = String::from_utf8(raw).unwrap().replace("Here.", "Other.");
+    let read = iris_compose::read(raw.as_bytes(), OWNER).unwrap();
+    let hash = iris_compose::hash(&read.content, read.reply.as_ref());
+    let content = json!({"content": read.content, "reply": read.reply}).to_string();
+    b.sql(
+        "UPDATE draft SET raw = ?1, hash = ?2, content = ?3 WHERE id = 1",
+        rusqlite::params![raw.as_bytes(), hash, content],
+    );
+    let (state, why, _) = b.send_marks();
+    assert_eq!(state, "denied");
+    assert_eq!(why.as_deref(), Some(iris_changeset::DRAFT_CHANGED));
+}
