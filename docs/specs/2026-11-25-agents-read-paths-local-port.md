@@ -140,10 +140,14 @@ launch takes a new egress port in that case.
   mount, a process of the person can change a part of the path into a
   link. So the hold helper opens each read path again, just before it
   starts `bwrap`, with `openat2` and `RESOLVE_NO_SYMLINKS` (`O_PATH`):
-  the open fails if a part of the path is a link. The helper checks that
-  the open file is on the same device and inode that the launch checked,
-  then gives the file descriptor to `bwrap` with `--ro-bind-fd <fd>
-  <real>`. `bwrap` mounts the object of the descriptor, not a path. If
+  the open fails if a part of the path is a link. The helper then runs
+  each check of the launch again on the object of the descriptor (its
+  place, the protected folders and the walk), and gives the descriptor to
+  `bwrap` with `--ro-bind-fd <fd> <real>`. The invariant needs no compare
+  with the object of the launch: an object that passes each check shows
+  no protected folder. If another folder takes the path, the session
+  sees that folder only if it passes each check, as a change of
+  `agents.toml` would. `bwrap` mounts the object of the descriptor, not a path. If
   an open or a check fails, no session starts. `bwrap` has
   `--ro-bind-fd` since version 0.5.0. An older `bwrap` refuses the
   unknown option and exits, so no session starts (fail closed).
@@ -213,7 +217,7 @@ fails at its first call.
 | A kernel that gives no mount ID (`STATX_MNT_ID`) | The run of an adapter with read paths is refused | unit test |
 | A tree of more than 200,000 entries | The run is refused | launch test |
 | A part of a read path that changes into a link after the launch checks | Linux: the open of the helper fails, and no session starts. macOS: Seatbelt checks the real path at each access | Linux helper test with a swap between the check and the open |
-| A read path that changes to another object (other device or inode) after the launch checks | The helper refuses it, and no session starts | Linux helper test |
+| A read path that changes to another folder after the launch checks | The helper checks the new folder: a protected or unsafe folder stops the start; a clean folder is bound | Linux helper test with a swap to the data folder |
 | `bwrap` older than 0.5.0 and an adapter with read paths | `bwrap` refuses the option and exits; no session starts | not testable in CI (the CI has 0.9) |
 | A write to a read path | The system refuses it (read-only bind) | Linux sandbox test |
 | A connection to a local port other than `allow_local` | Refused: no listener in the namespace (Linux), the profile denies it (macOS) | Linux sandbox test |

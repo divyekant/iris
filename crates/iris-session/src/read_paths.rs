@@ -404,10 +404,20 @@ fn walk(fd: &OwnedFd, path: &Path, mount: &u64, count: &mut usize) -> Result<(),
     }
     let d = Dir(d);
     loop {
+        // readdir gives null at the end and on an error; only errno tells
+        // them apart. An error refuses the read path (fail closed).
+        set_errno(0);
         // SAFETY: readdir on an open DIR; the entry is valid until the
         // next call, and the name is copied before it.
         let e = unsafe { libc::readdir(d.0) };
         if e.is_null() {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error().unwrap_or(0) != 0 {
+                return Err(format!(
+                    "the folder {} cannot be read: {err}",
+                    path.display()
+                ));
+            }
             break;
         }
         let name = unsafe { CStr::from_ptr((*e).d_name.as_ptr()) }.to_owned();
@@ -462,6 +472,19 @@ fn walk(fd: &OwnedFd, path: &Path, mount: &u64, count: &mut usize) -> Result<(),
         }
     }
     Ok(())
+}
+
+/// Sets `errno` of this thread.
+fn set_errno(v: i32) {
+    // SAFETY: the location is the errno of this thread.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        *libc::__errno_location() = v
+    };
+    #[cfg(target_os = "macos")]
+    unsafe {
+        *libc::__error() = v
+    };
 }
 
 /// A regular file, a folder or a link passes. A socket, a FIFO or a device

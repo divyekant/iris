@@ -169,3 +169,103 @@ fn a_nested_mount_is_refused_by_the_walk() {
         "{e}"
     );
 }
+
+/// A small random number source for the property tests.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self, n: u64) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.0 >> 33) % n
+    }
+
+    /// An absolute path of random parts, with the bytes that mountinfo
+    /// escapes (space, tab, newline, backslash).
+    fn path(&mut self) -> Vec<u8> {
+        // The file is read as UTF-8 (read_to_string), so the parts are
+        // whole characters.
+        let alphabet = ["a", "b", "-", "_", ".", "\\", " ", "\t", "\n", "é"];
+        let mut p = Vec::new();
+        for _ in 0..=self.next(4) {
+            p.push(b'/');
+            for _ in 0..=self.next(6) {
+                let c = alphabet[self.next(alphabet.len() as u64) as usize];
+                p.extend_from_slice(c.as_bytes());
+            }
+        }
+        p
+    }
+}
+
+/// The escape of the kernel for a path in mountinfo.
+fn escape(p: &[u8]) -> String {
+    let mut out = Vec::new();
+    for &b in p {
+        match b {
+            b' ' | b'\t' | b'\n' | b'\\' => out.extend(format!("\\{b:03o}").bytes()),
+            _ => out.push(b),
+        }
+    }
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn mountinfo_lines_round_trip_and_places_follow_the_root() {
+    let mut r = Rng(0x5eed);
+    for _ in 0..2000 {
+        let (root, point, rest) = (r.path(), r.path(), r.path());
+        let optional: Vec<String> = (0..r.next(3)).map(|i| format!("shared:{i}")).collect();
+        let id = r.next(1 << 20);
+        let line = format!(
+            "{id} 1 {}:{} {} {} rw{}{} - ext4 /dev/x rw\n",
+            r.next(300),
+            r.next(300),
+            escape(&root),
+            escape(&point),
+            if optional.is_empty() { "" } else { " " },
+            optional.join(" ")
+        );
+        let m = parse_mountinfo(&line).unwrap_or_else(|| panic!("{line:?}"));
+        let m = &m[0];
+        assert_eq!(m.id, id);
+        assert_eq!(m.root.as_os_str().as_bytes(), &root[..]);
+        assert_eq!(m.point.as_os_str().as_bytes(), &point[..]);
+        // A path below the mount point has the place root + rest.
+        let mut real = point.clone();
+        real.extend_from_slice(&rest);
+        let place = m.place(Path::new(OsStr::from_bytes(&real)));
+        let mut want = root.clone();
+        want.extend_from_slice(&rest);
+        assert_eq!(place.path, Path::new(OsStr::from_bytes(&want)), "{line:?}");
+    }
+}
+
+#[test]
+fn a_changed_mountinfo_line_parses_safely_or_not_at_all() {
+    let mut r = Rng(0xfeed);
+    let base = b"36 35 98:0 /mnt1 /mnt/parent rw,noatime master:1 - ext3 /dev/root rw\n";
+    for _ in 0..20000 {
+        let mut b = base.to_vec();
+        for _ in 0..=r.next(4) {
+            let i = r.next(b.len() as u64) as usize;
+            match r.next(3) {
+                0 => b[i] = r.next(256) as u8,
+                1 => {
+                    b.remove(i);
+                }
+                _ => b.insert(i, b" \\-:/0"[r.next(6) as usize]),
+            }
+        }
+        let text = String::from_utf8_lossy(&b);
+        // No panic, and each parsed mount has absolute paths and a device.
+        if let Some(ms) = parse_mountinfo(&text) {
+            for m in ms {
+                assert!(m.root.is_absolute() && m.point.is_absolute(), "{text:?}");
+                assert!(m.dev.contains(':'), "{text:?}");
+            }
+        }
+    }
+}

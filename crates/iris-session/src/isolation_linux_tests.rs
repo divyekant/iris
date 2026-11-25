@@ -867,3 +867,32 @@ fn a_read_path_that_changes_after_the_launch_stops_the_start() {
     let _ = fs::remove_file(&tool);
     let _ = fs::remove_dir_all(&old);
 }
+
+#[test]
+fn a_read_path_replaced_by_an_unsafe_folder_stops_the_start() {
+    let d = Data::new();
+    let iso = d.iso();
+    let tool = tool_dir("swap-dir");
+    let c = iso.command(
+        23,
+        &d.ws,
+        None,
+        Path::new("/bin/sh"),
+        &["-c".into(), "echo ran > ran".into()],
+        std::slice::from_ref(&tool),
+    );
+    // A plain folder takes the path, with a socket in it: the helper checks
+    // the new folder again, not only its name.
+    let old = tool.with_extension("old");
+    fs::rename(&tool, &old).unwrap();
+    fs::create_dir(&tool).unwrap();
+    let _l = std::os::unix::net::UnixListener::bind(tool.join("agent.sock")).unwrap();
+    let mut cmd = std::process::Command::new(&c.program);
+    cmd.args(&c.args).process_group(0).stdin(Stdio::null());
+    let e = iso.spawn_with(23, &mut cmd, None).unwrap_err();
+    assert!(e.to_string().contains("socket"), "{e}");
+    thread::sleep(Duration::from_millis(200));
+    assert!(!d.ws.join("ran").exists());
+    let _ = fs::remove_dir_all(&tool);
+    let _ = fs::remove_dir_all(&old);
+}
