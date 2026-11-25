@@ -204,7 +204,7 @@ pub fn gate_page(
     }
     let name = if declined { "declined" } else { "gate" };
     let after = after.map(|t| decode_cursor(t, name, 2)).transpose()?;
-    Ok(store.read(|c| Ok(read_gate(c, now, declined, limit, after.as_deref())?))?)
+    Ok(store.read(|c| read_gate(c, now, declined, limit, after.as_deref()))?)
 }
 
 /// The answer `answer` (`accept`, `decline` or `reopen`) of the person to the
