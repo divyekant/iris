@@ -337,7 +337,7 @@ fn migration_40_marks_each_understood_thread() {
         .write(|tx| {
             tx.execute_batch(
                 "DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender;
-                 DROP TRIGGER talk_due_sender_remove; DROP TABLE talk_due; DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
+                 DROP TRIGGER talk_due_sender_remove; DROP TRIGGER model_declined_end; DROP TRIGGER model_declined_end_remove; DROP TABLE model_declined; DROP TABLE talk_due; DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
                  DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; PRAGMA user_version = 39;",
             )?;
             Ok(())
@@ -1055,7 +1055,7 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                  ALTER TABLE account DROP COLUMN imap_user;
                  ALTER TABLE account DROP COLUMN categories_off_at;
                  DROP TRIGGER understand_owner_label_add; DROP TRIGGER understand_owner_label_remove;
-                 DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower; DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender; DROP TRIGGER talk_due_sender_remove; DROP TABLE talk_due; DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
+                 DROP TRIGGER header_from_addr_lower_add; DROP TRIGGER header_from_addr_lower; DROP TRIGGER talk_due_sender_add; DROP TRIGGER talk_due_sender; DROP TRIGGER talk_due_sender_remove; DROP TRIGGER model_declined_end; DROP TRIGGER model_declined_end_remove; DROP TABLE model_declined; DROP TABLE talk_due; DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP VIEW item_droppable;
                  DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; PRAGMA user_version = 19;",
             )?;
             Ok(())
@@ -1386,6 +1386,34 @@ fn a_change_during_a_refused_call_leaves_no_mark() {
     assert_eq!(marks, Some(0), "the changed message has no mark");
 }
 
+/// A decline of the sender during a refused call (decision D29): the mark
+/// of the refusal does not hold the mail of a declined stranger, so the next
+/// run understands it with no model call.
+#[test]
+fn a_decline_during_a_refused_call_does_not_hold_the_mail() {
+    let b = store("refusal-decline");
+    b.model(false, None);
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    let db = b._dir.0.join("iris.db");
+    b.script.push(Err(ModelError::Budget("refused".into())));
+    *b.script.during.borrow_mut() = Some(std::boxed::Box::new(move || {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO sender(address, kind, decided_by, declined_at)
+                 VALUES ('ana@example.org', 'stranger', 'engine', 1)
+                 ON CONFLICT(address) DO UPDATE SET declined_at = 1, kind = 'stranger'",
+                [],
+            )
+            .unwrap();
+    }));
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.script.calls(), 1);
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.script.calls(), 1, "no second call");
+    assert!(b.understood(m));
+}
+
 /// A change of the thread context during a refused call (a SPAM label on
 /// an earlier message) leaves no mark either (#153).
 #[test]
@@ -1444,4 +1472,73 @@ fn a_sender_rerun_clears_the_mark() {
         b.col(&format!("SELECT waits_model FROM message WHERE id = {m}")),
         Some(0)
     );
+}
+
+/// Decision D29: the mail of a declined stranger makes no model call, so it
+/// waits for nothing that only the model needs: a budget refusal, the try
+/// limit, or an older message of the thread that waits for the model.
+#[test]
+fn the_mail_of_a_declined_stranger_does_not_wait_for_the_model() {
+    let b = store("declined-wait");
+    b.model(true, None);
+    let far = |n: &str| {
+        format!("From: Far <x@far.example>\nTo: owner@example.com\nSubject: Offer {n}\n\nCan you send the price list?\n")
+    };
+    // A message of the stranger that a budget refusal marked, and one at the
+    // try limit, before the decline.
+    let refused = b.add_raw("1", "b", 3, &far("1"), &["INBOX"]);
+    let limit = b.add_raw("2", "c", 3, &far("2"), &["INBOX"]);
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!((r.stop.as_deref(), b.script.calls()), (Some("budget"), 0));
+    assert!(!b.understood(refused) && !b.understood(limit));
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET waits_model = 1 WHERE id = ?1 AND waits_model = 0",
+                [refused],
+            )?;
+            tx.execute("UPDATE message SET tries = 99 WHERE id = ?1", [limit])?;
+            Ok(())
+        })
+        .unwrap();
+    // New mail of the stranger behind an older message that waits.
+    let older = b.add("3", "a", 2, &["INBOX"]);
+    let behind = b.add_raw("4", "a", 1, &far("4"), &["INBOX"]);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sender(address, kind, decided_by, declined_at)
+                 VALUES ('x@far.example', 'stranger', 'engine', 1)
+                 ON CONFLICT(address) DO UPDATE SET declined_at = 1",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    // A model wait written after the decline (a store from before this
+    // rule, or a refusal that raced the decline) holds nothing either.
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET waits_model = 1, retry_at = ?2 WHERE id = ?1",
+                rusqlite::params![limit, NOW + 86_400_000],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    // The estimate counts no call for the mail of a declined stranger with
+    // a header. Mail with no header yet (`behind`) counts as a call: the
+    // estimate is an upper bound.
+    let e = batch::estimate(&b.store, NOW).unwrap();
+    assert_eq!(
+        e.output_tokens,
+        2 * batch::OUTPUT_TOKENS,
+        "older and behind"
+    );
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.script.calls(), 0);
+    assert!(!b.understood(older), "the older message still waits");
+    for m in [refused, limit, behind] {
+        assert!(b.understood(m), "message {m}");
+    }
 }

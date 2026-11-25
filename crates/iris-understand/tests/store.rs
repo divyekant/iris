@@ -1440,6 +1440,10 @@ fn a_change_during_the_model_call_saves_nothing() {
          SELECT 'bo@other.example', 'Bo Ren', 'person', 'person' WHERE ?1 = ?1",
         // A known party in Cc that the model got turned hostile.
         "UPDATE sender SET kind = 'hostile' WHERE address = 'ana@example.org' AND ?1 = ?1",
+        // The person declined the sender, a stranger (decision D29).
+        "INSERT INTO sender(address, kind, decided_by, declined_at)
+         SELECT 'bo@example.org', 'stranger', 'engine', 1 WHERE ?1 = ?1
+         ON CONFLICT(address) DO UPDATE SET declined_at = 1",
     ] {
         let b = store("changed");
         b.kind("ana@example.org", "Ana Lee", "person");
@@ -2357,4 +2361,98 @@ fn a_correction_of_the_expiry_of_a_signal_sets_its_status() {
     let doc = correct(&b.store, &id, "expires", json!("2025-12-01T00:00:00Z"), NOW).unwrap();
     assert_eq!(doc["status"], "used");
     assert_eq!(status(&b), "used");
+}
+
+/// Decision D29 (issue 263): mail from a declined sender gets no model call.
+/// The fixed steps still run. When the decline ends (a reopen, or a kind
+/// other than `stranger`), the mail is pending again for the model.
+#[test]
+fn a_declined_sender_gets_no_model_call_until_the_decline_ends() {
+    let b = store("declined");
+    let mail = |n: u32| {
+        format!(
+            "From: Far <x@far.example>\nTo: owner@example.com\nSubject: Offer {n}\n\nCan you send the price list?\n"
+        )
+    };
+    let fake = Fake::default();
+    let m1 = b.add("1", &mail(1), &["INBOX"]);
+    understand(&b.store, m1, &fake, NOW).unwrap();
+    assert_eq!(fake.calls.borrow().len(), 1);
+    let sender: i64 = b.col(
+        "SELECT id FROM sender WHERE address = 'x@far.example' AND ?1",
+        1,
+    );
+    let answer = b
+        .store
+        .write(|tx| Ok(iris_senders::gate::decline(tx, sender, NOW, true)?))
+        .unwrap();
+    assert!(matches!(answer, iris_senders::gate::Answer::Done { .. }));
+
+    let pending = |id: i64| {
+        b.col::<bool>(
+            "SELECT understood_at IS NULL FROM message WHERE id = ?1",
+            id,
+        )
+    };
+    let skipped = |id: i64| {
+        b.col::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM model_declined WHERE message_id = ?1)",
+            id,
+        )
+    };
+    let m2 = b.add("2", &mail(2), &["INBOX"]);
+    let out = understand(&b.store, m2, &fake, NOW).unwrap();
+    assert!(out.declined && out.items.is_empty());
+    assert_eq!(fake.calls.borrow().len(), 1, "no model call");
+    assert!(!pending(m2) && skipped(m2));
+    // No model item. The conversation rule still runs: its item is in no
+    // section while the decline applies (spec 1, the Decline row).
+    let forms: Vec<String> = b
+        .store
+        .read(|c| {
+            let mut q = c.prepare(
+                "SELECT i.form FROM item i JOIN item_source s ON s.item_id = i.id
+                 WHERE s.message_id = ?1 ORDER BY i.form",
+            )?;
+            let rows = q.query_map([m2], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+        .unwrap();
+    assert_eq!(forms, ["conversation"], "only the conversation item");
+    // The fixed steps ran: the header, the clean text and the marks.
+    assert_eq!(
+        b.col::<String>("SELECT subject FROM header WHERE message_id = ?1", m2),
+        "Offer 2"
+    );
+    assert_eq!(
+        b.col::<String>("SELECT hostile FROM message WHERE id = ?1", m2),
+        "[]"
+    );
+
+    // A reopen ends the decline: the mail waits for the model again.
+    b.store
+        .write(|tx| Ok(iris_senders::gate::reopen(tx, sender, NOW)?))
+        .unwrap();
+    assert!(pending(m2) && !skipped(m2));
+    let due: i64 = b.col(
+        "SELECT count(*) FROM talk_due WHERE thread_id = (SELECT thread_id FROM message WHERE id = ?1)",
+        m2,
+    );
+    assert_eq!(due, 1, "the conversation is computed again");
+    let out = understand(&b.store, m2, &fake, NOW).unwrap();
+    assert!(!out.declined);
+    assert_eq!(fake.calls.borrow().len(), 2);
+
+    // A kind other than `stranger` ends the decline too, by any writer.
+    b.store
+        .write(|tx| Ok(iris_senders::gate::decline(tx, sender, NOW, true)?))
+        .unwrap();
+    let m3 = b.add("3", &mail(3), &["INBOX"]);
+    assert!(understand(&b.store, m3, &fake, NOW).unwrap().declined);
+    b.store
+        .write(|tx| Ok(tx.execute("UPDATE sender SET kind = 'person' WHERE id = ?1", [sender])?))
+        .unwrap();
+    assert!(pending(m3) && !skipped(m3));
+    // The first message, understood with the model before the decline, keeps its state.
+    assert!(!pending(m1));
 }
