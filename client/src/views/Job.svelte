@@ -16,35 +16,28 @@
   let { detail: first, every = 5000 }: { detail: JobDetail; every?: number } = $props();
   // svelte-ignore state_referenced_locally
   let detail = $state(first);
-  // A document from the engine applies only if it is not older than the page (issue 322). Each move of
-  // the job adds one event and the events never go, so fewer events is an older job: a read from before
-  // an end, or a late answer, never puts back an earlier state. With the same events (an edit, a scope
-  // change), the request that started later wins: each request takes a number at its start.
-  let started = 0;
-  let applied = 0;
-  const take = (n: number, d: JobDetail) => {
-    const have = detail.job.events?.length ?? 0;
-    const got = d.job.events?.length ?? 0;
-    if (got < have || (got === have && n <= applied)) return false;
-    applied = Math.max(applied, n);
-    detail = d;
-    return true;
-  };
-  // The writes of this page (edit, end, answer, scope) in flight, and all that started. A write gives the job
-  // after it. A read that overlaps a write can hold the job from before it (an edit adds no event), so a read
-  // applies only if no write was in flight at its start or started before its end.
-  let writes = 0;
-  let wrote = 0;
-  const busy = (on: boolean) => (on ? (writes++, wrote++) : writes--);
-  // Read the job again and show it, if no newer request applied first and no write overlapped it.
-  // Gives the job that it read. It throws if the read fails.
-  const reload = async () => {
-    const n = ++started;
-    const [w, quiet] = [wrote, writes === 0];
-    const d = await loadJob(detail.job.id);
-    if (quiet && writes === 0 && wrote === w) take(n, d);
-    return d;
-  };
+  // Each request of this page about the job (a read, an edit, an end, an answer, a scope change) runs
+  // in one queue, one at a time, and a job that it gives shows before the next request starts. So the page
+  // shows the job of the last request, and a late answer never puts back an older job (issue 322).
+  let chain: Promise<unknown> = Promise.resolve();
+  let queued = 0;
+  function queue<T>(work: () => Promise<T>): Promise<T> {
+    queued++;
+    const step = chain.then(async () => {
+      try {
+        const out = await work();
+        if (isDetail(out)) detail = out;
+        return out;
+      } finally {
+        queued--;
+      }
+    });
+    chain = step.catch(() => {});
+    return step;
+  }
+  const isDetail = (x: unknown): x is JobDetail => typeof (x as JobDetail)?.job?.id === "string";
+  // Read the job again and show it. It throws if the read fails.
+  const reload = () => queue(() => loadJob(detail.job.id));
   // A failed read counts here, so the next read is planned again.
   let misses = $state(0);
   // While the job works, its session can start, fail or end at any time, also
@@ -54,6 +47,8 @@
     if (detail.job.state !== "working") return;
     let live = true;
     const timer = setTimeout(() => {
+      // A request of the person runs: its answer shows the job, and the next poll reads after it.
+      if (queued > 0) return void misses++;
       reload().catch(() => {
         if (live) misses++;
       });
@@ -74,16 +69,8 @@
 
   let editing = $state(false);
   async function save(goal: string, dueAt: string | null): Promise<string> {
-    const n = ++started;
     try {
-      busy(true);
-      let d: JobDetail;
-      try {
-        d = await editJob(job.id, goal, dueAt);
-      } finally {
-        busy(false);
-      }
-      take(n, d);
+      await queue(() => editJob(job.id, goal, dueAt));
       editing = false;
       return "";
     } catch (e) {
@@ -104,18 +91,10 @@
   let endBusy = $state(false);
   let endError = $state("");
   async function end(kind: "complete" | "cancel") {
-    const n = ++started;
     endBusy = true;
     endError = "";
     try {
-      busy(true);
-      let d: JobDetail;
-      try {
-        d = await endJob(job.id, kind);
-      } finally {
-        busy(false);
-      }
-      take(n, d);
+      await queue(() => endJob(job.id, kind));
     } catch (e) {
       const status = (e as { status?: number }).status;
       // A refusal (4xx, not a conflict) wrote nothing. Any other failure can come after the end: no answer,
@@ -165,8 +144,8 @@
     {#key job.updated}
       <AnswerForm
         {job}
-        onbusy={busy}
-        onanswered={(_, d) => take(++started, d)}
+        {queue}
+        onanswered={() => {}}
         onchanged={() => reload().catch(() => {})}
         onunknown={() => reload().catch(() => {})}
         lost="Iris does not know if your answer arrived. Open the job again to see."
@@ -184,7 +163,8 @@
   {/if}
 </section>
 
-<Scope {detail} onchange={(d) => take(++started, d)} onbusy={busy} />
+<!-- The queue shows the job of each scope request, so `onchange` has nothing to do here. -->
+<Scope {detail} {queue} onchange={() => {}} />
 
 <Grants {job} />
 

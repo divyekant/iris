@@ -14,12 +14,12 @@
   let {
     detail,
     onchange,
-    onbusy = () => {},
+    queue = (work) => work(),
   }: {
     detail: JobDetail;
     onchange: (d: JobDetail) => void;
-    /** True when a request of this part starts, false when it ends (before `onchange`). */
-    onbusy?: (on: boolean) => void;
+    /** Runs each request of this part: the job page runs them in its queue of job requests. */
+    queue?: <T>(work: () => Promise<T>) => Promise<T>;
   } = $props();
 
   let job = $derived(detail.job);
@@ -38,15 +38,13 @@
     busy = true;
     note = "";
     unknown = false;
-    onbusy(true);
     try {
-      return await work();
+      return await queue(work);
     } catch (e) {
       note = own(e) || (e as Error).message;
       unknown = (e as { status?: number }).status === undefined;
     } finally {
       busy = false;
-      onbusy(false);
     }
   }
 
@@ -114,7 +112,7 @@
 
   /** Read the job again after a change whose result is not known, and show it. */
   async function refresh(): Promise<JobDetail | null> {
-    const fresh = await loadJob(job.id).catch(() => null);
+    const fresh = await queue(() => loadJob(job.id)).catch(() => null);
     if (fresh) onchange(fresh);
     return fresh;
   }

@@ -180,8 +180,9 @@ test("a late answer response does not put back a job that a newer end replaced (
     button(view, "End").click();
     view.flushSync();
     button(view, "Cancel the job").click();
-    await until(() => !button(view, "End"));
+    // The end waits for the answer: the page runs one job request at a time.
     release();
+    await until(() => (view.flushSync(), !button(view, "End")));
     await new Promise((r) => setTimeout(r, 20));
     view.flushSync();
     assert.match(text(view.target.querySelector("[aria-label=Now]")), /Cancelled/);
@@ -192,99 +193,74 @@ test("a late answer response does not put back a job that a newer end replaced (
 });
 
 
-test("a poll that read the job before the end commits does not hide the end (review round 2)", async () => {
-  const d = structuredClone(fx.jobDetails["j-15"]);
+// The page runs its job requests one at a time (review round 4): each case holds the first request,
+// starts a second one, and checks that the second waits, and that the page ends on the job of the last.
+function queueServe(first, second) {
   let release;
-  const finished = new Promise((r) => (release = r));
-  let reads = 0;
-  serve(async (method, path) => {
-    if (method === "POST" && path === "jobs/j-15/finish") return (await finished, [200, doneOf(d)]);
-    // A poll that starts after the end request reads the job from before the end.
-    reads++;
-    return [200, d];
-  });
-  const view = await mount("/src/views/Job.svelte", { detail: d, every: 20 });
-  try {
-    button(view, "End").click();
-    view.flushSync();
-    button(view, "Mark as done").click();
-    const before = reads;
-    await until(() => reads > before);
-    await new Promise((r) => setTimeout(r, 30));
-    release();
-    await until(() => (view.flushSync(), !button(view, "End")));
-    assert.doesNotMatch(text(view.target), /does not know if the job ended/);
-    assert.equal(view.target.querySelector("[aria-label='End the job']"), null);
-  } finally {
-    view.destroy();
-  }
-});
-
-test("a late scope answer does not put back a job that ended after it (review round 2)", async () => {
-  const d = structuredClone(fx.jobDetails["j-12"]);
-  let release;
-  const removed = new Promise((r) => (release = r));
-  const posts = [];
-  serve(async (method, path) => {
-    if (method === "POST") posts.push(path);
-    if (method === "POST" && path === "jobs/j-12/scope/remove") return (await removed, [200, { ...d, scope: [] }]);
-    if (method === "POST" && path === "jobs/j-12/finish") return [200, doneOf(d, "cancel")];
-    return [200, d];
-  });
-  const view = await mount("/src/views/Job.svelte", { detail: d, every: 60_000 });
-  try {
-    button(view, "Remove").click();
-    await until(() => posts.includes("jobs/j-12/scope/remove"));
-    button(view, "End").click();
-    view.flushSync();
-    button(view, "Cancel the job").click();
-    await until(() => (view.flushSync(), !button(view, "End")));
-    release();
-    await new Promise((r) => setTimeout(r, 30));
-    view.flushSync();
-    assert.equal(button(view, "End"), undefined, "the job stays done");
-  } finally {
-    view.destroy();
-  }
-});
-
-test("a poll that read the job before an edit commits does not undo the edit (review round 3)", async () => {
-  const d = structuredClone(fx.jobDetails["j-15"]);
-  const edited = { ...d, job: { ...d.job, goal: "Book the dentist for Tuesday morning." } };
-  let committed = false;
-  let release;
-  const stale = new Promise((r) => (release = r));
-  let polls = 0;
-  serve(async (method, path) => {
-    if (method === "POST" && path === "jobs/j-15/edit") {
-      // A poll starts while the edit runs, and reads the job from before it.
-      await until(() => polls > 0);
-      committed = true;
-      return [200, edited.job];
+  const held = new Promise((r) => (release = r));
+  const log = { open: 0, most: 0, order: [] };
+  globalThis.fetch = async (url, init) => {
+    const path = String(url).replace(/^\/api\//, "");
+    const method = init?.method ?? "GET";
+    if (path === "policy") return new Response(JSON.stringify(fx.answer("/policy")), { status: 200, headers: { "content-type": "application/json" } });
+    log.open++;
+    log.most = Math.max(log.most, log.open);
+    log.order.push(`${method} ${path}`);
+    try {
+      const out = first.match(method, path) && !first.done ? ((first.done = true), await held, first.answer) : second(method, path);
+      return new Response(JSON.stringify(out), { status: 200, headers: { "content-type": "application/json" } });
+    } finally {
+      log.open--;
     }
-    if (!committed) {
-      polls++;
-      await stale;
-      return [200, d];
+  };
+  return { log, release };
+}
+const press = (view, name) => (button(view, name).click(), view.flushSync());
+function editTo(view, goal) {
+  press(view, "Edit");
+  const field = view.target.querySelector(".job-form textarea");
+  field.value = goal;
+  field.dispatchEvent(new window.Event("input", { bubbles: true }));
+  view.flushSync();
+  view.target.querySelector(".job-form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+}
+
+test("the job requests of the page run one at a time, and the page shows the job of the last (review round 4)", async () => {
+  const j15 = structuredClone(fx.jobDetails["j-15"]);
+  const j12 = structuredClone(fx.jobDetails["j-12"]);
+  const goal = "Book the dentist for Tuesday morning.";
+  const cases = [
+    // A poll reads the job before an end: the end waits for it, then shows.
+    { name: "poll, then end", d: j15, every: 20, first: { match: (m) => m === "GET", answer: j15 }, act: (v) => (press(v, "End"), press(v, "Mark as done")),
+      second: (m, p) => (p.endsWith("/finish") ? doneOf(j15) : doneOf(j15)), check: (v) => !button(v, "End") },
+    // A poll reads the job before an edit: the edit waits for it, then shows.
+    { name: "poll, then edit", d: j15, every: 20, first: { match: (m) => m === "GET", answer: j15 }, act: (v) => editTo(v, goal),
+      second: (m) => (m === "POST" ? { ...j15.job, goal } : { ...j15, job: { ...j15.job, goal } }), check: (v) => v.target.querySelector("h1")?.textContent.trim() === goal },
+    // A scope change, then an end.
+    { name: "scope, then end", d: j12, every: 60_000, first: { match: (m, p) => p.endsWith("/scope/remove"), answer: { ...j12, scope: [] } }, act: (v) => (press(v, "End"), press(v, "Cancel the job")),
+      second: () => doneOf({ ...j12, scope: [] }, "cancel"), check: (v) => !button(v, "End") },
+    // A scope change, then a goal edit (an edit adds no event).
+    { name: "scope, then edit", d: j12, every: 60_000, first: { match: (m, p) => p.endsWith("/scope/remove"), answer: { ...j12, scope: [] } }, act: (v) => editTo(v, goal),
+      second: (m) => (m === "POST" ? { ...j12.job, goal } : { ...j12, scope: [], job: { ...j12.job, goal } }), check: (v) => v.target.querySelector("h1")?.textContent.trim() === goal },
+  ];
+  for (const c of cases) {
+    const { log, release } = queueServe(c.first, c.second);
+    const view = await mount("/src/views/Job.svelte", { detail: structuredClone(c.d), every: c.every });
+    try {
+      if (c.d === j12) press(view, "Remove");
+      await until(() => c.first.done);
+      c.act(view);
+      await new Promise((r) => setTimeout(r, 40));
+      assert.equal(log.open, 1, `${c.name}: the second request waits`);
+      release();
+      await until(() => (view.flushSync(), c.check(view)));
+      await new Promise((r) => setTimeout(r, 40));
+      view.flushSync();
+      assert.ok(c.check(view), `${c.name}: the page ends on the job of the last request`);
+      assert.equal(log.most, 1, `${c.name}: one request at a time`);
+    } finally {
+      view.destroy();
     }
-    return [200, edited];
-  });
-  const view = await mount("/src/views/Job.svelte", { detail: d, every: 20 });
-  try {
-    button(view, "Edit").click();
-    view.flushSync();
-    const goal = view.target.querySelector(".job-form textarea");
-    goal.value = edited.job.goal;
-    goal.dispatchEvent(new window.Event("input", { bubbles: true }));
-    view.flushSync();
-    view.target.querySelector(".job-form").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
-    await until(() => (view.flushSync(), !view.target.querySelector(".job-form")));
-    release();
-    await new Promise((r) => setTimeout(r, 60));
-    view.flushSync();
-    assert.equal(text(view.target.querySelector("h1")).trim(), edited.job.goal);
-  } finally {
-    view.destroy();
   }
 });
 

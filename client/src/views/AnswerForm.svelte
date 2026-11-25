@@ -14,7 +14,7 @@
     onanswered,
     onchanged,
     onsend = () => {},
-    onbusy = () => {},
+    queue = (work) => work(),
     onunknown = () => {},
     lost = "Iris does not know if your answer arrived. Open the job to see.",
   }: {
@@ -25,8 +25,8 @@
     onchanged: () => void;
     /** Called when the answer request starts. */
     onsend?: () => void;
-    /** True when the answer request starts, false when it ends (before any other callback). */
-    onbusy?: (on: boolean) => void;
+    /** Runs the answer request: the job page runs it in its queue of job requests. */
+    queue?: (work: () => Promise<JobDetail>) => Promise<JobDetail>;
     /** Called when Iris does not know if the answer arrived. */
     onunknown?: () => void;
     lost?: string;
@@ -50,14 +50,7 @@
     error = "";
     try {
       onsend();
-      onbusy(true);
-      let detail: JobDetail;
-      try {
-        detail = await answerJob(job, text);
-      } finally {
-        onbusy(false);
-      }
-      onanswered(job, detail);
+      onanswered(job, await queue(() => answerJob(job, text)));
     } catch (e) {
       const status = (e as { status?: number }).status;
       if (status === 409 || status === 404) {
