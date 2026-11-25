@@ -306,15 +306,18 @@ fn change(
         let newest = iris_changeset::reply_parent(c, thread)?;
         if answers != newest {
             // Only a message that sorts after the parent is a new mail: a
-            // gone parent with an older message left is not.
-            let newer = c.query_row(
-                "SELECT (coalesce(n.internal_date, 0), n.id) > (coalesce(p.internal_date, 0), p.id)
+            // gone parent with an older message left is not. A NULL date
+            // sorts first, as in `reply_parent`.
+            let newer = c
+                .query_row(
+                    "SELECT (coalesce(n.internal_date, -9223372036854775808), n.id)
+                      > (coalesce(p.internal_date, -9223372036854775808), p.id)
                  FROM message n, message p WHERE n.id = ?1 AND p.id = ?2",
-                rusqlite::params![newest, answers],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(false);
+                    rusqlite::params![newest, answers],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(false);
             return Ok((None, newer));
         }
     }

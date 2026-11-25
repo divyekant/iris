@@ -1084,6 +1084,11 @@ async fn a_stopped_reply_changes_only_for_its_parent() {
     set("UPDATE account SET provider = 'outlook' WHERE id = 1");
     assert_eq!(change(&s, &cs).await, Value::Null);
     assert_eq!(newer_mail(&s, &cs).await, true);
+    // A parent with no date sorts before each date, as in `reply_parent`.
+    set("UPDATE message SET internal_date = -10 WHERE id = 1;
+         UPDATE message SET internal_date = NULL WHERE id = 2;
+         UPDATE message SET internal_date = -5 WHERE id = 3;");
+    assert_eq!(newer_mail(&s, &cs).await, true);
     set("UPDATE account SET provider = 'gmail' WHERE id = 1");
     let before = count(&s, "SELECT count(*) FROM changeset");
     let press = json!({"thread": "t-1", "parent": "m-3", "to": ["priya@example.com"],
