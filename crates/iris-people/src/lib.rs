@@ -424,31 +424,14 @@ pub fn addresses(list: &str) -> Vec<String> {
 }
 
 /// The mailboxes of an address list: each address in lower case, with its
-/// display name if it has one. `mail-parser` reads the list (RFC 5322
-/// quotes, comments, groups and RFC 2047 encoded words).
+/// display name if it has one. The RFC 5322 scanner of the sender axis
+/// (`iris_senders::head`) reads the list: quotes, comments, groups and RFC
+/// 2047 encoded words. So the people step, the conversations and the sender
+/// rows read the same addresses. Each address must pass [`valid_address`].
 pub fn mailboxes(list: &str) -> Vec<(String, Option<String>)> {
-    let low = list.to_lowercase();
-    let parsed = HeaderForm::Addresses.parse(list.as_bytes());
-    let Some(list) = parsed.value().as_address() else {
-        return Vec::new();
-    };
-    list.mailboxes()
-        .filter_map(|m| {
-            let name = m.name().map(str::trim).filter(|n| !n.is_empty());
-            let raw = m.address()?;
-            // mail-parser 1.0.1 reads a bare quoted local part such as
-            // `"a,b"@example.org` as the name `a,b` and the address
-            // `@example.org`. Join the two again if the list has that text.
-            if let (Some(n), Some(domain)) = (name, raw.strip_prefix('@')) {
-                let whole = format!("\"{n}\"@{domain}");
-                return low
-                    .contains(&whole.to_lowercase())
-                    .then(|| valid_address(&whole))
-                    .flatten()
-                    .map(|a| (a, None));
-            }
-            Some((valid_address(raw)?, name.map(str::to_string)))
-        })
+    iris_senders::head::addresses(list)
+        .into_iter()
+        .filter_map(|(a, name)| Some((valid_address(&a)?, name)))
         .collect()
 }
 
@@ -632,8 +615,8 @@ mod tests {
     #[test]
     fn property_each_entry_keeps_its_address() {
         const LOCALS: [&str; 3] = ["ana", "Bo.Lee", "c-y"];
-        // shortcut: no `<` or `>` in a quoted local part: mail-parser 1.0.1
-        // then drops the whole list (#83); upgrade with the parser.
+        // shortcut: no `<` or `>` in a quoted local part: the scanner of the
+        // sender axis reads them as angle brackets (#980); upgrade with it.
         const QUOTED: [&str; 5] = ["a,b", "a:b", "j o", "x;y", "a.b"];
         const DOMAINS: [&str; 2] = ["example.org", "Mail.Example.net"];
         let mut x: u64 = 0x2545_f491_4f6c_dd1d;
@@ -704,9 +687,11 @@ mod tests {
             valid_address(r#""a\"@b"@c.d"#).as_deref(),
             Some(r#""a\"@b"@c.d"#)
         );
-        // shortcut: a bare quoted local part with an escape gives no address
-        // (mail-parser 1.0.1 unescapes the name); upgrade with the parser (#83).
-        assert_eq!(addresses(r#""a\"b"@example.org"#), Vec::<String>::new());
+        // A bare quoted local part with an escape keeps its address (#83).
+        assert_eq!(
+            addresses(r#""a\"b"@example.org"#),
+            [r#""a\"b"@example.org"#]
+        );
         // A bare quoted local part and one in `<>` both count.
         assert_eq!(
             addresses(r#""john.doe"@Example.org, "a, b"@example.org, Jo <"j o"@example.org>"#),
@@ -741,19 +726,44 @@ mod tests {
         assert_eq!(
             mailboxes(r#""a\"b"@example.org, <c@example.org (note)>, "x<y>" <d@example.org>"#),
             [
+                (r#""a\"b"@example.org"#.to_string(), None),
                 ("c@example.org".to_string(), m("note")),
                 ("d@example.org".to_string(), m("x<y>"))
             ]
         );
         assert_eq!(
             mailboxes(r#"A (x, y: z) <e@example.org>, list:;, g: "h, i" <f@example.org>;"#),
-            // mail-parser keeps a comment after the name in the name.
+            // A comment is not part of the name.
             [
-                ("e@example.org".to_string(), m("A (x, y: z)")),
+                ("e@example.org".to_string(), m("A")),
                 ("f@example.org".to_string(), m("h, i"))
             ]
         );
-        assert_eq!(mailboxes(r#""unclosed <z@example.org>"#), vec![]);
+        // An open quote: the scanner of the sender axis keeps the address.
+        assert_eq!(
+            mailboxes(r#""unclosed <z@example.org>"#),
+            [("z@example.org".to_string(), m("unclosed"))]
+        );
+    }
+
+    #[test]
+    fn address_forms_outside_angle_brackets() {
+        // Issue 83: these forms gave no address with mail-parser 1.0.1.
+        assert_eq!(addresses("john(work)@example.org"), ["john@example.org"]);
+        assert_eq!(
+            addresses("user@[IPv6:2001:db8::1], b@example.org"),
+            ["user@[ipv6:2001:db8::1]", "b@example.org"]
+        );
+        assert_eq!(
+            addresses("Team: user@[IPv6:2001:db8::1];"),
+            ["user@[ipv6:2001:db8::1]"]
+        );
+        assert_eq!(
+            addresses(r#""a\"b"@example.org"#),
+            [r#""a\"b"@example.org"#]
+        );
+        // Not valid: an `@` outside a quoted local part.
+        assert_eq!(addresses("a@b@example.org"), Vec::<String>::new());
     }
 
     #[test]

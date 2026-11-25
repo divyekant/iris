@@ -221,7 +221,7 @@ pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
 /// with each (lowercase address, display name).
 pub fn each_address(v: &str, mut f: impl FnMut(String, Option<String>)) {
     let (mut quoted, mut angle, mut start, mut comment) = (false, false, 0, 0u32);
-    let mut escaped = false;
+    let (mut escaped, mut literal, mut prev) = (false, false, '\0');
     let mut push = |entry: &str| {
         let s = strip_comments(entry);
         let s = s.trim();
@@ -244,11 +244,19 @@ pub fn each_address(v: &str, mut f: impl FnMut(String, Option<String>)) {
         }
     };
     for (i, c) in v.char_indices() {
+        let after_at = std::mem::replace(&mut prev, c) == '@';
         // The sign after `\\` in a quoted string or a comment is text.
         if std::mem::take(&mut escaped) {
             continue;
         }
         match c {
+            // A domain literal (`user@[IPv6:2001:db8::1]`, RFC 5322 section
+            // 3.4.1) holds `:` that is not group syntax. It opens only right
+            // after `@`, so a `[` in a display name cannot hide the rest of
+            // the list, and an open `[` with no `]` after it is text.
+            '[' if after_at && !quoted && comment == 0 && v[i..].contains(']') => literal = true,
+            ']' if literal => literal = false,
+            _ if literal => {}
             '\\' if quoted || comment > 0 => escaped = true,
             '(' if !quoted => comment += 1,
             ')' if !quoted => comment = comment.saturating_sub(1),

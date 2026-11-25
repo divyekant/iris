@@ -774,9 +774,8 @@ fn a_decided_kind_wins_over_the_person_rule() {
         .collect();
     found.sort();
     // Ana is a stranger for the sender step. Dee is a person for it.
-    // Regression with mail-parser 1.0.1: it gives no address for
-    // `john(work)@example.org`, so John goes out. Before: dee and john.
-    assert_eq!(found, ["dee@example.org"]);
+    // John has no kind: the person rule shows him (issue #83).
+    assert_eq!(found, ["dee@example.org", "john@example.org"]);
     let kind: String = h
         .store
         .read(|c| {
@@ -807,7 +806,9 @@ fn a_domain_literal_is_an_address() {
         .map(String::from)
         .collect();
     found.sort();
-    // Regression with mail-parser 1.0.1: a bare IPv6 literal outside `<>`
-    // gives no address. Before: also c@[ipv6:2001:db8::2] and user@[ipv6:2001:db8::1].
-    assert_eq!(found, ["bo@[192.0.2.1]"]);
+    // A bare IPv6 literal outside `<>` is an address too (issue #83).
+    assert_eq!(
+        found,
+        ["bo@[192.0.2.1]", "c@[ipv6:2001:db8::2]", "user@[ipv6:2001:db8::1]"]
+    );
 }
