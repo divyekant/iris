@@ -734,6 +734,12 @@ impl iris_provider::Provider for Outlook {
         true
     }
 
+    /// `displayName` of `GET /me` (#864): Outlook gives `SENT` only to the
+    /// mail that Iris sent, so the mirror has no other safe source.
+    fn display_name(&self, token: &str) -> iris_provider::Result<Option<String>> {
+        Ok(self.graph.me(token).map_err(map)?.display_name)
+    }
+
     /// The cursor of now is the empty cursor: Graph has no cheap cursor of
     /// now, so the next `changes` starts a new round of each folder.
     fn profile(&self, token: &str) -> iris_provider::Result<Profile> {

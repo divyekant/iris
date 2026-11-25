@@ -318,24 +318,35 @@ fn change(
 
 /// The content of the draft `d-N` for the form of a change (draft change
 /// spec, section 5): `to`, `cc`, `bcc`, `subject`, `body`, `attachments`,
-/// and the account and the thread. `None` for a draft that does not exist,
-/// of an account that Iris removes, or with content that Iris does not
-/// write.
-pub fn draft_content(store: &Store, id: &str) -> Result<Option<Value>> {
+/// the account and the thread, and `change`: how the next press of Send
+/// writes the draft, the same value as the state of a stopped write. The
+/// Outbox reads it after a cancel (issue 941). `None` for a draft that does
+/// not exist, of an account that Iris removes, or with content that Iris
+/// does not write.
+pub fn draft_content(store: &Store, id: &str, now_ms: i64) -> Result<Option<Value>> {
     let Some((Kind::Draft, row)) = parse_id(id) else {
         return Ok(None);
     };
-    let found: Option<(i64, Option<i64>, String)> = store.read(|c| {
-        Ok(c.query_row(
-            "SELECT d.account_id, d.thread_id, d.content FROM draft d
+    type Found = (i64, Option<i64>, String, Option<&'static str>);
+    let found: Option<Found> = store.read(|c| {
+        let tx = c.unchecked_transaction()?;
+        let found = tx
+            .query_row(
+                "SELECT d.account_id, d.thread_id, d.content FROM draft d
              JOIN account a ON a.id = d.account_id
              WHERE d.id = ?1 AND d.foreign_at IS NULL AND (a.state IS NULL OR a.state NOT IN ('removing', 'removed'))",
-            [row],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?)
+                [row],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        Ok(match found {
+            Some((account, thread, content)) => {
+                Some((account, thread, content, change(store, &tx, row, now_ms)?))
+            }
+            None => None,
+        })
     })?;
-    let Some((account, thread, content)) = found else {
+    let Some((account, thread, content, change)) = found else {
         return Ok(None);
     };
     let Some(m) = serde_json::from_str::<Value>(&content)
@@ -354,6 +365,7 @@ pub fn draft_content(store: &Store, id: &str) -> Result<Option<Value>> {
         "subject": m.subject,
         "body": m.body,
         "attachments": m.attachments,
+        "change": change,
     })))
 }
 

@@ -344,3 +344,37 @@ fn one_outbox_answer_is_one_snapshot() {
     }
     writer.join().unwrap();
 }
+
+/// After a cancel in the outbox, the draft answer offers "Change and send"
+/// (issue 941): `change` is `update` for a Gmail draft. While the send
+/// waits, the draft takes no change, so `change` is null.
+#[tokio::test]
+async fn a_cancelled_send_offers_a_change_of_its_draft() {
+    let dir = temp("cancel-change");
+    let s = store(&dir);
+    let content = iris_compose::Content {
+        to: vec!["priya@example.com".into()],
+        cc: vec!["dana@example.com".into()],
+        subject: "Q4 plan".into(),
+        body: "Hello".into(),
+        ..Default::default()
+    };
+    s.write(|tx| {
+        tx.execute(
+            "UPDATE draft SET content = ?1 WHERE id = 1",
+            [json!({ "content": content }).to_string()],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    approved_send(&s, now());
+    iris_changeset::hold(&s, 1, now()).unwrap();
+    let (code, d) = call(&s, "GET", "/api/drafts/d-1").await;
+    assert_eq!(code, StatusCode::OK, "{d}");
+    assert_eq!(d["change"], Value::Null, "the send waits: {d}");
+    let (code, _) = call(&s, "POST", "/api/outbox/d-1/cancel").await;
+    assert_eq!(code, StatusCode::OK);
+    let (_, d) = call(&s, "GET", "/api/drafts/d-1").await;
+    assert_eq!(d["change"], "update", "{d}");
+    assert_eq!(d["subject"], "Q4 plan", "{d}");
+}

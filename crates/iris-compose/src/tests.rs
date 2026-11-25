@@ -920,6 +920,56 @@ fn the_size_bound_holds_for_large_content() {
     }
 }
 
+/// The streamed check of a file gives the answer of the check in memory,
+/// for each size around the size of its buffer, and for a wrong size or a
+/// wrong hash.
+#[test]
+fn the_streamed_file_check_agrees_with_the_check_in_memory() {
+    let mut seed = 7u64;
+    let mut next = || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as u8
+    };
+    for len in [
+        0,
+        1,
+        63,
+        FILE_CHUNK - 1,
+        FILE_CHUNK,
+        FILE_CHUNK + 1,
+        3 * FILE_CHUNK + 17,
+    ] {
+        let bytes: Vec<u8> = (0..len).map(|_| next()).collect();
+        let entry = Attachment {
+            name: "a.bin".into(),
+            mime: "application/octet-stream".into(),
+            size: len as u64,
+            sha256: sha256(&bytes),
+        };
+        let other = |e: &Attachment, b: &[u8]| (e.is_file(b), e.is_file_in(b).unwrap());
+        assert_eq!(other(&entry, &bytes), (true, true), "len {len}");
+        let mut longer = bytes.clone();
+        longer.push(1);
+        assert_eq!(other(&entry, &longer), (false, false), "len {len} + 1");
+        if len > 0 {
+            let mut changed = bytes.clone();
+            changed[len / 2] ^= 1;
+            assert_eq!(
+                other(&entry, &changed),
+                (false, false),
+                "len {len}, one bit"
+            );
+            assert_eq!(
+                other(&entry, &bytes[..len - 1]),
+                (false, false),
+                "len {len} - 1"
+            );
+        }
+    }
+}
+
 /// Raw mail with an empty or blank body, as an older build could write
 /// it, gives no content on both read paths, so it cannot send (#774).
 #[test]

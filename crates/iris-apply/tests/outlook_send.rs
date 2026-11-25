@@ -689,7 +689,7 @@ fn migration_41_adds_sent_to_the_confirmed_copies() {
             tx.execute_batch(
                 "DROP TRIGGER sent_copy_keep; DROP TRIGGER sent_copy_add; DROP VIEW iris_sent_copy; DROP INDEX draft_sent_copy; DROP TRIGGER draft_or_copy_drops_items; DROP TRIGGER draft_or_copy_talk_add; DROP TRIGGER draft_or_copy_talk_remove; DROP TRIGGER draft_or_copy_back_drops_items; DROP TRIGGER IF EXISTS spam_drops_items; DROP TRIGGER IF EXISTS spam_back_drops_items; DROP VIEW item_droppable;
                  DELETE FROM message_label WHERE label_id IN (SELECT id FROM label WHERE provider_id = 'SENT');
-                 DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 40;",
+                 DROP TRIGGER changeset_withdraw_by; DROP TRIGGER changeset_withdrawn_by; ALTER TABLE changeset DROP COLUMN withdrawn_by; DROP TRIGGER matter_add_end; DROP TRIGGER matter_item_kept_add; DROP TRIGGER matter_item_kept_update; DROP TRIGGER matter_add_insert; DROP TRIGGER matter_add_update; DROP VIEW matter_add_live; DROP TABLE matter_add; DROP TRIGGER matter_insert; DROP TRIGGER matter_update; DROP TRIGGER matter_decide; DROP TRIGGER matter_item_insert; DROP TRIGGER matter_item_update; DROP TRIGGER matter_delete; ALTER TABLE matter DROP COLUMN author; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 40;",
             )?;
             Ok(())
         })
@@ -739,4 +739,34 @@ fn the_sent_lookup_of_one_id_agrees_with_the_list() {
     let m = engine.minimal(TOKEN, &copy).unwrap();
     assert!(m.label_ids.contains(&"SENT".to_string()));
     assert_eq!(*asked.lock().unwrap(), vec![copy.clone()]);
+}
+
+/// The `From` of an Outlook draft has the display name of the mailbox at
+/// Graph (#864). A name that the compose refuses gives the address only.
+#[test]
+fn an_outlook_draft_has_the_display_name_of_the_mailbox() {
+    let b = setup("name");
+    let from = |draft: &str| {
+        let raw: Vec<u8> = b
+            .store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT raw FROM draft WHERE provider_id = ?1",
+                    [draft],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        let raw = String::from_utf8(raw).unwrap();
+        raw.lines()
+            .find(|l| l.starts_with("From: "))
+            .unwrap()
+            .to_string()
+    };
+    b.fake.set_display_name(Some("Dana Owner"));
+    let (_, d) = b.new_mail(AGED);
+    assert_eq!(from(&d), format!("From: \"Dana Owner\" <{OWNER}>"));
+    b.fake.set_display_name(Some("Dana\r\nBcc: spy@x.org"));
+    let (_, d) = b.new_mail(AGED);
+    assert_eq!(from(&d), format!("From: <{OWNER}>"));
 }
