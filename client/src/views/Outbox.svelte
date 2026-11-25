@@ -128,7 +128,7 @@
 {/if}
 
 {#if notes.length > 0}
-  <ul class="notes" role="status">{#each notes as note, i (i)}<li>{note.text}{#if note.change} <a href={href.change(note.change)}>Change and send</a>{/if}</li>{/each}</ul>
+  <ul class="notes" role="status">{#each notes as note, i (i)}<li>{note.text}{#if note.change}{" "}<a href={href.change(note.change)}>Change and send</a>{/if}</li>{/each}</ul>
 {/if}
 
 {#if box.sends.length === 0}
