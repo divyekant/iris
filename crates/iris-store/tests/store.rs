@@ -1594,7 +1594,7 @@ fn no_spam_message_keeps_a_droppable_item() {
     store
         .write(|tx| {
             tx.execute_batch(
-                "ALTER TABLE reply_draft DROP COLUMN seen; ALTER TABLE header DROP COLUMN reply_to; DROP TRIGGER spam_drops_items; DROP TRIGGER spam_back_drops_items;
+                "ALTER TABLE reply_draft DROP COLUMN seen; ALTER TABLE header DROP COLUMN reply_to; ALTER TABLE header DROP COLUMN content_sha256; DROP TRIGGER spam_drops_items; DROP TRIGGER spam_back_drops_items;
                  DELETE FROM talk_due; PRAGMA user_version = 64;",
             )?;
             Ok(())
@@ -1639,7 +1639,7 @@ fn the_upgrade_resets_each_live_spam_message() {
             tx.execute_batch(&format!(
                 "UPDATE message SET understood_at = 5, tries = 1, retry_at = 9;
                  UPDATE message SET gone_at = 1 WHERE id = {};
-                 ALTER TABLE reply_draft DROP COLUMN seen; ALTER TABLE header DROP COLUMN reply_to;
+                 ALTER TABLE reply_draft DROP COLUMN seen; ALTER TABLE header DROP COLUMN reply_to; ALTER TABLE header DROP COLUMN content_sha256;
                  DELETE FROM talk_due; PRAGMA user_version = 64;",
                 ids[1]
             ))?;

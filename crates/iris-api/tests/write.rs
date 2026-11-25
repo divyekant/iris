@@ -451,6 +451,63 @@ async fn a_reply_goes_to_reply_to_and_offers_the_others() {
     );
 }
 
+/// The reply form gives recipients only from a header row of the content
+/// of the parent now: after a sync of new content and before understanding
+/// reads it, the row is empty or of the old content (migration 69).
+#[tokio::test]
+async fn a_reply_waits_for_the_read_of_new_content() {
+    let dir = temp("reply-new-content");
+    let s = store(&dir);
+    let set = |sql: &str| s.write(|tx| Ok(tx.execute_batch(sql)?)).unwrap();
+    for (sql, code) in [
+        (
+            "UPDATE message SET content_sha256 = 'b' WHERE id = 2;
+          UPDATE header SET content_sha256 = 'a' WHERE message_id = 2",
+            StatusCode::CONFLICT,
+        ),
+        (
+            "UPDATE header SET content_sha256 = NULL WHERE message_id = 2",
+            StatusCode::CONFLICT,
+        ),
+        (
+            "UPDATE header SET content_sha256 = 'b' WHERE message_id = 2",
+            StatusCode::OK,
+        ),
+        (
+            "DELETE FROM header WHERE message_id = 2",
+            StatusCode::CONFLICT,
+        ),
+    ] {
+        set(sql);
+        let (got, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+        assert_eq!(got, code, "{sql}: {v}");
+    }
+}
+
+/// A parent with many recipients: reply all lists each one once, in order.
+#[tokio::test]
+async fn reply_all_lists_a_large_recipient_list_once() {
+    let dir = temp("reply-all-large");
+    let s = store(&dir);
+    let n = 30_000;
+    let cc: Vec<String> = (0..n).map(|i| format!("p{i}@example.com")).collect();
+    let cc = format!("{},{}", cc.join(","), cc.join(",").to_uppercase());
+    s.write(|tx| {
+        tx.execute(
+            "UPDATE header SET to_addrs = NULL, cc_addrs = ?1 WHERE message_id = 2",
+            [cc],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let (code, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+    assert_eq!(code, StatusCode::OK);
+    let all = v["all"].as_array().unwrap();
+    assert_eq!(all.len(), n);
+    assert_eq!(all[0], "p0@example.com");
+    assert_eq!(all[n - 1], format!("p{}@example.com", n - 1));
+}
+
 /// The start values hold the conversation above the reply form: the newest
 /// answerable mails, oldest first, with the parent last, and the count of
 /// the older ones. A draft or a mail in the trash is not part of it. The

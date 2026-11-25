@@ -521,12 +521,14 @@ fn reply_in(c: &Connection, thread: i64) -> Result<Option<Value>> {
         Option<String>,
         String,
         bool,
+        bool,
     );
-    let (account, subject, to, cc, reply_to, me, sent): Row = c
+    let (account, subject, to, cc, reply_to, me, sent, current): Row = c
         .query_row(
             "SELECT m.account_id, h.subject, h.to_addrs, h.cc_addrs, h.reply_to, a.address,
                     EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                            WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
+                            WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
+                    h.message_id IS NOT NULL AND h.content_sha256 IS m.content_sha256
              FROM message m JOIN account a ON a.id = m.account_id
              LEFT JOIN header h ON h.message_id = m.id WHERE m.id = ?1",
             [parent],
@@ -539,10 +541,19 @@ fn reply_in(c: &Connection, thread: i64) -> Result<Option<Value>> {
                     r.get(4)?,
                     r.get(5)?,
                     r.get(6)?,
+                    r.get(7)?,
                 ))
             },
         )
         .map_err(iris_store::Error::from)?;
+    // The recipients come from the header row. After a sync of new content
+    // and before understanding reads it, the row is empty or of the old
+    // content (migration 69).
+    if !current {
+        return Err(Error::Conflict(
+            "Iris has not read the newest mail of this thread yet. Try again in a moment.".into(),
+        ));
+    }
     let m = message_in(c, parent)
         .map_err(iris_store::Error::from)?
         .expect("reply_parent gives a message");
@@ -574,15 +585,12 @@ fn reply_in(c: &Connection, thread: i64) -> Result<Option<Value>> {
     };
     // Reply all adds each other address once, and never the address of
     // the account or an address that `to` has.
-    let mut seen: Vec<String> = to.iter().map(|a| a.to_lowercase()).collect();
-    seen.push(me.to_lowercase());
-    let mut all = vec![];
-    for a in others {
-        if !seen.contains(&a.to_lowercase()) {
-            seen.push(a.to_lowercase());
-            all.push(a);
-        }
-    }
+    let mut seen: std::collections::HashSet<String> = to.iter().map(|a| a.to_lowercase()).collect();
+    seen.insert(me.to_lowercase());
+    let all: Vec<String> = others
+        .into_iter()
+        .filter(|a| seen.insert(a.to_lowercase()))
+        .collect();
     let text = m.text.as_deref().map(|t| cut(t, PARENT_TEXT));
     let (mails, earlier) = conversation(c, thread).map_err(iris_store::Error::from)?;
     Ok(Some(json!({
