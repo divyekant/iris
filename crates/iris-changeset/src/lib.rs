@@ -1223,6 +1223,7 @@ fn clear(c: &Connection, action: i64) -> Result<()> {
 fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Option<String>> {
     // add_action writes one group of IDs. Another writer of the table may not.
     let bad = || Ok(Some("the targets are not valid".to_string()));
+    let raw = targets;
     let Ok(targets) = serde_json::from_str::<Map<String, Value>>(targets) else {
         return bad();
     };
@@ -1233,7 +1234,10 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
     // The undo of a ledger entry (section 7.4) names the entry. Its
     // messages come from the ledger in SQL, never as a list in memory.
     if group == "ledger" && !state {
-        return resolve_undo(c, action, ids);
+        return match resolve_undo(c, action, ids)? {
+            None => tombstone(c, action, raw),
+            refused => Ok(refused),
+        };
     }
     let linked: bool = c.query_row(
         "SELECT EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = ?1)",
@@ -1414,7 +1418,32 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
     if accounts > 1 {
         return Ok(Some("the targets are in two or more accounts".into()));
     }
-    Ok(None)
+    tombstone(c, action, raw)
+}
+
+/// Refuse an action whose resolved targets are in an account in state
+/// `removing` or `removed`: no new action targets a tombstone (issues 904,
+/// 1014, 1041). It reads each resolved row (messages, items, drafts) and
+/// each named thread, so a path of [`resolve`] cannot miss the check.
+fn tombstone(c: &Connection, action: i64, targets: &str) -> Result<Option<String>> {
+    let removed: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM account a
+           WHERE a.state IN ('removing', 'removed') AND a.id IN (
+             SELECT m.account_id FROM action_message am
+             JOIN message m ON m.id = am.message_id WHERE am.action_id = ?1
+             UNION ALL
+             SELECT i.account_id FROM action_item ai
+             JOIN item i ON i.id = ai.item_id WHERE ai.action_id = ?1
+             UNION ALL
+             SELECT d.account_id FROM action_draft ad
+             JOIN draft d ON d.id = ad.draft_id WHERE ad.action_id = ?1
+             UNION ALL
+             SELECT t.account_id FROM json_each(?2, '$.threads') j
+             JOIN thread t ON 't-' || t.id = j.value))",
+        params![action, targets],
+        |r| r.get(0),
+    )?;
+    Ok(removed.then(|| "the account was removed".to_string()))
 }
 
 /// The parent of a change of the reply draft `draft`: one message, with

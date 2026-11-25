@@ -203,7 +203,9 @@ egress port.
 
 ### Effect on the agent
 
-The variables of the session do not change. The person sets the address
+A session with `allow_local` gets one new variable, `IRIS_LOCAL_PORT`,
+with the port. A session without the key gets no new variable. The
+person sets the address
 of the model server in the arguments or the settings of the tool, for
 example `http://127.0.0.1:11434/v1`. The local relay has no proxy step,
 so a client must not send the request to `HTTPS_PROXY`; a tool that does

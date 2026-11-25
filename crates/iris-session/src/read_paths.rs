@@ -575,6 +575,28 @@ fn set_errno(v: i32) {
     };
 }
 
+/// A folder for the test folders of read paths, that the rules allow: under
+/// `target` of the checkout, or under `~/.cache` if the checkout is in a
+/// folder of system state (for example `/tmp`), which the rules refuse.
+#[cfg(test)]
+pub(crate) fn test_root() -> PathBuf {
+    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    std::fs::create_dir_all(&target).unwrap();
+    let target = std::fs::canonicalize(target).unwrap();
+    let root = test_root_of(&target, &homes(None).unwrap()[0]);
+    std::fs::create_dir_all(&root).unwrap();
+    root
+}
+
+#[cfg(test)]
+fn test_root_of(target: &Path, home: &Path) -> PathBuf {
+    if STATE.iter().any(|s| target.starts_with(s)) {
+        home.join(".cache/iris-read-paths-tests")
+    } else {
+        target.join("read-paths-tests")
+    }
+}
+
 #[cfg(test)]
 #[path = "read_paths_tests.rs"]
 mod tests;
