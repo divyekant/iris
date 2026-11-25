@@ -284,12 +284,24 @@ The search reads the lines in order and stops at the first of these:
   Nachricht-----"), or an Outlook header block (`From:`, then `Sent:` or
   `Date:` in the 4 lines after `From:`, then `Subject:` or `To:` in the 5
   lines after that line). The history starts at this line.
-- An attribution line: a line, or two lines that start with `On `, that end
-  with `wrote:` or the same word in French, German, Spanish, Italian, Danish
-  or Norwegian or Swedish, Dutch or Polish. It is history only if the next
-  line that is not empty starts with `>`, or if the message is a reply and
-  the line starts with one of `On `, `Le `, `Am `, `El `, `Il `, `Op `,
-  `Den `, `W dniu `, `Em `.
+- An attribution line: a line, or two lines that start with one of the
+  first words below, that end with `wrote:` or the same word in French,
+  German, Spanish, Italian, Danish or Norwegian or Swedish, Dutch, Polish,
+  Portuguese, Czech, Finnish, Turkish, Russian or Chinese. The client form
+  in any language is an attribution line too: a line of less than 400 bytes
+  with a time (`10:00`), an address in `<>` and a `:` (or `：`) at the end.
+  Gmail writes "Am 3. Feb. 2025 um 10:00 schrieb Ana <ana@example.org>:".
+  Two lines join into the client form only if the second line alone is not
+  the client form. Two lines never join if the first line ends with `.`,
+  `!` or `?`. An attribution line is history only if the next line that is
+  not empty starts with `>`, or if the message is a reply and the line
+  starts with one of `On `, `Le `, `Am `, `El `, `Il `, `Op `, `Den `,
+  `W dniu `, `Em ` and ends with one of the verbs. The client form alone
+  never starts the history without a `>` line after it, also with one of
+  these first words, because own lines can have a time and an address too.
+  An attribution line is never history when a `>` line after it has an own
+  line (not empty, not a `>` line) after it: that is an inline answer, and
+  the own lines stay.
 
 Before the history (or a forward marker):
 
@@ -429,8 +441,9 @@ client. They are not defects of this design:
   rule shows again stays hidden.
 - Rules inside `@media` do not apply, also for the screen of the person.
 - A reply in a language or a client that the lists above do not name keeps
-  its quoted history. A message that is not a reply keeps the quotes between
-  its own lines.
+  its quoted history, unless its attribution line has the client form and a
+  `>` line comes after it (issue #968). A message that is not a reply keeps
+  the quotes between its own lines.
 - A signature without a `--` line or a phone line stays, until
   `remove_repeated_end` finds it in a thread.
 - PDF: text hidden by a white fill, by clipping, by a position off the page,
