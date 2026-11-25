@@ -589,6 +589,19 @@ impl FakeGmail {
         true
     }
 
+    /// Give the draft `id` the new ID `new`, as Gmail can do after an
+    /// update. Returns false if there is no such draft.
+    pub fn rename_draft(&self, id: &str, new: &str) -> bool {
+        let mut s = self.store.lock().unwrap();
+        match s.drafts.iter_mut().find(|(d, _)| d == id) {
+            Some(d) => {
+                d.0 = new.to_string();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The IDs of the drafts now.
     pub fn draft_ids(&self) -> Vec<String> {
         let s = self.store.lock().unwrap();

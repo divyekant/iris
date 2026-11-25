@@ -29,6 +29,16 @@ pub const OLD_FILE: &str = "A file of the draft is not in Iris. Change it in Gma
 pub const DURING: &str = "The draft changed at Gmail during the change. Look at it in Gmail.";
 /// Recovery cannot show that the call applied (section 4, step 3).
 pub const UNKNOWN: &str = "Iris does not know if the draft changed. Look at it in Gmail.";
+/// An attachment of the content before a change has no file: the undo
+/// cannot compose the old draft again (section 3).
+pub const UNDO_FILE: &str = "A file of the old draft is gone.";
+
+/// The change entry that an undo undoes: the `Date` of its `pre`, and the
+/// hash after the change, which must be the hash at Gmail (section 3).
+struct Undoes {
+    date: Option<i64>,
+    hash: String,
+}
 
 /// The `pre` of the ledger entry of a change: the stored content of the
 /// draft row before the change, and its `Date` (the undo composes the
@@ -51,7 +61,8 @@ struct Row {
 }
 
 /// The apply of an approved `draft` action with a `drafts` target
-/// (section 2, steps 1 to 8).
+/// (section 2, steps 1 to 8), or of the undo of a change, with the
+/// differences of section 3.
 pub(super) fn apply(run: &mut Run<'_, '_>, action: i64, args: &str) -> Result<Outcome> {
     let store = run.store;
     let deny = |why: &str| -> Result<Outcome> {
@@ -80,6 +91,7 @@ pub(super) fn apply(run: &mut Run<'_, '_>, action: i64, args: &str) -> Result<Ou
     let Some(d) = row else {
         return deny("The draft does not exist.");
     };
+    let undoes = undoes(store, action)?;
     // Step 1: the checks of section 1 again.
     let denied = store
         .read(|c| iris_changeset::change_denied(c, action, d.id, now()).map_err(changeset_error))?;
@@ -95,8 +107,9 @@ pub(super) fn apply(run: &mut Run<'_, '_>, action: i64, args: &str) -> Result<Ou
     let Ok(mut content) = serde_json::from_str::<Content>(args) else {
         return deny("the arguments are not a draft content");
     };
-    // The files of the stored draft: the undo composes it again.
-    if files(store, &old.content)?.is_none() {
+    // The files of the stored draft: the undo composes it again. The undo
+    // itself has no undo.
+    if undoes.is_none() && files(store, &old.content)?.is_none() {
         return deny(OLD_FILE);
     }
     // A reply keeps the subject of its draft (section 1), as at submit,
@@ -117,7 +130,10 @@ pub(super) fn apply(run: &mut Run<'_, '_>, action: i64, args: &str) -> Result<Ou
         return Ok(Outcome::Denied(GROWN.into()));
     }
     let Some(files) = files(store, &content)? else {
-        return deny("an attachment file is missing or changed");
+        return deny(match undoes {
+            Some(_) => UNDO_FILE,
+            None => "an attachment file is missing or changed",
+        });
     };
     let hash = iris_compose::hash(&content, old.reply.as_ref());
     let post = Stored {
@@ -125,7 +141,11 @@ pub(super) fn apply(run: &mut Run<'_, '_>, action: i64, args: &str) -> Result<Ou
         reply: old.reply.clone(),
         name: owner_name(store, run.account, &run.address)?,
     };
-    let date = now() / 1000;
+    // The undo composes the old message again, with its `Date`.
+    let date = undoes.as_ref().and_then(|u| u.date).unwrap_or(now() / 1000);
+    // The content at Gmail that the action replaces: the draft row, or
+    // after the change that an undo undoes.
+    let expect = undoes.as_ref().map_or(&d.hash, |u| &u.hash).clone();
     let raw = compose_as(&run.address, &d.message_id, date, &post, &files);
     let provider: String = store.read(|c| {
         Ok(c.query_row(
@@ -147,7 +167,7 @@ pub(super) fn apply(run: &mut Run<'_, '_>, action: i64, args: &str) -> Result<Ou
     let read = iris_compose::read(&at_raw, &run.address);
     let same = read
         .as_ref()
-        .is_some_and(|r| iris_compose::hash(&r.content, r.reply.as_ref()) == d.hash);
+        .is_some_and(|r| iris_compose::hash(&r.content, r.reply.as_ref()) == expect);
     if !same {
         let new_ids = run.mail.sets_draft_message_id();
         return changed_at_gmail(
@@ -170,13 +190,14 @@ pub(super) fn apply(run: &mut Run<'_, '_>, action: i64, args: &str) -> Result<Ou
         provider_id: d.provider_id.clone(),
         message_id: d.message_id.clone(),
         date,
-        pre_hash: d.hash.clone(),
+        pre_hash: expect.clone(),
         hash: hash.clone(),
         thread: d.thread.clone(),
     };
     // The same content again: no call, a final entry (section 2, step 3).
-    let noop = hash == d.hash;
-    let ledger = match claim(run, action, d.id, &ops, &post, &pre, noop)? {
+    let noop = hash == expect;
+    let pre = (!noop && undoes.is_none()).then_some(pre);
+    let ledger = match claim(run, action, d.id, &ops, &post, pre.as_ref(), noop)? {
         None => return Err(Error::NotApproved(action)),
         Some(Err(o)) => return Ok(o),
         Some(Ok(l)) => l,
@@ -198,6 +219,24 @@ pub(super) fn apply(run: &mut Run<'_, '_>, action: i64, args: &str) -> Result<Ou
         // Step 7: a definite rejection. The draft row does not change.
         Err(e) => end(run, ledger, "failed", Some(e.to_string()), false),
     }
+}
+
+/// The change entry that the action undoes, or `None` for a change.
+fn undoes(store: &iris_store::Store, action: i64) -> Result<Option<Undoes>> {
+    Ok(store.read(|c| {
+        Ok(c.query_row(
+            "SELECT json_extract(l.pre, '$.date'), json_extract(l.ops, '$.hash') FROM ledger_undo u
+             JOIN ledger l ON l.id = u.ledger_id WHERE u.action_id = ?1",
+            [action],
+            |r| {
+                Ok(Undoes {
+                    date: r.get(0)?,
+                    hash: r.get(1)?,
+                })
+            },
+        )
+        .optional()?)
+    })?)
 }
 
 /// True if the parent of the action (the newest eligible message of the
@@ -242,20 +281,20 @@ fn same_parent(
 /// The claim of a change (section 2, step 4): in one transaction, the
 /// gate, the approval, the checks of section 1 again and the ledger row.
 /// The row is in `writing` with `call` 1, or for a no-op change
-/// `applied`, with `call` 0 and no undo.
+/// `applied`, with `call` 0. A no-op and an undo (no `pre`) have no undo.
 fn claim(
     run: &Run<'_, '_>,
     action: i64,
     draft: i64,
     ops: &Ops,
     post: &Stored,
-    pre: &Pre,
+    pre: Option<&Pre>,
     noop: bool,
 ) -> Result<Option<std::result::Result<i64, Outcome>>> {
     let account = run.account;
     let ops = serde_json::to_string(ops).expect("plain data");
     let post = serde_json::to_string(post).expect("plain data");
-    let pre = (!noop).then(|| serde_json::to_string(pre).expect("plain data"));
+    let pre = pre.map(|p| serde_json::to_string(p).expect("plain data"));
     Ok(run.store.write(|tx| {
         if let Some(o) = super::super::gate(tx, action)? {
             return Ok(Some(Err(o)));
@@ -275,7 +314,7 @@ fn claim(
             deny_in(tx, action, &why, t)?;
             return Ok(Some(Err(Outcome::Denied(why))));
         }
-        let undo = if noop { "none" } else { "inverse" };
+        let undo = if pre.is_some() { "inverse" } else { "none" };
         tx.execute(
             "INSERT INTO ledger(action_id, account_id, ops, pre, post, state, undo, at)
              VALUES (?1, ?2, ?3, ?4, ?5, 'writing', ?6, ?7)",
@@ -372,6 +411,14 @@ fn settle(run: &mut Run<'_, '_>, ledger: i64, id: &str, raw: &[u8], why: &str) -
                  WHERE id = ?1",
                 params![draft, id, message_id, content, hash, raw, t],
             )?;
+            // An undo that applied: the change that it undoes is `undone`.
+            tx.execute(
+                "UPDATE ledger SET state = 'undone', undone_by = ?1
+                 WHERE id = (SELECT u.ledger_id FROM ledger_undo u
+                             JOIN ledger n ON n.action_id = u.action_id WHERE n.id = ?1)
+                   AND state = 'applied'",
+                [ledger],
+            )?;
         }
         Ok(())
     })?;
@@ -411,26 +458,33 @@ pub(super) fn recover(run: &mut Run<'_, '_>, ledger: i64, at: i64) -> Result<Out
             UNKNOWN,
         ),
         // Gmail can give the changed draft a new ID: look for it by the
-        // Message-ID. Exactly one draft with the new hash is the change.
+        // Message-ID. Exactly one draft with the new hash is the change. One
+        // draft only is the draft of the row in each case: `settle` stores
+        // its ID and content, also when the person changed it (issue #1001).
         Err(GmailError::NotFound) => {
             let Ok(found) = run.call(|g, t| g.drafts_with_id(t, &message_id)) else {
                 return read_failed(run);
             };
-            let mut hits = Vec::new();
+            let mut all = Vec::with_capacity(found.len());
             for f in found {
                 let Ok(back) = run.call(|g, t| g.draft_raw(t, &f.id)) else {
                     return read_failed(run);
                 };
-                let raw = back.raw.unwrap_or_default();
-                let same = iris_compose::read(&raw, &run.address)
-                    .is_some_and(|r| iris_compose::hash(&r.content, r.reply.as_ref()) == hash);
-                if same {
-                    hits.push((f.id, raw));
-                }
+                all.push((f.id, back.raw.unwrap_or_default()));
             }
-            match hits.as_slice() {
-                [(id, raw)] => settle(run, ledger, id, raw, UNKNOWN),
-                _ => end(run, ledger, "failed", Some(UNKNOWN.into()), false),
+            let same = |raw: &[u8]| {
+                iris_compose::read(raw, &run.address)
+                    .is_some_and(|r| iris_compose::hash(&r.content, r.reply.as_ref()) == hash)
+            };
+            let hits: Vec<&(String, Vec<u8>)> = all.iter().filter(|(_, r)| same(r)).collect();
+            let one = match (all.as_slice(), hits.as_slice()) {
+                ([only], _) => Some(only),
+                (_, [only]) => Some(*only),
+                _ => None,
+            };
+            match one.cloned() {
+                Some((id, raw)) => settle(run, ledger, &id, &raw, UNKNOWN),
+                None => end(run, ledger, "failed", Some(UNKNOWN.into()), false),
             }
         }
         Err(_) => read_failed(run),
