@@ -21,6 +21,11 @@ pub struct JobPage {
     pub jobs: Vec<Value>,
     /// The `after` value of the next page, or `None` on the last page.
     pub next: Option<String>,
+    /// The newest session of each `working` job of the page, by job ID
+    /// (issue 791), so that the list can say when no agent works on a job.
+    /// A working job with no session has `null`. The job document itself
+    /// stays as the schema gives it.
+    pub sessions: Map<String, Value>,
 }
 
 fn job_error(e: iris_job::Error) -> Error {
@@ -48,16 +53,37 @@ pub fn jobs(store: &Store, state: &str, limit: u32, after: Option<&str>) -> Resu
                 .ok_or_else(|| Error::Query(format!("not a job ID: {a:?}")))?,
         ),
     };
-    let mut jobs = iris_job::page(store, &states, limit + 1, before).map_err(job_error)?;
+    // One read transaction: the page and the sessions come from the same
+    // snapshot, so a working job never shows a session of a later state.
+    store.read(|c| {
+        let tx = c.unchecked_transaction()?;
+        Ok(page_and_sessions(&tx, &states, limit, before))
+    })?
+}
+
+/// The page of [`jobs`] and the newest session of each working job, in the
+/// transaction `c` of the caller.
+fn page_and_sessions(
+    c: &Connection,
+    states: &[JobState],
+    limit: u32,
+    before: Option<i64>,
+) -> Result<JobPage> {
+    let mut jobs = iris_job::page_in(c, states, limit + 1, before).map_err(job_error)?;
     let next = if jobs.len() > limit as usize {
         jobs.truncate(limit as usize);
         jobs.last().map(|j| iris_job::format_job_id(j.id))
     } else {
         None
     };
+    let mut sessions = Map::new();
+    for j in jobs.iter().filter(|j| j.state == JobState::Working) {
+        sessions.insert(iris_job::format_job_id(j.id), newest_session(c, j.id)?);
+    }
     Ok(JobPage {
         jobs: jobs.iter().map(iris_job::job_json).collect(),
         next,
+        sessions,
     })
 }
 
