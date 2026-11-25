@@ -138,7 +138,7 @@ at most 256 KiB, at most 50 addresses).
 | Each case of the test set | Its flag | `each_case_of_the_test_set_gives_its_flag` |
 | A text with no case of the test set | No draft flag | same test, negative cases |
 | Random text, random Unicode, a body of 256 KiB | No panic; the same flags for the same input; the `untrusted_content` check makes at most one query for each 8 words | property test `draft_flags_hold_for_random_text` |
-| A body with FTS5 syntax (`"`, `*`, `NEAR`, `AND`, `^`) | The words are letters and digits only; the query is a phrase of words | property test (the generator writes these) |
+| A body with FTS5 syntax (`"`, `*`, `NEAR`, `AND`, `^`) | The words are the tokens of the `unicode61 remove_diacritics 2` tokenizer (`iris_store::index_tokens`), and a token never holds `"`; the query is a phrase of words | property test (the generator writes these) |
 | A store with no `sender_evidence` row (no sync of sent mail yet) | Each address is new: `new_recipient` | example test |
 | Stale `sent` evidence: its message is gone, lost `SENT`, or has other bytes | The address is new: `new_recipient` | `stale_sent_evidence_makes_the_address_new` |
 | A received message whose `From` is the account address (a forged sender) | External: no `SENT` or `DRAFT` label, so its text gives `untrusted_content` | example test |
