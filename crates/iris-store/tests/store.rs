@@ -1584,3 +1584,57 @@ fn no_spam_message_keeps_a_droppable_item() {
         .unwrap();
     assert_eq!(due, 1);
 }
+
+/// Issue #110, the upgrade: a live message of an older store can have SPAM
+/// and an understanding from before the label, also with no droppable
+/// item. The upgrade resets it and puts its thread in talk_due. A gone
+/// message waits for its come-back.
+#[test]
+fn the_upgrade_resets_each_live_spam_message() {
+    let dir = TempDir::new("spam-upgrade");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(acc, &[("SPAM", "SPAM", "system")])
+        .unwrap();
+    let ids = store
+        .put_messages(
+            acc,
+            &[
+                msg("a", "t1", 1, &["INBOX", "SPAM"], "Hi", "x"),
+                msg("b", "t2", 1, &["INBOX", "SPAM"], "Hi", "x"),
+                msg("c", "t3", 1, &["INBOX"], "Hi", "x"),
+            ],
+        )
+        .unwrap();
+    // Understood before the label in version 63: a, b and c understood,
+    // b gone. No message has an item.
+    store
+        .write(|tx| {
+            tx.execute_batch(&format!(
+                "UPDATE message SET understood_at = 5, tries = 1, retry_at = 9;
+                 UPDATE message SET gone_at = 1 WHERE id = {};
+                 DELETE FROM talk_due; PRAGMA user_version = 63;",
+                ids[1]
+            ))?;
+            Ok(())
+        })
+        .unwrap();
+    drop(store);
+    let store = Store::open(&dir.0).unwrap();
+    let state = |id: i64| -> (Option<i64>, i64, Option<i64>, i64) {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT understood_at, tries, retry_at,
+                       (SELECT count(*) FROM talk_due d WHERE d.thread_id = m.thread_id)
+                     FROM message m WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    assert_eq!(state(ids[0]), (None, 0, None, 1), "live SPAM");
+    assert_eq!(state(ids[1]), (Some(5), 1, Some(9), 0), "gone SPAM");
+    assert_eq!(state(ids[2]), (Some(5), 1, Some(9), 0), "no SPAM");
+}

@@ -41,6 +41,11 @@ pay again for the same mail.
   `SPAM` goes before the next run. A pinned item stays. A gone message
   that comes back with `SPAM`, and each message with `SPAM` at the
   upgrade (migration 64), drop their droppable items too.
+- At the upgrade (migration 64), each message that is not gone and has
+  `SPAM` can hold an understanding from before the label. The upgrade
+  clears its `understood_at`, `tries` and `retry_at`, and puts its thread
+  in `talk_due`. `SPAM` mail makes no model call, so this reset costs no
+  call. A gone message gets the reset when it comes back.
 - Each reset of `understood_at` by a change (new content, a gone message
   that comes back, a label of the list above, a new hostile mark) clears
   `tries` and `retry_at`, and puts the thread in `talk_due`. A failed try

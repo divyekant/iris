@@ -118,8 +118,19 @@ BEGIN
     (SELECT item_id FROM item_droppable WHERE message_id = NEW.id);
 END;
 
--- The messages that have SPAM now: their thread is computed again, and
--- their droppable items go.
+-- The live messages that have SPAM now can hold an understanding from
+-- before the label. Each one gets the understanding again (SPAM makes no
+-- model call), and its thread is computed again. Their droppable items go.
+INSERT OR IGNORE INTO talk_due(thread_id)
+  SELECT DISTINCT m.thread_id FROM message m
+    JOIN message_label ml ON ml.message_id = m.id
+    JOIN label l ON l.id = ml.label_id
+  WHERE l.provider_id = 'SPAM' AND m.thread_id IS NOT NULL AND m.gone_at IS NULL;
+UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL
+  WHERE gone_at IS NULL
+    AND (understood_at IS NOT NULL OR tries <> 0 OR retry_at IS NOT NULL)
+    AND EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+      WHERE ml.message_id = message.id AND l.provider_id = 'SPAM');
 INSERT OR IGNORE INTO talk_due(thread_id)
   SELECT DISTINCT m.thread_id FROM item_droppable d
     JOIN message m ON m.id = d.message_id
