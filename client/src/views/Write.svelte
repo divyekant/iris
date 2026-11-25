@@ -36,6 +36,7 @@
   const accounts = "accounts" in start ? start.accounts : [];
   const place = `iris.write.${thread ?? "new"}`;
 
+  type Changing = { draft: string; account: string };
   type Saved = {
     account: string;
     to: string[];
@@ -51,8 +52,8 @@
     ccText?: string;
     bccText?: string;
     intent?: string;
-    /** The draft that the next press changes in place (`d-N`). */
-    draft?: string | null;
+    /** The draft that the next press changes in place, with its account. */
+    draft?: Changing | null;
   };
   function storage(): Storage | undefined {
     try {
@@ -127,10 +128,12 @@
   let unknown = $state(false);
   let busy = $state(false);
   // The Gmail draft that the next press changes in place, after "Change and send".
-  let changing = $state<string | null>(saved?.draft ?? null);
+  // It holds only for its own account: a press from another account makes a new draft.
+  let changing = $state<Changing | null>(saved?.draft && typeof saved.draft === "object" ? saved.draft : null);
+  const target_ = () => (changing && (thread || account === changing.account) ? changing.draft : null);
 
   // The parent is part of the content: a reply to a new parent is a new mail.
-  let content = $derived(JSON.stringify([thread ? [thread, reply?.parent.id] : account, to, cc, bcc, files.map((f) => [f.sha256, f.name, f.type]), thread ? "" : subject, body, changing]));
+  let content = $derived(JSON.stringify([thread ? [thread, reply?.parent.id] : account, to, cc, bcc, files.map((f) => [f.sha256, f.name, f.type]), thread ? "" : subject, body, target_()]));
   // One key for one content: a new content gets a new key. Send calls it too,
   // after it ends the open address text, so each press sends the key of its own content.
   function rekey() {
@@ -281,7 +284,7 @@
     const extra = {
       ...(bcc.length ? { bcc: [...bcc] } : {}),
       ...(files.length ? { attachments: files.map((f) => ({ ...f })) } : {}),
-      ...(changing ? { draft: changing } : {}),
+      ...(target_() ? { draft: target_() } : {}),
     };
     const mail = { ...target, to: [...to], cc: [...cc], ...extra, body, key, flags: [...flags] };
     try {
@@ -382,18 +385,20 @@
     if (ws.state !== "stopped" || !ws.draft || !ws.change) return;
     const draft = ws.draft;
     const update = ws.change === "update";
+    const id = write;
     busy = true;
     note = "";
     try {
       const d = await get<DraftContent>(`drafts/${encodeURIComponent(draft)}`);
-      if (!alive) return;
+      // A late answer after Write another or a closed view does not fill the form.
+      if (!alive || write !== id) return;
       keep(null, write);
       clearTimeout(timer);
       [to, cc, bcc, files, body, toText, ccText, bccText] = [unique(d.to), unique(d.cc), unique(d.bcc), d.attachments, d.body, "", "", ""];
       if (!thread) [account, subject] = [d.account, d.subject];
       copy = cc.length > 0;
       blind = bcc.length > 0;
-      changing = update ? draft : null;
+      changing = update ? { draft, account: d.account } : null;
       write = "";
       ws = { state: "saving" };
     } catch (e) {
@@ -514,7 +519,8 @@
       <p class="muted">{ws.reason}</p>
       <div class="row">
         {#if ws.change && ws.draft}<button type="button" class="pill" onclick={changeIt} disabled={busy}>Change and send</button>{/if}
-        <button type="button" class="quiet" onclick={again}>Write another</button>
+        <!-- While the draft loads, Write another waits: the draft fills only its own form. -->
+        <button type="button" class="quiet" onclick={again} disabled={busy}>Write another</button>
       </div>
     {/if}
     {#if note}<p role="alert">{note}</p>{/if}
