@@ -378,8 +378,9 @@ pub fn dismiss_unconfirmed(store: &Store, ids: &[String], now: i64) -> Result<us
         for id in &rows {
             n += tx.execute(
                 "INSERT OR IGNORE INTO ledger_unknown_seen(ledger_id, at)
-                 SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM ledger_message
-                   WHERE ledger_id = ?1 AND listed = 'unknown')",
+                 SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM ledger_message lm
+                   JOIN ledger l ON l.id = lm.ledger_id
+                   WHERE lm.ledger_id = ?1 AND lm.listed = 'unknown' AND l.state = 'failed')",
                 params![id, now],
             )?;
         }
@@ -390,7 +391,9 @@ pub fn dismiss_unconfirmed(store: &Store, ids: &[String], now: i64) -> Result<us
 /// The line of the brief (specification 2, section 7.3): the newest
 /// [`crate::MAX_LIMIT`] entries with messages that the recovery cannot
 /// confirm, that the person did not dismiss, of an account that is not
-/// removed. `messages` counts the messages of these entries only, so the
+/// removed. Only a `failed` entry counts: the recovery of an entry in
+/// `writing` can still list more messages, and a dismissal is for the
+/// final list. `messages` counts the messages of these entries only, so the
 /// line is the entries that it lists, and one dismissal of them covers
 /// the line. `more` counts the other such entries: they show in the next
 /// line.
@@ -408,7 +411,7 @@ pub(crate) fn unconfirmed(c: &Connection) -> rusqlite::Result<Unconfirmed> {
     const OPEN: &str = "FROM ledger_message lm
            JOIN ledger l ON l.id = lm.ledger_id
            JOIN account a ON a.id = l.account_id
-         WHERE lm.listed = 'unknown'
+         WHERE lm.listed = 'unknown' AND l.state = 'failed'
            AND (a.state IS NULL OR a.state NOT IN ('removing', 'removed'))
            AND NOT EXISTS (SELECT 1 FROM ledger_unknown_seen s
                            WHERE s.ledger_id = lm.ledger_id)";

@@ -917,7 +917,14 @@ async fn a_change_of_a_draft_is_marked() {
 /// A failed `archive` entry: the recovery cannot confirm `unknown`, and
 /// Gmail confirmed `done`. Gives the ledger row ID.
 fn unconfirmed(s: &Store, unknown: &[i64], done: &[i64]) -> i64 {
-    let all: Vec<i64> = unknown.iter().chain(done).copied().collect();
+    unconfirmed_in(s, unknown, done, &[], true)
+}
+
+/// As `unconfirmed`, with the messages `pending` that the recovery did not
+/// check yet. With `end` false, the entry stays in `writing`: its recovery
+/// did not end.
+fn unconfirmed_in(s: &Store, unknown: &[i64], done: &[i64], pending: &[i64], end: bool) -> i64 {
+    let all: Vec<i64> = unknown.iter().chain(done).chain(pending).copied().collect();
     s.write(|tx| {
         tx.execute("INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0)", [])?;
         let cs = tx.last_insert_rowid();
@@ -970,10 +977,12 @@ fn unconfirmed(s: &Store, unknown: &[i64], done: &[i64]) -> i64 {
                 params![l, m],
             )?;
         }
-        tx.execute(
-            "UPDATE ledger SET state = 'failed', error = 'Gmail did not answer.' WHERE id = ?1",
-            [l],
-        )?;
+        if end {
+            tx.execute(
+                "UPDATE ledger SET state = 'failed', error = 'Gmail did not answer.' WHERE id = ?1",
+                [l],
+            )?;
+        }
         Ok(l)
     })
     .unwrap()
@@ -1106,4 +1115,35 @@ async fn a_removed_account_has_no_unconfirmed_line() {
             "{state}"
         );
     }
+}
+
+/// Issue #216, pre-review: the recovery of an entry in `writing` can list
+/// more messages `unknown` later. So the line and a dismissal wait for the
+/// final state `failed`, and a dismissal covers the final list.
+#[tokio::test]
+async fn the_line_waits_for_the_end_of_the_recovery() {
+    let dir = temp("unconfirmed-writing");
+    let s = store(&dir);
+    // Message 2 is not checked yet.
+    let l = unconfirmed_in(&s, &[1], &[3], &[2], false);
+    let none = json!({"messages": 0, "entries": [], "more": 0});
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(brief["unconfirmed"], none);
+    let (_, b) = dismiss(&s, json!({"entries": [format!("l-{l}")]})).await;
+    assert_eq!(b, json!({"dismissed": 0}));
+    // The recovery lists one more message, and the entry fails.
+    s.write(|tx| {
+        tx.execute_batch(&format!(
+            "UPDATE ledger_message SET listed = 'unknown'
+               WHERE ledger_id = {l} AND message_id = 2;
+             UPDATE ledger SET state = 'failed', error = 'Gmail did not answer.' WHERE id = {l};"
+        ))?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, brief) = call(&s, false, "/api/brief").await;
+    assert_eq!(
+        brief["unconfirmed"],
+        json!({"messages": 2, "entries": [format!("l-{l}")], "more": 0})
+    );
 }

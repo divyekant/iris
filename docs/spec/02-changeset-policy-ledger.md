@@ -921,7 +921,9 @@ it. The line lists the newest 200 entries with such messages that the
 person did not dismiss, and counts the messages of these entries. A
 dismissal covers the entries that the line listed; an older entry then
 shows in the next line, and an entry that fails later shows in a new line.
-The line leaves out an account in `removing` or `removed`. A state verb never stays in the state `writing`, because one transaction
+The line leaves out an account in `removing` or `removed`. The line shows an entry only in the state `failed`: while the row is
+`writing`, the recovery can still list more messages, and a dismissal is
+for the final list. A state verb never stays in the state `writing`, because one transaction
 applies it.
 
 ### 7.4 Undo
