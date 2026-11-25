@@ -5,6 +5,10 @@
 -- `needs_you`, by a trigger in the transaction of the move. A rule row has
 -- a mail and a rule; a job row has a job event and no rule.
 
+-- A test that sets the schema version back runs this migration again on a
+-- store that has the trigger: the rename below then fails on it.
+DROP TRIGGER IF EXISTS notice_job;
+
 CREATE TABLE notice_new (
   -- AUTOINCREMENT: the engine never uses an ID again (specification 1, 5.7).
   id INTEGER PRIMARY KEY AUTOINCREMENT,
