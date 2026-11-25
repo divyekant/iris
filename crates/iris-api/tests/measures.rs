@@ -798,7 +798,7 @@ fn migration_45_corrects_an_approval_after_a_comment() {
         approve_revision(&s, a, true);
         s.write(|tx| {
             tx.execute_batch(UNDO_46)?;
-            tx.execute_batch("UPDATE person_decision SET approved = 1; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 44;")?;
+            tx.execute_batch("ALTER TABLE reply_draft DROP COLUMN seen; UPDATE person_decision SET approved = 1; DROP TRIGGER ledger_hostile_before; ALTER TABLE ledger DROP COLUMN hostile_before; DROP TRIGGER fixed_due_release; DROP TRIGGER message_release_content; ALTER TABLE message DROP COLUMN released; ALTER TABLE message DROP COLUMN fixed_rules; DROP TRIGGER sender_gate_rev; ALTER TABLE sender DROP COLUMN gate_rev; PRAGMA user_version = 44;")?;
             Ok(())
         })
         .unwrap();
