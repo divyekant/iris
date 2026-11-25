@@ -169,7 +169,7 @@ pub fn recheck_links(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Resu
                 // error leaves the row for the next run.
                 let _ = understand(store, id, &crate::budget::NoModel, now_ms);
             }
-            let done = store.write(|tx| Ok(link_check_done(tx, row, id, &read)?))?;
+            let done = store.write(|tx| link_check_done(tx, row, id, &read))?;
             marked += u64::from(mark && done);
         }
     }
