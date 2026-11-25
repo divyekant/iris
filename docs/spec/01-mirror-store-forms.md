@@ -406,14 +406,37 @@ is never lost.
 New content files after step 2 are not in the backup, and the copy of
 `iris.db` does not refer to them.
 
-`iris backup` does not copy `workspaces/`. A copy of the whole folder while
-the engine is stopped copies `workspaces/` too, with the files of the agent.
-The build makes the files of a
-workspace again from the store, before each session. The folder `drafts/` of the
-agent is not in a copy of `iris backup`: after a restore from it, the next
-build makes it empty. A draft that the agent submits is in the store
-(specification 2), so only work that the agent did not submit is lost. This
-is a known limit, with a GitHub issue. The store keeps a copy of `notes.md`
+`iris backup` copies only the folder `drafts/` of each workspace
+(`workspaces/<job>/drafts/`). The build makes the other files of a workspace
+again from the store, before each session, and keeps a `drafts/` folder that
+is there. A program of a session writes `drafts/`, and can change it during
+the copy. So the copy opens the job folder and `drafts/` with no link, and
+then opens each file relative to the opened `drafts/` folder, with no link
+and no wait on a FIFO. It copies a regular file of at most 1 MiB (a body has
+at most 256 KiB), and at most 256 files of each job, by name. The scan of a
+folder keeps at most 256 names in memory. So a session cannot make the
+backup large, grow the memory of the engine, or make the backup read a file
+outside its `drafts/` folder. The two limits have issue #1063. A
+draft that the agent submits is in the store (specification 2) too. A copy
+of the whole folder while the engine is stopped copies `workspaces/` with
+all the files of the agent.
+
+Failure list of the copy of `drafts/` (input of a session, and changes
+during the copy):
+
+| Input or event | Result |
+|---|---|
+| A regular file of at most 1 MiB, one of the first 256 names | Copied, mode 0600 |
+| A file over 1 MiB, or a name after the first 256 | Not copied |
+| A link, a FIFO, a device, a socket or a subfolder in `drafts/` | Not copied |
+| `drafts/` or the job folder is a link | Nothing of that job is copied |
+| `drafts/` is renamed or replaced after the open | The copy reads the folder that it opened |
+| A file goes away, or becomes a link, before its open | Not copied |
+| A file changes during its read | The bytes of one read, at most 1 MiB |
+| A folder with very many entries | The scan keeps at most 256 names; the time grows with the count |
+| Any other error of the file system | The backup fails and says so. The folder of the failed backup is not a backup: use another one |
+
+The store keeps a copy of `notes.md`
 of each open job (R5-06, `docs/specs/2026-11-17-job-memory.md`), so
 `iris.db` in the backup holds it: after a restore, the next build writes the
 copy. The copy holds the notes of the last save (the last reap or build),
@@ -479,7 +502,7 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `sync_seen` | `account_id`, `message_id`, `labels` TEXT (JSON), PK(`account_id`, `message_id`) | The messages that the lists of a full resync or a verify name, with their label sets. The engine clears it when a new run starts, not when an unfinished run continues after a crash. |
 | `label` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, `name` TEXT, `kind` TEXT (`system` or `user`), UNIQUE(`account_id`, `provider_id`) | Labels of the provider. |
 | `thread` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, `viewed_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | Threads of the provider. Gives the `t-` IDs. `viewed_at` is the last view of the thread in Iris. |
-| `message` | `id` INTEGER PK, `account_id`, `thread_id`, `provider_id` TEXT, `content_sha256` TEXT, `size` INTEGER, `internal_date` INTEGER, `fetched_at` INTEGER, `gone_at` INTEGER, `understood_at` INTEGER, `hostile` TEXT (JSON), `tries` INTEGER, `retry_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | One row for each message. Gives the `m-` IDs. `hostile` is the list of the hostile marks of the message (section 6.7). `tries` and `retry_at` hold the failed tries of the model (section 7.4). `fixed_rules` TEXT (migration 58) records how the last understanding completed the message, for the fixed check: NULL when the model made an item, a JSON array of the rule of each rule item when the fixed rules completed it (a rule item that a pinned item holds counts too), or `unknown` after the backfill of a store that could not show it; the fixed check runs such a message again. `released` TEXT (migration 60): the hostile marks that the person released for the current content (a JSON array of `dmarc`, `spoof` and `link`), or NULL (section 6.7). A trigger sets it to NULL when the content hash changes, and a trigger queues the fixed check at each change of it. The store clears `understood_at` when the content hash changes, when a gone message comes back, and when the message gets or loses the label `SENT`, `DRAFT`, `UNSENT` or `SENT_COPY`. A message with `DRAFT`, `UNSENT` or `SENT_COPY` that is not gone keeps no item that a new understanding replaces: the triggers of store migration 42 delete such items when the label comes and when the message comes back. |
+| `message` | `id` INTEGER PK, `account_id`, `thread_id`, `provider_id` TEXT, `content_sha256` TEXT, `size` INTEGER, `internal_date` INTEGER, `fetched_at` INTEGER, `gone_at` INTEGER, `understood_at` INTEGER, `hostile` TEXT (JSON), `tries` INTEGER, `retry_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | One row for each message. Gives the `m-` IDs. `hostile` is the list of the hostile marks of the message (section 6.7). `tries` and `retry_at` hold the failed tries of the model (section 7.4). `fixed_rules` TEXT (migration 58) records how the last understanding completed the message, for the fixed check: NULL when the model made an item, a JSON array of the rule of each rule item when the fixed rules completed it (a rule item that a pinned item holds counts too), or `unknown` after the backfill of a store that could not show it; the fixed check runs such a message again. `released` TEXT (migration 61): the hostile marks that the person released for the current content (a JSON array of `dmarc`, `spoof` and `link`), or NULL (section 6.7). A trigger sets it to NULL when the content hash changes, and a trigger queues the fixed check at each change of it. The store clears `understood_at` when the content hash changes, when a gone message comes back, and when the message gets or loses the label `SENT`, `DRAFT`, `UNSENT` or `SENT_COPY`. A message with `DRAFT`, `UNSENT` or `SENT_COPY` that is not gone keeps no item that a new understanding replaces: the triggers of store migration 42 delete such items when the label comes and when the message comes back. |
 | `message_label` | `message_id`, `label_id`, PK(`message_id`, `label_id`) | The label set of each message. |
 | `header` | `message_id` PK, `date` INTEGER, `from_addr` TEXT, `from_name` TEXT, `to_addrs` TEXT, `cc_addrs` TEXT, `subject` TEXT, `message_id_hdr` TEXT, `in_reply_to` TEXT, `list_id` TEXT, `auth` TEXT | Parsed headers that queries need. `auth` holds the SPF, DKIM and DMARC results from `Authentication-Results`. `to_addrs` and `cc_addrs` hold bare lowercase addresses joined by `,`. `from_addr` is ASCII lowercase: the triggers of store migration 39 keep this form for each write. |
 | `body` | `message_id` INTEGER PK, `subject` TEXT, `sender` TEXT, `text` TEXT | The clean text of the message (section 7.2), with the subject and the sender name and address. `message_id` is the row ID. |

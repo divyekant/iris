@@ -15,6 +15,13 @@ use crate::{
 /// How long the store keeps the content of a gone message (section 4.5).
 pub const GONE_KEEP_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
+/// The largest file of `drafts/` that a backup copies. A larger file is not
+/// a draft of mail (a body has at most 256 KiB, `iris-compose`).
+pub const DRAFT_FILE_MAX: u64 = 1024 * 1024;
+
+/// The most files of one `drafts/` folder that a backup copies.
+pub const DRAFT_FILES_MAX: usize = 256;
+
 /// The most messages in one transaction of the cleanup.
 const CLEAN_BATCH: i64 = 500;
 
@@ -134,6 +141,10 @@ impl Store {
             &self.dir.join(crate::ATTACHMENTS),
             &dest.join(crate::ATTACHMENTS),
         )?;
+
+        // The drafts of each job workspace (issue #350): the build makes the
+        // other files of a workspace again from the store.
+        copy_drafts(&self.dir.join("workspaces"), &dest.join("workspaces"))?;
 
         // Without the key, the copy cannot decrypt the secrets.
         copy_private(&self.dir.join("key"), &dest.join("key"))?;
@@ -407,6 +418,220 @@ fn copy_attachments(src: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Copy `<src>/<job>/drafts/<file>` of each job workspace to the same path
+/// under `dest`, with mode 0600 and folders of mode 0700.
+///
+/// A program in a session writes `drafts/` and can change it during the
+/// copy. So the copy opens each folder relative to the handle of its parent,
+/// with no link at any level (`O_NOFOLLOW`), and opens each file relative to
+/// the handle of its `drafts/` folder. A rename of a folder after the open
+/// does not move the copy: it reads only the folder that it opened. The copy
+/// takes only regular files (no FIFO, no device, no subfolder), at most
+/// [`DRAFT_FILE_MAX`] bytes each, and the first [`DRAFT_FILES_MAX`] names (by
+/// byte order). The scan keeps at most [`DRAFT_FILES_MAX`] names in memory,
+/// so a folder with many entries does not grow the memory of the engine. A
+/// file that goes away, or that is not a regular file when the copy opens
+/// it, is not copied. A file that changes during the copy gives the bytes of
+/// one read, at most [`DRAFT_FILE_MAX`].
+#[cfg(unix)]
+fn copy_drafts(src: &Path, dest: &Path) -> Result<()> {
+    let Some(root) = dir_at(None, src.as_os_str())? else {
+        return Ok(());
+    };
+    let mut any = false;
+    // The engine makes each job folder; a session cannot add one here.
+    for job in smallest_names(&root, usize::MAX, true)? {
+        let Some(job_dir) = dir_at(Some(&root), &job)? else {
+            continue;
+        };
+        let Some(drafts) = dir_at(Some(&job_dir), std::ffi::OsStr::new("drafts"))? else {
+            continue;
+        };
+        let to_job = dest.join(&job);
+        if copy_from(&drafts, &to_job.join("drafts"))? {
+            // The new `drafts` entry is in the job folder, and the new job
+            // entry is in `dest`: sync both before the backup says done.
+            sync_dir(&to_job)?;
+            any = true;
+        }
+    }
+    if any {
+        sync_dir(dest)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn copy_drafts(_src: &Path, _dest: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Copy the drafts of one opened `drafts/` folder to `to_dir`. True if the
+/// copy made `to_dir`.
+#[cfg(unix)]
+fn copy_from(drafts: &std::os::fd::OwnedFd, to_dir: &Path) -> Result<bool> {
+    let mut made = false;
+    for name in smallest_names(drafts, DRAFT_FILES_MAX, false)? {
+        let Some(bytes) = read_draft(drafts, &name)? else {
+            continue;
+        };
+        make_private_dir(to_dir)?;
+        made = true;
+        let to = to_dir.join(&name);
+        private_file(&to, true)?.write_all(&bytes)?;
+        sync_file(&to)?;
+    }
+    if made {
+        sync_dir(to_dir)?;
+    }
+    Ok(made)
+}
+
+/// Open the folder `name` relative to `parent` (or the path `name` with no
+/// parent), with no link. `None` if it is gone, is not a folder, or is a
+/// link.
+#[cfg(unix)]
+fn dir_at(
+    parent: Option<&std::os::fd::OwnedFd>,
+    name: &std::ffi::OsStr,
+) -> io::Result<Option<std::os::fd::OwnedFd>> {
+    open_at(parent, name, libc::O_DIRECTORY)
+}
+
+#[cfg(unix)]
+fn open_at(
+    parent: Option<&std::os::fd::OwnedFd>,
+    name: &std::ffi::OsStr,
+    flags: libc::c_int,
+) -> io::Result<Option<std::os::fd::OwnedFd>> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let at = parent.map_or(libc::AT_FDCWD, |p| p.as_raw_fd());
+    let flags = flags | libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+    // SAFETY: `c` is a valid C string and `at` is an open folder or AT_FDCWD.
+    let fd = unsafe { libc::openat(at, c.as_ptr(), flags) };
+    if fd < 0 {
+        let e = io::Error::last_os_error();
+        return match e.raw_os_error() {
+            Some(libc::ENOENT | libc::ENOTDIR | libc::ELOOP) => Ok(None),
+            _ => Err(e),
+        };
+    }
+    // SAFETY: `fd` is a new descriptor that nothing else owns.
+    Ok(Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) }))
+}
+
+/// The `max` smallest names (by byte order) of the entries of the folder
+/// `dir` that can be folders (`dirs`) or regular files, sorted. The scan
+/// keeps at most `max` names in memory. The caller checks the type again
+/// at the open, because an entry can change after the scan.
+#[cfg(unix)]
+fn smallest_names(
+    dir: &std::os::fd::OwnedFd,
+    max: usize,
+    dirs: bool,
+) -> io::Result<Vec<std::ffi::OsString>> {
+    use std::os::fd::IntoRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    // `fdopendir` takes the descriptor, so give it a copy.
+    let copy = dir.try_clone()?;
+    // SAFETY: `copy` is an open folder; `closedir` below closes it.
+    let d = unsafe { libc::fdopendir(copy.into_raw_fd()) };
+    if d.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    struct Close(*mut libc::DIR);
+    impl Drop for Close {
+        fn drop(&mut self) {
+            // SAFETY: the pointer came from `fdopendir` and is closed once.
+            unsafe { libc::closedir(self.0) };
+        }
+    }
+    let d = Close(d);
+    // The copy shares the read offset of `dir`: start at the first entry.
+    // SAFETY: `d.0` is an open DIR.
+    unsafe { libc::rewinddir(d.0) };
+    let mut heap = std::collections::BinaryHeap::new();
+    loop {
+        // `readdir` gives NULL at the end and on an error: only errno tells
+        // the two apart, so a failed read does not look like the end.
+        set_errno(0);
+        // SAFETY: `d.0` is an open DIR.
+        let e = unsafe { libc::readdir(d.0) };
+        if e.is_null() {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error().is_some_and(|n| n != 0) {
+                return Err(err);
+            }
+            break;
+        }
+        // SAFETY: `e` points to a valid entry until the next `readdir`.
+        let (t, name) = unsafe {
+            (
+                (*e).d_type,
+                std::ffi::CStr::from_ptr((*e).d_name.as_ptr())
+                    .to_bytes()
+                    .to_vec(),
+            )
+        };
+        if name == b"." || name == b".." {
+            continue;
+        }
+        let want = if dirs { libc::DT_DIR } else { libc::DT_REG };
+        if t != want && t != libc::DT_UNKNOWN {
+            continue;
+        }
+        heap.push(name);
+        if heap.len() > max {
+            heap.pop();
+        }
+    }
+    Ok(heap
+        .into_sorted_vec()
+        .into_iter()
+        .map(|n| std::ffi::OsStr::from_bytes(&n).to_owned())
+        .collect())
+}
+
+#[cfg(unix)]
+fn set_errno(v: libc::c_int) {
+    // SAFETY: the errno of this thread is always valid to write.
+    unsafe {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            *libc::__errno_location() = v;
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        {
+            *libc::__error() = v;
+        }
+    }
+}
+
+/// The bytes of the file `name` of the opened folder `dir`, or `None` if it
+/// is gone, is not a regular file, or has more than [`DRAFT_FILE_MAX`] bytes.
+#[cfg(unix)]
+fn read_draft(dir: &std::os::fd::OwnedFd, name: &std::ffi::OsStr) -> Result<Option<Vec<u8>>> {
+    use std::io::Read as _;
+    // The type check below refuses a folder, a FIFO and a device.
+    let Some(fd) = open_at(Some(dir), name, 0)? else {
+        return Ok(None);
+    };
+    let file = File::from(fd);
+    let m = file.metadata()?;
+    if !m.is_file() || m.len() > DRAFT_FILE_MAX {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    file.take(DRAFT_FILE_MAX + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > DRAFT_FILE_MAX {
+        return Ok(None);
+    }
+    Ok(Some(bytes))
+}
+
 fn copy_private(from: &Path, to: &Path) -> io::Result<()> {
     let mut src = File::open(from)?;
     let mut dst = private_file(to, false)?;
@@ -416,4 +641,62 @@ fn copy_private(from: &Path, to: &Path) -> io::Result<()> {
 
 fn sync_file(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    fn temp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("iris-drafts-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A rename of `drafts/` after the open, and a link to the data folder
+    /// in its place, do not move the copy: it reads the folder that it
+    /// opened, never the target of the link.
+    #[test]
+    fn the_copy_reads_the_opened_folder_after_a_swap() {
+        let d = temp("swap");
+        let drafts = d.join("job/drafts");
+        fs::create_dir_all(&drafts).unwrap();
+        fs::write(drafts.join("key"), b"draft").unwrap();
+        let data = d.join("data");
+        fs::create_dir(&data).unwrap();
+        fs::write(data.join("key"), b"secret").unwrap();
+
+        let job = dir_at(None, d.join("job").as_os_str()).unwrap().unwrap();
+        let pinned = dir_at(Some(&job), OsStr::new("drafts")).unwrap().unwrap();
+        fs::rename(&drafts, d.join("job/old")).unwrap();
+        std::os::unix::fs::symlink(&data, &drafts).unwrap();
+
+        let to = d.join("out/drafts");
+        assert!(copy_from(&pinned, &to).unwrap());
+        assert_eq!(fs::read(to.join("key")).unwrap(), b"draft");
+        // A new open of the path refuses the link.
+        assert!(dir_at(Some(&job), OsStr::new("drafts")).unwrap().is_none());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The scan keeps the smallest names only, and never more than `max`.
+    #[test]
+    fn the_scan_keeps_only_the_smallest_names() {
+        let d = temp("scan");
+        for i in (0..600).rev() {
+            fs::write(d.join(format!("{i:04}")), b"x").unwrap();
+        }
+        fs::create_dir(d.join("0000a")).unwrap();
+        let dir = dir_at(None, d.as_os_str()).unwrap().unwrap();
+        let names = smallest_names(&dir, 3, false).unwrap();
+        // The folder `0000a` is not a file, so it takes no place.
+        assert_eq!(names, ["0000", "0001", "0002"]);
+        assert_eq!(
+            smallest_names(&dir, DRAFT_FILES_MAX, false).unwrap().len(),
+            DRAFT_FILES_MAX
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
 }
