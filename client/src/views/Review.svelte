@@ -17,45 +17,63 @@
   let list = $state(changesets);
   let later: Changeset[] = $state([]);
   let order: string[] = [];
-  // Each read takes a number at its start: the list of open requests, the state of one request, and
-  // the answer of a decision on this screen. For each request, a document applies only if no read that
-  // started later applied first, so a late answer never puts back an older document.
-  let started = 0;
-  let applied = 0;
-  const seen: Record<string, number> = {};
+  // One queue for each read and each write of a request: a step starts when the step before it
+  // ends, and applies its answer before the next step starts. So the screen applies the answers in
+  // the order that the store made them, and an older document never replaces a newer one. This
+  // holds for the poll, the read of a state, and the answer of a decision or a withdraw (issue 184).
+  let chain: Promise<unknown> = Promise.resolve();
+  let queued = 0;
+  function queue<T>(work: () => Promise<T>, apply: (out: T) => void): Promise<T> {
+    queued++;
+    const step = chain.then(async () => {
+      try {
+        const out = await work();
+        apply(out);
+        return out;
+      } finally {
+        queued--;
+      }
+    });
+    chain = step.catch(() => {});
+    return step;
+  }
   // What can change on the screen: the revision, the state, and the decision of each action.
   const mark = (c: Changeset) => `${c.revision}|${c.state}|${c.actions.map((a) => a.decision?.state ?? "").join(",")}`;
-  function put(n: number, d: Changeset) {
-    if ((seen[d.id] ?? 0) >= n) return;
-    seen[d.id] = n;
+  // A Request keeps its part (its ticks and pages): a poll replaces only a changed document. The
+  // answer to a read or a write of the Request itself always replaces it (`asked`), because the
+  // Request loads its lines again for each new document.
+  function put(d: Changeset, asked = false) {
     unknown = unknown.filter((x) => x !== d.id);
     const shownAs = all.find((c) => c.id === d.id);
-    // A Request keeps its part (its ticks and pages): only a changed document replaces its document.
     if (shownAs) {
-      if (mark(shownAs) !== mark(d)) now[d.id] = d;
+      if (asked || mark(shownAs) !== mark(d)) now[d.id] = d;
     } else later = later.map((c) => (c.id === d.id ? d : c));
+  }
+  // A Request sends its reads and writes of the request through the queue.
+  const read = (work: () => Promise<Changeset>) => queue(work, (d) => put(d, true));
+
+  function poll(open: Changeset[]) {
+    if (!Array.isArray(open)) return;
+    for (const c of open) put(c);
+    order = open.map((c) => c.id);
+    // A new request waits in `later` until Show. An announced request stays there, also when it closes.
+    const fresh = open.filter((c) => !list.some((x) => x.id === c.id) && !later.some((x) => x.id === c.id));
+    later = [...later, ...fresh];
+    // A request on the screen that left the open list goes to the end. Each keeps its part.
+    const moved = [...list.filter((c) => order.includes(c.id)), ...list.filter((c) => !order.includes(c.id))];
+    if (moved.some((c, i) => c !== list[i])) list = moved;
+    // A request on the screen or announced that the engine no longer lists as open: read its state,
+    // so that it never keeps the controls of an open request.
+    for (const c of [...all, ...later]) if (c.state === "open" && !order.includes(c.id)) void settle(c.id);
   }
   $effect(() => {
     if (!every) return;
-    const timer = setInterval(async () => {
-      if (globalThis.document?.visibilityState === "hidden") return;
-      const n = ++started;
-      try {
-        const open = (await get<{ changesets: Changeset[] }>("changesets")).changesets;
-        if (!Array.isArray(open)) return;
-        for (const c of open) put(n, c);
-        if (n <= applied) return;
-        applied = n;
-        order = open.map((c) => c.id);
-        // A new request waits in `later` until Show. An announced request stays there, also when it closes.
-        const fresh = open.filter((c) => !list.some((x) => x.id === c.id) && !later.some((x) => x.id === c.id));
-        later = [...later, ...fresh];
-        // A request on the screen or announced that the engine no longer lists as open: read its state,
-        // so that it never keeps the controls of an open request.
-        for (const c of [...all, ...later]) if (c.state === "open" && !order.includes(c.id)) void settle(c.id);
-      } catch {
+    const timer = setInterval(() => {
+      // The poll waits for a quiet queue, so that it never piles up behind a slow request.
+      if (globalThis.document?.visibilityState === "hidden" || queued > 0) return;
+      queue(() => get<{ changesets: Changeset[] }>("changesets"), (r) => poll(r.changesets)).catch(() => {
         // The next read tries again.
-      }
+      });
     }, every);
     return () => clearInterval(timer);
   });
@@ -63,13 +81,15 @@
   // The requests that left the open list and whose state Iris could not read. Each is locked
   // (inert) with a line and Try again, and the headline does not count it. The next poll tries again.
   let unknown: string[] = $state([]);
-  async function settle(id: string) {
-    const n = ++started;
-    try {
-      put(n, await get<Changeset>(`changesets/${encodeURIComponent(id)}`));
-    } catch {
-      if ((seen[id] ?? 0) < n && !unknown.includes(id)) unknown = [...unknown, id];
-    }
+  function settle(id: string) {
+    const step = async () => {
+      try {
+        return await get<Changeset>(`changesets/${encodeURIComponent(id)}`);
+      } catch {
+        return id;
+      }
+    };
+    return queue(step, (d) => (typeof d === "string" ? !unknown.includes(d) && (unknown = [...unknown, d]) : put(d)));
   }
 
   // Show the new requests in the order of the engine. A request that is no longer open stays at the end with its state.
@@ -128,7 +148,7 @@
   {#if c.state === "draft"}
     <p class="later" role="status">{author(c)} changes this request. You can decide when they submit the new version.</p>
   {/if}
-  <div class="one" data-changeset={c.id} inert={c.state === "draft" || unknown.includes(c.id)}><Request changeset={c} onchange={(d) => ((seen[d.id] = ++started), (now[d.id] = d))} /></div>
+  <div class="one" data-changeset={c.id} inert={c.state === "draft" || unknown.includes(c.id)}><Request changeset={c} {read} /></div>
 {/each}
 
 <style>

@@ -13,8 +13,9 @@
   import Comments from "./Comments.svelte";
   import { author, detail, FLAGS, itemRow, mail, TAGS, to, unmarked, key, messageRow, outcome, pages, plan, short, shown, target, targets, verb, waits, would, type Row } from "../review";
 
-  // `onchange` gets the changeset after a decision, so that the review shows it as it is now.
-  let { changeset: c, onchange = () => {} }: { changeset: Changeset; onchange?: (c: Changeset) => void } = $props();
+  // `read` runs each read and write that gives the request back, so that the review shows it as it is now.
+  // The review runs them one at a time, in its queue.
+  let { changeset: c, read = (work) => work() }: { changeset: Changeset; read?: (work: () => Promise<Changeset>) => Promise<Changeset> } = $props();
 
   // The messages endpoint takes at most 200 IDs, and the engine at most 500 decisions (issue 197).
   const PAGE = 200;
@@ -160,7 +161,7 @@
   async function refresh(why: string) {
     stale = true;
     try {
-      onchange(await get<Changeset>(`changesets/${encodeURIComponent(c.id)}`));
+      await read(() => get<Changeset>(`changesets/${encodeURIComponent(c.id)}`));
       stale = false;
       problem = why;
     } catch {
@@ -181,8 +182,7 @@
     problem = saved = "";
     const before = new Set(c.actions.filter((a) => a.decision?.state === "cancelled").map(key));
     try {
-      const after = await post<Changeset>(`changesets/${encodeURIComponent(c.id)}/withdraw`, {});
-      onchange(after);
+      const after = await read(() => post<Changeset>(`changesets/${encodeURIComponent(c.id)}/withdraw`, {}));
       asking = false;
       const gone = after.actions.filter((a) => a.decision?.state === "cancelled" && !before.has(key(a))).length;
       const going = after.actions.filter((a) => a.decision?.state === "approved").length;
@@ -212,7 +212,7 @@
     let done = 0;
     try {
       for (; done < all.length; done += BATCH) {
-        onchange(await post<Changeset>(`changesets/${encodeURIComponent(c.id)}/decide`, { actions: all.slice(done, done + BATCH) }));
+        await read(() => post<Changeset>(`changesets/${encodeURIComponent(c.id)}/decide`, { actions: all.slice(done, done + BATCH) }));
       }
       saved = [yes && `You approved ${yes === 1 ? "one change" : `${yes} changes`}.`, no && `You denied ${no === 1 ? "one change" : `${no} changes`}.`].filter(Boolean).join(" ");
     } catch (e) {

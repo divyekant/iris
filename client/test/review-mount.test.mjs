@@ -813,29 +813,80 @@ test("a new revision between two reads replaces the request on the screen, and a
       view.destroy();
     }
   }
-  // The request leaves the open list. Two reads of its state answer in the reverse order: the older stays out.
+  // The request leaves the open list. A second read of its state starts only after the first answers,
+  // so the newer answer applies last.
   {
     const approved = { ...first, state: "closed", actions: [act({ resolved: { messages: [] }, decision: { state: "approved", by: "person" } })] };
     const applied = { ...first, state: "closed", actions: [act({ resolved: { messages: [] }, decision: { state: "applied" } })] };
     let release;
     const held = new Promise((r) => (release = r));
     let reads = 0;
-    serve({
+    const asked = serve({
       changesets: () => [200, { changesets: [] }],
       "changesets/cs-9": async () => (++reads === 1 ? (await held, [200, approved]) : [200, applied]),
     });
     const view = await mount("/src/views/Review.svelte", { changesets: [first], every: 20 });
     try {
-      // The second read answers first: the action is done.
-      await until(() => (view.flushSync(), /Done/.test(text(view.target))));
+      await until(() => reads === 1);
+      await new Promise((r) => setTimeout(r, 100));
+      assert.deepEqual(asked.filter((p) => p === "changesets" || p === "changesets/cs-9"), ["changesets", "changesets/cs-9"], "no read starts while one waits");
       release();
-      await new Promise((r) => setTimeout(r, 60));
-      view.flushSync();
-      assert.match(text(view.target), /Done/);
-      assert.doesNotMatch(text(view.target), /You approved it/);
+      await until(() => (view.flushSync(), /You approved it/.test(text(view.target))));
+      assert.equal(reads, 1, "a closed request needs no second read");
     } finally {
       view.destroy();
     }
+  }
+});
+
+test("the answer of a decision applies before a poll that comes after it, and never after (issue 184)", async () => {
+  const first = changeset([act({ resolved: { messages: [] } })]);
+  const approved = { ...first, actions: [act({ resolved: { messages: [] }, decision: { state: "approved", by: "person" } })] };
+  const applied = { ...first, actions: [act({ resolved: { messages: [] }, decision: { state: "applied" } })] };
+  let release;
+  const held = new Promise((r) => (release = r));
+  let open = [first];
+  const asked = serve({
+    changesets: () => [200, { changesets: open }],
+    "changesets/cs-9/decide": async () => (await held, [200, approved]),
+  });
+  const view = await mount("/src/views/Review.svelte", { changesets: [first], every: 20 });
+  try {
+    await until(() => !view.target.querySelector("button.primary").disabled);
+    view.target.querySelector("button.primary").click();
+    await until(() => asked.some((p) => Array.isArray(p) && p[0] === "changesets/cs-9/decide"));
+    // The store applies the change while the answer of the decision is late.
+    open = [applied];
+    const sent = asked.length;
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(asked.length, sent, "no poll starts while the decision waits");
+    release();
+    await until(() => (view.flushSync(), /Done/.test(text(view.target))));
+    await new Promise((r) => setTimeout(r, 60));
+    view.flushSync();
+    assert.match(text(view.target), /Done/, "the older answer of the decision does not come back");
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a request on the screen that leaves the open list goes to the end with no Show, and keeps its part (issue 184)", async () => {
+  const first = changeset([act({ resolved: { messages: [] } })]);
+  const second = { ...changeset([act({ resolved: { messages: [] } })]), id: "cs-10", author: { kind: "agent", name: "Codex" } };
+  let open = [first, second];
+  serve({ changesets: () => [200, { changesets: open }], "changesets/cs-9": [200, { ...first, state: "withdrawn", withdrawn_by: "author" }] });
+  const view = await mount("/src/views/Review.svelte", { changesets: [first, second], every: 20 });
+  try {
+    const shown = () => [...view.target.querySelectorAll("[data-changeset]")].map((el) => el.dataset.changeset);
+    const before = view.target.querySelector("[data-changeset=cs-9]");
+    assert.deepEqual(shown(), ["cs-9", "cs-10"]);
+    open = [second];
+    await until(() => (view.flushSync(), /withdrew this request/.test(text(view.target))));
+    assert.deepEqual(shown(), ["cs-10", "cs-9"]);
+    assert.equal(view.target.querySelector("[data-changeset=cs-9]"), before, "the request keeps its part");
+    assert.doesNotMatch(text(view.target), /new request/);
+  } finally {
+    view.destroy();
   }
 });
 
