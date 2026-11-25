@@ -297,15 +297,17 @@ after "Change and send" in the write view. For a reply, the form is under
 the conversation of its thread. The form of a draft link has its own
 place in the session storage (`iris.write.d-N`), so it never replaces
 the unfinished form of a new mail or of a reply, and a reload keeps its
-changes. If `change` is `null` when the link first opens, the form is
-empty, and the view says why: the message of the table
-when `newer` is true, else "This draft cannot change now. Write a new
-mail here.". The form never shows a saved form of another mail, and
-never an automatic draft of the thread. If the thread of such a reply
-draft has no mail to answer now (its parent is in Trash, for example),
-the link opens the form of a new mail, and `newer` is false. Only the
-409 of the reply read says this. Each other failure shows, so the
-person can try again.
+changes. The form never takes an automatic draft of the thread. The next
+press sends `draft` only when `change` is `"update"` now.
+
+If `change` is `null` when the link opens, the view shows no form. It
+says why and links to a new write: "A new mail came into this thread.
+Write a new reply." with a link to the reply of the thread when `newer`
+is true, else "This draft cannot change now." with a link to a new mail.
+A saved form of the draft link does not show. `newer` is true only when
+the message that a reply answers now comes after the parent of the
+draft, in the order of `reply_parent`. When the parent of the draft is
+in Trash and an older mail is the parent now, `newer` is false.
 
 If the draft read of the Outbox fails after a cancel, each later poll of
 the Outbox tries it again, until the engine answers.

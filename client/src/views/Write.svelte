@@ -18,7 +18,7 @@
 -->
 <script lang="ts">
   import { onDestroy, untrack } from "svelte";
-  import { get, own, post, upload, type Account, type Attachment, type DraftContent, type ReplyStart, type ThreadDraft, type WriteState } from "../api";
+  import { get, NEWER_MAIL, own, post, upload, type Account, type Attachment, type DraftContent, type ReplyStart, type ThreadDraft, type WriteState } from "../api";
   import { chips, unique } from "../chips";
   import { bytes, initials, PROVIDER, when } from "../format";
   import { FLAGS } from "../review";
@@ -109,18 +109,15 @@
   // #/write/d-N (issue 941): the form opens with the content of the draft, as
   // after "Change and send" in this view. For `update`, the next press changes
   // the same draft. A reload keeps the form of this place.
-  // A reply draft answers an older mail of its thread (draft change spec, section 5).
-  const NEWER = "A new mail came into this thread. Write a new reply.";
   const fromDraft = (d: DraftContent): Saved => ({
     account: d.account, to: d.to, cc: d.cc, bcc: d.bcc, files: d.attachments, subject: d.subject, body: d.body,
     key: "", sig: "", flags: [], draft: d.change === "update" ? { draft: d.draft, account: d.account } : null,
   });
-  let changeNote = $state(!opened ? "" : opened.change ? "This is the draft that you cancelled. Change it, then press Send." : opened.newer ? NEWER : "This draft cannot change now. Write a new mail here.");
-  // A draft link opens its own saved form (after a reload), else the draft,
-  // else a fresh form. The draft that the next press changes is the one that
-  // the engine allows now.
-  const kept_ = opened ? (restore() ?? (opened.change ? fromDraft(opened) : null)) : null;
-  const saved = !opened ? restore() : kept_ && { ...kept_, draft: fromDraft(opened).draft };
+  let changeNote = $state(opened ? "This is the draft that you cancelled. Change it, then press Send." : "");
+  // A draft link (only for a draft that can change now) opens its own saved
+  // form after a reload, else the draft. The next press changes the draft
+  // only as the engine allows now.
+  const saved = opened ? { ...(restore() ?? fromDraft(opened)), draft: fromDraft(opened).draft } : restore();
   let account = $state(saved?.account ?? reply?.account ?? (accounts[0] ? `a-${accounts[0].id}` : ""));
   let to = $state<string[]>(unique(saved?.to ?? reply?.to ?? []));
   const startCc = unique(saved?.cc ?? reply?.cc ?? []);
@@ -542,7 +539,7 @@
     {:else}
       <h2 class="stop">This mail did not leave</h2>
       <p class="muted">{ws.reason}</p>
-      {#if ws.newer}<p class="muted">{NEWER}</p>{/if}
+      {#if ws.newer}<p class="muted">{NEWER_MAIL}</p>{/if}
       <div class="row">
         {#if ws.change && ws.draft}<button type="button" class="pill" onclick={changeIt} disabled={busy}>Change and send</button>{/if}
         <!-- While the draft loads, Write another waits: the draft fills only its own form. -->

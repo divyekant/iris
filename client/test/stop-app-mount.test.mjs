@@ -71,3 +71,31 @@ test("an open app shows a stop at the terminal within 30 seconds, with no naviga
     Object.assign(stopState, { stopped: false, since: null, known: true });
   }
 });
+
+test("#/write/d-N of a draft that cannot change shows why and a link, with no form (issue 941)", async () => {
+  const DRAFT = { draft: "d-7", account: "a-1", thread: "t-2", to: [], cc: [], bcc: [], subject: "Re: Q4", body: "Old.\n", attachments: [], change: null };
+  let newer = true;
+  globalThis.fetch = (url) => {
+    const path = String(url).replace(/^\/api\//, "");
+    const out = path === "drafts/d-7" ? { ...DRAFT, newer } : path === "stop" ? { stopped: false, since: null, live: 0, busy: false } : null;
+    if (!out) return new Promise(() => {});
+    return Promise.resolve(new Response(JSON.stringify(out), { status: 200, headers: { "content-type": "application/json" } }));
+  };
+  for (const name of ["location", "addEventListener", "removeEventListener", "scrollTo"]) {
+    globalThis[name] ??= typeof window[name] === "function" ? window[name].bind(window) : window[name];
+  }
+  for (const [n, words, link] of [[true, /A new mail came into this thread\. Write a new reply\./, "#/write/t-2"], [false, /This draft cannot change now\./, "#/write"]]) {
+    newer = n;
+    location.hash = "#/write/d-7";
+    const app = await mount("/src/App.svelte");
+    try {
+      await until(() => app.target.querySelector("main p.problem a"));
+      const p = app.target.querySelector("main p.problem");
+      assert.match(p.textContent, words);
+      assert.equal(p.querySelector("a").getAttribute("href"), link);
+      assert.equal(app.target.querySelector("main form"), null, "no form");
+    } finally {
+      app.destroy();
+    }
+  }
+});

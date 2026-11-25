@@ -1079,10 +1079,10 @@ test("Write another waits while the draft loads, and a draft holds only for its 
   }
 });
 
-test("#/write/d-N opens the form with the draft; update sends the draft, new does not, and null opens an empty form (issue 941)", async () => {
+test("#/write/d-N opens the form with the draft; update sends the draft, new does not (issue 941)", async () => {
   const DRAFT = { draft: "d-7", account: "a-1", thread: null, to: ["sam@okafor.example"], cc: ["kim@example.com"], bcc: [],
-                  subject: "Dinner on Saturday?", body: "Hi Sam,\n\nAre you free?\n", attachments: [] };
-  for (const change of ["update", "new", null]) {
+                  subject: "Dinner on Saturday?", body: "Hi Sam,\n\nAre you free?\n", attachments: [], newer: false };
+  for (const change of ["update", "new"]) {
     window.sessionStorage.clear();
     // A write of the new-mail form does not show in the form of the draft.
     window.sessionStorage.setItem("iris.write.new.taken", JSON.stringify({ write: "cs-9", to: ["x@example.com"], subject: "Old", body: "Old" }));
@@ -1096,16 +1096,8 @@ test("#/write/d-N opens the form with the draft; update sends the draft, new doe
     const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: { ...DRAFT, change } }, every: 20 });
     try {
       app.flushSync();
-      const form = app.target.querySelector("form");
-      assert.ok(form, `${change}: the form shows`);
-      if (change === null) {
-        assert.match(text(app.target), /This draft cannot change now\./);
-        assert.equal(app.target.querySelector("textarea").value, "");
-        assert.equal(app.target.querySelector("input.subject").value, "");
-        assert.doesNotMatch(text(app.target), /old@example\.com/, "no address of the other mail");
-        continue;
-      }
       assert.match(text(app.target), /This is the draft that you cancelled\./);
+      assert.doesNotMatch(text(app.target), /old@example\.com/, "no address of the other mail");
       assert.equal(app.target.querySelector("input.subject").value, "Dinner on Saturday?");
       assert.equal(app.target.querySelector("textarea").value, "Hi Sam,\n\nAre you free?\n");
       press(app);
@@ -1121,7 +1113,7 @@ test("#/write/d-N opens the form with the draft; update sends the draft, new doe
   }
 });
 
-test("a reply draft with a newer mail in its thread says so, from the draft link and from a stopped write", async () => {
+test("a reply draft link keeps the draft text, not an automatic draft; a stopped write names a newer mail", async () => {
   const net = serve((path, method) => {
     if (method === "POST" && path === "write") return [201, { write: "cs-1" }];
     if (path === "write/cs-1") return [200, { state: "stopped", reason: "You stopped this mail.", draft: "d-7", change: null, newer: true }];
@@ -1129,16 +1121,13 @@ test("a reply draft with a newer mail in its thread says so, from the draft link
     if (method === "GET" && path === "threads/t-2/draft") return [200, { body: "Hi Priya,\n\nYes.", based_on: "m-9", nudge: false }];
     return [404, { error: "Not found." }];
   });
-  const DRAFT = { draft: "d-7", account: "a-1", thread: "t-2", to: ["old@example.com"], cc: [], bcc: [],
-                  subject: "Re: Q4", body: "Old reply.\n", attachments: [], change: null, newer: true };
+  const DRAFT = { draft: "d-7", account: "a-1", thread: "t-2", to: ["priya@example.com"], cc: [], bcc: [],
+                  subject: "Re: Q4", body: "", attachments: [], change: "update", newer: false };
   let app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY, change: DRAFT }, every: 20 });
   try {
-    app.flushSync();
-    assert.match(text(app.target), /A new mail came into this thread\. Write a new reply\./);
-    assert.doesNotMatch(text(app.target), /This draft cannot change now/);
     await new Promise((r) => setTimeout(r, 60));
     app.flushSync();
-    assert.equal(app.target.querySelector("textarea").value, "", "a fresh reply: not the old text, not an automatic draft");
+    assert.equal(app.target.querySelector("textarea").value, "", "the text of the draft, not an automatic draft");
   } finally {
     app.destroy();
   }
@@ -1156,34 +1145,24 @@ test("a reply draft with a newer mail in its thread says so, from the draft link
   }
 });
 
-test("loadChange: a reply draft that cannot change opens a new mail when its thread has no mail to answer (issue 941)", async () => {
+test("loadChange: a draft that cannot change opens no form, and reads nothing more (issue 941)", async () => {
   const api = await load("/src/api.ts");
   const DRAFT = { draft: "d-7", account: "a-1", thread: "t-2", to: ["priya@example.com"], cc: [], bcc: [],
-                  subject: "Re: Q4", body: "Old.\n", attachments: [], newer: false };
+                  subject: "Re: Q4", body: "Old.\n", attachments: [], newer: true };
   for (const change of [null, "update"]) {
     const net = serve((path) => {
       if (path === "drafts/d-7") return [200, { ...DRAFT, change }];
       if (path === "threads/t-2/reply") return [409, { error: "This thread has no mail to reply to." }];
-      if (path === "status") return [200, { accounts: ACCOUNTS }];
       return [404, { error: "Not found." }];
     });
     try {
       if (change === null) {
         const start = await api.loadChange("d-7");
-        assert.equal(start.thread, undefined, "a new mail, not a reply");
-        assert.deepEqual(start.accounts, ACCOUNTS);
-        assert.equal(start.change.change, null);
-        // Another failure of the reply read is not a thread with no mail: it shows.
-        net.restore();
-        const down = serve((path) => (path === "drafts/d-7" ? [200, { ...DRAFT, change }] : [500, { error: "The engine stopped." }]));
-        try {
-          await assert.rejects(api.loadChange("d-7"), /The engine stopped\./);
-        } finally {
-          down.restore();
-        }
+        assert.deepEqual(start, { closed: { ...DRAFT, change: null } });
+        assert.deepEqual(net.asked.map((a) => a.path), ["drafts/d-7"]);
       } else {
         // A draft that can change needs its thread: the error shows.
-        await assert.rejects(api.loadChange("d-7"));
+        await assert.rejects(api.loadChange("d-7"), /no mail to reply to/);
       }
     } finally {
       net.restore();
@@ -1194,7 +1173,7 @@ test("loadChange: a reply draft that cannot change opens a new mail when its thr
 test("a draft link keeps its own form: the unfinished new mail stays, and a reload keeps the changes (issue 941)", async () => {
   const DRAFT = { draft: "d-7", account: "a-1", thread: null, to: ["sam@okafor.example"], cc: [], bcc: [],
                   subject: "Dinner on Saturday?", body: "Hi Sam,\n", attachments: [], change: "update", newer: false };
-  const net = serve(() => [404, { error: "Not found." }]);
+  const net = serve((path, method) => (method === "POST" && path === "write" ? [201, { write: "cs-1" }] : path === "write/cs-1" ? [200, { state: "saving" }] : [404, { error: "Not found." }]));
   try {
     // An unfinished new mail.
     let app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
@@ -1212,6 +1191,14 @@ test("a draft link keeps its own form: the unfinished new mail stays, and a relo
     app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: DRAFT }, every: 20 });
     app.flushSync();
     assert.equal(app.target.querySelector("textarea").value, "Hi Sam, changed.\n", "a reload keeps the changes");
+    app.destroy();
+    // The draft can change now only as a new draft: the kept form does not send the old draft.
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: { ...DRAFT, change: "new" } }, every: 20 });
+    app.flushSync();
+    assert.equal(app.target.querySelector("textarea").value, "Hi Sam, changed.\n");
+    press(app);
+    await until(() => net.posts().length === 1);
+    assert.equal(net.posts()[0].body.draft, undefined, "a new draft");
     app.destroy();
     // Back to the new mail: it is still there.
     app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });

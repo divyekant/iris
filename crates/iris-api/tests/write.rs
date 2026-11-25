@@ -1090,6 +1090,17 @@ async fn a_stopped_reply_changes_only_for_its_parent() {
         "{st} {d}"
     );
     set("UPDATE message SET gone_at = NULL WHERE thread_id = 1");
+    // The parent of the draft and the newer mail are gone: the older m-1 is
+    // the parent now. It is not newer.
+    set("UPDATE message SET gone_at = 1 WHERE id IN (2, 3)");
+    let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    let (_, d) = call(&s, "GET", "/api/drafts/d-1", None).await;
+    assert_eq!(
+        (&st["newer"], &d["newer"], &d["change"]),
+        (&json!(false), &json!(false), &Value::Null),
+        "{st} {d}"
+    );
+    set("UPDATE message SET gone_at = NULL WHERE thread_id = 1");
     set("UPDATE account SET provider = 'outlook' WHERE id = 1");
     assert_eq!(change(&s, &cs).await, Value::Null);
     set("UPDATE account SET provider = 'gmail' WHERE id = 1");

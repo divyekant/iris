@@ -1,10 +1,10 @@
 <script lang="ts">
   import { access } from "./access.svelte.ts";
-  import { followSignIn, get, loadBrief, loadChange, loadOutbox, own, type Changeset, type GatePage, type HandledPage, type LedgerPage, type JobDetail, type JobPage, type MatterList, type MatterView, type Item as ItemData, type Message as MessageData, type Page, type Policy, type ReplyStart, type Status } from "./api";
+  import { followSignIn, get, loadBrief, loadChange, loadOutbox, NEWER_MAIL, own, type Changeset, type GatePage, type HandledPage, type LedgerPage, type JobDetail, type JobPage, type MatterList, type MatterView, type Item as ItemData, type Message as MessageData, type Page, type Policy, type ReplyStart, type Status } from "./api";
   import { home } from "./format";
   import { pageSize } from "./jobs";
   import type { Measures as MeasuresData } from "./measures";
-  import { NAV, parse, SECTIONS, type Route } from "./route";
+  import { href, NAV, parse, SECTIONS, type Route } from "./route";
   import Setup from "./views/Setup.svelte";
   import Brief from "./views/Brief.svelte";
   import List from "./views/List.svelte";
@@ -168,7 +168,14 @@
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "write"}
       {#if route.draft}
-        {#await loadChange(route.draft) then start}<Write {start} />{:catch error}{@render failed(error)}{/await}
+        {#await loadChange(route.draft) then start}
+          {#if "closed" in start}
+            {@const d = start.closed}
+            <p class="problem" role="status">
+              {#if d.newer && d.thread}{NEWER_MAIL} <a href={href.reply(d.thread)}>Write a new reply</a>{:else}This draft cannot change now. <a href="#/write">Write a new mail</a>{/if}
+            </p>
+          {:else}<Write {start} />{/if}
+        {:catch error}{@render failed(error)}{/await}
       {:else if route.thread}
         {@const thread = route.thread}
         {#await get<ReplyStart>(`threads/${encodeURIComponent(thread)}/reply`) then reply}<Write start={{ thread, reply }} />{:catch error}{@render failed(error)}{/await}

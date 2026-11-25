@@ -363,24 +363,22 @@ export type OutboxSend = {
 export type Outbox = { sending: { on: boolean; since: string | null }; count: number; sends: OutboxSend[]; next: string | null };
 
 /** The whole outbox: each page of GET /api/outbox, so no send that can leave is hidden. */
+/** The words of a reply draft whose thread has a newer mail (draft change spec, section 5). */
+export const NEWER_MAIL = "A new mail came into this thread. Write a new reply.";
+
 /**
- * The start of #/write/d-N (issue 941): the draft, under its thread for a
- * reply. A reply draft that cannot change opens a new mail when its thread
- * has no mail to answer now, so the person can still write.
+ * The start of #/write/d-N (issue 941): the form of a draft that can change,
+ * under its thread for a reply. A draft that cannot change opens no form
+ * (`closed`): the view says why and links to a new mail or a new reply.
  */
-export async function loadChange(
-  id: string,
-): Promise<{ change: DraftContent } & ({ thread: string; reply: ReplyStart } | { accounts: Status["accounts"] })> {
+export type ChangeStart =
+  | ({ change: DraftContent } & ({ thread: string; reply: ReplyStart } | { accounts: Status["accounts"] }))
+  | { closed: DraftContent };
+
+export async function loadChange(id: string): Promise<ChangeStart> {
   const change = await get<DraftContent>(`drafts/${encodeURIComponent(id)}`);
-  if (change.thread) {
-    try {
-      return { thread: change.thread, reply: await get<ReplyStart>(`threads/${encodeURIComponent(change.thread)}/reply`), change };
-    } catch (e) {
-      // Only the 409 of the reply read says that the thread has no mail to
-      // answer. Each other failure shows, so the person can try again.
-      if (change.change !== null || (e as { status?: number }).status !== 409) throw e;
-    }
-  }
+  if (!change.change) return { closed: change };
+  if (change.thread) return { thread: change.thread, reply: await get<ReplyStart>(`threads/${encodeURIComponent(change.thread)}/reply`), change };
   return { accounts: (await get<Status>("status")).accounts, change };
 }
 

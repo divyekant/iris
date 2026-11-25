@@ -305,15 +305,22 @@ fn change(store: &Store, c: &Connection, draft: i64, now_ms: i64) -> rusqlite::R
     if let Some(thread) = thread {
         let answers = iris_changeset::draft_parent(c, draft).map_err(db)?;
         let now = iris_changeset::reply_parent(c, thread)?;
-        if answers.is_none() || now.is_none() {
-            // No mail to answer now (the parent is in Trash, for example):
-            // no newer mail either.
+        let (Some(answers), Some(now)) = (answers, now) else {
             return Ok(CANNOT);
-        }
+        };
         if answers != now {
+            // `newer` only when the parent now comes after the parent of the
+            // draft, in the order of `reply_parent`. When the parent of the
+            // draft is in Trash, an older mail is the parent now: not newer.
+            let newer: Option<bool> = c.query_row(
+                "SELECT (coalesce(b.internal_date, -1), b.id) > (coalesce(a.internal_date, -1), a.id)
+                 FROM message a, message b WHERE a.id = ?1 AND b.id = ?2",
+                [answers, now],
+                |r| r.get(0),
+            )?;
             return Ok(Can {
                 change: None,
-                newer: true,
+                newer: newer.unwrap_or(false),
             });
         }
     }

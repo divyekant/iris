@@ -36,7 +36,9 @@
     if (!d || checking.has(at)) return;
     checking.add(at);
     get<DraftContent>(`drafts/${encodeURIComponent(d)}`).then(
-      (v) => (notes = notes.map((n, i) => (i === at ? { text: n.text, ...(v.change ? { change: d } : {}) } : n))),
+      // The engine answered: the note has no `check` any more, so no poll reads it again.
+      (v) => (notes = notes.map((n, i) => (i === at ? (v.change ? { text: n.text, change: d } : { text: n.text }) : n))),
+      // No answer: `check` stays, and the next poll tries again.
       () => {},
     ).finally(() => checking.delete(at));
   }

@@ -287,6 +287,7 @@ test("a cancelled send links to Change and send only when the engine says that i
 test("a failed read of the draft after a cancel is tried again at the next poll (issue 941)", async () => {
   let sends = fx.outbox().sends;
   let reads = 0;
+  let nulls = 0;
   const net = serve((path, method) => {
     const cancel = path.match(/^outbox\/(d-\d+)\/cancel$/);
     if (method === "POST" && cancel) {
@@ -295,6 +296,7 @@ test("a failed read of the draft after a cancel is tried again at the next poll 
     }
     // The engine restarts during the first read of the draft.
     if (path === "drafts/d-14") return ++reads === 1 ? [500, { error: "The engine stopped." }] : [200, { draft: "d-14", change: "update" }];
+    if (path === "drafts/d-15") return (nulls++, [200, { draft: "d-15", change: null }]);
     return [200, { ...fx.outbox(), count: sends.length, sends }];
   });
   const app = await mount("/src/views/Outbox.svelte", { first: fx.outbox(), every: 20 });
@@ -306,6 +308,12 @@ test("a failed read of the draft after a cancel is tried again at the next poll 
     assert.equal(reads, 2, "one failed read, then one read that answered");
     await new Promise((r) => setTimeout(r, 80));
     assert.equal(reads, 2, "an answered read is not made again");
+    // A draft that cannot change: one answered read, no link, and no read again.
+    [...app.target.querySelectorAll("li.card")].find((c) => c.textContent.includes("Renewal")).querySelector("button").click();
+    await until(() => nulls === 1);
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(nulls, 1, "an answer with no change is not read again");
+    assert.deepEqual(links(), ["#/write/d-14"]);
   } finally {
     app.destroy();
     net.restore();
