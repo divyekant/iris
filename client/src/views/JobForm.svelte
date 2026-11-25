@@ -46,7 +46,12 @@
     event.preventDefault();
     if (!ready) return;
     sending = true;
-    note = await save(goal.trim(), keepDue(old, due));
+    try {
+      note = await save(goal.trim(), keepDue(old, due));
+    } catch (e) {
+      // keepDue refuses a day that the owner zone skipped (issue 987).
+      note = (e as Error).message;
+    }
     sending = false;
   }
 </script>

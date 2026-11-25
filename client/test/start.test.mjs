@@ -96,3 +96,17 @@ test("the due date of a job is a day of the owner zone, not of the browser (issu
     process.env.TZ = zone;
   }
 });
+
+test("endOfDay refuses a day that the owner zone skipped, and keeps the days around it (issue 987)", () => {
+  const { today } = act;
+  // Pacific/Apia skipped 2011-12-30, Pacific/Kwajalein skipped 1993-08-21.
+  for (const [tz, gone] of [["Pacific/Apia", "2011-12-30"], ["Pacific/Kwajalein", "1993-08-21"]]) {
+    assert.throws(() => s.endOfDay(gone, tz), /does not exist in the time zone/, `${tz} ${gone}`);
+    assert.throws(() => s.keepDue(undefined, gone, tz), /does not exist/);
+    assert.throws(() => s.dueValue({}, gone, tz), /does not exist/);
+    for (const near of [-2, -1, 1, 2]) {
+      const t = new Date(Date.parse(`${gone}T12:00:00Z`) + near * 86_400_000).toISOString().slice(0, 10);
+      assert.equal(today(new Date(Date.parse(s.endOfDay(t, tz))), tz), t, `${tz} ${t}`);
+    }
+  }
+});
