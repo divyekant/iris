@@ -859,6 +859,8 @@ from quarantine (`POST /api/messages/{id}/release`):
   after new content), the marks can be from old content, so a release
   gives 409 with no write.
 - A gone message gives 409 with no write, for a release and for an undo.
+- The web client offers Release in the hostile warning of a message with a
+  mark that a release covers, and Undo on a released message.
 
 The display name is input that Iris does not control. This is the failure
 list of the name-address part of the mark `spoof` (decision D32):
