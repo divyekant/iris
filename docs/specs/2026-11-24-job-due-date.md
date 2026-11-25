@@ -27,10 +27,9 @@ moves to "needs you", with a notice. Ending the job is too strong.
 
 - A change of the due date after the start. Card P9-D25 (decision D25)
   adds the edit. This spec says how an edit and this move work together.
-- A notice for the questions of an agent (`iris ask`). They have none
-  today. This card does not change that.
-- A row in the notice list of the web client or of the Mac app for the
-  move. See "Known limits".
+- A notice for the questions of an agent (`iris ask`), and a row in the
+  notice list for the move: `docs/specs/2026-11-25-job-notices.md` adds
+  both (issues #844, #845).
 
 ## Design
 
