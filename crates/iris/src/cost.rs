@@ -567,13 +567,19 @@ pub fn propose_matters(
     gate: iris_matters::Gate,
     now_ms: i64,
 ) -> Result<Option<String>, String> {
-    use iris_matters::Skip;
     let connect = |row: &ModelRow| connect(store, row);
     let o = match iris_matters::propose(store, &connect, gate, now_ms) {
         Ok(o) => o,
         Err(iris_matters::Error::Busy) => return Ok(None),
         Err(e) => return Err(e.to_string()),
     };
+    Ok(Some(matters_line(&o)))
+}
+
+/// The line that `iris matters propose` and `iris serve` print for one
+/// step: what it did, with the counts of proposals and additions.
+fn matters_line(o: &iris_matters::Outcome) -> String {
+    use iris_matters::Skip;
     let what = match o.skip {
         Some(Skip::NoModel) => "no model is set".to_string(),
         Some(Skip::Wait) => "the wait after a model error is not over".into(),
@@ -582,12 +588,15 @@ pub fn propose_matters(
         Some(Skip::Same) => "the candidates did not change since the last answer".into(),
         Some(Skip::Budget) => "the budget cannot pay the call; approve a budget to go on".into(),
         None if o.failed => "the model call failed; the step tries again after the wait".into(),
-        None => format!("{} new proposals, {} dropped", o.proposed, o.dropped),
+        None => format!(
+            "{} new proposals, {} items to add, {} dropped",
+            o.proposed, o.added, o.dropped
+        ),
     };
-    Ok(Some(format!(
+    format!(
         "Matters: {what}. {} proposals that were not valid now are gone.",
         o.cleaned
-    )))
+    )
 }
 
 fn report_of(store: &Store, r: &Report) -> Result<String, String> {
@@ -643,6 +652,22 @@ fn report_text(r: &Report, left: Option<Option<i64>>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_matters_line_counts_the_additions() {
+        let o = iris_matters::Outcome {
+            proposed: 1,
+            added: 3,
+            dropped: 2,
+            cleaned: 4,
+            ..Default::default()
+        };
+        assert_eq!(
+            matters_line(&o),
+            "Matters: 1 new proposals, 3 items to add, 2 dropped. \
+             4 proposals that were not valid now are gone."
+        );
+    }
 
     #[test]
     fn amounts_parse_with_bounds() {

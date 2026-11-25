@@ -55,7 +55,12 @@ pending state that the store gives. Each one has an issue:
   after a failed store write of the run marks no mail (#156). The model
   row holds the wait (`model_setting.retry_failures` and `retry_at`,
   schema 5), so `iris serve` and each `iris mirror sync` command see the
-  same wait, and `iris model set` (a new row) ends it. Only evidence of the
+  same wait, and `iris model set` (a new row) ends it. "Try now" of the web
+  client (`POST /api/model/try`, decision D35) sets `retry_at` to now and
+  keeps `retry_failures`, and it opens the hourly gate of the matters
+  proposal step (matters spec): the next run calls the model, and a new failure
+  doubles the wait again. `/api/status` gives the end of a running wait as
+  `model_retry_at`. Only evidence of the
   model changes the wait: each run that can call the model updates it in
   its end write, under the run lock. A model failure doubles it, a run with
   a call and no model failure ends it and clears the marks, and a run with no call
@@ -112,6 +117,14 @@ section 6.7), so it gets its hostile marks also while an older message
 waits for the budget or for its `retry_at`. A message whose hostile state
 depends on its own headers (marks `dmarc`, `spoof`) is not known before
 write 1, so it waits like other mail.
+
+The same exception applies to a message whose `From` sender is a stranger
+that the person declined at the gate (decision D29, spec 1 section 6.7).
+Such mail never goes to a model either, so the model wait (`waits_model`,
+the try limit, `retry_at`) does not hold it: the pending condition reads
+the decline of the sender at each run. The estimate counts no call for it.
+Mail with no header row yet is not known as such mail, so it counts and
+waits like other mail until its first read.
 
 So a message gets the thread context of each older message that can still
 be understood (spec 1 sections 7.1 and 7.4). `store::understand` keeps its

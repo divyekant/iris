@@ -153,6 +153,7 @@ fn rule(r: &Rule) -> Value {
     );
     put("author", w.author.map(|v| json!(v.name())));
     put("older_than_days", w.older_than_days.map(|v| json!(v)));
+    put("recipients", w.recipients.map(|v| json!(v.name())));
     json!({
         "id": r.id,
         "name": r.name,
@@ -238,6 +239,10 @@ pub fn grant(
     }
     if list.is_empty() {
         return Err(Error::Query("a grant needs one or more verbs".into()));
+    }
+    // A draft grant has the condition `recipients`, which only `draft` takes.
+    if list.len() > 1 && list.contains(&iris_policy::Verb::Draft) {
+        return Err(Error::Query("a grant of draft has no other verb".into()));
     }
     let state = match iris_job::get(store, row) {
         Ok(j) => j.state,

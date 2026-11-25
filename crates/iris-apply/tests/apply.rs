@@ -481,7 +481,10 @@ fn a_withdraw_during_the_apply_keeps_the_action() {
     b.fake.modify_labels(&b.provider_id(ms[0]), &[], &["INBOX"]);
     b.store
         .write(|tx| {
-            tx.execute("UPDATE changeset SET state = 'withdrawn'", [])?;
+            tx.execute(
+                "UPDATE changeset SET state = 'withdrawn', withdrawn_by = 'person'",
+                [],
+            )?;
             tx.execute(
                 "INSERT INTO policy_version(text, sha256, confirmed_at)
                  VALUES ('version = 0\nmode = \"observe\"\n', 'h3', 3)",
@@ -956,35 +959,115 @@ fn observe_applies_nothing() {
     assert_eq!(b.fake.requests().len(), before);
 }
 
-/// Before the ledger, no rule approval applies: two actions of 300
-/// messages that a rule approved would go past the bulk limit of 500
-/// (section 5.4). Each goes to review, and a person approval applies.
+/// An active policy whose rule 1 allows each `archive` of an agent.
+const ALLOW_ARCHIVE: &str = "version = 0\nmode = \"apply\"\n\n[[rule]]\nid = 1\n\
+    name = \"Archive\"\neffect = \"allow\"\nverbs = [\"archive\"]\n\
+    when = { author = \"agent\" }\nby = \"person\"\nadded = 2026-11-10\n";
+
+/// The decision columns of an approval by rule 1 of policy version 1.
+const RULE: &str = "decided_by = 'rule', rule = 1, policy = 1, decided_at = 2";
+
+/// Add a policy version with `text`, which becomes the active policy.
+fn new_policy(b: &Box, text: &str) {
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES (?1, 'h2', 3)",
+                [text],
+            )?)
+        })
+        .unwrap();
+}
+
+/// Section 5.4 (issue #168): an action that a rule approved applies with
+/// no review by a person while the active policy still allows it.
 #[test]
-fn a_rule_approval_goes_to_review() {
-    let b = setup("rule", 40, Some(APPLY_POLICY));
+fn a_rule_approval_applies_while_the_policy_allows_it() {
+    let b = setup("rule-ok", 40, Some(ALLOW_ARCHIVE));
     let ms = b.messages(IN_INBOX, 2);
-    for policy in [1, 2] {
-        if policy == 2 {
-            b.store
-                .write(|tx| {
-                    Ok(tx.execute(
-                        "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES (?1, 'h2', 3)",
-                        [APPLY_POLICY],
-                    )?)
-                })
-                .unwrap();
+    let a = b.approved("archive", &ms, RULE);
+    applied(b.apply(a));
+    assert_eq!(b.state(a), ("applied".into(), "rule".into()));
+}
+
+/// A rule that the person removed, or that denies now, while the action
+/// waited, applies nothing: the action gets the new result, by `engine`,
+/// with no call to Gmail.
+#[test]
+fn a_changed_policy_stops_a_rule_approval() {
+    let deny = ALLOW_ARCHIVE.replace("effect = \"allow\"", "effect = \"deny\"");
+    for (text, want) in [(APPLY_POLICY, "in_review"), (deny.as_str(), "denied")] {
+        let b = setup(&format!("rule-gone-{want}"), 40, Some(ALLOW_ARCHIVE));
+        let ms = b.messages(IN_INBOX, 2);
+        let a = b.approved("archive", &ms, RULE);
+        new_policy(&b, text);
+        match b.apply(a).unwrap() {
+            Outcome::Review(_) if want == "in_review" => {}
+            Outcome::Denied(_) if want == "denied" => {}
+            other => panic!("{other:?}"),
         }
-        let a = b.approved(
-            "archive",
-            &ms,
-            &format!("decided_by = 'rule', rule = 1, policy = {policy}, decided_at = 2"),
-        );
-        assert!(matches!(b.apply(a), Ok(Outcome::Review(_))));
-        assert_eq!(b.state(a), ("in_review".into(), "engine".into()));
+        assert_eq!(b.state(a), (want.into(), "engine".into()));
+        assert_eq!(b.calls("messages"), 0);
     }
-    assert_eq!(b.calls("messages"), 0);
-    let ok = b.approved("archive", &ms, PERSON);
-    applied(b.apply(ok));
+}
+
+/// A rule approval of `label` with a name that Gmail does not have makes no
+/// label: the create is a write call before the claim, and a policy change
+/// during it cannot stop it. The action goes to review. The author is an
+/// agent with no job, so a label that exists also goes to review (D14).
+#[test]
+fn a_rule_approval_makes_no_new_label() {
+    let text = ALLOW_ARCHIVE.replace("verbs = [\"archive\"]", "verbs = [\"label\"]");
+    let b = setup("rule-label", 40, Some(&text));
+    let ms = b.messages(IN_INBOX, 2);
+    let args = serde_json::json!({ "label": "Rule new" }).to_string();
+    let a = b.approved_args("label", &args, &ms, RULE, now());
+    assert!(matches!(b.apply(a), Ok(Outcome::Review(_))));
+    assert_eq!(b.state(a), ("in_review".into(), "engine".into()));
+    assert_eq!(b.calls("labels"), 0);
+    // The person makes the label. A later rule approval still goes to
+    // review: an agent with no job is marked, and a label of a marked author
+    // always needs a person (decision D14).
+    applied(b.apply(b.labelled("label", "Rule new", &ms[..1])));
+    let again = b.approved_args("label", &args, &ms, RULE, now());
+    let r = b.apply(again);
+    assert!(
+        matches!(&r, Ok(Outcome::Review(why)) if why.contains(iris_policy::MARKED_REASON)),
+        "{r:?}"
+    );
+    assert_eq!(b.state(again), ("in_review".into(), "engine".into()));
+}
+
+/// Two changesets of one author, 300 messages each, that a rule approved
+/// before either applies: the first applies, and the second goes past 500
+/// messages in the last hour, gets `bulk` at apply and goes to review. A
+/// person approval does not count, and applies.
+#[test]
+fn rule_approvals_of_one_author_stop_at_the_bulk_limit() {
+    let b = setup("rule-bulk", 1500, Some(ALLOW_ARCHIVE));
+    let ms = b.messages(IN_INBOX, 900);
+    assert_eq!(ms.len(), 900);
+    let first = b.approved("archive", &ms[..300], RULE);
+    let second = b.approved("archive", &ms[300..600], RULE);
+    applied(b.apply(first));
+    assert!(matches!(b.apply(second), Ok(Outcome::Review(r)) if r.contains("bulk")));
+    assert_eq!(b.state(second), ("in_review".into(), "engine".into()));
+    let flags: String = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT flags FROM changeset_action WHERE id = ?1",
+                [second],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        flags, r#"["bulk"]"#,
+        "the flag of the apply stays on the action"
+    );
+    let person = b.approved("archive", &ms[600..], PERSON);
+    applied(b.apply(person));
 }
 
 /// The hash check, another account, a verb with no apply, and a state that
@@ -2242,7 +2325,17 @@ fn a_later_entry_blocks_the_older_undo_after_a_failed_undo() {
         other => panic!("{other:?}"),
     }
     assert!(!b.gmail_labels(ms[0]).contains(&"INBOX".to_string()));
+    assert_eq!(b.mirror_labels(ms[0]), b.gmail_labels(ms[0]));
 
+    // Decision D18 (issue #463): an undo that changed no message keeps the
+    // entry open. After the undo of the later entry, the older entry can
+    // be undone again, and its undo puts the message back in the inbox.
+    assert_eq!(b.state(old).0, "applied");
+    b.undo(later);
+    assert_eq!(b.state(later).0, "undone");
+    b.undo(old);
+    assert_eq!(b.state(old).0, "undone");
+    assert!(b.gmail_labels(ms[0]).contains(&"INBOX".to_string()));
     assert_eq!(b.mirror_labels(ms[0]), b.gmail_labels(ms[0]));
 }
 
@@ -2349,7 +2442,15 @@ fn an_undo_in_any_order_changes_only_a_free_message() {
                     changed.push(m);
                 }
             }
-            entries[o].undone = true;
+            // An undo that changed no message keeps its entry open
+            // (decision D18, issue #463).
+            let undone = !changed.is_empty();
+            assert_eq!(
+                b.state(entries[o].action).0 == "undone",
+                undone,
+                "step {step}: the state of entry {o}"
+            );
+            entries[o].undone = undone;
             undos += 1;
             if entries[o].target.is_some() {
                 nested += 1;
@@ -2399,7 +2500,7 @@ fn an_undo_in_any_order_changes_only_a_free_message() {
 }
 
 /// The case of the review of PR #476: read A, archive B, inbox C, the undo
-/// of B (skipped, as C is later), then the undo of C. B is `undone`, but its
+/// of B (skipped, as C is later), then the undo of C. B stays open, and its
 /// archive stands again, so the undo of A skips the message.
 #[test]
 fn an_undo_that_skipped_a_message_keeps_its_entry_a_blocker() {
@@ -2415,7 +2516,8 @@ fn an_undo_that_skipped_a_message_keeps_its_entry_a_blocker() {
     applied(b.apply(c));
     b.undo(bb);
     b.undo(c);
-    assert_eq!(b.state(bb).0, "undone");
+    // The undo of B skipped the message, so B stays open (decision D18).
+    assert_eq!(b.state(bb).0, "applied");
     let labels = b.gmail_labels(ms[0]);
     assert!(!labels.contains(&"INBOX".to_string()));
     b.undo(a);

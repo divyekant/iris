@@ -88,6 +88,11 @@ pub struct Outcome {
     /// No fixed rule matched, and the message has 3 failed tries or a later
     /// `retry_at`: no model call, and step 8 wrote nothing.
     pub waiting: bool,
+    /// The sender is a stranger that the person declined at the gate
+    /// (decision D29): no model call. The message is understood with no
+    /// items, and its row in `model_declined` makes it pending again when
+    /// the decline stops applying (store migration 53).
+    pub declined: bool,
     /// The message changed in the store while the model worked (content,
     /// labels, sender kind or gone). Step 8 wrote nothing, and the message
     /// stays not understood for the next run.
@@ -498,6 +503,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         text: a.text.text.clone(),
     };
     let mut decided = None;
+    let mut declined = false;
     let mut after = Inputs::default();
     let seen = store.write(|tx| {
         // Steps 1 and 2 used the state of the message and `first`.
@@ -510,6 +516,12 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         // In the transaction of the kind change, so no error loses a rerun.
         rerun_senders(tx, &d.rerun, now_ms)?;
         decided = Some(d);
+        // After the kind of this message: a decline applies only to a stranger.
+        declined = declined_now(tx, from_addr.as_deref())?;
+        tx.execute(
+            "DELETE FROM model_declined WHERE message_id = ?1",
+            [message],
+        )?;
         // The clean text goes in the same checked write, so a sync between
         // two writes cannot leave the text of old content.
         iris_store::put_body(tx, message, &body)?;
@@ -579,9 +591,13 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     // fixed rules always run. Only the model call waits for `retry_at` and
     // stops after MAX_TRIES failed tries.
     let held = row.tries >= MAX_TRIES || row.retry_at.is_some_and(|t| t > now_ms);
-    let d = decide(&a, &cx, (!held).then_some(model))
+    // The mail of a declined sender gets no model call (decision D29). The
+    // fixed rules and the hostile check still run.
+    let d = decide(&a, &cx, (!held && !declined).then_some(model))
         .map_err(|e| Error::Model(e, rerun.clone(), Box::new(read())))?;
-    if d.waiting {
+    // A declined sender with no rule that applies: understood, no items.
+    let skip = declined && d.waiting;
+    if d.waiting && !skip {
         // No rule supports the old items now, and the model cannot run.
         let same = store.write(|tx| {
             let same = state(tx, message, true)? == seen;
@@ -605,6 +621,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     };
     let mut out = Outcome {
         hostile: d.hostile,
+        declined: skip,
         failed: d.failed,
         calls: d.calls,
         usage: d.usage,
@@ -619,7 +636,9 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     let written = store.write(|tx| {
         // The model saw `after`: each input must still be the same now, for
         // example with no later SPAM label on an earlier message.
-        if !read.same(tx)? {
+        // A decline, or the end of a decline, after write 1 changes the
+        // model step: save nothing, so the next run decides again.
+        if !read.same(tx)? || declined_now(tx, from_addr.as_deref())? != declined {
             changed = true;
             return Ok(Vec::new());
         }
@@ -658,6 +677,12 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
             "UPDATE message SET understood_at = ?2, retry_at = NULL WHERE id = ?1",
             params![message, now_ms],
         )?;
+        if skip {
+            tx.execute(
+                "INSERT INTO model_declined(message_id) VALUES (?1)",
+                [message],
+            )?;
+        }
         // Steps 4 and 7: the conversation counts this message unless it is
         // hostile mail, also after a phishing answer.
         iris_talk::update(tx, row.thread, Some(message), now_ms)?;
@@ -839,6 +864,21 @@ fn pinned(c: &rusqlite::Connection, message: i64) -> rusqlite::Result<Vec<Value>
         .iter()
         .filter_map(|d| serde_json::from_str(d).ok())
         .collect())
+}
+
+/// True when `from` is a stranger that the person declined at the gate:
+/// `declined_at` is set and the kind is `stranger` or not set yet (the rule
+/// of `kind_sql` in `iris-api`).
+fn declined_now(c: &rusqlite::Connection, from: Option<&str>) -> rusqlite::Result<bool> {
+    let Some(from) = from else {
+        return Ok(false);
+    };
+    c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sender WHERE address = ?1 AND declined_at IS NOT NULL
+                          AND coalesce(kind, 'stranger') = 'stranger')",
+        [from],
+        |r| r.get(0),
+    )
 }
 
 fn sender_kind_in(c: &rusqlite::Connection, from: &str) -> rusqlite::Result<Kind> {

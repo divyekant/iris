@@ -8,9 +8,10 @@
 -->
 <script lang="ts">
   import { href } from "../route";
-  import { get, post, type Changeset, type DraftView, type Item, type Part, type Recipient, type Target } from "../api";
+  import { fileLine } from "../format";
+  import { get, post, type Changeset, type DraftView, type Item, type Part, type Recipient, type Target, type Would } from "../api";
   import Comments from "./Comments.svelte";
-  import { author, detail, FLAGS, itemRow, mail, TAGS, to, unmarked, key, messageRow, outcome, pages, plan, short, shown, target, targets, verb, waits, type Row } from "../review";
+  import { author, detail, FLAGS, itemRow, mail, TAGS, to, unmarked, key, messageRow, outcome, pages, plan, short, shown, target, targets, verb, waits, would, type Row } from "../review";
 
   // `onchange` gets the changeset after a decision, so that the review shows it as it is now.
   let { changeset: c, onchange = () => {} }: { changeset: Changeset; onchange?: (c: Changeset) => void } = $props();
@@ -36,6 +37,14 @@
   // with an unknown result, or a 409, until the request loads again.
   let stale = $state(false);
   let who = $derived(author(c));
+  // Who withdrew the request (decision D16). A store from before the change does not know.
+  let withdrawn = $derived(
+    c.withdrawn_by === "person" || (c.withdrawn_by === "author" && c.author.kind === "person")
+      ? "You withdrew this request."
+      : c.withdrawn_by === "author"
+        ? `${who} withdrew this request.`
+        : "This request is withdrawn.",
+  );
   let mark = $derived(who.split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase()).join(""));
 
   // The targets of each action, loaded in pages: messages by their summaries, items one by one.
@@ -65,6 +74,29 @@
     get<{ revisions: { revision: number; why: string }[] }>(`changesets/${encodeURIComponent(c.id)}/revisions`).then(
       (got) => (reasons = Object.fromEntries(got.revisions.map((r) => [r.revision, r.why]))),
       // Without the reasons, each older change still says which revision it comes from.
+      () => {},
+    );
+  });
+  // Observe mode (decision D10): what a rule would decide for each proposed change, by its key.
+  // Only a hint: without it, the review works as before.
+  let rules: Record<string, Would> = $state({});
+  // Each load of the request (a new `c`: the first one, a new revision or a refresh) reads the
+  // lines again, because the active policy can change between two loads of the same revision.
+  // The load clears the old lines and drops an answer that comes after a newer read.
+  let rulesFor: Changeset | null = null;
+  let rulesRead = 0;
+  $effect(() => {
+    const cur = c;
+    const ask = open.some((a) => a.decision?.state === "proposed");
+    if (cur === rulesFor) return;
+    rulesFor = cur;
+    rules = {};
+    const read = ++rulesRead;
+    if (!ask) return;
+    get<{ would: Would[] }>(`changesets/${encodeURIComponent(cur.id)}/would`).then(
+      (got) => {
+        if (read === rulesRead) rules = Object.fromEntries(got.would.map((w) => [`${w.revision}.${w.n}`, w]));
+      },
       () => {},
     );
   });
@@ -216,7 +248,10 @@
 {#snippet draft(d: DraftView)}
   {#if d.readable}
     <div class="mail">
-      <dl>{@render people("To", d.to)}{@render people("Cc", d.cc)}</dl>
+      <dl>
+        {@render people("To", d.to)}{@render people("Cc", d.cc)}{@render people("Bcc", d.bcc ?? [])}
+        {#if d.attachments?.length}<dt>Files</dt><dd>{fileLine(d.attachments)}</dd>{/if}
+      </dl>
       <p class="subject-line">{@render text(d.subject)}</p>
       <p class="text">{@render text(d.body)}</p>
     </div>
@@ -246,9 +281,9 @@
   {/if}
 {/snippet}
 
-<!-- Only a changeset of a job takes a comment: its agent reads the comment in the next session. -->
+<!-- An agent or a local author takes a comment (decision D15). A job agent reads it in its next session; another author reads it with the request. -->
 {#snippet comments()}
-  {#if c.author.job}<Comments changeset={c} agent={who} refused={refresh} />{/if}
+  {#if c.author.kind === "agent" || c.author.kind === "local"}<Comments changeset={c} agent={who} job={!!c.author.job} refused={refresh} />{/if}
 {/snippet}
 
 <!-- Withdraw ends the whole request, so it sits at the end of the decision row (option B, the owner's pick). -->
@@ -297,6 +332,7 @@
             <label class="what" for={id}><b>{verb(a)}</b> {mail(a) && d ? to(d) : target(a)}</label>
             {#if detail(a)}<p class="because">{detail(a)}</p>{/if}
             {#if a.why}<p class="because">{a.why}</p>{/if}
+            {#if rules[key(a)] && a.decision?.state === "proposed"}<p class="would">{would(rules[key(a)])}</p>{/if}
             {#if a.revision < c.revision}<p class="because">From revision {a.revision}{reasons[a.revision] ? `, which asked: “${reasons[a.revision]}”` : "."}</p>{/if}
             {#each mail(a) ? unmarked(a, d) : a.flags.map((f) => FLAGS[f] ?? f) as words (words)}<p class="flag">{words}</p>{/each}
             {#if !approves(a)}<p class="denied">Iris will deny this change.</p>{/if}
@@ -324,7 +360,7 @@
     {/if}
   {/if}
   {#if asking}{@render question()}{/if}
-  {#if c.state === "withdrawn" && !saved}<p class="saved">This request is withdrawn.</p>{/if}
+  {#if c.state === "withdrawn" && !saved}<p class="saved">{withdrawn}</p>{/if}
   {#if problem}
     <p role="alert">
       {problem}
@@ -461,6 +497,7 @@
     font-weight: 600;
   }
   .because,
+  .would,
   .denied {
     margin: var(--space-1) 0 0;
     color: var(--color-text-muted);

@@ -87,11 +87,25 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// In a job workspace: list the items of the job, of one form if given.
-    /// A verb of a session only.
+    /// List the items, newest first, with the filters of the web client.
+    /// In a job workspace: only the items of the job, of one form if given.
     List {
         /// commitment, conversation, record, feed or signal.
         form: Option<String>,
+        /// Only the items with this status, for example open. Host mode only.
+        #[arg(long)]
+        status: Option<String>,
+        /// Only the records of this type, for example receipt. Needs the form
+        /// record. Host mode only.
+        #[arg(long = "type")]
+        kind: Option<String>,
+        /// Only the items older than this item ID: the last ID of the page
+        /// before. Host mode only.
+        #[arg(long)]
+        before: Option<String>,
+        /// The most items to show, 1 to 200. The default is 50. Host mode only.
+        #[arg(long)]
+        limit: Option<u32>,
         /// Print one JSON line for each item.
         #[arg(long)]
         json: bool,
@@ -147,11 +161,30 @@ pub enum Command {
         #[command(subcommand)]
         command: ModelCommand,
     },
+    /// Show or set the time zone of defer dates and due dates. With no
+    /// argument, show it. The default is the time zone of the computer.
+    Zone {
+        /// An IANA time zone name, for example `Europe/Berlin`.
+        #[arg(conflicts_with = "computer")]
+        name: Option<String>,
+        /// Use the time zone of the computer again.
+        #[arg(long)]
+        computer: bool,
+    },
     /// Show the send switch, or turn it on or off. No send leaves while it
     /// is off. `on` needs a terminal and a typed "yes".
+    /// `bcc-test <gmail|outlook> <to> <bcc>` and `bcc <gmail|outlook>` are
+    /// the owner check of the Bcc gate of a provider (send content spec,
+    /// section 6.2). They need a terminal and a typed "yes" too.
     Sending {
         #[arg(value_enum)]
         state: Option<Switch>,
+        /// The provider of the Bcc gate: gmail or outlook.
+        provider: Option<String>,
+        /// The `To` address of the test send.
+        to: Option<String>,
+        /// The `Bcc` address of the test send.
+        bcc: Option<String>,
     },
     /// Stop all agent work: end each session of a job, and apply and send
     /// nothing until `iris resume`. `--show` only shows the state.
@@ -399,9 +432,17 @@ pub enum MattersCommand {
     List,
     /// One matter (`g-4`) with its members, by form.
     Show { id: String },
-    /// Ask the model for new proposals now: at most one call, after the
-    /// wait of a model error, and only for a new set of candidates.
-    Propose,
+    /// With no title and no items: ask the model for new proposals now (at
+    /// most one call, after the wait of a model error, and only for a new
+    /// set of candidates). With `--title` and 2 or more item IDs: propose a
+    /// matter of these items; the person confirms it in the web client.
+    Propose {
+        /// The title of the matter, 1 to 80 characters.
+        #[arg(long)]
+        title: Option<String>,
+        /// The item IDs, for example `c-1 r-4 s-9`.
+        items: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -511,10 +552,12 @@ fn action(c: &Command) -> Result<Option<Action<'_>>, socket::Failure> {
     }))
 }
 
-#[derive(Clone, Copy, clap::ValueEnum)]
+#[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
 pub enum Switch {
     On,
     Off,
+    BccTest,
+    Bcc,
 }
 
 #[derive(Subcommand)]
@@ -598,6 +641,15 @@ pub enum AccountCommand {
         /// the wait for the redirect.
         #[arg(long)]
         paste: bool,
+    },
+    /// Remove an account and its mail from Iris. The mailbox at the
+    /// provider does not change. Backups keep the mail.
+    Remove {
+        /// The mail address of the account.
+        address: String,
+        /// Do not ask for the address again.
+        #[arg(long)]
+        yes: bool,
     },
     /// Add an IMAP mailbox, or give a new password to one. The command reads
     /// the password (an app password of the provider) from the terminal
@@ -704,11 +756,7 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
             return r;
         }
     }
-    if let Command::List { .. }
-    | Command::Wait { .. }
-    | Command::Ask { .. }
-    | Command::Done { .. } = &cli.command
-    {
+    if let Command::Wait { .. } | Command::Ask { .. } | Command::Done { .. } = &cli.command {
         return Err(socket::Failure {
             code: socket::code::USAGE,
             error: "this is a verb of a session: run it in a job workspace".into(),
@@ -750,6 +798,21 @@ fn socket_request(
         }
         Command::Revise { id, json } => {
             Some(("revise", serde_json::json!({ "changeset": id }), *json))
+        }
+        Command::Matters {
+            command: Some(MattersCommand::Propose { title, items }),
+        } if title.is_some() || !items.is_empty() => {
+            let Some(title) = title else {
+                return Err(socket::Failure {
+                    code: socket::code::USAGE,
+                    error: "give the title with --title".into(),
+                });
+            };
+            Some((
+                "matters.propose",
+                serde_json::json!({ "title": title, "items": items }),
+                true,
+            ))
         }
         c => add_request(c)?.map(|r| ("add", r, false)),
     })
@@ -810,10 +873,11 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
         print!("{}", session_status_text(&r, *json));
         return Ok(());
     }
-    // A job has no grant of an account or a draft (docs/specs/2026-11-17-job-verbs.md).
-    if matches!(c, Command::Compose { .. } | Command::Send { .. }) {
+    // Only a person sends (decision D2). A session drafts a reply in a
+    // granted thread: submit checks the grant (docs/specs/2026-11-17-job-verbs.md).
+    if matches!(c, Command::Send { .. }) {
         return Err(denied(
-            "a session cannot draft, send or nudge: a job has no grant of an account or a draft",
+            "a session cannot send or nudge: only a person sends mail",
         ));
     }
     if matches!(
@@ -866,7 +930,20 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
             *json,
         )),
         Command::Show { id, json } => Some(("show", serde_json::json!({ "id": id }), *json)),
-        Command::List { form, json } => Some(("list", serde_json::json!({ "form": form }), *json)),
+        Command::List {
+            form,
+            status: None,
+            kind: None,
+            before: None,
+            limit: None,
+            json,
+        } => Some(("list", serde_json::json!({ "form": form }), *json)),
+        Command::List { .. } => {
+            return Err(socket::Failure {
+                code: socket::code::USAGE,
+                error: "in a job workspace, iris list takes only a form".into(),
+            })
+        }
         _ => None,
     };
     if let Some((verb, args, json)) = read {
@@ -878,7 +955,14 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
     }
     // Only the write verbs of a session (R4-03): `drafts`, for example, is
     // a host verb of the socket.
-    const SESSION_VERBS: [&str; 5] = ["add", "submit", "show", "withdraw", "revise"];
+    const SESSION_VERBS: [&str; 6] = [
+        "add",
+        "submit",
+        "show",
+        "withdraw",
+        "revise",
+        "matters.propose",
+    ];
     let request = socket_request(c)?.filter(|(verb, ..)| SESSION_VERBS.contains(verb));
     let Some((verb, args, json)) = request else {
         return Err(denied("this verb is not a verb of a session"));
@@ -1213,6 +1297,8 @@ fn socket_verb_at(
             r["n"]
         ),
         "drafts" => drafts_text(&r, json),
+        // The matter view, as `iris matters show` prints it.
+        "matters.propose" => format!("{r}\n"),
         "submit" => {
             let code = submit_code(&r);
             if code != 0 {
@@ -1258,6 +1344,21 @@ fn mcp(dir: PathBuf) -> Result<(), String> {
                 read(open().and_then(|s| verbs::search(&s, &text, limit, true)))
             }
             Call::Show { id } => read(open().and_then(|s| verbs::show(&s, &id, true))),
+            Call::List {
+                form,
+                status,
+                kind,
+                before,
+                limit,
+            } => {
+                let filter = iris_api::Filter {
+                    form: form.as_deref(),
+                    status: status.as_deref(),
+                    kind: kind.as_deref(),
+                    before: before.as_deref(),
+                };
+                read(open().and_then(|s| verbs::list(&s, &filter, limit, true)))
+            }
             Call::WatchAdd { text } => watch(WatchCommand::Add { text }),
             Call::WatchList => watch(WatchCommand::List { json: true }),
             Call::WatchRemove { id } => watch(WatchCommand::Remove { id }),
@@ -1375,6 +1476,19 @@ pub fn changeset_text(doc: &serde_json::Value, json: bool) -> String {
         out.push_str(&line);
         out.push('\n');
     }
+    // Since open model 1.2: who withdrew (D16), and the review comments of
+    // the person (D15), so an author with no job workspace reads them.
+    if let Some(by) = doc["withdrawn_by"].as_str() {
+        out.push_str(&format!("Withdrawn by: {by}\n"));
+    }
+    for k in doc["comments"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "Comment on revision {} at {}: {}\n",
+            k["revision"],
+            s(&k["at"]),
+            verbs::field(&s(&k["text"]))
+        ));
+    }
     out
 }
 
@@ -1456,6 +1570,16 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
                     paste,
                 },
         } => account_add_outlook(&open()?, client_id, tenant, *paste),
+        Command::Account {
+            command: AccountCommand::Remove { address, yes },
+        } => {
+            let store = open()?;
+            if !yes {
+                let stdin = std::io::stdin();
+                remove_confirm(address, &mut stdin.lock())?;
+            }
+            print(account_remove(&store, address))
+        }
         Command::Mirror { command } => mirror(Arc::new(open()?), command),
         Command::Mcp => mcp(engine::data_dir(cli.data.clone()).map_err(|e| e.to_string())?),
         Command::Status { json } => print(verbs::status(&open()?, *json)),
@@ -1463,11 +1587,26 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             print(verbs::search(&open()?, text, *limit, *json))
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
+        Command::List {
+            form,
+            status,
+            kind,
+            before,
+            limit,
+            json,
+        } => {
+            let filter = iris_api::Filter {
+                form: form.as_deref(),
+                status: status.as_deref(),
+                kind: kind.as_deref(),
+                before: before.as_deref(),
+            };
+            print(verbs::list(&open()?, &filter, limit.unwrap_or(50), *json))
+        }
         // `run` refuses it in host mode, before the store.
-        Command::List { .. }
-        | Command::Wait { .. }
-        | Command::Ask { .. }
-        | Command::Done { .. } => Err("this is a verb of a session".into()),
+        Command::Wait { .. } | Command::Ask { .. } | Command::Done { .. } => {
+            Err("this is a verb of a session".into())
+        }
         Command::Watch { command } => print(verbs::watch(&open()?, command)),
         Command::Job {
             command: JobCommand::Session { id },
@@ -1524,7 +1663,7 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         Command::Matters { command } => {
             let store = open()?;
             let text = match command.as_ref().unwrap_or(&MattersCommand::List) {
-                MattersCommand::Propose => {
+                MattersCommand::Propose { title: None, items } if items.is_empty() => {
                     cost::propose_matters(&store, iris_matters::Gate::Now, engine::now_ms())?
                         .ok_or("an understanding run holds the lock; try again later")?
                 }
@@ -1561,8 +1700,39 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             println!("{text}");
             Ok(())
         }
-        Command::Sending { state } => {
+        Command::Zone { name, computer } => {
             let store = open()?;
+            if name.is_some() || *computer {
+                store
+                    .set_time_zone(name.as_deref())
+                    .map_err(|e| e.to_string())?;
+            }
+            println!("{}", zone_text(&store).map_err(|e| e.to_string())?);
+            Ok(())
+        }
+        Command::Sending {
+            state,
+            provider,
+            to,
+            bcc,
+        } => {
+            let store = open()?;
+            if let Some(Switch::BccTest | Switch::Bcc) = state {
+                use std::io::IsTerminal;
+                let stdin = std::io::stdin();
+                let text = bcc_gate(
+                    &store,
+                    *state == Some(Switch::BccTest),
+                    [provider, to, bcc].map(|a| a.as_deref()),
+                    stdin.is_terminal(),
+                    &mut stdin.lock(),
+                )?;
+                println!("{text}");
+                return Ok(());
+            }
+            if provider.is_some() {
+                return Err("`iris sending on` and `off` take no address".into());
+            }
             match state {
                 Some(Switch::On) => {
                     {
@@ -1579,7 +1749,7 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
                     }
                     Err(e) => return Err(e.to_string()),
                 },
-                None => {}
+                _ => {}
             }
             println!(
                 "{}",
@@ -1683,6 +1853,22 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
 
 /// `iris model set`: checks the input first, then reads the key, then
 /// writes the row.
+/// What `iris zone` shows: the time zone of the owner and where it comes from.
+fn zone_text(store: &Store) -> iris_store::Result<String> {
+    use rusqlite::OptionalExtension;
+    store.read(|c| {
+        let set: Option<String> = c
+            .query_row("SELECT time_zone FROM owner_setting", [], |r| r.get(0))
+            .optional()?;
+        let zone = iris_store::time_zone(c)?;
+        let name = zone.iana_name().unwrap_or("UTC offset of the computer");
+        Ok(match set {
+            Some(_) => format!("Time zone: {name}. Change it with iris zone <name>, or use the computer's with iris zone --computer."),
+            None => format!("Time zone: {name}, from the computer. Set another with iris zone <name>."),
+        })
+    })
+}
+
 fn model_set(store: &Store, provider: &SetModel) -> Result<String, String> {
     let m = match provider {
         SetModel::Anthropic {
@@ -2236,6 +2422,31 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// Decisions D15 and D16: the text form of a changeset names who
+    /// withdrew it and gives each review comment, oldest first.
+    #[test]
+    fn the_changeset_text_shows_who_withdrew_and_the_comments() {
+        let doc = serde_json::json!({
+            "id": "cs-4", "state": "withdrawn", "revision": 2, "why": null, "actions": [],
+            "withdrawn_by": "person",
+            "comments": [
+                {"revision": 1, "text": "Keep the mail of Dana.", "at": "2026-11-20T10:00:00Z"},
+                {"revision": 2, "text": "Not\nthis one.", "at": "2026-11-21T10:00:00Z"}
+            ]
+        });
+        let t = changeset_text(&doc, false);
+        assert!(t.contains("Withdrawn by: person\n"), "{t}");
+        let one = t.find("Comment on revision 1 at 2026-11-20T10:00:00Z: Keep the mail of Dana.\n");
+        let two = t.find("Comment on revision 2 at 2026-11-21T10:00:00Z: ");
+        assert!(one.is_some() && two.is_some() && one < two, "{t}");
+        // A line break in a comment does not start a new line of the output.
+        assert_eq!(
+            t.lines().filter(|l| l.starts_with("Comment")).count(),
+            2,
+            "{t}"
+        );
+    }
+
     #[test]
     fn version_line_names_the_program() {
         assert!(version_line().starts_with("iris "));
@@ -2364,6 +2575,62 @@ fn stop_text(s: &iris_apply::Stopped) -> String {
     text
 }
 
+/// What stays after a removal. The question says it before the removal,
+/// and the result says it again.
+const REMOVE_KEEPS: &str = "A backup copy that you made, the copies iris.db.v*.bak in the \
+     data folder and the notes of jobs still hold this mail. The record of what Iris and you \
+     did stays: drafts, the reasons of changes, job events and the titles of matters that you \
+     decided can hold text from this mail.";
+
+/// The question of `iris account remove`, before the removal.
+fn remove_question(address: &str) -> String {
+    format!(
+        "This removes {address} and its mail from Iris on this machine. \
+         The mailbox at the provider does not change. The files of agents in the \
+         workspaces of its jobs go. {REMOVE_KEEPS} Type the address to remove it: "
+    )
+}
+
+/// Ask for the address of the account again before a removal. A wrong
+/// answer refuses the removal.
+fn remove_confirm(address: &str, input: &mut impl BufRead) -> Result<(), String> {
+    eprint!("{}", remove_question(address));
+    let mut line = String::new();
+    input.read_line(&mut line).map_err(|e| e.to_string())?;
+    if line.trim() != address {
+        return Err("The account stays.".into());
+    }
+    Ok(())
+}
+
+/// `iris account remove`: the removal, then the delete of the mail. The
+/// delete waits for a sync or a backup that holds its lock.
+fn account_remove(store: &Store, address: &str) -> Result<String, String> {
+    let id = store
+        .remove_account(address, engine::now_ms())
+        .map_err(|e| e.to_string())?;
+    let done = engine::delete_removed(store, Some(id)).map_err(|e| e.to_string())?;
+    let state: Option<String> = store
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT state FROM account WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .map_err(|e| e.to_string())?;
+    let first = if state.as_deref() == Some(iris_store::STATE_REMOVED) {
+        format!(
+            "iris: removed {address} and its mail ({} messages).",
+            done.map_or(0, |d| d.messages)
+        )
+    } else {
+        // A busy checkpoint: the next engine tick ends the delete.
+        format!("iris: removed {address}. `iris serve` ends the delete of its mail.")
+    };
+    Ok(format!("{first}\niris: {REMOVE_KEEPS}\n"))
+}
+
 /// The confirmation of `iris sending on`: a terminal and a typed "yes". So
 /// a script with no terminal does not turn sending on by mistake.
 /// `terminal` is true when standard input is a terminal: a script or an
@@ -2382,6 +2649,72 @@ fn sending_on_confirm(terminal: bool, input: &mut impl BufRead) -> Result<(), St
         return Err("Sending stays off.".into());
     }
     Ok(())
+}
+
+/// `iris sending bcc-test` (`test` true) and `iris sending bcc`: the owner
+/// check of the Bcc gate of a provider (send content spec, section 6.2).
+/// `args` are the provider, the `To` address and the `Bcc` address.
+fn bcc_gate(
+    store: &Store,
+    test: bool,
+    args: [Option<&str>; 3],
+    terminal: bool,
+    input: &mut impl BufRead,
+) -> Result<&'static str, String> {
+    let usage = if test {
+        "usage: iris sending bcc-test <gmail|outlook> <to> <bcc>"
+    } else {
+        "usage: iris sending bcc <gmail|outlook>"
+    };
+    let [Some(provider @ ("gmail" | "outlook")), to, bcc] = args else {
+        return Err(usage.into());
+    };
+    if test != (to.is_some() && bcc.is_some()) || (!test && (to.is_some() || bcc.is_some())) {
+        return Err(usage.into());
+    }
+    if !terminal {
+        return Err("the Bcc check needs a terminal: standard input is not a TTY".into());
+    }
+    if test {
+        let (to, bcc) = (to.unwrap_or_default(), bcc.unwrap_or_default());
+        for a in [to, bcc] {
+            iris_compose::check_address(&a.to_ascii_lowercase())?;
+        }
+        if to.eq_ignore_ascii_case(bcc) {
+            return Err("use two different addresses".into());
+        }
+        eprint!(
+            "Only a send with exactly To {to}, no Cc and Bcc {bcc} passes the Bcc gate of \
+             {provider} until you run `iris sending bcc {provider}`. Type yes to continue: "
+        );
+    } else {
+        eprint!(
+            "Confirm that the Bcc mailbox got the test mail, and that the To copy does not \
+             show the Bcc address. Then each send with Bcc of {provider} can leave. \
+             Type yes to open the Bcc gate: "
+        );
+    }
+    let mut line = String::new();
+    input.read_line(&mut line).map_err(|e| e.to_string())?;
+    if line.trim() != "yes" {
+        return Err("Nothing changed.".into());
+    }
+    if test {
+        let (to, bcc) = (to.unwrap_or_default(), bcc.unwrap_or_default());
+        if !iris_apply::bcc_test(store, provider, to, bcc).map_err(|e| e.to_string())? {
+            return Err(format!(
+                "The Bcc gate of {provider} is open. Nothing changed."
+            ));
+        }
+        Ok("The test is ready. Write and approve the test send in Iris.")
+    } else {
+        if !iris_apply::bcc_open(store, provider).map_err(|e| e.to_string())? {
+            return Err(format!(
+                "Run `iris sending bcc-test {provider} <to> <bcc>` first."
+            ));
+        }
+        Ok("The Bcc gate is open.")
+    }
 }
 
 /// `iris cancel d-4`: cancel the open send of the draft.
@@ -2467,6 +2800,78 @@ mod outbox_tests {
         assert!(r.unwrap_err().contains("needs a terminal"));
     }
 
+    /// The Bcc gate commands need the right arguments, a terminal and a
+    /// typed "yes", and open the gate only after a test.
+    #[test]
+    fn the_bcc_gate_needs_a_test_a_terminal_and_yes() {
+        let dir = std::env::temp_dir().join(format!("iris-bcc-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let gate = |test, args, terminal, answer: &str| {
+            bcc_gate(&store, test, args, terminal, &mut answer.as_bytes())
+        };
+        let (to, bcc) = (Some("a@example.org"), Some("b@example.org"));
+        for args in [
+            [Some("imap"), to, bcc],
+            [Some("gmail"), to, None],
+            [None, None, None],
+        ] {
+            assert!(gate(true, args, true, "yes\n")
+                .unwrap_err()
+                .starts_with("usage"));
+        }
+        assert!(gate(false, [Some("gmail"), to, None], true, "yes\n")
+            .unwrap_err()
+            .starts_with("usage"));
+        assert!(gate(true, [Some("gmail"), to, to], true, "yes\n").is_err());
+        assert!(gate(true, [Some("gmail"), Some("a b@x"), bcc], true, "yes\n").is_err());
+        assert!(gate(true, [Some("gmail"), to, bcc], false, "yes\n")
+            .unwrap_err()
+            .contains("terminal"));
+        assert_eq!(
+            gate(true, [Some("gmail"), to, bcc], true, "no\n"),
+            Err("Nothing changed.".into())
+        );
+        assert!(gate(false, [Some("gmail"), None, None], true, "yes\n")
+            .unwrap_err()
+            .contains("bcc-test"));
+        assert!(gate(true, [Some("gmail"), to, bcc], true, "yes\n").is_ok());
+        assert_eq!(
+            gate(false, [Some("gmail"), None, None], true, "yes\n"),
+            Ok("The Bcc gate is open.")
+        );
+        assert!(gate(true, [Some("gmail"), to, bcc], true, "yes\n")
+            .unwrap_err()
+            .contains("is open"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_address_removes_an_account() {
+        let a = "a@example.org";
+        assert_eq!(remove_confirm(a, &mut "a@example.org\n".as_bytes()), Ok(()));
+        for answer in ["yes\n", "\n", "", "b@example.org\n", "A@example.org\n"] {
+            assert_eq!(
+                remove_confirm(a, &mut answer.as_bytes()),
+                Err("The account stays.".to_string()),
+                "{answer:?}"
+            );
+        }
+        // The question says what stays before the removal (spec, "Command").
+        let q = remove_question(a);
+        for word in [
+            "backup copy",
+            "iris.db.v*.bak",
+            "notes of jobs",
+            "files of agents",
+            "provider does not change",
+            "record of what Iris and you did stays",
+            "titles of matters",
+        ] {
+            assert!(q.contains(word), "{word}: {q}");
+        }
+    }
+
     /// A store with account 1 and draft d-1 (a new mail that the apply
     /// made), and a function that submits and approves a send of d-1.
     fn draft_store(name: &str) -> (std::path::PathBuf, Store) {
@@ -2486,6 +2891,7 @@ mod outbox_tests {
                     cc: Vec::new(),
                     subject: "Plan".into(),
                     body: "Hello".into(),
+                    ..Default::default()
                 }
                 .check()
                 .unwrap();

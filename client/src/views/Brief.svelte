@@ -4,9 +4,10 @@
   and links its full list. Read only in release 1.
 -->
 <script lang="ts">
-  import { get, loadBrief, newest, type Brief, type Item, type Job, type Status } from "../api";
+  import { get, loadBrief, newest, readStatus, type Brief, type Item, type Job, type Status } from "../api";
   import { poll as every, watch } from "../clock";
   import NoModel from "./NoModel.svelte";
+  import ModelWait from "./ModelWait.svelte";
   import { NOTHING, across, copying, needsModel, dueSoon, greeting, nextDay, party, partyKey, signals, summary, unfinished, when } from "../format";
   import Code from "./Code.svelte";
   import Bundle from "./Bundle.svelte";
@@ -17,9 +18,11 @@
   import MatterCard from "./MatterCard.svelte";
   import Question from "./Question.svelte";
   import { loadQuestions } from "../jobs";
-  import { loadProposed, type Proposed } from "../matters";
+  import { loadGrowing, loadProposed, type Proposed } from "../matters";
+  import type { Matter } from "../api";
   import { arrivedLine, loadWatches, type Watch } from "../watches";
   import { flushHolds, HOLD } from "../act";
+  import { href } from "../route";
 
   let {
     brief: firstBrief,
@@ -68,6 +71,9 @@
   // Two loads of the brief can answer out of order (a poll, an answer at the gate):
   // each takes a ticket, and a brief shows only while its ticket is the newest.
   const briefTicket = newest();
+  // Polls, the read at the end of a model wait and a Try now answer can arrive out of order: only
+  // the newest status shows (api.ts), and an older answer gives null.
+  const show = (s: Status | null) => s && (status = s);
 
   // Load the brief again while it is open: every 5 seconds while the first sync
   // runs (spec 1 section 4.2), then every minute for new mail.
@@ -77,9 +83,9 @@
     return every(
       () => {
         const fresh = briefTicket();
-        return Promise.all([loadBrief(), get<Status>("status"), fresh] as const);
+        return Promise.all([loadBrief(), readStatus(), fresh] as const);
       },
-      ([b, s, fresh]) => (fresh() && (brief = b), (status = s)),
+      ([b, s, fresh]) => (fresh() && (brief = b), show(s)),
       syncing ? poll : poll * 12,
     );
   });
@@ -95,11 +101,13 @@
   // svelte-ignore state_referenced_locally
   let proposed = $state(firstProposed ?? null);
   const proposedTicket = newest();
+  // The confirmed matters with additions (D20): one line each, that opens the matter.
+  let growing = $state<Matter[]>([]);
   async function reloadProposed() {
     const fresh = proposedTicket();
     try {
-      const p = await loadProposed();
-      if (fresh()) proposed = p;
+      const [p, g] = await Promise.all([loadProposed(), loadGrowing()]);
+      if (fresh()) [proposed, growing] = [p, g];
     } catch {
       // The next poll tries again.
     }
@@ -247,6 +255,7 @@
 </div>
 
 {#if needsModel(status)}<NoModel />{/if}
+{#if status?.model_retry_at}<ModelWait at={status.model_retry_at} onstatus={show} />{/if}
 
 {#if arrived.length}
   <div class="arrivals">
@@ -279,7 +288,7 @@
 {#snippet sentLine(job: Job)}
   <p class="sent" role="status">
     <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3 8.5l3 3 7-7" fill="none" stroke="var(--color-primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
-    Sent. The agent of “{job.goal}” continues with your answer.
+    Sent. The job “{job.goal}” goes on with your answer.
   </p>
 {/snippet}
 {#if shown}
@@ -315,6 +324,18 @@
     <h2 id="matter"><span>{proposed.count === 1 ? "A matter to confirm" : "Matters to confirm"}</span> <span class="count">{proposed.count}</span></h2>
     {#key proposed.view.matter.id}<MatterCard view={proposed.view} ondecided={() => (done(), reloadProposed())} delay={hold} />{/key}
     {#if proposed.count > 1}<a class="all touch" href="#/matters">All {proposed.count} that Iris proposes</a>{/if}
+  </section>
+{/if}
+
+<!-- Items that Iris proposes to add to a confirmed matter (D20): one line for each matter. -->
+{#if growing.length}
+  <section aria-labelledby="growing">
+    <h2 id="growing"><span>Your matters</span> <span class="count">{growing.length}</span></h2>
+    <ul class="growing">
+      {#each growing as m (m.id)}
+        <li><a class="touch" href={href.matter(m.id)}>Add {m.additions?.length === 1 ? "1 item" : `${m.additions?.length} items`} to {m.title}?</a></li>
+      {/each}
+    </ul>
   </section>
 {/if}
 

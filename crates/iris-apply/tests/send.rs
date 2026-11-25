@@ -480,7 +480,10 @@ fn a_rate_limit_of_the_send_is_one_request_and_pending() {
 }
 
 /// Acceptance 3: a change at Gmail after the approval, also a new Bcc
-/// only, denies the send, and no `drafts/send` request goes out.
+/// only, denies the send, and no `drafts/send` request goes out. A Bcc
+/// reads back (send content spec, section 4): the row gets it, and a new
+/// send of it waits for the Bcc gate (section 6.2). A `Reply-To` does not
+/// read back: the row becomes foreign.
 #[test]
 fn a_draft_changed_at_gmail_is_not_sent() {
     let b = setup("changed");
@@ -495,9 +498,93 @@ fn a_draft_changed_at_gmail_is_not_sent() {
         other => panic!("{other:?}"),
     }
     assert_eq!(b.sends(), 0);
+    let content: String = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT content FROM draft WHERE foreign_at IS NULL",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(content.contains("spy@x.org"), "{content}");
+    let (d, _) = b.draft(
+        b.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT action_id FROM draft WHERE foreign_at IS NULL",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap(),
+    );
+    let who = Author {
+        kind: AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    let cs = create(&b.store, &who, now()).unwrap();
+    add_action(
+        &b.store,
+        cs,
+        &who,
+        Verb::Send,
+        &[d.as_str()],
+        &Map::new(),
+        None,
+    )
+    .unwrap();
+    submit(&b.store, cs, &who, "Send.", now()).unwrap();
+    let st: String = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT state FROM changeset_action WHERE changeset_id = ?1",
+                [cs],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(st, "proposed");
+    // Approved, the new send waits for the Bcc gate of Gmail.
+    let id: i64 = b
+        .store
+        .write(|tx| {
+            Ok(tx.query_row(
+                "UPDATE changeset_action SET state = 'approved', decided_by = 'person',
+                   decided_at = ?2 WHERE changeset_id = ?1 RETURNING id",
+                params![cs, now() - AGED],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(b.release(id).unwrap(), Outcome::BccUnchecked);
+    assert_eq!(b.sends(), 0);
+
+    let (s, provider) = b.new_mail(AGED);
+    let raw = String::from_utf8(b.gmail.draft_raw(TOKEN, &provider).unwrap().raw.unwrap()).unwrap();
+    assert!(b.fake.edit_draft(
+        &provider,
+        raw.replacen("To: ", "Reply-To: spy@x.org\r\nTo: ", 1)
+            .as_bytes()
+    ));
+    match b.release(s) {
+        Ok(Outcome::Denied(why)) => assert!(why.contains("changed at Gmail"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.sends(), 0);
     let foreign: bool = b
         .store
-        .read(|c| Ok(c.query_row("SELECT foreign_at IS NOT NULL FROM draft", [], |r| r.get(0))?))
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT foreign_at IS NOT NULL FROM draft WHERE provider_id = ?1",
+                [&provider],
+                |r| r.get(0),
+            )?)
+        })
         .unwrap();
     assert!(foreign);
 
@@ -1237,4 +1324,257 @@ fn resume_after_a_wait_gets_a_full_hold() {
         other => panic!("{other:?}"),
     }
     assert_eq!(b.sends(), 0);
+}
+
+/// Send content spec, sections 2 and 4: a draft with a file from the
+/// attachment folder goes to Gmail with the file, reads back with the
+/// approved hash, and the release sends it.
+#[test]
+fn a_draft_with_a_file_is_created_and_sent() {
+    let b = setup("file");
+    let file = b"%PDF-1 the numbers".as_slice();
+    let sha = b.store.put_attachment(file).unwrap();
+    let mut m = mail();
+    m["attachments"] =
+        json!([{"name": "q4.pdf", "type": "application/pdf", "sha256": sha, "size": file.len()}]);
+    let a = b.approved(Verb::Draft, "a-1", m, 0);
+    assert!(matches!(b.apply(a), Ok(Outcome::Applied(_))));
+    let (d, provider) = b.draft(a);
+    let raw = b.gmail.draft_raw(TOKEN, &provider).unwrap().raw.unwrap();
+    let back = iris_compose::read(&raw, OWNER).unwrap();
+    assert_eq!(back.files, [file.to_vec()]);
+    assert_eq!(back.content.attachments[0].name, "q4.pdf");
+    let s = b.approved(Verb::Send, &d, json!({}), AGED);
+    assert!(
+        matches!(b.release(s), Ok(Outcome::Applied(_))),
+        "{:?}",
+        b.state(s)
+    );
+    assert_eq!(b.sends(), 1);
+}
+
+/// A file that is missing or changed in the attachment folder denies the
+/// apply, and no `drafts.create` goes out.
+#[test]
+fn a_missing_or_changed_file_denies_the_draft() {
+    let b = setup("nofile");
+    let file = b"the file".as_slice();
+    let sha = b.store.put_attachment(file).unwrap();
+    for (sha, size) in [("ab".repeat(32), file.len()), (sha.clone(), file.len() + 1)] {
+        let mut m = mail();
+        m["attachments"] =
+            json!([{"name": "a.txt", "type": "text/plain", "sha256": sha, "size": size}]);
+        let a = b.approved(Verb::Draft, "a-1", m, 0);
+        match b.apply(a) {
+            Ok(Outcome::Denied(why)) => assert!(why.contains("attachment file"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(b.posts("/drafts"), 0);
+}
+
+/// Send content spec, section 3: the From of a Gmail draft has the name of
+/// the newest sent message of the owner; a name with a control character
+/// is not used.
+#[test]
+fn a_gmail_draft_has_the_display_name_of_the_owner() {
+    let b = setup("name");
+    let from = |a: i64| {
+        let (_, provider) = b.draft(a);
+        let raw = b.gmail.draft_raw(TOKEN, &provider).unwrap().raw.unwrap();
+        let raw = String::from_utf8(raw).unwrap();
+        raw.lines()
+            .find(|l| l.starts_with("From:"))
+            .unwrap()
+            .to_string()
+    };
+    let set_name = |name: &str| {
+        b.store
+            .write(|tx| {
+                // The newest message of the mirror becomes a sent message of the owner.
+                let m: i64 = tx.query_row(
+                    "SELECT id FROM message WHERE gone_at IS NULL ORDER BY internal_date DESC LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO label(account_id, provider_id, name, kind) VALUES (?1, 'SENT', 'SENT', 'system')",
+                    [b.account],
+                )?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO message_label(message_id, label_id)
+                     SELECT ?1, id FROM label WHERE provider_id = 'SENT' AND account_id = ?2",
+                    params![m, b.account],
+                )?;
+                tx.execute(
+                    "UPDATE header SET from_addr = ?2, from_name = ?3 WHERE message_id = ?1",
+                    params![m, OWNER, name],
+                )?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    set_name("Dana Owner");
+    let a = b.approved(Verb::Draft, "a-1", mail(), 0);
+    assert!(matches!(b.apply(a), Ok(Outcome::Applied(_))));
+    assert_eq!(from(a), "From: \"Dana Owner\" <owner@example.com>");
+    set_name("Dana\r\nBcc: spy@x.org");
+    let a = b.approved(Verb::Draft, "a-1", mail(), 0);
+    assert!(matches!(b.apply(a), Ok(Outcome::Applied(_))));
+    assert_eq!(from(a), "From: <owner@example.com>");
+}
+
+/// Send content spec, section 5: the submit denies a draft whose size
+/// bound is over the limit of the provider of the account.
+#[test]
+fn the_size_limit_is_the_limit_of_the_provider() {
+    let b = setup("size");
+    let who = Author {
+        kind: AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    let state_of = |args: Value| -> String {
+        let cs = create(&b.store, &who, now()).unwrap();
+        let args = args.as_object().unwrap().clone();
+        add_action(&b.store, cs, &who, Verb::Draft, &["a-1"], &args, None).unwrap();
+        submit(&b.store, cs, &who, "Write.", now()).unwrap();
+        b.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT state FROM changeset_action WHERE changeset_id = ?1",
+                    [cs],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    // About 3 MB with base64: more than Outlook takes, less than Gmail.
+    let mut m = mail();
+    m["attachments"] = json!([{"name": "big.bin", "type": "application/octet-stream", "sha256": "ab".repeat(32), "size": 2_200_000}]);
+    assert_ne!(state_of(m.clone()), "denied");
+    b.store
+        .write(|tx| Ok(tx.execute("UPDATE account SET provider = 'outlook'", [])?))
+        .unwrap();
+    assert_eq!(state_of(m), "denied");
+}
+
+/// Send content spec, section 6.2: the `Bcc` gate of each provider.
+fn bcc_mail(cc: &[&str]) -> Value {
+    json!({"to": ["priya@example.com"], "cc": cc, "bcc": ["sam@example.org"],
+           "subject": "Q4 numbers", "body": "Hi Priya,\n\nHere.\n"})
+}
+
+impl Box {
+    /// The send of a new mail with `args`, approved `age` milliseconds ago.
+    fn send_of(&self, args: Value, age: i64) -> i64 {
+        let a = self.approved(Verb::Draft, "a-1", args, 0);
+        assert!(matches!(self.apply(a), Ok(Outcome::Applied(_))));
+        let (d, _) = self.draft(a);
+        self.approved(Verb::Send, &d, json!({}), age)
+    }
+
+    fn ledger_note(&self, action: i64) -> Option<String> {
+        self.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT error FROM ledger WHERE action_id = ?1",
+                    [action],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    }
+}
+
+#[test]
+fn a_send_with_bcc_waits_for_the_bcc_gate() {
+    let b = setup("bcc-gate");
+    let s = b.send_of(bcc_mail(&[]), AGED);
+    assert_eq!(b.release(s).unwrap(), Outcome::BccUnchecked);
+    assert_eq!((b.state(s).as_str(), b.sends()), ("held", 0));
+    // No test yet: the gate does not open.
+    assert!(!iris_apply::bcc_open(&b.store, "outlook").unwrap());
+    // A send with no bcc does not read the gate.
+    let (plain, _) = b.new_mail(AGED);
+    assert!(matches!(b.release(plain), Ok(Outcome::Applied(_))));
+    // The owner check: only the test send passes the closed gate.
+    assert!(
+        iris_apply::bcc_test(&b.store, "gmail", "Priya@Example.com", "sam@example.org").unwrap()
+    );
+    let other = b.send_of(bcc_mail(&["lee@example.org"]), AGED);
+    assert_eq!(b.release(other).unwrap(), Outcome::BccUnchecked);
+    assert!(matches!(b.release(s), Ok(Outcome::Applied(_))));
+    assert_eq!(b.ledger_note(s), None);
+    // The gate of Outlook stays closed. An open gate takes no new test.
+    assert!(iris_apply::bcc_open(&b.store, "gmail").unwrap());
+    assert!(!iris_apply::bcc_test(&b.store, "gmail", "a@example.org", "b@example.org").unwrap());
+    assert!(matches!(b.release(other), Ok(Outcome::Applied(_))));
+    assert_eq!(b.sends(), 3);
+}
+
+/// A closed gate does not hide a change at Gmail: release reads the draft
+/// first, so an edit that removes the Bcc denies the send and refreshes
+/// the row, and a new send of the edited draft goes out.
+#[test]
+fn a_closed_bcc_gate_still_sees_a_change_at_gmail() {
+    let b = setup("bcc-edit");
+    let a = b.approved(Verb::Draft, "a-1", bcc_mail(&[]), 0);
+    assert!(matches!(b.apply(a), Ok(Outcome::Applied(_))));
+    let d = b.draft(a);
+    let s = b.approved(Verb::Send, &d.0, json!({}), AGED);
+    let raw = String::from_utf8(b.gmail.draft_raw(TOKEN, &d.1).unwrap().raw.unwrap()).unwrap();
+    let edited: String = raw
+        .lines()
+        .filter(|l| !l.starts_with("Bcc:"))
+        .map(|l| format!("{l}\r\n"))
+        .collect();
+    assert!(b.fake.edit_draft(&d.1, edited.as_bytes()));
+    match b.release(s) {
+        Ok(Outcome::Denied(why)) => assert!(why.contains("changed at Gmail"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    let again = b.approved(Verb::Send, &d.0, json!({}), AGED);
+    assert!(matches!(b.release(again), Ok(Outcome::Applied(_))));
+    assert_eq!(b.sends(), 1);
+}
+
+/// The gate takes only a test that a draft can make: two valid, different
+/// addresses, and neither an account of the provider.
+#[test]
+fn the_bcc_gate_refuses_a_test_that_cannot_test_it() {
+    let b = setup("bcc-bad-test");
+    let own = OWNER.to_ascii_uppercase();
+    for (to, bcc) in [
+        ("alice@example", "sam@example.org"),
+        ("priya@example.com", "sam example.org"),
+        ("Sam@example.org", "sam@example.org"),
+        (own.as_str(), "sam@example.org"),
+        ("priya@example.com", OWNER),
+    ] {
+        match iris_apply::bcc_test(&b.store, "gmail", to, bcc) {
+            Err(iris_apply::Error::BccTest(_)) => {}
+            other => panic!("{to} {bcc}: {other:?}"),
+        }
+    }
+    // No test row: the gate cannot open.
+    assert!(!iris_apply::bcc_open(&b.store, "gmail").unwrap());
+    // The address of a Gmail account is a valid test for Outlook.
+    assert!(iris_apply::bcc_test(&b.store, "outlook", OWNER, "sam@example.org").unwrap());
+}
+
+#[test]
+fn a_sent_copy_with_no_bcc_takes_the_approved_bcc_with_a_note() {
+    let b = setup("bcc-note");
+    assert!(iris_apply::bcc_test(&b.store, "gmail", "x@example.org", "y@example.org").unwrap());
+    assert!(iris_apply::bcc_open(&b.store, "gmail").unwrap());
+    b.fake.drop_sent_bcc();
+    let s = b.send_of(bcc_mail(&[]), AGED);
+    assert!(matches!(b.release(s), Ok(Outcome::Applied(_))));
+    assert_eq!(b.ledger_note(s).as_deref(), Some(iris_apply::NO_BCC));
+    // The send stops no later release: the copy is the approved content.
+    let (plain, _) = b.new_mail(AGED);
+    assert!(matches!(b.release(plain), Ok(Outcome::Applied(_))));
+    assert_eq!(b.ledger_note(plain), None);
 }

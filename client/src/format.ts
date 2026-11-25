@@ -1,3 +1,5 @@
+import { access } from "./access.svelte.ts";
+import { today } from "./act";
 import type { Account, Brief, Item, MatterForm, Money, Party, Section, Status } from "./api";
 
 export function party(p: Party | undefined): string {
@@ -39,20 +41,24 @@ export function when(value: string | null | undefined): string {
 const relative = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
 const DAY = 86_400_000;
 
-/** Whole days from the local day of `now` to the local day of `value`. */
-export function daysFrom(value: string, now = new Date()): number {
-  const d = toDate(value);
-  const start = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
-  return Math.round((start(d) - start(now)) / DAY);
+/**
+ * Whole days from the day of `now` to the day of `value`, in the time zone
+ * of the owner (`zone`, an IANA name; by default the one of the engine
+ * status), so that "due tomorrow" and Due soon agree with the engine
+ * (decision D1). A date (YYYY-MM-DD) is that day.
+ */
+export function daysFrom(value: string, now = new Date(), zone: string | null | undefined = access.zone): number {
+  const day = isDay(value) ? value : today(toDate(value), zone);
+  return Math.round((Date.parse(day) - Date.parse(today(now, zone))) / DAY);
 }
 
 export type Due = { text: string; tone: "late" | "soon" | "" };
 
 /** The due date of a commitment as words: "due tomorrow", "was due 2 days ago". */
-export function due(item: Item, now = new Date()): Due | null {
+export function due(item: Item, now = new Date(), zone: string | null | undefined = access.zone): Due | null {
   const value = item.due?.date ?? item.due?.at;
   if (!value || Number.isNaN(toDate(value).getTime())) return null;
-  const days = daysFrom(value, now);
+  const days = daysFrom(value, now, zone);
   const words = relative.format(days, "day");
   // A due time earlier today has passed, although its day is today.
   const at = item.due?.at ? Date.parse(item.due.at) : NaN;
@@ -60,9 +66,9 @@ export function due(item: Item, now = new Date()): Due | null {
   return { text: `due ${words}`, tone: days <= 2 ? "soon" : "" };
 }
 
-/** The commitments of `items` that are due in 2 days or less, or late, in the local day of `now`. */
-export function dueSoon(items: Item[], now = new Date()): Item[] {
-  return items.filter((item) => !!due(item, now)?.tone);
+/** The commitments of `items` that are due in 2 days or less, or late, on the day of `now` in the time zone of the owner. */
+export function dueSoon(items: Item[], now = new Date(), zone: string | null | undefined = access.zone): Item[] {
+  return items.filter((item) => !!due(item, now, zone)?.tone);
 }
 
 /** Time left until a date-time, as words: "in 9 minutes". Null after the time. */
@@ -156,15 +162,28 @@ export const count = (n: number, one: string, many: string) => `${WORDS[n] ?? n.
 export const capital = (s: string) => s[0].toUpperCase() + s.slice(1);
 
 /** The members of a matter by form: "Two records, one conversation". */
-export function matterCounts(counts: Record<MatterForm, number>): string {
-  const forms: MatterForm[] = ["record", "conversation", "commitment"];
-  const text = forms.filter((f) => counts[f] > 0).map((f) => count(counts[f], f, `${f}s`)).join(", ");
+export function matterCounts(counts: Partial<Record<MatterForm, number>>): string {
+  const forms: MatterForm[] = ["record", "conversation", "commitment", "signal"];
+  const text = forms.filter((f) => (counts[f] ?? 0) > 0).map((f) => count(counts[f] ?? 0, f, `${f}s`)).join(", ");
   return text ? capital(text) : "No items now";
 }
 
 /** The start of the next local day, as an ISO date-time. */
-export function nextDay(now = new Date()): string {
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).toISOString();
+export function nextDay(now = new Date(), zone: string | null | undefined = access.zone): string {
+  const browser = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
+  let owner = browser;
+  try {
+    if (zone) {
+      const parts = new Intl.DateTimeFormat("en-US", { timeZone: zone, hourCycle: "h23", hour: "numeric", minute: "numeric", second: "numeric" }).formatToParts(now);
+      const part = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0);
+      const elapsed = ((part("hour") * 60 + part("minute")) * 60 + part("second")) * 1000 + now.getMilliseconds();
+      // shortcut: a day with a clock change is 23 or 25 hours, so this can be one hour off; the next call corrects it.
+      owner = now.getTime() - elapsed + DAY;
+    }
+  } catch {
+    // An unknown zone: the midnight of the browser.
+  }
+  return new Date(Math.min(browser, owner)).toISOString();
 }
 
 export function greeting(now = new Date()): string {
@@ -275,3 +294,16 @@ export function addPage(items: Item[], more: Item[]): Item[] {
  * only the fixed rules read mail. Drafts and gone mail never count (the engine gives `waits_model`).
  */
 export const needsModel = (status: Status | null): boolean => status?.model === false && (status.waits_model ?? 0) > 0;
+
+/** The size of a file in short words: "820 B", "12 KB", "2.4 MB". */
+export function bytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** The files of a mail in one line: "q4.pdf (12 KB), notes.txt (820 B)". */
+export const fileLine = (files: { name: string; size: number }[]) => files.map((f) => `${f.name} (${bytes(f.size)})`).join(", ");
+
+/** The name of a mail provider, as the person knows it. */
+export const PROVIDER: Record<string, string> = { gmail: "Gmail", outlook: "Outlook" };

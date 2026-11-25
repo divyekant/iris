@@ -57,19 +57,28 @@ export type Item = {
 
 // A matter: mail that belongs together, as Iris proposes it and the person decides it
 // (docs/spec/schema/matter.schema.json).
-export type MatterForm = "commitment" | "conversation" | "record";
+export type MatterForm = "commitment" | "conversation" | "record" | "signal";
 export type Matter = {
   id: string;
   title: string;
   status: "proposed" | "confirmed" | "declined";
   items: string[];
-  counts: Record<MatterForm, number>;
+  /** `signal` since open model 1.2: an older engine leaves it out. */
+  counts: Record<Exclude<MatterForm, "signal">, number> & { signal?: number };
   created: string;
   updated: string;
   decided?: string;
+  /** The items that Iris proposes to add to a confirmed matter (open model 1.2). */
+  additions?: string[];
+  derived?: { by: "model" | "agent" | "person"; model?: string; prompt?: string };
 };
 export type MatterList = { proposed: Matter[]; confirmed: Matter[] };
-export type MatterView = { matter: Matter; items: Record<MatterForm, Item[]> };
+export type MatterView = {
+  matter: Matter;
+  items: Record<Exclude<MatterForm, "signal">, Item[]> & { signal?: Item[] };
+  /** The documents of the additions of a confirmed matter, newest first. */
+  additions?: Item[];
+};
 
 // `duplicates` maps an item ID to newer items that can be the same thing (spec 1
 // section 7.5). The newer items are not in `items`: the client shows a pair as one line.
@@ -118,7 +127,8 @@ export type Account = {
   state: string | null;
   mirror_ready_at: string | null;
   sync: { kind: string; step: number | null } | null;
-  last_sync: { kind: string; started: string; ended: string | null; result: string | null } | null;
+  /** `after_failure`: the sync before this one failed or stopped. An older engine leaves it out. */
+  last_sync: { kind: string; started: string; ended: string | null; result: string | null; after_failure?: boolean } | null;
 };
 
 export type Status = {
@@ -130,6 +140,10 @@ export type Status = {
   model?: boolean;
   /** The live messages that wait for a model or a budget. Drafts and gone mail never count. An older engine leaves it out. */
   waits_model?: number;
+  /** The time zone of defer dates and due dates (an IANA name, `iris zone`). Null or left out: the zone of the browser. */
+  time_zone?: string | null;
+  /** After model errors: the time of the next model call (RFC 3339), while it is later than now. An older engine leaves it out. */
+  model_retry_at?: string;
 };
 
 /** A rule of policy.toml (spec 2 section 6.2). `when` holds only the conditions that the rule sets. */
@@ -225,6 +239,10 @@ export type Action = {
 export type Part = { text: string; flags?: string[]; source?: string };
 /** A recipient of a draft, with the flag `new_recipient` if the owner never wrote to the address. */
 export type Recipient = { address: string; flags?: string[] };
+/** A file of a draft, as the review and the outbox show it. */
+export type FileView = { name: string; type: string; size: number };
+/** A file in the attachment folder of the engine (POST /api/attachments), with its name and type for a draft. */
+export type Attachment = FileView & { sha256: string };
 /**
  * GET /api/changesets/{id}/drafts: the draft of each `draft` and `send`
  * action that waits, as the review shows it. Each part of the text carries
@@ -232,7 +250,7 @@ export type Recipient = { address: string; flags?: string[] };
  * cannot read has `readable: false` and no text.
  */
 export type DraftView = { revision: number; n: number; draft: string | null; thread: string | null } & (
-  | { readable: true; to: Recipient[]; cc: Recipient[]; subject: Part[]; body: Part[] }
+  | { readable: true; to: Recipient[]; cc: Recipient[]; bcc?: Recipient[]; attachments?: FileView[]; subject: Part[]; body: Part[] }
   | { readable: false }
 );
 
@@ -240,12 +258,20 @@ export type Changeset = {
   id: string;
   revision: number;
   author: { kind: "person" | "agent" | "triage" | "local"; name?: string; session?: string; job?: string };
+  /** Since open model 1.2: who withdrew the changeset (decision D16). Absent when it is not known. */
+  withdrawn_by?: "author" | "person";
   why: string | null;
   created: string;
   submitted: string | null;
   state: "draft" | "open" | "closed" | "withdrawn";
   actions: Action[];
 };
+
+/**
+ * GET /api/changesets/{id}/would: in observe mode, the decision that a rule of the active policy
+ * would give to each proposed action in apply mode (decision D10). Empty in apply mode.
+ */
+export type Would = { revision: number; n: number; outcome: "approved" | "in_review" | "denied"; rule: number; policy: number; reason: string };
 
 /** GET /api/handled: one action that an `allow` rule approved, with the reason. */
 export type HandledAction = {
@@ -291,6 +317,12 @@ export type LedgerEntry = {
   undo_open: boolean;
   undone_by: string | null;
   undo_of: string | null;
+  /** For an applied undo: the messages or items that it did not change (they changed again, or are gone). */
+  skipped: number;
+  /** For an undo: the targets that it tries to restore, also a gone message. 0 for each other entry. */
+  tried: number;
+  /** For an undo: true when the change that it undoes can be undone now. */
+  retry: boolean;
 };
 
 export type LedgerPage = { entries: LedgerEntry[]; next: string | null };
@@ -309,7 +341,11 @@ export type OutboxSend = {
   readable: boolean;
   to?: string[];
   cc?: string[];
+  bcc?: string[];
+  attachments?: FileView[];
   subject?: string;
+  /** The provider ("gmail" or "outlook") whose Bcc check keeps the send held, or null. An older engine leaves it out. */
+  bcc_check?: string | null;
 };
 /** GET /api/outbox: the send switch and each send that waits. Only `iris sending on|off` changes the switch. */
 export type Outbox = { sending: { on: boolean; since: string | null }; count: number; sends: OutboxSend[]; next: string | null };
@@ -357,7 +393,7 @@ export type ReplyStart = {
 /** GET /api/write/{cs}: the state of one press of Send (write spec, section 4). */
 export type WriteState =
   | { state: "saving" }
-  | { state: "waiting"; draft: string; sending: boolean; leaves_at: string | null }
+  | { state: "waiting"; draft: string; sending: boolean; bcc_check?: string | null; leaves_at: string | null }
   | { state: "review"; draft: string; reason: string | null }
   | { state: "sent"; draft: string }
   | { state: "stopped"; reason: string; draft: string | null };
@@ -402,7 +438,9 @@ export type JobSession = {
   exit: number | null;
   ended: string | null;
 };
-export type JobDetail = { job: Job & { events: JobEvent[] }; changesets: JobChangeset[]; threads: Record<string, Target>; session?: JobSession | null };
+/** One thread or item in the scope of a job (decision D25): the mail that the agent reads. `id` is null for a row that the page cannot name. */
+export type ScopeRef = { id: string | null; kind: "thread" | "item"; label: string | null; messages: number };
+export type JobDetail = { job: Job & { events: JobEvent[] }; changesets: JobChangeset[]; threads: Record<string, Target>; scope?: ScopeRef[]; session?: JobSession | null };
 
 export const SIGN_IN = "Sign in: run iris open in Terminal.";
 export const SIGN_IN_FAILED = "This sign-in address was used, ended or is not valid. Run iris open in Terminal for a new address.";
@@ -543,13 +581,17 @@ async function call(path: string, accept: string, body?: unknown): Promise<Respo
   if (active()) headers["x-iris-day"] = localDay();
   const sent = token;
   if (sent) headers.authorization = `Bearer ${sent}`;
-  const json = body === undefined ? undefined : JSON.stringify(body);
+  // A file (a Blob of any window) goes as its own bytes (POST /api/attachments).
+  const file = typeof (body as Blob | undefined)?.arrayBuffer === "function" ? (body as Blob) : undefined;
+  const json = body === undefined || file ? undefined : JSON.stringify(body);
   const init: RequestInit =
-    json === undefined
-      ? { headers }
-      : // keepalive: a POST that starts as the page closes still reaches the engine (Act.svelte).
-        // A browser refuses a keepalive body over 64 KiB, so a larger body (a long mail) goes without it.
-        { method: "POST", keepalive: keepable(json), headers: { ...headers, "content-type": "application/json" }, body: json };
+    file
+      ? { method: "POST", headers: { ...headers, "content-type": "application/octet-stream" }, body: file }
+      : json === undefined
+        ? { headers }
+        : // keepalive: a POST that starts as the page closes still reaches the engine (Act.svelte).
+          // A browser refuses a keepalive body over 64 KiB, so a larger body (a long mail) goes without it.
+          { method: "POST", keepalive: keepable(json), headers: { ...headers, "content-type": "application/json" }, body: json };
   const response = await fetch(`/api/${path}`, init).catch(() => fail(UNREACHABLE));
   if (response.status === 401) {
     // The engine does not know the token (for example after a restart of iris serve).
@@ -567,18 +609,64 @@ async function call(path: string, accept: string, body?: unknown): Promise<Respo
 
 /** Get one JSON resource from the local API. Throws an Error with the API's error text. */
 export async function get<T>(path: string): Promise<T> {
+  if (path === "status") return (await statusRead())[0] as T;
+  return getJson<T>(path);
+}
+
+async function getJson<T>(path: string): Promise<T> {
   const response = await call(path, "application/json");
   const body = await response.json().catch(() => null);
   // The status goes with the error, so that a caller can tell a 404 from other failures.
   if (!response.ok) throw Object.assign(new Error(body?.error ?? `The engine answered ${response.status}.`), { status: response.status });
-  // Spec 1 section 4.7: the provider refused the sign-in of these accounts, so their sync stopped.
-  if (path === "status") {
-    const accounts = (body as Status).accounts ?? [];
-    access.locked = accounts.filter((a) => a.state === "needs_sign_in").map(({ address, provider }) => ({ address, provider }));
-    access.none = accounts.length === 0;
-    access.accounts = accountNames(accounts);
-  }
   return body as T;
+}
+
+// The order of the status answers. Each request that answers with the status (a read, or a change
+// such as a removal or a try now) takes a number at its start. An answer is the newest only if no
+// answer of a request that started after it came first: requests in flight can answer out of order.
+let statusStarted = 0;
+let statusTaken = 0;
+
+/** Take `s`, the answer of request `n`, if it is the newest. Gives true if it is. */
+function takeStatus(n: number, s: Status): boolean {
+  if (n <= statusTaken) return false;
+  statusTaken = n;
+  // Spec 1 section 4.7: the provider refused the sign-in of these accounts, so their sync stopped.
+  const accounts = s.accounts ?? [];
+  access.locked = accounts.filter((a) => a.state === "needs_sign_in").map(({ address, provider }) => ({ address, provider }));
+  access.none = accounts.length === 0;
+  access.accounts = accountNames(accounts);
+  access.zone = s.time_zone ?? null;
+  return true;
+}
+
+async function statusRead(): Promise<[Status, boolean]> {
+  const n = ++statusStarted;
+  const s = await getJson<Status>("status");
+  return [s, takeStatus(n, s)];
+}
+
+/** Read the status. Gives null if a newer status answered first: a view keeps the newer one. */
+export async function readStatus(): Promise<Status | null> {
+  const [s, newest] = await statusRead();
+  return newest ? s : null;
+}
+
+/**
+ * Send a change whose answer is the status (POST). Gives the status, or null if a newer status
+ * answered first. A read that started during the change can show the state from before its commit,
+ * so after a change, a view reads the status again.
+ */
+export async function postStatus(path: string, body: unknown): Promise<Status | null> {
+  const n = ++statusStarted;
+  const s = await post<Status>(path, body);
+  return takeStatus(n, s) ? s : null;
+}
+
+/** Put one file into the attachment folder of the engine. The entry of a draft adds the name and the type. */
+export async function upload(file: File): Promise<Attachment> {
+  const v = await post<{ sha256: string; size: number }>("attachments", file);
+  return { name: file.name, type: file.type.split(";")[0].trim() || "application/octet-stream", size: v.size, sha256: v.sha256 };
 }
 
 /** Send a policy change (POST with a JSON body). Throws an Error with the API's error text. */

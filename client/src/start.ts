@@ -64,6 +64,7 @@ export const GRANTS = [
   { key: "tidy", title: "Tidy the mail", note: "Archive, add or remove labels, mark as read or unread, move back to the inbox", verbs: ["archive", "label", "unlabel", "read", "unread", "inbox"] },
   { key: "commitments", title: "Update commitments", note: "Mark as done, put off to a later day, decline", verbs: ["close", "defer", "decline"] },
   { key: "trash", title: "Move mail to the trash", note: "You can take it back from the trash for 30 days", verbs: ["trash"] },
+  { key: "replies", title: "Write reply drafts", note: "Only to the people in the thread and your own addresses. Each send still waits for you", verbs: ["draft"] },
 ] as const;
 
 /** The grants of `job` in the active policy: the allow rules with this job. */
@@ -73,11 +74,13 @@ export function grantsOf(rules: Rule[], job: string): Rule[] {
 
 type Group = (typeof GRANTS)[number];
 
-/** True if `rule` is the rule that the switch of `group` adds: the verbs of the group, `author = "agent"` and no other condition. */
+/** True if `rule` is the rule that the switch of `group` adds: the verbs of the group, `author = "agent"` and no other condition. A draft grant also has `recipients = "thread"` (decision D3). */
 export function isSwitch(rule: Rule, group: { verbs: readonly string[] }): boolean {
   const same = (a: readonly string[]) => [...a].sort().join();
-  const keys = Object.keys(rule.when ?? {});
-  return same(rule.verbs) === same(group.verbs) && keys.length === 1 && rule.when.author === "agent";
+  const want: Record<string, string> = group.verbs.includes("draft") ? { author: "agent", recipients: "thread" } : { author: "agent" };
+  const when = (rule.when ?? {}) as Record<string, unknown>;
+  const keys = Object.keys(when);
+  return same(rule.verbs) === same(group.verbs) && keys.length === Object.keys(want).length && keys.every((k) => when[k] === want[k]);
 }
 
 /**
@@ -98,4 +101,22 @@ export function grantView(rules: Rule[], job: string): { switches: Record<Group[
   }
   const general = rules.filter((r) => r.effect === "allow" && !r.job && (r.when?.author == null || r.when.author === "agent"));
   return { switches, others: mine.filter((r) => !taken.has(r.id)), general };
+}
+
+/** The `due` of a typed goal or an edit (decision D25): the old instant if the person kept its day, else the end of the picked day, or null. */
+export function keepDue(old: string | undefined, field: string): string | null {
+  if (!field) return null;
+  if (old && ymd(new Date(old)) === field) return old;
+  return endOfDay(field);
+}
+
+/** The threads of the messages of a search, in the order of the list: one line for each thread, with the subject of its first hit. */
+export function threadsOf(messages: Summary[]): { thread: string; subject: string; hits: number }[] {
+  const out = new Map<string, { thread: string; subject: string; hits: number }>();
+  for (const m of messages) {
+    const t = out.get(m.thread);
+    if (t) t.hits++;
+    else out.set(m.thread, { thread: m.thread, subject: subjectOf(m), hits: 1 });
+  }
+  return [...out.values()];
 }

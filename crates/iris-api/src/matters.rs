@@ -11,11 +11,13 @@ use serde_json::{json, Map, Value};
 use crate::read::{doc_at, rfc3339, row_of, MATTER};
 use crate::{Error, Result};
 
-/// The forms of a member, with the ID kind of each.
-const MEMBER_FORMS: [(&str, Kind); 3] = [
+/// The forms of a member, with the ID kind of each (signals since
+/// `docs/specs/2026-11-24-matters-edit.md`).
+const MEMBER_FORMS: [(&str, Kind); 4] = [
     ("commitment", Kind::Commitment),
     ("conversation", Kind::Conversation),
     ("record", Kind::Record),
+    ("signal", Kind::Signal),
 ];
 
 /// One statement reads each matter of a response with its members, so the
@@ -30,7 +32,7 @@ const MEMBER_FORMS: [(&str, Kind); 3] = [
 fn select(filter: &str, order: &str) -> String {
     format!(
         "SELECT m.id, m.title, m.status, m.model, m.prompt, m.created_at, m.updated_at,
-                m.decided_at, item.id, item.form, item.status, item.doc, {MATTER}
+                m.decided_at, item.id, item.form, item.status, item.doc, {MATTER}, m.author
            FROM matter m
            LEFT JOIN matter_item mi ON mi.matter_id = m.id AND CASE m.status
                 WHEN 'proposed' THEN mi.item_id IN
@@ -61,17 +63,23 @@ fn load(
         let id: i64 = r.get(0)?;
         if last != Some(id) {
             last = Some(id);
+            let author: String = r.get(14)?;
+            let derived = if author == "model" {
+                json!({"by": "model", "model": r.get::<_, String>(3)?,
+                       "prompt": r.get::<_, String>(4)?})
+            } else {
+                json!({ "by": author })
+            };
             let mut doc = json!({
                 "model": iris_store::MODEL,
                 "id": format_id(Kind::Matter, id),
                 "title": r.get::<_, String>(1)?,
                 "status": r.get::<_, String>(2)?,
                 "items": [],
-                "counts": {"commitment": 0, "conversation": 0, "record": 0},
+                "counts": {"commitment": 0, "conversation": 0, "record": 0, "signal": 0},
                 "created": rfc3339(r.get(5)?),
                 "updated": rfc3339(r.get(6)?),
-                "derived": {"by": "model", "model": r.get::<_, String>(3)?,
-                            "prompt": r.get::<_, String>(4)?},
+                "derived": derived,
             });
             if let Some(d) = r.get::<_, Option<i64>>(7)? {
                 doc["decided"] = rfc3339(d).into();
@@ -120,7 +128,13 @@ pub fn matters(store: &Store) -> Result<Value> {
         "m.status = 'confirmed',
          CASE m.status WHEN 'proposed' THEN m.created_at ELSE m.updated_at END DESC",
     );
-    let all = store.read(|c| Ok(load(c, &sql, [], false)?))?;
+    let all = store.read(|c| {
+        let mut all = load(c, &sql, [], false)?;
+        for (doc, _) in &mut all {
+            additions(c, doc, None)?;
+        }
+        Ok(all)
+    })?;
     let (mut proposed, mut confirmed) = (Vec::new(), Vec::new());
     for (doc, _) in all {
         if doc["status"] == "proposed" {
@@ -179,30 +193,126 @@ fn decided(
     match r {
         Ok(()) => Ok(store.read(|c| Ok(view(c, row)?))?),
         Err(MatterError::NotFound) => Ok(None),
-        Err(MatterError::Conflict(why)) => Err(Error::Conflict(why.into())),
-        Err(MatterError::Bad(why)) => Err(Error::Query(why.into())),
-        Err(MatterError::Store(e)) => Err(Error::Store(e)),
-        Err(e) => Err(Error::Conflict(e.to_string())),
+        Err(e) => Err(error(e)),
     }
 }
 
-/// The row and the form of a member ID (`c-`, `v-` or `r-`).
+fn error(e: MatterError) -> Error {
+    match e {
+        MatterError::Conflict(why) => Error::Conflict(why.into()),
+        MatterError::Bad(why) => Error::Query(why.into()),
+        MatterError::Store(e) => Error::Store(e),
+        MatterError::NotFound => Error::Conflict("no such matter".into()),
+        e => Error::Conflict(e.to_string()),
+    }
+}
+
+/// The row and the form of a member ID (`c-`, `v-`, `r-` or `s-`).
 fn member(id: &str) -> Result<(i64, &'static str)> {
-    parse_id(id)
-        .and_then(|(k, row)| {
-            MEMBER_FORMS
-                .iter()
-                .find(|(_, m)| *m == k)
-                .map(|(f, _)| (row, *f))
-        })
-        .ok_or_else(|| Error::Query(format!("not a valid ID: {id}")))
+    iris_matters::parse_ref(id).ok_or_else(|| Error::Query(format!("not a valid ID: {id}")))
 }
 
 /// The matter document with its member documents, or `None`. One
 /// statement.
 fn view(c: &Connection, row: i64) -> rusqlite::Result<Option<Value>> {
     let sql = select("m.id = ?1", "m.id");
-    Ok(load(c, &sql, [row], true)?
-        .pop()
-        .map(|(doc, items)| json!({ "matter": doc, "items": items })))
+    let Some((mut doc, items)) = load(c, &sql, [row], true)?.pop() else {
+        return Ok(None);
+    };
+    let mut docs = Vec::new();
+    additions(c, &mut doc, Some(&mut docs))?;
+    Ok(Some(
+        json!({ "matter": doc, "items": items, "additions": docs }),
+    ))
+}
+
+/// Sets the field `additions` of a confirmed matter document: the item IDs
+/// of its live additions (the view `matter_add_live`), newest first, with
+/// no item of hostile mail. With `docs`, also the item documents.
+fn additions(
+    c: &Connection,
+    doc: &mut Value,
+    mut docs: Option<&mut Vec<Value>>,
+) -> rusqlite::Result<()> {
+    if doc["status"] != "confirmed" {
+        return Ok(());
+    }
+    let Some((_, row)) = doc["id"].as_str().and_then(parse_id) else {
+        return Ok(());
+    };
+    let mut st = c.prepare_cached(&format!(
+        "SELECT item.id, item.form, item.status, item.doc, {MATTER}
+           FROM matter_add_live a JOIN item ON item.id = a.item_id
+          WHERE a.matter_id = ?1 AND NOT {from_hostile}
+          ORDER BY a.created_at DESC, item.id DESC LIMIT 50",
+        from_hostile = crate::read::FROM_HOSTILE
+    ))?;
+    let mut rows = st.query([row])?;
+    let mut ids = Vec::new();
+    while let Some(r) = rows.next()? {
+        let form: String = r.get(1)?;
+        let Some((_, kind)) = MEMBER_FORMS.iter().find(|(f, _)| *f == form) else {
+            continue;
+        };
+        ids.push(Value::from(format_id(*kind, r.get(0)?)));
+        if let Some(d) = docs.as_deref_mut() {
+            d.push(doc_at(r, 0)?);
+        }
+    }
+    if !ids.is_empty() {
+        doc["additions"] = ids.into();
+    }
+    Ok(())
+}
+
+/// True when the item `id` can join a matter now (`iris_matters::joinable`):
+/// the web client shows its matter picker only then.
+pub fn joinable(store: &Store, id: &str) -> Result<bool> {
+    iris_matters::joinable(store, member(id)?).map_err(error)
+}
+
+/// The person makes a matter by hand with a title and 1 to 50 item IDs.
+/// The answer is the new matter view.
+pub fn create_matter(store: &Store, title: &str, items: &[String], now_ms: i64) -> Result<Value> {
+    let items = refs(items)?;
+    let row = iris_matters::create(store, title, &items, now_ms).map_err(error)?;
+    store
+        .read(|c| Ok(view(c, row)?))?
+        .ok_or_else(|| Error::Conflict("the new matter is not visible".into()))
+}
+
+/// The person edits the confirmed matter `id`: a new title, items to add,
+/// items to remove. The answer is the matter view; `None` when no such
+/// matter exists.
+pub fn edit_matter(
+    store: &Store,
+    id: &str,
+    title: Option<String>,
+    add: &[String],
+    remove: &[String],
+    now_ms: i64,
+) -> Result<Option<Value>> {
+    let row = row_of(id, Kind::Matter)?;
+    let e = iris_matters::Edit {
+        title,
+        add: refs(add)?,
+        remove: refs(remove)?,
+    };
+    decided(store, row, iris_matters::edit(store, row, &e, now_ms))
+}
+
+/// The person deletes the confirmed matter `id`. `false` when no such
+/// matter exists.
+pub fn delete_matter(store: &Store, id: &str, now_ms: i64) -> Result<bool> {
+    let row = row_of(id, Kind::Matter)?;
+    match iris_matters::delete(store, row, now_ms) {
+        Ok(()) => Ok(true),
+        Err(MatterError::NotFound) => Ok(false),
+        Err(e) => Err(error(e)),
+    }
+}
+
+/// The row and the form of each member ID.
+pub(crate) fn refs(items: &[String]) -> Result<Vec<(i64, &'static str)>> {
+    items.iter().map(|i| member(i)).collect()
 }

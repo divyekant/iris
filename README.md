@@ -190,6 +190,7 @@ object, and JSON Lines for a list.
 | `iris status` | The accounts, the state of the sync and the message counts |
 | `iris search "<text>"` | The messages that match the search text, newest first |
 | `iris show <id>` | One message (`m-42`) or one item (`c-7`) |
+| `iris list [<form>]` | The items, newest first. Filters: `--status open`, `--type receipt` (with the form `record`), `--limit 20`. For the next page, add `--before <the last ID>`. |
 | `iris mirror sync` | One sync of each account now |
 | `iris mirror verify` | A compare of the mirror with Gmail, and a check of the content files |
 
@@ -232,11 +233,11 @@ give the reason of the action. A draft does nothing until you submit it.
 `iris mcp` serves the same verbs as MCP (Model Context Protocol) tools, on
 standard input and output. Use it with an agent that speaks MCP but does not
 use a terminal. Each tool has the name and the arguments of its verb:
-`status`, `search`, `show`, `draft`, `send`, `close`, `decline`, `skip`,
+`status`, `search`, `show`, `list`, `draft`, `send`, `close`, `decline`, `skip`,
 `mute`, `dismiss`, `defer`, `correct`, `archive`, `inbox`, `read`, `unread`, `trash`, `label`,
 `unlabel`, `submit`, `changeset`, `drafts`, `withdraw`, `revise`,
-`watch_add`, `watch_list`, `watch_remove`, `matters_list` and
-`matters_show`. The result is what the verb prints with `--json`, or its
+`watch_add`, `watch_list`, `watch_remove`, `matters_list`,
+`matters_show` and `matters_propose`. The result is what the verb prints with `--json`, or its
 text where the verb has no `--json` (`watch_add` and `watch_remove`). A tool
 that adds an action gives the JSON `{"changeset": ..., "n": ...}`.
 

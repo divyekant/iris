@@ -23,7 +23,9 @@ pub const MAX_SENDS: u32 = 200;
 /// (`approved` or `held`), the time of the approval, the time that it can
 /// leave (`null` while the switch is off), the flags, and the recipients
 /// and subject of its draft. The recipients and the subject come from the
-/// stored raw bytes of the draft, the bytes that Gmail gets. A send whose
+/// stored raw bytes of the draft, the bytes that Gmail gets. `bcc_check`
+/// is the provider (`gmail` or `outlook`) whose closed Bcc gate keeps the
+/// send held, or `null`. A send whose
 /// bytes Iris cannot read has `"readable": false`.
 pub fn outbox(store: &Store, limit: u32, after: Option<&str>) -> Result<Value> {
     if !(1..=MAX_SENDS).contains(&limit) {
@@ -98,6 +100,9 @@ fn send(
         "approved": rfc3339(decided_at),
         "leaves": leaves,
         "flags": flags,
+        // The provider whose Bcc gate keeps the send held (send content
+        // spec, section 6.2), or null.
+        "bcc_check": iris_apply::bcc_waits(c, draft)?,
     });
     match iris_changeset::action_content(c, action).map_err(|e| match changeset_error(e) {
         crate::Error::Store(e) => e,
@@ -107,7 +112,9 @@ fn send(
             v["readable"] = true.into();
             v["to"] = content.to.into();
             v["cc"] = content.cc.into();
+            v["bcc"] = content.bcc.into();
             v["subject"] = content.subject.into();
+            v["attachments"] = crate::drafts::files(&content.attachments).into();
         }
         None => v["readable"] = false.into(),
     }

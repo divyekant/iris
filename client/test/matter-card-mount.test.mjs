@@ -175,3 +175,21 @@ test("on the matter page, a proposal that the engine dropped shows as gone, with
     v.destroy();
   }
 });
+
+test("a proposal with a signal shows the signal on the card and in the confirm step (D21)", async () => {
+  const signal = fx.items.find((i) => i.form === "signal");
+  const withSignal = {
+    matter: { ...view.matter, items: [...view.matter.items, signal.id], counts: { ...view.matter.counts, signal: 1 } },
+    items: { ...view.items, signal: [signal] },
+  };
+  const v = await mount("/src/views/MatterCard.svelte", { view: withSignal });
+  try {
+    assert.ok(v.target.querySelector(`a[href="#/item/${signal.id}"]`), "the signal has a link");
+    assert.match(text(v.target), /one signal/i);
+    button(v, "Keep together").click();
+    v.flushSync();
+    assert.equal(v.target.querySelectorAll("input[type=checkbox]").length, withSignal.matter.items.length);
+  } finally {
+    v.destroy();
+  }
+});

@@ -379,11 +379,59 @@ fn a_revoke_or_the_end_of_the_job_empties_the_grant() {
     assert_eq!(e.0, code::USAGE, "{e:?}");
 }
 
+/// Decision D3: a session drafts a reply in a granted thread. A new mail,
+/// a thread outside the grant, a send and a nudge are refused.
 #[test]
-fn a_session_cannot_draft_send_or_nudge() {
+fn a_session_drafts_only_a_reply_in_a_granted_thread() {
+    let (store, job) = fixture("draft");
+    let me = session(job, "se-1");
+    let reply = json!({ "to": ["dana@example.com"], "body": "Signed." });
+    let r = add(&store, &me, "draft", &["t-1"], reply.clone()).unwrap();
+    let cs = r["changeset"].clone();
+    call(
+        &store,
+        &me,
+        "submit",
+        json!({ "changeset": cs, "why": "x" }),
+    )
+    .unwrap();
+    let state: String = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT state FROM changeset_action WHERE verb = 'draft'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(state, "proposed");
+    let mail = json!({ "to": ["dana@example.com"], "subject": "Hi", "body": "Hi." });
+    for (target, args) in [("t-2", reply), ("a-1", mail)] {
+        let r = add(&store, &me, "draft", &[target], args).unwrap();
+        let e = call(
+            &store,
+            &me,
+            "submit",
+            json!({ "changeset": r["changeset"], "why": "x" }),
+        )
+        .unwrap_err();
+        assert_eq!(e.0, code::DENIED, "{target}: {e:?}");
+        assert!(e.1.contains("outside the grant"), "{target}: {e:?}");
+        call(
+            &store,
+            &me,
+            "withdraw",
+            json!({ "changeset": r["changeset"] }),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn a_session_cannot_send_or_nudge() {
     let (store, job) = fixture("write");
     let me = session(job, "se-1");
-    for verb in ["draft", "send", "nudge"] {
+    for verb in ["send", "nudge"] {
         let e = add(&store, &me, verb, &["t-1"], json!({})).unwrap_err();
         assert_eq!(e.0, code::DENIED, "{verb}");
     }
@@ -400,7 +448,7 @@ fn a_session_cannot_draft_send_or_nudge() {
         .write(|tx| {
             tx.execute(
                 "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
-                 VALUES (?1, 1, 2, 'draft', '{\"threads\":[\"t-1\"]}', '{}')",
+                 VALUES (?1, 1, 2, 'send', '{\"drafts\":[\"d-1\"]}', '{}')",
                 [row],
             )?;
             Ok(())
@@ -791,4 +839,104 @@ fn a_read_sees_the_grant_and_the_text_of_one_snapshot() {
             reads += 1;
         }
     });
+}
+
+/// D22 (docs/specs/2026-11-24-matters-edit.md): an agent proposes a matter.
+/// A session may name only items of its grant; the host may name any
+/// live item. The proposal waits for the person.
+#[test]
+fn an_agent_proposes_a_matter_of_its_grant_only() {
+    let (store, job) = fixture("matters-propose");
+    let me = session(job, "se-1");
+    let args = json!({ "title": "Contract", "items": ["c-1", "c-4"] });
+    let (code, why) = call(&store, &me, "matters.propose", args.clone()).unwrap_err();
+    assert_eq!(code, code::DENIED, "{why}");
+    assert!(why.contains("c-4 is not in this job"), "{why}");
+    assert_eq!(count(&store, "SELECT count(*) FROM matter"), 0);
+    // A wrong form, a feed kind, one item: usage, no write.
+    for items in [json!(["r-1", "c-4"]), json!(["f-1", "c-4"]), json!(["c-1"])] {
+        let r = call(
+            &store,
+            &socket::local(),
+            "matters.propose",
+            json!({ "title": "Contract", "items": items }),
+        );
+        assert_eq!(r.unwrap_err().0, code::USAGE, "{items}");
+    }
+    let v = call(&store, &socket::local(), "matters.propose", args).unwrap();
+    assert_eq!(v["matter"]["status"], "proposed", "{v}");
+    assert_eq!(v["matter"]["derived"], json!({ "by": "agent" }));
+    assert_eq!(v["matter"]["items"], json!(["c-1", "c-4"]));
+    assert!(socket::parse_answer(
+        "matters.propose",
+        json!({ "ok": true, "result": v }).to_string().as_bytes()
+    )
+    .unwrap()
+    .is_ok());
+    assert!(v.get("items").is_none(), "{v}");
+    // The same items again: they are in an open matter now.
+    let again = json!({ "title": "Again", "items": ["c-1", "c-4"] });
+    assert_eq!(
+        call(&store, &socket::local(), "matters.propose", again)
+            .unwrap_err()
+            .0,
+        code::USAGE
+    );
+}
+
+/// D21 and D22: the host may propose an active signal (`s-`) as a member.
+/// An ended signal is refused, with no write.
+#[test]
+fn an_agent_proposes_a_matter_with_a_signal() {
+    let (store, _job) = fixture("matters-propose-signal");
+    store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE item SET form = 'signal', status = 'expired' WHERE id = 4",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let args = json!({ "title": "Contract", "items": ["c-1", "s-4"] });
+    let r = call(&store, &socket::local(), "matters.propose", args.clone());
+    assert_eq!(r.unwrap_err().0, code::USAGE);
+    assert_eq!(count(&store, "SELECT count(*) FROM matter"), 0);
+    store
+        .write(|tx| {
+            tx.execute("UPDATE item SET status = 'active' WHERE id = 4", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let v = call(&store, &socket::local(), "matters.propose", args).unwrap();
+    assert_eq!(v["matter"]["items"], json!(["c-1", "s-4"]), "{v}");
+    assert_eq!(v["matter"]["counts"]["signal"], 1, "{v}");
+}
+
+/// D22: the answer of a session proposal is the matter document only. A
+/// member document can hold model text from mail outside the grant, so a
+/// marker in it never comes back.
+#[test]
+fn a_session_proposal_answers_no_member_document() {
+    let (store, job) = fixture("matters-propose-ok");
+    add_scope(&store, job, Ref::Thread(2), By::Person, NOW).unwrap();
+    store
+        .write(|tx| {
+            tx.execute(
+                r#"UPDATE item SET doc = '{"id":"c-1","form":"commitment","title":"OUTSIDE-MARKER"}' WHERE id = 1"#,
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let me = session(job, "se-1");
+    let v = call(
+        &store,
+        &me,
+        "matters.propose",
+        json!({ "title": "Contract", "items": ["c-1", "c-4"] }),
+    )
+    .unwrap();
+    assert_eq!(v["matter"]["items"], json!(["c-1", "c-4"]), "{v}");
+    assert!(!v.to_string().contains("OUTSIDE-MARKER"), "{v}");
 }

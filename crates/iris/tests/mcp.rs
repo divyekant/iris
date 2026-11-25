@@ -169,7 +169,7 @@ fn a_client_reads_the_mail_and_submits_a_changeset() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     for verb in [
-        "status", "search", "show", "archive", "draft", "send", "submit", "withdraw",
+        "status", "search", "show", "list", "archive", "draft", "send", "submit", "withdraw",
     ] {
         assert!(names.contains(&verb), "{verb} not in {names:?}");
     }
@@ -329,6 +329,19 @@ fn each_tool_gives_the_output_and_the_code_of_its_verb() {
             json!({ "text": "label:INBOX", "limit": 3 }),
         ),
         (vec!["show", &m, "--json"], "show", json!({ "id": m })),
+        (vec!["list", "--json"], "list", json!({})),
+        (
+            vec![
+                "list", "record", "--type", "receipt", "--limit", "2", "--json",
+            ],
+            "list",
+            json!({ "form": "record", "type": "receipt", "limit": 2 }),
+        ),
+        (
+            vec!["list", "--status", "nope", "--json"],
+            "list",
+            json!({ "status": "nope" }),
+        ),
         (
             vec!["show", "m-999999", "--json"],
             "show",
@@ -537,8 +550,8 @@ fn a_bad_or_long_line_is_dropped_and_the_next_line_is_read() {
 
 /// The verbs that have no tool: the verbs of the person (the send switch
 /// and the cancel of a send), of the host (sign-in, service, model, backup,
-/// export, sync, understanding, the engine), and the paid proposal of
-/// matters.
+/// export, sync, understanding, the engine). `matters_propose` is a tool
+/// with a title and items only (D22); the paid model step is not.
 const NOT_TOOLS: &[&str] = &[
     "serve",
     "account",
@@ -548,16 +561,15 @@ const NOT_TOOLS: &[&str] = &[
     "service",
     "model",
     "sending",
+    "zone",
     "stop",
     "resume",
     "cancel",
     "understand",
     "mcp",
-    "matters_propose",
     "write",
     "job",
     // The verbs of a job session only: `iris mcp` serves the host.
-    "list",
     "wait",
     "ask",
     "done",

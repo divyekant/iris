@@ -481,17 +481,22 @@ pub fn withdraw_in(c: &Connection, changeset: i64, author: Option<&Author>) -> R
             "the mail left or is leaving now, so it cannot be stopped".into(),
         ));
     }
+    // Who withdrew (decision D16): the author, or you. A send of the write
+    // view has the same author as its draft (the person).
+    let by = if author.is_some() { "author" } else { "person" };
     let changed = c.execute(
-        "UPDATE changeset SET state = 'withdrawn' WHERE id = ?1 AND state <> 'withdrawn'",
-        [changeset],
+        "UPDATE changeset SET state = 'withdrawn', withdrawn_by = ?2
+         WHERE id = ?1 AND state <> 'withdrawn'",
+        params![changeset, by],
     )?;
     if changed == 0 {
         return Err(refused("the changeset is withdrawn".into()));
     }
     for (send, _) in sends {
         c.execute(
-            "UPDATE changeset SET state = 'withdrawn' WHERE id = ?1 AND state <> 'withdrawn'",
-            [send],
+            "UPDATE changeset SET state = 'withdrawn', withdrawn_by = ?2
+             WHERE id = ?1 AND state <> 'withdrawn'",
+            params![send, by],
         )?;
     }
     Ok(())
@@ -813,8 +818,9 @@ enum Phase {
     Apply,
 }
 
-/// The checks of one action against the grant of its job: no draft or
-/// send, each resolved message granted, each item an item of the workspace.
+/// The checks of one action against the grant of its job: no send, a
+/// draft only as a reply to a granted thread (decision D3), each resolved
+/// message granted, each item an item of the workspace.
 /// Invariant: an action of a session changes only granted rows, and a
 /// target that gives no row never passes. At submit, each declared target
 /// must also be in the grant, so a target that gives no row (each message
@@ -834,9 +840,12 @@ fn outside_grant(
         [action],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    if WRITE_VERBS.contains(&verb.as_str()) {
+    // A draft of a session is a reply: its thread is a target, and the
+    // checks below hold it to the grant. A new mail names an account, which
+    // no job grants. A send needs a person (decision D2).
+    if WRITE_VERBS.contains(&verb.as_str()) && verb != "draft" {
         return Ok(Some(format!(
-            "a session of {j} cannot {verb}: a job has no grant of an account or a draft"
+            "a session of {j} cannot {verb}: only a person sends mail"
         )));
     }
     let outside = || Ok(Some(format!("the targets are outside the grant of {j}")));
@@ -949,10 +958,13 @@ pub fn marked_in(c: &Connection, changeset: i64) -> Result<bool> {
 }
 
 /// The marks of the flag `outside_thread` (spec R4-06): each address of
-/// `to` and `cc` of `content` that is not in From, To or Cc of a live
-/// message of the threads of `action`, and is not one of your addresses. A
-/// new mail has no thread. Submit gives the flag to a marked author when
-/// this list is not empty.
+/// `to`, `cc` and `bcc` of `content` that is not in the thread of `action`, and is
+/// not one of your addresses. An address is in the thread only if it is the
+/// From of a live thread message, or in To or Cc of a live thread message
+/// that you sent (decision D13, issue #435). So a stranger cannot widen
+/// the thread with an address in Cc of its own message. A new mail has no
+/// thread. Submit gives the flag to a marked author when this list is not
+/// empty.
 pub fn outside_marks(
     c: &Connection,
     action: i64,
@@ -961,11 +973,8 @@ pub fn outside_marks(
     // Memory holds the recipients that no row names yet (at most the
     // recipients of the draft) and one header row, never a list of the
     // addresses of the thread or of one header.
-    let mut open: HashSet<String> = content
-        .to
-        .iter()
-        .chain(&content.cc)
-        .map(|a| a.trim().to_ascii_lowercase())
+    let mut open: HashSet<String> = flags::recipients(content)
+        .map(|(_, a)| a.trim().to_ascii_lowercase())
         .collect();
     iris_talk::each_your_address(c, |a| {
         open.remove(&a);
@@ -973,9 +982,14 @@ pub fn outside_marks(
     })?;
     if !open.is_empty() {
         let mut st = c.prepare(&format!(
-            "SELECT h.from_addr, h.to_addrs, h.cc_addrs
+            "SELECT h.from_addr, s.to_addrs, s.cc_addrs
              FROM changeset_action a, message t JOIN header h ON h.message_id = t.id
-             WHERE a.id = ?1 AND t.gone_at IS NULL AND t.thread_id IN ({ACTION_THREADS})"
+             LEFT JOIN header s ON s.message_id = t.id
+               AND EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                           WHERE ml.message_id = t.id AND l.provider_id = 'SENT')
+               AND NOT {copy}
+             WHERE a.id = ?1 AND t.gone_at IS NULL AND t.thread_id IN ({ACTION_THREADS})",
+            copy = iris_store::draft_or_copy!("t")
         ))?;
         let mut rows = st.query([action])?;
         while let (false, Some(r)) = (open.is_empty(), rows.next()?) {
@@ -988,18 +1002,7 @@ pub fn outside_marks(
             }
         }
     }
-    let to = content
-        .to
-        .iter()
-        .enumerate()
-        .map(|(i, a)| (Field::To(i), a));
-    let cc = content
-        .cc
-        .iter()
-        .enumerate()
-        .map(|(i, a)| (Field::Cc(i), a));
-    Ok(to
-        .chain(cc)
+    Ok(flags::recipients(content)
         .filter(|(_, a)| open.contains(&a.trim().to_ascii_lowercase()))
         .map(|(field, a)| Mark {
             flag: "outside_thread",
@@ -1475,14 +1478,31 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
         if let Some(why) = draft_busy(c, action, draft)? {
             return Ok(Some(why));
         }
-        // The flags come from the stored bytes (docs/specs/2026-11-17-send-checks.md).
-        if action_content(c, action)?.is_none() {
+        // The stored bytes have the limit of the provider of the draft
+        // account (send content spec, section 5): a refresh from the
+        // provider can make them larger than a draft that Iris wrote.
+        let (size, provider): (i64, String) = c.query_row(
+            "SELECT length(d.raw), a.provider FROM draft d JOIN account a ON a.id = d.account_id
+             WHERE d.id = ?1",
+            [draft],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let limit = iris_compose::max_message(&provider);
+        if size as u64 > limit {
             return Ok(Some(format!(
-                "{} has no content that Iris can check",
-                format_id(Kind::Draft, draft)
+                "the mail is too large for {provider}: at most {limit} bytes with its files"
             )));
         }
-        return Ok(None);
+        // The flags come from the stored bytes (docs/specs/2026-11-17-send-checks.md).
+        match action_content(c, action)? {
+            None => {
+                return Ok(Some(format!(
+                    "{} has no content that Iris can check",
+                    format_id(Kind::Draft, draft)
+                )))
+            }
+            Some(_) => return Ok(None),
+        }
     }
     let Ok(content) = serde_json::from_str::<iris_compose::Content>(args) else {
         return Ok(Some(
@@ -1515,7 +1535,40 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
     } else {
         content
     };
-    Ok(content.check().err())
+    let content = match content.check() {
+        Ok(c) => c,
+        Err(why) => return Ok(Some(why)),
+    };
+    // Only the person attaches a file (send content spec, scope): an agent
+    // could name a file of the folder by its hash.
+    if !content.attachments.is_empty() {
+        let person: bool = c.query_row(
+            "SELECT cs.author_kind = 'person' FROM changeset_action a
+             JOIN changeset cs ON cs.id = a.changeset_id WHERE a.id = ?1",
+            [action],
+            |r| r.get(0),
+        )?;
+        if !person {
+            return Ok(Some("only the person attaches a file to a draft".into()));
+        }
+    }
+    // The size of the whole message has the limit of the provider of the
+    // account (send content spec, section 5).
+    let provider: Option<String> = c
+        .query_row(
+            "SELECT a.provider FROM account a WHERE 'a-' || a.id IN
+               (SELECT value FROM json_each(
+                  (SELECT targets FROM changeset_action WHERE id = ?1), '$.accounts'))
+             UNION ALL
+             SELECT a.provider FROM action_message am JOIN message m ON m.id = am.message_id
+               JOIN account a ON a.id = m.account_id WHERE am.action_id = ?1
+             LIMIT 1",
+            [action],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let limit = iris_compose::max_message(provider.as_deref().unwrap_or(""));
+    Ok(content.check_size(limit).err())
 }
 
 /// Spec 2, section 6.5: an author other than the person writes no mail
@@ -1896,11 +1949,12 @@ fn document(c: &Connection, changeset: i64, out: &mut impl Write) -> Result<()> 
         i64,
         Option<i64>,
         String,
+        Option<String>,
     );
     let head: Option<Head> = c
         .query_row(
             "SELECT revision, author_kind, author_name, author_session, author_job, why,
-                    created_at, submitted_at, state
+                    created_at, submitted_at, state, withdrawn_by
              FROM changeset WHERE id = ?1",
             [changeset],
             |r| {
@@ -1914,11 +1968,12 @@ fn document(c: &Connection, changeset: i64, out: &mut impl Write) -> Result<()> 
                     r.get(6)?,
                     r.get(7)?,
                     r.get(8)?,
+                    r.get(9)?,
                 ))
             },
         )
         .optional()?;
-    let (revision, kind, name, session, job, why, created, submitted, state) =
+    let (revision, kind, name, session, job, why, created, submitted, state, withdrawn_by) =
         head.ok_or(Error::NotFound)?;
     let mut author = Map::new();
     author.insert("kind".into(), kind.into());
@@ -1930,12 +1985,14 @@ fn document(c: &Connection, changeset: i64, out: &mut impl Write) -> Result<()> 
     let time = |ms: Option<i64>| ms.map_or(Value::Null, |ms| iris_talk::rfc3339(ms).into());
     write!(
         out,
-        r#"{{"model":"{model}","id":"{}","revision":{revision},"author":{},"why":{},"created":{},"submitted":{},"state":"{state}","actions":["#,
+        r#"{{"model":"{model}","id":"{}","revision":{revision},"author":{},"why":{},"created":{},"submitted":{},"state":"{state}",{}"actions":["#,
         format_changeset_id(changeset),
         Value::Object(author),
         why.map_or(Value::Null, Value::String),
         time(Some(created)),
         time(submitted),
+        // Since iris/1.2: who withdrew (decision D16), when it is known.
+        withdrawn_by.map_or(String::new(), |b| format!(r#""withdrawn_by":"{b}","#)),
         model = iris_store::MODEL,
     )?;
     let mut st = c.prepare(
@@ -2010,7 +2067,29 @@ fn document(c: &Connection, changeset: i64, out: &mut impl Write) -> Result<()> 
             ledger.map_or(String::new(), |l| format!(r#","ledger":"l-{l}""#)),
         )?;
     }
-    out.write_all(b"]}")?;
+    out.write_all(b"]")?;
+    // Since iris/1.2: the review comments of the person, oldest first, so an
+    // author with no job workspace can read them too (decision D15).
+    // One comment at a time, so memory holds one comment.
+    let mut st = c.prepare_cached(
+        "SELECT revision, text, at_ms FROM changeset_comment WHERE changeset_id = ?1 ORDER BY id",
+    )?;
+    let mut rows = st.query([changeset])?;
+    let mut first = true;
+    while let Some(r) = rows.next()? {
+        out.write_all(if first { br#","comments":["# } else { b"," })?;
+        first = false;
+        let k = serde_json::json!({
+            "revision": r.get::<_, i64>(0)?,
+            "text": r.get::<_, String>(1)?,
+            "at": time(Some(r.get(2)?)),
+        });
+        write!(out, "{k}")?;
+    }
+    if !first {
+        out.write_all(b"]")?;
+    }
+    out.write_all(b"}")?;
     Ok(())
 }
 

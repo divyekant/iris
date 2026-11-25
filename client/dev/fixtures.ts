@@ -12,6 +12,7 @@ import feed from "../../docs/spec/schema/examples/feed.json" with { type: "json"
 import signal from "../../docs/spec/schema/examples/signal-code.json" with { type: "json" };
 import matterConfirmed from "../../docs/spec/schema/examples/matter-confirmed.json" with { type: "json" };
 import matterProposed from "../../docs/spec/schema/examples/matter-proposed.json" with { type: "json" };
+import matterByHand from "../../docs/spec/schema/examples/matter-by-hand.json" with { type: "json" };
 
 // Two accounts (card R6-02): the work mailbox has the conversation and the commitment owed to you.
 const work = new Set(["commitment-owed-to-you", "conversation"]);
@@ -155,6 +156,9 @@ const entry = (id: number, at: string, rest: Partial<LedgerEntry>): LedgerEntry 
   undo_open: false,
   undone_by: null,
   undo_of: null,
+  skipped: 0,
+  tried: 0,
+  retry: false,
   ...rest,
 });
 export const ledger: LedgerPage = {
@@ -167,6 +171,9 @@ export const ledger: LedgerPage = {
     entry(27, "2026-11-16T18:20:00Z", { state: "failed", messages: 40, changed: 12, error: "Gmail refused one call.", why: "Old notices from Example Air.", can_undo: true }),
     entry(26, "2026-11-16T17:05:00Z", { verb: "close", items: 1, title: "Send the Q4 numbers to Priya", why: "Done." }),
     entry(25, "2026-11-16T08:02:00Z", { verb: "read", state: "undone", messages: 6, changed: 6, author: { kind: "triage", name: null, job: null, goal: null }, decided_by: "rule", rule: 5, policy: 3, why: "Receipts that need no reply.", undone_by: "l-32" }),
+    // An undo that changed nothing (decision D18): each message changed again after l-23, so l-23 keeps its Undo.
+    entry(24, "2026-11-15T10:20:00Z", { verb: "inbox", skipped: 4, tried: 4, retry: true, why: "Undo of l-23", undo_of: "l-23" }),
+    entry(23, "2026-11-15T10:05:00Z", { messages: 4, changed: 4, why: "Shipping notices that arrived.", can_undo: true }),
   ],
 };
 
@@ -458,6 +465,7 @@ export function withdraw(id: string): Changeset | undefined {
   const c = changesets.find((x) => x.id === id);
   if (!c) return undefined;
   c.state = "withdrawn";
+  c.withdrawn_by = "person";
   for (const a of c.actions) {
     if (a.decision && ["proposed", "in_review", "approved"].includes(a.decision.state)) a.decision = { state: "cancelled", by: "author" };
   }
@@ -539,6 +547,7 @@ export const jobs: Record<string, Job> = {
     question: "The invoice says 2,400 EUR, but the quote said 2,150 EUR. Pay the full amount, or ask Brightline about the difference first?",
   },
   "j-15": { id: "j-15", goal: "Book a dentist appointment for next week, in the morning.", created: at(16, 11), updated: at(16, 11), state: "working" },
+  "j-16": { id: "j-16", goal: "Renew the passport before the trip.", due: at(16, 0), created: at(10, 9), updated: at(16, 0), state: "needs_you", question: "The due date passed. Answer to go on, or end the job." },
   "j-9": { id: "j-9", goal: "Cancel the gym membership.", created: at(12, 9), updated: at(13, 15), state: "done", end: "complete" },
 };
 export const jobDetails: Record<string, JobDetail> = {
@@ -559,11 +568,19 @@ export const jobDetails: Record<string, JobDetail> = {
       { id: "cs-34", at: at(16, 18, 38), state: "open", why: "Reply to Dana: accept clause 7 and ask for the signature.", actions: { in_review: 1 } },
     ],
     threads: { "t-8841": { id: "m-90211", thread: "t-8841", date: at(16, 16, 2), from: dana, subject: "Re: Northwind contract, final version", labels: ["INBOX"], gone: false } },
+    scope: [{ id: "t-8841", kind: "thread", label: "Northwind contract, final version", messages: 4 }],
   },
   "j-14": {
     job: { ...jobs["j-14"], events: [{ at: at(16, 8), state: "working", by: "person" }, { at: at(16, 10, 2), state: "needs_you", by: "agent", question: jobs["j-14"].question, why: "The amounts do not agree." }] },
     changesets: [],
     threads: {},
+  },
+  // The engine moved the job on its due date (decision D24).
+  "j-16": {
+    job: { ...jobs["j-16"], events: [{ at: at(10, 9), state: "working", by: "person" }, { at: at(16, 0), state: "needs_you", by: "engine", question: jobs["j-16"].question, why: "due" }] },
+    changesets: [],
+    threads: {},
+    scope: [],
   },
   // A working job whose session ended with an error: no agent works on it (issue #742).
   "j-15": {
@@ -619,6 +636,10 @@ export function answer(path: string): unknown {
   }
   if (name === "brief") return briefNow();
   if (name === "items" && id && url.pathname.endsWith("/job")) return startPreview(id);
+  if (name === "items" && id && url.pathname.endsWith("/joinable")) {
+    const item = items.find((i) => i.id === id);
+    return { joinable: !!item && !item.matter && ["commitment", "conversation", "record", "signal"].includes(item.form) };
+  }
   if (name === "items" && id) return [...items, ...hidden, ...strangers].find((i) => i.id === id);
   if (name === "items") {
     return { items: items.filter((i) => (!q.get("form") || i.form === q.get("form")) && (!q.get("type") || i.type === q.get("type"))), next: null };
@@ -629,7 +650,8 @@ export function answer(path: string): unknown {
   if (name === "changesets" && id && url.pathname.endsWith("/drafts")) return drafts[id] ? { drafts: drafts[id] } : undefined;
   if (name === "changesets" && id) return changesets.find((c) => c.id === id);
   if (name === "changesets") return { changesets };
-  if (name === "search") return { messages: [] };
+  if (name === "search") return { messages: q.get("q") ? ["m-55210", "m-55211", "m-55380"].map(summaryOf) : [] };
+  if (name === "jobs" && id && url.pathname.includes("/scope/")) return jobDetails[id] && scopePreview(decodeURIComponent(url.pathname.split("/").pop()!));
   if (name === "policy") return policy;
   if (name === "watches") return watches;
   if (name === "matters" && id) return matterViews[id];
@@ -660,17 +682,21 @@ const replyStart: ReplyStart = {
 };
 
 // Matters: the two examples, with members from the item examples above.
-const members = (base: object, list: Item[]): MatterView => {
+// g-4 has a signal member and one item that Iris proposes to add (D20, D21).
+const members = (base: object, list: Item[], added: Item[] = []): MatterView => {
   const by = (form: string) => list.filter((i) => i.form === form);
-  const items = { commitment: by("commitment"), conversation: by("conversation"), record: by("record") };
-  const counts = { commitment: items.commitment.length, conversation: items.conversation.length, record: items.record.length };
-  return { matter: { ...(base as Matter), items: list.map((i) => i.id), counts }, items };
+  const items = { commitment: by("commitment"), conversation: by("conversation"), record: by("record"), signal: by("signal") };
+  const counts = { commitment: items.commitment.length, conversation: items.conversation.length, record: items.record.length, signal: items.signal.length };
+  const { additions: _, ...rest } = base as Matter;
+  const extra = added.length ? { additions: added.map((i) => i.id) } : {};
+  return { matter: { ...rest, items: list.map((i) => i.id), counts, ...extra }, items, ...(added.length ? { additions: added } : {}) };
 };
 export const matterViews: Record<string, MatterView> = {
-  "g-4": members(matterConfirmed, [youOwe, conversation, booking] as unknown as Item[]),
+  "g-4": members(matterConfirmed, [youOwe, conversation, booking, signal] as unknown as Item[], [payment] as unknown as Item[]),
   "g-5": members(matterProposed, [receipt, owedToYou] as unknown as Item[]),
+  [matterByHand.id]: members({ ...matterByHand, title: "Kitchen remodel" }, [owedToYou] as unknown as Item[]),
 };
-export const matters: MatterList = { proposed: [matterViews["g-5"].matter], confirmed: [matterViews["g-4"].matter] };
+export const matters: MatterList = { proposed: [matterViews["g-5"].matter], confirmed: [matterViews["g-4"].matter, matterViews[matterByHand.id].matter] };
 
 /** POST /api/senders/<id>/<answer> in the fixture state: the sender row after the answer. */
 // The answers at the gate in the dev server: the state of each sender, from the fixtures.
@@ -729,6 +755,31 @@ export function answerJob(id: string, body: { answer?: unknown; question?: unkno
   const session = { id: "se-4", agent: "claude-code", state: "starting" as const, end: null, exit: null, ended: null };
   jobDetails[id] = { job: { ...jobs[id], events }, changesets: jobDetails[id]?.changesets ?? [], threads: jobDetails[id]?.threads ?? {}, session };
   return [200, jobDetails[id]];
+}
+/** GET /api/jobs/<id>/scope/<thread>: the messages of a fixture thread, with one that the agent cannot read yet. */
+function scopePreview(thread: string) {
+  const ids = Object.values(START).flat().filter(([m]) => (summaryOf(m) as Summary).thread === thread);
+  return ids.length ? { messages: ids.map(([m, readable], i) => ({ ...(summaryOf(m) as Summary), date: at(15, 9 + 3 * i, 12), readable })) } : undefined;
+}
+/** POST /api/jobs/<id>/edit, /scope and /scope/remove (decision D25), on the fixture jobs. */
+export function jobPost(path: string, body: { goal?: string; due?: string | null; thread?: string; messages?: string[]; ref?: string }): [number, unknown] {
+  const [, , id, verb, sub] = path.split("/");
+  const d = jobDetails[id];
+  if (!d) return [404, { error: "Not found." }];
+  if (d.job.state === "done") return [409, { error: "the job is done" }];
+  if (verb === "edit") {
+    jobs[id] = { ...jobs[id], goal: body.goal ?? jobs[id].goal, due: body.due ?? undefined };
+    d.job = { ...d.job, goal: jobs[id].goal, due: jobs[id].due };
+    return [200, jobs[id]];
+  }
+  if (verb === "scope" && sub === "remove") d.scope = (d.scope ?? []).filter((r) => r.id !== body.ref);
+  else if (verb === "scope" && body.thread) {
+    const preview = scopePreview(body.thread);
+    if (!preview) return [404, { error: "Not found." }];
+    const subject = preview.messages[0].subject;
+    d.scope = [...(d.scope ?? []).filter((r) => r.id !== body.thread), { id: body.thread, kind: "thread", label: subject, messages: preview.messages.filter((m) => m.readable).length }];
+  } else return [404, { error: "Not found." }];
+  return [200, d];
 }
 /** POST /api/jobs: the fixture job j-12 stands for the new job. */
 export function startJob(): [number, unknown] {

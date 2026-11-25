@@ -23,6 +23,11 @@ pub struct WriteBody {
     pub parent: Option<String>,
     pub to: Vec<String>,
     pub cc: Vec<String>,
+    /// Send content spec, section 6.1: can be absent.
+    #[serde(default)]
+    pub bcc: Vec<String>,
+    #[serde(default)]
+    pub attachments: Vec<iris_compose::Attachment>,
     pub subject: Option<String>,
     pub body: String,
     pub key: String,
@@ -63,6 +68,14 @@ pub fn write(store: &Store, b: &WriteBody, now_ms: i64) -> Result<Pressed> {
     args.insert("to".into(), json!(b.to));
     args.insert("cc".into(), json!(b.cc));
     args.insert("body".into(), json!(b.body));
+    // Only a field that is not empty: the args (and the request hash) of a
+    // mail with no Bcc and no file stay as before.
+    if !b.bcc.is_empty() {
+        args.insert("bcc".into(), json!(b.bcc));
+    }
+    if !b.attachments.is_empty() {
+        args.insert("attachments".into(), json!(b.attachments));
+    }
     let mail = match (&b.account, &b.thread) {
         (Some(account), None) => {
             if b.parent.is_some() {
@@ -169,6 +182,11 @@ fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Val
     let Some((state, reason, send, draft, foreign, sent, changeset, pressed)) = mark else {
         return Ok(None);
     };
+    // A send with Bcc waits for the gate of its provider, also after the hold.
+    let bcc_check = match draft {
+        Some(d) => iris_apply::bcc_waits(c, d)?,
+        None => None,
+    };
     let draft = draft.map(|d| format_id(Kind::Draft, d));
     let stopped = |why: &str| json!({"state": "stopped", "reason": why, "draft": draft});
     if let Some(send) = send {
@@ -187,6 +205,7 @@ fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Val
                 "state": "waiting",
                 "draft": draft,
                 "sending": on.is_some(),
+                "bcc_check": bcc_check,
                 "leaves_at": on.zip(decided_at)
                     .map(|(on, at)| rfc3339(at.max(on) + iris_apply::HOLD_MS)),
             }),
@@ -376,6 +395,7 @@ fn valid_address(a: &str) -> bool {
             cc: vec![],
             subject: "s".into(),
             body: "b".into(),
+            ..Default::default()
         }
         .check()
         .is_ok()
