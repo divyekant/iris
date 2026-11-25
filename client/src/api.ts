@@ -376,7 +376,9 @@ export async function loadChange(
     try {
       return { thread: change.thread, reply: await get<ReplyStart>(`threads/${encodeURIComponent(change.thread)}/reply`), change };
     } catch (e) {
-      if (change.change !== null) throw e;
+      // Only the 409 of the reply read says that the thread has no mail to
+      // answer. Each other failure shows, so the person can try again.
+      if (change.change !== null || (e as { status?: number }).status !== 409) throw e;
     }
   }
   return { accounts: (await get<Status>("status")).accounts, change };

@@ -284,6 +284,34 @@ test("a cancelled send links to Change and send only when the engine says that i
   }
 });
 
+test("a failed read of the draft after a cancel is tried again at the next poll (issue 941)", async () => {
+  let sends = fx.outbox().sends;
+  let reads = 0;
+  const net = serve((path, method) => {
+    const cancel = path.match(/^outbox\/(d-\d+)\/cancel$/);
+    if (method === "POST" && cancel) {
+      sends = sends.filter((x) => x.draft !== cancel[1]);
+      return [200, { cancelled: cancel[1] }];
+    }
+    // The engine restarts during the first read of the draft.
+    if (path === "drafts/d-14") return ++reads === 1 ? [500, { error: "The engine stopped." }] : [200, { draft: "d-14", change: "update" }];
+    return [200, { ...fx.outbox(), count: sends.length, sends }];
+  });
+  const app = await mount("/src/views/Outbox.svelte", { first: fx.outbox(), every: 20 });
+  const links = () => [...app.target.querySelectorAll(".notes a")].map((a) => a.getAttribute("href"));
+  try {
+    [...app.target.querySelectorAll("li.card")].find((c) => c.textContent.includes("Signing")).querySelector("button").click();
+    await until(() => links().length === 1);
+    assert.deepEqual(links(), ["#/write/d-14"]);
+    assert.equal(reads, 2, "one failed read, then one read that answered");
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(reads, 2, "an answered read is not made again");
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
 // Last: it cancels d-16 in the fixture state of this file.
 test("the fixture server cancels a send, as the API does", () => {
   const before = fx.outbox().sends.length;

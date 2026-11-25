@@ -294,13 +294,21 @@ Outbox reads `GET /api/drafts/{d-N}`. If `change` is not `null`, the
 cancelled card shows "Change and send". The link opens the write view of
 the draft (`#/write/d-N`), with the content of the draft in the form, as
 after "Change and send" in the write view. For a reply, the form is under
-the conversation of its thread. If `change` is `null` when the link
-opens, the form is empty, and the view says why: the message of the table
+the conversation of its thread. The form of a draft link has its own
+place in the session storage (`iris.write.d-N`), so it never replaces
+the unfinished form of a new mail or of a reply, and a reload keeps its
+changes. If `change` is `null` when the link first opens, the form is
+empty, and the view says why: the message of the table
 when `newer` is true, else "This draft cannot change now. Write a new
 mail here.". The form never shows a saved form of another mail, and
 never an automatic draft of the thread. If the thread of such a reply
 draft has no mail to answer now (its parent is in Trash, for example),
-the link opens the form of a new mail, and `newer` is false.
+the link opens the form of a new mail, and `newer` is false. Only the
+409 of the reply read says this. Each other failure shows, so the
+person can try again.
+
+If the draft read of the Outbox fails after a cancel, each later poll of
+the Outbox tries it again, until the engine answers.
 
 The write view, in the state `stopped` with `change` not `null`, shows
 "Change and send". The press opens the form with the content of the

@@ -35,7 +35,11 @@
   const thread = "thread" in start ? start.thread : null;
   // svelte-ignore state_referenced_locally
   const accounts = "accounts" in start ? start.accounts : [];
-  const place = `iris.write.${thread ?? "new"}`;
+  // svelte-ignore state_referenced_locally
+  const opened = start.change;
+  // A draft link (#/write/d-N) keeps its form in its own place, so it never
+  // replaces the unfinished form of a new mail or of a reply.
+  const place = `iris.write.${opened?.draft ?? thread ?? "new"}`;
 
   type Changing = { draft: string; account: string };
   type Saved = {
@@ -104,21 +108,19 @@
 
   // #/write/d-N (issue 941): the form opens with the content of the draft, as
   // after "Change and send" in this view. For `update`, the next press changes
-  // the same draft. A record of an earlier write of this place gives way.
-  // svelte-ignore state_referenced_locally
-  const opened = start.change;
+  // the same draft. A reload keeps the form of this place.
   // A reply draft answers an older mail of its thread (draft change spec, section 5).
   const NEWER = "A new mail came into this thread. Write a new reply.";
   const fromDraft = (d: DraftContent): Saved => ({
     account: d.account, to: d.to, cc: d.cc, bcc: d.bcc, files: d.attachments, subject: d.subject, body: d.body,
     key: "", sig: "", flags: [], draft: d.change === "update" ? { draft: d.draft, account: d.account } : null,
   });
-  if (opened) keep(null);
   let changeNote = $state(!opened ? "" : opened.change ? "This is the draft that you cancelled. Change it, then press Send." : opened.newer ? NEWER : "This draft cannot change now. Write a new mail here.");
-  // A draft link opens the draft or a fresh form, never a saved form of another mail.
-  const saved = opened ? (opened.change ? fromDraft(opened) : null) : restore();
-  // A reload keeps the changed form (sessionStorage), not the draft again.
-  if (opened && typeof history !== "undefined") history.replaceState(history.state, "", thread ? href.reply(thread) : "#/write");
+  // A draft link opens its own saved form (after a reload), else the draft,
+  // else a fresh form. The draft that the next press changes is the one that
+  // the engine allows now.
+  const kept_ = opened ? (restore() ?? (opened.change ? fromDraft(opened) : null)) : null;
+  const saved = !opened ? restore() : kept_ && { ...kept_, draft: fromDraft(opened).draft };
   let account = $state(saved?.account ?? reply?.account ?? (accounts[0] ? `a-${accounts[0].id}` : ""));
   let to = $state<string[]>(unique(saved?.to ?? reply?.to ?? []));
   const startCc = unique(saved?.cc ?? reply?.cc ?? []);
@@ -433,7 +435,7 @@
     keep(null, write);
     changing = null;
     changeNote = "";
-    if (thread) return void (location.hash = "#/write");
+    if (thread || opened) return void (location.hash = "#/write");
     clearTimeout(timer);
     [write, to, cc, bcc, files, subject, body, note, toText, ccText, bccText] = ["", [], [], [], [], "", "", "", "", "", ""];
     ws = { state: "saving" };

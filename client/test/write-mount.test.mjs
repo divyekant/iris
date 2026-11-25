@@ -1084,7 +1084,7 @@ test("#/write/d-N opens the form with the draft; update sends the draft, new doe
                   subject: "Dinner on Saturday?", body: "Hi Sam,\n\nAre you free?\n", attachments: [] };
   for (const change of ["update", "new", null]) {
     window.sessionStorage.clear();
-    // An earlier write of this place gives way to the change.
+    // A write of the new-mail form does not show in the form of the draft.
     window.sessionStorage.setItem("iris.write.new.taken", JSON.stringify({ write: "cs-9", to: ["x@example.com"], subject: "Old", body: "Old" }));
     // An unfinished form of another mail: the draft link never shows it.
     window.sessionStorage.setItem("iris.write.new", JSON.stringify({ key: "k-old", to: ["old@example.com"], cc: [], bcc: [], subject: "Other", body: "Other text" }));
@@ -1163,7 +1163,7 @@ test("loadChange: a reply draft that cannot change opens a new mail when its thr
   for (const change of [null, "update"]) {
     const net = serve((path) => {
       if (path === "drafts/d-7") return [200, { ...DRAFT, change }];
-      if (path === "threads/t-2/reply") return [409, { error: "This thread has no mail to answer." }];
+      if (path === "threads/t-2/reply") return [409, { error: "This thread has no mail to reply to." }];
       if (path === "status") return [200, { accounts: ACCOUNTS }];
       return [404, { error: "Not found." }];
     });
@@ -1173,6 +1173,14 @@ test("loadChange: a reply draft that cannot change opens a new mail when its thr
         assert.equal(start.thread, undefined, "a new mail, not a reply");
         assert.deepEqual(start.accounts, ACCOUNTS);
         assert.equal(start.change.change, null);
+        // Another failure of the reply read is not a thread with no mail: it shows.
+        net.restore();
+        const down = serve((path) => (path === "drafts/d-7" ? [200, { ...DRAFT, change }] : [500, { error: "The engine stopped." }]));
+        try {
+          await assert.rejects(api.loadChange("d-7"), /The engine stopped\./);
+        } finally {
+          down.restore();
+        }
       } else {
         // A draft that can change needs its thread: the error shows.
         await assert.rejects(api.loadChange("d-7"));
@@ -1180,5 +1188,38 @@ test("loadChange: a reply draft that cannot change opens a new mail when its thr
     } finally {
       net.restore();
     }
+  }
+});
+
+test("a draft link keeps its own form: the unfinished new mail stays, and a reload keeps the changes (issue 941)", async () => {
+  const DRAFT = { draft: "d-7", account: "a-1", thread: null, to: ["sam@okafor.example"], cc: [], bcc: [],
+                  subject: "Dinner on Saturday?", body: "Hi Sam,\n", attachments: [], change: "update", newer: false };
+  const net = serve(() => [404, { error: "Not found." }]);
+  try {
+    // An unfinished new mail.
+    let app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+    await fill(app, "kim@example.com ");
+    type(app.target.querySelector("textarea"), "My unfinished mail.\n");
+    app.flushSync();
+    app.destroy();
+    // The draft link: the person changes the text, then reloads.
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: DRAFT }, every: 20 });
+    app.flushSync();
+    assert.equal(app.target.querySelector("textarea").value, "Hi Sam,\n");
+    type(app.target.querySelector("textarea"), "Hi Sam, changed.\n");
+    app.flushSync();
+    app.destroy();
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS, change: DRAFT }, every: 20 });
+    app.flushSync();
+    assert.equal(app.target.querySelector("textarea").value, "Hi Sam, changed.\n", "a reload keeps the changes");
+    app.destroy();
+    // Back to the new mail: it is still there.
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+    app.flushSync();
+    assert.equal(app.target.querySelector("textarea").value, "My unfinished mail.\n");
+    assert.match(text(app.target), /kim@example\.com/);
+    app.destroy();
+  } finally {
+    net.restore();
   }
 });

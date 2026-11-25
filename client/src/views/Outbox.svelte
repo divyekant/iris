@@ -27,7 +27,19 @@
   // What each cancel did, as lines above the cards. The cards show only the
   // sends that the engine gives, so a new send of the same draft shows too.
   // `change`: the draft that a cancelled line offers to change (issue 941).
-  let notes = $state<{ text: string; change?: string }[]>([]);
+  // `check`: the draft whose read of `change` did not answer yet. Each poll tries again.
+  let notes = $state<{ text: string; change?: string; check?: string }[]>([]);
+  const checking = new Set<number>();
+  // "Change and send" shows only when the engine says that the draft can change now.
+  function check(at: number) {
+    const d = notes[at]?.check;
+    if (!d || checking.has(at)) return;
+    checking.add(at);
+    get<DraftContent>(`drafts/${encodeURIComponent(d)}`).then(
+      (v) => (notes = notes.map((n, i) => (i === at ? { text: n.text, ...(v.change ? { change: d } : {}) } : n))),
+      () => {},
+    ).finally(() => checking.delete(at));
+  }
 
   // Each read of the outbox gets a number when it starts. A read applies
   // only if no read that started later applied first, so an older answer
@@ -42,6 +54,7 @@
       applied = mine;
       box = v;
       pending = pending.filter((p) => p.after >= mine);
+      notes.forEach((_, i) => check(i));
     } catch {
       // The engine can restart. The next read tries again.
     }
@@ -100,15 +113,8 @@
     posting = s.draft;
     try {
       await post(`outbox/${encodeURIComponent(s.draft)}/cancel`, {});
-      const at = notes.length;
-      notes = [...notes, { text: `${name(s)} is cancelled. It does not leave.` }];
-      // "Change and send" shows only when the engine says that the draft can change now.
-      void get<DraftContent>(`drafts/${encodeURIComponent(s.draft)}`).then(
-        (d) => {
-          if (d.change) notes = notes.map((n, i) => (i === at ? { ...n, change: s.draft } : n));
-        },
-        () => {},
-      );
+      notes = [...notes, { text: `${name(s)} is cancelled. It does not leave.`, check: s.draft }];
+      check(notes.length - 1);
     } catch (e) {
       // A 409: the release claimed the send. The note stays after its card goes.
       const started409 = (e as { status?: number }).status === 409;
