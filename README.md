@@ -118,9 +118,13 @@ time: the account keeps its copy of the mail.
 3. If the browser is on another machine than Iris, add `--paste`. Then copy
    the address of the browser after the sign-in, and paste it into the
    command.
-4. Start the engine. If you installed with `install.sh`, the background
-   service already runs the engine, and the account syncs with no more step.
-   Else (a source build, or `IRIS_NO_SERVICE=1`), run:
+4. Start the engine. If `install.sh` started the background service, the
+   service runs the engine, and the account syncs with no more step. Run
+   this command in these cases:
+
+   - a source build;
+   - an install with `IRIS_NO_SERVICE=1`;
+   - an install that printed "the background service did not start".
 
    ```bash
    iris serve
