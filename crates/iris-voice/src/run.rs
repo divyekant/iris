@@ -69,8 +69,8 @@ pub fn draft(
 ) -> Result<Drafted, Failure> {
     // The lock of cost control: no `iris model set` and no budget approval
     // can change the model row or the budget during the call.
-    // shortcut: a running understanding run makes this call fail at once, wait for the lock if this bothers the owner.
-    let _lock = batch::lock(store).map_err(|e| match e {
+    // A running understanding run stops before its next message (#279).
+    let _lock = batch::lock_wait(store, batch::WAIT).map_err(|e| match e {
         batch::Error::Busy => Failure::Busy,
         e => Failure::Connect(e.to_string()),
     })?;

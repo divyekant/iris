@@ -192,6 +192,35 @@ A second runner, in this process or in another, gets "a run is in progress"
 and makes no call. The OS releases the lock when the process ends, also
 after a crash. So two runners never pay for the same message.
 
+A draft (`iris_voice::draft`) and a question (`iris_understand::ask`) of
+the person take the lock with `batch::lock_wait` (#279). If another holder
+has the run lock, the waiter takes an OS file lock on `understand.want` and
+tries the run lock again each 50 ms, for up to `batch::WAIT` (60 seconds).
+Then it fails with "a run is in progress", as before.
+
+- While a waiter holds `understand.want`, `batch::lock` gives "a run is in
+  progress". `batch::lock` holds a shared lock on `understand.want` through
+  its take of the run lock, so a waiter cannot signal during a take. So the run after a sync, the nudge and summary steps of the
+  engine and `iris model set` do not take the lock before the waiter.
+- A holder that works in a loop probes `understand.want` (a shared lock
+  try) before each unit of work and stops: the batch runner before each
+  message and before each row of the link and fixed checks (`stop =
+  yield`), the nudge step before each thread. The summary step makes the
+  calls of one thread only, so it needs no probe. In the nudge and summary
+  steps, the model refuses each call while a waiter waits, also the retry
+  of an invalid answer: the run row says `yield`, and the thread is not
+  blocked.
+- The OS releases the want lock of a waiter that crashes, so no signal
+  stays. Waiters take the run lock in turn: only the holder of the want
+  lock tries the run lock, and it releases the want lock when it returns.
+- A scan that stops for a waiter says so (`store::Scan::yielded`), also
+  the fixed check at the end of a pass. The run then ends with `stop =
+  yield`, not `done`.
+- Limit: a model call that runs when the waiter comes is not stopped, and
+  in a batch run the retry of the answer of that message can follow it. A
+  call can take up to `timeout_s` (default 120 seconds), so a waiter can
+  still fail after 60 seconds (limit #1126).
+
 ### Model and budget
 
 The table `model_setting` has one row: `provider`, `base_url`, `model`,
@@ -354,6 +383,10 @@ Stop conditions, checked before each message:
   call counts in `unknown_calls` (tokens unknown) and the run goes on. A
   time-out or an error of a local server still stops the run with `stop =
   model`, because the next call would likely fail too.
+- A draft or a question waits for the run lock (`understand.want`, see
+  "Run lock"): `stop = yield`. The link and fixed checks probe it before
+  each row too, and leave the rest of their queues. The next run (the run
+  after the next sync) goes on with the mail and the rows that are left.
 - Another error: `stop = error`, and the error goes to the caller.
 
 ### Counts

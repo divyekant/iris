@@ -617,6 +617,7 @@ fn report_text(r: &Report, left: Option<Option<i64>>) -> String {
         "messages" => "the --max-messages limit",
         "model" => "the model refused the key or the local server failed",
         "unknown" => "a call had an unknown cost; its worst case stays counted",
+        "yield" => "a draft or a question needed the model; the next run goes on",
         _ => "an error",
     };
     let mut out = format!(

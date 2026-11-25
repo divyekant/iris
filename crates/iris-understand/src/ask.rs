@@ -222,7 +222,8 @@ pub fn ask(store: &Store, connect: Connect, question: &str, now_ms: i64) -> Resu
     }
     // The lock stays to the end of the function: `iris model set` and a
     // budget change wait, so the call settles against its own row.
-    let _lock = match batch::lock(store) {
+    // A running understanding run stops before its next message (#279).
+    let _lock = match batch::lock_wait(store, batch::WAIT) {
         Ok(l) => l,
         Err(batch::Error::Store(e)) => return Err(Error::Store(e)),
         Err(_) => return Err(Error::Busy),

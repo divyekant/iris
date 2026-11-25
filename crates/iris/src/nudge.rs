@@ -50,6 +50,10 @@ pub fn step(store: &Store, connect: Connect, now_ms: i64) -> Result<usize, Strin
     let mut saved = 0;
     let mut calls = 0;
     for l in late {
+        // A draft or a question of the person waits for the lock (#279).
+        if batch::wanted(store) {
+            break;
+        }
         // A nudge can make two calls (a call and the retry of an invalid
         // answer). With less room in the turn, the thread waits for the
         // next step, so its retry is not lost.
@@ -139,9 +143,16 @@ pub(crate) fn call(
         })
         .map_err(|e| e.to_string())?;
     let budgeted = Budgeted::new(model, store, run, Some(row));
-    let result = run_with(&budgeted);
+    let waits = Yielding {
+        model: &budgeted,
+        store,
+        refused: std::cell::Cell::new(false),
+    };
+    let result = run_with(&waits);
     let s = budgeted.state();
-    let stop = if s.refused || s.overrun {
+    let stop = if waits.refused.get() {
+        "yield"
+    } else if s.refused || s.overrun {
         "budget"
     } else if s.unknown {
         "unknown"
@@ -184,6 +195,35 @@ pub(crate) fn call(
         Done::Other => Outcome::Other,
     };
     Ok((outcome, made))
+}
+
+/// The model of [`call`]: it refuses each call while a draft or a question
+/// waits for the run lock (#279), also the retry of an invalid answer. The
+/// refusal is no invalid answer, so the thing stays open for a later step.
+struct Yielding<'a> {
+    model: &'a dyn Model,
+    store: &'a Store,
+    refused: std::cell::Cell<bool>,
+}
+
+impl Model for Yielding<'_> {
+    fn name(&self) -> &str {
+        self.model.name()
+    }
+
+    fn request_bytes(&self, instruction: &str, data: &str) -> u64 {
+        self.model.request_bytes(instruction, data)
+    }
+
+    fn ask(&self, instruction: &str, data: &str) -> Result<iris_model::Reply, iris_model::Error> {
+        if batch::wanted(self.store) {
+            self.refused.set(true);
+            return Err(iris_model::Error::Budget(
+                "a draft or a question waits for the model".into(),
+            ));
+        }
+        self.model.ask(instruction, data)
+    }
 }
 
 #[cfg(test)]
@@ -421,6 +461,107 @@ mod tests {
         assert_eq!(step(&store, &connect, late), Ok(0));
         drop(lock);
         assert_eq!(calls.get(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    type Want = Rc<std::cell::RefCell<Option<iris_store::FileLock>>>;
+
+    /// A model that takes the want lock in its first call, as a draft or
+    /// a question that starts to wait during the call.
+    struct Grab(Fake, Want, std::path::PathBuf);
+
+    impl Model for Grab {
+        fn name(&self) -> &str {
+            self.0.name()
+        }
+        fn request_bytes(&self, i: &str, d: &str) -> u64 {
+            self.0.request_bytes(i, d)
+        }
+        fn ask(&self, i: &str, d: &str) -> Result<Reply, iris_model::Error> {
+            self.1
+                .borrow_mut()
+                .get_or_insert_with(|| iris_store::FileLock::try_take(&self.2).unwrap().unwrap());
+            self.0.ask(i, d)
+        }
+    }
+
+    /// The retry of an invalid answer waits too (#279): no second call
+    /// while a waiter waits, the run says `yield`, and the thread is not
+    /// blocked, so a later step tries it again.
+    #[test]
+    fn a_retry_waits_for_a_waiter_and_the_thread_stays_open() {
+        let (store, dir) = open("wantretry");
+        ask(&store, "t1", "Ana, can you send the slides?");
+        store
+            .write(|tx| {
+                tx.execute("UPDATE model_setting SET budget_micro_usd = 1000000", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let want: Want = Rc::default();
+        let path = dir.join(batch::WANT_FILE);
+        let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+            Ok(Box::new(Grab(
+                Fake(calls.clone(), "not json"),
+                want.clone(),
+                path.clone(),
+            )))
+        };
+        let late = 1_000 + iris_voice::LATE_AFTER_MS;
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!((calls.get(), blocked(&store)), (1, 0));
+        assert_eq!(
+            count(
+                &store,
+                "SELECT count(*) FROM understand_run WHERE stop = 'yield'"
+            ),
+            1
+        );
+        drop(want.borrow_mut().take());
+        // The waiter is gone: the call and its retry, then the block.
+        let plain = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+            Ok(Box::new(Fake(calls.clone(), "not json")))
+        };
+        assert_eq!(step(&store, &plain, late), Ok(0));
+        assert_eq!((calls.get(), blocked(&store)), (3, 1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A draft or a question that waits for the lock (#279): the step stops
+    /// before its next thread, and takes no lock while the waiter waits.
+    #[test]
+    fn a_step_stops_for_a_waiter_and_does_not_start_while_it_waits() {
+        let (store, dir) = open("want");
+        ask(&store, "t1", "Ana, can you send the slides?");
+        ask(&store, "t2", "Ana, can you send the deck?");
+        let calls = Rc::new(Cell::new(0));
+        let want: Want = Rc::default();
+        let path = dir.join(batch::WANT_FILE);
+        let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+            Ok(Box::new(Grab(
+                Fake(
+                    calls.clone(),
+                    r#"{"body": "Hi Ana, any news? D", "named": [1]}"#,
+                ),
+                want.clone(),
+                path.clone(),
+            )))
+        };
+        let late = 1_000 + iris_voice::LATE_AFTER_MS;
+        store
+            .write(|tx| {
+                tx.execute("UPDATE model_setting SET budget_micro_usd = 1000000", [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(step(&store, &connect, late), Ok(1));
+        assert_eq!(calls.get(), 1, "the second thread waits");
+        assert_eq!(step(&store, &connect, late), Ok(0));
+        assert_eq!(calls.get(), 1, "no lock while the waiter waits");
+        drop(want.borrow_mut().take());
+        assert_eq!(step(&store, &connect, late), Ok(1));
+        assert_eq!(calls.get(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -248,6 +248,27 @@ mod tests {
         assert_eq!(calls.get(), 1);
     }
 
+    /// While a draft or a question waits for the lock (#279), the step
+    /// takes no lock and makes no call. One step makes the calls of one
+    /// thread only (`MAX_PER_TURN`), so it needs no stop in its loop.
+    #[test]
+    fn a_step_does_not_start_while_a_waiter_waits() {
+        let (store, dir) = open("want");
+        thread(&store, "t1", 5, "s-1");
+        let calls = Rc::new(Cell::new(0));
+        let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+            Ok(Box::new(Fake(calls.clone(), GOOD)))
+        };
+        let want = iris_store::FileLock::try_take(&dir.join(batch::WANT_FILE))
+            .unwrap()
+            .unwrap();
+        assert_eq!(step(&store, &connect, 10_000), Ok(0));
+        assert_eq!(calls.get(), 0);
+        drop(want);
+        assert_eq!(step(&store, &connect, 10_000), Ok(1));
+        assert_eq!(calls.get(), 1);
+    }
+
     #[test]
     fn an_invalid_answer_twice_stops_the_calls_and_a_refusal_or_a_failure_does_not() {
         let (store, _dir) = open("invalid");
