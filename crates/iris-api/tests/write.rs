@@ -1037,8 +1037,13 @@ async fn a_stopped_write_says_how_its_draft_can_change() {
     assert_eq!(change(&s, &cs).await, Value::Null);
 }
 
+/// `newer_mail` of the stopped write `cs`. The draft read of d-1 gives the
+/// same value (issue 941).
 async fn newer_mail(s: &Arc<Store>, cs: &str) -> Value {
-    call(s, "GET", &format!("/api/write/{cs}"), None).await.1["newer_mail"].clone()
+    let st = call(s, "GET", &format!("/api/write/{cs}"), None).await.1["newer_mail"].clone();
+    let d = call(s, "GET", "/api/drafts/d-1", None).await.1["newer_mail"].clone();
+    assert_eq!(st, d, "the write state and the draft read agree");
+    st
 }
 
 async fn change(s: &Arc<Store>, cs: &str) -> Value {

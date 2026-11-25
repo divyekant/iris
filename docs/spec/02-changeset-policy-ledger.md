@@ -334,7 +334,8 @@ that a rule approved at the same time cannot together go past the limit of
 - The person reviews in the web client. The review shows each action fully
   resolved: the real messages, the real recipients and the final text.
 - The person can approve all, approve one, edit the text of a draft, comment
-  or deny.
+  or deny. To edit the text of a send, the person denies the send and
+  changes its draft in the write view (`docs/specs/2026-11-25-draft-change.md`).
 - An approval names the changeset, the revision, the action number, and the
   hash that the person saw (`actions[].hash`, section 5.1). The engine
   refuses an approval while a new revision is a draft, an approval of a

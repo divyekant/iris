@@ -282,16 +282,44 @@ A ledger row of a change in `writing` after a crash or a lost answer:
 The client reads the content of the draft from `GET /api/drafts/{d-N}`
 (a new read route: `to`, `cc`, `bcc`, `subject`, `body`, `attachments`,
 and the account and the thread). The route also gives `change`, with the
-values of the table above for the draft now. The engine computes both
-values with one function, so the draft answer and the write state never
-disagree (issue 941).
+values of the table above for the draft now, and `newer_mail` as in the
+stopped state (only when it is true). The engine computes these values
+with one function, so the draft answer and the
+write state never disagree (issue 941).
 
 A cancel in the Outbox makes a stopped mail too. After a cancel, the
 Outbox reads `GET /api/drafts/{d-N}`. If `change` is not `null`, the
 cancelled card shows "Change and send". The link opens the write view of
 the draft (`#/write/d-N`), with the content of the draft in the form, as
 after "Change and send" in the write view. For a reply, the form is under
-the conversation of its thread.
+the conversation of its thread. The form of a draft link has its own
+place in the session storage (`iris.write.d-N`), so it never replaces
+the unfinished form of a new mail or of a reply, and a reload keeps its
+changes. The form never takes an automatic draft of the thread. The next
+press sends `draft` only when `change` is `"update"` now. A write that
+the engine took from a draft link stays in that place until it ends: a
+reload or a new link of the same draft shows the state of that write,
+not the form, while it can still leave (for `"new"`, the old draft can
+still change). When the write ends (sent or stopped), the form shows.
+
+If `change` is `null` when the link opens, the view shows no form. It
+says why and links to a new write: "A new mail came into this thread.
+Write a new reply." with a link to the reply of the thread when
+`newer_mail` is true, else "This draft cannot change now." with a link
+to a new mail. A saved form of the draft link does not show.
+
+If the draft read of the Outbox fails after a cancel, each later poll of
+the Outbox tries it again, until the engine answers.
+
+A send of a request in the review (spec 2 section 5.5, issue 208) whose
+draft Iris can read shows "Deny this send and change it yourself". The
+press denies that send only, with the hash that the review showed, then
+opens the write view of its draft (`#/write/d-N`). The engine gives
+`change` for the draft after the deny. The next press of Send there is a
+new write of the person, with the hold of the Outbox. If the decision is
+refused (409) or has no answer, the review loads the request again and the
+view does not move. A `draft` action that waits has no Gmail draft yet,
+so it has no change link in this version. A limit issue records this.
 
 The write view, in the state `stopped` with `change` not `null`, shows
 "Change and send". The press opens the form with the content of the
