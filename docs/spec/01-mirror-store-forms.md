@@ -406,14 +406,37 @@ is never lost.
 New content files after step 2 are not in the backup, and the copy of
 `iris.db` does not refer to them.
 
-`iris backup` does not copy `workspaces/`. A copy of the whole folder while
-the engine is stopped copies `workspaces/` too, with the files of the agent.
-The build makes the files of a
-workspace again from the store, before each session. The folder `drafts/` of the
-agent is not in a copy of `iris backup`: after a restore from it, the next
-build makes it empty. A draft that the agent submits is in the store
-(specification 2), so only work that the agent did not submit is lost. This
-is a known limit, with a GitHub issue. The store keeps a copy of `notes.md`
+`iris backup` copies only the folder `drafts/` of each workspace
+(`workspaces/<job>/drafts/`). The build makes the other files of a workspace
+again from the store, before each session, and keeps a `drafts/` folder that
+is there. A program of a session writes `drafts/`, and can change it during
+the copy. So the copy opens the job folder and `drafts/` with no link, and
+then opens each file relative to the opened `drafts/` folder, with no link
+and no wait on a FIFO. It copies a regular file of at most 1 MiB (a body has
+at most 256 KiB), and at most 256 files of each job, by name. The scan of a
+folder keeps at most 256 names in memory. So a session cannot make the
+backup large, grow the memory of the engine, or make the backup read a file
+outside its `drafts/` folder. The two limits have issue #1063. A
+draft that the agent submits is in the store (specification 2) too. A copy
+of the whole folder while the engine is stopped copies `workspaces/` with
+all the files of the agent.
+
+Failure list of the copy of `drafts/` (input of a session, and changes
+during the copy):
+
+| Input or event | Result |
+|---|---|
+| A regular file of at most 1 MiB, one of the first 256 names | Copied, mode 0600 |
+| A file over 1 MiB, or a name after the first 256 | Not copied |
+| A link, a FIFO, a device, a socket or a subfolder in `drafts/` | Not copied |
+| `drafts/` or the job folder is a link | Nothing of that job is copied |
+| `drafts/` is renamed or replaced after the open | The copy reads the folder that it opened |
+| A file goes away, or becomes a link, before its open | Not copied |
+| A file changes during its read | The bytes of one read, at most 1 MiB |
+| A folder with very many entries | The scan keeps at most 256 names; the time grows with the count |
+| Any other error of the file system | The backup fails and says so. The folder of the failed backup is not a backup: use another one |
+
+The store keeps a copy of `notes.md`
 of each open job (R5-06, `docs/specs/2026-11-17-job-memory.md`), so
 `iris.db` in the backup holds it: after a restore, the next build writes the
 copy. The copy holds the notes of the last save (the last reap or build),
@@ -479,7 +502,7 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `sync_seen` | `account_id`, `message_id`, `labels` TEXT (JSON), PK(`account_id`, `message_id`) | The messages that the lists of a full resync or a verify name, with their label sets. The engine clears it when a new run starts, not when an unfinished run continues after a crash. |
 | `label` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, `name` TEXT, `kind` TEXT (`system` or `user`), UNIQUE(`account_id`, `provider_id`) | Labels of the provider. |
 | `thread` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, `viewed_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | Threads of the provider. Gives the `t-` IDs. `viewed_at` is the last view of the thread in Iris. |
-| `message` | `id` INTEGER PK, `account_id`, `thread_id`, `provider_id` TEXT, `content_sha256` TEXT, `size` INTEGER, `internal_date` INTEGER, `fetched_at` INTEGER, `gone_at` INTEGER, `understood_at` INTEGER, `hostile` TEXT (JSON), `tries` INTEGER, `retry_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | One row for each message. Gives the `m-` IDs. `hostile` is the list of the hostile marks of the message (section 6.7). `tries` and `retry_at` hold the failed tries of the model (section 7.4). `fixed_rules` TEXT (migration 58) records how the last understanding completed the message, for the fixed check: NULL when the model made an item, a JSON array of the rule of each rule item when the fixed rules completed it (a rule item that a pinned item holds counts too), or `unknown` after the backfill of a store that could not show it; the fixed check runs such a message again. The store clears `understood_at` when the content hash changes, when a gone message comes back, and when the message gets or loses the label `SENT`, `DRAFT`, `UNSENT`, `SENT_COPY` or `SPAM` (store migration 60). Each such change also sets `tries` to 0 and `retry_at` to NULL, also for a message that failed the model 3 times, so the message gets a new try budget (issue #110). A message with `DRAFT`, `UNSENT` or `SENT_COPY` that is not gone keeps no item that a new understanding replaces: the triggers of store migration 42 delete such items when the label comes and when the message comes back. |
+| `message` | `id` INTEGER PK, `account_id`, `thread_id`, `provider_id` TEXT, `content_sha256` TEXT, `size` INTEGER, `internal_date` INTEGER, `fetched_at` INTEGER, `gone_at` INTEGER, `understood_at` INTEGER, `hostile` TEXT (JSON), `tries` INTEGER, `retry_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | One row for each message. Gives the `m-` IDs. `hostile` is the list of the hostile marks of the message (section 6.7). `tries` and `retry_at` hold the failed tries of the model (section 7.4). `fixed_rules` TEXT (migration 58) records how the last understanding completed the message, for the fixed check: NULL when the model made an item, a JSON array of the rule of each rule item when the fixed rules completed it (a rule item that a pinned item holds counts too), or `unknown` after the backfill of a store that could not show it; the fixed check runs such a message again. The store clears `understood_at` when the content hash changes, when a gone message comes back, and when the message gets or loses the label `SENT`, `DRAFT`, `UNSENT`, `SENT_COPY` or `SPAM` (store migration 62). Each such change also sets `tries` to 0 and `retry_at` to NULL, also for a message that failed the model 3 times, so the message gets a new try budget (issue #110). A message with `DRAFT`, `UNSENT` or `SENT_COPY` that is not gone keeps no item that a new understanding replaces: the triggers of store migration 42 delete such items when the label comes and when the message comes back. |
 | `message_label` | `message_id`, `label_id`, PK(`message_id`, `label_id`) | The label set of each message. |
 | `header` | `message_id` PK, `date` INTEGER, `from_addr` TEXT, `from_name` TEXT, `to_addrs` TEXT, `cc_addrs` TEXT, `subject` TEXT, `message_id_hdr` TEXT, `in_reply_to` TEXT, `list_id` TEXT, `auth` TEXT | Parsed headers that queries need. `auth` holds the SPF, DKIM and DMARC results from `Authentication-Results`. `to_addrs` and `cc_addrs` hold bare lowercase addresses joined by `,`. `from_addr` is ASCII lowercase: the triggers of store migration 39 keep this form for each write. |
 | `body` | `message_id` INTEGER PK, `subject` TEXT, `sender` TEXT, `text` TEXT | The clean text of the message (section 7.2), with the subject and the sender name and address. `message_id` is the row ID. |
@@ -572,7 +595,7 @@ Each item of each form has these fields:
 | `confidence` | number from 0 to 1 | no | How sure the understanding step is. Not set when `derived.by` is `person`. |
 | `matter` | string or null | no | The `g-` ID of the confirmed matter of the item, or null (`docs/specs/2026-11-16-matters.md`). The engine sets it when it reads the item. |
 | `account` | string, `a-` ID | no | Since `iris/1.1`. The account (the mailbox) of the item (card R6-02, `docs/specs/2026-11-17-accounts.md`). The engine sets it when it reads the item. |
-| `ready` | array of `"draft"`, at least 1, no repeats | no | What Iris prepared for the item (card R3-09). `"draft"`: the thread of the `origin` message has a reply draft that is not stale (`iris_voice::ready_item_sql`). A reply draft of the owner marks each item of its thread. A nudge (card R3-07, a draft with `ask`) marks each commitment of its key (decision D8), not the other items of its thread. The key is the key at the time of the read, so a commitment that becomes late later makes the nudge stale. The engine sets it only on the items of the brief lists and pages, when it reads them. A stored value is never shown, and a correction of it is refused. |
+| `ready` | array of `"draft"`, at least 1, no repeats | no | What Iris prepared for the item (card R3-09). `"draft"`: the thread of the `origin` message has a reply draft that is not stale (`iris_voice::ready_item_sql`). A reply draft of the owner marks each item of its thread. A nudge (card R3-07, a draft with `ask`) marks each commitment of its key (decision D8), not the other items of its thread. The key is the key at the time of the read, so a commitment that becomes late later makes the nudge stale. The engine sets it only on the items of these lists, when it reads them: the sections, bundles and pages of the brief (`/api/brief`, `/api/brief/{section}`), the gate (`/api/gate`, `/api/gate/declined` and the gate of `/api/brief`), and the item lists (`/api/items` and `iris list --json`). Other outputs of an item (one item, the read verbs other than `list`, the export) never have it. A stored value is never shown, and a correction of it is refused. |
 | `attention` | object | no | Reserved for specification 2: `state` is `shown`, `bundled` or `hidden`, with the rule and the reason. |
 
 A source has these fields:
@@ -806,7 +829,7 @@ The `hostile` column of the message holds each mark that applies:
 | Mark | Rule |
 |---|---|
 | `dmarc` | `Authentication-Results` reports a DMARC fail for the domain of `From`. |
-| `spoof` | The display name is the name of a known person, the address is not the address of that person, and DKIM or DMARC does not pass for the domain of the address. If DKIM and DMARC pass, the address is a new sender, with the kind `stranger`. Also: the display name holds an email address whose registrable domain is not the one of the `From` address, as in `"ceo@bank.example" <x@evil.example.net>` (decision D32). A DKIM or DMARC pass does not clear this case. A name with the word `via` is a list form (`"x@y.example via List" <list@lists.example>`) and does not get the mark. |
+| `spoof` | The display name is the name of a known person, the address is not the address of that person, and DKIM or DMARC does not pass for the domain of the address. If DKIM and DMARC pass, the address is a new sender, with the kind `stranger`. Also: the display name holds an email address whose registrable domain is not the one of the `From` address, as in `"ceo@bank.example" <x@evil.example.net>` (decision D32). A DKIM or DMARC pass does not clear this case. A name with the word `via` is a list form (`"x@y.example via List" <list@lists.example>`) and does not get the mark. Also: a message of 256 KiB or more whose first 256 KiB hold no empty line that ends the header block (issue #1033). |
 | `link` | An HTML link of the message (from `Clean.links`) shows a web address with the host `S` (text that starts with `http://`, `https://` or `www.`, or a first word that is a domain with a known public suffix, not a file name such as `report.pdf`), and its target is an `http` or `https` URL that a browser opens on another owner. Iris reads the target with the WHATWG URL standard. The owner of a host is its registrable domain by the public suffix list, with the hosts and the `From` domain in punycode (so `münchen.de` and `xn--mnchen-3ya.de` are one owner). The link is deceptive if one of these is true: the target host is an IP address or Iris cannot read it; the target has a user part, a backslash or a percent sign in front of its path; the target host has another owner than `S`. If DMARC passes for the domain of `From` and that domain has the owner of `S`, a target host of another owner is not deceptive: the sender owns the shown domain and can link through a redirect. The first two conditions (an IP address or a target that Iris cannot read; a user part, a backslash or a percent sign) apply also to this sender. DMARC for another domain proves nothing about `S`. If `iris-clean` could not list each link (`links_cut`), or the part of the file past the read limit has a part header (after a delimiter of a declared boundary) with the type `text/html`, the message gets the mark. |
 | `spam` | The message has the label `SPAM`. |
 | `phishing` | The understanding step marks the message as phishing. |
@@ -818,7 +841,8 @@ The display name is input that Iris does not control. This is the failure
 list of the name-address part of the mark `spoof` (decision D32):
 
 - Supported input: a display name, decoded from RFC 2047, of any length and
-  any characters. The check splits the name into words at white space and at
+  any characters, in a header block that ends in the first 256 KiB of the
+  message (the read limit of the header). The check splits the name into words at white space and at
   the signs `"` `'` `<` `>` `(` `)` `[` `]` `,` `;` `:` and backtick. It
   removes `.`, `!` and `?` at the ends of each word. A full-width at sign
   (U+FF20, U+FE6B) counts as `@`.
@@ -841,7 +865,8 @@ list of the name-address part of the mark `spoof` (decision D32):
 | At least one address in the name has another owner than the `From` address, also when other addresses in the name have the same owner | The mark `spoof`, unless the name has the word `via`. |
 | A word has two `@` (`a@b@c.example`) | Not an address. No mark from this word. |
 | A name with the word `via`, in any case | No mark from this rule, also when the name holds an address of another owner. |
-| No `From` address that Iris can read | No display name, so no mark from this rule. |
+| A message of 256 KiB or more whose first 256 KiB hold no empty line that ends the header block, so a `From` field past the limit is not read (issue #1033) | The mark `spoof`: Iris cannot check the sender that a mail program shows. Your sent mail does not get it. |
+| A complete header block with no `From` address that Iris can read | No display name, so no mark from this rule. |
 | A `From` address with an empty domain (`x@`) | Each address in the name has another owner: the mark `spoof`. |
 
 - Safe result for all other input: no mark from this rule. The other rules

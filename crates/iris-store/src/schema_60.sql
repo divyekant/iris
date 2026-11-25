@@ -1,75 +1,124 @@
--- Migration 60 (issue 110): a change that makes a message need the
--- understanding again also gives it a new try budget, and the label SPAM
--- is such a change.
+-- Migration 60: the undo of a change of a draft
+-- (docs/specs/2026-11-25-draft-change.md, section 3).
 --
--- Invariant: after each such change, `tries` is 0 and `retry_at` is NULL,
--- also for a message that failed the model before the change (its
--- `understood_at` is NULL already).
---
--- 1. SPAM decides if a message is hostile mail (specification 1, section
---    6.7). Understanding drops the items of hostile mail, so a message that
---    leaves SPAM (a false positive) needs the understanding again to get its
---    items. A message that gets SPAM drops its items at the next run; the
---    reads hide them before that (`hostile_mail!`). The label triggers of
---    migration 42 get SPAM, and clear `tries` and `retry_at` too.
--- 2. A gone message that comes back, and new content, clear
---    `understood_at`, `tries` and `retry_at` for each writer (triggers
---    `understand_come_back` and `understand_new_content`). The content
---    cleanup sets `content_sha256` to NULL on gone mail; that is not new
---    content.
--- 3. Each reset of an understood message (`understood_at` goes to NULL, and
---    `tries` does not grow) clears `tries` and `retry_at` and puts its thread
---    in `talk_due`, so the conversation is computed again. This covers each
---    other writer too (for example a new hostile mark). A failed try adds 1
---    to `tries`, so the condition `NEW.tries <= OLD.tries` keeps it out.
+-- 1. The trigger ledger_undo_insert accepts a `draft` action as the undo of
+--    an applied change of a draft (`drafts.update`) whose call started. Its
+--    arguments are the content of `pre`. Each rule of migration 29 stays.
+-- 2. The view ledger_can_undo lists such an entry while it is the newest
+--    entry of its draft that counts, and the draft passes the checks of a
+--    change (iris_changeset::change_denied): not sent, in a form that Iris
+--    writes, an account that Iris does not remove, no send that waits, and
+--    no open change. A failed later
+--    change counts only with the two errors of an unknown result (the
+--    constants CHANGE_UNKNOWN and CHANGE_DURING of iris-apply; a test
+--    compares them). Each rule of migration 29 stays.
 
-DROP TRIGGER IF EXISTS understand_owner_label_add;
-DROP TRIGGER IF EXISTS understand_owner_label_remove;
+DROP TRIGGER ledger_undo_insert;
 
-CREATE TRIGGER understand_owner_label_add AFTER INSERT ON message_label
-  WHEN (SELECT provider_id FROM label WHERE id = NEW.label_id)
-    IN ('SENT', 'DRAFT', 'UNSENT', 'SENT_COPY', 'SPAM')
+CREATE TRIGGER ledger_undo_insert BEFORE INSERT ON ledger_undo
+WHEN NOT EXISTS (SELECT 1 FROM changeset_action a JOIN changeset c ON c.id = a.changeset_id
+                 WHERE a.id = new.action_id AND a.state IS NULL AND c.author_kind = 'person')
+  OR NOT EXISTS (SELECT 1 FROM ledger WHERE id = new.ledger_id
+                   AND state IN ('applied', 'failed') AND undo = 'inverse')
+  -- The target is the entry. Step 1 is the inverse of the verb of the
+  -- entry, with the same arguments. Step 2 is the `archive` after the `untrash` of a `trash`.
+  OR NOT EXISTS (SELECT 1 FROM changeset_action a, ledger l
+                 JOIN changeset_action o ON o.id = l.action_id
+                 WHERE a.id = new.action_id AND l.id = new.ledger_id
+                   -- The target is the whole entry.
+                   AND json(a.targets) = json_object('ledger', json_array('l-' || l.id))
+                   AND ((new.step = 1 AND json(a.args) = json(o.args)
+                         AND o.verb || '>' || a.verb IN (
+                           'archive>inbox', 'inbox>archive', 'read>unread', 'unread>read',
+                           'label>unlabel', 'unlabel>label', 'trash>untrash', 'untrash>trash'))
+                        -- The undo of a state entry: `restore`, with no arguments.
+                        -- An entry from before migration 26 has no IDs of its
+                        -- correction rows, so it has no undo.
+                        OR (new.step = 1 AND json(a.args) = '{}' AND a.verb = 'restore'
+                            AND o.verb IN ('close', 'decline', 'defer', 'correct', 'skip', 'mute', 'dismiss')
+                            AND json_type(l.ops, '$.corrections') = 'array')
+                        -- The undo of a change of a draft: a `draft` action whose
+                        -- arguments are the content before the change. A reply
+                        -- takes no subject: the draft keeps its subject.
+                        OR (new.step = 1 AND o.verb = 'draft' AND a.verb = 'draft'
+                            AND json_extract(l.ops, '$.call') = 'drafts.update'
+                            AND l.state = 'applied' AND l.call = 1
+                            AND json(a.args) = CASE
+                              WHEN json_extract(l.ops, '$.thread') IS NULL
+                                THEN json(json_extract(l.pre, '$.draft.content'))
+                              ELSE json_remove(json_extract(l.pre, '$.draft.content'), '$.subject') END)
+                        OR (new.step = 2 AND o.verb = 'trash' AND a.verb = 'archive'
+                            -- Step 1 of the same entry, in the same changeset.
+                            AND EXISTS (SELECT 1 FROM ledger_undo u1
+                                        JOIN changeset_action a1 ON a1.id = u1.action_id
+                                        WHERE u1.ledger_id = new.ledger_id AND u1.step = 1
+                                          AND a1.changeset_id = a.changeset_id))))
+  -- One open undo of an entry: no open action of another undo changeset,
+  -- and one action of each step in the same changeset.
+  OR EXISTS (SELECT 1 FROM ledger_undo u JOIN changeset_action a ON a.id = u.action_id
+             JOIN changeset_action na ON na.id = new.action_id
+             WHERE u.ledger_id = new.ledger_id
+               AND coalesce(a.state, 'proposed') IN ('proposed', 'in_review', 'approved')
+               AND (a.changeset_id <> na.changeset_id OR u.step = new.step))
 BEGIN
-  UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL
-    WHERE id = NEW.message_id
-      AND (understood_at IS NOT NULL OR tries <> 0 OR retry_at IS NOT NULL);
+  SELECT RAISE(ABORT, 'iris: this undo link is not allowed');
 END;
 
-CREATE TRIGGER understand_owner_label_remove AFTER DELETE ON message_label
-  WHEN (SELECT provider_id FROM label WHERE id = OLD.label_id)
-    IN ('SENT', 'DRAFT', 'UNSENT', 'SENT_COPY', 'SPAM')
-BEGIN
-  UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL
-    WHERE id = OLD.message_id
-      AND (understood_at IS NOT NULL OR tries <> 0 OR retry_at IS NOT NULL);
-END;
+DROP VIEW ledger_can_undo;
 
-DROP TRIGGER IF EXISTS understand_reset;
-
-CREATE TRIGGER understand_reset AFTER UPDATE OF understood_at ON message
-  WHEN OLD.understood_at IS NOT NULL AND NEW.understood_at IS NULL
-   AND NEW.tries <= OLD.tries
-BEGIN
-  UPDATE message SET tries = 0, retry_at = NULL WHERE id = NEW.id;
-  INSERT INTO talk_due(thread_id) SELECT NEW.thread_id
-    WHERE NEW.thread_id IS NOT NULL
-      AND NOT EXISTS (SELECT 1 FROM talk_due t WHERE t.thread_id = NEW.thread_id);
-END;
-
-DROP TRIGGER IF EXISTS understand_new_content;
-
-CREATE TRIGGER understand_new_content AFTER UPDATE OF content_sha256 ON message
-  WHEN OLD.content_sha256 IS NOT NEW.content_sha256 AND NEW.content_sha256 IS NOT NULL
-   AND (NEW.understood_at IS NOT NULL OR NEW.tries <> 0 OR NEW.retry_at IS NOT NULL)
-BEGIN
-  UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL WHERE id = NEW.id;
-END;
-
-DROP TRIGGER IF EXISTS understand_come_back;
-
-CREATE TRIGGER understand_come_back AFTER UPDATE OF gone_at ON message
-  WHEN OLD.gone_at IS NOT NULL AND NEW.gone_at IS NULL
-   AND (NEW.understood_at IS NOT NULL OR NEW.tries <> 0 OR NEW.retry_at IS NOT NULL)
-BEGIN
-  UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL WHERE id = NEW.id;
-END;
+CREATE VIEW ledger_can_undo AS
+  SELECT l.id AS ledger_id FROM ledger l
+  WHERE l.state IN ('applied', 'failed') AND l.undo = 'inverse'
+    AND (EXISTS (SELECT 1 FROM ledger_message lm
+                 JOIN message m ON m.id = lm.message_id AND m.gone_at IS NULL
+                 WHERE lm.ledger_id = l.id AND lm.done = 1)
+         -- A state entry changed items, not messages: its `post` holds them.
+         OR EXISTS (SELECT 1 FROM changeset_action o, json_each(l.post) p
+                    WHERE o.id = l.action_id
+                      AND o.verb IN ('close', 'decline', 'defer', 'correct', 'skip', 'mute', 'dismiss')
+                      AND json_type(l.ops, '$.corrections') = 'array')
+         OR (json_extract(l.ops, '$.call') = 'drafts.update' AND l.state = 'applied' AND l.call = 1
+             -- Checks of section 1 that the store shows: the draft is not
+             -- sent, is in a form that Iris writes, and has no claimed send.
+             AND EXISTS (SELECT 1 FROM draft d JOIN account ac ON ac.id = d.account_id
+                         WHERE d.id = json_extract(l.ops, '$.draft')
+                           AND d.sent_at IS NULL AND d.foreign_at IS NULL
+                           AND (ac.state IS NULL OR ac.state NOT IN ('removing', 'removed')))
+             -- The checks of iris_changeset::change_denied, for no action:
+             -- no claimed send, no open send action, no send mark of a
+             -- press with no send yet (younger than MARK_MS, 24 hours),
+             -- and no open change or undo of the draft.
+             AND NOT EXISTS (SELECT 1 FROM ledger_send s
+                             WHERE s.draft_id = json_extract(l.ops, '$.draft'))
+             AND NOT EXISTS (SELECT 1 FROM action_draft o JOIN changeset_action b ON b.id = o.action_id
+                             LEFT JOIN ledger bl ON bl.action_id = b.id
+                             WHERE o.draft_id = json_extract(l.ops, '$.draft')
+                               AND ((b.verb = 'send'
+                                     AND b.state IN ('proposed', 'in_review', 'approved', 'held'))
+                                    OR (b.verb = 'draft'
+                                        AND (b.state IN ('approved', 'held') OR bl.state = 'writing'))))
+             AND NOT EXISTS (SELECT 1 FROM write_send w
+                             JOIN changeset_action b ON b.id = w.action_id
+                             JOIN changeset c ON c.id = b.changeset_id
+                             WHERE w.send_action_id IS NULL AND c.state <> 'withdrawn'
+                               AND b.state IN ('approved', 'held', 'applied')
+                               AND w.created_at > (julianday('now') - 2440587.5) * 86400000 - 86400000
+                               AND (EXISTS (SELECT 1 FROM draft d
+                                            WHERE d.id = json_extract(l.ops, '$.draft')
+                                              AND d.action_id = b.id)
+                                    OR EXISTS (SELECT 1 FROM action_draft o
+                                               WHERE o.action_id = b.id
+                                                 AND o.draft_id = json_extract(l.ops, '$.draft'))))
+             -- The newest entry of the draft. A later change or undo
+             -- counts after its call started, unless Gmail rejected it.
+             AND NOT EXISTS (SELECT 1 FROM ledger n
+                             WHERE n.id > l.id AND json_extract(n.ops, '$.call') = 'drafts.update'
+                               AND json_extract(n.ops, '$.draft') = json_extract(l.ops, '$.draft')
+                               AND (n.state = 'writing'
+                                    OR (n.state IN ('applied', 'undone') AND n.call = 1)
+                                    OR (n.state = 'failed' AND n.error IN (
+                                      'Iris does not know if the draft changed. Look at it in Gmail.',
+                                      'The draft changed at Gmail during the change. Look at it in Gmail.'))))))
+    AND NOT EXISTS (SELECT 1 FROM ledger_undo u JOIN changeset_action a ON a.id = u.action_id
+                    WHERE u.ledger_id = l.id
+                      AND coalesce(a.state, 'proposed') IN ('proposed', 'in_review', 'approved'));

@@ -31,7 +31,7 @@ pay again for the same mail.
 5. The person sets the model and its key with the `iris` command. The key is
    a secret (spec 1 section 5.4).
 
-## Resets (issue #110, migration 60)
+## Resets (issue #110, migration 62)
 
 - A change of the label `SPAM` (it comes or goes) clears `understood_at`,
   as a change of `SENT`, `DRAFT`, `UNSENT` or `SENT_COPY` does. Mail that

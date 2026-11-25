@@ -117,6 +117,7 @@ mod id;
 mod remove;
 mod search;
 mod secret;
+mod tokens;
 pub mod verify_log;
 mod watch;
 
@@ -129,7 +130,9 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 
-pub use backup::{BackupLock, Cleaned, PolicyExpect, PolicyWrite, GONE_KEEP_MS};
+pub use backup::{
+    BackupLock, Cleaned, PolicyExpect, PolicyWrite, DRAFT_FILES_MAX, DRAFT_FILE_MAX, GONE_KEEP_MS,
+};
 pub use content::ContentWriter;
 pub use file_lock::{FileLock, Probe};
 pub use remove::{Deleted, STATE_REMOVED, STATE_REMOVING};
@@ -139,6 +142,7 @@ pub use remove::{Deleted, STATE_REMOVED, STATE_REMOVING};
 pub const SYNC_STOPPED: &str = "stopped: the process ended before the sync ended";
 pub use id::{format_id, parse_id, Kind};
 pub use search::{day_ms, Query};
+pub use tokens::{index_tokens, Token};
 pub use watch::{Watch, SINCE_MARGIN_MS, TEXT_MAX, WAIT_MAX};
 
 /// The schema migrations, in order. Item `n` makes `PRAGMA user_version` `n + 1`.
@@ -204,6 +208,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_58.sql"),
     include_str!("schema_59.sql"),
     include_str!("schema_60.sql"),
+    include_str!("schema_61.sql"),
+    include_str!("schema_62.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
@@ -1069,12 +1075,26 @@ fn migrate(conn: &mut Connection, db: &Path) -> Result<()> {
 /// else the time zone of the computer. A saved name that the computer no
 /// longer knows gives the time zone of the computer too.
 pub fn time_zone(c: &Connection) -> rusqlite::Result<jiff::tz::TimeZone> {
+    Ok(time_zone_and_set(c)?.0)
+}
+
+/// [`time_zone`], and true when it is the zone that the owner set, from one
+/// read of `owner_setting`, so the two values always agree (issue 891).
+pub fn time_zone_and_set(c: &Connection) -> rusqlite::Result<(jiff::tz::TimeZone, bool)> {
+    Ok(match owner_time_zone(c)? {
+        Some(zone) => (zone, true),
+        None => (jiff::tz::TimeZone::system(), false),
+    })
+}
+
+/// The time zone that the owner set (`owner_setting`), or `None` when the
+/// owner set none, or set a name that the computer no longer knows. Then
+/// [`time_zone`] gives the time zone of the computer.
+pub fn owner_time_zone(c: &Connection) -> rusqlite::Result<Option<jiff::tz::TimeZone>> {
     let name: Option<String> = c
         .query_row("SELECT time_zone FROM owner_setting", [], |r| r.get(0))
         .optional()?;
-    Ok(name
-        .and_then(|n| jiff::tz::TimeZone::get(&n).ok())
-        .unwrap_or_else(jiff::tz::TimeZone::system))
+    Ok(name.and_then(|n| jiff::tz::TimeZone::get(&n).ok()))
 }
 
 /// The day of the instant `now_ms` (milliseconds since the epoch) in the

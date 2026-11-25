@@ -413,6 +413,7 @@ fn downgrade(s: &Store) {
             "DROP TRIGGER measure_connect;
              DROP TRIGGER person_decision; DROP TABLE person_decision;
              DROP TABLE use_open; DROP TABLE use_day; DROP TABLE measure_time;
+             DROP VIEW ledger_can_undo; CREATE VIEW ledger_can_undo AS SELECT NULL AS ledger_id WHERE 0;
              DROP TABLE write_send; DROP TABLE comment_delivery;
              DROP TABLE changeset_comment; DROP TABLE nudge_try;
              ALTER TABLE reply_draft DROP COLUMN ask;

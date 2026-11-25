@@ -25,6 +25,11 @@ test("a send and a draft name their subject and first recipient, so two sends di
   assert.equal(words({ verb: "send", mail: { subject: "Q4 plan", to: "priya@example.com", recipients: 1 } }), "Sent “Q4 plan” to priya@example.com");
   assert.equal(words({ verb: "send", mail: { subject: "Q4 plan", to: "priya@example.com", recipients: 2 } }), "Sent “Q4 plan” to priya@example.com and 1 other");
   assert.equal(words({ verb: "draft", mail: { subject: " ", to: "dana@example.com", recipients: 4 } }), "Wrote the draft of a mail with no subject to dana@example.com and 3 others");
+  // A change of a draft and its undo (draft change spec, section 6).
+  const q4 = { subject: "Q4 plan", to: "priya@example.com", recipients: 1 };
+  assert.equal(words({ verb: "draft", change: true, mail: q4 }), "Changed the draft of “Q4 plan” to priya@example.com");
+  assert.equal(words({ verb: "draft", change: true, undo_of: "l-4", mail: q4 }), "Restored the old text of “Q4 plan” to priya@example.com");
+  assert.equal(words({ verb: "draft", change: false, mail: q4 }), "Wrote the draft of “Q4 plan” to priya@example.com");
   // A mail that Iris cannot read, or an engine from before the field: no name.
   assert.equal(words({ verb: "send", mail: null }), "Sent a mail");
 });
