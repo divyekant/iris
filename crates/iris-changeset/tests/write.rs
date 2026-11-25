@@ -38,6 +38,9 @@ fn author(kind: AuthorKind) -> Author {
 /// Account 1. Thread 1: messages 1 and 2, with Message-IDs (2 is newer).
 /// Thread 2 (message 3's thread): one message with no Message-ID. Draft 1, a reply in thread 1.
 fn store(dir: &TempDir) -> Store {
+    // Each test of this binary sees a change of a draft: the switch is
+    // global to the process, and the test order is not fixed.
+    iris_changeset::allow_draft_change(true);
     let s = Store::open(&dir.0).unwrap();
     let a = s.add_account("gmail", "owner@example.com").unwrap();
     let m = |id: &str, t: &str, date: i64, mid: Option<&str>| NewMessage {
@@ -572,7 +575,6 @@ fn set(s: &Store, sql: &str) {
 /// resolves to the newest message of the thread.
 #[test]
 fn a_change_of_a_draft_is_proposed_only_when_each_check_passes() {
-    iris_changeset::allow_draft_change(true);
     let dir = TempDir::new("change");
     let s = store(&dir);
     let a = one(&s, AuthorKind::Person, Verb::Draft, &["d-1"], REPLY());
@@ -637,7 +639,6 @@ fn a_change_of_a_draft_is_proposed_only_when_each_check_passes() {
 /// blocks a change, while the mark is open (not withdrawn, not too old).
 #[test]
 fn an_open_send_mark_of_the_draft_blocks_a_change() {
-    iris_changeset::allow_draft_change(true);
     let dir = TempDir::new("change-mark");
     let s = store(&dir);
     // A write of a new mail: its approved draft action has a mark, and the
@@ -687,7 +688,6 @@ fn an_open_send_mark_of_the_draft_blocks_a_change() {
 /// reads the subject of its draft, not the subject of the thread.
 #[test]
 fn the_flags_of_a_change_read_the_changed_draft() {
-    iris_changeset::allow_draft_change(true);
     let dir = TempDir::new("change-flags");
     let s = store(&dir);
     set(
@@ -720,7 +720,6 @@ fn the_flags_of_a_change_read_the_changed_draft() {
 /// A reply change needs a message to reply to, as a new reply does.
 #[test]
 fn a_reply_change_needs_a_parent() {
-    iris_changeset::allow_draft_change(true);
     let dir = TempDir::new("change-parent");
     let s = store(&dir);
     set(&s, "UPDATE message SET gone_at = 1 WHERE thread_id = 1");

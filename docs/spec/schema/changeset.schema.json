@@ -1266,6 +1266,68 @@
           }
         },
         {
+          "$comment": "A checked change of a draft (docs/specs/2026-11-25-draft-change.md, section 1) follows the same rules: a reply change has no subject and one parent, a new-mail change has a subject and no resolved message.",
+          "if": {
+            "properties": {
+              "verb": {
+                "const": "draft"
+              },
+              "targets": {
+                "required": [
+                  "drafts"
+                ]
+              }
+            },
+            "required": [
+              "verb",
+              "targets"
+            ]
+          },
+          "then": {
+            "oneOf": [
+              {
+                "required": [
+                  "resolved"
+                ],
+                "properties": {
+                  "args": {
+                    "properties": {
+                      "subject": false
+                    }
+                  },
+                  "resolved": {
+                    "required": [
+                      "messages"
+                    ],
+                    "properties": {
+                      "messages": {
+                        "minItems": 1,
+                        "maxItems": 1
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "args": {
+                    "required": [
+                      "subject"
+                    ]
+                  },
+                  "resolved": {
+                    "properties": {
+                      "messages": {
+                        "maxItems": 0
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
           "$comment": "See the rule above: a checked reply has no subject and one parent.",
           "if": {
             "properties": {
