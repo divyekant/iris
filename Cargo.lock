@@ -1351,6 +1351,7 @@ dependencies = [
 name = "iris-workspace"
 version = "0.0.0"
 dependencies = [
+ "iris-clean",
  "iris-job",
  "iris-spec",
  "iris-store",
