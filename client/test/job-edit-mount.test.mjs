@@ -303,3 +303,53 @@ test("the due field of an edit follows the owner zone that comes after the form 
     access.zone = keep;
   }
 });
+
+test("End closes the add-mail form with its picked thread, so a done job offers no add (issue 992)", async () => {
+  const d = structuredClone(fx.jobDetails["j-12"]);
+  const preview = { messages: [{ ...fx.answer("/items/c-311/job").messages[0] }] };
+  const ended = { ...d, job: { ...d.job, state: "done", end: "cancel", wait: undefined } };
+  serve((method, path) => {
+    if (path.startsWith("search")) return [200, { messages: preview.messages }];
+    if (path.startsWith("jobs/j-12/scope/") && method === "GET") return [200, preview];
+    if (path === "jobs/j-12/cancel" || path === "jobs/j-12/finish") return [200, ended];
+    return [200, ended];
+  });
+  const view = await mount("/src/views/Job.svelte", { detail: d, every: 60_000 });
+  button(view, "Add mail").click();
+  view.flushSync();
+  fill(view, "input[type=search]", "contract");
+  submit(view, "form.search");
+  (await until(() => view.target.querySelector("button.hit"))).click();
+  await until(() => button(view, "Add this thread"));
+  button(view, "End").click();
+  view.flushSync();
+  button(view, "Cancel the job").click();
+  await until(() => (view.flushSync(), !button(view, "End")));
+  for (const name of ["Add this thread", "Search", "Add mail"]) assert.ok(!button(view, name), name);
+  assert.equal(view.target.querySelector("#scope-search"), null);
+  view.destroy();
+});
+
+test("the job form refuses a day that the owner zone skipped, sends nothing, and takes another day (issue 987)", async () => {
+  const { access } = await load("/src/access.svelte.ts");
+  const keep = access.zone;
+  access.zone = "Pacific/Apia";
+  const sent = [];
+  const view = await mount("/src/views/JobForm.svelte", { goal: "Book the dentist", action: "Save", save: async (goal, due) => (sent.push(due), ""), oncancel: () => {} });
+  try {
+    fill(view, "input[type=date]", "2011-12-30");
+    submit(view);
+    await until(() => (view.flushSync(), view.target.querySelector("[role=alert]")));
+    assert.match(text(view.target.querySelector("[role=alert]")), /2011-12-30 does not exist in the time zone Pacific\/Apia\. Pick another day\./);
+    assert.equal(sent.length, 0, "no save of a day that does not exist");
+    const go = view.target.querySelector("button[type=submit]");
+    assert.equal(go.disabled, false, "the form takes another try");
+    fill(view, "input[type=date]", "2011-12-31");
+    submit(view);
+    await until(() => sent.length === 1);
+    assert.equal(sent[0], "2011-12-31T23:59:59.999+14:00");
+  } finally {
+    view.destroy();
+    access.zone = keep;
+  }
+});

@@ -17,6 +17,16 @@ use crate::Model;
 
 /// The run lock file in the data folder.
 pub const LOCK_FILE: &str = "understand.lock";
+
+/// The file lock of a caller that waits for the run lock ([`lock_wait`]).
+/// While a caller holds it, a run stops before its next message
+/// ([`Stop::Yield`]), so a draft or a question of the person does not wait
+/// for a long run (#279).
+pub const WANT_FILE: &str = "understand.want";
+
+/// The longest wait of [`lock_wait`]. One model call of a run must end
+/// before the run stops.
+pub const WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 /// Messages between two sender refreshes (step 5 of the runner).
 pub const BATCH: usize = 50;
 /// The age limit of the first group of threads.
@@ -125,13 +135,75 @@ impl From<rusqlite::Error> for Error {
 /// releases it when the process ends, also after a crash.
 pub struct RunLock(#[allow(dead_code)] iris_store::FileLock);
 
-/// Takes the run lock, or gives [`Error::Busy`].
+/// Takes the run lock, or gives [`Error::Busy`]. While a caller of
+/// [`lock_wait`] waits, it gives [`Error::Busy`] too: the waiter gets the
+/// lock first (#279). A shared lock on [`WANT_FILE`] stays held through
+/// the take, so a waiter that comes during the take waits for its end and
+/// then finds the run lock held: the two never take the lock in an order
+/// that the waiter cannot see.
 pub fn lock(store: &Store) -> Result<RunLock, Error> {
+    let want = store.dir().join(WANT_FILE);
+    // The file exists after this, so the probe below always gives a lock.
+    // No lock here: an exclusive try would look like a waiter to a run.
+    std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&want)
+        .map_err(|e| Error::Store(e.into()))?;
+    match iris_store::FileLock::probe(&want) {
+        Ok(iris_store::Probe::Free(shared)) => {
+            let r = take(store);
+            drop(shared);
+            r
+        }
+        Ok(_) => Err(Error::Busy),
+        Err(e) => Err(Error::Store(e.into())),
+    }
+}
+
+fn take(store: &Store) -> Result<RunLock, Error> {
     match iris_store::FileLock::try_take(&store.dir().join(LOCK_FILE)) {
         Ok(Some(l)) => Ok(RunLock(l)),
         Ok(None) => Err(Error::Busy),
         Err(e) => Err(Error::Store(e.into())),
     }
+}
+
+/// Takes the run lock. If a run holds it, asks the run to stop (the lock
+/// on [`WANT_FILE`]) and waits up to `max`, then gives [`Error::Busy`].
+/// Waiters take the run lock in turn: only the holder of the want lock
+/// tries the run lock, and it releases the want lock when it returns. The
+/// OS releases the want lock of a waiter that crashes.
+pub fn lock_wait(store: &Store, max: std::time::Duration) -> Result<RunLock, Error> {
+    let start = std::time::Instant::now();
+    let mut want = None;
+    loop {
+        if want.is_none() {
+            want = iris_store::FileLock::try_take(&store.dir().join(WANT_FILE))
+                .map_err(|e| Error::Store(e.into()))?;
+        }
+        if want.is_some() {
+            match take(store) {
+                Err(Error::Busy) => {}
+                r => return r,
+            }
+        }
+        if start.elapsed() >= max {
+            return Err(Error::Busy);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// True while a caller of [`lock_wait`] waits. Each holder of the run lock
+/// that works in a loop (a run, the nudge and summary steps of the engine)
+/// stops before its next unit of work. An error of the probe reads as no
+/// waiter: the holder goes on.
+pub fn wanted(store: &Store) -> bool {
+    matches!(
+        iris_store::FileLock::probe(&store.dir().join(WANT_FILE)),
+        Ok(iris_store::Probe::Held)
+    )
 }
 
 /// The limits of one run.
@@ -183,6 +255,9 @@ pub enum Stop {
     Model,
     /// A call to a priced model with an unknown result or unknown usage.
     Unknown,
+    /// A draft or a question of the person waits for the run lock
+    /// ([`lock_wait`]). The next run goes on with the mail that is left.
+    Yield,
     Error,
 }
 
@@ -196,6 +271,7 @@ impl Stop {
             Stop::Messages => "messages",
             Stop::Model => "model",
             Stop::Unknown => "unknown",
+            Stop::Yield => "yield",
             Stop::Error => "error",
         }
     }
@@ -343,13 +419,14 @@ fn run_messages(
     now_ms: i64,
 ) -> Result<Stop, Error> {
     // Issue 1049: the context of the understood messages from before
-    // migration 68, before a step below changes one.
+    // migration 69, before a step below changes one.
     store::record_unknown_contexts(store)?;
     // Step 1: the link check of each new or old content (migration 20),
     // with no model, so a model error cannot hold it back. Each message
     // that it understands counts toward the run limit.
-    let done =
-        store::recheck_links(store, now_ms, limits.max_messages).map_err(Error::Understand)?;
+    let links =
+        store::recheck_links_scan(store, now_ms, limits.max_messages).map_err(Error::Understand)?;
+    let done = links.count;
     store.write(|tx| {
         tx.execute(
             "UPDATE understand_run SET messages = messages + ?2 WHERE id = ?1",
@@ -357,6 +434,10 @@ fn run_messages(
         )?;
         Ok(())
     })?;
+    // Each scan stops for a waiter and leaves its rows (#279).
+    if links.yielded {
+        return Ok(Stop::Yield);
+    }
     // Step 2 before step 3: the refresh needs no model, so a model that
     // cannot be made does not keep stale items of a changed sender. Its
     // resets come before the main pass, which sees them.
@@ -364,7 +445,11 @@ fn run_messages(
     // The fixed check after a kind or name change (decision D31), with no
     // model, so a model that cannot be made does not hold it back either.
     let left = limits.max_messages.map(|n| n.saturating_sub(done));
-    let done = done + fixed_check(store, now_ms, run, left)?;
+    let fixed = fixed_check(store, now_ms, run, left)?;
+    if fixed.yielded {
+        return Ok(Stop::Yield);
+    }
+    let done = done + fixed.count;
     let inner: Box<dyn Model> = match row {
         Some(r) if calls => connect(r).map_err(Error::Connect)?,
         _ => Box::new(NoModel),
@@ -384,6 +469,7 @@ fn run_messages(
         done,
         since_refresh: 0,
         rerun: false,
+        yielded: false,
     };
     // Main pass, then one more pass if a sender rerun or a fixed check
     // reset mail. Resets of the second pass wait for the next run, so a
@@ -411,6 +497,9 @@ fn run_messages(
         // message). Mail that the check of the main pass resets gets the
         // second pass.
         r.fixed()?;
+        if r.yielded {
+            return Ok(Stop::Yield);
+        }
     }
     let s = model.state();
     Ok(if !s.refused {
@@ -436,18 +525,23 @@ fn refresh_senders(store: &Store, now_ms: i64) -> Result<u64, Error> {
 /// The fixed check of the queue `fixed_due` (decision D31), inside the
 /// message limit `left`. Counts the messages that it understood again in
 /// the run row, and gives their count.
-fn fixed_check(store: &Store, now_ms: i64, run: i64, left: Option<u64>) -> Result<u64, Error> {
-    let n = store::recheck_fixed(store, now_ms, left).map_err(Error::Understand)?;
-    if n > 0 {
+fn fixed_check(
+    store: &Store,
+    now_ms: i64,
+    run: i64,
+    left: Option<u64>,
+) -> Result<store::Scan, Error> {
+    let scan = store::recheck_fixed_scan(store, now_ms, left).map_err(Error::Understand)?;
+    if scan.count > 0 {
         store.write(|tx| {
             tx.execute(
                 "UPDATE understand_run SET messages = messages + ?2 WHERE id = ?1",
-                params![run, i64_of(n)],
+                params![run, i64_of(scan.count)],
             )?;
             Ok(())
         })?;
     }
-    Ok(n)
+    Ok(scan)
 }
 
 struct Runner<'a> {
@@ -462,6 +556,8 @@ struct Runner<'a> {
     since_refresh: usize,
     /// A sender rerun reset mail in this run: one more pass.
     rerun: bool,
+    /// A fixed check of this run stopped for a waiter (#279).
+    yielded: bool,
 }
 
 impl Runner<'_> {
@@ -481,9 +577,10 @@ impl Runner<'_> {
             .limits
             .max_messages
             .map(|n| n.saturating_sub(self.done));
-        let n = fixed_check(self.store, self.now_ms, self.run, left)?;
-        self.done += n;
-        self.rerun |= n > 0;
+        let scan = fixed_check(self.store, self.now_ms, self.run, left)?;
+        self.done += scan.count;
+        self.rerun |= scan.count > 0;
+        self.yielded |= scan.yielded;
         Ok(())
     }
 
@@ -501,6 +598,9 @@ impl Runner<'_> {
             };
             if self.limits.max_messages.is_some_and(|n| self.done >= n) {
                 return Ok(Some(Stop::Messages));
+            }
+            if self.yielded || wanted(self.store) {
+                return Ok(Some(Stop::Yield));
             }
             if let Some(max) = self.limits.max_cost_micro_usd {
                 let spent = self.store.read(|c| Ok(run_cost(c, self.run)?))?;

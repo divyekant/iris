@@ -1452,3 +1452,33 @@ test("a kept write of a draft link shows also when the draft of the link is gone
     net.restore();
   }
 });
+
+test("a failed status read does not hide the kept write of a new-mail draft link (issue 1112)", async () => {
+  const api = await load("/src/api.ts");
+  const net = serve((path) => {
+    if (path === "write/cs-1") return [200, { state: "waiting", draft: "d-7", sending: true, leaves_at: null }];
+    if (path === "drafts/d-7") return [200, { ...D7, change: "update" }];
+    if (path === "status") return [503, { error: "The store is busy." }];
+    return [404, { error: "Not found." }];
+  });
+  try {
+    window.sessionStorage.removeItem("iris.write.d-7.taken");
+    // No kept write: the status is the account list of the form, and its error shows.
+    await assert.rejects(api.loadChange("d-7"), /The store is busy/);
+    window.sessionStorage.setItem("iris.write.d-7.taken", JSON.stringify({ write: "cs-1", to: ["sam@okafor.example"], subject: "Dinner on Saturday?", body: "Hi Sam,\n" }));
+    // A kept write: the write shows, with no form after it (no account list), as a start with no mail to reply to.
+    const start = await api.loadChange("d-7");
+    assert.deepEqual(start.accounts, []);
+    assert.equal(start.change.change, null);
+    const app = await mount("/src/views/Write.svelte", { start, every: 20 });
+    try {
+      await until(() => /Cancel the send/.test(text(app.target)));
+      assert.equal(app.target.querySelector("form"), null);
+    } finally {
+      app.destroy();
+    }
+  } finally {
+    window.sessionStorage.removeItem("iris.write.d-7.taken");
+    net.restore();
+  }
+});

@@ -3093,7 +3093,7 @@ fn a_change_of_an_earlier_message_runs_the_later_ones_again() {
     }
 }
 
-/// Issue 1049: a message that a run understood before migration 68 has no
+/// Issue 1049: a message that a run understood before migration 69 has no
 /// recorded context. The first check records its context and runs nothing
 /// again.
 #[test]
@@ -3110,7 +3110,7 @@ fn a_message_with_no_recorded_context_gets_one_and_does_not_run_again() {
         recorded.starts_with(&format!("t:{m1}:")) && recorded.contains(";s:;p:"),
         "{recorded}"
     );
-    // Migration 68 gives each understood message "?".
+    // Migration 69 gives each understood message "?".
     b.store
         .write(|tx| {
             tx.execute("UPDATE message SET context = '?'", [])?;
@@ -3125,7 +3125,7 @@ fn a_message_with_no_recorded_context_gets_one_and_does_not_run_again() {
     assert_eq!(fake.calls.borrow().len(), 2);
 }
 
-/// Issue 1049, pre-review: a change after migration 68 and before the
+/// Issue 1049, pre-review: a change after migration 69 and before the
 /// queue step records the context of an old message ("?") runs the later
 /// message again: the change put the thread in `talk_due` first.
 #[test]

@@ -1629,6 +1629,7 @@ async fn the_draft_route_gives_a_ready_nudge_with_its_person() {
         ),
         [thread, newest],
     );
+    seen_now(&store);
     let (status, draft) = get(&store, &format!("/api/threads/t-{thread}/draft")).await;
     assert_eq!(status, StatusCode::OK, "{draft}");
     assert_eq!(
@@ -1700,6 +1701,7 @@ async fn an_item_shows_a_ready_draft_of_its_thread_until_the_draft_is_stale() {
          ORDER BY coalesce(m.internal_date, 0) DESC, m.id DESC LIMIT 1",
         [first],
     );
+    seen_now(&store);
     // The text of the draft: GET /api/threads/{t}/draft.
     let thread = format!(
         "t-{}",
@@ -2364,4 +2366,17 @@ fn the_summary_route_reads_the_item_and_the_summary_in_one_snapshot() {
     assert!(seen > 0, "the route gave no summary");
     stop.store(true, Ordering::Relaxed);
     writer.join().unwrap();
+}
+
+/// Gives each reply draft the set of the messages of its thread that a
+/// reply can answer now, as a save does (#479).
+fn seen_now(store: &Store) {
+    exec(
+        store,
+        &format!(
+            "UPDATE reply_draft SET seen = ({})",
+            iris_voice::seen_sql(&iris_voice::messages_sql("reply_draft.thread_id"))
+        ),
+        [],
+    );
 }

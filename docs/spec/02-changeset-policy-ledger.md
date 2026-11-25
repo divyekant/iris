@@ -1312,10 +1312,18 @@ agent that does not work in a folder. The rules for the MCP interface:
   | `watch_add`, `watch_list`, `watch_remove` | Read and write the watch rows of the store directly, as `iris watch` does. A watch changes no mailbox, so it does not go through the policy. |
   | All other tools | A request on `iris.sock`, with the author `local`. |
 
-  In
-  session mode, the MCP interface uses the session socket, so the session
-  limits apply. The command has no session mode yet, so `iris mcp` has
-  host mode only (issue #440).
+  In session mode (a `.iris/` folder in the current folder or above it,
+  as for the command), each tool takes the path of its command in session
+  mode, so the session limits apply (issue #440):
+
+  | Tools | Path |
+  |---|---|
+  | `status`, `search`, `show`, `list` | A read verb of the session socket. `list` takes only a form: another filter, also an explicit `limit`, is a usage error (code 2). |
+  | `send`, `skip`, `mute`, `dismiss` | Refused (code 3), with the text of the command. |
+  | The tools of `add`, `submit`, `changeset`, `drafts`, `withdraw`, `revise`, `matters_propose` | A request on the session socket. `drafts` gives only the draft of the job, so after a lost `add` answer the client finds the changeset with `drafts` before a retry. |
+  | All other tools | Refused (code 3): they are host verbs. |
+
+  The tools never open the data folder in session mode.
 - The result of a call is what its verb prints on standard output: with
   `--json` where the verb has it (section 8.3), else the text of the verb.
   Two exceptions:
@@ -1339,7 +1347,7 @@ control):
 | A line that is not JSON, or a line over 2 MiB | The server drops the line, answers nothing and reads the next line. No request goes to the engine. |
 | A tool that does not exist | An error of the protocol (`invalid params`). No request goes to the engine. |
 | A missing, unknown or wrong argument | An error result with code 2. No request goes to the engine. |
-| Calls at the same time | At most 4 calls run at the same time. The others wait. Each call is one request on the socket, and the engine orders the writes. Each add with no `changeset` makes its own draft. |
+| Calls at the same time | At most 4 calls run at the same time. The others wait. Each call is one request on the socket, and the engine orders the writes. On the host, each add with no `changeset` makes its own draft. In a session, an add with no `changeset` uses the one draft of the job, so two such adds go to the same draft. |
 | The answer of the engine is lost (time-out, the engine stops) | Code 1, "the result is not known", as for the command. The client reads the state with `changeset` or `drafts`. |
 | The client stops or closes standard input during a call | The server stops after the running calls end (at most the answer wait of 30 seconds). The answer of a running call is lost. The client reads the state with `changeset` or `drafts`. |
 | A retry of `submit` after a lost answer | The engine refuses a changeset that is not a draft (code 2) and changes nothing. `changeset` gives the state. |

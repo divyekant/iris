@@ -55,7 +55,7 @@ pay again for the same mail.
   back, a label of the list above) clears `tries` and `retry_at` also for
   a message that is not understood, for example one that failed the model
   3 times. Triggers of the store do each reset, so each writer gets it.
-- Context (issue #1049, migration 68): each successful run records the
+- Context (issue #1049, migration 69): each successful run records the
   row IDs and a hash of the text of the earlier messages that shaped it
   (`message.context`): the newest 3 earlier messages of the thread, with
   a hash of the text that the model data held of each (sender, subject
@@ -106,7 +106,7 @@ pay again for the same mail.
   waits for a run waits for the end of that run, so one change runs a
   message once. A run reads only earlier messages, so a reset never comes
   back to the message that caused it.
-- Upgrade: migration 68 gives each understood message the record "?":
+- Upgrade: migration 69 gives each understood message the record "?":
   its context is not known. Each batch run first records the context now
   of each "?" message whose thread is not in `talk_due`, and the queue
   step does the same. A change after the migration puts the thread in
@@ -249,6 +249,35 @@ in the data folder (`File::try_lock`, like the backup lock of `iris-store`).
 A second runner, in this process or in another, gets "a run is in progress"
 and makes no call. The OS releases the lock when the process ends, also
 after a crash. So two runners never pay for the same message.
+
+A draft (`iris_voice::draft`) and a question (`iris_understand::ask`) of
+the person take the lock with `batch::lock_wait` (#279). If another holder
+has the run lock, the waiter takes an OS file lock on `understand.want` and
+tries the run lock again each 50 ms, for up to `batch::WAIT` (60 seconds).
+Then it fails with "a run is in progress", as before.
+
+- While a waiter holds `understand.want`, `batch::lock` gives "a run is in
+  progress". `batch::lock` holds a shared lock on `understand.want` through
+  its take of the run lock, so a waiter cannot signal during a take. So the run after a sync, the nudge and summary steps of the
+  engine and `iris model set` do not take the lock before the waiter.
+- A holder that works in a loop probes `understand.want` (a shared lock
+  try) before each unit of work and stops: the batch runner before each
+  message and before each row of the link and fixed checks (`stop =
+  yield`), the nudge step before each thread. The summary step makes the
+  calls of one thread only, so it needs no probe. In the nudge and summary
+  steps, the model refuses each call while a waiter waits, also the retry
+  of an invalid answer: the run row says `yield`, and the thread is not
+  blocked.
+- The OS releases the want lock of a waiter that crashes, so no signal
+  stays. Waiters take the run lock in turn: only the holder of the want
+  lock tries the run lock, and it releases the want lock when it returns.
+- A scan that stops for a waiter says so (`store::Scan::yielded`), also
+  the fixed check at the end of a pass. The run then ends with `stop =
+  yield`, not `done`.
+- Limit: a model call that runs when the waiter comes is not stopped, and
+  in a batch run the retry of the answer of that message can follow it. A
+  call can take up to `timeout_s` (default 120 seconds), so a waiter can
+  still fail after 60 seconds (limit #1126).
 
 ### Model and budget
 
@@ -412,6 +441,10 @@ Stop conditions, checked before each message:
   call counts in `unknown_calls` (tokens unknown) and the run goes on. A
   time-out or an error of a local server still stops the run with `stop =
   model`, because the next call would likely fail too.
+- A draft or a question waits for the run lock (`understand.want`, see
+  "Run lock"): `stop = yield`. The link and fixed checks probe it before
+  each row too, and leave the rest of their queues. The next run (the run
+  after the next sync) goes on with the mail and the rows that are left.
 - Another error: `stop = error`, and the error goes to the caller.
 
 ### Counts

@@ -334,3 +334,20 @@ fn an_injected_answer_keeps_the_connection_for_the_next_write() {
         graph.create_draft(TOKEN, MIME).unwrap();
     }
 }
+
+/// Issue #977: an injected failure reads the request body too. Else the
+/// next write on the pooled connection fails at transport.
+#[test]
+fn an_injected_failure_keeps_the_connection_for_the_next_write() {
+    use serde_json::json;
+    let (fake, graph) = setup();
+    let id = inbox_message(&fake);
+    let big = [MIME, &vec![b'x'; 4 << 20][..]].concat();
+    for _ in 0..5 {
+        fake.fail_next(&[(400, None)]);
+        let err = graph.create_draft(TOKEN, &big).unwrap_err();
+        assert!(!matches!(err, iris_graph::Error::Transport(_)), "{err}");
+        fake.answer_next_status(201, &answer(&id, json!({"isDraft": true})));
+        graph.create_draft(TOKEN, MIME).unwrap();
+    }
+}

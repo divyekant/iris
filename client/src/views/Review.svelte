@@ -52,6 +52,8 @@
   // A Request sends its reads and writes of the request through the queue.
   const read = (work: () => Promise<Changeset>) => queue(work, (d) => put(d, true));
 
+  // An approved or held action that Iris can still apply, also after its request closed.
+  const moves = (a: Changeset["actions"][number]) => a.decision?.state === "approved" || a.decision?.state === "held";
   function poll(open: Changeset[]) {
     if (!Array.isArray(open)) return;
     for (const c of open) put(c);
@@ -63,8 +65,9 @@
     const moved = [...list.filter((c) => order.includes(c.id)), ...list.filter((c) => !order.includes(c.id))];
     if (moved.some((c, i) => c !== list[i])) list = moved;
     // A request on the screen or announced that the engine no longer lists as open: read its state,
-    // so that it never keeps the controls of an open request.
-    for (const c of [...all, ...later]) if (c.state === "open" && !order.includes(c.id)) void settle(c.id);
+    // so that it never keeps the controls of an open request. Read again each such request whose
+    // started action can still move (issue 997), until it ends: only the requests on this screen.
+    for (const c of [...all, ...later]) if (!order.includes(c.id) && (c.state === "open" || c.actions.some(moves))) void settle(c.id, c.state === "open");
   }
   $effect(() => {
     if (!every) return;
@@ -81,7 +84,8 @@
   // The requests that left the open list and whose state Iris could not read. Each is locked
   // (inert) with a line and Try again, and the headline does not count it. The next poll tries again.
   let unknown: string[] = $state([]);
-  function settle(id: string) {
+  // `lock`: a failed read locks the request. A closed request keeps its last state and its next poll reads again.
+  function settle(id: string, lock = true) {
     const step = async () => {
       try {
         return await get<Changeset>(`changesets/${encodeURIComponent(id)}`);
@@ -89,7 +93,7 @@
         return id;
       }
     };
-    return queue(step, (d) => (typeof d === "string" ? !unknown.includes(d) && (unknown = [...unknown, d]) : put(d)));
+    return queue(step, (d) => (typeof d === "string" ? lock && !unknown.includes(d) && (unknown = [...unknown, d]) : put(d)));
   }
 
   // Show the new requests in the order of the engine. A request that is no longer open stays at the end with its state.

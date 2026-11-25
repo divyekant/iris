@@ -141,6 +141,9 @@ pub struct Text {
     pub links: Vec<iris_clean::Link>,
     /// `iris-clean` could not list each link.
     pub links_cut: bool,
+    /// The links of the attached messages (from `iris-clean`). They count
+    /// with no sender proof.
+    pub attached_links: Vec<iris_clean::Link>,
 }
 
 impl Text {
@@ -171,6 +174,7 @@ impl Text {
             invitation: c.invitation,
             links: c.links,
             links_cut: c.links_cut || html_after,
+            attached_links: c.attached_links,
         }
     }
 }
@@ -319,15 +323,23 @@ pub const IDNA_PUNCTUATION: [char; 5] =
     ['\u{00B7}', '\u{05F3}', '\u{05F4}', '\u{0F0B}', '\u{30FB}'];
 
 /// True when the links of a received message give the mark `link`
-/// ([`link::deceptive`]). The caller skips your sent mail.
-pub fn link_mark(head: &Head, links: &[iris_clean::Link], links_cut: bool) -> bool {
+/// ([`link::deceptive`]). The caller skips your sent mail. `attached` holds
+/// the links of the attached messages: their own sender is not proven, so
+/// no `From` domain and no DMARC result of the outer message counts for
+/// them (issue #372).
+pub fn link_mark(
+    head: &Head,
+    links: &[iris_clean::Link],
+    attached: &[iris_clean::Link],
+    links_cut: bool,
+) -> bool {
     let from_domain = head::domain(head.from_addr.as_deref().unwrap_or(""));
     link::deceptive(
         links,
         links_cut,
         from_domain,
         dmarc_of(head) == Some("pass"),
-    )
+    ) || link::deceptive(attached, false, "", false)
 }
 
 /// [`analyze`] for the first bytes of a message, with the flags of
@@ -383,7 +395,7 @@ pub fn analyze_cut(raw: &[u8], raw_cut: bool, html_after: bool, cx: &Context) ->
     {
         marks.push(Mark::Spoof);
     }
-    if !sent && link_mark(&head, &text.links, text.links_cut) {
+    if !sent && link_mark(&head, &text.links, &text.attached_links, text.links_cut) {
         marks.push(Mark::Link);
     }
     if cx.labels.iter().any(|l| l == "SPAM") {

@@ -16,16 +16,22 @@ export function canStart(item: Item): boolean {
 /**
  * The end of the day `date` (`YYYY-MM-DD`) in the time zone of the owner (decision D1,
  * issue 892), as RFC 3339 with the offset of that zone. With no zone, or a zone that
- * the browser does not know, the end of the day of the browser.
+ * the browser does not know, the end of the day of the browser. Throws for a day
+ * that the zone skipped (issue 987): no instant of that day exists.
  */
 export function endOfDay(date: string, zone: string | null | undefined = access.zone): string {
   const pad = (n: number, w = 2) => String(Math.abs(n)).padStart(w, "0");
   const offset = (off: number) => `${off < 0 ? "-" : "+"}${pad(Math.trunc(off / 60))}:${pad(off % 60)}`;
+  const skipped = () => new Error(`${date} does not exist in the time zone ${zone || "of this browser"}. Pick another day.`);
   const end = instantOf(date, 86_399_999, zone, true);
-  if (end !== null) return `${date}T23:59:59.999${offset(Math.round((offsetOf(end, zone) ?? 0) / 60_000))}`;
+  if (end !== null) {
+    if (today(new Date(end), zone) !== date) throw skipped();
+    return `${date}T23:59:59.999${offset(Math.round((offsetOf(end, zone) ?? 0) / 60_000))}`;
+  }
   const [y, m, d] = date.split("-").map(Number);
   const t = new Date(2000, 0, 1, 23, 59, 59, 999);
   t.setFullYear(y, m - 1, d);
+  if (ymd(t) !== date) throw skipped();
   return `${ymd(t)}T23:59:59.999${offset(-t.getTimezoneOffset())}`;
 }
 

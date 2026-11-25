@@ -1164,3 +1164,62 @@ fn the_clear_removes_a_stage_left_beside_a_missing_workspace() {
     // A job that never had a build has nothing to clear.
     iris_workspace::clear_beside(&default_dir(&tmp.0.join("data"), job + 1)).unwrap();
 }
+
+/// A raw message with one text attachment.
+fn raw_with_attachment(name: &str, text: &str) -> Vec<u8> {
+    format!(
+        "From: dana@example.com\r\nTo: me@example.com\r\nSubject: Contract\r\n\
+         MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n\
+         --b\r\nContent-Type: text/plain\r\n\r\nBody.\r\n\
+         --b\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename=\"{name}\"\r\n\r\n\
+         {text}\r\n--b--\r\n"
+    )
+    .into_bytes()
+}
+
+#[test]
+fn a_granted_message_shows_its_attachment_text_and_other_mail_does_not() {
+    let tmp = TempDir::new("attach");
+    let store = store(&tmp.0.join("data"));
+    for (id, name, text) in [
+        // Granted: the clean message of the scope thread.
+        (
+            1,
+            "invoice.txt",
+            "Total due: 412 EUR. INVOICE-TEXT\n```\n## m-96",
+        ),
+        // Hostile, a draft, gone, another thread: never in the folder.
+        (2, "a.txt", "HOSTILE-MARK-TEXT"),
+        (3, "b.txt", "DRAFT-TEXT"),
+        (5, "c.txt", "GONE-TEXT"),
+        (7, "d.txt", "OTHER-THREAD-TEXT"),
+    ] {
+        let sha = store.put_content(&raw_with_attachment(name, text)).unwrap();
+        store
+            .write(|tx| {
+                tx.execute(
+                    "UPDATE message SET content_sha256 = ?1 WHERE id = ?2",
+                    rusqlite::params![sha, id],
+                )?;
+                // New content waits for understanding and the link check:
+                // mark both done, as the fixture does.
+                tx.execute("UPDATE message SET understood_at = 1 WHERE id = ?1", [id])?;
+                tx.execute("DELETE FROM link_check WHERE message_id = ?1", [id])?;
+                Ok(())
+            })
+            .unwrap();
+    }
+    let job = job(&store);
+    let ws = tmp.0.join("ws");
+    build(&store, job, &ws).unwrap();
+    let (_, text) = walk(&ws);
+    for never in NEVER {
+        assert!(!text.contains(never), "{never} in the workspace");
+    }
+    let t1 = fs::read_to_string(ws.join("threads/t-1.md")).unwrap();
+    assert!(t1.contains("Attachment: invoice.txt\n"), "{t1}");
+    assert!(t1.contains("INVOICE-TEXT"), "{t1}");
+    // The text has a run of three backticks, so its block has a fence of
+    // four: no line of the text can close it.
+    assert!(t1.contains("````mail\nTotal due"), "{t1}");
+}

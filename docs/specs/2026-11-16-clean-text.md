@@ -38,7 +38,7 @@ each input.
 
 ```rust
 pub fn clean(raw: &[u8]) -> Clean;
-pub struct Clean { pub subject: String, pub text: String, pub cut: bool, pub attachments: Vec<Attachment>, pub invitation: bool, pub links: Vec<Link>, pub links_cut: bool }
+pub struct Clean { pub subject: String, pub text: String, pub cut: bool, pub attachments: Vec<Attachment>, pub invitation: bool, pub links: Vec<Link>, pub links_cut: bool, pub attached_links: Vec<Link> }
 pub struct Link { pub text: String, pub href: String }
 pub struct Attachment { pub name: String, pub mime_type: String, pub size: u64, pub text: Option<String> }
 pub fn remove_repeated_end(text: &str, earlier: &[&str]) -> String;
@@ -225,7 +225,18 @@ not used makes no cut in either case.
   true when a limit can hide a boundary or a type: a `Content-Type` field
   past 8 KiB or with a line past 1,000 bytes, or more than 64 boundaries. The caller then sets `links_cut` too,
   because the rest can hold an HTML part that a mail client shows. The
-  links of an attached message are not in the list.
+  links of an attached message (at each depth) go in a second list,
+  `attached_links`, inside the same `LINK_BYTES` limit for that list. The
+  link check reads them with no sender proof (issue #372). An attached
+  message that Iris does not parse sets `links_cut`. An attached message
+  past `INNER_LIMIT` sets `links_cut` when an HTML part reaches the limit,
+  when the scan above finds an HTML part header in its bytes past the
+  limit, when it is not 7bit, 8bit or binary (Iris does not scan the rest
+  of another encoding), or when it holds an attached message that is not
+  read. When the raw message is a prefix (`clean_cut`), an attached message
+  that reaches the cut sets `links_cut`, and the scan of the rest counts a
+  part header with the type `message/rfc822` or `message/global` as an
+  HTML part.
 - Images go out. The `alt` text stays, unless `width` or `height` is `0` or
   `1` (a tracking pixel).
 - Headings, lists, block quotes, `pre`, `hr` and line breaks become Markdown.
@@ -491,7 +502,11 @@ client. They are not defects of this design:
   the display name. These limits stay:
   - An address with two `@` outside a quoted local part (`a@b@example.org`)
     gives no address.
-  - A `<` or `>` inside a quoted local part breaks the list (issue #980).
+  - In `<>`, a quoted local part counts only at the start of the address
+    (after white space and comments) and only when its closing `"` comes
+    right before an `@` inside 256 bytes. There, a `<`, `>`, `,` or `;` is
+    text (issue #980). A longer quoted local part, or one with no `@` right
+    after its closing quote, is read as before: its `<` and `>` count.
   - Mail that Iris understood before the change to the scanner keeps the
     recipients that `mail-parser` read, so a domain-literal recipient of
     that mail is not in the profiles (issue #1003).

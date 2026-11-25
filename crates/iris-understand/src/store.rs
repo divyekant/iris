@@ -137,6 +137,20 @@ pub const LINK_CHECKS: i64 = 200;
 /// count of messages that got the mark. With `max_marks`, it stops before
 /// one more message would get the mark: the run limit counts them.
 pub fn recheck_links(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Result<u64> {
+    Ok(recheck_links_scan(store, now_ms, max_marks)?.count)
+}
+
+/// The result of a scan of a queue: the count of [`recheck_links`] or
+/// [`recheck_fixed`], and true if the scan stopped for a waiter of the run
+/// lock and left rows that it did not read (#279).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Scan {
+    pub count: u64,
+    pub yielded: bool,
+}
+
+/// [`recheck_links`] that says if it stopped for a waiter.
+pub fn recheck_links_scan(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Result<Scan> {
     let mut marked = 0;
     let mut after = 0;
     loop {
@@ -150,10 +164,21 @@ pub fn recheck_links(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Resu
             Ok(rows)
         })?;
         let Some(&(last, _)) = rows.last() else {
-            return Ok(marked);
+            return Ok(Scan {
+                count: marked,
+                yielded: false,
+            });
         };
         after = last;
         for (row, id) in rows {
+            // A draft or a question waits for the run lock: the rest of
+            // the queue waits for the next run (#279).
+            if crate::batch::wanted(store) {
+                return Ok(Scan {
+                    count: marked,
+                    yielded: true,
+                });
+            }
             // The row ID first: a trigger that queues the message again
             // after this read gives it a new row, which this check keeps.
             let Some(read) = link_read(store, id) else {
@@ -162,7 +187,10 @@ pub fn recheck_links(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Resu
             let mark = read.mark;
             if mark && max_marks.is_some_and(|n| marked >= n) {
                 // The message limit of the run: the rest waits.
-                return Ok(marked);
+                return Ok(Scan {
+                    count: marked,
+                    yielded: false,
+                });
             }
             if mark {
                 // Hostile mail never reaches the model (section 6.7). An
@@ -198,6 +226,11 @@ pub const FIXED_CHECKS: i64 = 200;
 /// message would be understood again: the run limit counts them, and the
 /// rest of the queue waits for the next run.
 pub fn recheck_fixed(store: &Store, now_ms: i64, max: Option<u64>) -> Result<u64> {
+    Ok(recheck_fixed_scan(store, now_ms, max)?.count)
+}
+
+/// [`recheck_fixed`] that says if it stopped for a waiter.
+pub fn recheck_fixed_scan(store: &Store, now_ms: i64, max: Option<u64>) -> Result<Scan> {
     let mut done = 0;
     let mut after = 0;
     loop {
@@ -211,17 +244,31 @@ pub fn recheck_fixed(store: &Store, now_ms: i64, max: Option<u64>) -> Result<u64
             Ok(rows)
         })?;
         let Some(&(last, _)) = rows.last() else {
-            return Ok(done);
+            return Ok(Scan {
+                count: done,
+                yielded: false,
+            });
         };
         after = last;
         for (row, id) in rows {
+            // A draft or a question waits for the run lock: the rest of
+            // the queue waits for the next run (#279).
+            if crate::batch::wanted(store) {
+                return Ok(Scan {
+                    count: done,
+                    yielded: true,
+                });
+            }
             let start = store.read(|c| Ok(state(c, id, true)?))?;
             // A file that Iris cannot read now keeps the row for the next run.
             let Ok(differs) = fixed_differs(store, id, now_ms) else {
                 continue;
             };
             if differs && max.is_some_and(|n| done >= n) {
-                return Ok(done);
+                return Ok(Scan {
+                    count: done,
+                    yielded: false,
+                });
             }
             if differs {
                 // No model: the run ends with a refusal when the message
@@ -413,8 +460,12 @@ pub fn link_read(store: &Store, id: i64) -> Option<LinkRead> {
     let c = iris_clean::clean_cut(&raw, raw_cut);
     let head = crate::Head::parse(&raw, row.authserv);
     // A released `link` mark is no mark (section 6.7).
-    let mark = crate::link_mark(&head, &c.links, c.links_cut || html_after)
-        && !row.released.iter().any(|r| r == "link");
+    let mark = crate::link_mark(
+        &head,
+        &c.links,
+        &c.attached_links,
+        c.links_cut || html_after,
+    ) && !row.released.iter().any(|r| r == "link");
     Some(LinkRead {
         mark,
         sha: row.sha,
@@ -1153,7 +1204,7 @@ fn render_context(sender: &str, subject: &str, text: &str) -> String {
     )
 }
 
-/// The context of a run of `message` now (store migration 68, issue
+/// The context of a run of `message` now (store migration 69, issue
 /// 1049), as text ("t:7:<hash>,4:<hash>;s:4:<hash>"), so that a change of
 /// what a run reads changes it:
 ///
@@ -1298,7 +1349,7 @@ fn parties_of(recorded: &str) -> Option<usize> {
 
 /// Checks one understood message `id` with the recorded context
 /// `recorded` (issue 1049). A message with no recorded context (from
-/// before migration 68) gets its context now. A message whose context now
+/// before migration 69) gets its context now. A message whose context now
 /// is not its recorded one runs again, unless the difference is only a
 /// message that waits for a run: that run checks again when it ends, so a
 /// message does not run twice for one change. Gives true for a reset.
@@ -1321,7 +1372,7 @@ fn check_one(
         // Hostile mail: no context shaped its run.
         return Ok(false);
     }
-    // "?": a message from before migration 68 whose context the queue step
+    // "?": a message from before migration 69 whose context the queue step
     // did not record before a change (see [`record_unknown`]). Run it again.
     let held = held_of(&recorded);
     let parties = parties_of(&recorded);
@@ -1846,7 +1897,7 @@ pub fn update_due_talks(store: &Store, now_ms: i64) -> iris_store::Result<usize>
 }
 
 /// Issue 1049: records the context now of each understood message from
-/// before migration 68 whose thread is not in `talk_due`, in pages. The
+/// before migration 69 whose thread is not in `talk_due`, in pages. The
 /// batch run does it first, before step 1 can change a context.
 pub fn record_unknown_contexts(store: &Store) -> iris_store::Result<()> {
     while store.write(|tx| Ok(record_unknown(tx)?))? > 0 {}
@@ -1854,7 +1905,7 @@ pub fn record_unknown_contexts(store: &Store) -> iris_store::Result<()> {
 }
 
 /// Issue 1049: records the context now of a page of understood messages
-/// from before migration 68 (context "?") whose thread is not in
+/// from before migration 69 (context "?") whose thread is not in
 /// `talk_due`. No change since the migration reached such a thread, so the
 /// context now is the context of its last run, as far as Iris can know
 /// (limit #1119). A message whose thread is in `talk_due` keeps "?", and
