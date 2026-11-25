@@ -731,3 +731,41 @@ test("an announced request stays until Show, and a request that closed before Sh
     view.destroy();
   }
 });
+
+test("a request on the screen that closes elsewhere shows its state, and an unknown state locks it until a read works (issue 184)", async () => {
+  const first = changeset([act({ resolved: { messages: [] } })]);
+  const second = { ...changeset([act({ resolved: { messages: [] } })]), id: "cs-10", author: { kind: "agent", name: "Codex" } };
+  const withdrawn = { ...first, state: "withdrawn", withdrawn_by: "author", actions: first.actions.map((a) => ({ ...a, decision: { ...a.decision, state: "cancelled" } })) };
+  for (const readWorks of [true, false]) {
+    let open = [first];
+    let read = readWorks ? [200, withdrawn] : [500, { error: "database: locked" }];
+    serve({ changesets: () => [200, { changesets: open }], "changesets/cs-9": () => read });
+    const view = await mount("/src/views/Review.svelte", { changesets: [first], every: 20 });
+    const one = () => view.target.querySelector("[data-changeset=cs-9]");
+    try {
+      // The author withdraws cs-9 elsewhere, and cs-10 comes in.
+      open = [second];
+      await until(() => (view.flushSync(), /1 new request/.test(text(view.target))));
+      if (readWorks) {
+        await until(() => (view.flushSync(), /withdrew this request/.test(text(one()))));
+        assert.equal(one().hasAttribute("inert"), false);
+      } else {
+        await until(() => (view.flushSync(), /Iris could not read its state/.test(text(view.target))));
+        assert.equal(one().hasAttribute("inert"), true, "no stale controls of an open request");
+        assert.match(text(view.target), /Nothing waits for your review\./, "the headline does not count it");
+      }
+      [...view.target.querySelectorAll("button")].find((b) => text(b).trim() === "Show").click();
+      view.flushSync();
+      assert.deepEqual([...view.target.querySelectorAll("[data-changeset]")].map((el) => el.dataset.changeset), ["cs-10", "cs-9"]);
+      if (!readWorks) {
+        read = [200, withdrawn];
+        [...view.target.querySelectorAll("button")].find((b) => text(b).trim() === "Try again").click();
+        await until(() => (view.flushSync(), /withdrew this request/.test(text(one()))));
+        assert.doesNotMatch(text(view.target), /could not read/);
+        assert.equal(one().hasAttribute("inert"), false);
+      }
+    } finally {
+      view.destroy();
+    }
+  }
+});

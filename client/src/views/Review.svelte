@@ -33,38 +33,50 @@
         const fresh = open.filter((c) => !list.some((x) => x.id === c.id) && !later.some((x) => x.id === c.id));
         later = [...later.map((c) => open.find((x) => x.id === c.id) ?? c), ...fresh];
         order = open.map((c) => c.id);
+        // A request on the screen or announced that the engine no longer lists as open: read its state,
+        // so that it never keeps the controls of an open request.
+        void settle([...all, ...later].filter((c) => c.state === "open" && !order.includes(c.id)).map((c) => c.id));
       } catch {
         // The next read tries again.
       }
     }, every);
     return () => clearInterval(timer);
   });
-  // Show the new requests in the order of the engine. A request that is no longer open stays at the end with its state:
-  // for an announced request that closed before Show, the screen reads that state first.
-  let showing = $state(false);
-  async function showLater() {
-    if (showing) return;
-    showing = true;
-    const gone = later.filter((c) => !order.includes(c.id));
-    // With no closed request, Show applies at once (no await).
-    const closed = gone.length
-      ? await Promise.all(gone.map((c) => get<Changeset>(`changesets/${encodeURIComponent(c.id)}`).catch(() => c)))
-      : [];
-    const known = [...list, ...later.filter((c) => order.includes(c.id))];
+
+  // The requests that left the open list and whose state Iris could not read. Each is locked
+  // (inert) with a line and Try again, and the headline does not count it. The next poll tries again.
+  let unknown: string[] = $state([]);
+  async function settle(ids: string[]) {
+    await Promise.all(
+      ids.map(async (id) => {
+        try {
+          const d = await get<Changeset>(`changesets/${encodeURIComponent(id)}`);
+          if (list.some((c) => c.id === id)) now[id] = d;
+          else later = later.map((c) => (c.id === id ? d : c));
+          unknown = unknown.filter((x) => x !== id);
+        } catch {
+          if (!unknown.includes(id)) unknown = [...unknown, id];
+        }
+      }),
+    );
+  }
+
+  // Show the new requests in the order of the engine. A request that is no longer open stays at the end with its state.
+  function showLater() {
+    const known = [...list, ...later];
     list = [
       ...order.flatMap((id) => known.filter((c) => c.id === id)),
       ...list.filter((c) => !order.includes(c.id)),
-      ...closed.filter((c) => !list.some((x) => x.id === c.id)),
+      ...later.filter((c) => !order.includes(c.id)),
     ];
-    later = later.filter((c) => !list.some((x) => x.id === c.id));
-    showing = false;
+    later = [];
   }
 
   // Each open changeset shows, also one whose actions all have a decision. The headline counts only the waiting ones.
   // A changeset after a decision on this screen, by its ID. It takes the place of the one that the page loaded.
   let now: Record<string, Changeset> = $state({});
   let all = $derived(list.map((c) => now[c.id] ?? c));
-  let asks = $derived(all.filter((c) => shown(c).some(waits)));
+  let asks = $derived(all.filter((c) => !unknown.includes(c.id) && shown(c).some(waits)));
   let count = $derived(asks.reduce((sum, c) => sum + shown(c).filter(waits).length, 0));
   let headline = $derived(
     count === 0
@@ -90,11 +102,19 @@
 {#if later.length > 0}
   <p class="later" role="status">
     {later.length === 1 ? "1 new request" : `${later.length} new requests`} came in.
-    <button type="button" onclick={showLater} disabled={showing}>Show</button>
+    <button type="button" onclick={showLater}>Show</button>
   </p>
 {/if}
 
-{#each all as c (c.id)}<div class="one" data-changeset={c.id}><Request changeset={c} onchange={(d) => (now[d.id] = d)} /></div>{/each}
+{#each all as c (c.id)}
+  {#if unknown.includes(c.id)}
+    <p class="later" role="status">
+      This request is no longer open. Iris could not read its state.
+      <button type="button" onclick={() => settle([c.id])}>Try again</button>
+    </p>
+  {/if}
+  <div class="one" data-changeset={c.id} inert={unknown.includes(c.id)}><Request changeset={c} onchange={(d) => (now[d.id] = d)} /></div>
+{/each}
 
 <style>
   .opening {
