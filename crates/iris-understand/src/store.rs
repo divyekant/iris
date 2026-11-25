@@ -711,6 +711,9 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
                  WHERE id = ?1",
                 params![message, now_ms + RETRY_MS],
             )?;
+            // Issue 1049: after its last try, this message is not context
+            // any more, and the later messages stop waiting for it.
+            check_after(tx, message)?;
             iris_talk::update(tx, row.thread, None, now_ms)?;
             return Ok(Vec::new());
         }
@@ -733,15 +736,29 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
             )?);
         }
         keep_choices(tx, message)?;
+        // The thread context counts only through a model call, and only
+        // as far as the budget of the data held it.
+        let kept = if d.calls == 0 {
+            Some(0)
+        } else if d.context_kept < after.context.len() {
+            Some(d.context_kept)
+        } else {
+            None
+        };
         tx.execute(
             "UPDATE message SET understood_at = ?2, retry_at = NULL, fixed_rules = ?3,
                     context = ?4
              WHERE id = ?1",
-            params![message, now_ms, fixed_rules(&d), context_key(tx, message)?],
+            params![
+                message,
+                now_ms,
+                fixed_rules(&d),
+                context_key(tx, message, kept, false)?
+            ],
         )?;
-        // Issue 1049: this message is context of the later messages of the
-        // thread now.
-        check_context(tx, row.thread)?;
+        // Issue 1049: this message can be context of the later messages of
+        // the thread now.
+        check_after(tx, message)?;
         if skip {
             tx.execute(
                 "INSERT INTO model_declined(message_id) VALUES (?1)",
@@ -1029,8 +1046,19 @@ fn inputs(
 macro_rules! earlier_ok {
     () => {
         concat!(
-            "m.thread_id = ?1 AND m.id <> ?2 AND m.gone_at IS NULL
-         AND m.internal_date < ?3 AND NOT ",
+            "m.thread_id = ?1 AND m.id <> ?2 AND m.internal_date < ?3 AND ",
+            context_ok!()
+        )
+    };
+}
+
+/// The part of [`earlier_ok!`] that depends only on message `m`: it is
+/// not gone, not hostile mail, has no SPAM label, is not a draft or a copy,
+/// and its sender is not hostile.
+macro_rules! context_ok {
+    () => {
+        concat!(
+            "m.gone_at IS NULL AND NOT ",
             iris_store::may_be_hostile!(),
             " AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                          WHERE ml.message_id = m.id AND l.provider_id = 'SPAM')
@@ -1070,16 +1098,34 @@ macro_rules! thread_context_from {
             " ORDER BY m.internal_date DESC, m.id DESC LIMIT ?4"
         )
     };
+    // The same rows, with each message that waits for a run (?5 is
+    // `MAX_TRIES`) counted as understood: the context after these runs, if
+    // they keep the message as context.
+    (waiting) => {
+        concat!(
+            "FROM message m JOIN body b ON b.message_id = m.id
+             WHERE (m.understood_at IS NOT NULL OR m.tries < ?5) AND ",
+            earlier_ok!(),
+            " ORDER BY m.internal_date DESC, m.id DESC LIMIT ?4"
+        )
+    };
 }
 
 /// The context of a run of `message` now (store migration 68, issue
-/// 1049): the row IDs of the earlier messages of the thread and of the
-/// same sender that the model gets, as text ("t:4,7;s:4"). It reads the
-/// sender address from the store, so a check and the run agree. `None`
-/// for a message with no thread.
-pub(crate) fn context_key(
+/// 1049), as text ("t:7,4;s:4"): `t` the row IDs of the newest
+/// [`THREAD_MESSAGES`] earlier messages of the thread, newest first, and
+/// `s` the row IDs of the earlier messages of the same sender, which shape
+/// the clean text of each run. With `kept`, the data of the model call held
+/// only the newest `kept` of them (the budget of the data cut it, or no
+/// model call ran: 0), and the key is "t!:7;s:4". It reads the sender
+/// address from the store, so a check and the run agree. `waiting`: count
+/// each message that waits for a run as understood. `None` for a message
+/// with no thread.
+fn context_key(
     c: &rusqlite::Connection,
     message: i64,
+    kept: Option<usize>,
+    waiting: bool,
 ) -> rusqlite::Result<Option<String>> {
     let row: Option<(Option<i64>, Option<i64>, Option<String>)> = c
         .query_row(
@@ -1101,12 +1147,18 @@ pub(crate) fn context_key(
     };
     let (mut t, mut s) = (Vec::new(), Vec::new());
     if let Some(date) = date {
-        t = c
-            .prepare_cached(concat!("SELECT m.id ", thread_context_from!()))?
-            .query_map(params![thread, message, date, THREAD_MESSAGES], |r| {
-                r.get(0)
-            })?
-            .collect::<rusqlite::Result<_>>()?;
+        let kept = kept.map_or(THREAD_MESSAGES, |k| (k as i64).min(THREAD_MESSAGES));
+        t = if waiting {
+            c.prepare_cached(concat!("SELECT m.id ", thread_context_from!(waiting)))?
+                .query_map(params![thread, message, date, kept, MAX_TRIES], |r| {
+                    r.get(0)
+                })?
+                .collect::<rusqlite::Result<_>>()?
+        } else {
+            c.prepare_cached(concat!("SELECT m.id ", thread_context_from!()))?
+                .query_map(params![thread, message, date, kept], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
         if let Some(from) = &from {
             s = c
                 .prepare_cached(concat!("SELECT m.id ", same_sender_from!()))?
@@ -1117,47 +1169,164 @@ pub(crate) fn context_key(
                 .collect::<rusqlite::Result<_>>()?;
         }
     }
-    Ok(Some(format!("t:{};s:{}", ids(t), ids(s))))
+    let cut = if kept.is_some() { "!" } else { "" };
+    Ok(Some(format!("t{cut}:{};s:{}", ids(t), ids(s))))
 }
 
-/// Issue 1049: runs again each understood message of `thread` whose context
-/// is not the context of its last run (an earlier message got SPAM or a
-/// hostile mark, went away, came back, changed, or a run understood it).
-/// A message with no recorded context (from before migration 68) gets its
-/// context now and runs nothing again. Gives the count of messages that
-/// run again. Only earlier messages are context, so a reset cannot come
-/// back to the message that caused it.
+/// The `kept` of a recorded context: `None` for the full window, or the
+/// count of thread messages that the data held.
+fn kept_of(recorded: &str) -> Option<usize> {
+    let t = recorded.strip_prefix("t!:")?;
+    Some(
+        t.split(';')
+            .next()
+            .map_or(0, |t| t.split(',').filter(|x| !x.is_empty()).count()),
+    )
+}
+
+/// Checks one understood message `id` with the recorded context
+/// `recorded` (issue 1049). A message with no recorded context (from
+/// before migration 68) gets its context now. A message whose context now
+/// is not its recorded one runs again, unless the difference is only a
+/// message that waits for a run: that run checks again when it ends, so a
+/// message does not run twice for one change. Gives true for a reset.
+fn check_one(
+    tx: &rusqlite::Connection,
+    id: i64,
+    recorded: Option<String>,
+) -> rusqlite::Result<bool> {
+    let Some(recorded) = recorded else {
+        // A message from before the migration: the context of its run is
+        // not known. Record the newest ones that can be in it.
+        let now = context_key(tx, id, None, false)?;
+        tx.execute(
+            "UPDATE message SET context = ?2 WHERE id = ?1",
+            params![id, now],
+        )?;
+        return Ok(false);
+    };
+    let kept = kept_of(&recorded);
+    if context_key(tx, id, kept, false)?.as_deref() == Some(recorded.as_str())
+        || context_key(tx, id, kept, true)?.as_deref() == Some(recorded.as_str())
+    {
+        return Ok(false);
+    }
+    // `understand_reset` (migration 65) clears `tries` and `retry_at` and
+    // puts the thread in `talk_due`.
+    tx.execute(
+        "UPDATE message SET understood_at = NULL, context = NULL WHERE id = ?1",
+        [id],
+    )?;
+    Ok(true)
+}
+
+/// Issue 1049: checks each understood message of `thread` (a change put
+/// the thread in `talk_due`: for example an earlier message went away, a
+/// link check started or ended, or a sender kind changed). It reads the
+/// thread in pages of [`CHECK_PAGE`] rows by row ID, so a long thread does
+/// not grow the memory. Gives the count of messages that run again.
 pub(crate) fn check_context(tx: &rusqlite::Connection, thread: i64) -> rusqlite::Result<usize> {
-    let rows: Vec<(i64, Option<String>)> = tx
-        .prepare_cached(
-            "SELECT id, context FROM message
-             WHERE thread_id = ?1 AND understood_at IS NOT NULL AND gone_at IS NULL",
-        )?
-        .query_map([thread], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
     let mut reset = 0;
-    for (id, recorded) in rows {
-        let now = context_key(tx, id)?;
-        match recorded {
-            None => {
-                tx.execute(
-                    "UPDATE message SET context = ?2 WHERE id = ?1",
-                    params![id, now],
-                )?;
-            }
-            Some(r) if Some(&r) != now.as_ref() => {
-                // `understand_reset` (migration 65) clears `tries` and
-                // `retry_at` and puts the thread in `talk_due`.
-                tx.execute(
-                    "UPDATE message SET understood_at = NULL, context = NULL WHERE id = ?1",
-                    [id],
-                )?;
-                reset += 1;
-            }
-            Some(_) => {}
+    let mut after = 0;
+    loop {
+        let page: Vec<(i64, Option<String>)> = tx
+            .prepare_cached(
+                "SELECT id, context FROM message
+                 WHERE thread_id = ?1 AND id > ?2 AND understood_at IS NOT NULL
+                   AND gone_at IS NULL
+                 ORDER BY id LIMIT ?3",
+            )?
+            .query_map(params![thread, after, CHECK_PAGE], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let Some(&(last, _)) = page.last() else {
+            return Ok(reset);
+        };
+        after = last;
+        for (id, recorded) in page {
+            reset += usize::from(check_one(tx, id, recorded)?);
         }
     }
-    Ok(reset)
+}
+
+/// The most messages of one page of [`check_context`].
+const CHECK_PAGE: i64 = 200;
+
+/// Issue 1049: checks the later messages of the thread of `message` after
+/// a run of `message` ended (it is context now, or it is not any more).
+/// Only a later message with fewer than [`THREAD_MESSAGES`] context
+/// messages between it and `message` can have `message` in its thread
+/// context, and only a later message of the same sender with fewer than
+/// [`SAME_SENDER_MESSAGES`] such messages of that sender between can have
+/// it in its sender context. So two short walks find each message to
+/// check, and a run in a long thread reads only a few rows. Gives the
+/// count of messages that run again, and the count of rows that the walks
+/// read.
+fn check_after(tx: &rusqlite::Connection, message: i64) -> rusqlite::Result<(usize, usize)> {
+    let row: Option<(Option<i64>, Option<i64>, Option<String>)> = tx
+        .query_row(
+            "SELECT m.thread_id, m.internal_date,
+                    (SELECT h.from_addr FROM header h WHERE h.message_id = m.id)
+             FROM message m WHERE m.id = ?1",
+            [message],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((Some(thread), Some(date), from)) = row else {
+        return Ok((0, 0));
+    };
+    // ?4: NULL for each later message, or one sender address.
+    let mut st = tx.prepare_cached(concat!(
+        "SELECT m.id, m.context, m.understood_at IS NOT NULL,
+                EXISTS (SELECT 1 FROM body b WHERE b.message_id = m.id) AND ",
+        context_ok!(),
+        " FROM message m WHERE m.thread_id = ?1 AND m.id <> ?2 AND m.internal_date > ?3
+           AND (?4 IS NULL OR EXISTS (SELECT 1 FROM header h
+                                      WHERE h.message_id = m.id AND h.from_addr = ?4))
+         ORDER BY m.internal_date, m.id"
+    ))?;
+    let mut due = std::collections::BTreeMap::new();
+    let mut read = 0;
+    // The thread walk counts the context of the run (understood messages),
+    // the sender walk the texts of the sender (any message with a text).
+    let walks = [
+        (None, THREAD_MESSAGES, true),
+        (from, SAME_SENDER_MESSAGES, false),
+    ];
+    for (sender, max, understood_only) in walks {
+        if !understood_only && sender.is_none() {
+            continue;
+        }
+        let mut rows = st.query(params![thread, message, date, sender])?;
+        let mut between = 0;
+        while let Some(r) = rows.next()? {
+            if between >= max {
+                break;
+            }
+            read += 1;
+            let (id, recorded, understood, ok): (i64, Option<String>, bool, bool) =
+                (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
+            if understood {
+                due.insert(id, recorded);
+            }
+            if ok && (understood || !understood_only) {
+                between += 1;
+            }
+        }
+    }
+    let mut reset = 0;
+    for (id, recorded) in due {
+        reset += usize::from(check_one(tx, id, recorded)?);
+    }
+    Ok((reset, read))
+}
+
+/// Runs the check of the later messages after `message` (issue 1049), as
+/// the end of a run does. Gives the count of rows that it read. For tests.
+#[doc(hidden)]
+pub fn check_later(store: &Store, message: i64) -> iris_store::Result<usize> {
+    store.write(|tx| Ok(check_after(tx, message)?.1))
 }
 
 /// The most known parties that the model gets.

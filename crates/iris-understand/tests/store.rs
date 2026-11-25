@@ -3123,3 +3123,79 @@ fn a_message_with_no_recorded_context_gets_one_and_does_not_run_again() {
     assert_eq!(recorded, format!("t:{m1};s:"));
     assert_eq!(fake.calls.borrow().len(), 2);
 }
+
+/// Issue 1049: the key records only the earlier messages that the data of
+/// the model call held. When the current message fills the budget, a
+/// change of an earlier message runs nothing again.
+#[test]
+fn a_context_that_the_budget_left_out_runs_nothing_again() {
+    let b = store("context-budget");
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, &context_mail(1), &["INBOX"]);
+    let long = format!(
+        "From: y@example.net\nTo: owner@example.com\nSubject: S\n\n{}\n",
+        "漢字".repeat(20_000)
+    );
+    let m2 = b.add_in("2", "t", NOW - DAY, &long, &["INBOX"]);
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    assert!(!last[&m2].contains("Words k1k."));
+    let recorded: String = b.col("SELECT context FROM message WHERE id = ?1", m2);
+    assert_eq!(recorded, "t!:;s:");
+    let calls = fake.calls.borrow().len();
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO message_label(message_id, label_id)
+                 SELECT ?1, id FROM label WHERE provider_id = 'SPAM'",
+                [m1],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    drain(&b, &fake, &mut last);
+    assert_eq!(
+        fake.calls.borrow().len(),
+        calls,
+        "SPAM makes no call, and m2 did not run again"
+    );
+}
+
+/// Issue 1049: in a long thread, the check after a run reads only the next
+/// few messages, and a run in order of a new thread runs nothing twice.
+#[test]
+fn the_check_after_a_run_reads_only_the_next_few_messages() {
+    let b = store("context-long");
+    let n = 60;
+    let ids: Vec<i64> = (1..=n)
+        .map(|k| {
+            b.add_in(
+                &k.to_string(),
+                "t",
+                NOW - DAY * 100 + k as i64 * 1000,
+                &context_mail(k),
+                &["INBOX"],
+            )
+        })
+        .collect();
+    let fake = Fake::default();
+    let mut last = std::collections::HashMap::new();
+    drain(&b, &fake, &mut last);
+    assert_eq!(fake.calls.borrow().len(), n, "one call for each message");
+    // Each message has its own sender: only the thread walk reads rows.
+    let read = iris_understand::store::check_later(&b.store, ids[0]).unwrap();
+    assert!(read <= 3, "{read} rows");
+    // The first message leaves: the next 3 messages run again, no other.
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO message_label(message_id, label_id)
+                 SELECT ?1, id FROM label WHERE provider_id = 'SPAM'",
+                [ids[0]],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    drain(&b, &fake, &mut last);
+    assert_eq!(fake.calls.borrow().len(), n + 3);
+}

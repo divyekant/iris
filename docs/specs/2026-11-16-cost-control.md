@@ -55,20 +55,26 @@ pay again for the same mail.
   a message that is not understood, for example one that failed the model
   3 times. Triggers of the store do each reset, so each writer gets it.
 - Context (issue #1049, migration 68): each successful run records the
-  row IDs of the earlier messages that the model got as context
-  (`message.context`: the thread context and the texts of the same
-  sender). A check compares the recorded context of each understood
-  message of a thread with its context now, and clears `understood_at`
-  where they differ. The check runs for each thread in `talk_due`, and
-  after each successful run in the same transaction. A message that goes
-  away, and the start and the end of a link check, put the thread in
-  `talk_due` too. So a later message runs again only when its context
-  changed: an earlier message got `SPAM` or a hostile mark, left `SPAM`,
-  went away or came back, got new content, or a run understood it (a late
-  older message). The count of runs again is bounded: a message gets at
-  most 3 thread messages and 5 messages of its sender as context, so only
-  these later messages can change. A run reads only earlier messages, so a
-  reset never comes back to the message that caused it.
+  row IDs of the earlier messages that shaped it (`message.context`): the
+  newest 3 earlier messages of the thread, and the newest 5 texts of the
+  same sender, which shape the clean text. When the budget of the data
+  left out some thread messages, or no model call ran, the record holds
+  only the thread messages that the data held. A check compares the
+  recorded context of an understood message with its context now, and
+  clears `understood_at` where they differ. So a later message runs again
+  only when the context that its last run used changed: an earlier
+  message got `SPAM` or a hostile mark, left `SPAM`, went away or came
+  back, got new content, or a run understood it (a late older message).
+- The check runs at two places. After each run that ends (a success, or
+  a failed try), two short walks check the later messages that can hold
+  the message in their context: they stop after 3 context messages of the
+  thread, and after 5 texts of the same sender. And for each thread in
+  `talk_due` (a message that goes away, the start or the end of a link
+  check, a sender kind change), it checks each understood message of the
+  thread, 200 rows at a time. A difference that is only a message that
+  waits for a run waits for the end of that run, so one change runs a
+  message once. A run reads only earlier messages, so a reset never comes
+  back to the message that caused it.
 - Limit (issue #1119): a message that a run understood before migration
   68 has no recorded context. The first check records its context now and
   runs nothing again, so a change before the upgrade is not seen.

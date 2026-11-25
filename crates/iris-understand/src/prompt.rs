@@ -67,6 +67,12 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
 
 /// [`data`] in at most about `budget` bytes.
 pub fn data_in(a: &Analysis, cx: &Context, budget: usize) -> String {
+    data_kept(a, cx, budget).0
+}
+
+/// [`data_in`], and the count of earlier messages of the thread that the
+/// budget left in (the newest ones).
+pub fn data_kept(a: &Analysis, cx: &Context, budget: usize) -> (String, usize) {
     let h = &a.head;
     let mut d = String::new();
     let from = match (&h.from_name, &h.from_addr) {
@@ -166,7 +172,7 @@ pub fn data_in(a: &Analysis, cx: &Context, budget: usize) -> String {
     // Each text from the mail went through the escape: the client escape
     // adds nothing, so the block stays in the budget.
     debug_assert!(!d.contains("<<<"));
-    d
+    (d, earlier.len())
 }
 
 /// Push `text` to `out`, escaped as `iris_model::data_block` does and cut
